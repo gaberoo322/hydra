@@ -121,7 +121,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export const VLM_DEFERRED_MARKER = "vlm-deferred" as const;
 
 /** A skill's last-failure marker: an OV failure code, the VLM-deferred marker, or null (never failed). */
-export type SkillLastError = OvErrorCode | typeof VLM_DEFERRED_MARKER | null;
+type SkillLastError = OvErrorCode | typeof VLM_DEFERRED_MARKER | null;
 
 /** Per-skill registration outcome in the in-process catalog state. */
 interface SkillRegistrationEntry {
