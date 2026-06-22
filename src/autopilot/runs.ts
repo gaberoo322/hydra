@@ -539,6 +539,17 @@ export async function recordCycle(
       const enrichment: CycleMetricsInput = {};
       if (enrichFiles !== undefined) enrichment.filesChanged = enrichFiles;
       if (enrichPr !== undefined && enrichPr.length > 0) enrichment.prNumber = enrichPr;
+      // Issue #2364: forward a non-zero totalDurationMs on the dedup/enrichment
+      // path too. The first write (reap-time `completed`) often lands a 0 span
+      // (no slot start stamp, or — for qa_orch relay cycles — reap never wrote a
+      // cycle-record at all and this follow-up is itself the first real write);
+      // the post-merge `merged`/auto-merge follow-up is the writer that holds the
+      // real duration. Without forwarding it here, that real span never reaches
+      // recordCycleMetrics on the dedup path and the cycle stays `totalDurationMs=0`
+      // despite merging. recordCycleMetrics enforces monotonic-max, so a 0 here
+      // can never regress a stored non-zero — only a real span upgrades a stored 0.
+      const enrichDuration = numberOrDefault(body.totalDurationMs, 0);
+      if (enrichDuration > 0) enrichment.totalDurationMs = enrichDuration;
 
       let enriched = false;
       if (Object.keys(enrichment).length > 0) {

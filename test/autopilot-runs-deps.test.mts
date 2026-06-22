@@ -356,6 +356,50 @@ describe("recordCycle — injected deps (#2158)", () => {
     await recordCycle({ cycleId: "c-zero", status: "merged", filesChanged: 0 } as any, deps);
     assert.equal(store.metrics.get("c-zero")!.filesChanged, "0");
   });
+
+  // Issue #2364: the dedup/enrichment path must forward a non-zero
+  // totalDurationMs so the post-merge follow-up's real wall-clock span reaches
+  // the metrics hash when the reap-time `completed` write recorded a 0 (or never
+  // wrote a duration). recordCycleMetrics enforces monotonic-max separately
+  // (tested against real Redis in cycle-metrics-monotonic-duration.test.mts);
+  // this asserts the forwarding policy that feeds it.
+  test("the #2364 enrich path forwards a non-zero totalDurationMs to repair a 0-duration first write", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    // Phase 1 — reap-time `completed` write with no usable start stamp → 0 span.
+    await recordCycle({ cycleId: "c-dur", status: "completed", totalDurationMs: 0 } as any, deps);
+    assert.equal(store.metrics.get("c-dur")!.totalDurationMs, "0");
+
+    // Phase 2 — post-merge follow-up carries the real duration. It dedups on the
+    // count/bucket surface but enriches the metrics hash with the real span.
+    const r2 = await recordCycle(
+      { cycleId: "c-dur", status: "merged", prNumber: 9, totalDurationMs: 619721 } as any,
+      deps,
+    );
+    assert.equal((r2 as any).deduped, true, "count/bucket surface still no-ops");
+    assert.equal((r2 as any).bucketed, null);
+    assert.equal((r2 as any).enriched, true, "metrics hash was enriched with the duration");
+    assert.equal(store.counters.run, 1, "no counter re-fire");
+    assert.equal(store.metrics.get("c-dur")!.totalDurationMs, "619721");
+  });
+
+  test("the #2364 enrich path does NOT forward a 0 totalDurationMs (no spurious enrichment)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    // First write lands a real duration.
+    await recordCycle({ cycleId: "c-dur0", status: "completed", totalDurationMs: 12345 } as any, deps);
+    assert.equal(store.metrics.get("c-dur0")!.totalDurationMs, "12345");
+
+    // A follow-up carrying duration 0 and no other new data must stay a true
+    // no-op — it must NOT enrich (and the real first-write duration is untouched).
+    const r2 = await recordCycle(
+      { cycleId: "c-dur0", status: "merged", totalDurationMs: 0 } as any,
+      deps,
+    );
+    assert.equal((r2 as any).deduped, true);
+    assert.equal((r2 as any).enriched, false, "a 0 duration is not an enrichment");
+    assert.equal(store.metrics.get("c-dur0")!.totalDurationMs, "12345", "real span preserved");
+  });
 });
 
 // ---------------------------------------------------------------------------
