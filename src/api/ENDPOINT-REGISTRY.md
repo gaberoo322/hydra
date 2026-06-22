@@ -1,0 +1,475 @@
+# Hydra Orchestrator — API Endpoint Registry
+
+> **Status:** living catalog. This is a documentation-only artifact (see
+> [ADR-0024](../../docs/adr/0024-api-versioning.md)); it introduces no runtime
+> code and changes no behavior.
+
+**As of:** commit `cdb04ab` (origin/master, 2026-06-22)
+**Endpoint count:** 154 routes across 45 router modules
+
+## What this is
+
+A catalog of every HTTP endpoint the orchestrator data plane (the Express
+service on port 4000, mounted under the `/api` prefix in
+[`src/api.ts`](./../api.ts)) exposes today. It exists so that future dashboard
+refactors (the 19→4 page simplification) and skill-subagent upgrades can reason
+about the surface without grepping the router tree, and so the versioning /
+deprecation strategy in ADR-0024 has a concrete baseline to apply against.
+
+It is **descriptive, not normative** — adding a route to a router file is still
+the only way to add an endpoint. This file does not generate or validate
+routes; it records them. When the surface changes, regenerate it with the
+extraction recipe below and update the as-of commit + count.
+
+## Extraction methodology (so the count is reproducible, not asserted)
+
+Every sub-router is mounted at the bare `/api` prefix in `src/api.ts`
+(`api.use(createXRouter())`) with **no per-router sub-prefix** — each router
+declares its own full path. `src/api.ts` itself registers **zero** routes; it
+is a thin mount point per the `CONTEXT.md` "API routes in sub-routers"
+convention. So the full path of any route is `/api` + the path string passed to
+`router.<verb>(...)` inside its module.
+
+The table below was extracted by scanning `src/api.ts` and `src/api/*.ts`
+(excluding the non-router helpers `route-helpers.ts` and `event-bus-types.ts`)
+for `(router|app).(get|post|put|delete|patch)(` registrations whose first
+argument is a quoted path literal — including multi-line registrations where the
+path sits on the line after the `(`. To regenerate after the surface changes:
+
+```bash
+# Run from repo root. Prints "<METHOD> <path>" per route, grouped per file,
+# and the total count. Mirror the result into the table + header below.
+npx tsx -e '
+const fs=require("fs"),path=require("path");
+const dir="src/api";
+const files=["src/api.ts",...fs.readdirSync(dir).filter(f=>f.endsWith(".ts")).map(f=>path.join(dir,f))];
+const exclude=new Set(["src/api/route-helpers.ts","src/api/event-bus-types.ts"]);
+const re=/\b(router|app)\.(get|post|put|delete|patch)\(\s*["\x60'"'"']([^"\x60'"'"']+)["\x60'"'"']/g;
+let total=0;
+for(const f of files){ if(exclude.has(f))continue;
+  const src=fs.readFileSync(f,"utf8"); const set=new Set(); let m;
+  while((m=re.exec(src))) set.add(m[2].toUpperCase()+" /api"+m[3]);
+  if(set.size){ console.log("#### "+f); [...set].sort().forEach(r=>console.log(r)); total+=set.size; }
+}
+console.error("TOTAL: "+total);'
+```
+
+The recipe is a regex scan, not an AST parse, so two caveats apply: a route
+whose path is a computed expression (none exist today) would be missed, and a
+`.get(`/`.post(` call on a non-router object inside these files would
+false-match (none exist today — the exclude list covers the two helper modules).
+Both are acceptable for a descriptive baseline; a reviewer cross-checks the
+total against a fresh run when updating.
+
+## Stability legend
+
+| Status | Meaning |
+|---|---|
+| **stable** | In active use by the dashboard, a skill subagent, an internal chore, or `decide.py`; treat as a contract. |
+| **experimental** | Newly added, contract may change; not yet a deprecation-policy obligation. |
+| **deprecated** | Slated for removal; carries a sunset note per the ADR-0024 deprecation policy. |
+
+All 154 routes are currently marked **stable** — no endpoint has yet entered an
+experimental or deprecated lifecycle stage, because the deprecation policy
+(ADR-0024) is being adopted *with* this registry. The columns exist so that the
+first endpoint to change status has a place to record it; populating per-route
+consumer attribution and lifecycle transitions is incremental follow-up work
+(ADR-0024 "Consequences"), not a precondition of this baseline.
+
+## Consumer notes (router-group level)
+
+Per-route consumer attribution is deferred (it requires cross-referencing the
+dashboard, every skill playbook, and `decide.py`); at the router-group level the
+broad consumers are:
+
+- **Dashboard** (`dashboard/src`): `now/*`, `today/*`, `outcomes/*`,
+  `explore/*` (the v2 page routers), `autopilot/runs*`, `usage*`,
+  `recommendations`, `openviking/search`, `health*`.
+- **Skill subagents** (`hydra-dev`, `hydra-qa`, `hydra-autopilot`, …):
+  `reflections`, `design-concepts/*`, `tier`, `holdback/*`, `memory/*`,
+  `backlog/*`, `cycle/*`, `metrics/*`, `merge/*`.
+- **`decide.py` / autopilot control loop**: `autopilot/*`, `queue*`,
+  `anchor/candidates`, `capacity*`, `scout/*`.
+- **External / webhook**: `webhooks/sentry` (Sentry alert ingestion).
+
+## Endpoint catalog
+<!-- Generated by the extraction recipe above. Do not hand-edit individual rows
+     without re-running the recipe — regenerate the whole table instead. -->
+### `src/api/agents.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/agents/stream` | stable |
+
+### `src/api/alerts.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/alerts` | stable |
+| POST | `/api/alerts/:id/dismiss` | stable |
+| POST | `/api/alerts/dismiss-all` | stable |
+| POST | `/api/webhooks/sentry` | stable |
+
+### `src/api/anchor.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/anchor/candidates` | stable |
+
+### `src/api/architecture.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/architecture` | stable |
+
+### `src/api/autopilot-board.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/autopilot/board-state` | stable |
+
+### `src/api/autopilot-control.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/autopilot/emergency-brake` | stable |
+| GET | `/api/autopilot/paused` | stable |
+| POST | `/api/autopilot/emergency-brake` | stable |
+| POST | `/api/autopilot/paused` | stable |
+
+### `src/api/autopilot-idle.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/autopilot/idle-diagnostics` | stable |
+
+### `src/api/autopilot-lifecycle.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| POST | `/api/autopilot/cycle-record` | stable |
+| POST | `/api/autopilot/reflection-record` | stable |
+| POST | `/api/autopilot/run-end` | stable |
+| POST | `/api/autopilot/run-start` | stable |
+| POST | `/api/autopilot/turn` | stable |
+
+### `src/api/autopilot-log.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/autopilot/runs/:runId/journal` | stable |
+| GET | `/api/autopilot/runs/:runId/log` | stable |
+
+### `src/api/autopilot-runs.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/autopilot/inflight-slots` | stable |
+| GET | `/api/autopilot/retros` | stable |
+| GET | `/api/autopilot/runs` | stable |
+| GET | `/api/autopilot/runs/:runId` | stable |
+| GET | `/api/autopilot/runs/:runId/retro` | stable |
+| GET | `/api/autopilot/runs/current` | stable |
+
+### `src/api/backlog.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| DELETE | `/api/backlog/:id` | stable |
+| GET | `/api/backlog` | stable |
+| GET | `/api/backlog/:id/children` | stable |
+| GET | `/api/backlog/audit` | stable |
+| GET | `/api/backlog/counts` | stable |
+| GET | `/api/backlog/stale-claims` | stable |
+| PATCH | `/api/backlog/:id` | stable |
+| PATCH | `/api/backlog/:id/move` | stable |
+| POST | `/api/backlog` | stable |
+| POST | `/api/backlog/:id/approve` | stable |
+| POST | `/api/backlog/claim` | stable |
+| POST | `/api/backlog/stale-claims/reap` | stable |
+
+### `src/api/builder-health.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/builder-health` | stable |
+| POST | `/api/builder-health/dispatch-pr` | stable |
+| POST | `/api/builder-health/scope-violation` | stable |
+
+### `src/api/capacity.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/capacity` | stable |
+| POST | `/api/capacity/orchestrator-merge` | stable |
+
+### `src/api/config.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| DELETE | `/api/env/:project/:key` | stable |
+| GET | `/api/config/:section` | stable |
+| GET | `/api/config/:section/:name` | stable |
+| GET | `/api/env/:project` | stable |
+| PUT | `/api/config/:section/:name` | stable |
+| PUT | `/api/env/:project` | stable |
+
+### `src/api/cycles.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/cycle/history` | stable |
+| GET | `/api/cycle/report/:cycleId` | stable |
+| GET | `/api/cycle/status` | stable |
+| POST | `/api/cycle/complete` | stable |
+| POST | `/api/cycle/register` | stable |
+
+### `src/api/design-concepts.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/design-concepts` | stable |
+| GET | `/api/design-concepts/:anchorRef` | stable |
+| GET | `/api/design-concepts/:anchorRef/resolve` | stable |
+| GET | `/api/design-concepts/exempt-log` | stable |
+| GET | `/api/design-concepts/snapshots` | stable |
+| POST | `/api/design-concepts` | stable |
+| POST | `/api/design-concepts/:anchorRef/approve` | stable |
+| POST | `/api/design-concepts/exempt-log` | stable |
+
+### `src/api/digest.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| POST | `/api/digest/heartbeat` | stable |
+| POST | `/api/digest/send` | stable |
+
+### `src/api/dispatches.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/dispatches/:dispatchId/transcript` | stable |
+| PATCH | `/api/dispatches/subagent/:sessionId/current-step` | stable |
+| POST | `/api/dispatches/subagent` | stable |
+
+### `src/api/events.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/events/:stream` | stable |
+| POST | `/api/events/publish` | stable |
+
+### `src/api/explore-page.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/explore/anomalies` | stable |
+| GET | `/api/explore/behavior` | stable |
+| GET | `/api/explore/flow` | stable |
+| GET | `/api/explore/friction` | stable |
+| GET | `/api/explore/lessons` | stable |
+
+### `src/api/goals.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/goals` | stable |
+| GET | `/api/goals/summary` | stable |
+
+### `src/api/health.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/health` | stable |
+| GET | `/api/health/deep` | stable |
+| GET | `/api/health/services` | stable |
+| GET | `/api/health/skills` | stable |
+| GET | `/api/health/source-index` | stable |
+
+### `src/api/holdback.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| POST | `/api/holdback/check` | stable |
+| POST | `/api/holdback/enroll` | stable |
+| POST | `/api/holdback/revert-failed` | stable |
+
+### `src/api/learning.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/learning/context-trace` | stable |
+| GET | `/api/learning/friction-patterns` | stable |
+| GET | `/api/learning/ineffective-rules` | stable |
+| GET | `/api/learning/rule-action-log` | stable |
+
+### `src/api/maintenance.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| POST | `/api/maintenance/housekeeping` | stable |
+
+### `src/api/merge-lock.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| POST | `/api/merge/lock` | stable |
+| POST | `/api/merge/unlock` | stable |
+
+### `src/api/metrics.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/metrics` | stable |
+| GET | `/api/metrics/abandonment` | stable |
+| GET | `/api/metrics/anchor-distribution` | stable |
+| GET | `/api/metrics/cost` | stable |
+| GET | `/api/metrics/cost-by-class` | stable |
+| GET | `/api/metrics/grounding-duration` | stable |
+| GET | `/api/metrics/quality-gates` | stable |
+| GET | `/api/summary` | stable |
+| POST | `/api/metrics/record` | stable |
+| POST | `/api/metrics/tokens` | stable |
+
+### `src/api/now-page.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/now/active-dispatches` | stable |
+| GET | `/api/now/alerts` | stable |
+| GET | `/api/now/autopilot-health` | stable |
+| GET | `/api/now/autopilot-tick` | stable |
+| GET | `/api/now/cost-burn` | stable |
+| GET | `/api/now/service-strip` | stable |
+
+### `src/api/now-recommendations.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/now/recommendations` | stable |
+| POST | `/api/now/recommendations/:id/dismiss` | stable |
+| POST | `/api/now/recommendations/mute-class` | stable |
+
+### `src/api/observability.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/observability/config` | stable |
+| GET | `/api/observability/trace-url` | stable |
+
+### `src/api/openviking.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/learning/coverage` | stable |
+| GET | `/api/openviking-stats` | stable |
+| GET | `/api/openviking/search` | stable |
+
+### `src/api/operational.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| POST | `/api/kill` | stable |
+
+### `src/api/outcomes-page.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/outcomes/calibration` | stable |
+| GET | `/api/outcomes/lessons` | stable |
+| GET | `/api/outcomes/quota` | stable |
+| GET | `/api/outcomes/trends` | stable |
+
+### `src/api/outcomes.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/outcomes` | stable |
+
+### `src/api/pattern-memory.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/memory/:agent` | stable |
+| POST | `/api/memory/:agent/pattern` | stable |
+| POST | `/api/memory/subagent-friction` | stable |
+| POST | `/api/memory/subagent-lesson` | stable |
+
+### `src/api/queue.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/queue` | stable |
+| GET | `/api/queue/snapshot` | stable |
+| POST | `/api/queue` | stable |
+| POST | `/api/queue/reconcile` | stable |
+
+### `src/api/recommendations.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/recommendations` | stable |
+
+### `src/api/reflections.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/calibration/outcomes` | stable |
+| GET | `/api/reflections` | stable |
+| POST | `/api/calibration/outcomes/sync` | stable |
+
+### `src/api/research.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| POST | `/api/research/force` | stable |
+| POST | `/api/research/start` | stable |
+
+### `src/api/scheduler.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/scheduler/status` | stable |
+| POST | `/api/scheduler/start` | stable |
+| POST | `/api/scheduler/stop` | stable |
+
+### `src/api/scout.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/scout/alert-plan` | stable |
+| GET | `/api/scout/dispatches` | stable |
+| GET | `/api/scout/stats` | stable |
+
+### `src/api/tasks.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/agents/status` | stable |
+| GET | `/api/grounding/latest` | stable |
+| POST | `/api/agents/:id/pause` | stable |
+
+### `src/api/tier.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/tier` | stable |
+
+### `src/api/today-page.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/today/decision-queue` | stable |
+| GET | `/api/today/findings` | stable |
+| GET | `/api/today/lessons-overnight` | stable |
+| GET | `/api/today/merges` | stable |
+| GET | `/api/today/stuck` | stable |
+| GET | `/api/today/summary` | stable |
+
+### `src/api/usage.ts`
+
+| Method | Path | Stability |
+|---|---|---|
+| GET | `/api/usage` | stable |
+| GET | `/api/usage/eligibility` | stable |
+| POST | `/api/usage/session-block` | stable |
