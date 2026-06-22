@@ -482,6 +482,39 @@ RULES:
    allowed and passes the fence — but never base an Edit on such a path.
 ```
 
+### Child-prompt EnterWorktree anchor contract (REQUIRED — issue #2371)
+
+Append the following block to every dispatched hydra-dev BG agent prompt, immediately after the PATH ANCHORING block above. It is the sibling rule that resolves the **write-fence-blocks-a-valid-in-worktree-Edit** symptom (#2371; ~16 cross-run hits) — distinct from the #1861 ghost-write symptom the PATH ANCHORING block addresses. Root cause: the native Claude Code harness tracks a single writable-worktree-root *anchor* per agent, and a **redundant** `EnterWorktree` from an agent that is already launch-pinned to its worktree (the `Agent(isolation="worktree")` dispatch case) desyncs that anchor from cwd — so a later, perfectly-valid in-cwd Edit/Write is denied. The custom `worktree-write-fence.sh` hook is NOT the cause here (it is absent from `~/.claude/settings.json`, and even when installed its in-cwd short-circuit ALLOWS a valid in-worktree write); the deny comes from the native anchor desync. The fix is preventive — don't trigger the redundant switch — never the reactive `python3`/`Bash` shell-out (which bypasses the harness's own diff/permission tracking and costs turns every recurrence).
+
+```
+## ENTERWORKTREE ANCHOR — do not desync the writable root (issue #2371)
+
+You were dispatched via Agent(isolation="worktree"), so the harness has already
+LAUNCH-PINNED your writable-worktree root to your cwd. The harness tracks ONE
+writable-root anchor per agent; a redundant or sibling EnterWorktree desyncs
+that anchor from your cwd and makes a valid in-cwd Edit/Write get DENIED even
+though the write is correct.
+
+RULES:
+1. NEVER call EnterWorktree when your launch-time `pwd` already satisfies the
+   worktree predicate (i.e. `git rev-parse --git-dir` resolves under
+   `.git/worktrees/`). You are already pinned — a redundant switch is exactly
+   what breaks the anchor. Verify the predicate; if it holds, proceed straight
+   to file ops, NO EnterWorktree.
+2. If EnterWorktree WAS genuinely required (your initial pwd failed the
+   predicate — a non-pinned dispatch), re-run `pwd` IMMEDIATELY after the switch
+   and re-derive EVERY subsequent `file_path` from that fresh post-switch root.
+   Never reuse a path captured before the switch.
+3. If an in-worktree Edit/Write is STILL denied even though the file resolves
+   inside your cwd, the anchor has desynced. RECOVER by re-anchoring:
+   `ExitWorktree` then `EnterWorktree` by `path` (the harness's documented
+   re-anchor path). Do NOT fall back to writing the file via `python3`/`Bash` —
+   that shell-out bypasses the harness diff tracking and is the reactive
+   workaround this contract exists to eliminate.
+```
+
+> Orthogonal note (issue #1861 / #549 — NOT the #2371 fix): the custom `worktree-write-fence.sh` PreToolUse hook that guards against ghost-writes INTO the main tree is currently *uninstalled* on this host (absent from `~/.claude/settings.json`). Installing it via `scripts/setup-claude-hooks.sh` closes the orthogonal ghost-write-to-main gap, but does NOT resolve the #2371 write-fence-blocks-a-valid-write symptom above (the two share a path-reconciliation root-cause family but have opposite mechanics — one wrongly DENIES a valid write, the other fails to DENY an invalid one). Keep hook installation as a separate operator step; do not conflate it with the EnterWorktree anchor contract.
+
 ### Child-prompt scope-respect block (REQUIRED — issue #396)
 
 Append the following block to every dispatched hydra-dev BG agent prompt, immediately after the worktree-guard preamble. It is the subagent-side replacement for the deleted `reconcilePlanVsActual()` step (control-loop step 6.5, removed in PR #400):
