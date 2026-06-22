@@ -1,5 +1,5 @@
 /**
- * Tool-currency check (issue #480).
+ * Tool-currency check — pure logic (issue #480).
  *
  * Compares installed versions of the CLI tools Hydra shells out to against
  * their upstream "latest" reference, and reports drift. Surfaced by the
@@ -15,8 +15,11 @@
  * This module is the **pure-logic** half — version parsing + drift
  * classification + report shaping. All I/O (running subprocesses, fetching
  * upstream APIs, writing Redis alerts) lives in
- * `scripts/tool-currency-check.ts`. The split is intentional so the test
- * suite can mock both halves cleanly without touching the network.
+ * `scripts/tool-currency-check.ts`, the only production caller. The split
+ * is intentional so the test suite can mock both halves cleanly without
+ * touching the network. This helper is co-located under `scripts/` (rather
+ * than `src/`) because the driver script is the sole consumer — there is no
+ * cross-boundary reach from a `scripts/` CLI into `src/`.
  *
  * Read-only by contract: nothing here can install, upgrade, or modify a
  * binary. The doctor reports; the operator decides.

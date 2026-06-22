@@ -3,8 +3,8 @@
  * Tool-currency check driver (issue #480).
  *
  * Runs the actual subprocesses, hits the upstream APIs, and emits a
- * structured report. Wires the pure-logic module in `src/tool-currency.ts`
- * to real I/O.
+ * structured report. Wires the pure-logic module in
+ * `scripts/tool-currency-logic.ts` to real I/O.
  *
  * Output modes:
  *   - `--json`    print a JSON array of ToolReport entries (default for
@@ -36,7 +36,7 @@ import {
   formatReportTable,
   type ToolReport,
   type Verdict,
-} from "../src/tool-currency.ts";
+} from "./tool-currency-logic.ts";
 
 const execFileAsync = promisify(execFile);
 
