@@ -45,6 +45,7 @@ process.env.HYDRA_ESCALATION_DISABLED = "1"; // never spawn real gh during tests
 
 let redis: any;
 let agentMemory: typeof import("../src/pattern-memory/agent-memory.ts");
+let PROMOTION_THRESHOLD: number;
 
 const noopEscalate = async () => null;
 
@@ -76,6 +77,7 @@ describe("fuzzy cue dedup (issue #1667)", () => {
   before(async () => {
     redis = new Redis(REDIS_URL);
     agentMemory = await import("../src/pattern-memory/agent-memory.ts");
+    ({ PROMOTION_THRESHOLD } = await import("../src/pattern-memory/constants.ts"));
   });
 
   beforeEach(async () => {
@@ -301,7 +303,7 @@ describe("fuzzy cue dedup (issue #1667)", () => {
     const stored = await loadFrictionPatterns("hydra-target-build");
     assert.equal(stored.length, 1);
     assert.equal(stored[0].category, SENTRY_SPELLINGS[0]);
-    assert.equal(stored[0].hitCount, agentMemory.PROMOTION_THRESHOLD);
+    assert.equal(stored[0].hitCount, PROMOTION_THRESHOLD);
     assert.equal(stored[0].promoted, true);
     assert.deepEqual(
       [...stored[0].aliases].sort(),

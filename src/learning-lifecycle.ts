@@ -21,10 +21,8 @@
  *   initLearning()    — start knowledge indexer, register OV skills
  */
 
-import {
-  consolidateAgentPatterns,
-  consolidateStalePromotedRules,
-} from "./pattern-memory/agent-memory.ts";
+import { consolidateAgentPatterns } from "./pattern-memory/agent-memory.ts";
+import { consolidateStalePromotedRules } from "./pattern-memory/feedback-file.ts";
 import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";

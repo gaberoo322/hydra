@@ -12,12 +12,15 @@
  * `loadPatterns`/`savePatterns` internal storage helpers with that sibling.
  *
  * Public API used outside this module:
- *   PROMOTION_THRESHOLD            — re-exported from ./constants.ts (#2117)
  *   recordPattern                  — POST /api/memory/:agent/pattern
  *   loadAgentMemory                — used by getContext()
  *   consolidateAgentPatterns       — daily prune driven by consolidate()
- *   detectStalePromotedRules       — pure helper (tests)
- *   processStaleRules              — pure helper (tests)
+ *
+ * Issue #2342 — the back-compat re-export relay was removed: external callers
+ * now import `PROMOTION_THRESHOLD` from `./constants.ts` and the stale-rule
+ * maintenance functions (`consolidateStalePromotedRules`,
+ * `detectStalePromotedRules`, `processStaleRules`, `StaleRule`) from
+ * `./feedback-file.ts` directly, so the import path names the canonical owner.
  */
 
 import {
@@ -35,13 +38,7 @@ import {
 // feedback file? escalate?", so the "when to call the seams" choice is named
 // and testable on its own instead of inlined across `recordPattern`'s branches.
 import { decideRecordActions } from "./decision.ts";
-import {
-  consolidateStalePromotedRules,
-  detectStalePromotedRules,
-  processStaleRules,
-  promoteToFeedbackFile,
-  type StaleRule,
-} from "./feedback-file.ts";
+import { promoteToFeedbackFile } from "./feedback-file.ts";
 // Issue #2108 — the fuzzy cue-deduplication algorithm (stemming, tokenization,
 // the overlap-coefficient `cueSimilarity`, the `findPatternForCue` resolver, and
 // the `CUE_MERGE_THRESHOLD` constant) now lives in the sibling `cue-matcher.ts`
@@ -51,28 +48,11 @@ import {
 import { findPatternForCue } from "./cue-matcher.ts";
 
 // Issue #2117 — the promotion-policy constant `PROMOTION_THRESHOLD` (a public
-// contract of the pattern-memory domain, not store implementation detail) now
-// lives in the leaf `constants.ts` Module. It is re-exported below so existing
-// import sites (the four display-tier aggregators and the tests) keep resolving
-// against `agent-memory.ts` unchanged, while the canonical definition has one
-// home that does not require importing this 778-line store to read a number.
+// contract of the pattern-memory domain, not store implementation detail) lives
+// in the leaf `constants.ts` Module. Used below by the promotion/escalation
+// decision predicate; external display-tier consumers import it from
+// `constants.ts` directly (issue #2342 dropped the back-compat re-export).
 import { PROMOTION_THRESHOLD } from "./constants.ts";
-export { PROMOTION_THRESHOLD };
-
-// Issue #940 — the Feedback File markdown grammar (path resolution, the
-// `## Auto-Promoted Rules` / `## Stale Rules` section layout, the
-// `### <category> (...)` block format, and the three block operations) is now
-// owned by the sibling `feedback-file.ts` Module. The stale-rule transforms and
-// the daily archival pass are re-exported here so the existing import sites
-// (`detectStalePromotedRules`/`processStaleRules` in test/stale-rules.test.mts,
-// `consolidateStalePromotedRules` in src/learning.ts) keep resolving against
-// `agent-memory.ts` without churn — the grammar still has exactly one definition.
-export {
-  consolidateStalePromotedRules,
-  detectStalePromotedRules,
-  processStaleRules,
-  type StaleRule,
-};
 
 // ===========================================================================
 // Constants / types

@@ -13,9 +13,10 @@
  *
  * A leaf module: no Redis, no filesystem, no async, and no imports from the rest
  * of `src/pattern-memory/`. Import direction is one-way — the store module and
- * the aggregators import from here, never the reverse. `agent-memory.ts`
- * re-exports `PROMOTION_THRESHOLD` for back-compat so existing import sites
- * (including tests) keep working unchanged.
+ * the aggregators import from here, never the reverse. Issue #2342 removed the
+ * back-compat re-export from `agent-memory.ts`: every consumer (the store, the
+ * aggregators, and the tests) now imports `PROMOTION_THRESHOLD` from here
+ * directly, so the import path names the canonical owner.
  */
 
 /**
