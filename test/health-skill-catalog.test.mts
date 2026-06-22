@@ -79,3 +79,47 @@ describe("assessSkillCatalog (#1968)", () => {
     assert.match(a.diagnostic!.action, /director \(ov-non-2xx\)/);
   });
 });
+
+describe("assessSkillCatalog: VLM-deferred graceful degradation (#2277)", () => {
+  const deferredSnap = (): SkillCatalogSnapshot => ({
+    registered: 0,
+    total: 4,
+    completed: true,
+    vlmDeferred: true,
+    skills: ["planner", "executor", "skeptic", "director"].map((n) => ({
+      name: n,
+      registered: false,
+      lastError: "vlm-deferred",
+    })),
+  });
+
+  test("a deferred empty catalog is DEGRADED (warning, auto-recovering), NOT empty/error", () => {
+    const a = assessSkillCatalog(deferredSnap());
+    // The key #2277 acceptance: zero-registered but VLM-deferred must NOT fold to
+    // the #1968 `empty`/`error` framing — it is a deliberate, self-healing
+    // degradation, so it is a `degraded` warning.
+    assert.equal(a.status, "degraded");
+    assert.equal(a.diagnostic?.severity, "warning");
+    assert.equal(a.diagnostic?.component, "intelligence");
+    assert.match(a.diagnostic!.what, /defer/i);
+    assert.match(a.diagnostic!.why, /VLM/i);
+    // Auto-recovering: the hourly chore re-registers once the VLM is back, so the
+    // diagnostic advertises autoRecovery — distinct from the #1968 empty (false).
+    assert.equal(a.diagnostic?.autoRecovery, true);
+    assert.match(a.diagnostic!.action, /ollama-recovery/);
+  });
+
+  test("vlmDeferred takes precedence over the empty rule at registered:0", () => {
+    // Same zero-registered shape, but without the deferred flag it would be the
+    // hard `empty`/error verdict — proving the flag is what flips the framing.
+    const notDeferred = deferredSnap();
+    notDeferred.vlmDeferred = false;
+    const empty = assessSkillCatalog(notDeferred);
+    assert.equal(empty.status, "empty");
+    assert.equal(empty.diagnostic?.severity, "error");
+
+    const deferred = assessSkillCatalog(deferredSnap());
+    assert.equal(deferred.status, "degraded");
+    assert.equal(deferred.diagnostic?.severity, "warning");
+  });
+});

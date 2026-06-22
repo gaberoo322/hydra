@@ -15,8 +15,12 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { registerSkills, getSkillCatalogState, reRegisterMissingSkills, isOvServerTimeout } =
+const { registerSkills, getSkillCatalogState, reRegisterMissingSkills, isOvServerTimeout, VLM_DEFERRED_MARKER } =
   await import("../src/knowledge-base/skill-registration.ts");
+
+/** Injectable VLM probe stubs (issue #2277). Default real probe is bypassed in tests. */
+const vlmUp = async () => ({ status: "ok" as const, latencyMs: 5 });
+const vlmDown = async () => ({ status: "down" as const, latencyMs: 5000, error: "timeout" });
 
 const realFetch = globalThis.fetch;
 const realErr = console.error;
@@ -69,7 +73,7 @@ describe("registerSkills: transient-failure retry (#1828)", () => {
     }) as any;
 
     // backoffBaseMs:0 keeps the retry sleep off the wall clock.
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     // 4 skills, one extra call for the retried first skill = 5 total.
     assert.equal(calls, 5, "the timed-out first skill must be retried exactly once");
@@ -83,7 +87,7 @@ describe("registerSkills: transient-failure retry (#1828)", () => {
       timeoutThrow();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     // 4 skills × 3 attempts each (1 initial + 2 retries) = 12 calls, all failing.
     assert.equal(calls, 12, "each skill must be attempted exactly 3 times");
@@ -99,7 +103,7 @@ describe("registerSkills: non-retryable failures short-circuit (#1828)", () => {
       return { ok: false, status: 400, json: async () => ({}), text: async () => "bad payload" };
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     // 4 skills, one attempt each — ov-non-2xx is not in the retryable set.
     assert.equal(calls, 4, "a non-retryable code must not trigger retries");
@@ -118,7 +122,7 @@ describe("registerSkills: raised per-attempt timeout (#1828)", () => {
       return okResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
     assert.equal(sawSignal, true, "fetch must receive an AbortSignal with a live timeout budget");
   });
 });
@@ -128,7 +132,7 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
     muteConsole();
     globalThis.fetch = (async () => okResponse()) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const state = getSkillCatalogState();
     assert.equal(state.completed, true, "a finished pass must mark completed");
@@ -145,7 +149,7 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
       timeoutThrow();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const state = getSkillCatalogState();
     assert.equal(state.completed, true);
@@ -170,7 +174,7 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
       return okResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const state = getSkillCatalogState();
     assert.equal(state.registered, 3, "3 of 4 skills register; the first fails out");
@@ -188,7 +192,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
     // so instead assert the already-full branch is a no-op: register all 4 then
     // re-register — nothing is attempted.
     globalThis.fetch = (async () => okResponse()) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     let calls = 0;
     globalThis.fetch = (async () => {
@@ -209,7 +213,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
     assert.equal(getSkillCatalogState().registered, 0, "precondition: catalog empty after startup");
 
     // OV recovers — re-register all four missing skills now succeed.
@@ -242,7 +246,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
       }
       return okResponse();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
     const before = getSkillCatalogState();
     assert.equal(before.registered, 3, "precondition: 3/4 after a partial startup");
     const succeededAt = before.skills[1].lastSuccessAt;
@@ -275,7 +279,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     // OV still timing out during the recovery pass.
     const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
@@ -297,7 +301,7 @@ describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", 
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     // Capture only the recovery-pass output: count [Learning] recovery lines
     // across BOTH console.error and console.log. The per-skill [Learning] logs
@@ -330,7 +334,7 @@ describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", 
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const lines: string[] = [];
     console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
@@ -415,7 +419,7 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
       return ovServerTimeoutResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     assert.equal(calls, 12, "4 skills × 3 attempts — the server-timeout body must be retried");
     assert.equal(getSkillCatalogState().registered, 0, "all four still fail when OV never clears");
@@ -432,7 +436,7 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
       return okResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     assert.equal(calls, 5, "the timed-out first skill is retried exactly once, then all succeed");
     assert.equal(getSkillCatalogState().registered, 4, "all four skills register after the retry");
@@ -453,7 +457,7 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
       };
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     assert.equal(calls, 4, "4 skills, one attempt each — a genuine 4xx is not retried");
   });
@@ -463,7 +467,7 @@ describe("getSkillCatalogState: defensive copy", () => {
   test("mutating the returned object does not corrupt the live state", async () => {
     muteConsole();
     globalThis.fetch = (async () => okResponse()) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const a = getSkillCatalogState();
     a.registered = -999;
@@ -472,5 +476,79 @@ describe("getSkillCatalogState: defensive copy", () => {
     const b = getSkillCatalogState();
     assert.equal(b.registered, 4, "the returned object must be a copy, not the live state");
     assert.equal(b.skills[0].registered, true, "skill entries must be copied too");
+  });
+});
+
+describe("registerSkills: VLM-down graceful degradation (#2277)", () => {
+  test("a down VLM DEFERS the pass — zero fetches, no timeout cascade", async () => {
+    muteConsole();
+    // If even ONE skill POST fires, this counter trips — the whole point of
+    // deferral is that we never call OV while the VLM (which OV's semantic
+    // enrichment blocks on) is offline, so the 4×3×120s timeout budget is saved.
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return okResponse();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmDown });
+
+    assert.equal(fetchCalls, 0, "a down VLM must POST nothing — the cascade is short-circuited");
+
+    const state = getSkillCatalogState();
+    assert.equal(state.completed, true, "the deferred pass still marks completed");
+    assert.equal(state.registered, 0, "nothing registers while the VLM is down");
+    assert.equal(state.total, 4);
+    assert.equal(state.vlmDeferred, true, "the state flags the deliberate VLM deferral");
+    assert.ok(
+      state.skills.every((s) => !s.registered && s.lastError === VLM_DEFERRED_MARKER),
+      "each skill records the vlm-deferred marker, distinct from an ov-* failure code",
+    );
+  });
+
+  test("emits EXACTLY ONE operator-visible alert on deferral", async () => {
+    // Capture console.error: the deferral path must emit exactly one [Learning]
+    // DEFERRED alert and nothing else (no per-skill failure spam, no EMPTY line).
+    console.error = () => {};
+    console.log = () => {};
+    globalThis.fetch = (async () => okResponse()) as any;
+
+    const lines: string[] = [];
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmDown });
+
+    const deferredLines = lines.filter((l) => l.includes("DEFERRED"));
+    assert.equal(deferredLines.length, 1, "exactly one operator-visible deferral alert");
+    assert.match(deferredLines[0], /VLM/, "the alert names the VLM root cause");
+    assert.match(deferredLines[0], /no restart needed/, "the alert states the no-restart recovery path");
+    // No #1968 EMPTY line — deferral replaces, not augments, the failure framing.
+    assert.equal(
+      lines.filter((l) => l.includes("EMPTY")).length,
+      0,
+      "a deferral must NOT also emit the #1968 EMPTY alert (would be a double alert)",
+    );
+  });
+
+  test("a reachable VLM falls through to the normal loop and clears a prior deferral", async () => {
+    muteConsole();
+    // First pass: VLM down → deferred state set.
+    globalThis.fetch = (async () => okResponse()) as any;
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmDown });
+    assert.equal(getSkillCatalogState().vlmDeferred, true, "precondition: deferred after a down pass");
+
+    // Second pass: VLM back up → normal registration runs and clears the flag.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return okResponse();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+
+    assert.equal(calls, 4, "a reachable VLM runs the normal 4-skill registration loop");
+    const state = getSkillCatalogState();
+    assert.equal(state.registered, 4, "all four register once the VLM is reachable");
+    assert.equal(state.vlmDeferred, false, "a successful up-pass clears the deferred flag");
   });
 });

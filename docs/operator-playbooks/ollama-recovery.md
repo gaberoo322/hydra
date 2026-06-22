@@ -103,6 +103,31 @@ systemctl --user restart hydra-orchestrator.service
 The failure-rate alert and the `ollamaVlm` deep-health probe clear on their own
 once the catalog is repopulated — no separate acknowledgement step.
 
+## Graceful degradation: the catalog is DEFERRED, not failed (issue #2277)
+
+When the VLM host is down at startup, `registerSkills` no longer burns the full
+4 skills × 3 attempts × 120s timeout budget against an OV handler that cannot
+answer (OV's `POST /api/v1/skills` does VLM-dependent semantic enrichment
+SYNCHRONOUSLY — verified to block ~52s and 500 with `INTERNAL: Request timed
+out.` even with `wait:false`). Instead it **pre-flights the VLM liveness probe
+and DEFERS the pass**: it POSTs nothing, records every skill with the
+`vlm-deferred` marker, sets `vlmDeferred:true` on the catalog state, and emits
+**exactly one** operator alert (`[Learning] OV skill catalog DEFERRED — …`).
+
+What you will see while the VLM is down:
+
+- `GET /api/health/skills` → `status:"degraded"`, `vlmDeferred:true`,
+  `registered:0` — a **deliberate** graceful degradation, NOT the `empty`/error
+  verdict that means "every POST failed under load" (#1968). The deep-health
+  diagnostic is a `warning` with `autoRecovery:true`, not an `error`.
+- The orchestrator logs ONE deferral line, not 200+ per-skill timeout lines —
+  the cascade is short-circuited at the source.
+
+No operator action beyond recovering the host (the Recovery steps above). Once
+the VLM answers, the hourly Housekeeping chore (`reRegisterMissingSkills`,
+gated on the skills-endpoint liveness) re-registers the deferred skills and
+flips `vlmDeferred` back to false — **no restart needed**.
+
 ## Durable fix (out of scope for this runbook)
 
 This is the recurring root cause behind a cluster of issues
