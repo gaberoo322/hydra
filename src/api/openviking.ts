@@ -6,7 +6,7 @@ import { Router } from "express";
 // OpenViking Request Adapter's transport discipline plus this reader's metrics
 // and zero-result fallback.
 import { getOvSearchMetrics, trackedOvSearch } from "../knowledge-base/ov-search.ts";
-import { getCoverageStats } from "../knowledge-base/source-indexer.ts";
+import { getCoverageStats } from "../knowledge-base/indexer.ts";
 import { OpenVikingSearchQuerySchema } from "../schemas/openviking.ts";
 
 /**

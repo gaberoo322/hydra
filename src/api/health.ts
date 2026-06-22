@@ -47,7 +47,7 @@ import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // Both are best-effort/never-throw. This route MUTATES NOTHING — the auto-clear
 // repair lives in the lifecycle path (learning-lifecycle.ts), not the probe.
 import { countSourceHashes } from "../redis/source-index.ts";
-import { probeOvSourceResourcesPresent } from "../knowledge-base/source-freshness.ts";
+import { probeOvSourceResourcesPresent } from "../knowledge-base/indexer.ts";
 import type { PingableBus } from "./event-bus-types.ts";
 
 import { gitExec } from "../github/git.ts";

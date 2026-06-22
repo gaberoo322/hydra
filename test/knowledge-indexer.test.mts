@@ -25,7 +25,7 @@ import {
   resetCoverageStats,
   loadPersistedHashes,
   _setHashPersistence,
-} from "../src/knowledge-base/source-indexer.ts";
+} from "../src/knowledge-base/indexer.ts";
 
 // Use a unique temp root for each describe block so we don't collide with
 // other tests in the suite.
