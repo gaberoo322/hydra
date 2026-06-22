@@ -48,6 +48,7 @@
 
 import { getWorkQueueItems, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
+import { time } from "./metrics/instrumentation.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/per-anchor.ts";
 // All design-concept domain symbols live in the single deep module (issue #2316).
 import {
@@ -327,6 +328,16 @@ function resolveDeps(deps?: Partial<CandidateFeedDeps>): CandidateFeedDeps {
  * contributes nothing, the rest of the feed still builds.
  */
 export async function getCandidateFeed(
+  opts: GetCandidateFeedOpts = {},
+  deps?: Partial<CandidateFeedDeps>,
+): Promise<CandidateFeed> {
+  // Issue #2353: time the candidate-feed selection hot path. `time()` is a
+  // transparent no-op unless HYDRA_PERF_INSTRUMENT is set, so the feed's
+  // result and never-throws contract are unchanged.
+  return time("anchor.getCandidateFeed", () => getCandidateFeedImpl(opts, deps));
+}
+
+async function getCandidateFeedImpl(
   opts: GetCandidateFeedOpts = {},
   deps?: Partial<CandidateFeedDeps>,
 ): Promise<CandidateFeed> {
