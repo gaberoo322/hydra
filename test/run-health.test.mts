@@ -40,6 +40,7 @@ describe("run-health seam (issue #1378) — pure heuristics, no aggregator deps"
       idleStreakCritical: 5,
       churnMinRecurrences: 3,
       churnCriticalRecurrences: 5,
+      mergeWindowLookbackS: 14_400,
     };
     assert.deepEqual(T, expected);
   });

@@ -449,11 +449,70 @@ describe("getAutopilotHealth — never-throw + composition (issue #890)", () => 
       },
     });
     assert.equal(signals.some((s) => s.type === "unproductive-loop"), false);
-    // Cross-check was queried with the OLDEST run's start (window span start).
-    assert.equal(sawSince, 1_700_000_000);
+    // Cross-check was queried with the oldest run's start minus the lookback
+    // buffer (issue #2369): 1_700_000_000 - 14_400 (default mergeWindowLookbackS).
+    assert.equal(sawSince, 1_700_000_000 - T.mergeWindowLookbackS);
   });
 
-  test("a genuinely dead window (zero real merges anywhere) still flags (#924)", async () => {
+  test("#2369 window-clipping: merges that landed before the run burst are captured via lookback", async () => {
+    // The incident: 14 runs clustered in one afternoon burst. The oldest run
+    // started at T0; every master merge landed ~38 min BEFORE T0. With a raw
+    // window of [T0, now], realMergesInWindow was 0 and the false alarm fired.
+    // With the mergeWindowLookbackS buffer, the query window extends back to
+    // T0 - 14400 and the morning merges are counted → signal suppressed.
+    const T0 = 1_700_050_000; // oldest run start (afternoon)
+    const mergeTime = T0 - 2_280; // ~38 min earlier (morning merges)
+    let queriedSince = -1;
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => null,
+      readRecentRuns: async () =>
+        Array.from({ length: 14 }, (_, i) => ({
+          dispatches: 3,
+          merged_count: 0, // CI merged out-of-band after each run ended
+          failed_count: 0,
+          term_reason: "interrupted",
+          started_epoch: T0 + i * 60,
+        })) as unknown as RunDigest[],
+      readWindowMergeCount: async (since) => {
+        queriedSince = since;
+        // Simulate: 5 master merges exist at mergeTime
+        return since <= mergeTime ? 5 : 0;
+      },
+    });
+    // The lookback must extend the query window past the merge time.
+    assert.ok(
+      queriedSince <= mergeTime,
+      `queriedSince (${queriedSince}) must be ≤ mergeTime (${mergeTime}); got window that still excludes morning merges`,
+    );
+    assert.equal(
+      signals.some((s) => s.type === "unproductive-loop"),
+      false,
+      "unproductive-loop must not fire when morning merges are within the lookback",
+    );
+  });
+
+  test("#2369 lookback does not suppress a genuinely idle multi-day window", async () => {
+    // If no merges have landed for >24h, widening the window by 4h should not
+    // create a false suppression — the reader returns 0 throughout.
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => null,
+      readRecentRuns: async () =>
+        Array.from({ length: 14 }, (_, i) => ({
+          dispatches: 3,
+          merged_count: 0,
+          failed_count: 0,
+          started_epoch: 1_700_000_000 + i * 60,
+        })) as unknown as RunDigest[],
+      readWindowMergeCount: async () => 0, // genuinely zero delivery
+    });
+    assert.equal(
+      signals.some((s) => s.type === "unproductive-loop"),
+      true,
+      "must still flag when truly no merges in the extended window",
+    );
+  });
+
+    test("a genuinely dead window (zero real merges anywhere) still flags (#924)", async () => {
     const signals = await getAutopilotHealth({
       readLiveRun: async () => null,
       readRecentRuns: async () => [

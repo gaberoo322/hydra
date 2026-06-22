@@ -56,6 +56,22 @@ export interface AutopilotHealthThresholds {
   churnMinRecurrences: number;
   /** Recurrence count at or above which churn escalates to critical. */
   churnCriticalRecurrences: number;
+  /**
+   * Extra look-back seconds subtracted from the oldest run's `started_epoch`
+   * when computing the real-merge cross-check window (issue #2369).
+   *
+   * The incident: 14 runs were clustered in an afternoon burst; every master
+   * merge from that morning landed ~38 min BEFORE the oldest run started, so
+   * `readWindowMergeCount(oldestRunStart)` returned 0 even though 5 PRs had
+   * merged. By extending the merge-count window backward by this buffer we
+   * capture merges that landed before the run cluster began — the actual
+   * delivery cadence is wider than a single burst's span.
+   *
+   * Default 14 400 s (4 h): enough to span a typical morning-merge-then-
+   * afternoon-run cadence without widening so far that stale merges from an
+   * earlier productive day suppress a genuinely idle window.
+   */
+  mergeWindowLookbackS: number;
 }
 
 export const DEFAULT_HEALTH_THRESHOLDS: AutopilotHealthThresholds = {
@@ -66,6 +82,7 @@ export const DEFAULT_HEALTH_THRESHOLDS: AutopilotHealthThresholds = {
   idleStreakCritical: 5,
   churnMinRecurrences: 3,
   churnCriticalRecurrences: 5,
+  mergeWindowLookbackS: 14_400, // 4 h — spans the typical morning-merge→afternoon-run gap
 };
 
 // ---------------------------------------------------------------------------
