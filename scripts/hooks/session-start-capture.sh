@@ -63,6 +63,17 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
+# Shared sentinel-parse grammar (issue #2406) — same source of truth the
+# subagent-scoped PostToolUse hook uses, so the two registration writers stay
+# in lock-step. Sourced from this script's own directory so a worktree / synced
+# copy resolves it relative to itself.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=scripts/hooks/extract-dispatch-sentinel.sh
+if ! . "$HOOK_DIR/extract-dispatch-sentinel.sh" 2>/dev/null; then
+  warn "could not source extract-dispatch-sentinel.sh from $HOOK_DIR — skipping"
+  exit 0
+fi
+
 session_id="$(printf '%s' "$payload" | jq -r '(.session_id // .sessionId // "") | tostring' 2>/dev/null || printf '')"
 transcript_path="$(printf '%s' "$payload" | jq -r '(.transcript_path // .transcriptPath // "") | tostring' 2>/dev/null || printf '')"
 project_dir="$(printf '%s' "$payload" | jq -r '(.cwd // .project_dir // "") | tostring' 2>/dev/null || printf '')"
@@ -78,19 +89,9 @@ fi
 
 # --- find the first user message text --------------------------------------
 # The transcript is JSONL, one record per line. We want the textual content
-# of the first record whose role/type is "user". The content may be a plain
-# string or an array of content blocks; jq handles both.
-first_user_text="$(jq -rs '
-  [ .[]
-    | select((.type? == "user") or (.role? == "user") or (.message?.role? == "user"))
-  ] as $users
-  | ($users[0] // {}) as $u
-  | ( $u.message?.content // $u.content // $u.text // "" ) as $c
-  | if ($c | type) == "array"
-    then ( [ $c[] | (.text // .content // "") ] | join("\n") )
-    else ($c | tostring)
-    end
-' "$transcript_path" 2>/dev/null || printf '')"
+# of the first record whose role/type is "user" (shared grammar — see
+# extract-dispatch-sentinel.sh).
+first_user_text="$(extract_first_user_text "$transcript_path")"
 
 if [ -z "$first_user_text" ]; then
   warn "no first user message — skipping"
@@ -102,24 +103,15 @@ fi
 #   <!-- hydra-dispatch v1 skill={skill} dispatchId={id} runId={runId} -->
 # runId is optional. We extract each field independently so field order and
 # the presence/absence of runId don't matter.
-sentinel_line="$(printf '%s\n' "$first_user_text" | grep -m1 -E '<!--[[:space:]]*hydra-dispatch[[:space:]]+v1[[:space:]]' || true)"
+sentinel_line="$(extract_sentinel_line "$first_user_text")"
 if [ -z "$sentinel_line" ]; then
   # No sentinel — interactive operator session. Silent no-op.
   exit 0
 fi
 
-extract_field() {
-  # $1 = field name. Matches `name=VALUE` where VALUE runs up to the next
-  # whitespace or the closing `-->`.
-  printf '%s' "$sentinel_line" \
-    | grep -oE "$1=[^[:space:]>]+" \
-    | head -n1 \
-    | sed -E "s/^$1=//"
-}
-
-skill="$(extract_field skill)"
-dispatch_id="$(extract_field dispatchId)"
-run_id="$(extract_field runId)"
+skill="$(extract_sentinel_field "$sentinel_line" skill)"
+dispatch_id="$(extract_sentinel_field "$sentinel_line" dispatchId)"
+run_id="$(extract_sentinel_field "$sentinel_line" runId)"
 
 if [ -z "$skill" ] || [ -z "$dispatch_id" ]; then
   warn "malformed sentinel (skill='$skill' dispatchId='$dispatch_id') — skipping"
