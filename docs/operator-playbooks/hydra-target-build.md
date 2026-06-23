@@ -678,6 +678,63 @@ git push origin main
 hydra raw POST /merge/unlock
 ```
 
+#### 7b. Auto-merge / PR-path merge completion — already-merged-post-green is SUCCESS, not friction (issue #2392)
+
+This subsection applies ONLY to the **auto-merge/PR path** — a build that opens a
+hydra-betting PR and lets CI + the host-side **emulated** auto-merger
+(`automerge.yml` in hydra-betting) land it. It does NOT apply to the
+direct-to-main `git merge` block above, and it does NOT apply to the
+orchestrator (`gaberoo322/hydra`) merge path, which is branch-protected and
+unaffected.
+
+`hydra-betting` has no native branch protection; the emulated auto-merger
+squashes the PR the moment CI goes green. So by the time this build reaches its
+explicit merge step, the PR is very often **already merged** — the squash landed
+by `automerge.yml` on the `workflow_run`-success that this build was itself
+polling for. That is a benign, expected race: the merge succeeded. Treat it as a
+SUCCESS terminal state, never as friction.
+
+```bash
+# Auto-merge/PR path only. Poll CI to green, then observe the PR's merge state.
+# (Poll-to-green is retained as complementary guidance — see the
+# betting-automerge-bypasses-CI ops note — but the cue fix below does NOT depend
+# on who wins the squash race.)
+PR_STATE=$(gh pr view "$PR_NUM" --repo gaberoo322/hydra-betting \
+  --json state,mergedAt,mergeStateStatus 2>/dev/null || echo '')
+PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MERGED" once landed
+```
+
+**Decision — the load-bearing branch:**
+
+- **PR is MERGED and CI concluded green** → this is the **already-merged-post-green
+  SUCCESS terminal state.** The merge step is COMPLETE. Read `COMMIT_SHA` from the
+  merged PR's merge commit (`gh pr view "$PR_NUM" --json mergeCommit --jq
+  '.mergeCommit.oid'`) for the metrics/event bookkeeping below.
+  - **Explicitly DO NOT POST the `betting-emulated-automerge-lands-before-explicit-merge`
+    cue to `/api/memory/subagent-friction`.** The merge succeeded — recording
+    friction here is the pure-noise defect this subsection fixes (it 3-hit-escalated
+    a meta-friction issue, #2391, working-as-intended-but-spurious). Root-cause
+    suppression is at the emission site (do not narrate the POST), NOT a downstream
+    threshold bump in `src/pattern-memory/escalation.ts`.
+  - Fall through to **Step 8.5** (worktree cleanup + branch delete) and **Step 9**
+    (state sync: move ITEM_ID to done, `tasksMerged:1` metrics record,
+    `cycle:completed` event with `merged:true`, and `/cycle/complete`
+    registration) **identically to a build-performed merge.** Nothing is silently
+    skipped — the post-merge bookkeeping is the same regardless of who landed the
+    squash. The post-merge health steps (7.5 deploy, 8 verify, 8.6 smoke) also
+    run as normal; the Step 7 `pmh-baseline.json` you captured before enabling
+    auto-merge feeds Step 8.6 in delta mode.
+  - The **post-green qualifier is load-bearing**: an already-merged PR whose CI is
+    NOT green / still in progress is NOT a clean success — do not silently treat it
+    as one. Wait for CI to conclude before classifying the outcome.
+
+- **PR is NOT merged** → attempt the explicit merge yourself (poll-to-green then
+  merge). **Record friction (`betting-emulated-automerge-lands-before-explicit-merge`
+  or the genuine merge-failure cue) ONLY if that explicit merge actually fails.**
+  This is the only branch that records the cue — the genuine merge-failure signal
+  is preserved; suppression is narrowly the already-merged-post-green case, nothing
+  wider.
+
 ### 7.5. Deploy + post-deploy health
 ```bash
 systemctl --user restart hydra-betting-web.service
