@@ -19,7 +19,7 @@ import Redis from "ioredis";
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { recordCycleMetrics } = await import("../src/metrics/record.ts");
-const { getAbandonmentBreakdown, categorizeAbandonReason } = await import("../src/metrics/abandonment.ts");
+const { getAbandonmentBreakdown, categorizeAbandonReason } = await import("../src/api/metrics.ts");
 
 let testRedis: any;
 
