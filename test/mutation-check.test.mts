@@ -19,6 +19,7 @@ import {
   filterMutationCandidates,
   selectKillFloor,
   classifyNoSignal,
+  classifyTimedOut,
 } from "../scripts/ci/mutation-check.ts";
 import type { MutationTestReport } from "../src/mutation.ts";
 
@@ -362,5 +363,104 @@ describe("classifyNoSignal — no-testable-mutants gate (issue #1120)", () => {
     });
     assert.equal(classifyNoSignal(report, 3), null);
     assert.equal(classifyNoSignal(report, 1), null);
+  });
+});
+
+describe("classifyTimedOut — budget-exhausted partial verdict (issue #2393)", () => {
+  // The pre-#2393 bug: the Orchestrator gate captured report.timedOut into the
+  // summary JSON but NEVER branched on it — it computed killRate over only the
+  // evaluated sample (e.g. 75 of 553) and emitted `pass` if that partial rate
+  // cleared the floor, silently rubber-stamping a diff whose surviving mutants
+  // land in the unevaluated tail. This mirrors the Target gate's shipped #1821
+  // classifyTimedOut seam.
+
+  test("returns null when the runner did NOT time out (caller runs kill-rate)", () => {
+    // A complete run (timedOut:false) is not a timed-out case — the caller
+    // proceeds to the normal kill-rate comparison.
+    const report = makeReport({
+      totalMutants: 10,
+      skipped: 0,
+      killed: 8,
+      candidatesGenerated: 10,
+      timedOut: false,
+    });
+    assert.equal(classifyTimedOut(report), null);
+  });
+
+  test("timed-out run → warn (NOT pass), informational partial killRate, distinct reason", () => {
+    // The scanner.ts symptom: 75 of 553 candidate mutants run before the budget
+    // expired, 57 killed of 75 testable → partial rate 76% — which would have
+    // cleared a 60 floor and emitted a silent `pass` pre-fix.
+    const report = makeReport({
+      totalMutants: 75,
+      skipped: 0,
+      killed: 57,
+      survived: 18,
+      candidatesGenerated: 553,
+      timedOut: true,
+    });
+    const result = classifyTimedOut(report);
+    assert.ok(result, "expected a classification for the timed-out case");
+    assert.equal(result.status, "warn");
+    assert.notEqual(result.status, "pass" as unknown as string);
+    assert.equal(result.timedOut, true);
+    // 57/75 = 76% — surfaced for context, but it is informational only and is
+    // NEVER compared against the kill floor.
+    assert.equal(result.killRate, 76);
+    assert.match(result.reason, /timed out before evaluating all mutants/);
+    assert.match(result.reason, /75 of 553/);
+    assert.match(result.reason, /non-blocking/);
+  });
+
+  test("timed out with zero testable signal → null killRate (no partial rate to report)", () => {
+    // Budget exhausted before any mutant produced testable signal: all the
+    // mutants that ran were skipped, so testable===0 and there is no partial
+    // rate to surface — killRate is null, NOT a fabricated 100.
+    const report = makeReport({
+      totalMutants: 12,
+      skipped: 12,
+      killed: 0,
+      candidatesGenerated: 400,
+      timedOut: true,
+    });
+    const result = classifyTimedOut(report);
+    assert.ok(result);
+    assert.equal(result.status, "warn");
+    assert.equal(result.killRate, null, "must NOT fabricate a kill rate");
+    assert.match(result.reason, /partial kill rate n\/a/);
+  });
+
+  test("a timed-out run that WOULD clear the floor still warns (never synthesizes a pass)", () => {
+    // 95% partial rate, well above any floor — the invariant is that this is
+    // STILL a warn, never a pass: a partial sample above the floor is not proof
+    // the full mutant set clears it.
+    const report = makeReport({
+      totalMutants: 40,
+      skipped: 0,
+      killed: 38,
+      survived: 2,
+      candidatesGenerated: 500,
+      timedOut: true,
+    });
+    const result = classifyTimedOut(report);
+    assert.ok(result);
+    assert.equal(result.status, "warn");
+    assert.equal(result.killRate, 95);
+    assert.notEqual(result.status, "pass" as unknown as string);
+  });
+
+  test("timed-out classification is tier-independent (no tier parameter)", () => {
+    // Unlike classifyNoSignal, classifyTimedOut takes no tier — a
+    // budget-exhausted run has reached no verdict regardless of tier, so the
+    // outcome is always warn. (Compile-time: the signature has arity 1.)
+    assert.equal(classifyTimedOut.length, 1);
+    const report = makeReport({
+      totalMutants: 5,
+      skipped: 0,
+      killed: 3,
+      candidatesGenerated: 200,
+      timedOut: true,
+    });
+    assert.equal(classifyTimedOut(report)?.status, "warn");
   });
 });
