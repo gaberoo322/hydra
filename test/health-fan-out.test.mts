@@ -48,6 +48,17 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
     // Issue #2278: stub the Tailnet VLM-host probe so the fan-out never hits the
     // real gabes-desktop-1:11434 host from a test/CI environment.
     probeOllamaVlmImpl: (async () => ({ status: "ok", latencyMs: 9 })) as any,
+    // Issue #2386: stub the in-process skill-catalog read so the assembled
+    // ProbeInputs.skillCatalog is deterministic in tests (no dependency on the
+    // process-lifetime registerSkills singleton).
+    skillCatalogState: (() => ({
+      skills: [],
+      registered: 4,
+      total: 4,
+      completed: true,
+      lastAttemptAt: 1234,
+      vlmDeferred: false,
+    })) as any,
     targetServiceName: () => "hydra-betting-web.service",
     ...overrides,
   };
@@ -98,6 +109,33 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     // index 19 — the Tailnet Ollama VLM-host liveness probe (issue #2278).
     assert.equal((probes.ollamaVlm as any)?.status, "ok");
     assert.equal((probes.ollamaVlm as any)?.latencyMs, 9);
+
+    // Issue #2386 — the in-process skill-catalog read (not an async settle-array
+    // probe) is merged onto the named record by collectProbeInputs.
+    assert.equal((probes.skillCatalog as any)?.registered, 4);
+    assert.equal((probes.skillCatalog as any)?.total, 4);
+    assert.equal((probes.skillCatalog as any)?.completed, true);
+  });
+
+  test("the injected skill-catalog state flows into ProbeInputs.skillCatalog (issue #2386)", async () => {
+    // An empty, completed catalog (every skill lost) must flow through verbatim so
+    // the downstream skill-catalog rules see it on the snapshot. This is the live
+    // read collectProbeInputs owns — previously rules.ts read the singleton
+    // out-of-band, so the fan-out had no skill-catalog coverage.
+    const probes = await collectProbeInputs(happyDeps({
+      skillCatalogState: (() => ({
+        skills: [],
+        registered: 0,
+        total: 4,
+        completed: true,
+        lastAttemptAt: 9999,
+        vlmDeferred: false,
+      })) as any,
+    }));
+    assert.equal((probes.skillCatalog as any)?.registered, 0);
+    assert.equal((probes.skillCatalog as any)?.total, 4);
+    assert.equal((probes.skillCatalog as any)?.completed, true);
+    assert.equal((probes.skillCatalog as any)?.lastAttemptAt, 9999);
   });
 
   test("a down VLM host flows into ollamaVlm (issue #2278)", async () => {

@@ -15,13 +15,16 @@
 
 import type { HealthSnapshot, HealthDiagnostic } from "./diagnostics.ts";
 import { assessSkillCatalog, assessRegistrationFailureRate } from "./skill-catalog.ts";
-// Issue #1968: the OV skill-catalog state is in-process module state populated by
-// startup `registerSkills` (resets on restart), NOT a deep-health probe — so it
-// is read directly here rather than carried on the HealthSnapshot. The skill-rule
-// below ignores its `s` argument and reads `getSkillCatalogState()`; that read is
-// a pure, never-throw copy of an in-memory singleton (no Redis/OV I/O), so the
-// rule stays side-effect-free even though it doesn't source from the snapshot.
-import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
+// Issue #2386: the OV skill-catalog state is now carried ON the HealthSnapshot
+// (`s.skillCatalog`), read live once at fan-out time in collectProbeInputs — the
+// module that already owns every other in-process probe read. The two
+// skill-catalog rules below read it from the snapshot like every other rule,
+// making rule purity (a rule is a function of HealthSnapshot → diagnostic|null)
+// literally true for ALL rules, not approximately true with two exceptions.
+// rules.ts no longer value-imports getSkillCatalogState from the knowledge-base
+// cluster (issue #1968's direct read), so the rule-authoring module's dependency
+// graph is exactly its documented seam: it reads only diagnostics.ts types and
+// the pure assessors in skill-catalog.ts.
 
 // Issue #2013: service-probe keys that already have a bespoke diagnostic rule
 // (with a tailored why/impact/action) earlier in RULES. The generic
@@ -401,23 +404,24 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // deep-health Health Assessment fold so an operator watching /api/health/deep
   // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a
   // supplementary detail view, but only this rule folds the failure into the
-  // top-level `status` and `diagnostics` array. The `_s` snapshot argument is
-  // unused: skill-catalog state is in-process module state, not a deep-health
-  // probe, so it's read directly via getSkillCatalogState() (a pure, never-throw
-  // in-memory read). assessSkillCatalog already maps empty → severity:"error",
-  // partial → severity:"warning", and ok/in-flight → diagnostic:null, so this
-  // rule is a thin pass-through of that gate's diagnostic.
-  (_s) => assessSkillCatalog(getSkillCatalogState()).diagnostic,
+  // top-level `status` and `diagnostics` array. Issue #2386: the catalog state
+  // now arrives ON the snapshot (`s.skillCatalog`, assembled at fan-out time),
+  // so this rule is pure over its `s` argument like every other rule — no more
+  // out-of-band getSkillCatalogState() read. assessSkillCatalog already maps
+  // empty → severity:"error", partial → severity:"warning", and ok/in-flight →
+  // diagnostic:null, so this rule is a thin pass-through of that gate's diagnostic.
+  (s) => assessSkillCatalog(s.skillCatalog).diagnostic,
   // Issue #2277: the registration-FAILURE-RATE alert. Distinct from the
   // population gate above (empty/partial): this reads the last completed pass's
-  // failure rate via getSkillCatalogState() (the same pure, never-throw in-memory
-  // read) and correlates it with the #2284 Ollama VLM liveness probe carried on
-  // the snapshot (`s.ollamaVlm`). It fires a `warning` when the failure rate
-  // exceeds 10% and, when the VLM host is down, names that root cause + the
-  // ollama-recovery playbook. `warning` (not `error`) so it ANNOTATES the
-  // population verdict without escalating the deep-health fold above it.
-  // Read-only: it adds no export to skill-registration and never mutates state.
-  (s) => assessRegistrationFailureRate(getSkillCatalogState(), s.ollamaVlm),
+  // failure rate from `s.skillCatalog` (issue #2386 — sourced from the snapshot,
+  // not a live getSkillCatalogState() read) and correlates it with the #2284
+  // Ollama VLM liveness probe also carried on the snapshot (`s.ollamaVlm`). It
+  // fires a `warning` when the failure rate exceeds 10% and, when the VLM host is
+  // down, names that root cause + the ollama-recovery playbook. `warning` (not
+  // `error`) so it ANNOTATES the population verdict without escalating the
+  // deep-health fold above it. Read-only: it adds no export to skill-registration
+  // and never mutates state.
+  (s) => assessRegistrationFailureRate(s.skillCatalog, s.ollamaVlm),
 ];
 
 // ---- fmtUp — uptime humanizer shared by assessHealth + the wire projection -

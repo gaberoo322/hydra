@@ -1,64 +1,37 @@
 /**
- * test/health-skill-rule.test.mts — the #1968 skill-catalog Health-Assessment rule.
+ * test/health-skill-rule.test.mts — the skill-catalog Health-Assessment rules.
  *
  * The standalone GET /api/health/skills endpoint surfaces the empty/partial OV
- * skill catalog, but QA flagged that the FAILURE never folded into the deep-health
- * Health Assessment: an operator watching /api/health/deep (or hydra-doctor, which
- * reads that fold) saw a clean `status` even when startup skill registration lost
- * every skill to OpenViking timeouts. The fix added a rule to src/health/rules.ts
- * that reads the in-process skill-catalog state via getSkillCatalogState() and
- * folds assessSkillCatalog()'s verdict into assessHealth's diagnostics + status.
+ * skill catalog, but the FAILURE must ALSO fold into the deep-health Health
+ * Assessment so an operator watching /api/health/deep (or hydra-doctor, which
+ * reads that fold) sees a non-clean `status` when startup skill registration lost
+ * skills to OpenViking timeouts. Two rules in src/health/rules.ts cover this:
+ * the #1968 population gate (assessSkillCatalog) and the #2277 registration-
+ * failure-rate alert (assessRegistrationFailureRate).
  *
- * This file lives apart from test/health-diagnostics.test.mts on purpose: the rule
- * reads a MODULE SINGLETON (the catalog state populated by registerSkills), which
- * has no public reset. Driving it here — in its own test process — keeps the
- * mutation from polluting that file's "fully-healthy snapshot fires zero
- * diagnostics" baseline. We drive the singleton through registerSkills with a
- * stubbed globalThis.fetch (same lever test/skill-registration.test.mts uses).
+ * Issue #2386: the skill-catalog STATE now rides on `HealthSnapshot.skillCatalog`
+ * (assembled at fan-out time in collectProbeInputs), so the two rules are pure
+ * functions over the snapshot — they no longer read the in-process singleton via
+ * getSkillCatalogState(). That makes these rules testable EXACTLY like every
+ * other health rule: construct a HealthSnapshot with a controlled `skillCatalog`
+ * field and assert the folded diagnostic. No more registerSkills lifecycle
+ * dependency, no stubbed globalThis.fetch, and no module-singleton-ordering
+ * caveat — the whole reason this file used to live apart from
+ * test/health-diagnostics.test.mts. (The end-to-end live read in collectProbeInputs
+ * is covered by test/health-fan-out.test.mts; the pure assessors themselves by
+ * test/health-skill-catalog.test.mts.)
  */
 
-import { test, describe, afterEach } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { assessHealth, type HealthSnapshot } from "../src/health/diagnostics.ts";
-import { assessRegistrationFailureRate } from "../src/health/skill-catalog.ts";
-import { registerSkills } from "../src/knowledge-base/skill-registration.ts";
-
-const realFetch = globalThis.fetch;
-const realErr = console.error;
-const realLog = console.log;
-afterEach(() => {
-  globalThis.fetch = realFetch;
-  console.error = realErr;
-  console.log = realLog;
-});
-
-function muteConsole() {
-  console.error = () => {};
-  console.log = () => {};
-}
-
-// Issue #2277: registerSkills now pre-flights the Ollama VLM liveness probe and
-// DEFERS (POSTs nothing) when it is down. These tests drive the OV-reachable
-// failure/success paths through the stubbed fetch, so they inject a VLM-up probe
-// to bypass the deferral short-circuit; the deferral path has its own coverage in
-// test/skill-registration.test.mts.
-const vlmUp = async () => ({ status: "ok" as const, latencyMs: 5 });
-
-function okResponse(): any {
-  return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
-}
-
-/** A fetch throw the OV adapter classifies as `ov-timeout`. */
-function timeoutThrow(): never {
-  const err: any = new Error("The operation was aborted due to timeout");
-  err.name = "TimeoutError";
-  throw err;
-}
+import type { SkillCatalogState } from "../src/knowledge-base/skill-registration.ts";
 
 // A fully-healthy snapshot (mirrors test/health-diagnostics.test.mts' baseline).
-// Every other rule is satisfied so any fired diagnostic is attributable to the
-// skill-catalog rule alone.
+// Every other rule is satisfied so any fired diagnostic is attributable to a
+// skill-catalog rule alone. The default skillCatalog is fully-registered, so
+// both skill-catalog rules no-op until a case overrides it.
 function healthySnapshot(): HealthSnapshot {
   return {
     health: { status: "ok", redis: true, cycle: "idle", uptime: 3600 },
@@ -80,6 +53,17 @@ function healthySnapshot(): HealthSnapshot {
     blCounts: { triage: 0, backlog: 2, inProgress: 1, blocked: 0, done: 5, total: 3 },
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
+    // Issue #2386: fully-registered catalog by default → both skill-catalog rules
+    // no-op. Cases override `skillCatalog` to drive the empty/partial/failure-rate
+    // verdicts directly off the snapshot, no module-singleton mutation.
+    skillCatalog: {
+      skills: [],
+      registered: 4,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: false,
+    },
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
     ollamaVlm: { status: "ok", latencyMs: 12 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },
@@ -102,84 +86,16 @@ function healthySnapshot(): HealthSnapshot {
   };
 }
 
+/** Clone the healthy snapshot, mutating `skillCatalog` to drive a case. */
+function withCatalog(catalog: SkillCatalogState): HealthSnapshot {
+  const s = healthySnapshot();
+  s.skillCatalog = catalog;
+  return s;
+}
+
 function skillDiag(s: HealthSnapshot) {
   return assessHealth(s).diagnostics.find((d) => d.what.startsWith("OV skill catalog"));
 }
-
-// NOTE: ordering is load-bearing. The singleton starts `completed:false`, so the
-// no-pass case must be asserted BEFORE any registerSkills() call mutates it. The
-// empty-catalog case mutates the singleton into a completed-empty state, so it
-// runs LAST (a later test reading the snapshot would otherwise inherit it).
-
-describe("skill-catalog Health-Assessment rule (#1968)", () => {
-  test("before any registration pass → no diagnostic, status stays healthy", () => {
-    // Fresh process: getSkillCatalogState().completed === false, so the gate
-    // returns null and the deep-health fold reports healthy. A slow startup must
-    // not be a false alarm.
-    const a = assessHealth(healthySnapshot());
-    assert.equal(a.status, "healthy");
-    assert.equal(skillDiag(healthySnapshot()), undefined);
-  });
-
-  test("an all-success pass → no diagnostic (catalog populated)", async () => {
-    muteConsole();
-    globalThis.fetch = (async () => okResponse()) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
-
-    const a = assessHealth(healthySnapshot());
-    assert.equal(skillDiag(healthySnapshot()), undefined);
-    assert.equal(a.status, "healthy", "a full catalog must not degrade deep-health");
-  });
-
-  test("a partial-failure pass → warning folded into status:degraded", async () => {
-    muteConsole();
-    // First skill burns its 3 attempts (ov-timeout); the rest succeed first try.
-    let firstSkillCalls = 0;
-    globalThis.fetch = (async () => {
-      if (firstSkillCalls < 3) {
-        firstSkillCalls++;
-        timeoutThrow();
-      }
-      return okResponse();
-    }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
-
-    const d = skillDiag(healthySnapshot());
-    assert.ok(d, "a partial catalog must fire a diagnostic");
-    assert.equal(d!.severity, "warning");
-    assert.equal(d!.component, "intelligence");
-    assert.match(d!.what, /partial \(3\/4\)/);
-    // A warning is the worst severity on an otherwise-healthy snapshot → degraded.
-    assert.equal(assessHealth(healthySnapshot()).status, "degraded");
-  });
-
-  test("an all-failure pass → error folded into status:unhealthy", async () => {
-    muteConsole();
-    globalThis.fetch = (async () => {
-      timeoutThrow();
-    }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
-
-    const d = skillDiag(healthySnapshot());
-    assert.ok(d, "an empty catalog must fire a diagnostic");
-    assert.equal(d!.severity, "error");
-    assert.equal(d!.component, "intelligence");
-    assert.equal(d!.what, "OV skill catalog empty");
-    // An error is the worst severity on an otherwise-healthy snapshot → unhealthy.
-    assert.equal(assessHealth(healthySnapshot()).status, "unhealthy");
-  });
-});
-
-// Issue #2277: the registration-FAILURE-RATE alert. Driven through the SAME
-// module-singleton lever (registerSkills with a stubbed fetch) as the population
-// rule above, but asserted via the pure assessRegistrationFailureRate() function
-// so the VLM-down vs VLM-ok branch is exercised deterministically without
-// depending on a particular probe field on the deep-health snapshot.
-//
-// This is a NEW top-level describe with its own afterEach restore (it does not
-// piggyback the population suite's lifecycle). Ordering note: it mutates the
-// SAME singleton as the suite above, so it asserts only via getSkillCatalogState
-// reads it performs itself — it never relies on the singleton's pre-state.
 
 function failRateDiag(s: HealthSnapshot) {
   return assessHealth(s).diagnostics.find((d) =>
@@ -187,46 +103,96 @@ function failRateDiag(s: HealthSnapshot) {
   );
 }
 
-describe("skill-registration failure-rate alert (#2277)", () => {
-  afterEach(() => {
-    globalThis.fetch = realFetch;
-    console.error = realErr;
-    console.log = realLog;
+// Issue #2386: every case reads `skillCatalog` off the snapshot, so cases are now
+// fully order-independent — no shared singleton to mutate, unlike the pre-#2386
+// registerSkills-driven version where the empty-catalog case had to run last.
+
+describe("skill-catalog Health-Assessment population rule (#1968, snapshot-sourced #2386)", () => {
+  test("before any registration pass → no diagnostic, status stays healthy", () => {
+    // completed:false → the gate returns null and the deep-health fold reports
+    // healthy. A slow startup must not be a false alarm.
+    const s = withCatalog({
+      skills: [],
+      registered: 0,
+      total: 4,
+      completed: false,
+      lastAttemptAt: null,
+      vlmDeferred: false,
+    });
+    assert.equal(assessHealth(s).status, "healthy");
+    assert.equal(skillDiag(s), undefined);
   });
 
-  test("pure: fully-registered catalog (0% failed) → no alert", () => {
-    const ok = assessRegistrationFailureRate(
-      { registered: 4, total: 4, completed: true, skills: [] },
-      { status: "ok" },
-    );
-    assert.equal(ok, null, "0% failure rate must not alert");
+  test("an all-success pass → no diagnostic (catalog populated)", () => {
+    // Default healthy catalog is fully registered.
+    const s = healthySnapshot();
+    assert.equal(skillDiag(s), undefined);
+    assert.equal(assessHealth(s).status, "healthy", "a full catalog must not degrade deep-health");
   });
 
-  test("pure: no completed pass → no alert (registration still in flight)", () => {
-    assert.equal(
-      assessRegistrationFailureRate(
-        { registered: 0, total: 4, completed: false, skills: [] },
-        { status: "down" },
-      ),
-      null,
-    );
+  test("a partial-failure pass → warning folded into status:degraded", () => {
+    const s = withCatalog({
+      skills: [
+        { name: "planner", registered: false, lastError: "ov-timeout", lastSuccessAt: null },
+        { name: "executor", registered: true, lastError: null, lastSuccessAt: Date.now() },
+        { name: "skeptic", registered: true, lastError: null, lastSuccessAt: Date.now() },
+        { name: "director", registered: true, lastError: null, lastSuccessAt: Date.now() },
+      ],
+      registered: 3,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: false,
+    });
+    const d = skillDiag(s);
+    assert.ok(d, "a partial catalog must fire a diagnostic");
+    assert.equal(d!.severity, "warning");
+    assert.equal(d!.component, "intelligence");
+    assert.match(d!.what, /partial \(3\/4\)/);
+    // A warning is the worst severity on an otherwise-healthy snapshot → degraded.
+    assert.equal(assessHealth(s).status, "degraded");
   });
 
-  test("pure: total 0 → no alert (no meaningful rate)", () => {
-    assert.equal(
-      assessRegistrationFailureRate(
-        { registered: 0, total: 0, completed: true, skills: [] },
-        { status: "down" },
-      ),
-      null,
-    );
+  test("an all-failure pass → error folded into status:unhealthy", () => {
+    const s = withCatalog({
+      skills: [],
+      registered: 0,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: false,
+    });
+    const d = skillDiag(s);
+    assert.ok(d, "an empty catalog must fire a diagnostic");
+    assert.equal(d!.severity, "error");
+    assert.equal(d!.component, "intelligence");
+    assert.equal(d!.what, "OV skill catalog empty");
+    // An error is the worst severity on an otherwise-healthy snapshot → unhealthy.
+    assert.equal(assessHealth(s).status, "unhealthy");
+  });
+});
+
+// Issue #2277/#2386: the registration-FAILURE-RATE alert, now driven entirely off
+// the snapshot's `skillCatalog` + `ollamaVlm` fields — no singleton, no fetch
+// stub. The VLM-down vs VLM-ok branch is exercised by setting `ollamaVlm.status`.
+
+describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)", () => {
+  test("fully-registered catalog (0% failed) → no alert", () => {
+    // The default healthy catalog is 4/4 registered.
+    assert.equal(failRateDiag(healthySnapshot()), undefined, "0% failure rate must not alert");
   });
 
-  test("pure: failure rate above threshold + VLM down → warning naming the VLM root cause", () => {
-    const d = assessRegistrationFailureRate(
-      { registered: 0, total: 4, completed: true, skills: [] },
-      { status: "down" },
-    );
+  test("failure rate above threshold + VLM down → warning naming the VLM root cause", () => {
+    const s = withCatalog({
+      skills: [],
+      registered: 0,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: false,
+    });
+    s.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
+    const d = failRateDiag(s);
     assert.ok(d, "100% failed must alert");
     // `warning` so it annotates the population verdict without escalating the fold.
     assert.equal(d!.severity, "warning");
@@ -235,13 +201,23 @@ describe("skill-registration failure-rate alert (#2277)", () => {
     assert.match(d!.why, /Ollama VLM backend/);
     assert.match(d!.action, /ollama-recovery\.md/);
     assert.equal(d!.autoRecovery, true, "VLM-down path recovers via the hourly chore");
+    // The population rule fires `error` (empty catalog) on this same snapshot →
+    // the fold stays unhealthy from THAT error; the failure-rate `warning`
+    // annotates it without escalating further.
+    assert.equal(assessHealth(s).status, "unhealthy");
   });
 
-  test("pure: failure rate above threshold + VLM ok → error pointing at OpenViking load, NOT the VLM", () => {
-    const d = assessRegistrationFailureRate(
-      { registered: 3, total: 4, completed: true, skills: [] },
-      { status: "ok" },
-    );
+  test("failure rate above threshold + VLM ok → warning pointing at OpenViking load, NOT the VLM", () => {
+    const s = withCatalog({
+      skills: [],
+      registered: 3,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: false,
+    });
+    // ollamaVlm defaults to status:ok in healthySnapshot().
+    const d = failRateDiag(s);
     assert.ok(d, "25% failed must alert");
     assert.match(d!.what, /failure rate 25% \(1\/4 failed\)/);
     assert.match(d!.why, /NOT the usual VLM-offline cascade/);
@@ -249,22 +225,19 @@ describe("skill-registration failure-rate alert (#2277)", () => {
     assert.equal(d!.autoRecovery, false);
   });
 
-  test("wired: an all-failure pass + VLM-down snapshot → failure-rate alert folds into status", async () => {
-    muteConsole();
-    globalThis.fetch = (async () => {
-      timeoutThrow();
-    }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
-
-    const snap = healthySnapshot();
-    snap.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
-    const d = failRateDiag(snap);
-    assert.ok(d, "a wired all-failure pass with VLM down must fire the failure-rate alert");
-    assert.equal(d!.severity, "warning");
-    assert.match(d!.why, /Ollama VLM backend/);
-    // The population rule fires `error` (empty catalog) on this same pass → the
-    // fold stays unhealthy from THAT error; the failure-rate `warning` annotates
-    // it without escalating further.
-    assert.equal(assessHealth(snap).status, "unhealthy");
+  test("vlm-deferred pass → no failure-rate alert (deliberate degradation, not failed registration)", () => {
+    // vlmDeferred:true means registration was SKIPPED, not failed — the failure-
+    // rate framing would be misleading, so the alert suppresses (assessRegistration-
+    // FailureRate's #2277 short-circuit).
+    const s = withCatalog({
+      skills: [],
+      registered: 0,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: true,
+    });
+    s.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
+    assert.equal(failRateDiag(s), undefined, "a deferred pass must not fire the failure-rate alert");
   });
 });
