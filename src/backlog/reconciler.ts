@@ -76,20 +76,18 @@ import {
   itemMatchesOpenPr,
 } from "./target-pr-feed.ts";
 import { escalateStaleItems } from "./stale-escalation.ts";
+import { RECONCILE_LANES } from "./reconcile-constants.ts";
 
 // `MergedRef` moved to `target-pr-feed.ts` (issue #2084); re-export it for
 // back-compat so unrelated import sites that referenced `reconciler.MergedRef`
 // do not churn.
 export type { MergedRef };
 
-/**
- * Lanes the reconciler sweeps. `blocked` is deliberately EXCLUDED (design-concept
- * invariant 3): it is an operator-attention lane — a blocked item with a merged
- * PR still needs its blocker resolved by a human/agent decision, never a silent
- * auto-done. The blocked-item re-escalation chore surfaces merged-but-blocked
- * items instead. `done` is excluded for idempotency.
- */
-export const RECONCILE_LANES = ["inProgress", "queued", "backlog"] as const;
+// `RECONCILE_LANES` moved to the leaf `reconcile-constants.ts` (issue #2387) to
+// break the mutual import with `stale-escalation.ts` (which imported the
+// constant back from here). Re-export it for back-compat so existing import
+// sites that referenced `reconciler.RECONCILE_LANES` do not churn.
+export { RECONCILE_LANES };
 
 /**
  * Alert code raised when BOTH feeds are unavailable in a single run (issue

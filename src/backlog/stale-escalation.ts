@@ -38,7 +38,7 @@ import { pushAlert } from "../redis/alerts.ts";
 import { applyLaneTransition, getItem, saveItem } from "./internal.ts";
 import { subjectCoveredBy } from "./merged-refs.ts";
 import { type MergedRef } from "./target-pr-feed.ts";
-import { RECONCILE_LANES } from "./reconciler.ts";
+import { RECONCILE_LANES } from "./reconcile-constants.ts";
 
 /**
  * Stale-claim escalation tunables (issue #2031).
