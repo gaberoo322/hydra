@@ -38,11 +38,22 @@ import { RULES, fmtUp } from "./rules.ts";
 // `import type` is erased at compile time, so this is zero runtime coupling and
 // does NOT re-create the value-import inversion the move removed.
 import type { OvSearchProbeStatus, OllamaVlmProbeResult } from "./probe.ts";
+// Issue #2386: type-only import — HealthSnapshot.skillCatalog carries the
+// in-process OV skill-registration state so the two skill-catalog rules in
+// rules.ts read it FROM the snapshot rather than calling getSkillCatalogState()
+// out-of-band. `import type` is erased at compile time, so this is zero runtime
+// coupling (mirroring the OvSearchProbeStatus type-only import above): the pure
+// parse seam never imports the knowledge-base singleton as a value. The live
+// read happens once, in collectProbeInputs (the fan-out I/O owner), exactly
+// where every other in-process probe read already lives.
+import type { SkillCatalogState } from "../knowledge-base/skill-registration.ts";
 
 // Skill-catalog health gate moved to src/health/skill-catalog.ts (issue #1992).
 // It described a separate concern — the Knowledge Base's in-process skill
 // registration state — not a probe-marshalling input, so it now lives in its
-// own focused module that type-imports `HealthDiagnostic` from here.
+// own focused module that type-imports `HealthDiagnostic` from here. Issue #2386:
+// the catalog STATE itself now rides on HealthSnapshot.skillCatalog (assembled at
+// fan-out time), so the rules read it from the snapshot like every other input.
 
 // ---- Service Probe Map — the extensible external-service health record ----
 //
@@ -109,6 +120,12 @@ export interface HealthSnapshot {
   };
   patterns: { planner: number; executor: number; skeptic: number };
   reflCount: number;
+  // Issue #2386: the in-process OV skill-registration state (registered/total/
+  // completed/skills/vlmDeferred), read live at fan-out time and carried here so
+  // the two skill-catalog rules are pure over the snapshot — "what state did the
+  // rules read?" is answerable from HealthSnapshot alone. Joins patterns/reflCount
+  // as the other in-process (non-deep-probe) reads that flow through the pipeline.
+  skillCatalog: SkillCatalogState;
   ovSearch: { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number };
   // Issue #2278: the Tailnet Ollama VLM host (gabes-desktop-1:11434) liveness
   // probe. A DIRECT reachability check of the host OpenViking uses for its
@@ -259,6 +276,12 @@ export interface ProbeInputs {
   sysdTargetWeb: string | null;
   patterns: HealthSnapshot["patterns"] | null;
   reflections: number | null;
+  // Issue #2386: the in-process OV skill-catalog state, read synchronously at
+  // fan-out time (NOT a Promise.allSettled probe — it is a pure in-memory copy,
+  // never I/O). `| null` so a fan-out that cannot resolve it degrades to the
+  // parseProbes safe default (an un-run, empty catalog → the two skill-catalog
+  // rules no-op) exactly as a rejected async probe would.
+  skillCatalog: HealthSnapshot["skillCatalog"] | null;
   ovSearch: HealthSnapshot["ovSearch"] | null;
   // Issue #2278: the Tailnet Ollama VLM host liveness probe result. `| null` on a
   // rejected settle (the never-throwing probe folds its own failures to a `down`
@@ -361,6 +384,20 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const mData = probes.metrics || { trend: [], stats: {} };
   const patterns = probes.patterns || { planner: 0, executor: 0, skeptic: 0 };
   const reflCount = probes.reflections || 0;
+  // Issue #2386: a null skillCatalog (the fan-out could not resolve the live
+  // read) defaults to an un-run, empty catalog — `completed:false` so both
+  // skill-catalog rules (assessSkillCatalog / assessRegistrationFailureRate)
+  // no-op, exactly the "registration still in flight / no pass yet" framing
+  // they already treat as a non-alarm. This is honest-none, never a phantom
+  // populated catalog.
+  const skillCatalog: HealthSnapshot["skillCatalog"] = probes.skillCatalog || {
+    skills: [],
+    registered: 0,
+    total: 0,
+    completed: false,
+    lastAttemptAt: null,
+    vlmDeferred: false,
+  };
   const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
   // Issue #2278: a rejected settle (probes.ollamaVlm === null) defaults to a
   // `down` result — honest-none (the whole probe settle failed), never a phantom
@@ -397,6 +434,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     blCounts,
     patterns,
     reflCount,
+    skillCatalog,
     ovSearch,
     ollamaVlm,
     redisInfo,

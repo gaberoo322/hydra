@@ -49,6 +49,11 @@ import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
 import { ovPostJson } from "../knowledge-base/ov-request.ts";
+// Issue #2386: the live in-process skill-catalog read. The fan-out is the I/O
+// owner that resolves every probe input, so this synchronous in-memory read now
+// happens HERE (next to the other probe reads) and is carried onto the snapshot
+// via ProbeInputs.skillCatalog — rules.ts no longer reads it out-of-band.
+import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult } from "./probe.ts";
 import { parseRedisInfoSnapshot, type ProbeInputs } from "./diagnostics.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
@@ -247,6 +252,14 @@ export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
     knowledgeContext: val<ProbeInputs["knowledgeContext"]>(18),
     // Issue #2278: the Tailnet Ollama VLM-host liveness probe (index 19).
     ollamaVlm: val<ProbeInputs["ollamaVlm"]>(19),
+    // Issue #2386: the skill-catalog state is NOT an async settle-array probe (it
+    // is a synchronous in-memory read), so it has no positional index here.
+    // assembleProbeInputs sets it null; collectProbeInputs overrides it with the
+    // live read. A direct caller of assembleProbeInputs (e.g. the round-trip test)
+    // therefore gets null, which parseProbes coalesces to the empty-catalog
+    // default — the two skill-catalog rules no-op, matching the prior behaviour
+    // where assembleProbeInputs carried no catalog at all.
+    skillCatalog: null,
   };
 }
 
@@ -286,6 +299,14 @@ export interface CollectProbeDeps {
   probeEmbedBackendImpl?: typeof probeEmbedBackend;
   /** Issue #2278: the Tailnet Ollama VLM-host liveness probe (default: real fetch). */
   probeOllamaVlmImpl?: typeof probeOllamaVlm;
+  /**
+   * Issue #2386: the in-process OV skill-catalog read (default: the real
+   * getSkillCatalogState). A synchronous, never-throwing in-memory copy — NOT a
+   * Promise.allSettled probe — so the full fan-out pipeline (and therefore the
+   * two skill-catalog rules downstream) is testable with an injected catalog
+   * state, no module-singleton reset and no registerSkills lifecycle dependency.
+   */
+  skillCatalogState?: typeof getSkillCatalogState;
   targetServiceName?: () => string;
 }
 
@@ -312,6 +333,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeOvImpl = probeOv,
     probeEmbedBackendImpl = probeEmbedBackend,
     probeOllamaVlmImpl = probeOllamaVlm,
+    skillCatalogState = getSkillCatalogState,
     targetServiceName = getTargetServiceName,
   } = deps;
 
@@ -411,5 +433,11 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     /* 19 */ (async () => maybeWakeVlmHost(await probeOllamaVlmImpl()))(),
   ]);
 
-  return assembleProbeInputs(settled);
+  // Issue #2386: the in-process skill-catalog state is a synchronous, never-throw
+  // in-memory copy — not an async probe — so it is read directly (not via the
+  // Promise.allSettled array, which is reserved for I/O probes mapped by integer
+  // position) and merged onto the assembled named record. parseProbes copies it
+  // onto HealthSnapshot.skillCatalog; the two skill-catalog rules read it from the
+  // snapshot, so this fan-out is the single place the live read happens.
+  return { ...assembleProbeInputs(settled), skillCatalog: skillCatalogState() };
 }

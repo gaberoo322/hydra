@@ -58,6 +58,17 @@ function healthySnapshot(): HealthSnapshot {
     blCounts: { triage: 0, backlog: 2, inProgress: 1, blocked: 0, done: 5, total: 3 },
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
+    // Issue #2386: a fully-registered skill catalog — both skill-catalog rules
+    // (assessSkillCatalog / assessRegistrationFailureRate) no-op, so the baseline
+    // "fully-healthy snapshot fires zero diagnostics" assertion holds.
+    skillCatalog: {
+      skills: [],
+      registered: 4,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: false,
+    },
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
     // Issue #2278: the Tailnet Ollama VLM-host liveness probe — healthy by default.
     ollamaVlm: { status: "ok", latencyMs: 12 },
@@ -747,6 +758,10 @@ describe("parseProbes", () => {
       // Issue #2278: null = the VLM probe settle rejected; parseProbes defaults it
       // to a `down` result (honest-none, never a phantom `ok`).
       ollamaVlm: null,
+      // Issue #2386: null = the fan-out could not resolve the live skill-catalog
+      // read; parseProbes defaults it to an un-run empty catalog so both
+      // skill-catalog rules no-op (honest-none, never a phantom populated catalog).
+      skillCatalog: null,
     };
   }
 
@@ -838,6 +853,16 @@ describe("parseProbes", () => {
       ovSearchWindow: null,
       knowledgeContext: null,
       ollamaVlm: { status: "ok", latencyMs: 8 },
+      // Issue #2386: a fully-registered catalog so the skill-catalog rules don't
+      // add a diagnostic to this degraded-fan-out assertion.
+      skillCatalog: {
+        skills: [],
+        registered: 4,
+        total: 4,
+        completed: true,
+        lastAttemptAt: Date.now(),
+        vlmDeferred: false,
+      },
     });
     const a = assessHealth(snap);
     assert.equal(a.status, "degraded"); // only warnings
