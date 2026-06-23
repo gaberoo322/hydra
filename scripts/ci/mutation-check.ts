@@ -42,8 +42,27 @@
  * generated mutants skipped"; T1/T2 stays `neutral`. Both are non-blocking
  * (exit 0) — `warn` only surfaces the no-signal gap in the step-summary JSON.
  *
+ * Timed-out status (issue #2393, porting the Target gate's #1821 precedent):
+ * when the runner exhausts its time budget on a large file it can only
+ * evaluate a partial mutant sample (e.g. 75 of 553). The pre-#2393 gate
+ * captured `report.timedOut` into the summary JSON but NEVER branched on it —
+ * it computed `killRate` over only the EVALUATED sample and emitted `pass` if
+ * that partial rate cleared the floor, silently rubber-stamping a diff whose
+ * surviving mutants land in the unevaluated tail. Now `classifyTimedOut` emits
+ * a distinct `status:"warn"` carrying the partial kill rate for context
+ * (informational only, NEVER compared against the floor); the warn is
+ * non-blocking (exit 0) but never masquerades as a pass. This brings the
+ * Orchestrator gate to parity with the Target gate (scripts/target/mutation-
+ * check.ts). The timed-out check is tier-independent — a budget-exhausted run
+ * has reached NO verdict regardless of tier, so it must not present as a pass
+ * on any tier.
+ *
+ * Branch precedence in main(): classifyNoSignal -> classifyTimedOut ->
+ * kill-rate, matching the Target sibling's ordering so the two gates stay
+ * behaviorally aligned.
+ *
  * Exit codes:
- *   0 — pass, neutral/warn skip, or no-signal (non-blocking)
+ *   0 — pass, neutral/warn skip, no-signal, or timed-out warn (non-blocking)
  *   2 — mutation gate failed: kill rate below floor (block merge)
  *   1 — usage / unexpected error
  */
@@ -168,6 +187,74 @@ export function classifyNoSignal(
   return { status, reason, killRate: null };
 }
 
+/**
+ * Result of the timed-out classification (issue #2393, porting the Target
+ * gate's #1821 seam verbatim).
+ *
+ * `status` is always `"warn"` — a gate that exhausted its time budget reached
+ * NO verdict, so it must not present as a clean `pass`. `killRate` carries the
+ * partial kill rate computed from whatever mutants finished before the budget
+ * ran out (informational only, NEVER compared against the floor) so the
+ * step-summary still shows progress; it is explicitly NOT a pass/fail signal.
+ * `warn` is non-blocking (the caller keeps exit 0) — a slow gate must not
+ * hard-block an otherwise-good diff, but it must stop masquerading as a pass
+ * (the silent partial-coverage verdict this issue names).
+ *
+ * Tier-independent: unlike `classifyNoSignal` (which emits `neutral` on T1/T2),
+ * a budget-exhausted run has reached no verdict regardless of tier, so the
+ * outcome is ALWAYS `warn`. There is no `neutral`/T1-T2 sub-case — a partial
+ * sample is never a pass on any tier.
+ */
+export type TimedOutClassification = {
+  status: "warn";
+  reason: string;
+  timedOut: true;
+  killRate: number | null;
+};
+
+/**
+ * Classify a mutation report whose runner exhausted its time budget (issue
+ * #2393).
+ *
+ * The pre-#2393 gate computed `killRate` from whatever mutants finished before
+ * the 540s budget and emitted `pass`/`fail` from that partial sample, so a
+ * timed-out run looked identical to a complete one — a pure-enrichment diff to
+ * a large (e.g. 553-mutant) file could survive because surviving mutants land
+ * in the untouched (unevaluated) tail. This helper is the pure, unit-testable
+ * seam that turns a timed-out report into a DISTINCT non-pass `warn` outcome
+ * with an explicit reason, instead of a partial-sample verdict.
+ *
+ * Returns `null` when the runner did NOT time out (`report.timedOut === false`)
+ * — the caller then runs the normal kill-rate comparison. Only `timedOut`
+ * yields a classification.
+ *
+ * The partial kill rate is surfaced for context (how far the gate got before
+ * the budget ran out) but is informational: a timed-out gate has, by
+ * definition, not evaluated the full mutant set, so a partial rate above the
+ * floor is not proof the diff clears it. `killRate` is `null` when no mutant
+ * produced testable signal before the timeout.
+ *
+ * Pure — no env, no IO, no git. Test it by passing arbitrary reports.
+ */
+export function classifyTimedOut(
+  report: MutationTestReport,
+): TimedOutClassification | null {
+  if (!report.timedOut) return null;
+
+  const testable = report.totalMutants - report.skipped;
+  const partialKillRate =
+    testable > 0 ? Math.round((report.killed / testable) * 100) : null;
+
+  const reason =
+    `mutation gate timed out before evaluating all mutants ` +
+    `(${report.totalMutants} of ${report.candidatesGenerated} candidate mutant(s) run; ` +
+    `partial kill rate ` +
+    (partialKillRate === null ? "n/a" : `${partialKillRate}%`) +
+    `) — no complete verdict, treat as inconclusive (non-blocking)`;
+
+  return { status: "warn", reason, timedOut: true, killRate: partialKillRate };
+}
+
 function readChangedFiles(): string[] {
   const env = process.env.CHANGED_FILES ?? "";
   return env
@@ -283,6 +370,48 @@ async function main(): Promise<number> {
     );
     process.stderr.write(
       `Mutation gate: ${noSignal.reason} — status=${noSignal.status} (tier=${tier}, non-blocking).\n`,
+    );
+    return 0;
+  }
+
+  // Timed-out case (issue #2393, porting the Target gate's #1821 seam): the
+  // runner exhausted its time budget before evaluating every mutant on a large
+  // file. The pre-#2393 gate captured `report.timedOut` into the summary JSON
+  // (below) but NEVER branched on it — it computed `killRate` over only the
+  // EVALUATED sample and emitted `pass` if that partial rate cleared the floor,
+  // silently rubber-stamping a diff whose surviving mutants land in the
+  // unevaluated tail (the silent partial-coverage verdict this issue names).
+  // Classify via the pure `classifyTimedOut` seam: it emits a DISTINCT `warn`
+  // (NOT a pass, NOT compared against the floor) carrying the partial kill rate
+  // for context only. Checked AFTER the no-signal branch and BEFORE the
+  // kill-rate comparison, matching the Target sibling's
+  // classifyNoSignal -> classifyTimedOut -> kill-rate precedence. The check is
+  // tier-independent: a budget-exhausted run has reached no verdict regardless
+  // of tier. The warn is non-blocking (exit 0) — a tooling wall-clock limit
+  // must not hard-block an otherwise-good diff, but it must stop masquerading
+  // as a pass.
+  const timedOut = classifyTimedOut(report);
+  if (timedOut) {
+    process.stdout.write(
+      JSON.stringify({
+        status: timedOut.status,
+        reason: timedOut.reason,
+        timedOut: true,
+        killRate: timedOut.killRate,
+        killFloor,
+        tier,
+        killed: report.killed,
+        survived: report.survived,
+        testable,
+        totalMutants: report.totalMutants,
+        skipped: report.skipped,
+        candidatesGenerated: report.candidatesGenerated,
+        durationMs: report.durationMs,
+        inspectable: inspectable.length,
+      }) + "\n",
+    );
+    process.stderr.write(
+      `Mutation gate: ${timedOut.reason} — status=${timedOut.status} (tier=${tier}, non-blocking).\n`,
     );
     return 0;
   }
