@@ -36,12 +36,35 @@
 #   success=<true|false|unknown>
 #   ts_epoch=<unix-epoch-seconds>
 #
+# Subagent-dispatch registration (issue #2406)
+# ---------------------------------------------
+# This hook is ALSO the only event that fires INSIDE an Agent-tool subagent
+# child and carries that child's `session_id` + `transcript_path`. The #692
+# `SessionStart` hook is a TOP-LEVEL session event the harness never fires for
+# an Agent(...) child, so `hydra:dispatches:subagent:*` stayed empty (0 entries
+# ever) and the live in-flight dispatch view (`listActiveSubagentDispatches`,
+# consumed by src/autopilot/runs.ts + run-projections.ts) was blind.
+#
+# So, in ADDITION to the slot-event XADD above, this hook registers the running
+# subagent into the dispatch registry on its tool calls: it scrapes the same
+# hidden `<!-- hydra-dispatch v1 ... -->` sentinel from the child's own
+# transcript (shared grammar — scripts/hooks/extract-dispatch-sentinel.sh) and
+# POSTs the UNCHANGED `/api/dispatches/subagent` body. The storage layer + API +
+# schema are unchanged. A once-per-session marker keeps the scrape+POST to the
+# first observed tool call (the registry write is idempotent, so re-firing would
+# only be a harmless no-op anyway). Sessions with no sentinel (interactive
+# operator `claude`) never register — the sentinel stays the opt-in marker.
+#
+# This is DECOUPLED from the offline usage-attribution work (#2401/#2402): the
+# two share only the sentinel-parse grammar, never a mechanism, and this hook
+# introduces no registry dependency into src/cost/*.
+#
 # Best-effort guarantee
 # ---------------------
 # Same as the sibling slot hooks: every failure path is logged to stderr
-# and returns exit 0. A Redis outage, a malformed payload, a missing jq —
-# none of these block the parent subagent. We never gate a tool call on
-# this hook succeeding.
+# and returns exit 0. A Redis outage, a malformed payload, a missing jq, a
+# missing transcript, an unreachable API — none of these block the parent
+# subagent. We never gate a tool call on this hook succeeding.
 #
 # Env-var overrides (for tests)
 # -----------------------------
@@ -51,6 +74,9 @@
 #                        (default: hydra:autopilot:slot-events)
 #   HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN
 #                        (default: 1000)
+#   HYDRA_API_BASE       (default: http://localhost:4000) — dispatch-registry POST target
+#   HYDRA_DISPATCH_REGISTER_MARKER_DIR
+#                        (default: $TMPDIR or /tmp) — once-per-session guard dir
 #
 
 set -uo pipefail
@@ -59,6 +85,8 @@ STREAM_KEY="${HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM:-hydra:autopilot:slot-events}"
 REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
 REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
 MAXLEN_CAP="${HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN:-1000}"
+API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
+DISPATCH_REGISTER_MARKER_DIR="${HYDRA_DISPATCH_REGISTER_MARKER_DIR:-${TMPDIR:-/tmp}}"
 
 KNOWN_SLOTS=(
   dev_orch
@@ -315,7 +343,113 @@ emit() {
 
 if ! emit >/dev/null 2>&1; then
   warn "XADD to ${STREAM_KEY} failed (REDIS_HOST=${REDIS_HOST}, REDIS_PORT=${REDIS_PORT}) — slot=${slot} tool=${tool} category=${category}"
-  exit 0
+  # NOT a return — fall through to the dispatch-registration attempt below.
+  # The two are independent best-effort writes; a slot-event XADD failure
+  # (e.g. Redis down) must not suppress the registry POST (which targets the
+  # HTTP API, a different surface).
 fi
+
+# ===========================================================================
+# Subagent-dispatch registration (issue #2406) — additive, best-effort.
+#
+# Register THIS subagent session into hydra:dispatches:subagent:* so the live
+# in-flight view is populated for Agent-tool dispatches (which SessionStart can
+# never see). Scrape the sentinel from the child's own transcript and POST the
+# existing /api/dispatches/subagent body. Every failure path exits 0.
+# ===========================================================================
+register_subagent_dispatch() {
+  # jq is required to read the payload + build the body; without it, no-op.
+  command -v jq >/dev/null 2>&1 || { warn "jq not found — skipping dispatch registration"; return 0; }
+  [ -n "$payload" ] || return 0
+
+  # PostToolUse carries the child's own session_id, transcript_path, and cwd at
+  # the top level (same shape SessionStart uses). These are DISTINCT from the
+  # `task_id` derived above (which the slot-event uses): the registry is keyed
+  # on the harness session_id, the JSONL filename stem.
+  local session_id transcript_path project_dir
+  session_id="$(printf '%s' "$payload" | jq -r '(.session_id // .sessionId // "") | tostring' 2>/dev/null || printf '')"
+  transcript_path="$(printf '%s' "$payload" | jq -r '(.transcript_path // .transcriptPath // "") | tostring' 2>/dev/null || printf '')"
+  project_dir="$(printf '%s' "$payload" | jq -r '(.cwd // .project_dir // "") | tostring' 2>/dev/null || printf '')"
+
+  [ -n "$session_id" ] || { warn "no session_id in payload — skipping dispatch registration"; return 0; }
+  if [ -z "$transcript_path" ] || [ ! -f "$transcript_path" ]; then
+    warn "transcript not found ($transcript_path) — skipping dispatch registration"
+    return 0
+  fi
+
+  # Once-per-session guard. The registry write is idempotent (ZADD without
+  # XX/NX, keyed on sessionId), so re-registering on every tool call is a
+  # harmless no-op — this marker is purely an optimisation to avoid re-scraping
+  # the transcript and re-POSTing on every subsequent tool call. Best-effort:
+  # if we can't create the marker (read-only TMPDIR), we just register again,
+  # which is safe.
+  local marker
+  marker="${DISPATCH_REGISTER_MARKER_DIR%/}/hydra-dispatch-registered-${session_id}"
+  if [ -e "$marker" ]; then
+    return 0
+  fi
+
+  # Source the shared sentinel grammar relative to THIS hook's location. The
+  # helper lives under scripts/hooks/, this hook under scripts/autopilot/hooks/.
+  local hook_dir helper
+  hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  helper="$hook_dir/../../hooks/extract-dispatch-sentinel.sh"
+  if [ ! -f "$helper" ]; then
+    warn "sentinel helper not found at $helper — skipping dispatch registration"
+    return 0
+  fi
+  # shellcheck source=scripts/hooks/extract-dispatch-sentinel.sh
+  . "$helper" 2>/dev/null || { warn "could not source $helper — skipping dispatch registration"; return 0; }
+
+  local first_user_text sentinel_line d_skill d_dispatch_id d_run_id
+  first_user_text="$(extract_first_user_text "$transcript_path")"
+  [ -n "$first_user_text" ] || { warn "no first user message — skipping dispatch registration"; return 0; }
+
+  sentinel_line="$(extract_sentinel_line "$first_user_text")"
+  # No sentinel — interactive operator subagent / non-dispatch session. Silent
+  # no-op (don't even write the marker; a later resume might carry one).
+  [ -n "$sentinel_line" ] || return 0
+
+  d_skill="$(extract_sentinel_field "$sentinel_line" skill)"
+  d_dispatch_id="$(extract_sentinel_field "$sentinel_line" dispatchId)"
+  d_run_id="$(extract_sentinel_field "$sentinel_line" runId)"
+
+  if [ -z "$d_skill" ] || [ -z "$d_dispatch_id" ]; then
+    warn "malformed sentinel (skill='$d_skill' dispatchId='$d_dispatch_id') — skipping dispatch registration"
+    return 0
+  fi
+
+  local started_at body
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  body="$(jq -nc \
+    --arg sessionId "$session_id" \
+    --arg skill "$d_skill" \
+    --arg dispatchId "$d_dispatch_id" \
+    --arg startedAt "$started_at" \
+    --arg runId "$d_run_id" \
+    --arg projectDir "$project_dir" \
+    '{sessionId: $sessionId, skill: $skill, dispatchId: $dispatchId, startedAt: $startedAt}
+     + (if ($runId | length) > 0 then {runId: $runId} else {} end)
+     + (if ($projectDir | length) > 0 then {projectDir: $projectDir} else {} end)' \
+    2>/dev/null || printf '')"
+
+  [ -n "$body" ] || { warn "failed to build dispatch-registration body — skipping"; return 0; }
+
+  if ! curl -fsS --max-time 5 \
+    -X POST "$API_BASE/api/dispatches/subagent" \
+    -H 'content-type: application/json' \
+    -d "$body" >/dev/null 2>&1; then
+    warn "POST to $API_BASE/api/dispatches/subagent failed — skipping"
+    return 0
+  fi
+
+  # Registered. Drop the once-per-session marker so subsequent tool calls in
+  # this session skip the scrape+POST. Best-effort: a failure here just means
+  # we re-register (idempotent) on the next tool call.
+  : > "$marker" 2>/dev/null || true
+  return 0
+}
+
+register_subagent_dispatch
 
 exit 0
