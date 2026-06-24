@@ -138,6 +138,58 @@ export function deriveSkill(firstUserText: string | null): string {
 }
 
 /**
+ * The three mutually-exclusive **dispatch kinds** (issue #2403). A PROJECTION
+ * over WHICH branch of the {@link deriveSkill} precedence chain fired for a
+ * session's first user message — NOT an independent re-derivation:
+ *
+ *   - `autopilot-dispatched` — the `hydra-dispatch` sentinel matched (a
+ *     background Agent-tool dispatch; `runId` is structurally present iff the
+ *     sentinel matched, so the sentinel branch IS this kind).
+ *   - `operator-invoked` — a `<command-name>/skill</command-name>` marker or a
+ *     leading `/skill` slash matched (the operator typed/ran a slash command).
+ *   - `interactive` — neither matched (a plain interactive operator session, or
+ *     a legacy transcript predating the sentinel). The SAME residual the
+ *     `bySkillByModel` cross-tab buckets under {@link INTERACTIVE_SKILL}.
+ *
+ * The order of this tuple is the precedence order; it is also the canonical
+ * render/iteration order for the dashboard kind split.
+ */
+export const DISPATCH_KINDS = [
+  "autopilot-dispatched",
+  "operator-invoked",
+  "interactive",
+] as const;
+export type DispatchKind = (typeof DISPATCH_KINDS)[number];
+
+/**
+ * Resolves a transcript's first user message text to its **dispatch kind**
+ * (issue #2403). Total, deterministic, Redis-free — partitions over the SAME
+ * precedence chain as {@link deriveSkill} (sentinel → command/slash marker →
+ * residual), so every contributing file lands in exactly one kind and the
+ * `Σ_kind byDispatchKind[kind][f].total === byModel[f].total` invariant holds.
+ *
+ * Pure projection: no second `readFile`, no `runId` re-parse — the precedence
+ * branch already IS the kind. Exported for direct unit test.
+ */
+export function deriveDispatchKind(firstUserText: string | null): DispatchKind {
+  if (firstUserText) {
+    if (SENTINEL_RE.test(firstUserText)) return "autopilot-dispatched"; // (1) sentinel
+    if (COMMAND_NAME_RE.test(firstUserText)) return "operator-invoked"; // (2a) <command-name>
+    if (LEADING_SLASH_RE.test(firstUserText)) return "operator-invoked"; // (2b) leading /slash
+  }
+  return "interactive"; // (3) residual
+}
+
+/** Empty per-kind × per-family accumulator, all three kinds zero-valued. */
+export function emptyByDispatchKind(): Record<DispatchKind, Record<ModelFamily, TokenBreakdown>> {
+  return {
+    "autopilot-dispatched": emptyByModel(),
+    "operator-invoked": emptyByModel(),
+    interactive: emptyByModel(),
+  };
+}
+
+/**
  * Extract the text of a transcript's FIRST user message from its already-read
  * content (issue #2402) — the signal `deriveSkill` reads. Walks the JSONL lines
  * the scan already split, returns the text of the first `type:"user"` record
@@ -337,6 +389,14 @@ export interface ScanResult {
   byModel24h: Record<ModelFamily, TokenBreakdown>;
   /** Per-skill × per-family 7d cross-tab (the `bySkillByModel` snapshot field). */
   bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
+  /**
+   * Per-dispatch-kind × per-family 7d cross-tab (the `byDispatchKind` snapshot
+   * field, issue #2403). A SECOND partition over the SAME per-file tokens as
+   * `bySkillByModel`, keyed by {@link DispatchKind} instead of skill. Always
+   * carries all three kind keys (zero-valued where a kind produced none), so
+   * `Σ_kind byDispatchKind[kind][f].total === byModel[f].total` per family.
+   */
+  byDispatchKind: Record<DispatchKind, Record<ModelFamily, TokenBreakdown>>;
   /** Raw .total over the 24h window (the unchanged `tokensLast24h` field). */
   tokens24h: number;
   /** The OAuth read result (fresh / served-stale / failed), already resolved. */
@@ -402,6 +462,10 @@ export async function transcriptScan(
   // Per-skill × per-family 7d accumulator (the `bySkillByModel` snapshot
   // field). Skills are added lazily as transcripts resolve to them.
   const bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
+  // Per-dispatch-kind × per-family 7d accumulator (issue #2403). A parallel
+  // partition over the SAME per-file tokens as `bySkillByModel`, pre-seeded
+  // with all three kind buckets so the snapshot always carries the full split.
+  const byDispatchKind = emptyByDispatchKind();
   let tokens24h = 0;
 
   // Weekly Reset Anchor (issue #856). The since-reset boundary can be moved
@@ -424,6 +488,12 @@ export async function transcriptScan(
   // slash marker, so resolving once per session — keyed by sessionId — keeps
   // attribution O(files) AND attributes a multi-shard session uniformly.
   const skillCache = new Map<string, string>();
+  // Per-session dispatch-kind memo (issue #2403). Resolved from the SAME
+  // first-user-message text as the skill, in lockstep, so the kind partition
+  // is exact and O(files). The kind always uses the canonical
+  // `deriveDispatchKind` (it is a projection over WHICH precedence branch
+  // fired) — independent of any test-injected `resolveSkill`.
+  const kindCache = new Map<string, DispatchKind>();
 
   let filesScanned = 0;
   let filesSkippedByMtime = 0;
@@ -523,12 +593,21 @@ export async function transcriptScan(
     if (fileHadInWindow7d) {
       const sessionId = sessionIdFromPath(file);
       let skill = skillCache.get(sessionId);
-      if (skill === undefined) {
-        skill = resolveSkill(firstUserMessageText(lines));
+      let kind = kindCache.get(sessionId);
+      if (skill === undefined || kind === undefined) {
+        // Resolve BOTH from the same first-user-message text (one extraction).
+        const firstText = firstUserMessageText(lines);
+        skill = resolveSkill(firstText);
+        kind = deriveDispatchKind(firstText);
         skillCache.set(sessionId, skill);
+        kindCache.set(sessionId, kind);
       }
       const row = (bySkillByModel[skill] ??= emptyByModel());
-      for (const f of MODEL_FAMILIES) addBreakdown(row[f], fileByFamily7d[f]);
+      const kindRow = byDispatchKind[kind];
+      for (const f of MODEL_FAMILIES) {
+        addBreakdown(row[f], fileByFamily7d[f]);
+        addBreakdown(kindRow[f], fileByFamily7d[f]);
+      }
     }
   }
 
@@ -553,6 +632,7 @@ export async function transcriptScan(
     byModel7d,
     byModel24h,
     bySkillByModel,
+    byDispatchKind,
     tokens24h,
     oauth,
     mostRecentObservedResetMs,

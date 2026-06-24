@@ -142,6 +142,7 @@ import {
   deriveSinceReset,
   detectCalibrationDrift,
   deriveBySkillWoW,
+  deriveAttributedPercent,
 } from "./snapshot-assembly.ts";
 import type { SkillWoWEntry } from "./snapshot-assembly.ts";
 // Weekly Usage Snapshot seam (issue #2404): the typed Redis accessor for the
@@ -182,7 +183,7 @@ import {
   UNATTRIBUTED_SKILL,
   sessionIdFromPath as transcriptScanSessionIdFromPath,
 } from "./transcript-scan.ts";
-import type { ScanResult, SkillResolver } from "./transcript-scan.ts";
+import type { ScanResult, SkillResolver, DispatchKind } from "./transcript-scan.ts";
 
 // `INTERACTIVE_SKILL` (and its back-compat alias `UNATTRIBUTED_SKILL`),
 // `SkillResolver`, and `sessionIdFromPath` live in the TranscriptScan seam
@@ -191,6 +192,11 @@ import type { ScanResult, SkillResolver } from "./transcript-scan.ts";
 // unchanged.
 export { INTERACTIVE_SKILL, UNATTRIBUTED_SKILL };
 export type { SkillResolver };
+// `DispatchKind` (issue #2403) is referenced in the public `UsageSnapshot`
+// shape (the `byDispatchKind` field key); re-export at the same name so
+// consumers of the snapshot can name the kind union without reaching into the
+// TranscriptScan seam directly.
+export type { DispatchKind } from "./transcript-scan.ts";
 
 // Production attribution resolver (issue #2402). Pure, Redis-free: derives the
 // dispatching skill from the transcript's FIRST user message text — the
@@ -360,6 +366,32 @@ export interface UsageSnapshot {
    * is written by the weekly Housekeeping chore, never on this read path.
    */
   bySkillWoW: Record<string, SkillWoWEntry>;
+  /**
+   * Per-DISPATCH-KIND × per-model-family token breakdown over the 7d window
+   * (issue #2403). A SECOND partition over the SAME per-file tokens as
+   * {@link bySkillByModel}, keyed by how the session was dispatched:
+   *   - `autopilot-dispatched` — the `hydra-dispatch` sentinel matched (a
+   *     background Agent-tool dispatch; runId present iff the sentinel matched).
+   *   - `operator-invoked` — a `<command-name>` / leading-`/` slash marker (the
+   *     operator typed or ran a slash command).
+   *   - `interactive` — neither matched (a plain interactive session); the SAME
+   *     residual `bySkillByModel` buckets under `INTERACTIVE_SKILL`.
+   * ALWAYS carries all three kind keys (zero-valued where a kind produced no
+   * tokens). Reconciliation invariant: for each family `f`,
+   * `Σ_kind byDispatchKind[kind][f].total === byModel[f].total`. RAW token
+   * counts only — no quota-weight, no USD. Pure read-side projection, never
+   * persisted. (issue #2403)
+   */
+  byDispatchKind: Record<DispatchKind, Record<ModelFamily, TokenBreakdown>>;
+  /**
+   * **Attribution coverage %** (issue #2403): `(total - interactive) / total *
+   * 100` over the {@link byDispatchKind} cross-tab — the inverse of the
+   * `interactive`-residual token share over the 7d window. In `[0, 100]`; 0 when
+   * no tokens were recorded OR every token is interactive (the metric #2402
+   * drives up by shrinking the residual). RAW token counts only, never
+   * persisted. (issue #2403)
+   */
+  attributedPercent: number;
   /**
    * Quota-Weight burn over the 5h window: `Σ family.total * weight(family)`
    * (opus/sonnet/haiku from env, unknown implicit 1.0). Exactly 0 unless ALL
@@ -635,6 +667,7 @@ function assembleSnapshot(
     byModel7d,
     byModel24h,
     bySkillByModel,
+    byDispatchKind,
     tokens24h,
     mostRecentObservedResetMs,
     sinceResetEntries,
@@ -809,6 +842,10 @@ function assembleSnapshot(
     // Per-skill week-over-week trend (issue #2404). Pure fold over the current
     // cross-tab + the injected prior-week per-skill totals — no Redis here.
     bySkillWoW: deriveBySkillWoW(bySkillByModel, priorBySkill),
+    // Dispatch-kind split + attribution coverage % (issue #2403). Pure
+    // projections over the SAME per-file tokens as the per-skill cross-tab.
+    byDispatchKind,
+    attributedPercent: deriveAttributedPercent(byDispatchKind),
     quotaWeightLast5h,
     quotaWeightLast7d,
     quotaWeightCalibrated,

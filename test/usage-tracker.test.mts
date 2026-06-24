@@ -32,7 +32,13 @@ import {
 import {
   deriveSkill,
   firstUserMessageText,
+  deriveDispatchKind,
+  emptyByDispatchKind,
+  DISPATCH_KINDS,
 } from "../src/cost/transcript-scan.ts";
+// Attribution coverage % pure fold (issue #2403) lives on the snapshot-assembly
+// leaf; imported directly for unit test without the JSONL-scan machinery.
+import { deriveAttributedPercent } from "../src/cost/snapshot-assembly.ts";
 // The pure token-math functions now live in their own leaf (issue #1909).
 // Import them directly from cost/token-math.ts to prove the seam is importable
 // without pulling in the JSONL-scan machinery — mirroring the eligibility.ts
@@ -1112,6 +1118,245 @@ describe("usage-tracker", () => {
     });
   });
 
+  describe("deriveDispatchKind — precedence projection (issue #2403)", () => {
+    test("sentinel -> autopilot-dispatched", () => {
+      assert.equal(
+        deriveDispatchKind(
+          "<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=x runId=y -->",
+        ),
+        "autopilot-dispatched",
+      );
+    });
+
+    test("a sentinel embedded in a longer prompt still wins -> autopilot-dispatched", () => {
+      assert.equal(
+        deriveDispatchKind(
+          "preamble text <!-- hydra-dispatch v1 skill=hydra-qa dispatchId=x runId=z --> more",
+        ),
+        "autopilot-dispatched",
+      );
+    });
+
+    test("<command-name> marker -> operator-invoked", () => {
+      assert.equal(
+        deriveDispatchKind("<command-name>hydra-incident</command-name>"),
+        "operator-invoked",
+      );
+      assert.equal(
+        deriveDispatchKind("<command-name>/hydra-qa</command-name>"),
+        "operator-invoked",
+      );
+    });
+
+    test("leading /slash -> operator-invoked", () => {
+      assert.equal(deriveDispatchKind("/hydra-digest please summarise"), "operator-invoked");
+    });
+
+    test("no marker / empty / null -> interactive residual", () => {
+      assert.equal(deriveDispatchKind("hey can you look at this bug"), "interactive");
+      assert.equal(deriveDispatchKind(""), "interactive");
+      assert.equal(deriveDispatchKind(null), "interactive");
+    });
+
+    test("is total: every input lands in exactly one of the three kinds", () => {
+      for (const input of [
+        "<!-- hydra-dispatch v1 skill=s runId=r -->",
+        "<command-name>/x</command-name>",
+        "/y",
+        "plain",
+        "",
+        null,
+      ]) {
+        assert.ok(
+          DISPATCH_KINDS.includes(deriveDispatchKind(input)),
+          `kind for ${JSON.stringify(input)} must be one of DISPATCH_KINDS`,
+        );
+      }
+    });
+  });
+
+  describe("deriveAttributedPercent — coverage % pure fold (issue #2403)", () => {
+    const b = (total: number) => ({ ...EMPTY, input: total, total });
+    const EMPTY = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
+    const row = (opus: number) => ({
+      opus: b(opus),
+      sonnet: { ...EMPTY },
+      haiku: { ...EMPTY },
+      unknown: { ...EMPTY },
+    });
+
+    test("0 when total is 0 (no division by zero)", () => {
+      assert.equal(deriveAttributedPercent(emptyByDispatchKind()), 0);
+    });
+
+    test("0 when every token is interactive (the pre-#2402 all-residual world)", () => {
+      const k = emptyByDispatchKind();
+      k.interactive = row(500);
+      assert.equal(deriveAttributedPercent(k), 0);
+    });
+
+    test("100 when no interactive tokens", () => {
+      const k = emptyByDispatchKind();
+      k["autopilot-dispatched"] = row(300);
+      k["operator-invoked"] = row(100);
+      assert.equal(deriveAttributedPercent(k), 100);
+    });
+
+    test("(total - interactive)/total * 100 on a mixed split", () => {
+      const k = emptyByDispatchKind();
+      k["autopilot-dispatched"] = row(60);
+      k["operator-invoked"] = row(20);
+      k.interactive = row(20);
+      // (100 - 20) / 100 * 100 = 80
+      assert.equal(deriveAttributedPercent(k), 80);
+    });
+  });
+
+  describe("byDispatchKind cross-tab + attributedPercent (issue #2403)", () => {
+    test("production path partitions sentinel/slash/interactive into the three kinds", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        // sentinel -> autopilot-dispatched
+        await writeFixture(root, "p/auto.jsonl", [
+          sentinelLine("hydra-dev"),
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"),
+        ]);
+        // slash marker -> operator-invoked
+        await writeFixture(root, "p/op.jsonl", [
+          userLine("<command-name>/hydra-qa</command-name>"),
+          assistantLine(t, { in: 40 }, "claude-sonnet-4-6"),
+        ]);
+        // no signal -> interactive
+        await writeFixture(root, "p/inter.jsonl", [
+          assistantLine(t, { in: 60 }, "claude-haiku-4-5"),
+        ]);
+
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+        assert.equal(snap.byDispatchKind["autopilot-dispatched"].opus.total, 100);
+        assert.equal(snap.byDispatchKind["operator-invoked"].sonnet.total, 40);
+        assert.equal(snap.byDispatchKind.interactive.haiku.total, 60);
+        // attributedPercent = (200 - 60) / 200 * 100 = 70
+        assert.equal(snap.attributedPercent, 70);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("all three kind keys always present (zero-valued where empty)", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/only-auto.jsonl", [
+          sentinelLine("hydra-dev"),
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"),
+        ]);
+
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+        for (const kind of DISPATCH_KINDS) {
+          assert.ok(snap.byDispatchKind[kind], `kind key ${kind} must be present`);
+        }
+        assert.equal(snap.byDispatchKind["operator-invoked"].opus.total, 0);
+        assert.equal(snap.byDispatchKind.interactive.opus.total, 0);
+        assert.equal(snap.attributedPercent, 100);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("reconciliation: Σ over kinds of byDispatchKind[*][f] === byModel[f] per family", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/a.jsonl", [
+          sentinelLine("hydra-dev"),
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"),
+          assistantLine(t, { in: 30 }, "claude-sonnet-4-6"),
+        ]);
+        await writeFixture(root, "p/b.jsonl", [
+          userLine("<command-name>/hydra-qa</command-name>"),
+          assistantLine(t, { in: 50 }, "claude-opus-4-6"),
+          assistantLine(t, { in: 9 }, "<synthetic>"), // unknown
+        ]);
+        await writeFixture(root, "p/c.jsonl", [
+          assistantLine(t, { in: 11 }, "claude-haiku-4-5"),
+        ]);
+
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+        for (const family of ["opus", "sonnet", "haiku", "unknown"] as const) {
+          for (const field of [
+            "input",
+            "output",
+            "cacheRead",
+            "cacheCreation",
+            "total",
+          ] as const) {
+            const summed = DISPATCH_KINDS.reduce(
+              (acc, kind) => acc + snap.byDispatchKind[kind][family][field],
+              0,
+            );
+            assert.equal(
+              summed,
+              snap.byModel[family][field],
+              `kind cross-tab must reconcile to byModel for ${family}.${field}`,
+            );
+          }
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("kind partition reconciles to the SAME tokens as bySkillByModel per family", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/a.jsonl", [
+          sentinelLine("hydra-dev"),
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"),
+        ]);
+        await writeFixture(root, "p/b.jsonl", [
+          assistantLine(t, { in: 70 }, "claude-sonnet-4-6"),
+        ]);
+
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+        for (const family of ["opus", "sonnet", "haiku", "unknown"] as const) {
+          const bySkill = Object.values(snap.bySkillByModel).reduce(
+            (acc, r) => acc + r[family].total,
+            0,
+          );
+          const byKind = DISPATCH_KINDS.reduce(
+            (acc, kind) => acc + snap.byDispatchKind[kind][family].total,
+            0,
+          );
+          assert.equal(byKind, bySkill, `both partitions must cover the same ${family} tokens`);
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("attributedPercent is 0 when no transcripts produced in-window tokens", async () => {
+      const snap = await getUsage({
+        now: new Date("2026-05-25T12:00:00Z"),
+        projectsRoot: "/does/not/exist/anywhere",
+        force: true,
+      });
+      assert.equal(snap.attributedPercent, 0);
+      for (const kind of DISPATCH_KINDS) {
+        assert.equal(snap.byDispatchKind[kind].opus.total, 0);
+      }
+    });
+  });
+
   describe("projectEligibility", () => {
     function snapshotWith(overrides: Partial<UsageSnapshot>): UsageSnapshot {
       const empty = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
@@ -1140,6 +1385,27 @@ describe("usage-tracker", () => {
         },
         bySkillByModel: {},
         bySkillWoW: {},
+        byDispatchKind: {
+          "autopilot-dispatched": {
+            opus: { ...empty },
+            sonnet: { ...empty },
+            haiku: { ...empty },
+            unknown: { ...empty },
+          },
+          "operator-invoked": {
+            opus: { ...empty },
+            sonnet: { ...empty },
+            haiku: { ...empty },
+            unknown: { ...empty },
+          },
+          interactive: {
+            opus: { ...empty },
+            sonnet: { ...empty },
+            haiku: { ...empty },
+            unknown: { ...empty },
+          },
+        },
+        attributedPercent: 0,
         quotaWeightLast5h: 0,
         quotaWeightLast7d: 0,
         quotaWeightCalibrated: false,
