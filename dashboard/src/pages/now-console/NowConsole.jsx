@@ -4,6 +4,7 @@ import StatusVerdict from "./StatusVerdict.jsx";
 import UsagePanel from "./UsagePanel.jsx";
 import StuckSignals from "./StuckSignals.jsx";
 import RunHistoryStrip from "./RunHistoryStrip.jsx";
+import RunDetailDrawer from "./RunDetailDrawer.jsx";
 import RetroPanel from "./RetroPanel.jsx";
 import { summariseTurns, formatRelativeTime } from "../now-pixel/oak-tab-state.ts";
 
@@ -101,6 +102,10 @@ export default function NowConsole() {
   const [pausePending, setPausePending] = useState(false);
   const [pauseError, setPauseError] = useState(null);
 
+  // RunHistoryStrip → RunDetailDrawer open/close state (issue #2410). The
+  // selected run_id is null when no drawer is open.
+  const [selectedRunId, setSelectedRunId] = useState(null);
+
   // Server-confirmed, never optimistic: POST the new state, then re-fetch the
   // flag and only let the verdict flip once the read confirms the write. A
   // failed POST surfaces the error and leaves the verdict where it was.
@@ -142,8 +147,9 @@ export default function NowConsole() {
         <TurnJournal />
         <StuckSignals />
       </div>
-      <RunHistoryStrip />
+      <RunHistoryStrip onSelect={setSelectedRunId} />
       <RetroPanel />
+      <RunDetailDrawer runId={selectedRunId} onClose={() => setSelectedRunId(null)} />
     </div>
   );
 }
