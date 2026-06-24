@@ -372,6 +372,60 @@ export function deriveSinceReset(input: {
   return { tokensSinceReset, percentSinceReset, weeklyResetAnchor };
 }
 
+/** A single skill's week-over-week trend entry (issue #2404). */
+export interface SkillWoWEntry {
+  /** This week's RAW total tokens for the skill (sum over model families). */
+  current: number;
+  /**
+   * The SAME skill's RAW total in the immediately-prior stored Weekly Usage
+   * Snapshot, or `null` when no prior snapshot exists OR the skill is absent
+   * from it (a "new this week" skill).
+   */
+  prior: number | null;
+  /**
+   * Percentage change `(current - prior) / prior * 100`, or `null` when it
+   * cannot be meaningfully computed: no prior snapshot, the skill is new this
+   * week, or the prior total was 0 (avoids divide-by-zero / Infinity).
+   */
+  deltaPct: number | null;
+}
+
+/**
+ * Per-skill week-over-week trend (issue #2404).
+ *
+ * For each skill present in the CURRENT week's `bySkillByModel` cross-tab,
+ * compute its RAW total this week (sum over model families) and the delta vs
+ * the SAME skill in the immediately-prior stored Weekly Usage Snapshot. The
+ * trend is keyed off the current week's skills — a skill that dropped out of
+ * the current week is simply absent (not surfaced as a -100% entry).
+ *
+ * PURE read-side projection (the ADR-0021 invariant): the prior-week per-skill
+ * totals enter as an ARGUMENT (`priorBySkill`), fetched by `getUsage()` via the
+ * typed `src/redis/usage-snapshots.ts` accessor BEFORE this assembler runs. This
+ * helper itself reads NO Redis. When `priorBySkill` is `null` (no prior snapshot,
+ * or Redis was down) every entry's `prior`/`deltaPct` is `null` ("new") — never
+ * throws. `deltaPct` is computed only when the prior total is > 0.
+ *
+ * Exported for direct unit test, NOT added to the `index.ts` public barrel.
+ */
+export function deriveBySkillWoW(
+  bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>,
+  priorBySkill: Record<string, number> | null,
+): Record<string, SkillWoWEntry> {
+  const out: Record<string, SkillWoWEntry> = {};
+  for (const skill of Object.keys(bySkillByModel)) {
+    const row = bySkillByModel[skill];
+    const current = MODEL_FAMILIES.reduce((sum, f) => sum + (row[f]?.total ?? 0), 0);
+    const priorRaw = priorBySkill ? priorBySkill[skill] : undefined;
+    const prior = typeof priorRaw === "number" && Number.isFinite(priorRaw) ? priorRaw : null;
+    // deltaPct only when a positive prior exists (no divide-by-zero / Infinity,
+    // no "new this week" % — that stays null and the UI renders it as "new").
+    const deltaPct = prior !== null && prior > 0 ? ((current - prior) / prior) * 100 : null;
+    out[skill] = { current, prior, deltaPct };
+  }
+  return out;
+}
+
 /**
  * Calibration-drift detector (issue #873; extracted to a named pure helper in
  * #2188). Fail-loud, ONCE per scan: when an operator has seeded a reference

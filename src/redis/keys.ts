@@ -344,6 +344,12 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   digestLastWeekly: () => "hydra:digest:last-weekly",
 
+  // Weekly usage-snapshot chore cadence stamp (issue #2404). Mirrors
+  // `digestLastWeekly` — a weekly time-guard read at the housekeeping
+  // composition level so the per-skill rollup is persisted at most once per
+  // ISO week.
+  usageSnapshotLastWeekly: () => "hydra:metrics:usage-snapshot:last-weekly",
+
   // ---------------------------------------------------------------------------
   // Regression Hunt
   // ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
       unknown: { ...zero },
     },
     bySkillByModel: {},
+    bySkillWoW: {},
     quotaWeightLast5h: 0,
     quotaWeightLast7d: 0,
     quotaWeightCalibrated: false,

@@ -109,7 +109,10 @@ function WeekModelMix({ usage }) {
           </div>
         )}
       </div>
-      <SkillModelCrossTab bySkillByModel={usage?.bySkillByModel} />
+      <SkillModelCrossTab
+        bySkillByModel={usage?.bySkillByModel}
+        bySkillWoW={usage?.bySkillWoW}
+      />
     </div>
   );
 }
@@ -117,16 +120,45 @@ function WeekModelMix({ usage }) {
 const CROSS_TAB_FAMILIES = ["opus", "sonnet", "haiku", "unknown"];
 
 /**
- * Expandable per-skill × per-model token cross-tab (issue #693).
+ * Render a single skill's week-over-week trend cell (issue #2404).
  *
- * Reads `bySkillByModel` from `/api/usage` and renders one row per
- * dispatching skill, one column per model family, plus a per-skill row
- * total. Sessions with no dispatch-registry entry appear under the
- * `unattributed` row. Raw token counts only — no quota-weight, no spend
- * figures — matching the tracker's read-only posture. Collapsed by default so the
- * headline mix stays the focus.
+ * `entry` is `bySkillWoW[skill] = {current, prior, deltaPct}`. A null/absent
+ * entry or a null `deltaPct` (no prior snapshot, or "new this week") renders a
+ * muted "new"; otherwise an up/down arrow + signed percentage, green when the
+ * skill's burn fell week-over-week, amber when it rose.
  */
-function SkillModelCrossTab({ bySkillByModel }) {
+function WoWTrendCell({ entry }) {
+  if (!entry || entry.deltaPct === null || entry.deltaPct === undefined) {
+    return <span className="text-zinc-600">new</span>;
+  }
+  const pct = entry.deltaPct;
+  const up = pct > 0;
+  const flat = Math.abs(pct) < 0.05;
+  const color = flat ? "text-zinc-500" : up ? "text-amber-400" : "text-emerald-400";
+  const arrow = flat ? "→" : up ? "▲" : "▼";
+  const sign = up ? "+" : "";
+  return (
+    <span className={color}>
+      {arrow} {sign}
+      {pct.toFixed(1)}%
+    </span>
+  );
+}
+
+/**
+ * Expandable per-skill × per-model token cross-tab (issue #693), with a
+ * week-over-week per-skill trend column (issue #2404).
+ *
+ * Reads `bySkillByModel` + `bySkillWoW` from `/api/usage` and renders one row
+ * per dispatching skill, one column per model family, a per-skill row total,
+ * and the WoW trend of that total vs the immediately-prior stored Weekly Usage
+ * Snapshot. Sessions with no dispatch-registry entry appear under the
+ * `interactive`/`unattributed` row. Raw token counts only — no quota-weight, no
+ * spend figures — matching the tracker's read-only posture. Auto-EXPANDED when
+ * populated (issue #2404) so the per-skill trend is visible at a glance rather
+ * than hidden behind a collapsed disclosure.
+ */
+function SkillModelCrossTab({ bySkillByModel, bySkillWoW }) {
   if (!bySkillByModel) return null;
   const skills = Object.keys(bySkillByModel).sort();
   if (skills.length === 0) return null;
@@ -137,8 +169,10 @@ function SkillModelCrossTab({ bySkillByModel }) {
   // Sort skills by descending total so the heaviest consumer is on top.
   skills.sort((a, b) => rowTotal(bySkillByModel[b]) - rowTotal(bySkillByModel[a]));
 
+  const wow = bySkillWoW ?? {};
+
   return (
-    <details className="mt-3 group">
+    <details className="mt-3 group" open>
       <summary className="cursor-pointer text-xs uppercase tracking-wide text-zinc-400 hover:text-zinc-200 select-none">
         Per-skill breakdown ({skills.length})
       </summary>
@@ -152,7 +186,8 @@ function SkillModelCrossTab({ bySkillByModel }) {
                   {f}
                 </th>
               ))}
-              <th className="font-medium py-1 pl-3">total</th>
+              <th className="font-medium py-1 px-3">total</th>
+              <th className="font-medium py-1 pl-3">wow</th>
             </tr>
           </thead>
           <tbody>
@@ -166,8 +201,11 @@ function SkillModelCrossTab({ bySkillByModel }) {
                       {(row[f]?.total ?? 0).toLocaleString()}
                     </td>
                   ))}
-                  <td className="text-zinc-200 py-1 pl-3 font-semibold">
+                  <td className="text-zinc-200 py-1 px-3 font-semibold">
                     {rowTotal(row).toLocaleString()}
+                  </td>
+                  <td className="py-1 pl-3 font-medium">
+                    <WoWTrendCell entry={wow[skill]} />
                   </td>
                 </tr>
               );

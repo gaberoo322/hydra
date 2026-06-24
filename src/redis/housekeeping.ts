@@ -54,6 +54,19 @@ export async function setDigestLastWeekly(value: string): Promise<void> {
   await r.set(redisKeys.digestLastWeekly(), value);
 }
 
+// Weekly usage-snapshot cadence stamp (issue #2404). Same shape as the
+// weekly-digest guard above — the chore persists the per-skill rollup at most
+// once per ISO week; this is the composition-level cadence stamp.
+export async function getUsageSnapshotLastWeekly(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.usageSnapshotLastWeekly());
+}
+
+export async function setUsageSnapshotLastWeekly(value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.usageSnapshotLastWeekly(), value);
+}
+
 export async function getMemoryLastConsolidation(): Promise<string | null> {
   const r = getRedisConnection();
   return r.get(redisKeys.memoryLastConsolidation());
