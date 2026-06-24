@@ -56,22 +56,124 @@ const WINDOW_7D_MS = 7 * MS_PER_DAY;
 const MODEL_FAMILIES: readonly ModelFamily[] = ["opus", "sonnet", "haiku", "unknown"];
 
 /**
- * Bucket key for sessions that have no `hydra:dispatches:subagent:{sessionId}`
- * registry entry (legacy transcripts, or an operator-launched session whose
- * prompt carried no hydra-dispatch sentinel). Tokens are still counted — they
- * bucket here — so `bySkillByModel` stays reconcilable to `byModel` and to the
- * per-skill counters in `src/redis/cost.ts`; nothing is dropped. (issue #693)
+ * Residual bucket key for sessions whose first user message carries NEITHER a
+ * `hydra-dispatch` sentinel NOR a leading `/command-name` slash marker — i.e. a
+ * plain interactive operator session (or a legacy transcript predating the
+ * sentinel). Tokens are still counted — they bucket here — so `bySkillByModel`
+ * stays reconcilable to `byModel` and to the per-skill counters in
+ * `src/redis/cost.ts`; nothing is dropped. (issue #693, #2402)
+ *
+ * Renamed from the former `"unattributed"` value (issue #2402): in-transcript
+ * derivation makes "no attribution signal" mean exactly "interactive", not
+ * "registry empty". The exported NAME `UNATTRIBUTED_SKILL` is retained below as
+ * a back-compat alias so `src/cost/index.ts` and existing tests keep resolving.
  */
-export const UNATTRIBUTED_SKILL = "unattributed";
+export const INTERACTIVE_SKILL = "interactive";
 
 /**
- * Resolves a transcript's `sessionId` to the dispatching skill, or null when
- * the session has no registry entry. The default (wired by `usage-tracker.ts`)
- * reads the subagent-dispatch registry — the tracker keeps its no-Redis-WRITE
- * posture. Injectable so tests can pin the cross-tab without standing up Redis.
- * (issue #693)
+ * Back-compat alias for {@link INTERACTIVE_SKILL} (issue #2402). The pre-#2402
+ * name for the residual bucket was `UNATTRIBUTED_SKILL` with the value
+ * `"unattributed"`; the value is now `"interactive"`. Kept as an alias so the
+ * `index.ts` barrel and existing `from "./usage-tracker.ts"` imports resolve
+ * unchanged. New code should reference {@link INTERACTIVE_SKILL}.
  */
-export type SkillResolver = (sessionId: string) => Promise<string | null>;
+export const UNATTRIBUTED_SKILL = INTERACTIVE_SKILL;
+
+/**
+ * Resolves a transcript's FIRST user message text to the dispatching skill
+ * (issue #2402). Derivation is pure and Redis-free: the precedence is
+ * (1) `hydra-dispatch` sentinel `skill=` → (2) a leading `/command-name` slash
+ * marker → (3) the literal residual bucket {@link INTERACTIVE_SKILL}. A TOTAL
+ * function: always returns a non-empty string, so every contributing file
+ * lands in exactly one bucket and the `Σ bySkillByModel === byModel`
+ * reconciliation invariant holds.
+ *
+ * The argument is the first user message's text (or `null` when the transcript
+ * has no readable first user message), which the scan already holds — no second
+ * `readFile`, no Redis read. Injectable so tests can pin the cross-tab by
+ * passing fixture text instead of standing up a registry. Replaces the former
+ * `(sessionId)=>Promise<string|null>` registry-read resolver (issue #693) that
+ * the dead SessionStart hook (issue #2401) left structurally empty.
+ */
+export type SkillResolver = (firstUserText: string | null) => string;
+
+/**
+ * The `hydra-dispatch` sentinel (issue #692): the hidden
+ * `<!-- hydra-dispatch v1 ... skill={skill} ... -->` HTML comment prepended to
+ * the FIRST user message of every Agent-tool dispatch. `skill=` is the
+ * highest-precedence attribution signal. Anchored on the bare token, not the
+ * full comment, so it matches whether the comment is the whole message or
+ * embedded in a longer prompt body. (issue #2402)
+ */
+const SENTINEL_RE = /<!--\s*hydra-dispatch\s+v1\b[^>]*\bskill=([^\s>]+)/;
+
+/**
+ * The slash-command marker (issue #2402). Slash-command dispatches (the
+ * autopilot's own `/hydra-autopilot`, an operator-invoked `/hydra-grill`, …)
+ * record their first user message as `<command-name>/skill-name</command-name>`
+ * (the leading `/` is optional in that tag), OR — for a raw typed slash command
+ * — a leading `/skill-name`. Either form attributes to `skill-name`. The
+ * `command-name` arm is checked first so a `<command-name>` wrapper is matched
+ * even though it does not start the string. Supports the `plugin:skill`
+ * namespaced form via the `:` in the character class.
+ */
+const COMMAND_NAME_RE = /<command-name>\s*\/?([a-z0-9][a-z0-9:_-]*)/i;
+const LEADING_SLASH_RE = /^\s*\/([a-z0-9][a-z0-9:_-]*)/i;
+
+/**
+ * Derive the dispatching skill from a transcript's first user message text
+ * (issue #2402). Total, deterministic, Redis-free — see {@link SkillResolver}
+ * for the precedence contract. Exported for direct unit test.
+ */
+export function deriveSkill(firstUserText: string | null): string {
+  if (firstUserText) {
+    const sentinel = SENTINEL_RE.exec(firstUserText);
+    if (sentinel) return sentinel[1]; // (1) hydra-dispatch sentinel skill=
+    const cmd = COMMAND_NAME_RE.exec(firstUserText);
+    if (cmd) return cmd[1]; // (2a) <command-name>/skill</command-name> marker
+    const slash = LEADING_SLASH_RE.exec(firstUserText);
+    if (slash) return slash[1]; // (2b) leading /skill slash marker
+  }
+  return INTERACTIVE_SKILL; // (3) residual
+}
+
+/**
+ * Extract the text of a transcript's FIRST user message from its already-read
+ * content (issue #2402) — the signal `deriveSkill` reads. Walks the JSONL lines
+ * the scan already split, returns the text of the first `type:"user"` record
+ * that is NOT a harness-injected meta line (`isMeta:true`, e.g. the
+ * `<local-command-caveat>` banner or the skill-template echo), and whose content
+ * is non-empty. `content` may be a plain string OR an array of content blocks
+ * (the harness emits both shapes); text blocks are concatenated. Returns `null`
+ * when no readable first user message exists. Cheap: stops at the first match.
+ */
+export function firstUserMessageText(lines: readonly string[]): string | null {
+  for (const line of lines) {
+    if (!line || line[0] !== "{") continue;
+    let obj: any;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      /* intentional: a non-JSON line cannot be the first user message — skip it */
+      continue;
+    }
+    if (obj?.type !== "user" || obj?.isMeta === true) continue;
+    const content = obj?.message?.content;
+    let text: string;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .map((b: any) => (b && typeof b.text === "string" ? b.text : ""))
+        .join(" ");
+    } else {
+      continue;
+    }
+    if (text.trim() === "") continue;
+    return text;
+  }
+  return null;
+}
 
 export const EMPTY_BREAKDOWN: TokenBreakdown = {
   input: 0,
@@ -259,7 +361,8 @@ export interface ScanResult {
  * The injectables mirror what the former private `scanUsage()` accepted:
  *   - `root`         the projects root to walk (a fixture dir in tests)
  *   - `now`          the anchor instant for the rolling-window cutoffs
- *   - `resolveSkill` sessionId → skill for the `bySkillByModel` cross-tab
+ *   - `resolveSkill` first-user-message text → skill for the `bySkillByModel`
+ *                    cross-tab (issue #2402; Redis-free, in-transcript)
  *   - `readOAuth`    the OAuth read closure (cached or bypass-injected by caller)
  *
  * OAuth concurrency (issue #1090): `readOAuth()` is fired at the top and only
@@ -314,9 +417,13 @@ export async function transcriptScan(
   // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
   const unknownModelsSeen = new Set<string>();
   // Memoise sessionId → skill within a scan so a session with many transcript
-  // shards resolves once, not once-per-shard. (Distinct files usually carry
-  // distinct sessionIds, but a resumed session can append a new shard.)
-  const skillCache = new Map<string, string | null>();
+  // shards resolves once, not once-per-shard (issue #693; preserved #2402).
+  // (Distinct files usually carry distinct sessionIds, but a resumed session
+  // can append a new shard.) The signal is now the first user message text
+  // (issue #2402): the FIRST shard of a session carries the dispatch sentinel /
+  // slash marker, so resolving once per session — keyed by sessionId — keeps
+  // attribution O(files) AND attributes a multi-shard session uniformly.
+  const skillCache = new Map<string, string>();
 
   let filesScanned = 0;
   let filesSkippedByMtime = 0;
@@ -410,16 +517,17 @@ export async function transcriptScan(
 
     // Bucket this file's 7d tokens into the per-skill cross-tab. Skip files
     // with no in-window tokens so we don't conjure empty skill rows. Exactly
-    // one skill resolution per contributing file (memoised by sessionId).
+    // one skill resolution per contributing SESSION (memoised by sessionId) —
+    // the resolver derives the skill from the first user message text the walk
+    // already read (issue #2402), so attribution stays O(files) and Redis-free.
     if (fileHadInWindow7d) {
       const sessionId = sessionIdFromPath(file);
       let skill = skillCache.get(sessionId);
       if (skill === undefined) {
-        skill = await resolveSkill(sessionId);
+        skill = resolveSkill(firstUserMessageText(lines));
         skillCache.set(sessionId, skill);
       }
-      const bucket = skill ?? UNATTRIBUTED_SKILL;
-      const row = (bySkillByModel[bucket] ??= emptyByModel());
+      const row = (bySkillByModel[skill] ??= emptyByModel());
       for (const f of MODEL_FAMILIES) addBreakdown(row[f], fileByFamily7d[f]);
     }
   }

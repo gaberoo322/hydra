@@ -83,6 +83,7 @@ export {
   getUsage,
   clearUsageCache,
   sessionIdFromPath,
+  INTERACTIVE_SKILL,
   UNATTRIBUTED_SKILL,
 } from "./usage-tracker.ts";
 
