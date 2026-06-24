@@ -76,6 +76,14 @@ function WeekModelMix({ usage }) {
 
   const calibrated = Boolean(usage?.quotaWeightCalibrated);
   const hasUnknown = (byModel.unknown?.total ?? 0) > 0;
+  // The quota weights only shape the *estimate* fallback figure; under the
+  // OAuth meter the authoritative percentage comes straight from the OAuth
+  // usage read, so calibration has no effect and the loud "needs calibration"
+  // banner is a false alarm (issue #2405). Suppress it under `oauth` (including
+  // a served-stale last-good, which is still `usageSource === "oauth"`) and
+  // show a quiet explained state; only surface the loud banner when the
+  // transcript estimate is the active source AND the weights are uncalibrated.
+  const isOauthSource = usage?.usageSource === "oauth";
 
   return (
     <div className="bg-zinc-800/50 rounded-lg border border-zinc-700 p-4">
@@ -102,12 +110,21 @@ function WeekModelMix({ usage }) {
             <p className="text-lg font-semibold text-zinc-500">No tokens recorded yet</p>
           )}
         </div>
-        {!calibrated && (
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm whitespace-nowrap bg-zinc-500/10 text-zinc-300 border border-zinc-500/30">
-            <span className="w-2 h-2 rounded-full bg-zinc-400" />
-            Quota-weight calibration needed
-          </div>
-        )}
+        {!calibrated &&
+          (isOauthSource ? (
+            <div
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs whitespace-nowrap bg-zinc-700/20 text-zinc-500 border border-zinc-700/40"
+              title="Quota percentages come from the OAuth usage meter, so quota weights don't affect them — calibration isn't needed."
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-600" />
+              Quota weights inactive under OAuth meter
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm whitespace-nowrap bg-zinc-500/10 text-zinc-300 border border-zinc-500/30">
+              <span className="w-2 h-2 rounded-full bg-zinc-400" />
+              Quota-weight calibration needed
+            </div>
+          ))}
       </div>
       <SkillModelCrossTab bySkillByModel={usage?.bySkillByModel} />
     </div>
