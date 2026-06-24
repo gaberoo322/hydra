@@ -104,7 +104,6 @@
  *     estimate (never silently 0). Only a SUCCESSFUL read overwrites the cache.
  */
 
-import { getSubagentDispatch } from "../redis/dispatches.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
 // Pure hard-stop threshold predicate (issue #2041): the two-line fold that says
 // "≥90% OAuth utilization is a hard stop" lives with the dispatch-gating policy
@@ -167,32 +166,29 @@ import {
   clearOAuthCache,
   projectsRoot,
   readOAuthUsage,
+  deriveSkill,
+  INTERACTIVE_SKILL,
   UNATTRIBUTED_SKILL,
   sessionIdFromPath as transcriptScanSessionIdFromPath,
 } from "./transcript-scan.ts";
 import type { ScanResult, SkillResolver } from "./transcript-scan.ts";
 
-// `UNATTRIBUTED_SKILL`, `SkillResolver`, and `sessionIdFromPath` now live in the
-// TranscriptScan seam (issue #1971). Re-exported here at the SAME names so the
-// `index.ts` barrel and existing `from "./usage-tracker.ts"` imports keep
-// resolving unchanged.
-export { UNATTRIBUTED_SKILL };
+// `INTERACTIVE_SKILL` (and its back-compat alias `UNATTRIBUTED_SKILL`),
+// `SkillResolver`, and `sessionIdFromPath` live in the TranscriptScan seam
+// (issue #1971, #2402). Re-exported here at the SAME names so the `index.ts`
+// barrel and existing `from "./usage-tracker.ts"` imports keep resolving
+// unchanged.
+export { INTERACTIVE_SKILL, UNATTRIBUTED_SKILL };
 export type { SkillResolver };
 
-const defaultSkillResolver: SkillResolver = async (sessionId) => {
-  try {
-    const dispatch = await getSubagentDispatch(sessionId);
-    return dispatch?.skill ?? null;
-  } catch (err: any) {
-    // A Redis hiccup must not take down the read-only usage scan; bucket the
-    // session under `unattributed` (null) and keep totals closed. Logged so a
-    // persistent registry outage is visible rather than silently swallowed.
-    console.error(
-      `[usage-tracker] skill resolution failed for session ${sessionId}: ${err?.message || err}`,
-    );
-    return null;
-  }
-};
+// Production attribution resolver (issue #2402). Pure, Redis-free: derives the
+// dispatching skill from the transcript's FIRST user message text — the
+// `hydra-dispatch` sentinel (#692) wins, else a `/command-name` slash marker,
+// else the `interactive` residual. Replaces the former registry-read resolver
+// (`getSubagentDispatch`) that the structurally-dead SessionStart hook (issue
+// #2401) left empty, which bucketed 100% of tokens under `unattributed`. The
+// tracker now reads NO Redis for attribution — only on-disk transcripts.
+const defaultSkillResolver: SkillResolver = (firstUserText) => deriveSkill(firstUserText);
 
 const CACHE_TTL_MS = 60_000;
 
@@ -321,16 +317,20 @@ export interface UsageSnapshot {
   byModel: Record<ModelFamily, TokenBreakdown>;
   /**
    * Per-skill × per-model-family token breakdown over the 7d window. The outer
-   * key is the dispatching skill resolved from the subagent-dispatch registry
-   * (`getSubagentDispatch`); the inner key is the model family. Sessions with
-   * no registry entry bucket under `skill = "unattributed"` (see
-   * {@link UNATTRIBUTED_SKILL}) so totals stay reconcilable to `byModel`.
+   * key is the dispatching skill derived IN-TRANSCRIPT from the session's first
+   * user message (issue #2402): the `hydra-dispatch` sentinel `skill=` wins,
+   * else a leading `/command-name` slash marker, else the residual bucket
+   * `skill = "interactive"` (see {@link INTERACTIVE_SKILL}); the inner key is
+   * the model family. Attribution reads NO Redis and no longer depends on the
+   * subagent-dispatch registry or the SessionStart hook (issue #2401) — it is
+   * recomputed every scan from on-disk transcripts, so it backfills any
+   * transcript carrying a sentinel/marker with no migration.
    *
    * Reconciliation invariant: for each family `f`,
    * `Σ_skill bySkillByModel[skill][f].total === byModel[f].total`. Only skills
    * that produced tokens in the window appear; each present skill carries all
    * four family keys (zero-valued where the skill produced none). Pure
-   * read-side projection — NO new Redis writes. (issue #693)
+   * read-side projection — NO new Redis writes. (issue #693, #2402)
    */
   bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
   /**
@@ -450,9 +450,11 @@ export async function getUsage(opts: {
   force?: boolean;
   projectsRoot?: string;
   /**
-   * Resolves a transcript's `sessionId` to its dispatching skill for the
-   * `bySkillByModel` cross-tab. Defaults to the subagent-dispatch registry
-   * read. Injected by tests to pin attribution without Redis. (issue #693)
+   * Resolves a transcript's first user message text to its dispatching skill
+   * for the `bySkillByModel` cross-tab (issue #2402). Defaults to the pure
+   * in-transcript {@link deriveSkill} (sentinel → slash marker → `interactive`).
+   * Injected by tests to pin attribution by passing fixture text. Reads no
+   * Redis. (issue #693, #2402)
    */
   resolveSkill?: SkillResolver;
   /**

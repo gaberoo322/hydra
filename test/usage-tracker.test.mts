@@ -20,11 +20,19 @@ import {
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
   sessionIdFromPath,
+  INTERACTIVE_SKILL,
   UNATTRIBUTED_SKILL,
   type UsageSnapshot,
   type SkillResolver,
   type OAuthUsageResult,
 } from "../src/cost/index.ts";
+// In-transcript skill derivation (issue #2402): the pure resolver + the
+// first-user-message extractor live on the TranscriptScan seam. Imported
+// directly to unit-test the derivation grammar without the JSONL-scan machinery.
+import {
+  deriveSkill,
+  firstUserMessageText,
+} from "../src/cost/transcript-scan.ts";
 // The pure token-math functions now live in their own leaf (issue #1909).
 // Import them directly from cost/token-math.ts to prove the seam is importable
 // without pulling in the JSONL-scan machinery — mirroring the eligibility.ts
@@ -118,6 +126,29 @@ function assistantLine(ts: string, tokens: TokenInput = {}, model?: string): str
     timestamp: ts,
     message,
   });
+}
+
+/**
+ * A `type:"user"` transcript line carrying `content` as a plain string — the
+ * first-user-message signal `deriveSkill` reads (issue #2402). Pass the
+ * `hydra-dispatch` sentinel comment or a `<command-name>/skill</command-name>`
+ * marker to attribute a fixture session; omit to leave it interactive.
+ * `isMeta:true` marks a harness-injected line the extractor must skip.
+ */
+function userLine(content: string, opts: { meta?: boolean } = {}): string {
+  return JSON.stringify({
+    type: "user",
+    timestamp: "2026-05-25T10:59:00Z",
+    isMeta: opts.meta === true,
+    message: { role: "user", content },
+  });
+}
+
+/** The hydra-dispatch sentinel comment for `skill`, as it lands in a transcript. */
+function sentinelLine(skill: string): string {
+  return userLine(
+    `<!-- hydra-dispatch v1 skill=${skill} dispatchId=worktree-agent-deadbeef-t1-x runId=deadbeef-0000 -->`,
+  );
 }
 
 async function writeFixture(root: string, relPath: string, lines: string[]): Promise<void> {
@@ -811,81 +842,155 @@ describe("usage-tracker", () => {
     });
   });
 
-  describe("bySkillByModel cross-tab (issue #693)", () => {
-    // A SkillResolver backed by a fixed sessionId -> skill map; null for
-    // sessions absent from the map (the unattributed case). Records calls so
-    // the O(files) resolution invariant can be asserted.
+  describe("deriveSkill — in-transcript precedence (issue #2402)", () => {
+    test("(1) hydra-dispatch sentinel skill= wins over everything", () => {
+      assert.equal(
+        deriveSkill("<!-- hydra-dispatch v1 skill=hydra-dev dispatchId=x runId=y -->"),
+        "hydra-dev",
+      );
+      // Sentinel embedded in a longer prompt body still wins over a slash marker.
+      assert.equal(
+        deriveSkill(
+          "/hydra-autopilot\n<!-- hydra-dispatch v1 skill=hydra-grill dispatchId=x runId=y -->\nbody",
+        ),
+        "hydra-grill",
+      );
+    });
+
+    test("(2a) <command-name>/skill</command-name> marker, then (2b) leading /skill", () => {
+      assert.equal(
+        deriveSkill(
+          "<command-message>hydra-autopilot</command-message>\n<command-name>/hydra-autopilot</command-name>",
+        ),
+        "hydra-autopilot",
+      );
+      // Leading-slash optional inside the command-name tag.
+      assert.equal(
+        deriveSkill("<command-name>hydra-incident</command-name>"),
+        "hydra-incident",
+      );
+      // A raw typed slash command (no command-name wrapper).
+      assert.equal(deriveSkill("/hydra-digest please summarise"), "hydra-digest");
+      // Namespaced plugin:skill form.
+      assert.equal(deriveSkill("<command-name>/foo:bar</command-name>"), "foo:bar");
+    });
+
+    test("(3) residual: plain prose, empty, and null all bucket to 'interactive'", () => {
+      assert.equal(deriveSkill("hey can you look at this bug"), INTERACTIVE_SKILL);
+      assert.equal(deriveSkill(""), INTERACTIVE_SKILL);
+      assert.equal(deriveSkill(null), INTERACTIVE_SKILL);
+      assert.equal(INTERACTIVE_SKILL, "interactive");
+      // Back-compat alias still resolves to the same residual value.
+      assert.equal(UNATTRIBUTED_SKILL, INTERACTIVE_SKILL);
+    });
+  });
+
+  describe("firstUserMessageText — extractor (issue #2402)", () => {
+    test("returns the first non-meta user message text (string content)", () => {
+      const lines = [
+        assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7"),
+        userLine("<local-command-caveat>banner</local-command-caveat>", { meta: true }),
+        userLine("/hydra-dev real prompt"),
+        userLine("a later message"),
+      ];
+      assert.equal(firstUserMessageText(lines), "/hydra-dev real prompt");
+    });
+
+    test("concatenates text blocks of an array content; skips blank/meta lines", () => {
+      const arrayContentLine = JSON.stringify({
+        type: "user",
+        timestamp: "2026-05-25T10:00:00Z",
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "<command-name>/hydra-qa</command-name>" },
+            { type: "image", source: {} },
+          ],
+        },
+      });
+      assert.equal(firstUserMessageText([arrayContentLine]).trim(), "<command-name>/hydra-qa</command-name>");
+    });
+
+    test("returns null when there is no readable first user message", () => {
+      assert.equal(firstUserMessageText([]), null);
+      assert.equal(
+        firstUserMessageText([assistantLine("2026-05-25T10:00:00Z", { in: 1 }, "claude-opus-4-7")]),
+        null,
+      );
+      // A user line whose content is only whitespace is skipped.
+      assert.equal(firstUserMessageText([userLine("   ")]), null);
+    });
+  });
+
+  describe("bySkillByModel cross-tab (issue #693, #2402)", () => {
+    // A SkillResolver backed by a fixed firstUserText -> skill map (issue #2402:
+    // the resolver now keys on the first user message text, not sessionId).
+    // Records calls so the O(files) resolution invariant can be asserted.
     function fakeResolver(
       map: Record<string, string>,
       calls?: string[],
     ): SkillResolver {
-      return async (sessionId: string) => {
-        if (calls) calls.push(sessionId);
-        return map[sessionId] ?? null;
+      return (firstUserText: string | null) => {
+        const key = firstUserText ?? "";
+        if (calls) calls.push(key);
+        return map[key] ?? INTERACTIVE_SKILL;
       };
     }
 
-    test("buckets each session's 7d tokens under its resolved skill × family", async () => {
+    test("derives skill in-transcript: sentinel + slash marker buckets, production resolver", async () => {
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
         const t = "2026-05-25T11:00:00Z";
-        // sess-dev.jsonl -> hydra-dev; sess-qa.jsonl -> hydra-qa.
+        // sess-dev.jsonl carries a sentinel -> hydra-dev; sess-qa.jsonl a slash
+        // marker -> hydra-qa. No resolveSkill injected: exercises the production
+        // deriveSkill path (the #2402 acceptance criterion).
         await writeFixture(root, "p/sess-dev.jsonl", [
+          sentinelLine("hydra-dev"),
           assistantLine(t, { in: 100 }, "claude-opus-4-7"), // opus 100
           assistantLine(t, { in: 40 }, "claude-sonnet-4-6"), // sonnet 40
         ]);
         await writeFixture(root, "p/sess-qa.jsonl", [
+          userLine("<command-name>/hydra-qa</command-name>"),
           assistantLine(t, { in: 25 }, "claude-haiku-4-5"), // haiku 25
           assistantLine(t, { in: 60 }, "claude-opus-4-7"), // opus 60
         ]);
 
-        const snap = await getUsage({
-          now,
-          projectsRoot: root,
-          force: true,
-          resolveSkill: fakeResolver({
-            "sess-dev": "hydra-dev",
-            "sess-qa": "hydra-qa",
-          }),
-        });
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
 
-        assert.ok(snap.bySkillByModel["hydra-dev"]);
+        assert.ok(snap.bySkillByModel["hydra-dev"], "real skill name, not 'unattributed'");
         assert.ok(snap.bySkillByModel["hydra-qa"]);
         assert.equal(snap.bySkillByModel["hydra-dev"].opus.total, 100);
         assert.equal(snap.bySkillByModel["hydra-dev"].sonnet.total, 40);
         assert.equal(snap.bySkillByModel["hydra-dev"].haiku.total, 0);
         assert.equal(snap.bySkillByModel["hydra-qa"].haiku.total, 25);
         assert.equal(snap.bySkillByModel["hydra-qa"].opus.total, 60);
-        // No spurious unattributed bucket when every session resolved.
-        assert.equal(snap.bySkillByModel[UNATTRIBUTED_SKILL], undefined);
+        // No interactive residual bucket when every session resolved a signal.
+        assert.equal(snap.bySkillByModel[INTERACTIVE_SKILL], undefined);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
     });
 
-    test("sessions without a registry entry bucket under 'unattributed'", async () => {
+    test("sessions with no sentinel/marker bucket under 'interactive' (production path)", async () => {
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
       try {
         const now = new Date("2026-05-25T12:00:00Z");
         const t = "2026-05-25T11:00:00Z";
         await writeFixture(root, "p/known.jsonl", [
+          sentinelLine("hydra-dev"),
           assistantLine(t, { in: 100 }, "claude-opus-4-7"),
         ]);
+        // No first user message at all -> interactive residual.
         await writeFixture(root, "p/legacy.jsonl", [
           assistantLine(t, { in: 70 }, "claude-sonnet-4-6"),
         ]);
 
-        const snap = await getUsage({
-          now,
-          projectsRoot: root,
-          force: true,
-          resolveSkill: fakeResolver({ known: "hydra-dev" }), // legacy unmapped
-        });
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
 
         assert.equal(snap.bySkillByModel["hydra-dev"].opus.total, 100);
-        assert.ok(snap.bySkillByModel[UNATTRIBUTED_SKILL]);
-        assert.equal(snap.bySkillByModel[UNATTRIBUTED_SKILL].sonnet.total, 70);
+        assert.ok(snap.bySkillByModel[INTERACTIVE_SKILL]);
+        assert.equal(snap.bySkillByModel[INTERACTIVE_SKILL].sonnet.total, 70);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
@@ -897,23 +1002,21 @@ describe("usage-tracker", () => {
         const now = new Date("2026-05-25T12:00:00Z");
         const t = "2026-05-25T11:00:00Z";
         await writeFixture(root, "p/a.jsonl", [
+          sentinelLine("hydra-dev"),
           assistantLine(t, { in: 100 }, "claude-opus-4-7"),
           assistantLine(t, { in: 30 }, "claude-sonnet-4-6"),
         ]);
         await writeFixture(root, "p/b.jsonl", [
+          userLine("<command-name>/hydra-qa</command-name>"),
           assistantLine(t, { in: 50 }, "claude-opus-4-6"),
           assistantLine(t, { in: 9 }, "<synthetic>"), // unknown
         ]);
+        // c has no signal -> interactive residual.
         await writeFixture(root, "p/c.jsonl", [
           assistantLine(t, { in: 11 }, "claude-haiku-4-5"),
         ]);
 
-        const snap = await getUsage({
-          now,
-          projectsRoot: root,
-          force: true,
-          resolveSkill: fakeResolver({ a: "hydra-dev", b: "hydra-qa" }), // c unattributed
-        });
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
 
         for (const family of ["opus", "sonnet", "haiku", "unknown"] as const) {
           for (const field of [
@@ -945,7 +1048,9 @@ describe("usage-tracker", () => {
         const now = new Date("2026-05-25T12:00:00Z");
         const t = "2026-05-25T11:00:00Z";
         // 4 token-bearing lines in one file -> still exactly one resolution.
+        const firstText = "<command-name>/hydra-dev</command-name>";
         await writeFixture(root, "p/sess.jsonl", [
+          userLine(firstText),
           assistantLine(t, { in: 10 }, "claude-opus-4-7"),
           assistantLine(t, { in: 10 }, "claude-opus-4-7"),
           assistantLine(t, { in: 10 }, "claude-sonnet-4-6"),
@@ -953,14 +1058,15 @@ describe("usage-tracker", () => {
         ]);
 
         const calls: string[] = [];
-        await getUsage({
+        const snap = await getUsage({
           now,
           projectsRoot: root,
           force: true,
-          resolveSkill: fakeResolver({ sess: "hydra-dev" }, calls),
+          resolveSkill: fakeResolver({ [firstText]: "hydra-dev" }, calls),
         });
 
-        assert.deepEqual(calls, ["sess"]);
+        assert.deepEqual(calls, [firstText]);
+        assert.equal(snap.bySkillByModel["hydra-dev"].opus.total, 20);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
@@ -976,15 +1082,11 @@ describe("usage-tracker", () => {
         const now = new Date("2026-05-25T12:00:00Z");
         const t = "2026-05-25T11:00:00Z";
         await writeFixture(root, "p/sess.jsonl", [
+          sentinelLine("hydra-dev"),
           assistantLine(t, { in: 100 }, "claude-opus-4-7"),
         ]);
 
-        const snap = await getUsage({
-          now,
-          projectsRoot: root,
-          force: true,
-          resolveSkill: fakeResolver({ sess: "hydra-dev" }),
-        });
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
 
         // Raw cross-tab cell populated regardless of weight calibration.
         assert.equal(snap.bySkillByModel["hydra-dev"].opus.total, 100);
@@ -1001,7 +1103,6 @@ describe("usage-tracker", () => {
         now: new Date("2026-05-25T12:00:00Z"),
         projectsRoot: "/does/not/exist/anywhere",
         force: true,
-        resolveSkill: fakeResolver({}),
       });
       assert.deepEqual(snap.bySkillByModel, {});
     });
