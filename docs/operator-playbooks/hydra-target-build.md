@@ -561,6 +561,38 @@ file the cycle created is committed on the feature branch, and treat a
 `0-mutant` warn on a diff that adds money-critical files as a red flag, not a
 pass.
 
+**Large-scanner pure-enrichment diffs: the gate verdict is unreliable, not a
+pass to trust.** A second, opposite failure mode (friction cue
+`mutation-gate-timeout-on-large-scanner-file`, recurred 3×): when the changed
+file is a **large** money-critical module (e.g.
+`web/src/lib/arbitrage/scanner.ts`, `web/src/lib/execution/kalshi-executor.ts`)
+and your diff is **pure enrichment** — it adds/annotates without changing the
+existing logic lines (a new field, a relocation, a comment-level tweak) — the
+gate mutates the *whole* file, hits `MUTATION_TIME_BUDGET_MS` before reaching a
+full verdict, and any surviving mutants it reports live in **untouched code you
+did not write**. That is neither a real pass nor a real fail of *your* change;
+it is a budget-exhausted partial run whose verdict is noise. Do NOT treat the
+incomplete result as a kill-floor failure of your diff, and do NOT pad the PR
+with throwaway tests against untouched lines to chase those mutants.
+
+Handle it as follows:
+- **Confirm the diff is genuinely pure-enrichment** for the scanned file: `git
+  diff "$(git merge-base origin/main HEAD)"...HEAD -- <scanner-file>` shows only
+  additive/annotative hunks, no edit to an existing executable line. If your
+  diff *does* change logic in the scanner, the gate verdict stands — fix the
+  surviving mutants normally.
+- **For a confirmed pure-enrichment diff on a too-large-to-mutate-in-budget
+  file, the gate is skippable** — but the skip must be *declared, not silent*.
+  Record the rationale in the PR body (e.g. `Mutation gate: skipped on
+  web/src/lib/arbitrage/scanner.ts — pure-enrichment diff, no logic-line change;
+  surviving mutants are budget-truncated and land in untouched code`) so QA and
+  the audit trail see why the floor was not enforced. A bare green from a
+  budget-truncated run with no note is the failure mode to avoid.
+- **Prefer raising the budget over skipping when the file is borderline.** If
+  the file is only marginally over budget, bump `MUTATION_TIME_BUDGET_MS` for
+  this run so the gate reaches a full verdict on the *changed* hunks before you
+  reach for the skip.
+
 ```bash
 cd "$TARGET_WT"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
