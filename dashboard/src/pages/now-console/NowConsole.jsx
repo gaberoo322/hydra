@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, useApi } from "../../hooks/useApi.js";
 import StatusVerdict from "./StatusVerdict.jsx";
 import StatusStrip from "./StatusStrip.jsx";
+import StopBanner from "./StopBanner.jsx";
 import UsagePanel from "./UsagePanel.jsx";
 import StuckSignals from "./StuckSignals.jsx";
 import RunHistoryStrip from "./RunHistoryStrip.jsx";
@@ -133,6 +134,7 @@ export default function NowConsole() {
 
   return (
     <div className="space-y-4" data-testid="now-console">
+      <StopBanner />
       <StatusVerdict
         lifecycle={tick.data?.lifecycle}
         signals={health.data?.signals}

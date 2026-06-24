@@ -8,14 +8,22 @@ import {
 } from "./console-state.ts";
 
 /**
- * UsagePanel — quota / pacing drill-down (issue #891, now-console-4).
+ * UsagePanel — quota / pacing drill-down (issue #891, now-console-4;
+ * reworked in #2409, now-status-5, parent #2408).
  *
  * Replaces the dead $0 cost framing (retired in #885/#704) with the live
- * quota surface from /api/usage/eligibility:
- *   - 5h burn vs the emergency-stop (5h quota) line + throttle-risk gauge
+ * quota surface from /api/usage/eligibility, presenting the SAME rate-limit
+ * values the Claude Code status line shows:
+ *   - rl5h / rl7d OAuth utilization gauges (percentLast5h / percentLast7d)
+ *     each with an inline "resets in Xh Ym" countdown
  *   - weekly pace curve: sinceReset% vs target% with ahead/on/behind
  *   - per-skill/per-model attribution from bySkillByModel
  *   - cache-hit efficiency (cacheHitRatioLast5h)
+ *
+ * The old weighted "5h burn vs emergency-stop line" gauge and its
+ * tokens5h/quota5h subtext were removed in #2409: that gauge already drew
+ * value=percentLast5h/max=100 — the SAME OAuth number as the rl5h gauge once
+ * labeled honestly — so it showed the operator the same figure twice.
  *
  * No dollar metric anywhere — acceptance criterion #3.
  *
@@ -32,6 +40,23 @@ const PACE_STYLE = {
   on: { chip: "bg-emerald-500/10 text-emerald-300 border-emerald-500/40", label: "on pace" },
   behind: { chip: "bg-sky-500/10 text-sky-300 border-sky-500/40", label: "behind pace (headroom)" },
 };
+
+/**
+ * Format an ISO resets-at timestamp into a "resets in Xh Ym" countdown,
+ * tolerating null (acceptance criterion). Returns "" when the timestamp is
+ * missing/unparseable so the caller can omit the segment rather than render
+ * a misleading value; a past/now delta clamps to "resets now".
+ */
+function formatResetCountdown(resetsAt, nowMs = Date.now()) {
+  if (typeof resetsAt !== "string" || resetsAt.length === 0) return "";
+  const targetMs = Date.parse(resetsAt);
+  if (!Number.isFinite(targetMs)) return "";
+  const diffSec = Math.floor((targetMs - nowMs) / 1000);
+  if (diffSec <= 0) return "resets now";
+  const hrs = Math.floor(diffSec / 3600);
+  const mins = Math.floor((diffSec % 3600) / 60);
+  return hrs > 0 ? `resets in ${hrs}h ${mins}m` : `resets in ${mins}m`;
+}
 
 function Gauge({ label, value, max, testid, danger }) {
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
@@ -54,8 +79,9 @@ export default function UsagePanel() {
   const usage = data?.usage ?? {};
 
   const percent5h = Number(usage.percentLast5h ?? 0);
-  const tokens5h = Number(usage.tokensLast5h?.total ?? 0);
-  const quota5h = Number(usage.fiveHourQuotaTokens ?? 0);
+  const percent7d = Number(usage.percentLast7d ?? 0);
+  const reset5h = formatResetCountdown(usage.oauthFiveHourResetsAt);
+  const reset7d = formatResetCountdown(usage.oauthSevenDayResetsAt);
   const sinceReset = Number(
     usage.percentSinceReset ?? data?.sinceResetPercent ?? 0,
   );
@@ -115,18 +141,26 @@ export default function UsagePanel() {
         <p className="text-xs text-zinc-500 italic">Loading usage…</p>
       ) : (
         <>
-          {/* 5h burn vs emergency-stop line */}
-          <div className="space-y-2">
-            <Gauge
-              label="5h burn vs emergency-stop line"
-              value={percent5h}
-              max={100}
-              danger
-              testid="burn-5h-gauge"
-            />
-            <p className="text-[11px] text-zinc-500 font-mono">
-              {formatTokens(tokens5h)} / {formatTokens(quota5h)} tokens in the last 5h
-            </p>
+          {/* rl5h / rl7d OAuth utilization gauges — the same values the
+              Claude Code status line shows, each with an inline reset
+              countdown. Reuses the in-file Gauge (value=percent, max=100). */}
+          <div className="space-y-3">
+            <div data-testid="rl5h" className="space-y-1">
+              <Gauge label="rl5h" value={percent5h} max={100} danger testid="rl5h-gauge" />
+              {reset5h && (
+                <p data-testid="rl5h-reset" className="text-[10px] text-zinc-500 font-mono text-right">
+                  {reset5h}
+                </p>
+              )}
+            </div>
+            <div data-testid="rl7d" className="space-y-1">
+              <Gauge label="rl7d" value={percent7d} max={100} danger testid="rl7d-gauge" />
+              {reset7d && (
+                <p data-testid="rl7d-reset" className="text-[10px] text-zinc-500 font-mono text-right">
+                  {reset7d}
+                </p>
+              )}
+            </div>
           </div>
 
           {/* Weekly pace curve */}
