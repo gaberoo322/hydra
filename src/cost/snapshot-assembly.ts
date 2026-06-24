@@ -46,8 +46,8 @@ import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
 // TranscriptScan seam (issue #1971): the empty-breakdown constants + per-family
 // accumulator helpers, plus the `ScanResult` boundary type the OAuth-rebase /
 // since-reset folds read slices of. One-way import (this leaf never imports back).
-import { EMPTY_BREAKDOWN, emptyByModel, addBreakdown } from "./transcript-scan.ts";
-import type { ScanResult } from "./transcript-scan.ts";
+import { EMPTY_BREAKDOWN, emptyByModel, addBreakdown, DISPATCH_KINDS } from "./transcript-scan.ts";
+import type { ScanResult, DispatchKind } from "./transcript-scan.ts";
 
 /**
  * The composed two-axis quota-burn numerator over a per-family accumulator
@@ -424,6 +424,34 @@ export function deriveBySkillWoW(
     out[skill] = { current, prior, deltaPct };
   }
   return out;
+}
+
+/**
+ * **Attribution coverage %** (issue #2403): the inverse of the
+ * `interactive`-residual token share over the 7d window. Pure read-side
+ * projection over the {@link DispatchKind} cross-tab:
+ *
+ *   `attributedPercent = (total - interactive) / total * 100`
+ *
+ * where `total` and `interactive` are RAW `.total` summed across model families
+ * (no quota-weight, no USD — matching the cross-tab's read-only posture). This
+ * is the metric #2402 drives UP by shrinking the residual (formerly the
+ * `UNATTRIBUTED_SKILL=100%` world). Returns 0 when `total === 0` OR every token
+ * is interactive (no division by zero, and the all-residual world reads 0% —
+ * not 100% — coverage). Result is clamped to `[0, 100]`. Exported for direct
+ * unit test, NOT added to the `index.ts` public barrel.
+ */
+export function deriveAttributedPercent(
+  byDispatchKind: Record<DispatchKind, Record<ModelFamily, TokenBreakdown>>,
+): number {
+  const kindTotal = (kind: DispatchKind): number =>
+    MODEL_FAMILIES.reduce((sum, f) => sum + (byDispatchKind[kind][f]?.total ?? 0), 0);
+  const total = DISPATCH_KINDS.reduce((sum, k) => sum + kindTotal(k), 0);
+  if (total <= 0) return 0;
+  const interactive = kindTotal("interactive");
+  const pct = ((total - interactive) / total) * 100;
+  // Clamp defensively to the documented [0,100] invariant.
+  return pct < 0 ? 0 : pct > 100 ? 100 : pct;
 }
 
 /**
