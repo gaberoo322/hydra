@@ -82,6 +82,9 @@ gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progre
   ```bash
   WT=/dev/shm/hydra-worktrees/issue-${issue_number}-$(date +%s)
   git -C ~/hydra worktree add -b "issue-${issue_number}-dev" "$WT" master
+  # MANDATORY: /dev/shm worktrees have no ancestor node_modules — symlink before any npm/npx call.
+  # (cue: devshm-verify-worktree-needs-node-modules-symlink)
+  ln -sfn /home/gabe/hydra/node_modules "$WT/node_modules"
   (cd "$WT" && codex exec --skill hydra-dev-child --json "{\"issue\":${issue_number}}")
   ```
 
