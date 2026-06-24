@@ -83,7 +83,11 @@ import {
   deriveWeightedBurns,
   deriveEstimatePercents,
   deriveQuotaWeightTotals,
+  deriveBySkillWoW,
 } from "../src/cost/snapshot-assembly.ts";
+// Weekly Usage Snapshot ISO-week label helper (issue #2404). Pure, no Redis —
+// imported from the typed accessor seam for direct unit test of the week math.
+import { isoWeekLabel } from "../src/redis/usage-snapshots.ts";
 // `rebaseOnOAuth` consumes the already-resolved OAuth read (`ScanResult["oauth"]`,
 // = CachedOAuthRead). Alias it here so the fixtures below name the shape the
 // helper expects without importing the whole ScanResult boundary type.
@@ -1135,6 +1139,7 @@ describe("usage-tracker", () => {
           unknown: { ...empty },
         },
         bySkillByModel: {},
+        bySkillWoW: {},
         quotaWeightLast5h: 0,
         quotaWeightLast7d: 0,
         quotaWeightCalibrated: false,
@@ -3348,5 +3353,97 @@ describe("deriveQuotaWeightTotals (pure Quota-Weight totals, issue #2247)", () =
     const rPlain = deriveQuotaWeightTotals(plain, plain, weights, true);
     assert.equal(rHeavy.quotaWeightLast5h, rPlain.quotaWeightLast5h);
     assert.equal(rHeavy.quotaWeightLast5h, 500); // 100 * 5
+  });
+});
+
+describe("deriveBySkillWoW (pure per-skill week-over-week trend, issue #2404)", () => {
+  test("no prior snapshot → every skill is 'new' (prior/deltaPct null)", () => {
+    const cur = {
+      "hydra-dev": byModelWith({ opus: bd({ total: 100, input: 100 }) }),
+      "hydra-qa": byModelWith({ sonnet: bd({ total: 40, output: 40 }) }),
+    };
+    const r = deriveBySkillWoW(cur, null);
+    assert.equal(r["hydra-dev"].current, 100);
+    assert.equal(r["hydra-dev"].prior, null);
+    assert.equal(r["hydra-dev"].deltaPct, null);
+    assert.equal(r["hydra-qa"].current, 40);
+    assert.equal(r["hydra-qa"].prior, null);
+    assert.equal(r["hydra-qa"].deltaPct, null);
+  });
+
+  test("computes signed deltaPct vs the prior week's per-skill total", () => {
+    const cur = {
+      "hydra-dev": byModelWith({ opus: bd({ total: 150, input: 150 }) }),
+      "hydra-qa": byModelWith({ sonnet: bd({ total: 50, output: 50 }) }),
+    };
+    const prior = { "hydra-dev": 100, "hydra-qa": 100 };
+    const r = deriveBySkillWoW(cur, prior);
+    // +50% up
+    assert.equal(r["hydra-dev"].prior, 100);
+    assert.equal(r["hydra-dev"].deltaPct, 50);
+    // -50% down
+    assert.equal(r["hydra-qa"].prior, 100);
+    assert.equal(r["hydra-qa"].deltaPct, -50);
+  });
+
+  test("a skill present this week but absent from prior is 'new' (deltaPct null)", () => {
+    const cur = { "hydra-research": byModelWith({ opus: bd({ total: 10, input: 10 }) }) };
+    const prior = { "hydra-dev": 100 };
+    const r = deriveBySkillWoW(cur, prior);
+    assert.equal(r["hydra-research"].current, 10);
+    assert.equal(r["hydra-research"].prior, null);
+    assert.equal(r["hydra-research"].deltaPct, null);
+  });
+
+  test("prior total of 0 yields deltaPct null (no divide-by-zero / Infinity)", () => {
+    const cur = { "hydra-dev": byModelWith({ opus: bd({ total: 100, input: 100 }) }) };
+    const prior = { "hydra-dev": 0 };
+    const r = deriveBySkillWoW(cur, prior);
+    assert.equal(r["hydra-dev"].prior, 0);
+    assert.equal(r["hydra-dev"].deltaPct, null);
+  });
+
+  test("the trend is keyed off CURRENT-week skills — a dropped skill is absent", () => {
+    const cur = { "hydra-dev": byModelWith({ opus: bd({ total: 100, input: 100 }) }) };
+    const prior = { "hydra-dev": 100, "hydra-qa": 200 };
+    const r = deriveBySkillWoW(cur, prior);
+    assert.deepEqual(Object.keys(r), ["hydra-dev"]);
+    assert.equal(r["hydra-qa"], undefined);
+  });
+
+  test("current total sums over ALL model families (raw .total)", () => {
+    const cur = {
+      "hydra-dev": byModelWith({
+        opus: bd({ total: 100, input: 100 }),
+        sonnet: bd({ total: 25, output: 25 }),
+        haiku: bd({ total: 5, input: 5 }),
+      }),
+    };
+    const r = deriveBySkillWoW(cur, null);
+    assert.equal(r["hydra-dev"].current, 130);
+  });
+});
+
+describe("isoWeekLabel (pure ISO-8601 week math, issue #2404)", () => {
+  test("a mid-week date maps to the correct ISO week", () => {
+    // 2026-06-23 is a Tuesday in ISO week 26 of 2026.
+    assert.equal(isoWeekLabel(new Date("2026-06-23T12:00:00.000Z")), "2026-W26");
+  });
+
+  test("zero-pads the week number to two digits", () => {
+    // 2026-01-05 is a Monday — ISO week 2 of 2026.
+    assert.equal(isoWeekLabel(new Date("2026-01-05T00:00:00.000Z")), "2026-W02");
+  });
+
+  test("year-boundary day belongs to the prior ISO year's last week", () => {
+    // 2027-01-01 is a Friday; ISO-8601 places it in 2026-W53.
+    assert.equal(isoWeekLabel(new Date("2027-01-01T00:00:00.000Z")), "2026-W53");
+  });
+
+  test("is stable regardless of host timezone (UTC-based)", () => {
+    // Same instant, expressed as a Date — the label is derived in UTC.
+    const a = isoWeekLabel(new Date("2026-06-23T23:59:59.000Z"));
+    const b = isoWeekLabel(new Date("2026-06-23T00:00:01.000Z"));
+    assert.equal(a, b);
   });
 });

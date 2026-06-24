@@ -48,6 +48,8 @@ import {
   getMemoryLastConsolidation,
   getCleanupLastDaily,
   setCleanupLastDaily,
+  getUsageSnapshotLastWeekly,
+  setUsageSnapshotLastWeekly,
 } from "../redis/housekeeping.ts";
 import type { PublishableBus } from "../api/event-bus-types.ts";
 
@@ -65,6 +67,7 @@ import { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts"
 import { runLaneIndexReconcile } from "./chores/lane-index-reconcile.ts";
 import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
+import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 
 // ---------------------------------------------------------------------------
 // Re-exports (issue #2090): keep the pre-split public surface stable so
@@ -241,6 +244,23 @@ async function runHousekeeping(
         return !lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS;
       },
       work: () => runWeeklyDigest(),
+    },
+
+    {
+      // Issue #2404: persist this ISO week's per-skill usage rollup so the
+      // week-over-week trend has a prior week to compare against. Weekly cadence
+      // guard (mirroring weekly-summary); the underlying write is idempotent on
+      // the ISO-week key. Stamp the success key inside `work` (like
+      // stale-key-prune) so a skipped/failed run doesn't advance the cadence.
+      name: "usage-weekly-snapshot",
+      guard: async () => {
+        const lastWeekly = await getUsageSnapshotLastWeekly();
+        return !lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS;
+      },
+      work: async () => {
+        await runUsageWeeklySnapshot();
+        await setUsageSnapshotLastWeekly(Date.now().toString());
+      },
     },
 
     {

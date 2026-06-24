@@ -141,7 +141,18 @@ import {
   rebaseOnOAuth,
   deriveSinceReset,
   detectCalibrationDrift,
+  deriveBySkillWoW,
 } from "./snapshot-assembly.ts";
+import type { SkillWoWEntry } from "./snapshot-assembly.ts";
+// Weekly Usage Snapshot seam (issue #2404): the typed Redis accessor for the
+// persisted per-ISO-week per-skill rollup. The ONLY Redis touch on the read
+// path is the prior-week READ here in `getUsage()` (the I/O coordinator) —
+// fetched BEFORE the pure `assembleSnapshot()` and INJECTED as an argument, so
+// the assembler stays Redis-free (ADR-0021). The WRITE lives in the weekly
+// Housekeeping chore, never here. Injectable so tests pin the prior week
+// without standing up Redis.
+import { readPriorWeekUsageSnapshot } from "../redis/usage-snapshots.ts";
+import type { WeeklyUsageSnapshot } from "../redis/usage-snapshots.ts";
 // Env-config readers + their DEFAULT_* constants live in the pure leaf
 // `./config.ts` (issue #1896). The snapshot-assembly logic below consumes them;
 // `index.ts` re-exports them so the public surface is unchanged.
@@ -334,6 +345,22 @@ export interface UsageSnapshot {
    */
   bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
   /**
+   * Per-skill WEEK-OVER-WEEK trend (issue #2404). For each skill present in
+   * `bySkillByModel`, `{current, prior, deltaPct}` of its RAW total tokens this
+   * week vs the SAME skill in the immediately-prior stored **Weekly Usage
+   * Snapshot** (`src/redis/usage-snapshots.ts`). `prior`/`deltaPct` are `null`
+   * for a skill that is "new this week" (absent from the prior snapshot), when
+   * no prior snapshot exists yet (the first week, or after the 30-day TTL aged
+   * it out), or when Redis was unreachable. RAW token counts only — no
+   * quota-weight, no USD — matching the `bySkillByModel` read-only posture.
+   *
+   * PURE read-side projection: the prior-week totals are fetched by
+   * `getUsage()` via the typed accessor and INJECTED into the otherwise
+   * Redis-free `assembleSnapshot()` (ADR-0021). The persisted snapshot itself
+   * is written by the weekly Housekeeping chore, never on this read path.
+   */
+  bySkillWoW: Record<string, SkillWoWEntry>;
+  /**
    * Quota-Weight burn over the 5h window: `Σ family.total * weight(family)`
    * (opus/sonnet/haiku from env, unknown implicit 1.0). Exactly 0 unless ALL
    * THREE HYDRA_QUOTA_WEIGHT_* env vars are set to positive values, mirroring
@@ -480,6 +507,17 @@ export async function getUsage(opts: {
    * uses the cache because no reader/root is injected.
    */
   useOAuthCache?: boolean;
+  /**
+   * Reads the immediately-prior ISO-week's **Weekly Usage Snapshot** for the
+   * per-skill week-over-week trend (issue #2404). Defaults to
+   * {@link readPriorWeekUsageSnapshot}, which reads Redis via the typed
+   * accessor. Injected by tests to pin the prior week without a live Redis (or
+   * to assert the no-prior-week path). Fetched HERE in the I/O coordinator and
+   * injected into the pure `assembleSnapshot()`, preserving its no-IO contract.
+   * A read error degrades to a null prior week (WoW becomes all-"new") — it
+   * never fails the snapshot.
+   */
+  readPriorWeek?: (at: Date) => Promise<WeeklyUsageSnapshot | null>;
 } = {}): Promise<UsageSnapshot> {
   const now = opts.now ?? new Date();
   const nowMs = now.getTime();
@@ -487,7 +525,15 @@ export async function getUsage(opts: {
   const overrideRoot = opts.projectsRoot !== undefined;
   const overrideResolver = opts.resolveSkill !== undefined;
   const overrideMeter = opts.readUsage !== undefined;
-  if (!opts.force && !overrideRoot && !overrideResolver && !overrideMeter && cache) {
+  const overridePriorWeek = opts.readPriorWeek !== undefined;
+  if (
+    !opts.force &&
+    !overrideRoot &&
+    !overrideResolver &&
+    !overrideMeter &&
+    !overridePriorWeek &&
+    cache
+  ) {
     if (nowMs - cache.storedAt < CACHE_TTL_MS) {
       return cache.snapshot;
     }
@@ -522,9 +568,25 @@ export async function getUsage(opts: {
   // assembler below turns that into the final UsageSnapshot. No behavioural
   // delta from the former single `scanUsage()` — the boundary is the ScanResult.
   const scan = await transcriptScan(root, now, resolveSkill, readOAuth);
-  const snapshot = assembleSnapshot(scan, now);
 
-  if (!overrideRoot && !overrideResolver && !overrideMeter) {
+  // Prior-week read for the week-over-week per-skill trend (issue #2404). This
+  // is the SINGLE Redis touch on the read path; it is performed HERE in the I/O
+  // coordinator and injected into the pure `assembleSnapshot()` so the assembler
+  // stays Redis-free (ADR-0021). A read error degrades to a null prior week
+  // (WoW becomes all-"new") — fail-loud but never fail the snapshot.
+  const readPriorWeek = opts.readPriorWeek ?? readPriorWeekUsageSnapshot;
+  let priorWeek: WeeklyUsageSnapshot | null = null;
+  try {
+    priorWeek = await readPriorWeek(now);
+  } catch (err: any) {
+    console.error(
+      `[usage-tracker] prior-week snapshot read failed (week-over-week trend degrades to 'new'): ${err?.message || err}`,
+    );
+  }
+
+  const snapshot = assembleSnapshot(scan, now, priorWeek?.bySkill ?? null);
+
+  if (!overrideRoot && !overrideResolver && !overrideMeter && !overridePriorWeek) {
     cache = { snapshot, storedAt: nowMs };
   }
   return snapshot;
@@ -554,8 +616,17 @@ export const sessionIdFromPath = transcriptScanSessionIdFromPath;
  * pure env-config leaf. Behaviour-neutral with the former inline tail of
  * `scanUsage()`; the emitted snapshot is identical field-for-field for any
  * given scan input.
+ *
+ * `priorBySkill` (issue #2404) is the immediately-prior **Weekly Usage
+ * Snapshot**'s per-skill raw totals, fetched by `getUsage()` via the typed
+ * Redis accessor and INJECTED here so the assembler reads NO Redis itself
+ * (ADR-0021). `null` means no prior week — every WoW entry is then "new".
  */
-function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
+function assembleSnapshot(
+  scan: ScanResult,
+  now: Date,
+  priorBySkill: Record<string, number> | null = null,
+): UsageSnapshot {
   const nowMs = now.getTime();
   const {
     acc5h,
@@ -735,6 +806,9 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
     calibrated,
     byModel: byModel7d,
     bySkillByModel,
+    // Per-skill week-over-week trend (issue #2404). Pure fold over the current
+    // cross-tab + the injected prior-week per-skill totals — no Redis here.
+    bySkillWoW: deriveBySkillWoW(bySkillByModel, priorBySkill),
     quotaWeightLast5h,
     quotaWeightLast7d,
     quotaWeightCalibrated,
