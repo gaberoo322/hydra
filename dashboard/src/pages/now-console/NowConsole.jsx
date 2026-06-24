@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch, useApi } from "../../hooks/useApi.js";
 import StatusVerdict from "./StatusVerdict.jsx";
+import StatusStrip from "./StatusStrip.jsx";
 import UsagePanel from "./UsagePanel.jsx";
 import StuckSignals from "./StuckSignals.jsx";
 import RunHistoryStrip from "./RunHistoryStrip.jsx";
@@ -137,6 +138,7 @@ export default function NowConsole() {
         pausePending={pausePending}
         pauseError={pauseError}
       />
+      <StatusStrip />
       <UsagePanel />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
         <TurnJournal />
