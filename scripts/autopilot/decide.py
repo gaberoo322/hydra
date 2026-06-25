@@ -88,6 +88,9 @@ state.json {
     "scout_orch":      unix-epoch | 0
     # architecture_orch (#790) and retro_orch (#920) also track last-fired
     # here when they fire; absent keys default to 0 (never fired).
+    # The backfill starvation floor (#2428, signal_starved) reads these same
+    # timestamps to force a backfill class through the stagger if it has gone
+    # dark for >24h — an absent/0 entry counts as never-fired → force-eligible.
   }
 
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
@@ -324,6 +327,25 @@ SIGNAL_COOLDOWNS = {
 # retro_orch (run-anchored, 24h) and scout_orch (7d walk + cost-cap) are
 # deliberately NOT in this set.
 BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
+
+# Backfill starvation floor (issue #2428). The one-per-turn stagger guard above
+# means that on a busy run a staggered backfill class (discover_orch /
+# architecture_orch) can LOSE the stagger slot every idle turn and go fully dark
+# for a day or more — nobody chose that, it just emerges from the round-robin.
+# The floor is a safety net: a backfill class that has NOT dispatched in
+# >BACKFILL_STARVATION_FLOOR_SEC AND is otherwise eligible this turn (idle
+# signal present, not saturated, not burned, cooled, in scope) BYPASSES the
+# stagger suppression so it is forced through. Derived purely from the existing
+# `signal_last_fired` timestamp (the same source signal_is_cooled reads) + now,
+# so decide.py stays a pure function of (state, events, now) with NO new
+# rotation state. cleanup_orch is exempt from the stagger guard entirely (it
+# co-fires every idle turn) so it can never starve and needs no floor.
+#
+# An UNSEEN class (no signal_last_fired entry) is treated as having NEVER run,
+# so it is floor-eligible immediately — the first idle turn after a fresh
+# bootstrap forces any still-dark backfill class through rather than letting the
+# stagger starve it for another full window.
+BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
@@ -973,6 +995,40 @@ def stamp_signal(state: dict, signal: str, now_epoch: int | None = None) -> None
     state["signal_last_fired"][signal] = now_epoch if now_epoch is not None else int(time.time())
 
 
+def signal_starved(
+    state: dict, signal: str, now: int, floor_sec: int = BACKFILL_STARVATION_FLOOR_SEC
+) -> bool:
+    """True iff `signal` has not fired within `floor_sec` (the starvation floor).
+
+    Issue #2428 — the read-only predicate behind the backfill starvation floor.
+    Reads the same `signal_last_fired[<class>]` timestamp signal_is_cooled reads
+    (the dispatcher-stamped last-run time), so it is a pure function of (state,
+    now).
+
+    An UNSEEN class (absent / null / 0 timestamp) is deliberately NOT starved.
+    "Never fired" is the normal cold-start state right after a bootstrap — every
+    backfill class is unseen then, and treating them all as starved would force
+    them ALL through every idle turn and defeat the one-per-turn stagger
+    entirely. The round-robin already drains a cold start fairly over successive
+    turns; the floor is strictly a safety net for a class that DID run and then
+    got starved out for >floor_sec, which only a real (non-zero) last-fired
+    timestamp can evidence.
+
+    Pure: never mutates state and never touches fs/network/Redis.
+    """
+    last = (state.get("signal_last_fired") or {}).get(signal, 0) or 0
+    try:
+        last_i = int(last)
+    except (TypeError, ValueError):
+        last_i = 0
+    if last_i <= 0:
+        # Never seen → cold-start, not starvation. Let the stagger round-robin
+        # drain it normally; the floor only protects a class with a real prior
+        # last-fired time that has since gone dark for >floor_sec.
+        return False
+    return (now - last_i) >= floor_sec
+
+
 # ---------------------------------------------------------------------------
 # Candidate selection
 # ---------------------------------------------------------------------------
@@ -1604,8 +1660,20 @@ def _rule_signal_classes(
         # passed its saturation cap + cooldown + presence checks and WOULD
         # dispatch — but if another backfill class already did so this turn,
         # record a `stagger` decision instead of a second real dispatch.
+        #
+        # Starvation floor (issue #2428): a backfill class that has not fired in
+        # >24h is FORCED through even when another backfill class already
+        # dispatched this turn — the stagger round-robin must never let a quality
+        # class go dark for a full day. The floor is checked AFTER the saturation
+        # cap / cooldown / scope / burned gates above (all of which already
+        # passed, since `action` is non-None) so a starved class can NEVER bypass
+        # the saturation cap (the FIRST gate) — it only overrides the
+        # one-per-turn stagger. The starved dispatch does NOT consume the
+        # backfill_dispatched slot for other (non-starved) classes: it is an
+        # additive exception, not a replacement for the round-robin winner.
         if sig in BACKFILL_SIGNAL_CLASSES:
-            if backfill_dispatched:
+            starved = signal_starved(state, sig, now)
+            if backfill_dispatched and not starved:
                 out.events.append(
                     make_dispatch_decision_event(
                         state, now, cls=sig, outcome="stagger",
@@ -1614,7 +1682,16 @@ def _rule_signal_classes(
                 )
                 out.skipped += 1
                 continue
-            backfill_dispatched = True
+            if not backfill_dispatched:
+                backfill_dispatched = True
+            if starved:
+                # Annotate the forced dispatch so the audit trail shows the floor
+                # (not the round-robin) selected it. Mutating action["reason"]
+                # here is safe — `action` is this turn's freshly-built dict.
+                action["reason"] = (
+                    f"backfill starvation floor (>24h since last {sig}): "
+                    + str(action.get("reason") or "dispatched")
+                )
         out.emit(action, reason=f"signal:{sig}")
         out.events.append(
             make_dispatch_decision_event(

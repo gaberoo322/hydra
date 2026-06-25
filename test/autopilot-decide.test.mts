@@ -1690,6 +1690,195 @@ describe("decide.py — board-idle backfill set (issue #959)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7c-bis. Board-idle backfill STARVATION FLOOR (issue #2428)
+// ---------------------------------------------------------------------------
+//
+// The one-per-turn stagger guard (issue #959) can starve a backfill class:
+// on a busy run a staggered class (discover_orch / architecture_orch) loses
+// the round-robin slot every idle turn and goes fully dark for >24h. The
+// starvation floor forces a class that has not fired in >24h through the
+// stagger, while NEVER bypassing the saturation cap / cooldown / scope / burned
+// gates (those are checked FIRST and the floor only overrides the stagger).
+// The `now` is pinned per the AC so the >24h boundary is deterministic.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — backfill starvation floor (issue #2428)", () => {
+  // The decide CLI resolves `now` from wall-clock (int(time.time())), so the
+  // floor boundary is exercised deterministically via offsets from the same
+  // clock the CLI reads (the established pattern in the #959 backfill tests).
+  // A few-seconds test↔CLI skew is irrelevant against the 24h/1h windows, so
+  // the >24h boundary stays effectively pinned.
+  const now = Math.floor(Date.now() / 1000);
+  const DAY = 24 * 60 * 60;
+
+  function backfillDispatches(plan: any) {
+    return (plan.actions ?? []).filter(
+      (a: any) =>
+        a.type === "dispatch" &&
+        (a.slot === "discover_orch" || a.slot === "architecture_orch"),
+    );
+  }
+
+  test("starved architecture_orch (>24h) is FORCED through even though discover_orch wins the stagger", () => {
+    // discover_orch is fresh (never-fired → it wins the stagger slot this turn).
+    // architecture_orch last fired 25h ago → past the 24h floor → forced through.
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { architecture_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    const dispatched = backfillDispatches(plan).map((a: any) => a.slot).sort();
+    assert.deepEqual(
+      dispatched,
+      ["architecture_orch", "discover_orch"],
+      "both must dispatch: discover_orch wins the stagger, architecture_orch is forced by the starvation floor",
+    );
+  });
+
+  test("forced dispatch is annotated with the starvation-floor reason (audit trail)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { architecture_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    const arch = findAction(
+      plan,
+      (a: any) => a.type === "dispatch" && a.slot === "architecture_orch",
+    );
+    assert.ok(arch, "architecture_orch must be force-dispatched");
+    assert.match(
+      String(arch.reason),
+      /starvation floor/,
+      "forced dispatch reason must name the starvation floor, not the round-robin",
+    );
+  });
+
+  test("a backfill class just UNDER the 24h floor (23h) is NOT forced — normal stagger holds", () => {
+    // architecture_orch fired 23h ago → inside the floor window → no force.
+    // discover_orch (fresh) wins the stagger; architecture_orch is staggered out.
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { architecture_orch: now - 23 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    const dispatched = backfillDispatches(plan).map((a: any) => a.slot);
+    assert.deepEqual(
+      dispatched,
+      ["discover_orch"],
+      "23h < 24h floor → no force; exactly one backfill class dispatches (the stagger winner)",
+    );
+  });
+
+  test("the floor boundary is inclusive at exactly 24h", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { architecture_orch: now - DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(
+        plan,
+        (a: any) => a.type === "dispatch" && a.slot === "architecture_orch",
+      ),
+      "exactly 24h since last fire is starved (>= floor) → forced through",
+    );
+  });
+
+  test("starvation floor NEVER bypasses the saturation cap (cap is the FIRST gate)", () => {
+    // architecture_orch is starved (>24h) AND the arch board is saturated.
+    // The saturation cap is checked before the stagger/floor, so the class is
+    // suppressed at the selector — the floor must not resurrect a capped class.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, arch_board_saturated: true },
+      signal_last_fired: { architecture_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(
+        plan,
+        (a: any) => a.type === "dispatch" && a.slot === "architecture_orch",
+      ),
+      undefined,
+      "a saturated class is suppressed before the floor — the cap stays the hardest limit",
+    );
+  });
+
+  test("starvation floor NEVER bypasses the per-class cooldown", () => {
+    // Construct a case where the floor would WANT to force a class that is still
+    // inside its 1h cooldown. signal_starved keys on the SAME timestamp as the
+    // cooldown, so a class inside its cooldown is by definition NOT >24h stale —
+    // but pin it explicitly: discover_orch fired 30m ago (cooling), so even
+    // though it is the stagger winner it must not dispatch this turn.
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: now - 30 * 60, architecture_orch: now } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(
+        plan,
+        (a: any) => a.type === "dispatch" && a.slot === "discover_orch",
+      ),
+      undefined,
+      "a class inside its 1h cooldown is never starved (same timestamp source) and never forced",
+    );
+  });
+
+  test("starvation floor NEVER bypasses the burned-class soft-cap", () => {
+    const state = baseState({
+      burned_classes: ["architecture_orch"],
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { architecture_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(
+        plan,
+        (a: any) => a.type === "dispatch" && a.slot === "architecture_orch",
+      ),
+      undefined,
+      "a burned class is suppressed before the floor — starvation does not override the soft-cap",
+    );
+  });
+
+  test("starvation floor NEVER bypasses scope exclusion", () => {
+    const state = baseState({
+      scope: "target-only",
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { architecture_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(
+        plan,
+        (a: any) => a.type === "dispatch" && a.slot === "architecture_orch",
+      ),
+      undefined,
+      "target-only scope excludes architecture_orch before the floor is ever consulted",
+    );
+  });
+
+  test("an UNSEEN backfill class (no signal_last_fired entry) is NOT force-dispatched (cold-start ≠ starvation)", () => {
+    // On a fresh state every backfill class is unseen. Treating never-fired as
+    // starved would force them ALL through every turn and defeat the stagger, so
+    // signal_starved returns False for an unseen class — the stagger round-robin
+    // drains the cold start fairly over successive turns instead. discover_orch
+    // wins turn 1; architecture_orch (also unseen) is staggered out, NOT forced.
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: {} as any,
+    });
+    const plan = runDecide(state, null);
+    const dispatched = backfillDispatches(plan).map((a: any) => a.slot);
+    assert.deepEqual(
+      dispatched,
+      ["discover_orch"],
+      "cold-start unseen classes obey the normal stagger (exactly one dispatch) — the floor needs a real prior last-fired time",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7d. cleanup_orch signal class (issue #960, parent #958)
 // ---------------------------------------------------------------------------
 //
