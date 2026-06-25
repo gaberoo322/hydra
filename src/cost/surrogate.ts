@@ -68,6 +68,22 @@ export function todayDateString(now: Date = new Date()): string {
   return now.toISOString().slice(0, 10);
 }
 
+/**
+ * Yesterday's date in YYYY-MM-DD (UTC) relative to `now`.
+ *
+ * Used by the rolling-window readers below: the token surrogate stores only
+ * per-UTC-day buckets (no hourly granularity), so an at-a-glance "today" read
+ * taken just after UTC midnight covers only a thin sliver of the operator's
+ * actual day and reads a false 0% for classes that demonstrably ran hours
+ * earlier in their local day (issue #2427). Folding yesterday's UTC bucket in
+ * alongside today's guarantees the at-a-glance number always spans the prior
+ * ~24h of work regardless of where `now` falls inside the UTC day.
+ */
+export function yesterdayDateString(now: Date = new Date()): string {
+  const d = new Date(now.getTime() - 24 * 3600 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
 // ---------------------------------------------------------------------------
 // Write path
 // ---------------------------------------------------------------------------
@@ -236,4 +252,75 @@ async function safeSkillTokensAll(date: string): Promise<Record<string, string> 
     console.error(`[cost-surrogate] getSkillTokensAll ${date} failed: ${err?.message || err}`);
     return null;
   }
+}
+
+export interface RollingTokenCounter extends DailyTokenCounter {
+  /**
+   * Human-readable window label for the operator-facing view, e.g.
+   * "last 24h (UTC) · 2026-06-24 + 2026-06-25". Distinguishes the
+   * rolling-window read from a single-day `getDailyTokenCounter` read so the
+   * dashboard can label "today" honestly (issue #2427).
+   */
+  window: string;
+  /** The UTC date strings folded into this window (yesterday, today). */
+  dates: [string, string];
+}
+
+/**
+ * Read a rolling ~24h token counter ending at `now` (defaults to wall-clock).
+ *
+ * Folds the previous UTC day and the current UTC day into one breakdown so a
+ * read taken just after UTC midnight still reflects work that ran earlier in
+ * the operator's local day (issue #2427). The surrogate stores per-UTC-day
+ * buckets only, so this two-bucket merge is the coarsest window that is
+ * guaranteed to span at least the trailing 24h regardless of where `now` sits
+ * inside the UTC day — it is deliberately NOT a precise trailing-24h slice
+ * (that would need hourly buckets the store does not keep; it may include up to
+ * ~24h of extra history near the end of the UTC day, which is the safe
+ * direction: it never under-counts a class that actually ran).
+ *
+ * The `date` field carries today's UTC date (the window's leading edge) so the
+ * existing `DailyTokenCounter` consumers keep a sensible single-date value;
+ * `window` + `dates` describe the full span for honest labelling.
+ *
+ * Best-effort: each Redis sub-read is wrapped, so a single hiccup yields
+ * partial data rather than a thrown error.
+ */
+export async function getRollingTokenCounter(
+  now: Date = new Date(),
+): Promise<RollingTokenCounter> {
+  const today = todayDateString(now);
+  const yesterday = yesterdayDateString(now);
+
+  const [todayCounter, yesterdayCounter] = await Promise.all([
+    getDailyTokenCounter(today),
+    getDailyTokenCounter(yesterday),
+  ]);
+
+  // Merge the two per-skill breakdowns by skill name.
+  const mergedBySkill = new Map<string, number>();
+  for (const counter of [yesterdayCounter, todayCounter]) {
+    for (const { skill, tokens } of counter.bySkill) {
+      const n = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
+      if (n === 0) continue;
+      mergedBySkill.set(skill, (mergedBySkill.get(skill) ?? 0) + n);
+    }
+  }
+
+  const total = todayCounter.tokens + yesterdayCounter.tokens;
+  const bySkill = Array.from(mergedBySkill.entries())
+    .map(([skill, tokens]) => ({
+      skill,
+      tokens,
+      pct: total > 0 ? Math.round((tokens / total) * 10000) / 100 : 0,
+    }))
+    .sort((a, b) => b.tokens - a.tokens);
+
+  return {
+    date: today,
+    tokens: total,
+    bySkill,
+    window: `last 24h (UTC) · ${yesterday} + ${today}`,
+    dates: [yesterday, today],
+  };
 }

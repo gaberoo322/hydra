@@ -31,10 +31,12 @@ const {
   skillToCostClass,
   projectCostByClass,
   getCostByClass,
+  getRollingCostByClass,
+  yesterdayDateString,
   COST_CLASS_ORDER,
 } = await import("../src/cost/index.ts");
 
-const { recordSubagentTokens } = await import("../src/cost/surrogate.ts");
+const { recordSubagentTokens, todayDateString } = await import("../src/cost/surrogate.ts");
 const { tokensAutopilotDailyKey, tokensBySkillDailyKey } = await import("../src/redis/cost.ts");
 
 // ---------------------------------------------------------------------------
@@ -234,6 +236,117 @@ describe("getCostByClass (Redis-backed)", () => {
     for (const c of COST_CLASS_ORDER) {
       assert.equal(result.byClass[c].tokens, 0);
       assert.equal(result.byClass[c].fraction, 0);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure: projectCostByClass window labelling (issue #2427)
+// ---------------------------------------------------------------------------
+
+describe("projectCostByClass window field", () => {
+  test("defaults the window label to the date when none is supplied", () => {
+    const result = projectCostByClass([{ skill: "hydra-dev", tokens: 100 }], "2026-06-09");
+    assert.equal(result.window, "2026-06-09");
+  });
+
+  test("uses an explicit window label when supplied (rolling read)", () => {
+    const result = projectCostByClass(
+      [{ skill: "hydra-dev", tokens: 100 }],
+      "2026-06-25",
+      "last 24h (UTC) · 2026-06-24 + 2026-06-25",
+    );
+    assert.equal(result.window, "last 24h (UTC) · 2026-06-24 + 2026-06-25");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: getRollingCostByClass — the false-0% near-UTC-midnight fix
+// (issue #2427). New top-level suite with its own Redis lifecycle so it does
+// not piggyback on a sibling suite's teardown (CLAUDE.md authoring rule).
+// ---------------------------------------------------------------------------
+
+describe("getRollingCostByClass (Redis-backed, issue #2427)", () => {
+  let testRedis: any;
+  // Pin `now` to a thin sliver just after UTC midnight — the exact condition
+  // that produced the false "decide.py isn't dispatching" 0% alarm.
+  const NOW = new Date("2026-06-25T02:45:00.000Z");
+  const TODAY = todayDateString(NOW); // "2026-06-25"
+  const YESTERDAY = yesterdayDateString(NOW); // "2026-06-24"
+
+  async function cleanKeys() {
+    const keys = await testRedis.keys("hydra:metrics:tokens:*");
+    if (keys.length > 0) await testRedis.del(...keys);
+  }
+
+  before(async () => {
+    testRedis = new Redis(process.env.REDIS_URL);
+  });
+  beforeEach(async () => {
+    await cleanKeys();
+  });
+  after(async () => {
+    await cleanKeys();
+    await testRedis.quit();
+  });
+
+  test("yesterdayDateString / todayDateString span the rolling window", () => {
+    assert.equal(TODAY, "2026-06-25");
+    assert.equal(YESTERDAY, "2026-06-24");
+  });
+
+  test("a class that ran only YESTERDAY (UTC) is NOT a false 0% at 02:45 UTC", async () => {
+    // Work happened on UTC-06-24 (the operator's local day); the sliver of
+    // UTC-06-25 so far is empty. A single-day "today" read would show 0%.
+    await recordSubagentTokens("hydra-dev", 1900, { date: YESTERDAY });
+    await recordSubagentTokens("hydra-qa", 1000, { date: YESTERDAY });
+
+    // Baseline: the single-UTC-day "today" read reproduces the false 0%.
+    const todayOnly = await getCostByClass(TODAY);
+    assert.equal(todayOnly.totalTokens, 0);
+    assert.equal(todayOnly.byClass["dev-orch"].tokens, 0);
+    assert.equal(todayOnly.byClass.qa.tokens, 0);
+
+    // Fix: the rolling window folds yesterday's bucket in, so the classes that
+    // demonstrably ran in the last 24h read non-zero.
+    const rolling = await getRollingCostByClass(NOW);
+    assert.equal(rolling.totalTokens, 2900);
+    assert.equal(rolling.byClass["dev-orch"].tokens, 1900);
+    assert.ok(rolling.byClass["dev-orch"].fraction > 0, "dev-orch must not read 0%");
+    assert.equal(rolling.byClass.qa.tokens, 1000);
+    assert.ok(rolling.byClass.qa.fraction > 0, "qa must not read 0%");
+  });
+
+  test("merges today + yesterday per-skill buckets into one breakdown", async () => {
+    await recordSubagentTokens("hydra-dev", 1000, { date: YESTERDAY });
+    await recordSubagentTokens("hydra-dev", 500, { date: TODAY });
+    await recordSubagentTokens("hydra-research", 2000, { date: TODAY });
+
+    const rolling = await getRollingCostByClass(NOW);
+    assert.equal(rolling.totalTokens, 3500);
+    // dev-orch tokens are summed across both UTC days.
+    assert.equal(rolling.byClass["dev-orch"].tokens, 1500);
+    assert.equal(rolling.byClass.research.tokens, 2000);
+    // The folded skill entry sums the two days too (not two separate rows).
+    const devEntry = rolling.byClass["dev-orch"].skills.find((s: any) => s.skill === "hydra-dev");
+    assert.equal(devEntry?.tokens, 1500);
+  });
+
+  test("carries an honest rolling-window label spanning both UTC dates", async () => {
+    await recordSubagentTokens("hydra-dev", 100, { date: TODAY });
+    const rolling = await getRollingCostByClass(NOW);
+    assert.equal(rolling.date, TODAY);
+    assert.ok(rolling.window.includes(YESTERDAY), "window names yesterday");
+    assert.ok(rolling.window.includes(TODAY), "window names today");
+    assert.ok(/24h/i.test(rolling.window), "window labels the 24h span");
+  });
+
+  test("empty 24h window => zeroed breakdown (no throw)", async () => {
+    const rolling = await getRollingCostByClass(NOW);
+    assert.equal(rolling.totalTokens, 0);
+    for (const c of COST_CLASS_ORDER) {
+      assert.equal(rolling.byClass[c].tokens, 0);
+      assert.equal(rolling.byClass[c].fraction, 0);
     }
   });
 });
