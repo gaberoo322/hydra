@@ -893,6 +893,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` |
 | `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |
 | `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch` |
+| `untriaged_orphans > 0` (orch GH board — open issues carrying NONE of {ready-for-agent, in-progress, blocked, needs-qa, needs-triage, needs-research, target-backlog}) | `untriaged_orphans_orch` | `sweep_orch` (issue #2426) — triage backstop: routes mislabeled/orphaned issues invisible to BOTH the dev_orch and needs_triage_orch paths into an actionable lane |
 | `health=FAIL` or `failed_services>0` | `health_fail` | `health` |
 | `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |

@@ -955,6 +955,45 @@ describe("decide.py — signal classes with cooldowns", () => {
       "60s ago is within the 900s sweep cooldown");
   });
 
+  // Issue #2426: untriaged-orphans triage backstop. An open issue carrying
+  // none of the actionable/lifecycle labels is invisible to both the
+  // dev_orch (ready-for-agent) and the needs_triage_orch sweep paths.
+  // collect-state.sh emits an `untriaged_orphans` count; the playbook maps
+  // `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch` signal,
+  // which sweep_orch reads as a secondary trigger to route the orphans
+  // through hydra-sweep.
+  test("sweep_orch fires on untriaged_orphans_orch signal when cooled (#2426)", () => {
+    const state = baseState({ signals: { untriaged_orphans_orch: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "sweep_orch");
+    assert.ok(a, "untriaged_orphans_orch must dispatch a sweep_orch triage pass");
+    assert.equal(a.skill, "hydra-sweep");
+  });
+
+  test("untriaged_orphans_orch sweep respects the sweep_orch cooldown (#2426)", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      signals: { untriaged_orphans_orch: true },
+      signal_last_fired: { health: 0, sweep_orch: now - 60, sweep_target: 0, discover_orch: 0, discover_target: 0 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "sweep_orch"),
+      undefined,
+      "60s ago is within the 900s sweep cooldown — the backstop must not busy-loop",
+    );
+  });
+
+  test("sweep_orch stays idle with no triage or orphan signal (#2426)", () => {
+    const state = baseState();  // no signals
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "sweep_orch"),
+      undefined,
+      "no needs_triage_orch and no untriaged_orphans_orch → no sweep dispatch",
+    );
+  });
+
   test("discover_target fires on target_idle when cooled", () => {
     const state = baseState({ signals: { target_idle: true } });
     const plan = runDecide(state, null);
