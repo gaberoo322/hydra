@@ -84,7 +84,7 @@ export function indexerTargetUri(rel: string): string {
  * Index a file already mounted into the OV container (config tree).
  * Tells OV to ingest the file by container-relative path.
  */
-export async function indexFile(filePath: string): Promise<void> {
+async function indexFile(filePath: string): Promise<void> {
   const rel = relative(CONFIG_PATH, filePath);
   const containerPath = join(OV_CONFIG_MOUNT, rel);
   const targetUri = indexerTargetUri(rel);
@@ -265,7 +265,7 @@ export function parseSourcePaths(spec: string): SourcePath[] {
   return out;
 }
 
-export const SOURCE_PATHS: SourcePath[] = parseSourcePaths(
+const SOURCE_PATHS: SourcePath[] = parseSourcePaths(
   process.env.HYDRA_INDEX_SOURCE_PATHS || DEFAULT_SOURCE_SPEC
 );
 // Files modified within this window get the initial-index pass on startup.
@@ -359,7 +359,7 @@ export function resetCoverageStats(): void {
  * Test-only: set the watchedPaths summary that startKnowledgeIndexer
  * reports (kept here so the array stays colocated with the stats).
  */
-export function setWatchedPaths(paths: string[]): void {
+function setWatchedPaths(paths: string[]): void {
   coverageStats.watchedPaths = paths;
 }
 
@@ -520,7 +520,7 @@ export async function runSourceInitialPass(
  * debounce window are owned by the caller (startKnowledgeIndexer) so the
  * config watcher and source watcher share a single dedup queue.
  */
-export function makeSourceWatcher(
+function makeSourceWatcher(
   source: SourcePath,
   pending: Map<string, ReturnType<typeof setTimeout>>,
   debounceMs: number = DEBOUNCE_MS
