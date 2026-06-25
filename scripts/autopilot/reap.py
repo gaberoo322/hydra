@@ -94,6 +94,12 @@ REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
 CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill"}
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
+# Issue #2450: subset of CYCLE_RECORD_SKILLS that actually run the planning-time
+# reflection-source deposit recipe. hydra-grill writes a design-concept artifact,
+# not a reflection-source deposit, so it is NOT in this set — adding it would
+# produce a false-positive WARN on every grill completion.
+REFLECTION_DEPOSIT_SKILLS: frozenset[str] = frozenset({"hydra-dev", "hydra-target-build"})
+
 # Worktree-orphan GC trigger (issue #911).
 #
 # Every code-writing / QA dispatch runs inside a `git worktree`, but the
@@ -831,6 +837,27 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # forwarded `reflection_sources` string is unchanged, so the cycle-record
     # POST body and its truthful-'none' behaviour are untouched.
     reflection_sources, reflection_presence = _read_reflection_sources(task_id)
+
+    # Issue #2450: warn when a code-writing class completes with no deposit file
+    # at all — deposit-absent on a REFLECTION_DEPOSIT_SKILLS slot means the
+    # deposit recipe either did not run or deposited under a miskeyed path. This
+    # distinguishes broken deposit plumbing (false-none) from an honest
+    # empty-reflection case where the store had nothing to serve.
+    # deposit-empty is the HONEST variant (recipe ran, served nothing, wrote an
+    # empty deposit) — only deposit-absent is the suspicious case.
+    # hydra-grill is excluded: it writes a design-concept artifact, not a
+    # reflection-source deposit, so a deposit-absent on grill is NOT a bug.
+    # Best-effort: print to stderr (operator-visible) AND append to the run log.
+    if (skill in REFLECTION_DEPOSIT_SKILLS and
+            reflection_presence == REFL_PRESENCE_ABSENT):
+        warn_msg = (
+            f"refl_deposit_absent skill={skill} task_id={task_id} "
+            f"anchor={anchor_ref or ''} — deposit recipe may not have run; "
+            f"check for refl-deposit-no-task-id / refl-deposit-write-failed "
+            f"in the child's stderr (cue: refl-deposit-absent-on-code-write)"
+        )
+        print(f"[autopilot] WARN {warn_msg}", file=sys.stderr)
+        _append_log(f"WARN {warn_msg}")
 
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "

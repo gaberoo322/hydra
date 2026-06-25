@@ -225,3 +225,215 @@ describe("reap.py completion → reflection-record live fire (issue #1820)", () 
     }
   });
 });
+
+describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () => {
+  /**
+   * When a code-writing skill (CYCLE_RECORD_SKILLS: hydra-dev, hydra-target-build,
+   * hydra-grill) completes with no deposit file at all (deposit-absent), reap must
+   * emit a WARN so operators can distinguish broken deposit plumbing from an honest
+   * empty-reflection case. deposit-absent means the recipe did not write ANY deposit
+   * file — the #1912/#2450 regression signature.
+   */
+
+  /**
+   * Helper that runs reap.py completion with an explicit HYDRA_AUTOPILOT_REFL_DIR
+   * so deposit-file presence is fully controlled by the test.
+   */
+  function runCompletionWithReflDir(
+    args: string[],
+    paths: Paths,
+    reflDir: string,
+  ): { status: number; stdout: string; stderr: string } {
+    const r = spawnSync("python3", [REAP, "completion", ...args], {
+      env: {
+        ...process.env,
+        HYDRA_API_BASE: DEAD_API_BASE,
+        HYDRA_AUTOPILOT_STATE: paths.state,
+        HYDRA_AUTOPILOT_LOG: paths.log,
+        HYDRA_AUTOPILOT_REFL_DIR: reflDir,
+        HYDRA_REAP_WORKTREE_GC: "0",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  test("a code-writing skill completion with no deposit file emits WARN to stderr and run log", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tABS",
+            anchor: "issue-2450",
+          },
+        },
+        failure_log: [],
+      });
+
+      // tmp.dir has no hydra-refl-sources-tABS file → deposit-absent.
+      const r = runCompletionWithReflDir(
+        ["dev_orch", "tABS", "1000", "hydra-dev"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.match(
+        r.stderr,
+        /WARN refl_deposit_absent skill=hydra-dev task_id=tABS/,
+        "deposit-absent on a code-writing skill must emit WARN to stderr",
+      );
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /WARN refl_deposit_absent skill=hydra-dev task_id=tABS/,
+        "deposit-absent WARN must also appear in the run log",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("hydra-target-build with no deposit also emits the WARN (it is in REFLECTION_DEPOSIT_SKILLS)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_target: {
+            skill: "hydra-target-build",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tTGT",
+            anchor: "issue-2450",
+          },
+        },
+        failure_log: [],
+      });
+
+      const r = runCompletionWithReflDir(
+        ["dev_target", "tTGT", "1000", "hydra-target-build"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.match(
+        r.stderr,
+        /WARN refl_deposit_absent skill=hydra-target-build task_id=tTGT/,
+        "hydra-target-build with deposit-absent must emit WARN",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-code-writing skill (hydra-qa) with no deposit does NOT emit a WARN", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          qa_orch: {
+            skill: "hydra-qa",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tQA",
+            anchor: "issue-2450",
+          },
+        },
+        failure_log: [],
+      });
+
+      const r = runCompletionWithReflDir(
+        ["qa_orch", "tQA", "1000", "hydra-qa"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.doesNotMatch(
+        r.stderr,
+        /WARN refl_deposit_absent/,
+        "non-code-writing skills must not emit deposit-absent WARN",
+      );
+      const log = runLog(tmp);
+      assert.doesNotMatch(
+        log,
+        /WARN refl_deposit_absent/,
+        "non-code-writing skills must not emit deposit-absent WARN in run log",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a code-writing skill WITH a deposit file does NOT emit a WARN", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tDEP",
+            anchor: "issue-2450",
+          },
+        },
+        failure_log: [],
+      });
+
+      // Write a deposit file so reap sees deposit-present, not deposit-absent.
+      writeFileSync(join(tmp.dir, "hydra-refl-sources-tDEP"), "per-anchor");
+
+      const r = runCompletionWithReflDir(
+        ["dev_orch", "tDEP", "1000", "hydra-dev"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.doesNotMatch(
+        r.stderr,
+        /WARN refl_deposit_absent/,
+        "a present deposit must not trigger the absent WARN",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("hydra-grill with no deposit does NOT emit a WARN (grill is not in REFLECTION_DEPOSIT_SKILLS)", () => {
+    // hydra-grill is in CYCLE_RECORD_SKILLS but writes a design-concept artifact,
+    // not a reflection-source deposit. A deposit-absent on grill is expected and
+    // must NOT produce a false-positive WARN.
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          design_concept_orch: {
+            skill: "hydra-grill",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tGRL",
+            anchor: "issue-2450",
+          },
+        },
+        failure_log: [],
+      });
+
+      const r = runCompletionWithReflDir(
+        ["design_concept_orch", "tGRL", "1000", "hydra-grill"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.doesNotMatch(
+        r.stderr,
+        /WARN refl_deposit_absent/,
+        "hydra-grill must not emit deposit-absent WARN (it never writes a reflection-source deposit)",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
