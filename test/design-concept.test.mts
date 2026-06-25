@@ -28,11 +28,17 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 // All design-concept domain symbols live in the single deep module (issue #2316).
 // `dc` is the main namespace; `gate` is an alias to the same module so the
-// test bodies can reference `gate.gateCheck`, `gate.isFresh`, and
-// `gate.DESIGN_CONCEPT_MAX_AGE_MS` without rewriting every call site.
+// test bodies can reference `gate.gateCheck` and `gate.isFresh` without
+// rewriting every call site.
 const dc = await import("../src/design-concept.ts");
 const gate = dc;
 const dcSeam = await import("../src/redis/design-concept.ts");
+
+// The 7-day freshness window is module-private in src/design-concept.ts
+// (it is no longer exported — issue #2442). The test pins the same literal
+// to build "stale" (>7d) fixtures; if the source window changes this must
+// follow, and isFresh()/gateCheck() assertions will catch a divergence.
+const DESIGN_CONCEPT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const TEST_NS = "hydra:design-concept:";
 const DC_INDEX_KEY = "hydra:design-concept:index";
@@ -222,7 +228,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("listDesignConcepts prunes stale (>7d) entries from the index", async () => {
     const now = Date.now();
-    const stale = now - gate.DESIGN_CONCEPT_MAX_AGE_MS - 60_000;
+    const stale = now - DESIGN_CONCEPT_MAX_AGE_MS - 60_000;
     await dc.saveDesignConcept(
       buildComplete({ anchorRef: "test:stale" } as any),
       stale,
@@ -426,7 +432,7 @@ describe("design-concept Redis store + gate", () => {
     const now = Date.now();
     const stale: DesignConcept = {
       ...approvedFresh(),
-      createdAt: now - gate.DESIGN_CONCEPT_MAX_AGE_MS - 60_000,
+      createdAt: now - DESIGN_CONCEPT_MAX_AGE_MS - 60_000,
     };
     const v = gate.gateCheck(stale, now);
     assert.equal(v.ok, false);
