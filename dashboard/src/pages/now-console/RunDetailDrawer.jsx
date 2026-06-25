@@ -36,7 +36,7 @@ function formatDuration(s) {
  * non-null `prNumber`. De-duplicated, in first-seen order. Defensive against
  * missing/partial shapes — a malformed turn never throws.
  */
-export function extractMergedPrs(turns) {
+function extractMergedPrs(turns) {
   if (!Array.isArray(turns)) return [];
   const seen = new Set();
   const out = [];
