@@ -832,6 +832,25 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # POST body and its truthful-'none' behaviour are untouched.
     reflection_sources, reflection_presence = _read_reflection_sources(task_id)
 
+    # Issue #2450: warn when a code-writing class completes with no deposit file
+    # at all — deposit-absent on a CYCLE_RECORD_SKILLS slot means the deposit
+    # recipe either did not run or deposited under a miskeyed path. This is the
+    # diagnostic signal that distinguishes a broken deposit plumbing (false-none)
+    # from an honest empty-reflection case where the store had nothing to serve.
+    # deposit-empty is the HONEST honest-none variant (recipe ran, served nothing,
+    # wrote an empty deposit) — only deposit-absent is the suspicious case.
+    # Best-effort: print to stderr (operator-visible) AND append to the run log.
+    if (skill in CYCLE_RECORD_SKILLS and
+            reflection_presence == REFL_PRESENCE_ABSENT):
+        warn_msg = (
+            f"refl_deposit_absent skill={skill} task_id={task_id} "
+            f"anchor={anchor_ref or ''} — deposit recipe may not have run; "
+            f"check for refl-deposit-no-task-id / refl-deposit-write-failed "
+            f"in the child's stderr (cue: refl-deposit-absent-on-code-write)"
+        )
+        print(f"[autopilot] WARN {warn_msg}", file=sys.stderr)
+        _append_log(f"WARN {warn_msg}")
+
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "
         f"tokens={total_tokens} cumulative={s['cumulative_tokens']} "
