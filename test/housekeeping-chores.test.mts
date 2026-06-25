@@ -292,6 +292,7 @@ describe("pruneStaleRedisKeys — isolated (issue #2067)", () => {
       deleteKeysBatch: async (keys) => {
         deleted = deleted.concat(keys);
       },
+      setLastDaily: async () => {},
     });
     assert.deepEqual(deleted, [staleKey], "only the >7d dated key is deleted");
   });
@@ -312,8 +313,29 @@ describe("pruneStaleRedisKeys — isolated (issue #2067)", () => {
       deleteKeysBatch: async (keys) => {
         deleted += keys.length;
       },
+      setLastDaily: async () => {},
     });
     assert.equal(deleted, 0, "a key with a TTL is never pruned");
+  });
+
+  // Issue #2461: verify the chore stamps its own daily guard key on success
+  // (consistent pattern — the chore that does the work owns its success stamp).
+  test("stamps the daily cadence guard key on success (issue #2461)", async () => {
+    let stamped: string | null = null;
+    await pruneStaleRedisKeys({
+      now: () => new Date("2026-06-18T00:00:00Z").getTime(),
+      pruneMetricsIndex: async () => 0,
+      getMetricsIndexSize: async () => 0,
+      trimMetricsIndex: async () => {},
+      scanKeys: async () => [],
+      getKeyTTL: async () => -1,
+      getKeyType: async () => "string",
+      hashGet: async () => null,
+      deleteKeysBatch: async () => {},
+      setLastDaily: async (ts) => { stamped = ts; },
+    });
+    assert.ok(stamped !== null, "setLastDaily must be called on success");
+    assert.ok(/^\d+$/.test(stamped!), "stamped value must be a numeric timestamp string");
   });
 });
 

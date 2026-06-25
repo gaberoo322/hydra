@@ -47,9 +47,7 @@ import {
   getDigestLastWeekly,
   getMemoryLastConsolidation,
   getCleanupLastDaily,
-  setCleanupLastDaily,
   getUsageSnapshotLastWeekly,
-  setUsageSnapshotLastWeekly,
 } from "../redis/housekeeping.ts";
 import type { PublishableBus } from "../api/event-bus-types.ts";
 
@@ -88,6 +86,40 @@ export { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 export { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
 export { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
+
+// ---------------------------------------------------------------------------
+// Cadence constants (issue #2461)
+// ---------------------------------------------------------------------------
+//
+// Exported so individual chore files and tests can reference named constants
+// instead of computing `7 * 24 * 60 * 60 * 1000` inline. Previously these
+// lived only as local `const` inside `runHousekeeping`, making them invisible
+// to the chore files that needed them (the guard period is the chore's
+// semantic, not the registry's).
+export const HOUR_MS = 60 * 60 * 1000;
+export const DAY_MS = 24 * HOUR_MS;
+export const WEEK_MS = 7 * DAY_MS;
+
+/**
+ * Canonical cadence-check for a time-guarded chore (issue #2461).
+ *
+ * Reads the last-run timestamp from `getLastTs()` and returns `true` when the
+ * chore should proceed: either no prior run is recorded, or `periodMs` has
+ * elapsed since the last run. Centralises the `!lastTs || Date.now() -
+ * parseInt(lastTs) >= periodMs` pattern that was previously spelled out inline
+ * in every guard lambda.
+ *
+ * Pure function except for the injected Redis read — testable without a full
+ * chore setup. Not exported as a public API surface; callers are the guard
+ * lambdas in `runHousekeeping`.
+ */
+async function choreGuard(
+  getLastTs: () => Promise<string | null>,
+  periodMs: number,
+): Promise<boolean> {
+  const lastTs = await getLastTs();
+  return !lastTs || Date.now() - parseInt(lastTs) >= periodMs;
+}
 
 // ---------------------------------------------------------------------------
 // Chore runner (issue #1864)
@@ -211,14 +243,17 @@ async function runHousekeeping(
   const ran: string[] = [];
   const skipped: string[] = [];
 
-  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-  const DAY_MS = 24 * 60 * 60 * 1000;
-
   // The chores as declarations. Each carries an optional `guard` (the cadence
   // window, read at the composition level) and a `work` thunk that delegates to
   // the chore's named runner imported from `./chores/`. `runChore` applies the
   // uniform guard → work → bookkeeping → error-log + Sentry-breadcrumb pattern.
   // Order is preserved verbatim from the pre-#2090 sequence.
+  //
+  // Issue #2461: guards now use `choreGuard(getter, periodMs)` — a single
+  // canonical cadence-check — instead of the repeated inline
+  // `!lastTs || Date.now() - parseInt(lastTs) >= periodMs` pattern. Period
+  // constants (`WEEK_MS`, `DAY_MS`) are module-level exports rather than
+  // function-local consts so chore files can reference them directly.
   const chores: Chore[] = [
     {
       name: "blocked-escalation",
@@ -239,10 +274,7 @@ async function runHousekeeping(
 
     {
       name: "weekly-summary",
-      guard: async () => {
-        const lastWeekly = await getDigestLastWeekly();
-        return !lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS;
-      },
+      guard: () => choreGuard(getDigestLastWeekly, WEEK_MS),
       work: () => runWeeklyDigest(),
     },
 
@@ -250,25 +282,18 @@ async function runHousekeeping(
       // Issue #2404: persist this ISO week's per-skill usage rollup so the
       // week-over-week trend has a prior week to compare against. Weekly cadence
       // guard (mirroring weekly-summary); the underlying write is idempotent on
-      // the ISO-week key. Stamp the success key inside `work` (like
-      // stale-key-prune) so a skipped/failed run doesn't advance the cadence.
+      // the ISO-week key.
+      // Issue #2461: the success stamp is now applied inside
+      // `runUsageWeeklySnapshot` itself (consistent with `runWeeklyDigest` and
+      // `runMemoryConsolidation`) — no stamp call at the registry level.
       name: "usage-weekly-snapshot",
-      guard: async () => {
-        const lastWeekly = await getUsageSnapshotLastWeekly();
-        return !lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS;
-      },
-      work: async () => {
-        await runUsageWeeklySnapshot();
-        await setUsageSnapshotLastWeekly(Date.now().toString());
-      },
+      guard: () => choreGuard(getUsageSnapshotLastWeekly, WEEK_MS),
+      work: () => runUsageWeeklySnapshot(),
     },
 
     {
       name: "memory-consolidation",
-      guard: async () => {
-        const lastConsolidation = await getMemoryLastConsolidation();
-        return !lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS;
-      },
+      guard: () => choreGuard(getMemoryLastConsolidation, DAY_MS),
       work: () => runMemoryConsolidation(),
     },
 
@@ -293,15 +318,12 @@ async function runHousekeeping(
     },
 
     {
+      // Issue #2461: the success stamp is now applied inside
+      // `pruneStaleRedisKeys` itself (consistent with `runWeeklyDigest` and
+      // `runMemoryConsolidation`) — no stamp call at the registry level.
       name: "stale-key-prune",
-      guard: async () => {
-        const lastDaily = await getCleanupLastDaily();
-        return !lastDaily || Date.now() - parseInt(lastDaily) >= DAY_MS;
-      },
-      work: async () => {
-        await pruneStaleRedisKeys();
-        await setCleanupLastDaily(Date.now().toString());
-      },
+      guard: () => choreGuard(getCleanupLastDaily, DAY_MS),
+      work: () => pruneStaleRedisKeys(),
     },
 
     {

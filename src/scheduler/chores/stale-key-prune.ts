@@ -25,6 +25,7 @@ import {
   hashGet,
   deleteKeysBatch,
 } from "../../redis/utility.ts";
+import { setCleanupLastDaily } from "../../redis/housekeeping.ts";
 
 // Prefix shapes used by the stale-key sweep. Kept inline (rather than importing
 // from redis/keys.ts) because this is a housekeeping sweep, not a domain owner —
@@ -49,6 +50,14 @@ export interface PruneStaleRedisKeysDeps {
   hashGet?: typeof hashGet;
   deleteKeysBatch?: typeof deleteKeysBatch;
   now?: () => number;
+  /**
+   * Stamps the daily cadence guard key on success. Injectable for unit tests.
+   *
+   * Issue #2461: moved from the composition level in `housekeeping.ts` into
+   * this chore so stamp placement is consistent across all guarded chores —
+   * the chore that does the work also owns its own success stamp.
+   */
+  setLastDaily?: typeof setCleanupLastDaily;
 }
 
 /**
@@ -66,6 +75,7 @@ export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): P
   const hashGetFn = deps.hashGet ?? hashGet;
   const deleteKeysBatchFn = deps.deleteKeysBatch ?? deleteKeysBatch;
   const nowFn = deps.now ?? Date.now;
+  const setLastDailyFn = deps.setLastDaily ?? setCleanupLastDaily;
 
   const cutoffMs = nowFn() - STALE_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let totalPruned = 0;
@@ -146,4 +156,11 @@ export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): P
   if (totalPruned > 0) {
     console.log(`[Housekeeping] Total stale Redis keys pruned: ${totalPruned}`);
   }
+  // Stamp the daily guard key so an immediate second housekeeping invocation
+  // skips this chore. Consistent with `runWeeklyDigest`, `runMemoryConsolidation`,
+  // and `runUsageWeeklySnapshot`, which all own their own stamp.
+  // Issue #2461: this stamp was previously applied in `housekeeping.ts` after
+  // calling `pruneStaleRedisKeys()` — moved here so all guarded chores follow
+  // the same pattern: the chore that does the work stamps its own guard key.
+  await setLastDailyFn(Date.now().toString());
 }
