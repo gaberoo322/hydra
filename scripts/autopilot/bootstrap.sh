@@ -722,6 +722,12 @@ fi
 #     multi-run-per-day relaunch cadence. Additive + tolerated-missing
 #     by all readers, so no schema_version bump.
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
+#   - `cumulative_tokens` seeds at 0 and is advanced ONLY by reap.py on each
+#     subagent completion (the per-turn token surrogate). This is the field the
+#     LIVE `TERM:budget` gate reads in term-check.py + decide.py — NOT dead code
+#     (issue #2429). The same value is mirrored onto the Redis run hash by
+#     heartbeat.py for the dashboard; the run-hash copy is 0 only for a run that
+#     exits before the surrogate accumulates (a 1-2-turn print-mode run).
 #
 # Backward compat: this heredoc OVERWRITES the existing file. A v1
 # legacy state.json (or a v2 state.json with `slots: {}` empty) is
