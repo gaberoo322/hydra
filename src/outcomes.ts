@@ -267,6 +267,15 @@ async function readFileAdapter(query: string): Promise<OutcomeReading | null> {
     }
     return { value, ts };
   } catch (err: any) {
+    if (err && err.code === "ENOENT") {
+      /* intentional: a missing metric file is no-data, NOT an error. The file
+         is created lazily by its publisher (e.g. forecast-calibration-brier.txt
+         is only written once betting has ≥1 resolved forecast — see #2448), so
+         on cold start it is legitimately absent every tick. Mirror the
+         ENOENT-is-no-data handling in `loadOutcomes` above: return null quietly
+         instead of logging ENOENT spam. Downstream treats null as no-data. */
+      return null;
+    }
     console.error(`[outcomes] file adapter: failed to read ${path}: ${err?.message || String(err)}`);
     return null;
   }

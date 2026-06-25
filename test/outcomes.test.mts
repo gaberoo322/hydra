@@ -218,6 +218,73 @@ describe("getOutcomeValue — source adapters", () => {
     assert.equal(reading, null);
   });
 
+  test("file adapter treats ENOENT (missing file) as no-data WITHOUT an error log (#2448)", async () => {
+    // A metric file is created lazily by its publisher: e.g.
+    // forecast-calibration-brier.txt is only written once betting has ≥1
+    // resolved forecast, so on cold start it is legitimately absent every
+    // Meta-analysis tick. The adapter must return null (no-data) WITHOUT
+    // logging ENOENT spam — mirroring loadOutcomes' ENOENT-is-no-data handling.
+    const outcome: Outcome = {
+      name: "forecast-calibration-brier",
+      kind: "leading",
+      direction: "down",
+      source: "file",
+      query: join(tmpDir, "metrics", "forecast-calibration-brier.txt"),
+      baseline: 0,
+      target: 1,
+      noise_epsilon: 0,
+    };
+
+    const originalError = console.error;
+    const errorCalls: string[] = [];
+    console.error = (...args: unknown[]) => {
+      errorCalls.push(args.map(String).join(" "));
+    };
+    try {
+      const reading = await getOutcomeValue(outcome);
+      assert.equal(reading, null, "missing file is no-data → null");
+    } finally {
+      console.error = originalError;
+    }
+    assert.deepEqual(
+      errorCalls,
+      [],
+      `ENOENT must not log an error; got: ${errorCalls.join(" | ")}`,
+    );
+  });
+
+  test("file adapter STILL logs a non-ENOENT read failure (#2448 — quiet ENOENT only)", async () => {
+    // Quieting ENOENT must not silence genuine read errors. Reading a directory
+    // as a file yields EISDIR, which must still surface a [outcomes] error log
+    // (fail-loud convention) and return null.
+    const outcome: Outcome = {
+      name: "x",
+      kind: "leading",
+      direction: "up",
+      source: "file",
+      query: tmpDir, // a directory, not a file → EISDIR, not ENOENT
+      baseline: 0,
+      target: 1,
+      noise_epsilon: 0,
+    };
+
+    const originalError = console.error;
+    const errorCalls: string[] = [];
+    console.error = (...args: unknown[]) => {
+      errorCalls.push(args.map(String).join(" "));
+    };
+    try {
+      const reading = await getOutcomeValue(outcome);
+      assert.equal(reading, null);
+    } finally {
+      console.error = originalError;
+    }
+    assert.ok(
+      errorCalls.some((m) => m.includes("[outcomes] file adapter: failed to read")),
+      `non-ENOENT read failure must still log; got: ${errorCalls.join(" | ")}`,
+    );
+  });
+
   test("file adapter returns null when contents not numeric", async () => {
     const valFile = join(tmpDir, "bad-val.txt");
     await writeFile(valFile, "hello world\n");
