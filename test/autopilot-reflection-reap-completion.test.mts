@@ -297,7 +297,7 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
     }
   });
 
-  test("hydra-target-build with no deposit also emits the WARN (it is in CYCLE_RECORD_SKILLS)", () => {
+  test("hydra-target-build with no deposit also emits the WARN (it is in REFLECTION_DEPOSIT_SKILLS)", () => {
     const tmp = makeTmp();
     try {
       writeState(tmp.state, {
@@ -396,6 +396,41 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
         r.stderr,
         /WARN refl_deposit_absent/,
         "a present deposit must not trigger the absent WARN",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("hydra-grill with no deposit does NOT emit a WARN (grill is not in REFLECTION_DEPOSIT_SKILLS)", () => {
+    // hydra-grill is in CYCLE_RECORD_SKILLS but writes a design-concept artifact,
+    // not a reflection-source deposit. A deposit-absent on grill is expected and
+    // must NOT produce a false-positive WARN.
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          design_concept_orch: {
+            skill: "hydra-grill",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tGRL",
+            anchor: "issue-2450",
+          },
+        },
+        failure_log: [],
+      });
+
+      const r = runCompletionWithReflDir(
+        ["design_concept_orch", "tGRL", "1000", "hydra-grill"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.doesNotMatch(
+        r.stderr,
+        /WARN refl_deposit_absent/,
+        "hydra-grill must not emit deposit-absent WARN (it never writes a reflection-source deposit)",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
