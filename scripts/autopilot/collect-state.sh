@@ -123,6 +123,38 @@ else
   }'
 fi
 
+# untriaged-orphans triage backstop (issue #2426).
+#
+# The dev_orch dispatch path keys ONLY on `ready-for-agent` and the triage
+# path keys ONLY on `needs-triage`, so an open issue carrying NONE of the
+# actionable/lifecycle labels {ready-for-agent, in-progress, blocked,
+# needs-qa, needs-triage, needs-research, target-backlog} is invisible to
+# BOTH — nothing re-triages an issue that landed with the wrong label (e.g.
+# only `enhancement` / `meta-friction` / `backlog`). Observed live
+# 2026-06-24: 7 open issues sat in this blind spot with no route to either
+# dispatch or triage.
+#
+# This emits `untriaged_orphans` = the count of open issues carrying NONE of
+# that label set. The autopilot turn maps `untriaged_orphans > 0` → the
+# boolean `untriaged_orphans_orch` signal (mirroring the
+# `needs_triage > 0` → `needs_triage_orch` mapping), which decide.py's
+# `sweep_orch` selector reads as a SECONDARY trigger to dispatch hydra-sweep
+# and route the orphans into an actionable lane. This is a STANDALONE `gh`
+# read (not derived from the board-state seam) so the backstop holds whether
+# or not `/api/autopilot/board-state` is healthy. Best-effort: any failure
+# emits `untriaged_orphans=0` so a transient gh outage never spuriously
+# triggers a sweep.
+echo -n "untriaged_orphans="
+gh issue list --repo gaberoo322/hydra --state open --json number,labels --jq '
+  [ .[]
+    | select(
+        (.labels | map(.name)) as $n
+        | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
+             "needs-triage", "needs-research", "target-backlog" ]
+           | any(. as $lbl | $n | index($lbl))) | not
+      )
+  ] | length' 2>/dev/null || echo 0
+
 # design-concept gate (issue #628): pick the first orch-board
 # `ready-for-agent` issue whose design-concept artifact is missing or
 # stale. The autopilot promotes this to `state.signals.orch_pending_grill_anchor`

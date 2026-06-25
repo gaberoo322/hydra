@@ -2196,6 +2196,21 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
     if sig == "sweep_orch":
         if _signal_present(state, events, "needs_triage_orch"):
             return make_dispatch(sig, "hydra-sweep", reason="needs-triage on orch board")
+        # Untriaged-orphans triage backstop (issue #2426). An open issue that
+        # carries NONE of the actionable/lifecycle labels {ready-for-agent,
+        # in-progress, blocked, needs-qa, needs-triage, needs-research,
+        # target-backlog} is invisible to BOTH the dev_orch dispatch path
+        # (which keys only on ready-for-agent) AND the needs_triage_orch sweep
+        # path (which keys only on needs-triage). collect-state.sh emits an
+        # `untriaged_orphans` COUNT for exactly that blind spot; the playbook
+        # maps `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch`
+        # signal (mirroring the needs_triage > 0 → needs_triage_orch mapping).
+        # Route those orphans through the SAME hydra-sweep triage skill so a
+        # mislabeled/orphaned issue lands in an actionable lane instead of
+        # silently falling off the board. Subject to the same sweep_orch
+        # cooldown (already enforced above) so it cannot busy-loop.
+        if _signal_present(state, events, "untriaged_orphans_orch"):
+            return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
         return None
     if sig == "sweep_target":
         if _signal_present(state, events, "needs_triage_target"):
