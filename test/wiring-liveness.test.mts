@@ -20,9 +20,11 @@ import {
   parseLivenessYaml,
   loadLivenessManifest,
   diffTimers,
-  evaluateOutputs,
   runWiringLiveness,
   type WiringLivenessResult,
+  // OutputSourceReader / OutputSeriesResult are re-exported from this module for
+  // the runWiringLiveness integration cases below; the pure-evaluator tests live
+  // in test/wiring-liveness-output.test.mts (#2456).
   type OutputSourceReader,
   type OutputSeriesResult,
 } from "../src/scheduler/chores/wiring-liveness.ts";
@@ -382,65 +384,11 @@ describe("wiring-liveness: output manifest load + schema validation", () => {
   });
 });
 
-describe("wiring-liveness: evaluateOutputs verdicts", () => {
-  test("BELOW-FLOOR: every value in the window at the floor => flagged", async () => {
-    // The seed regression: registryPairs pinned at 0 across the last 3 runs.
-    const entries = [outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3)];
-    const res = await evaluateOutputs(entries, fakeReader([0, 0, 0]));
-    assert.deepEqual(res.belowFloor, ["/api/scanner/latest"]);
-    assert.deepEqual(res.unreadable, []);
-    assert.equal(res.outputVerdicts[0].status, "below-floor");
-  });
-
-  test("AT-FLOOR (non-zero floor): values equal to the floor count as a hit", async () => {
-    const entries = [outputEntry("/api/x", "a.b", 5, 3)];
-    const res = await evaluateOutputs(entries, fakeReader([5, 4, 5]));
-    assert.deepEqual(res.belowFloor, ["/api/x"]);
-    assert.equal(res.outputVerdicts[0].status, "below-floor");
-  });
-
-  test("RECOVERED: one value above the floor in the window clears the alert", async () => {
-    // Most-recent value is above the floor => OK, no sticky false-positive.
-    const entries = [outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3)];
-    const res = await evaluateOutputs(entries, fakeReader([0, 0, 7]));
-    assert.deepEqual(res.belowFloor, []);
-    assert.equal(res.outputVerdicts[0].status, "ok");
-    if (res.outputVerdicts[0].status === "ok") {
-      assert.equal(res.outputVerdicts[0].latest, 7);
-    }
-  });
-
-  test("only the trailing `runs` values matter: an old zero outside the window is ignored", async () => {
-    // window=3, series=[0, 9, 9, 9] => last 3 are all above floor => OK.
-    const entries = [outputEntry("/api/x", "a.b", 0, 3)];
-    const res = await evaluateOutputs(entries, fakeReader([0, 9, 9, 9]));
-    assert.deepEqual(res.belowFloor, []);
-    assert.equal(res.outputVerdicts[0].status, "ok");
-  });
-
-  test("not enough history (series shorter than runs) => OK, never flagged", async () => {
-    const entries = [outputEntry("/api/x", "a.b", 0, 3)];
-    const res = await evaluateOutputs(entries, fakeReader([0, 0]));
-    assert.deepEqual(res.belowFloor, []);
-    assert.equal(res.outputVerdicts[0].status, "ok");
-  });
-
-  test("reader failure => UNREADABLE, distinct from a floor hit", async () => {
-    const entries = [outputEntry("/api/x", "a.b", 0, 3)];
-    const read: OutputSourceReader = async () => ({ ok: false, reason: "source 503" });
-    const res = await evaluateOutputs(entries, read);
-    assert.deepEqual(res.belowFloor, []);
-    assert.deepEqual(res.unreadable, ["/api/x"]);
-    assert.equal(res.outputVerdicts[0].status, "unreadable");
-  });
-
-  test("timer entries are ignored by the output evaluator", async () => {
-    const res = await evaluateOutputs([timerEntry("a.timer", 60)], fakeReader([0, 0, 0]));
-    assert.deepEqual(res.belowFloor, []);
-    assert.deepEqual(res.unreadable, []);
-    assert.deepEqual(res.outputVerdicts, []);
-  });
-});
+// NOTE: the pure `evaluateOutputs` verdict cases moved to
+// `test/wiring-liveness-output.test.mts` alongside the extracted output-check
+// module (#2456). The cases below stay here because they exercise the
+// `runWiringLiveness` COORDINATOR (manifest load + timer/output fan-out + merge),
+// which still lives in `wiring-liveness.ts`.
 
 describe("wiring-liveness: runWiringLiveness (output integration)", () => {
   const NOW = 1_700_000_000_000;

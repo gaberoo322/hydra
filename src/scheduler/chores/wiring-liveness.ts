@@ -10,15 +10,18 @@
  * failure mode (a source that runs on schedule but produces zero / floor-pinned
  * output).
  *
- * Two check types:
+ * Two check types — one module each (issue #2456):
  *   - `timer`  (slice 1, #2287): diff declared systemd timers against the live
- *     `--user` timer set → MISSING, STALE, NOT-YET-FIRED, OK.
+ *     `--user` timer set → MISSING, STALE, NOT-YET-FIRED, OK. This path lives in
+ *     THIS file ({@link diffTimers}).
  *   - `output` (slice 2, #2288): read the trailing run-series for a declared
  *     source (an Orchestrator API path / metric) at a JSON path and flag
  *     BELOW-FLOOR when every value in the `minOverRuns.runs` window is at or
  *     below `minOverRuns.value`. A single value above the floor clears the alert
  *     — the check is stateless, so a recovered source never sticks a
- *     false-positive.
+ *     false-positive. This path lives in the focused sibling module
+ *     `wiring-liveness-output.ts` ({@link evaluateOutputs}); `runWiringLiveness`
+ *     here is the thin coordinator that fans out to both and merges results.
  *
  * NEVER THROWS (CLAUDE.md fail-loud + host-probe never-throw conventions): every
  * failure mode — manifest read error, parse error, schema-validation error,
@@ -37,7 +40,6 @@ import { join, resolve } from "node:path";
 import {
   LivenessManifestSchema,
   type LivenessEntry,
-  type OutputEntry,
   type LivenessManifest,
 } from "../../schemas/liveness.ts";
 import {
@@ -47,6 +49,25 @@ import {
   type ProbeResult,
 } from "../../host-probe/probe.ts";
 import { parseConfigYaml, type YamlValue } from "../../config-yaml.ts";
+import {
+  evaluateOutputs,
+  defaultOutputReader,
+  type OutputVerdict,
+  type OutputSourceReader,
+} from "./wiring-liveness-output.ts";
+
+// The output-series check (slice 2, #2288) lives in its own focused module
+// (`wiring-liveness-output.ts`, extracted by #2456 — one check type, one module).
+// Re-exported here so existing importers (and `test/wiring-liveness.test.mts`'s
+// historical entry point) keep a stable surface; new code may import either path.
+export {
+  evaluateOutputs,
+  defaultOutputReader,
+  type OutputVerdict,
+  type OutputSourceReader,
+  type OutputSeriesResult,
+  type OutputEvaluation,
+} from "./wiring-liveness-output.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
@@ -167,19 +188,6 @@ type TimerVerdict =
   | { unit: string; status: "not-yet-fired" }
   | { unit: string; status: "stale"; lastFiredMsAgo: number; maxStaleMinutes: number };
 
-/** Per-entry verdict from evaluating a declared output source (slice 2). */
-type OutputVerdict =
-  | { source: string; jsonPath: string; status: "ok"; latest: number }
-  | {
-      source: string;
-      jsonPath: string;
-      status: "below-floor";
-      window: number[];
-      floor: number;
-      runs: number;
-    }
-  | { source: string; jsonPath: string; status: "unreadable"; reason: string };
-
 /** The chore's never-throwing result object. */
 export interface WiringLivenessResult {
   /** True when the manifest loaded and the live timers were read. */
@@ -271,110 +279,6 @@ export function diffTimers(
 }
 
 // ---------------------------------------------------------------------------
-// Evaluate: declared output sources (slice 2, #2288)
-// ---------------------------------------------------------------------------
-
-/**
- * The trailing run-series for one output source, most-recent-LAST. The chore asks
- * the injected reader for observations of `source`@`jsonPath`; the reader returns
- * the numeric values it observed across recent runs (it MAY return fewer than the
- * window — a young source). A failed read returns an error result so the chore
- * surfaces UNREADABLE rather than mistaking an absent series for a floor hit.
- */
-export type OutputSeriesResult =
-  | { ok: true; values: number[] }
-  | { ok: false; reason: string };
-
-/**
- * Type guard narrowing an {@link OutputSeriesResult} to its failure arm. As with
- * {@link isLoadFailure} and the host-probe `isProbeFailure`, the orchestrator's
- * `strict: false` tsconfig cannot discriminate this union on `ok` via a plain
- * `if (!series.ok)`, so callers narrow through this guard instead.
- */
-function isSeriesFailure(
-  result: OutputSeriesResult,
-): result is { ok: false; reason: string } {
-  return result.ok === false;
-}
-
-/**
- * Injectable reader for an output source's trailing run-series. Real callers wire
- * this to whatever queries the live source (an Orchestrator API path / metric
- * history); tests inject a deterministic fake so below-floor / at-floor /
- * recovered cases are reproducible without network or time. Never throws — a read
- * failure is an `{ ok: false, reason }` result.
- */
-export type OutputSourceReader = (entry: OutputEntry) => Promise<OutputSeriesResult>;
-
-/**
- * Pure evaluation of declared `output` entries against their trailing run-series.
- * Exported so the verdict logic is unit-tested without I/O.
- *
- * For each `output` entry the reader is asked for the source's recent values; the
- * verdict is:
- *   - UNREADABLE  — the reader failed. Surfaced distinctly from a floor hit (an
- *                   unreadable source is NOT a zero-output source).
- *   - BELOW-FLOOR — the trailing window (the last `runs` observations) is full
- *                   AND every value in it is `<= minOverRuns.value`. This is the
- *                   live-but-inert signal: the source ran but stayed pinned at or
- *                   under the floor across the whole window.
- *   - OK          — at least one value in the window is ABOVE the floor (a
- *                   recovered source clears immediately — no sticky
- *                   false-positive), or the series is shorter than `runs` (not
- *                   yet enough history to conclude inert).
- */
-export async function evaluateOutputs(
-  entries: LivenessEntry[],
-  read: OutputSourceReader,
-): Promise<{
-  belowFloor: string[];
-  unreadable: string[];
-  outputVerdicts: OutputVerdict[];
-}> {
-  const belowFloor: string[] = [];
-  const unreadable: string[] = [];
-  const outputVerdicts: OutputVerdict[] = [];
-
-  for (const entry of entries) {
-    if (entry.type !== "output") continue;
-    const source = entry.source;
-    const jsonPath = entry.jsonPath;
-    const floor = entry.minOverRuns.value;
-    const runs = entry.minOverRuns.runs;
-
-    const series = await read(entry);
-    if (isSeriesFailure(series)) {
-      outputVerdicts.push({ source, jsonPath, status: "unreadable", reason: series.reason });
-      unreadable.push(source);
-      continue;
-    }
-
-    // Take the trailing `runs` observations (most-recent-last).
-    const window = series.values.slice(-runs);
-
-    // Not enough history yet to conclude the source is inert → OK (no alarm).
-    if (window.length < runs) {
-      const latest = window.length > 0 ? window[window.length - 1] : floor;
-      outputVerdicts.push({ source, jsonPath, status: "ok", latest });
-      continue;
-    }
-
-    // BELOW-FLOOR only when EVERY value in the full window is at or below the
-    // floor. A single value above the floor → OK (recovered, no sticky alert).
-    const allAtOrBelow = window.every((v) => v <= floor);
-    if (allAtOrBelow) {
-      outputVerdicts.push({ source, jsonPath, status: "below-floor", window, floor, runs });
-      belowFloor.push(source);
-      continue;
-    }
-
-    outputVerdicts.push({ source, jsonPath, status: "ok", latest: window[window.length - 1] });
-  }
-
-  return { belowFloor, unreadable, outputVerdicts };
-}
-
-// ---------------------------------------------------------------------------
 // Chore runner
 // ---------------------------------------------------------------------------
 
@@ -402,19 +306,6 @@ export interface WiringLivenessDeps {
   /** Injectable clock for the stale boundary; defaults to `Date.now`. */
   now?: () => number;
 }
-
-/**
- * The default output reader: a no-op that reports every output source UNREADABLE
- * with a "no live reader wired" reason. The live source reader (an Orchestrator
- * API / metric-history query) is a follow-up; until then output entries are
- * declared in the manifest and exercised by tests via an injected reader, but the
- * scheduled chore does not yet hit a real source — it stays silent because an
- * UNREADABLE verdict is informational, not an alert (see {@link runWiringLiveness}).
- */
-const defaultOutputReader: OutputSourceReader = async (entry) => ({
-  ok: false,
-  reason: `no live output reader wired for source '${entry.source}'`,
-});
 
 /**
  * Run the wiring-liveness chore. Loads the manifest, reads the live timers, diffs
