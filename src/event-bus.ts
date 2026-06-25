@@ -288,11 +288,13 @@ interface EventEnvelope {
 }
 
 /**
- * A parsed inbound event handed to a `consume()` handler. `_parseFields`
+ * A parsed inbound event handed to a `consume()` handler. `parseStreamFields`
  * folds the flat Redis field list back into an object and JSON-parses the
  * `payload` field when present, so handlers see a structured `payload`.
+ * Exported (#2455) so callers of the extracted stream-consume free functions
+ * can type their synthetic event inputs.
  */
-interface ConsumedEvent {
+export interface ConsumedEvent {
   type?: string;
   source?: string;
   payload?: unknown;
@@ -303,7 +305,7 @@ type EventHandler = (event: ConsumedEvent) => void | Promise<void>;
 
 /**
  * One raw stream entry as Redis returns it: `[msgId, [k0, v0, k1, v1, ...]]`.
- * The flat field list is what `_parseFields` folds back into an object.
+ * The flat field list is what `parseStreamFields` folds back into an object.
  */
 type RawStreamEntry = [string, string[]];
 
@@ -319,6 +321,262 @@ interface ConsumeOptions {
    * the at-least-once notifications/DLQ groups whose PELs must survive restart.
    */
   reapStale?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Stream-consume protocol — the XAUTOCLAIM recovery pass, the XREADGROUP
+// long-poll loop, the DLQ-promotion policy, and the inbound field parser as
+// injectable, module-level functions (issue #2455).
+//
+// These were previously folded inside the `EventBus.consume()` /
+// `_handleFailure()` / `_parseFields()` class-body methods, where the
+// stream-consume mechanics were threaded through class instance state
+// (`_consuming`, `publisher`, `subscriber`) and could not be tested without a
+// full bus instance. Lifting them to free functions that each take a raw Redis
+// client (plus an explicit config / callback surface) follows the pattern the
+// module's existing free functions already establish (`ensureConsumerGroup`,
+// `reapStaleConsumers`, `initConsumerGroups`, `delConsumer`) and the pure
+// assessment functions in `health/diagnostics.ts` — the protocol is now
+// directly assertable with synthetic `RawStreamEntry[]` inputs and a stub
+// client. `EventBus` becomes a thin coordinator that wires these into its own
+// connections; its public method signatures are unchanged.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fold a flat Redis `[k0, v0, k1, v1, ...]` field list into a `ConsumedEvent`,
+ * JSON-parsing the `payload` field when present (handlers see a structured
+ * `payload`). Pure — no Redis, no side effects. A non-JSON `payload` is kept
+ * as the raw string. (Issue #2455: lifted from `EventBus._parseFields`.)
+ */
+export function parseStreamFields(fields: string[]): ConsumedEvent {
+  const obj: Record<string, unknown> = {};
+  for (let i = 0; i < fields.length; i += 2) {
+    obj[fields[i]] = fields[i + 1];
+  }
+  if (typeof obj.payload === "string") {
+    try { obj.payload = JSON.parse(obj.payload); } catch { /* intentional: payload may not be JSON, keep as raw string */ }
+  }
+  return obj;
+}
+
+/** Delivery-count threshold after which a repeatedly-failing message is DLQ'd. */
+const DLQ_PROMOTION_THRESHOLD = 3;
+
+/**
+ * The DLQ-promotion predicate (issue #2455): is a message that has now failed
+ * `deliveryCount` times eligible for the dead-letter queue? Pure and directly
+ * assertable — the "3 attempts → DLQ" invariant no longer requires a running
+ * consumer loop to test. Extracted from the inline `deliveryCount >= 3` check
+ * inside `_handleFailure`.
+ */
+export function shouldPromoteToDlq(deliveryCount: number): boolean {
+  return deliveryCount >= DLQ_PROMOTION_THRESHOLD;
+}
+
+/**
+ * A message's delivery count as recorded in the group's PEL — the 4th element
+ * of an XPENDING summary row `[msgId, consumer, idleMs, deliveryCount]`. Reads
+ * the secondary XPENDING query `_handleFailure` makes; returns 0 when the
+ * message has no PEL entry. Best-effort caller decides on the count.
+ *
+ * @param redis  - Redis client (the bus publisher).
+ * @param stream - Stream key.
+ * @param group  - Consumer group name.
+ * @param msgId  - The failed message ID.
+ */
+export async function getDeliveryCount(
+  redis: Redis,
+  stream: string,
+  group: string,
+  msgId: string,
+): Promise<number> {
+  const info = (await redis.xpending(
+    stream, group, msgId, msgId, 1,
+  )) as [string, string, number, number][];
+  return info?.[0]?.[3] || 0;
+}
+
+/** How a failed message is forwarded onto the DLQ stream once exhausted. */
+type DlqPublisher = (entry: {
+  originalStream: string;
+  originalGroup: string;
+  originalEvent: ConsumedEvent;
+  error: string;
+  deliveryCount: number;
+}) => Promise<unknown>;
+
+/**
+ * The DLQ-promotion policy (issue #2455): on a handler failure, query the
+ * message's delivery count and, once it crosses the threshold, forward the
+ * message onto the DLQ stream and ACK it off the source group. Below the
+ * threshold the message is left in the PEL for a later redelivery. Concentrates
+ * the "secondary XPENDING → threshold decision → DLQ publish → xack" path that
+ * was spread across `_handleFailure` and inline class state.
+ *
+ * The DLQ publish is injected as `publishDlq` so the policy does not reach for
+ * the bus's enveloped `publish()` — the caller (the `EventBus` coordinator)
+ * wires its own DLQ writer, keeping this function testable with a stub.
+ *
+ * @param redis       - Redis client (the bus publisher).
+ * @param stream      - Source stream key.
+ * @param group       - Source consumer group.
+ * @param msgId       - The failed message ID.
+ * @param event       - The parsed event whose handler threw.
+ * @param err         - The handler error.
+ * @param publishDlq  - Forwards the exhausted entry onto the DLQ stream.
+ * @returns Whether the message was promoted to the DLQ (and ACKed).
+ */
+export async function promoteToDlqIfExhausted(
+  redis: Redis,
+  stream: string,
+  group: string,
+  msgId: string,
+  event: ConsumedEvent,
+  err: Error,
+  publishDlq: DlqPublisher,
+): Promise<boolean> {
+  console.error(`[EventBus] Handler failed for ${event.type}:`, err.message);
+
+  const deliveryCount = await getDeliveryCount(redis, stream, group, msgId);
+  if (!shouldPromoteToDlq(deliveryCount)) return false;
+
+  await publishDlq({
+    originalStream: stream,
+    originalGroup: group,
+    originalEvent: event,
+    error: err.message,
+    deliveryCount,
+  });
+  await redis.xack(stream, group, msgId);
+  console.error(`[EventBus] Moved ${event.type} to DLQ after ${deliveryCount} attempts`);
+  return true;
+}
+
+/** What `runAutoclaimRecovery` / `runLongPollLoop` do with each parsed event. */
+interface ConsumeDeps {
+  /** The handler the producer registered. */
+  handler: EventHandler;
+  /** ACK a successfully-processed message off the group's PEL. */
+  ack: (msgId: string) => Promise<unknown>;
+  /** Apply the DLQ-promotion policy to a handler failure. */
+  onFailure: (msgId: string, event: ConsumedEvent, err: Error) => Promise<void>;
+}
+
+/** XAUTOCLAIM minimum idle: only reclaim messages idle longer than this (ms). */
+const AUTOCLAIM_MIN_IDLE_MS = 60_000;
+
+/**
+ * The XAUTOCLAIM orphan-recovery pass (issue #2455): reclaim messages pending
+ * on dead consumers and run each through the handler, ACKing on success and
+ * deferring to the DLQ policy on failure. XREADGROUP with ">" only delivers
+ * NEW messages, so without this pass a message orphaned by a crashed consumer
+ * (its PEL entry) is never redelivered. Deleted messages surface with an empty
+ * field list (`fields.length === 0`) and are short-circuited — the gap the
+ * issue calls out as previously untested.
+ *
+ * Best-effort and never throws (fail-loud convention): a reclaim failure must
+ * not block the long-poll loop that follows. Takes a raw Redis client so it is
+ * testable with a stub XAUTOCLAIM reply, no full bus instance required.
+ *
+ * @param redis    - Redis client (the bus subscriber).
+ * @param stream   - Stream key.
+ * @param group    - Consumer group name.
+ * @param consumer - This instance's consumer name.
+ * @param deps     - handler / ack / onFailure wiring.
+ */
+export async function runAutoclaimRecovery(
+  redis: Redis,
+  stream: string,
+  group: string,
+  consumer: string,
+  deps: ConsumeDeps,
+): Promise<void> {
+  try {
+    let startId = "0-0";
+    while (true) {
+      // ioredis types XAUTOCLAIM's reply loosely; narrow at this seam to the
+      // documented shape: [nextStartId, [[msgId, fields], ...], deletedIds].
+      const result = (await redis.xautoclaim(
+        stream, group, consumer, AUTOCLAIM_MIN_IDLE_MS, startId, "COUNT", 10
+      )) as [string, RawStreamEntry[], ...unknown[]];
+      const [nextId, claimed] = result;
+      if (claimed.length === 0) break;
+
+      for (const [msgId, fields] of claimed) {
+        if (!fields || fields.length === 0) continue; // deleted message
+        const event = parseStreamFields(fields);
+        try {
+          console.log(`[EventBus] Reclaimed orphan ${event.type} on ${stream}/${group} (msg ${msgId})`);
+          await deps.handler(event);
+          await deps.ack(msgId);
+        } catch (err: any) {
+          await deps.onFailure(msgId, event, err);
+        }
+      }
+      if (nextId === "0-0") break;
+      startId = nextId;
+    }
+  } catch (err: any) {
+    console.error(`[EventBus] XAUTOCLAIM failed on ${stream}/${group}:`, err.message);
+  }
+}
+
+/**
+ * The XREADGROUP long-poll loop (issue #2455): block on new messages for the
+ * group, run each through the handler, ACK on success and defer to the DLQ
+ * policy on failure — looping while `isActive()` returns true. The active flag
+ * is read through a callback (the bus reads its own `_consuming` instance flag)
+ * so the loop owns no class state; `stopConsuming()` flips the flag and the
+ * loop exits after its current BLOCK.
+ *
+ * Takes a raw Redis client so the loop is testable with a stub XREADGROUP reply
+ * and a controllable `isActive` predicate, no full bus instance required.
+ *
+ * @param redis    - Redis client (the bus subscriber).
+ * @param stream   - Stream key.
+ * @param group    - Consumer group name.
+ * @param consumer - This instance's consumer name.
+ * @param opts     - { count, blockMs } poll tuning.
+ * @param isActive - Read each iteration; the loop exits when it returns false.
+ * @param deps     - handler / ack / onFailure wiring.
+ */
+export async function runLongPollLoop(
+  redis: Redis,
+  stream: string,
+  group: string,
+  consumer: string,
+  opts: { count: number; blockMs: number },
+  isActive: () => boolean,
+  deps: ConsumeDeps,
+): Promise<void> {
+  const { count, blockMs } = opts;
+  while (isActive()) {
+    try {
+      // XREADGROUP reply: [[streamName, [[msgId, fields], ...]], ...] | null.
+      const result = (await redis.xreadgroup(
+        "GROUP", group, consumer,
+        "COUNT", count,
+        "BLOCK", blockMs,
+        "STREAMS", stream, ">"
+      )) as [string, RawStreamEntry[]][] | null;
+      if (!result) continue;
+
+      for (const [msgId, fields] of result[0][1]) {
+        const event = parseStreamFields(fields);
+        try {
+          await deps.handler(event);
+          await deps.ack(msgId);
+        } catch (err: any) {
+          await deps.onFailure(msgId, event, err);
+        }
+      }
+    } catch (err: any) {
+      if (isActive()) {
+        console.error(`[EventBus] consume error on ${stream}/${group}:`, err.message);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
 }
 
 /** Dynamic stream name lookup for `/events/:stream` and similar surfaces. */
@@ -495,68 +753,33 @@ class EventBus {
       await this.reapStaleConsumers(stream, group, consumer);
     }
 
+    // Wire the extracted stream-consume protocol (issue #2455) onto this
+    // instance's connections: orphan recovery and the long-poll loop both run
+    // through the same handler/ack/onFailure deps, so a message reclaimed from
+    // a dead consumer and a freshly-delivered one follow the identical
+    // success-ACK / failure-DLQ path.
+    const deps: ConsumeDeps = {
+      handler,
+      ack: (msgId) => this.subscriber.xack(stream, group, msgId),
+      onFailure: (msgId, event, err) => this._handleFailure(stream, group, msgId, event, err),
+    };
+
     // First, reclaim pending messages from dead consumers via XAUTOCLAIM.
-    // XREADGROUP with "0" only returns messages owned by THIS consumer,
-    // missing messages orphaned by old consumers (e.g., after a restart).
-    const MIN_IDLE_MS = 60_000; // claim messages idle > 1 minute
-    try {
-      let startId = "0-0";
-      while (true) {
-        // ioredis types XAUTOCLAIM's reply loosely; narrow at this seam to the
-        // documented shape: [nextStartId, [[msgId, fields], ...], deletedIds].
-        const result = (await this.subscriber.xautoclaim(
-          stream, group, consumer, MIN_IDLE_MS, startId, "COUNT", 10
-        )) as [string, RawStreamEntry[], ...unknown[]];
-        const [nextId, claimed] = result;
-        if (claimed.length === 0) break;
+    // XREADGROUP with ">" only returns NEW messages, missing those orphaned by
+    // old consumers (e.g., after a restart).
+    await runAutoclaimRecovery(this.subscriber, stream, group, consumer, deps);
 
-        for (const [msgId, fields] of claimed) {
-          if (!fields || fields.length === 0) continue; // deleted message
-          const event = this._parseFields(fields);
-          try {
-            console.log(`[EventBus] Reclaimed orphan ${event.type} on ${stream}/${group} (msg ${msgId})`);
-            await handler(event);
-            await this.subscriber.xack(stream, group, msgId);
-          } catch (err: any) {
-            await this._handleFailure(stream, group, msgId, event, err);
-          }
-        }
-        if (nextId === "0-0") break;
-        startId = nextId;
-      }
-    } catch (err: any) {
-      console.error(`[EventBus] XAUTOCLAIM failed on ${stream}/${group}:`, err.message);
-    }
-
-    // Then listen for new messages
+    // Then long-poll for new messages until stopConsuming() flips the flag.
     this._consuming = true;
-    while (this._consuming) {
-      try {
-        // XREADGROUP reply: [[streamName, [[msgId, fields], ...]], ...] | null.
-        const result = (await this.subscriber.xreadgroup(
-          "GROUP", group, consumer,
-          "COUNT", count,
-          "BLOCK", blockMs,
-          "STREAMS", stream, ">"
-        )) as [string, RawStreamEntry[]][] | null;
-        if (!result) continue;
-
-        for (const [msgId, fields] of result[0][1]) {
-          const event = this._parseFields(fields);
-          try {
-            await handler(event);
-            await this.subscriber.xack(stream, group, msgId);
-          } catch (err: any) {
-            await this._handleFailure(stream, group, msgId, event, err);
-          }
-        }
-      } catch (err: any) {
-        if (this._consuming) {
-          console.error(`[EventBus] consume error on ${stream}/${group}:`, err.message);
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-      }
-    }
+    await runLongPollLoop(
+      this.subscriber,
+      stream,
+      group,
+      consumer,
+      { count, blockMs },
+      () => this._consuming,
+      deps,
+    );
   }
 
   stopConsuming(): void {
@@ -573,6 +796,12 @@ class EventBus {
     await delConsumer(this.publisher, stream, group, consumer);
   }
 
+  /**
+   * Apply the DLQ-promotion policy to a handler failure. Kept on the class so
+   * the consume path stays zero-diff; wires the bus's enveloped `publish()` as
+   * the DLQ writer. See `promoteToDlqIfExhausted` (module-level) for the
+   * "secondary XPENDING → 3-attempt threshold → DLQ publish → xack" contract.
+   */
   async _handleFailure(
     stream: string,
     group: string,
@@ -580,41 +809,28 @@ class EventBus {
     event: ConsumedEvent,
     err: Error,
   ): Promise<void> {
-    console.error(`[EventBus] Handler failed for ${event.type}:`, err.message);
-
-    // Check retry count via XPENDING
-    const info = (await this.publisher.xpending(
-      stream, group, msgId, msgId, 1,
-    )) as [string, string, number, number][];
-    const deliveryCount = info?.[0]?.[3] || 0;
-
-    if (deliveryCount >= 3) {
-      // Move to DLQ after 3 attempts
-      await this.publish(STREAMS.DLQ, {
+    await promoteToDlqIfExhausted(
+      this.publisher,
+      stream,
+      group,
+      msgId,
+      event,
+      err,
+      (entry) => this.publish(STREAMS.DLQ, {
         type: NOTIFICATION_EVENT_TYPES.DLQ_ENTRY,
         source: "event-bus",
-        payload: {
-          originalStream: stream,
-          originalGroup: group,
-          originalEvent: event,
-          error: err.message,
-          deliveryCount,
-        },
-      });
-      await this.publisher.xack(stream, group, msgId);
-      console.error(`[EventBus] Moved ${event.type} to DLQ after ${deliveryCount} attempts`);
-    }
+        payload: entry,
+      }),
+    );
   }
 
+  /**
+   * Fold a flat Redis field list into a `ConsumedEvent`. Kept on the class so
+   * `readRecent`/`reapStaleConsumers` callers stay zero-diff. See
+   * `parseStreamFields` (module-level) for the JSON-payload contract.
+   */
   _parseFields(fields: string[]): ConsumedEvent {
-    const obj: Record<string, unknown> = {};
-    for (let i = 0; i < fields.length; i += 2) {
-      obj[fields[i]] = fields[i + 1];
-    }
-    if (typeof obj.payload === "string") {
-      try { obj.payload = JSON.parse(obj.payload); } catch { /* intentional: payload may not be JSON, keep as raw string */ }
-    }
-    return obj;
+    return parseStreamFields(fields);
   }
 
   /**
