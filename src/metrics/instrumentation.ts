@@ -145,7 +145,7 @@ function round(n: number): number {
   return Math.round(n * 1000) / 1000;
 }
 
-export interface LabelStats {
+interface LabelStats {
   label: string;
   /** Observations in the current ring window (<= RING_CAPACITY). */
   count: number;
