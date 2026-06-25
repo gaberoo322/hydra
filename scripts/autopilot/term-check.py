@@ -155,6 +155,20 @@ def main() -> int:
     run_id = s.get("run_id", "")
 
     cause: str | None = None
+    # `tokens` is state.json's `cumulative_tokens` — the per-turn surrogate that
+    # reap.py increments on every subagent completion (reap.py: `s["cumulative_tokens"]
+    # += total_tokens`). This is a LIVE gate, NOT dead code (issue #2429): the
+    # input is the local state file, never the Redis run hash, so it accumulates
+    # and fires for any multi-turn run regardless of the print-mode session model
+    # (#1352/#1903) that can leave the run hash at 0 for a 1-2-turn run. The run
+    # hash `cumulative_tokens` is a downstream MIRROR of this same value (POSTed by
+    # heartbeat.py -> recordTurn in src/autopilot/runs.ts), used only for the
+    # dashboard — it is NOT what this budget term reads. decide.py's
+    # `_check_termination` mirrors this exact comparison, and both are pinned by a
+    # regression test (test/autopilot-scripts.test.mts "prints TERM:budget when
+    # cumulative tokens >= budget" + INV-005 in assert_invariants.py). Do not
+    # "remove the dead branch" — measure state.json first (it is non-zero on any
+    # live run; see issue #2429's investigation).
     if tokens >= limits["token_budget"]:
         cause = "budget"
         print(f"TERM:budget tokens={tokens}/{limits['token_budget']} elapsed={elapsed}s")

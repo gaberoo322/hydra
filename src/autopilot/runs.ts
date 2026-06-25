@@ -796,6 +796,15 @@ export async function startRun(
       limits: JSON.stringify(limits),
       turns: "0",
       dispatches: "0",
+      // `cumulative_tokens` is a dashboard-facing MIRROR of state.json's
+      // per-turn token surrogate, advanced by `recordTurn` from each turn's
+      // `tokens_after` POST (see the write below). It is NOT the autopilot's
+      // budget gate: `TERM:budget` reads state.json directly in
+      // scripts/autopilot/term-check.py (+ decide.py `_check_termination`), so
+      // a 0 here never disables termination (issue #2429). It stays 0 only for
+      // a run that never accumulates surrogate tokens — e.g. a 1-2-turn run
+      // that exits under the print-mode session model (#1352/#1903) before the
+      // surrogate grows. Multi-turn runs carry the real accumulated value.
       cumulative_tokens: "0",
       idle_turns: "0",
       last_heartbeat_epoch: String(startedEpoch),
@@ -938,6 +947,11 @@ export async function recordTurn(
     if (dispatchCount > 0) {
       await deps.runs.incrAutopilotRunField(runId, "dispatches", dispatchCount);
     }
+    // Mirror state.json's surrogate onto the run hash (issue #2429). `tokensAfter`
+    // is the per-turn `tokens_after` POSTed by heartbeat.py, which sources it from
+    // state.json `cumulative_tokens` — so this field tracks the same value the
+    // live `TERM:budget` gate reads, NOT an independent accounting. See the
+    // init-site comment above for why this is dashboard-only and never the gate.
     await deps.runs.setAutopilotRunField(runId, "cumulative_tokens", String(tokensAfter));
     await deps.runs.setAutopilotRunField(runId, "idle_turns", String(idleTurns));
     await deps.runs.setAutopilotRunField(runId, "last_heartbeat_epoch", String(epoch));

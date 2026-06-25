@@ -806,6 +806,39 @@ describe("scripts/autopilot/term-check.py", () => {
     }
   });
 
+  // Issue #2429 — `TERM:budget` is a LIVE gate, NOT dead code. It reads
+  // state.json's `cumulative_tokens` (the reap.py surrogate), not the Redis run
+  // hash, so a run-hash value of 0 (common on a 1-2-turn print-mode run) never
+  // disables it. These two cases pin the budget boundary so a future "the field
+  // is always 0, remove the dead branch" change has to contradict a named test:
+  // just-below-budget keeps iterating (OK), at-budget terminates (TERM:budget).
+  test("does NOT trip budget when cumulative tokens are just below budget (#2429)", () => {
+    const tmp = makeTempState();
+    try {
+      // base writeState() sets token_budget = 2_000_000.
+      writeState(tmp.state, { cumulative_tokens: 1_999_999 });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^OK /,
+        "below the budget the live gate keeps iterating — proves the branch is reachable, not dead");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("trips budget exactly AT the token_budget boundary (#2429)", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, { cumulative_tokens: 2_000_000 });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^TERM:budget /,
+        "the comparison is >=, so reaching the budget exactly terminates — the gate fires on real state.json spend");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("prints TERM:wall_clock when elapsed >= wall_clock_max_sec", () => {
     const tmp = makeTempState();
     try {
