@@ -19,10 +19,15 @@
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
-// Shared vocabulary (mirrors aggregators/types.ts)
+// Shared vocabulary
 // ---------------------------------------------------------------------------
 
-const AutopilotRunOutcomeSchema = z.enum([
+/**
+ * Outcome of an autopilot run, as recorded on the `hydra:autopilot:run:*`
+ * hash. Closed set so the dashboard can render a coloured chip without
+ * re-bucketing. `unknown` covers historical rows pre-dating outcome stamping.
+ */
+export const AutopilotRunOutcomeSchema = z.enum([
   "success",
   "failure",
   "aborted",
@@ -30,13 +35,30 @@ const AutopilotRunOutcomeSchema = z.enum([
   "unknown",
 ]);
 
-const AnomalyMetricSchema = z.enum([
+export type AutopilotRunOutcome = z.infer<typeof AutopilotRunOutcomeSchema>;
+
+/**
+ * Which metric an anomaly was detected on. The anomaly-detector aggregator
+ * uses a z-score against the rolling baseline for each series; the metric
+ * is the discriminator the dashboard uses to badge each item.
+ */
+export const AnomalyMetricSchema = z.enum([
   "token-burn-rate",
   "abandonment-rate",
   "dispatch-class-failure-rate",
 ]);
 
-const AnomalyDirectionSchema = z.enum(["high", "low"]);
+export type AnomalyMetric = z.infer<typeof AnomalyMetricSchema>;
+
+/**
+ * Direction of an anomaly relative to the baseline. `high` = the latest
+ * sample is far ABOVE the mean (e.g. token-burn-rate spiked), `low` = far
+ * BELOW (e.g. abandonment-rate suddenly collapsed). Both are anomalies but
+ * the dashboard renders them differently.
+ */
+export const AnomalyDirectionSchema = z.enum(["high", "low"]);
+
+export type AnomalyDirection = z.infer<typeof AnomalyDirectionSchema>;
 
 // ---------------------------------------------------------------------------
 // /v2/explore/friction
