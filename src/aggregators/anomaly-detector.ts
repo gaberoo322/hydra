@@ -35,7 +35,7 @@
 
 import { getAutopilotDailyTokensRaw } from "../redis/cost.ts";
 
-import type { AnomalyDirection, AnomalyMetric } from "./types.ts";
+import type { AnomalyDirection, AnomalyMetric } from "../schemas/explore-page.ts";
 
 // ---------------------------------------------------------------------------
 // Public types

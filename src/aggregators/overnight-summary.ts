@@ -36,7 +36,7 @@ import { execFileViaSeam } from "../github/exec-file-compat.ts";
 import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
 import { countAutopilotRunsSince as countAutopilotRunsSinceSeam } from "../redis/autopilot-runs.ts";
 
-import type { HeadroomLevel } from "./types.ts";
+import type { HeadroomLevel } from "../schemas/today-page.ts";
 import { settledOr } from "./settle.ts";
 
 // The production default routes the `git log` merge count through the GitHub

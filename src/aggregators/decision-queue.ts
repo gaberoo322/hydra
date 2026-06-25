@@ -32,7 +32,7 @@ import {
   listIssuesBySearchOrEmpty,
 } from "../github/issues.ts";
 
-import type { DecisionItemSource } from "./types.ts";
+import type { DecisionItemSource } from "../schemas/today-page.ts";
 import { settledOrEmpty } from "./settle.ts";
 import {
   datedTitle,

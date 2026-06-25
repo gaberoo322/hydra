@@ -41,7 +41,7 @@
  */
 
 import { listRuns } from "../autopilot/runs.ts";
-import type { AutopilotRunOutcome } from "./types.ts";
+import type { AutopilotRunOutcome } from "../schemas/explore-page.ts";
 
 // ---------------------------------------------------------------------------
 // Public types

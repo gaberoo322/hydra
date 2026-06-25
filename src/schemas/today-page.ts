@@ -49,7 +49,9 @@ export const OvernightSummaryQuerySchema = z
  * Keeping this as a discriminated string (not a number) so the dashboard
  * can render a colored chip directly without re-thresholding.
  */
-const HeadroomLevelSchema = z.enum(["green", "yellow", "red", "unknown"]);
+export const HeadroomLevelSchema = z.enum(["green", "yellow", "red", "unknown"]);
+
+export type HeadroomLevel = z.infer<typeof HeadroomLevelSchema>;
 
 /**
  * Response body for `GET /api/v2/today/summary`.
@@ -90,12 +92,20 @@ export type OvernightSummaryResponse = z.infer<typeof OvernightSummaryResponseSc
 // Slice-2 schemas (issue #617)
 // ---------------------------------------------------------------------------
 
-/** Source vocabulary for `DecisionItem.source` — mirror of the aggregator type. */
-const DecisionItemSourceSchema = z.enum([
+/**
+ * Source vocabulary for `DecisionItem.source`. The decision-queue aggregator
+ * unifies three distinct sources into one list; the `source` discriminator
+ * lets the dashboard render a small badge so the operator can see at a glance
+ * whether an item came from the overnight decision-queue digest issue, the
+ * persistent `ready-for-human` label, or the `needs-info` waiting lane.
+ */
+export const DecisionItemSourceSchema = z.enum([
   "operator-decision-queue",
   "ready-for-human",
   "needs-info",
 ]);
+
+export type DecisionItemSource = z.infer<typeof DecisionItemSourceSchema>;
 
 /**
  * Response body for `GET /api/v2/today/decision-queue`. The aggregator
