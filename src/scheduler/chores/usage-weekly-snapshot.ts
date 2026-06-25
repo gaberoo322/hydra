@@ -16,6 +16,8 @@
  * write is idempotent on the ISO-week key, so even a guard miss-fire is harmless.
  */
 
+import { setUsageSnapshotLastWeekly } from "../../redis/housekeeping.ts";
+
 interface UsageWeeklySnapshotModule {
   getUsage: (opts?: { now?: Date }) => Promise<{
     bySkillByModel: Record<string, Record<string, { total: number }>>;
@@ -32,6 +34,16 @@ interface UsageWeeklySnapshotModule {
 export interface UsageWeeklySnapshotDeps {
   module?: UsageWeeklySnapshotModule;
   now?: () => Date;
+  /**
+   * Stamps the weekly cadence guard key on success so the next housekeeping
+   * invocation within the same week skips this chore. Injectable for unit tests
+   * (mirrors the `setLastWeekly` dep in `weekly-digest.ts`).
+   *
+   * Issue #2461: moved from the composition level in `housekeeping.ts` into
+   * this chore so stamp placement is consistent across all guarded chores —
+   * the chore that does the work also owns its own success stamp.
+   */
+  setLastWeekly?: typeof setUsageSnapshotLastWeekly;
 }
 
 /**
@@ -54,6 +66,7 @@ export async function runUsageWeeklySnapshot(
       ...(await import("../../redis/usage-snapshots.ts")),
     } as unknown as UsageWeeklySnapshotModule);
   const now = (deps.now ?? (() => new Date()))();
+  const setLastWeekly = deps.setLastWeekly ?? setUsageSnapshotLastWeekly;
 
   const snapshot = await mod.getUsage({ now });
   const bySkillByModel = snapshot.bySkillByModel ?? {};
@@ -73,5 +86,12 @@ export async function runUsageWeeklySnapshot(
     takenAt: now.toISOString(),
     bySkill,
   });
+  // Stamp the weekly guard key AFTER a successful write. Consistent with
+  // `runWeeklyDigest` and `runMemoryConsolidation`, which own their own stamp
+  // rather than deferring to the composition level in `housekeeping.ts`.
+  // Issue #2461: this stamp was previously applied in `housekeeping.ts` after
+  // calling `runUsageWeeklySnapshot()` — moved here so all guarded chores follow
+  // the same pattern: the chore that does the work stamps its own guard key.
+  await setLastWeekly(Date.now().toString());
   return true;
 }

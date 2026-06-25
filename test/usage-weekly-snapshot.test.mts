@@ -119,4 +119,24 @@ describe("weekly usage snapshot seam + chore (#2404)", () => {
     assert.equal(read.bySkill["hydra-dev"], 130); // 100+25+5
     assert.equal(read.bySkill["hydra-qa"], 40);
   });
+
+  // Issue #2461: verify that the chore stamps the weekly guard key itself
+  // (consistent pattern — the chore that does the work owns its success stamp).
+  test("chore stamps the weekly cadence guard key on success (issue #2461)", async () => {
+    const { runUsageWeeklySnapshot } = await import(
+      "../src/scheduler/chores/usage-weekly-snapshot.ts"
+    );
+    let stamped: string | null = null;
+    await runUsageWeeklySnapshot({
+      now: () => new Date("2026-06-23T12:00:00.000Z"),
+      module: {
+        getUsage: async () => ({ bySkillByModel: {} }),
+        writeWeeklyUsageSnapshot: async () => {},
+        isoWeekLabel: () => "2026-W26",
+      },
+      setLastWeekly: async (ts) => { stamped = ts; },
+    });
+    assert.ok(stamped !== null, "setLastWeekly must be called on success");
+    assert.ok(/^\d+$/.test(stamped!), "stamped value must be a numeric timestamp string");
+  });
 });
