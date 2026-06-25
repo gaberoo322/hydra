@@ -4,12 +4,18 @@ import { Section } from "./Section.jsx";
 /**
  * CostByClass — per-class token attribution (issue #1439).
  *
- * Reads `GET /api/metrics/cost-by-class` (today UTC) and renders a stacked
- * bar of the share of subagent token spend per autopilot dispatch class:
- * research / dev-orch / dev-target / qa / cleanup / retro / other. Answers
- * the operator question "what fraction of today's budget does research vs dev
- * vs QA consume?" — the per-class granularity the daily token counter alone
- * could not give.
+ * Reads `GET /api/metrics/cost-by-class` over a rolling trailing-24h UTC
+ * window (issue #2427) and renders a stacked bar of the share of subagent
+ * token spend per autopilot dispatch class: research / dev-orch / dev-target /
+ * qa / cleanup / retro / other. Answers the operator question "what fraction
+ * of the last day's budget does research vs dev vs QA consume?" — the per-class
+ * granularity the daily token counter alone could not give.
+ *
+ * The window is rolling (yesterday + today's UTC buckets), not a single UTC
+ * calendar day: a single-day read taken just after UTC midnight covers a thin
+ * sliver and reads a false 0% for classes that demonstrably ran earlier in the
+ * operator's local day (the false "decide.py isn't dispatching" alarm #2427 was
+ * filed for). The server's `window` field labels the exact span.
  *
  * Token-based (not dollar): the orchestrator runs on a Claude Code
  * subscription, so spend is measured in tokens. The fraction is the class's
@@ -44,8 +50,8 @@ export function CostByClass() {
   return (
     <Section
       title="Cost by class"
-      subtitle="Share of today's subagent token spend per dispatch class. Identify which class is driving cost."
-      right={data?.date && `${data.date} · ${fmtTokens(total)} tok`}
+      subtitle="Share of the last 24h of subagent token spend per dispatch class. Identify which class is driving cost."
+      right={(data?.window || data?.date) && `${data.window || data.date} · ${fmtTokens(total)} tok`}
       loading={loading}
       error={error}
       empty={!loading && !error && (!byClass || total === 0)}

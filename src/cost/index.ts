@@ -36,7 +36,9 @@
 export {
   recordSubagentTokens,
   getDailyTokenCounter,
+  getRollingTokenCounter,
   todayDateString,
+  yesterdayDateString,
   // Re-export key helpers so tests that probe Redis directly stay on the
   // public Interface rather than reaching into `surrogate.ts`.
 } from "./surrogate.ts";
@@ -119,4 +121,5 @@ export {
   skillToCostClass,
   projectCostByClass,
   getCostByClass,
+  getRollingCostByClass,
 } from "./cost-attribution.ts";

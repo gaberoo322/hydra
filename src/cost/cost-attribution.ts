@@ -13,7 +13,7 @@
  * Interface of the Cost module; callers import from `../cost/index.ts`.
  */
 
-import { getDailyTokenCounter, todayDateString } from "./surrogate.ts";
+import { getDailyTokenCounter, getRollingTokenCounter, todayDateString } from "./surrogate.ts";
 import { DISPATCH_CLASSES, classBySkill } from "../taxonomy/classes.ts";
 import { InvariantViolationError } from "../errors.ts";
 
@@ -114,6 +114,13 @@ export interface CostByClassResult {
   totalTokens: number;
   /** Per-class breakdown keyed by CostClass; every class present, zeros included. */
   byClass: Record<CostClass, CostByClassEntry>;
+  /**
+   * Human-readable window label for the operator-facing view. For a single-date
+   * read it is the date string; for the default rolling read (issue #2427) it
+   * spells out the trailing-24h UTC span so the dashboard can label "today"
+   * honestly and a thin post-UTC-midnight sliver never reads a false 0%.
+   */
+  window: string;
 }
 
 /**
@@ -126,6 +133,7 @@ export interface CostByClassResult {
 export function projectCostByClass(
   bySkill: Array<{ skill: string; tokens: number }>,
   date: string,
+  window?: string,
 ): CostByClassResult {
   const byClass: Record<CostClass, CostByClassEntry> = {
     research: { tokens: 0, fraction: 0, skills: [] },
@@ -155,7 +163,7 @@ export function projectCostByClass(
     entry.skills.sort((a, b) => b.tokens - a.tokens);
   }
 
-  return { date, totalTokens, byClass };
+  return { date, totalTokens, byClass, window: window ?? date };
 }
 
 /**
@@ -170,4 +178,27 @@ export async function getCostByClass(dateOverride?: string): Promise<CostByClass
   const date = dateOverride || todayDateString();
   const counter = await getDailyTokenCounter(date);
   return projectCostByClass(counter.bySkill, counter.date);
+}
+
+/**
+ * Read the per-class cost breakdown over a rolling ~24h UTC window ending at
+ * `now` (issue #2427).
+ *
+ * This is the read the operator-facing "today" view should use: the surrogate
+ * stores per-UTC-day buckets only, so a single-day `getCostByClass()` taken
+ * just after UTC midnight covers a thin sliver and reads a false 0% for classes
+ * that demonstrably ran earlier in the operator's local day (the false
+ * "decide.py isn't dispatching" alarm #2427 was filed for). Folding the
+ * previous UTC day in via `getRollingTokenCounter` guarantees the at-a-glance
+ * number always spans the trailing ~24h regardless of where `now` falls inside
+ * the UTC day.
+ *
+ * Callers that want a specific calendar day (an explicit `?date=`) must use
+ * `getCostByClass(date)` — this function is exclusively the default-"today"
+ * path. The `window` field on the result spells out the span for honest
+ * labelling.
+ */
+export async function getRollingCostByClass(now: Date = new Date()): Promise<CostByClassResult> {
+  const counter = await getRollingTokenCounter(now);
+  return projectCostByClass(counter.bySkill, counter.date, counter.window);
 }

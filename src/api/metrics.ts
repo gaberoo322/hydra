@@ -11,6 +11,7 @@ import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import {
   getCostByClass,
+  getRollingCostByClass,
   getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,
@@ -151,12 +152,15 @@ export function createMetricsRouter() {
       const trend = await getMetricsTrend(count);
       const stats = await getAggregateStats(count);
       // Issue #1439: per-class cost attribution. Folded from the per-skill
-      // daily token surrogate (today UTC) so operators can answer "what
-      // fraction of spend does research vs dev vs QA consume?". Best-effort —
-      // a Redis hiccup yields an empty breakdown rather than failing /metrics.
+      // token surrogate over a rolling trailing-24h UTC window (issue #2427 —
+      // a single-UTC-day "today" read just after midnight shows a false 0% for
+      // classes that ran earlier in the operator's local day) so operators can
+      // answer "what fraction of spend does research vs dev vs QA consume?".
+      // Best-effort — a Redis hiccup yields an empty breakdown rather than
+      // failing /metrics.
       let costByClass: Awaited<ReturnType<typeof getCostByClass>> | null = null;
       try {
-        costByClass = await getCostByClass();
+        costByClass = await getRollingCostByClass();
       } catch (costErr: any) {
         console.error(`[api/metrics] costByClass projection failed: ${costErr?.message || costErr}`);
       }
@@ -282,15 +286,22 @@ export function createMetricsRouter() {
   // classes (research / dev-orch / dev-target / qa / cleanup / retro / other)
   // so the operator can see "QA is now 25% of daily spend" or "research
   // spiked today". The per-skill data already carries the class signal via
-  // the skill name — no new Redis write path. `?date=YYYY-MM-DD` optional.
+  // the skill name — no new Redis write path.
+  //
+  // Window semantics (issue #2427): with NO `?date=`, the default operator
+  // "today" view is a rolling ~24h UTC window (yesterday + today's buckets) so
+  // a read taken just after UTC midnight cannot show a false 0% for a class
+  // that demonstrably ran earlier in the operator's local day — the false
+  // "decide.py isn't dispatching" alarm this issue was filed for. An explicit
+  // `?date=YYYY-MM-DD` still reads exactly that single UTC calendar day.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   router.get(
     "/metrics/cost-by-class",
     aggregatorRouteNoQuery("api/metrics/cost-by-class", (req) => {
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
-      const date = parsedDate || todayDateString();
-      return getCostByClass(date);
+      // Explicit date → single-day read; default → rolling trailing-24h window.
+      return parsedDate ? getCostByClass(parsedDate) : getRollingCostByClass();
     }),
   );
 
