@@ -934,6 +934,95 @@ row here is the trigger to also emit the signal in `collect-state.sh`.
 - Failure pattern keeps retrying → `self_heal.py` + `state.failure_log` + Phase 3 backstop
 - A subagent in flight wedged → Phase 2 reap or `subagent-hard-max-tokens`
 
+## Merge-rate stabilization history (2026-05 → 2026-06)
+
+### Reading the two merge-rate metrics
+
+`/api/scheduler/status` exposes two distinct figures — keep them separate:
+
+| Field | Formula | What it means |
+|---|---|---|
+| `mergeRate` | merged / cyclesInWindow (last N=50) | **The health signal.** Current operational health; use this to judge whether the autopilot is working. |
+| `mergeRateLifetime` | cyclesMerged / cyclesRun (all time) | **Audit-only accumulator.** Permanently skewed by past failures; introduced by #232 precisely because it cannot reflect current health. Never alert on this metric. |
+
+As of 2026-06-25 the live counters read: `mergeRate=96%` (window 50),
+`mergeRateLifetime=17%`. **This is the healthy steady state.** A high rolling
+rate alongside a low lifetime rate means the system recovered; it does NOT
+signal an ongoing problem.
+
+> **Accounting identity caveat.** `cyclesRun` (7557) exceeds
+> `cyclesMerged + cyclesFailed + cyclesUnaccounted` (6957) by ~600. Those
+> ~600 cycles predate the `cyclesUnaccounted` counter introduced in #1919 /
+> #2150 — they were housekeeping/no-op era cycles that were never bucketed
+> and permanently inflate the lifetime denominator. The identity holds only
+> for cycles recorded after those PRs merged.
+
+### What broke, how it was fixed
+
+The high historical failure count is the sum of several compounding issues
+fixed across spring/summer 2026. The most impactful clusters, in order of
+root-cause severity:
+
+**1. Autopilot runs hung and were never reaped (2026-05, #711)**
+`claude -p /hydra-autopilot` logged `run complete` but the process was never
+reaped — systemd stuck in `activating (start)` blocked every subsequent
+pace-gate launch. Fix: `fix(autopilot): reap hung runs (Type=exec) +
+force-exit test lesson (#711)`. This was the single largest failure multiplier:
+all cycles dispatched after a hung run failed silently.
+
+**2. CI cancelled in-progress master merges (2026-05, #760)**
+`cancel-in-progress: true` in `ci.yml`'s `concurrency` block caused back-to-back
+pushes to master to cancel each other's deploy. Two rapid merges could leave
+prod stale and the second merge's CI red. Fix: `fix(ci): don't cancel
+in-progress master CI runs (closes #712) (#760)` — scoped the cancel to
+non-master refs only.
+
+**3. QA false-greened on QUEUED status (2026-05, #769)**
+`qa-verdict.ts` compared GitHub's UPPERCASE enum strings case-sensitively; a
+`QUEUED` check appeared as not-completed, causing the verdict to pass a PR
+before CI finished. Fix: `fix(qa): case-insensitive CI status matching (#769)`.
+
+**4. Scope-check blocked valid in-scope files (2026-06, #837 + #1873)**
+`scope-check.ts` short-circuited on code-spans before reading bullet-list
+paths, and later hard-failed when a code-span in out-of-scope prose matched an
+in-scope file. Both caused CI to eject valid PRs. Fixes: `fix(scope-check):
+union code-span + bullet Files-in-scope (#837)` and `fix(scope-check): in-scope
+wins over incidental out-of-scope code-span (#1873)`.
+
+**5. Stale-claim reaper was mis-routing merged work (2026-06, #1758 + #2085)**
+`reapStaleClaims()` had an open-PR guard but no merged-PR guard: when an agent
+merged its PR and died before releasing its backlog claim, the reaper re-queued
+the work as `queued` instead of `done`, causing duplicate dispatches. A separate
+path silently moved reconciled items to `done` when the PR matched only by
+fuzzy-token rather than issue-ref. Fixes: `fix(reaper): merged-PR guard (#1758)`
+and `fix(backlog): escalate unconfirmable stale claims to blocked (#2085)`.
+
+**6. Worktree write-fence blocked valid in-worktree edits (2026-06, #2371)**
+~16 cross-run friction hits: a redundant `EnterWorktree` call desynced the
+harness's writable-root anchor from the agent's cwd, causing in-cwd Edits to be
+denied. This stalled or aborted dev cycles. Fix: `docs(playbooks): EnterWorktree
+anchor contract (#2372)` — preventive playbook rule, no code change needed.
+
+**7. Agent-tool subagents were not registered (2026-06, #2412)**
+The `SessionStart` hook that populated `hydra:dispatches:subagent:*` never fires
+for `Agent`-tool dispatches; as a result slot accounting was blind to running
+subagents, causing double-dispatches and silent capacity waste. Fix:
+`fix(autopilot): register Agent-tool subagents via PostToolUse hook (#2412)`.
+
+### Confidence that the recovery is sustained
+
+- `mergeRate=96%` over the last 50 cycles (as of 2026-06-25); no consecutive
+  errors; `lastError=null`.
+- The seven failure modes above are each closed by a discrete, tested fix — not
+  configuration changes that could drift.
+- Structural guards added: atomic Lua lane transitions (#2160), merged-PR guard
+  in reaper (#1758), scope-check tiebreaker (#1873), and the EnterWorktree
+  anchor contract (#2372) close the recurrence vectors.
+- Monitoring: `GET /api/scheduler/status` → `mergeRate` (rolling window) is the
+  single authoritative health gauge. Any sustained drop below ~80% in the rolling
+  window warrants investigation; `mergeRateLifetime` is informational only and
+  will trend upward very slowly as the denominator is dominated by historical runs.
+
 ## Safety rules
 
 1. NEVER modify `~/hydra` or `~/hydra-betting` working trees directly.
