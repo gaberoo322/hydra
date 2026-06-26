@@ -226,6 +226,104 @@ __reap_session_should_post() {
   fi
 }
 
+# Issue #2479: capture a bounded log tail for crash_detail.log_tail. #1079
+# shipped the schema + read path but the writer only ever read the run log
+# (/tmp/hydra-autopilot-nightly.log). A session that crashes at STARTUP — the
+# observed network/socket failures (FailedToOpenSocket) with turns=0,
+# dispatches=0 — writes NOTHING to the run log before dying, so the tail came
+# back empty and log_tail was omitted: the run landed as `{exit_code: 1}` and
+# the real cause was only recoverable from journald out-of-band. This function
+# reads the run log first (the rich source when the session got far enough to
+# write it) and, when that yields nothing, FALLS BACK to the unit's journal
+# tail — the exact source the retro had to reach for by hand — so a
+# startup-crash's API error is durably captured.
+#
+# Reads/sets REAP_LOG_TAIL. Inputs: REAP_LOG_PATH (run log), REAP_STARTED_EPOCH
+# (scope the journal scan to THIS run, mirroring the session-limit scan), and
+# the test-injection knob HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL (stand in for the
+# journal read the harness can't poke, mirroring HYDRA_AUTOPILOT_REAP_SESSION_LINE).
+# Each source is capped to ~8 KB so the payload stays small; the server
+# (sanitizeCrashDetail) re-truncates defensively. Best-effort throughout: a
+# missing/unreadable log AND an unavailable journal yield an empty tail (the
+# caller then simply omits the field — never blocks the reap).
+__reap_capture_log_tail() {
+  REAP_LOG_TAIL=""
+  # 1. Run log straight off disk — last 120 lines, capped to ~8 KB.
+  if [ -r "${REAP_LOG_PATH:-}" ]; then
+    REAP_LOG_TAIL="$(tail -n 120 "${REAP_LOG_PATH}" 2>/dev/null | tail -c 8192 || echo "")"
+  fi
+  # 2. Journal fallback (issue #2479) — only when the run log gave us nothing,
+  # i.e. the startup-crash case the run log never captured. The injected knob
+  # wins (test harness); otherwise read THIS run's unit journal scoped to
+  # started_epoch so a stale prior-run tail cannot leak in, falling back to a
+  # bounded line window when the start epoch is unknown.
+  if [ -z "${REAP_LOG_TAIL}" ]; then
+    if [ -n "${HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL+set}" ]; then
+      # The knob is DEFINED (even if empty) — it is authoritative and fully
+      # stands in for the journal read, so the real journalctl is never invoked
+      # under test. An empty value pins the "no journal content available" case.
+      REAP_LOG_TAIL="$(printf '%s' "${HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL}" | tail -c 8192)"
+    elif command -v journalctl >/dev/null 2>&1; then
+      if [ -n "${REAP_STARTED_EPOCH:-}" ] && [ "${REAP_STARTED_EPOCH}" != "0" ]; then
+        REAP_LOG_TAIL="$(journalctl --user -u hydra-autopilot.service --since "@${REAP_STARTED_EPOCH}" --no-pager 2>/dev/null \
+          | tail -n 120 | tail -c 8192 || echo "")"
+      else
+        REAP_LOG_TAIL="$(journalctl --user -u hydra-autopilot.service -n 120 --no-pager 2>/dev/null \
+          | tail -c 8192 || echo "")"
+      fi
+    fi
+  fi
+}
+
+# Issue #1079 + #2479: assemble the structured crash_detail snapshot for an
+# abnormal exit. Reads REAP_CAUSE / REAP_EXIT_NUM / REAP_EXIT_CODE_KIND /
+# REAP_EXIT_STATUS (set by __reap_derive_cause) and captures the bounded log
+# tail via __reap_capture_log_tail (run log → journal fallback). Echoes the
+# crash_detail JSON object on stdout, or the literal `null` for a clean exit
+# (cause != crash/failure_backstop) that records no detail — keeping the field
+# a reliable "died badly" signal. Shared by the live --reap path and the
+# --reap-crash-detail dry-run so the test pins exactly the live assembly.
+__reap_build_crash_detail() {
+  if [ "${REAP_CAUSE}" != "crash" ] && [ "${REAP_CAUSE}" != "failure_backstop" ]; then
+    echo "null"
+    return 0
+  fi
+  # Signal name only when systemd reported a signal kill (EXIT_CODE=signal);
+  # REAP_EXIT_STATUS then holds the name (e.g. SEGV, KILL, ABRT). A numeric
+  # status is an exit *code*, not a signal name, so leave signal empty there —
+  # exit_code already carries it.
+  __rbcd_signal=""
+  if [ "${REAP_EXIT_CODE_KIND:-}" = "signal" ]; then
+    case "${REAP_EXIT_STATUS}" in
+      ''|*[!0-9]*) __rbcd_signal="${REAP_EXIT_STATUS}" ;;
+      *) __rbcd_signal="" ;;
+    esac
+  fi
+  __reap_capture_log_tail
+  jq -n \
+    --arg signal "${__rbcd_signal}" \
+    --argjson exit_code "${REAP_EXIT_NUM}" \
+    --arg log_tail "${REAP_LOG_TAIL}" \
+    '{exit_code: $exit_code}
+      + (if $signal == "" then {} else {signal: $signal} end)
+      + (if $log_tail == "" then {} else {log_tail: $log_tail} end)'
+}
+
+# Dry-run (issue #2479): echo the assembled crash_detail JSON for the current
+# $EXIT_CODE/$EXIT_STATUS plus injected log/journal inputs. No POST — purely the
+# crash_detail assembly + log_tail capture+fallback under test. Reads the same
+# REAP_LOG_PATH / REAP_STARTED_EPOCH / HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL env the
+# live --reap path uses, so a crafted run-log/journal can pin the startup-crash
+# fallback. Output: the crash_detail JSON object on stdout (or `null` for a
+# clean exit that records none).
+if [ "${1:-}" = "--reap-crash-detail" ]; then
+  REAP_LOG_PATH="${HYDRA_AUTOPILOT_LOG:-/tmp/hydra-autopilot-nightly.log}"
+  REAP_STARTED_EPOCH="${HYDRA_AUTOPILOT_REAP_STARTED_EPOCH:-0}"
+  __reap_derive_cause
+  __reap_build_crash_detail
+  exit 0
+fi
+
 # Dry-run: echo the derived (cause, exit_code) for the current
 # $EXIT_CODE/$EXIT_STATUS and exit. No state read, no POST — purely the
 # mapping under test. Output shape: `cause=<c> exit_code=<n>`.
@@ -350,6 +448,10 @@ if [ "${1:-}" = "--reap" ]; then
   # directly (the test harness can't poke the journal); when unset and the run
   # crashed we read THIS run's journal for the just-exited run. The cause-gate
   # decision is pinned by the `--reap-session-decision` dry-run above.
+  # Read this run's start epoch once — both the session-limit scan AND the
+  # issue #2479 crash_detail journal fallback scope their journal reads to it
+  # so a stale prior-run line cannot leak in.
+  REAP_STARTED_EPOCH="$(jq -r '.started_epoch // 0' "${REAP_STATE_PATH}" 2>/dev/null || echo 0)"
   REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
   if [ "${REAP_CAUSE}" = "crash" ]; then
     if [ -z "${REAP_SESSION_LINE}" ] && command -v journalctl >/dev/null 2>&1; then
@@ -357,7 +459,6 @@ if [ "${1:-}" = "--reap" ]; then
       # prior run cannot match. Fall back to the bounded tail only when the
       # start epoch is unavailable — still safe because the cause=crash gate
       # already holds. Newest match wins; the server-side regex is the real filter.
-      REAP_STARTED_EPOCH="$(jq -r '.started_epoch // 0' "${REAP_STATE_PATH}" 2>/dev/null || echo 0)"
       if [ -n "${REAP_STARTED_EPOCH}" ] && [ "${REAP_STARTED_EPOCH}" != "0" ]; then
         REAP_SESSION_LINE="$(journalctl --user -u hydra-autopilot.service --since "@${REAP_STARTED_EPOCH}" --no-pager 2>/dev/null \
           | grep -i 'hit your session limit' | tail -n 1 || echo "")"
@@ -385,41 +486,16 @@ if [ "${1:-}" = "--reap" ]; then
     echo "[autopilot] reap: clean exit (cause=${REAP_CAUSE}) — no session-limit block (issue #1130)"
   fi
 
-  # Issue #1079: for an abnormal exit (cause=crash / failure_backstop) capture
-  # a durable structured crash_detail so the run is drillable AFTER the
-  # ephemeral /log (.log.prev-bounded) + journal rotate. We can derive the
-  # signal name from EXIT_STATUS on a signal-kill and ship a bounded tail of
-  # the run log read straight off disk here — the server (endRun) persists it
-  # on the run hash and re-truncates defensively. A clean stop sends no
-  # crash_detail, keeping the field a reliable "died badly" signal.
-  REAP_CRASH_DETAIL_JSON="null"
-  if [ "${REAP_CAUSE}" = "crash" ] || [ "${REAP_CAUSE}" = "failure_backstop" ]; then
-    # Signal name only when systemd reported a signal kill (EXIT_CODE=signal);
-    # REAP_EXIT_STATUS (set by __reap_derive_cause) then holds the name (e.g.
-    # SEGV, KILL, ABRT). A numeric status is an exit *code*, not a signal name,
-    # so leave signal empty there — exit_code already carries it.
-    REAP_SIGNAL=""
-    if [ "${REAP_EXIT_CODE_KIND:-}" = "signal" ]; then
-      case "${REAP_EXIT_STATUS}" in
-        ''|*[!0-9]*) REAP_SIGNAL="${REAP_EXIT_STATUS}" ;;
-        *) REAP_SIGNAL="" ;;
-      esac
-    fi
-    # Bounded log tail straight off disk — last 120 lines of the run log,
-    # capped to ~8 KB so the payload stays small. Best-effort: a missing /
-    # unreadable log yields an empty tail (the server simply omits the field).
-    REAP_LOG_TAIL=""
-    if [ -r "${REAP_LOG_PATH}" ]; then
-      REAP_LOG_TAIL="$(tail -n 120 "${REAP_LOG_PATH}" 2>/dev/null | tail -c 8192 || echo "")"
-    fi
-    REAP_CRASH_DETAIL_JSON="$(jq -n \
-      --arg signal "${REAP_SIGNAL}" \
-      --argjson exit_code "${REAP_EXIT_NUM}" \
-      --arg log_tail "${REAP_LOG_TAIL}" \
-      '{exit_code: $exit_code}
-        + (if $signal == "" then {} else {signal: $signal} end)
-        + (if $log_tail == "" then {} else {log_tail: $log_tail} end)')"
-  fi
+  # Issue #1079 + #2479: for an abnormal exit (cause=crash / failure_backstop)
+  # capture a durable structured crash_detail so the run is drillable AFTER the
+  # ephemeral /log (.log.prev-bounded) + journal rotate. __reap_build_crash_detail
+  # derives the signal name from EXIT_STATUS on a signal-kill and ships a bounded
+  # log tail — run log first, then the unit journal (issue #2479) when the run log
+  # is empty (the startup-crash case, where the session died before writing the
+  # run log and the real API error lives only in journald). The server (endRun)
+  # persists it on the run hash and re-truncates defensively. A clean stop sends
+  # no crash_detail, keeping the field a reliable "died badly" signal.
+  REAP_CRASH_DETAIL_JSON="$(__reap_build_crash_detail)"
 
   REAP_PAYLOAD="$(jq -n \
     --arg run_id "${REAP_RUN_ID}" \
