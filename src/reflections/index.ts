@@ -102,6 +102,16 @@ export interface LoadReflectionsDeps {
  * `combined: { content: "", count: 0 }` so a caller can graceful-degrade to a
  * no-op injection — matching the live `/api/reflections` miss contract.
  *
+ * Issue #2467: that `count: 0` total-miss is the HONEST steady state, not a
+ * bug. The per-anchor store is written ONLY on a non-merged failure, so a
+ * high-merge-rate run structurally serves nothing here — which is exactly why
+ * the downstream `reflectionMatchSource` cycle metric reads `none`
+ * (`deriveReflectionMatchSource("") === "none"`). This coordinator therefore
+ * MUST NOT fabricate a non-empty block from an empty store; the
+ * `GET /learning/reflection-health` surface (src/api/learning.ts) exists to
+ * make that honest-none distinguishable from a genuinely-broken deposit at the
+ * observability layer, rather than papering over it here.
+ *
  * The `deps` bag is for testing only; production callers omit it.
  */
 export async function loadReflectionsForAnchor(
