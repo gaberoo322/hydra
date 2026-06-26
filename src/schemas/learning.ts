@@ -50,3 +50,17 @@ export const ContextTraceQuerySchema = z.object({
   type: z.string().trim().min(1),
   files: z.string().optional(),
 });
+
+/**
+ * `GET /learning/reflection-health?count=N` (issue #2467).
+ *
+ * The window-size pager for the reflection-deposit observability surface. The
+ * wire param is named `count`; it REUSES `countQuerySchema`'s coercion
+ * (`parseInt(...) || N`, clamped to `[1, max]`) with the route's default (20,
+ * matching `getMetricsTrend`'s default window) and cap (200). Garbage / absent
+ * / out-of-range values collapse to the default exactly like the rule-action
+ * pager above. Non-strict so any other query param is ignored.
+ */
+export const ReflectionHealthQuerySchema = z.object({
+  count: countQuerySchema(20, 200).shape.count,
+});
