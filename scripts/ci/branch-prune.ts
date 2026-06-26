@@ -102,6 +102,25 @@ export interface BranchRow {
    * Null/absent = unknown age = conservative skip, never delete.
    */
   ageSeconds?: number | null;
+  /**
+   * The SHORT name of the upstream ref this branch tracks, e.g. `origin/master`
+   * or `origin/issue-443-foo` (caller-computed from
+   * `git for-each-ref --format='%(upstream:short)'`, equivalently
+   * `git config branch.<name>.merge`). Null/absent = no configured upstream OR
+   * the caller did not collect it.
+   *
+   * The master-tracking-orphan GC (issue #2459) keys on this. A dispatch branch
+   * created via `git worktree add` / `checkout -b` that INHERITED `origin/master`
+   * as its upstream (rather than tracking `origin/<own-name>`) and was never
+   * pushed under its own name has a LIVE, non-`[gone]` upstream forever —
+   * `origin/master` is the most-alive ref in the repo, so `git fetch --prune`
+   * can never flip it to `[gone]`, there is no `origin/<own-name>` ref to prune,
+   * and the name was never a PR head. Passes 1, 3 and 4 therefore skip it
+   * permanently. The distinguishing signal is upstream-tracks-a-FOREIGN-branch:
+   * the tracked ref's branch name (the segment after the remote prefix) differs
+   * from the local branch's own name. See {@link tracksForeignUpstream}.
+   */
+  upstreamRef?: string | null;
 }
 
 export type PruneAction =
@@ -1308,6 +1327,347 @@ export function renderMergedRemoteReport(buckets: MergedRemoteBuckets, auditOnly
   lines.push("");
 
   lines.push("#### Skipped — merged-remote GC");
+  if (buckets.skip.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const s of buckets.skip) {
+      lines.push(`- ${s.row.name}: ${s.reason}`);
+    }
+  }
+
+  if (buckets.cappedOut) {
+    lines.push("");
+    lines.push(`> Hit per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}). Remaining candidates will be picked up on the next run.`);
+  }
+
+  return lines.join("\n");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Master-tracking-orphan GC (issue #2459)
+//
+// The fifth, structurally-distinct accumulation source the first four passes
+// ALL miss: a dispatch branch whose configured upstream is a FOREIGN branch —
+// almost always `origin/master` — rather than `origin/<its-own-name>`. A
+// snapshot on 2026-06-25 found 108 surviving `worktree-agent-*` branches, of
+// which ~104 show `[origin/master: ahead N, behind M]` under `git branch -vv`.
+// They were created via `git worktree add` / `checkout -b` INHERITING
+// `origin/master` as upstream, the harness then opened the PR under a DIFFERENT
+// branch name, and the worktree-agent-* branch was never pushed under its own
+// name. The consequence:
+//
+//   - `origin/master` is the most-alive ref in the repo, so the upstream can
+//     NEVER go `[gone]` (`git fetch --prune` has nothing to prune — there is no
+//     `origin/worktree-agent-<hash>` remote ref at all):
+//       · pass 1 (classifyBranch)      → skip-not-gone (upstream is healthy)
+//       · pass 3 (classifyDeadBranch)  → skip-has-upstream (it HAS an upstream)
+//   - the name was never a PR head, so `gh pr list --head <name>` is empty:
+//       · pass 4 (classifyMergedRemote) → skip-pr-unresolved (no merge signal)
+//
+// All four passes skip them PERMANENTLY. classifyMasterTrackingOrphan closes
+// the gap on the same never-touch-first rails as the other four passes, with
+// ONE new distinguishing predicate — the upstream tracks a foreign branch
+// ({@link tracksForeignUpstream}) — and ONE new caller-supplied input
+// ({@link BranchRow.upstreamRef}).
+//
+// Local-only invariant (ADR-0005): this pass deletes the LOCAL branch only.
+// (There is no `origin/<name>` ref to touch — that is precisely why the branch
+// accumulates — so the local-only envelope is naturally airtight here.)
+//
+// Safety asymmetry vs the merged-remote pass: this pass has NO positive merge
+// signal to lean on (the branch never had a PR), so the open-PR-head set is
+// used as a NEGATIVE guard (skip if the name IS an open-PR head — a
+// worktree-agent-* branch heading an open PR is rare but real under the modern
+// flow), and a missing/unauthenticated `gh` degrades that guard to empty —
+// the LESS-safe direction. The 6h age floor + no-attached-worktree + dead-PID
+// rails therefore stand as independent backstops, exactly as the dead-branch
+// GC (#1784) does for the same gh-absent case.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Strip the remote prefix off a tracked upstream short-name, returning just the
+ * branch segment. `origin/master` → `master`; `upstream/feature/x` →
+ * `feature/x`; a bare `master` (no slash) → `master`. Null/empty → null.
+ *
+ * We split on the FIRST slash only: a remote name never contains a slash, but a
+ * branch name can (`feature/x`), so everything after the first slash is the
+ * tracked branch name.
+ */
+export function upstreamBranchName(upstreamRef: string | null | undefined): string | null {
+  if (!upstreamRef) return null;
+  const slash = upstreamRef.indexOf("/");
+  if (slash < 0) return upstreamRef; // no remote prefix — treat the whole thing as the branch name
+  return upstreamRef.slice(slash + 1);
+}
+
+/**
+ * Predicate: does this branch track a FOREIGN upstream — i.e. an upstream whose
+ * branch segment differs from the branch's own name? `worktree-agent-abc`
+ * tracking `origin/master` → true (foreign); `issue-443-foo` tracking
+ * `origin/issue-443-foo` → false (self). A branch with no configured upstream,
+ * or whose upstream the caller did not collect, → false (not a candidate — the
+ * other four passes own the no-upstream / no-info cases).
+ *
+ * This is the SOLE signal that distinguishes a master-tracking dispatch orphan
+ * from a genuine `origin/<own-name>`-tracking work branch, so the pass keys on
+ * it exclusively.
+ */
+export function tracksForeignUpstream(row: BranchRow): boolean {
+  if (!row.hasUpstream) return false;
+  const tracked = upstreamBranchName(row.upstreamRef);
+  if (tracked === null) return false;
+  return tracked !== row.name;
+}
+
+export type MasterTrackingOrphanAction =
+  | "delete-branch-master-tracking-orphan"
+  | "skip-no-upstream"
+  | "skip-gone"
+  | "skip-self-tracking"
+  | "skip-not-dispatch-branch"
+  | "skip-current-branch"
+  | "skip-live-agent"
+  | "skip-open-pr-head"
+  | "skip-attached-worktree"
+  | "skip-too-young"
+  | "skip-cap";
+
+export interface MasterTrackingOrphanResult {
+  action: MasterTrackingOrphanAction;
+  reason: string;
+}
+
+export interface MasterTrackingOrphanContext {
+  /** Branch the orchestrator is currently sitting on — never deleted. */
+  currentBranch: string;
+  /** Worktrees parsed from `git worktree list --porcelain` (with lock PIDs). */
+  worktrees: readonly WorktreeRow[];
+  /** Live-PID predicate — true iff the given PID is currently running. */
+  isLivePid: LivePidCheck;
+  /**
+   * Set of branch names that head an OPEN PR. Used here as a NEGATIVE guard:
+   * unlike the merged-remote pass (#2029) this pass has no positive merge
+   * signal, so a master-tracking branch that nonetheless heads an open PR is
+   * preserved. Built from `gh pr list --json headRefName`; a missing/
+   * unauthenticated `gh` degrades to an EMPTY set — the LESS-safe direction —
+   * so the dispatch-name + dead-PID + no-attached-worktree + age rails stand as
+   * independent backstops.
+   */
+  openPrHeads: ReadonlySet<string>;
+  /**
+   * Minimum branch age (seconds) before deletion — the same shared floor as the
+   * other passes (caller passes {@link DEFAULT_WORKTREE_MIN_AGE_SECONDS}).
+   * Age = seconds since the ref was last updated (reflog tail / tip committer
+   * date), caller-computed. Unknown age = conservative skip.
+   */
+  minAgeSeconds: number;
+  /** Optional injected counter — shares the per-run hard cap with the other passes. */
+  deletionCount?: () => number;
+}
+
+/**
+ * Classify a single branch row for the master-tracking-orphan GC. Pure — no I/O.
+ *
+ * Decision order (highest priority first), never-touch-first like the other
+ * four passes:
+ *
+ *  1. Branch has NO upstream                          → skip-no-upstream
+ *     (the dead-branch GC owns never-pushed branches)
+ *  2. Branch upstream is `[gone]`                      → skip-gone
+ *     (pass 1 owns gone-upstream branches)
+ *  3. Branch tracks its OWN `origin/<name>`            → skip-self-tracking
+ *     (a genuine work branch — passes 1/4 own it; never touch it here)
+ *  4. Branch is the current branch                     → skip-current-branch
+ *  5. Name is not dispatch-shaped                      → skip-not-dispatch-branch
+ *  6. We already hit the per-run hard cap              → skip-cap
+ *  7. Attached worktree held by a live PID             → skip-live-agent
+ *  8. Branch heads an OPEN PR                          → skip-open-pr-head
+ *     (negative guard — no positive merge signal exists for this pass)
+ *  9. Attached worktree (dead/no PID)                  → skip-attached-worktree
+ *     (the worktree-orphan GC deletes worktree + branch together)
+ * 10. Branch younger than the age floor / unknown age  → skip-too-young
+ * 11. Otherwise                                        → delete-branch-master-tracking-orphan
+ *
+ * The foreign-upstream test (step 3's inverse) is the SOLE predicate that
+ * distinguishes this pass from a no-op: a branch that self-tracks
+ * `origin/<own-name>` is a genuine work branch and is surfaced as the precise
+ * `skip-self-tracking`, never reaped here.
+ */
+export function classifyMasterTrackingOrphan(
+  row: BranchRow,
+  ctx: MasterTrackingOrphanContext,
+): MasterTrackingOrphanResult {
+  if (!row.hasUpstream) {
+    return {
+      action: "skip-no-upstream",
+      reason: `${row.name} has no upstream — the dead-branch GC owns never-pushed branches.`,
+    };
+  }
+
+  if (row.upstreamGone) {
+    return {
+      action: "skip-gone",
+      reason: `${row.name} upstream is [gone] — the [gone] pass owns it.`,
+    };
+  }
+
+  if (!tracksForeignUpstream(row)) {
+    const tracked = upstreamBranchName(row.upstreamRef);
+    return {
+      action: "skip-self-tracking",
+      reason: `${row.name} tracks ${tracked ? `origin/${tracked}` : "its own upstream"} (self-tracking work branch) — not a master-tracking orphan; passes 1/4 own it.`,
+    };
+  }
+
+  if (row.isCurrent || row.name === ctx.currentBranch) {
+    return {
+      action: "skip-current-branch",
+      reason: `${row.name} is the current branch — refusing to delete.`,
+    };
+  }
+
+  if (!isDispatchBranchName(row.name)) {
+    return {
+      action: "skip-not-dispatch-branch",
+      reason: `${row.name} does not match a dispatch-generated name pattern — never auto-delete operator branches (even ones that track origin/master).`,
+    };
+  }
+
+  if (ctx.deletionCount && ctx.deletionCount() >= HARD_CAP_DELETIONS_PER_RUN) {
+    return {
+      action: "skip-cap",
+      reason: `Per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}) reached — refusing to delete more.`,
+    };
+  }
+
+  const wt = ctx.worktrees.find((w) => w.branch === row.name) ?? null;
+
+  if (wt && wt.lockedByPid !== null && ctx.isLivePid(wt.lockedByPid)) {
+    return {
+      action: "skip-live-agent",
+      reason: `${row.name} is checked out in worktree ${wt.path} held by live PID ${wt.lockedByPid} — leave for next run.`,
+    };
+  }
+
+  if (ctx.openPrHeads.has(row.name)) {
+    return {
+      action: "skip-open-pr-head",
+      reason: `${row.name} is the head of an open PR — preserve until the PR closes (negative guard; this pass has no positive merge signal).`,
+    };
+  }
+
+  if (wt) {
+    return {
+      action: "skip-attached-worktree",
+      reason: `${row.name} is checked out in worktree ${wt.path} — the worktree-orphan GC owns attached worktrees (it deletes worktree and branch together).`,
+    };
+  }
+
+  // Age floor — the LAST gate, mirroring the other passes. Unknown age is
+  // treated conservatively as too-young: never delete a ref we know nothing
+  // about.
+  if (row.ageSeconds === null || row.ageSeconds === undefined || row.ageSeconds < ctx.minAgeSeconds) {
+    const ageNote =
+      row.ageSeconds === null || row.ageSeconds === undefined ? "unknown age" : `${row.ageSeconds}s old`;
+    return {
+      action: "skip-too-young",
+      reason: `${row.name} tracks a foreign upstream but the ref is ${ageNote}, under the ${ctx.minAgeSeconds}s floor — defer in case it is an in-flight dispatch.`,
+    };
+  }
+
+  return {
+    action: "delete-branch-master-tracking-orphan",
+    reason: `${row.name} is a master-tracking dispatch orphan (tracks ${upstreamBranchName(row.upstreamRef) ? `origin/${upstreamBranchName(row.upstreamRef)}` : "a foreign branch"}, never pushed under its own name, no open PR, no attached worktree, ${row.ageSeconds}s old) — delete LOCAL branch.`,
+  };
+}
+
+export interface MasterTrackingOrphanBuckets {
+  /** Local branches to delete (`git branch -D`). No remote ref exists to touch. */
+  deleteBranch: BranchRow[];
+  /**
+   * Skipped candidates with their reasons. `skip-no-upstream`, `skip-gone` and
+   * `skip-self-tracking` rows are dropped silently — passes 1/3/4 already report
+   * the upstream-bearing branches, and self-tracking branches are simply not
+   * this pass's concern, so listing every one would drown the report.
+   */
+  skip: Array<{ row: BranchRow; action: MasterTrackingOrphanAction; reason: string }>;
+  /** True iff any candidate was deferred because the hard cap was reached. */
+  cappedOut: boolean;
+}
+
+/**
+ * Classify a batch of branch rows for the master-tracking-orphan GC. Maintains a
+ * running deletion counter seeded with `priorDeletions` (the other passes'
+ * deletion counts) so the 250-deletion hard cap spans ALL passes in a single
+ * run. Input order is preserved within each bucket.
+ */
+export function classifyMasterTrackingOrphans(
+  rows: readonly BranchRow[],
+  ctx: Omit<MasterTrackingOrphanContext, "deletionCount"> & { priorDeletions?: number },
+): MasterTrackingOrphanBuckets {
+  const buckets: MasterTrackingOrphanBuckets = {
+    deleteBranch: [],
+    skip: [],
+    cappedOut: false,
+  };
+
+  let localDeletions = 0;
+  const prior = ctx.priorDeletions ?? 0;
+  const ctxWithCounter: MasterTrackingOrphanContext = {
+    ...ctx,
+    deletionCount: () => prior + localDeletions,
+  };
+
+  for (const row of rows) {
+    const r = classifyMasterTrackingOrphan(row, ctxWithCounter);
+    switch (r.action) {
+      case "delete-branch-master-tracking-orphan":
+        buckets.deleteBranch.push(row);
+        localDeletions++;
+        break;
+      case "skip-no-upstream":
+      case "skip-gone":
+      case "skip-self-tracking":
+        /* intentional: passes 1/3/4 already report upstream-bearing branches; self-tracking branches are not this pass's concern */
+        break;
+      case "skip-cap":
+        buckets.cappedOut = true;
+        buckets.skip.push({ row, action: r.action, reason: r.reason });
+        break;
+      default:
+        buckets.skip.push({ row, action: r.action, reason: r.reason });
+        break;
+    }
+  }
+
+  return buckets;
+}
+
+/**
+ * Render the master-tracking-orphan GC section of the report. Pure —
+ * deterministic. Appended below the merged-remote section so a single run shows
+ * all five passes.
+ */
+export function renderMasterTrackingOrphanReport(
+  buckets: MasterTrackingOrphanBuckets,
+  auditOnly: boolean,
+): string {
+  const verb = auditOnly ? "Would delete" : "Deleted";
+  const lines: string[] = [];
+  lines.push("### Master-tracking-orphan GC (issue #2459)");
+  lines.push("");
+
+  lines.push(`#### ${verb} (dispatch branches tracking origin/master, never pushed under their own name)`);
+  if (buckets.deleteBranch.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const r of buckets.deleteBranch) {
+      lines.push(`- ${r.name}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("#### Skipped — master-tracking-orphan GC");
   if (buckets.skip.length === 0) {
     lines.push("- _none_");
   } else {
