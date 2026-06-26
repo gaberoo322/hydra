@@ -159,6 +159,56 @@ function reapSessionDecision(exitCode: string, exitStatus: string, sessionLine: 
   return { cause: m?.[1] ?? "", post: m?.[2] ?? "", stdout };
 }
 
+/**
+ * Invoke `bootstrap.sh --reap-crash-detail` (issue #2479) with a simulated exit
+ * environment + an injected run-log path and journal-tail fallback, returning the
+ * parsed crash_detail JSON the live --reap path would POST. This pins the
+ * log_tail capture+fallback: the run log is read first, and when it yields
+ * nothing the unit journal tail (injected here) fills log_tail — the startup-crash
+ * case #1079's writer never covered (the run landed as `{exit_code: N}` with the
+ * real API error only in journald). A clean exit echoes the literal `null`.
+ *
+ * Sets HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL empty by default so the dry-run never
+ * shells out to a real journalctl during tests.
+ */
+function reapCrashDetail(
+  exitCode: string,
+  exitStatus: string,
+  opts: { logContents?: string; journalTail?: string } = {},
+): { status: number; detail: unknown; stdout: string } {
+  const tmp = makeTempState();
+  try {
+    const logPath = join(tmp.dir, "nightly.log");
+    // Always create the log file; empty contents simulate the startup-crash
+    // (session died before writing the run log) that forces the journal fallback.
+    writeFileSync(logPath, opts.logContents ?? "");
+    const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-crash-detail"], {
+      env: {
+        ...process.env,
+        EXIT_CODE: exitCode,
+        EXIT_STATUS: exitStatus,
+        HYDRA_AUTOPILOT_LOG: logPath,
+        // Inject the journal tail directly — the test harness can't poke a real
+        // journal, mirroring HYDRA_AUTOPILOT_REAP_SESSION_LINE. Empty string =>
+        // no journal fallback content available.
+        HYDRA_AUTOPILOT_REAP_JOURNAL_TAIL: opts.journalTail ?? "",
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    const stdout = (result.stdout ?? "").trim();
+    let detail: unknown = null;
+    try {
+      detail = JSON.parse(stdout);
+    } catch {
+      detail = stdout; // surface raw text on a parse failure so the assertion is legible
+    }
+    return { status: result.status ?? -1, detail, stdout };
+  } finally {
+    rmSync(tmp.dir, { recursive: true, force: true });
+  }
+}
+
 const SESSION_LIMIT_LINE =
   "You've hit your session limit · resets 7:50pm (America/Los_Angeles)";
 
@@ -676,6 +726,74 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Issue #2479: crash_detail.log_tail must be FILLED on a crash, not just an
+ * `{exit_code: N}` shell. #1079 shipped the schema + read path but the reaper
+ * only ever read the run log — so a STARTUP crash (network/socket failure,
+ * turns=0, dispatches=0) that died before writing the run log landed with no
+ * log_tail, and the real API error was recoverable only from journald
+ * out-of-band. The fix reads the run log first, then falls back to the unit
+ * journal tail. These dry-run tests pin the assembled crash_detail the live
+ * --reap POST path sends.
+ */
+describe("scripts/autopilot/bootstrap.sh --reap-crash-detail (issue #2479)", () => {
+  test("crash with run-log present captures it as log_tail", () => {
+    const log = "turn 1: dispatched dev_orch\nAPI Error: something blew up\nfinal line";
+    const r = reapCrashDetail("exited", "1", { logContents: log });
+    assert.equal(r.status, 0, `dry-run exited non-zero: ${r.stdout}`);
+    const d = r.detail as Record<string, unknown>;
+    assert.equal(d.exit_code, 1);
+    assert.equal(d.log_tail, log, "run-log contents must populate log_tail");
+    assert.equal(d.signal, undefined, "no signal field on a non-signal exit");
+  });
+
+  test("STARTUP crash (empty run-log) falls back to the journal tail", () => {
+    // The #2479 failure mode: the session crashed before writing the run log,
+    // so log_tail was empty and the run was un-drillable. The journal fallback
+    // must fill it with the real API error.
+    const journal =
+      "hydra-pace-gate: eligible — exec'ing autopilot session\n" +
+      "API Error: Unable to connect to API (FailedToOpenSocket)";
+    const r = reapCrashDetail("exited", "1", { logContents: "", journalTail: journal });
+    assert.equal(r.status, 0, `dry-run exited non-zero: ${r.stdout}`);
+    const d = r.detail as Record<string, unknown>;
+    assert.equal(d.exit_code, 1);
+    assert.equal(
+      d.log_tail,
+      journal,
+      "an empty run-log must trigger the journal-tail fallback so the crash is drillable",
+    );
+  });
+
+  test("run-log wins over the journal fallback when both are available", () => {
+    const log = "real run output line";
+    const journal = "stale journal noise that should NOT be used";
+    const r = reapCrashDetail("exited", "1", { logContents: log, journalTail: journal });
+    const d = r.detail as Record<string, unknown>;
+    assert.equal(d.log_tail, log, "the richer run-log source is preferred over the journal");
+  });
+
+  test("signal-kill crash records the signal name alongside log_tail", () => {
+    const r = reapCrashDetail("signal", "SEGV", { logContents: "boom" });
+    const d = r.detail as Record<string, unknown>;
+    assert.equal(d.signal, "SEGV", "a signal kill records the signal name");
+    assert.equal(d.log_tail, "boom");
+  });
+
+  test("clean exit records NO crash_detail (stays a 'died badly' signal)", () => {
+    const r = reapCrashDetail("exited", "0", { logContents: "irrelevant" });
+    assert.equal(r.detail, null, "a clean exit must echo null — no crash_detail persisted");
+  });
+
+  test("crash with no run-log AND no journal omits log_tail (best-effort, never blocks)", () => {
+    const r = reapCrashDetail("exited", "1", { logContents: "", journalTail: "" });
+    assert.equal(r.status, 0, `dry-run exited non-zero: ${r.stdout}`);
+    const d = r.detail as Record<string, unknown>;
+    assert.equal(d.exit_code, 1, "exit_code is still recorded");
+    assert.equal(d.log_tail, undefined, "no source available => log_tail omitted, not empty-string");
   });
 });
 
