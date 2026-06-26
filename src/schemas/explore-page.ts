@@ -27,7 +27,7 @@ import { z } from "zod";
  * hash. Closed set so the dashboard can render a coloured chip without
  * re-bucketing. `unknown` covers historical rows pre-dating outcome stamping.
  */
-export const AutopilotRunOutcomeSchema = z.enum([
+const AutopilotRunOutcomeSchema = z.enum([
   "success",
   "failure",
   "aborted",
@@ -42,7 +42,7 @@ export type AutopilotRunOutcome = z.infer<typeof AutopilotRunOutcomeSchema>;
  * uses a z-score against the rolling baseline for each series; the metric
  * is the discriminator the dashboard uses to badge each item.
  */
-export const AnomalyMetricSchema = z.enum([
+const AnomalyMetricSchema = z.enum([
   "token-burn-rate",
   "abandonment-rate",
   "dispatch-class-failure-rate",
@@ -56,7 +56,7 @@ export type AnomalyMetric = z.infer<typeof AnomalyMetricSchema>;
  * BELOW (e.g. abandonment-rate suddenly collapsed). Both are anomalies but
  * the dashboard renders them differently.
  */
-export const AnomalyDirectionSchema = z.enum(["high", "low"]);
+const AnomalyDirectionSchema = z.enum(["high", "low"]);
 
 export type AnomalyDirection = z.infer<typeof AnomalyDirectionSchema>;
 
