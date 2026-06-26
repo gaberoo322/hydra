@@ -91,14 +91,16 @@ export { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts"
 // Cadence constants (issue #2461)
 // ---------------------------------------------------------------------------
 //
-// Exported so individual chore files and tests can reference named constants
-// instead of computing `7 * 24 * 60 * 60 * 1000` inline. Previously these
-// lived only as local `const` inside `runHousekeeping`, making them invisible
-// to the chore files that needed them (the guard period is the chore's
-// semantic, not the registry's).
-export const HOUR_MS = 60 * 60 * 1000;
-export const DAY_MS = 24 * HOUR_MS;
-export const WEEK_MS = 7 * DAY_MS;
+// Module-private named constants so the cadence guards in `runHousekeeping`
+// read `WEEK_MS`/`DAY_MS` instead of computing `7 * 24 * 60 * 60 * 1000`
+// inline. Previously `export`ed (issue #2461) on the theory that chore files
+// and tests would reference them, but no module ever imported them from this
+// path — the chore files receive their guard period as a `choreGuard(getter,
+// periodMs)` argument composed here, so the `export` was dead surface (issue
+// #2469). Re-export them only if a future chore file genuinely needs the values.
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const WEEK_MS = 7 * DAY_MS;
 
 /**
  * Canonical cadence-check for a time-guarded chore (issue #2461).
@@ -252,8 +254,8 @@ async function runHousekeeping(
   // Issue #2461: guards now use `choreGuard(getter, periodMs)` — a single
   // canonical cadence-check — instead of the repeated inline
   // `!lastTs || Date.now() - parseInt(lastTs) >= periodMs` pattern. Period
-  // constants (`WEEK_MS`, `DAY_MS`) are module-level exports rather than
-  // function-local consts so chore files can reference them directly.
+  // constants (`WEEK_MS`, `DAY_MS`) are module-private consts hoisted above
+  // `runHousekeeping` so the guards read a named cadence instead of inline math.
   const chores: Chore[] = [
     {
       name: "blocked-escalation",
