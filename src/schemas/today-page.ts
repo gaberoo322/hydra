@@ -49,7 +49,7 @@ export const OvernightSummaryQuerySchema = z
  * Keeping this as a discriminated string (not a number) so the dashboard
  * can render a colored chip directly without re-thresholding.
  */
-export const HeadroomLevelSchema = z.enum(["green", "yellow", "red", "unknown"]);
+const HeadroomLevelSchema = z.enum(["green", "yellow", "red", "unknown"]);
 
 export type HeadroomLevel = z.infer<typeof HeadroomLevelSchema>;
 
@@ -99,7 +99,7 @@ export type OvernightSummaryResponse = z.infer<typeof OvernightSummaryResponseSc
  * whether an item came from the overnight decision-queue digest issue, the
  * persistent `ready-for-human` label, or the `needs-info` waiting lane.
  */
-export const DecisionItemSourceSchema = z.enum([
+const DecisionItemSourceSchema = z.enum([
   "operator-decision-queue",
   "ready-for-human",
   "needs-info",
