@@ -114,7 +114,7 @@ export function parseWorktreeList(
 /** Live-PID predicate — true iff the given PID is currently running on this host. */
 export type LivePidCheck = (pid: number) => boolean;
 
-export type OrphanAction =
+type OrphanAction =
   | "delete-orphan-worktree"
   | "skip-main-worktree"
   | "skip-current-worktree"
