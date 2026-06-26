@@ -11,6 +11,14 @@ import { cleanWorkQueue } from "./redis/work-queue.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { gitExec } from "./github/git.ts";
 import { isGhFailure, isGhOk } from "./github/exec.ts";
+import {
+  parseWorktreeList,
+  classifyOrphanWorktree,
+  DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+  type WorktreeRow,
+} from "./worktree-orphan.ts";
+import { statSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { startConsumers } from "./notification-consumer.ts";
 import { slotEventsBridgeConsumer } from "./autopilot/slot-events-bridge.ts";
 import { recsEngineConsumer } from "./autopilot/recommendation-consumer.ts";
@@ -61,6 +69,132 @@ function stopObservabilityBridges(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Startup orphan-worktree prune (issue #2465, recurrence of #2115)
+//
+// A code-writing dispatch into the target project runs in a `/dev/shm`
+// worktree. When that dispatch crashes / exits uncleanly the worktree dir AND
+// its `.git/worktrees/<id>` registry entry survive, with the feature branch
+// still checked out there. The startup `git branch -D` sweep below then fails
+// closed — git refuses to delete a branch a registered worktree still holds —
+// so stale feature branches accumulate over every boot.
+//
+// This pass reclaims the ORPHANED worktree dirs first, so the subsequent
+// `git branch -D` loop succeeds. It reuses the SAME liveness classifier the
+// hydra-branch-prune skill encodes (scripts/ci/branch-prune.ts) rather than
+// hand-rolling an `rm -rf` of a dispatch dir:
+//   - never reclaims a worktree held by a live agent PID (lock-file `(pid N)`),
+//   - never reclaims one under the 6h age floor (an in-flight dispatch that
+//     simply hasn't taken its lock yet looks identical to a crashed orphan),
+//   - never touches the main working tree.
+// `git worktree remove --force` unregisters the entry AND removes the dir; the
+// trailing `git worktree prune` reclaims any registry entry whose dir already
+// vanished. Best-effort and never-throwing — a prune fault must never block
+// server.listen (it runs inside the same try/catch envelope as the branch
+// sweep). Idempotent: a second run no-ops (the dir/entry are already gone).
+// ---------------------------------------------------------------------------
+
+/** Live-PID predicate — mirrors scripts/ci/branch-prune-runner.ts::isLivePid. */
+function isLivePid(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    // EPERM means the process exists but we can't signal it — treat as live.
+    return err && err.code === "EPERM";
+  }
+}
+
+/**
+ * Reclaim orphaned `/dev/shm/hydra-worktrees/` worktrees in the target
+ * workspace so the stale-branch sweep can delete their feature branches.
+ * Returns the count reclaimed (0 on any non-orphan / unreachable state).
+ */
+async function pruneOrphanedTargetWorktrees(
+  workspace: string,
+  gitOpts: { cwd: string; timeout: number },
+): Promise<number> {
+  // Locate the common git dir so we can read each worktree's lock-file body
+  // (`<commonDir>/worktrees/<id>/locked`), whose `(pid N)` token feeds the
+  // live-agent guard. `git worktree list --porcelain` does not carry the PID.
+  const commonDirRes = await gitExec(["rev-parse", "--git-common-dir"], gitOpts);
+  if (isGhFailure(commonDirRes)) {
+    console.error(`[Hydra] Startup worktree prune: 'git rev-parse --git-common-dir' failed (${commonDirRes.code}) — skipping`);
+    return 0;
+  }
+  let commonDir = commonDirRes.data.stdout.trim();
+  if (!commonDir) return 0;
+  // A relative `.git` resolves against the workspace cwd.
+  if (!commonDir.startsWith("/")) commonDir = join(workspace, commonDir);
+
+  const listed = await gitExec(["worktree", "list", "--porcelain"], gitOpts);
+  if (isGhFailure(listed)) {
+    console.error(`[Hydra] Startup worktree prune: 'git worktree list' failed (${listed.code}) — skipping`);
+    return 0;
+  }
+
+  // Read lock-file bodies for each worktree so the classifier's live-PID rail
+  // can parse the `(pid N)` token. The worktree id is the basename of its path
+  // (git's `.git/worktrees/<id>` convention); the lock lives in the common git
+  // dir, never under the (possibly-vanished) worktree dir itself.
+  const porcelain = listed.data.stdout;
+  const lockBodies = new Map<string, string>();
+  for (const wt of parseWorktreeList(porcelain)) {
+    const id = wt.path.slice(wt.path.lastIndexOf("/") + 1);
+    try {
+      lockBodies.set(wt.path, readFileSync(join(commonDir, "worktrees", id, "locked"), "utf-8"));
+    } catch { /* intentional: no lock file = unlocked worktree, not an error */ }
+  }
+  // Parse once with lock bodies (populates lockedByPid), then attach each dir's
+  // mtime age — the last gate the age-floor rail checks. A vanished dir leaves
+  // ageSeconds null = unknown = conservative skip (git worktree prune reclaims
+  // its registry entry instead).
+  const withLocks: WorktreeRow[] = parseWorktreeList(porcelain, lockBodies).map((wt) => {
+    let ageSeconds: number | null = null;
+    try {
+      ageSeconds = Math.floor((Date.now() - statSync(wt.path).mtimeMs) / 1000);
+    } catch { /* intentional: dir already gone = let `git worktree prune` reclaim the registry entry */ }
+    return { ...wt, ageSeconds };
+  });
+
+  // The main working tree is the first porcelain stanza; never reclaim it.
+  const mainWorktreePath = withLocks.length > 0 ? withLocks[0].path : workspace;
+
+  let reclaimed = 0;
+  for (const wt of withLocks) {
+    const result = classifyOrphanWorktree(wt, {
+      mainWorktreePath,
+      // Startup runs on `main`; the orphans hold `feature/*` branches. Pass the
+      // real current branch so the never-reap-current-branch rail is honest.
+      currentBranch: "main",
+      isLivePid,
+      minAgeSeconds: DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+      // Scope the destructive action to `/dev/shm/hydra-worktrees/` — the dir
+      // family the recurrence (#2115 -> #2465) is observed in. A worktree
+      // elsewhere is left for the hydra-branch-prune skill's broader sweep.
+      scopePrefix: "/dev/shm/hydra-worktrees/",
+    });
+    if (result.action !== "delete-orphan-worktree") continue;
+    const removed = await gitExec(["worktree", "remove", "--force", wt.path], gitOpts);
+    if (isGhFailure(removed)) {
+      console.error(`[Hydra] Startup worktree prune: 'git worktree remove --force ${wt.path}' skipped (${removed.code})`);
+      continue;
+    }
+    reclaimed++;
+    console.log(`[Hydra] Startup worktree prune: reclaimed orphan worktree ${wt.path}${wt.branch ? ` (branch ${wt.branch})` : ""}`);
+  }
+
+  // Reclaim any registry entry whose dir already vanished (the orphan dir was
+  // removed out-of-band but `.git/worktrees/<id>` lingered) so a stale entry
+  // can't keep blocking its branch on a later boot.
+  const pruned = await gitExec(["worktree", "prune"], gitOpts);
+  if (isGhFailure(pruned)) {
+    console.error(`[Hydra] Startup worktree prune: 'git worktree prune' skipped (${pruned.code})`);
+  }
+
+  return reclaimed;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -95,6 +229,17 @@ async function main() {
     const checkout = await gitExec(["checkout", "main"], gitOpts);
     if (isGhFailure(checkout)) {
       console.error(`[Hydra] Startup cleanup: 'git checkout main' skipped (${checkout.code})`);
+    }
+    // Issue #2465 (recurrence of #2115): reclaim orphaned /dev/shm worktrees
+    // BEFORE the branch sweep — a registered worktree holding a feature branch
+    // makes `git branch -D` fail closed, so stale branches accumulate. The
+    // prune is best-effort and never-throwing; a fault here must not abort the
+    // branch sweep that follows.
+    try {
+      const reclaimed = await pruneOrphanedTargetWorktrees(PROJECT_WORKSPACE, gitOpts);
+      if (reclaimed > 0) console.log(`[Hydra] Startup cleanup: reclaimed ${reclaimed} orphan worktree(s) before stale-branch sweep`);
+    } catch (err: any) {
+      console.error(`[Hydra] Startup worktree prune failed: ${err.message}`);
     }
     const listed = await gitExec(["branch", "--list", "feature/*"], gitOpts);
     if (isGhOk(listed)) {
