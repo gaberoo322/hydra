@@ -27,12 +27,18 @@
  *     // Merged-remote GC input (issue #2029) — optional; absent/empty = the
  *     // pass deletes nothing (no positive merge signal). Branch names whose PR
  *     // is MERGED/CLOSED but whose `origin/<name>` remote ref still exists.
- *     mergedOrClosedPrHeads?: string[]
+ *     mergedOrClosedPrHeads?: string[],
+ *     // Master-tracking-orphan GC input (issue #2459) — optional; absent = the
+ *     // pass is a no-op (no foreign-upstream signal). Maps each local branch
+ *     // name → its upstream short-name (e.g. `origin/master`), from
+ *     // `git for-each-ref --format='%(upstream:short)'`. A branch whose tracked
+ *     // branch segment differs from its own name is a master-tracking orphan.
+ *     branchUpstreams?: { [branchName: string]: string }
  *   }
  *
  * Output JSON shape:
  *   {
- *     report: string,           // human-readable report (all four passes)
+ *     report: string,           // human-readable report (all five passes)
  *     plan: {
  *       deleteWorktreeAndBranch: Array<{ branch: string, worktreePath: string }>,
  *       deleteBranchOnly: string[],
@@ -43,6 +49,9 @@
  *       // Merged-remote GC plan (issue #2029) — local refs of merged/closed
  *       // PRs whose remote branch survived; LOCAL delete only:
  *       deleteBranchMergedRemote: string[],
+ *       // Master-tracking-orphan GC plan (issue #2459) — dispatch branches that
+ *       // track origin/master, never pushed under their own name; LOCAL delete:
+ *       deleteBranchMasterTrackingOrphan: string[],
  *     }
  *   }
  *
@@ -63,6 +72,8 @@ import {
   renderDeadBranchReport,
   classifyMergedRemotes,
   renderMergedRemoteReport,
+  classifyMasterTrackingOrphans,
+  renderMasterTrackingOrphanReport,
   DEFAULT_WORKTREE_MIN_AGE_SECONDS,
   type WorktreeRow,
 } from "./branch-prune.ts";
@@ -85,6 +96,12 @@ interface RunnerInput {
   // CLOSED but whose `origin/<name>` remote ref still exists (squash-merge
   // without --delete-branch). Absent/empty → the pass deletes nothing.
   mergedOrClosedPrHeads?: string[];
+  // Master-tracking-orphan GC input (issue #2459): branch-name → its upstream
+  // short-name (e.g. `origin/master`). A branch whose tracked branch segment
+  // differs from its own name tracks a FOREIGN upstream and is a candidate.
+  // Absent entries leave upstreamRef null → tracksForeignUpstream is false →
+  // the pass treats the branch as out-of-scope (conservative no-op).
+  branchUpstreams?: Record<string, string>;
 }
 
 function readStdin(): string {
@@ -111,9 +128,13 @@ const branches = String(input.branchesRaw || "")
   .filter((b): b is NonNullable<typeof b> => b !== null)
   // Attach caller-computed ref ages (issue #1784) — consumed by the dead-
   // branch GC age floor. A missing entry stays null = unknown = skip.
+  // Also attach the per-branch upstream short-name (issue #2459) — consumed by
+  // the master-tracking-orphan GC's foreign-upstream predicate. A missing entry
+  // stays null → the branch is out of that pass's scope (conservative no-op).
   .map((b) => ({
     ...b,
     ageSeconds: input.branchAges ? input.branchAges[b.name] ?? null : null,
+    upstreamRef: input.branchUpstreams ? input.branchUpstreams[b.name] ?? null : null,
   }));
 
 const locks = new Map<string, string>(Object.entries(input.locks || {}));
@@ -221,7 +242,36 @@ const mergedRemoteBuckets = classifyMergedRemotes(branches, {
 });
 
 const mergedRemoteReport = renderMergedRemoteReport(mergedRemoteBuckets, audit);
-const fullReport = `${report}\n\n${orphanReport}\n\n${deadBranchReport}\n\n${mergedRemoteReport}`;
+
+// ── Master-tracking-orphan GC pass (issue #2459) ───────────────────────────
+// Dispatch branches that INHERITED `origin/master` as their upstream (via
+// `git worktree add` / `checkout -b`) and were never pushed under their own
+// name. The upstream is healthy and non-`[gone]` forever, and the name was
+// never a PR head, so passes 1/3/4 all skip them permanently:
+//   pass 1 → skip-not-gone, pass 3 → skip-has-upstream, pass 4 → skip-pr-unresolved.
+// The distinguishing signal is the foreign-upstream test (upstreamRef tracks a
+// branch whose name differs from the local branch's own name), supplied via the
+// per-branch upstream map. Hard cap seeded with ALL four prior passes so the
+// 250 ceiling spans the whole run. Deletes the LOCAL ref ONLY (no `origin/<name>`
+// ref exists to touch — that absence is precisely why these accumulate).
+const masterTrackingOrphanBuckets = classifyMasterTrackingOrphans(branches, {
+  currentBranch,
+  worktrees,
+  isLivePid,
+  openPrHeads: new Set(input.openPrHeads || []),
+  minAgeSeconds,
+  priorDeletions:
+    priorDeletions +
+    orphanBuckets.deleteOrphan.length +
+    deadBranchBuckets.deleteBranch.length +
+    mergedRemoteBuckets.deleteBranch.length,
+});
+
+const masterTrackingOrphanReport = renderMasterTrackingOrphanReport(
+  masterTrackingOrphanBuckets,
+  audit,
+);
+const fullReport = `${report}\n\n${orphanReport}\n\n${deadBranchReport}\n\n${mergedRemoteReport}\n\n${masterTrackingOrphanReport}`;
 
 const plan = {
   deleteWorktreeAndBranch: buckets.deleteWorktreeAndBranch.map((e) => ({
@@ -235,6 +285,7 @@ const plan = {
   })),
   deleteBranchNoUpstream: deadBranchBuckets.deleteBranch.map((b) => b.name),
   deleteBranchMergedRemote: mergedRemoteBuckets.deleteBranch.map((b) => b.name),
+  deleteBranchMasterTrackingOrphan: masterTrackingOrphanBuckets.deleteBranch.map((b) => b.name),
 };
 
 process.stdout.write(JSON.stringify({ report: fullReport, plan }));

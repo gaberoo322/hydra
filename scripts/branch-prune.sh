@@ -215,6 +215,31 @@ prune_repo() {
       BRANCH_AGES_JSON=$(printf '%s\n' "${BRANCH_AGE_ENTRIES[@]}" | jq -s 'add // {}')
     fi
 
+    # Per-branch upstream short-names (issue #2459) — feeds the master-tracking-
+    # orphan GC's foreign-upstream predicate. A dispatch branch created via
+    # `git worktree add` / `checkout -b` can INHERIT `origin/master` as its
+    # upstream (rather than `origin/<own-name>`); such a branch never goes
+    # `[gone]` and was never a PR head, so the first four passes skip it forever.
+    # `%(upstream:short)` renders the tracked ref (e.g. `origin/master`) or an
+    # empty string when the branch has no configured upstream. We map only
+    # branches WITH an upstream; an absent entry leaves upstreamRef null in the
+    # classifier → the branch is out of that pass's scope (conservative no-op).
+    # Read-only `git for-each-ref` enumeration — no mutation, no remote calls.
+    local -a BRANCH_UPSTREAM_ENTRIES=()
+    local bu_name bu_up
+    while IFS=$'\t' read -r bu_name bu_up; do
+      [ -z "$bu_name" ] && continue
+      [ -z "$bu_up" ] && continue
+      BRANCH_UPSTREAM_ENTRIES+=("$(jq -nc --arg n "$bu_name" --arg u "$bu_up" '{($n): $u}')")
+    done < <(git for-each-ref refs/heads --format='%(refname:short)%09%(upstream:short)' 2>/dev/null)
+
+    local BRANCH_UPSTREAMS_JSON
+    if [ ${#BRANCH_UPSTREAM_ENTRIES[@]} -eq 0 ]; then
+      BRANCH_UPSTREAMS_JSON='{}'
+    else
+      BRANCH_UPSTREAMS_JSON=$(printf '%s\n' "${BRANCH_UPSTREAM_ENTRIES[@]}" | jq -s 'add // {}')
+    fi
+
     # Open-PR head branches — a worktree whose branch heads an open PR is
     # preserved even when its lock PID is dead (the PR may still merge). A
     # missing/unauthenticated `gh` degrades to an empty set: the GC then
@@ -277,13 +302,14 @@ prune_repo() {
       --argjson l "$LOCKS_JSON" \
       --argjson ag "$AGES_JSON" \
       --argjson ba "$BRANCH_AGES_JSON" \
+      --argjson bu "$BRANCH_UPSTREAMS_JSON" \
       --argjson ph "$OPEN_PR_HEADS_JSON" \
       --argjson mc "$MERGED_CLOSED_PR_HEADS_JSON" \
       --argjson mn "$MIN_AGE_JSON" \
       --argjson a "$AUDIT_JSON" \
       '{branchesRaw: $b, worktreesRaw: $w, currentBranch: $c, mainWorktreePath: $m,
-        locks: $l, worktreeAges: $ag, branchAges: $ba, openPrHeads: $ph,
-        mergedOrClosedPrHeads: $mc, minAgeSeconds: $mn, audit: $a}')
+        locks: $l, worktreeAges: $ag, branchAges: $ba, branchUpstreams: $bu,
+        openPrHeads: $ph, mergedOrClosedPrHeads: $mc, minAgeSeconds: $mn, audit: $a}')
 
     PLAN=$(printf '%s' "$INPUT_JSON" | npx -y tsx "$REPO_ROOT/scripts/ci/branch-prune-runner.ts")
     if [ -z "$PLAN" ]; then
@@ -396,6 +422,25 @@ prune_repo() {
         ERRORS=$((ERRORS+1))
       fi
     done < <(printf '%s' "$PLAN" | jq -r '.plan.deleteBranchMergedRemote // [] | .[]')
+
+    # Master-tracking-orphan GC (issue #2459): dispatch branches that INHERITED
+    # `origin/master` as their upstream (via `git worktree add` / `checkout -b`)
+    # and were never pushed under their own name. The upstream is healthy and
+    # non-[gone] forever, and the name was never a PR head, so passes 1/3/4 all
+    # skip them permanently. The classifier guarantees a foreign-upstream signal,
+    # a dispatch-shaped name, not the current branch, no live/attached worktree,
+    # not an open-PR head, and past the age floor — so a plain LOCAL
+    # `git branch -D` is all that's left. There is no `origin/<name>` remote ref
+    # to touch (its absence is exactly why these accumulate), so the local-only
+    # invariant (ADR-0005) is naturally airtight. `// []` tolerates an older runner.
+    while IFS= read -r br; do
+      [ -z "$br" ] && continue
+      echo "branch-prune: [$LABEL] deleting master-tracking-orphan local branch $br (tracks origin/master, never pushed under its own name)"
+      if ! git branch -D "$br" 2>&1 | sed "s/^/  [$LABEL] /"; then
+        echo "  branch-prune: [$LABEL] branch -D failed for master-tracking-orphan $br" >&2
+        ERRORS=$((ERRORS+1))
+      fi
+    done < <(printf '%s' "$PLAN" | jq -r '.plan.deleteBranchMasterTrackingOrphan // [] | .[]')
 
     # Final pass: prune metadata for manually-deleted worktree dirs.
     echo "branch-prune: [$LABEL] git worktree prune"
