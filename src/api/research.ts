@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { setResearchForceOnce } from "../redis/scheduler.ts";
 
 export function createResearchRouter() {
   const router = Router();
@@ -25,15 +24,17 @@ export function createResearchRouter() {
     });
   });
 
-  // POST /research/force — Force one research cycle on next scheduler tick (bypasses throttle)
-  router.post("/research/force", async (req, res) => {
-    try {
-      await setResearchForceOnce();
-      res.json({ ok: true, message: "Research force flag set — next scheduler tick will run research bypassing all throttles" });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+  // POST /research/force was retired in #2489 (Option A). It wrote a Redis
+  // one-shot flag (`setResearchForceOnce` → `hydra:scheduler:research-force-once`)
+  // whose only consumer, `consumeResearchForceOnce`, was deleted in #706
+  // (scheduler fold PR-1/4, ADR-0006) along with the in-process research loop.
+  // The write end then had no reader: callers got a `{ ok: true }` success for
+  // an action with zero effect, and the flag silently expired after its 1h TTL.
+  // Forcing a research cycle is now an autopilot-brain concern — see
+  // `scripts/autopilot/decide.py` (`_research_force_allowed`/`_research_force_stamp`,
+  // the daily research-force cap) and the work-queue priority lever
+  // (POST /api/queue). The legacy HTTP endpoint, its writer, and its Redis key
+  // were removed rather than rebuilt across the Python boundary.
 
   return router;
 }

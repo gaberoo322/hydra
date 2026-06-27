@@ -422,7 +422,6 @@ broad consumers are:
 
 | Method | Path | Stability |
 |---|---|---|
-| POST | `/api/research/force` | stable |
 | POST | `/api/research/start` | stable |
 
 ### `src/api/scheduler.ts`
