@@ -8,66 +8,23 @@ import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 // ---------------------------------------------------------------------------
-// Research-to-build ratio tracking (issue #84)
+// Research-force-once flag (issue #84)
 // ---------------------------------------------------------------------------
-
-/** Record a research cycle event (timestamp-scored sorted set, rolling 24h). */
-export async function recordResearchEvent(): Promise<void> {
-  const r = getRedisConnection();
-  const now = Date.now();
-  const key = redisKeys.schedulerResearchEvents();
-  await r.zadd(key, now, `${now}`);
-  // Prune entries older than 24h
-  await r.zremrangebyscore(key, "-inf", now - 86400_000);
-}
-
-/** Record a build cycle event (timestamp-scored sorted set, rolling 24h). */
-export async function recordBuildEvent(): Promise<void> {
-  const r = getRedisConnection();
-  const now = Date.now();
-  const key = redisKeys.schedulerBuildEvents();
-  await r.zadd(key, now, `${now}`);
-  // Prune entries older than 24h
-  await r.zremrangebyscore(key, "-inf", now - 86400_000);
-}
-
-/** Get count of research events in the last 24h. */
-export async function getResearchEventCount24h(): Promise<number> {
-  const r = getRedisConnection();
-  const key = redisKeys.schedulerResearchEvents();
-  const now = Date.now();
-  // Prune old entries first
-  await r.zremrangebyscore(key, "-inf", now - 86400_000);
-  return r.zcard(key);
-}
-
-/** Get count of build events in the last 24h. */
-export async function getBuildEventCount24h(): Promise<number> {
-  const r = getRedisConnection();
-  const key = redisKeys.schedulerBuildEvents();
-  const now = Date.now();
-  // Prune old entries first
-  await r.zremrangebyscore(key, "-inf", now - 86400_000);
-  return r.zcard(key);
-}
+//
+// The research/build event-count accessors (recordResearchEvent,
+// recordBuildEvent, getResearchEventCount24h, getBuildEventCount24h) and the
+// consumeResearchForceOnce reader were removed in #2488: they backed the
+// in-process research-floor decision plane deleted in #706 (scheduler fold
+// PR-1/4) and had zero live callers. The research-force policy now lives in
+// the autopilot brain (`scripts/autopilot/decide.py` `_research_force_allowed`).
+// `setResearchForceOnce` is retained — its sole live caller is the
+// POST /research/force endpoint (`src/api/research.ts`).
 
 /** Set the force-research-once flag (consumed on next maybeRunResearch). */
 export async function setResearchForceOnce(): Promise<void> {
   const r = getRedisConnection();
   // TTL of 1 hour — if not consumed by then, it expires
   await r.set(redisKeys.schedulerResearchForceOnce(), "1", "EX", 3600);
-}
-
-/** Consume the force-research-once flag. Returns true if it was set. */
-export async function consumeResearchForceOnce(): Promise<boolean> {
-  const r = getRedisConnection();
-  const key = redisKeys.schedulerResearchForceOnce();
-  const val = await r.get(key);
-  if (val) {
-    await r.del(key);
-    return true;
-  }
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,11 +206,10 @@ export async function getSchedulerStateRaw(): Promise<string | null> {
   return r.get(redisKeys.schedulerState());
 }
 
-/** Write the raw scheduler-state JSON blob. */
-export async function setSchedulerStateRaw(payload: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.schedulerState(), payload);
-}
+// `setSchedulerStateRaw` (the write side of `hydra:scheduler:state`) was removed
+// in #2488: it had no live caller (writes go through saveSchedulerStateVersioned).
+// The read side `getSchedulerStateRaw` is retained — still called by the
+// observability heartbeat (`src/scheduler/heartbeat.ts`).
 
 // `getDailySpendRaw` + the `hydra:scheduler:daily-spend` key were removed in
 // #704. The key had no live writer (its writer + budget-threshold bridge were

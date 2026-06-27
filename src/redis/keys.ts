@@ -171,8 +171,10 @@ export const redisKeys = {
   // writer + budget-threshold bridge were deleted in #703, and its sole
   // surviving reader (`src/cost/surrogate.ts` legacy back-compat path) was
   // removed in #704. The live cost guardrail is `src/cost/usage-tracker.ts`.
-  schedulerResearchEvents: () => "hydra:scheduler:research-events",
-  schedulerBuildEvents: () => "hydra:scheduler:build-events",
+  // `schedulerResearchEvents` (`hydra:scheduler:research-events`) and
+  // `schedulerBuildEvents` (`hydra:scheduler:build-events`) removed in #2488:
+  // their only callers were the research/build event-count accessors deleted in
+  // the same change, themselves dead since #706 (research-floor decision plane).
   schedulerResearchForceOnce: () => "hydra:scheduler:research-force-once",
   schedulerCyclesRun: () => "hydra:scheduler:cycles-run",
   schedulerCyclesMerged: () => "hydra:scheduler:cycles-merged",
