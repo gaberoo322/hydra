@@ -9,6 +9,17 @@
 # This script is read-only: no Redis writes, no GitHub edits.
 #
 # Behavior-preserving extraction of the Phase 1 collectors (issue #409).
+#
+# Forcing a research cycle (issue #2489): there is no longer an HTTP lever for
+# this. The old POST /research/force endpoint wrote a Redis one-shot flag
+# (hydra:scheduler:research-force-once) whose consumer was deleted with the
+# in-process research loop in #706; the orphaned write end was retired in #2489.
+# To force research today, drive it through the autopilot brain: decide.py's
+# daily research-force cap (_research_force_allowed / _research_force_stamp)
+# governs forced research_target dispatches, or write the work-queue directly
+# (POST /api/queue) to push a research anchor to the front of the next turn.
+# This collector deliberately does NOT read or surface a force flag — it stays
+# read-only and the policy lives in decide.py, not at the HTTP seam.
 
 set -uo pipefail
 

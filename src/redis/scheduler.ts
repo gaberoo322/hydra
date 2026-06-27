@@ -8,24 +8,19 @@ import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 // ---------------------------------------------------------------------------
-// Research-force-once flag (issue #84)
+// Research-force-once flag (issue #84) — fully retired in #2489
 // ---------------------------------------------------------------------------
 //
 // The research/build event-count accessors (recordResearchEvent,
 // recordBuildEvent, getResearchEventCount24h, getBuildEventCount24h) and the
 // consumeResearchForceOnce reader were removed in #2488: they backed the
 // in-process research-floor decision plane deleted in #706 (scheduler fold
-// PR-1/4) and had zero live callers. The research-force policy now lives in
-// the autopilot brain (`scripts/autopilot/decide.py` `_research_force_allowed`).
-// `setResearchForceOnce` is retained — its sole live caller is the
-// POST /research/force endpoint (`src/api/research.ts`).
-
-/** Set the force-research-once flag (consumed on next maybeRunResearch). */
-export async function setResearchForceOnce(): Promise<void> {
-  const r = getRedisConnection();
-  // TTL of 1 hour — if not consumed by then, it expires
-  await r.set(redisKeys.schedulerResearchForceOnce(), "1", "EX", 3600);
-}
+// PR-1/4) and had zero live callers. The writer, `setResearchForceOnce`, and
+// its Redis key (`schedulerResearchForceOnce` → `hydra:scheduler:research-force-once`)
+// were removed in #2489 (Option A): with the consumer gone, the flag was
+// write-only and the POST /research/force endpoint that called it returned a
+// hollow success. The research-force policy now lives entirely in the autopilot
+// brain (`scripts/autopilot/decide.py` `_research_force_allowed`).
 
 // ---------------------------------------------------------------------------
 // Atomic scheduler counters (issue #140 / #208)

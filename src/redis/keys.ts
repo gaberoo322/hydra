@@ -175,7 +175,9 @@ export const redisKeys = {
   // `schedulerBuildEvents` (`hydra:scheduler:build-events`) removed in #2488:
   // their only callers were the research/build event-count accessors deleted in
   // the same change, themselves dead since #706 (research-floor decision plane).
-  schedulerResearchForceOnce: () => "hydra:scheduler:research-force-once",
+  // `schedulerResearchForceOnce` (`hydra:scheduler:research-force-once`) removed
+  // in #2489: its writer `setResearchForceOnce` (the only caller) was retired
+  // with the orphaned POST /research/force endpoint once #706 deleted the reader.
   schedulerCyclesRun: () => "hydra:scheduler:cycles-run",
   schedulerCyclesMerged: () => "hydra:scheduler:cycles-merged",
   schedulerCyclesFailed: () => "hydra:scheduler:cycles-failed",
