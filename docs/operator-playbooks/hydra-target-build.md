@@ -401,7 +401,12 @@ Read `~/hydra/config/agents/skeptic.md`. Challenge:
 3. Scope bounded? >5 files → reject.
 4. Verification hard? (shell commands, not "review")
 5. Smallest possible move?
-6. Before deleting: `grep -rn "from.*['\"].*<filename>" src/`
+6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line (this is why `verified-pairs.ts`'s multi-line import of `nba-finals-pair-seeding` read as zero-importer). It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`, falsely flagging live `kalshi-tail-zone-scanner` / `polymarket-sports-route-timing` modules). Verify by **bare basename** across the Target code root (`web/src`, NOT `src/` — Target code lives under `web/`), then let the compiler be the proof:
+   ```bash
+   grep -rn "<basename-without-ext>" web/src   # bare name, every line — necessary-but-not-sufficient
+   npm run typecheck && npm run deadcode:check  # the authoritative liveness verdict; red ⇒ NOT orphaned
+   ```
+   An empty bare-basename grep is only a *hint*; the retire is safe **only** when typecheck/deadcode still pass. When a `wire-or-retire` ledger row is the anchor, the row itself is the authoritative orphan source — trust it over a hand-grep, and re-verify each module against `origin/main` before deleting (the ledger lags the active retire wave).
 
 If rejected, replan narrower.
 
