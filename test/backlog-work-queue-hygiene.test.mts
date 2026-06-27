@@ -15,6 +15,7 @@ import {
   harvestOrchIssueRefs,
   reconcileWorkQueue,
 } from "../src/backlog/work-queue-hygiene.ts";
+import { type MergedRef } from "../src/backlog/target-pr-feed.ts";
 
 const NOW = Date.UTC(2026, 4, 31, 12, 0, 0);
 const isoAgo = (ms: number) => new Date(NOW - ms).toISOString();
@@ -65,6 +66,10 @@ describe("reconcileWorkQueue — resolved-state reaper (#1690)", () => {
       removeWorkQueueItem: async (raw: string) => { removed.push(raw); return 1; },
       loadMergedAnchorRefs: async () => new Set<string>(["item-322"]),
       getIssueState: async (n: string) => (n === "1683" ? "closed" as const : "open" as const),
+      // No merged blobs by default → the shipped-subject gate (#2482) is a no-op
+      // for the merged-work / closed-issue cases; subject-coverage is exercised
+      // by its own top-level describe below.
+      fetchMergedRefs: async (): Promise<MergedRef[]> => [],
       ...over,
     };
     return { deps, removed };
@@ -176,6 +181,7 @@ describe("reconcileWorkQueue — terminal-marker reap (#2187)", () => {
       loadMergedAnchorRefs: async () => new Set<string>(),
       // Live (#1700) is open → kept; no terminal-marker entry needs a gh call.
       getIssueState: async () => "open" as const,
+      fetchMergedRefs: async (): Promise<MergedRef[]> => [],
       ...over,
     };
     return { deps, removed };
@@ -208,5 +214,120 @@ describe("reconcileWorkQueue — terminal-marker reap (#2187)", () => {
     const result = await reconcileWorkQueue(deps);
     assert.equal(result.removed, 1);
     assert.equal(ghCalls, 0, "a terminal marker is reaped without an issue-state lookup");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shipped-subject reap (issue #2482): an entry whose TITLE is covered by a
+// recently-merged PR/commit subject is shipped-under-a-renamed-title work the
+// #882 token scan misses. Reuses the #2110 asymmetric-containment matcher
+// (`subjectCoveredBy`) against the merged-blob feed. CRITICAL polarity: removal
+// requires a POSITIVE coverage hit against a CONCRETE merged blob — absence of
+// a token is NEVER evidence of shipped (the #2031 / #2110 92%-FP class). These
+// deps are pure injectables (no Redis seam), so this needs no special suite
+// lifecycle.
+// ---------------------------------------------------------------------------
+
+describe("reconcileWorkQueue — shipped-subject reap (#2482)", () => {
+  // A live entry whose title is fully covered by a merged PR subject below.
+  const shippedRaw = JSON.stringify({
+    reference: "reconcile work-queue head against shipped anchors",
+    queuedAt: isoAgo(0),
+  });
+  // A live entry whose title shares too few words with any merged blob.
+  const unrelatedRaw = JSON.stringify({
+    reference: "forecast directional execution graduated capital lever",
+    queuedAt: isoAgo(0),
+  });
+
+  // Merged PR blob carrying all of shippedRaw's significant words (renamed
+  // title — no #NNN / item-NNN token, so the #882 scan would miss it).
+  const mergedBlob: MergedRef = {
+    ref: "pr-2483",
+    blob: "feat(hygiene): reconcile the work queue head and drop already-shipped anchors that resurfaced",
+  };
+
+  function makeDeps(over: any = {}) {
+    const removed: string[] = [];
+    const deps = {
+      getWorkQueueItems: async () => [shippedRaw, unrelatedRaw],
+      removeWorkQueueItem: async (raw: string) => { removed.push(raw); return 1; },
+      loadMergedAnchorRefs: async () => new Set<string>(),
+      // No orch issue refs in either title → no gh lookup needed.
+      getIssueState: async () => "open" as const,
+      fetchMergedRefs: async (): Promise<MergedRef[]> => [mergedBlob],
+      ...over,
+    };
+    return { deps, removed };
+  }
+
+  test("removes an entry whose title is subject-covered by a merged blob; keeps the unrelated one", async () => {
+    const { deps, removed } = makeDeps();
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.scanned, 2);
+    assert.equal(result.removed, 1);
+    assert.deepEqual(removed, [shippedRaw]);
+    assert.deepEqual(result.details.map((d) => d.cause), ["shipped-subject"]);
+  });
+
+  test("an empty merged-blob feed yields ZERO subject removals (positive-evidence only)", async () => {
+    const { deps, removed } = makeDeps({
+      fetchMergedRefs: async (): Promise<MergedRef[]> => [],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 0);
+    assert.deepEqual(removed, []);
+  });
+
+  test("a failing merged-blob feed degrades to no subject removals (never throws)", async () => {
+    const { deps, removed } = makeDeps({
+      fetchMergedRefs: async (): Promise<MergedRef[]> => { throw new Error("gh down"); },
+    });
+    await assert.doesNotReject(async () => {
+      const result = await reconcileWorkQueue(deps);
+      assert.equal(result.removed, 0);
+      assert.deepEqual(removed, []);
+    });
+  });
+
+  test("a short/generic title (<4 significant words) never subject-matches", async () => {
+    const shortRaw = JSON.stringify({ reference: "fix tests", queuedAt: isoAgo(0) });
+    const { deps, removed } = makeDeps({
+      getWorkQueueItems: async () => [shortRaw],
+      // A blob that literally contains "fix" and "tests" — but the 4-word guard
+      // means a 2-word title can never reach the 0.70 threshold.
+      fetchMergedRefs: async (): Promise<MergedRef[]> => [
+        { ref: "pr-1", blob: "fix flaky tests across the suite to keep things green" },
+      ],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 0, "short titles cannot spuriously reconcile live work");
+    assert.deepEqual(removed, []);
+  });
+
+  test("an earlier cause (terminal-marker) wins — subject gate only fires when no other cause did", async () => {
+    // A terminal marker whose words also appear in the merged blob: the cause
+    // must report terminal-marker, not shipped-subject (checked-first ordering).
+    const completedRaw = JSON.stringify({
+      reference: "COMPLETED: reconcile work-queue head against shipped anchors",
+      queuedAt: isoAgo(0),
+    });
+    const { deps, removed } = makeDeps({
+      getWorkQueueItems: async () => [completedRaw],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 1);
+    assert.deepEqual(removed, [completedRaw]);
+    assert.deepEqual(result.details.map((d) => d.cause), ["terminal-marker"]);
+  });
+
+  test("the merged-blob feed is fetched ONCE per run, not per entry", async () => {
+    let feedCalls = 0;
+    const { deps } = makeDeps({
+      getWorkQueueItems: async () => [shippedRaw, unrelatedRaw, shippedRaw],
+      fetchMergedRefs: async (): Promise<MergedRef[]> => { feedCalls++; return [mergedBlob]; },
+    });
+    await reconcileWorkQueue(deps);
+    assert.equal(feedCalls, 1, "subject matching is pure in-memory after a single fetch");
   });
 });
