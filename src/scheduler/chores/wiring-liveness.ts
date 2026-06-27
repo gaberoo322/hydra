@@ -58,15 +58,13 @@ import {
 
 // The output-series check (slice 2, #2288) lives in its own focused module
 // (`wiring-liveness-output.ts`, extracted by #2456 — one check type, one module).
-// Re-exported here so existing importers (and `test/wiring-liveness.test.mts`'s
-// historical entry point) keep a stable surface; new code may import either path.
+// Only the two type names `test/wiring-liveness.test.mts` consumes through this
+// module's surface (for its `runWiringLiveness` integration cases) are re-exported
+// here; every other symbol is imported directly from the output module by its
+// live consumers, so re-exporting it here would be dead surface (knip #2484).
 export {
-  evaluateOutputs,
-  defaultOutputReader,
-  type OutputVerdict,
   type OutputSourceReader,
   type OutputSeriesResult,
-  type OutputEvaluation,
 } from "./wiring-liveness-output.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
