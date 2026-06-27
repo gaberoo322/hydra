@@ -20,10 +20,26 @@
 // verify+LREM (highest-recurrence unfixed retro cue, recurrence 14).
 // `reconcileWorkQueue` is the shared engine: it REMOVES entries that are
 // (a) merged work per the #882 token scan, (b) reference orchestrator issues
-// that are ALL closed, or (c) terminal-state markers (COMPLETED:/CLOSED:
-// completion notes that are never actionable as work, issue #1853). It is
-// fail-open — any uncertainty (no issue refs, an open issue, an unreachable
-// `gh`) keeps the entry.
+// that are ALL closed, (c) terminal-state markers (COMPLETED:/CLOSED:
+// completion notes that are never actionable as work, issue #1853), or
+// (d) shipped-subject — the entry's title is COVERED by a recently-merged
+// PR/commit subject (issue #2482). It is fail-open — any uncertainty (no issue
+// refs, an open issue, an unreachable `gh`) keeps the entry.
+//
+// The (d) shipped-subject cause closes the residual gap (#2482) the #882 token
+// scan leaves: Hydra routinely ships an item's work under a RENAMED / sibling
+// title carrying no matching `#NNN` / `item-NNN` token, so the (a) merged-work
+// scan misses it and the stale work-queue entry resurfaces at tier 0.70,
+// burning a dev_target dispatch on no-op verify+LREM. This reuses the #2110
+// asymmetric-containment matcher (`subjectCoveredBy`, `merged-refs.ts`) against
+// the merged PR/commit blob feed (`fetchMergedTargetPrRefs` +
+// `fetchTargetMergeCommitRefs`, the merge-commit feed covering the
+// bare-commit-no-PR-token case). CRITICAL polarity (the #2031 / #2110 lesson):
+// removal requires a POSITIVE subject-coverage hit against a CONCRETE merged
+// blob — absence of a token is NEVER evidence of shipped (that polarity was the
+// documented 92%-false-positive class). An empty/unreachable feed yields zero
+// subject removals; the 0.70 threshold + 4-significant-word guard are reused
+// unchanged, mirroring the existing `escalateStaleItems` usage.
 //
 // The terminal-marker reap (cause "terminal-marker") MOVED here from the
 // Candidate Feed (issue #2187): the Feed still SUPPRESSES terminal markers on
@@ -38,7 +54,12 @@ import {
   removeWorkQueueItem,
   isTerminalMarker,
 } from "../redis/work-queue.ts";
-import { isMergedWork, loadMergedAnchorRefsImpl } from "./merged-refs.ts";
+import { isMergedWork, subjectCoveredBy, loadMergedAnchorRefsImpl } from "./merged-refs.ts";
+import {
+  fetchMergedTargetPrRefs,
+  fetchTargetMergeCommitRefs,
+  type MergedRef,
+} from "./target-pr-feed.ts";
 
 // ---------------------------------------------------------------------------
 // GitHub CLI adapter + the orchestrator repo literal (issue #899 / #882).
@@ -106,12 +127,48 @@ async function getIssueStateImpl(
   }
 }
 
+/**
+ * Production merged-blob feed reader. Fetches the recently-merged target PR set
+ * AND the recent merge-commit set ONCE per reconcile run and returns the union
+ * of their `MergedRef`s. Each feed is fail-open (returns `null` on any failure,
+ * meaning "no information" — never "nothing merged"); a `null` feed contributes
+ * zero refs, so a total `gh` outage degrades to an empty set and yields ZERO
+ * shipped-subject removals (positive-evidence-only invariant). Never throws.
+ *
+ * The merge-commit feed is included deliberately: it covers the
+ * bare-commit-no-PR-token case (a cycle merge that lands without a PR), which
+ * the merged-PR feed alone would miss.
+ */
+async function fetchMergedRefsImpl(): Promise<MergedRef[]> {
+  const out: MergedRef[] = [];
+  try {
+    const prRefs = await fetchMergedTargetPrRefs();
+    if (prRefs) out.push(...prRefs);
+  } catch (err: any) {
+    console.error(`[WorkQueueHygiene] merged-PR feed failed: ${err?.message || err}`);
+  }
+  try {
+    const commitRefs = await fetchTargetMergeCommitRefs();
+    if (commitRefs) out.push(...commitRefs);
+  } catch (err: any) {
+    console.error(`[WorkQueueHygiene] merge-commit feed failed: ${err?.message || err}`);
+  }
+  return out;
+}
+
 /** Injectable dependencies for `reconcileWorkQueue` — the test surface. */
 export interface WorkQueueReconcileDeps {
   getWorkQueueItems: () => Promise<string[]>;
   removeWorkQueueItem: (raw: string) => Promise<number>;
   loadMergedAnchorRefs: () => Promise<Set<string>>;
   getIssueState: (issueNumber: string) => Promise<"open" | "closed" | null>;
+  /**
+   * Merged PR/commit blob feed for the shipped-subject gate (issue #2482).
+   * Defaults to `fetchMergedRefsImpl` (the union of `fetchMergedTargetPrRefs` +
+   * `fetchTargetMergeCommitRefs`). Fetched ONCE per reconcile run, before the
+   * loop, so subject matching is pure in-memory and the `gh` cost is bounded.
+   */
+  fetchMergedRefs: () => Promise<MergedRef[]>;
 }
 
 export interface WorkQueueReconcileResult {
@@ -122,17 +179,18 @@ export interface WorkQueueReconcileResult {
   /** One row per distinct removed raw, with the cause. */
   details: Array<{
     reference: string;
-    cause: "merged-work" | "closed-issue" | "terminal-marker";
+    cause: "merged-work" | "closed-issue" | "terminal-marker" | "shipped-subject";
   }>;
 }
 
 /**
  * Reconcile the work queue against resolved state. Removes entries that are
  * (a) merged work (the #882 token set), (b) reference orch issues that are
- * ALL closed (at least one ref required), or (c) terminal-state markers
+ * ALL closed (at least one ref required), (c) terminal-state markers
  * (COMPLETED:/CLOSED: completion notes, issue #1853 — reap moved here from the
- * Candidate Feed in #2187). Fail-open on every uncertainty; never throws — a
- * failing read degrades to a no-op result.
+ * Candidate Feed in #2187), or (d) shipped-subject — the entry's title is
+ * covered by a recently-merged PR/commit subject (issue #2482). Fail-open on
+ * every uncertainty; never throws — a failing read degrades to a no-op result.
  */
 export async function reconcileWorkQueue(
   deps: Partial<WorkQueueReconcileDeps> = {},
@@ -142,6 +200,7 @@ export async function reconcileWorkQueue(
     removeWorkQueueItem: deps.removeWorkQueueItem ?? removeWorkQueueItem,
     loadMergedAnchorRefs: deps.loadMergedAnchorRefs ?? (() => loadMergedAnchorRefsImpl()),
     getIssueState: deps.getIssueState ?? getIssueStateImpl,
+    fetchMergedRefs: deps.fetchMergedRefs ?? fetchMergedRefsImpl,
     // NOTE: `() => loadMergedAnchorRefsImpl()` calls the shared production
     // loader with no clock arg so the closure-local TTL cache uses Date.now().
   };
@@ -164,6 +223,18 @@ export async function reconcileWorkQueue(
     console.error(`[WorkQueueHygiene] merged-refs load failed: ${err.message}`);
   }
 
+  // Merged PR/commit blob feed for the shipped-subject gate (issue #2482),
+  // fetched ONCE before the loop so subject matching is pure in-memory and the
+  // `gh` cost is bounded. Fail-open: an unreachable/empty feed yields zero
+  // subject removals (positive-evidence-only invariant — absence is never proof
+  // of shipped). `subjectCoveredBy` already no-ops on an empty blob set.
+  let mergedBlobs: MergedRef[] = [];
+  try {
+    mergedBlobs = await d.fetchMergedRefs();
+  } catch (err: any) {
+    console.error(`[WorkQueueHygiene] merged-blob feed failed: ${err.message}`);
+  }
+
   // Per-run issue-state cache — entries referencing the same issue share one
   // lookup, and the cap bounds total `gh` cost per invocation.
   const stateCache = new Map<string, "open" | "closed" | null>();
@@ -181,7 +252,12 @@ export async function reconcileWorkQueue(
     const ref: string = item.reference || item.description || "";
     if (!ref) continue;
 
-    let cause: "merged-work" | "closed-issue" | "terminal-marker" | null = null;
+    let cause:
+      | "merged-work"
+      | "closed-issue"
+      | "terminal-marker"
+      | "shipped-subject"
+      | null = null;
     // Terminal-state markers (COMPLETED:/CLOSED:) are completion notes, never
     // actionable as work (issue #1853). Independent of merged/closed-issue —
     // checked first and cheaply (no `gh` lookup). The Candidate Feed suppresses
@@ -220,6 +296,19 @@ export async function reconcileWorkQueue(
         if (allClosed) cause = "closed-issue";
       }
     }
+
+    // Shipped-subject (issue #2482): only when no earlier cause fired — the
+    // entry is not a terminal marker, not a #882 token hit, and not all-closed.
+    // Removal requires POSITIVE evidence: the entry's title must be COVERED
+    // (>=0.70 asymmetric containment, >=4 significant words) by a CONCRETE
+    // merged PR/commit blob. Absence of a token is NOT evidence (the #2031 /
+    // #2110 92%-false-positive polarity); an empty `mergedBlobs` makes this a
+    // no-op. Mirrors the `escalateStaleItems` usage in `stale-escalation.ts`.
+    if (!cause && mergedBlobs.length > 0) {
+      const hit = mergedBlobs.find((r) => subjectCoveredBy(ref, r.blob));
+      if (hit) cause = "shipped-subject";
+    }
+
     if (!cause) continue;
 
     try {
