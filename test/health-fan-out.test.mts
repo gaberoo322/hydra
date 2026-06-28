@@ -15,6 +15,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { collectProbeInputs, type CollectProbeDeps } from "../src/health/fan-out.ts";
+import { WakeGate } from "../src/health/wol.ts";
 
 // A fully-stubbed dep set: every probe resolves to a recognizable value so the
 // test can assert the positional-to-named mapping end-to-end. Callers override
@@ -192,5 +193,103 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     }));
     assert.equal((probes.ovSearch as any)?.status, "backend-unreachable");
     assert.equal((probes.ovSearch as any)?.latencyMs, null);
+  });
+});
+
+// Issue #2498: the WakeGate injection seam. `maybeWakeEmbedBackend` /
+// `maybeWakeVlmHost` already accept an injectable `gate` (the #2228 seam), but
+// before #2498 `collectProbeInputs` forwarded NO gate — so a test that wanted
+// to exercise gate exhaustion or cross-request leakage had to reset the
+// module-level singletons (impossible without a module-reset harness this repo
+// lacks). These tests inject a FRESH WakeGate through CollectProbeDeps and
+// assert the fan-out forwards it to the right wake call site, without touching
+// module state. WoL is enabled for these cases so a `failed`/`down` probe
+// actually consults the gate (`recordSend` advances the count before the
+// best-effort, never-throwing UDP broadcast). Each case constructs its own
+// gate, so there is no cross-test leakage.
+describe("collectProbeInputs — injectable WakeGate seam (issue #2498)", () => {
+  const PRIOR_WOL = process.env.HYDRA_WOL_ENABLED;
+  // Enable WoL so the wake path is reached; restore afterward so no sibling
+  // suite inherits the flag.
+  const enableWol = () => { process.env.HYDRA_WOL_ENABLED = "true"; };
+  const restoreWol = () => {
+    if (PRIOR_WOL === undefined) delete process.env.HYDRA_WOL_ENABLED;
+    else process.env.HYDRA_WOL_ENABLED = PRIOR_WOL;
+  };
+
+  test("a failed embed probe consumes the INJECTED embedWakeGate, not the module singleton", async () => {
+    enableWol();
+    try {
+      // A fresh gate with a 1-attempt budget and no cooldown: a single failed
+      // probe must exhaust it.
+      const embedGate = new WakeGate(0, 1);
+      assert.equal(embedGate.attemptCount, 0);
+      assert.equal(embedGate.exhausted, false);
+
+      await collectProbeInputs(happyDeps({
+        probeEmbedBackendImpl: (async () => ({ status: "failed", latencyMs: 0, error: "down" })) as any,
+        embedWakeGate: embedGate,
+      }));
+
+      // The injected gate was the one the fan-out forwarded to
+      // maybeWakeEmbedBackend → attemptEmbedBackendWake → recordSend.
+      assert.equal(embedGate.attemptCount, 1);
+      assert.equal(embedGate.exhausted, true);
+    } finally {
+      restoreWol();
+    }
+  });
+
+  test("a down VLM host consumes the INJECTED vlmWakeGate", async () => {
+    enableWol();
+    try {
+      const vlmGate = new WakeGate(0, 1);
+      await collectProbeInputs(happyDeps({
+        probeOllamaVlmImpl: (async () => ({ status: "down", latencyMs: 5000, error: "timeout" })) as any,
+        vlmWakeGate: vlmGate,
+      }));
+      assert.equal(vlmGate.attemptCount, 1);
+      assert.equal(vlmGate.exhausted, true);
+    } finally {
+      restoreWol();
+    }
+  });
+
+  test("the embed and vlm gate budgets stay independent — no cross-wiring", async () => {
+    enableWol();
+    try {
+      const embedGate = new WakeGate(0, 3);
+      const vlmGate = new WakeGate(0, 3);
+      // Only the embed probe fails; the VLM probe is healthy.
+      await collectProbeInputs(happyDeps({
+        probeEmbedBackendImpl: (async () => ({ status: "failed", latencyMs: 0, error: "down" })) as any,
+        probeOllamaVlmImpl: (async () => ({ status: "ok", latencyMs: 9 })) as any,
+        embedWakeGate: embedGate,
+        vlmWakeGate: vlmGate,
+      }));
+      // The embed gate recorded one wake; the VLM gate was reset by the healthy
+      // read (and never consumed the embed budget).
+      assert.equal(embedGate.attemptCount, 1);
+      assert.equal(vlmGate.attemptCount, 0);
+      assert.equal(vlmGate.exhausted, false);
+    } finally {
+      restoreWol();
+    }
+  });
+
+  test("a healthy embed read resets the injected gate (cross-request re-arm)", async () => {
+    // No WoL needed: a non-failed probe takes the reset() branch unconditionally.
+    const embedGate = new WakeGate(0, 1);
+    embedGate.recordSend(0); // simulate a prior consumed budget
+    assert.equal(embedGate.exhausted, true);
+
+    await collectProbeInputs(happyDeps({
+      probeEmbedBackendImpl: (async () => ({ status: "running", latencyMs: 7 })) as any,
+      embedWakeGate: embedGate,
+    }));
+
+    // The healthy read cleared the budget so a future outage starts fresh.
+    assert.equal(embedGate.attemptCount, 0);
+    assert.equal(embedGate.exhausted, false);
   });
 });
