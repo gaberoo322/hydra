@@ -356,10 +356,12 @@ export function resetCoverageStats(): void {
 }
 
 /**
- * Test-only: set the watchedPaths summary that startKnowledgeIndexer
- * reports (kept here so the array stays colocated with the stats).
+ * Set the watchedPaths summary that the indexer reports through
+ * getCoverageStats (#210). Called by IndexerController.start() so the
+ * /api/learning/coverage endpoint reflects the live watch set; kept here so
+ * the array stays colocated with the stats it mutates (issue #2523, INV-5).
  */
-function setWatchedPaths(paths: string[]): void {
+export function setWatchedPaths(paths: string[]): void {
   coverageStats.watchedPaths = paths;
 }
 
@@ -650,134 +652,23 @@ export async function probeOvSourceResourcesPresent(
   }
 }
 
+
 // ===========================================================================
 // SECTION 4 — Background indexer lifecycle (formerly knowledge-indexer.ts,
-// issue #219).
+// issue #219). Extracted into IndexerController (issue #2523).
 //
-// Watches the operator config directory for changes, polls Redis for new
-// memory patterns, and uploads source code via the source-indexer helpers
-// above. Public API: startKnowledgeIndexer() / stopKnowledgeIndexer().
-// Behavior preserved 1:1 from the previous implementation.
+// The lifecycle state (indexerInterval, lastRuleCounts, indexerPending) and
+// the free functions (startKnowledgeIndexer / stopKnowledgeIndexer) now live
+// in src/knowledge-base/indexer-lifecycle.ts as a named, testable class.
+// The thin delegators below keep import paths zero-diff for all callers.
+//
+// See IndexerController in indexer-lifecycle.ts for the full implementation
+// and HeartbeatController (#2195) for the pattern rationale.
 // ===========================================================================
 
-const INDEXABLE_EXTS = new Set([".md", ".txt", ".json", ".yaml", ".yml"]);
-const REDIS_POLL_MS = parseInt(process.env.INDEXER_POLL_MS as any) || 30000;
-
-const indexerPending = new Map<string, ReturnType<typeof setTimeout>>();
-let lastRuleCounts: Record<string, number> = {};
-
-function shouldIndex(filePath: string): boolean {
-  const rel = relative(CONFIG_PATH, filePath);
-  for (const skip of SKIP_DIRS) {
-    if (rel.startsWith(skip)) return false;
-  }
-  return INDEXABLE_EXTS.has(extname(filePath));
-}
-
-function onFileChange(_eventType: string, filename: string | null) {
-  if (!filename) return;
-  const fullPath = resolve(CONFIG_PATH, filename);
-  if (!shouldIndex(fullPath)) return;
-
-  if (indexerPending.has(fullPath)) clearTimeout(indexerPending.get(fullPath)!);
-  indexerPending.set(
-    fullPath,
-    setTimeout(() => {
-      indexerPending.delete(fullPath);
-      indexFile(fullPath);
-    }, DEBOUNCE_MS)
-  );
-}
-
-async function pollRedisContent() {
-  try {
-    // Reality-report indexing was removed in #965 — saveRealityReport had zero
-    // callers (a retired codex control-loop artifact, ADR-0006/ADR-0012), so
-    // this poll read a write-dead store. Memory-pattern polling stays.
-    for (const agent of ["planner", "executor", "skeptic"]) {
-      const raw = await getMemoryPatterns(agent);
-      if (!raw) continue;
-      try {
-        const patterns = JSON.parse(raw);
-        const patternCount = patterns.length;
-        const prev = lastRuleCounts[agent] || 0;
-        if (patternCount > prev) {
-          for (const p of patterns.slice(prev)) {
-            const text = `${agent} pattern [${p.severity}]: ${p.category} (${p.hitCount}x) — ACTION: ${p.action}. Last: ${p.lastCycleId}`;
-            await indexText(`memory:${agent}:${p.category}`, text);
-          }
-          lastRuleCounts[agent] = patternCount;
-        }
-      } catch { /* intentional: skip unparseable patterns */ }
-    }
-  } catch (err: any) {
-    console.error(`[Learning:Indexer] Redis poll failed: ${err.message}`);
-  }
-}
-
-let indexerInterval: ReturnType<typeof setInterval> | null = null;
-
-export function startKnowledgeIndexer() {
-  console.log(`[Learning:Indexer] Watching configs: ${CONFIG_PATH}`);
-  console.log(`[Learning:Indexer] Polling Redis every ${REDIS_POLL_MS / 1000}s`);
-
-  setWatchedPaths([CONFIG_PATH, ...SOURCE_PATHS.map(s => `${s.root}(${s.ext})`)]);
-
-  // Watch config files
-  try {
-    watch(CONFIG_PATH, { recursive: true }, onFileChange);
-  } catch (err: any) {
-    console.error(`[Learning:Indexer] fs.watch failed: ${err.message}`);
-  }
-
-  // Issue #210: Watch source paths (src/, docs/, test/) so agents can
-  // semantically retrieve actual implementation context. The watcher
-  // shares indexerPending with the config watcher so debounce dedup
-  // is global across both surfaces.
-  for (const source of SOURCE_PATHS) {
-    try {
-      watch(source.root, { recursive: true }, makeSourceWatcher(source, indexerPending, DEBOUNCE_MS));
-      console.log(`[Learning:Indexer] Watching source: ${source.root} (${source.ext})`);
-    } catch (err: any) {
-      // ENOENT for missing dir is non-fatal (e.g. docs/ may not exist).
-      if (err.code === "ENOENT") {
-        console.log(`[Learning:Indexer] Source path missing, skipping: ${source.root}`);
-      } else {
-        console.error(`[Learning:Indexer] fs.watch failed for ${source.root}: ${err.message}`);
-      }
-    }
-  }
-
-  // Issue #1123: hydrate the in-memory dedup cache from its durable Redis copy
-  // BEFORE the initial pass, so files unchanged since a previous process's run
-  // are skipped instead of re-embedded on every restart. Best-effort — a load
-  // failure degrades to the pre-#1123 re-upload behavior, never blocks startup.
-  loadPersistedHashes()
-    .then((loaded) => {
-      console.log(`[Learning:Indexer] Loaded ${loaded} persisted source hashes`);
-    })
-    .catch((err: any) => console.error(`[Learning:Indexer] Hash hydrate failed: ${err.message}`))
-    // Initial-index pass: upload recently-modified source files in the
-    // background so agents have code-level context after a restart. Chained
-    // after the hydrate so the cache is warm before the pass decides what to
-    // skip.
-    .then(() => runSourceInitialPass())
-    .then(({ scanned, indexed, skipped }) => {
-      console.log(`[Learning:Indexer] Initial source pass: scanned=${scanned} indexed=${indexed} skipped=${skipped}`);
-    })
-    .catch((err: any) => console.error(`[Learning:Indexer] Initial source pass failed: ${err.message}`));
-
-  // Poll Redis for new content
-  indexerInterval = setInterval(() => pollRedisContent(), REDIS_POLL_MS);
-  pollRedisContent();
-}
-
-// Issue #866: clear the Redis-poll interval so it does not survive a clean
-// shutdown. Idempotent via null-guard — a double-call (SIGINT then SIGTERM,
-// or a second stop in a test) is a safe no-op.
-export function stopKnowledgeIndexer() {
-  if (indexerInterval) {
-    clearInterval(indexerInterval);
-    indexerInterval = null;
-  }
-}
+export {
+  IndexerController,
+  startKnowledgeIndexer,
+  stopKnowledgeIndexer,
+} from "./indexer-lifecycle.ts";
+export type { IndexerControllerDeps } from "./indexer-lifecycle.ts";
