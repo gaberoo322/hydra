@@ -20,7 +20,6 @@ import assert from "node:assert/strict";
 import {
   getCandidateFeed,
   type CandidateFeedDeps,
-  type CandidateDesignConcept,
 } from "../src/anchor-candidates.ts";
 // Pure scoring policy now lives in its own sibling Module (issue #2040); import
 // the scorer from its canonical home rather than the anchor-candidates facade.
@@ -28,6 +27,13 @@ import {
   scoreCandidate,
   PRIORITY_TIER_BASE_SCORE,
 } from "../src/backlog/candidate-scoring.ts";
+// Design-concept annotation policy now lives in its own sibling Module (issue
+// #2499); import the `CandidateDesignConcept` type from its canonical home
+// rather than the anchor-candidates facade (the back-compat re-export was
+// retired per the #2077 precedent).
+import {
+  type CandidateDesignConcept,
+} from "../src/backlog/candidate-design-concept.ts";
 
 const ABSENT_DC: CandidateDesignConcept = {
   present: false,
