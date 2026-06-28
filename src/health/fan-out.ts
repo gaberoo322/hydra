@@ -308,6 +308,22 @@ export interface CollectProbeDeps {
    */
   skillCatalogState?: typeof getSkillCatalogState;
   targetServiceName?: () => string;
+  /**
+   * Issue #2498: the embed-backend Wake-on-LAN gate forwarded to
+   * {@link maybeWakeEmbedBackend} (default: the module-level `embedWakeGate`
+   * singleton, so production callers passing no gate are byte-for-byte
+   * identical and keep cross-request cooldown/attempt persistence). Injecting a
+   * fresh `new WakeGate(cooldown, maxAttempts)` lets a test exercise gate
+   * exhaustion at the `collectProbeInputs` seam without resetting module state.
+   */
+  embedWakeGate?: WakeGate;
+  /**
+   * Issue #2498: the VLM-host Wake-on-LAN gate forwarded to
+   * {@link maybeWakeVlmHost} (default: the module-level `vlmWakeGate`
+   * singleton). Kept distinct from `embedWakeGate` so the two wake budgets stay
+   * independent — no cross-wiring even though both wake the same physical host.
+   */
+  vlmWakeGate?: WakeGate;
 }
 
 export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeInputs> {
@@ -335,6 +351,13 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeOllamaVlmImpl = probeOllamaVlm,
     skillCatalogState = getSkillCatalogState,
     targetServiceName = getTargetServiceName,
+    // Issue #2498: default to the module-level singletons so a no-gate
+    // production caller is identical to today (and keeps cross-request
+    // cooldown/attempt persistence). A test injects a fresh WakeGate to
+    // exercise exhaustion without touching module state. Distinct names from
+    // the singletons avoid self-referential destructure shadowing.
+    embedWakeGate: embedGate = embedWakeGate,
+    vlmWakeGate: vlmGate = vlmWakeGate,
   } = deps;
 
   const settled = await Promise.allSettled([
@@ -366,7 +389,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       // to POST. The powered-off box self-heals (the #1794 stretch goal) by the
       // NEXT scheduled health tick; this tick still surfaces the failure (so the
       // #2131 alert fires correctly while it's down). NEVER throws.
-      const embedFinal = await maybeWakeEmbedBackend(embedBackend);
+      const embedFinal = await maybeWakeEmbedBackend(embedBackend, { gate: embedGate });
       return { vikingdb, openviking: ov, "embed-backend": embedFinal };
     })(),
     /* 2 */ schedulerStatus(),
@@ -430,7 +453,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     // FROZEN registration chore self-heal the empty skill catalog on the next
     // hourly tick once the box answers. THIS tick still surfaces `down` so the
     // #2278 degraded signal + #2131 alert stay correct. NEVER throws.
-    /* 19 */ (async () => maybeWakeVlmHost(await probeOllamaVlmImpl()))(),
+    /* 19 */ (async () => maybeWakeVlmHost(await probeOllamaVlmImpl(), { gate: vlmGate }))(),
   ]);
 
   // Issue #2386: the in-process skill-catalog state is a synchronous, never-throw
