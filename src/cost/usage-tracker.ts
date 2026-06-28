@@ -112,7 +112,7 @@ import type { OAuthUsageResult } from "./oauth-usage.ts";
 // TYPES from here); `deriveHardStop` is an IO-free scalar leaf called inside the
 // assembly function below, so the value+type edge cannot initialise a cycle.
 // See the eligibility.ts header for the full one-way-rule exception rationale.
-import { deriveHardStop, EMERGENCY_STOP_PERCENT } from "./eligibility.ts";
+import { deriveHardStop } from "./eligibility.ts";
 // Pure math leaf (issue #1909): the model-family classifier, JSONL-line parser,
 // quota-weight / cache-hit formulas, and weekly-reset / session-limit time math
 // were extracted into `./token-math.ts`. The snapshot-assembly logic below
@@ -192,11 +192,6 @@ import type { ScanResult, SkillResolver, DispatchKind } from "./transcript-scan.
 // unchanged.
 export { INTERACTIVE_SKILL, UNATTRIBUTED_SKILL };
 export type { SkillResolver };
-// `DispatchKind` (issue #2403) is referenced in the public `UsageSnapshot`
-// shape (the `byDispatchKind` field key); re-export at the same name so
-// consumers of the snapshot can name the kind union without reaching into the
-// TranscriptScan seam directly.
-export type { DispatchKind } from "./transcript-scan.ts";
 
 // Production attribution resolver (issue #2402). Pure, Redis-free: derives the
 // dispatching skill from the transcript's FIRST user message text — the
@@ -209,11 +204,10 @@ const defaultSkillResolver: SkillResolver = (firstUserText) => deriveSkill(first
 
 const CACHE_TTL_MS = 60_000;
 
-// `TokenBreakdown`, `ModelFamily`, `ParsedUsageLine`, and `ResetWindow` now live
-// in the pure leaf `./token-math.ts` (issue #1909). Re-exported here so existing
-// `from "./usage-tracker.ts"` type imports (incl. the `index.ts` barrel) keep
-// resolving at the same names.
-export type { TokenBreakdown, ModelFamily, ParsedUsageLine, ResetWindow } from "./token-math.ts";
+// `TokenBreakdown`, `ModelFamily`, `ParsedUsageLine`, and `ResetWindow` live in
+// the pure leaf `./token-math.ts` (issue #1909). `TokenBreakdown` and
+// `ModelFamily` are imported above for internal use; consumers import all four
+// directly from `./token-math.ts`.
 
 // `MODEL_FAMILIES` (the canonical ordered family list) + `familyWeight` (the
 // per-family Quota-Weight selector) moved DOWN into the pure leaf
@@ -470,10 +464,9 @@ let cache: CacheEntry | null = null;
 // The hard-stop threshold constant `EMERGENCY_STOP_PERCENT` and the two-line
 // `deriveHardStop` predicate it parameterises moved to `./eligibility.ts`
 // (issue #2041) so the threshold POLICY lives with the dispatch-gating fold and
-// is independently unit-testable. Both are imported at the top of this file;
-// `EMERGENCY_STOP_PERCENT` is re-exported here at the same name so any existing
-// `from "./usage-tracker.ts"` import path resolves unchanged.
-export { EMERGENCY_STOP_PERCENT };
+// is independently unit-testable. `deriveHardStop` is imported at the top of
+// this file; `EMERGENCY_STOP_PERCENT` is consumed directly from
+// `./eligibility.ts` by its callers (and `test/usage-tracker.test.mts`).
 
 // `familyWeight`, `MODEL_FAMILIES`, `weightedQuotaBurn`, and the seven pure
 // snapshot-assembly slice helpers (`deriveWeightedBurns`, `deriveEstimatePercents`,
