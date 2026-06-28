@@ -50,13 +50,19 @@ import { getWorkQueueItems, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { time } from "./metrics/instrumentation.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/per-anchor.ts";
-// All design-concept domain symbols live in the single deep module (issue #2316).
+// Design-concept annotation policy — the `CandidateDesignConcept` type, its
+// ABSENT_DESIGN_CONCEPT projection, and the production assembler
+// (`loadDesignConceptImpl`) now live in their own sibling Module
+// (`src/backlog/candidate-design-concept.ts`, issue #2499), mirroring the #2040
+// (candidate-scoring), #2066 (candidate-eligibility), #1880 (merged-refs), and
+// #1844 (work-queue-hygiene) extractions from this same file. `getCandidateFeed`
+// imports the assembler + type; consumers import the type directly from the
+// canonical home (the back-compat re-exports were retired in issue #2077).
 import {
-  getDesignConcept,
-  type DesignConcept,
-  gateCheck,
-  isFresh as isDesignConceptFresh,
-} from "./design-concept.ts";
+  type CandidateDesignConcept,
+  ABSENT_DESIGN_CONCEPT,
+  loadDesignConceptImpl,
+} from "./backlog/candidate-design-concept.ts";
 // MergedAnchorRefs — shared merged-by-cycle suppression Seam (issue #1880,
 // extracted from this module). The Candidate Feed below imports the suppression
 // predicate (`isMergedWork`) + production loader (`loadMergedAnchorRefsImpl`);
@@ -115,24 +121,11 @@ const RESEARCH_THRESHOLD = 0.5; // top score below this → recommend research
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 
-// ---------------------------------------------------------------------------
-// Per-candidate design-concept annotation (issue #628).
-// ---------------------------------------------------------------------------
-
-/**
- * Design-concept annotation surfaced per candidate. decide.py's
- * `design_concept_orch` selector consumes this block:
- *   - present  — artifact exists in `hydra:design-concept:{anchorRef}`
- *   - isFresh  — within DESIGN_CONCEPT_MAX_AGE_MS of createdAt
- *   - status   — `draft` | `approved` | `stale` | null (when absent)
- *   - gateOk   — `gateCheck(d, now).ok`
- */
-export interface CandidateDesignConcept {
-  present: boolean;
-  isFresh: boolean;
-  status: "draft" | "approved" | "stale" | null;
-  gateOk: boolean;
-}
+// The per-candidate design-concept annotation (the `CandidateDesignConcept`
+// type, ABSENT_DESIGN_CONCEPT projection, and `loadDesignConceptImpl` reader,
+// issue #628) now lives in `src/backlog/candidate-design-concept.ts` (issue
+// #2499) — imported above. This module composes the annotation into each
+// candidate inside the feed loop below.
 
 // ---------------------------------------------------------------------------
 // Public result shapes.
@@ -250,13 +243,6 @@ interface CandidateBase {
   blockerJustCleared?: boolean;
 }
 
-const ABSENT_DESIGN_CONCEPT: CandidateDesignConcept = {
-  present: false,
-  isFresh: false,
-  status: null,
-  gateOk: false,
-};
-
 /**
  * Production reflection reader. Returns the most recent reflection timestamp
  * for an anchor reference, or null. Never throws.
@@ -271,37 +257,6 @@ async function loadLastReflectionAtImpl(anchorRef: string): Promise<string | nul
   } catch (err: any) {
     console.error(`[CandidateFeed] reflection load failed for "${anchorRef.slice(0, 60)}": ${err.message}`);
     return null;
-  }
-}
-
-/**
- * Production design-concept reader + projection. Always returns a fully
- * populated block (even when no artifact exists). On any Redis failure returns
- * the "no artifact" projection rather than throwing — a failing annotation
- * must NEVER drop a candidate from the feed.
- */
-async function loadDesignConceptImpl(
-  anchorRef: string,
-  now: number,
-): Promise<CandidateDesignConcept> {
-  if (!anchorRef) return ABSENT_DESIGN_CONCEPT;
-  try {
-    const dc: DesignConcept | null = await getDesignConcept(anchorRef);
-    if (!dc) return ABSENT_DESIGN_CONCEPT;
-    const fresh = isDesignConceptFresh(dc, now);
-    const gate = gateCheck(dc, now);
-    return {
-      present: true,
-      isFresh: fresh,
-      // `stale` is a derived label: artifact exists but aged out of freshness.
-      status: fresh ? dc.status : "stale",
-      gateOk: gate.ok,
-    };
-  } catch (err: any) {
-    console.error(
-      `[CandidateFeed] design-concept load failed for "${anchorRef.slice(0, 60)}": ${err.message}`,
-    );
-    return ABSENT_DESIGN_CONCEPT;
   }
 }
 
