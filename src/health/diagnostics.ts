@@ -33,6 +33,14 @@
 // banner and `projectHealthDeepResponse`'s `uptimeHuman` field. The structured
 // types, parse pipeline, and wire projection all stay in this module.
 import { RULES, fmtUp } from "./rules.ts";
+// Issue #2492: the pure reflection-deposit-health projection + its report type,
+// relocated to the metrics domain (it is a tally over the same cycle-trend rows
+// the metrics probe already collects). Consuming it HERE — a downward edge into
+// the metrics seam, NOT into the api/learning router — lets the deep-health
+// reflection rule surface the verdict where operators actually look, so the
+// recurring #1912→#2450→#2467→#2492 false-alarm re-file loop stops. parseProbes
+// runs it over the metrics-probe trend it already has; no new I/O, no writer.
+import { projectReflectionHealth, type ReflectionHealthReport } from "../metrics/trend.ts";
 // Issue #2023: type-only import — HealthSnapshot.ovSearch.status names the
 // OV-search probe's result vocabulary, owned by the ServiceProbe Adapter Seam.
 // `import type` is erased at compile time, so this is zero runtime coupling and
@@ -120,6 +128,15 @@ export interface HealthSnapshot {
   };
   patterns: { planner: number; executor: number; skeptic: number };
   reflCount: number;
+  // Issue #2492: the reflection-deposit-health verdict over the recent
+  // cycle-metrics window — the SAME projection GET /api/learning/reflection-health
+  // serves, derived in parseProbes from the metrics-probe trend already collected
+  // (a pure tally; no new I/O, no second cycle-record writer). Carried on the
+  // snapshot so the deep-health reflection rule (rules.ts) is pure over `s` like
+  // every other rule, surfacing the verdict as a NON-ALARM info diagnostic where
+  // operators look — closing the discoverability gap that kept re-filing this as
+  // a phantom bug (#1912→#2450→#2467→#2492).
+  reflectionHealth: ReflectionHealthReport;
   // Issue #2386: the in-process OV skill-registration state (registered/total/
   // completed/skills/vlmDeferred), read live at fan-out time and carried here so
   // the two skill-catalog rules are pure over the snapshot — "what state did the
@@ -426,6 +443,14 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   // Pipeline metrics (issue #1936: derivation extracted to derivePipelineMetrics)
   const recent = derivePipelineMetrics(mData.trend || []);
 
+  // Issue #2492: tally the reflection-deposit health verdict over the SAME
+  // metrics-probe trend rows (each already carries a derived
+  // `reflectionMatchSource` from getMetricsTrend/deriveReflectionMatchSource).
+  // Pure — no new I/O, no writer; a rejected metrics settle (mData.trend absent)
+  // yields the `no-data` verdict, never throws. The deep-health reflection rule
+  // reads this off the snapshot as an info-only (never-alarm) diagnostic.
+  const reflectionHealth = projectReflectionHealth(mData.trend || []);
+
   return {
     health,
     sched,
@@ -434,6 +459,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     blCounts,
     patterns,
     reflCount,
+    reflectionHealth,
     skillCatalog,
     ovSearch,
     ollamaVlm,

@@ -400,6 +400,34 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: true,
         }
       : null,
+  // Issue #2492: surface the reflection-deposit-health verdict through the
+  // deep-health fold so an operator checking /api/health/deep sees it where they
+  // look — closing the discoverability gap that kept re-filing a NON-bug
+  // (#1912→#2450→#2467→#2492). The full verdict ALWAYS rides the wire envelope
+  // (intelligence.reflectionHealth), so this rule deliberately fires NOTHING on
+  // the honest `all-none-empty-store` / `healthy` / `no-data` states — a
+  // 100%-`none` distribution on an empty reflection store is the EXPECTED steady
+  // state of a high-merge-rate run (reflections are produced only on a non-merged
+  // failure), NOT an alarm; folding it to `degraded` would BE the false alarm the
+  // design-concept invariant forbids (mirrors the #2386/#2278 honest-none-never-
+  // phantom-alarm discipline). It fires a single INFO (never warning/error) ONLY
+  // on `served-but-bucketed-none`: a cycle DID carry a present reflectionSources
+  // deposit yet still bucketed `none` — the genuine candidate false-none worth an
+  // operator's eye (deposit/read plumbing), distinct from the honest empty store.
+  (s) =>
+    s.reflectionHealth.verdict === "served-but-bucketed-none"
+      ? {
+          severity: "info",
+          component: "intelligence",
+          what: "Reflection deposit served but bucketed 'none'",
+          why: s.reflectionHealth.note,
+          impact:
+            "A reflection deposit landed yet did not register as applied context — a candidate false-none (distinct from the EXPECTED all-none of an empty store on a high-merge run, which is not surfaced here). Learning-context telemetry may under-count what reached a retry.",
+          action:
+            "Inspect the deposit/read path: GET /api/learning/reflection-health for the full distribution; confirm reap.py reflection_sources forwarding and the per-anchor/by-file read seam (src/reflections/index.ts).",
+          autoRecovery: true,
+        }
+      : null,
   // Issue #1968: surface the silent empty/partial OV skill catalog through the
   // deep-health Health Assessment fold so an operator watching /api/health/deep
   // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a

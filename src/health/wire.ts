@@ -129,6 +129,15 @@ export interface HealthDeepResponse {
   intelligence: {
     patterns: HealthSnapshot["patterns"];
     reflections: number;
+    // Issue #2492: the reflection-deposit-health verdict over the recent
+    // cycle-metrics window — the SAME projection GET /api/learning/reflection-health
+    // serves, now ALSO surfaced here so an operator checking /api/health/deep (the
+    // surface the #1912→#2450→#2467→#2492 re-files kept landing on) reads the
+    // honest verdict (`all-none-empty-store` = expected, not a bug) inline rather
+    // than re-discovering a flat `none` column and re-filing. ALWAYS present (a
+    // pure read; `no-data` when the metrics probe rejected). Distinct from the
+    // info-only deep-health diagnostic, which fires only on `served-but-bucketed-none`.
+    reflectionHealth: HealthSnapshot["reflectionHealth"];
     ovSearch: HealthSnapshot["ovSearch"];
     ovSearchTrend: unknown;
     knowledgeContext: unknown;
@@ -145,7 +154,7 @@ export function projectHealthDeepResponse(
   checkedAt: string,
   probes: ProbeInputs,
 ): HealthDeepResponse {
-  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, reflectionHealth, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
 
   // Issue #1440: coalesce the two persisted OV-quality reads.
@@ -185,7 +194,7 @@ export function projectHealthDeepResponse(
     // (resets on restart). `ovSearchTrend` is the restart-surviving 24h
     // hour-bucketed rollup (zeroResultRate/fallbackSuccessRate trends) and
     // `knowledgeContext` the 7d per-day context-availability rate.
-    intelligence: { patterns, reflections: reflCount, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
+    intelligence: { patterns, reflections: reflCount, reflectionHealth, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
     diagnostics,
   };
 }
