@@ -31,7 +31,7 @@
  */
 
 import type { ActiveDispatch, ActiveDispatchesPayload } from "./derive-sprite-state.ts";
-import { classSpriteFile, type ClassName } from "./sprite-map.ts";
+import { classSpriteFile, hasClassSprite, type ClassName } from "./sprite-map.ts";
 
 // ---------------------------------------------------------------------------
 // Live counter / wait / activity state — accumulated as WS events stream in.
@@ -341,17 +341,19 @@ export function deriveBattleCardRows(
 
 function resolveSpriteFile(classLabel: string): string {
   // classLabel may already be a class name (dev_orch, qa_target, …) or it
-  // may be a skill alias / unknown string. classSpriteFile throws for
-  // anything outside the pipeline+signal closed set; we swallow that and
-  // fall back to the placeholder so an unexpected payload doesn't crash
-  // the strip. We don't import the skill-alias table here because the
-  // /now-pixel sprite-map keeps it private — the active-dispatches
+  // may be a skill alias / unknown string. `classSpriteFile` no longer throws
+  // for an unmapped class — it degrades to its own habitat fallback sprite —
+  // so we gate on `hasClassSprite` and keep the strip's OWN placeholder
+  // (Pikachu) for anything outside the pipeline+signal closed set, preserving
+  // the legacy strip convention. We don't import the skill-alias table here
+  // because the /now-pixel sprite-map keeps it private — the active-dispatches
   // payload normalises to the class string at the API boundary today.
+  if (!hasClassSprite(classLabel)) return PLACEHOLDER_SPRITE_FILE;
   try {
     const file = classSpriteFile(classLabel as ClassName, 0);
     return file || PLACEHOLDER_SPRITE_FILE;
   } catch {
-    /* intentional: unknown class label falls back to the placeholder sprite */
+    /* intentional: unexpected sprite-lookup failure falls back to the placeholder */
     return PLACEHOLDER_SPRITE_FILE;
   }
 }
