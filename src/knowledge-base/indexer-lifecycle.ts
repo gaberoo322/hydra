@@ -26,15 +26,15 @@
  */
 
 import { watch } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { basename, extname, relative, resolve } from "node:path";
+import { extname, relative, resolve } from "node:path";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import {
+  indexFile,
   indexText,
   loadPersistedHashes,
+  makeSourceWatcher,
   runSourceInitialPass,
   setWatchedPaths,
-  shouldIndexSource,
   parseSourcePaths,
   type SourcePath,
 } from "./indexer.ts";
@@ -75,7 +75,21 @@ export interface IndexerControllerDeps {
   /** Poll memory patterns for a given agent. Defaults to getMemoryPatterns. */
   getMemoryPatterns?: (agent: string) => Promise<string | null>;
 
-  /** Upload arbitrary text to OV. Defaults to indexText from indexer.ts. */
+  /**
+   * Index a config-tree file via OV container-path ingestion (with per-file
+   * SHA-256 hash-dedup). Defaults to indexFile from indexer.ts. This is the
+   * config-file index path used by onFileChange — NOT indexText. Restoring
+   * this dep (issue #2523) reverts the #2526 regression that re-routed config
+   * changes through the blob-upload (indexText) path.
+   */
+  indexFile?: (filePath: string) => Promise<void>;
+
+  /**
+   * Upload arbitrary text to OV (blob-upload to the hydra-memory/ namespace).
+   * Defaults to indexText from indexer.ts. Used only by pollRedisContent for
+   * memory-pattern entries — config + source files route through indexFile /
+   * makeSourceWatcher's indexSourceFile, never this.
+   */
   indexText?: (title: string, content: string) => Promise<void>;
 
   /** Source paths to watch + index. Defaults to DEFAULT_SOURCE_PATHS. */
@@ -144,6 +158,7 @@ export class IndexerController {
   private readonly indexerPending = new Map<string, ReturnType<typeof setTimeout>>();
 
   private readonly _getMemoryPatterns: NonNullable<IndexerControllerDeps["getMemoryPatterns"]>;
+  private readonly _indexFile: NonNullable<IndexerControllerDeps["indexFile"]>;
   private readonly _indexText: NonNullable<IndexerControllerDeps["indexText"]>;
   private readonly _sourcePaths: SourcePath[];
   private readonly _loadPersistedHashes: NonNullable<IndexerControllerDeps["loadPersistedHashes"]>;
@@ -157,6 +172,7 @@ export class IndexerController {
 
   constructor(deps: IndexerControllerDeps = {}) {
     this._getMemoryPatterns = deps.getMemoryPatterns ?? getMemoryPatterns;
+    this._indexFile = deps.indexFile ?? indexFile;
     this._indexText = deps.indexText ?? indexText;
     this._sourcePaths = deps.sourcePaths ?? DEFAULT_SOURCE_PATHS;
     this._loadPersistedHashes = deps.loadPersistedHashes ?? loadPersistedHashes;
@@ -190,12 +206,17 @@ export class IndexerController {
     if (this.indexerPending.has(fullPath)) {
       clearTimeout(this.indexerPending.get(fullPath)!);
     }
-    const indexTextFn = this._indexText;
+    // Issue #2523: route config-file changes through indexFile — the OV
+    // container-path ingestion with per-file SHA-256 hash-dedup — exactly as
+    // the original startKnowledgeIndexer did. The #2526 extraction wrongly
+    // used indexText (blob-upload, no dedup, different URI namespace); this
+    // restores 1:1 behaviour (INV-1).
+    const indexFileFn = this._indexFile;
     this.indexerPending.set(
       fullPath,
       setTimeout(() => {
         this.indexerPending.delete(fullPath);
-        indexConfigFile(fullPath, indexTextFn).catch((err: any) =>
+        indexFileFn(fullPath).catch((err: any) =>
           console.error(
             `[Learning:Indexer] Config change index failed for ${fullPath}: ${err.message}`
           )
@@ -353,75 +374,15 @@ export class IndexerController {
 }
 
 // ---------------------------------------------------------------------------
-// Module-internal helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Upload a config-directory file to OV via the public indexText surface.
- * Avoids crossing into indexer.ts Section 1's private indexFile function
- * (which owns its own module-level hash map). Config files are small text
- * blobs; uploading via indexText is functionally equivalent.
- */
-async function indexConfigFile(
-  filePath: string,
-  indexTextFn: (title: string, content: string) => Promise<void>
-): Promise<void> {
-  let content: string;
-  try {
-    content = await readFile(filePath, "utf-8");
-  } catch (err: any) {
-    if (err.code !== "ENOENT") {
-      console.error(
-        `[Learning:Indexer] Failed to read config file ${filePath}: ${err.message}`
-      );
-    }
-    return;
-  }
-  const name = basename(filePath);
-  await indexTextFn(`config:${name}`, content);
-}
-
-/**
- * Build a fs.watch callback that debounces source-file changes through a
- * shared pending map. Mirrors makeSourceWatcher from indexer.ts Section 2
- * but takes the pending map from the IndexerController instance so the
- * controller owns shared state.
- */
-function makeSourceWatcher(
-  source: SourcePath,
-  pending: Map<string, ReturnType<typeof setTimeout>>,
-  debounceMs: number
-): (eventType: string, filename: string | null) => void {
-  return (_eventType: string, filename: string | null) => {
-    if (!filename) return;
-    const fullPath = resolve(source.root, filename);
-    if (!shouldIndexSource(fullPath, source)) return;
-    if (pending.has(fullPath)) clearTimeout(pending.get(fullPath)!);
-    pending.set(
-      fullPath,
-      setTimeout(() => {
-        pending.delete(fullPath);
-        // Route through indexText (the public surface from indexer.ts).
-        // indexSourceFile is private in indexer.ts; this path uploads a
-        // source-file-changed entry so OV gets updated without crossing the
-        // module-private boundary.
-        const rel = fullPath.slice(source.root.length + 1);
-        const folder = basename(source.root);
-        indexText(
-          `hydra-source:${folder}__${rel.replace(/\//g, "__")}`,
-          `Source file changed: ${fullPath}`
-        ).catch((err: any) =>
-          console.error(
-            `[Learning:Indexer] Source change index failed for ${fullPath}: ${err.message}`
-          )
-        );
-      }, debounceMs)
-    );
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Module-level default singleton + thin delegators (zero-diff for callers)
+//
+// Issue #2523 forward-fix: the config-file index path (onFileChange ->
+// indexFile) and the source-file watcher (makeSourceWatcher -> indexSourceFile)
+// are now consumed by import from indexer.ts (INV-5), not re-implemented here.
+// The prior local indexConfigFile + makeSourceWatcher copies routed both
+// surfaces through indexText (blob-upload, no hash-dedup, wrong URI namespace),
+// a 1:1-behaviour regression (INV-1). Deleting them restores the original
+// container-path + content-index behaviour.
 // ---------------------------------------------------------------------------
 
 /**

@@ -327,6 +327,159 @@ describe("IndexerController — pollRedisContent", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Config-file index path — INV-1 regression guard (issue #2523 forward-fix)
+//
+// The original onFileChange routed config-file changes through indexFile (OV
+// container-path ingestion + SHA-256 hash-dedup). The #2526 extraction wrongly
+// re-routed them through indexText (blob-upload, no dedup, wrong URI
+// namespace). These tests pin that config changes drive indexFile, never
+// indexText.
+// ---------------------------------------------------------------------------
+
+describe("IndexerController — config-file index path (INV-1)", () => {
+  /**
+   * Capture the config-watch callback the controller registers, so a test can
+   * synthesize a file-change event and assert which index path fires. Returns
+   * the callback registered for the config path.
+   */
+  function startAndCaptureConfigWatcher(
+    deps: IndexerControllerDeps,
+    configPath: string
+  ): (eventType: string, filename: string | null) => void {
+    let configCb:
+      | ((eventType: string, filename: string | null) => void)
+      | undefined;
+    const ctrl = new IndexerController({
+      ...deps,
+      configPath,
+      sourcePaths: [], // isolate the config watcher
+      watch: (path, _opts, cb) => {
+        if (path === configPath) configCb = cb;
+      },
+    });
+    ctrl.start();
+    assert.ok(configCb, "config watcher callback must be registered on start()");
+    return configCb!;
+  }
+
+  test("onFileChange routes a changed config file through indexFile, not indexText", async () => {
+    const indexFileCalls: string[] = [];
+    const indexTextCalls: string[] = [];
+    const configPath = "/test/config";
+    const cb = startAndCaptureConfigWatcher(
+      {
+        ...silentDeps(),
+        debounceMs: 1, // fire the debounce timer fast
+        indexFile: async (filePath) => { indexFileCalls.push(filePath); },
+        indexText: async (title) => { indexTextCalls.push(title); },
+      },
+      configPath
+    );
+
+    // Synthesize a change to an indexable config file.
+    cb("change", "agents/planner.md");
+
+    // Wait past the 1ms debounce window for the timer to fire.
+    await new Promise((r) => setTimeout(r, 15));
+
+    assert.deepEqual(
+      indexFileCalls,
+      [`${configPath}/agents/planner.md`],
+      "config change must invoke indexFile with the resolved path"
+    );
+    assert.equal(
+      indexTextCalls.length,
+      0,
+      "config change must NOT invoke indexText (the #2526 regression)"
+    );
+  });
+
+  test("onFileChange ignores non-indexable extensions", async () => {
+    const indexFileCalls: string[] = [];
+    const cb = startAndCaptureConfigWatcher(
+      {
+        ...silentDeps(),
+        debounceMs: 1,
+        indexFile: async (filePath) => { indexFileCalls.push(filePath); },
+      },
+      "/test/config"
+    );
+
+    cb("change", "notes.bin"); // not in INDEXABLE_EXTS
+    await new Promise((r) => setTimeout(r, 15));
+
+    assert.equal(
+      indexFileCalls.length,
+      0,
+      "a non-indexable extension must not be indexed"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared indexerPending map across both watchers — INV-3 (issue #2523)
+//
+// The debounce-timer map is a SINGLE shared instance field across the
+// config-file watcher (onFileChange) and the source-file watchers
+// (makeSourceWatcher), so debounce dedup is global across both surfaces.
+// ---------------------------------------------------------------------------
+
+describe("IndexerController — shared indexerPending map (INV-3)", () => {
+  test("config + source pending timers accumulate in one shared map", () => {
+    const callbacks: Record<
+      string,
+      (eventType: string, filename: string | null) => void
+    > = {};
+    const configPath = "/test/config";
+    const sourceRoot = "/repo/src";
+    const ctrl = new IndexerController({
+      ...silentDeps(),
+      configPath,
+      sourcePaths: [{ root: sourceRoot, ext: ".ts" }],
+      // Long debounce so the timers stay pending while we inspect the map.
+      debounceMs: 99999,
+      // Never actually index — keep the debounce timers alive.
+      indexFile: async () => { /* intentional: no-op */ },
+      indexText: async () => { /* intentional: no-op */ },
+      watch: (path, _opts, cb) => { callbacks[path] = cb; },
+    });
+    ctrl.start();
+
+    assert.equal(
+      ctrl._getPendingSize(),
+      0,
+      "no pending timers before any change event"
+    );
+
+    // Fire a config change → one pending timer.
+    callbacks[configPath]("change", "agents/skeptic.md");
+    assert.equal(
+      ctrl._getPendingSize(),
+      1,
+      "config change adds one timer to the shared map"
+    );
+
+    // Fire a source change → a SECOND pending timer in the SAME map.
+    callbacks[sourceRoot]("change", "knowledge-base/indexer.ts");
+    assert.equal(
+      ctrl._getPendingSize(),
+      2,
+      "source change adds to the same shared indexerPending map as the config watcher"
+    );
+
+    // Re-firing the same config path collapses (debounce dedup), not grows.
+    callbacks[configPath]("change", "agents/skeptic.md");
+    assert.equal(
+      ctrl._getPendingSize(),
+      2,
+      "re-firing the same path replaces its timer in-place — still 2 distinct entries"
+    );
+
+    ctrl.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Module-level delegators (zero-diff import path contract)
 // ---------------------------------------------------------------------------
 
