@@ -19,7 +19,7 @@ import { LANES, getLaneItems, sortByQueuePriority } from "./internal.ts";
  * narrowing the item record is out of scope here; this issue only tightens the
  * lane-key layer that forced the casts.
  */
-export type Item = any;
+type Item = any;
 
 export type Backlog = {
   triage: Item[];
