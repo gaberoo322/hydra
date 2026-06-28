@@ -58,6 +58,16 @@ function healthySnapshot(): HealthSnapshot {
     blCounts: { triage: 0, backlog: 2, inProgress: 1, blocked: 0, done: 5, total: 3 },
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
+    // Issue #2492: a `healthy` reflection-deposit verdict — the reflection rule
+    // fires ONLY on `served-but-bucketed-none`, so this keeps the baseline
+    // "fires zero diagnostics" assertion holding while exercising the field.
+    reflectionHealth: {
+      sampleSize: 20,
+      distribution: { both: 5, none: 15 },
+      reflectionSourcesPresent: 5,
+      verdict: "healthy",
+      note: "Reflection context reached 5/20 recent cycles; deposit plumbing is live.",
+    },
     // Issue #2386: a fully-registered skill catalog — both skill-catalog rules
     // (assessSkillCatalog / assessRegistrationFailureRate) no-op, so the baseline
     // "fully-healthy snapshot fires zero diagnostics" assertion holds.
@@ -587,6 +597,86 @@ describe("assessHealth — per-rule firing", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Reflection-deposit-health deep-health rule (issue #2492)
+//
+// The recurring #1912→#2450→#2467→#2492 re-file loop misreads a flat 100%-`none`
+// reflectionMatchSource distribution as a broken-telemetry bug. It is the HONEST
+// steady state of an empty reflection store (reflections are produced only on a
+// non-merged failure). This rule surfaces the verdict in /api/health/deep — where
+// the re-files kept landing — but MUST NOT alarm on that honest state: it fires a
+// single INFO ONLY on the genuine candidate false-none (`served-but-bucketed-none`),
+// and NOTHING on `healthy` / `all-none-empty-store` / `no-data`. The full verdict
+// always rides the wire envelope (covered in the projectHealthDeepResponse suite).
+// ---------------------------------------------------------------------------
+
+describe("assessHealth — reflection-deposit health rule (#2492)", () => {
+  const reflDiag = (s: HealthSnapshot) =>
+    assessHealth(s).diagnostics.find((d) => d.what === "Reflection deposit served but bucketed 'none'");
+
+  test("honest all-none-empty-store does NOT fire and keeps status healthy (no false alarm)", () => {
+    const a = assessHealth(
+      clone((s) => {
+        s.reflectionHealth = {
+          sampleSize: 50,
+          distribution: { none: 50 },
+          reflectionSourcesPresent: 0,
+          verdict: "all-none-empty-store",
+          note: "All 50 recent cycles bucketed 'none' with no deposit served — Expected, not an alarm.",
+        };
+      }),
+    );
+    assert.ok(
+      !a.diagnostics.some((d) => d.what === "Reflection deposit served but bucketed 'none'"),
+      "the EXPECTED empty-store none must not surface a diagnostic",
+    );
+    assert.equal(a.status, "healthy", "the honest all-none state must not degrade status");
+  });
+
+  test("healthy verdict (a non-none bucket present) does NOT fire", () => {
+    assert.equal(reflDiag(clone(() => {})), undefined, "the baseline healthy verdict is silent");
+  });
+
+  test("no-data verdict (metrics probe rejected) does NOT fire", () => {
+    const d = reflDiag(
+      clone((s) => {
+        s.reflectionHealth = {
+          sampleSize: 0,
+          distribution: {},
+          reflectionSourcesPresent: 0,
+          verdict: "no-data",
+          note: "No cycle metrics recorded yet — nothing to assess.",
+        };
+      }),
+    );
+    assert.equal(d, undefined);
+  });
+
+  test("served-but-bucketed-none → a single INFO intelligence diagnostic (the genuine candidate false-none)", () => {
+    const a = assessHealth(
+      clone((s) => {
+        s.reflectionHealth = {
+          sampleSize: 20,
+          distribution: { none: 20 },
+          reflectionSourcesPresent: 3,
+          verdict: "served-but-bucketed-none",
+          note: "3/20 cycles carried a reflectionSources deposit yet bucketed 'none' — candidate false-none; inspect the deposit/read path.",
+        };
+      }),
+    );
+    const d = a.diagnostics.find((x) => x.what === "Reflection deposit served but bucketed 'none'");
+    assert.ok(d, "the candidate false-none must surface a diagnostic");
+    assert.equal(d!.severity, "info", "NEVER warning/error — it annotates, it does not alarm");
+    assert.equal(d!.component, "intelligence");
+    assert.equal(d!.autoRecovery, true);
+    // The note (the verdict's own explanation) is threaded into `why`.
+    assert.match(d!.why, /candidate false-none/);
+    // An info diagnostic with no higher-severity sibling folds status to degraded
+    // (the established info-rule behaviour) — it is the genuine signal worth a look.
+    assert.equal(a.status, "degraded");
+  });
+});
+
 // Issue #2023: the `classifyOvSearchProbe` describe block moved to
 // test/health-probe.test.mts, tracking the classifier's move into the
 // ServiceProbe Adapter Seam (src/health/probe.ts).
@@ -1098,8 +1188,19 @@ describe("projectHealthDeepResponse", () => {
       "ovSearch",
       "ovSearchTrend",
       "patterns",
+      // Issue #2492: the reflection-deposit-health verdict now rides the
+      // intelligence block so /api/health/deep surfaces it where operators look.
+      "reflectionHealth",
       "reflections",
     ]);
+  });
+
+  test("intelligence.reflectionHealth carries the verdict the snapshot computed (issue #2492)", () => {
+    const r = project(healthySnapshot());
+    // The full verdict ALWAYS rides the wire envelope (it is a pure read), even
+    // when no deep-health diagnostic fires — that always-on visibility is the
+    // discoverability fix that stops the #1912→#2450→#2467→#2492 re-file loop.
+    assert.deepEqual(r.intelligence.reflectionHealth, healthySnapshot().reflectionHealth);
   });
 
   test("ovSearchTrend/knowledgeContext coalesce to null when settled[17]/[18] rejected", () => {

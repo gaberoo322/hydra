@@ -57,6 +57,144 @@ export function deriveReflectionMatchSource(rawSources: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Reflection-deposit health projection (issue #2467; relocated here #2492)
+// ---------------------------------------------------------------------------
+//
+// Issue #2492: this pure projection lived in src/api/learning.ts, but it is
+// metrics-domain logic — a tally over the same cycle-trend rows that carry the
+// `reflectionMatchSource` `deriveReflectionMatchSource` already derives above.
+// It moved HERE (with `deriveReflectionMatchSource`, its conceptual sibling) so
+// BOTH the HTTP route (GET /api/learning/reflection-health) and the pure
+// deep-health diagnostics seam (src/health/diagnostics.ts) can consume it
+// without the health seam importing an `src/api/` router module (a backwards
+// inward edge). src/api/learning.ts re-exports these for its existing callers,
+// so the route + its test keep their import site unchanged.
+//
+// The recurring #1912/#2450/#2467/#2492 false alarm is reading a flat
+// 100%-`none` `reflectionMatchSource` distribution as broken telemetry when it
+// is the HONEST steady state of an empty reflection store — reflections are
+// PRODUCED only on a non-merged failure (reap.py `_fire_reflection_for_completion`),
+// so a high-merge-rate run structurally serves nothing and `none` is correct,
+// NOT a regression. `reflectionSourcesPresent` is the discriminator the raw
+// metric hides: it counts cycles whose raw `reflectionSources` field is a
+// non-empty, non-sentinel string (a deposit actually landed). When every cycle
+// is `none` AND none carried a present deposit, that is consistent with an empty
+// store (the expected case) → verdict `all-none-empty-store`, explicitly NOT an
+// alarm. The verdict only flags `served-but-bucketed-none` when a cycle DID
+// carry a present deposit yet still bucketed `none` (the real false-none).
+
+/**
+ * One cycle's projection for the reflection-health read: the derived bucket
+ * plus whether its raw `reflectionSources` deposit field was actually present
+ * (a non-empty, non-`"none"`-sentinel string).
+ */
+export interface ReflectionHealthSampleProjection {
+  reflectionMatchSource: string;
+  reflectionSourcesPresent: boolean;
+}
+
+/** The wire shape of `GET /learning/reflection-health`. */
+export interface ReflectionHealthReport {
+  /** Cycles examined (≤ requested window; fewer if the store has fewer). */
+  sampleSize: number;
+  /** Count per `reflectionMatchSource` bucket (only non-zero buckets appear). */
+  distribution: Record<string, number>;
+  /** Cycles whose raw `reflectionSources` deposit landed (non-empty, non-sentinel). */
+  reflectionSourcesPresent: number;
+  /**
+   * Honest verdict over the window:
+   *   - "no-data"                 — sampleSize 0 (nothing recorded yet).
+   *   - "healthy"                 — at least one non-`none` bucket present.
+   *   - "all-none-empty-store"    — every cycle `none` AND none carried a
+   *                                 present deposit; consistent with an empty
+   *                                 store / high merge rate. NOT an alarm.
+   *   - "served-but-bucketed-none"— ≥1 cycle carried a present deposit yet still
+   *                                 bucketed `none` — a candidate false-none
+   *                                 (deposit/read plumbing worth an operator's eye).
+   */
+  verdict:
+    | "no-data"
+    | "healthy"
+    | "all-none-empty-store"
+    | "served-but-bucketed-none";
+  /** One-line human-readable explanation of the verdict (for the dashboard). */
+  note: string;
+}
+
+/**
+ * The single cycle field this read inspects beyond the derived bucket: the raw
+ * `reflectionSources` string reap forwarded. A non-empty, non-`"none"`-sentinel
+ * value means a deposit actually landed for that cycle (the #2209 sentinel is
+ * treated as absent, mirroring `deriveReflectionMatchSource`).
+ */
+function reflectionSourcesIsPresent(raw: unknown): boolean {
+  if (typeof raw !== "string") return false;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 && trimmed !== "none";
+}
+
+/**
+ * Pure projection of a recent-cycles window into a `ReflectionHealthReport`
+ * (issue #2467). Exported so the test suite can pin the bucket-distribution and
+ * verdict logic on synthetic rows WITHOUT a Redis connection — the
+ * `GET /learning/reflection-health` route feeds it `getMetricsTrend()`'s output,
+ * and the deep-health reflection rule (issue #2492) feeds it the metrics-probe
+ * trend it already collected.
+ *
+ * Never throws and reads nothing: it consumes already-read cycle rows (each
+ * already carries a derived `reflectionMatchSource` from
+ * `getMetricsTrend`/`deriveReflectionMatchSource`) and tallies. A row missing a
+ * `reflectionMatchSource` is defensively bucketed `none` (the same default the
+ * derive helper applies to an empty source string), so the projection stays
+ * total over any input shape.
+ */
+export function projectReflectionHealth(
+  cycles: Array<Record<string, any>>,
+): ReflectionHealthReport {
+  const distribution: Record<string, number> = {};
+  let reflectionSourcesPresent = 0;
+  let servedButNone = 0;
+
+  for (const cycle of cycles) {
+    const bucket =
+      typeof cycle.reflectionMatchSource === "string" && cycle.reflectionMatchSource.length > 0
+        ? cycle.reflectionMatchSource
+        : "none";
+    distribution[bucket] = (distribution[bucket] ?? 0) + 1;
+
+    const present = reflectionSourcesIsPresent(cycle.reflectionSources);
+    if (present) {
+      reflectionSourcesPresent += 1;
+      // A deposit landed yet the bucket is still `none` → a candidate false-none
+      // (the real broken-plumbing / stale-record signal, distinct from the
+      // honest empty-store none the operator keeps mis-reading as a regression).
+      if (bucket === "none") servedButNone += 1;
+    }
+  }
+
+  const sampleSize = cycles.length;
+  const nonNoneBuckets = Object.keys(distribution).filter(b => b !== "none").length;
+
+  let verdict: ReflectionHealthReport["verdict"];
+  let note: string;
+  if (sampleSize === 0) {
+    verdict = "no-data";
+    note = "No cycle metrics recorded yet — nothing to assess.";
+  } else if (nonNoneBuckets > 0) {
+    verdict = "healthy";
+    note = `Reflection context reached ${sampleSize - (distribution.none ?? 0)}/${sampleSize} recent cycles; deposit plumbing is live.`;
+  } else if (servedButNone > 0) {
+    verdict = "served-but-bucketed-none";
+    note = `${servedButNone}/${sampleSize} cycles carried a reflectionSources deposit yet bucketed 'none' — candidate false-none; inspect the deposit/read path.`;
+  } else {
+    verdict = "all-none-empty-store";
+    note = `All ${sampleSize} recent cycles bucketed 'none' with no deposit served — consistent with an empty reflection store (high merge rate). Expected, not an alarm.`;
+  }
+
+  return { sampleSize, distribution, reflectionSourcesPresent, verdict, note };
+}
+
+// ---------------------------------------------------------------------------
 // Grounding-duration aggregation (issue #341, extracted in #2126)
 // ---------------------------------------------------------------------------
 
