@@ -17,7 +17,7 @@ import {
   getBacklogItemRaw, saveBacklogItem, removeBacklogItem as removeBacklogItemAdapter,
   getBacklogLaneIds,
   incrBacklogCounter,
-  setBacklogTitleIndex, clearBacklogTitleIndex, getBacklogItemIdByTitle,
+  clearBacklogTitleIndex, getBacklogItemIdByTitle,
 } from "../redis/backlog.ts";
 
 export const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
@@ -98,42 +98,36 @@ export async function removeItem(id: any) {
 }
 
 /**
- * Resolve an itemId from a title (issue #2500). Tries the O(1) by-title index
- * first; on a miss, falls back to a bounded scan of `searchLanes` so items that
- * predate the index (or were written by a path that skipped index maintenance)
- * are still found — and back-fills the index for next time. Returns the id, or
- * null if no item with that exact title exists in any searched lane.
+ * Resolve an itemId from a title (issue #2500). A single O(1) HGET against the
+ * by-title index (`hydra:backlog:title-index`), then a by-id verify. Returns the
+ * id on a verified hit, or null on a miss / stale hit.
  *
- * The fallback verifies `item.title === title` exactly (case-sensitive), matching
- * the equality the scan loops used, and also re-verifies an index HIT before
- * trusting it — a stale index entry (title since changed, item since deleted)
- * degrades to the scan rather than mutating the wrong item.
+ * MUST NOT fall back to a full lane scan on an index miss (design-concept
+ * Invariant 7 — "it MUST NOT fall back to a full scan, otherwise the leverage
+ * claim is void"; the lane-scan fallback this previously carried was the hard
+ * Spec violation the dedicated T3 QA caught on PR #2504). The sole recovery path
+ * for a pre-existing or diverged backlog is the index reconciler's rebuild from
+ * the canonical items hash (Invariant 8 — `reconcileLaneIndices` /
+ * `rebuildBacklogTitleIndex` in src/backlog/index-reconciler.ts), NOT a per-call
+ * scan. `searchLanes` is retained in the signature so callers (and the
+ * Invariant-6 "identical public signatures" contract) are unaffected, but it is
+ * no longer used to scan.
+ *
+ * The by-id verify re-confirms `item.title === title` exactly (case-sensitive,
+ * Invariant 3) before trusting an index hit — a stale index entry (title since
+ * changed, item since deleted) returns null rather than mutating the wrong item,
+ * letting the caller's existing not-found result stand until the reconciler
+ * self-heals the entry.
  */
 export async function resolveItemIdByTitle(
   title: string,
-  searchLanes: string[],
+  _searchLanes: string[],
 ): Promise<string | null> {
   const indexed = await getBacklogItemIdByTitle(title);
   if (indexed) {
     const item = await getItem(indexed);
     if (item && item.title === title) return String(indexed);
-    // Stale hit — fall through to the authoritative scan below.
-  }
-
-  for (const lane of searchLanes) {
-    const ids = await getBacklogLaneIds(lane);
-    for (const id of ids) {
-      const item = await getItem(id);
-      if (item && item.title === title) {
-        // Back-fill the index so the next lookup is O(1).
-        try {
-          await setBacklogTitleIndex(title, String(id));
-        } catch (err: any) {
-          console.error(`[Backlog] resolveItemIdByTitle: index back-fill failed for "${title}": ${err.message}`);
-        }
-        return String(id);
-      }
-    }
+    // Stale hit — return null; the reconciler (Invariant 8) is the recovery path.
   }
   return null;
 }

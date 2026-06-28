@@ -4,12 +4,16 @@
  * The four title-based lane mutations in src/backlog/lanes.ts
  * (moveToInProgress / moveToDone / blockByTitle / returnToBacklog) used to scan
  * whole lanes (one HGET per item) to resolve an id from a title. They now do a
- * single HGET against `hydra:backlog:title-index`, falling back to a bounded
- * scan (with index back-fill) on a miss. These tests assert:
+ * single HGET against `hydra:backlog:title-index` and verify by id — with NO
+ * lane-scan fallback on a miss (design-concept Invariant 7: "it MUST NOT fall
+ * back to a full scan, otherwise the leverage claim is void"; the recovery path
+ * for a diverged/pre-existing backlog is the reconciler rebuild, Invariant 8).
+ * These tests assert:
  *   1. the index is maintained on create / title-change / delete,
  *   2. the title-based mutations resolve via the index (constant Redis reads
  *      regardless of lane depth),
- *   3. correctness is preserved on a stale / missing index entry (scan fallback),
+ *   3. an index miss / stale entry returns not-found and does NOT scan
+ *      (Invariant 7) — the reconciler, not a per-call scan, is the recovery path,
  *   4. the lane-index reconciler rebuilds the title-index FROM the hash.
  *
  * Requires Redis on localhost:6379. Uses DB 1, cleaned between tests via a
@@ -132,29 +136,69 @@ describe("backlog by-title index (issue #2500)", () => {
     assert.equal((await getItem(c.id)).lane, "backlog");
   });
 
-  test("missing index entry: scan fallback still finds the item and back-fills", async (t) => {
+  test("missing index entry: returns not-found WITHOUT a fallback scan (Invariant 7)", async (t) => {
     requireRedis(t);
     const { id } = await addToBacklog({ title: "No index entry", lane: "queued" });
     // Simulate a pre-existing item whose index entry was never written.
     await redis.hdel(TITLE_INDEX_KEY, "No index entry");
     assert.equal(await redis.hget(TITLE_INDEX_KEY, "No index entry"), null);
 
+    // Invariant 7: an index miss MUST NOT fall back to a full scan, so the item
+    // is NOT found and the lane mutation does not happen.
     const moved = await moveToInProgress("No index entry");
-    assert.equal(moved, true);
-    assert.equal((await getItem(id)).lane, "inProgress");
-    // Back-filled during the fallback scan.
-    assert.equal(await redis.hget(TITLE_INDEX_KEY, "No index entry"), String(id));
+    assert.equal(moved, false);
+    assert.equal((await getItem(id)).lane, "queued");
+    // No back-fill — the index entry stays absent until the reconciler (Invariant
+    // 8) rebuilds it from the canonical items hash.
+    assert.equal(await redis.hget(TITLE_INDEX_KEY, "No index entry"), null);
   });
 
-  test("stale index entry (points at wrong id): degrades to scan, mutates correct item", async (t) => {
+  test("index miss does NOT trigger a full lane scan (Invariant 7 — bounded reads on miss)", async (t) => {
+    requireRedis(t);
+    // Seed a deep backlog so a lane scan would HGET every item in the lane.
+    for (let i = 0; i < 25; i++) {
+      await addToBacklog({ title: `Scan filler ${i}`, lane: "queued" });
+    }
+    const { id } = await addToBacklog({ title: "Unindexed target", lane: "queued" });
+    // Drop the target's index entry: this is the index-miss case. If the old
+    // scan fallback were present, resolving this title would HGET every one of
+    // the 26 queued items looking for a title match.
+    await redis.hdel(TITLE_INDEX_KEY, "Unindexed target");
+
+    let itemHgets = 0;
+    const orig = Redis.prototype.hget;
+    (Redis.prototype as any).hget = function (key: string, ...rest: any[]) {
+      if (key === ITEMS_KEY) itemHgets++;
+      return orig.apply(this, [key, ...rest] as any);
+    };
+    let moved: any;
+    try {
+      moved = await moveToInProgress("Unindexed target");
+    } finally {
+      (Redis.prototype as any).hget = orig;
+    }
+
+    // On an index miss the resolver does a single HGET against the title-index
+    // (NOT counted here — that is not ITEMS_KEY) and returns null immediately.
+    // It must NOT iterate the lane's items. A scan would read ~26; assert it
+    // stays far below the lane depth so a reintroduced fallback fails the test.
+    assert.ok(itemHgets < 25, `index miss must not scan the lane; got ${itemHgets} item reads`);
+    assert.equal(moved, false);
+    // Untouched — the move did not happen because the title was unresolvable.
+    assert.equal((await getItem(id)).lane, "queued");
+  });
+
+  test("stale index entry (points at wrong id): returns not-found, does NOT scan (Invariant 7)", async (t) => {
     requireRedis(t);
     const { id } = await addToBacklog({ title: "Real item", lane: "queued" });
-    // Corrupt the index to point at a non-existent id.
+    // Corrupt the index to point at a non-existent id. The by-id verify fails,
+    // and per Invariant 7 there is no scan fallback — so the mutation is a no-op.
     await redis.hset(TITLE_INDEX_KEY, "Real item", "item-99999");
 
     const moved = await moveToInProgress("Real item");
-    assert.equal(moved, true);
-    assert.equal((await getItem(id)).lane, "inProgress");
+    assert.equal(moved, false);
+    // The genuine item is untouched (no scan mutated it).
+    assert.equal((await getItem(id)).lane, "queued");
   });
 
   test("not-found title returns false / not-found without throwing", async (t) => {
