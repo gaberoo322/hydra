@@ -70,6 +70,28 @@ describe("projectReflectionHealth — reflection-deposit health verdict (#2467)"
     assert.deepEqual(report.distribution, { both: 1, none: 1, "by-anchor": 1 });
   });
 
+  test("healthy note explains a low served fraction is expected on a high-merge run (#2494)", () => {
+    // The #2494 re-file framed a 1/20 (5%) deposit rate as a regression even
+    // though the verdict is `healthy` (one non-none bucket present). The note
+    // MUST tie the low fraction to its structural cause — reflections are
+    // produced only on non-merged failures, so the served fraction tracks the
+    // failure rate — so an operator reading "1/20" does not re-open it as a bug.
+    const cycles = [
+      { reflectionMatchSource: "both", reflectionSources: "per-anchor,by-file" },
+      ...Array.from({ length: 19 }, () => ({
+        reflectionMatchSource: "none",
+        reflectionSources: "",
+      })),
+    ];
+    const report = projectReflectionHealth(cycles);
+    assert.equal(report.verdict, "healthy");
+    assert.equal(report.sampleSize, 20);
+    assert.match(report.note, /reached 1\/20/);
+    // The structural-cause clause is the #2494 anti-refile fix.
+    assert.match(report.note, /produced ONLY on non-merged failures/);
+    assert.match(report.note, /expected, not a regression/);
+  });
+
   test("rows with a missing reflectionMatchSource default to the 'none' bucket", () => {
     // The projection stays total over any input shape — an undefined bucket is
     // tallied as 'none' (mirroring deriveReflectionMatchSource's empty default).

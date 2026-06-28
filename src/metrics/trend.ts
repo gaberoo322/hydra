@@ -182,7 +182,16 @@ export function projectReflectionHealth(
     note = "No cycle metrics recorded yet — nothing to assess.";
   } else if (nonNoneBuckets > 0) {
     verdict = "healthy";
-    note = `Reflection context reached ${sampleSize - (distribution.none ?? 0)}/${sampleSize} recent cycles; deposit plumbing is live.`;
+    const served = sampleSize - (distribution.none ?? 0);
+    // Issue #2494: spell out WHY the served fraction is structurally low so a
+    // small ratio (e.g. 1/20) is not re-read as a regression. Reflections are
+    // PRODUCED only on a non-merged failure (reap.py
+    // `_fire_reflection_for_completion`), so the served fraction tracks the
+    // recent FAILURE rate — a high-merge-rate run serves few by design, and
+    // `none` on the merged cycles is the expected honest steady state, not a
+    // broken deposit. This closes the #1912→#2450→#2467→#2492→#2494 re-file
+    // loop where the bare ratio looked alarming without its structural cause.
+    note = `Reflection context reached ${served}/${sampleSize} recent cycles; deposit plumbing is live. Reflections are produced ONLY on non-merged failures, so this fraction tracks the recent failure rate — a low ratio on a high-merge run is expected, not a regression.`;
   } else if (servedButNone > 0) {
     verdict = "served-but-bucketed-none";
     note = `${servedButNone}/${sampleSize} cycles carried a reflectionSources deposit yet bucketed 'none' — candidate false-none; inspect the deposit/read path.`;
