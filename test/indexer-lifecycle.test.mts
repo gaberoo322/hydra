@@ -14,6 +14,10 @@ import {
   IndexerController,
   type IndexerControllerDeps,
 } from "../src/knowledge-base/indexer-lifecycle.ts";
+import {
+  getCoverageStats,
+  resetCoverageStats,
+} from "../src/knowledge-base/indexer.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -147,6 +151,31 @@ describe("IndexerController — start/stop", () => {
     ctrl.start();
     assert.ok(watchedPaths.includes("/repo/src"), "src should be watched");
     assert.ok(watchedPaths.includes("/repo/docs"), "docs should be watched");
+  });
+
+  // Issue #2523 (INV-5): start() must publish the live watch set via
+  // setWatchedPaths so /api/learning/coverage (getCoverageStats) reports it.
+  // A prior QA pass FAILed the extraction because start() dropped this call,
+  // leaving coverageStats.watchedPaths empty. This is the regression guard.
+  test("start() records the watch set in coverage stats (INV-5)", () => {
+    resetCoverageStats();
+    const ctrl = new IndexerController({
+      ...silentDeps(),
+      configPath: "/test/config",
+      sourcePaths: [
+        { root: "/repo/src", ext: ".ts" },
+        { root: "/repo/docs", ext: ".md" },
+      ],
+    });
+    ctrl.start();
+    const { watchedPaths } = getCoverageStats();
+    assert.deepEqual(
+      watchedPaths,
+      ["/test/config", "/repo/src(.ts)", "/repo/docs(.md)"],
+      `watchedPaths should list the config dir + each source root tagged ` +
+        `with its extension, got: ${JSON.stringify(watchedPaths)}`
+    );
+    resetCoverageStats();
   });
 });
 

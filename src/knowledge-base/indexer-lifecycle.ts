@@ -33,6 +33,7 @@ import {
   indexText,
   loadPersistedHashes,
   runSourceInitialPass,
+  setWatchedPaths,
   shouldIndexSource,
   parseSourcePaths,
   type SourcePath,
@@ -248,6 +249,15 @@ export class IndexerController {
     console.log(
       `[Learning:Indexer] Polling Redis every ${this._redisPollMs / 1000}s`
     );
+
+    // Record the live watch set for /api/learning/coverage (#210, INV-5):
+    // the config dir plus each source root tagged with its extension. Must
+    // run on every start() so the coverage endpoint never reports an empty
+    // watch list (the defect a prior QA pass caught on issue #2523).
+    setWatchedPaths([
+      this._configPath,
+      ...this._sourcePaths.map((s) => `${s.root}(${s.ext})`),
+    ]);
 
     // Watch config files
     try {

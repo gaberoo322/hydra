@@ -356,10 +356,12 @@ export function resetCoverageStats(): void {
 }
 
 /**
- * Test-only: set the watchedPaths summary that startKnowledgeIndexer
- * reports (kept here so the array stays colocated with the stats).
+ * Set the watchedPaths summary that the indexer reports through
+ * getCoverageStats (#210). Called by IndexerController.start() so the
+ * /api/learning/coverage endpoint reflects the live watch set; kept here so
+ * the array stays colocated with the stats it mutates (issue #2523, INV-5).
  */
-function setWatchedPaths(paths: string[]): void {
+export function setWatchedPaths(paths: string[]): void {
   coverageStats.watchedPaths = paths;
 }
 
