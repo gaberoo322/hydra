@@ -155,7 +155,7 @@ export async function getCumulativeAccomplishments(count = 15) {
 // ---------------------------------------------------------------------------
 
 /** One live priority lane's served-count rollup. */
-export interface AnchorDistributionEntry {
+interface AnchorDistributionEntry {
   priority: string;
   served: number;
   candidatesAvailable: number | null;
