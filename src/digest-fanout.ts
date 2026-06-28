@@ -24,6 +24,16 @@
  */
 
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
+import {
+  listRecentAutopilotRunIds as defaultListRecentAutopilotRunIds,
+  getAutopilotRun as defaultGetAutopilotRun,
+} from "./redis/autopilot-runs.ts";
+import { getUsage as defaultGetUsage } from "./cost/usage-tracker.ts";
+import { getBacklogCounts as defaultGetBacklogCounts } from "./backlog/reads.ts";
+import { readRecentAlerts as defaultReadRecentAlerts } from "./redis/alerts.ts";
+import { getMetricsTrend as defaultGetMetricsTrend } from "./metrics/trend.ts";
+import { getFixFeatureRatio as defaultGetFixFeatureRatio } from "./metrics/aggregate.ts";
+import { getCurrentMilestoneProgress as defaultGetCurrentMilestoneProgress } from "./config/roadmap.ts";
 
 /**
  * Injectable readers for `buildDailyHeartbeat`. Each defaults to the real
@@ -64,11 +74,8 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
   // --- Liveness: latest autopilot run + age ---
   try {
     const listRecentAutopilotRunIds =
-      deps.listRecentAutopilotRunIds ??
-      (await import("./redis/autopilot-runs.ts")).listRecentAutopilotRunIds;
-    const getAutopilotRun =
-      deps.getAutopilotRun ??
-      (await import("./redis/autopilot-runs.ts")).getAutopilotRun;
+      deps.listRecentAutopilotRunIds ?? defaultListRecentAutopilotRunIds;
+    const getAutopilotRun = deps.getAutopilotRun ?? defaultGetAutopilotRun;
     const [latestId] = await listRecentAutopilotRunIds(1);
     if (latestId) {
       const run = await getAutopilotRun(latestId);
@@ -86,8 +93,7 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
 
   // --- Usage: 5h + weekly since-reset, with the 90% hard-stops in view ---
   try {
-    const getUsage =
-      deps.getUsage ?? (await import("./cost/usage-tracker.ts")).getUsage;
+    const getUsage = deps.getUsage ?? defaultGetUsage;
     const u = await getUsage();
     if (!u.calibrated) {
       lines.push(`*Usage:* uncalibrated (quota env vars unset)`);
@@ -120,8 +126,7 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
 
   // --- Queue: target backlog lanes ---
   try {
-    const getBacklogCounts =
-      deps.getBacklogCounts ?? (await import("./backlog/reads.ts")).getBacklogCounts;
+    const getBacklogCounts = deps.getBacklogCounts ?? defaultGetBacklogCounts;
     const counts = await getBacklogCounts();
     lines.push(
       `*Target backlog:* ${counts.queued || 0} queued, ${counts.blocked || 0} blocked, ${counts.triage || 0} triage`,
@@ -132,8 +137,7 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
 
   // --- Alerts: count recorded in the last 24h ---
   try {
-    const readRecentAlerts =
-      deps.readRecentAlerts ?? (await import("./redis/alerts.ts")).readRecentAlerts;
+    const readRecentAlerts = deps.readRecentAlerts ?? defaultReadRecentAlerts;
     const raw = await readRecentAlerts(100);
     const since = now() - 24 * 60 * 60 * 1000;
     let count = 0;
@@ -183,15 +187,11 @@ export interface WeeklySummaryDeps {
  */
 export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<string | null> {
   const now = deps.now ?? (() => Date.now());
-  const getMetricsTrend =
-    deps.getMetricsTrend ?? (await import("./metrics/trend.ts")).getMetricsTrend;
-  const getFixFeatureRatio =
-    deps.getFixFeatureRatio ?? (await import("./metrics/aggregate.ts")).getFixFeatureRatio;
+  const getMetricsTrend = deps.getMetricsTrend ?? defaultGetMetricsTrend;
+  const getFixFeatureRatio = deps.getFixFeatureRatio ?? defaultGetFixFeatureRatio;
   const getCurrentMilestoneProgress =
-    deps.getCurrentMilestoneProgress ??
-    (await import("./config/roadmap.ts")).getCurrentMilestoneProgress;
-  const getBacklogCounts =
-    deps.getBacklogCounts ?? (await import("./backlog/reads.ts")).getBacklogCounts;
+    deps.getCurrentMilestoneProgress ?? defaultGetCurrentMilestoneProgress;
+  const getBacklogCounts = deps.getBacklogCounts ?? defaultGetBacklogCounts;
 
   const trend = await getMetricsTrend(50);
   const weekAgo = now() - 7 * 24 * 60 * 60 * 1000;
