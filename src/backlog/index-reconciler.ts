@@ -46,6 +46,7 @@ import {
   getBacklogLaneIds,
   addToBacklogLane,
   removeFromBacklogLane,
+  rebuildBacklogTitleIndex,
 } from "../redis/backlog.ts";
 import { LANES } from "./internal.ts";
 
@@ -58,6 +59,8 @@ export interface ReconcileResult {
   scanned: number;
   /** Hash items with an absent / unknown `item.lane` — counted, left in place. */
   unLaned: number;
+  /** Entries written into the rebuilt by-title index (issue #2500). */
+  titleIndexed: number;
 }
 
 /**
@@ -94,7 +97,14 @@ export async function reconcileLaneIndices(): Promise<ReconcileResult> {
     orphansRemoved: 0,
     scanned: 0,
     unLaned: 0,
+    titleIndexed: 0,
   };
+
+  // By-title index rebuild (issue #2500): collect every live item's title → id
+  // as we walk the hash, then overwrite the index in one atomic step at the end.
+  // The hash is canonical, so rebuilding FROM it self-heals any divergence the
+  // create/delete/title-change maintenance hooks missed (e.g. a crash mid-write).
+  const titleToId: Record<string, string> = {};
 
   let rawItems: Record<string, string>;
   try {
@@ -136,6 +146,12 @@ export async function reconcileLaneIndices(): Promise<ReconcileResult> {
       result.unLaned++;
       continue;
     }
+
+    // Collect the title→id mapping for the by-title index rebuild (issue #2500).
+    // Lane-independent: even an un-laned item is title-resolvable. On duplicate
+    // titles last-write-wins; resolveItemIdByTitle re-verifies a hit and degrades
+    // to a scan if the indexed id no longer carries that exact title.
+    if (typeof item?.title === "string") titleToId[item.title] = id;
 
     const lane = item?.lane;
     if (typeof lane !== "string" || !LANES.includes(lane)) {
@@ -180,9 +196,19 @@ export async function reconcileLaneIndices(): Promise<ReconcileResult> {
     }
   }
 
+  // Rebuild the by-title index FROM the canonical hash (issue #2500). One atomic
+  // DEL + HSET* so a reader never sees an empty index mid-rebuild. Self-heals any
+  // stale entry the create/delete/title-change hooks missed.
+  try {
+    await rebuildBacklogTitleIndex(titleToId);
+    result.titleIndexed = Object.keys(titleToId).length;
+  } catch (err: any) {
+    console.error(`[IndexReconciler] Failed to rebuild by-title index: ${err.message}`);
+  }
+
   if (result.reindexed > 0 || result.orphansRemoved > 0) {
     console.log(
-      `[IndexReconciler] Reconciled lane indices: re-indexed ${result.reindexed}, removed ${result.orphansRemoved} orphan(s) (scanned ${result.scanned}, ${result.unLaned} un-laned)`,
+      `[IndexReconciler] Reconciled lane indices: re-indexed ${result.reindexed}, removed ${result.orphansRemoved} orphan(s) (scanned ${result.scanned}, ${result.unLaned} un-laned, ${result.titleIndexed} title-indexed)`,
     );
   }
 

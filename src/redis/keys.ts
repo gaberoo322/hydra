@@ -155,6 +155,11 @@ export const redisKeys = {
   backlogItems: () => "hydra:backlog:items",
   backlogCounter: () => "hydra:backlog:counter",
   backlogLane: (lane: string) => `hydra:backlog:lane:${lane}`,
+  // By-title secondary index (issue #2500): Hash mapping exact item.title → itemId
+  // so the title-based lane mutations in src/backlog/lanes.ts resolve an id with a
+  // single HGET instead of scanning whole lanes. A derived, rebuildable index over
+  // the canonical items hash — the lane-index reconciler repairs it FROM the hash.
+  backlogTitleIndex: () => "hydra:backlog:title-index",
 
   // ---------------------------------------------------------------------------
   // Specs — RETIRED (issue #513). The Specs subsystem was deleted; key

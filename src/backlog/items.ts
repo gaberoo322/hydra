@@ -2,7 +2,10 @@
  * Backlog item lifecycle — creation (with fuzzy dedup) and field-level updates.
  */
 
-import { addToBacklogLane } from "../redis/backlog.ts";
+import {
+  addToBacklogLane,
+  setBacklogTitleIndex, clearBacklogTitleIndex,
+} from "../redis/backlog.ts";
 import {
   LANES, applyLaneTransition, getItem, saveItem, nextId,
 } from "./internal.ts";
@@ -69,6 +72,9 @@ export async function addToBacklog(item: any): Promise<{
   applyLaneTransition(backlogItem, targetLane, { claimedBy: item.claimedBy ?? null });
   await saveItem(backlogItem);
   await addToBacklogLane(targetLane, Date.now(), id);
+  // Maintain the by-title index (issue #2500). Exact-title dedup above guarantees
+  // a 1:1 title→id mapping for items created through this path.
+  await setBacklogTitleIndex(backlogItem.title, String(id));
   return { added: true, id };
 }
 
@@ -79,9 +85,17 @@ export async function updateItem(itemId: any, updates: Record<string, any>) {
   const item = await getItem(itemId);
   if (!item) return { ok: false, error: "Item not found" };
   const ALLOWED = ["priority", "description", "labels", "estimate", "parentId", "title"];
+  const oldTitle = item.title;
   for (const key of ALLOWED) {
     if (updates[key] !== undefined) item[key] = updates[key];
   }
   await saveItem(item);
+  // Keep the by-title index consistent on a title change (issue #2500): retire
+  // the old title's entry (compare-and-delete, so a re-used old title belonging
+  // to another item survives) and point the new title at this id.
+  if (typeof item.title === "string" && item.title !== oldTitle) {
+    if (typeof oldTitle === "string") await clearBacklogTitleIndex(oldTitle, String(itemId));
+    await setBacklogTitleIndex(item.title, String(itemId));
+  }
   return { ok: true, item };
 }

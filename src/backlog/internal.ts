@@ -17,6 +17,7 @@ import {
   getBacklogItemRaw, saveBacklogItem, removeBacklogItem as removeBacklogItemAdapter,
   getBacklogLaneIds,
   incrBacklogCounter,
+  setBacklogTitleIndex, clearBacklogTitleIndex, getBacklogItemIdByTitle,
 } from "../redis/backlog.ts";
 
 export const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
@@ -76,7 +77,65 @@ export async function saveItem(item: any) {
 }
 
 export async function removeItem(id: any) {
+  // Clear the by-title index FIRST (issue #2500) so a concurrent title lookup
+  // can't resolve to an id that is about to vanish from the items hash. Read the
+  // item to learn its title; if it's already gone the compare-and-delete is a
+  // no-op. The clear is title-scoped + compare-and-delete (only removes the
+  // entry if it still points at THIS id), so it can't orphan another live
+  // item that has since taken the same title.
+  const raw = await getBacklogItemRaw(id);
+  if (raw) {
+    try {
+      const title = JSON.parse(raw)?.title;
+      if (typeof title === "string") await clearBacklogTitleIndex(title, String(id));
+    } catch (err: any) {
+      // A malformed hash entry has no usable title — the reconciler will reap any
+      // stale index entry FROM the hash on its next sweep. Log, don't abort the delete.
+      console.error(`[Backlog] removeItem: could not parse ${id} to clear title-index: ${err.message}`);
+    }
+  }
   await removeBacklogItemAdapter(id, LANES);
+}
+
+/**
+ * Resolve an itemId from a title (issue #2500). Tries the O(1) by-title index
+ * first; on a miss, falls back to a bounded scan of `searchLanes` so items that
+ * predate the index (or were written by a path that skipped index maintenance)
+ * are still found — and back-fills the index for next time. Returns the id, or
+ * null if no item with that exact title exists in any searched lane.
+ *
+ * The fallback verifies `item.title === title` exactly (case-sensitive), matching
+ * the equality the scan loops used, and also re-verifies an index HIT before
+ * trusting it — a stale index entry (title since changed, item since deleted)
+ * degrades to the scan rather than mutating the wrong item.
+ */
+export async function resolveItemIdByTitle(
+  title: string,
+  searchLanes: string[],
+): Promise<string | null> {
+  const indexed = await getBacklogItemIdByTitle(title);
+  if (indexed) {
+    const item = await getItem(indexed);
+    if (item && item.title === title) return String(indexed);
+    // Stale hit — fall through to the authoritative scan below.
+  }
+
+  for (const lane of searchLanes) {
+    const ids = await getBacklogLaneIds(lane);
+    for (const id of ids) {
+      const item = await getItem(id);
+      if (item && item.title === title) {
+        // Back-fill the index so the next lookup is O(1).
+        try {
+          await setBacklogTitleIndex(title, String(id));
+        } catch (err: any) {
+          console.error(`[Backlog] resolveItemIdByTitle: index back-fill failed for "${title}": ${err.message}`);
+        }
+        return String(id);
+      }
+    }
+  }
+  return null;
 }
 
 export async function getLaneItems(lane: string) {
