@@ -83,6 +83,19 @@ function spriteFile(pokedexId: number): string {
 }
 
 /**
+ * Fallback sprite for a class this map has no art for yet. Since the
+ * class alphabet now arrives from the live `/api/taxonomy/classes`
+ * endpoint (issue #2524) rather than being hard-coded here, the API can
+ * legitimately surface a class added to `classes.json` before this file
+ * gains a sprite for it. The habitat must render *something* for that
+ * class instead of crashing, so {@link classSpriteFile} resolves an
+ * unknown class to this vendored sprite (a question-mark-y Psyduck —
+ * "I'm confused / unmapped"). Pokedex id 54 is already in POKEDEX and
+ * SIGNAL_POOLS, so the asset is guaranteed present in the sprite set.
+ */
+export const FALLBACK_SPRITE_ID = 54; // Psyduck — the "unmapped class" stand-in
+
+/**
  * Pipeline class → fixed Pokemon ID. The mapping is intentional but
  * subjective; what matters is stability so operators build muscle
  * memory.
@@ -132,19 +145,45 @@ export function pickSignalSprite(cls: SignalClass, seed: number): number {
 }
 
 /**
+ * Whether this sprite map has dedicated art for `cls` (a pipeline class with a
+ * fixed sprite, or a signal class with a pool). Callers that want their own
+ * placeholder for an unmapped class (e.g. battle-card-state's Pikachu) gate on
+ * this rather than relying on {@link classSpriteFile} to throw — it no longer
+ * throws for an unknown class (it degrades to {@link FALLBACK_SPRITE_ID}), so a
+ * membership check is the explicit way to branch.
+ */
+export function hasClassSprite(cls: string): boolean {
+  return cls in CLASS_TO_SPRITE || cls in SIGNAL_POOLS;
+}
+
+/**
  * Resolves the sprite filename a class should render with right now.
  * For pipeline classes this is the fixed Pokemon. For signals, it
  * picks from the pool keyed by `signalSeed` (the last-fired epoch).
+ *
+ * Tolerates an *unknown* class (one not in CLASS_TO_SPRITE and not in
+ * SIGNAL_POOLS): rather than throw, it returns the {@link FALLBACK_SPRITE_ID}
+ * art. The class alphabet now comes from the live `/api/taxonomy/classes`
+ * endpoint (issue #2524), so the API can legitimately surface a class this
+ * map has no art for yet — the habitat must degrade to a fallback sprite,
+ * never render-crash. Accepts a plain `string` (the API supplies class
+ * names as strings) and narrows internally.
  */
 export function classSpriteFile(
-  cls: ClassName,
+  cls: ClassName | string,
   signalSeed: number | null | undefined,
 ): string {
   if (cls in CLASS_TO_SPRITE) {
     return spriteFile(CLASS_TO_SPRITE[cls as PipelineClass]);
   }
-  const seed = typeof signalSeed === "number" ? signalSeed : 0;
-  return spriteFile(pickSignalSprite(cls as SignalClass, seed));
+  if (cls in SIGNAL_POOLS) {
+    const seed = typeof signalSeed === "number" ? signalSeed : 0;
+    return spriteFile(pickSignalSprite(cls as SignalClass, seed));
+  }
+  // Unknown class — the sprite map has no art for it yet. Degrade to the
+  // fallback sprite so the habitat keeps rendering (load-bearing invariant
+  // from the issue-2524 design concept).
+  return spriteFile(FALLBACK_SPRITE_ID);
 }
 
 export const PIPELINE_CLASSES: readonly PipelineClass[] = [

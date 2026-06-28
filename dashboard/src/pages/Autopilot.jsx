@@ -21,18 +21,58 @@ const STATUS_STYLES = {
   killed:  { label: "KILLED",  bg: "bg-red-500/15",   border: "border-red-500/40",   text: "text-red-300",   dot: "bg-red-400" },
 };
 
-// Slice 2 — the 6 pipeline slots and the 5 signal classes. The order here
-// drives the grid layout. Kept in lockstep with bootstrap.sh's state.json
-// scaffold and decide.py's SIGNAL_COOLDOWNS map.
-const PIPELINE_SLOTS = ["dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target"];
-const SIGNAL_CLASSES = ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"];
-const SIGNAL_COOLDOWN_SEC = {
+// The dispatch-class alphabet drives the pipeline-snapshot grid layout. It is
+// owned by the Dispatch-Class Taxonomy (scripts/autopilot/classes.json) and
+// served by GET /api/taxonomy/classes (issue #2524). The constants below are
+// now only the BUILT-IN FALLBACK used until the fetch lands (or if the endpoint
+// is unreachable) — `useTaxonomy()` substitutes the live alphabet at runtime so
+// adding/retiring a class no longer requires editing this file.
+const FALLBACK_PIPELINE_SLOTS = ["dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target"];
+const FALLBACK_SIGNAL_CLASSES = ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"];
+const FALLBACK_SIGNAL_COOLDOWN_SEC = {
   health: 0,
   sweep_orch: 900,
   sweep_target: 900,
   discover_orch: 1800,
   discover_target: 1800,
 };
+
+/**
+ * Fetch the live dispatch-class alphabet from GET /api/taxonomy/classes,
+ * falling back to the built-in constants until the fetch resolves or if the
+ * endpoint is unreachable / degraded. Never throws — a failed or degraded
+ * response keeps the built-in defaults so the page renders regardless (the
+ * load-bearing tolerate-unreachable-endpoint invariant from issue #2524).
+ */
+function useTaxonomy() {
+  const [taxonomy, setTaxonomy] = useState({
+    pipelineSlots: FALLBACK_PIPELINE_SLOTS,
+    signalClasses: FALLBACK_SIGNAL_CLASSES,
+    signalCooldowns: FALLBACK_SIGNAL_COOLDOWN_SEC,
+  });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/taxonomy/classes`);
+        if (!res.ok) return; // keep fallback
+        const body = await res.json();
+        if (cancelled || !body || body.degraded) return; // keep fallback
+        const pipelineSlots = Array.isArray(body.pipelineSlots) && body.pipelineSlots.length > 0
+          ? body.pipelineSlots : FALLBACK_PIPELINE_SLOTS;
+        const signalClasses = Array.isArray(body.signalClasses) && body.signalClasses.length > 0
+          ? body.signalClasses : FALLBACK_SIGNAL_CLASSES;
+        const signalCooldowns = body.signalCooldowns && typeof body.signalCooldowns === "object"
+          ? body.signalCooldowns : FALLBACK_SIGNAL_COOLDOWN_SEC;
+        setTaxonomy({ pipelineSlots, signalClasses, signalCooldowns });
+      } catch {
+        // Unreachable endpoint — keep the built-in fallback alphabet.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  return taxonomy;
+}
 
 function statusKey(run) {
   if (!run) return "ended";
@@ -160,9 +200,9 @@ function PipelineSlot({ name, occupant, nowEpoch }) {
   );
 }
 
-function SignalChip({ cls, epoch, nowEpoch }) {
+function SignalChip({ cls, epoch, nowEpoch, cooldownSec }) {
   const e = Number(epoch || 0);
-  const cooldown = SIGNAL_COOLDOWN_SEC[cls] || 0;
+  const cooldown = Number(cooldownSec) || 0;
   const onCooldown = e > 0 && cooldown > 0 && nowEpoch - e < cooldown;
   // For health (cooldown=0) "active" only means fired within 60s.
   const recentlyFired = e > 0 && (cooldown === 0 ? nowEpoch - e <= 60 : true);
@@ -187,24 +227,27 @@ function PipelineSnapshot({ run, latestTurn }) {
   const slots = latestTurn?.slots_snapshot || {};
   const signals = latestTurn?.signals_snapshot || {};
   const nowEpoch = Math.floor(Date.now() / 1000);
+  // Live dispatch-class alphabet (issue #2524), with a built-in fallback so the
+  // snapshot renders even before the fetch lands or if the endpoint is down.
+  const { pipelineSlots, signalClasses, signalCooldowns } = useTaxonomy();
   return (
     <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-base font-semibold text-zinc-100">Pipeline snapshot</h2>
         <span className="text-[10px] uppercase tracking-widest text-zinc-500">
-          slots filled: {PIPELINE_SLOTS.filter((s) => slots[s]).length}/6
+          slots filled: {pipelineSlots.filter((s) => slots[s]).length}/{pipelineSlots.length}
         </span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-        {PIPELINE_SLOTS.map((name) => (
+        {pipelineSlots.map((name) => (
           <PipelineSlot key={name} name={name} occupant={slots[name]} nowEpoch={nowEpoch} />
         ))}
       </div>
       <div>
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Signals</div>
         <div className="flex flex-wrap gap-2">
-          {SIGNAL_CLASSES.map((cls) => (
-            <SignalChip key={cls} cls={cls} epoch={signals[cls]} nowEpoch={nowEpoch} />
+          {signalClasses.map((cls) => (
+            <SignalChip key={cls} cls={cls} epoch={signals[cls]} nowEpoch={nowEpoch} cooldownSec={signalCooldowns[cls]} />
           ))}
         </div>
       </div>
