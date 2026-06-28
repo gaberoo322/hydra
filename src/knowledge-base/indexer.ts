@@ -83,8 +83,16 @@ export function indexerTargetUri(rel: string): string {
 /**
  * Index a file already mounted into the OV container (config tree).
  * Tells OV to ingest the file by container-relative path.
+ *
+ * Exported (issue #2523 forward-fix) so the IndexerController in
+ * indexer-lifecycle.ts can inject it as the config-file index path — the
+ * OV container-path ingestion (`/api/v1/resources` with `path:/config/<rel>,
+ * to:viking://resources/<rel>`) WITH per-file SHA-256 hash-dedup via
+ * indexedConfigHashes. The #2526 extraction wrongly re-routed config changes
+ * through indexText (blob-upload to the hydra-memory/ namespace, no dedup);
+ * this export restores the original 1:1 behaviour (INV-1, INV-5).
  */
-async function indexFile(filePath: string): Promise<void> {
+export async function indexFile(filePath: string): Promise<void> {
   const rel = relative(CONFIG_PATH, filePath);
   const containerPath = join(OV_CONFIG_MOUNT, rel);
   const targetUri = indexerTargetUri(rel);
@@ -521,8 +529,13 @@ export async function runSourceInitialPass(
  * shared `pending` map and indexes them via indexSourceFile. The map +
  * debounce window are owned by the caller (startKnowledgeIndexer) so the
  * config watcher and source watcher share a single dedup queue.
+ *
+ * Exported (issue #2523 forward-fix) so IndexerController consumes the single
+ * canonical source-watcher by import (INV-5) instead of re-implementing it —
+ * the #2526 extraction's local copy uploaded a "Source file changed" text blob
+ * via indexText, dropping the real indexSourceFile content-index + hash-dedup.
  */
-function makeSourceWatcher(
+export function makeSourceWatcher(
   source: SourcePath,
   pending: Map<string, ReturnType<typeof setTimeout>>,
   debounceMs: number = DEBOUNCE_MS
