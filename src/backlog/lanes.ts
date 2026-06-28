@@ -22,6 +22,7 @@ import {
 import {
   LANES, DONE_RETENTION_DAYS, WIP_LIMIT,
   applyLaneTransition, getItem, removeItem, sortByQueuePriority,
+  resolveItemIdByTitle,
 } from "./internal.ts";
 import { time } from "../metrics/instrumentation.ts";
 
@@ -86,17 +87,19 @@ export async function moveToInProgress(
     return false;
   }
 
-  for (const sourceLane of ["queued", "backlog"]) {
-    const ids = await getBacklogLaneIds(sourceLane);
-    for (const id of ids) {
-      const item = await getItem(id);
-      if (item && item.title === title) {
-        item.meta = { ...item.meta, startedAt: new Date(now).toISOString().split("T")[0] };
-        applyLaneTransition(item, "inProgress", { claimedBy }, now);
-        await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "inProgress", laneScore("inProgress", now));
-        if (structured) return { ok: true, item };
-        return true;
-      }
+  // Resolve the id via the by-title index (issue #2500), constrained to the same
+  // source lanes the scan used so an item already in another lane is not pulled.
+  const sourceLanes = ["queued", "backlog"];
+  const id = await resolveItemIdByTitle(title, sourceLanes);
+  if (id) {
+    const item = await getItem(id);
+    if (item && item.title === title && sourceLanes.includes(item.lane)) {
+      const sourceLane = item.lane;
+      item.meta = { ...item.meta, startedAt: new Date(now).toISOString().split("T")[0] };
+      applyLaneTransition(item, "inProgress", { claimedBy }, now);
+      await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "inProgress", laneScore("inProgress", now));
+      if (structured) return { ok: true, item };
+      return true;
     }
   }
   if (structured) return { ok: false, reason: "not-found" };
@@ -108,21 +111,21 @@ export async function moveToInProgress(
  * or queued can also be completed (e.g. merged while blocked).
  */
 export async function moveToDone(title: string, outcome = "merged", now: number = Date.now()) {
-  for (const sourceLane of ["inProgress", "blocked", "queued", "backlog"]) {
-    const ids = await getBacklogLaneIds(sourceLane);
-    for (const id of ids) {
-      const item = await getItem(id);
-      if (item && item.title === title) {
-        item.checked = outcome === "merged";
-        item.meta = {
-          ...item.meta,
-          completedAt: new Date(now).toISOString().split("T")[0],
-          outcome,
-        };
-        applyLaneTransition(item, "done", {}, now);
-        await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "done", laneScore("done", now));
-        return true;
-      }
+  const sourceLanes = ["inProgress", "blocked", "queued", "backlog"];
+  const id = await resolveItemIdByTitle(title, sourceLanes);
+  if (id) {
+    const item = await getItem(id);
+    if (item && item.title === title && sourceLanes.includes(item.lane)) {
+      const sourceLane = item.lane;
+      item.checked = outcome === "merged";
+      item.meta = {
+        ...item.meta,
+        completedAt: new Date(now).toISOString().split("T")[0],
+        outcome,
+      };
+      applyLaneTransition(item, "done", {}, now);
+      await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "done", laneScore("done", now));
+      return true;
     }
   }
   console.warn(`[Backlog] moveToDone: item "${title}" not found in any lane`);
@@ -138,21 +141,21 @@ export async function moveToDone(title: string, outcome = "merged", now: number 
  * does not throw for not-found).
  */
 export async function blockByTitle(title: string, reason: string, now: number = Date.now()) {
-  for (const sourceLane of ["inProgress", "queued", "backlog"]) {
-    const ids = await getBacklogLaneIds(sourceLane);
-    for (const id of ids) {
-      const item = await getItem(id);
-      if (item && item.title === title) {
-        item.meta = {
-          ...item.meta,
-          blockedAt: new Date(now).toISOString().split("T")[0],
-          blockedReason: reason,
-        };
-        applyLaneTransition(item, "blocked", {}, now);
-        await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "blocked", laneScore("blocked", now));
-        console.log(`[Backlog] Moved "${title}" to Blocked: ${reason}`);
-        return true;
-      }
+  const sourceLanes = ["inProgress", "queued", "backlog"];
+  const id = await resolveItemIdByTitle(title, sourceLanes);
+  if (id) {
+    const item = await getItem(id);
+    if (item && item.title === title && sourceLanes.includes(item.lane)) {
+      const sourceLane = item.lane;
+      item.meta = {
+        ...item.meta,
+        blockedAt: new Date(now).toISOString().split("T")[0],
+        blockedReason: reason,
+      };
+      applyLaneTransition(item, "blocked", {}, now);
+      await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "blocked", laneScore("blocked", now));
+      console.log(`[Backlog] Moved "${title}" to Blocked: ${reason}`);
+      return true;
     }
   }
   return false;
@@ -162,11 +165,11 @@ export async function blockByTitle(title: string, reason: string, now: number = 
  * Remove a failed/abandoned item from In Progress back to Backlog.
  */
 export async function returnToBacklog(title: string, reason: string, now: number = Date.now()) {
-  const ids = await getBacklogLaneIds("inProgress");
-
-  for (const id of ids) {
+  const sourceLanes = ["inProgress"];
+  const id = await resolveItemIdByTitle(title, sourceLanes);
+  if (id) {
     const item = await getItem(id);
-    if (item && item.title === title) {
+    if (item && item.title === title && sourceLanes.includes(item.lane)) {
       item.meta = {
         ...item.meta,
         returnedAt: new Date(now).toISOString().split("T")[0],

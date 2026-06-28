@@ -83,6 +83,89 @@ export async function removeBacklogItem(id: string, lanes: string[]): Promise<vo
   }
 }
 
+// ---------------------------------------------------------------------------
+// By-title secondary index (issue #2500): hydra:backlog:title-index — a Hash
+// mapping exact `item.title` → itemId. The four title-based lane mutations in
+// src/backlog/lanes.ts (moveToInProgress / moveToDone / blockByTitle /
+// returnToBacklog) used to scan whole lanes (one HGET per item) to resolve an
+// id from a title; with this index they do a single HGET. The items hash stays
+// canonical — this index is a derived, rebuildable view (the lane-index
+// reconciler repairs it FROM the hash), exactly like the lane zsets.
+//
+// Title equality is the existing exact, case-sensitive `item.title === title`
+// match; the index key is the raw title string, so no normalisation is applied.
+// ---------------------------------------------------------------------------
+
+/** Resolve an itemId from the by-title index. Returns null on a miss. */
+export async function getBacklogItemIdByTitle(title: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.hget(redisKeys.backlogTitleIndex(), title);
+}
+
+/** Point the by-title index at `id` for `title` (create / title-change). */
+export async function setBacklogTitleIndex(title: string, id: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(redisKeys.backlogTitleIndex(), title, id);
+}
+
+/**
+ * Remove a title→id entry from the index, but only if it still points at `id`
+ * (compare-and-delete). A different live item may have claimed the same title
+ * since this id was created; deleting unconditionally would orphan that item's
+ * lookup. Owned here because the index key is owned by this seam (ADR-0017).
+ */
+export async function clearBacklogTitleIndex(title: string, id: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.eval(
+    LUA_CLEAR_TITLE_INDEX_IF_MATCH,
+    1,
+    redisKeys.backlogTitleIndex(),
+    title,
+    id,
+  );
+}
+
+const LUA_CLEAR_TITLE_INDEX_IF_MATCH = `
+-- KEYS[1] = hydra:backlog:title-index
+-- ARGV[1] = title (hash field)
+-- ARGV[2] = expected id
+if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+  redis.call('HDEL', KEYS[1], ARGV[1])
+  return 1
+end
+return 0
+`;
+
+/**
+ * Overwrite the entire by-title index from a fresh `title → id` map (issue
+ * #2500) — the lane-index reconciler's rebuild step. DEL the old index then
+ * HSET the new entries in one atomic Lua step so a reader never observes an
+ * empty index mid-rebuild. ARGV is a flat [title1, id1, title2, id2, ...] list.
+ */
+export async function rebuildBacklogTitleIndex(titleToId: Record<string, string>): Promise<void> {
+  const r = getRedisConnection();
+  const flat: string[] = [];
+  for (const [title, id] of Object.entries(titleToId)) {
+    flat.push(title, id);
+  }
+  await r.eval(
+    LUA_REBUILD_TITLE_INDEX,
+    1,
+    redisKeys.backlogTitleIndex(),
+    ...flat,
+  );
+}
+
+const LUA_REBUILD_TITLE_INDEX = `
+-- KEYS[1] = hydra:backlog:title-index
+-- ARGV    = flat [title1, id1, title2, id2, ...]
+redis.call('DEL', KEYS[1])
+for i = 1, #ARGV, 2 do
+  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+end
+return 'OK'
+`;
+
 /** Get all IDs in a backlog lane. */
 export async function getBacklogLaneIds(lane: string): Promise<string[]> {
   const r = getRedisConnection();
