@@ -31,7 +31,7 @@ import { getRedisConnection } from "./connection.ts";
 // ---------------------------------------------------------------------------
 
 /** 14 days — covers any scorecard window plus merge latency tail. */
-export const PR_LINK_TTL_SECONDS = 14 * 24 * 60 * 60;
+const PR_LINK_TTL_SECONDS = 14 * 24 * 60 * 60;
 
 function autopilotPrKey(prNumber: number): string {
   return `hydra:autopilot:pr:${prNumber}`;
@@ -83,14 +83,6 @@ export async function listAutopilotPrLinksSince(
     }
   }
   return out;
-}
-
-/** Test-only: clear all PR-link state. */
-export async function _resetAutopilotPrLinks(): Promise<void> {
-  const r = getRedisConnection();
-  const prNumbers: string[] = await r.zrange(autopilotPrsIndexKey(), 0, -1);
-  for (const pr of prNumbers) await r.del(autopilotPrKey(Number(pr)));
-  await r.del(autopilotPrsIndexKey());
 }
 
 // ---------------------------------------------------------------------------
