@@ -38,6 +38,7 @@ import Redis from "ioredis";
 // imports directly from there. recordPattern (the write-side store integration
 // exercised below) still comes from agent-memory.ts via the dynamic import.
 import { cueSimilarity, findPatternForCue } from "../src/pattern-memory/cue-matcher.ts";
+import { canonicalizeCue } from "../src/pattern-memory/escalation.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
@@ -424,5 +425,152 @@ describe("fuzzy cue dedup (issue #1667)", () => {
     assert.equal(stored[0].category, METADATA_CUE_A);
     assert.equal(stored[0].hitCount, 2);
     assert.deepEqual(stored[0].aliases, [METADATA_CUE_B]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. Explicit cue alias table (issue #2527) — worktree write-fence desync
+// ---------------------------------------------------------------------------
+//
+// The five worktree write-fence cues score below the 0.6 fuzzy-merge threshold
+// against the canonical `worktree-write-fence-desync` and against each other
+// (except one pair). The alias table in escalation.ts normalises them before
+// the fuzzy-match step so all ~135 historical hits roll up into one pattern.
+//
+// IMPORTANT: this suite uses its OWN Redis connection lifecycle so it does not
+// trip the "shared-Redis after() teardown" ordering pitfall documented in
+// CLAUDE.md. The sibling suite above closes the module-level `redis` handle in
+// its `after()` hook; this suite creates a FRESH connection in its own `before`
+// and disconnects in its own `after`.
+
+describe("explicit cue alias table (issue #2527)", () => {
+  let aliasRedis: InstanceType<typeof Redis>;
+  let aliasAgentMemory: typeof import("../src/pattern-memory/agent-memory.ts");
+  let aliasPromotionThreshold: number;
+
+  async function cleanAliasKeys() {
+    const keys = await aliasRedis.keys("hydra:*");
+    if (keys.length > 0) await aliasRedis.del(...keys);
+  }
+
+  before(async () => {
+    aliasRedis = new Redis(REDIS_URL);
+    aliasAgentMemory = await import("../src/pattern-memory/agent-memory.ts");
+    ({ PROMOTION_THRESHOLD: aliasPromotionThreshold } = await import("../src/pattern-memory/constants.ts"));
+    await cleanAliasKeys();
+  });
+
+  after(async () => {
+    if (aliasRedis) { await cleanAliasKeys(); aliasRedis.disconnect(); }
+  });
+
+  beforeEach(async () => {
+    await cleanAliasKeys();
+  });
+
+  // The five historically-fragmented cue spellings for the write-fence cluster.
+  const WRITE_FENCE_CUES = [
+    "worktree-write-fence-blocks-entered-worktree",
+    "edit-tool-ghost-writes-to-main-checkout-not-worktree",
+    "edit-resolved-to-main-checkout-needs-worktree-path",
+    "enterworktree-pinned-agent-write-fence-mismatch",
+    "enterworktree-anchor-desync-blocks-write-tool",
+  ];
+  const CANONICAL = "worktree-write-fence-desync";
+
+  test("canonicalizeCue: every variant maps to the canonical cue", () => {
+    for (const variant of WRITE_FENCE_CUES) {
+      assert.equal(
+        canonicalizeCue(variant),
+        CANONICAL,
+        `expected ${variant} -> ${CANONICAL}`,
+      );
+    }
+  });
+
+  test("canonicalizeCue: unknown cues pass through unchanged", () => {
+    assert.equal(canonicalizeCue("scope-check-codespan-trap"), "scope-check-codespan-trap");
+    assert.equal(canonicalizeCue("stale-local-master-ref"), "stale-local-master-ref");
+    assert.equal(canonicalizeCue(CANONICAL), CANONICAL);
+  });
+
+  test("canonicalizeCue: non-string input passes through (defensive)", () => {
+    // TypeScript won't allow this call, but the runtime guard must hold.
+    assert.equal(canonicalizeCue(undefined as unknown as string), undefined);
+    assert.equal(canonicalizeCue(null as unknown as string), null);
+  });
+
+  test("recordPattern: all five variants fold into ONE canonical pattern (friction namespace)", async () => {
+    const spyEscalate = async (_input: any) => null;
+
+    for (let i = 0; i < WRITE_FENCE_CUES.length; i++) {
+      await aliasAgentMemory.recordPattern("hydra-dev", WRITE_FENCE_CUES[i], {
+        action: "verify worktree anchor before first Write/Edit",
+        example: `worktree fence sighting ${i + 1}`,
+        cycleId: `wf-cycle-${i + 1}`,
+        source: "subagent",
+        namespace: "friction",
+        escalate: spyEscalate,
+      });
+    }
+
+    const raw = await aliasRedis.get("hydra:friction:hydra-dev:patterns");
+    const stored: any[] = raw ? JSON.parse(raw) : [];
+    assert.equal(
+      stored.length,
+      1,
+      "five alias cues must NOT fragment into separate patterns",
+    );
+    assert.equal(stored[0].category, CANONICAL, "canonical cue must be the pattern key");
+    assert.equal(stored[0].hitCount, WRITE_FENCE_CUES.length);
+  });
+
+  test("recordPattern: canonical cue used for escalation intent (not the raw variant)", async () => {
+    let escalationCue: string | null = null;
+    const spyEscalate = async (input: any) => {
+      if (input) escalationCue = input.cue;
+      return null;
+    };
+
+    // Drive hitCount to PROMOTION_THRESHOLD using three different variants.
+    for (let i = 0; i < aliasPromotionThreshold; i++) {
+      await aliasAgentMemory.recordPattern("hydra-dev", WRITE_FENCE_CUES[i % WRITE_FENCE_CUES.length], {
+        action: "verify anchor",
+        example: `sighting ${i + 1}`,
+        cycleId: `wf-esc-cycle-${i + 1}`,
+        source: "subagent",
+        namespace: "friction",
+        escalate: spyEscalate,
+      });
+    }
+
+    assert.equal(
+      escalationCue,
+      CANONICAL,
+      "escalation must key on the canonical cue, not the raw variant spelling",
+    );
+  });
+
+  test("alias canonicalization is FRICTION-ONLY: memory namespace keeps the raw variant", async () => {
+    // Writing a write-fence variant to the MEMORY namespace must not remap it.
+    // Memory cues are deliberate identifiers with per-cue escalation thresholds.
+    const rawVariant = WRITE_FENCE_CUES[0];
+    await aliasAgentMemory.recordPattern("hydra-dev", rawVariant, {
+      action: "memory-record only",
+      example: "memory-namespace sighting",
+      cycleId: "wf-mem-cycle-1",
+      source: "subagent",
+      namespace: "memory",
+      escalate: noopEscalate,
+    });
+
+    const raw = await aliasRedis.get("hydra:memory:hydra-dev:patterns");
+    const memPatterns: any[] = raw ? JSON.parse(raw) : [];
+    const found = memPatterns.find((p: any) => p.category === rawVariant);
+    assert.ok(
+      found,
+      `memory namespace must store the raw variant "${rawVariant}", not the canonical form`,
+    );
+    assert.equal(found.hitCount, 1);
   });
 });

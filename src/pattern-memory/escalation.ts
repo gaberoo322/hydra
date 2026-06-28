@@ -80,6 +80,68 @@ const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguis
 // Any other cue uses the default threshold (`PROMOTION_THRESHOLD` = 3).
 const ACCEPTANCE_CRITERION_DEFERRED_CUE = "acceptance-criterion-deferred";
 
+// ---------------------------------------------------------------------------
+// Cue alias table (issue #2527)
+// ---------------------------------------------------------------------------
+//
+// The fuzzy cue-deduplication algorithm in cue-matcher.ts (overlap coefficient
+// >= 0.6) handles SIMILAR spellings of the same gotcha automatically. But some
+// high-recurrence friction clusters fragment across cues that are lexically
+// TOO DIFFERENT to merge by token overlap — the five worktree write-fence
+// fragments are the canonical example (~135 total hits spread across five cues,
+// none individually crossing the auto-escalation threshold):
+//
+//   worktree-write-fence-blocks-entered-worktree      (51 hits)
+//   edit-tool-ghost-writes-to-main-checkout-not-worktree  (50 hits)
+//   edit-resolved-to-main-checkout-needs-worktree-path    (17 hits)
+//   enterworktree-pinned-agent-write-fence-mismatch   (16 hits)
+//   enterworktree-anchor-desync-blocks-write-tool      (1 hit)
+//
+// The alias table maps every known variant to ONE canonical cue so that
+// `canonicalizeCue()` can normalise the incoming cue BEFORE the fuzzy-merge
+// step in `recordPattern`. The canonical cue is the one used for escalation,
+// pattern storage, and the feedback-file key — variants are demoted to aliases.
+//
+// When to add a new entry: when a /hydra-retro surfaces a cue cluster whose
+// members score < 0.6 against each other (or against the desired canonical)
+// and the aggregate hit count is already worth an escalation. Mirror the #2521
+// approach for the cleanup cluster: pick the most descriptive spelling as
+// canonical, map all siblings to it.
+//
+// The alias table is FRICTION-NAMESPACE ONLY (design invariant 1 from #1667):
+// memory-namespace cues are deliberate identifiers with per-cue escalation
+// thresholds; a forced alias there would corrupt those thresholds. The
+// `canonicalizeCue()` caller in `agent-memory.ts` applies the mapping only
+// when `namespace === "friction"`.
+const CUE_ALIAS_TABLE: Readonly<Record<string, string>> = {
+  // Worktree write-fence desync cluster (issue #2527).
+  // All five cues describe the same root failure: the harness write-fence /
+  // anchor not aligned with the worktree the agent is actually in.
+  "worktree-write-fence-blocks-entered-worktree": "worktree-write-fence-desync",
+  "edit-tool-ghost-writes-to-main-checkout-not-worktree": "worktree-write-fence-desync",
+  "edit-resolved-to-main-checkout-needs-worktree-path": "worktree-write-fence-desync",
+  "enterworktree-pinned-agent-write-fence-mismatch": "worktree-write-fence-desync",
+  "enterworktree-anchor-desync-blocks-write-tool": "worktree-write-fence-desync",
+};
+
+/**
+ * Map a raw friction cue to its canonical form using the explicit alias table.
+ * Returns the canonical cue when a mapping exists, otherwise the original cue
+ * unchanged. Applies to FRICTION NAMESPACE ONLY — callers in the memory
+ * namespace must not call this (per design invariant 1, #1667).
+ *
+ * This is the complement to the fuzzy overlap-coefficient merge in
+ * `findPatternForCue` (cue-matcher.ts): the fuzzy layer handles SIMILAR
+ * spellings automatically; this layer handles lexically DISTANT variants of
+ * the same gotcha that score below the 0.6 merge threshold.
+ *
+ * Exported for tests and for `agent-memory.ts`'s `recordPattern`.
+ */
+export function canonicalizeCue(cue: string): string {
+  if (typeof cue !== "string") return cue;
+  return CUE_ALIAS_TABLE[cue] ?? cue;
+}
+
 // Expected-telemetry cue (issue #1789). The hydra-target-build Step-2
 // inline-mode contract (#1782) mandates a friction-log POST with this exact
 // cue on EVERY autopilot-dispatched inline build — by design — because the

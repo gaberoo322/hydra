@@ -29,6 +29,7 @@ import {
 } from "../redis/agent-memory.ts";
 import {
   escalateIfNeeded,
+  canonicalizeCue,
   type EscalationInput,
   type EscalationResult,
 } from "./escalation.ts";
@@ -396,6 +397,18 @@ export async function recordPattern(
   const namespace: PatternNamespace = details.namespace || "memory";
   const patterns = await loadPatterns(agentName, namespace);
   const today = new Date().toISOString().split("T")[0];
+
+  // Issue #2527 — explicit alias normalization, FRICTION NAMESPACE ONLY.
+  // `canonicalizeCue` maps lexically-distant variant cues (which score below
+  // the 0.6 fuzzy-merge threshold in cue-matcher.ts) to a single canonical
+  // cue BEFORE the fuzzy-merge step below. This collapses high-recurrence
+  // clusters that fragmented because their members use different terminology
+  // (e.g. the five worktree write-fence cues totalling ~135 hits, no single
+  // one ever reaching PROMOTION_THRESHOLD). The memory namespace is exempt —
+  // memory cues are deliberate identifiers with per-cue escalation thresholds.
+  if (namespace === "friction") {
+    category = canonicalizeCue(category);
+  }
 
   // Issue #1667 — exact match first, then fuzzy (token-overlap) merge so
   // free-authored respellings of the same gotcha increment ONE pattern
