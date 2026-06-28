@@ -32,8 +32,8 @@ const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hy
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
 /**
  * Default path to `config/direction/outcomes.yaml`. Exported so the sibling
- * Outcome Regression Policy module (`src/outcomes-regression.ts`, #2095) can
- * reuse the same default when sampling leading outcomes through this loader.
+ * Outcome Regression Policy module (`src/outcome-regression.ts`) can reuse the
+ * same default when sampling leading outcomes through this loader.
  */
 export const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.yaml");
 
@@ -309,11 +309,12 @@ export async function getOutcomeValue(outcome: Outcome): Promise<OutcomeReading 
 
 // ---------------------------------------------------------------------------
 // Outcome Holdback regression policy (issue #786, ADR-0004 step 4) was extracted
-// from this loader into the sibling `src/outcomes-regression.ts` Module (#2095).
-// `snapshotLeadingOutcomes`, `detectRegressions`, `isOutcomeRegressed`, and the
-// `LeadingOutcomeSample` / `OutcomeRegression` types now live there, imported by
-// the sole production caller `src/holdback.ts`. They read leading outcomes back
-// through THIS loader (`loadOutcomes` + `getOutcomeValue`), so the producer
-// still goes through the same seam every other consumer uses — it just no longer
-// shares a file with the YAML parser and source-adapter machinery.
+// from this loader into the sibling `src/outcome-regression.ts` Module.
+// `snapshotLeadingOutcomes`, `detectRegressions`, `isOutcomeRegressed`,
+// `decideHoldback`, and the `LeadingOutcomeSample` / `OutcomeRegression` types
+// now live there, imported by the sole production caller `src/holdback.ts`. They
+// read leading outcomes back through THIS loader (`loadOutcomes` +
+// `getOutcomeValue`), so the producer still goes through the same seam every
+// other consumer uses — it just no longer shares a file with the YAML parser and
+// source-adapter machinery.
 // ---------------------------------------------------------------------------

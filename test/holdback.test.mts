@@ -33,9 +33,11 @@ import {
   isOutcomeRegressed,
   detectRegressions,
   snapshotLeadingOutcomes,
+  decideHoldback,
+} from "../src/outcome-regression.ts";
+import {
   enrollHoldback,
   checkHoldback,
-  decideHoldback,
   reportRevertFailed,
   type HoldbackEventBus,
 } from "../src/holdback.ts";
