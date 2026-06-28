@@ -18,7 +18,12 @@ import assert from "node:assert/strict";
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
-const learning = await import("../src/api/learning.ts");
+// Issue #2497: import getContext from the learning-composition DOMAIN module,
+// not the HTTP route file. The composition domain was extracted out of
+// src/api/learning.ts so tests (and any non-HTTP consumer) can reach it without
+// entangling with the Express router. The route file still re-exports these
+// symbols for back-compat, but the domain module is the canonical test surface.
+const learning = await import("../src/learning/composition.ts");
 const { closeRedisConnections } = await import("../src/redis/connection.ts");
 
 describe("getContext returns a structured LearningContext", () => {
