@@ -38,12 +38,6 @@
  */
 
 import {
-  loadOutcomes,
-  getOutcomeValue,
-  DEFAULT_OUTCOMES_FILE,
-  type OutcomeDirection,
-} from "./outcomes.ts";
-import {
   recordBaseline,
   loadBaseline,
   clearBaseline,
@@ -52,9 +46,13 @@ import {
   utcDateKey,
   isEnrolledTier,
   windowCyclesForTier,
-  HOLDBACK_MAX_REVERTS_PER_DAY,
   type HoldbackBaseline,
 } from "./redis/holdback.ts";
+import {
+  snapshotLeadingOutcomes,
+  decideHoldback,
+  type LeadingOutcomeSample,
+} from "./outcome-regression.ts";
 
 /** Stream the digest consumer reads from (see src/index.ts startConsumers). */
 const NOTIFICATIONS_STREAM = "hydra:notifications";
@@ -64,137 +62,13 @@ export interface HoldbackEventBus {
   publish(stream: string, event: { type: string; source: string; payload: unknown }): Promise<unknown>;
 }
 
-// ---------------------------------------------------------------------------
-// Outcome Regression Policy (folded in from `src/outcomes-regression.ts`,
-// issue #2380 — originally extracted from `src/outcomes.ts` in #2095).
-//
-// This section owns the Outcome Holdback regression policy: sampling the
-// leading outcomes, comparing a fresh snapshot against a baseline, and deciding
-// "did this outcome regress?". It sits ON TOP of the loader: it imports
-// `loadOutcomes` and `getOutcomeValue` from `src/outcomes.ts` (the loader/
-// adapter Module) and adds the comparison policy. The pure helpers
-// (`detectRegressions`, `isOutcomeRegressed`) take plain arrays — no
-// filesystem, no YAML, no adapter switching — so the holdback policy is
-// testable in isolation.
-//
-// Invariant: only `kind: leading` outcomes ever drive a holdback decision.
-// Terminal outcomes are too slow for any watch window (outcomes.yaml schema
-// comment + CONTEXT.md) and are filtered out here so a caller cannot
-// accidentally watch one.
-//
-// Per CLAUDE.md conventions:
-//   - Never throws: a failed load yields an empty snapshot (logged by
-//     `loadOutcomes`); the pure helpers return `false`/`[]` on no-data.
-//   - Adapter outages surface as `value: null` — never a synthetic 0 — so a
-//     missing reading is treated as no-data, never a false regression.
-// ---------------------------------------------------------------------------
-
-/** One leading-outcome sample: the outcome's contract fields + current value. */
-export interface LeadingOutcomeSample {
-  name: string;
-  direction: OutcomeDirection;
-  /** Absolute change below this is treated as no-move. */
-  noiseEpsilon: number;
-  /** Current value, or null if the adapter returned no data (no-data, not 0). */
-  value: number | null;
-}
-
-/**
- * Snapshot the current value of every `kind: leading` outcome.
- *
- * Returns one sample per leading outcome (terminal outcomes are excluded).
- * Adapter outages surface as `value: null` — never as a synthetic 0 — so the
- * regression detector can treat them as no-data rather than a false regression.
- * Never throws: a failed load yields an empty array (logged by `loadOutcomes`).
- */
-export async function snapshotLeadingOutcomes(
-  filePath: string = DEFAULT_OUTCOMES_FILE,
-): Promise<LeadingOutcomeSample[]> {
-  const result = await loadOutcomes(filePath);
-  if (result.ok === false) return [];
-  const leading = result.outcomes.filter((o) => o.kind === "leading");
-  return Promise.all(
-    leading.map(async (o) => {
-      const reading = await getOutcomeValue(o);
-      return {
-        name: o.name,
-        direction: o.direction,
-        noiseEpsilon: o.noise_epsilon,
-        value: reading?.value ?? null,
-      };
-    }),
-  );
-}
-
-/**
- * Decide whether a single leading outcome has regressed vs its baseline.
- *
- * A regression is a move in the UNFAVORABLE direction (opposite `direction`)
- * whose magnitude EXCEEDS `noiseEpsilon`. A favorable move, a no-move (delta
- * ≤ epsilon), or missing data on either side is NOT a regression.
- *
- *   direction: "up"   → regressed when current < baseline by more than epsilon
- *   direction: "down" → regressed when current > baseline by more than epsilon
- *
- * Returns `false` (no regression) when either value is null — adapter outages
- * are no-data, never a synthetic regression (matches the historical watcher's
- * "no false revert" posture, docs/reference.md).
- */
-export function isOutcomeRegressed(
-  baselineValue: number | null,
-  currentValue: number | null,
-  direction: OutcomeDirection,
-  noiseEpsilon: number,
-): boolean {
-  if (baselineValue == null || currentValue == null) return false;
-  if (!Number.isFinite(baselineValue) || !Number.isFinite(currentValue)) return false;
-  const eps = Number.isFinite(noiseEpsilon) ? Math.abs(noiseEpsilon) : 0;
-  // Favorable delta is positive when moving the favorable way.
-  const favorableDelta = direction === "up"
-    ? currentValue - baselineValue
-    : baselineValue - currentValue;
-  // Regressed = moved unfavorably by MORE than epsilon.
-  return favorableDelta < -eps;
-}
-
-/** A leading outcome that regressed past its noise epsilon vs baseline. */
-export interface OutcomeRegression {
-  name: string;
-  baseline: number;
-  current: number;
-  direction: OutcomeDirection;
-  noiseEpsilon: number;
-}
-
-/**
- * Compare a baseline snapshot against a current snapshot and return the leading
- * outcomes that regressed past their noise epsilon. The two arrays are matched
- * by outcome `name`; an outcome present in one but not the other, or with null
- * data on either side, is skipped (no-data, not a regression).
- *
- * Pure function — no I/O — so the producer (and its tests) can reason about the
- * revert decision deterministically.
- */
-export function detectRegressions(
-  baseline: Array<{ name: string; direction: OutcomeDirection; noiseEpsilon: number; value: number | null }>,
-  current: Array<{ name: string; value: number | null }>,
-): OutcomeRegression[] {
-  const currentByName = new Map(current.map((c) => [c.name, c.value]));
-  const regressions: OutcomeRegression[] = [];
-  for (const b of baseline) {
-    const cur = currentByName.has(b.name) ? currentByName.get(b.name)! : null;
-    if (isOutcomeRegressed(b.value, cur, b.direction, b.noiseEpsilon)) {
-      regressions.push({
-        name: b.name,
-        baseline: b.value as number,
-        current: cur as number,
-        direction: b.direction,
-        noiseEpsilon: b.noiseEpsilon,
-      });
-    }
-  }
-  return regressions;
-}
+// The pure Outcome Regression Policy (snapshotLeadingOutcomes,
+// isOutcomeRegressed, detectRegressions, decideHoldback, cycleDurationMs, and
+// the LeadingOutcomeSample / OutcomeRegression / DecideHoldbackInput types)
+// lives in the sibling `src/outcome-regression.ts` (issue #2507). This module
+// is the Redis-touching *coordinator* half: it imports the policy from that
+// sibling and applies the side effects (Redis reads/writes + event-bus
+// publish) the pure decision asks for.
 
 // ---------------------------------------------------------------------------
 // Enroll — snapshot the pre-merge baseline of the leading outcomes.
@@ -323,84 +197,6 @@ export type CheckResult =
   | { ok: false; error: string };
 
 /**
- * Inputs to the pure {@link decideHoldback} regression decision.
- *
- * Everything {@link checkHoldback} reads from Redis / the clock / the outcome
- * adapter is hoisted into this struct so the decision is a deterministic
- * function of plain in-memory values — no bus, no Redis, no filesystem.
- */
-export interface DecideHoldbackInput {
-  /** The persisted pre-merge baseline being evaluated. */
-  baseline: HoldbackBaseline;
-  /**
-   * Freshly sampled leading-outcome values to compare against the baseline.
-   * Only `{ name, value }` is consulted (by {@link detectRegressions}); the
-   * direction/epsilon come from the enrolled baseline, so the full
-   * {@link LeadingOutcomeSample} (which `snapshotLeadingOutcomes` returns) is
-   * accepted but only its `name`/`value` matter.
-   */
-  current: Array<{ name: string; value: number | null }>;
-  /** Today's revert count (against the per-day cap), read before deciding. */
-  revertCount: number;
-  /** Epoch millis "now" — defaults to {@link Date.now}; injectable for tests. */
-  nowMs?: number;
-}
-
-/**
- * The pure Outcome Holdback regression decision (issue #2096).
- *
- * Given an enrolled baseline, a fresh outcome snapshot, and today's revert
- * count, decide what should happen — with NO side effects: no event-bus
- * publish, no Redis write, no clock read beyond the injectable `nowMs`. The
- * returned {@link CheckDecision} discriminant is the single source of truth for
- * which side effects {@link checkHoldback} then applies:
- *
- *   - `revert`      → caller increments the day's revert count, clears the
- *                     baseline, and publishes `holdback.reverted`.
- *   - `cap-reached` → caller publishes `holdback.cap-reached` (revert
- *                     suppressed; baseline left intact for the next sample).
- *   - `passed`      → caller clears the baseline (probation complete).
- *   - `watching`    → caller does nothing (keep watching).
- *
- * Tests for the branching logic ("cap reached", "window elapsed", "regression
- * but not yet capped") pass plain arguments — they no longer need a stubbed
- * `HoldbackEventBus` or a Redis fixture. The `no-enrollment` decision is NOT
- * produced here: a missing baseline is handled by the orchestrator before it
- * has anything to decide over.
- */
-export function decideHoldback(input: DecideHoldbackInput): CheckDecision {
-  const { baseline, current, revertCount } = input;
-  const nowMs = input.nowMs ?? Date.now();
-
-  const regressions = detectRegressions(baseline.leading, current);
-
-  if (regressions.length === 0) {
-    // No regression. If the window has elapsed, the merge passed probation.
-    const windowMs = baseline.windowCycles * cycleDurationMs();
-    const elapsed = nowMs - baseline.enrolledAt >= windowMs;
-    if (elapsed) {
-      return { decision: "passed", commitSha: baseline.commitSha };
-    }
-    return { decision: "watching", commitSha: baseline.commitSha };
-  }
-
-  const regressedOutcomes = regressions.map((r) => r.name);
-
-  // Enforce the per-day cap BEFORE reverting (ADR-0004 step 4).
-  if (revertCount >= HOLDBACK_MAX_REVERTS_PER_DAY) {
-    return { decision: "cap-reached", commitSha: baseline.commitSha, regressedOutcomes };
-  }
-
-  // Revert warranted.
-  return {
-    decision: "revert",
-    commitSha: baseline.commitSha,
-    prNumber: baseline.prNumber,
-    regressedOutcomes,
-  };
-}
-
-/**
  * Evaluate an enrolled commit's window once.
  *
  * Re-samples the leading outcomes, compares against the persisted baseline, and:
@@ -507,17 +303,6 @@ export async function reportRevertFailed(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Approximate real time per autopilot cycle, used to decide when a watch
- * window has elapsed. Env-overridable (ADR-0005) so operators can tune the
- * window→wall-clock mapping without code edits. Defaults to 1h/cycle.
- */
-function cycleDurationMs(): number {
-  const raw = process.env.HYDRA_HOLDBACK_CYCLE_MS;
-  const n = raw === undefined || raw === "" ? NaN : Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 60 * 60 * 1000;
-}
 
 /** Publish best-effort — a bus error must never break the producer flow. */
 async function publishSafe(
