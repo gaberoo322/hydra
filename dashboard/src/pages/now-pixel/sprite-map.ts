@@ -93,7 +93,7 @@ function spriteFile(pokedexId: number): string {
  * "I'm confused / unmapped"). Pokedex id 54 is already in POKEDEX and
  * SIGNAL_POOLS, so the asset is guaranteed present in the sprite set.
  */
-export const FALLBACK_SPRITE_ID = 54; // Psyduck — the "unmapped class" stand-in
+const FALLBACK_SPRITE_ID = 54; // Psyduck — the "unmapped class" stand-in
 
 /**
  * Pipeline class → fixed Pokemon ID. The mapping is intentional but
