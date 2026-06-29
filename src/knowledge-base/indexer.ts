@@ -684,4 +684,3 @@ export {
   startKnowledgeIndexer,
   stopKnowledgeIndexer,
 } from "./indexer-lifecycle.ts";
-export type { IndexerControllerDeps } from "./indexer-lifecycle.ts";
