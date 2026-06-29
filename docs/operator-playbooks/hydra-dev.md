@@ -150,6 +150,7 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
 7. **Declares glossary/ADR impact** — per the `docs/agents/domain.md` WRITE contract, add a `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved or decision made (a `## Glossary delta` in the issue or referenced ADR names it). Do **not** edit `CONTEXT.md` in this code PR — the delta lands in a **separate `ubiquitous-language`-labelled PR**.
 8. Runs `npm test` + `npm run typecheck` + `npm run build`
 9. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
+9a. **Reconciles the diff against the design-concept artifact BEFORE opening the PR (issue #2537 — do-not-open-on-unmet-invariant).** If a design-concept artifact was fetched at planning time (step 4 region / "Design-concept artifact — live API" below), run the "Design-concept reconciliation gate" recipe in that section: for EACH invariant, cite the diff hunk that satisfies it; for each MUST-NOT invariant, confirm the diff does not introduce the forbidden behavior. If ANY invariant cannot be satisfied, do **NOT** open the PR — emit a `## Friction Report` naming the unmet invariant and stop. This closes the #2504 gap where the artifact was fetched but Invariant 7 ("MUST NOT fall back to a full scan") was violated anyway — the failure was verification-side, not authoring-side. When no artifact was fetched (404 at planning time), this gate is a clean no-op.
 10. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API. **Acceptance criteria MUST be written as checkboxes with a mechanical "verified by:" assertion** — each criterion must name the exact command or observable output a reviewer can check without reading code. Format:
     ```
     - [ ] Criterion A — verified by: `npm test -- --test-name-pattern "criterion-A"` exits 0
@@ -379,6 +380,33 @@ planning time — same point as the reflections + tier reads:
   (cue `design-concept-endpoint-concept-field-absent`).
 - 404 → no artifact persisted for that anchor — proceed without one; do not
   retry alternate route spellings.
+
+**Design-concept reconciliation gate (issue #2537 — MANDATORY pre-PR step when
+an artifact was fetched).** Fetching the artifact at planning time is not
+enough: #2504 fetched it and still violated Invariant 7 ("MUST NOT fall back to
+a full scan") because nothing re-checked the *diff* against the invariants
+before the PR opened. The gate closes that verification-side gap. Run it as
+child-step 9a — AFTER the change is committed and tier-classified, BEFORE
+`gh pr create`:
+
+1. Re-read the `invariants` array from the artifact you fetched at planning
+   time (read `.invariants` directly — there is NO `.concept` envelope).
+2. For EACH invariant, cite the concrete evidence that it holds — the diff
+   hunk (`git diff origin/master...HEAD`), the test name, or the command output
+   that demonstrates it. For each MUST-NOT / negative invariant, confirm the
+   diff does **not** introduce the forbidden behavior.
+3. Mirror the existing "verified by:" framing: each invariant pairs with a
+   mechanical check, exactly like the acceptance-criteria checkboxes.
+4. **If ANY invariant cannot be satisfied, do NOT open the PR.** Emit a
+   `## Friction Report` that names the unmet invariant and what blocks it, then
+   stop. This is a gate (do-not-open), not a post-hoc report — shipping a PR
+   that violates a stated invariant is the #2504 failure mode this step exists
+   to catch.
+5. When step 4 of planning returned a 404 (no artifact for this anchor), this
+   gate is a clean no-op — proceed straight to `gh pr create`.
+
+The reconciliation summary (each invariant + its evidence) SHOULD also be
+included in the PR body so QA can re-verify it against the same artifact.
 
 ### Tier classification — live API (issue #406)
 
