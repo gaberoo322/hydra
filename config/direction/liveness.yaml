@@ -73,6 +73,10 @@ entries:
     type: timer
     maxStaleMinutes: 1560
     description: Forecast-outcome settlement loop (calibration/brier feed).
+  - unit: hydra-betting-directional-nomination.timer
+    type: timer
+    maxStaleMinutes: 120
+    description: "M13 directional/paper-execution runner (item-718/item-611) — the PRODUCER of paper directional venue_orders the forecast-outcomes timer scores; without it live, forecast_outcomes never accumulates and brierScore stays null. Hourly, default-off until installed+enabled (first run NOT-YET-FIRED, never STALE). Paper-only."
 
   # Output checks (slice 2, #2288) — live-but-inert detection.
   #
