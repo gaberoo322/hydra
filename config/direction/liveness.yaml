@@ -54,18 +54,17 @@ entries:
     type: timer
     maxStaleMinutes: 360
     description: Upstream data ingest for the betting pipeline.
-  - unit: hydra-betting-arbitrage-auto-approval.timer
-    type: timer
-    maxStaleMinutes: 60
-    description: Arbitrage auto-approval loop.
+  # NOTE: hydra-betting-arbitrage-auto-approval.timer and
+  # hydra-betting-automated-pair-review.timer were removed here — they belong to
+  # the cross-venue arbitrage strategy retired by hydra-betting ADR-0002. The
+  # automated-pair-review runner was deleted (betting PR #318); arbitrage
+  # auto-approval is a default-off dispatcher, never a must-be-live entrypoint.
+  # Declaring them here made wiring-liveness false-flag them as "missing"
+  # forever (see orchestrator issue #2519).
   - unit: hydra-betting-arbitrage-recovery.timer
     type: timer
     maxStaleMinutes: 60
     description: Arbitrage recovery loop.
-  - unit: hydra-betting-automated-pair-review.timer
-    type: timer
-    maxStaleMinutes: 120
-    description: Automated pair-review loop.
   - unit: hydra-betting-nba-injuries.timer
     type: timer
     maxStaleMinutes: 1560
