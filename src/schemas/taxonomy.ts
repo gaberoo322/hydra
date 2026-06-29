@@ -54,7 +54,7 @@ export const TaxonomyClassesQuerySchema = z.object({}).strict();
  * the typed module already validates at import time. Nullable columns are
  * always present (explicit `null`, never absent) so a consumer miss is loud.
  */
-export const TaxonomyClassRowSchema = z
+const TaxonomyClassRowSchema = z
   .object({
     /** The class name decide.py dispatches on, e.g. `dev_orch`. */
     name: z.string().min(1),
