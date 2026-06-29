@@ -66,7 +66,14 @@ const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguis
 //
 //   acceptance-criterion-unmet     — the implementation didn't satisfy the
 //                                    criterion. This is a true planner-quality
-//                                    signal; promote + escalate aggressively.
+//                                    signal, but QA reports it on nearly every
+//                                    PR with non-trivial ACs, so the legacy
+//                                    default of 3 flooded the operator with an
+//                                    every-10-hits nag. Surface only at a much
+//                                    higher (but still FINITE) bar — 150 hits
+//                                    across distinct skills (issue #2537). It is
+//                                    NOT muted to Infinity: it remains a genuine
+//                                    signal, it just escalates at a higher bar.
 //
 //   acceptance-criterion-deferred  — the criterion requires post-deploy /
 //                                    runtime / manual observation that
@@ -79,6 +86,17 @@ const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguis
 //
 // Any other cue uses the default threshold (`PROMOTION_THRESHOLD` = 3).
 const ACCEPTANCE_CRITERION_DEFERRED_CUE = "acceptance-criterion-deferred";
+
+// acceptance-criterion-unmet fires on nearly every PR with operator-observable
+// ACs, so the legacy default of 3 produced a chronic every-10-hits operator
+// nag. Raise the bar to a high-but-FINITE 150 (issue #2537): the cue still
+// escalates — it is a genuine planner-quality QA signal — just at a much higher
+// volume. It is deliberately NOT Number.POSITIVE_INFINITY (that sentinel is
+// reserved for the no-agent-spawn-tool-run-inline inline-mode contract, which
+// is not a defect at all). 150 mirrors the high-volume treatment already given
+// to acceptance-criterion-deferred (20), scaled to unmet's higher hit rate.
+const ACCEPTANCE_CRITERION_UNMET_CUE = "acceptance-criterion-unmet";
+const ACCEPTANCE_CRITERION_UNMET_THRESHOLD = 150;
 
 // ---------------------------------------------------------------------------
 // Cue alias table (issue #2527)
@@ -163,6 +181,11 @@ const NO_AGENT_SPAWN_TOOL_RUN_INLINE_CUE = "no-agent-spawn-tool-run-inline";
  * skills before opening a GitHub issue, because the cue is expected to fire on
  * nearly every PR with operator-observable ACs.
  *
+ * `acceptance-criterion-unmet` raises the bar to 150 hits (issue #2537) for the
+ * same reason at a higher volume — it is a genuine planner-quality defect
+ * signal, so the threshold stays FINITE (never Infinity); it just escalates at
+ * a much higher bar than the legacy default of 3.
+ *
  * `no-agent-spawn-tool-run-inline` uses `Number.POSITIVE_INFINITY` — the
  * never-escalate sentinel. `escalationThresholdForCue` accepts any override
  * `> 0` (Infinity qualifies) and `shouldEscalateAtHitCount(n, Infinity)` is
@@ -171,6 +194,7 @@ const NO_AGENT_SPAWN_TOOL_RUN_INLINE_CUE = "no-agent-spawn-tool-run-inline";
  */
 const CUE_ESCALATION_THRESHOLDS: Record<string, number> = {
   [ACCEPTANCE_CRITERION_DEFERRED_CUE]: 20,
+  [ACCEPTANCE_CRITERION_UNMET_CUE]: ACCEPTANCE_CRITERION_UNMET_THRESHOLD,
   [NO_AGENT_SPAWN_TOOL_RUN_INLINE_CUE]: Number.POSITIVE_INFINITY,
 };
 

@@ -305,8 +305,19 @@ describe("escalation to GitHub (issue #512)", () => {
   // Issue #524 — acceptance-criterion-deferred vs unmet cue split
   // -------------------------------------------------------------------------
 
-  test("escalationThresholdForCue: acceptance-criterion-unmet keeps the default (3)", () => {
-    assert.equal(escalationThresholdForCue("acceptance-criterion-unmet", 3), 3);
+  test("escalationThresholdForCue: acceptance-criterion-unmet uses the raised 150-hit threshold (issue #2537)", () => {
+    const threshold = escalationThresholdForCue("acceptance-criterion-unmet", 3);
+    // Raised from the default 3 to a high-but-finite bar: the cue fires on
+    // nearly every PR with operator-observable ACs, so the default flooded the
+    // operator with every-10-hits nags. The new bar stops that flood while
+    // keeping the cue a genuine planner-quality signal.
+    assert.equal(threshold, 150);
+    // It MUST stay FINITE — unlike no-agent-spawn-tool-run-inline (an
+    // inline-mode contract muted to Infinity), this is a real defect signal
+    // that still escalates, just at a much higher bar.
+    assert.ok(Number.isFinite(threshold), "threshold must be finite, not Infinity");
+    assert.ok(threshold > 100, "threshold must exceed 100");
+    assert.notEqual(threshold, Number.POSITIVE_INFINITY);
   });
 
   test("escalationThresholdForCue: acceptance-criterion-deferred uses the higher 20-hit threshold", () => {
@@ -353,6 +364,51 @@ describe("escalation to GitHub (issue #512)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Issue #2537 — acceptance-criterion-unmet raised to a finite 150-hit bar
+  // -------------------------------------------------------------------------
+  //
+  // The cue is a genuine planner-quality defect signal but fires on nearly
+  // every PR with operator-observable ACs, so the legacy default of 3 flooded
+  // the operator with an every-10-hits nag. The bar is raised to 150 — high
+  // enough to stop the flood, but FINITE so the cue still escalates (it is NOT
+  // muted to Infinity like the no-agent-spawn-tool-run-inline inline-mode cue).
+
+  test("shouldEscalateAtHitCount with unmet threshold (150): silent below 150", () => {
+    const threshold = escalationThresholdForCue("acceptance-criterion-unmet", 3);
+    for (const n of [1, 3, 13, 50, 100, 140, 149]) {
+      assert.equal(
+        shouldEscalateAtHitCount(n, threshold),
+        false,
+        `hitCount=${n} should NOT escalate for acceptance-criterion-unmet at threshold=150`,
+      );
+    }
+  });
+
+  test("shouldEscalateAtHitCount with unmet threshold (150): fires at 150 and on +10 multiples", () => {
+    const threshold = escalationThresholdForCue("acceptance-criterion-unmet", 3);
+    assert.equal(shouldEscalateAtHitCount(150, threshold), true);
+    assert.equal(shouldEscalateAtHitCount(160, threshold), true);
+    assert.equal(shouldEscalateAtHitCount(250, threshold), true);
+    // Off-by-one sanity — silent between decade marks.
+    assert.equal(shouldEscalateAtHitCount(151, threshold), false);
+    assert.equal(shouldEscalateAtHitCount(159, threshold), false);
+  });
+
+  test("acceptance-criterion-unmet threshold is finite, never Infinity (issue #2537)", () => {
+    const threshold = escalationThresholdForCue("acceptance-criterion-unmet", 3);
+    assert.ok(Number.isFinite(threshold), "must be finite — it is a real escalation signal");
+    assert.notEqual(threshold, Number.POSITIVE_INFINITY);
+    assert.ok(threshold > 100, "must exceed 100 to stop the operator-nag flood");
+    // Raising unmet must NOT regress the other resolved thresholds.
+    assert.equal(escalationThresholdForCue("acceptance-criterion-deferred", 3), 20);
+    assert.equal(escalationThresholdForCue("scope-creep", 3), 3);
+    assert.equal(
+      escalationThresholdForCue("no-agent-spawn-tool-run-inline", 3),
+      Number.POSITIVE_INFINITY,
+    );
+  });
+
+  // -------------------------------------------------------------------------
   // Integration-ish: agent-memory.recordPattern() should populate
   // `result.escalation` as null for the deferred cue at hit 3 (its threshold
   // is higher), while the unmet cue still fires at hit 3 as it always has.
@@ -364,18 +420,22 @@ describe("escalation to GitHub (issue #512)", () => {
   // `escalation` field and to drive the internal escalate() dispatch.
   // -------------------------------------------------------------------------
 
-  test("deferred cue suppresses escalation at hit 3 (unmet still fires)", () => {
+  test("deferred and unmet both suppress escalation at hit 3 (raised thresholds, issue #2537)", () => {
     const unmetThreshold = escalationThresholdForCue("acceptance-criterion-unmet", 3);
     const deferredThreshold = escalationThresholdForCue("acceptance-criterion-deferred", 3);
 
-    // Hit 3 (the legacy `PROMOTION_THRESHOLD`) — unmet fires, deferred does not.
-    assert.equal(shouldEscalateAtHitCount(3, unmetThreshold), true);
+    // Hit 3 (the legacy `PROMOTION_THRESHOLD`) — neither fires now: unmet was
+    // raised to 150 (issue #2537) and deferred sits at 20 (issue #524).
+    assert.equal(shouldEscalateAtHitCount(3, unmetThreshold), false);
     assert.equal(shouldEscalateAtHitCount(3, deferredThreshold), false);
 
-    // Hit 20 — deferred fires for the first time; unmet would NOT (only
-    // multiples of 10 above its threshold of 3 fire, i.e. 13, 23, 33...).
+    // Hit 20 — deferred fires for the first time; unmet still does NOT (its
+    // bar is 150, so it stays silent at every hit count below 150).
     assert.equal(shouldEscalateAtHitCount(20, deferredThreshold), true);
     assert.equal(shouldEscalateAtHitCount(20, unmetThreshold), false);
+
+    // Hit 150 — unmet fires for the first time.
+    assert.equal(shouldEscalateAtHitCount(150, unmetThreshold), true);
   });
 
   // -------------------------------------------------------------------------
