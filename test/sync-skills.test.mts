@@ -140,6 +140,204 @@ describe("scripts/sync-skills.sh — playbook edit propagates to generated SKILL
   });
 });
 
+describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)", () => {
+  /**
+   * Build a throwaway repo whose layout matches what sync-skills.sh expects
+   * (REPO_ROOT = script dir's parent; playbooks at
+   * docs/operator-playbooks/). We copy the REAL sync-skills.sh into it so the
+   * resolver under test is the production one, then drop a tiny playbook +
+   * fragment so each assertion is hermetic and fast.
+   */
+  function makeFragRepo(): {
+    dir: string;
+    script: string;
+    playbooks: string;
+    fragments: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-frag-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    const fragments = join(playbooks, "_fragments");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(fragments, { recursive: true });
+    const script = join(scripts, "sync-skills.sh");
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    return { dir, script, playbooks, fragments };
+  }
+
+  function runSync(
+    repo: { dir: string; script: string },
+  ): { status: number | null; stdout: string; stderr: string; claudeDir: string } {
+    const claudeDir = join(repo.dir, "out-claude");
+    const codexDir = join(repo.dir, "out-codex");
+    const r = spawnSync("bash", [repo.script], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: codexDir,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, claudeDir };
+  }
+
+  test("an @include directive is replaced by the fragment's content", () => {
+    const repo = makeFragRepo();
+    try {
+      writeFileSync(
+        join(repo.fragments, "greeting.md"),
+        "FRAGMENT-START\nhello from a shared fragment\nFRAGMENT-END\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "demo.md"),
+        "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\n@include _fragments/greeting.md\n\ntrailing prose\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(join(r.claudeDir, "demo", "SKILL.md"), "utf-8");
+      assert.match(out, /FRAGMENT-START/, "fragment content must be inlined");
+      assert.match(out, /hello from a shared fragment/);
+      assert.match(out, /FRAGMENT-END/);
+      // The literal directive line must be GONE — never shipped verbatim.
+      assert.doesNotMatch(
+        out,
+        /^[ \t]*@include\b/m,
+        "the @include directive line must not survive into the generated skill",
+      );
+      // Surrounding playbook prose must be preserved around the inlined block.
+      assert.match(out, /# Demo/);
+      assert.match(out, /trailing prose/);
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("{{SKILL_NAME}} in a fragment is substituted with the including skill's name", () => {
+    const repo = makeFragRepo();
+    try {
+      writeFileSync(
+        join(repo.fragments, "tagged.md"),
+        "log tag is [{{SKILL_NAME}}] here\n",
+      );
+      // Two skills include the SAME fragment — each must get its own name.
+      writeFileSync(
+        join(repo.playbooks, "alpha.md"),
+        "---\nname: alpha\ndescription: alpha\n---\n\n@include _fragments/tagged.md\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "beta.md"),
+        "---\nname: beta\ndescription: beta\n---\n\n@include _fragments/tagged.md\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const alpha = readFileSync(join(r.claudeDir, "alpha", "SKILL.md"), "utf-8");
+      const beta = readFileSync(join(r.claudeDir, "beta", "SKILL.md"), "utf-8");
+      assert.match(alpha, /log tag is \[alpha\] here/, "alpha must get its own name");
+      assert.match(beta, /log tag is \[beta\] here/, "beta must get its own name");
+      assert.doesNotMatch(alpha, /\{\{SKILL_NAME\}\}/, "no unsubstituted token in alpha");
+      assert.doesNotMatch(beta, /\{\{SKILL_NAME\}\}/, "no unsubstituted token in beta");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unresolved @include FAILS LOUD (non-zero exit, no literal directive shipped)", () => {
+    const repo = makeFragRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "demo.md"),
+        "---\nname: demo\ndescription: demo\n---\n\n@include _fragments/does-not-exist.md\n",
+      );
+      const r = runSync(repo);
+      assert.notEqual(
+        r.status,
+        0,
+        "a missing fragment must abort the sync (set -euo pipefail) — never emit a literal @include line",
+      );
+      assert.match(
+        r.stderr + r.stdout,
+        /unresolved @include/i,
+        "the failure must name the unresolved include",
+      );
+      // And the broken skill must NOT have been written with a literal directive.
+      const broken = join(r.claudeDir, "demo", "SKILL.md");
+      if (existsSync(broken)) {
+        assert.doesNotMatch(
+          readFileSync(broken, "utf-8"),
+          /^[ \t]*@include\b/m,
+          "a skill must never ship a literal @include line",
+        );
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a nested @include inside a fragment FAILS LOUD (includes are non-recursive)", () => {
+    const repo = makeFragRepo();
+    try {
+      writeFileSync(join(repo.fragments, "inner.md"), "inner content\n");
+      writeFileSync(
+        join(repo.fragments, "outer.md"),
+        "outer before\n@include _fragments/inner.md\nouter after\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "demo.md"),
+        "---\nname: demo\ndescription: demo\n---\n\n@include _fragments/outer.md\n",
+      );
+      const r = runSync(repo);
+      assert.notEqual(r.status, 0, "a nested include must abort the sync");
+      assert.match(
+        r.stderr + r.stdout,
+        /nested @include|non-recursive/i,
+        "the failure must explain that includes are non-recursive",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the live hydra-dev + hydra-target-build playbooks resolve their reflection-telemetry-deposit include cleanly", () => {
+    // Golden check against the REAL repo: sync the real playbooks, then assert
+    // both build skills inlined the shared deposit fragment with their own log
+    // tag and no leftover directive/token. This pins the issue #2552 wiring.
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-live-"));
+    try {
+      const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+        env: {
+          ...process.env,
+          CLAUDE_SKILLS_DIR: join(dir, "claude"),
+          CODEX_SKILLS_DIR: join(dir, "codex"),
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+      for (const skill of ["hydra-dev", "hydra-target-build"]) {
+        const out = readFileSync(join(dir, "claude", skill, "SKILL.md"), "utf-8");
+        assert.match(
+          out,
+          new RegExp(`\\[${skill}\\] refl-anchor-deposit ok`),
+          `${skill} must inline the shared deposit fragment with its own [${skill}] log tag`,
+        );
+        assert.doesNotMatch(
+          out,
+          /^[ \t]*@include\b/m,
+          `${skill} must not ship a literal @include directive`,
+        );
+        assert.doesNotMatch(
+          out,
+          /\{\{SKILL_NAME\}\}/,
+          `${skill} must not ship an unsubstituted {{SKILL_NAME}} token`,
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/setup-git-hooks.sh (issue #433)", () => {
   /**
    * Create a throwaway git repo with a `scripts/sync-skills.sh` stub and a

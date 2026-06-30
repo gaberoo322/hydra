@@ -41,10 +41,21 @@ for pb in "${PLAYBOOK_FILES[@]}"; do
   base=$(basename "$pb" .md)
   [ "$base" = "README" ] && continue
 
-  # Parse frontmatter + body via Python; emit JSON.
-  parsed=$(python3 - "$pb" <<'PY' || true
-import sys, json, re
+  # Parse frontmatter + body via Python; emit JSON. The same Python pass also
+  # resolves `@include _fragments/<name>.md` directives in the body (issue
+  # #2552): a line matching `^@include\s+(\S+)$` is replaced verbatim by the
+  # referenced fragment's content, with a flat `{{SKILL_NAME}}` substitution so
+  # a single shared fragment can carry a per-skill log-tag prefix. Includes are
+  # non-recursive (one level) and FAIL LOUD — a missing/typo'd fragment makes
+  # this pass exit non-zero so `set -euo pipefail` aborts the sync (and, via the
+  # issue #433 deploy contract, the deploy) before a skill ships a literal
+  # `@include ...` line. Fragments live under docs/operator-playbooks/_fragments/
+  # — a subdirectory the non-recursive PLAYBOOK_FILES glob never matches, so a
+  # fragment is never itself emitted as a SKILL.md.
+  parsed=$(python3 - "$pb" "$PLAYBOOKS" <<'PY'
+import sys, json, re, os
 path = sys.argv[1]
+playbooks_dir = sys.argv[2]
 with open(path, "r", encoding="utf-8") as f:
     text = f.read()
 m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
@@ -71,7 +82,54 @@ for line in fm_raw.splitlines():
     elif v.lower() in ("true","false"):
         v = (v.lower() == "true")
     fm[k] = v
-print(json.dumps({"fm": fm, "body": body}))
+
+# Resolve @include directives in the body. The directive must be the whole
+# line (leading/trailing whitespace allowed). `{{SKILL_NAME}}` in the fragment
+# body is substituted with the skill's frontmatter name so a shared fragment
+# can carry a per-skill prefix (the [hydra-dev] vs [hydra-target-build] log
+# tag). Fragment paths are relative to docs/operator-playbooks/.
+skill_name = fm.get("name", "")
+include_re = re.compile(r"^[ \t]*@include[ \t]+(\S+)[ \t]*$")
+
+def resolve_line(line):
+    mm = include_re.match(line)
+    if not mm:
+        return line
+    frag_rel = mm.group(1)
+    frag_path = os.path.normpath(os.path.join(playbooks_dir, frag_rel))
+    # Contain the include within the playbooks dir — refuse path-escapes.
+    if not frag_path.startswith(os.path.normpath(playbooks_dir) + os.sep):
+        raise SystemExit(
+            "sync-skills: @include path escapes operator-playbooks/: "
+            + frag_rel + " (in " + os.path.basename(path) + ")"
+        )
+    if not os.path.isfile(frag_path):
+        # FAIL LOUD (issue #2552 invariant): an unresolved include must abort
+        # the sync, never silently emit a literal `@include` line.
+        raise SystemExit(
+            "sync-skills: unresolved @include " + frag_rel
+            + " (in " + os.path.basename(path) + "): no such fragment at "
+            + frag_path
+        )
+    with open(frag_path, "r", encoding="utf-8") as ff:
+        frag = ff.read()
+    # Strip a single trailing newline so the fragment slots in cleanly where
+    # the directive line was, regardless of the fragment file's final newline.
+    if frag.endswith("\n"):
+        frag = frag[:-1]
+    frag = frag.replace("{{SKILL_NAME}}", skill_name)
+    # Guard against a fragment that itself contains an @include (non-recursive
+    # by design — ADR-0014 simplicity). FAIL LOUD rather than silently leave it.
+    for fl in frag.splitlines():
+        if include_re.match(fl):
+            raise SystemExit(
+                "sync-skills: nested @include in fragment " + frag_rel
+                + " — includes are non-recursive (one level)"
+            )
+    return frag
+
+resolved = "\n".join(resolve_line(l) for l in body.split("\n"))
+print(json.dumps({"fm": fm, "body": resolved}))
 PY
 )
 
