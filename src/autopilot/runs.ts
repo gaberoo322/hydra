@@ -83,8 +83,6 @@ import type {
 // every projection symbol, so callers import them from there directly.
 import {
   RUN_TURNS_MAX_FETCH,
-  MERGED_STATUSES,
-  FAILED_STATUSES,
   isPidAlive,
   fetchTurnsWithJoins,
   projectRunView,
@@ -93,6 +91,7 @@ import {
   deriveInflightSlotSeed,
 } from "./run-projections.ts";
 import type { AutopilotLifecycle, InflightSlotSeed } from "./run-projections.ts";
+import { bucketCycleStatus } from "./cycle-status.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -630,12 +629,12 @@ export async function recordCycle(
     await deps.metrics.recordCycleMetrics(cycleId, metrics);
 
     await deps.scheduler.incrSchedulerCyclesRun();
-    const lowerStatus = status.toLowerCase();
+    const twoWay = bucketCycleStatus(status);
     let bucketed: "merged" | "failed" | "unaccounted" = "unaccounted";
-    if (MERGED_STATUSES.has(lowerStatus)) {
+    if (twoWay === "merged") {
       await deps.scheduler.incrSchedulerCyclesMerged();
       bucketed = "merged";
-    } else if (FAILED_STATUSES.has(lowerStatus)) {
+    } else if (twoWay === "failed") {
       await deps.scheduler.incrSchedulerCyclesFailed();
       bucketed = "failed";
     } else {
