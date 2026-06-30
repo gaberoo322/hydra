@@ -26,6 +26,14 @@
  * that `scripts/sync-skills.sh` regenerates into `~/.claude/skills/.../SKILL.md`.
  * Pinning the playbooks pins what gets synced downstream — so the deposit
  * obligation can't silently erode back into optional prose.
+ *
+ * Issue #2552: the deposit bash recipe was extracted into a shared fragment
+ * (`docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md`)
+ * that both build playbooks pull in via an `@include` directive resolved at
+ * sync time. The deposit obligation is therefore present in the EFFECTIVE
+ * synced source (playbook body + its included fragments), not necessarily in
+ * the raw playbook `.md`. We resolve includes here exactly as sync-skills.sh
+ * does so the lint still pins what actually ships downstream.
  */
 
 import test, { describe } from "node:test";
@@ -37,11 +45,31 @@ import { dirname, resolve } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLAYBOOK_DIR = resolve(__dirname, "..", "docs", "operator-playbooks");
 
+// Resolve `@include _fragments/<name>.md` directives the same way
+// scripts/sync-skills.sh does (issue #2552): a whole-line `@include` is
+// replaced by the fragment's content, with `{{SKILL_NAME}}` substituted by the
+// skill name. This is non-recursive (one level) — matching the resolver — and
+// lets the lint below assert against the EFFECTIVE synced source.
+function resolveIncludes(playbookFile: string, skillName: string): string {
+  const raw = readFileSync(resolve(PLAYBOOK_DIR, playbookFile), "utf8");
+  const includeRe = /^[ \t]*@include[ \t]+(\S+)[ \t]*$/;
+  return raw
+    .split("\n")
+    .map((line) => {
+      const m = line.match(includeRe);
+      if (!m) return line;
+      let frag = readFileSync(resolve(PLAYBOOK_DIR, m[1]), "utf8");
+      if (frag.endsWith("\n")) frag = frag.slice(0, -1);
+      return frag.split("{{SKILL_NAME}}").join(skillName);
+    })
+    .join("\n");
+}
+
 const playbooks: Record<string, string> = {
-  "hydra-dev.md": readFileSync(resolve(PLAYBOOK_DIR, "hydra-dev.md"), "utf8"),
-  "hydra-target-build.md": readFileSync(
-    resolve(PLAYBOOK_DIR, "hydra-target-build.md"),
-    "utf8",
+  "hydra-dev.md": resolveIncludes("hydra-dev.md", "hydra-dev"),
+  "hydra-target-build.md": resolveIncludes(
+    "hydra-target-build.md",
+    "hydra-target-build",
   ),
 };
 
