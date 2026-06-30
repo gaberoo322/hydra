@@ -251,3 +251,59 @@ export function getWeeklyPaceCeiling(): number {
   }
   return Math.min(parsed, 1);
 }
+
+/** Default Tier-1 5h-utilization throttle threshold (fraction of quota). */
+export const DEFAULT_FIVE_HOUR_THROTTLE_T1 = 0.6;
+/** Default Tier-2 5h-utilization throttle threshold (fraction of quota). */
+export const DEFAULT_FIVE_HOUR_THROTTLE_T2 = 0.75;
+
+/**
+ * Read a 5h-throttle threshold env var as a fraction in (0, 1). Unset/empty →
+ * `fallback`. Set-but-invalid (non-finite, ≤0, or ≥1) → `fallback` with a
+ * fail-loud `console.error`, mirroring {@link getWeeklyPaceCeiling}'s discipline
+ * (a mis-configured env var is visible, never silently honoured). (issue #1087)
+ *
+ * Relocated VERBATIM out of `eligibility.ts` into this pure env-reader leaf
+ * (issue #2550): all Cost-family env parsing now lives here, alongside its
+ * `getFiveHourThrottleT1` / `getFiveHourThrottleT2` callers, so the env-read
+ * seam stays distinct from the `fiveHourThrottleShed` dispatch-gating policy
+ * fold (which becomes a pure fold over already-parsed thresholds).
+ */
+function getFiveHourThrottleThreshold(envVar: string, fallback: number): number {
+  const raw = process.env[envVar];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) {
+    console.error(
+      `[usage-tracker] ${envVar} is set but not a finite fraction in (0, 1) (${JSON.stringify(
+        raw,
+      )}); falling back to default ${fallback}`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
+/**
+ * The Tier-1 5h-utilization throttle threshold from
+ * `HYDRA_USAGE_5H_THROTTLE_T1` (fraction in (0, 1)); falls back to
+ * {@link DEFAULT_FIVE_HOUR_THROTTLE_T1}. (issue #1087, relocated #2550)
+ */
+export function getFiveHourThrottleT1(): number {
+  return getFiveHourThrottleThreshold(
+    "HYDRA_USAGE_5H_THROTTLE_T1",
+    DEFAULT_FIVE_HOUR_THROTTLE_T1,
+  );
+}
+
+/**
+ * The Tier-2 5h-utilization throttle threshold from
+ * `HYDRA_USAGE_5H_THROTTLE_T2` (fraction in (0, 1)); falls back to
+ * {@link DEFAULT_FIVE_HOUR_THROTTLE_T2}. (issue #1087, relocated #2550)
+ */
+export function getFiveHourThrottleT2(): number {
+  return getFiveHourThrottleThreshold(
+    "HYDRA_USAGE_5H_THROTTLE_T2",
+    DEFAULT_FIVE_HOUR_THROTTLE_T2,
+  );
+}
