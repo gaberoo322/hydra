@@ -23,6 +23,7 @@ import { z } from "zod";
 
 import * as defaultRecsRedis from "../redis/recommendations.ts";
 import { RUN_TTL_SECONDS } from "../autopilot/sweep-reader.ts";
+import { getCurrentRun as defaultGetCurrentRun } from "../autopilot/runs.ts";
 
 // ---------------------------------------------------------------------------
 // Recommendations sub-router schemas (issue #674)
@@ -295,8 +296,7 @@ export function filterActiveRecommendations(input: {
 // ---------------------------------------------------------------------------
 
 async function defaultReadCurrentRunId(): Promise<string | null> {
-  const { getCurrentRun } = await import("../autopilot/runs.ts");
-  const result = await getCurrentRun();
+  const result = await defaultGetCurrentRun();
   if (!result.ok) return null;
   const view = result.view as Record<string, unknown>;
   const id = typeof view.run_id === "string" ? view.run_id : "";
