@@ -18,10 +18,29 @@ import assert from "node:assert/strict";
 
 import {
   evaluateOutputs,
+  productionOutputReader,
+  extractNumericPath,
   type OutputSourceReader,
   type OutputSeriesResult,
 } from "../src/scheduler/chores/wiring-liveness-output.ts";
 import type { LivenessEntry, OutputEntry } from "../src/schemas/liveness.ts";
+
+/** A minimal `Response`-like stand-in for the injected fetch. */
+function fakeResponse(opts: {
+  ok: boolean;
+  status?: number;
+  json?: unknown;
+  jsonThrows?: boolean;
+}): Response {
+  return {
+    ok: opts.ok,
+    status: opts.status ?? (opts.ok ? 200 : 500),
+    json: async () => {
+      if (opts.jsonThrows) throw new Error("not JSON");
+      return opts.json;
+    },
+  } as unknown as Response;
+}
 
 function timerEntry(unit: string, maxStaleMinutes: number): LivenessEntry {
   return { unit, type: "timer", maxStaleMinutes };
@@ -98,5 +117,120 @@ describe("wiring-liveness-output: evaluateOutputs verdicts", () => {
     assert.deepEqual(res.belowFloor, []);
     assert.deepEqual(res.unreadable, []);
     assert.deepEqual(res.outputVerdicts, []);
+  });
+});
+
+describe("wiring-liveness-output: extractNumericPath", () => {
+  test("extracts a finite number at a dotted path", () => {
+    assert.equal(extractNumericPath({ funnelBreakdown: { registryPairs: 42 } }, "funnelBreakdown.registryPairs"), 42);
+  });
+  test("missing path => undefined", () => {
+    assert.equal(extractNumericPath({ funnelBreakdown: {} }, "funnelBreakdown.registryPairs"), undefined);
+  });
+  test("non-numeric leaf => undefined", () => {
+    assert.equal(extractNumericPath({ a: { b: "12" } }, "a.b"), undefined);
+  });
+  test("non-finite leaf (NaN) => undefined", () => {
+    assert.equal(extractNumericPath({ a: { b: Number.NaN } }, "a.b"), undefined);
+  });
+  test("descending through a non-object => undefined (never throws)", () => {
+    assert.equal(extractNumericPath({ a: 5 }, "a.b.c"), undefined);
+    assert.equal(extractNumericPath(null, "a"), undefined);
+  });
+});
+
+describe("wiring-liveness-output: productionOutputReader (issue #2578)", () => {
+  const entry = outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3);
+
+  test("happy path: appends the fresh observation and returns the trailing series", async () => {
+    const appends: number[] = [];
+    const reader = productionOutputReader({
+      fetchImpl: async () => fakeResponse({ ok: true, json: { funnelBreakdown: { registryPairs: 7 } } }),
+      appendObservation: async (_s, _p, v) => {
+        appends.push(v);
+      },
+      // Reader returns the accumulated series (most-recent-LAST), here including
+      // the just-appended value.
+      readSeries: async () => [3, 5, 7],
+    });
+    const res = await reader(entry);
+    assert.deepEqual(appends, [7]);
+    assert.equal(res.ok, true);
+    if (res.ok) assert.deepEqual(res.values, [3, 5, 7]);
+  });
+
+  test("non-2xx => {ok:false}, no append", async () => {
+    let appended = 0;
+    const reader = productionOutputReader({
+      fetchImpl: async () => fakeResponse({ ok: false, status: 503 }),
+      appendObservation: async () => {
+        appended += 1;
+      },
+      readSeries: async () => [],
+    });
+    const res = await reader(entry);
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.reason, /HTTP 503/);
+    assert.equal(appended, 0);
+  });
+
+  test("network error => {ok:false}, no append", async () => {
+    let appended = 0;
+    const reader = productionOutputReader({
+      fetchImpl: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      appendObservation: async () => {
+        appended += 1;
+      },
+      readSeries: async () => [],
+    });
+    const res = await reader(entry);
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.reason, /fetch failed/);
+    assert.equal(appended, 0);
+  });
+
+  test("malformed JSON => {ok:false}, no append", async () => {
+    let appended = 0;
+    const reader = productionOutputReader({
+      fetchImpl: async () => fakeResponse({ ok: true, jsonThrows: true }),
+      appendObservation: async () => {
+        appended += 1;
+      },
+      readSeries: async () => [],
+    });
+    const res = await reader(entry);
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.reason, /malformed JSON/);
+    assert.equal(appended, 0);
+  });
+
+  test("missing/non-numeric jsonPath => {ok:false}, no append (Target outage never fabricates a zero)", async () => {
+    let appended = 0;
+    const reader = productionOutputReader({
+      fetchImpl: async () => fakeResponse({ ok: true, json: { funnelBreakdown: {} } }),
+      appendObservation: async () => {
+        appended += 1;
+      },
+      readSeries: async () => [],
+    });
+    const res = await reader(entry);
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.reason, /non-numeric jsonPath/);
+    assert.equal(appended, 0);
+  });
+
+  test("a single accumulated value yields a short series => evaluateOutputs stays OK (young source)", async () => {
+    // End-to-end through the pure evaluator: the reader has only one observation,
+    // so the runs:3 window is not full and the verdict is OK, not below-floor.
+    const reader = productionOutputReader({
+      fetchImpl: async () => fakeResponse({ ok: true, json: { funnelBreakdown: { registryPairs: 0 } } }),
+      appendObservation: async () => {},
+      readSeries: async () => [0],
+    });
+    const res = await evaluateOutputs([entry], reader);
+    assert.deepEqual(res.belowFloor, []);
+    assert.equal(res.outputVerdicts[0].status, "ok");
   });
 });

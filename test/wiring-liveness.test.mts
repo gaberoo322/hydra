@@ -28,6 +28,7 @@ import {
   type OutputSourceReader,
   type OutputSeriesResult,
 } from "../src/scheduler/chores/wiring-liveness.ts";
+import { productionOutputReader } from "../src/scheduler/chores/wiring-liveness-output.ts";
 import type { TimerRecord, ProbeResult } from "../src/host-probe/probe.ts";
 import type { LivenessEntry, OutputEntry } from "../src/schemas/liveness.ts";
 
@@ -435,7 +436,21 @@ describe("wiring-liveness: runWiringLiveness (output integration)", () => {
     assert.equal(res.outputVerdicts[0].status, "ok");
   });
 
-  test("default reader (no injection) marks output UNREADABLE, never below-floor", async () => {
+  test("production reader (issue #2578 default) marks an unreachable-Target output UNREADABLE, never below-floor", async () => {
+    // The production default now hits the Target over HYDRA_BETTING_URL rather
+    // than a no-op. A Target outage must surface as UNREADABLE (informational) —
+    // never a fabricated below-floor — so we inject the production reader with a
+    // failing fetch + a redis accessor that is NEVER touched on a failed read.
+    let appended = 0;
+    const reader = productionOutputReader({
+      fetchImpl: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      appendObservation: async () => {
+        appended += 1;
+      },
+      readSeries: async () => [],
+    });
     const res = await runWiringLiveness({
       loadManifest: async () => ({
         ok: true,
@@ -444,11 +459,14 @@ describe("wiring-liveness: runWiringLiveness (output integration)", () => {
         },
       }),
       readTimers: freshTimers,
+      readOutput: reader,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
     assert.deepEqual(res.belowFloor, []);
     assert.deepEqual(res.unreadable, ["/api/scanner/latest"]);
     assert.equal(res.outputVerdicts[0].status, "unreadable");
+    // Outage appended NOTHING — no fabricated zero observation.
+    assert.equal(appended, 0);
   });
 });
