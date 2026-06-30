@@ -11,6 +11,11 @@
  *   - `projectDispatches` — project the run's turn timeline into the flat
  *     per-dispatch list (cross-turn / cross-slot identity dedup, #1776/#1352)
  *   - `dedupByCanonicalCycleId` — post-enrichment identity-keyed dedup (#1823)
+ *   - `collectProvisionalCycleIds` / `confirmDrillableCycleIds` — the named
+ *     PROVISIONAL→CONFIRMED cycle-id confirmation protocol (#1352/#2547): the
+ *     pure halves of the "what counts as a drillable transcript handle" rule
+ *     that `assembleRetroBundle` used to spread across four inline mutation
+ *     sites in its local scope
  *   - `flagDispatchesForDrill` — pure drill-flag selector
  *   - the `RetroDispatch` type both sides need, plus the supporting pure
  *     helpers (`bucketOf` / `prNumberFromAnchor` / `slotOfAction` / `slotStr` /
@@ -377,7 +382,9 @@ export function projectDispatches(
       // terminal cycle record. The assemble loop confirms it by reading the
       // cycle metrics/hash and DROPS it back to "" if no terminal record
       // exists, so an in-flight slot stays undrillable. See
-      // `confirmDrillableCycleIds` in assembleRetroBundle.
+      // `confirmDrillableCycleIds` (the named confirm-or-drop stage of the
+      // provisional→confirmed protocol, this module) called by
+      // assembleRetroBundle after its enrichment loop.
       const slotTaskId = slotStr(slotObj, "task_id");
       const epoch = slotEpoch(slotObj);
       const epochKey = epoch ? `epoch:${slot}@${epoch}` : null;
@@ -515,4 +522,87 @@ export function dedupByCanonicalCycleId(dispatches: RetroDispatch[]): RetroDispa
     // `d` is dropped (not pushed to survivors).
   }
   return survivors;
+}
+
+// ---------------------------------------------------------------------------
+// PROVISIONAL→CONFIRMED cycle-id confirmation protocol (issue #1352 / #2547)
+//
+// `projectDispatches` recovers a CANDIDATE cycleId from a snapshot-only
+// dispatch's slot `task_id` (the crashed/interrupted-run case) — the same id
+// reap sends on its durable `cycle-record` write. That candidate is PROVISIONAL:
+// it is a real transcript handle ONLY if a terminal cycle record was actually
+// written for it (the genuinely-completed-but-interrupted dispatch); a slot
+// still in-flight when the run died has a task_id but no terminal record.
+//
+// Before #2547 this protocol lived as four inline mutation sites inside
+// `assembleRetroBundle`'s local scope — a `provisionalCycleIds` Set built from
+// the projection, a `confirmedCycleIds` Set accreted during the Redis
+// enrichment loop, a confirm-or-drop pass that blanked unconfirmed candidates,
+// and the downstream `undrillable` derivation. A caller reading the
+// `projectDispatches` → `RetroDispatch[]` seam could not tell that the
+// dispatches had to be enriched-then-confirmed in that exact sequence, nor that
+// the provisional/confirmed sets even existed. These two pure functions move
+// the "what counts as a drillable transcript handle" rule into the Interface:
+// the assembler still owns the Redis terminal-record reads (it accretes the
+// `confirmed` set during enrichment), but the provisional-set derivation and
+// the confirm-or-drop transition are now named, directly-testable stages.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure half 1 of the confirmation protocol (issue #1352 / #2547). Collect the
+ * set of PROVISIONAL candidate cycleIds from the freshly-projected dispatches —
+ * the snapshot-recovered candidates that need a terminal-record confirmation
+ * before they can be trusted as transcript handles.
+ *
+ * A cycleId is provisional iff it is non-empty AND its status is still `null`
+ * at projection time. An action/outcome-joined dispatch always carries a
+ * resolved `status` alongside its cycleId (a clean transcript handle that needs
+ * no confirmation), so only a snapshot-recovered candidate (recovered from the
+ * slot's `task_id`, which `projectDispatches` leaves `status: null`) satisfies
+ * this predicate. MUST be called on the projection BEFORE the enrichment loop
+ * mutates `status`, since the predicate keys on the pre-enrichment `status`.
+ *
+ * Pure + total: no Redis, no clock, no mutation of the input.
+ */
+export function collectProvisionalCycleIds(
+  dispatches: readonly RetroDispatch[],
+): Set<string> {
+  return new Set<string>(
+    dispatches.filter((d) => d.cycleId && d.status === null).map((d) => d.cycleId),
+  );
+}
+
+/**
+ * Pure half 2 of the confirmation protocol (issue #1352 / #2547). Confirm-or-
+ * drop the PROVISIONAL candidate cycleIds: a provisional candidate that the
+ * enrichment loop did NOT confirm (no terminal cycle record materialised — the
+ * slot was still in-flight when the run was interrupted) has no transcript
+ * handle, so its `cycleId` is reset to `""` in place, leaving it
+ * {@link RetroDispatch.undrillable}. A CONFIRMED candidate (a
+ * genuinely-completed dispatch on an interrupted run — the case #1352
+ * unstarves) keeps its cycleId and becomes drillable through the normal flag
+ * machinery. A NON-provisional (action-derived) cycleId is never dropped: its
+ * handle came from a recorded outcome.
+ *
+ * `provisional` is the set from {@link collectProvisionalCycleIds} (captured
+ * before enrichment); `confirmed` is the set the assembler's enrichment loop
+ * accreted (a candidate is confirmed once a terminal cycle record — status,
+ * abandonReason, or regression — is seen for it). Mutates the `cycleId` field
+ * of unconfirmed-provisional rows in place and returns the same array for
+ * chaining; no Redis, no clock.
+ */
+export function confirmDrillableCycleIds(
+  dispatches: RetroDispatch[],
+  provisional: ReadonlySet<string>,
+  confirmed: ReadonlySet<string>,
+): RetroDispatch[] {
+  for (const d of dispatches) {
+    if (!d.cycleId) continue;
+    if (provisional.has(d.cycleId) && !confirmed.has(d.cycleId)) {
+      // Unconfirmed candidate: no terminal cycle record materialised. Drop the
+      // handle so the dispatch is recorded undrillable (the pre-#1352 shape).
+      d.cycleId = "";
+    }
+  }
+  return dispatches;
 }
