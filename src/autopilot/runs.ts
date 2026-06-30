@@ -475,6 +475,52 @@ export async function readAndSweepAutopilotRun(
   return sweepRunIfDead(runId, row);
 }
 
+/**
+ * Compose the dead-pid sweep with lifecycle derivation in ONE reader
+ * (issue #2549). Every high-level reader of an Autopilot Run must call
+ * `sweepRunIfDead(runId, row)` *before* `deriveLifecycleState(...)`, or it
+ * derives a stale `running` lifecycle from a dead-pid row. Before this
+ * function that ordering was duplicated at four call sites and enforced only
+ * by convention — `deriveLifecycleState`'s signature gives a reader no way to
+ * know it is only correct after a sweep. This names the sweep→derive sequence
+ * so a caller cannot forget the sweep half.
+ *
+ * Takes the row the caller already loaded (the readers each apply their own
+ * `!row.started` guard with caller-specific not-found/idle semantics, so the
+ * read stays at the call site) and returns the swept row's derived lifecycle.
+ * `sweepRunIfDead` is idempotent — a terminal row is never re-swept — so this
+ * never double-sweeps. `deriveLifecycleState` stays a pure function: the
+ * composition lives here, in the Redis-touching reader, not inside the
+ * projection (the route layer and projection tests keep pinning the pure
+ * derivation directly).
+ */
+export async function readLifecycleState(
+  runId: string,
+  row: Record<string, string>,
+): Promise<AutopilotLifecycle> {
+  const sweepResult = await sweepRunIfDead(runId, row);
+  return deriveLifecycleState(sweepResult.row);
+}
+
+/**
+ * Composed read-side companion to {@link readLifecycleState} for the readers
+ * that project the SWEPT row through something other than the lifecycle
+ * derivation (`projectRunView` / `projectRunDigest`). Names the
+ * sweep-then-return-row half of the same two-step contract so those readers
+ * stop replicating the inline `sweepRunIfDead(...).row` dance.
+ *
+ * Like {@link readLifecycleState}, it takes the already-loaded row (so each
+ * caller keeps its own `!row.started` guard semantics) and relies on
+ * `sweepRunIfDead`'s idempotence — no row is swept twice.
+ */
+export async function sweepLoadedRow(
+  runId: string,
+  row: Record<string, string>,
+): Promise<Record<string, string>> {
+  const sweepResult = await sweepRunIfDead(runId, row);
+  return sweepResult.row;
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle: cycle-record
 // ---------------------------------------------------------------------------
@@ -993,8 +1039,7 @@ export async function getCurrentLifecycle(): Promise<GetCurrentLifecycleResult> 
         lifecycle: { state: "idle", run_id: null, term_reason: null, ended_epoch: null },
       };
     }
-    const sweepResult = await sweepRunIfDead(runId, row);
-    return { ok: true, lifecycle: deriveLifecycleState(sweepResult.row) };
+    return { ok: true, lifecycle: await readLifecycleState(runId, row) };
   } catch (err: any) {
     return errRedis(err);
   }
@@ -1020,8 +1065,7 @@ export async function getCurrentRun(): Promise<GetCurrentRunResult> {
     if (!row || !row.started) {
       return { ok: false, code: "not-found", detail: "no autopilot runs recorded yet" };
     }
-    const sweepResult = await sweepRunIfDead(runId, row);
-    const view = projectRunView(sweepResult.row);
+    const view = projectRunView(await sweepLoadedRow(runId, row));
     const turns = await fetchTurnsWithJoins(runId, 50);
     (view as any).turns = turns;
     return { ok: true, view };
@@ -1041,8 +1085,7 @@ export async function getRun(runId: string): Promise<GetRunResult> {
     if (!row || !row.started) {
       return { ok: false, code: "not-found", detail: `unknown run_id: ${runId}` };
     }
-    const sweepResult = await sweepRunIfDead(runId, row);
-    const view = projectRunView(sweepResult.row);
+    const view = projectRunView(await sweepLoadedRow(runId, row));
     const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH);
     return { ok: true, run: view, turns };
   } catch (err: any) {
@@ -1098,8 +1141,7 @@ export async function listRuns(limit: number): Promise<ListRunsResult> {
     for (const runId of runIds) {
       const row = await getAutopilotRun(runId);
       if (!row || !row.started) continue;
-      const sweepResult = await sweepRunIfDead(runId, row);
-      const digest = await projectRunDigest(runId, sweepResult.row);
+      const digest = await projectRunDigest(runId, await sweepLoadedRow(runId, row));
       digests.push(digest);
     }
     return { ok: true, runs: digests };
