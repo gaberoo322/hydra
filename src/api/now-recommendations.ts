@@ -22,7 +22,7 @@ import { Router } from "express";
 import { z } from "zod";
 
 import * as defaultRecsRedis from "../redis/recommendations.ts";
-import { RUN_TTL_SECONDS } from "../autopilot/runs.ts";
+import { RUN_TTL_SECONDS } from "../autopilot/sweep-reader.ts";
 
 // ---------------------------------------------------------------------------
 // Recommendations sub-router schemas (issue #674)
