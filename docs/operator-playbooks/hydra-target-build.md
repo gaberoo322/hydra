@@ -593,7 +593,7 @@ flow below. The auto-merge/PR path (build opens a PR, lets CI + auto-merge land
 it) previously skipped this snapshot because the snapshot was mentally bundled
 with the inline `git merge` block that only the direct-to-main path runs. With
 no `pmh-baseline.json` written, Step 8.6 fell back to absolute thresholds and —
-against the ambiently-degraded betting Target — false-alarmed `hydra-incident`
+against the ambiently-degraded betting Target — false-alarmed `hydra-target-incident`
 on EVERY auto-merge, even for type-only refactors and client-nav components that
 structurally cannot touch the alarming services (observed 6× in autopilot run
 `4d10ad1b`, friction cue `pmh-absolute-threshold-false-alarm-on-pr-automerge-path`).
@@ -745,12 +745,19 @@ of holding a merge back on an outcome signal, we let the merge land and then
 sample fast, merge-attributable operational signals the Target already exposes
 (`/api/health/full` — overall status + per-service execution-success and
 provider/API error proxies). On a regression past a configurable noise floor it
-raises a `hydra-incident` alarm.
+raises a `hydra-target-incident` alarm.
 
 ALARM-ONLY: this step NEVER reverts and NEVER blocks a merge. It observes
-post-merge and routes to `hydra-incident`, which decides whether to
+post-merge and routes to `hydra-target-incident`, which decides whether to
 investigate/fix/revert. The auto-revert path is Step 7.5 (deploy failure) /
 Step 8 (test regression) only — do NOT add a revert here.
+
+REALM ROUTING (ADR-0025, issue #2553): the watcher dispatches the Target-scoped
+`hydra-target-incident`, NOT the Orchestrator's `hydra-incident`. Each
+Operate-layer incident skill is single-realm — `hydra-target-incident` operates
+only on `~/hydra-betting`, `hydra-incident` only on `~/hydra`. The dispatch
+target string lives in `scripts/target/post-merge-health.ts` (the `--dispatch`
+spawn); it and this playbook move in lockstep.
 
 Run the **mirrored** script from the worktree (issue #1451 — synced into
 `$TARGET_WT/.hydra-gate/` by Step 0.6); do NOT invoke it from `~/hydra`. This
@@ -758,7 +765,7 @@ step runs BEFORE the Step 8.5 worktree cleanup, so the mirror is still present.
 
 ```bash
 cd "$TARGET_WT"
-# Pass --dispatch so a real regression actually fires hydra-incident.
+# Pass --dispatch so a real regression actually fires hydra-target-incident.
 # Without --dispatch it is a dry-run (prints the alarm context, spawns nothing),
 # which is what you want when smoke-testing the watcher itself.
 # --baseline points at the pre-merge snapshot captured in Step 7 (issue #1699):
@@ -804,7 +811,7 @@ ingestion/scanner/provider/odds code), treat it as a baseline-miss false
 positive — do NOT pass `--dispatch` for that run (omit it to keep the watcher in
 its print-only dry-run), and log the friction cue
 `pmh-absolute-threshold-false-alarm-on-pr-automerge-path` instead of spawning
-`hydra-incident`. Any alarming service OUTSIDE the ambient set, OR any changed
+`hydra-target-incident`. Any alarming service OUTSIDE the ambient set, OR any changed
 path that could reach an alarming service, still dispatches normally — this
 guard only suppresses the provably-spurious ambient-only case, never a true
 regression. The clean fix remains capturing the Step-7 baseline on both merge

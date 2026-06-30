@@ -16,13 +16,13 @@
  * This is the lowest-effort, highest-attribution slice: it samples signals that
  * already exist on the Target's web service (`/api/health/full`) right after a
  * Target merge and, if operational health has regressed past a configurable
- * noise floor, raises a **hydra-incident** alarm.
+ * noise floor, raises a **hydra-target-incident** alarm.
  *
  * ALARM-ONLY — NEVER AUTO-REVERT
  * ------------------------------
  * This watcher deliberately does NOT revert, gate, or block any merge. It runs
  * *after* the merge has already landed and only *observes*. On a detected
- * regression it dispatches the `hydra-incident` skill (which decides whether to
+ * regression it dispatches the `hydra-target-incident` skill (which decides whether to
  * investigate/fix/revert). The post-merge watch is an alarm bell, not a merge
  * gate — see epic #1052's rationale ("the post-merge watch keys on fast
  * operational-health signals in alarm-only mode").
@@ -82,7 +82,7 @@
  * mode) never runs on this path, and the absolute floors false-positive on
  * every merge — the 2026-06-13 recurrences (#1817). The orchestrator-only fix
  * is to make the absolute-threshold fallback NON-BLOCKING: an absolute breach is
- * reported `inconclusive` (logged for diagnostics, hydra-incident NEVER
+ * reported `inconclusive` (logged for diagnostics, hydra-target-incident NEVER
  * dispatched) instead of alarming. The real fix that restores a signal is
  * supplying a pre-merge --baseline (delta mode), which the paved
  * hydra-target-build road now does on both merge paths (#1839). An operator who
@@ -113,7 +113,7 @@
  *   - HYDRA_PMH_MAX_EXECUTION_ERRORS  execution-class not-ok count tolerated
  *   - HYDRA_PMH_MAX_PROVIDER_ERRORS   provider-class not-ok count tolerated
  *   - HYDRA_PMH_TIMEOUT_MS            per-request fetch timeout
- *   - HYDRA_PMH_DISPATCH              "1" to actually dispatch hydra-incident,
+ *   - HYDRA_PMH_DISPATCH              "1" to actually dispatch hydra-target-incident,
  *                                     anything else => dry-run (print only)
  *   - HYDRA_PMH_FRESHNESS_SERVICES    csv keyword allowlist of freshness-class
  *                                     service names whose ok->soft delta is
@@ -229,7 +229,7 @@ export interface PostMergeHealthConfig {
    * alarm. Env-overridable via HYDRA_PMH_ALARM_WITHOUT_BASELINE=1.
    */
   alarmWithoutBaseline: boolean;
-  /** When false, an alarm is logged + printed but hydra-incident is not spawned. */
+  /** When false, an alarm is logged + printed but hydra-target-incident is not spawned. */
   dispatch: boolean;
 }
 
@@ -308,7 +308,7 @@ function parseIntEnv(raw: string | undefined, fallback: number): number {
 /**
  * Build the watcher config from the environment, layering env overrides over
  * DEFAULTS. `dispatch` defaults to false (dry-run); set HYDRA_PMH_DISPATCH=1 (or
- * pass --dispatch) to actually spawn hydra-incident.
+ * pass --dispatch) to actually spawn hydra-target-incident.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PostMergeHealthConfig {
   const apiUrl = (env.HYDRA_TARGET_API_URL && env.HYDRA_TARGET_API_URL.trim()) || DEFAULTS.apiUrl;
@@ -532,7 +532,7 @@ export function evaluateDelta(
 }
 
 /**
- * Compose the `$context` argument handed to the hydra-incident skill. Pure +
+ * Compose the `$context` argument handed to the hydra-target-incident skill. Pure +
  * deterministic so it can be asserted in tests.
  */
 export function buildIncidentContext(
@@ -667,10 +667,14 @@ export function readBaseline(
 }
 
 /**
- * Dispatch the hydra-incident skill with the regression context. Spawns
- * `claude -p "/hydra-incident <context>"` detached (subscription-billed, may run
- * minutes). Never throws — a spawn failure is logged and reported as not
+ * Dispatch the hydra-target-incident skill with the regression context. Spawns
+ * `claude -p "/hydra-target-incident <context>"` detached (subscription-billed,
+ * may run minutes). Never throws — a spawn failure is logged and reported as not
  * dispatched, because failing to alarm must not look like a build failure.
+ *
+ * Realm note (ADR-0025, issue #2553): post-merge Target regressions route to
+ * the Target-scoped hydra-target-incident, not the Orchestrator's hydra-incident
+ * — each Operate-layer incident skill is single-realm.
  *
  * `spawnImpl` is injectable so tests can assert the argv without spawning.
  */
@@ -681,16 +685,18 @@ export function dispatchIncident(
   try {
     const child = spawnImpl(
       "claude",
-      ["--dangerously-skip-permissions", "-p", `/hydra-incident ${context}`],
+      ["--dangerously-skip-permissions", "-p", `/hydra-target-incident ${context}`],
       { detached: true, stdio: "ignore" },
     );
     child.unref?.();
     child.on?.("error", (err: unknown) => {
-      console.error(`[post-merge-health] hydra-incident dispatch failed to start: ${String(err)}`);
+      console.error(
+        `[post-merge-health] hydra-target-incident dispatch failed to start: ${String(err)}`,
+      );
     });
     return { dispatched: true };
   } catch (err) {
-    console.error(`[post-merge-health] hydra-incident dispatch threw: ${String(err)}`);
+    console.error(`[post-merge-health] hydra-target-incident dispatch threw: ${String(err)}`);
     return { dispatched: false, reason: String(err) };
   }
 }
@@ -714,7 +720,7 @@ export function dispatchIncident(
  * entirely in the pure evaluator; runWatch samples the Target exactly once.
  *
  * Only on a regression and only when `config.dispatch` is true does it fire
- * hydra-incident. Returns a WatchResult; never throws.
+ * hydra-target-incident. Returns a WatchResult; never throws.
  */
 export async function runWatch(
   config: PostMergeHealthConfig,
@@ -797,7 +803,7 @@ export async function runWatch(
       verdict.reasons.join("; ");
     console.error(
       `[post-merge-health] INCONCLUSIVE (mode=absolute, httpStatus=${fetched.httpStatus}): ${reason}\n` +
-        "NOT dispatching hydra-incident — post-merge health is meaningless without a baseline. " +
+        "NOT dispatching hydra-target-incident — post-merge health is meaningless without a baseline. " +
         "Capture one pre-merge via --snapshot-out so the post-merge run can diff in delta mode.",
     );
     return { kind: "inconclusive", verdict, reason };
@@ -808,7 +814,7 @@ export async function runWatch(
 
   if (!config.dispatch) {
     console.error(
-      "[post-merge-health] dry-run (HYDRA_PMH_DISPATCH != 1): NOT dispatching hydra-incident. " +
+      "[post-merge-health] dry-run (HYDRA_PMH_DISPATCH != 1): NOT dispatching hydra-target-incident. " +
         "Re-run with --dispatch to alarm.",
     );
     return { kind: "alarm", verdict, dispatched: false, mode };
@@ -816,7 +822,7 @@ export async function runWatch(
 
   const { dispatched } = dispatchIncident(context, deps.spawnImpl ?? spawn);
   if (dispatched) {
-    console.error("[post-merge-health] dispatched hydra-incident (alarm-only; no revert performed).");
+    console.error("[post-merge-health] dispatched hydra-target-incident (alarm-only; no revert performed).");
   }
   return { kind: "alarm", verdict, dispatched, mode };
 }
