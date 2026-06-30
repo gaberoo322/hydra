@@ -97,7 +97,9 @@
  *     scan cadence. `?force=1` busts the snapshot scan but NOT this cache.
  *   - HYDRA_OAUTH_USAGE_MAX_STALE_MS — how long PAST the TTL a last-good value
  *     may still be served (as STALE oauth) on a failed read before the headline
- *     falls through to the transcript estimate (default = the effective TTL). A
+ *     falls through to the transcript estimate (default 1_800_000 = 30min,
+ *     issue #2574 — DECOUPLED from the TTL, which it formerly defaulted to; the
+ *     TTL is the GET-cadence lever, this is the trust-window lever). A
  *     transient 429 keeps `usageSource:"oauth"` on the last-good value (with
  *     `oauthStale=true` + `oauthAgeMs`) rather than flipping to the estimate;
  *     only when no recent-enough OAuth value exists at all does it fall to the

@@ -32,6 +32,27 @@
 export const DEFAULT_OAUTH_USAGE_TTL_MS = 300_000;
 
 /**
+ * Default OAuth-meter max-stale grace (issue #2574): how long PAST the TTL a
+ * last-good OAuth value may still be SERVED on a failed read before the headline
+ * falls through to the transcript estimate. DECOUPLED from the TTL — the TTL
+ * governs GET *cadence* (how often a fresh read is attempted), this governs how
+ * long an already-fetched real value is TRUSTED through a meter outage. They are
+ * different levers and must not be coupled: the 2026-06-30 incident
+ * (`OAuth last-good value is too stale (age 601371ms …)`) was a sustained 429
+ * burst that ran past the old `TTL+maxStale = 5min+5min = 10min` servable cliff,
+ * flipping ceiling enforcement onto the fail-OPEN transcript estimate (#1124).
+ * A stale-but-REAL utilization is strictly better than the estimate for the
+ * spend ceiling (utilization moves slowly relative to the 5h/7d windows), so the
+ * grace defaults to 30 minutes — riding through a multi-minute 429 burst
+ * (servable window TTL+maxStale = ~35min) while still eventually falling to the
+ * estimate during a genuine multi-hour outage. Overridable via
+ * `HYDRA_OAUTH_USAGE_MAX_STALE_MS`. Raising the TTL would NOT fix the incident:
+ * it only delays the next GET attempt, it does not extend how long a last-good
+ * is trusted.
+ */
+export const DEFAULT_OAUTH_USAGE_MAX_STALE_MS = 1_800_000;
+
+/**
  * Default per-token-type cache-read weight (issue #873): 1.0 = identity =
  * the pre-#873 full-weight behaviour. Keeping the default at identity makes an
  * unset `HYDRA_USAGE_CACHE_READ_WEIGHT` a pure no-op so the change is purely
@@ -103,26 +124,32 @@ export function getOAuthUsageTtlMs(): number {
 /**
  * How long PAST the TTL a stale last-good OAuth value may still be served on a
  * failed read before the headline falls through to the transcript estimate
- * (issue #1090), from `HYDRA_OAUTH_USAGE_MAX_STALE_MS`, defaulting to the
- * effective TTL. So the lifecycle of one successful read is:
+ * (issue #1090), from `HYDRA_OAUTH_USAGE_MAX_STALE_MS`, defaulting to
+ * {@link DEFAULT_OAUTH_USAGE_MAX_STALE_MS} (30min, issue #2574). So the
+ * lifecycle of one successful read is:
  *   - age < TTL                  → served fresh, no GET attempted (oauth)
  *   - TTL ≤ age < TTL+maxStale    → GET attempted; on failure served STALE (oauth+stale)
  *   - age ≥ TTL + maxStale        → too stale; falls through to the estimate
  * This realises AC2 ("a 429 keeps usageSource:oauth using last-good while a
- * recent value exists") AND AC3 ("after the OAuth TTL with no successful read,
- * falls to estimate"). A non-empty-but-invalid value is logged and falls back
- * to the effective TTL. Pure + env-only.
+ * recent value exists") AND AC3 ("after the OAuth TTL+maxStale with no
+ * successful read, falls to estimate"). The default is DECOUPLED from the TTL
+ * (issue #2574): it previously fell back to `getOAuthUsageTtlMs()`, which made
+ * the too-stale cliff `TTL+TTL = 10min` and flipped ceiling enforcement onto the
+ * fail-open estimate after a >10min 429 burst (the 2026-06-30 incident). The TTL
+ * is the GET-cadence lever; this is the trust-window lever — they are tuned
+ * independently. A non-empty-but-invalid value is logged (fail-loud) and falls
+ * back to the default. Pure + env-only.
  */
 export function getOAuthUsageMaxStaleMs(): number {
   const raw = process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS;
-  if (raw === undefined || raw === "") return getOAuthUsageTtlMs();
+  if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_MAX_STALE_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     console.error(
       `[usage-tracker] HYDRA_OAUTH_USAGE_MAX_STALE_MS is set but not a positive ` +
-        `finite number (${JSON.stringify(raw)}); falling back to the OAuth TTL`,
+        `finite number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_MAX_STALE_MS}`,
     );
-    return getOAuthUsageTtlMs();
+    return DEFAULT_OAUTH_USAGE_MAX_STALE_MS;
   }
   return parsed;
 }
