@@ -78,9 +78,31 @@ Output: ≥5 opportunities (`category: "infrastructure"`).
 ## Phase 3: Synthesis (inline)
 
 ### 3a. Deduplicate
-- Drop items matching open issues (>50% title overlap)
-- Drop items matching recently closed issues
-- Merge duplicates across researchers
+
+Use the **shared dedup baseline** so research and `hydra-discover` reach the
+SAME duplicate verdict against the SAME inputs (issue #2554). The baseline is
+*open issues + issues closed within the last 14 days* — exactly the
+`gh issue list` calls in Phase 1. Build the title list once, then call the
+deterministic helper per candidate instead of eyeballing ">50% overlap":
+
+```bash
+# CANDIDATE = one finding title; BASELINE_TITLES = newline-separated open +
+# recently-closed (14d) issue titles gathered in Phase 1.
+node --experimental-strip-types scripts/ci/issue-dedup.ts \
+  "$CANDIDATE" "${BASELINE_TITLES[@]}"
+# → {"duplicate":true,"matchedTitle":"...","overlap":0.71}  (drop)
+# → {"duplicate":false,"overlap":0.2}                       (keep)
+```
+
+The helper (`isDuplicateIssue` / `partitionCandidates` in
+`scripts/ci/issue-dedup.ts`) keys on normalised word-set Jaccard overlap >50%
+— the historical prose rule, now deterministic so two skills can't disagree at
+the margin and double-file. After classifying each finding via Step 4a, append
+the **kept** titles to the in-memory baseline before classifying the next so
+two findings within THIS run also dedup against each other.
+
+- Drop items the helper marks `duplicate` (matches open OR recently-closed issues)
+- Merge duplicates across researchers (run them through the same helper pairwise)
 
 ### 3b. Score and rank by:
 1. Merge-rate impact (heaviest weight)
@@ -252,6 +274,30 @@ These slices were originally part of one finding but were filed flat because `hy
 ### Operator actions needed
 - <strategic decisions surfaced>
 ```
+
+## Firing contract vs hydra-discover (issue #2554)
+
+`hydra-research` and `hydra-discover` both "fill the board," so their firing
+contracts are deliberately disjoint to keep them from colliding:
+
+- **`hydra-research` is opportunistic / empty-board.** It fires when the
+  Orchestrator board runs low on `ready-for-agent` issues (Phase 1 computes
+  `gap = max(0, 5 - open_ready_for_agent_count)` and aims to produce that
+  many) — i.e. when `/hydra-dev` is about to idle. It is **expensive** (3
+  parallel research agents) and self-throttles to ≥60 min between runs (below).
+- **`hydra-discover` is a heartbeat.** It runs on a `/loop` cadence doing
+  cheap Tier 1+2 runtime/behavioral diagnostics every iteration (Tier 3 every
+  3rd), capped at 0–2 issues per iteration.
+
+The overlap is the **board-filling moment**: if research fires for an empty
+board in the same window a discover heartbeat surfaces a finding, both could
+file the same improvement. The **shared dedup baseline** (Step 3a;
+`scripts/ci/issue-dedup.ts`) is the guard that closes that double-file path —
+both skills run every candidate through the SAME deterministic
+`isDuplicateIssue` check against the SAME open + recently-closed baseline, so
+whichever fires second skips what the first already filed. Research owns the
+deliberate gap-fill; discover owns continuous patrol; the dedup helper is the
+seam that makes them safe to run concurrently.
 
 ## Rate limiting
 

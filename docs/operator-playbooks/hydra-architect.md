@@ -151,6 +151,28 @@ overall_score: <weighted avg>
 
 Include: executive summary, scorecard, key findings, 3-tier recommendations, comparison to state of the art, next-review triggers.
 
+## How the scorecard feeds downstream (issue #2554)
+
+`hydra-architect` files **no GitHub issues** — by design. Its product is the
+ranked scorecard + 3-tier recommendations written to
+`config/direction/architecture-review.md`. That file is the seam into the
+board-filling skills:
+
+- **`hydra-research` consumes it** in Phase 1 (it loads
+  `architecture-review.md` as context) and again in Phase 3b scoring, where the
+  architect's lowest-scoring dimensions and "Quick wins / Medium efforts"
+  recommendations weight which research findings to file. The architect names
+  *where the architecture is weak*; research turns the weak spots into
+  ready-for-agent issues.
+- **`hydra-discover` compares against its baselines** (Tier 3 §3b reads
+  `architecture-review.md` for the coupling/size baselines).
+
+So the scorecard is not orphaned: it is the strategic prior that biases the
+two issue-producing skills, kept as a standalone report (not auto-filed issues)
+so the operator reviews direction before research mass-produces work from it.
+Keep recommendations specific (file paths, expected impact) so research can map
+them onto findings without re-deriving the analysis.
+
 ## Output to operator (concise summary)
 
 ```

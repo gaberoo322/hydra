@@ -147,13 +147,29 @@ Include sources in issue body.
 ## Dedup and issue creation
 
 ### Dedup
+
+Gather the **shared dedup baseline** — open issues + issues closed in the last
+7 days — then run each candidate through the SAME deterministic helper
+`hydra-research` uses, so the two board-filling skills can't disagree at the
+margin and double-file the same finding (issue #2554):
+
 ```bash
 gh issue list --state open --json number,title,labels,createdAt --jq '.[] | "\(.number): \(.title)"'
 gh issue list --state closed --json number,title,closedAt \
   --jq '[.[] | select(.closedAt > (now - 7*24*3600 | todate))] | .[] | "\(.number): \(.title)"'
+
+# Per candidate: BASELINE_TITLES = the open + recently-closed titles above.
+node --experimental-strip-types scripts/ci/issue-dedup.ts \
+  "$CANDIDATE" "${BASELINE_TITLES[@]}"
+# → {"duplicate":true,...}  → SKIP or COMMENT on existing
+# → {"duplicate":false,...} → file
 ```
 
-Word overlap >50% → SKIP or COMMENT on existing.
+`isDuplicateIssue` (`scripts/ci/issue-dedup.ts`) keys on normalised word-set
+Jaccard overlap >50% — the historical "word overlap >50% → SKIP" rule, now a
+shared, testable function instead of an eyeball. `duplicate: true` → SKIP or
+COMMENT on the matched existing issue. See **Firing contract** in
+`hydra-research.md` for why both skills share this baseline.
 
 ### Issue formats
 
