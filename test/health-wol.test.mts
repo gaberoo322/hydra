@@ -14,7 +14,7 @@
  *  /health/deep path on a re-probe (#2228 QA fix), resetting the gate when the
  *  backend reads healthy.
  */
-import { test, describe } from "node:test";
+import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -25,6 +25,8 @@ import {
   readWolConfig,
   attemptEmbedBackendWake,
   attemptVlmHostWake,
+  getWolGates,
+  resetWolGates,
   WOL_DEFAULT_MAC,
   WOL_DEFAULT_BROADCAST,
   WOL_PORTS,
@@ -430,5 +432,84 @@ describe("maybeWakeVlmHost — fan-out integration (issue #2335)", () => {
       wake: async () => ({ attempted: true, sent: { ok: false, reason: "send-error", error: "ENETUNREACH" } }),
     });
     assert.equal(out.status, "down");
+  });
+});
+
+// Issue #2570: the WoL Adapter that owns the process-lifetime WakeGate singleton
+// pair. Before #2570 the embed + vlm gates were module-level `new WakeGate(...)`
+// constants in src/health/fan-out.ts, which left the fan-out holding mutable
+// module-global state and bled the retry budget across test cases (no module-reset
+// harness could clear them). getWolGates() relocates that lifecycle here:
+// lazily-constructed, memoized, distinct-but-paired gates; resetWolGates() clears
+// the memo so a test gets a fresh pair. Each case resets in a beforeEach so the
+// singleton state never leaks across cases (the very isolation the adapter exists
+// to provide).
+describe("WoL Adapter — getWolGates()/resetWolGates() singleton lifecycle (issue #2570)", () => {
+  // resetWolGates is a per-case isolation reset (NOT a once-per-suite before) so
+  // a gate budget consumed by one case never bleeds into the next.
+  beforeEach(() => resetWolGates());
+  afterEach(() => resetWolGates());
+
+  test("returns the SAME memoized pair across calls (cross-request persistence)", () => {
+    const a = getWolGates();
+    const b = getWolGates();
+    assert.strictEqual(a.embed, b.embed, "embed gate is the same instance across calls");
+    assert.strictEqual(a.vlm, b.vlm, "vlm gate is the same instance across calls");
+  });
+
+  test("embed and vlm are DISTINCT instances (independent budgets)", () => {
+    const gates = getWolGates();
+    assert.notStrictEqual(gates.embed, gates.vlm, "the two host budgets must be separate gates");
+    // Exhausting one budget must not touch the other.
+    gates.embed.recordSend(0);
+    assert.equal(gates.embed.attemptCount, 1);
+    assert.equal(gates.vlm.attemptCount, 0, "consuming the embed budget left the vlm budget untouched");
+  });
+
+  test("the pair starts with a zero attempt budget", () => {
+    const gates = getWolGates();
+    assert.equal(gates.embed.attemptCount, 0);
+    assert.equal(gates.vlm.attemptCount, 0);
+    assert.equal(gates.embed.exhausted, false);
+    assert.equal(gates.vlm.exhausted, false);
+  });
+
+  test("resetWolGates() rebuilds a fresh, zero-budget pair (test-isolation defect fixed)", () => {
+    const first = getWolGates();
+    first.embed.recordSend(0);
+    first.vlm.recordSend(0);
+    assert.equal(first.embed.attemptCount, 1);
+    assert.equal(first.vlm.attemptCount, 1);
+
+    resetWolGates();
+    const second = getWolGates();
+    // A brand-new pair: different instances, zero budget — the retry budget did
+    // NOT bleed across the reset (the module-singleton isolation defect #2570 cites).
+    assert.notStrictEqual(second.embed, first.embed);
+    assert.notStrictEqual(second.vlm, first.vlm);
+    assert.equal(second.embed.attemptCount, 0);
+    assert.equal(second.vlm.attemptCount, 0);
+  });
+
+  test("the gates are seeded from readWolConfig() cooldown + max-attempts", () => {
+    const PRIOR = {
+      cd: process.env.HYDRA_WOL_COOLDOWN_MS,
+      max: process.env.HYDRA_WOL_MAX_ATTEMPTS,
+    };
+    try {
+      process.env.HYDRA_WOL_MAX_ATTEMPTS = "1";
+      process.env.HYDRA_WOL_COOLDOWN_MS = "0";
+      resetWolGates(); // force a rebuild that reads the env we just set
+      const gates = getWolGates();
+      // maxAttempts:1 → a single recordSend exhausts the budget; cooldown:0 → the
+      // attempt cap (not the cooldown) is the gating constraint.
+      assert.equal(gates.embed.shouldSend(0), true);
+      gates.embed.recordSend(0);
+      assert.equal(gates.embed.exhausted, true, "maxAttempts:1 from env exhausts after one send");
+    } finally {
+      if (PRIOR.cd === undefined) delete process.env.HYDRA_WOL_COOLDOWN_MS; else process.env.HYDRA_WOL_COOLDOWN_MS = PRIOR.cd;
+      if (PRIOR.max === undefined) delete process.env.HYDRA_WOL_MAX_ATTEMPTS; else process.env.HYDRA_WOL_MAX_ATTEMPTS = PRIOR.max;
+      resetWolGates();
+    }
   });
 });

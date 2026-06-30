@@ -342,3 +342,85 @@ export async function attemptVlmHostWake(
 ): Promise<WakeOutcome> {
   return attemptHostWake(config, gate, now, "vlm-host", { send });
 }
+
+// ---- WoL Adapter — owns the cross-request WakeGate singleton lifecycle (#2570) --
+//
+// WHY THIS ADAPTER EXISTS (the #2570 deepening)
+//   The embed-backend WoL recovery (#2228) and the VLM-host WoL recovery (#2335)
+//   each need a single WakeGate whose cooldown + max-attempt state persists
+//   ACROSS heartbeats/health-deep requests — the fan-out runs once per request,
+//   so a per-call gate would let a down backend be wake-spammed once per request.
+//   Those two singletons used to be module-level `new WakeGate(...)` instances in
+//   src/health/fan-out.ts, with their WoL-config resolution (`readWolConfig()`)
+//   inlined at fan-out module load. That left fan-out.ts holding mutable
+//   module-global state — the only health module that did — so `collectProbeInputs`
+//   was NOT a pure function of its injected deps, and the gates' retry budget bled
+//   across test cases (the test-isolation defect the issue cites: a test had to
+//   reset the module-level singletons, which this repo has no module-reset harness
+//   for).
+//
+//   This adapter relocates that singleton lifecycle out of the fan-out and into
+//   the WoL module that already owns WakeGate. `getWolGates()` lazily constructs
+//   the pair from `readWolConfig()` (cooldown + max-attempts resolved once at
+//   first access from the environment — same conservative, auto-wake-OFF
+//   posture), memoizes them, and hands the SAME two instances back on every call
+//   — so a no-gate `collectProbeInputs` caller keeps ONE embed + ONE vlm budget
+//   across requests (cross-request persistence invariant). The two gates are
+//   DISTINCT objects so the embed and VLM wake budgets stay independent (a down
+//   embed backend never exhausts the VLM budget or vice versa) even though both
+//   wake the same physical box.
+//
+//   `resetWolGates()` clears the memo so a test gets a fresh, resettable gate
+//   pair without a module-reset harness — closing the test-isolation defect. The
+//   pure / never-throw IO split above is UNTOUCHED: this adapter only encapsulates
+//   the singleton lifecycle; it moves no pure logic and sends no packet.
+
+/** The cross-request WoL gate pair: one budget per physical down-signal. */
+export interface WolGates {
+  /** Embed-backend wake budget (#2228) — consumed by `probeEmbedBackend` failures. */
+  embed: WakeGate;
+  /** VLM-host wake budget (#2335) — consumed by `probeOllamaVlm` down reads. */
+  vlm: WakeGate;
+}
+
+let wolGates: WolGates | null = null;
+
+/**
+ * The process-lifetime WoL gate pair (issue #2570).
+ *
+ * Lazily constructs (on first call) ONE embed gate and ONE vlm gate from
+ * `readWolConfig()` — the same cooldown + max-attempt values the fan-out used to
+ * resolve inline at module load — then memoizes and returns the SAME pair on
+ * every subsequent call. This is the cross-request persistence the WoL recovery
+ * needs: a no-gate `collectProbeInputs` caller shares ONE budget per host across
+ * heartbeats, so a down backend can't be wake-spammed once per request.
+ *
+ * The two gates are distinct instances so the embed and VLM wake budgets remain
+ * independent even though both wake the same gaming-PC box. Pure with respect to
+ * I/O — it touches no socket and no clock; it only constructs the policy objects.
+ */
+export function getWolGates(): WolGates {
+  if (wolGates === null) {
+    const config = readWolConfig();
+    wolGates = {
+      embed: new WakeGate(config.cooldownMs, config.maxAttempts),
+      vlm: new WakeGate(config.cooldownMs, config.maxAttempts),
+    };
+  }
+  return wolGates;
+}
+
+/**
+ * Drop the memoized WoL gate pair so the NEXT {@link getWolGates} call rebuilds
+ * a fresh, zero-attempt pair from the current environment (issue #2570).
+ *
+ * Exists for test isolation: a test that exercises gate exhaustion or
+ * cross-request leakage through the default (no-gate) `collectProbeInputs` path
+ * can call this in a `beforeEach`/`afterEach` to guarantee the retry budget does
+ * not bleed across cases — the defect the issue cites, previously impossible to
+ * clear because the gates were module-level constants in fan-out.ts and this repo
+ * has no module-reset harness. Production never calls this.
+ */
+export function resetWolGates(): void {
+  wolGates = null;
+}
