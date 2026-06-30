@@ -690,7 +690,8 @@ STARTED_EPOCH="$(date -u +%s)"
 #      mirrors the new playbook.
 #
 # Why v2 today: the post-#426 schema collapsed the legacy 10 flat slots
-# into 6 pipeline slots + 5 signal_last_fired. A v1 state.json (no
+# into 6 pipeline slots + signal_last_fired (5 always-on + 4 long-cooldown
+# classes seeded from prior state per #2575). A v1 state.json (no
 # schema_version field, ten-slot shape) is detected at Phase 0 as a
 # legacy run; bootstrap re-runs and writes v2 on the next tick.
 SCHEMA_VERSION=2
@@ -727,6 +728,58 @@ if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
   case "${RESEARCH_FORCE_SEED}" in
     "{"*) ;;
     *) RESEARCH_FORCE_SEED="{}" ;;
+  esac
+fi
+
+# Issue #2575 — carry the cooled-class last-fired timestamps across runs.
+#
+# Same hazard as RESEARCH_FORCE_SEED above: the state-file heredoc clobbers
+# `signal_last_fired` on EVERY bootstrap, and the pace-gate relaunches the
+# autopilot roughly every 15 minutes. The original heredoc seeded only the 5
+# always-on signal classes (health / sweep_* / discover_*) at 0 and OMITTED the
+# long-cooldown classes `retro_orch` / `architecture_orch` / `cleanup_orch` /
+# `scout_orch`. decide.py's `signal_is_cooled()` defaults a missing key to
+# epoch 0 — permanently "cooled" — so the 24h retro cooldown never held across a
+# relaunch and retro fired 5–8×/day instead of the designed 1×/day (~8–10× token
+# overrun, all zero-emit clean runs).
+#
+# Seed = the prior state file's timestamp for each class (carried forward so the
+# cooldown survives the relaunch), defaulting to 0 only when there is no prior
+# value (first-ever run). Missing prior file, missing jq, unparseable JSON, or a
+# non-object shape all degrade to all-0 — fail-open (at worst one extra fire),
+# and a seed failure must never block bootstrap. Read happens BEFORE the heredoc
+# clobbers the file, mirroring RESEARCH_FORCE_SEED.
+COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0}'
+if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
+  COOLDOWN_SIGNAL_SEED="$(jq -c '
+    (.signal_last_fired // {}) as $s
+    | {
+        retro_orch:        (($s.retro_orch        // 0) | if type == "number" then . else 0 end),
+        architecture_orch: (($s.architecture_orch // 0) | if type == "number" then . else 0 end),
+        cleanup_orch:      (($s.cleanup_orch      // 0) | if type == "number" then . else 0 end),
+        scout_orch:        (($s.scout_orch        // 0) | if type == "number" then . else 0 end)
+      }
+  ' "${STATE_PATH}" 2>/dev/null || echo '{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0}')"
+  # Belt-and-braces: anything that does not look like a JSON object would
+  # corrupt the heredoc below into invalid JSON — degrade to all-0.
+  case "${COOLDOWN_SIGNAL_SEED}" in
+    "{"*) ;;
+    *) COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0}' ;;
+  esac
+fi
+
+# Compose the full 9-key signal_last_fired object: the 5 always-on classes seeded
+# at 0 (re-armed each run by design) plus the 4 long-cooldown classes carried
+# forward from the prior state (COOLDOWN_SIGNAL_SEED). Prefer jq for the merge;
+# fall back to a manual splice if jq is unavailable so bootstrap never blocks.
+SIGNAL_LAST_FIRED_JSON='{"health":0,"sweep_orch":0,"sweep_target":0,"discover_orch":0,"discover_target":0,"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0}'
+if command -v jq >/dev/null 2>&1; then
+  SIGNAL_LAST_FIRED_MERGED="$(jq -cn --argjson cooled "${COOLDOWN_SIGNAL_SEED}" '
+    {health:0, sweep_orch:0, sweep_target:0, discover_orch:0, discover_target:0} + $cooled
+  ' 2>/dev/null || echo "")"
+  case "${SIGNAL_LAST_FIRED_MERGED}" in
+    "{"*) SIGNAL_LAST_FIRED_JSON="${SIGNAL_LAST_FIRED_MERGED}" ;;
+    *) ;;  # keep the all-0 fallback above
   esac
 fi
 
@@ -783,20 +836,29 @@ fi
 #     empty dict silently allowed any dispatch. Pin the 7-key schema
 #     here; tests in test/autopilot-scripts.test.mts and
 #     test/autopilot-invariants.test.mts enforce both shapes.
-#   - The previous signal-driven classes (health / sweep_* / discover_*)
-#     no longer occupy slots; they track only their last-fired timestamp
-#     under `signal_last_fired`, replacing the legacy
-#     `/tmp/hydra-last-*.txt` files. ALL FIVE KEYS MUST BE PRESENT
-#     (as `0`) for the same reason.
+#   - The signal-driven classes no longer occupy slots; they track only
+#     their last-fired timestamp under `signal_last_fired`, replacing the
+#     legacy `/tmp/hydra-last-*.txt` files. ALL NINE KEYS MUST BE PRESENT
+#     for the same reason: the 5 always-on classes
+#     (health / sweep_* / discover_*) seeded at `0` (re-armed each run),
+#     plus the 4 long-cooldown classes
+#     (retro_orch / architecture_orch / cleanup_orch / scout_orch) which
+#     are SEEDED FROM THE PRIOR STATE FILE (issue #2575 —
+#     COOLDOWN_SIGNAL_SEED above) so their 24h cooldown survives the
+#     pace-gate's ~15-min relaunch cadence. Before #2575 these 4 were
+#     omitted entirely, so decide.py's `signal_is_cooled()` read a missing
+#     key as epoch 0 (permanently cooled) and retro_orch fired 5–8×/day
+#     instead of the designed 1×/day.
 #   - `failure_log` is a new ring buffer of structured failure records
 #     consumed by `self_heal.py` (issue #426 self-heal table).
 #   - `reaped_task_ids` (issue #411) and `burned_classes` (issue #395)
 #     are preserved unchanged.
-#   - `research_force_counter` (issue #1666) is the ONLY field seeded
-#     from the prior state file (see RESEARCH_FORCE_SEED above) — the
-#     4/day forced-research cap must survive the pace-gate's
-#     multi-run-per-day relaunch cadence. Additive + tolerated-missing
-#     by all readers, so no schema_version bump.
+#   - `research_force_counter` (issue #1666) is seeded from the prior state
+#     file (see RESEARCH_FORCE_SEED above) — the 4/day forced-research cap
+#     must survive the pace-gate's multi-run-per-day relaunch cadence.
+#     Additive + tolerated-missing by all readers, so no schema_version bump.
+#     The 4 long-cooldown `signal_last_fired` classes are seeded from prior
+#     state the same way (issue #2575 — COOLDOWN_SIGNAL_SEED above).
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
 #   - `cumulative_tokens` seeds at 0 and is advanced ONLY by reap.py on each
 #     subagent completion (the per-turn token surrogate). This is the field the
@@ -836,13 +898,7 @@ cat > "${STATE_PATH}" <<EOF
   "failure_log": [],
   "research_force_counter": ${RESEARCH_FORCE_SEED},
   "slots": ${SLOTS_JSON},
-  "signal_last_fired": {
-    "health": 0,
-    "sweep_orch": 0,
-    "sweep_target": 0,
-    "discover_orch": 0,
-    "discover_target": 0
-  }
+  "signal_last_fired": ${SIGNAL_LAST_FIRED_JSON}
 }
 EOF
 
