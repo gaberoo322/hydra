@@ -55,6 +55,13 @@ import {
   type AutopilotHealthDeps,
 } from "../aggregators/autopilot-health.ts";
 
+import { getStatus as defaultGetSchedulerStatus } from "../scheduler/heartbeat.ts";
+import {
+  getCurrentRun as defaultGetCurrentRun,
+  getCurrentLifecycle as defaultGetCurrentLifecycle,
+} from "../autopilot/runs.ts";
+import { readRecentAlerts as defaultReadRecentAlerts } from "../redis/alerts.ts";
+
 // ---------------------------------------------------------------------------
 // Sub-source types for the thin wrappers (autopilot-tick, alerts)
 // ---------------------------------------------------------------------------
@@ -326,8 +333,7 @@ async function defaultReadSchedulerStatus(): Promise<{
   running: boolean;
   lastTickAt: string | null;
 }> {
-  const { getStatus } = await import("../scheduler/heartbeat.ts");
-  const status = await getStatus();
+  const status = await defaultGetSchedulerStatus();
   return {
     running: !!status.running,
     lastTickAt:
@@ -336,8 +342,7 @@ async function defaultReadSchedulerStatus(): Promise<{
 }
 
 async function defaultReadCurrentRun(): Promise<AutopilotCurrentRun | null> {
-  const { getCurrentRun } = await import("../autopilot/runs.ts");
-  const result = await getCurrentRun();
+  const result = await defaultGetCurrentRun();
   if (!result.ok) return null;
   const view = result.view as Record<string, unknown>;
   const id = typeof view.run_id === "string" ? view.run_id : "";
@@ -355,8 +360,7 @@ async function defaultReadCurrentRun(): Promise<AutopilotCurrentRun | null> {
 }
 
 async function defaultReadAutopilotLifecycle(): Promise<AutopilotLifecyclePayload> {
-  const { getCurrentLifecycle } = await import("../autopilot/runs.ts");
-  const result = await getCurrentLifecycle();
+  const result = await defaultGetCurrentLifecycle();
   if (!result.ok) {
     return { state: "idle", runId: null, termReason: null, endedEpoch: null };
   }
@@ -370,6 +374,5 @@ async function defaultReadAutopilotLifecycle(): Promise<AutopilotLifecyclePayloa
 }
 
 async function defaultReadAlertsJson(limit: number): Promise<string[]> {
-  const { readRecentAlerts } = await import("../redis/alerts.ts");
-  return readRecentAlerts(limit);
+  return defaultReadRecentAlerts(limit);
 }

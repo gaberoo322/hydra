@@ -29,6 +29,12 @@ import {
   type IdleAutopilotLiveness,
 } from "../schemas/autopilot-idle.ts";
 
+import {
+  getUsage as defaultGetUsage,
+  projectEligibility as defaultProjectEligibility,
+} from "../cost/index.ts";
+import { getCurrentLifecycle as defaultGetCurrentLifecycle } from "../autopilot/runs.ts";
+
 // ---------------------------------------------------------------------------
 // Sub-source readers (all overridable for tests)
 // ---------------------------------------------------------------------------
@@ -257,9 +263,8 @@ function defaultPaceGateIntervalSeconds(): number {
 // ---------------------------------------------------------------------------
 
 async function defaultReadEligibility(): Promise<EligibilityView> {
-  const { getUsage, projectEligibility } = await import("../cost/index.ts");
-  const snapshot = await getUsage();
-  const e = projectEligibility(snapshot);
+  const snapshot = await defaultGetUsage();
+  const e = defaultProjectEligibility(snapshot);
   return {
     paceState: e.paceState,
     targetPercent: e.targetPercent,
@@ -272,8 +277,7 @@ async function defaultReadEligibility(): Promise<EligibilityView> {
 }
 
 async function defaultReadAutopilotLiveness(): Promise<IdleAutopilotLiveness> {
-  const { getCurrentLifecycle } = await import("../autopilot/runs.ts");
-  const result = await getCurrentLifecycle();
+  const result = await defaultGetCurrentLifecycle();
   if (!result.ok) return IDLE_LIVENESS_DEFAULT;
   const lc = result.lifecycle;
   return {
