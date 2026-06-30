@@ -36,10 +36,11 @@ let originalDisabled: string | undefined;
 let originalRepo: string | undefined;
 
 let escalatePatternToIssue: typeof import("../src/pattern-memory/escalation.ts").escalatePatternToIssue;
-let shouldEscalateAtHitCount: typeof import("../src/pattern-memory/escalation.ts").shouldEscalateAtHitCount;
 let findExistingIssue: typeof import("../src/pattern-memory/escalation.ts").findExistingIssue;
-let escalationThresholdForCue: typeof import("../src/pattern-memory/escalation.ts").escalationThresholdForCue;
-let isMetadataCue: typeof import("../src/pattern-memory/escalation.ts").isMetadataCue;
+// Pure cue policy moved to the cue-policy.ts leaf (issue #2569).
+let shouldEscalateAtHitCount: typeof import("../src/pattern-memory/cue-policy.ts").shouldEscalateAtHitCount;
+let escalationThresholdForCue: typeof import("../src/pattern-memory/cue-policy.ts").escalationThresholdForCue;
+let isMetadataCue: typeof import("../src/pattern-memory/cue-policy.ts").isMetadataCue;
 
 /** Render a fake gh script that dispatches by SCENARIO env var. */
 async function writeFakeGh(path: string, invocationsLog: string) {
@@ -132,10 +133,11 @@ describe("escalation to GitHub (issue #512)", () => {
 
     const mod = await import("../src/pattern-memory/escalation.ts");
     escalatePatternToIssue = mod.escalatePatternToIssue;
-    shouldEscalateAtHitCount = mod.shouldEscalateAtHitCount;
     findExistingIssue = mod.findExistingIssue;
-    escalationThresholdForCue = mod.escalationThresholdForCue;
-    isMetadataCue = mod.isMetadataCue;
+    const policy = await import("../src/pattern-memory/cue-policy.ts");
+    shouldEscalateAtHitCount = policy.shouldEscalateAtHitCount;
+    escalationThresholdForCue = policy.escalationThresholdForCue;
+    isMetadataCue = policy.isMetadataCue;
   });
 
   beforeEach(async () => {

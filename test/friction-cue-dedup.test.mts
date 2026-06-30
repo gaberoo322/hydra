@@ -38,7 +38,8 @@ import Redis from "ioredis";
 // imports directly from there. recordPattern (the write-side store integration
 // exercised below) still comes from agent-memory.ts via the dynamic import.
 import { cueSimilarity, findPatternForCue } from "../src/pattern-memory/cue-matcher.ts";
-import { canonicalizeCue } from "../src/pattern-memory/escalation.ts";
+// canonicalizeCue moved to the zero-IO cue-policy.ts leaf (issue #2569).
+import { canonicalizeCue } from "../src/pattern-memory/cue-policy.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
