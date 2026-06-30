@@ -69,12 +69,19 @@ import {
   fiveHourThrottleShed,
   FIVE_HOUR_THROTTLE_T1_CLASSES,
   FIVE_HOUR_THROTTLE_T2_CLASSES,
-  DEFAULT_FIVE_HOUR_THROTTLE_T1,
-  DEFAULT_FIVE_HOUR_THROTTLE_T2,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   type UsageEligibility,
 } from "../src/cost/eligibility.ts";
+// The 5h-throttle threshold DEFAULT_* constants (and their env-reader getters)
+// were relocated to the Cost env-reader leaf cost/config.ts in #2550; import
+// them from there (cost/index.ts re-exports them at the same names too).
+import {
+  DEFAULT_FIVE_HOUR_THROTTLE_T1,
+  DEFAULT_FIVE_HOUR_THROTTLE_T2,
+  getFiveHourThrottleT1,
+  getFiveHourThrottleT2,
+} from "../src/cost/config.ts";
 // The pure snapshot-assembly helpers (extracted in issue #2188, relocated to
 // their own pure leaf cost/snapshot-assembly.ts in issue #2279). They are
 // exported from cost/snapshot-assembly.ts (for direct unit test) but deliberately
@@ -1554,6 +1561,12 @@ describe("usage-tracker", () => {
         ...FIVE_HOUR_THROTTLE_T1_CLASSES,
         ...FIVE_HOUR_THROTTLE_T2_CLASSES,
       ]);
+      // The default thresholds, passed explicitly into the now-pure fold
+      // (issue #2550): fiveHourThrottleShed no longer reads process.env — the
+      // caller supplies the parsed fractions. Tests exercise pinned tiers by
+      // passing them directly, NO process.env mutation needed.
+      const D1 = DEFAULT_FIVE_HOUR_THROTTLE_T1;
+      const D2 = DEFAULT_FIVE_HOUR_THROTTLE_T2;
 
       test("defaults are 0.60 / 0.75", () => {
         assert.equal(DEFAULT_FIVE_HOUR_THROTTLE_T1, 0.6);
@@ -1561,7 +1574,7 @@ describe("usage-tracker", () => {
       });
 
       test("below T1 (59%): no shed", () => {
-        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(59))], []);
+        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(59), D1, D2)], []);
         const v = projectEligibility(oauthSnap(59));
         assert.deepEqual([...v.shed], []);
         assert.equal(v.reasons.fiveHourThrottleShed, false);
@@ -1569,7 +1582,7 @@ describe("usage-tracker", () => {
       });
 
       test("exactly at T1 (60%): T1 set sheds (boundary is inclusive)", () => {
-        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(60))), T1);
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(60), D1, D2)), T1);
         const v = projectEligibility(oauthSnap(60));
         assert.deepEqual(new Set(v.shed), T1);
         assert.equal(v.reasons.fiveHourThrottleShed, true);
@@ -1581,11 +1594,11 @@ describe("usage-tracker", () => {
       });
 
       test("between T1 and T2 (70%): only the T1 set", () => {
-        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(70))), T1);
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(70), D1, D2)), T1);
       });
 
       test("exactly at T2 (75%): T1 ∪ T2; dev_orch shed but qa_* + dev_target kept", () => {
-        const shed = new Set(fiveHourThrottleShed(oauthSnap(75)));
+        const shed = new Set(fiveHourThrottleShed(oauthSnap(75), D1, D2));
         assert.deepEqual(shed, T1T2);
         assert.equal(shed.has("dev_orch"), true);
         assert.equal(shed.has("design_concept_orch"), true);
@@ -1608,38 +1621,42 @@ describe("usage-tracker", () => {
           percentLast5h: 88,
           pacingState: "under",
         });
-        assert.deepEqual([...fiveHourThrottleShed(snap)], []);
+        assert.deepEqual([...fiveHourThrottleShed(snap, D1, D2)], []);
         const v = projectEligibility(snap);
         assert.deepEqual([...v.shed], []);
         assert.equal(v.reasons.fiveHourThrottleShed, false);
       });
 
-      test("env override: custom T1/T2 thresholds honoured", () => {
+      test("custom T1/T2 thresholds honoured (pure fold over passed args)", () => {
+        // Pass custom thresholds directly — no process.env mutation (#2550).
+        // 45% crosses the custom T1 (0.40) but not the custom T2 (0.50).
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(45), 0.4, 0.5)), T1);
+        // 55% crosses both.
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(55), 0.4, 0.5)), T1T2);
+        // 35% below custom T1 → no shed.
+        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(35), 0.4, 0.5)], []);
+      });
+
+      test("env override threads through projectEligibility's getters", () => {
+        // projectEligibility reads HYDRA_USAGE_5H_THROTTLE_T1/_T2 via the Cost
+        // env-reader leaf (cost/config.ts) and passes the parsed fractions into
+        // the fold — the full env-read→fold path stays behavior-preserving.
         process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0.40";
         process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "0.50";
-        // 45% now crosses the custom T1 but not the custom T2.
-        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(45))), T1);
+        // 45% crosses the custom T1 but not the custom T2 → T1 only.
+        assert.deepEqual(new Set(projectEligibility(oauthSnap(45)).shed), T1);
         // 55% crosses both.
-        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(55))), T1T2);
+        assert.deepEqual(new Set(projectEligibility(oauthSnap(55)).shed), T1T2);
         // 35% below custom T1 → no shed.
-        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(35))], []);
+        assert.deepEqual([...projectEligibility(oauthSnap(35)).shed], []);
       });
 
-      test("set-but-invalid env falls back to default (fail-loud, no throw)", () => {
-        process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "not-a-number";
-        process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "1.5"; // >=1 invalid
-        // Falls back to 0.60 / 0.75: 70% → T1 only.
-        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(70))), T1);
-        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(80))), T1T2);
-      });
-
-      test("mis-set T2 < T1: T2 cut never inverts below T1", () => {
-        process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0.70";
-        process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "0.50";
-        // T1=70, T2 clamped up to max(70,50)=70. At 65% → no shed.
-        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(65))], []);
+      test("mis-set T2 < T1: T2 cut never inverts below T1 (pure fold)", () => {
+        // T1=0.70, T2=0.50 passed directly; T2 clamped up to max(70,50)=70.
+        // At 65% → no shed.
+        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(65), 0.7, 0.5)], []);
         // At 72% → both tiers fire together (T2 boundary == T1 boundary).
-        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(72))), T1T2);
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(72), 0.7, 0.5)), T1T2);
       });
 
       test("composes with pacing shed (union, de-duped)", () => {
@@ -1876,6 +1893,58 @@ describe("usage-tracker", () => {
     test("non-numeric → default", () => {
       process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "abc";
       assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 5h-throttle threshold env-readers (relocated to cost/config.ts in #2550).
+  // These are the env-read seam the fiveHourThrottleShed fold no longer owns:
+  // parse a fraction in (0,1); unset/empty/invalid → default + fail-loud.
+  // -------------------------------------------------------------------------
+  describe("getFiveHourThrottleT1 / getFiveHourThrottleT2", () => {
+    const restore = withEnvSnapshot();
+    afterEach(() => restore());
+
+    test("unset → default", () => {
+      delete process.env.HYDRA_USAGE_5H_THROTTLE_T1;
+      delete process.env.HYDRA_USAGE_5H_THROTTLE_T2;
+      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
+      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
+    });
+
+    test("empty → default", () => {
+      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "";
+      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "";
+      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
+      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
+    });
+
+    test("valid fraction in (0,1) is used", () => {
+      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0.4";
+      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "0.5";
+      assert.equal(getFiveHourThrottleT1(), 0.4);
+      assert.equal(getFiveHourThrottleT2(), 0.5);
+    });
+
+    test("non-finite / non-numeric → default (fail-loud, no throw)", () => {
+      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "not-a-number";
+      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "NaN";
+      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
+      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
+    });
+
+    test("≤0 → default", () => {
+      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0";
+      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "-0.2";
+      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
+      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
+    });
+
+    test("≥1 → default (must be a strict fraction below 1)", () => {
+      process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "1";
+      process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "1.5";
+      assert.equal(getFiveHourThrottleT1(), DEFAULT_FIVE_HOUR_THROTTLE_T1);
+      assert.equal(getFiveHourThrottleT2(), DEFAULT_FIVE_HOUR_THROTTLE_T2);
     });
   });
 
