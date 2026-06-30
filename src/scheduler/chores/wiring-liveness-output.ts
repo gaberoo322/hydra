@@ -16,11 +16,23 @@
  *
  * It owns: the `OutputSourceReader` injection surface, the pure
  * {@link evaluateOutputs} evaluator, the `OutputVerdict` / `OutputSeriesResult`
- * shapes, and the {@link defaultOutputReader} placeholder. The placeholder lives
- * HERE — next to where the real production reader (an Orchestrator metric-trend
- * query) belongs — so the wiring gap between the declared `output` entry in
- * `config/direction/liveness.yaml` and the no-op default is structurally visible
- * in this file's header rather than buried elsewhere.
+ * shapes, and the {@link productionOutputReader} that wires the declared seed
+ * source to its real data plane.
+ *
+ * PRODUCTION DATA PLANE (issue #2578): the single declared `output` entry's
+ * source — `/api/scanner/latest @ funnelBreakdown.registryPairs` — lives on the
+ * TARGET (`~/hydra-betting/web`), NOT in-process. The orchestrator reaches it
+ * over HTTP via `HYDRA_BETTING_URL` (the established cross-process proxy seam,
+ * same precedent as `src/api/reflections.ts` / `src/metrics/publish.ts`). The
+ * issue title's "metric-trend source" is a MISNOMER: `getMetricsTrend()`
+ * (`src/metrics/trend.ts`) reads orchestrator CYCLE metrics, which have no
+ * knowledge of the betting scanner funnel — it is the wrong data plane and is
+ * deliberately NOT wired here. Because the Target route returns ONE snapshot but
+ * `evaluateOutputs` needs a trailing `runs`-length series, the production reader
+ * ACCUMULATES the per-source series across hourly chore ticks in a bounded Redis
+ * list, via the `src/redis/wiring-liveness-output-series.ts` typed accessor
+ * (ADR-0009/ADR-0017). On a failed read it returns `{ ok: false }` and appends
+ * NOTHING — a Target outage is UNREADABLE, never a fabricated zero observation.
  *
  * NEVER THROWS (CLAUDE.md fail-loud + host-probe never-throw conventions): a read
  * failure is an `{ ok: false, reason }` result, not an exception, so the chore
@@ -28,6 +40,10 @@
  */
 
 import type { LivenessEntry, OutputEntry } from "../../schemas/liveness.ts";
+import {
+  appendOutputObservation,
+  readOutputSeries,
+} from "../../redis/wiring-liveness-output-series.ts";
 
 /** Per-entry verdict from evaluating a declared output source (slice 2). */
 export type OutputVerdict =
@@ -148,19 +164,122 @@ export async function evaluateOutputs(
   return { belowFloor, unreadable, outputVerdicts };
 }
 
+// ---------------------------------------------------------------------------
+// Production reader (issue #2578) — the real data plane for declared sources.
+// ---------------------------------------------------------------------------
+
 /**
- * The default output reader: a no-op that reports every output source UNREADABLE
- * with a "no live reader wired" reason. The live source reader (an Orchestrator
- * API / metric-history query) is a follow-up; until then output entries are
- * declared in the manifest and exercised by tests via an injected reader, but the
- * scheduled chore does not yet hit a real source — it stays silent because an
- * UNREADABLE verdict is informational, not an alert (see `runWiringLiveness`).
- *
- * It lives in this focused module — next to where the real production reader
- * belongs — so the wiring gap is structurally visible rather than buried in the
- * timer-check file.
+ * Time-bound on the Target fetch so an unresponsive hydra-betting service can
+ * never wedge the housekeeping run. Same discipline as
+ * `publishForecastCalibrationBrierMetric` in `src/metrics/publish.ts`.
  */
-export const defaultOutputReader: OutputSourceReader = async (entry) => ({
-  ok: false,
-  reason: `no live output reader wired for source '${entry.source}'`,
-});
+const DEFAULT_OUTPUT_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * The injectable surface the {@link productionOutputReader} closes over. Real
+ * production uses the module defaults (`fetch`, `HYDRA_BETTING_URL`, and the
+ * `src/redis/wiring-liveness-output-series.ts` accessor); tests inject fakes so
+ * the happy / non-2xx / missing-path / non-numeric / outage cases run without a
+ * live Target or Redis.
+ */
+export interface ProductionOutputReaderDeps {
+  /** Base URL of the Target web service. Defaults to `HYDRA_BETTING_URL`. */
+  baseUrl?: string;
+  /** Fetch implementation. Defaults to the global `fetch`. */
+  fetchImpl?: typeof fetch;
+  /** Per-fetch timeout in ms. Defaults to {@link DEFAULT_OUTPUT_FETCH_TIMEOUT_MS}. */
+  timeoutMs?: number;
+  /** Append one observation to the per-source bounded series. */
+  appendObservation?: (source: string, jsonPath: string, value: number) => Promise<void>;
+  /** Read back the accumulated series, most-recent-LAST. */
+  readSeries?: (source: string, jsonPath: string) => Promise<number[]>;
+}
+
+/**
+ * Extract a dotted JSON path (e.g. `funnelBreakdown.registryPairs`) from a parsed
+ * response body, returning the leaf only when it is a finite number. Returns
+ * `undefined` for a missing path or a non-numeric leaf — the caller folds that
+ * into an `{ ok: false }` UNREADABLE result. Pure / no I/O, so it is unit-tested
+ * directly.
+ */
+export function extractNumericPath(body: unknown, jsonPath: string): number | undefined {
+  let cursor: unknown = body;
+  for (const segment of jsonPath.split(".")) {
+    if (cursor === null || typeof cursor !== "object") return undefined;
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  return typeof cursor === "number" && Number.isFinite(cursor) ? cursor : undefined;
+}
+
+/**
+ * The production {@link OutputSourceReader}. For one declared `output` entry it:
+ *   1. fetches `${baseUrl}${entry.source}` from the Target (the
+ *      `/api/scanner/latest` route lives in `~/hydra-betting/web`, reached via
+ *      the `HYDRA_BETTING_URL` proxy seam — NOT an orchestrator self-call);
+ *   2. extracts `entry.jsonPath` as a finite number;
+ *   3. APPENDS that one observation to the per-source bounded Redis series and
+ *      reads the trailing series back, returning `{ ok: true, values }`
+ *      (most-recent-LAST) for the pure `evaluateOutputs` to window over.
+ *
+ * On ANY failure — Target unreachable / timeout, non-2xx, malformed JSON, missing
+ * path, non-numeric leaf — it returns `{ ok: false, reason }` and APPENDS NOTHING.
+ * A transient Target outage is therefore UNREADABLE (informational), never a
+ * fabricated zero that would later read back as a floor hit. NEVER THROWS: every
+ * failure path is caught and folded into the result, honoring the module's
+ * never-throw contract and the `evaluateOutputs` UNREADABLE-not-alarm invariant.
+ *
+ * `deps` is injectable so tests exercise every branch without a live Target/Redis.
+ */
+export function productionOutputReader(
+  deps: ProductionOutputReaderDeps = {},
+): OutputSourceReader {
+  const baseUrl = deps.baseUrl ?? process.env.HYDRA_BETTING_URL ?? "http://localhost:3333";
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_OUTPUT_FETCH_TIMEOUT_MS;
+  const appendObservation = deps.appendObservation ?? appendOutputObservation;
+  const readSeries = deps.readSeries ?? readOutputSeries;
+
+  return async (entry: OutputEntry): Promise<OutputSeriesResult> => {
+    const url = `${baseUrl}${entry.source}`;
+
+    let response: Response;
+    try {
+      response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err: any) {
+      return { ok: false, reason: `target fetch failed (${url}): ${err?.message || String(err)}` };
+    }
+
+    if (!response.ok) {
+      return { ok: false, reason: `target returned HTTP ${response.status} (${url})` };
+    }
+
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (err: any) {
+      return { ok: false, reason: `malformed JSON from ${url}: ${err?.message || String(err)}` };
+    }
+
+    const value = extractNumericPath(body, entry.jsonPath);
+    if (value === undefined) {
+      return {
+        ok: false,
+        reason: `missing or non-numeric jsonPath '${entry.jsonPath}' in response from ${url}`,
+      };
+    }
+
+    // Success: append the fresh observation, then read the trailing series back.
+    // The append/read are best-effort against Redis; a Redis failure surfaces as
+    // UNREADABLE (never a throw, never a fabricated value).
+    try {
+      await appendObservation(entry.source, entry.jsonPath, value);
+      const values = await readSeries(entry.source, entry.jsonPath);
+      return { ok: true, values };
+    } catch (err: any) {
+      return {
+        ok: false,
+        reason: `output-series accumulation failed for '${entry.source}': ${err?.message || String(err)}`,
+      };
+    }
+  };
+}

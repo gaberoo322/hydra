@@ -51,7 +51,7 @@ import {
 import { parseConfigYaml, type YamlValue } from "../../config-yaml.ts";
 import {
   evaluateOutputs,
-  defaultOutputReader,
+  productionOutputReader,
   type OutputVerdict,
   type OutputSourceReader,
 } from "./wiring-liveness-output.ts";
@@ -291,10 +291,11 @@ export interface WiringLivenessDeps {
   /**
    * Injectable output-source reader (slice 2). Tests pass a deterministic fake so
    * below-floor / at-floor / recovered cases are reproducible. When omitted, the
-   * chore uses {@link defaultOutputReader} — a no-op that marks every output
-   * source UNREADABLE (no live network reader is wired yet; a follow-up supplies
-   * it). UNREADABLE is informational, not an alert, so the scheduled chore stays
-   * silent for outputs until a real reader is injected.
+   * chore uses the live {@link productionOutputReader} (issue #2578) — it fetches
+   * each declared source from the Target via `HYDRA_BETTING_URL`, accumulates the
+   * per-source run-series in a bounded Redis list, and returns the trailing window
+   * for `evaluateOutputs`. A failed read is UNREADABLE (informational, never an
+   * alarm), so a transient Target outage does not false-flag a below-floor output.
    */
   readOutput?: OutputSourceReader;
   /** Injectable manifest loader so tests can point at a fixture. */
@@ -323,7 +324,7 @@ export async function runWiringLiveness(
 ): Promise<WiringLivenessResult> {
   const loadManifest = deps.loadManifest ?? loadLivenessManifest;
   const readTimers = deps.readTimers ?? readUserTimers;
-  const readOutput = deps.readOutput ?? defaultOutputReader;
+  const readOutput = deps.readOutput ?? productionOutputReader();
   const now = deps.now ?? Date.now;
 
   try {
