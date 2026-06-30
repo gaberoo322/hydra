@@ -90,7 +90,27 @@ This is where the upstream skill would ask *"Which of these would you like to ex
 Drop a candidate before it becomes an issue when ANY of:
 
 - It touches the **Untouchable Core** (`src/untouchable.ts` protected paths: merge gate, rollback, watchdog, cost guardrails) as its *primary* change. Those are operator-only (ADR-0001/0004) and an architecture-scan issue should not steer an agent at them. Note the friction in the report, but do not file it as a deepening issue.
-- It duplicates an already-open issue carrying the `architecture-scan` label (read the board in step 0/§"When NOT to run this"). Re-filing the same deepening candidate every idle tick is the exact failure `hydra-tool-scout`'s seen-list guards against; here the lightweight equivalent is a title/scope match against open `architecture-scan` issues.
+- It duplicates an already-tracked issue in the **shared backfill dedup baseline** (open issues across EVERY backfill label set + issues closed within the last 7 days — NOT just open `architecture-scan` issues). Re-filing the same deepening candidate every idle tick is the exact failure `hydra-tool-scout`'s seen-list guards against; here the lightweight equivalent is the deterministic title/scope-overlap helper below. **This is the load-bearing collision guard for issue #2554:** `hydra-discover` and `hydra-architecture-scan` BOTH fire on the unified `orch_backfill_idle` signal (both in `BACKFILL_SIGNAL_CLASSES`, decide.py:329). The one-per-turn stagger stops same-turn co-fire, but their independent 1h cooldowns + the `BACKFILL_STARVATION_FLOOR` let both dispatch within the same idle HOUR — so an architecture-scan candidate MUST dedup against discover's just-filed `needs-triage` issues (and cleanup's `cleanup-scan` issues), not only against other `architecture-scan` issues, or the same underlying gap gets double-filed.
+
+  ```bash
+  # Shared backfill dedup baseline: open across the WHOLE backfill set
+  # (architecture-scan + needs-triage + cleanup-scan + enhancement) plus
+  # recently-closed — so we see what hydra-discover / cleanup_orch just filed
+  # this same idle window, not only our own architecture-scan issues.
+  mapfile -t BASELINE_TITLES < <(
+    { gh issue list --state open --json number,title --jq '.[] | .title'
+      gh issue list --state closed --json number,title,closedAt \
+        --jq '[.[] | select(.closedAt > (now - 7*24*3600 | todate))] | .[] | .title'
+    } )
+
+  # Per surviving candidate title $CANDIDATE:
+  node --experimental-strip-types scripts/ci/issue-dedup.ts \
+    "$CANDIDATE" "${BASELINE_TITLES[@]}"
+  # → {"duplicate":true,...}  → DROP the candidate (note the friction in the report)
+  # → {"duplicate":false,...} → it survives the filter
+  ```
+
+  `isDuplicateIssue` (`scripts/ci/issue-dedup.ts`) keys on normalised word-set Jaccard overlap >50% — the SAME deterministic helper `hydra-discover` uses, so the two co-firing classes reach the SAME duplicate verdict against the SAME baseline. After a candidate survives the filter AND is emitted as an issue (step 4), append its title to `BASELINE_TITLES` so later candidates in this run dedup against it too.
 - It fails the **deletion test as a pass-through** — deleting the module would just *move* complexity to its callers, not concentrate it. The module *has* live callers; it is genuinely earning its place in the call graph as a pass-through layer, so there is nothing to deepen. Drop it (note the friction in the report).
 
 > **Deletion-test failure is two different findings — split them before dropping.** A candidate that fails the deletion test is NOT always a pass-through. The old rule conflated two distinct outcomes and discarded both; only one of them is actually a drop:

@@ -151,6 +151,30 @@ overall_score: <weighted avg>
 
 Include: executive summary, scorecard, key findings, 3-tier recommendations, comparison to state of the art, next-review triggers.
 
+## Relationship to the board-filling skills (issue #2554)
+
+`hydra-architect` files **no GitHub issues** — by design. Its product is the
+ranked scorecard + 3-tier recommendations delivered **to the operator**
+(below). It is **operator-invoked and off the autopilot path**, so it is NOT a
+member of the `orch_backfill_idle` board-filling set and does NOT participate in
+the same-idle-window double-file collision that set guards against.
+
+Because architect emits nothing, it does not call the shared backfill dedup
+helper (`scripts/ci/issue-dedup.ts`) directly. But when the operator acts on a
+recommendation by turning it into tracked work, that filing goes through one of
+the board-filling skills (`hydra-discover` / `hydra-architecture-scan` /
+operator-run `hydra-research`), each of which runs the candidate through the
+SAME deterministic dedup baseline — open issues across every backfill label set
++ recently-closed. So an architect recommendation that overlaps an already-filed
+backfill issue is caught at that filing step, not re-derived here.
+
+Keep recommendations specific (file paths, expected impact) so whichever skill
+files them can title the issue in terms the dedup helper can match against
+existing board entries. Wiring architect's scorecard to auto-feed
+`hydra-research` weighting is explicitly **out of scope** for #2554 (a
+manual→manual flow with no recurring autonomy payoff) — if desired, raise it as
+its own issue.
+
 ## Output to operator (concise summary)
 
 ```

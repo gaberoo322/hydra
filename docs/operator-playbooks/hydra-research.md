@@ -78,9 +78,47 @@ Output: ≥5 opportunities (`category: "infrastructure"`).
 ## Phase 3: Synthesis (inline)
 
 ### 3a. Deduplicate
-- Drop items matching open issues (>50% title overlap)
-- Drop items matching recently closed issues
-- Merge duplicates across researchers
+
+Use the **shared backfill dedup baseline** so a research run reaches the SAME
+duplicate verdict as the autonomous backfill classes (`hydra-discover` /
+`hydra-architecture-scan`) against the SAME inputs (issue #2554). The baseline
+is *open issues across every backfill label set + issues closed within the last
+14 days* — gathered with the same `gh issue list` calls used elsewhere. Build
+the title list once, then call the deterministic helper per candidate instead
+of eyeballing ">50% overlap":
+
+```bash
+mapfile -t BASELINE_TITLES < <(
+  { gh issue list --state open --json number,title --jq '.[] | .title'
+    gh issue list --state closed --json number,title,closedAt \
+      --jq '[.[] | select(.closedAt > (now - 14*24*3600 | todate))] | .[] | .title'
+  } )
+
+# CANDIDATE = one finding title.
+node --experimental-strip-types scripts/ci/issue-dedup.ts \
+  "$CANDIDATE" "${BASELINE_TITLES[@]}"
+# → {"duplicate":true,"matchedTitle":"...","overlap":0.71}  (drop)
+# → {"duplicate":false,"overlap":0.2}                       (keep)
+```
+
+The helper (`isDuplicateIssue` / `partitionCandidates` in
+`scripts/ci/issue-dedup.ts`) keys on normalised word-set Jaccard overlap >50%
+— the historical prose rule, now deterministic so the board-filling skills
+can't disagree at the margin and double-file. After classifying a finding,
+append its **kept** title to `BASELINE_TITLES` before classifying the next so
+two findings within THIS run also dedup against each other.
+
+> **Note (issue #2554):** `hydra-research` is the board-filler and is
+> **operator/manual-only** — it has no autopilot dispatch path (post-#458 the
+> `research_orch` class dispatches `hydra-issue-research`, which enriches ONE
+> named issue, not this skill). So the live same-idle-window double-file
+> collision the shared baseline guards against is `hydra-discover` ↔
+> `hydra-architecture-scan`, NOT research ↔ discover (which cannot co-fire via
+> autopilot). Research shares the baseline anyway so a manual research run
+> doesn't re-file what the autonomous backfill classes already surfaced.
+
+- Drop items the helper marks `duplicate` (matches open OR recently-closed issues)
+- Merge duplicates across researchers (run them through the same helper pairwise)
 
 ### 3b. Score and rank by:
 1. Merge-rate impact (heaviest weight)

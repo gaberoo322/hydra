@@ -915,16 +915,38 @@ received target-product anchors (item-26x). Post-#458, candidates are
 treated as target-side work: `dev_target` surfaces the top candidate as
 a hint, and a low best-score forces `research_target` (not `research_orch`).
 
-**Dormant discover signals.** The `discover_orch` / `discover_target`
-selectors in `decide.py` gate on `orch_idle` / `target_idle` respectively,
-but `collect-state.sh` emits **neither** signal today — so both discover
-signal classes are currently dormant (never fire). This is intentional for
-now: idle-time reclamation on the orch side is handled by
-`architecture_orch` (above), and the discover paths are kept wired in
-`decide.py` so re-activating them is a `collect-state.sh` emit change, not
-a selector rewrite. The signal-wiring table above has no `orch_idle` /
-`target_idle` rows precisely because nothing produces them — re-adding a
-row here is the trigger to also emit the signal in `collect-state.sh`.
+**Discover signals (revived).** `discover_orch` was **revived by issue #959**
+(epic #958): it no longer gates on the dead `orch_idle` name — its `decide.py`
+selector (`decide.py:2296`) now reads the unified **`orch_backfill_idle`**
+board-empty signal, the SAME signal `architecture_orch` reads. Both classes are
+members of `BACKFILL_SIGNAL_CLASSES` (`decide.py:329`) and share the 1h backfill
+cadence, so `discover_orch` **fires today** on an idle orch board. `collect-state.sh`
+emits `orch_backfill_idle` (line ~488); the dead `orch_idle` name it never
+produced is gone. `discover_target` still gates on `target_idle` (its own
+selector at `decide.py:2307`); whether that signal is produced is a separate
+Target-side question.
+
+**Backfill dedup baseline (issue #2554).** Because `discover_orch` and
+`architecture_orch` both fire on `orch_backfill_idle`, the **one-per-turn
+stagger guard** (it lets only one `BACKFILL_SIGNAL_CLASSES` member dispatch per
+turn) prevents them co-firing the same TURN — but their independent per-class 1h
+cooldowns plus the `BACKFILL_STARVATION_FLOOR` (`decide.py:331+`, which forces a
+starved backfill class through) mean **both can dispatch within the same idle
+HOUR**. `cleanup_orch` co-fires on the same signal every idle turn (it is
+deliberately NOT in `BACKFILL_SIGNAL_CLASSES`, so exempt from the stagger).
+`decide.py` cannot dedup this: it must stay a pure function of `(state, events,
+now)` and cannot know what issues a just-dispatched skill WILL file (the filing
+happens inside the subagent, after dispatch). The guard therefore lives **at
+file-time inside the skill bodies**: `hydra-discover`, `hydra-architecture-scan`
+(and `cleanup_orch`/`hydra-research`) each run every candidate through the SAME
+deterministic helper `scripts/ci/issue-dedup.ts` (`isDuplicateIssue`,
+normalised word-set Jaccard overlap >50%) against the SAME **shared backfill
+dedup baseline** — open issues across EVERY backfill label set (`needs-triage` +
+`architecture-scan` + `cleanup-scan` + `enhancement`) plus recently-closed — so
+whichever class files second sees what the first just filed THIS idle window and
+SKIPs the duplicate. The `discover_orch` ↔ `architecture_orch` co-fire is the
+primary collision this baseline closes. The helper is a standalone script (NOT
+an `@include` fragment), so it is independent of the `_fragments`/#2552 work.
 
 ## Where to look when something goes wrong
 
