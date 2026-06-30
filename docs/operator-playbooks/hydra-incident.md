@@ -103,7 +103,13 @@ Create GitHub issue with all evidence, label `needs-triage`, high priority.
 
 ### Phase 4: Post-mortem
 
+The `Source: …` provenance footer comes from the shared helper
+(`scripts/hydra/footer.sh`, issue #2556) — composed OUTSIDE the single-quoted
+heredoc so the `<<'EOF'` injection-safety quoting is preserved (the helper
+expands the live timestamp; the heredoc body stays literal):
+
 ```bash
+. ~/hydra/scripts/hydra/footer.sh
 gh issue create --repo gaberoo322/hydra --title "Post-mortem: <summary>" --label "needs-triage" --body "$(cat <<'EOF'
 ## Incident Summary
 - **Type:** <regression/crash/build-failure/data-corruption>
@@ -131,9 +137,9 @@ gh issue create --repo gaberoo322/hydra --title "Post-mortem: <summary>" --label
 <metrics, logs, diffs>
 
 ---
-Source: hydra-incident | $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-)"
+)
+$(hydra_issue_footer hydra-incident)"
 ```
 
 ### Phase 5: Prevention rule

@@ -88,16 +88,21 @@ Only if ALL true:
      --jq '[.[] | select(.closedAt > "'$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)'")] | .[].title'
    ```
 
+The `Source: …` provenance footer comes from the shared helper
+(`scripts/hydra/footer.sh`, issue #2556) — composed OUTSIDE the single-quoted
+heredoc so the `<<'EOF'` injection-safety quoting is preserved:
+
 ```bash
+. ~/hydra/scripts/hydra/footer.sh
 gh issue create --repo gaberoo322/hydra --title "..." --label "target-backlog" --body "$(cat <<'EOF'
 ## Problem
 ## Evidence
 ## Suggested fix
 ## Context for orchestrator
 ---
-Source: hydra-target-discover | $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-)"
+)
+$(hydra_issue_footer hydra-target-discover)"
 ```
 
 Limit: 0–2 per iteration.

@@ -13,6 +13,8 @@ Automated QA verification for PRs against the Hydra orchestrator. This skill is 
 
 The Spec axis reads the **design-concept artifact** for the issue (Phase A of #437) — produced by `hydra-grill` and persisted at `GET /api/design-concepts/:anchorRef`. The Standards axis reads `CLAUDE.md`, `CONTEXT.md`, `docs/adr/`, and lint configs. The two axes deliberately do not share context.
 
+> **Retired prompt artifact (issue #2556).** A standalone single-agent "Reality Checker" prompt (`AGENT-PROMPT.md`) used to be bundled alongside this skill. It predates the current parallel Standards/Spec fan-out and is **no longer injected by any flow** — the live reviewer prompts are embedded in this playbook (the `review`-skill sub-agents above). The stale artifact has been removed; it is not referenced anywhere. Do not re-introduce a separate prompt file: the reviewer prompts live here, in the playbook that `scripts/sync-skills.sh` regenerates the skill from.
+
 ## Tier-aware verification depth (issue #739, ADR-0015)
 
 QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the single tier authority — never self-classified by path):

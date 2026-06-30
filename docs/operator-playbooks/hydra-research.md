@@ -181,7 +181,12 @@ If `hydra-prd` exits non-zero on `--apply` (e.g. `gh issue create` 422 mid-batch
 
 For findings the classifier routes flat, file each slice as its own GitHub issue with the canonical agent-ready body:
 
+The `Source: …` provenance footer comes from the shared helper
+(`scripts/hydra/footer.sh`, issue #2556) — composed OUTSIDE the single-quoted
+heredoc so the `<<'EOF'` injection-safety quoting is preserved:
+
 ```bash
+. ~/hydra/scripts/hydra/footer.sh
 gh issue create --repo gaberoo322/hydra --title "..." --label "needs-triage" --body "$(cat <<'EOF'
 ## Summary
 <1-2 sentences>
@@ -203,9 +208,9 @@ gh issue create --repo gaberoo322/hydra --title "..." --label "needs-triage" --b
 ## Implementation notes
 
 ---
-Source: hydra-research | $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-)"
+)
+$(hydra_issue_footer hydra-research)"
 ```
 
 Issues MUST have acceptance criteria — `/hydra-dev` requires them.
