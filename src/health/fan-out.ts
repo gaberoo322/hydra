@@ -61,6 +61,7 @@ import {
   readWolConfig,
   attemptEmbedBackendWake,
   attemptVlmHostWake,
+  getWolGates,
   WakeGate,
   type WolConfig,
 } from "./wol.ts";
@@ -69,39 +70,27 @@ import type { OllamaVlmProbeResult } from "./probe.ts";
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
-// ---- embed-backend Wake-on-LAN auto-recovery (issue #2228) -----------------
+// ---- Wake-on-LAN auto-recovery (issues #2228 + #2335 + #2570) --------------
 //
-// The cooldown + max-attempt state must persist ACROSS heartbeats/health-deep
-// requests (the fan-out runs once per request), so the WakeGate is a single
-// module-level instance — not a per-call object. `embedWakeGate` is reset the
-// moment the embed-backend probe reads `running` again, so a future outage gets
-// a fresh budget of wakes. The WoL config is resolved once at module load from
-// the environment (conservative defaults; auto-wake OFF unless HYDRA_WOL_ENABLED).
-const embedWakeGate = new WakeGate(
-  readWolConfig().cooldownMs,
-  readWolConfig().maxAttempts,
-);
-
-// ---- VLM-host Wake-on-LAN auto-recovery (issue #2335) ----------------------
+// The cooldown + max-attempt state for both WoL recovery triggers must persist
+// ACROSS heartbeats/health-deep requests (the fan-out runs once per request), so
+// each is a single process-lifetime WakeGate — not a per-call object. Those two
+// singletons (the embed-backend gate #2228 + the VLM-host gate #2335) used to
+// live HERE as module-level `new WakeGate(...)` instances, which left this
+// fan-out holding mutable module-global state — the only health module that did,
+// breaking `collectProbeInputs`'s purity contract and bleeding the gates' retry
+// budget across test cases (no module-reset harness existed to clear them).
 //
-// The Tailnet Ollama VLM HOST (`gabes-desktop-1:11434`) is what OpenViking's
-// skill-registration handler blocks on (its vision/indexing model). When that
-// host is hard-down, `/api/v1/skills` times out and 500s, so the hourly
-// recovery chore correctly SKIPS a doomed pass and the skill catalog stays
-// empty (0/4) for hours — the recurring #2148→#2269→#2311→#2335 failure. The
-// #2228 WoL recovery already wakes this SAME physical box, but it was wired ONLY
-// into the embed-backend probe (index-1 ollama-embed, OV-internal), not the
-// index-19 VLM-host probe (`probeOllamaVlm`) that registration actually depends
-// on. This gate gives the VLM-host wake its OWN cooldown + attempt budget,
-// independent of the embed-backend gate, so a down embed backend can't exhaust
-// the VLM-host wake budget (or vice versa) even though both wake one host. Like
-// `embedWakeGate` it is a single module-level instance (the fan-out runs once
-// per request, so the cooldown/attempt state must persist across heartbeats) and
-// is reset the moment the VLM-host probe reads `ok` again.
-const vlmWakeGate = new WakeGate(
-  readWolConfig().cooldownMs,
-  readWolConfig().maxAttempts,
-);
+// Issue #2570 relocated that singleton lifecycle into the WoL Adapter that owns
+// WakeGate (src/health/wol.ts `getWolGates()` / `resetWolGates()`). The adapter
+// lazily constructs the SAME embed + vlm pair from `readWolConfig()` and hands it
+// back on every call — preserving cross-request persistence — while the two gates
+// stay distinct so the embed and VLM wake budgets remain independent. The
+// embed gate is reset the moment the embed-backend probe reads `running` again;
+// the VLM gate the moment the VLM-host probe reads `ok` again, so a future outage
+// gets a fresh budget of wakes. `collectProbeInputs` now reads NO module-global
+// mutable state — the gates flow in through the injectable deps bag, defaulting
+// to the adapter's singletons (so a no-gate production caller is unchanged).
 
 /**
  * If the embed-backend probe reported `failed`, fire a best-effort WoL wake
@@ -129,7 +118,7 @@ export async function maybeWakeEmbedBackend(
   initial: ServiceProbeResult,
   {
     config = readWolConfig(),
-    gate = embedWakeGate,
+    gate = getWolGates().embed,
     wake = attemptEmbedBackendWake,
   }: {
     config?: WolConfig;
@@ -181,7 +170,7 @@ export async function maybeWakeVlmHost(
   initial: OllamaVlmProbeResult,
   {
     config = readWolConfig(),
-    gate = vlmWakeGate,
+    gate = getWolGates().vlm,
     wake = attemptVlmHostWake,
   }: {
     config?: WolConfig;
@@ -309,19 +298,21 @@ export interface CollectProbeDeps {
   skillCatalogState?: typeof getSkillCatalogState;
   targetServiceName?: () => string;
   /**
-   * Issue #2498: the embed-backend Wake-on-LAN gate forwarded to
-   * {@link maybeWakeEmbedBackend} (default: the module-level `embedWakeGate`
-   * singleton, so production callers passing no gate are byte-for-byte
-   * identical and keep cross-request cooldown/attempt persistence). Injecting a
-   * fresh `new WakeGate(cooldown, maxAttempts)` lets a test exercise gate
-   * exhaustion at the `collectProbeInputs` seam without resetting module state.
+   * Issue #2498/#2570: the embed-backend Wake-on-LAN gate forwarded to
+   * {@link maybeWakeEmbedBackend} (default: the WoL Adapter's `embed` singleton,
+   * src/health/wol.ts `getWolGates().embed`, so production callers passing no
+   * gate are byte-for-byte identical and keep cross-request cooldown/attempt
+   * persistence). Injecting a fresh `new WakeGate(cooldown, maxAttempts)` lets a
+   * test exercise gate exhaustion at the `collectProbeInputs` seam without
+   * touching the adapter singleton.
    */
   embedWakeGate?: WakeGate;
   /**
-   * Issue #2498: the VLM-host Wake-on-LAN gate forwarded to
-   * {@link maybeWakeVlmHost} (default: the module-level `vlmWakeGate`
-   * singleton). Kept distinct from `embedWakeGate` so the two wake budgets stay
-   * independent — no cross-wiring even though both wake the same physical host.
+   * Issue #2498/#2570: the VLM-host Wake-on-LAN gate forwarded to
+   * {@link maybeWakeVlmHost} (default: the WoL Adapter's `vlm` singleton,
+   * src/health/wol.ts `getWolGates().vlm`). Kept distinct from `embedWakeGate`
+   * so the two wake budgets stay independent — no cross-wiring even though both
+   * wake the same physical host.
    */
   vlmWakeGate?: WakeGate;
 }
@@ -351,13 +342,16 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeOllamaVlmImpl = probeOllamaVlm,
     skillCatalogState = getSkillCatalogState,
     targetServiceName = getTargetServiceName,
-    // Issue #2498: default to the module-level singletons so a no-gate
-    // production caller is identical to today (and keeps cross-request
-    // cooldown/attempt persistence). A test injects a fresh WakeGate to
-    // exercise exhaustion without touching module state. Distinct names from
-    // the singletons avoid self-referential destructure shadowing.
-    embedWakeGate: embedGate = embedWakeGate,
-    vlmWakeGate: vlmGate = vlmWakeGate,
+    // Issue #2498/#2570: default to the WoL Adapter's process-lifetime gate pair
+    // (src/health/wol.ts getWolGates()) so a no-gate production caller is
+    // identical to today and keeps cross-request cooldown/attempt persistence
+    // (ONE embed + ONE vlm budget across requests). A test injects a fresh
+    // WakeGate to exercise exhaustion without touching the singleton — and, for
+    // the default path, can call resetWolGates() to clear the memo between cases.
+    // Distinct local names (embedGate/vlmGate) avoid self-referential destructure
+    // shadowing against the same-named CollectProbeDeps fields.
+    embedWakeGate: embedGate = getWolGates().embed,
+    vlmWakeGate: vlmGate = getWolGates().vlm,
   } = deps;
 
   const settled = await Promise.allSettled([
