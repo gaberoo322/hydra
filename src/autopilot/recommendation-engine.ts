@@ -49,7 +49,7 @@
  *   6. Production LLM client — the thin Anthropic Request Adapter wrapper
  */
 
-import { RUN_TTL_SECONDS } from "./runs.ts";
+import { RUN_TTL_SECONDS } from "./sweep-reader.ts";
 import * as defaultRedis from "../redis/recommendations.ts";
 import { anthropicMessages, isAnthropicFailure } from "../anthropic/request.ts";
 

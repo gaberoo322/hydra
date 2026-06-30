@@ -10,6 +10,15 @@
  * them only for the high-level readers below, which compose Redis reads + the
  * dead-pid sweeper with those projections.
  *
+ * The **sweep-composite-reader idiom** (the dead-pid sweeper `sweepRunIfDead`
+ * plus the `readAndSweepAutopilotRun` / `readLifecycleState` / `sweepLoadedRow`
+ * readers that pair a Redis load with that sweep, and the `RUN_TTL_SECONDS`
+ * constant) was likewise extracted into the sibling `sweep-reader.ts`
+ * (issue #2568): one Module per concern. This write Module imports only the
+ * sweep predicate + TTL it needs along the single `runs → sweep-reader` edge;
+ * it does NOT re-export that surface (AC2 / #2125 precedent), so external
+ * callers import the sweep helpers from `sweep-reader.ts` directly.
+ *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
  *     bookended by run-start / run-end, persisted as
@@ -87,10 +96,21 @@ import {
   fetchTurnsWithJoins,
   projectRunView,
   projectRunDigest,
-  deriveLifecycleState,
   deriveInflightSlotSeed,
 } from "./run-projections.ts";
 import type { AutopilotLifecycle, InflightSlotSeed } from "./run-projections.ts";
+// The sweep-composite-reader idiom was extracted into the sibling
+// `sweep-reader.ts` (issue #2568): the dead-pid sweeper plus the composed
+// readers that pair a Redis load with that sweep. The write lifecycle below
+// imports only the `RUN_TTL_SECONDS` constant + the sweep predicate it needs
+// along this single `runs → sweep-reader` edge (one-directional, acyclic).
+// There is NO re-export of the sweep surface here (AC2, #2125 precedent):
+// external callers import the sweep helpers from `sweep-reader.ts` directly.
+import {
+  RUN_TTL_SECONDS,
+  readLifecycleState,
+  sweepLoadedRow,
+} from "./sweep-reader.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
 
 // ---------------------------------------------------------------------------
@@ -98,7 +118,6 @@ import { bucketCycleStatus } from "./cycle-status.ts";
 // ---------------------------------------------------------------------------
 
 const CYCLE_TTL_SECONDS = 7 * 24 * 3600;
-export const RUN_TTL_SECONDS = 7 * 24 * 3600;
 
 /**
  * `term_reason` values the autopilot writers are allowed to emit. Anything
@@ -165,12 +184,18 @@ function errRedis(err: any): Err {
 // ---------------------------------------------------------------------------
 // Injectable lifecycle-write deps (issue #2158)
 //
-// The run-lifecycle writers (`startRun`/`endRun`/`recordCycle`/`recordTurn`/
-// `sweepRunIfDead`) each touch the Redis Adapters seam (and, for recordCycle,
-// the metrics writer). That made the lifecycle write POLICY — idempotency
-// keying, the #2063 enrichment-vs-dedup gate, the #1919 three-bucket counter
-// identity, and the dead-pid running→killed/crash sweep — only exercisable with
-// a live Redis (every test in autopilot-runs / autopilot-cycle-records stands up
+// The run-lifecycle writers (`startRun`/`endRun`/`recordCycle`/`recordTurn`)
+// each touch the Redis Adapters seam (and, for recordCycle, the metrics
+// writer). That made the lifecycle write POLICY — idempotency keying, the
+// #2063 enrichment-vs-dedup gate, and the #1919 three-bucket counter identity
+// — only exercisable with a live Redis. (The dead-pid running→killed/crash
+// sweeper `sweepRunIfDead` was extracted into `sweep-reader.ts` with its own
+// narrow `SweepReaderDeps` in #2568; the wide bag below STRUCTURALLY satisfies
+// that narrow surface, so the deps-test fixture still passes this bag to the
+// sweeper unchanged.) This seam wraps those writes in an injectable deps bag
+// so the SAME policy is testable on in-memory fixtures — exactly the precedent
+// the read-side `ProjectionDeps` (run-projections.ts, #1183) set. (Every test
+// in autopilot-runs / autopilot-cycle-records stands up
 // `new Redis(REDIS_URL)` in a `beforeEach`). This seam wraps those writes in an
 // injectable deps bag so the SAME policy is testable on in-memory fixtures,
 // exactly the precedent the read-side `ProjectionDeps` (run-projections.ts,
@@ -186,9 +211,11 @@ function errRedis(err: any): Err {
 //   - A SINGLE `now()` epoch-ms clock (the `EngineDeps` precedent): both the
 //     `*_epoch` seconds fields (`Math.floor(now()/1000)`) and the ISO strings
 //     (`new Date(now()).toISOString()`) derive from it — one source of truth.
-//   - `isPidAlive` is RE-DECLARED here (same field name as `ProjectionDeps`, by
-//     convention not interface inheritance) so the sweeper's dead-pid branch is
-//     reachable on a synthetic `running` row without faking a real dead PID.
+//   - `isPidAlive` is RE-DECLARED here (same field name as `ProjectionDeps` /
+//     `SweepReaderDeps`, by convention not interface inheritance) so this wide
+//     bag still structurally satisfies the moved sweeper's narrow deps surface
+//     and the deps-test fixture's dead-pid branch stays reachable on a
+//     synthetic `running` row without faking a real dead PID.
 //
 // Default deps route through the exact same accessors + clock as before, so
 // omitting the `deps` arg is byte-for-byte the current production behaviour and
@@ -367,158 +394,6 @@ function sanitizeCrashDetail(detail: CrashDetail | undefined): Record<string, un
         : tail;
   }
   return Object.keys(out).length > 0 ? out : null;
-}
-
-/**
- * Read-time sweeper for a dead-pid `running` row. The terminal status it
- * writes depends on whether a clean exit was recorded:
- *
- *   - If the row carries `exit_code === "0"` (an exit hook stamped a
- *     clean exit but the run-end POST that would have flipped `status`
- *     never landed), promote to `status: ended, term_reason: interrupted`
- *     — the process is gone but it exited cleanly.
- *   - Otherwise (no recorded exit code, or a non-zero one), promote to
- *     `status: killed, term_reason: crash` — the historical catch-all for
- *     "the process is gone and nobody recorded a clean run-end."
- *
- * Idempotent: only fires on a `running` row, and a terminal row written
- * once is never re-swept. With the reap-on-exit backstop (issue #898)
- * POSTing run-end on every exit path, this sweeper is now the rare
- * genuine-crash fallback rather than the common termination route.
- *
- * Exported so other read surfaces that scan autopilot run rows (e.g. the
- * active-dispatches aggregator's autopilot sub-source, issue #888) can
- * apply the SAME liveness rule rather than trusting `status: running`
- * verbatim — a crashed run that never POSTed its run-end would otherwise
- * linger as a phantom in-flight dispatch until the 7-day TTL.
- */
-export async function sweepRunIfDead(
-  runId: string,
-  row: Record<string, string>,
-  deps: AutopilotRunsDeps = defaultAutopilotRunsDeps,
-): Promise<{ row: Record<string, string>; swept: boolean }> {
-  if (row.status !== "running") return { row, swept: false };
-  const pid = Number(row.pid || "0");
-  if (deps.isPidAlive(pid)) return { row, swept: false };
-
-  const endedEpoch =
-    Number(row.last_heartbeat_epoch || "0") ||
-    Number(row.started_epoch || "0") ||
-    Math.floor(deps.now() / 1000);
-
-  // A recorded clean exit (exit_code === 0) means the process ended
-  // normally even though the terminal run-end POST didn't land — treat
-  // it as a clean interrupted end, not a crash. Reserve crash for a
-  // missing or non-zero exit code.
-  const cleanExit = row.exit_code !== undefined && Number(row.exit_code) === 0;
-  const status = cleanExit ? "ended" : "killed";
-  const termReason = cleanExit ? "interrupted" : "crash";
-
-  const fields: Record<string, string> = {
-    status,
-    term_reason: termReason,
-    ended_epoch: String(endedEpoch),
-  };
-
-  // Issue #1079: a dead-pid running row swept to `killed`/`crash` means NO
-  // run-end POST ever landed — the reap backstop missed too. We can't recover
-  // the signal/log_tail here, but stamp a minimal crash_detail (unless one was
-  // already persisted) so this fallback path is still distinguishable from a
-  // run that genuinely has no detail, and `last_action` records that the sweep
-  // (not a clean term) produced the verdict.
-  if (termReason === "crash" && row.crash_detail === undefined) {
-    fields.crash_detail = JSON.stringify({
-      last_action: "swept-dead-pid: no run-end POST received before pid death",
-    });
-  }
-
-  await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
-
-  const mutated = {
-    ...row,
-    ...fields,
-  };
-  return { row: mutated, swept: true };
-}
-
-/**
- * Composed read-and-sweep reader (issue #2189): load a run hash via the
- * leaf Redis accessor (`getAutopilotRun`) and then apply the canonical
- * dead-pid sweeper (`sweepRunIfDead`), returning the SWEPT row.
- *
- * This names the read→sweep idiom the high-level readers above already do
- * inline (`getCurrentLifecycle`/`getCurrentRun`/`getRun`/`listRuns`), so a
- * caller that only wants "a run row that already had the stale-pid rule
- * applied" can inject this single reader instead of orchestrating the
- * two-step itself.
- *
- * Its first consumer is the active-dispatches aggregator's autopilot
- * sub-source: by defaulting `getAutopilotRunRow` to THIS function, the
- * aggregator drops its separate `sweepAutopilotRun` dep and its explicit
- * sweep call, restoring the "pure aggregator — no Redis writes in the
- * aggregation layer" family contract. The write side-effect (the dead-pid
- * `running`→`killed`/`crash` promotion) now lives behind the injected
- * reader, not in the aggregator body.
- *
- * Both `getAutopilotRun` and `sweepRunIfDead` are already imported in this
- * module, so this introduces NO new dependency edge — in particular the leaf
- * adapter `src/redis/autopilot-runs.ts` is untouched and gains no import of
- * `src/autopilot/`, so no cycle is created. `getAutopilotRun` keeps its
- * pure-read semantics (this composes it; it does not change it), so the
- * other `getAutopilotRun` callers (`digest-format.ts`, `api/agents.ts`) are
- * unaffected and no row is double-swept.
- */
-export async function readAndSweepAutopilotRun(
-  runId: string,
-): Promise<{ row: Record<string, string>; swept: boolean }> {
-  const row = await getAutopilotRun(runId);
-  return sweepRunIfDead(runId, row);
-}
-
-/**
- * Compose the dead-pid sweep with lifecycle derivation in ONE reader
- * (issue #2549). Every high-level reader of an Autopilot Run must call
- * `sweepRunIfDead(runId, row)` *before* `deriveLifecycleState(...)`, or it
- * derives a stale `running` lifecycle from a dead-pid row. Before this
- * function that ordering was duplicated at four call sites and enforced only
- * by convention — `deriveLifecycleState`'s signature gives a reader no way to
- * know it is only correct after a sweep. This names the sweep→derive sequence
- * so a caller cannot forget the sweep half.
- *
- * Takes the row the caller already loaded (the readers each apply their own
- * `!row.started` guard with caller-specific not-found/idle semantics, so the
- * read stays at the call site) and returns the swept row's derived lifecycle.
- * `sweepRunIfDead` is idempotent — a terminal row is never re-swept — so this
- * never double-sweeps. `deriveLifecycleState` stays a pure function: the
- * composition lives here, in the Redis-touching reader, not inside the
- * projection (the route layer and projection tests keep pinning the pure
- * derivation directly).
- */
-export async function readLifecycleState(
-  runId: string,
-  row: Record<string, string>,
-): Promise<AutopilotLifecycle> {
-  const sweepResult = await sweepRunIfDead(runId, row);
-  return deriveLifecycleState(sweepResult.row);
-}
-
-/**
- * Composed read-side companion to {@link readLifecycleState} for the readers
- * that project the SWEPT row through something other than the lifecycle
- * derivation (`projectRunView` / `projectRunDigest`). Names the
- * sweep-then-return-row half of the same two-step contract so those readers
- * stop replicating the inline `sweepRunIfDead(...).row` dance.
- *
- * Like {@link readLifecycleState}, it takes the already-loaded row (so each
- * caller keeps its own `!row.started` guard semantics) and relies on
- * `sweepRunIfDead`'s idempotence — no row is swept twice.
- */
-export async function sweepLoadedRow(
-  runId: string,
-  row: Record<string, string>,
-): Promise<Record<string, string>> {
-  const sweepResult = await sweepRunIfDead(runId, row);
-  return sweepResult.row;
 }
 
 // ---------------------------------------------------------------------------

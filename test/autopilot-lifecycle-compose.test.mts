@@ -23,7 +23,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-import { readLifecycleState, sweepLoadedRow } from "../src/autopilot/runs.ts";
+import { readLifecycleState, sweepLoadedRow } from "../src/autopilot/sweep-reader.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;

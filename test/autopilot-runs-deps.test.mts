@@ -35,9 +35,12 @@ import {
   endRun,
   recordCycle,
   recordTurn,
-  sweepRunIfDead,
   type AutopilotRunsDeps,
 } from "../src/autopilot/runs.ts";
+// sweepRunIfDead was extracted into the sibling sweep-reader Module (#2568).
+// The wide AutopilotRunsDeps the fixture builds still structurally satisfies
+// the sweeper's narrow SweepReaderDeps, so the fixture is passed unchanged.
+import { sweepRunIfDead } from "../src/autopilot/sweep-reader.ts";
 
 // ---------------------------------------------------------------------------
 // In-memory deps fixture — a tiny store standing in for the Redis Adapters.
