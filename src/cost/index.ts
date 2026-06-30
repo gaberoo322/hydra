@@ -56,6 +56,7 @@ export {
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
   DEFAULT_OAUTH_USAGE_TTL_MS,
+  DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
   getWeeklyResetAnchorMs,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,

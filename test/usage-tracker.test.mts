@@ -11,6 +11,7 @@ import {
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
   DEFAULT_OAUTH_USAGE_TTL_MS,
+  DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
   getWeeklyResetAnchorMs,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,
@@ -2932,14 +2933,46 @@ describe("usage-tracker", () => {
       assert.equal(getOAuthUsageTtlMs(), DEFAULT_OAUTH_USAGE_TTL_MS);
     });
 
-    test("getOAuthUsageMaxStaleMs: defaults to the effective TTL, honours override", () => {
+    test("getOAuthUsageMaxStaleMs: defaults to the DECOUPLED constant (NOT the TTL), honours override (issue #2574)", () => {
+      // Decoupled from the TTL (#2574): an unset max-stale falls back to its own
+      // DEFAULT_OAUTH_USAGE_MAX_STALE_MS constant, independent of the TTL value.
       delete process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS;
       process.env.HYDRA_OAUTH_USAGE_TTL_MS = "90000";
-      assert.equal(getOAuthUsageMaxStaleMs(), 90000);
+      assert.equal(
+        getOAuthUsageMaxStaleMs(),
+        DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
+        "unset max-stale uses its own default, not the TTL",
+      );
+      assert.notEqual(
+        getOAuthUsageMaxStaleMs(),
+        90000,
+        "the max-stale default is decoupled from the TTL — must not track it",
+      );
+      // An explicit override is still honoured verbatim.
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "30000";
       assert.equal(getOAuthUsageMaxStaleMs(), 30000);
+      // A non-empty-but-invalid value falls back to the decoupled constant (not the TTL).
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "bad";
-      assert.equal(getOAuthUsageMaxStaleMs(), 90000); // falls back to TTL
+      assert.equal(getOAuthUsageMaxStaleMs(), DEFAULT_OAUTH_USAGE_MAX_STALE_MS);
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "-5";
+      assert.equal(getOAuthUsageMaxStaleMs(), DEFAULT_OAUTH_USAGE_MAX_STALE_MS);
+    });
+
+    test("DEFAULT_OAUTH_USAGE_MAX_STALE_MS is 30min and decoupled from the TTL default (issue #2574)", () => {
+      // The constant value is load-bearing: it sets the too-stale cliff at
+      // TTL+maxStale. At the 5min TTL default + 30min max-stale this gives a
+      // ~35min servable window that rides through the 2026-06-30 multi-minute
+      // 429 burst (which ran past the old 10min cliff and flipped to estimate).
+      assert.equal(DEFAULT_OAUTH_USAGE_MAX_STALE_MS, 1_800_000);
+      assert.notEqual(
+        DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
+        DEFAULT_OAUTH_USAGE_TTL_MS,
+        "the two defaults are independent levers, not the same number",
+      );
+      assert.ok(
+        DEFAULT_OAUTH_USAGE_TTL_MS + DEFAULT_OAUTH_USAGE_MAX_STALE_MS > 600_000,
+        "default servable window exceeds the old 10min cliff that the incident breached",
+      );
     });
 
     test("AC1: cache reuse within TTL — one OAuth GET across many scans", async () => {
@@ -3052,6 +3085,79 @@ describe("usage-tracker", () => {
         assert.equal(snap.percentLast5h, 95, "estimate gauge stands — never silently 0");
         // #1124: the estimate gauge no longer drives the stop.
         assert.equal(snap.emergencyStop, false, "estimate path never trips the hard-stop");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("issue #2574: a multi-minute 429 burst rides through on stale-but-real OAuth with the DEFAULT max-stale (env UNSET)", async () => {
+      // Reproduces the 2026-06-30 incident shape against the NEW decoupled
+      // default: TTL stays 5min, max-stale is left UNSET so it uses the 30min
+      // DEFAULT_OAUTH_USAGE_MAX_STALE_MS (servable window ~35min). A meter that
+      // 429s for ~10 minutes past the seeding read — the exact window that
+      // breached the OLD 10min cliff (TTL+TTL) and flipped to estimate — must
+      // now STILL serve the stale-but-real OAuth value and keep enforcing the
+      // ceiling, never degrading to the fail-open transcript estimate.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "300000"; // 5min — production default
+      delete process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS; // rely on the 30min decoupled default
+      const root = await mkdtemp(join(tmpdir(), "usage-2574-"));
+      try {
+        // Estimate would read 95% — proving we stay on the OAuth 92%, not the estimate.
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:30:00Z", { in: 900, out: 50 })]);
+        const m = countingMeter([
+          { ok: true, five: 92, seven: 60 }, // seed last-good = real 92%
+          { ok: false, code: "oauth-usage-non-2xx" }, // sustained 429 burst
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        const first = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(first.usageSource, "oauth");
+        assert.equal(first.percentLast5h, 92);
+
+        // ~10.5 min later — PAST the old 10min (TTL+TTL) cliff, but well inside
+        // the new ~35min window. Under the old coupled default this fell to
+        // estimate; now it rides through as stale-but-real oauth.
+        const tBurst = new Date(t0.getTime() + 630_000); // 10.5 min — the 601371ms-shaped breach
+        const second = await getUsage({ now: tBurst, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(second.usageSource, "oauth", "rides the 429 burst on stale-but-real OAuth (was 'estimate' pre-#2574)");
+        assert.equal(second.percentLast5h, 92, "serves the last-good real 92%, not the 95% estimate");
+        assert.equal(second.oauthStale, true);
+        assert.equal(second.oauthAgeMs, 630_000, "surfaces the served value's age for observability");
+        // Ceiling enforcement stays on ground truth through the burst.
+        assert.equal(second.emergencyStop, true, "stale-but-real >=90% still trips the hard stop");
+        assert.equal(projectEligibility(second).allow, false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("issue #2574: a multi-HOUR outage still falls through to the estimate with the DEFAULT max-stale (env UNSET)", async () => {
+      // The decoupled default widens — but does NOT remove — the eventual
+      // fall-through. A genuine multi-hour outage (age past TTL+30min) is still
+      // too stale to trust, so the headline correctly degrades to the fail-open
+      // estimate (#1124: the estimate never trips the hard stop).
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "300000"; // 5min
+      delete process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS; // 30min default → ~35min cliff
+      const root = await mkdtemp(join(tmpdir(), "usage-2574-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:30:00Z", { in: 900, out: 50 })]);
+        const m = countingMeter([
+          { ok: true, five: 92, seven: 60 },
+          { ok: false, code: "oauth-usage-non-2xx" },
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        // 2 hours later: age (7200s) >= TTL(300s)+maxStale(1800s) = 2100s → too stale.
+        const tHours = new Date(t0.getTime() + 2 * 60 * 60_000);
+        const snap = await getUsage({ now: tHours, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(snap.usageSource, "estimate", "a multi-hour outage past TTL+30min still falls to the estimate");
+        assert.equal(snap.oauthStale, false);
+        assert.equal(snap.oauthAgeMs, null);
+        assert.equal(snap.percentLast5h, 95, "estimate gauge stands — never silently 0 (#1083)");
+        assert.equal(snap.emergencyStop, false, "estimate path never trips the hard stop (#1124 fail-open)");
       } finally {
         await rm(root, { recursive: true, force: true });
       }
