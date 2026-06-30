@@ -147,13 +147,42 @@ Include sources in issue body.
 ## Dedup and issue creation
 
 ### Dedup
+
+Gather the **shared backfill dedup baseline** — open issues across EVERY
+backfill label set + issues closed in the last 7 days — then run each candidate
+through the SAME deterministic helper `hydra-architecture-scan` uses, so the two
+classes that co-fire on `orch_backfill_idle` can't disagree at the margin and
+double-file the same finding (issue #2554):
+
 ```bash
-gh issue list --state open --json number,title,labels,createdAt --jq '.[] | "\(.number): \(.title)"'
-gh issue list --state closed --json number,title,closedAt \
-  --jq '[.[] | select(.closedAt > (now - 7*24*3600 | todate))] | .[] | "\(.number): \(.title)"'
+# Open issues across the WHOLE backfill set — NOT just discover's own
+# needs-triage. The collision partner is hydra-architecture-scan (label
+# `architecture-scan`); cleanup_orch (label `cleanup-scan`) co-fires too. All
+# three plus generic `enhancement` belong in the baseline so discover sees what
+# architecture-scan / cleanup just filed THIS idle window.
+mapfile -t BASELINE_TITLES < <(
+  { gh issue list --state open --json number,title \
+      --jq '.[] | .title'
+    gh issue list --state closed --json number,title,closedAt \
+      --jq '[.[] | select(.closedAt > (now - 7*24*3600 | todate))] | .[] | .title'
+  } )
+
+# Per candidate finding title $CANDIDATE:
+node --experimental-strip-types scripts/ci/issue-dedup.ts \
+  "$CANDIDATE" "${BASELINE_TITLES[@]}"
+# → {"duplicate":true,"matchedTitle":"...","overlap":0.71}  → SKIP or COMMENT on the matched issue
+# → {"duplicate":false,"overlap":0.2}                       → file it
 ```
 
-Word overlap >50% → SKIP or COMMENT on existing.
+`isDuplicateIssue` (`scripts/ci/issue-dedup.ts`) keys on normalised word-set
+Jaccard overlap >50% — the historical "word overlap >50% → SKIP" rule, now a
+shared, testable function instead of an eyeball. `duplicate: true` → SKIP or
+COMMENT on the matched existing issue. After you decide to FILE a candidate,
+append its title to `BASELINE_TITLES` before checking the next so two findings
+within THIS run also dedup against each other. The
+**`hydra-discover` ↔ `hydra-architecture-scan` co-fire on `orch_backfill_idle`
+is the primary motivating collision** this baseline closes — see the
+**Backfill dedup baseline** note in `hydra-autopilot.md`.
 
 ### Issue formats
 
