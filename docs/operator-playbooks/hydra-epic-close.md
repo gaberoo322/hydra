@@ -77,7 +77,7 @@ For each epic in the `close` bucket:
 # 4a) Render the summary comment via renderClosingComment(epic, references, subTitles, mergedPRs).
 #     Best-effort: subTitles populated from the sub-state fetch in Step 2; mergedPRs
 #     pulled via `gh issue view N --json closedByPullRequestsReferences` when available.
-gh pr/issue comment "${EPIC_NUMBER}" --repo gaberoo322/hydra --body "${RENDERED_COMMENT}"
+gh issue comment "${EPIC_NUMBER}" --repo gaberoo322/hydra --body "${RENDERED_COMMENT}"
 
 # 4b) Close with reason=completed (this is what an operator would do manually).
 gh issue close "${EPIC_NUMBER}" --repo gaberoo322/hydra --reason completed
