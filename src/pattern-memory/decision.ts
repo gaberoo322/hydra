@@ -10,22 +10,25 @@
  * independently of the side-effecting seams it gates.
  *
  * Purely arithmetic over a pattern's current state: no Redis, no filesystem, no
- * async, no `gh`. It composes the existing pure helpers from the sibling
- * modules (`isMetadataCue`, `escalationThresholdForCue`,
- * `shouldEscalateAtHitCount` from `escalation.ts`) into a single answer, so the
+ * async, no `gh`. It composes the existing pure helpers from the cue-policy
+ * leaf (`isMetadataCue`, `escalationThresholdForCue`,
+ * `shouldEscalateAtHitCount` from `cue-policy.ts`) into a single answer, so the
  * "when to call the seams" decision has exactly one home. The seams themselves
  * are unchanged — `recordPattern` still calls them — but it now calls them
  * *because* this predicate said to, rather than re-deriving the condition inline.
  *
- * Import direction is one-way: this module imports the escalation pure helpers;
- * `agent-memory.ts` imports this. `escalation.ts` does NOT import this back.
+ * Import direction is one-way: this module imports the cue-policy pure helpers;
+ * `agent-memory.ts` imports this. Neither `cue-policy.ts` nor `escalation.ts`
+ * import this back. (Issue #2569 moved the policy helpers out of escalation.ts
+ * into the zero-IO `cue-policy.ts` leaf, so this module no longer pulls in the
+ * `ghExec`/`ghJson` GitHub-IO chain at module load.)
  */
 
 import {
   escalationThresholdForCue,
   isMetadataCue,
   shouldEscalateAtHitCount,
-} from "./escalation.ts";
+} from "./cue-policy.ts";
 // Type-only import: erased at runtime, so this introduces NO circular runtime
 // dependency even though `agent-memory.ts` imports `decideRecordActions` from
 // here. `PatternNamespace` has its canonical definition there.

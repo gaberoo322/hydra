@@ -29,10 +29,11 @@ import {
 } from "../redis/agent-memory.ts";
 import {
   escalateIfNeeded,
-  canonicalizeCue,
   type EscalationInput,
   type EscalationResult,
 } from "./escalation.ts";
+// canonicalizeCue moved to the zero-IO cue-policy leaf (issue #2569).
+import { canonicalizeCue } from "./cue-policy.ts";
 // Issue #2178 — the promotion/escalation decision spine extracted from this
 // file's `recordPattern` orchestration. `decideRecordActions` is a pure
 // predicate: given a pattern's post-hit state it answers "promote? write the
