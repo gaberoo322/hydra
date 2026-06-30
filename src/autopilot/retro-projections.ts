@@ -24,7 +24,7 @@
  * that purity is now enforced by the import boundary, not merely documented.
  */
 
-import { MERGED_STATUSES, FAILED_STATUSES } from "./run-projections.ts";
+import { bucketCycleStatus } from "./cycle-status.ts";
 
 // ---------------------------------------------------------------------------
 // Dispatch projection shape
@@ -139,11 +139,7 @@ export function flagDispatchesForDrill(dispatches: RetroDispatch[]): RetroDispat
 // ---------------------------------------------------------------------------
 
 export function bucketOf(status: string | null): "merged" | "failed" | null {
-  if (!status) return null;
-  const s = status.toLowerCase();
-  if (MERGED_STATUSES.has(s)) return "merged";
-  if (FAILED_STATUSES.has(s)) return "failed";
-  return null;
+  return bucketCycleStatus(status);
 }
 
 /**

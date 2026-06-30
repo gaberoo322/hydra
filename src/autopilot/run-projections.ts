@@ -35,6 +35,7 @@ import {
   epochFromIsoOrNow,
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
+import { bucketCycleStatus } from "./cycle-status.ts";
 
 // ---------------------------------------------------------------------------
 // Constants (read-side)
@@ -56,29 +57,6 @@ export const RUN_TURNS_MAX_FETCH = 10000;
  * write follows.
  */
 export const WEDGE_AGE_THRESHOLD_S = 600;
-
-/**
- * Status values that count toward `cycles-merged` (vs `cycles-failed`).
- * Aligned with the autopilot taxonomy: a "cycle" merged when the
- * dispatched subagent landed a PR; failed when it abandoned, timed
- * out, or its PR closed unmerged.
- *
- * Owned here because the projections (`projectRunDigest`) are the
- * primary read-side users; the `recordCycle` writer imports them back
- * from this module so there is a single definition.
- */
-export const MERGED_STATUSES: ReadonlySet<string> = new Set([
-  "merged",
-  "completed",
-  "succeeded",
-]);
-export const FAILED_STATUSES: ReadonlySet<string> = new Set([
-  "failed",
-  "abandoned",
-  "aborted",
-  "timeout",
-  "timed-out",
-]);
 
 // ---------------------------------------------------------------------------
 // Read-only leaf helpers
@@ -328,9 +306,9 @@ export async function projectRunDigest(
     const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
     for (const a of actions) {
       if (a && a.type === "dispatch" && a.outcome && typeof a.outcome === "object") {
-        const status = String((a.outcome as any).status || "").toLowerCase();
-        if (MERGED_STATUSES.has(status)) merged += 1;
-        else if (FAILED_STATUSES.has(status)) failed += 1;
+        const bucket = bucketCycleStatus(String((a.outcome as any).status || ""));
+        if (bucket === "merged") merged += 1;
+        else if (bucket === "failed") failed += 1;
       }
     }
   }
