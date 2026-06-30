@@ -45,7 +45,11 @@ import type { UsageSnapshot } from "./usage-tracker.ts";
 // The **Pacing Ceiling** env reader moved to the pure-leaf config module
 // (issue #1896); we keep the Pacing-Curve math here and read the ceiling
 // fraction from there.
-import { getWeeklyPaceCeiling } from "./config.ts";
+import {
+  getWeeklyPaceCeiling,
+  getFiveHourThrottleT1,
+  getFiveHourThrottleT2,
+} from "./config.ts";
 
 /**
  * Length of the fixed weekly window in ms. Duplicated as a private const here
@@ -188,56 +192,31 @@ export const FIVE_HOUR_THROTTLE_T2_CLASSES: readonly string[] = Object.freeze([
   "dev_orch",
 ]);
 
-/** Default Tier-1 5h-utilization throttle threshold (fraction of quota). */
-export const DEFAULT_FIVE_HOUR_THROTTLE_T1 = 0.6;
-/** Default Tier-2 5h-utilization throttle threshold (fraction of quota). */
-export const DEFAULT_FIVE_HOUR_THROTTLE_T2 = 0.75;
-
-/**
- * Read a 5h-throttle threshold env var as a fraction in (0, 1). Unset/empty →
- * `fallback`. Set-but-invalid (non-finite, ≤0, or ≥1) → `fallback` with a
- * fail-loud `console.error`, mirroring {@link getWeeklyPaceCeiling}'s discipline
- * (a mis-configured env var is visible, never silently honoured). (issue #1087)
- */
-function getFiveHourThrottleThreshold(envVar: string, fallback: number): number {
-  const raw = process.env[envVar];
-  if (raw === undefined || raw === "") return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) {
-    console.error(
-      `[usage-tracker] ${envVar} is set but not a finite fraction in (0, 1) (${JSON.stringify(
-        raw,
-      )}); falling back to default ${fallback}`,
-    );
-    return fallback;
-  }
-  return parsed;
-}
-
 /**
  * The graduated 5h-utilization shed set for a snapshot (issue #1087), as a
- * PURE function (env-only + snapshot; no `Date.now()`, no IO). Returns the
+ * PURE fold over already-parsed thresholds (snapshot + scalar T1/T2; no
+ * `process.env`, no `Date.now()`, no IO). The env-read seam moved to the Cost
+ * env-reader leaf `config.ts` (`getFiveHourThrottleT1` / `getFiveHourThrottleT2`,
+ * issue #2550); the sole caller {@link projectEligibility} reads those getters
+ * and passes the parsed fractions in — exactly as it already does for the
+ * Pacing Ceiling (`getWeeklyPaceCeiling()` → `projectPacingCurve`). Returns the
  * classes to shed given the authoritative OAuth `percentLast5h`:
  *   - `usageSource !== "oauth"` (estimate/uncalibrated) → `[]` (inert).
  *   - `percentLast5h >= T2*100` → T1 ∪ T2.
  *   - `percentLast5h >= T1*100` → T1.
  *   - below T1 → `[]`.
- * T1/T2 read from `HYDRA_USAGE_5H_THROTTLE_T1` / `_T2` (fractions). When a
- * mis-set T2 < T1, the higher of the two governs the T2 cut so the ordering
- * invariant (T2 ⊇ T1 only above T1) never inverts.
+ * `t1` / `t2` are fractions in (0, 1). When a mis-set T2 < T1, the higher of the
+ * two governs the T2 cut so the ordering invariant (T2 ⊇ T1 only above T1)
+ * never inverts.
  */
-export function fiveHourThrottleShed(snapshot: UsageSnapshot): readonly string[] {
+export function fiveHourThrottleShed(
+  snapshot: UsageSnapshot,
+  t1: number,
+  t2: number,
+): readonly string[] {
   // Only the AUTHORITATIVE OAuth meter throttles real work; the transcript
   // estimate is too rough to gate on (and is 0 when uncalibrated).
   if (snapshot.usageSource !== "oauth") return [];
-  const t1 = getFiveHourThrottleThreshold(
-    "HYDRA_USAGE_5H_THROTTLE_T1",
-    DEFAULT_FIVE_HOUR_THROTTLE_T1,
-  );
-  const t2 = getFiveHourThrottleThreshold(
-    "HYDRA_USAGE_5H_THROTTLE_T2",
-    DEFAULT_FIVE_HOUR_THROTTLE_T2,
-  );
   const pct = snapshot.percentLast5h;
   // Defensive ordering: T2 must not cut below T1. If an operator mis-sets
   // T2 < T1, treat the larger as the T2 boundary (the T1 set still sheds at T1).
@@ -415,7 +394,14 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
   //   - the weekly-projection pacing shed (existing, `pacingState === "over"`)
   //   - the graduated 5h-utilization throttle (keyed off OAuth `percentLast5h`)
   // Union + de-dupe so a class shed by either path appears exactly once.
-  const throttleShed = fiveHourThrottleShed(snapshot);
+  // Read the 5h-throttle thresholds from the Cost env-reader leaf here and pass
+  // the parsed fractions into the pure fold (issue #2550) — the same seam the
+  // Pacing Ceiling already uses (getWeeklyPaceCeiling() → projectPacingCurve).
+  const throttleShed = fiveHourThrottleShed(
+    snapshot,
+    getFiveHourThrottleT1(),
+    getFiveHourThrottleT2(),
+  );
   const fiveHourThrottleShed_ = throttleShed.length > 0;
   const shed =
     pacingShed || fiveHourThrottleShed_
