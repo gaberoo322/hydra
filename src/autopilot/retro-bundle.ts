@@ -63,6 +63,8 @@ import {
   bucketOf,
   projectDispatches,
   dedupByCanonicalCycleId,
+  collectProvisionalCycleIds,
+  confirmDrillableCycleIds,
   flagDispatchesForDrill,
 } from "./retro-projections.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
@@ -278,10 +280,10 @@ export async function assembleRetroBundle(
   // #1352) starts status:null / bucket:null, so it is PROVISIONAL: we keep its
   // handle only if the metrics-sidecar / cycle-hash read confirms a terminal
   // cycle record was durably written (the genuinely-completed-but-interrupted
-  // dispatch). Capture provenance BEFORE enrichment mutates status.
-  const provisionalCycleIds = new Set<string>(
-    dispatches.filter((d) => d.cycleId && d.status === null).map((d) => d.cycleId),
-  );
+  // dispatch). Capture provenance BEFORE enrichment mutates status — the
+  // `collectProvisionalCycleIds` stage names this rule in the projection
+  // Interface (issue #2547) instead of inlining it in the assembler's scope.
+  const provisionalCycleIds = collectProvisionalCycleIds(dispatches);
   const confirmedCycleIds = new Set<string>();
   for (const d of dispatches) {
     if (!d.cycleId) continue;
@@ -325,26 +327,17 @@ export async function assembleRetroBundle(
     if (terminalRecordSeen) confirmedCycleIds.add(d.cycleId);
   }
 
-  // 3a. Confirm-or-drop PROVISIONAL candidate cycleIds (issue #1352). A
-  //     snapshot-only dispatch whose recovered task_id-cycleId pointed at NO
-  //     terminal cycle record (the slot was still in-flight when the run was
-  //     interrupted) has no transcript handle — reset its cycleId to "" so it
-  //     stays undrillable, exactly as before #1352. A confirmed candidate (a
-  //     genuinely-completed dispatch on an interrupted run — the case #1352
-  //     unstarves) keeps its cycleId and becomes drillable through the normal
-  //     flag machinery below. A NON-provisional (action-derived) cycleId is
-  //     never dropped: its handle came from a recorded outcome (the provisional
-  //     set is keyed on status===null at projection time, which only a
-  //     snapshot-recovered candidate satisfies — an action/outcome join always
-  //     carries the resolved status alongside the cycleId).
-  for (const d of dispatches) {
-    if (!d.cycleId) continue;
-    if (provisionalCycleIds.has(d.cycleId) && !confirmedCycleIds.has(d.cycleId)) {
-      // Unconfirmed candidate: no terminal cycle record materialised. Drop the
-      // handle so the dispatch is recorded undrillable (the pre-#1352 shape).
-      d.cycleId = "";
-    }
-  }
+  // 3a. Confirm-or-drop PROVISIONAL candidate cycleIds (issue #1352). The
+  //     `confirmDrillableCycleIds` stage (issue #2547) names this confirm-or-
+  //     drop transition in the projection Interface: a snapshot-only dispatch
+  //     whose recovered task_id-cycleId pointed at NO terminal cycle record (the
+  //     slot was still in-flight when the run was interrupted) has its cycleId
+  //     reset to "" so it stays undrillable, exactly as before #1352; a
+  //     confirmed candidate (a genuinely-completed dispatch on an interrupted
+  //     run) keeps its cycleId and becomes drillable through the normal flag
+  //     machinery below; a NON-provisional (action-derived) cycleId is never
+  //     dropped (its handle came from a recorded outcome).
+  confirmDrillableCycleIds(dispatches, provisionalCycleIds, confirmedCycleIds);
 
   // 3c. Post-enrichment identity dedup (issue #1823). The projection-time
   //     `byIdentity` map deduped on the identity present ON THE ACTION; a

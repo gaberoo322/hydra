@@ -28,6 +28,8 @@ import {
   type RetroBundleDeps,
 } from "../src/autopilot/retro-bundle.ts";
 import {
+  collectProvisionalCycleIds,
+  confirmDrillableCycleIds,
   dedupByCanonicalCycleId,
   flagDispatchesForDrill,
   projectDispatches,
@@ -549,6 +551,73 @@ describe("dedupByCanonicalCycleId", () => {
     const yDup = dispatch({ cycleId: "y", turn_n: 2 });
     const out = dedupByCanonicalCycleId([x, y, yDup]);
     assert.deepEqual(out.map((d) => d.cycleId), ["x", "y"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PROVISIONAL→CONFIRMED cycle-id confirmation protocol (issue #1352 / #2547)
+//
+// The two pure halves of the "what counts as a drillable transcript handle"
+// rule that #2547 moved out of `assembleRetroBundle`'s local scope and into the
+// projection Interface. These assert the protocol directly on
+// `RetroDispatch[]`, instead of reconstructing a full turn stream and
+// inspecting mutated array entries through the assembler (the structural win
+// the issue calls out). The end-to-end #1352 behaviour stays pinned by the
+// `assembleRetroBundle — composition` suite below.
+// ---------------------------------------------------------------------------
+
+describe("collectProvisionalCycleIds (#1352/#2547)", () => {
+  test("collects only non-empty-cycleId, status===null candidates", () => {
+    const snapshotCandidate = dispatch({ cycleId: "cand", status: null, bucket: null });
+    const actionJoined = dispatch({ cycleId: "real", status: "merged", bucket: "merged" });
+    const emptyHandle = dispatch({ cycleId: "", status: null, bucket: null });
+    const set = collectProvisionalCycleIds([snapshotCandidate, actionJoined, emptyHandle]);
+    assert.deepEqual([...set], ["cand"], "only the snapshot-recovered candidate is provisional");
+  });
+
+  test("an action-derived dispatch (resolved status) is never provisional", () => {
+    const failed = dispatch({ cycleId: "f", status: "failed", bucket: "failed" });
+    const set = collectProvisionalCycleIds([failed]);
+    assert.equal(set.size, 0, "a resolved-status cycleId carries a confirmed handle");
+  });
+
+  test("does not mutate its input", () => {
+    const d = dispatch({ cycleId: "cand", status: null, bucket: null });
+    collectProvisionalCycleIds([d]);
+    assert.equal(d.cycleId, "cand", "input cycleId is left intact (pure collect)");
+  });
+});
+
+describe("confirmDrillableCycleIds (#1352/#2547)", () => {
+  test("drops an unconfirmed provisional candidate's handle to ''", () => {
+    const inFlight = dispatch({ cycleId: "cand", status: null, bucket: null });
+    const provisional = new Set(["cand"]);
+    const confirmed = new Set<string>(); // enrichment confirmed nothing
+    confirmDrillableCycleIds([inFlight], provisional, confirmed);
+    assert.equal(inFlight.cycleId, "", "unconfirmed in-flight candidate is reset to '' (undrillable)");
+  });
+
+  test("keeps a confirmed provisional candidate's handle", () => {
+    const completed = dispatch({ cycleId: "cand", status: null, bucket: null });
+    const provisional = new Set(["cand"]);
+    const confirmed = new Set(["cand"]); // enrichment found a terminal cycle record
+    confirmDrillableCycleIds([completed], provisional, confirmed);
+    assert.equal(completed.cycleId, "cand", "a confirmed candidate keeps its drillable handle");
+  });
+
+  test("never drops a NON-provisional (action-derived) cycleId", () => {
+    const actionJoined = dispatch({ cycleId: "real", status: "failed", bucket: "failed" });
+    const provisional = new Set<string>(); // not provisional — resolved at projection time
+    const confirmed = new Set<string>();
+    confirmDrillableCycleIds([actionJoined], provisional, confirmed);
+    assert.equal(actionJoined.cycleId, "real", "an action-derived handle is never confirm-or-dropped");
+  });
+
+  test("leaves an already-empty cycleId untouched and returns the same array", () => {
+    const emptyHandle = dispatch({ cycleId: "", status: null, bucket: null });
+    const out = confirmDrillableCycleIds([emptyHandle], new Set(), new Set());
+    assert.equal(emptyHandle.cycleId, "", "empty handle stays empty");
+    assert.equal(out.length, 1, "returns the same array for chaining");
   });
 });
 
