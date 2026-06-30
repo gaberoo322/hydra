@@ -469,7 +469,10 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     assert.equal(calls.length, 1, "exactly one hydra-incident dispatch");
     assert.equal(calls[0]!.cmd, "claude");
     const joined = calls[0]!.args.join(" ");
-    assert.ok(joined.includes("/hydra-incident"), "dispatches the hydra-incident skill");
+    assert.ok(
+      joined.includes("/hydra-target-incident"),
+      "dispatches the Target-scoped hydra-target-incident skill (ADR-0025, issue #2553)",
+    );
     assert.ok(joined.includes("deadbeef"), "passes the merge SHA into the incident context");
     // Alarm-only: nothing in the argv asks for a revert.
     assert.ok(!/revert/i.test(joined) || /not assume an auto-revert/i.test(joined));
