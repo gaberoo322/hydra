@@ -157,6 +157,18 @@ Word overlap >50% → SKIP or COMMENT on existing.
 
 ### Issue formats
 
+All three formats stamp the `Source: …` provenance footer from the shared
+helper (`scripts/hydra/footer.sh`, issue #2556). It is composed OUTSIDE the
+single-quoted heredoc so the `<<'EOF'` injection-safety quoting is preserved
+(the helper expands the live timestamp; the heredoc body stays literal). Source
+the lib once at the top of the dispatch, then call `hydra_issue_footer
+hydra-discover 'tier N'` after each closing `EOF` (replace `tier N` with the
+real tier).
+
+```bash
+. ~/hydra/scripts/hydra/footer.sh
+```
+
 **Bug / health:**
 ```bash
 gh issue create --title "..." --label "needs-triage" --body "$(cat <<'EOF'
@@ -165,9 +177,9 @@ gh issue create --title "..." --label "needs-triage" --body "$(cat <<'EOF'
 ## Impact
 ## Suggested fix
 ---
-Source: hydra-discover (tier N) | $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-)"
+)
+$(hydra_issue_footer hydra-discover 'tier N')"
 ```
 
 **Improvement:**
@@ -184,9 +196,9 @@ gh issue create --title "..." --label "needs-triage" --body "$(cat <<'EOF'
 - Estimated scope: small/medium/large
 ## Research References
 ---
-Source: hydra-discover (tier N) | $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-)"
+)
+$(hydra_issue_footer hydra-discover 'tier N')"
 ```
 
 **Target project finding:**
@@ -197,9 +209,9 @@ gh issue create --title "..." --label "target-backlog" --body "$(cat <<'EOF'
 ## Suggested fix
 ## Context for orchestrator
 ---
-Source: hydra-discover (tier N) | $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-)"
+)
+$(hydra_issue_footer hydra-discover 'tier N')"
 ```
 
 ## Calibration
