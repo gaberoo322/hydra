@@ -1,21 +1,34 @@
 ---
 name: hydra-auto-merge-window
-description: Time-bounded auto-merger for the codex-removal refactor batch. When a window is open, classifies open hydra-dev PRs linked to refactor-batch issues, applies operator-approved to Tier-0 PRs, and enables auto-merge on Tier 1/2/3. Audit-only outside the window.
-when_to_use: "When the operator says 'open the merge window', 'close the merge window', 'auto-merge refactor batch', or wants to manage bulk approval of a labeled issue batch. Also invoked on a /loop interval to process eligible PRs."
+description: "Dormant batch-campaign template — a time-bounded auto-merger for any labeled issue batch (e.g. a future bulk-refactor wave). When a window is open, classifies open hydra-dev PRs linked to the configured batch-label issues, applies operator-approved to Tier-0 PRs, and enables auto-merge on Tier 1/2/3. Audit-only outside the window. Activated only when the operator points HYDRA_BATCH_LABEL at a live campaign label; idle otherwise."
+when_to_use: "When the operator is running a labeled bulk-PR campaign and says 'open the merge window', 'close the merge window', 'auto-merge the batch', or wants to manage bulk approval of a labeled issue batch — first set HYDRA_BATCH_LABEL to the campaign's label. Also invoked on a /loop interval to process eligible PRs. Dormant (no live campaign) by default."
 allowed_tools_claude: Read(*) Bash(*) Write(*)
 arguments: [action]
 ---
 
 # Hydra Auto-Merge Window
 
-Operator-controlled batch auto-merger. Used during the codex-removal refactor (and any future batched refactor) to bulk-approve PRs against an issue list without per-PR clicking.
+> **DORMANT — campaign template, not a standing skill.** This skill is **idle by
+> default**: no batch campaign is in flight, and with no `HYDRA_BATCH_LABEL`
+> configured it has nothing eligible to act on. It is a reusable template for the
+> *next* bulk-PR wave (a refactor batch, a migration sweep, a dependency bump
+> campaign), not infrastructure that runs during normal operation. Its original
+> use — the codex-removal `refactor-batch-2026-05` wave — has passed; that label
+> is no longer hardcoded. **To reactivate:** set `HYDRA_BATCH_LABEL` to the live
+> campaign's GitHub label (see Configuration) and open a window. When no campaign
+> is running, leave it dormant.
+
+Operator-controlled batch auto-merger. Used to bulk-approve PRs against a labeled
+issue list — without per-PR clicking — for the duration of a campaign. The batch
+label is configurable (`HYDRA_BATCH_LABEL`), so the same template serves any
+future bulk-refactor or migration wave; it is not tied to a single dated batch.
 
 ## Safety model
 
 Three nested constraints — all must pass before any PR is touched:
 
 1. **Window is open**: `~/.config/hydra/auto-merge-until.txt` exists and contains an ISO8601 timestamp in the future.
-2. **PR is in the batch**: PR body references an issue carrying the configured batch label (default `refactor-batch-2026-05`).
+2. **PR is in the batch**: PR body references an issue carrying the configured batch label (`HYDRA_BATCH_LABEL`). There is **no default** — if `HYDRA_BATCH_LABEL` is unset, the `run` action is a no-op (the skill is dormant until a campaign is named).
 3. **CI is green**: branch protection still enforces tests + tier-gate. This skill never bypasses CI — it only does what the operator would do manually: apply `operator-approved` to Tier-0 PRs and click `gh pr merge --auto`.
 
 Outside the window the skill is a no-op. Audit log at `~/.config/hydra/auto-merge-log.txt` records every action.
@@ -36,10 +49,18 @@ Outside the window the skill is a no-op. Audit log at `~/.config/hydra/auto-merg
 WINDOW_FILE=~/.config/hydra/auto-merge-until.txt
 LOG_FILE=~/.config/hydra/auto-merge-log.txt
 REPO=gaberoo322/hydra
-BATCH_LABEL=refactor-batch-2026-05
+# Campaign label — set this to the live batch's GitHub label before running.
+# No default: the codex-removal `refactor-batch-2026-05` wave is over, so the
+# template ships dormant. Point it at the next campaign's label to reactivate.
+BATCH_LABEL="${HYDRA_BATCH_LABEL:-}"
 MAX_WINDOW_HOURS=24
 DEFAULT_WINDOW_HOURS=6
 ```
+
+If `BATCH_LABEL` is empty, the `run`/`status` passes treat the skill as
+dormant and do nothing (a clean no-op + audit-log line) — they never scan or
+touch PRs. Set `HYDRA_BATCH_LABEL=<campaign-label>` to arm it, e.g.
+`HYDRA_BATCH_LABEL=migration-sweep-2026-Q3`.
 
 ## Step 1: parse action
 
@@ -81,6 +102,12 @@ fi
 
 **Status:**
 ```bash
+if [ -z "$BATCH_LABEL" ]; then
+  echo "Campaign: DORMANT (HYDRA_BATCH_LABEL unset — no batch to process)"
+else
+  echo "Campaign label: $BATCH_LABEL"
+fi
+
 if [ ! -f "$WINDOW_FILE" ]; then
   echo "Window: CLOSED"
 else
@@ -113,7 +140,21 @@ echo "                        /hydra-auto-merge-window status"
 
 The `run` action is the workhorse. Each step gates the next — if any check fails, exit cleanly with a log line.
 
-### 3a. Window check
+### 3a. Dormancy check (campaign label must be configured)
+
+```bash
+if [ -z "$BATCH_LABEL" ]; then
+  echo "[$(date -u +%FT%TZ)] HYDRA_BATCH_LABEL unset — dormant, no campaign to process (no-op)" | tee -a "$LOG_FILE"
+  exit 0
+fi
+```
+
+This runs first: with no campaign label there is nothing to act on, so the
+skill exits before touching the window or any PR. (Same guard belongs at the
+top of the `status` action so it reports `DORMANT` rather than an eligible-PR
+count.)
+
+### 3b. Window check
 
 ```bash
 if [ ! -f "$WINDOW_FILE" ]; then
@@ -131,7 +172,7 @@ fi
 echo "[$(date -u +%FT%TZ)] window open until $UNTIL — scanning PRs" >> "$LOG_FILE"
 ```
 
-### 3b. Build the eligible-issue list
+### 3c. Build the eligible-issue list
 
 A PR is eligible only if its body references an issue carrying `$BATCH_LABEL`.
 
@@ -146,7 +187,7 @@ if [ -z "$ELIGIBLE_ISSUES" ]; then
 fi
 ```
 
-### 3c. Fetch candidate PRs
+### 3d. Fetch candidate PRs
 
 ```bash
 gh pr list --repo "$REPO" --state open \
@@ -154,7 +195,7 @@ gh pr list --repo "$REPO" --state open \
   --limit 50 > /tmp/auto-merge-prs.json
 ```
 
-### 3d. Filter + classify + act
+### 3e. Filter + classify + act
 
 For each PR:
 1. Body must reference an eligible issue number: regex `(#|issues/)($ELIGIBLE_ISSUES)\b`.
@@ -172,6 +213,7 @@ from datetime import datetime, timezone
 
 REPO = "${REPO}"
 LOG = os.path.expanduser("${LOG_FILE}")
+BATCH_LABEL = "${BATCH_LABEL}"
 ELIGIBLE = "${ELIGIBLE_ISSUES}".split("|")
 ELIGIBLE_RE = re.compile(r"(?:#|issues/)(" + "|".join(re.escape(i) for i in ELIGIBLE) + r")\b")
 
@@ -244,7 +286,7 @@ for pr in prs:
                 continue
             log(f"PR #{num}: TIER-0 AUTO-APPROVED via window. Reason: {reason}")
             gh("pr", "comment", str(num), "--repo", REPO,
-               "--body", f"Auto-approved via refactor-batch window (this skill: hydra-auto-merge-window). Tier-0 reason: {reason}. CI re-runs against the labeled commit.",
+               "--body", f"Auto-approved via the '{BATCH_LABEL}' batch-campaign window (this skill: hydra-auto-merge-window). Tier-0 reason: {reason}. CI re-runs against the labeled commit.",
                check=False)
         # Enable auto-merge (will wait for CI to re-pass post-label)
         r = gh("pr", "merge", str(num), "--repo", REPO, "--auto", "--squash", check=False)
@@ -266,7 +308,7 @@ for pr in prs:
             continue
         log(f"PR #{num}: auto-merge enabled (tier {tier}). Reason: {reason}")
         gh("pr", "comment", str(num), "--repo", REPO,
-           "--body", f"Auto-merge enabled via refactor-batch window. Tier {tier}: {reason}",
+           "--body", f"Auto-merge enabled via the '{BATCH_LABEL}' batch-campaign window. Tier {tier}: {reason}",
            check=False)
         acted += 1
         continue
@@ -280,7 +322,11 @@ PYEOF
 ## Operator workflow
 
 ```bash
-# 1. File the refactor issues (already labeled refactor-batch-2026-05 + ready-for-agent)
+# 0. Arm the template for THIS campaign — point it at the campaign's GitHub
+#    label (this is what makes the dormant skill active). Example label only:
+export HYDRA_BATCH_LABEL=migration-sweep-2026-Q3
+
+# 1. File the campaign issues (labeled $HYDRA_BATCH_LABEL + ready-for-agent)
 # 2. Open the window for 6 hours
 /hydra-auto-merge-window open 6
 
@@ -293,7 +339,10 @@ PYEOF
 
 # 5. Audit
 tail -50 ~/.config/hydra/auto-merge-log.txt
-gh pr list --repo gaberoo322/hydra --state merged --label refactor-batch-2026-05 --limit 20
+gh pr list --repo gaberoo322/hydra --state merged --label "$HYDRA_BATCH_LABEL" --limit 20
+
+# 6. Stand down — unset the label so the skill returns to its dormant state
+unset HYDRA_BATCH_LABEL
 ```
 
 ## Failure modes the operator should know
