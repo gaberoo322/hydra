@@ -1,10 +1,11 @@
 /**
  * Stale-claim reaper (issue #374).
  *
- * Distinct from `requeueStaleInProgressItems` in ./wip.ts — that function uses
- * `meta.startedAt` (date precision) and reclaims items the system has been
- * chewing on for >7 days. This file uses `claimedAt` (ISO timestamp, stamped
- * on every move-into-inProgress) and reclaims items whose claimant died — the
+ * Distinct from the housekeeping stale-inProgress return chore
+ * (`src/scheduler/chores/stale-inprogress-return.ts`), which returns items
+ * stuck in `inProgress` for >24h (ZSET-score age signal) back to `queued`.
+ * This file uses `claimedAt` (ISO timestamp, stamped on every
+ * move-into-inProgress) and reclaims items whose claimant died — the
  * "Phase-A codex-removal orphaned 3 in-progress items" failure mode. Default
  * threshold 2h; tunable via HYDRA_CLAIM_MAX_AGE_MS.
  */
