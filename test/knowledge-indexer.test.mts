@@ -23,8 +23,7 @@ import {
   runSourceInitialPass,
   getCoverageStats,
   resetCoverageStats,
-  loadPersistedHashes,
-  _setHashPersistence,
+  HashDedupAdapter,
 } from "../src/knowledge-base/indexer.ts";
 
 // Use a unique temp root for each describe block so we don't collide with
@@ -282,9 +281,15 @@ describe("runSourceInitialPass", () => {
 // Issue #1123: the dedup hash map is persisted to Redis and reloaded on startup
 // so unchanged files are skipped ACROSS process restarts (not just within one
 // process lifetime). These tests drive the persistence seam through an in-memory
-// fake — no live Redis — and simulate a restart by clearing the in-memory cache
-// (resetCoverageStats) while keeping the persisted store, exactly the cold-cache /
-// warm-Redis condition every orchestrator bounce hits.
+// fake — no live Redis.
+//
+// Issue #2603: the persistence seam is now injected through the HashDedupAdapter
+// CONSTRUCTOR (the `_setHashPersistence` module-global escape-hatch is deleted).
+// A "process restart" is simulated by constructing a FRESH adapter with the SAME
+// injected persistence — the fresh adapter has empty in-memory maps while the
+// `fakeStore` (durable Redis stand-in) survives, exactly the cold-cache /
+// warm-Redis condition every orchestrator bounce hits. No shared module-global
+// state to reset — the fresh adapter IS the reset.
 describe("source-index persistence across restarts (issue #1123)", () => {
   let tempRoot: string;
   let src: string;
@@ -292,6 +297,17 @@ describe("source-index persistence across restarts (issue #1123)", () => {
   // The in-memory stand-in for the durable Redis hash.
   let fakeStore: Map<string, string>;
   let persistCalls: { path: string; hash: string }[];
+
+  /** Build an adapter wired to the (shared) fakeStore-backed persistence. */
+  function makeAdapter(): HashDedupAdapter {
+    return new HashDedupAdapter({
+      load: async () => new Map(fakeStore),
+      persist: async (path: string, hash: string) => {
+        fakeStore.set(path, hash);
+        persistCalls.push({ path, hash });
+      },
+    });
+  }
 
   before(async () => {
     const t = await makeTempProject();
@@ -314,25 +330,18 @@ describe("source-index persistence across restarts (issue #1123)", () => {
 
   after(async () => {
     globalThis.fetch = originalFetch;
-    _setHashPersistence(); // restore real Redis-backed accessors
     await rm(tempRoot, { recursive: true, force: true });
   });
 
   beforeEach(() => {
+    // Fresh durable store + call log per case — no cross-case dedup leakage.
     fakeStore = new Map<string, string>();
     persistCalls = [];
-    resetCoverageStats(); // clears the in-memory cache
-    _setHashPersistence({
-      load: async () => new Map(fakeStore),
-      persist: async (path: string, hash: string) => {
-        fakeStore.set(path, hash);
-        persistCalls.push({ path, hash });
-      },
-    });
   });
 
   test("first pass persists each indexed file's hash to the durable store", async () => {
-    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    const adapter = makeAdapter();
+    const result = await adapter.runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
     // makeTempProject creates control-loop.ts + nested/thing.ts under src.
     assert.equal(result.indexed, 2);
     assert.equal(fakeStore.size, 2, "both indexed files should be persisted");
@@ -340,22 +349,22 @@ describe("source-index persistence across restarts (issue #1123)", () => {
   });
 
   test("a file unchanged since its last persisted hash is skipped with a fresh in-memory cache", async () => {
-    // Pass 1: index + persist.
-    await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    // Pass 1: index + persist through the first adapter.
+    const adapter1 = makeAdapter();
+    await adapter1.runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
     assert.equal(fakeStore.size, 2);
 
-    // Simulate a process restart: the in-memory cache is gone, but the durable
-    // store survives. resetCoverageStats() drops the in-memory hashes; the
-    // fakeStore (Redis stand-in) is untouched.
-    resetCoverageStats();
+    // Simulate a process restart: a fresh adapter has empty in-memory maps, but
+    // the durable store (fakeStore) survives.
+    const adapter2 = makeAdapter();
 
     // Hydrate from the durable store — the startup hook does this before the pass.
-    const loaded = await loadPersistedHashes();
+    const loaded = await adapter2.loadPersistedHashes();
     assert.equal(loaded, 2, "hydrated both hashes from the durable store");
 
     // Pass 2 (post-restart): no file changed → zero re-uploads, all skipped.
     const persistCallsBefore = persistCalls.length;
-    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    const result = await adapter2.runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
     assert.equal(result.indexed, 0, "unchanged files must NOT be re-embedded after restart");
     assert.equal(result.skipped, 2, "both files skipped via the rehydrated dedup map");
     assert.equal(
@@ -366,18 +375,19 @@ describe("source-index persistence across restarts (issue #1123)", () => {
   });
 
   test("a changed file is re-indexed and re-persisted after a restart", async () => {
-    await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    const adapter1 = makeAdapter();
+    await adapter1.runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
 
-    // Restart: drop in-memory cache, keep durable store.
-    resetCoverageStats();
-    await loadPersistedHashes();
+    // Restart: fresh adapter (empty in-memory maps), durable store survives.
+    const adapter2 = makeAdapter();
+    await adapter2.loadPersistedHashes();
 
     // Mutate one file so its content hash changes.
     await writeFile(join(src, "control-loop.ts"), "export const scheduler = 12345;\n");
     const now = new Date();
     await utimes(join(src, "control-loop.ts"), now, now);
 
-    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    const result = await adapter2.runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
     assert.equal(result.indexed, 1, "only the changed file is re-embedded");
     assert.equal(result.skipped, 1, "the unchanged file is still skipped");
     // The durable store now reflects the new hash for the changed file.
@@ -387,17 +397,18 @@ describe("source-index persistence across restarts (issue #1123)", () => {
 
   test("loadPersistedHashes does not clobber a hotter in-memory entry", async () => {
     // Index once this lifetime (writes both in-memory + durable).
-    await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    const adapter = makeAdapter();
+    await adapter.runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
     const liveHash = fakeStore.get(join(src, "control-loop.ts"));
 
     // Simulate the durable store holding a STALE hash for the same path (e.g. a
     // racing writer). loadPersistedHashes must not overwrite the live cache.
     fakeStore.set(join(src, "control-loop.ts"), "stale-hash-deadbeef");
-    await loadPersistedHashes();
+    await adapter.loadPersistedHashes();
 
     // Re-run: the live (correct) hash still matches on disk → skipped, NOT
     // re-indexed off the stale durable value.
-    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    const result = await adapter.runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
     assert.equal(result.indexed, 0, "live in-memory hash wins over stale durable hash");
     assert.ok(liveHash, "sanity: a live hash existed");
   });
