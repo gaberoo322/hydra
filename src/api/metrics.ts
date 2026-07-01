@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { getMetricsTrend, projectGroundingDuration } from "../metrics/trend.ts";
+import { getMetricsTrend } from "../metrics/trend.ts";
+import { projectGroundingDuration } from "../metrics/grounding.ts";
 import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import {
   getAggregateStats,
@@ -186,8 +187,8 @@ export function createMetricsRouter() {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const trend = await getMetricsTrend(count);
 
-      // Percentile + bucketing math lives in src/metrics/trend.ts; this route
-      // is a thin delegate (issue #2126).
+      // Percentile + bucketing math lives in src/metrics/grounding.ts; this
+      // route is a thin delegate (issue #2126; relocated out of trend.ts #2614).
       return projectGroundingDuration(trend);
     }),
   );
