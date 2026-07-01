@@ -19,7 +19,11 @@ import Redis from "ioredis";
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { recordCycleMetrics } = await import("../src/metrics/record.ts");
-const { getAbandonmentBreakdown, categorizeAbandonReason } = await import("../src/api/metrics.ts");
+// Issue #2589: these functions relocated to the metrics domain module. Import
+// from the domain home directly — a domain import, not an API-layer import, so
+// this pure-function test carries no HTTP concern. The route
+// (src/api/metrics.ts) still re-exports them for back-compat.
+const { getAbandonmentBreakdown, categorizeAbandonReason } = await import("../src/metrics/abandonment.ts");
 
 let testRedis: any;
 
