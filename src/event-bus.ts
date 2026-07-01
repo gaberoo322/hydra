@@ -12,6 +12,13 @@ import { makeWsBroadcastRegistry, type WsBroadcastRegistry } from "./ws-broadcas
 // `NotificationEventType` is the type `EventInput.type` widens from.
 import { NOTIFICATION_EVENT_TYPES } from "./event-bus-vocabulary.ts";
 import type { NotificationEventType } from "./event-bus-vocabulary.ts";
+// The consumer open/stop/recover lifecycle (the former `consume()` coordinator,
+// `_consuming` flag, `stopConsuming()`, and the `_handleFailure` DLQ delegator)
+// was extracted into its own Seam (issue #2592). EventBus keeps a delegating
+// `consume()`/`stopConsuming()` that forwards to a `ConsumerSession` running on
+// this bus's connections, so all three production callers stay zero-diff and
+// the bus remains the sole raw-stream (x*) owner (CONTEXT.md L186 / ADR-0017).
+import { ConsumerSession, type ConsumerSessionOptions } from "./consumer-session.ts";
 
 
 // ---------------------------------------------------------------------------
@@ -604,12 +611,42 @@ class EventBus {
    * delegates to `this.wsRegistry.broadcast(...)`.
    */
   readonly wsRegistry: WsBroadcastRegistry;
-  _consuming: boolean;
+  /**
+   * The consumer open/stop/recover lifecycle, extracted into its own Seam
+   * (issue #2592). Lazily created on the first `consume()` so instances built
+   * via `Object.create(EventBus.prototype)` (transport-only tests) never pay
+   * for a session they don't run. The session receives THIS bus's connections
+   * as its transport — the bus stays the sole raw-stream (x*) owner.
+   */
+  private _session: ConsumerSession | null = null;
   constructor() {
     this.publisher = getRedisConnection();
     this.subscriber = getRedisSubscriber();
     this.wsRegistry = makeWsBroadcastRegistry();
-    this._consuming = false;
+  }
+
+  /**
+   * Lazily construct (and memoise) the `ConsumerSession` this bus delegates
+   * its consume lifecycle to. The session runs on the bus's own
+   * subscriber/publisher connections and wires the bus's enveloped
+   * `publish(STREAMS.DLQ, …)` as the DLQ writer, so no raw-stream ownership
+   * leaks out of the bus (CONTEXT.md L186 / ADR-0017 Category B).
+   */
+  private getSession(): ConsumerSession {
+    if (!this._session) {
+      this._session = new ConsumerSession({
+        subscriber: this.subscriber,
+        publisher: this.publisher,
+        publishDlq: (entry) =>
+          this.publish(STREAMS.DLQ, {
+            type: NOTIFICATION_EVENT_TYPES.DLQ_ENTRY,
+            source: "event-bus",
+            payload: entry,
+          }),
+        parseFields: (fields) => this._parseFields(fields),
+      });
+    }
+    return this._session;
   }
 
   /**
@@ -743,47 +780,16 @@ class EventBus {
     handler: EventHandler,
     opts: ConsumeOptions = {},
   ): Promise<void> {
-    const { count = 1, blockMs = 5000, reapStale = false } = opts;
-
-    // Before reclaiming, sweep ZOMBIE consumers (issue #1221). Opt-in via
-    // `reapStale` and gated to the PEL-loss-tolerant slot-events groups. This
-    // must run BEFORE XAUTOCLAIM so reclamation scans ~1 consumer (this one),
-    // not the hundreds an ungraceful-restart history would otherwise leave.
-    if (reapStale) {
-      await this.reapStaleConsumers(stream, group, consumer);
-    }
-
-    // Wire the extracted stream-consume protocol (issue #2455) onto this
-    // instance's connections: orphan recovery and the long-poll loop both run
-    // through the same handler/ack/onFailure deps, so a message reclaimed from
-    // a dead consumer and a freshly-delivered one follow the identical
-    // success-ACK / failure-DLQ path.
-    const deps: ConsumeDeps = {
-      handler,
-      ack: (msgId) => this.subscriber.xack(stream, group, msgId),
-      onFailure: (msgId, event, err) => this._handleFailure(stream, group, msgId, event, err),
-    };
-
-    // First, reclaim pending messages from dead consumers via XAUTOCLAIM.
-    // XREADGROUP with ">" only returns NEW messages, missing those orphaned by
-    // old consumers (e.g., after a restart).
-    await runAutoclaimRecovery(this.subscriber, stream, group, consumer, deps);
-
-    // Then long-poll for new messages until stopConsuming() flips the flag.
-    this._consuming = true;
-    await runLongPollLoop(
-      this.subscriber,
-      stream,
-      group,
-      consumer,
-      { count, blockMs },
-      () => this._consuming,
-      deps,
-    );
+    // The open/stop/recover lifecycle lives in `ConsumerSession` (issue #2592).
+    // This delegator keeps the caller signature zero-diff: it forwards to the
+    // session running on this bus's connections. The `ConsumeOptions` /
+    // `ConsumerSessionOptions` shapes are identical (count/blockMs/reapStale).
+    await this.getSession().start(stream, group, consumer, handler, opts as ConsumerSessionOptions);
   }
 
   stopConsuming(): void {
-    this._consuming = false;
+    // No session yet means nothing to stop — never force a lazy construction.
+    this._session?.stop();
   }
 
   /**
@@ -794,34 +800,6 @@ class EventBus {
    */
   async delConsumer(stream: string, group: string, consumer: string): Promise<void> {
     await delConsumer(this.publisher, stream, group, consumer);
-  }
-
-  /**
-   * Apply the DLQ-promotion policy to a handler failure. Kept on the class so
-   * the consume path stays zero-diff; wires the bus's enveloped `publish()` as
-   * the DLQ writer. See `promoteToDlqIfExhausted` (module-level) for the
-   * "secondary XPENDING → 3-attempt threshold → DLQ publish → xack" contract.
-   */
-  async _handleFailure(
-    stream: string,
-    group: string,
-    msgId: string,
-    event: ConsumedEvent,
-    err: Error,
-  ): Promise<void> {
-    await promoteToDlqIfExhausted(
-      this.publisher,
-      stream,
-      group,
-      msgId,
-      event,
-      err,
-      (entry) => this.publish(STREAMS.DLQ, {
-        type: NOTIFICATION_EVENT_TYPES.DLQ_ENTRY,
-        source: "event-bus",
-        payload: entry,
-      }),
-    );
   }
 
   /**
@@ -858,7 +836,9 @@ class EventBus {
   }
 
   async close(): Promise<void> {
-    this._consuming = false;
+    // Stop the consume loop before dropping the connections. `stopConsuming()`
+    // is a no-op when no session was ever opened (transport-only usage).
+    this.stopConsuming();
     closeRedisConnections();
   }
 }
