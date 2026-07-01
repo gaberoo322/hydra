@@ -26,7 +26,8 @@ import {
   projectAnchorDistribution,
   projectCumulativeAccomplishments,
 } from "../src/metrics/aggregate.ts";
-import { percentile, projectGroundingDuration } from "../src/metrics/trend.ts";
+import { projectGroundingDuration } from "../src/metrics/trend.ts";
+import { percentileNearestRankFraction as percentile } from "../src/metrics/math.ts";
 
 // ---------------------------------------------------------------------------
 // projectAnchorDistribution (anchor-distribution route extraction)

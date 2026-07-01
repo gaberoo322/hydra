@@ -25,6 +25,8 @@
 // The only API surface is `GET /metrics/instrumentation` (src/api/metrics.ts),
 // which reads `getInstrumentationSnapshot()`.
 
+import { percentileInterpolatedSorted } from "./math.ts";
+
 /**
  * Max samples retained per label. A small bounded ring keeps memory flat
  * regardless of cycle volume while still giving a stable p50/p95/p99 over a
@@ -128,18 +130,6 @@ export function time<T>(label: string, fn: () => T): T {
   return result;
 }
 
-/** Percentile (linear interpolation) over an already-sorted ascending array. */
-function percentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  if (sorted.length === 1) return round(sorted[0]);
-  const rank = (p / 100) * (sorted.length - 1);
-  const lo = Math.floor(rank);
-  const hi = Math.ceil(rank);
-  if (lo === hi) return round(sorted[lo]);
-  const frac = rank - lo;
-  return round(sorted[lo] + (sorted[hi] - sorted[lo]) * frac);
-}
-
 /** Round to 3 decimal places (sub-millisecond resolution, no float noise). */
 function round(n: number): number {
   return Math.round(n * 1000) / 1000;
@@ -177,9 +167,9 @@ export function getInstrumentationSnapshot(): InstrumentationSnapshot {
       label,
       count: sorted.length,
       total: ring.total,
-      p50: percentile(sorted, 50),
-      p95: percentile(sorted, 95),
-      p99: percentile(sorted, 99),
+      p50: percentileInterpolatedSorted(sorted, 50, 3),
+      p95: percentileInterpolatedSorted(sorted, 95, 3),
+      p99: percentileInterpolatedSorted(sorted, 99, 3),
       min: round(sorted[0]),
       max: round(sorted[sorted.length - 1]),
     });

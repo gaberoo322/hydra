@@ -17,7 +17,8 @@ import Redis from "ioredis";
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { recordCycleMetrics } = await import("../src/metrics/record.ts");
-const { getQualityGateTrend, percentile } = await import("../src/metrics/quality-gates.ts");
+const { getQualityGateTrend } = await import("../src/metrics/quality-gates.ts");
+const { percentileNearestRank: percentile } = await import("../src/metrics/math.ts");
 
 let testRedis: any;
 

@@ -12,20 +12,8 @@
  * fed nothing live.
  */
 
-/**
- * Compute the p-th percentile of a numeric array using nearest-rank.
- * Pure function — used by quality-gate trend summary.
- */
-export function percentile(values: number[], p: number): number | null {
-  const nums = values.filter((v) => typeof v === "number" && Number.isFinite(v));
-  if (nums.length === 0) return null;
-  const sorted = [...nums].sort((a, b) => a - b);
-  const clampedP = Math.max(0, Math.min(100, p));
-  const rank = Math.max(1, Math.ceil((clampedP / 100) * sorted.length));
-  return sorted[rank - 1];
-}
-
 import { getMetricsTrend } from "./trend.ts";
+import { percentileNearestRank } from "./math.ts";
 
 /**
  * Aggregate mutation kill-rate and JIT trend across the last N cycles (issue #212).
@@ -97,8 +85,8 @@ export async function getQualityGateTrend(count = 50) {
     ? Math.round(validKillRates.reduce((a, b) => a + b, 0) / validKillRates.length)
     : null;
 
-  const killRateP50 = percentile(validKillRates, 50);
-  const killRateP95 = percentile(validKillRates, 95);
+  const killRateP50 = percentileNearestRank(validKillRates, 50);
+  const killRateP95 = percentileNearestRank(validKillRates, 95);
 
   const gateBlockCount = entries.filter((e) => e.gateBlocked).length;
   const totalJitTestsAdded = entries.reduce(

@@ -47,11 +47,12 @@
  *   render "no data yet" rather than error.
  * - **Per-metric native windows.** Each metric echoes its own `window` +
  *   provenance; there is no false-precision single global window.
- * - **Pure classifier.** `classifyAutonomy` (autonomy-classifier.ts) and
- *   `percentile` (autonomy-rate.ts) are pure functions exported for tests; the
- *   GitHub and Redis readers are overridable via `deps`. Both live in their own
- *   canonical modules — this file imports `percentile`'s output via
- *   `computeAutonomyRate` and no longer re-exports it.
+ * - **Pure classifier.** `classifyAutonomy` (autonomy-classifier.ts) and the
+ *   `percentileInterpolated` primitive (metrics/math.ts, issue #2613) are pure
+ *   functions exported for tests; the GitHub and Redis readers are overridable
+ *   via `deps`. Both live in their own canonical modules — this file imports
+ *   the percentile's output via `computeAutonomyRate` and no longer re-exports
+ *   it.
  * - **Autonomy Rate fan-out lives in its own module.** `computeAutonomyRate`
  *   (autonomy-rate.ts, issue #2068) owns the dispatch->PR link + GitHub fan-out
  *   that produces the autonomy-rate + time-to-merge slices; this file composes

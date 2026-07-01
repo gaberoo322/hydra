@@ -21,7 +21,7 @@ import {
   getBuilderHealthScorecard,
   type BuilderHealthDeps,
 } from "../src/aggregators/builder-health.ts";
-import { percentile } from "../src/aggregators/autonomy-rate.ts";
+import { percentileInterpolated as percentile } from "../src/metrics/math.ts";
 import {
   classifyAutonomy,
   type GhPrView,

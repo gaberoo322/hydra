@@ -13,6 +13,7 @@ import {
   getCycleMetrics,
 } from "../redis/cycle-metrics.ts";
 import { NUMERIC_FIELD_NAMES } from "./record.ts";
+import { percentileNearestRankFraction } from "./math.ts";
 
 /**
  * Numeric fields known to live on the cycle-metrics hash. Parsed back from
@@ -242,19 +243,6 @@ export interface GroundingDurationResult {
 }
 
 /**
- * Pure percentile over a numeric array (nearest-rank, clamped to the last
- * index). Returns null for an empty array. Exported so the test suite can pin
- * the bucket math directly. Extracted verbatim from the inline
- * `GET /metrics/grounding-duration` route (#341, extracted in #2126).
- */
-export function percentile(arr: number[], p: number): number | null {
-  if (arr.length === 0) return null;
-  const sorted = [...arr].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
-  return sorted[idx];
-}
-
-/**
  * Pure projection: bucket a metrics-trend array by `groundingMode`
  * ("incremental" | "full" | "") and roll up p50/p95/mean grounding &
  * verification durations per bucket (issue #341). Extracted verbatim from the
@@ -286,13 +274,13 @@ export function projectGroundingDuration(
     return {
       cycles: subset.length,
       grounding: {
-        p50: percentile(ground, 0.5),
-        p95: percentile(ground, 0.95),
+        p50: percentileNearestRankFraction(ground, 0.5),
+        p95: percentileNearestRankFraction(ground, 0.95),
         mean: ground.length > 0 ? Math.round(ground.reduce((a, b) => a + b, 0) / ground.length) : null,
       },
       verification: {
-        p50: percentile(verify, 0.5),
-        p95: percentile(verify, 0.95),
+        p50: percentileNearestRankFraction(verify, 0.5),
+        p95: percentileNearestRankFraction(verify, 0.95),
         mean: verify.length > 0 ? Math.round(verify.reduce((a, b) => a + b, 0) / verify.length) : null,
       },
     };
