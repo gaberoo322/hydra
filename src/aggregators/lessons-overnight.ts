@@ -34,6 +34,7 @@
  */
 
 import { PROMOTION_THRESHOLD } from "../pattern-memory/constants.ts";
+import type { FrictionPattern } from "../pattern-memory/friction-pattern.ts";
 import {
   readFrictionPatterns,
   readMetaFrictionIssues,
@@ -82,19 +83,12 @@ export interface LessonsOvernightDeps {
   readFrictionPatterns?: () => Promise<Array<{ skill: string; patterns: FrictionPattern[] }>>;
 }
 
-/**
- * Minimal shape of one entry in a `hydra:friction:{skill}:patterns` JSON
- * array. Mirrors `MemoryPattern` from `pattern-memory/agent-memory.ts` but
- * only the fields this aggregator reads — keeping the type local avoids a
- * circular ts-only coupling on `MemoryPattern`'s growing field list.
- */
-export interface FrictionPattern {
-  category: string;
-  hitCount: number;
-  promoted?: boolean;
-  lastSeen: string;
-  examples?: string[];
-}
+// `FrictionPattern` (the read-side friction-pattern domain type) moved to its
+// canonical home in `src/pattern-memory/friction-pattern.ts` (issue #2596),
+// next to `MemoryPattern` and `PROMOTION_THRESHOLD`. Re-exported here (via the
+// top-of-file import) so any consumer that still imports it from this
+// aggregator keeps working.
+export type { FrictionPattern };
 
 // ---------------------------------------------------------------------------
 // Public entrypoint

@@ -38,7 +38,7 @@ import {
   type TrendPoint,
 } from "./trend-series.ts";
 import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
-import type { FrictionPattern } from "./lessons-overnight.ts";
+import type { FrictionPattern } from "../pattern-memory/friction-pattern.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
