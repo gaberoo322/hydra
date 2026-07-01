@@ -19,14 +19,6 @@ export async function getBacklogLaneWithScores(lane: string): Promise<string[]> 
 }
 
 /**
- * Get a backlog item by ID.
- */
-export async function getBacklogItem(id: string): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.hget(redisKeys.backlogItems(), id);
-}
-
-/**
  * Get the entire backlog items hash as an `id → raw JSON string` map (issue
  * #2056). HGETALL over `hydra:backlog:items` — the typed hash-scan accessor the
  * lane-index reconciler uses to read the canonical item set behind the Redis
@@ -38,21 +30,6 @@ export async function getBacklogItem(id: string): Promise<string | null> {
 export async function getAllBacklogItems(): Promise<Record<string, string>> {
   const r = getRedisConnection();
   return r.hgetall(redisKeys.backlogItems());
-}
-
-/**
- * Update a backlog item and move it between lanes atomically.
- */
-export async function moveBacklogItem(
-  id: string,
-  itemJson: string,
-  fromLane: string,
-  toLane: string,
-): Promise<void> {
-  const r = getRedisConnection();
-  await r.hset(redisKeys.backlogItems(), id, itemJson);
-  await r.zrem(redisKeys.backlogLane(fromLane), id);
-  await r.zadd(redisKeys.backlogLane(toLane), Date.now(), id);
 }
 
 /** Increment the backlog counter and return new ID. */

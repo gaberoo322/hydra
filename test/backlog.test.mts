@@ -363,6 +363,54 @@ describe("backlog state machine", () => {
     assert.equal(await admin.getInProgressCount(), 2);
   });
 
+  // Issue #2582: the housekeeping stale-inProgress return chore delegates its
+  // lane mutation to this backlog-module helper so the write goes through the
+  // atomic seam AND the stale claim fields are cleared. A returned item must
+  // land in queued with claimedAt/claimedBy nulled — the chore's earlier inline
+  // `item.lane = "queued"` + non-atomic moveBacklogItem left both stale.
+  test("returnInProgressItemToQueued moves to queued and clears claim fields", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "Claimed stale build", category: "test" });
+    // moveToInProgress with a claimedBy stamps claimedAt + claimedBy.
+    await admin.moveToInProgress("Claimed stale build", { claimedBy: "agent-xyz" });
+
+    const before = (await admin.getInProgressItems()).find(
+      (i: any) => i.title === "Claimed stale build",
+    );
+    assert.ok(before.claimedBy === "agent-xyz", "precondition: item carries a claim");
+    assert.ok(typeof before.claimedAt === "string", "precondition: item carries claimedAt");
+
+    const returned = await admin.returnInProgressItemToQueued(before.id, {
+      returnedReason: "stale_in_progress",
+    });
+    assert.ok(returned, "returns the moved item");
+    assert.equal(returned.lane, "queued");
+    assert.equal(returned.claimedBy, null, "claimedBy cleared on transition out of inProgress");
+    assert.equal(returned.claimedAt, null, "claimedAt cleared on transition out of inProgress");
+    assert.equal(returned.meta.returnedReason, "stale_in_progress");
+
+    // Atomic commit: lane hash (canonical) and zset membership agree.
+    const counts = await admin.getBacklogCounts();
+    assert.equal(counts.inProgress, 0);
+    assert.equal(counts.queued, 1);
+    const persisted = JSON.parse(await redis.hget("hydra:backlog:items", before.id));
+    assert.equal(persisted.lane, "queued");
+    assert.equal(persisted.claimedBy, null);
+  });
+
+  test("returnInProgressItemToQueued is a no-op for an item not in inProgress", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "Queued not-in-progress", category: "test" });
+    const backlogItem = (await admin.loadBacklog()).backlog.find(
+      (i: any) => i.title === "Queued not-in-progress",
+    );
+    // Item sits in the backlog lane, never inProgress.
+    const result = await admin.returnInProgressItemToQueued(backlogItem.id, {});
+    assert.equal(result, null, "returns null when the item is not in inProgress");
+    // Also null for a missing id.
+    assert.equal(await admin.returnInProgressItemToQueued("item-nonexistent", {}), null);
+  });
+
   test("getInProgressItems returns items sorted from inProgress lane", async (t) => {
     requireRedis(t);
     await admin.addToBacklog({ title: "IP item 1", category: "test", priority: 2 });
