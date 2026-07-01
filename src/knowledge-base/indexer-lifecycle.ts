@@ -29,13 +29,10 @@ import { watch } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import {
-  indexFile,
   indexText,
-  loadPersistedHashes,
-  makeSourceWatcher,
-  runSourceInitialPass,
-  setWatchedPaths,
   parseSourcePaths,
+  defaultHashAdapter,
+  HashDedupAdapter,
   type SourcePath,
 } from "./indexer.ts";
 
@@ -76,8 +73,25 @@ export interface IndexerControllerDeps {
   getMemoryPatterns?: (agent: string) => Promise<string | null>;
 
   /**
+   * The dedup + coverage state boundary this controller drives (issue #2603).
+   * Defaults to the production-shared {@link defaultHashAdapter} so the running
+   * indexer and the controller-less API reader (getCoverageStats in
+   * src/api/openviking.ts) observe the SAME state (INV-4). Tests construct a
+   * fresh {@link HashDedupAdapter} (optionally with injected persistence) so
+   * each case starts with clean hash maps and no cross-case dedup leakage — the
+   * constructor-injection path that replaces the deleted _setHashPersistence
+   * escape-hatch (INV-6, INV-7).
+   *
+   * When set, this adapter's methods (indexFile, loadPersistedHashes,
+   * runSourceInitialPass, setWatchedPaths, makeSourceWatcher) drive the config +
+   * source index paths — unless an explicit per-function override below is also
+   * supplied (the finer-grained stubs the lifecycle tests already use).
+   */
+  hashAdapter?: HashDedupAdapter;
+
+  /**
    * Index a config-tree file via OV container-path ingestion (with per-file
-   * SHA-256 hash-dedup). Defaults to indexFile from indexer.ts. This is the
+   * SHA-256 hash-dedup). Defaults to the hashAdapter's indexFile. This is the
    * config-file index path used by onFileChange — NOT indexText. Restoring
    * this dep (issue #2523) reverts the #2526 regression that re-routed config
    * changes through the blob-upload (indexText) path.
@@ -95,10 +109,10 @@ export interface IndexerControllerDeps {
   /** Source paths to watch + index. Defaults to DEFAULT_SOURCE_PATHS. */
   sourcePaths?: SourcePath[];
 
-  /** Load persisted source hashes from Redis. Defaults to loadPersistedHashes. */
+  /** Load persisted source hashes from Redis. Defaults to the hashAdapter's loadPersistedHashes. */
   loadPersistedHashes?: () => Promise<number>;
 
-  /** Run the initial source-file indexing pass. Defaults to runSourceInitialPass. */
+  /** Run the initial source-file indexing pass. Defaults to the hashAdapter's runSourceInitialPass. */
   runSourceInitialPass?: (opts?: {
     paths?: SourcePath[];
     windowMs?: number;
@@ -157,6 +171,11 @@ export class IndexerController {
   private lastRuleCounts: Record<string, number> = {};
   private readonly indexerPending = new Map<string, ReturnType<typeof setTimeout>>();
 
+  // The dedup + coverage state boundary (issue #2603). Owned so that
+  // constructing a fresh controller with a fresh adapter gets fresh hash maps
+  // automatically; production shares defaultHashAdapter so the API view is not
+  // orphaned (INV-4).
+  private readonly _hashAdapter: HashDedupAdapter;
   private readonly _getMemoryPatterns: NonNullable<IndexerControllerDeps["getMemoryPatterns"]>;
   private readonly _indexFile: NonNullable<IndexerControllerDeps["indexFile"]>;
   private readonly _indexText: NonNullable<IndexerControllerDeps["indexText"]>;
@@ -171,12 +190,20 @@ export class IndexerController {
   private readonly _debounceMs: number;
 
   constructor(deps: IndexerControllerDeps = {}) {
+    this._hashAdapter = deps.hashAdapter ?? defaultHashAdapter;
     this._getMemoryPatterns = deps.getMemoryPatterns ?? getMemoryPatterns;
-    this._indexFile = deps.indexFile ?? indexFile;
+    // Config-file + source index paths route through the owned adapter unless a
+    // finer-grained per-function override is supplied (the lifecycle tests'
+    // stub style). Bind so `this` inside the adapter method resolves correctly.
+    this._indexFile =
+      deps.indexFile ?? ((filePath) => this._hashAdapter.indexFile(filePath));
     this._indexText = deps.indexText ?? indexText;
     this._sourcePaths = deps.sourcePaths ?? DEFAULT_SOURCE_PATHS;
-    this._loadPersistedHashes = deps.loadPersistedHashes ?? loadPersistedHashes;
-    this._runSourceInitialPass = deps.runSourceInitialPass ?? runSourceInitialPass;
+    this._loadPersistedHashes =
+      deps.loadPersistedHashes ?? (() => this._hashAdapter.loadPersistedHashes());
+    this._runSourceInitialPass =
+      deps.runSourceInitialPass ??
+      ((opts) => this._hashAdapter.runSourceInitialPass(opts));
     this._setInterval = deps.setInterval ?? ((cb, ms) => setInterval(cb, ms));
     this._clearInterval =
       deps.clearInterval ?? ((id) => { if (id != null) clearInterval(id); });
@@ -275,7 +302,7 @@ export class IndexerController {
     // the config dir plus each source root tagged with its extension. Must
     // run on every start() so the coverage endpoint never reports an empty
     // watch list (the defect a prior QA pass caught on issue #2523).
-    setWatchedPaths([
+    this._hashAdapter.setWatchedPaths([
       this._configPath,
       ...this._sourcePaths.map((s) => `${s.root}(${s.ext})`),
     ]);
@@ -297,7 +324,11 @@ export class IndexerController {
         this._watch(
           source.root,
           { recursive: true },
-          makeSourceWatcher(source, this.indexerPending, this._debounceMs)
+          this._hashAdapter.makeSourceWatcher(
+            source,
+            this.indexerPending,
+            this._debounceMs
+          )
         );
         console.log(
           `[Learning:Indexer] Watching source: ${source.root} (${source.ext})`
@@ -386,17 +417,31 @@ export class IndexerController {
 // ---------------------------------------------------------------------------
 
 /**
- * The production IndexerController singleton. Callers use the thin delegators
- * below so import paths remain unchanged.
+ * The production IndexerController singleton, lazily constructed on first use.
+ *
+ * Lazy (not eager) because indexer.ts and indexer-lifecycle.ts form a circular
+ * import: indexer.ts re-exports IndexerController from here, and this module
+ * imports `defaultHashAdapter` back from indexer.ts. IndexerController's
+ * constructor now reads `defaultHashAdapter` (issue #2603, INV-4) — a `const`
+ * subject to the temporal dead zone. Eagerly running `new IndexerController()`
+ * at module-init time can execute before indexer.ts finishes initializing
+ * `defaultHashAdapter`, throwing `ReferenceError: Cannot access
+ * 'defaultHashAdapter' before initialization`. Deferring construction to the
+ * first startKnowledgeIndexer() call — long after both modules' top-level init
+ * has completed — sidesteps the TDZ without changing the delegator API.
  */
-const defaultController = new IndexerController();
+let defaultController: IndexerController | null = null;
+function getDefaultController(): IndexerController {
+  if (!defaultController) defaultController = new IndexerController();
+  return defaultController;
+}
 
 /**
  * Start the background knowledge indexer.
  * Zero-diff drop-in for the former free function in indexer.ts Section 4.
  */
 export function startKnowledgeIndexer(): void {
-  defaultController.start();
+  getDefaultController().start();
 }
 
 /**
@@ -404,5 +449,5 @@ export function startKnowledgeIndexer(): void {
  * Zero-diff drop-in for the former free function in indexer.ts Section 4.
  */
 export function stopKnowledgeIndexer(): void {
-  defaultController.stop();
+  getDefaultController().stop();
 }
