@@ -10,33 +10,40 @@
  * time-guard.
  */
 
-import {
-  getBacklogLaneWithScores,
-  getBacklogItem,
-  moveBacklogItem,
-} from "../../redis/backlog.ts";
+import { getBacklogLaneWithScores } from "../../redis/backlog.ts";
+import { returnInProgressItemToQueued } from "../../backlog/wip.ts";
 
 const STALE_IN_PROGRESS_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /** External touchpoints of the stale-inProgress return chore. */
 export interface ReturnStaleInProgressItemsDeps {
   getBacklogLaneWithScores?: typeof getBacklogLaneWithScores;
-  getBacklogItem?: typeof getBacklogItem;
-  moveBacklogItem?: typeof moveBacklogItem;
+  /**
+   * Return one `inProgress` item (by id) to `queued`. Defaults to the
+   * backlog-module `returnInProgressItemToQueued`, which runs the write through
+   * the atomic seam (`applyAtomicLaneTransition`) AND clears the claim fields
+   * via `applyLaneTransition` (issue #2582). Returns the moved item, or `null`
+   * if it was already handled / no longer in `inProgress`.
+   */
+  returnInProgressItemToQueued?: typeof returnInProgressItemToQueued;
   now?: () => number;
 }
 
 /**
  * Return backlog items stuck in the `inProgress` lane for > 24h back to
- * `queued`. The same body that ran on the cleanup.ts timer. Naturally
- * idempotent: each invocation re-checks item age.
+ * `queued`. Naturally idempotent: each invocation re-checks item age.
+ *
+ * The lane mutation itself is delegated to the backlog module's
+ * `returnInProgressItemToQueued` (issue #2582) so it goes through the atomic
+ * write-commit seam and clears the item's stale `claimedAt` / `claimedBy`
+ * fields — the chore's earlier inline `item.lane = "queued"` +
+ * `moveBacklogItem` path did neither.
  */
 export async function returnStaleInProgressItems(
   deps: ReturnStaleInProgressItemsDeps = {},
 ): Promise<void> {
   const getBacklogLaneWithScoresFn = deps.getBacklogLaneWithScores ?? getBacklogLaneWithScores;
-  const getBacklogItemFn = deps.getBacklogItem ?? getBacklogItem;
-  const moveBacklogItemFn = deps.moveBacklogItem ?? moveBacklogItem;
+  const returnInProgressItemToQueuedFn = deps.returnInProgressItemToQueued ?? returnInProgressItemToQueued;
   const nowFn = deps.now ?? Date.now;
   try {
     const ids = await getBacklogLaneWithScoresFn("inProgress");
@@ -48,12 +55,12 @@ export async function returnStaleInProgressItems(
       const id = ids[i];
       const score = Number(ids[i + 1]);
       if (now - score > STALE_IN_PROGRESS_MS) {
-        const raw = await getBacklogItemFn(id);
-        if (!raw) continue;
-        const item = JSON.parse(raw);
-        item.lane = "queued";
-        item.meta = { ...item.meta, returnedReason: "stale_in_progress", returnedAt: new Date().toISOString() };
-        await moveBacklogItemFn(id, JSON.stringify(item), "inProgress", "queued");
+        const item = await returnInProgressItemToQueuedFn(
+          id,
+          { returnedReason: "stale_in_progress", returnedAt: new Date(now).toISOString() },
+          now,
+        );
+        if (!item) continue;
         returned++;
         console.log(`[Housekeeping] Returned stale inProgress item ${id} ("${item.title?.slice(0, 60)}") to queued`);
       }

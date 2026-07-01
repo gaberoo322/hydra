@@ -240,20 +240,26 @@ describe("runMemoryConsolidation — isolated (issue #2067)", () => {
 });
 
 describe("returnStaleInProgressItems — isolated (issue #2067)", () => {
-  test("moves a >24h inProgress item to queued via injected deps", async () => {
+  test("returns a >24h inProgress item to queued via the atomic backlog seam", async () => {
     const now = 1_000_000_000_000;
     const staleScore = now - 25 * 60 * 60 * 1000; // 25h old
-    const moves: Array<{ id: string; from: string; to: string }> = [];
+    const calls: Array<{ id: string; meta: Record<string, unknown> }> = [];
     await returnStaleInProgressItems({
       getBacklogLaneWithScores: async () => ["item-stale", String(staleScore)],
-      getBacklogItem: async (id) =>
-        JSON.stringify({ id, title: "stale build", lane: "inProgress", meta: {} }),
-      moveBacklogItem: async (id, _raw, from, to) => {
-        moves.push({ id, from, to });
+      // Issue #2582: the chore now delegates the mutation to the backlog
+      // module's atomic + claim-clearing helper instead of the pre-#1990
+      // non-atomic moveBacklogItem. Assert on the id + returnedReason it hands
+      // in; the helper (unit-tested separately) owns the actual write.
+      returnInProgressItemToQueued: async (id, meta) => {
+        calls.push({ id, meta });
+        return { id, title: "stale build", lane: "queued", meta };
       },
       now: () => now,
     });
-    assert.deepEqual(moves, [{ id: "item-stale", from: "inProgress", to: "queued" }]);
+    assert.equal(calls.length, 1, "the stale item is returned exactly once");
+    assert.equal(calls[0].id, "item-stale");
+    assert.equal(calls[0].meta.returnedReason, "stale_in_progress");
+    assert.equal(typeof calls[0].meta.returnedAt, "string");
   });
 
   test("leaves a fresh inProgress item alone", async () => {
@@ -261,11 +267,9 @@ describe("returnStaleInProgressItems — isolated (issue #2067)", () => {
     let moved = false;
     await returnStaleInProgressItems({
       getBacklogLaneWithScores: async () => ["item-fresh", String(now)],
-      getBacklogItem: async () => {
-        throw new Error("should not be read for a fresh item");
-      },
-      moveBacklogItem: async () => {
+      returnInProgressItemToQueued: async () => {
         moved = true;
+        return null;
       },
       now: () => now,
     });

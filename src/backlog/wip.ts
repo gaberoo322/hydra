@@ -13,10 +13,50 @@
  * and was removed (issue #2583) as a dead export.
  */
 
-import { getBacklogLaneCount } from "../redis/backlog.ts";
-import { WIP_LIMIT, getLaneItems } from "./internal.ts";
+import { getBacklogLaneCount, applyAtomicLaneTransition } from "../redis/backlog.ts";
+import {
+  WIP_LIMIT, applyLaneTransition, getItem, getLaneItems,
+} from "./internal.ts";
 
 export { WIP_LIMIT };
+
+/**
+ * Return a single `inProgress` item (by id) to the `queued` lane through the
+ * atomic seam (issue #2582).
+ *
+ * This is the backlog-module boundary for the housekeeping stale-inProgress
+ * return chore (`src/scheduler/chores/stale-inprogress-return.ts`). Routing the
+ * chore's lane mutation through here — rather than the pre-#1990 non-atomic
+ * `redis/backlog.ts:moveBacklogItem` (raw sequential HSET+ZREM+ZADD) — buys two
+ * invariants the chore's inline mutation lacked:
+ *
+ *  1. **Atomic write-commit** — `applyAtomicLaneTransition` runs {ZREM
+ *     inProgress, HSET item, ZADD queued} as one Lua step, so a crash / Redis
+ *     restart can never observe a half-write where `item.lane` (canonical hash)
+ *     disagrees with zset membership (the #1990 "phantom done" class of bug).
+ *  2. **Claim fields cleared** — `applyLaneTransition(item, "queued")` nulls
+ *     `claimedAt` + `claimedBy` on the transition OUT of `inProgress`, so the
+ *     stale-claims reaper, in-flight-PR suppression, and WIP counters don't
+ *     observe corrupted claim state on a returned item.
+ *
+ * The caller owns the *decision* (which items are stale, on what age signal)
+ * and stamps its own `meta` (e.g. `returnedReason`); this function owns the
+ * *mutation* and merges the supplied `meta` before persisting. Returns the
+ * mutated item on success, or `null` when the id is missing or no longer in
+ * `inProgress` (idempotent — a concurrent move already handled it).
+ */
+export async function returnInProgressItemToQueued(
+  id: string,
+  meta: Record<string, unknown> = {},
+  now: number = Date.now(),
+): Promise<any | null> {
+  const item = await getItem(id);
+  if (!item || item.lane !== "inProgress") return null;
+  item.meta = { ...item.meta, ...meta };
+  applyLaneTransition(item, "queued", {}, now);
+  await applyAtomicLaneTransition(id, JSON.stringify(item), ["inProgress"], "queued", now);
+  return item;
+}
 
 export async function getInProgressCount() {
   return await getBacklogLaneCount("inProgress");
