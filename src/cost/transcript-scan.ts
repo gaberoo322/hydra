@@ -44,6 +44,8 @@ import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
 import {
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
+  getOAuthUsageBackoffBaseMs,
+  getOAuthUsageBackoffMaxMs,
   getWeeklyResetAnchorMs,
 } from "./config.ts";
 
@@ -284,13 +286,52 @@ interface OAuthCacheEntry {
 let oauthCache: OAuthCacheEntry | null = null;
 
 /**
- * Null the module-level OAuth last-good cache. `clearUsageCache()` in
- * `usage-tracker.ts` calls this so its single reset entry point continues to
- * null BOTH the snapshot cache AND the oauthCache, even though the latter now
- * lives here (issue #1971). Test isolation depends on this. (issue #1090)
+ * Exponential-backoff state for the OAuth meter GET (issue #2619). Before this,
+ * every post-TTL scan UNCONDITIONALLY re-attempted the external GET, so a
+ * sustained 429 produced ~1–2 GETs/min (~90–100 failed reads/hour) that kept
+ * hammering an already rate-limited endpoint. Now a failed GET records the
+ * failure count and a `nextAttemptMs` gate; while `now < nextAttemptMs` the
+ * external GET is SKIPPED (the last-good stale value is served if still within
+ * TTL+maxStale, else the estimate) — so the re-probe cadence backs off
+ * exponentially (`base * 2^(failures-1)`, capped) instead of firing per-scan.
+ * A SUCCESSFUL read resets this to the zero-value, restoring the healthy fixed
+ * TTL cadence immediately. `null` means "no active backoff" (healthy or never
+ * failed). Only a SUCCESSFUL read clears it; failures grow it. Nulled by
+ * {@link clearOAuthCache} for test isolation.
+ */
+interface OAuthBackoffState {
+  /** Consecutive failed-GET count since the last success (>= 1 while active). */
+  failures: number;
+  /** Epoch-ms before which no external GET is attempted (the backoff gate). */
+  nextAttemptMs: number;
+}
+
+let oauthBackoff: OAuthBackoffState | null = null;
+
+/**
+ * Null the module-level OAuth last-good cache AND the backoff state (issue
+ * #2619). `clearUsageCache()` in `usage-tracker.ts` calls this so its single
+ * reset entry point continues to null the snapshot cache, the oauthCache, and
+ * the backoff clock, even though the latter two now live here (issue #1971).
+ * Test isolation depends on this. (issue #1090, #2619)
  */
 export function clearOAuthCache(): void {
   oauthCache = null;
+  oauthBackoff = null;
+}
+
+/**
+ * Compute the exponential-backoff delay for the Nth consecutive failure (issue
+ * #2619): `base * 2^(failures-1)`, clamped to `maxMs`. Pure so the curve is
+ * unit-testable. `failures` is >= 1 (the count AFTER incrementing for the
+ * current failure). Exported for direct unit test.
+ */
+export function oauthBackoffDelayMs(failures: number, baseMs: number, maxMs: number): number {
+  // 2^(failures-1), guarded so a huge failure count can't overflow into Infinity
+  // before the min-clamp (a healthy system never gets near this, but fail-safe).
+  const exponent = Math.min(Math.max(failures - 1, 0), 30);
+  const delay = baseMs * 2 ** exponent;
+  return Math.min(delay, maxMs);
 }
 
 /**
@@ -324,6 +365,15 @@ export interface CachedOAuthRead {
  * Only a SUCCESSFUL read overwrites the cache — a 429/timeout never evicts the
  * last-good. Pure of `Date.now()` (caller passes `nowMs`); the module cache is
  * the only side effect, mirroring the snapshot `cache`.
+ *
+ * Exponential backoff (issue #2619): once the TTL has expired, the external GET
+ * is NO LONGER attempted on every scan. A failed GET arms the module-level
+ * {@link oauthBackoff} gate; while `nowMs` is inside that gate the GET is
+ * SKIPPED entirely (the last-good stale value is served if still trustworthy,
+ * else the caller falls to the estimate), so a rate-limited endpoint is
+ * re-probed on an exponential-backoff cadence (`base * 2^(failures-1)`, capped)
+ * rather than being hammered ~1–2×/min. A SUCCESSFUL read clears the gate,
+ * restoring the healthy fixed-TTL cadence immediately.
  */
 async function readOAuthCached(
   readUsage: () => Promise<OAuthUsageResult>,
@@ -342,16 +392,63 @@ async function readOAuthCached(
     };
   }
 
-  // TTL expired (or no cache): attempt a fresh read.
+  // Backoff gate (issue #2619): the TTL has expired, but a recent failure has
+  // us in an exponential-backoff window — SKIP the external GET rather than
+  // hammer the rate-limited endpoint. Serve the last-good stale value if it is
+  // still within TTL+maxStale; otherwise the synthetic failure below falls the
+  // caller through to the estimate. This is the fix for the ~90–100 failed
+  // reads/hour steady state: no GET is spent while backing off.
+  if (oauthBackoff !== null && nowMs < oauthBackoff.nextAttemptMs) {
+    if (oauthCache !== null) {
+      const ageMs = nowMs - oauthCache.storedAt;
+      if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
+        return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs };
+      }
+    }
+    // No trustworthy last-good to serve: report the backoff-suppressed state as
+    // a failure so the caller falls to the estimate (never a silent 0). No GET
+    // was made — the whole point of the gate.
+    return {
+      result: { ok: false, code: "oauth-usage-non-2xx" },
+      stale: false,
+      ageMs: null,
+    };
+  }
+
+  // TTL expired (and not gated by backoff): attempt a fresh read.
   const result = await readUsage();
   if (isOAuthUsageOk(result)) {
+    // Success — refresh the cache AND reset the backoff clock so the next reads
+    // resume the healthy fixed-TTL cadence immediately (issue #2619 recovery).
     oauthCache = { data: result.data, storedAt: nowMs };
+    if (oauthBackoff !== null) {
+      console.error(
+        `[usage-tracker] OAuth meter recovered after ${oauthBackoff.failures} ` +
+          `consecutive failure(s); backoff cleared, resuming fixed-TTL cadence`,
+      );
+      oauthBackoff = null;
+    }
     return { result, stale: false, ageMs: 0 };
   }
 
-  // Read failed. Serve the last-good value (now stale) instead of flipping to
-  // the estimate — UNLESS it is older than TTL + maxStale, in which case it is
-  // too stale to trust and we let the failure fall through to the estimate.
+  // Read failed. Arm/advance the exponential-backoff gate so subsequent scans
+  // do NOT re-GET until the delay elapses (issue #2619). Each consecutive
+  // failure doubles the delay up to the ceiling; a later success resets it.
+  const failures = (oauthBackoff?.failures ?? 0) + 1;
+  const delayMs = oauthBackoffDelayMs(
+    failures,
+    getOAuthUsageBackoffBaseMs(),
+    getOAuthUsageBackoffMaxMs(),
+  );
+  oauthBackoff = { failures, nextAttemptMs: nowMs + delayMs };
+  console.error(
+    `[usage-tracker] OAuth meter read failed (${result.code}); backing off ` +
+      `${delayMs}ms before next GET (consecutive failure #${failures})`,
+  );
+
+  // Serve the last-good value (now stale) instead of flipping to the estimate —
+  // UNLESS it is older than TTL + maxStale, in which case it is too stale to
+  // trust and we let the failure fall through to the estimate.
   if (oauthCache !== null) {
     const ageMs = nowMs - oauthCache.storedAt;
     if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
