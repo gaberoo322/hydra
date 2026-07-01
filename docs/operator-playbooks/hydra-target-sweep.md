@@ -74,7 +74,7 @@ Each entry is JSON with `taskId`, `reason`, `retryCount`:
 
 ### 5. Stall-detection (in-progress >90 min)
 
-Detect items that claimed an `inProgress` slot but stopped making progress. Backlog items expose `movedAt` (ISO timestamp of the most recent lane transition) and, for `inProgress`, `claimedAt` + `claimedBy`. Items that landed in `inProgress` before these timestamps shipped (PR #201) will have `movedAt: null` — skip those, the longer-cutoff `requeueStaleInProgressItems()` job (multi-day) handles them.
+Detect items that claimed an `inProgress` slot but stopped making progress. Backlog items expose `movedAt` (ISO timestamp of the most recent lane transition) and, for `inProgress`, `claimedAt` + `claimedBy`. Items that landed in `inProgress` before these timestamps shipped (PR #201) will have `movedAt: null` — skip those, the longer-cutoff housekeeping stale-inProgress return chore (24h+, `returnStaleInProgressItems`) handles them.
 
 ```bash
 hydra backlog ls | python3 -c "
@@ -105,7 +105,7 @@ For each row printed (id, age, claimer, title):
 2. Log the action in the report under "Stall recoveries" with id, age, prior claimer, and reason `stalled-90min`.
 3. If the same item shows up here on consecutive sweeps, flag it for operator attention — repeated stalls usually mean a structural blocker, not a transient agent crash.
 
-This step complements (does not replace) the daily `requeueStaleInProgressItems()` cleanup that uses a multi-day cutoff. The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up.
+This step complements (does not replace) the housekeeping stale-inProgress return chore (`returnStaleInProgressItems`, 24h+ cutoff). The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up.
 
 ### 6. Clean prior failures
 

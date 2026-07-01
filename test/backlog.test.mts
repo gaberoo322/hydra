@@ -363,35 +363,6 @@ describe("backlog state machine", () => {
     assert.equal(await admin.getInProgressCount(), 2);
   });
 
-  test("requeueStaleInProgressItems requeues old items, leaves fresh ones", async (t) => {
-    requireRedis(t);
-    // Add two items to in-progress
-    await admin.addToBacklog({ title: "Fresh item", category: "test" });
-    await admin.moveToInProgress("Fresh item");
-
-    await admin.addToBacklog({ title: "Stale item", category: "test" });
-    await admin.moveToInProgress("Stale item");
-
-    // Manually backdate the stale item's startedAt to 10 days ago
-    const inProgressItems = await admin.getInProgressItems();
-    const staleEntry = inProgressItems.find((i: any) => i.title === "Stale item");
-    const raw = await redis.hget("hydra:backlog:items", staleEntry.id);
-    const staleItem = JSON.parse(raw);
-    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    staleItem.meta.startedAt = tenDaysAgo;
-    await redis.hset("hydra:backlog:items", staleItem.id, JSON.stringify(staleItem));
-
-    const requeued = await admin.requeueStaleInProgressItems();
-    assert.equal(requeued.length, 1);
-    assert.equal(requeued[0].title, "Stale item");
-    assert.equal(requeued[0].lane, "queued");
-
-    // Fresh item should still be in-progress
-    const counts = await admin.getBacklogCounts();
-    assert.equal(counts.inProgress, 1);
-    assert.equal(counts.queued, 1);
-  });
-
   test("getInProgressItems returns items sorted from inProgress lane", async (t) => {
     requireRedis(t);
     await admin.addToBacklog({ title: "IP item 1", category: "test", priority: 2 });
