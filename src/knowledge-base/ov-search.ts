@@ -315,6 +315,11 @@ export async function trackedOvSearch(
     const body: Record<string, any> = { query, limit };
     if (sessionId) body.session_id = sessionId;
 
+    // LOAD-BEARING PATH — do NOT drop the `/api/v1` prefix. The live OpenViking
+    // container serves `POST /api/v1/search/find` 200 with real hits; the
+    // prefix-less `/search/find` 404s. Issue #2586 misdiagnosed a bare-path curl
+    // 404 as a code bug and proposed rewriting this to `/search/find` — that
+    // would break the knowledge plane. `test/ov-search-path.test.mts` pins this.
     const result = await ovPostJson<any>("/api/v1/search/find", body, { timeout: 5000 });
 
     const latencyMs = Date.now() - startMs;
