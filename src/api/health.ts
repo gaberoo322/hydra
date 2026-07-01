@@ -36,6 +36,13 @@ import {
   probeOv,
   probeEmbedBackend,
   assessSkillCatalog,
+  // Issue #2605: the advisory deployed-SHA probe (the #734 deploy-drift backstop
+  // read) + its 60s TTL cache were the last module-level mutable state in this
+  // route file. They were extracted to the focused src/health/deployed-sha.ts
+  // leaf (owns the cache singleton + gitExec seam behind an injectable deps bag,
+  // like fan-out.ts/wol.ts) so this route becomes stateless. Zero behavioural
+  // change — /health produces `deployedSha` exactly as before.
+  getDeployedSha,
 } from "../health/index.ts";
 // Issue #1968: the in-process OV skill-catalog state, so /api/health/skills can
 // surface the silent empty-catalog failure (startup skill registration losing
@@ -50,21 +57,14 @@ import { countSourceHashes } from "../redis/source-index.ts";
 import { probeOvSourceResourcesPresent } from "../knowledge-base/indexer.ts";
 import type { PingableBus } from "./event-bus-types.ts";
 
-import { gitExec } from "../github/git.ts";
-import { isGhFailure } from "../github/exec.ts";
-
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
-// Issue #734 (deploy-drift backstop): expose the SHA the orchestrator is
-// running from so the watchdog (and operators) can compare it against
-// origin/master HEAD. This is a pure read — `git rev-parse HEAD` against
-// $HYDRA_ROOT, which deploy.sh leaves checked out on master. Cached for 60s
-// so the per-2-minute watchdog poll plus dashboard traffic doesn't fork a git
-// process on every /health hit. Fail-safe: any error resolves to null and is
-// simply omitted from the response (never throws, never blocks /health).
-let deployedShaCache: { sha: string | null; at: number } = { sha: null, at: 0 };
-const DEPLOYED_SHA_TTL_MS = 60_000;
+// Issue #734 (deploy-drift backstop): the SHA the orchestrator is running from
+// (advisory `git rev-parse HEAD` vs origin/master HEAD, cached 60s). Issue #2605:
+// the probe + its cache singleton moved to the focused src/health/deployed-sha.ts
+// leaf (imported via the ../health barrel as getDeployedSha) — this route file no
+// longer holds any module-level mutable state.
 
 // Issue #1324 + #1980: the plain-HTTP service probe and the OpenViking liveness
 // probe live in the focused ServiceProbe Adapter Seam (src/health/probe.ts) so
@@ -73,28 +73,6 @@ const DEPLOYED_SHA_TTL_MS = 60_000;
 // callers. The /health/services route below composes the three canonical probes
 // inline; the /health/deep fan-out is owned by the Health Probe Fan-out Module
 // (src/health/fan-out.ts, issue #2089).
-
-async function getDeployedSha(): Promise<string | null> {
-  const now = Date.now();
-  if (deployedShaCache.sha !== null && now - deployedShaCache.at < DEPLOYED_SHA_TTL_MS) {
-    return deployedShaCache.sha;
-  }
-  // Routes the `git rev-parse HEAD` through the GitHub CLI Adapter seam (issue
-  // #899). The seam never throws; a failure arm (not a git checkout, git
-  // missing, or timeout) degrades to null — the field is advisory and must
-  // never block /health.
-  const result = await gitExec(["-C", HYDRA_ROOT, "rev-parse", "HEAD"], { timeout: 3000 });
-  if (isGhFailure(result)) {
-    // Log once-per-cache-window so a misconfigured host is visible without
-    // spamming, then omit the field.
-    console.error(`[API] /health deployedSha unavailable (${result.code}): ${result.stderr.slice(0, 200)}`);
-    deployedShaCache = { sha: null, at: now };
-    return null;
-  }
-  const sha = result.data.stdout.trim() || null;
-  deployedShaCache = { sha, at: now };
-  return sha;
-}
 
 export function createHealthRouter(eventBus: PingableBus) {
   const router = Router();
