@@ -10,6 +10,7 @@ import {
   LANES, applyLaneTransition, getItem, saveItem, nextId,
 } from "./internal.ts";
 import { loadBacklog } from "./reads.ts";
+import type { BacklogItem, NewBacklogItemInput } from "./types.ts";
 // `titleSimilarity` was extracted to the neutral merged-refs home (issue #2110)
 // so the symmetric dedup helper sits beside the asymmetric `subjectCoveredBy`
 // the reconciler uses; this dedup surface keeps the identical symmetric scoring.
@@ -21,11 +22,11 @@ const FUZZY_DEDUP_THRESHOLD = 0.7; // 70% word overlap = duplicate
  * Add a new item to the backlog with title-based dedup (exact + fuzzy).
  * Called by the dashboard's POST /backlog endpoint and the work-queue API.
  */
-export async function addToBacklog(item: any): Promise<{
+export async function addToBacklog(item: NewBacklogItemInput): Promise<{
   added: boolean;
   id?: string | number;
   reason?: string;
-  matchedId?: any;
+  matchedId?: string | number;
   similarity?: number;
 }> {
   // Dedup: check all lanes for exact or fuzzy title match
@@ -45,7 +46,7 @@ export async function addToBacklog(item: any): Promise<{
 
   const id = await nextId();
   const targetLane = item.lane || "backlog";
-  const backlogItem: any = {
+  const backlogItem: BacklogItem = {
     id,
     title: item.title,
     checked: false,
@@ -81,13 +82,17 @@ export async function addToBacklog(item: any): Promise<{
 /**
  * Update specific fields on an existing backlog item.
  */
-export async function updateItem(itemId: any, updates: Record<string, any>) {
+export async function updateItem(
+  itemId: string | number,
+  updates: Partial<Pick<BacklogItem, "priority" | "description" | "labels" | "estimate" | "parentId" | "title">> & Record<string, unknown>,
+) {
   const item = await getItem(itemId);
   if (!item) return { ok: false, error: "Item not found" };
-  const ALLOWED = ["priority", "description", "labels", "estimate", "parentId", "title"];
+  const ALLOWED = ["priority", "description", "labels", "estimate", "parentId", "title"] as const;
   const oldTitle = item.title;
+  const target = item as Record<(typeof ALLOWED)[number], unknown>;
   for (const key of ALLOWED) {
-    if (updates[key] !== undefined) item[key] = updates[key];
+    if (updates[key] !== undefined) target[key] = updates[key];
   }
   await saveItem(item);
   // Keep the by-title index consistent on a title change (issue #2500): retire

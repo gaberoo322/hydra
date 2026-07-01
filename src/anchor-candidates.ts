@@ -48,6 +48,21 @@
 
 import { getWorkQueueItems, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
+import type { BacklogItem, BacklogItemLike } from "./backlog/types.ts";
+
+/**
+ * A parsed work-queue JSON entry (POST /queue or research auto-queue). Distinct
+ * from a Kanban BacklogItem — it carries `reference`/`queuedAt`/`reason` — but it
+ * extends BacklogItemLike so the shared eligibility predicates
+ * (requiresSpawnCapableDispatch / requiresNonPrDispatch) accept it directly.
+ */
+interface WorkQueueEntry extends BacklogItemLike {
+  reference?: string;
+  description?: string;
+  queuedAt?: string;
+  source?: string;
+  reason?: string;
+}
 import { time } from "./metrics/instrumentation.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/per-anchor.ts";
 // Design-concept annotation policy — the `CandidateDesignConcept` type, its
@@ -214,7 +229,10 @@ export interface GetCandidateFeedOpts {
  * degrades that one field; it never drops a candidate (ADR-0016 invariant).
  */
 export interface CandidateFeedDeps {
-  loadBacklog: () => Promise<Record<string, any[]>>;
+  // The production adapter returns full BacklogItems, but this is a test-injection
+  // seam: stubs supply only the fields the feed reads, so it accepts
+  // Partial<BacklogItem>. The feed loop defensively narrows every field it uses.
+  loadBacklog: () => Promise<Record<string, Partial<BacklogItem>[]>>;
   getWorkQueueItems: () => Promise<string[]>;
   loadLastReflectionAt: (anchorRef: string) => Promise<string | null>;
   loadDesignConcept: (anchorRef: string, now: number) => Promise<CandidateDesignConcept>;
@@ -337,7 +355,7 @@ async function getCandidateFeedImpl(
       ["backlog", "kanban-queued"],
     ];
     for (const [lane, tier] of kanbanLanes) {
-      const items = (lanes as any)[lane] || [];
+      const items: Partial<BacklogItem>[] = lanes[lane] || [];
       for (const item of items) {
         if (excludeInFlight && isInFlightPR(item, now)) {
           inFlightSuppressed++;
@@ -392,8 +410,13 @@ async function getCandidateFeedImpl(
   try {
     const raw = await d.getWorkQueueItems();
     for (const r of raw) {
-      let item: any;
-      try { item = JSON.parse(r); } catch { /* intentional: skip corrupt work-queue entry */ continue; }
+      // A work-queue entry is a DIFFERENT shape from a Kanban BacklogItem: it is
+      // free-form JSON carrying `reference`/`description`/`queuedAt`/`source`/
+      // `reason` plus the same eligibility carrier flags. Typed as WorkQueueEntry
+      // (which structurally satisfies BacklogItemLike) so the eligibility
+      // predicates accept it without an `any` (issue #2588).
+      let item: WorkQueueEntry;
+      try { item = JSON.parse(r) as WorkQueueEntry; } catch { /* intentional: skip corrupt work-queue entry */ continue; }
       const ref = item.reference || item.description;
       if (!ref) continue;
       // Terminal-state markers (COMPLETED:/CLOSED:) are completion notes, not

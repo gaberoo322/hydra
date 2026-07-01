@@ -177,7 +177,7 @@ export async function fetchTargetMergeCommitRefs(): Promise<MergedRef[] | null> 
  * matcher without invoking `gh`, and so knip/dead-code sees it through a static
  * import rather than the dynamic-import `admin` namespace.
  */
-export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs: string[]): boolean {
+export function itemMatchesOpenPr(item: { id: string | number; title?: string }, prBlobs: string[]): boolean {
   if (!Array.isArray(prBlobs) || prBlobs.length === 0) return false;
   const id = String(item.id || "");
   if (!id) return false;

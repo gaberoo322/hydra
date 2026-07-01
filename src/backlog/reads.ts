@@ -4,6 +4,9 @@
 
 import { getBacklogLaneCount } from "../redis/backlog.ts";
 import { LANES, getLaneItems, sortByQueuePriority } from "./internal.ts";
+import type { BacklogItem } from "./types.ts";
+
+export type { BacklogItem } from "./types.ts";
 
 /**
  * The full set of Kanban lanes loadBacklog() returns, keyed by lane name.
@@ -11,24 +14,22 @@ import { LANES, getLaneItems, sortByQueuePriority } from "./internal.ts";
  * The shape is fully determined by the `LANES` const in ./internal.ts; naming
  * each lane explicitly lets callers (e.g. api/queue.ts) reach `backlog.triage`
  * without an `as any` cast, and turns a renamed lane into a compile error
- * instead of a silent `undefined`. The trailing `[lane: string]: Item[]` index
- * signature preserves the historical string-indexed access pattern
+ * instead of a silent `undefined`. The trailing `[lane: string]: BacklogItem[]`
+ * index signature preserves the historical string-indexed access pattern
  * (`lanes[lane]` while iterating `LANES`) used by addToBacklog/getItemsByParent.
  *
- * Items themselves stay `Item` (an alias for the module's untyped item shape) —
- * narrowing the item record is out of scope here; this issue only tightens the
- * lane-key layer that forced the casts.
+ * Items are `BacklogItem` (issue #2588) — the compiler-enforced domain type
+ * declared in ./types.ts. This replaced the historical `type Item = any` that
+ * propagated an untyped bag through the whole backlog module family.
  */
-type Item = any;
-
 export type Backlog = {
-  triage: Item[];
-  backlog: Item[];
-  queued: Item[];
-  blocked: Item[];
-  inProgress: Item[];
-  done: Item[];
-  [lane: string]: Item[];
+  triage: BacklogItem[];
+  backlog: BacklogItem[];
+  queued: BacklogItem[];
+  blocked: BacklogItem[];
+  inProgress: BacklogItem[];
+  done: BacklogItem[];
+  [lane: string]: BacklogItem[];
 };
 
 /**
@@ -61,9 +62,9 @@ export async function getBacklogCounts(): Promise<Record<string, number>> {
 /**
  * Return all items with the given parentId across all lanes.
  */
-export async function getItemsByParent(parentId: any) {
+export async function getItemsByParent(parentId: string | number) {
   const lanes = await loadBacklog();
-  const children: any[] = [];
+  const children: BacklogItem[] = [];
   for (const lane of LANES) {
     for (const item of lanes[lane]) {
       if (item.parentId === parentId) children.push(item);

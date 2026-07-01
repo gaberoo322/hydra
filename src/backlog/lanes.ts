@@ -25,6 +25,7 @@ import {
   resolveItemIdByTitle,
 } from "./internal.ts";
 import { time } from "../metrics/instrumentation.ts";
+import type { BacklogItem } from "./types.ts";
 
 /** Score for a to-lane ZADD: done is negated (-now) so ascending ZRANGE lists most-recently-done first. */
 function laneScore(lane: string, now: number): number {
@@ -39,7 +40,7 @@ export async function promoteToQueued(count = 1, now: number = Date.now()) {
   const ids = await getBacklogLaneIds("backlog");
   if (ids.length === 0) return [];
 
-  const items: any[] = [];
+  const items: BacklogItem[] = [];
   for (const id of ids) {
     const item = await getItem(id);
     if (item) items.push(item);
@@ -53,7 +54,7 @@ export async function promoteToQueued(count = 1, now: number = Date.now()) {
   for (const item of toPromote) {
     item.meta = { ...item.meta, queuedAt: dateOnly };
     applyLaneTransition(item, "queued", {}, now);
-    await applyAtomicLaneTransition(item.id, JSON.stringify(item), ["backlog"], "queued", laneScore("queued", now));
+    await applyAtomicLaneTransition(String(item.id), JSON.stringify(item), ["backlog"], "queued", laneScore("queued", now));
     moved.push(item);
   }
 
@@ -74,7 +75,12 @@ export async function moveToInProgress(
   title: string,
   opts: { claimedBy?: string | null } | string | null = null,
   now: number = Date.now(),
-): Promise<any> {
+): Promise<
+  | boolean
+  | { blocked: "wip-limit"; count: number; limit: number }
+  | { ok: true; item: BacklogItem }
+  | { ok: false; reason: "not-found" }
+> {
   const structured = opts !== null && opts !== undefined;
   const claimedBy = typeof opts === "string"
     ? opts
@@ -199,7 +205,7 @@ export async function returnToBacklog(title: string, reason: string, now: number
  * throws. Non-blocked transitions are entirely unaffected.
  */
 export async function moveItemToLane(
-  itemId: any,
+  itemId: string | number,
   targetLane: string,
   opts: { claimedBy?: string | null; reason?: string | null } = {},
   now: number = Date.now(),
@@ -213,7 +219,7 @@ export async function moveItemToLane(
 }
 
 async function moveItemToLaneImpl(
-  itemId: any,
+  itemId: string | number,
   targetLane: string,
   opts: { claimedBy?: string | null; reason?: string | null } = {},
   now: number = Date.now(),
@@ -252,14 +258,14 @@ async function moveItemToLaneImpl(
   applyLaneTransition(item, targetLane, { claimedBy: opts.claimedBy ?? null }, now);
   // Defensively ZREM every lane (the dashboard drag-and-drop boundary doesn't
   // track the source lane) before HSET + ZADD into the target — all atomic.
-  await applyAtomicLaneTransition(itemId, JSON.stringify(item), LANES, targetLane, laneScore(targetLane, now));
+  await applyAtomicLaneTransition(String(itemId), JSON.stringify(item), LANES, targetLane, laneScore(targetLane, now));
   return { ok: true };
 }
 
 /**
  * Delete an item entirely.
  */
-export async function deleteItem(itemId: any) {
+export async function deleteItem(itemId: string | number) {
   const item = await getItem(itemId);
   if (!item) return { ok: false, error: "Item not found" };
   await removeItem(itemId);

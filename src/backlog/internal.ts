@@ -19,6 +19,7 @@ import {
   incrBacklogCounter,
   clearBacklogTitleIndex, getBacklogItemIdByTitle,
 } from "../redis/backlog.ts";
+import type { BacklogItem } from "./types.ts";
 
 export const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
 export const DONE_RETENTION_DAYS = 7;
@@ -44,7 +45,7 @@ export const WIP_LIMIT = parseInt(process.env.HYDRA_WIP_LIMIT) || 3;
  * as before — purely extending, never breaking.
  */
 export function applyLaneTransition(
-  item: any,
+  item: BacklogItem,
   targetLane: string,
   opts: { claimedBy?: string | null } = {},
   now: number = Date.now(),
@@ -66,24 +67,24 @@ export async function nextId() {
   return incrBacklogCounter();
 }
 
-export async function getItem(id: any) {
-  const raw = await getBacklogItemRaw(id);
+export async function getItem(id: string | number): Promise<BacklogItem | null> {
+  const raw = await getBacklogItemRaw(String(id));
   if (!raw) return null;
-  return JSON.parse(raw);
+  return JSON.parse(raw) as BacklogItem;
 }
 
-export async function saveItem(item: any) {
-  await saveBacklogItem(item.id, JSON.stringify(item));
+export async function saveItem(item: BacklogItem) {
+  await saveBacklogItem(String(item.id), JSON.stringify(item));
 }
 
-export async function removeItem(id: any) {
+export async function removeItem(id: string | number) {
   // Clear the by-title index FIRST (issue #2500) so a concurrent title lookup
   // can't resolve to an id that is about to vanish from the items hash. Read the
   // item to learn its title; if it's already gone the compare-and-delete is a
   // no-op. The clear is title-scoped + compare-and-delete (only removes the
   // entry if it still points at THIS id), so it can't orphan another live
   // item that has since taken the same title.
-  const raw = await getBacklogItemRaw(id);
+  const raw = await getBacklogItemRaw(String(id));
   if (raw) {
     try {
       const title = JSON.parse(raw)?.title;
@@ -94,7 +95,7 @@ export async function removeItem(id: any) {
       console.error(`[Backlog] removeItem: could not parse ${id} to clear title-index: ${err.message}`);
     }
   }
-  await removeBacklogItemAdapter(id, LANES);
+  await removeBacklogItemAdapter(String(id), LANES);
 }
 
 /**
@@ -132,10 +133,10 @@ export async function resolveItemIdByTitle(
   return null;
 }
 
-export async function getLaneItems(lane: string) {
+export async function getLaneItems(lane: string): Promise<BacklogItem[]> {
   const ids = await getBacklogLaneIds(lane);
   if (ids.length === 0) return [];
-  const items = [];
+  const items: BacklogItem[] = [];
   for (const id of ids) {
     const item = await getItem(id);
     if (item) items.push(item);

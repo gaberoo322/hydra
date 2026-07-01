@@ -140,7 +140,7 @@ export function createBacklogRouter() {
   router.get(
     "/backlog/:id/children",
     aggregatorRouteNoQuery("api/backlog/children", (req) =>
-      getItemsByParent(req.params.id),
+      getItemsByParent(String(req.params.id)),
     ),
   );
 
