@@ -13,6 +13,7 @@
  * from `../health` / `../src/health` rather than reaching into each submodule.
  * Internal cross-imports between the modules stay relative (`./rules.ts`).
  */
+export * from "./deployed-sha.ts";
 export * from "./diagnostics.ts";
 export * from "./fan-out.ts";
 export * from "./probe.ts";
