@@ -17,9 +17,9 @@ import assert from "node:assert/strict";
 
 import {
   computeAutonomyRate,
-  percentile,
   type AutonomyRateDeps,
 } from "../src/aggregators/autonomy-rate.ts";
+import { percentileInterpolated as percentile } from "../src/metrics/math.ts";
 import type { GhPrView } from "../src/aggregators/autonomy-classifier.ts";
 
 const NOW = new Date("2026-06-18T12:00:00.000Z");

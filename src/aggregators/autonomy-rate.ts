@@ -31,6 +31,7 @@ import { viewPr } from "../github/issues.ts";
 
 import { classifyAutonomy, type GhPrView, type AutonomyDecision } from "./autonomy-classifier.ts";
 import { listAutopilotPrLinksSince } from "../redis/autopilot-runs.ts";
+import { percentileInterpolated } from "../metrics/math.ts";
 
 /** The Autonomy Rate metric slice: autonomous / total over the PR window. */
 export interface AutonomyRateMetric {
@@ -124,8 +125,8 @@ export async function computeAutonomyRate(
       breakdown: decisions,
     },
     timeToMerge: {
-      medianMinutes: latencies.length > 0 ? percentile(latencies, 50) : null,
-      p90Minutes: latencies.length > 0 ? percentile(latencies, 90) : null,
+      medianMinutes: latencies.length > 0 ? percentileInterpolated(latencies, 50) : null,
+      p90Minutes: latencies.length > 0 ? percentileInterpolated(latencies, 90) : null,
       samples: latencies.length,
       window: prWindow,
     },
@@ -145,22 +146,3 @@ function makeDefaultFetchPrView(
     });
 }
 
-/**
- * Pure helper — exported for tests. Linear-interpolated percentile (p in
- * 0..100) over a numeric sample. Returns 0 for empty input.
- */
-export function percentile(values: number[], p: number): number {
-  const xs = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-  if (xs.length === 0) return 0;
-  if (xs.length === 1) return round1(xs[0]);
-  const rank = (p / 100) * (xs.length - 1);
-  const lo = Math.floor(rank);
-  const hi = Math.ceil(rank);
-  if (lo === hi) return round1(xs[lo]);
-  const frac = rank - lo;
-  return round1(xs[lo] + (xs[hi] - xs[lo]) * frac);
-}
-
-function round1(n: number): number {
-  return Math.round(n * 10) / 10;
-}
