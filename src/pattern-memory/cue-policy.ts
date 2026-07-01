@@ -99,7 +99,7 @@ const ACCEPTANCE_CRITERION_UNMET_THRESHOLD = 150;
 // thresholds; a forced alias there would corrupt those thresholds. The
 // `canonicalizeCue()` caller in `agent-memory.ts` applies the mapping only
 // when `namespace === "friction"`.
-export const CUE_ALIAS_TABLE: Readonly<Record<string, string>> = {
+const CUE_ALIAS_TABLE: Readonly<Record<string, string>> = {
   // Worktree write-fence desync cluster (issue #2527).
   // All five cues describe the same root failure: the harness write-fence /
   // anchor not aligned with the worktree the agent is actually in.
