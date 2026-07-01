@@ -72,7 +72,10 @@ function makeBus(publisher: unknown) {
   // tests override `bus.wsRegistry` to capture broadcasts.
   // @ts-expect-error — assigning into the readonly wsRegistry seam for the test.
   bus.wsRegistry = makeWsBroadcastRegistry();
-  bus._consuming = false;
+  // The consume open/stop/recover lifecycle moved to `ConsumerSession`
+  // (issue #2592); the former `bus._consuming = false` initializer is gone —
+  // these transport-only fakes never open a session. ConsumerSession has its
+  // own dedicated test suite in test/consumer-session.test.mts.
   return bus;
 }
 
