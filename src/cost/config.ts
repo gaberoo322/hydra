@@ -53,6 +53,31 @@ export const DEFAULT_OAUTH_USAGE_TTL_MS = 300_000;
 export const DEFAULT_OAUTH_USAGE_MAX_STALE_MS = 1_800_000;
 
 /**
+ * Default OAuth-meter backoff BASE delay (issue #2619): after the first failed
+ * external GET (a 429 or a transient network/timeout error) the read cadence
+ * backs off — the NEXT external GET is suppressed until `now + base` even though
+ * the TTL has expired, instead of the pre-#2619 behaviour of re-GETting on EVERY
+ * post-TTL scan (~1–2 GETs/min against a rate-limited endpoint). Each further
+ * consecutive failure DOUBLES the delay (`base * 2^(failures-1)`) up to
+ * {@link DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS}. At 30s the first backoff already
+ * collapses the ~90–100 failed-reads/hour steady state to a bounded exponential
+ * curve. A SUCCESSFUL read resets the counter to zero — the healthy cadence is
+ * the unchanged fixed TTL. Overridable via `HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS`.
+ */
+export const DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS = 30_000;
+
+/**
+ * Default OAuth-meter backoff CEILING (issue #2619): the exponential backoff
+ * delay is clamped here so a prolonged outage settles at a fixed slow re-probe
+ * cadence rather than growing unboundedly. At 15 minutes the meter re-probes at
+ * most ~4 times/hour during a sustained 429 wave (vs the pre-#2619 ~60/hr), and
+ * a recovered endpoint is still noticed within one ceiling interval. Sits above
+ * the 5-min TTL so backoff genuinely SLOWS the cadence below the TTL floor
+ * during an outage. Overridable via `HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS`.
+ */
+export const DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS = 900_000;
+
+/**
  * Default per-token-type cache-read weight (issue #873): 1.0 = identity =
  * the pre-#873 full-weight behaviour. Keeping the default at identity makes an
  * unset `HYDRA_USAGE_CACHE_READ_WEIGHT` a pure no-op so the change is purely
@@ -150,6 +175,53 @@ export function getOAuthUsageMaxStaleMs(): number {
         `finite number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_MAX_STALE_MS}`,
     );
     return DEFAULT_OAUTH_USAGE_MAX_STALE_MS;
+  }
+  return parsed;
+}
+
+/**
+ * The OAuth-meter backoff BASE delay in ms (issue #2619), from
+ * `HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS`, falling back to
+ * {@link DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS}. After a failed external GET the
+ * next GET is suppressed until `now + base * 2^(consecutiveFailures-1)` (capped
+ * by {@link getOAuthUsageBackoffMaxMs}), so a rate-limited endpoint is re-probed
+ * on an exponential-backoff cadence rather than on every post-TTL scan. A
+ * non-empty-but-invalid value (non-finite or <= 0) is logged (fail-loud) and
+ * falls back to the default. Pure + env-only so the backoff math stays
+ * unit-testable.
+ */
+export function getOAuthUsageBackoffBaseMs(): number {
+  const raw = process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS;
+  if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS is set but not a positive ` +
+        `finite number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS}`,
+    );
+    return DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS;
+  }
+  return parsed;
+}
+
+/**
+ * The OAuth-meter backoff CEILING in ms (issue #2619), from
+ * `HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS`, falling back to
+ * {@link DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS}. The exponential backoff delay is
+ * clamped to this, so a prolonged outage settles at a fixed slow re-probe
+ * cadence. A non-empty-but-invalid value (non-finite or <= 0) is logged
+ * (fail-loud) and falls back to the default. Pure + env-only.
+ */
+export function getOAuthUsageBackoffMaxMs(): number {
+  const raw = process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS;
+  if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS is set but not a positive ` +
+        `finite number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS}`,
+    );
+    return DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS;
   }
   return parsed;
 }

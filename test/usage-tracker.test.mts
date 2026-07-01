@@ -10,8 +10,12 @@ import {
   getFiveHourQuotaTokens,
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
+  getOAuthUsageBackoffBaseMs,
+  getOAuthUsageBackoffMaxMs,
   DEFAULT_OAUTH_USAGE_TTL_MS,
   DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
+  DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS,
+  DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS,
   getWeeklyResetAnchorMs,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,
@@ -35,6 +39,7 @@ import {
   firstUserMessageText,
   deriveDispatchKind,
   emptyByDispatchKind,
+  oauthBackoffDelayMs,
   DISPATCH_KINDS,
 } from "../src/cost/transcript-scan.ts";
 // Attribution coverage % pure fold (issue #2403) lives on the snapshot-assembly
@@ -3207,6 +3212,195 @@ describe("usage-tracker", () => {
         assert.equal(snap.oauthStale, false);
         assert.equal(snap.oauthAgeMs, null);
         assert.equal(snap.percentLast5h, 30); // (300/1000)*100
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // Exponential backoff on the OAuth meter GET (issue #2619). Before this, once
+  // the OAuth TTL expired every scan UNCONDITIONALLY re-attempted the external
+  // GET, so a sustained 429 produced ~1–2 GETs/min (~90–100 failed reads/hour)
+  // that kept hammering the rate-limited endpoint. Backoff now SKIPS the GET
+  // while inside an exponentially-growing window after a failure, and resets to
+  // the healthy fixed-TTL cadence on the first success.
+  describe("OAuth meter exponential backoff (issue #2619)", () => {
+    let restoreEnv: () => void;
+    beforeEach(() => {
+      restoreEnv = withEnvSnapshot();
+      clearUsageCache();
+    });
+    afterEach(() => {
+      restoreEnv();
+      clearUsageCache();
+    });
+
+    // Counting meter identical in shape to the #1090 block's — local so this
+    // sibling describe is self-contained.
+    function countingMeter(
+      results: Array<{ ok: boolean; five?: number; seven?: number; code?: any }>,
+    ) {
+      let calls = 0;
+      const reader = async () => {
+        const r = results[Math.min(calls, results.length - 1)];
+        calls++;
+        if (r.ok) {
+          return {
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: r.five ?? 0, resetsAt: null },
+              sevenDay: { utilization: r.seven ?? 0, resetsAt: null },
+            },
+          };
+        }
+        return { ok: false as const, code: r.code ?? "oauth-usage-non-2xx" };
+      };
+      return { reader, calls: () => calls };
+    }
+
+    test("getOAuthUsageBackoffBaseMs / MaxMs: default, override, and invalid fall-back", () => {
+      delete process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS;
+      assert.equal(getOAuthUsageBackoffBaseMs(), DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS);
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "45000";
+      assert.equal(getOAuthUsageBackoffBaseMs(), 45000);
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "not-a-number";
+      assert.equal(getOAuthUsageBackoffBaseMs(), DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS);
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "-5";
+      assert.equal(getOAuthUsageBackoffBaseMs(), DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS);
+
+      delete process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS;
+      assert.equal(getOAuthUsageBackoffMaxMs(), DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS);
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = "600000";
+      assert.equal(getOAuthUsageBackoffMaxMs(), 600000);
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = "bad";
+      assert.equal(getOAuthUsageBackoffMaxMs(), DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS);
+    });
+
+    test("oauthBackoffDelayMs: doubles per consecutive failure and clamps to the ceiling", () => {
+      // base * 2^(failures-1), clamped to maxMs.
+      assert.equal(oauthBackoffDelayMs(1, 30_000, 900_000), 30_000);
+      assert.equal(oauthBackoffDelayMs(2, 30_000, 900_000), 60_000);
+      assert.equal(oauthBackoffDelayMs(3, 30_000, 900_000), 120_000);
+      assert.equal(oauthBackoffDelayMs(4, 30_000, 900_000), 240_000);
+      // Grows to but never past the ceiling.
+      assert.equal(oauthBackoffDelayMs(6, 30_000, 900_000), 900_000, "clamped at ceiling");
+      assert.equal(oauthBackoffDelayMs(50, 30_000, 900_000), 900_000, "no overflow past ceiling");
+    });
+
+    test("backoff ENGAGES: a 429 suppresses the next GET while inside the window", async () => {
+      // Seed a good read, let the TTL expire, 429 once (arms backoff), then scan
+      // AGAIN inside the backoff window — the endpoint must NOT be re-GET.
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "600000"; // 10 min grace (serve stale)
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "120000"; // 2 min backoff
+      const root = await mkdtemp(join(tmpdir(), "usage-2619-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+        const m = countingMeter([
+          { ok: true, five: 55, seven: 33 }, // scan 1: seeds last-good
+          { ok: false, code: "oauth-usage-non-2xx" }, // scan 2: 429 → arms backoff
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        // Scan 1: fresh success. GET #1.
+        const first = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(first.usageSource, "oauth");
+        assert.equal(m.calls(), 1);
+
+        // Scan 2 at +90s (> 60s TTL): 429. The GET fires (GET #2), backoff armed
+        // for 2 min → nextAttempt = t0+90s+120s = t0+210s. Serves stale last-good.
+        const t1 = new Date(t0.getTime() + 90_000);
+        const second = await getUsage({ now: t1, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(second.usageSource, "oauth", "429 serves stale last-good");
+        assert.equal(second.oauthStale, true);
+        assert.equal(m.calls(), 2, "the first failure still attempts a GET");
+
+        // Scan 3 at +150s: still > TTL (would GET pre-#2619) but INSIDE the backoff
+        // window (< t0+210s). The GET MUST be suppressed — call count stays 2.
+        const t2 = new Date(t0.getTime() + 150_000);
+        const third = await getUsage({ now: t2, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 2, "backoff engaged: no GET spent while inside the window");
+        assert.equal(third.usageSource, "oauth", "still serves stale last-good during backoff");
+        assert.equal(third.oauthStale, true);
+
+        // Scan 4 at +250s: PAST the backoff window (> t0+210s). A GET is attempted
+        // again (GET #3) — the reader keeps 429ing, so backoff re-arms (now doubled).
+        const t3 = new Date(t0.getTime() + 250_000);
+        await getUsage({ now: t3, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 3, "past the window a re-probe GET fires");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("backoff RESETS on success: cadence returns to the fixed TTL", async () => {
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "600000"; // 10 min grace
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "120000"; // 2 min backoff
+      const root = await mkdtemp(join(tmpdir(), "usage-2619-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+        const m = countingMeter([
+          { ok: true, five: 40, seven: 20 }, // scan 1: seed
+          { ok: false, code: "oauth-usage-non-2xx" }, // scan 2: 429 → arms backoff
+          { ok: true, five: 70, seven: 50 }, // scan 3 (post-window): recovers
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        // +90s: 429 arms backoff until t0+210s. GET #2.
+        await getUsage({ now: new Date(t0.getTime() + 90_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 2);
+        // +150s: inside backoff window → GET suppressed.
+        await getUsage({ now: new Date(t0.getTime() + 150_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 2, "still backing off");
+        // +250s: past window → GET #3 succeeds → backoff CLEARED, cache refreshed.
+        const recovered = await getUsage({ now: new Date(t0.getTime() + 250_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 3);
+        assert.equal(recovered.usageSource, "oauth");
+        assert.equal(recovered.percentLast5h, 70, "fresh recovered reading");
+        assert.equal(recovered.oauthStale, false, "fresh, not stale, after recovery");
+
+        // Post-recovery the cadence is the plain fixed TTL again: a scan just past
+        // the TTL re-GETs normally (no lingering backoff suppression). +320s is
+        // 70s after the +250s success (> 60s TTL).
+        const post = await getUsage({ now: new Date(t0.getTime() + 320_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 4, "healthy fixed-TTL cadence restored — a post-TTL scan re-GETs");
+        assert.equal(post.usageSource, "oauth");
+        assert.equal(post.percentLast5h, 70, "reader pinned at its last programmed value");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("backoff with NO trustworthy last-good falls to the estimate without a GET", async () => {
+      // If the last-good has aged past TTL+maxStale during the backoff window,
+      // the suppressed scan degrades to the estimate (never a silent 0) — and
+      // still spends no GET.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000"; // 1 min grace (short)
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "600000"; // 10 min backoff (long)
+      const root = await mkdtemp(join(tmpdir(), "usage-2619-"));
+      try {
+        // Estimate = (300/1000)*100 = 30%.
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:30:00Z", { in: 300 })]);
+        const m = countingMeter([
+          { ok: true, five: 55, seven: 33 }, // seed
+          { ok: false, code: "oauth-usage-non-2xx" }, // 429 arms a 10-min backoff
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        // +90s: 429 → last-good still fresh enough to serve stale (age 90s < TTL+grace 120s). GET #2.
+        await getUsage({ now: new Date(t0.getTime() + 90_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 2);
+        // +180s: inside the 10-min backoff window, but last-good age (180s) >=
+        // TTL+maxStale (120s) → too stale. Falls to estimate, still NO GET.
+        const snap = await getUsage({ now: new Date(t0.getTime() + 180_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(m.calls(), 2, "backoff still suppresses the GET even when serving the estimate");
+        assert.equal(snap.usageSource, "estimate", "too-stale-during-backoff falls to estimate");
+        assert.equal(snap.oauthStale, false);
+        assert.equal(snap.oauthAgeMs, null);
+        assert.equal(snap.percentLast5h, 30, "estimate gauge stands — never silently 0");
       } finally {
         await rm(root, { recursive: true, force: true });
       }
