@@ -14,6 +14,9 @@
  *                                    events the digest consumes.
  *   - POST /holdback/revert-failed — emit holdback.revert_failed when the
  *                                    caller's git-revert / PR-open failed.
+ *   - POST /holdback/pending       — register a PR the autopilot has armed for
+ *                                    auto-merge but that has not yet landed
+ *                                    (issue #2622). Idempotent on prNumber.
  *
  * Holdback is read-only with respect to merge: these routes run strictly AFTER
  * a merge and never block one. The actual `git revert` + PR is performed by the
@@ -26,8 +29,10 @@ import {
   HoldbackEnrollBodySchema,
   HoldbackCheckBodySchema,
   HoldbackRevertFailedBodySchema,
+  HoldbackPendingBodySchema,
 } from "../schemas/holdback.ts";
 import { enrollHoldback, checkHoldback, reportRevertFailed, type HoldbackEventBus } from "../holdback.ts";
+import { pendingEnrollAdd } from "../redis/holdback.ts";
 
 export function createHoldbackRouter(eventBus: HoldbackEventBus) {
   const router = Router();
@@ -76,6 +81,28 @@ export function createHoldbackRouter(eventBus: HoldbackEventBus) {
       console.error(`[holdback-api] revert-failed emit failed: ${err?.message || String(err)}`);
       res.status(500).json({ error: err?.message || String(err) });
     }
+  });
+
+  // POST /holdback/pending — register an armed-but-not-landed PR (issue #2622).
+  // Idempotent on prNumber; records intent only (never arms/blocks/performs a
+  // merge). No GET route — the #2623 watcher reads the registry in-process via
+  // pendingEnrollList, not over HTTP.
+  router.post("/holdback/pending", async (req, res) => {
+    const parsed = HoldbackPendingBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    const entry = {
+      prNumber: parsed.data.prNumber,
+      tier: parsed.data.tier,
+      cycleId: parsed.data.cycleId,
+      registeredAt: Date.now(),
+    };
+    const result = await pendingEnrollAdd(entry);
+    if (result.ok === false) {
+      return res.status(500).json({ error: result.error });
+    }
+    res.json({ ok: true, entry });
   });
 
   return router;

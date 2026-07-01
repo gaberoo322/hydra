@@ -139,6 +139,25 @@ function holdbackRevertCountKey(date: string): string {
   return `hydra:holdback:reverts:${date}`;
 }
 
+/**
+ * Pending-enroll registry (issue #2622). A single Redis HASH, one field per
+ * `prNumber` (field = `String(prNumber)`), value = JSON `PendingEnrollEntry`.
+ *
+ * This is the durable record of PRs the autopilot has ARMED for auto-merge but
+ * that have not yet landed+enrolled. It is deliberately a DIFFERENT key from
+ * {@link holdbackBaselineKey}: a pending entry exists BEFORE landing and is
+ * keyed by prNumber (no commit SHA yet); a baseline exists AFTER landing and is
+ * keyed by commit SHA. Conflating "armed" with "watched" would break the
+ * #2623 merge-completion watcher's semantics.
+ *
+ * A HASH (not a LIST) so upsert-by-prNumber is idempotent for free: `HSET` on
+ * the same field overwrites in place, `HGETALL` lists all in one call, `HDEL`
+ * removes one. Mirrors the `src/redis/autopilot-runs.ts` hash pattern.
+ */
+export function holdbackPendingEnrollKey(): string {
+  return "hydra:holdback:pending-enroll";
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -175,6 +194,28 @@ export type RecordBaselineResult =
 
 export type LoadBaselineResult =
   | { ok: true; baseline: HoldbackBaseline | null }
+  | { ok: false; error: string };
+
+/**
+ * One entry in the pending-enroll registry (issue #2622): a PR the autopilot has
+ * armed for auto-merge but that has not yet landed+enrolled. Keyed (in the hash)
+ * by `prNumber`. `tier` is nullable to mirror the enroll schema's tier semantics
+ * (a merge whose tier we cannot yet resolve is still recordable as "armed").
+ */
+export interface PendingEnrollEntry {
+  prNumber: number;
+  tier: number | null;
+  cycleId: string;
+  /** Epoch ms the entry was registered. */
+  registeredAt: number;
+}
+
+export type PendingEnrollAddResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+export type PendingEnrollListResult =
+  | { ok: true; entries: PendingEnrollEntry[] }
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
@@ -285,4 +326,83 @@ export async function incrRevertCount(date: string = utcDateKey()): Promise<numb
 export async function _resetRevertCount(date: string): Promise<void> {
   const r = getRedisConnection();
   await r.del(holdbackRevertCountKey(date));
+}
+
+// ---------------------------------------------------------------------------
+// Pending-enroll registry accessors (issue #2622)
+// ---------------------------------------------------------------------------
+
+/**
+ * Register (or upsert) a PR the autopilot has armed for auto-merge. Idempotent
+ * on `prNumber`: a second call for the same prNumber overwrites the field in
+ * place (single entry, updated), never appends a duplicate. Best-effort — a
+ * Redis error is logged with the `[holdback]` prefix and returned as a
+ * structured result, never thrown (this path only records intent; it never
+ * arms, blocks, or performs a merge).
+ */
+export async function pendingEnrollAdd(entry: PendingEnrollEntry): Promise<PendingEnrollAddResult> {
+  if (!Number.isInteger(entry.prNumber) || entry.prNumber <= 0) {
+    return { ok: false, error: "pendingEnrollAdd: prNumber must be a positive integer" };
+  }
+  try {
+    const r = getRedisConnection();
+    await r.hset(holdbackPendingEnrollKey(), String(entry.prNumber), JSON.stringify(entry));
+    return { ok: true };
+  } catch (err: any) {
+    const msg = `[holdback] pendingEnrollAdd failed for pr ${entry.prNumber}: ${err?.message || String(err)}`;
+    console.error(msg);
+    return { ok: false, error: msg };
+  }
+}
+
+/**
+ * List every armed-but-not-landed pending entry. Returns them sorted by
+ * `prNumber` ascending for a stable read. A malformed hash field is skipped
+ * (logged) rather than failing the whole list — one bad entry can never blind
+ * the caller to the rest.
+ */
+export async function pendingEnrollList(): Promise<PendingEnrollListResult> {
+  try {
+    const r = getRedisConnection();
+    const hash = await r.hgetall(holdbackPendingEnrollKey());
+    const entries: PendingEnrollEntry[] = [];
+    for (const [field, raw] of Object.entries(hash) as Array<[string, string]>) {
+      try {
+        entries.push(JSON.parse(raw) as PendingEnrollEntry);
+      } catch (err: any) {
+        console.error(
+          `[holdback] pendingEnrollList: skipping malformed field ${field}: ${err?.message || String(err)}`,
+        );
+      }
+    }
+    entries.sort((a, b) => a.prNumber - b.prNumber);
+    return { ok: true, entries };
+  } catch (err: any) {
+    const msg = `[holdback] pendingEnrollList failed: ${err?.message || String(err)}`;
+    console.error(msg);
+    return { ok: false, error: msg };
+  }
+}
+
+/**
+ * Remove a pending entry once its PR has landed (or been abandoned). Best-effort
+ * cleanup consumed by the #2623 merge-completion watcher — harmless if the field
+ * is already gone.
+ */
+export async function pendingEnrollRemove(prNumber: number): Promise<void> {
+  try {
+    const r = getRedisConnection();
+    await r.hdel(holdbackPendingEnrollKey(), String(prNumber));
+  } catch (err: any) {
+    /* intentional: removing a landed pending entry is best-effort cleanup; a
+       stale field is harmless and the #2623 watcher re-reconciles on its next
+       pass. */
+    console.error(`[holdback] pendingEnrollRemove failed for pr ${prNumber}: ${err?.message || String(err)}`);
+  }
+}
+
+/** Test-only: clear the entire pending-enroll registry. */
+export async function _resetPendingEnroll(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(holdbackPendingEnrollKey());
 }

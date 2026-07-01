@@ -22,7 +22,7 @@
 // Point the Redis singleton at DB 1 before any seam import (matches backlog.test).
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
-import { test, describe, before, after } from "node:test";
+import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -53,6 +53,10 @@ import {
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
   HOLDBACK_WINDOW_CYCLES_T4,
+  pendingEnrollAdd,
+  pendingEnrollList,
+  pendingEnrollRemove,
+  _resetPendingEnroll,
 } from "../src/redis/holdback.ts";
 
 // ---------------------------------------------------------------------------
@@ -541,5 +545,109 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     const ev = events.find((e) => e.type === "holdback.revert_failed");
     assert.ok(ev, "must emit holdback.revert_failed (the name digest.ts reads)");
     assert.equal(ev!.payload.commitSha, "failsha01");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pending-enroll registry (issue #2622)
+//
+// NEW top-level describe with its OWN before/after lifecycle — do NOT nest
+// inside "Outcome Holdback producer": a describe's after() disconnects its
+// Redis before sibling top-level suites run, so nesting here would flake this
+// suite against a torn-down connection (CLAUDE.md nested-teardown pitfall).
+// Per-case isolation via beforeEach (fresh key each case), not before.
+// ---------------------------------------------------------------------------
+
+describe("Outcome Holdback pending-enroll registry (#2622)", () => {
+  let redis: any;
+  let redisUp = false;
+
+  before(async () => {
+    try {
+      redis = new Redis(process.env.REDIS_URL!);
+      await redis.ping();
+      redisUp = true;
+    } catch {
+      redisUp = false;
+    }
+  });
+
+  after(async () => {
+    if (redis) {
+      try { await redis.quit(); } catch { /* intentional: best-effort close */ }
+    }
+  });
+
+  // Fresh registry per case so sibling cases can't leak entries into each other.
+  beforeEach(async () => {
+    if (redisUp) await _resetPendingEnroll();
+  });
+
+  function guard(t: any): boolean {
+    if (!redisUp) {
+      t.skip("Redis unavailable at localhost:6379/1");
+      return false;
+    }
+    return true;
+  }
+
+  test("add + list roundtrips the entry with tier and cycleId", async (t) => {
+    if (!guard(t)) return;
+    const add = await pendingEnrollAdd({ prNumber: 101, tier: 3, cycleId: "cyc-a", registeredAt: 111 });
+    assert.equal(add.ok, true);
+
+    const listed = await pendingEnrollList();
+    assert.equal(listed.ok, true);
+    const entries = (listed as any).entries;
+    assert.equal(entries.length, 1);
+    assert.deepEqual(entries[0], { prNumber: 101, tier: 3, cycleId: "cyc-a", registeredAt: 111 });
+  });
+
+  test("duplicate add for same prNumber is idempotent (updated in place)", async (t) => {
+    if (!guard(t)) return;
+    await pendingEnrollAdd({ prNumber: 202, tier: 2, cycleId: "first", registeredAt: 1 });
+    await pendingEnrollAdd({ prNumber: 202, tier: 4, cycleId: "second", registeredAt: 2 });
+
+    const listed = await pendingEnrollList();
+    const entries = (listed as any).entries;
+    assert.equal(entries.length, 1, "same prNumber must not append a duplicate");
+    assert.equal(entries[0].tier, 4, "fields must be overwritten in place");
+    assert.equal(entries[0].cycleId, "second");
+    assert.equal(entries[0].registeredAt, 2);
+  });
+
+  test("list returns all entries sorted by prNumber; tier may be null", async (t) => {
+    if (!guard(t)) return;
+    await pendingEnrollAdd({ prNumber: 303, tier: null, cycleId: "c3", registeredAt: 30 });
+    await pendingEnrollAdd({ prNumber: 111, tier: 2, cycleId: "c1", registeredAt: 10 });
+
+    const listed = await pendingEnrollList();
+    const entries = (listed as any).entries;
+    assert.deepEqual(entries.map((e: any) => e.prNumber), [111, 303]);
+    assert.equal(entries[1].tier, null);
+  });
+
+  test("remove drops the entry", async (t) => {
+    if (!guard(t)) return;
+    await pendingEnrollAdd({ prNumber: 404, tier: 3, cycleId: "c4", registeredAt: 40 });
+    await pendingEnrollRemove(404);
+
+    const listed = await pendingEnrollList();
+    assert.deepEqual((listed as any).entries, []);
+  });
+
+  test("list on an empty registry returns []", async (t) => {
+    if (!guard(t)) return;
+    const listed = await pendingEnrollList();
+    assert.equal(listed.ok, true);
+    assert.deepEqual((listed as any).entries, []);
+  });
+
+  test("add rejects a non-positive prNumber without touching the store", async (t) => {
+    if (!guard(t)) return;
+    const bad = await pendingEnrollAdd({ prNumber: 0, tier: 2, cycleId: "c0", registeredAt: 1 });
+    assert.equal(bad.ok, false);
+    const listed = await pendingEnrollList();
+    assert.deepEqual((listed as any).entries, []);
   });
 });
