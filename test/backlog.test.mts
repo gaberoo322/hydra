@@ -872,10 +872,10 @@ describe("loadBacklog Backlog return type (issue #2230)", () => {
     // in the `Backlog` type, this destructure would be a compile error.
     const backlog: reads.Backlog = {
       triage: [],
-      backlog: [{ id: 1, title: "t" }],
+      backlog: [{ id: 1, title: "t", lane: "backlog", movedAt: null, claimedAt: null, claimedBy: null }],
       queued: [],
       blocked: [],
-      inProgress: [{ id: 2, title: "p" }],
+      inProgress: [{ id: 2, title: "p", lane: "inProgress", movedAt: null, claimedAt: null, claimedBy: null }],
       done: [],
     };
 
@@ -891,7 +891,7 @@ describe("loadBacklog Backlog return type (issue #2230)", () => {
     // addToBacklog/getItemsByParent iterate `LANES` and index `lanes[lane]`
     // with a `string`. The index signature on `Backlog` preserves that.
     const backlog: reads.Backlog = {
-      triage: [{ id: 1 }],
+      triage: [{ id: 1, title: "t", lane: "triage", movedAt: null, claimedAt: null, claimedBy: null }],
       backlog: [],
       queued: [],
       blocked: [],

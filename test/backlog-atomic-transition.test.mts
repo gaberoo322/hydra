@@ -128,7 +128,7 @@ describe("atomic lane transition — hash/zset stay in lock-step (issue #1990)",
     requireRedis(t);
     const id = await seed("Atomic in-progress bravo 1990", "queued");
     const result = await moveToInProgress("Atomic in-progress bravo 1990", { claimedBy: "claude" });
-    assert.equal(result.ok, true);
+    assert.equal((result as { ok?: boolean }).ok, true);
     await assertHashZsetAgree(id, "inProgress");
     // Claim metadata still stamped (applyLaneTransition path preserved).
     const raw = JSON.parse(await redis.hget("hydra:backlog:items", id));

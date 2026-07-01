@@ -55,6 +55,8 @@
 // those invocations (and their degrade-on-failure reap side-effects) stay in the
 // feed as part of the enumeration loop it owns.
 
+import type { BacklogItemLike } from "./types.ts";
+
 // ---------------------------------------------------------------------------
 // Eligibility policy — the freshness windows.
 // ---------------------------------------------------------------------------
@@ -87,7 +89,7 @@ export const IN_FLIGHT_PR_FRESHNESS_MS = 30 * 60 * 1000; // 30 min
  * "Fresh" is bounded by IN_FLIGHT_PR_FRESHNESS_MS so a long-open PR eventually
  * resurfaces.
  */
-export function isInFlightPR(item: any, now: number): boolean {
+export function isInFlightPR(item: BacklogItemLike, now: number): boolean {
   if (!item?.claimedBy) return false;
   if (typeof item.claimedBy !== "string") return false;
   if (!item.claimedBy.startsWith("pr-")) return false;
@@ -102,7 +104,7 @@ export function isInFlightPR(item: any, now: number): boolean {
  * (it WAS blocked) but the current lane is no longer "blocked", AND the most
  * recent lane transition (movedAt) is within the last 24h.
  */
-export function isBlockerJustCleared(item: any, now: number): boolean {
+export function isBlockerJustCleared(item: BacklogItemLike, now: number): boolean {
   if (!item?.meta?.blockedReason) return false;
   if (item.lane === "blocked") return false;
   if (!item.movedAt) return false;
@@ -134,7 +136,7 @@ export function isBlockerJustCleared(item: any, now: number): boolean {
  * un-flagged anchor is never hidden — this gate only ever SUBTRACTS the
  * known-too-complex anchors, never the default population.
  */
-export function requiresSpawnCapableDispatch(item: any): boolean {
+export function requiresSpawnCapableDispatch(item: BacklogItemLike): boolean {
   if (!item || typeof item !== "object") return false;
   if (item.dispatchSpawnCapable === true) return true;
   if (item.meta && typeof item.meta === "object" && item.meta.dispatchSpawnCapable === true) {
@@ -200,7 +202,7 @@ export const NON_PR_DELIVERABLE_LABELS: readonly string[] = [
  * anchor is never hidden — this gate only ever SUBTRACTS the known-undeliverable
  * anchors, never the default population.
  */
-export function requiresNonPrDispatch(item: any): boolean {
+export function requiresNonPrDispatch(item: BacklogItemLike): boolean {
   if (!item || typeof item !== "object") return false;
   if (item.nonPrDeliverable === true) return true;
   if (item.meta && typeof item.meta === "object" && item.meta.nonPrDeliverable === true) {

@@ -77,10 +77,10 @@ export async function runBlockedItemEscalation(
       const age = now - blockedAt;
       if (age < BLOCKED_REESCALATE_MS) continue;
 
-      const lastEsc = await getLastEscalation(item.id);
+      const lastEsc = await getLastEscalation(String(item.id));
       if (lastEsc && now - parseInt(lastEsc) < BLOCKED_REESCALATE_MS) continue;
 
-      await setLastEscalation(item.id, now.toString());
+      await setLastEscalation(String(item.id), now.toString());
       const ageDays = Math.round(age / (24 * 60 * 60 * 1000));
 
       const { STREAMS } = await import("../../event-bus.ts");
