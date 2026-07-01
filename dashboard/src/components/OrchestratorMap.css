@@ -1,0 +1,258 @@
+/*
+ * OrchestratorMap styling (epic #2607, component #2609).
+ *
+ * Hand-rolled CSS — no framework component, no new dependency. Palette tracks
+ * the dashboard's zinc/amber dark theme so the map reads as native chrome. All
+ * class names are namespaced `omap-` to avoid colliding with Tailwind's
+ * utility layer that the rest of the dashboard uses.
+ */
+
+.omap {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  color: #e4e4e7; /* zinc-200 */
+  font-size: 0.8125rem;
+}
+
+/* --- layer toggle toolbar ------------------------------------------------ */
+
+.omap-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.omap-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 9999px;
+  border: 1px solid #3f3f46; /* zinc-700 */
+  background: rgba(39, 39, 42, 0.5); /* zinc-800/50 */
+  color: #a1a1aa; /* zinc-400 */
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.omap-toggle:hover {
+  color: #e4e4e7;
+  border-color: #52525b; /* zinc-600 */
+}
+
+.omap-toggle.is-on {
+  color: #fcd34d; /* amber-300 */
+  border-color: rgba(251, 191, 36, 0.5); /* amber-400/50 */
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.omap-toggle-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: #52525b;
+}
+
+.omap-toggle.is-on .omap-toggle-dot {
+  background: #fbbf24; /* amber-400 */
+}
+
+/* --- section chrome ------------------------------------------------------ */
+
+.omap-section-title {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #a1a1aa;
+  margin-bottom: 0.6rem;
+}
+
+.omap-muted {
+  color: #71717a; /* zinc-500 */
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.omap-layer {
+  border-top: 1px solid rgba(63, 63, 70, 0.5);
+  padding-top: 1rem;
+}
+
+/* --- shared node box ----------------------------------------------------- */
+
+.omap-node {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 0.5rem;
+  border: 1px solid #3f3f46;
+  background: rgba(39, 39, 42, 0.6);
+  text-decoration: none;
+  color: inherit;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    transform 0.1s ease;
+}
+
+.omap-node:hover {
+  border-color: rgba(251, 191, 36, 0.6);
+  background: rgba(39, 39, 42, 0.9);
+  transform: translateY(-1px);
+}
+
+.omap-node-name {
+  font-weight: 600;
+  color: #f4f4f5; /* zinc-100 */
+  font-size: 0.8125rem;
+}
+
+.omap-node-sub {
+  color: #a1a1aa;
+  font-size: 0.6875rem;
+  line-height: 1.25;
+}
+
+/* --- lifecycle spine (hand-rolled SVG rail behind node boxes) ------------ */
+
+.omap-spine-wrap {
+  position: relative;
+}
+
+.omap-spine {
+  position: relative;
+  padding: 0.25rem 0;
+}
+
+.omap-spine-rail {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.omap-rail-line {
+  stroke: #52525b;
+  stroke-width: 0.4;
+  stroke-dasharray: 1.5 1.2;
+}
+
+.omap-arrow-head {
+  fill: #52525b;
+}
+
+.omap-spine-nodes {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.omap-spine-node-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 8.5rem;
+}
+
+.omap-spine-node {
+  width: 100%;
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.06);
+}
+
+.omap-branch {
+  font-size: 0.6875rem;
+  color: #a1a1aa;
+  text-decoration: none;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.35rem;
+  border: 1px dashed #3f3f46;
+  background: rgba(39, 39, 42, 0.4);
+}
+
+.omap-branch:hover {
+  color: #fcd34d;
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+/* --- classes + cooldowns grid ------------------------------------------- */
+
+.omap-class-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.6rem;
+}
+
+.omap-kind-pipeline {
+  border-left: 3px solid #34d399; /* emerald-400 */
+}
+
+.omap-kind-signal {
+  border-left: 3px solid #60a5fa; /* blue-400 */
+}
+
+.omap-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.omap-chip {
+  font-size: 0.625rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.35rem;
+  background: rgba(63, 63, 70, 0.6);
+  color: #d4d4d8; /* zinc-300 */
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.omap-scope-orch {
+  color: #fcd34d;
+}
+.omap-scope-target {
+  color: #f0abfc; /* fuchsia-300 */
+}
+.omap-scope-both {
+  color: #93c5fd; /* blue-300 */
+}
+
+.omap-model {
+  color: #a5b4fc; /* indigo-300 */
+}
+
+.omap-cooldown {
+  color: #86efac; /* green-300 */
+}
+
+.omap-skill-edge {
+  font-size: 0.6875rem;
+  color: #71717a;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* --- skill edges + other pieces grids ----------------------------------- */
+
+.omap-skill-grid,
+.omap-other-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: 0.6rem;
+}
+
+.omap-other-node {
+  border-style: dashed;
+  opacity: 0.9;
+}
