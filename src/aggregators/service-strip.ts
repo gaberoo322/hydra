@@ -1,11 +1,9 @@
 /**
  * Service-strip aggregator (issue #618, PRD #615).
  *
- * Reshapes the existing `/api/health/services` payload into a list of rows
- * the Now-page health strip can render verbatim. Probes the same two
- * dependencies the dashboard's Health page already shows — VikingDB and
- * OpenViking — plus the orchestrator process itself and Redis, so the
- * pinned strip has all the load-bearing dependencies in one place.
+ * Reshapes external-service liveness probes into a list of rows the Now-page
+ * health strip can render verbatim, so the pinned strip has all the load-bearing
+ * dependencies in one place.
  *
  * Why "pinned at top": the operator's first question every morning is
  * "is anything red?". One glance at the strip should answer it without
@@ -14,10 +12,21 @@
  * # Design contract — same as overnight-summary.ts
  *
  * - Pure aggregator. All external touchpoints injected via `deps`.
- * - Never throws. A failed probe degrades to `{ status: "down" }` with the
- *   error captured in `lastError` — the row still renders.
+ * - Never throws. A failed or absent probe degrades to `{ status: "down" }` with
+ *   the error captured in `lastError` — the row still renders.
  * - Probe timeout is 3s per service, hard-cap. The strip refreshes every
  *   15s on the dashboard, so a stuck probe can't pin the request.
+ *
+ * # Issue #2597 — the strip is DRIVEN by the shared probe enumeration
+ *
+ * The strip no longer hand-maintains its own probe fan-out (which probes appear
+ * + in what order). That list — the ordered, user-facing subset of external-
+ * service liveness probes — is the single `STRIP_PROBE_DESCRIPTORS` enumeration
+ * exported from the fan-out (src/health/fan-out.ts), the module that already owns
+ * "which external services does the orchestrator monitor?". This closed the
+ * silent drift where the strip omitted embed-backend (#2013) and ollamaVlm
+ * (#2278). Adding a probe to the strip is now a one-entry edit to that
+ * enumeration — NO change to the row-assembly logic here.
  */
 
 import { existsSync } from "node:fs";
@@ -25,10 +34,8 @@ import { resolve } from "node:path";
 
 // Issue #954: resolve the OpenViking base URL from OPENVIKING_URL (via the
 // OpenViking Request Adapter's `ovBaseUrl`) instead of hardcoding
-// `http://localhost:1933` — a non-default OPENVIKING_URL must reach this probe
-// too, or the strip lies exactly as the #231-class health-probe bug did. This
-// aggregator keeps its injectable generic `probe(url, timeout)` dep; only the
-// OV URL it passes is no longer a hardcoded literal.
+// `http://localhost:1933`. The URL is passed to the shared descriptor `run`
+// closures via the deps bag, not hardcoded.
 import { ovBaseUrl } from "../knowledge-base/ov-request.ts";
 import { pingRedis } from "../redis/utility.ts";
 // Issue #2281: the probe-status DISPLAY vocabulary ("ok"|"degraded"|"down"), the
@@ -42,8 +49,18 @@ import { pingRedis } from "../redis/utility.ts";
 import {
   classifyServiceBoolean,
   classifyServiceProbe,
+  probeEmbedBackend,
+  probeOllamaVlm,
   type ProbeStatus,
 } from "../health/probe.ts";
+// Issue #2597: the ordered, shared enumeration of which external-service
+// liveness probes the strip renders (and in what order) lives in the fan-out —
+// the single owner of the orchestrator's probe set. The strip maps each
+// descriptor to a ServiceRow via the shared classifiers above.
+import {
+  STRIP_PROBE_DESCRIPTORS,
+  type StripProbeDeps,
+} from "../health/fan-out.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -75,6 +92,17 @@ export interface ServiceStripDeps {
    * kill switch — same surface `/health` consults).
    */
   checkOrchestrator?: () => Promise<boolean>;
+  /**
+   * Issue #2013/#2597: the OV dense-embedding backend liveness probe. Defaults
+   * to the shared `probeEmbedBackend` producer; injectable for tests. Never
+   * throws.
+   */
+  probeEmbedBackend?: typeof probeEmbedBackend;
+  /**
+   * Issue #2278/#2597: the Tailnet Ollama VLM-host liveness probe. Defaults to
+   * the shared `probeOllamaVlm` producer; injectable for tests. Never throws.
+   */
+  probeOllamaVlm?: typeof probeOllamaVlm;
 }
 
 export interface ProbeResult {
@@ -90,44 +118,44 @@ export interface ProbeResult {
 export async function getServiceStrip(deps: ServiceStripDeps = {}): Promise<ServiceRow[]> {
   const now = deps.now ?? new Date();
   const lastChecked = now.toISOString();
-  const probe = deps.probe ?? defaultProbe;
-  const pingRedis = deps.pingRedis ?? defaultPingRedis;
-  const checkOrch = deps.checkOrchestrator ?? defaultOrchestratorOk;
 
-  // Run all four checks in parallel — none depends on another, and a slow
-  // probe must not delay the rest.
-  const [orchSettled, redisSettled, vikingdbSettled, openvikingSettled] =
-    await Promise.allSettled([
-      checkOrch(),
-      pingRedis(),
-      probe("http://localhost:5000/health", 3000),
-      probe(`${ovBaseUrl()}/health`, 3000),
-    ]);
+  // Resolve every dep to a concrete implementation once, then hand the bag to
+  // each descriptor's `run` closure. The descriptor enumeration
+  // (STRIP_PROBE_DESCRIPTORS, owned by the fan-out) decides WHICH probes appear
+  // and in WHAT order — this function no longer hard-codes that (issue #2597).
+  const resolved: StripProbeDeps = {
+    probe: deps.probe ?? defaultProbe,
+    pingRedis: deps.pingRedis ?? defaultPingRedis,
+    checkOrchestrator: deps.checkOrchestrator ?? defaultOrchestratorOk,
+    ovBaseUrl,
+    probeEmbedBackend: deps.probeEmbedBackend ?? probeEmbedBackend,
+    probeOllamaVlm: deps.probeOllamaVlm ?? probeOllamaVlm,
+  };
 
-  return [
-    classifyBoolean({
-      service: "orchestrator",
-      result: orchSettled,
+  // Run every descriptor's probe in parallel — none depends on another, and a
+  // slow probe must not delay the rest. Promise.allSettled preserves the
+  // never-throw contract: a rejected `run` folds to a `down` row via the shared
+  // classifiers below, so the row still renders.
+  const settled = await Promise.allSettled(
+    STRIP_PROBE_DESCRIPTORS.map((d) => d.run(resolved)),
+  );
+
+  return STRIP_PROBE_DESCRIPTORS.map((descriptor, i) => {
+    const result = settled[i];
+    if (descriptor.kind === "boolean") {
+      return classifyBoolean({
+        service: descriptor.service,
+        result: result as PromiseSettledResult<boolean>,
+        lastChecked,
+        degradedMessage: descriptor.degradedMessage,
+      });
+    }
+    return classifyProbe({
+      service: descriptor.service,
+      result: result as PromiseSettledResult<ProbeResult>,
       lastChecked,
-      degradedMessage: "kill-switch active",
-    }),
-    classifyBoolean({
-      service: "redis",
-      result: redisSettled,
-      lastChecked,
-      degradedMessage: undefined,
-    }),
-    classifyProbe({
-      service: "vikingdb",
-      result: vikingdbSettled,
-      lastChecked,
-    }),
-    classifyProbe({
-      service: "openviking",
-      result: openvikingSettled,
-      lastChecked,
-    }),
-  ];
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
