@@ -47,14 +47,14 @@ import { staleEscalationVerdict } from "./stale-escalation-policy.ts";
 // sibling `stale-escalation-policy.ts` (issue #2678), mirroring the
 // `holdback.ts → outcome-regression.ts` split. `escalateStaleItems` below is the
 // Redis-touching coordinator: it delegates the *decision* to the policy leaf,
-// then applies the lane transitions / alerts. The policy symbols are re-exported
-// here for back-compat so existing callers/tests importing them from this path
-// keep working.
+// then applies the lane transitions / alerts. The policy predicates (`itemAgeMs`,
+// `staleEscalationVerdict`) are re-exported here for back-compat so existing
+// callers/tests importing them from this path keep working; the bare tunables
+// (`STALE_ESCALATE_AFTER_MS`, `RETIRED_CLAIMANTS`) are policy internals — import
+// them from `stale-escalation-policy.ts` directly if ever needed.
 export {
   itemAgeMs,
   staleEscalationVerdict,
-  STALE_ESCALATE_AFTER_MS,
-  RETIRED_CLAIMANTS,
 } from "./stale-escalation-policy.ts";
 
 /**
