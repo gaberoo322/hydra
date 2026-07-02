@@ -39,6 +39,7 @@
 import type { StuckSignal } from "../schemas/now-page.ts";
 import { settledOr, settledOrEmpty, settledOrNull } from "./settle.ts";
 import { getAutopilotStatusSnapshot } from "../autopilot/status.ts";
+import { listRecentMergeCommits } from "./recent-merges.ts";
 import {
   DEFAULT_HEALTH_THRESHOLDS,
   detectStalledDispatch,
@@ -222,7 +223,6 @@ export async function getAutopilotHealth(
  */
 async function defaultReadWindowMergeCount(sinceEpochS: number): Promise<number> {
   try {
-    const { listRecentMergeCommits } = await import("./recent-merges.ts");
     // Use the cheap git-log primitive (issue #2177), NOT getRecentMerges: this
     // count caller only needs {prNumber, mergedAt} pairs and the since-epoch
     // filter, so it must not pay the N-parallel `gh pr view` fan-out for the
