@@ -17,6 +17,8 @@
  */
 
 import { setUsageSnapshotLastWeekly } from "../../redis/housekeeping.ts";
+import * as costModule from "../../cost/index.ts";
+import * as usageSnapshotsModule from "../../redis/usage-snapshots.ts";
 
 interface UsageWeeklySnapshotModule {
   getUsage: (opts?: { now?: Date }) => Promise<{
@@ -62,8 +64,8 @@ export async function runUsageWeeklySnapshot(
   const mod =
     deps.module ??
     ({
-      ...(await import("../../cost/index.ts")),
-      ...(await import("../../redis/usage-snapshots.ts")),
+      ...costModule,
+      ...usageSnapshotsModule,
     } as unknown as UsageWeeklySnapshotModule);
   const now = (deps.now ?? (() => new Date()))();
   const setLastWeekly = deps.setLastWeekly ?? setUsageSnapshotLastWeekly;

@@ -5,6 +5,8 @@
  * from `src/scheduler/housekeeping.ts` (issue #2090). Behaviour unchanged.
  */
 
+import { reconcileWorkQueue as reconcileWorkQueueImpl } from "../../backlog/work-queue-hygiene.ts";
+
 /** External touchpoints of the work-queue-hygiene chore. */
 export interface WorkQueueHygieneDeps {
   reconcileWorkQueue?: () => Promise<{ removed: number; scanned: number }>;
@@ -17,8 +19,7 @@ export interface WorkQueueHygieneDeps {
  * internal per-run cap, so no Redis time-guard is needed.
  */
 export async function runWorkQueueHygiene(deps: WorkQueueHygieneDeps = {}): Promise<void> {
-  const reconcileWorkQueue =
-    deps.reconcileWorkQueue ?? (await import("../../backlog/work-queue-hygiene.ts")).reconcileWorkQueue;
+  const reconcileWorkQueue = deps.reconcileWorkQueue ?? reconcileWorkQueueImpl;
   const wq = await reconcileWorkQueue();
   if (wq.removed > 0) {
     console.log(
