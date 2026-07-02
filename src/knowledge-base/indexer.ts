@@ -692,11 +692,6 @@ export const defaultHashAdapter = new HashDedupAdapter();
 // facade over the single shared state object.
 // ---------------------------------------------------------------------------
 
-/** @see HashDedupAdapter.loadPersistedHashes */
-export function loadPersistedHashes(): Promise<number> {
-  return defaultHashAdapter.loadPersistedHashes();
-}
-
 /** @see HashDedupAdapter.getCoverageStats */
 export function getCoverageStats(): CoverageStats {
   return defaultHashAdapter.getCoverageStats();
@@ -705,11 +700,6 @@ export function getCoverageStats(): CoverageStats {
 /** @see HashDedupAdapter.resetCoverageStats (test-only reset of shared state) */
 export function resetCoverageStats(): void {
   defaultHashAdapter.resetCoverageStats();
-}
-
-/** @see HashDedupAdapter.setWatchedPaths */
-export function setWatchedPaths(paths: string[]): void {
-  defaultHashAdapter.setWatchedPaths(paths);
 }
 
 /** @see HashDedupAdapter.runSourceInitialPass */
@@ -786,39 +776,6 @@ export function buildSourceTitle(filePath: string, source: SourcePath): string {
   const folder = basename(source.root);
   const slug = `${folder}/${rel}`.replace(/\//g, "__");
   return `hydra-source:${slug}`;
-}
-
-/**
- * Build a fs.watch callback that debounces source-file changes through a
- * shared `pending` map and indexes them via the production-shared adapter's
- * indexSourceFile. The map + debounce window are owned by the caller
- * (IndexerController) so the config watcher and source watcher share a single
- * dedup queue.
- *
- * Free-function delegator (interfaceImpact:none — issue #2603 INV-6) over
- * {@link HashDedupAdapter.makeSourceWatcher} bound to the production-shared
- * {@link defaultHashAdapter}. IndexerController consumes the single canonical
- * source-watcher by import (INV-5) instead of re-implementing it — the #2526
- * extraction's local copy uploaded a "Source file changed" text blob via
- * indexText, dropping the real content-index + hash-dedup.
- */
-export function makeSourceWatcher(
-  source: SourcePath,
-  pending: Map<string, ReturnType<typeof setTimeout>>,
-  debounceMs: number = DEBOUNCE_MS
-): (eventType: string, filename: string | null) => void {
-  return defaultHashAdapter.makeSourceWatcher(source, pending, debounceMs);
-}
-
-/**
- * Index a config-tree file via the production-shared adapter (OV container-path
- * ingestion + per-file SHA-256 dedup). Free-function delegator
- * (interfaceImpact:none — issue #2603 INV-6) over
- * {@link HashDedupAdapter.indexFile} bound to {@link defaultHashAdapter}, so
- * IndexerController.onFileChange keeps its existing import + call shape (INV-1).
- */
-export function indexFile(filePath: string): Promise<void> {
-  return defaultHashAdapter.indexFile(filePath);
 }
 
 // ===========================================================================
