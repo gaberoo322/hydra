@@ -57,7 +57,17 @@ import {
   pendingEnrollList,
   pendingEnrollRemove,
   _resetPendingEnroll,
+  wasEnrolledMarked,
+  markEnrolled,
+  _resetEnrolledMarker,
+  setMergeWatchHealth,
+  getMergeWatchHealth,
 } from "../src/redis/holdback.ts";
+import {
+  runHoldbackMergeWatch,
+  type MergeStatus,
+  type HoldbackMergeWatchDeps,
+} from "../src/scheduler/chores/holdback-merge-watch.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -649,5 +659,321 @@ describe("Outcome Holdback pending-enroll registry (#2622)", () => {
     assert.equal(bad.ok, false);
     const listed = await pendingEnrollList();
     assert.deepEqual((listed as any).entries, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Merge-completion watcher chore (#2623) — pure decision logic.
+//
+// All external touchpoints are injected as in-memory fakes, so this suite runs
+// WITHOUT gh or a live Redis. It exercises the acceptance criteria directly:
+// landed→enroll+enrich (AC1), still-open→left (AC2), idempotent across ticks
+// (AC3), T1/unknown dropped without enrolling (AC4), never-throws on failure
+// (AC5). The observability read/write (AC6) is covered by the live-Redis suite
+// below. No Redis connection ⇒ no teardown ⇒ no shared-connection flake.
+// ---------------------------------------------------------------------------
+
+/** Build a fake dep harness around an in-memory pending registry + marker set. */
+function makeWatchHarness(
+  pending: Array<{ prNumber: number; tier: number | null; cycleId: string; registeredAt: number }>,
+  merge: Record<number, MergeStatus | null>,
+) {
+  const registry = new Map(pending.map((e) => [e.prNumber, e]));
+  const marked = new Set<number>();
+  const enrollCalls: Array<{ commitSha: string; prNumber?: number | null; tier?: number | null }> = [];
+  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number }> = [];
+  const removeCalls: number[] = [];
+  const healthWrites: any[] = [];
+
+  const deps: HoldbackMergeWatchDeps = {
+    listPending: async () => ({ ok: true as const, entries: [...registry.values()].sort((a, b) => a.prNumber - b.prNumber) }),
+    removePending: async (prNumber: number) => { removeCalls.push(prNumber); registry.delete(prNumber); },
+    wasEnrolled: async (prNumber: number) => marked.has(prNumber),
+    mark: async (prNumber: number) => { marked.add(prNumber); return { ok: true as const }; },
+    fetchMergeStatus: async (prNumber: number) => merge[prNumber] ?? null,
+    enroll: async (input: any) => {
+      enrollCalls.push(input);
+      // Mirror the real server-side carry-up: T2/T3/T4 enroll, T1/null do not.
+      if (input.tier == null || !(input.tier >= 2 && input.tier <= 4)) {
+        return { ok: true as const, enrolled: false as const, reason: "exempt" };
+      }
+      return { ok: true as const, enrolled: true as const, leadingCount: 1, baseline: {} as any };
+    },
+    recordCycleRecord: async (body: any) => {
+      cycleCalls.push(body);
+      return { ok: true as const, cycleId: body.cycleId, status: "completed", bucketed: null, deduped: true, enriched: true };
+    },
+    setHealth: async (rec: any) => { healthWrites.push(rec); },
+  };
+
+  return { deps, registry, marked, enrollCalls, cycleCalls, removeCalls, healthWrites };
+}
+
+describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)", () => {
+  test("AC1: a landed T3 PR enrolls with the merge SHA + tier and enriches the cycle record", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 501, tier: 3, cycleId: "cyc-501", registeredAt: 1 }],
+      { 501: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 7 } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.enrollCalls, [{ commitSha: "abc1234def", prNumber: 501, tier: 3 }]);
+    assert.deepEqual(h.cycleCalls, [{ cycleId: "cyc-501", prNumber: 501, filesChanged: 7 }]);
+    assert.deepEqual(h.removeCalls, [501], "landed entry is dropped from the registry");
+    assert.equal(h.registry.has(501), false);
+  });
+
+  test("AC2: a still-open PR (no merge commit) is left in the registry and NOT enrolled", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 502, tier: 3, cycleId: "cyc-502", registeredAt: 1 }],
+      { 502: { state: "OPEN", mergeCommitSha: null, changedFiles: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.stillOpen, 1);
+    assert.equal(res.landed, 0);
+    assert.deepEqual(h.enrollCalls, []);
+    assert.deepEqual(h.removeCalls, []);
+    assert.equal(h.registry.has(502), true, "still-open entry survives for a later tick");
+  });
+
+  test("AC3: enroll + enrichment fire at most once per PR across repeated ticks", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 503, tier: 2, cycleId: "cyc-503", registeredAt: 1 }],
+      { 503: { state: "MERGED", mergeCommitSha: "deadbeef99", changedFiles: 2 } },
+    );
+
+    await runHoldbackMergeWatch(h.deps);
+    // Re-add the SAME entry (simulate a prior tick's pendingEnrollRemove having
+    // failed, so the entry is re-observed on the next tick) and run again.
+    h.registry.set(503, { prNumber: 503, tier: 2, cycleId: "cyc-503", registeredAt: 1 });
+    await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(h.enrollCalls.length, 1, "enroll fires exactly once (marker short-circuits the re-fire)");
+    assert.equal(h.cycleCalls.length, 1, "cycle-record enrichment fires exactly once");
+    assert.equal(h.registry.has(503), false, "the re-observed stale entry is still dropped");
+  });
+
+  test("AC4: a landed T1 PR is dropped from the registry WITHOUT a baseline being enrolled", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 504, tier: 1, cycleId: "cyc-504", registeredAt: 1 }],
+      { 504: { state: "MERGED", mergeCommitSha: "f00dcafe11", changedFiles: 1 } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedExempt, 1, "T1 landing is a drop, not a landed enrollment");
+    assert.equal(res.landed, 0);
+    // enroll IS called (the server-side exemption lives inside enrollHoldback),
+    // but it returns enrolled:false — no baseline persisted for a T1 merge.
+    assert.equal(h.enrollCalls.length, 1);
+    assert.deepEqual(h.removeCalls, [504]);
+    assert.equal(h.registry.has(504), false);
+  });
+
+  test("AC4: an unknown-tier (null) landed PR is likewise dropped without enrolling", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 505, tier: null, cycleId: "cyc-505", registeredAt: 1 }],
+      { 505: { state: "MERGED", mergeCommitSha: "aaaabbbbcc", changedFiles: 0 } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedExempt, 1);
+    assert.equal(res.landed, 0);
+    assert.deepEqual(h.removeCalls, [505]);
+  });
+
+  test("AC5: a gh/API fetch failure leaves the entry in the registry to retry next tick (never throws)", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 506, tier: 3, cycleId: "cyc-506", registeredAt: 1 }],
+      { 506: null }, // fetchMergeStatus returns null → treated as transient failure
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.retried, 1);
+    assert.equal(res.landed, 0);
+    assert.deepEqual(h.enrollCalls, [], "no enroll on a fetch failure");
+    assert.equal(h.registry.has(506), true, "the entry survives for the next tick");
+  });
+
+  test("AC5: an entry whose enroll returns a hard error is left to retry, not dropped", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 507, tier: 3, cycleId: "cyc-507", registeredAt: 1 }],
+      { 507: { state: "MERGED", mergeCommitSha: "111222333c", changedFiles: 4 } },
+    );
+    // Override enroll to fail hard.
+    h.deps.enroll = async () => ({ ok: false as const, error: "boom" });
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.retried, 1);
+    assert.equal(res.landed, 0);
+    assert.deepEqual(h.removeCalls, [], "entry is NOT dropped when enroll fails");
+    assert.deepEqual(h.cycleCalls, [], "enrichment is not attempted after an enroll failure");
+    assert.equal(h.registry.has(507), true);
+  });
+
+  test("AC5: a throwing dep for one PR does not abort processing of the others", async () => {
+    const h = makeWatchHarness(
+      [
+        { prNumber: 508, tier: 3, cycleId: "cyc-508", registeredAt: 1 },
+        { prNumber: 509, tier: 3, cycleId: "cyc-509", registeredAt: 2 },
+      ],
+      {
+        508: { state: "MERGED", mergeCommitSha: "aaa", changedFiles: 1 },
+        509: { state: "MERGED", mergeCommitSha: "bbbbbbb", changedFiles: 3 },
+      },
+    );
+    const realFetch = h.deps.fetchMergeStatus!;
+    h.deps.fetchMergeStatus = async (pr: number) => {
+      if (pr === 508) throw new Error("kaboom");
+      return realFetch(pr);
+    };
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.retried, 1, "508 throws → retried");
+    assert.equal(res.landed, 1, "509 still lands despite 508 throwing");
+    assert.deepEqual(h.removeCalls, [509]);
+  });
+
+  test("a landed enrolled-tier PR with no changedFiles still enrolls (filesChanged omitted)", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 510, tier: 4, cycleId: "cyc-510", registeredAt: 1 }],
+      { 510: { state: "MERGED", mergeCommitSha: "c0ffee1234", changedFiles: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.cycleCalls, [{ cycleId: "cyc-510", prNumber: 510 }], "no filesChanged key when the view didn't report one");
+  });
+
+  test("summary counts + a health snapshot are produced every run", async () => {
+    const h = makeWatchHarness(
+      [
+        { prNumber: 520, tier: 3, cycleId: "c520", registeredAt: 1 }, // lands
+        { prNumber: 521, tier: 3, cycleId: "c521", registeredAt: 2 }, // still open
+        { prNumber: 522, tier: 1, cycleId: "c522", registeredAt: 3 }, // dropped exempt
+      ],
+      {
+        520: { state: "MERGED", mergeCommitSha: "s520", changedFiles: 2 },
+        521: { state: "OPEN", mergeCommitSha: null, changedFiles: null },
+        522: { state: "MERGED", mergeCommitSha: "s522", changedFiles: 1 },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.pendingDepth, 3);
+    assert.equal(res.landed, 1);
+    assert.equal(res.stillOpen, 1);
+    assert.equal(res.droppedExempt, 1);
+    assert.equal(h.healthWrites.length, 1);
+    assert.equal(h.healthWrites[0].pendingDepth, 3);
+    assert.equal(h.healthWrites[0].landed, 1);
+    assert.equal(typeof h.healthWrites[0].ranAt, "string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Merge-completion watcher (#2623) — Redis-backed marker + health accessors.
+//
+// NEW top-level describe with its OWN before/after lifecycle (CLAUDE.md
+// nested-teardown pitfall). Per-case isolation via beforeEach. Covers AC6 (the
+// health snapshot is readable from Redis) + the per-PR enrolled marker seam.
+// ---------------------------------------------------------------------------
+
+describe("Merge-completion watcher (#2623) — marker + health (Redis)", () => {
+  let redis: any;
+  let redisUp = false;
+
+  before(async () => {
+    try {
+      redis = new Redis(process.env.REDIS_URL!);
+      await redis.ping();
+      redisUp = true;
+    } catch {
+      redisUp = false;
+    }
+  });
+
+  after(async () => {
+    if (redis) {
+      try { await redis.quit(); } catch { /* intentional: best-effort close */ }
+    }
+  });
+
+  beforeEach(async () => {
+    if (redisUp) {
+      await _resetEnrolledMarker();
+      await _resetPendingEnroll();
+    }
+  });
+
+  function guard(t: any): boolean {
+    if (!redisUp) {
+      t.skip("Redis unavailable at localhost:6379/1");
+      return false;
+    }
+    return true;
+  }
+
+  test("markEnrolled → wasEnrolledMarked roundtrips per PR", async (t) => {
+    if (!guard(t)) return;
+    assert.equal(await wasEnrolledMarked(701), false, "unmarked PR reads false");
+    const m = await markEnrolled(701, "sha701abc");
+    assert.equal(m.ok, true);
+    assert.equal(await wasEnrolledMarked(701), true, "marked PR reads true");
+    assert.equal(await wasEnrolledMarked(702), false, "a different PR stays false");
+  });
+
+  test("setMergeWatchHealth → getMergeWatchHealth roundtrips the snapshot (AC6)", async (t) => {
+    if (!guard(t)) return;
+    assert.equal(await getMergeWatchHealth(), null, "no record before the first write");
+    await setMergeWatchHealth({
+      ranAt: "2026-07-01T00:00:00.000Z",
+      pendingDepth: 5,
+      landed: 2,
+      droppedExempt: 1,
+      stillOpen: 2,
+    });
+    const got = await getMergeWatchHealth();
+    assert.equal(got?.pendingDepth, 5);
+    assert.equal(got?.landed, 2);
+    assert.equal(got?.ranAt, "2026-07-01T00:00:00.000Z");
+  });
+
+  test("end-to-end against live Redis: the per-PR marker makes the run idempotent", async (t) => {
+    if (!guard(t)) return;
+    // Seed a landed T3 PR into the REAL pending registry, then run the watcher
+    // twice with a fake gh + fake enroll/cycle but the REAL Redis marker/registry
+    // accessors. The second run must be a no-op.
+    await pendingEnrollAdd({ prNumber: 710, tier: 3, cycleId: "cyc-710", registeredAt: 1 });
+
+    const enrollCalls: any[] = [];
+    const cycleCalls: any[] = [];
+    const deps: HoldbackMergeWatchDeps = {
+      fetchMergeStatus: async () => ({ state: "MERGED", mergeCommitSha: "sha710xyz", changedFiles: 3 }),
+      enroll: async (input: any) => { enrollCalls.push(input); return { ok: true as const, enrolled: true as const, leadingCount: 1, baseline: {} as any }; },
+      recordCycleRecord: async (body: any) => { cycleCalls.push(body); return { ok: true as const, cycleId: body.cycleId, status: "completed", bucketed: null, deduped: true, enriched: true }; },
+      // Real Redis accessors for listPending/removePending/wasEnrolled/mark/setHealth (defaults).
+    };
+
+    await runHoldbackMergeWatch(deps);
+    // Re-add the same entry (simulate the remove being lost) and re-run.
+    await pendingEnrollAdd({ prNumber: 710, tier: 3, cycleId: "cyc-710", registeredAt: 1 });
+    await runHoldbackMergeWatch(deps);
+
+    assert.equal(enrollCalls.length, 1, "enroll fired exactly once across two ticks");
+    assert.equal(cycleCalls.length, 1, "enrichment fired exactly once across two ticks");
+    assert.equal(await wasEnrolledMarked(710), true);
+    const listed = await pendingEnrollList();
+    assert.deepEqual((listed as any).entries, [], "the re-observed entry is dropped again");
   });
 });

@@ -158,6 +158,31 @@ export function holdbackPendingEnrollKey(): string {
   return "hydra:holdback:pending-enroll";
 }
 
+/**
+ * Per-PR "already processed on landing" marker (issue #2623). One field per
+ * `prNumber` in a single HASH, value = the landing commit SHA (informational).
+ * Set the first time the merge-completion watcher sees a pending PR's merge land
+ * and fires the enroll + cycle-record enrichment; consulted on every subsequent
+ * tick so those two merge-coupled writes fire **at most once per PR** even if the
+ * pending entry's `HDEL` failed and the entry is re-observed. Distinct from the
+ * per-commit baseline (`enrollHoldback` is itself idempotent on the SHA) — this
+ * marker also guards the cycle-record enrichment, which is idempotent on cycleId
+ * but which we still only want to fire once from this path.
+ */
+export function holdbackEnrolledMarkerKey(): string {
+  return "hydra:holdback:enrolled-marker";
+}
+
+/**
+ * Merge-completion watcher health (issue #2623). A single JSON blob — the chore
+ * is the sole writer, the scheduler-status surface the sole reader — recording
+ * the last run's pending-depth + wall-clock stamp so the mechanism is observable
+ * rather than silent (mirrors the reconciler-health pattern, #2057).
+ */
+export function holdbackMergeWatchHealthKey(): string {
+  return "hydra:holdback:merge-watch:health";
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -217,6 +242,23 @@ export type PendingEnrollAddResult =
 export type PendingEnrollListResult =
   | { ok: true; entries: PendingEnrollEntry[] }
   | { ok: false; error: string };
+
+/**
+ * Last-run health snapshot for the merge-completion watcher chore (issue #2623).
+ * Single JSON blob behind the seam (ADR-0017); the chore is the sole writer.
+ */
+export interface MergeWatchHealthRecord {
+  /** ISO timestamp of the run that wrote this record. */
+  ranAt: string;
+  /** How many pending-enroll entries were in the registry at run start. */
+  pendingDepth: number;
+  /** How many landed PRs were enrolled+enriched this run. */
+  landed: number;
+  /** How many landed T1/unknown-tier PRs were dropped without enrolling. */
+  droppedExempt: number;
+  /** How many entries were left untouched (PR still open / no merge commit). */
+  stillOpen: number;
+}
 
 // ---------------------------------------------------------------------------
 // Baseline accessors
@@ -405,4 +447,100 @@ export async function pendingEnrollRemove(prNumber: number): Promise<void> {
 export async function _resetPendingEnroll(): Promise<void> {
   const r = getRedisConnection();
   await r.del(holdbackPendingEnrollKey());
+}
+
+// ---------------------------------------------------------------------------
+// Merge-completion watcher: per-PR enrolled marker (issue #2623)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when this PR's landing has ALREADY been processed (enroll + cycle-record
+ * enrichment fired) by the merge-completion watcher. Consulted before firing the
+ * merge-coupled writes so they happen at most once per PR — even if a prior
+ * tick's `pendingEnrollRemove` failed and the entry is re-observed. On a Redis
+ * error returns `true` (fail closed: never double-enroll on a blip; the pending
+ * entry is left in place so a healthy later tick can re-check and drop it).
+ */
+export async function wasEnrolledMarked(prNumber: number): Promise<boolean> {
+  try {
+    const r = getRedisConnection();
+    const v = await r.hget(holdbackEnrolledMarkerKey(), String(prNumber));
+    return v != null;
+  } catch (err: any) {
+    console.error(
+      `[holdback] wasEnrolledMarked failed for pr ${prNumber}: ${err?.message || String(err)}`,
+    );
+    return true;
+  }
+}
+
+/**
+ * Record that this PR's landing has been processed (enroll + enrichment fired),
+ * so a re-observed entry never re-fires them. Value is the landing commit SHA
+ * (informational). Best-effort — a write failure is logged and returned as a
+ * structured result, never thrown; the caller only removes the pending entry
+ * once the mark succeeded, so a failed mark leaves the entry to retry next tick.
+ */
+export async function markEnrolled(
+  prNumber: number,
+  commitSha: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const r = getRedisConnection();
+    await r.hset(holdbackEnrolledMarkerKey(), String(prNumber), commitSha);
+    return { ok: true };
+  } catch (err: any) {
+    const msg = `[holdback] markEnrolled failed for pr ${prNumber}: ${err?.message || String(err)}`;
+    console.error(msg);
+    return { ok: false, error: msg };
+  }
+}
+
+/** Test-only: clear the entire enrolled-marker hash. */
+export async function _resetEnrolledMarker(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(holdbackEnrolledMarkerKey());
+}
+
+// ---------------------------------------------------------------------------
+// Merge-completion watcher: observability health (issue #2623)
+// ---------------------------------------------------------------------------
+
+/** TTL on the health record — 2 days, longer than the hourly run cadence so a
+ * present record is always the genuine last run, but short enough that a
+ * long-stopped scheduler's record ages out (mirrors reconciler-health, #2057). */
+const MERGE_WATCH_HEALTH_TTL_SEC = 2 * 24 * 60 * 60;
+
+/**
+ * Persist the merge-completion watcher's last-run health snapshot (best-effort;
+ * the chore already logs, so a write failure here must never abort it).
+ */
+export async function setMergeWatchHealth(record: MergeWatchHealthRecord): Promise<void> {
+  try {
+    const r = getRedisConnection();
+    await r.set(
+      holdbackMergeWatchHealthKey(),
+      JSON.stringify(record),
+      "EX",
+      MERGE_WATCH_HEALTH_TTL_SEC,
+    );
+  } catch (err: any) {
+    /* intentional: health persistence is observability, not correctness — a
+       write failure is logged and swallowed so the watcher's own work stands. */
+    console.error(`[holdback] setMergeWatchHealth failed: ${err?.message || String(err)}`);
+  }
+}
+
+/** Read the merge-completion watcher's last-run health snapshot, or `null` if
+ * none/expired or the stored value is unparseable. */
+export async function getMergeWatchHealth(): Promise<MergeWatchHealthRecord | null> {
+  try {
+    const r = getRedisConnection();
+    const raw = await r.get(holdbackMergeWatchHealthKey());
+    if (!raw) return null;
+    return JSON.parse(raw) as MergeWatchHealthRecord;
+  } catch (err: any) {
+    console.error(`[holdback] getMergeWatchHealth: unreadable health record: ${err?.message || String(err)}`);
+    return null;
+  }
 }
