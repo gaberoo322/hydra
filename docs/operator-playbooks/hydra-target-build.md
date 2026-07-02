@@ -319,6 +319,34 @@ endpoint — NOT `/api/learning/context-trace`, which reports only
 `getContext()`'s composition (a prompt no subagent receives on today's
 architecture).
 
+**Knowledge context — live API (issue #2647).** At the SAME planning-time step,
+fetch the agent-scoped **knowledge context** — the learned patterns (prior-cycle
+failures, successful tactics) OpenViking has indexed for this skill — and fold it
+into the plan you hand the executor role. Before #2647 no build fetched it, so
+`knowledgeContext.cyclesWithContext` read 0% on the health surface.
+
+```bash
+KB_JSON=$(curl -sf --max-time 5 \
+  "http://localhost:4000/api/learning/knowledge?agent=hydra-target-build")
+
+KB_CONTENT=$(printf '%s' "$KB_JSON" | jq -r '.content // ""')
+if [ -n "$KB_CONTENT" ]; then
+  # Learned patterns for this agent from prior cycles — read them, avoid known
+  # failures, reuse known-good tactics. Fold KB_CONTENT into the executor plan.
+  printf '%s\n' "$KB_CONTENT"
+fi
+# Empty / unreachable → graceful no-op. Never fail the build over a
+# knowledge-context miss.
+```
+
+Use `/api/learning/knowledge`, NOT `/api/learning/context-trace`: the latter is
+a counts-only diagnostic that omits block `.content` by design (#804/#841), so
+there is nothing to weave into a plan. This route SERVES the content (like
+`/api/reflections` serves `formatted`) and records the #1440 per-cycle
+availability metric server-side on its success path — so the record stays
+co-located with a real served fetch and you never touch the metric from a shell
+block (which the single-quoted PR-body heredoc quoting would make fragile).
+
 ### 4. Skeptic (skip for quick-fix)
 
 Read `~/hydra/config/agents/skeptic.md`. Challenge:

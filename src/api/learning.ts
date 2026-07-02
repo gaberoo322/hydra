@@ -8,7 +8,17 @@ import {
   RuleActionLogQuerySchema,
   ContextTraceQuerySchema,
   ReflectionHealthQuerySchema,
+  KnowledgeQuerySchema,
 } from "../schemas/learning.ts";
+// Issue #2647: the dispatch-served, plan-time knowledge fetch. This route is
+// the CONTENT-serving counterpart to the counts-only context-trace: it returns
+// the rendered agent-scoped knowledge block (`loadKnowledgeBaseForPrompt`) that
+// the dispatch playbooks weave into the implementation plan, and it records the
+// #1440 per-cycle availability metric ON ITS SUCCESS PATH — so
+// `cyclesWithContext` moves only on a real dispatch fetch, never on a diagnostic
+// context-trace hit (the metric side effect moved OUT of getContext, #2647).
+import { loadKnowledgeBaseForPrompt } from "../knowledge-base/ov-search.ts";
+import { recordKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 // Issue #2467: the reflection-deposit observability surface reads the recent
 // cycle-metrics window (each row already carries a derived `reflectionMatchSource`
 // from `deriveReflectionMatchSource(reflectionSources)`) and projects the bucket
@@ -112,8 +122,29 @@ export { projectReflectionHealth } from "../metrics/trend.ts";
  * Each entry includes pre/post firing rates, promotion date, and the ratio
  * between them so reviewers can prioritise the worst offenders.
  */
-export function createLearningRouter() {
+/**
+ * Issue #2647 — injectable deps for the plan-time knowledge route. Both
+ * optional; each defaults to the real implementation (`deps?.field ?? realImpl`)
+ * so production mounts `createLearningRouter()` with no args and observes
+ * byte-identical behaviour, while a test can drive the record-on-success
+ * invariant deterministically without a live OpenViking / Redis connection.
+ */
+export interface LearningRouterDeps {
+  loadKnowledgeBaseForPrompt?: (
+    agent: string,
+  ) => Promise<{ content: string; itemCount: number }>;
+  recordKnowledgeContextAvailability?: (hadContext: boolean) => Promise<void>;
+}
+
+export function createLearningRouter(deps: LearningRouterDeps = {}) {
   const router = Router();
+
+  // Issue #2647: resolve the two knowledge-route primitives from the optional
+  // deps bag, defaulting to the real implementations. Production passes no deps.
+  const loadKnowledgeBaseForPromptFn =
+    deps.loadKnowledgeBaseForPrompt ?? loadKnowledgeBaseForPrompt;
+  const recordKnowledgeContextAvailabilityFn =
+    deps.recordKnowledgeContextAvailability ?? recordKnowledgeContextAvailability;
 
   router.get("/learning/ineffective-rules", async (_req, res) => {
     try {
@@ -263,6 +294,75 @@ export function createLearningRouter() {
       });
     } catch (err: any) {
       console.error(`[learning-api] context-trace failed: ${err?.message || String(err)}`);
+      res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  /**
+   * GET /learning/knowledge?agent= — the dispatch-served, plan-time knowledge
+   * fetch (issue #2647).
+   *
+   * This is the CONTENT-serving knowledge route the dispatch playbooks
+   * (`hydra-dev`, `hydra-target-build`) fetch at planning time — the same seam
+   * where they already read `/api/reflections`, `/api/design-concepts/<ref>`,
+   * and `/api/tier`. It wraps `loadKnowledgeBaseForPrompt` (the agent-scoped
+   * OpenViking search, top-5 rendered into a prompt block) and returns real
+   * `content` the agent weaves into its implementation plan — deliberately NOT
+   * the counts-only `/api/learning/context-trace` shape, which omits block
+   * `.content` by design (#804/#841) and is a diagnostic composer no dispatch
+   * consumes.
+   *
+   * CRITICAL (issue #2647): this route is the SINGLE place the #1440 per-cycle
+   * knowledge-context-availability metric is recorded. The record fires
+   * SERVER-SIDE on the success path — any served fetch increments `cyclesTotal`,
+   * a non-empty result (`itemCount > 0`) also increments `cyclesWithContext` —
+   * so the metric tracks actual dispatch-served fetches, never a diagnostic
+   * context-trace hit (the side effect was MOVED here out of `getContext()`).
+   * Recording server-side (rather than from a playbook shell block) keeps the
+   * record co-located with a real served fetch and sidesteps the single-quoted
+   * heredoc / `$VAR`-expansion fragility the dispatch PR-body quoting has.
+   *
+   * The availability record is best-effort / never-throw: a Redis error is
+   * logged and swallowed so it can never break the plan-time fetch the dispatch
+   * depends on.
+   *
+   * Query param (required):
+   *   agent — the agent/skill name (e.g. `hydra-dev`)
+   *
+   * Response (200): { agent, content, itemCount }
+   *   - `content` is prompt-ready markdown; `""` / `itemCount: 0` on a miss (OV
+   *     returned nothing) — a clean no-op the dispatch degrades over silently.
+   * Response (400): { error } when `agent` is absent/blank.
+   */
+  router.get("/learning/knowledge", async (req, res) => {
+    // ADR-0022: read query through the Schemas seam. This route owns a bespoke
+    // 400 (mirroring context-trace), so it safeParses inline.
+    const parsed = KnowledgeQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: "agent query param is required" });
+      return;
+    }
+    const { agent } = parsed.data;
+
+    try {
+      const { content, itemCount } = await loadKnowledgeBaseForPromptFn(agent);
+
+      // Issue #2647 / #1440: record per-cycle knowledge-context availability on
+      // the SUCCESS path of this dispatch-served fetch. Best-effort and
+      // never-throws — a Redis hiccup must not break the plan-time fetch. Any
+      // served fetch counts toward cyclesTotal; a non-empty result also counts
+      // toward cyclesWithContext (itemCount > 0 ⇔ the block had content).
+      try {
+        await recordKnowledgeContextAvailabilityFn(itemCount > 0);
+      } catch (recErr: any) {
+        console.error(
+          `[learning-api] knowledge availability record failed: ${recErr?.message ?? recErr}`,
+        );
+      }
+
+      res.json({ agent, content, itemCount });
+    } catch (err: any) {
+      console.error(`[learning-api] knowledge failed: ${err?.message || String(err)}`);
       res.status(500).json({ error: err?.message || String(err) });
     }
   });
