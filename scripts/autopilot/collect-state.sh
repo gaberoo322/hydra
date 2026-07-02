@@ -124,7 +124,7 @@ else
   # Fallback: orchestrator down or its gh read degraded — read directly.
   gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
     needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
-    ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
+    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not))] | length,
     needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
     in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,
@@ -226,8 +226,16 @@ gh issue list --repo gaberoo322/hydra --state open --json number,labels --jq '
 #   - Best-effort: any failure prints `none` so dispatch is never blocked
 #     by a transient orchestrator outage.
 echo -n "orch_pending_grill_anchor="
+# Exclude `target-backlog` issues from the grill candidate set (issue #2704):
+# `target-backlog` is the routing label for Target work (code in hydra-betting).
+# An issue carrying BOTH `ready-for-agent` and `target-backlog` (e.g. #2701)
+# is Target-scope, but grilling it here fires an orchestrator-scope
+# `design_concept_orch` grill against target code — a scope mismatch that
+# re-fires every idle turn. Drop such issues from the candidate list up front,
+# mirroring how the untriaged-orphans jq excludes label sets above.
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt,body,labels,title --jq '
-  sort_by(.updatedAt) | reverse | .[0:10]
+  [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
+  | sort_by(.updatedAt) | reverse | .[0:10]
 ' 2>/dev/null || true)
 ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
 import json, sys
@@ -457,7 +465,7 @@ CLEANUP_BOARD_SATURATION_CAP=10
 # architecture-sourced and cleanup-sourced counts, in one gh call to keep this
 # collector cheap.
 ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --json number,labels --jq "{
-  ready_for_agent: [.[] | select(.labels | map(.name) | index(\"ready-for-agent\"))] | length,
+  ready_for_agent: [.[] | select((.labels | map(.name)) as \$n | (\$n | index(\"ready-for-agent\")) and ((\$n | index(\"target-backlog\")) | not))] | length,
   needs_research: [.[] | select(.labels | map(.name) | index(\"needs-research\"))] | length,
   needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,
   arch_sourced: [.[] | select(.labels | map(.name) | index(\"${ARCH_SCAN_LABEL}\"))] | length,

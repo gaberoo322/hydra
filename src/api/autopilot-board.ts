@@ -66,6 +66,12 @@ export const ORCH_BOARD_LABELS = {
   needs_research: "needs-research",
   in_progress: "in-progress",
   blocked: "blocked",
+  // `target-backlog` is the routing label for Target work (code in
+  // hydra-betting), NOT an orchestrator board state. It excludes an issue from
+  // the orch `ready_for_agent` count so a Target-scope issue that also carries
+  // `ready-for-agent` (e.g. #2701) is not counted as orch-pipeline work and
+  // does not drive an orchestrator-scope grill / dispatch (issue #2704).
+  target_backlog: "target-backlog",
 } as const;
 
 /**
@@ -109,7 +115,14 @@ export function deriveBoardState(
   for (const row of rows) {
     const labels = new Set(row.labels);
     if (labels.has(ORCH_BOARD_LABELS.needs_qa)) needs_qa++;
-    if (labels.has(ORCH_BOARD_LABELS.ready_for_agent)) ready_for_agent++;
+    // Exclude `target-backlog` issues from the orch `ready_for_agent` count
+    // (issue #2704): they are Target-scope routing, not orchestrator work, so
+    // counting them mis-fires an orch-scope grill / dispatch on target code.
+    if (
+      labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
+      !labels.has(ORCH_BOARD_LABELS.target_backlog)
+    )
+      ready_for_agent++;
     if (labels.has(ORCH_BOARD_LABELS.needs_triage)) needs_triage++;
     if (labels.has(ORCH_BOARD_LABELS.needs_research)) needs_research++;
 
