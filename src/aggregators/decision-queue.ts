@@ -35,9 +35,11 @@ import {
 import type { DecisionItemSource } from "../schemas/today-page.ts";
 import { settledOrEmpty } from "./settle.ts";
 import {
+  addDays,
   datedTitle,
   digestRefsFromRows,
   labeledItemsFromRows,
+  mergeBySource,
   type RawDigestInput,
 } from "./digest-issue.ts";
 
@@ -126,11 +128,16 @@ type RawDecisionInput = RawDigestInput;
  * item; the `sources` array collects every source that did. This lets the
  * dashboard render a primary badge plus optional secondary badges without
  * the aggregator picking a winner arbitrarily.
+ *
+ * The dedup skeleton (keying, first-write-wins by order priority, sources
+ * accumulation) is owned by the digest-issue seam's {@link mergeBySource};
+ * this function owns the decision-queue *policy*: the fixed source order, the
+ * label-union on duplicates (via `onDuplicate`), the `DecisionItem` projection
+ * (which carries createdAt + labels), and the createdAt-ascending sort.
  */
 export function mergeDecisionItems(
   bySource: Partial<Record<DecisionItemSource, RawDecisionInput[]>>,
 ): DecisionItem[] {
-  const byNumber = new Map<number, DecisionItem>();
   // Iterate sources in a stable order — digest first so it wins as the
   // primary source when the same issue is also labeled.
   const order: DecisionItemSource[] = [
@@ -138,37 +145,31 @@ export function mergeDecisionItems(
     "ready-for-human",
     "needs-info",
   ];
-  for (const source of order) {
-    const items = bySource[source] ?? [];
-    for (const item of items) {
-      const existing = byNumber.get(item.number);
-      if (existing) {
-        if (!existing.sources.includes(source)) existing.sources.push(source);
-        // Merge labels too so we don't lose any taxonomy.
-        for (const label of item.labels) {
-          if (!existing.labels.includes(label)) existing.labels.push(label);
-        }
-        continue;
-      }
-      byNumber.set(item.number, {
-        number: item.number,
-        title: item.title,
-        url: item.url,
-        createdAt: item.createdAt,
-        labels: [...item.labels],
-        source,
-        sources: [source],
-      });
-    }
-  }
 
-  return Array.from(byNumber.values()).sort((a, b) => {
-    const aMs = Date.parse(a.createdAt);
-    const bMs = Date.parse(b.createdAt);
-    if (Number.isFinite(aMs) && Number.isFinite(bMs)) return aMs - bMs;
-    // Fall back to number ordering if a createdAt is missing/unparseable.
-    return a.number - b.number;
+  const merged = mergeBySource(bySource, order, (existing, incoming) => {
+    // Merge labels too so we don't lose any taxonomy.
+    for (const label of incoming.labels) {
+      if (!existing.row.labels.includes(label)) existing.row.labels.push(label);
+    }
   });
+
+  return merged
+    .map(({ row, source, sources }): DecisionItem => ({
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      createdAt: row.createdAt,
+      labels: row.labels,
+      source,
+      sources,
+    }))
+    .sort((a, b) => {
+      const aMs = Date.parse(a.createdAt);
+      const bMs = Date.parse(b.createdAt);
+      if (Number.isFinite(aMs) && Number.isFinite(bMs)) return aMs - bMs;
+      // Fall back to number ordering if a createdAt is missing/unparseable.
+      return a.number - b.number;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -213,15 +214,4 @@ async function fetchLabeledItems(
     repo: deps.githubRepo,
   });
   return labeledItemsFromRows(rows);
-}
-
-// ---------------------------------------------------------------------------
-// Small date helper — pure, local (the dated-title format itself lives in the
-// digest-issue seam).
-// ---------------------------------------------------------------------------
-
-function addDays(d: Date, n: number): Date {
-  const out = new Date(d.getTime());
-  out.setUTCDate(out.getUTCDate() + n);
-  return out;
 }
