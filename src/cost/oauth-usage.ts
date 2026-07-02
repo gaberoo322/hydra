@@ -47,6 +47,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HydraErrorCode } from "../errors.ts";
+import { getOAuthUsageMaxStaleMs } from "./config.ts";
 
 /** The subset of `HydraErrorCode` the OAuth Usage Adapter can return. */
 export type OAuthUsageErrorCode = Extract<HydraErrorCode, `oauth-usage-${string}`>;
@@ -81,15 +82,20 @@ export interface OAuthUsageData {
  * result must make the caller FALL BACK to the transcript estimate — it must
  * never be read as "0% utilization" (which would wrongly unblock dispatch
  * during an OAuth outage; issue #1083 gate-safe invariant).
+ *
+ * `retryAfterMs` (issue #2666) is ADDITIVE and only ever populated on the
+ * `oauth-usage-rate-limited` (429) failure: the server's parsed `Retry-After`
+ * hint in ms, clamped to the maxStale ceiling. The cadence layer may use it
+ * only to LENGTHEN its exponential backoff, never to shorten it.
  */
 export type OAuthUsageResult =
   | { ok: true; data: OAuthUsageData }
-  | { ok: false; code: OAuthUsageErrorCode };
+  | { ok: false; code: OAuthUsageErrorCode; retryAfterMs?: number };
 
 /** Type guard narrowing an {@link OAuthUsageResult} to its failure arm. */
 export function isOAuthUsageFailure(
   result: OAuthUsageResult,
-): result is { ok: false; code: OAuthUsageErrorCode } {
+): result is { ok: false; code: OAuthUsageErrorCode; retryAfterMs?: number } {
   return result.ok === false;
 }
 
@@ -224,6 +230,46 @@ export function parseOAuthUsageBody(body: unknown): OAuthUsageData | null {
 }
 
 /**
+ * Parse an HTTP `Retry-After` header value into a delay in ms, or `undefined`
+ * when the header is absent / unparseable (issue #2666). Accepts both RFC 9110
+ * forms:
+ *
+ *   - delta-seconds (`"120"`)  → 120_000 ms
+ *   - HTTP-date               → `Date.parse(value) - nowMs` (a past date → 0)
+ *
+ * The result is clamped to `[0, ceilingMs]` so a hostile/buggy header cannot
+ * park the meter for hours — the ceiling is the maxStale window, past which the
+ * cadence layer would have fallen to the estimate anyway. Pure (nowMs +
+ * ceilingMs injected) so it is unit-testable without a live clock. Exported for
+ * direct unit test.
+ */
+export function parseRetryAfterMs(
+  headerValue: string | null | undefined,
+  nowMs: number,
+  ceilingMs: number,
+): number | undefined {
+  if (typeof headerValue !== "string") return undefined;
+  const value = headerValue.trim();
+  if (value === "") return undefined;
+  let delayMs: number;
+  if (/^\d+$/.test(value)) {
+    delayMs = Number(value) * 1000;
+  } else if (/^[+-]?\d+$/.test(value)) {
+    // An integer-like string that is NOT plain digits (e.g. "-5", "+30") is
+    // invalid delta-seconds per RFC 9110 — reject it rather than letting
+    // Date.parse misread it as a year (Date.parse("-5") → year -5, a past
+    // date, which would wrongly clamp to "retry now").
+    return undefined;
+  } else {
+    const dateMs = Date.parse(value);
+    if (!Number.isFinite(dateMs)) return undefined;
+    delayMs = dateMs - nowMs;
+  }
+  if (!Number.isFinite(delayMs)) return undefined;
+  return Math.min(Math.max(delayMs, 0), ceilingMs);
+}
+
+/**
  * Map a thrown fetch error onto an `oauth-usage-*` failure code, mirroring the
  * OpenViking Request Adapter's `classifyThrown`. `AbortSignal.timeout` rejects
  * with a `TimeoutError`/`AbortError` name (=> `oauth-usage-timeout`); anything
@@ -243,6 +289,9 @@ function classifyThrown(err: any): OAuthUsageErrorCode {
  *
  *   oauth-usage-no-credentials — no credentials file / no access token,
  *   oauth-usage-token-expired  — the endpoint reported 401/403 (token expired/invalid),
+ *   oauth-usage-rate-limited   — the endpoint reported 429; carries the parsed
+ *                                Retry-After hint as `retryAfterMs` when present
+ *                                (issue #2666),
  *   oauth-usage-non-2xx        — any other non-2xx status from the endpoint,
  *   oauth-usage-parse          — a 2xx body that failed JSON.parse OR a
  *                                200-with-garbage body missing a usable window,
@@ -286,6 +335,29 @@ export async function readOAuthUsage(
   }
 
   if (!res.ok) {
+    // 429 is the shared account-wide rate-limit bucket, distinct from a sick
+    // endpoint (issue #2666): classify it separately so the operator-facing
+    // oauthError string reads "rate-limited, meter serving stale" rather than a
+    // generic non-2xx, and surface the parsed Retry-After hint so the cadence
+    // layer can LENGTHEN (never shorten) its exponential backoff. Degrades to
+    // stale-serve/estimate like every failure; never throws.
+    if (res.status === 429) {
+      const retryAfterMs = parseRetryAfterMs(
+        // Defensive access: injected test doubles may omit `headers` entirely.
+        typeof res.headers?.get === "function" ? res.headers.get("retry-after") : null,
+        Date.now(),
+        getOAuthUsageMaxStaleMs(),
+      );
+      const text = await res.text().catch(() => "");
+      console.error(
+        `[oauth-usage] oauth-usage-rate-limited: 429` +
+          (retryAfterMs !== undefined ? ` (Retry-After ${retryAfterMs}ms)` : "") +
+          ` ${text.slice(0, 200)}`,
+      );
+      return retryAfterMs !== undefined
+        ? { ok: false, code: "oauth-usage-rate-limited", retryAfterMs }
+        : { ok: false, code: "oauth-usage-rate-limited" };
+    }
     // 401/403 means the token expired or was revoked (the account-switch /
     // re-login window). Distinguish it from a generic non-2xx so a caller /
     // operator can tell "log back in" from "endpoint is sick". Both degrade to

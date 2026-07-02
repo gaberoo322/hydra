@@ -15,11 +15,13 @@ import assert from "node:assert/strict";
 const {
   readOAuthUsage,
   parseOAuthUsageBody,
+  parseRetryAfterMs,
   isOAuthUsageFailure,
   isOAuthUsageOk,
   OAUTH_USAGE_URL,
   OAUTH_USAGE_BETA,
 } = await import("../src/cost/oauth-usage.ts");
+const { DEFAULT_OAUTH_USAGE_MAX_STALE_MS } = await import("../src/cost/config.ts");
 
 /** A minimal Response-like stub. */
 function fakeResponse(opts: {
@@ -27,12 +29,16 @@ function fakeResponse(opts: {
   status?: number;
   json?: () => Promise<any>;
   text?: () => Promise<string>;
+  headers?: Record<string, string>;
 }): any {
   return {
     ok: opts.ok,
     status: opts.status ?? (opts.ok ? 200 : 500),
     json: opts.json ?? (async () => ({})),
     text: opts.text ?? (async () => ""),
+    headers: {
+      get: (name: string) => opts.headers?.[name.toLowerCase()] ?? null,
+    },
   };
 }
 
@@ -95,6 +101,62 @@ describe("oauth-usage: the failure modes (never throw)", () => {
     const fetchImpl = (async () => fakeResponse({ ok: false, status: 500 })) as any;
     const r = await readOAuthUsage({ fetchImpl, readToken: tokenOk });
     assert.equal(r.ok === false && r.code, "oauth-usage-non-2xx");
+  });
+
+  test("oauth-usage-rate-limited — 429 is classified distinctly from non-2xx (issue #2666)", async () => {
+    const fetchImpl = (async () => fakeResponse({ ok: false, status: 429 })) as any;
+    const r = await readOAuthUsage({ fetchImpl, readToken: tokenOk });
+    assert.equal(r.ok === false && r.code, "oauth-usage-rate-limited");
+    assert.equal(r.ok === false && r.retryAfterMs, undefined, "no Retry-After header → no hint");
+  });
+
+  test("oauth-usage-rate-limited — delta-seconds Retry-After is parsed to ms (issue #2666)", async () => {
+    const fetchImpl = (async () =>
+      fakeResponse({ ok: false, status: 429, headers: { "retry-after": "120" } })) as any;
+    const r = await readOAuthUsage({ fetchImpl, readToken: tokenOk });
+    assert.equal(r.ok === false && r.code, "oauth-usage-rate-limited");
+    assert.equal(r.ok === false && r.retryAfterMs, 120_000);
+  });
+
+  test("oauth-usage-rate-limited — HTTP-date Retry-After is parsed relative to now (issue #2666)", async () => {
+    const future = new Date(Date.now() + 60_000).toUTCString();
+    const fetchImpl = (async () =>
+      fakeResponse({ ok: false, status: 429, headers: { "retry-after": future } })) as any;
+    const r = await readOAuthUsage({ fetchImpl, readToken: tokenOk });
+    assert.equal(r.ok === false && r.code, "oauth-usage-rate-limited");
+    const hint = r.ok === false ? r.retryAfterMs : undefined;
+    assert.ok(hint !== undefined, "HTTP-date must parse to a hint");
+    // toUTCString truncates to whole seconds, so allow the sub-minute skew.
+    assert.ok(hint! > 50_000 && hint! <= 60_000, `expected ~60s, got ${hint}ms`);
+  });
+
+  test("oauth-usage-rate-limited — garbage Retry-After degrades to no hint, never throws (issue #2666)", async () => {
+    const fetchImpl = (async () =>
+      fakeResponse({ ok: false, status: 429, headers: { "retry-after": "soonish" } })) as any;
+    const r = await readOAuthUsage({ fetchImpl, readToken: tokenOk });
+    assert.equal(r.ok === false && r.code, "oauth-usage-rate-limited");
+    assert.equal(r.ok === false && r.retryAfterMs, undefined);
+  });
+
+  test("oauth-usage-rate-limited — an hours-long Retry-After is clamped to the maxStale ceiling (issue #2666)", async () => {
+    const fetchImpl = (async () =>
+      fakeResponse({ ok: false, status: 429, headers: { "retry-after": "86400" } })) as any; // 24h
+    const r = await readOAuthUsage({ fetchImpl, readToken: tokenOk });
+    assert.equal(r.ok === false && r.code, "oauth-usage-rate-limited");
+    assert.equal(
+      r.ok === false && r.retryAfterMs,
+      DEFAULT_OAUTH_USAGE_MAX_STALE_MS,
+      "a hostile/buggy header must not park the meter for hours",
+    );
+  });
+
+  test("oauth-usage-rate-limited — a 429 from a Response-like with NO headers object still classifies (issue #2666)", async () => {
+    // Defensive-access path: injected doubles may omit `headers` entirely.
+    const bare: any = { ok: false, status: 429, text: async () => "" };
+    const fetchImpl = (async () => bare) as any;
+    const r = await readOAuthUsage({ fetchImpl, readToken: tokenOk });
+    assert.equal(r.ok === false && r.code, "oauth-usage-rate-limited");
+    assert.equal(r.ok === false && r.retryAfterMs, undefined);
   });
 
   test("oauth-usage-parse — a 2xx body that fails JSON.parse", async () => {
@@ -186,5 +248,45 @@ describe("oauth-usage: parseOAuthUsageBody — defensive parse (gate-safety)", (
     assert.ok(d !== null);
     assert.equal(d!.fiveHour.resetsAt, null);
     assert.equal(d!.sevenDay.resetsAt, null);
+  });
+});
+
+describe("oauth-usage: parseRetryAfterMs — pure Retry-After parse (issue #2666)", () => {
+  const NOW = Date.parse("2026-07-02T12:00:00Z");
+  const CEILING = 1_800_000; // 30 min
+
+  test("delta-seconds → ms", () => {
+    assert.equal(parseRetryAfterMs("120", NOW, CEILING), 120_000);
+    assert.equal(parseRetryAfterMs("0", NOW, CEILING), 0);
+    assert.equal(parseRetryAfterMs(" 30 ", NOW, CEILING), 30_000, "whitespace tolerated");
+  });
+
+  test("HTTP-date → dateMs - nowMs", () => {
+    assert.equal(
+      parseRetryAfterMs("Thu, 02 Jul 2026 12:02:00 GMT", NOW, CEILING),
+      120_000,
+    );
+  });
+
+  test("a PAST HTTP-date clamps to 0 (retry now), not a negative delay", () => {
+    assert.equal(parseRetryAfterMs("Thu, 02 Jul 2026 11:00:00 GMT", NOW, CEILING), 0);
+  });
+
+  test("absent / empty / garbage → undefined", () => {
+    assert.equal(parseRetryAfterMs(null, NOW, CEILING), undefined);
+    assert.equal(parseRetryAfterMs(undefined, NOW, CEILING), undefined);
+    assert.equal(parseRetryAfterMs("", NOW, CEILING), undefined);
+    assert.equal(parseRetryAfterMs("   ", NOW, CEILING), undefined);
+    assert.equal(parseRetryAfterMs("soonish", NOW, CEILING), undefined);
+    assert.equal(parseRetryAfterMs("-5", NOW, CEILING), undefined, "negative delta-seconds is not RFC 9110");
+  });
+
+  test("clamped to the injected ceiling", () => {
+    assert.equal(parseRetryAfterMs("86400", NOW, CEILING), CEILING); // 24h → 30min
+    assert.equal(
+      parseRetryAfterMs("Fri, 03 Jul 2026 12:00:00 GMT", NOW, CEILING),
+      CEILING,
+      "HTTP-date a day out clamps too",
+    );
   });
 });

@@ -40,6 +40,7 @@ import {
   deriveDispatchKind,
   emptyByDispatchKind,
   oauthBackoffDelayMs,
+  makeReadOAuth,
   DISPATCH_KINDS,
 } from "../src/cost/transcript-scan.ts";
 // Attribution coverage % pure fold (issue #2403) lives on the snapshot-assembly
@@ -3400,6 +3401,183 @@ describe("usage-tracker", () => {
         assert.equal(snap.usageSource, "estimate", "too-stale-during-backoff falls to estimate");
         assert.equal(snap.oauthStale, false);
         assert.equal(snap.oauthAgeMs, null);
+        assert.equal(snap.percentLast5h, 30, "estimate gauge stands — never silently 0");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // Single-flight + Retry-After honor on the OAuth meter GET (issue #2666).
+  // Journalctl 2026-07-02 showed every 429 as a SAME-SECOND DUPLICATE PAIR: two
+  // concurrent scans past TTL expiry each fired their own GET, burning two
+  // rate-limit bucket slots and double-arming the #2619 backoff. The fix: the
+  // first post-TTL caller launches the GET; concurrent callers share its
+  // in-flight promise. And a 429's parsed Retry-After hint may only LENGTHEN
+  // the exponential backoff, never shorten it. These tests drive the production
+  // cached path directly via makeReadOAuth (bypassOAuthCache: false) with
+  // pinned nowMs values — the same seam getUsage wires in.
+  describe("OAuth single-flight + Retry-After honor (issue #2666)", () => {
+    let restoreEnv: () => void;
+    beforeEach(() => {
+      restoreEnv = withEnvSnapshot();
+      clearUsageCache();
+    });
+    afterEach(() => {
+      restoreEnv();
+      clearUsageCache();
+    });
+
+    const okData = {
+      fiveHour: { utilization: 42, resetsAt: null },
+      sevenDay: { utilization: 21, resetsAt: null },
+    };
+
+    test("single-flight: two concurrent post-TTL reads share ONE GET and one outcome", async () => {
+      let resolveGate!: () => void;
+      const gate = new Promise<void>((r) => (resolveGate = r));
+      let calls = 0;
+      const reader = async () => {
+        calls++;
+        await gate; // hold the GET open so the second read arrives mid-flight
+        return { ok: true as const, data: okData };
+      };
+      const t0 = Date.parse("2026-07-02T12:00:00Z");
+      const read = makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false });
+
+      // Both fired before the first resolves — the second MUST NOT launch a GET.
+      const p1 = read();
+      const p2 = read();
+      resolveGate();
+      const [r1, r2] = await Promise.all([p1, p2]);
+
+      assert.equal(calls, 1, "concurrent post-TTL reads must share a single GET");
+      assert.equal(r1.result.ok, true);
+      assert.equal(r2.result.ok, true);
+      assert.equal(r1.result.ok && r1.result.data.fiveHour.utilization, 42);
+      assert.equal(r2.result.ok && r2.result.data.fiveHour.utilization, 42);
+      assert.equal(r1.stale, false);
+      assert.equal(r2.stale, false);
+    });
+
+    test("single-flight: a concurrent 429 pair arms backoff ONCE (failure #1, not #2)", async () => {
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000"; // 30s
+      let resolveGate!: () => void;
+      const gate = new Promise<void>((r) => (resolveGate = r));
+      let calls = 0;
+      const reader = async (): Promise<OAuthUsageResult> => {
+        calls++;
+        await gate;
+        return { ok: false, code: "oauth-usage-rate-limited" };
+      };
+      const t0 = Date.parse("2026-07-02T12:00:00Z");
+      const read0 = makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false });
+      const p1 = read0();
+      const p2 = read0();
+      resolveGate();
+      await Promise.all([p1, p2]);
+      assert.equal(calls, 1, "the duplicate-pair GET is gone");
+
+      // Had the pair double-armed backoff (failures=2), the gate would run to
+      // t0+60s. Single-armed (failures=1) it runs to t0+30s — so a read at
+      // t0+31s must attempt a fresh GET.
+      const read31 = makeReadOAuth({
+        readUsage: reader,
+        nowMs: t0 + 31_000,
+        bypassOAuthCache: false,
+      });
+      await read31();
+      assert.equal(calls, 2, "backoff armed once: the t0+31s read re-probes past the 30s gate");
+    });
+
+    test("Retry-After LENGTHENS the backoff gate past the exponential delay", async () => {
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000"; // exponential #1 = 30s
+      let calls = 0;
+      const reader = async (): Promise<OAuthUsageResult> => {
+        calls++;
+        return { ok: false, code: "oauth-usage-rate-limited", retryAfterMs: 120_000 };
+      };
+      const t0 = Date.parse("2026-07-02T12:00:00Z");
+      await makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false })();
+      assert.equal(calls, 1);
+
+      // t0+60s: PAST the 30s exponential delay but INSIDE the 120s server hint —
+      // the GET must stay suppressed (the hint lengthened the gate).
+      const mid = await makeReadOAuth({
+        readUsage: reader,
+        nowMs: t0 + 60_000,
+        bypassOAuthCache: false,
+      })();
+      assert.equal(calls, 1, "server hint honored: no GET inside the Retry-After window");
+      assert.equal(mid.result.ok, false, "no last-good → backoff-suppressed failure passthrough");
+
+      // t0+121s: past the hint — the re-probe fires.
+      await makeReadOAuth({
+        readUsage: reader,
+        nowMs: t0 + 121_000,
+        bypassOAuthCache: false,
+      })();
+      assert.equal(calls, 2, "past the Retry-After window the re-probe GET fires");
+    });
+
+    test("a lying `Retry-After: 0` cannot SHORTEN the exponential backoff", async () => {
+      process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "30000";
+      let calls = 0;
+      const reader = async (): Promise<OAuthUsageResult> => {
+        calls++;
+        return { ok: false, code: "oauth-usage-rate-limited", retryAfterMs: 0 };
+      };
+      const t0 = Date.parse("2026-07-02T12:00:00Z");
+      await makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: false })();
+      assert.equal(calls, 1);
+
+      // t0+1s: the hint said "retry now", but the exponential curve says 30s —
+      // max(0, 30s) keeps the gate at 30s. No GET.
+      await makeReadOAuth({ readUsage: reader, nowMs: t0 + 1_000, bypassOAuthCache: false })();
+      assert.equal(calls, 1, "retry-after: 0 must not restore hammering");
+
+      // t0+31s: past the exponential gate — re-probe fires.
+      await makeReadOAuth({ readUsage: reader, nowMs: t0 + 31_000, bypassOAuthCache: false })();
+      assert.equal(calls, 2);
+    });
+
+    test("bypassOAuthCache path keeps the #1083 fresh-each-call contract (no single-flight)", async () => {
+      let calls = 0;
+      const reader = async () => {
+        calls++;
+        return { ok: true as const, data: okData };
+      };
+      const t0 = Date.parse("2026-07-02T12:00:00Z");
+      const read = makeReadOAuth({ readUsage: reader, nowMs: t0, bypassOAuthCache: true });
+      await read();
+      await read();
+      assert.equal(calls, 2, "injected/fixture readers stay deterministic fresh-each-call");
+    });
+
+    test("getUsage surfaces the new code: a 429 with no last-good reads oauthError=oauth-usage-rate-limited", async () => {
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      const root = await mkdtemp(join(tmpdir(), "usage-2666-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 300 })]);
+        const reader = async (): Promise<OAuthUsageResult> => ({
+          ok: false,
+          code: "oauth-usage-rate-limited",
+          retryAfterMs: 60_000,
+        });
+        const snap = await getUsage({
+          now: new Date("2026-05-25T12:00:00Z"),
+          projectsRoot: root,
+          force: true,
+          useOAuthCache: true,
+          readUsage: reader,
+        });
+        assert.equal(snap.usageSource, "estimate", "no last-good → gate-safe estimate fallback");
+        assert.equal(
+          snap.oauthError,
+          "oauth-usage-rate-limited",
+          "operator-diagnosable: rate-limited is distinct from endpoint-sick",
+        );
         assert.equal(snap.percentLast5h, 30, "estimate gauge stands — never silently 0");
       } finally {
         await rm(root, { recursive: true, force: true });
