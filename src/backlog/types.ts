@@ -30,7 +30,7 @@
  * access pattern (`item.meta = { ...item.meta, someNewKey }`) working without a
  * schema edit for every ad-hoc stamp.
  */
-export interface BacklogItemMeta {
+interface BacklogItemMeta {
   /** Producer that created the item (e.g. "research", "operator"). */
   source?: string;
   /** Ranking score folded in at creation (from the producer's `adjustedScore`). */

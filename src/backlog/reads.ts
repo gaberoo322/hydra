@@ -6,8 +6,6 @@ import { getBacklogLaneCount } from "../redis/backlog.ts";
 import { LANES, getLaneItems, sortByQueuePriority } from "./internal.ts";
 import type { BacklogItem } from "./types.ts";
 
-export type { BacklogItem } from "./types.ts";
-
 /**
  * The full set of Kanban lanes loadBacklog() returns, keyed by lane name.
  *
