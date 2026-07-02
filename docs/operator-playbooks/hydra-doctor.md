@@ -26,6 +26,45 @@ hydra scheduler status
 curl -s -o /dev/null -w "External: %{http_code}\n" https://admin.clawstreetbets.xyz/api/health
 ```
 
+### Deployed-build drift (issue #2663)
+```bash
+# Compares the SHA the RUNNING orchestrator reports it is deployed from
+# (/api/health.deployedSha) against origin/master HEAD, after a bounded
+# `git fetch`. Closes the 2026-07-02 blind spot where prod ran ~30h-stale
+# code (POST /api/holdback/pending 404'd) while the doctor said "uptime 22h,
+# status ok" — the doctor had no deployed-build-vs-master drift check.
+#
+# Read-only: the fetch updates only origin/* remote-tracking refs — it NEVER
+# checks out, pulls, or mutates the working tree. Fail-safe: an unreachable
+# API, detached origin, or git error degrades to an `unknown` verdict and
+# exits 0 (the check never makes the doctor itself "fail"). `--alert` pushes
+# a critical alert into hydra:alerts ONLY on SUSTAINED drift (past the grace
+# window) — a deploy caught mid-flight reads as `settling`, not an alarm.
+#
+# The verdict is the load-bearing line:
+#   in-sync  — deployed == origin/master. Healthy.
+#   settling — drift younger than the grace window (~15m). A deploy is
+#              likely mid-flight; re-check next run, don't act yet.
+#   drift    — deployed != origin/master past the grace window. LOUD: prod
+#              is running STALE code. Deploy-on-merge did NOT restart the
+#              service. If a `probable cause: ... dirty tree` note is shown,
+#              a spurious tracked modification (e.g. docker/ov.conf) tripped
+#              deploy.sh's dirty-tree guard — reset/commit it first.
+#   unknown  — a SHA couldn't be resolved (service down / detached origin).
+#              Information-only.
+cd ~/hydra && npx tsx scripts/deploy-drift-check.ts --text --alert 2>/dev/null \
+  || echo "deploy-drift check unavailable"
+```
+A `drift` verdict is the durable backstop for the "prod is stale but health
+says ok" failure mode (`reference_deploy_concurrency_cancels_master`): the
+per-2-min `hydra-watchdog.sh` DEPLOY DRIFT block (#734) may already be
+converging prod automatically, but its journald WARN is invisible to a
+`hydra doctor` reader — this line renders the same drift as an explicit
+doctor finding. **Fix (Phase 3):** run `scripts/deploy.sh` from the
+`~/hydra` master checkout (rebuilds dashboard + restarts the service); if a
+dirty-tree cause is shown, `git reset`/commit the tracked change first so
+deploy.sh's guard doesn't re-abort.
+
 ### Cycle Performance (last 20 metrics — richer than cycle/history)
 ```bash
 hydra metrics --count 20 | python3 -c "
@@ -254,6 +293,7 @@ grep -n "hydra-postgres\|grep -v" ~/.local/bin/hydra-docker-cleanup.sh 2>/dev/nu
 Only report issues actually present — don't speculate.
 
 - **Cycle health**: Merge rate, fix:feat ratio trend, rollback clusters, repeated task titles
+- **Deployed-build drift**: Is the drift verdict `drift`? Prod is running STALE code — deploy-on-merge did not restart the service (the "uptime 22h, status ok" trap). NEVER report a `drift` verdict as healthy. `settling` is a mid-flight deploy (re-check next run). `unknown` is information-only (service unreachable / detached origin). If a dirty-tree probable-cause is shown, that tracked modification is what blocked deploy.sh.
 - **Blockers**: Dirty working tree blocking grounding? Grounding timeout (0/0 tests)? Stale cycles?
 - **External access**: Did the external health check return non-200? Tunnel down?
 - **Services**: Any in failed state? Crash loops? Missing module errors?
@@ -285,6 +325,13 @@ Quick wins to apply automatically:
   `cd ~/hydra && docker compose up -d` (bare bring-up pulls the whole chain;
   ollama-embed goes healthy after the ~270MB nomic-embed-text pull lands)
 - Kill stale test containers: `docker ps --format '{{.Names}}' | grep test | xargs -r docker kill`
+- Converge a `drift` verdict (prod stale): run `scripts/deploy.sh` from the
+  `~/hydra` master checkout (rebuilds `dashboard/dist/` + restarts the
+  service). If the drift check reported a dirty-tree probable-cause, first
+  `git -C ~/hydra reset`/commit that tracked change so deploy.sh's dirty-tree
+  guard doesn't re-abort — `docker/ov.conf` is a known spurious offender.
+  (`settling` needs no action — re-check next run; `unknown` is a service
+  reachability issue, not stale code.)
 - Deduplicate agent memory rules
 - Delete duplicate backlog items: `hydra backlog rm <id>`
 - Dismiss stale alerts: `hydra alerts dismiss-all`
