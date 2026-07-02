@@ -241,6 +241,29 @@ export function isHonestNoneVerdict(
 }
 
 /**
+ * Issue #2699: fold every "no real anchor type" form to the single "unknown"
+ * bucket at trend read time, mirroring the stats aggregator's
+ * `m.anchorType || "unknown"` fallback (src/metrics/aggregate.ts).
+ *
+ * Redis hashes only store strings, so a cycle recorded with a JS `null`
+ * anchorType was flattened by `record.ts` via `String(null)` into the LITERAL
+ * string "null" (undefined is skipped, but null is not). A bare truthy `||`
+ * therefore lets "null" (and "undefined") slip through as a non-empty string,
+ * which is exactly why the ~12 pre-fix records surfaced as `null` in the trend
+ * array. This helper collapses absent, empty, and the "null"/"undefined"
+ * stringified sentinels to "unknown"; any genuine anchor type passes through
+ * unchanged. Pure and exported so the test suite can pin it without Redis.
+ */
+export function normalizeAnchorType(raw: unknown): string {
+  if (typeof raw !== "string") return "unknown";
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed === "null" || trimmed === "undefined") {
+    return "unknown";
+  }
+  return trimmed;
+}
+
+/**
  * Get metrics for the N most recent cycles, with all known numeric fields
  * parsed back from their Redis string form.
  */
@@ -265,6 +288,18 @@ export async function getMetricsTrend(count = 20) {
     if (!parsed.reflectionMatchSource) {
       parsed.reflectionMatchSource = deriveReflectionMatchSource(parsed.reflectionSources);
     }
+
+    // Issue #2699: normalize `anchorType` at the read/parse step, mirroring the
+    // stats aggregator's `m.anchorType || "unknown"` fallback (aggregate.ts).
+    // The write path was made explicit in f95fee2 (#2689), but the ~12 pre-fix
+    // records already persisted in Redis carry an absent OR literal-"null"
+    // anchorType (record.ts flattens a JS `null` via `String(null)` → the
+    // string "null", which a bare truthy `||` does NOT catch). Without this
+    // guard those historical rows surface as `null`/"null" in the trend array —
+    // the distinct downstream read-path gap #2699 names. Fold every unknown
+    // form (absent, empty, the "null"/"undefined" sentinels) to "unknown" so
+    // the trend output matches the aggregator's honest bucket.
+    parsed.anchorType = normalizeAnchorType(parsed.anchorType);
 
     results.push(parsed);
   }
