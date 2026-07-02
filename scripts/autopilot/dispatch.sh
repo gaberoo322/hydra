@@ -150,15 +150,34 @@ if files_changed != '':
         pass
 print(json.dumps(body))
 " "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed")
+    # Issue #2635: the rest of the autopilot ecosystem (reap.py, heartbeat.py,
+    # term-check.py, decide.py, bootstrap.sh, the hooks) resolves the API origin
+    # from HYDRA_API_BASE, but the `hydra` CLI reads HYDRA_BASE_URL and the curl
+    # fallback reads HYDRA_API — neither honours HYDRA_API_BASE. Tests (and any
+    # isolated harness) set HYDRA_API_BASE=http://127.0.0.1:1 to sink writes into
+    # a dead socket; without this propagation the cycle-record POST leaked to the
+    # live orchestrator on :4000, injecting test-fixture cycle IDs into the
+    # production metrics window. Bridge HYDRA_API_BASE onto both call paths so a
+    # single env var isolates every cycle-record write. HYDRA_API_BASE is the
+    # bare origin (no /api); the curl fallback appends its own /api path segment,
+    # so we suffix it here to keep the existing endpoint shape.
     if command -v hydra >/dev/null 2>&1; then
-      hydra raw POST /autopilot/cycle-record --json "$payload" >/dev/null 2>&1 || {
+      HYDRA_BASE_URL="${HYDRA_API_BASE:-${HYDRA_BASE_URL:-http://localhost:4000}}" \
+        hydra raw POST /autopilot/cycle-record --json "$payload" >/dev/null 2>&1 || {
         echo "[autopilot] dispatch: cycle-record post failed for cycle=$cycle_id (non-fatal)" >&2
       }
     else
-      # Fallback when `hydra` CLI is unavailable (e.g. CI smoke).
+      # Fallback when `hydra` CLI is unavailable (e.g. CI smoke). HYDRA_API_BASE
+      # is a bare origin, so append /api to match the endpoint prefix; otherwise
+      # keep honouring the legacy HYDRA_API (which already includes /api).
+      if [ -n "${HYDRA_API_BASE:-}" ]; then
+        cycle_record_url="${HYDRA_API_BASE}/api/autopilot/cycle-record"
+      else
+        cycle_record_url="${HYDRA_API:-http://localhost:4000/api}/autopilot/cycle-record"
+      fi
       curl -fsS -X POST -H "Content-Type: application/json" \
         --data "$payload" \
-        "${HYDRA_API:-http://localhost:4000/api}/autopilot/cycle-record" >/dev/null 2>&1 || {
+        "$cycle_record_url" >/dev/null 2>&1 || {
         echo "[autopilot] dispatch: cycle-record curl failed for cycle=$cycle_id (non-fatal)" >&2
       }
     fi
