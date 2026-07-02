@@ -81,6 +81,28 @@ describe("deriveBoardState — counts + stale lists (issue #934)", () => {
     assert.equal(out.blocked, 1);
   });
 
+  test("target-backlog + ready-for-agent is NOT counted as orch ready_for_agent (issue #2704)", () => {
+    const out = deriveBoardState(
+      [
+        // pure orch ready-for-agent → counted
+        row({ number: 1, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+        // Target-scope: carries BOTH labels → excluded from the orch count
+        row({
+          number: 2701,
+          labels: [
+            ORCH_BOARD_LABELS.ready_for_agent,
+            ORCH_BOARD_LABELS.target_backlog,
+          ],
+        }),
+        // target-backlog alone (no ready-for-agent) → not counted anyway
+        row({ number: 3, labels: [ORCH_BOARD_LABELS.target_backlog] }),
+      ],
+      NOW_MS,
+    );
+    // Only the pure orch issue counts; the dual-labeled Target issue is excluded.
+    assert.equal(out.ready_for_agent, 1);
+  });
+
   test("empty board → all zero, empty stale lists", () => {
     const out = deriveBoardState([], NOW_MS);
     assert.equal(out.needs_qa, 0);
