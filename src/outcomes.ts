@@ -60,6 +60,18 @@ export interface Outcome {
   baseline: number;
   target: number;
   noise_epsilon: number;
+  /**
+   * Per-metric attribution-window duration in milliseconds (issue #2632,
+   * additive/optional). The outcome-attribution recorder opens one window per
+   * live leading metric when a merge lands and closes each on ITS OWN duration
+   * — a fast metric (test-count) settles in minutes, a slow one (Brier) needs
+   * days — so this is keyed on how fast the metric moves, distinct from the
+   * per-MERGE tier watch windows (`windowCyclesForTier`) keyed on blast radius.
+   * Undefined ⇒ the recorder applies a conservative long default so an
+   * unconfigured metric still closes eventually. Only meaningful for
+   * `kind: leading` outcomes (the attribution spine only watches those).
+   */
+  attribution_window_ms?: number;
 }
 
 export interface OutcomeReading {
@@ -137,6 +149,24 @@ function validateOutcome(
     }
   }
 
+  // attribution_window_ms is optional (issue #2632). When present it must be a
+  // finite POSITIVE number of milliseconds; omitted ⇒ left undefined so the
+  // recorder applies its conservative long default.
+  let attributionWindowMs: number | undefined;
+  if (raw.attribution_window_ms !== undefined) {
+    if (
+      typeof raw.attribution_window_ms !== "number" ||
+      !Number.isFinite(raw.attribution_window_ms) ||
+      raw.attribution_window_ms <= 0
+    ) {
+      errors.push(
+        `${ctx}: field 'attribution_window_ms' must be a finite positive number of milliseconds when provided`,
+      );
+    } else {
+      attributionWindowMs = raw.attribution_window_ms;
+    }
+  }
+
   if (errors.length > 0) return { ok: false, errors };
   if (
     name === null ||
@@ -151,19 +181,20 @@ function validateOutcome(
     return { ok: false, errors: [`${ctx}: schema violation (unknown reason)`] };
   }
 
-  return {
-    ok: true,
-    outcome: {
-      name,
-      kind,
-      direction,
-      source,
-      query,
-      baseline,
-      target,
-      noise_epsilon: noiseEpsilon,
-    },
+  const outcome: Outcome = {
+    name,
+    kind,
+    direction,
+    source,
+    query,
+    baseline,
+    target,
+    noise_epsilon: noiseEpsilon,
   };
+  if (attributionWindowMs !== undefined) {
+    outcome.attribution_window_ms = attributionWindowMs;
+  }
+  return { ok: true, outcome };
 }
 
 // ---------------------------------------------------------------------------
