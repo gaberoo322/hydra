@@ -23,7 +23,6 @@
  * #965, #1123, #2267) are retained inline at each block.
  */
 
-import { watch } from "node:fs";
 import { readFile, readdir, stat, writeFile, unlink } from "node:fs/promises";
 import {
   extname,
@@ -50,7 +49,6 @@ import {
 import type { OvErrorCode } from "./ov-request.ts";
 import { recordIndexerError, recordIndexerRetry } from "../scheduler/heartbeat.ts";
 import { trackedOvSearch } from "./ov-search.ts";
-import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import {
   loadSourceHashes as redisLoadSourceHashes,
   persistSourceHash as redisPersistSourceHash,
