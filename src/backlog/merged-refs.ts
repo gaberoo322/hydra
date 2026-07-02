@@ -48,7 +48,6 @@ export {
   subjectCoverageScore,
   subjectCoveredBy,
   SUBJECT_MATCH_THRESHOLD,
-  SUBJECT_MATCH_MIN_WORDS,
 } from "./token-algebra.ts";
 
 // Merged-by-cycle suppression (issue #882). The in-flight window in the
