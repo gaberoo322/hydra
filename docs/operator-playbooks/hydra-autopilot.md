@@ -303,7 +303,7 @@ INV-008.
 | Action type | Tool the model invokes |
 |---|---|
 | `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. |
-| `auto-merge` | `Bash` → `gh pr review --approve && gh pr merge --auto --squash` |
+| `auto-merge` | `Bash` → `gh pr review --approve && gh pr merge --auto --squash`, then a SINGLE `POST /api/holdback/pending {prNumber, tier, cycleId}` register call (see Phase 6). The handler does NOT itself enroll the holdback or write the merged cycle-record — it only ARMS the PR; the in-process merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue #2623) fires both merge-coupled follow-ups once the merge lands. |
 | `route-prs-to-review` | `Bash` → emitted only while the operator-only **emergency brake** (issue #744) is engaged, IN PLACE OF every `auto-merge` action. The model routes the current open PRs to the `/hydra-review` pickup set: `gh pr list --repo gaberoo322/hydra --state open --json number` to enumerate them, then for each apply the review label (`gh api .../labels` — `gh pr edit` is broken, per operator memory) so `/hydra-review` surfaces them. The action carries no per-PR list — `decide()` is pure and cannot enumerate PRs. Because the brake suppresses all `auto-merge`, no PR auto-merges this turn; the operator clears the brake via `hydra brake off` once the incident is resolved. The autopilot NEVER engages or disengages the brake — there is no such action type. |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
 | `update-branch` | `Bash` → `gh pr update-branch` |
@@ -383,109 +383,90 @@ declared that autopilot subagents would write their own `hydra:cycle:*`
 records. That handoff is implemented by `POST /api/autopilot/cycle-record`
 (see `src/api/autopilot.ts`), invoked via `dispatch.sh cycle-record`.
 
-Two callers fire the write:
+The cycle-record write fires at **reap time**:
 
 1. **`reap.py completion`** — when a code-writing class (`hydra-dev` /
    `hydra-target-build`) reaps, it fires cycle-record with `status=completed`
    (or `status=failed` if the soft cap was tripped). The autopilot task_id
-   is the `cycleId`, which gives natural dedup across retries.
-2. **`auto-merge` action** — after `gh pr merge --auto --squash` succeeds,
-   the model SHOULD fire a follow-up `dispatch.sh cycle-record <task_id>
-   merged <skill> <pr_number> "<title>" "<anchor>" <duration_ms>
-   "<reflection_sources>" <files_changed>` so the `cycles-merged` lifetime
-   counter and `/api/metrics` reflect the merge. The reap-time write (caller 1)
-   already filed this `cycleId` with `status=completed` and NO PR/files data
-   (reap.py has no PR number at reap time), so this follow-up post is treated as
-   an ENRICHMENT, not a discarded duplicate (issue #2063): it updates
-   `filesChanged`/`prNumber` on the already-recorded metrics hash WITHOUT
-   re-firing any lifetime counter. A plain follow-up that carries no new
-   `filesChanged`/`prNumber` stays a true no-op (`deduped:true, enriched:false`).
+   is the `cycleId`, which gives natural dedup across retries. This write has
+   no PR number (reap.py runs before the merge lands), so it files the record
+   with NO PR/files data.
 
-`filesChanged` is the INTEGER COUNT of files the merged PR touched — the
-auto-merge follow-up block is the only point that knows the PR, so it fetches
-the count and forwards it as the 9th positional:
+The **merged-status enrichment** — the follow-up that stamps `filesChanged` +
+`prNumber` on the already-recorded metrics hash (issue #2063) — is NO LONGER
+posted by the auto-merge handler. It now fires **in-process** from the
+merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue
+#2623): once a registered PR (see the register handoff below) lands, the watcher
+fetches the merged PR's `changedFiles` and calls `recordCycle({cycleId,
+prNumber, filesChanged})` itself. Because `recordCycle` is idempotent on
+`cycleId`, that duplicate post ENRICHES the existing record WITHOUT re-firing any
+lifetime counter — the same enrichment semantics the auto-merge follow-up used
+to carry, but coupled to the merge event in-process rather than shelled out from
+the playbook.
 
-```bash
-# Runs in the SAME post-merge follow-up block as cycle-record/holdback. The PR
-# is merged, so the files list is final. `gh pr view --json files` returns every
-# changed file; `| length` is the integer count the metrics trend consumes (NOT
-# the string[] path list capacity-writeback sends — a different observability
-# plane). Best-effort: an empty/unreachable result forwards "" → the field is
-# omitted server-side → the cycle truthfully buckets to 'unknown/never-written'.
-files_changed=$(gh pr view "$pr_number" --repo gaberoo322/hydra \
-  --json files --jq '.files | length' 2>/dev/null)
-./scripts/autopilot/dispatch.sh cycle-record "$task_id" merged "$skill" \
-  "$pr_number" "$title" "$anchor" "$duration_ms" "$reflection_sources" "${files_changed:-}"
-```
-
-`dispatch.sh cycle-record` is best-effort: a 5xx or unreachable API is logged
-to the nightly run log and the autopilot proceeds. Fetching the files count
-NEVER blocks or delays a merge — it runs strictly after the merge resolves, and
-a missing count records nothing rather than failing. The write covers three
-surfaces atomically server-side:
+The reap-time write covers three surfaces atomically server-side:
 
 - `hydra:cycle:<id>` hash + `hydra:cycle:index` ZSET → `/api/cycle/history`
 - `hydra:metrics:<id>` via `recordCycleMetrics(source: "claude")` →
   `/api/metrics` and `/api/scheduler/status.mergeRateWindow` (carries the
-  enriched `filesChanged` count once the auto-merge follow-up posts it)
+  enriched `filesChanged` count once the watcher posts the merged enrichment)
 - `hydra:scheduler:cycles-{run,merged,failed,unaccounted}` lifetime counters →
   `/api/scheduler/status.mergeRateLifetime`
 
-### Phase 6 holdback enrollment on auto-merge (issue #2055)
+`dispatch.sh cycle-record` is best-effort: a 5xx or unreachable API is logged
+to the nightly run log and the autopilot proceeds.
 
-The **`auto-merge` action handler is the only point in the system that runs
-AFTER a confirmed merge with the merged `prNumber` + `tier` in hand** — the same
-post-merge follow-up block that already fires `cycle-record` (above) and the
-token-surrogate write (below). So it owns one more best-effort write: enrolling
-the just-merged commit into the **Outcome Holdback** (ADR-0004 step 4, #786).
-Outcome Holdback **carries up** the monotonic tier ladder (#741, ADR-0015) —
-every tier deeper than T1 inherits the post-merge watch, so **T2, T3, and T4
-merges all enroll** while **T1 (prompt-shaped) and unknown-tier merges are
-exempt**. Before #2055 this was a manual operator step (CLAUDE.md memory note
-"Autopilot owns T2 holdback enrollment"); no automatic caller existed, so most
-enrollable merges silently went unwatched.
+### Phase 6 register handoff on auto-merge (issues #2055, #2621–#2624)
 
-After `gh pr merge --auto --squash` succeeds for an `auto-merge` action, capture
-the squash-merge commit SHA and POST it to `/api/holdback/enroll` with the PR
-number and the integer `tier` from the action payload (`state.actions[].tier`,
-1–4 per ADR-0015):
+The auto-merge handler no longer holds the merge — `gh pr merge --auto --squash`
+ARMS auto-merge, so the PR may land seconds to minutes later, out-of-band from
+this print-mode turn. Rather than block the turn waiting for the squash SHA, the
+handler simply **registers** the armed PR and hands both merge-coupled
+follow-ups (Outcome-Holdback enroll + the merged cycle-record enrichment) to the
+in-process **merge-completion watcher** (`src/scheduler/chores/holdback-merge-watch.ts`,
+issue #2623).
+
+After `gh pr review --approve && gh pr merge --auto --squash` succeeds for an
+`auto-merge` action, fire ONE register call:
 
 ```bash
-# Runs in the SAME post-merge follow-up block as cycle-record, immediately after
-# the merge resolves. $pr_number is the merged PR; $pr_tier is the integer tier
-# from the auto-merge action payload (state.actions[].tier).
-#
-# Capture the squash-merge commit SHA so the baseline pins the post-merge commit.
-merge_sha=$(gh pr view "$pr_number" --repo gaberoo322/hydra \
-  --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null)
-
-if [ -n "$merge_sha" ]; then
-  # POST UNCONDITIONALLY — do NOT add a client-side `if tier in {2,3,4}` guard.
-  # enrollHoldback (src/holdback.ts) enforces the carry-up exemption server-side
-  # (T1/unknown return {enrolled:false}), so the single source of truth for the
-  # carry-up invariant stays on the server (Redis-seam rule: the playbook shells
-  # curl, never calls enrollHoldback in-process). windowCycles is omitted so the
-  # server derives the tier-aware watch window via windowCyclesForTier.
-  curl -fsS -X POST http://localhost:4000/api/holdback/enroll \
-    -H 'content-type: application/json' \
-    -d "$(jq -n --arg sha "$merge_sha" --argjson pr "$pr_number" \
-          --argjson tier "${pr_tier:-null}" \
-          '{commitSha:$sha, prNumber:$pr, tier:$tier}')" \
-    || echo "[autopilot] holdback enroll failed for ${merge_sha} (non-fatal — merge already landed)" >&2
-else
-  echo "[autopilot] holdback enroll skipped: no merge SHA for PR #${pr_number} (non-fatal)" >&2
-fi
+# The ONLY post-merge follow-up the handler makes. $pr_number is the just-armed
+# PR; $pr_tier is the integer tier from the auto-merge action payload
+# (state.actions[].tier, 1–4 per ADR-0015, or null); $task_id is the autopilot
+# cycleId. Best-effort: a non-2xx or unreachable endpoint is logged and the
+# autopilot cycle proceeds — registration NEVER blocks or delays a merge.
+curl -fsS -X POST http://localhost:4000/api/holdback/pending \
+  -H 'content-type: application/json' \
+  -d "$(jq -n --argjson pr "$pr_number" --argjson tier "${pr_tier:-null}" \
+        --arg cycleId "$task_id" \
+        '{prNumber:$pr, tier:$tier, cycleId:$cycleId}')" \
+  || echo "[autopilot] holdback pending register failed for PR #${pr_number} (non-fatal — merge already armed)" >&2
 ```
 
-This is **best-effort and strictly post-merge** (same posture as cycle-record): a
-non-2xx or unreachable `/api/holdback/enroll` is logged and the autopilot cycle
-proceeds — enrollment NEVER blocks or delays a merge. It fires exactly once per
-merged PR, immediately after merge and before any check window elapses
-(idempotent on `commitSha`; a re-POST harmlessly overwrites the not-yet-sampled
-baseline). The **check** mechanism that watches each enrolled merge each poll
-tick lives in the `hydra-qa` Post-merge Regression Check section B — only the
-*enroll-at-merge* step moved here, because that is the one step that needs the
-confirmed merge SHA + tier the auto-merge handler holds.
+`POST /api/holdback/pending` (`src/api/holdback.ts`, issue #2622) records the
+armed PR into the durable **pending-enroll registry** (idempotent on `prNumber`;
+it records intent only — it never arms, blocks, or performs a merge). The
+merge-completion watcher then consumes that registry each housekeeping tick and,
+for each entry whose merge has landed, fires BOTH merge-coupled follow-ups
+in-process:
+
+1. **Outcome-Holdback enroll** — `enrollHoldback({commitSha, prNumber, tier})`
+   against the landed squash SHA (ADR-0004 step 4, #786). Outcome Holdback
+   **carries up** the monotonic tier ladder (#741, ADR-0015) — **T2, T3, and T4
+   merges all enroll** while **T1 (prompt-shaped) and unknown-tier merges are
+   exempt** (`enrollHoldback` enforces the carry-up exemption server-side, so the
+   single source of truth for the invariant stays on the server). The watcher
+   POSTs the `tier` from the register call verbatim; do NOT add a client-side
+   `if tier in {2,3,4}` guard.
+2. **Merged cycle-record enrichment** — `recordCycle({cycleId, prNumber,
+   filesChanged})` (issue #2063), idempotent-enriching the reap-time record.
+
+The watcher is idempotent (per-PR enrolled marker), leaves a still-open PR in the
+registry for a later tick, and never throws (all best-effort). So the auto-merge
+handler is reduced to *arm the merge, register the PR* — it holds no merge SHA
+and makes no enroll/cycle-record call itself. The **check** mechanism that
+watches each enrolled merge lives in the `hydra-qa` Post-merge Regression Check
+section B.
 
 ### Phase 6 token-surrogate write (issue #394)
 
