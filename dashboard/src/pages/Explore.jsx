@@ -6,11 +6,12 @@ import { LessonsTab } from "../components/pages/explore/LessonsTab.jsx";
 import { AnomaliesTab } from "../components/pages/explore/AnomaliesTab.jsx";
 import { ArchitectureTab } from "../components/pages/explore/ArchitectureTab.jsx";
 import { SearchTab } from "../components/pages/explore/SearchTab.jsx";
+import { OrchestratorMap } from "../components/OrchestratorMap.jsx";
 
 /**
  * Dashboard v2 — `/explore/:tab` page (issue #620, PRD #615).
  *
- * Tabbed sense-making hub. Seven tabs, default = `friction`. Each tab is a
+ * Tabbed sense-making hub. Eight tabs, default = `friction`. Each tab is a
  * full sub-page that owns its own data lifecycle (the tabs don't share
  * polling state, on purpose — switching tabs shouldn't tear down the
  * Friction tab's near-promotion cache, but it also shouldn't poll Lessons
@@ -31,6 +32,7 @@ const TABS = [
   { id: "anomalies", label: "Anomalies", Component: AnomaliesTab },
   { id: "architecture", label: "Architecture", Component: ArchitectureTab },
   { id: "search", label: "Search", Component: SearchTab },
+  { id: "orchestrator-map", label: "Orchestrator Map", Component: OrchestratorMap },
 ];
 
 const DEFAULT_TAB = "friction";
