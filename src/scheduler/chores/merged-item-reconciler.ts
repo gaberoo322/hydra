@@ -5,6 +5,9 @@
  * from `src/scheduler/housekeeping.ts` (issue #2090). Behaviour unchanged.
  */
 
+import { reconcileMergedItems as reconcileMergedItemsImpl } from "../../backlog/reconciler.ts";
+import { setReconcilerHealth as setReconcilerHealthImpl } from "../../redis/reconciler.ts";
+
 /** Per-feed liveness + batch metrics shape returned by the reconciler (#2057). */
 interface ReconcilerRunResult {
   reconciled: Array<{ id: string; ref: string }>;
@@ -43,10 +46,8 @@ export interface MergedItemReconcilerDeps {
  * never aborts the chore (the reconciler's own alert path already fired).
  */
 export async function runMergedItemReconciler(deps: MergedItemReconcilerDeps = {}): Promise<void> {
-  const reconcileMergedItems =
-    deps.reconcileMergedItems ?? (await import("../../backlog/reconciler.ts")).reconcileMergedItems;
-  const setHealth =
-    deps.setReconcilerHealth ?? (await import("../../redis/reconciler.ts")).setReconcilerHealth;
+  const reconcileMergedItems = deps.reconcileMergedItems ?? reconcileMergedItemsImpl;
+  const setHealth = deps.setReconcilerHealth ?? setReconcilerHealthImpl;
   const rec = await reconcileMergedItems();
   if (rec.reconciled.length > 0) {
     console.log(

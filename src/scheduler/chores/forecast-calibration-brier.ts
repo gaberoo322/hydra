@@ -5,6 +5,8 @@
  * from `src/scheduler/housekeeping.ts` (issue #2090). Behaviour unchanged.
  */
 
+import { publishForecastCalibrationBrierMetric } from "../../metrics/publish.ts";
+
 /** External touchpoints of the forecast-calibration-brier chore. */
 export interface ForecastCalibrationBrierDeps {
   publishBrierMetric?: () => Promise<{ ok: boolean }>;
@@ -21,7 +23,6 @@ export interface ForecastCalibrationBrierDeps {
 export async function runForecastCalibrationBrier(
   deps: ForecastCalibrationBrierDeps = {},
 ): Promise<void> {
-  const publishBrier =
-    deps.publishBrierMetric ?? (await import("../../metrics/publish.ts")).publishForecastCalibrationBrierMetric;
+  const publishBrier = deps.publishBrierMetric ?? publishForecastCalibrationBrierMetric;
   await publishBrier();
 }

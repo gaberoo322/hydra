@@ -5,6 +5,8 @@
  * from `src/scheduler/housekeeping.ts` (issue #2090). Behaviour unchanged.
  */
 
+import { reconcileLaneIndices as reconcileLaneIndicesImpl } from "../../backlog/index-reconciler.ts";
+
 /** External touchpoints of the lane-index-reconcile chore. */
 export interface LaneIndexReconcileDeps {
   reconcileLaneIndices?: () => Promise<unknown>;
@@ -17,7 +19,6 @@ export interface LaneIndexReconcileDeps {
  * no-op).
  */
 export async function runLaneIndexReconcile(deps: LaneIndexReconcileDeps = {}): Promise<void> {
-  const reconcileLaneIndices =
-    deps.reconcileLaneIndices ?? (await import("../../backlog/index-reconciler.ts")).reconcileLaneIndices;
+  const reconcileLaneIndices = deps.reconcileLaneIndices ?? reconcileLaneIndicesImpl;
   await reconcileLaneIndices();
 }

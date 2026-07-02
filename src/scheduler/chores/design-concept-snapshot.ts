@@ -5,6 +5,8 @@
  * from `src/scheduler/housekeeping.ts` (issue #2090). Behaviour unchanged.
  */
 
+import * as designConceptModule from "../../redis/design-concept.ts";
+
 interface DesignConceptSnapshotModule {
   getDesignConceptProductionCountForDate: (date: string) => Promise<number>;
   writeDailySnapshot: (date: string, count: number) => Promise<unknown>;
@@ -31,7 +33,7 @@ export interface DesignConceptSnapshotDeps {
 export async function runDesignConceptSnapshot(
   deps: DesignConceptSnapshotDeps = {},
 ): Promise<boolean> {
-  const mod = deps.module ?? (await import("../../redis/design-concept.ts"));
+  const mod = deps.module ?? designConceptModule;
   const today = (deps.today ?? (() => new Date().toISOString().slice(0, 10)))();
   const count = await mod.getDesignConceptProductionCountForDate(today);
   const existing = await mod.readDailySnapshots();
