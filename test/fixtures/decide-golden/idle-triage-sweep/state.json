@@ -1,0 +1,1009 @@
+{
+  "started": "2026-07-02T05:26:36Z",
+  "started_epoch": 1782969996,
+  "pid": 2116225,
+  "run_id": "7d18b4d6-8fda-47b7-82d7-6ff95cae56de",
+  "limits": {
+    "token_budget": 10000000,
+    "wall_clock_max_sec": 28800,
+    "idle_drain_turns": 5,
+    "scope": "all",
+    "subagent_max_tokens": 400000,
+    "subagent_hard_max_tokens": 800000,
+    "unattended": true,
+    "schema_version": 2,
+    "daily_spend_cap_usd": 0,
+    "scout_cost_share": 0.04
+  },
+  "cumulative_tokens": 0,
+  "dispatches": 0,
+  "idle_turns": 0,
+  "turn": 0,
+  "burned_classes": [],
+  "reaped_task_ids": [],
+  "failure_log": [],
+  "research_force_counter": {
+    "2026-07-02": {
+      "research_target": 1
+    }
+  },
+  "slots": {
+    "dev_orch": null,
+    "qa_orch": null,
+    "research_orch": null,
+    "dev_target": null,
+    "qa_target": null,
+    "research_target": null,
+    "design_concept_orch": null
+  },
+  "signal_last_fired": {
+    "health": 0,
+    "sweep_orch": 0,
+    "sweep_target": 0,
+    "discover_orch": 0,
+    "discover_target": 0,
+    "retro_orch": 1782910836,
+    "architecture_orch": 1782958440,
+    "cleanup_orch": 1782969497,
+    "scout_orch": 0
+  },
+  "signals": {
+    "orch_work_available": false,
+    "target_work_available": false,
+    "needs_qa_orch": false,
+    "needs_research": false,
+    "needs_triage_orch": true,
+    "untriaged_orphans_orch": false,
+    "health_fail": false,
+    "scout_walk_due": false,
+    "scout_board_saturated": false,
+    "arch_fallback_due": false,
+    "arch_board_saturated": false,
+    "orch_backfill_idle": false,
+    "cleanup_board_saturated": false,
+    "target_backfill_idle": false,
+    "target_cleanup_board_saturated": false,
+    "retro_run_available": true
+  },
+  "scout_spend_usd_today": 0.0,
+  "dev_target_spend_usd_cycle": 0.0,
+  "usage_eligibility": {
+    "allow": true,
+    "shed": [],
+    "reasons": {
+      "emergencyStop": false,
+      "weeklyEmergencyStop": false,
+      "pacingShed": false,
+      "fiveHourThrottleShed": false,
+      "calibrated": true,
+      "paused": false,
+      "sessionBlockedUntil": null
+    },
+    "paceState": "behind",
+    "targetPercent": 6.808833293650793,
+    "sinceResetPercent": 0.2932705409090909,
+    "anchor": "2026-07-01T17:00:00.000Z",
+    "usage": {
+      "tokensLast5h": {
+        "input": 782807,
+        "output": 1201791,
+        "cacheRead": 245145524,
+        "cacheCreation": 10301502,
+        "total": 257431624
+      },
+      "tokensLast7d": {
+        "input": 23750041,
+        "output": 28585755,
+        "cacheRead": 5072443533,
+        "cacheCreation": 217567891,
+        "total": 5342347220
+      },
+      "tokensLast24h": 1083919229,
+      "percentLast5h": 24,
+      "percentLast7d": 11,
+      "usageSource": "oauth",
+      "oauthError": null,
+      "oauthStale": false,
+      "oauthAgeMs": 179915,
+      "oauthFiveHourResetsAt": "2026-07-02T07:00:00.058Z",
+      "oauthSevenDayResetsAt": "2026-07-08T17:00:00.058Z",
+      "projectedWeeklyPercent": 3.4488339104545456,
+      "pacingState": "under",
+      "emergencyStop": false,
+      "weeklyEmergencyStop": false,
+      "calibrated": true,
+      "byModel": {
+        "opus": {
+          "input": 23656868,
+          "output": 26105227,
+          "cacheRead": 4141392245,
+          "cacheCreation": 172393269,
+          "total": 4363547609
+        },
+        "sonnet": {
+          "input": 45455,
+          "output": 1988867,
+          "cacheRead": 732850630,
+          "cacheCreation": 32746529,
+          "total": 767631481
+        },
+        "haiku": {
+          "input": 47718,
+          "output": 491661,
+          "cacheRead": 198200658,
+          "cacheCreation": 12428093,
+          "total": 211168130
+        },
+        "unknown": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheCreation": 0,
+          "total": 0
+        }
+      },
+      "bySkillByModel": {
+        "hydra-qa": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 36546,
+            "output": 888195,
+            "cacheRead": 247555494,
+            "cacheCreation": 15676714,
+            "total": 264156949
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-discover": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 185,
+            "output": 31119,
+            "cacheRead": 12333532,
+            "cacheCreation": 228196,
+            "total": 12593032
+          },
+          "haiku": {
+            "input": 6286,
+            "output": 315935,
+            "cacheRead": 144642769,
+            "cacheCreation": 6568932,
+            "total": 151533922
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-dev": {
+          "opus": {
+            "input": 3801452,
+            "output": 1459877,
+            "cacheRead": 533108715,
+            "cacheCreation": 23210643,
+            "total": 561580687
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-cleanup": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 514,
+            "output": 46530,
+            "cacheRead": 15359419,
+            "cacheCreation": 1113786,
+            "total": 16520249
+          },
+          "haiku": {
+            "input": 4355,
+            "output": 81150,
+            "cacheRead": 40333817,
+            "cacheCreation": 3529608,
+            "total": 43948930
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-architecture-scan": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 2551,
+            "output": 287025,
+            "cacheRead": 218985549,
+            "cacheCreation": 5387174,
+            "total": 224662299
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-retro": {
+          "opus": {
+            "input": 4457938,
+            "output": 1100920,
+            "cacheRead": 254126427,
+            "cacheCreation": 21922518,
+            "total": 281607803
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-autopilot": {
+          "opus": {
+            "input": 9738225,
+            "output": 18030442,
+            "cacheRead": 1831382318,
+            "cacheCreation": 48971982,
+            "total": 1908122967
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-sweep": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 3869,
+            "output": 474844,
+            "cacheRead": 155512397,
+            "cacheCreation": 6694371,
+            "total": 162685481
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-build": {
+          "opus": {
+            "input": 2986076,
+            "output": 3047623,
+            "cacheRead": 1145286795,
+            "cacheCreation": 56863070,
+            "total": 1208183564
+          },
+          "sonnet": {
+            "input": 44,
+            "output": 4013,
+            "cacheRead": 1646055,
+            "cacheCreation": 110104,
+            "total": 1760216
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-sweep": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 215,
+            "output": 23994,
+            "cacheRead": 5171610,
+            "cacheCreation": 312219,
+            "total": 5508038
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-doctor": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 225,
+            "output": 27813,
+            "cacheRead": 6714313,
+            "cacheCreation": 596804,
+            "total": 7339155
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-grill": {
+          "opus": {
+            "input": 1130086,
+            "output": 542091,
+            "cacheRead": 124074630,
+            "cacheCreation": 10377103,
+            "total": 136123910
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-research": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 640,
+            "output": 111248,
+            "cacheRead": 41756542,
+            "cacheCreation": 1351668,
+            "total": 43220098
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "interactive": {
+          "opus": {
+            "input": 504594,
+            "output": 153638,
+            "cacheRead": 52003715,
+            "cacheCreation": 3145755,
+            "total": 55807702
+          },
+          "sonnet": {
+            "input": 292,
+            "output": 41225,
+            "cacheRead": 10034747,
+            "cacheCreation": 581894,
+            "total": 10658158
+          },
+          "haiku": {
+            "input": 36825,
+            "output": 90024,
+            "cacheRead": 11902777,
+            "cacheCreation": 2151513,
+            "total": 14181139
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-digest": {
+          "opus": {
+            "input": 97103,
+            "output": 50214,
+            "cacheRead": 2226427,
+            "cacheCreation": 343546,
+            "total": 2717290
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-cleanup": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 252,
+            "output": 4552,
+            "cacheRead": 1321295,
+            "cacheCreation": 178040,
+            "total": 1504139
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-issue-research": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 283,
+            "output": 41230,
+            "cacheRead": 13889013,
+            "cacheCreation": 537839,
+            "total": 14468365
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "clear": {
+          "opus": {
+            "input": 674209,
+            "output": 803962,
+            "cacheRead": 50660903,
+            "cacheCreation": 3914587,
+            "total": 56053661
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "login": {
+          "opus": {
+            "input": 189046,
+            "output": 849491,
+            "cacheRead": 145672037,
+            "cacheCreation": 3214771,
+            "total": 149925345
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-tool-scout": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 91,
+            "output": 11631,
+            "cacheRead": 3891959,
+            "cacheCreation": 155760,
+            "total": 4059441
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "improve-codebase-architecture": {
+          "opus": {
+            "input": 78139,
+            "output": 66969,
+            "cacheRead": 2850278,
+            "cacheCreation": 429294,
+            "total": 3424680
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        }
+      },
+      "bySkillWoW": {
+        "hydra-qa": {
+          "current": 264156949,
+          "prior": 496943881,
+          "deltaPct": -46.8437062815952
+        },
+        "hydra-discover": {
+          "current": 164126954,
+          "prior": 301506953,
+          "deltaPct": -45.56445469434995
+        },
+        "hydra-dev": {
+          "current": 561580687,
+          "prior": 943044901,
+          "deltaPct": -40.45027056458259
+        },
+        "hydra-cleanup": {
+          "current": 60469179,
+          "prior": 127576268,
+          "deltaPct": -52.60154576711713
+        },
+        "hydra-architecture-scan": {
+          "current": 224662299,
+          "prior": 416073025,
+          "deltaPct": -46.00411814728917
+        },
+        "hydra-retro": {
+          "current": 281607803,
+          "prior": 421299785,
+          "deltaPct": -33.15738269365601
+        },
+        "hydra-autopilot": {
+          "current": 1908122967,
+          "prior": 2481619731,
+          "deltaPct": -23.109776120650935
+        },
+        "hydra-sweep": {
+          "current": 162685481,
+          "prior": 164124480,
+          "deltaPct": -0.8767729226011866
+        },
+        "hydra-target-build": {
+          "current": 1209943780,
+          "prior": 856189798,
+          "deltaPct": 41.31723863404409
+        },
+        "hydra-target-sweep": {
+          "current": 5508038,
+          "prior": 4613990,
+          "deltaPct": 19.37689505178815
+        },
+        "hydra-doctor": {
+          "current": 7339155,
+          "prior": 6045303,
+          "deltaPct": 21.402599671182735
+        },
+        "hydra-grill": {
+          "current": 136123910,
+          "prior": 281867597,
+          "deltaPct": -51.70643541549048
+        },
+        "hydra-target-research": {
+          "current": 43220098,
+          "prior": 114041167,
+          "deltaPct": -62.10131907892524
+        },
+        "interactive": {
+          "current": 80646999,
+          "prior": 118919572,
+          "deltaPct": -32.18357782182398
+        },
+        "hydra-digest": {
+          "current": 2717290,
+          "prior": 22097639,
+          "deltaPct": -87.70325644291682
+        },
+        "hydra-target-cleanup": {
+          "current": 1504139,
+          "prior": 1294330,
+          "deltaPct": 16.209853746726104
+        },
+        "hydra-issue-research": {
+          "current": 14468365,
+          "prior": 9569780,
+          "deltaPct": 51.18806283948011
+        },
+        "clear": {
+          "current": 56053661,
+          "prior": 142378012,
+          "deltaPct": -60.63039495171487
+        },
+        "login": {
+          "current": 149925345,
+          "prior": null,
+          "deltaPct": null
+        },
+        "hydra-tool-scout": {
+          "current": 4059441,
+          "prior": 5356371,
+          "deltaPct": -24.212848587224446
+        },
+        "improve-codebase-architecture": {
+          "current": 3424680,
+          "prior": null,
+          "deltaPct": null
+        }
+      },
+      "byDispatchKind": {
+        "autopilot-dispatched": {
+          "opus": {
+            "input": 12319068,
+            "output": 6127009,
+            "cacheRead": 2050615180,
+            "cacheCreation": 111872728,
+            "total": 2180933985
+          },
+          "sonnet": {
+            "input": 45163,
+            "output": 1947642,
+            "cacheRead": 722815883,
+            "cacheCreation": 32164635,
+            "total": 756973323
+          },
+          "haiku": {
+            "input": 10893,
+            "output": 401637,
+            "cacheRead": 186297881,
+            "cacheCreation": 10276580,
+            "total": 196986991
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "operator-invoked": {
+          "opus": {
+            "input": 10833206,
+            "output": 19824580,
+            "cacheRead": 2038773350,
+            "cacheCreation": 57374786,
+            "total": 2126805922
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "interactive": {
+          "opus": {
+            "input": 504594,
+            "output": 153638,
+            "cacheRead": 52003715,
+            "cacheCreation": 3145755,
+            "total": 55807702
+          },
+          "sonnet": {
+            "input": 292,
+            "output": 41225,
+            "cacheRead": 10034747,
+            "cacheCreation": 581894,
+            "total": 10658158
+          },
+          "haiku": {
+            "input": 36825,
+            "output": 90024,
+            "cacheRead": 11902777,
+            "cacheCreation": 2151513,
+            "total": 14181139
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        }
+      },
+      "attributedPercent": 98.49042011537394,
+      "quotaWeightLast5h": 0,
+      "quotaWeightLast7d": 0,
+      "quotaWeightCalibrated": false,
+      "weeklyQuotaTokens": 220000000000,
+      "fiveHourQuotaTokens": 4920000000,
+      "filesScanned": 1149,
+      "filesSkippedByMtime": 5039,
+      "linesParsed": 120036,
+      "linesWithUsage": 68884,
+      "parseErrors": 0,
+      "generatedAt": "2026-07-02T05:26:00.678Z",
+      "cacheHitRatioLast5h": 0.956740755476354,
+      "cacheHitRatioLast7d": 0.9545862316949149,
+      "tokensSinceReset": {
+        "input": 2441112,
+        "output": 3377178,
+        "cacheRead": 614751070,
+        "cacheCreation": 24625830,
+        "total": 645195190
+      },
+      "percentSinceReset": 0.2932705409090909,
+      "weeklyResetAnchor": "2026-07-01T17:00:00.000Z"
+    }
+  },
+  "emergency_brake": {
+    "engaged": false
+  },
+  "slot_events": {
+    "events": [],
+    "last_id": "1782870954475-1"
+  },
+  "slot_events_last_id": "1782870954475-1"
+}

@@ -1,0 +1,5 @@
+{
+  "now": 1783040756,
+  "capturedAt": "2026-07-02",
+  "note": "Same live run-3626c94b turn-1 triple as turn1-dev-in-flight, replayed 2h in: the in-flight dev_orch slot exceeds the default 3600s subagent wall, so the silent-wedge rule must emit wait_or_reap. Also pins that the harness-pinned (unset) HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS default of 3600 holds."
+}

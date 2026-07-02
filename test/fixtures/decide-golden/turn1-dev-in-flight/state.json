@@ -1,0 +1,2449 @@
+{
+  "started": "2026-07-02T23:05:56Z",
+  "started_epoch": 1783033556,
+  "pid": 3395061,
+  "run_id": "3626c94b-51f7-48a9-be6b-c17fc6a5f3a0",
+  "limits": {
+    "token_budget": 10000000,
+    "wall_clock_max_sec": 28800,
+    "idle_drain_turns": 5,
+    "scope": "all",
+    "subagent_max_tokens": 400000,
+    "subagent_hard_max_tokens": 800000,
+    "unattended": true,
+    "schema_version": 2,
+    "daily_spend_cap_usd": 0,
+    "scout_cost_share": 0.04
+  },
+  "cumulative_tokens": 0,
+  "dispatches": 1,
+  "idle_turns": 0,
+  "turn": 1,
+  "burned_classes": [],
+  "reaped_task_ids": [],
+  "failure_log": [],
+  "research_force_counter": {
+    "2026-07-02": {
+      "research_target": 4
+    }
+  },
+  "slots": {
+    "dev_orch": {
+      "task_id": "agent-ad6109fed5e3f34b9",
+      "skill": "hydra-dev",
+      "dispatch_id": "worktree-agent-3626c94b-t1-dev_orch",
+      "anchor": "issue-2713",
+      "started_epoch": 1783033793
+    },
+    "qa_orch": null,
+    "research_orch": null,
+    "dev_target": null,
+    "qa_target": null,
+    "research_target": null,
+    "design_concept_orch": null
+  },
+  "signal_last_fired": {
+    "health": 0,
+    "sweep_orch": 0,
+    "sweep_target": 0,
+    "discover_orch": 0,
+    "discover_target": 0,
+    "retro_orch": 1782998409,
+    "architecture_orch": 1783007952,
+    "cleanup_orch": 1783023927,
+    "scout_orch": 0
+  },
+  "signals": {
+    "orch_work_available": true,
+    "target_work_available": false,
+    "needs_qa_orch": false,
+    "needs_research": false,
+    "needs_triage_orch": false,
+    "untriaged_orphans_orch": false,
+    "health_fail": false,
+    "scout_walk_due": false,
+    "scout_board_saturated": false,
+    "arch_fallback_due": false,
+    "arch_board_saturated": false,
+    "orch_backfill_idle": false,
+    "cleanup_board_saturated": false,
+    "target_backfill_idle": false,
+    "target_cleanup_board_saturated": false,
+    "retro_run_available": true,
+    "orch_pending_grill_anchor": "none"
+  },
+  "usage_eligibility": {
+    "allow": true,
+    "shed": [],
+    "reasons": {
+      "emergencyStop": false,
+      "weeklyEmergencyStop": false,
+      "pacingShed": false,
+      "fiveHourThrottleShed": false,
+      "calibrated": true,
+      "paused": false,
+      "sessionBlockedUntil": null
+    },
+    "paceState": "behind",
+    "targetPercent": 16.477068267195765,
+    "sinceResetPercent": 0.7286106940909091,
+    "anchor": "2026-07-01T17:00:00.000Z",
+    "usage": {
+      "tokensLast5h": {
+        "input": 1156512,
+        "output": 1874548,
+        "cacheRead": 278253186,
+        "cacheCreation": 12602797,
+        "total": 293887043
+      },
+      "tokensLast7d": {
+        "input": 23893888,
+        "output": 29917851,
+        "cacheRead": 5279809642,
+        "cacheCreation": 224829388,
+        "total": 5558450769
+      },
+      "tokensLast24h": 1337056087,
+      "percentLast5h": 9,
+      "percentLast7d": 32,
+      "usageSource": "oauth",
+      "oauthError": null,
+      "oauthStale": false,
+      "oauthAgeMs": 77987,
+      "oauthFiveHourResetsAt": "2026-07-03T03:00:00.151Z",
+      "oauthSevenDayResetsAt": "2026-07-08T17:00:00.151Z",
+      "projectedWeeklyPercent": 4.254269367727273,
+      "pacingState": "under",
+      "emergencyStop": false,
+      "weeklyEmergencyStop": false,
+      "calibrated": true,
+      "byModel": {
+        "opus": {
+          "input": 23799669,
+          "output": 27239541,
+          "cacheRead": 4308638716,
+          "cacheCreation": 176196280,
+          "total": 4535874206
+        },
+        "sonnet": {
+          "input": 46578,
+          "output": 2192322,
+          "cacheRead": 774811474,
+          "cacheCreation": 36215493,
+          "total": 813265867
+        },
+        "haiku": {
+          "input": 47641,
+          "output": 485988,
+          "cacheRead": 196359452,
+          "cacheCreation": 12417615,
+          "total": 209310696
+        },
+        "unknown": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheCreation": 0,
+          "total": 0
+        }
+      },
+      "bySkillByModel": {
+        "hydra-qa": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 37605,
+            "output": 1048786,
+            "cacheRead": 294272633,
+            "cacheCreation": 18480794,
+            "total": 313839818
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-discover": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 185,
+            "output": 31119,
+            "cacheRead": 12333532,
+            "cacheCreation": 228196,
+            "total": 12593032
+          },
+          "haiku": {
+            "input": 6305,
+            "output": 306745,
+            "cacheRead": 140496729,
+            "cacheCreation": 6542583,
+            "total": 147352362
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-dev": {
+          "opus": {
+            "input": 4569935,
+            "output": 1663224,
+            "cacheRead": 615219628,
+            "cacheCreation": 28119561,
+            "total": 649572348
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-cleanup": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 378,
+            "output": 37457,
+            "cacheRead": 11947442,
+            "cacheCreation": 757737,
+            "total": 12743014
+          },
+          "haiku": {
+            "input": 4424,
+            "output": 87470,
+            "cacheRead": 43454379,
+            "cacheCreation": 3659787,
+            "total": 47206060
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-architecture-scan": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 2434,
+            "output": 278017,
+            "cacheRead": 212936681,
+            "cacheCreation": 5058863,
+            "total": 218275995
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-retro": {
+          "opus": {
+            "input": 3706450,
+            "output": 917730,
+            "cacheRead": 210370704,
+            "cacheCreation": 18240286,
+            "total": 233235170
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-autopilot": {
+          "opus": {
+            "input": 9517595,
+            "output": 18699354,
+            "cacheRead": 1945840849,
+            "cacheCreation": 48773351,
+            "total": 2022831149
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-sweep": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 3579,
+            "output": 439536,
+            "cacheRead": 135076558,
+            "cacheCreation": 6420403,
+            "total": 141940076
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "interactive": {
+          "opus": {
+            "input": 808765,
+            "output": 290170,
+            "cacheRead": 84424773,
+            "cacheCreation": 5711288,
+            "total": 91234996
+          },
+          "sonnet": {
+            "input": 396,
+            "output": 62501,
+            "cacheRead": 12894388,
+            "cacheCreation": 930760,
+            "total": 13888045
+          },
+          "haiku": {
+            "input": 36825,
+            "output": 90024,
+            "cacheRead": 11902777,
+            "cacheCreation": 2151513,
+            "total": 14181139
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "clear": {
+          "opus": {
+            "input": 881193,
+            "output": 1267164,
+            "cacheRead": 104008200,
+            "cacheCreation": 7909425,
+            "total": 114065982
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-build": {
+          "opus": {
+            "input": 2710160,
+            "output": 2815847,
+            "cacheRead": 1057138220,
+            "cacheCreation": 51750709,
+            "total": 1114414936
+          },
+          "sonnet": {
+            "input": 44,
+            "output": 4013,
+            "cacheRead": 1646055,
+            "cacheCreation": 110104,
+            "total": 1760216
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-sweep": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 195,
+            "output": 21394,
+            "cacheRead": 4528441,
+            "cacheCreation": 301298,
+            "total": 4851328
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-doctor": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 567,
+            "output": 81109,
+            "cacheRead": 18640098,
+            "cacheCreation": 1360879,
+            "total": 20082653
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-grill": {
+          "opus": {
+            "input": 1241283,
+            "output": 619378,
+            "cacheRead": 140887600,
+            "cacheCreation": 11704049,
+            "total": 154452310
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-research": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 773,
+            "output": 130059,
+            "cacheRead": 51344447,
+            "cacheCreation": 1764463,
+            "total": 53239742
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-qa": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 48,
+            "output": 5470,
+            "cacheRead": 1410227,
+            "cacheCreation": 108397,
+            "total": 1524142
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-digest": {
+          "opus": {
+            "input": 97103,
+            "output": 50214,
+            "cacheRead": 2226427,
+            "cacheCreation": 343546,
+            "total": 2717290
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-issue-research": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 283,
+            "output": 41230,
+            "cacheRead": 13889013,
+            "cacheCreation": 537839,
+            "total": 14468365
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "login": {
+          "opus": {
+            "input": 189046,
+            "output": 849491,
+            "cacheRead": 145672037,
+            "cacheCreation": 3214771,
+            "total": 149925345
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-tool-scout": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 91,
+            "output": 11631,
+            "cacheRead": 3891959,
+            "cacheCreation": 155760,
+            "total": 4059441
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "improve-codebase-architecture": {
+          "opus": {
+            "input": 78139,
+            "output": 66969,
+            "cacheRead": 2850278,
+            "cacheCreation": 429294,
+            "total": 3424680
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "hydra-target-cleanup": {
+          "opus": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 87,
+            "output": 1749,
+            "cacheRead": 505567,
+            "cacheCreation": 63732,
+            "total": 571135
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        }
+      },
+      "bySkillWoW": {
+        "hydra-qa": {
+          "current": 313839818,
+          "prior": 496943881,
+          "deltaPct": -36.84602426969012
+        },
+        "hydra-discover": {
+          "current": 159945394,
+          "prior": 301506953,
+          "deltaPct": -46.95134145049053
+        },
+        "hydra-dev": {
+          "current": 649572348,
+          "prior": 943044901,
+          "deltaPct": -31.119679740466566
+        },
+        "hydra-cleanup": {
+          "current": 59949074,
+          "prior": 127576268,
+          "deltaPct": -53.00922739016005
+        },
+        "hydra-architecture-scan": {
+          "current": 218275995,
+          "prior": 416073025,
+          "deltaPct": -47.539017940420436
+        },
+        "hydra-retro": {
+          "current": 233235170,
+          "prior": 421299785,
+          "deltaPct": -44.63914335963879
+        },
+        "hydra-autopilot": {
+          "current": 2022831149,
+          "prior": 2481619731,
+          "deltaPct": -18.48746511276026
+        },
+        "hydra-sweep": {
+          "current": 141940076,
+          "prior": 164124480,
+          "deltaPct": -13.516816016720966
+        },
+        "interactive": {
+          "current": 119304180,
+          "prior": 118919572,
+          "deltaPct": 0.32341858748028457
+        },
+        "clear": {
+          "current": 114065982,
+          "prior": 142378012,
+          "deltaPct": -19.885114002013175
+        },
+        "hydra-target-build": {
+          "current": 1116175152,
+          "prior": 856189798,
+          "deltaPct": 30.365387979079845
+        },
+        "hydra-target-sweep": {
+          "current": 4851328,
+          "prior": 4613990,
+          "deltaPct": 5.143877641694066
+        },
+        "hydra-doctor": {
+          "current": 20082653,
+          "prior": 6045303,
+          "deltaPct": 232.20258769494268
+        },
+        "hydra-grill": {
+          "current": 154452310,
+          "prior": 281867597,
+          "deltaPct": -45.20394978213832
+        },
+        "hydra-target-research": {
+          "current": 53239742,
+          "prior": 114041167,
+          "deltaPct": -53.31533041923361
+        },
+        "hydra-target-qa": {
+          "current": 1524142,
+          "prior": 1724750,
+          "deltaPct": -11.63113494709378
+        },
+        "hydra-digest": {
+          "current": 2717290,
+          "prior": 22097639,
+          "deltaPct": -87.70325644291682
+        },
+        "hydra-issue-research": {
+          "current": 14468365,
+          "prior": 9569780,
+          "deltaPct": 51.18806283948011
+        },
+        "login": {
+          "current": 149925345,
+          "prior": null,
+          "deltaPct": null
+        },
+        "hydra-tool-scout": {
+          "current": 4059441,
+          "prior": 5356371,
+          "deltaPct": -24.212848587224446
+        },
+        "improve-codebase-architecture": {
+          "current": 3424680,
+          "prior": null,
+          "deltaPct": null
+        },
+        "hydra-target-cleanup": {
+          "current": 571135,
+          "prior": 1294330,
+          "deltaPct": -55.874081571160374
+        }
+      },
+      "byDispatchKind": {
+        "autopilot-dispatched": {
+          "opus": {
+            "input": 12171344,
+            "output": 5992677,
+            "cacheRead": 2017634765,
+            "cacheCreation": 109313999,
+            "total": 2145112785
+          },
+          "sonnet": {
+            "input": 46182,
+            "output": 2129821,
+            "cacheRead": 761917086,
+            "cacheCreation": 35284733,
+            "total": 799377822
+          },
+          "haiku": {
+            "input": 10816,
+            "output": 395964,
+            "cacheRead": 184456675,
+            "cacheCreation": 10266102,
+            "total": 195129557
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "operator-invoked": {
+          "opus": {
+            "input": 10819560,
+            "output": 20956694,
+            "cacheRead": 2206579178,
+            "cacheCreation": 61170993,
+            "total": 2299526425
+          },
+          "sonnet": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "haiku": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        },
+        "interactive": {
+          "opus": {
+            "input": 808765,
+            "output": 290170,
+            "cacheRead": 84424773,
+            "cacheCreation": 5711288,
+            "total": 91234996
+          },
+          "sonnet": {
+            "input": 396,
+            "output": 62501,
+            "cacheRead": 12894388,
+            "cacheCreation": 930760,
+            "total": 13888045
+          },
+          "haiku": {
+            "input": 36825,
+            "output": 90024,
+            "cacheRead": 11902777,
+            "cacheCreation": 2151513,
+            "total": 14181139
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0,
+            "total": 0
+          }
+        }
+      },
+      "attributedPercent": 97.85364330893474,
+      "quotaWeightLast5h": 0,
+      "quotaWeightLast7d": 0,
+      "quotaWeightCalibrated": false,
+      "weeklyQuotaTokens": 220000000000,
+      "fiveHourQuotaTokens": 4920000000,
+      "filesScanned": 1160,
+      "filesSkippedByMtime": 5070,
+      "linesParsed": 121800,
+      "linesWithUsage": 69605,
+      "parseErrors": 0,
+      "generatedAt": "2026-07-02T23:05:18.814Z",
+      "cacheHitRatioLast5h": 0.9528810950367038,
+      "cacheHitRatioLast7d": 0.9550109803651168,
+      "tokensSinceReset": {
+        "input": 5430858,
+        "output": 8677332,
+        "cacheRead": 1527141708,
+        "cacheCreation": 61693629,
+        "total": 1602943527
+      },
+      "percentSinceReset": 0.7286106940909091,
+      "weeklyResetAnchor": "2026-07-01T17:00:00.000Z"
+    }
+  },
+  "emergency_brake": {
+    "engaged": false
+  },
+  "slot_events": [
+    {
+      "id": "1783014565850-4",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2641",
+        "title": "feat(attribution): ridge marginal-effect estimator + null-baseline (closes #2630)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2641",
+        "task_id": "agent-a2b02e8f737fd0614",
+        "head_branch": "worktree-agent-a2b02e8f737fd0614",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565850-5",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2638",
+        "title": "fix(api/metrics): gate POST /metrics/record through zod safeParse (closes #2636)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2638",
+        "task_id": "head_branch",
+        "fix/2636-metrics-record-zod": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565851-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2637",
+        "title": "fix(metrics): dispatch.sh cycle-record honours HYDRA_API_BASE (closes #2635)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2637",
+        "task_id": "head_branch",
+        "fix/2635-dispatch-env-mismatch": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565851-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2634",
+        "title": "feat(attribution): ledger + window recorder tracer bullet (closes #2629)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2634",
+        "task_id": "head_branch",
+        "feat/attribution-spine-2629": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565851-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2633",
+        "title": "feat(holdback): merge-completion watcher chore — in-process enroll + cycle-record enrichment on landing (closes #2623)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2633",
+        "task_id": "agent-abb080d13a4308062",
+        "head_branch": "worktree-agent-abb080d13a4308062",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565851-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2627",
+        "title": "feat(dashboard): wire OrchestratorMap into Explore as a tab (closes #2610)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2627",
+        "task_id": "agent-af4c34cb4d2c65781",
+        "head_branch": "worktree-agent-af4c34cb4d2c65781",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565851-4",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2626",
+        "title": "feat(holdback): pending-enroll registry + POST /api/holdback/pending (closes #2622)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2626",
+        "task_id": "head_branch",
+        "feat/2622-pending-enroll-registry": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565852-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2620",
+        "title": "fix(cost): exponential backoff on OAuth meter GET to stop sustained 429 hammering (#2619)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2620",
+        "task_id": "agent-ab07d4b04e4e7e3dd",
+        "head_branch": "worktree-agent-ab07d4b04e4e7e3dd",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565852-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2618",
+        "title": "orchestrator-map: hand-rolled SVG map component (spine + toggleable layers) (#2609)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2618",
+        "task_id": "agent-a40fd70e",
+        "head_branch": "worktree-agent-a40fd70e-orchestrator-map-component",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565853-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2617",
+        "title": "refactor(metrics): extract grounding-duration projection into src/metrics/grounding.ts (closes #2614)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2617",
+        "task_id": "head_branch",
+        "refactor/metrics-grounding-leaf-2614": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565853-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2616",
+        "title": "ci(control-plane): advisory drift check for control-plane.json (closes #2611)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2616",
+        "task_id": "head_branch",
+        "feat/control-plane-drift-check-2611": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565853-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2615",
+        "title": "refactor(metrics): consolidate duplicated percentile into src/metrics/math.ts leaf (closes #2613)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2615",
+        "task_id": "agent-adb4fd38fde2d2cdf",
+        "head_branch": "worktree-agent-adb4fd38fde2d2cdf",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565854-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2612",
+        "title": "feat(dashboard): generate control-plane census from repo source (closes #2608)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2612",
+        "task_id": "agent-a04badfbc98196392",
+        "head_branch": "worktree-agent-a04badfbc98196392",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565855-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2606",
+        "title": "refactor(health): extract deployed-SHA probe into src/health/deployed-sha.ts (closes #2605)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2606",
+        "task_id": "issue-2605",
+        "head_branch": "issue-2605-deployed-sha-leaf",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565855-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2604",
+        "title": "refactor(knowledge-base): concentrate hash-dedup + coverage state in HashDedupAdapter (closes #2603)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2604",
+        "task_id": "agent-adbdd91f5cca630e2",
+        "head_branch": "worktree-agent-adbdd91f5cca630e2",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565856-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2602",
+        "title": "cleanup(pattern-memory): demote unused export CUE_ALIAS_TABLE (closes #2601)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2602",
+        "task_id": "head_branch",
+        "cleanup/2601-demote-cue-alias-table": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565856-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2599",
+        "title": "refactor(health): drive service-strip rows from shared ServiceProbe enumeration (closes #2597)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2599",
+        "task_id": "agent-aba43dcfd22fb312b",
+        "head_branch": "worktree-agent-aba43dcfd22fb312b",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565856-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2598",
+        "title": "refactor(pattern-memory): extract FrictionPattern read-side type into canonical leaf (closes #2596)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2598",
+        "task_id": "agent-a8a442416fa06fe38",
+        "head_branch": "worktree-agent-a8a442416fa06fe38",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565856-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2594",
+        "title": "refactor(event-bus): extract ConsumerSession lifecycle Seam from EventBus (closes #2592)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2594",
+        "task_id": "issue-2592",
+        "head_branch": "issue-2592-consumer-session",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565857-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2591",
+        "title": "refactor(metrics): extract getAbandonmentBreakdown + categorizeAbandonReason into metrics domain (closes #2589)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2591",
+        "task_id": "agent-a7527d031ac37ec65",
+        "head_branch": "worktree-agent-a7527d031ac37ec65",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565857-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2590",
+        "title": "refactor(backlog): introduce BacklogItem domain type to replace pervasive `type Item = any` (closes #2588)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2590",
+        "task_id": "agent-a7671a855f2741df4",
+        "head_branch": "worktree-agent-a7671a855f2741df4",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565857-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2587",
+        "title": "test(ov-search): pin /api/v1/search/find contract — #2586 premise was a misdiagnosis (closes #2586)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2587",
+        "task_id": "agent-ac75581c2c1d4f848",
+        "head_branch": "worktree-agent-ac75581c2c1d4f848",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565857-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2585",
+        "title": "cleanup(backlog): remove dead requeueStaleInProgressItems export from wip.ts (closes #2583)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2585",
+        "task_id": "head_branch",
+        "cleanup/2583-remove-requeue-stale-inprogress-dead-export": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565857-4",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2584",
+        "title": "fix(backlog): stale-inProgress return chore goes through atomic seam + clears claim fields (closes #2582)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2584",
+        "task_id": "head_branch",
+        "fix/2582-stale-inprogress-atomic-seam": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565857-5",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2581",
+        "title": "fix(wiring-liveness): wire output check to real Target source via accumulated series (closes #2578)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2581",
+        "task_id": "head_branch",
+        "fix/wiring-liveness-output-production-reader-2578": "ts_epoch",
+        "1783014565": ""
+      }
+    },
+    {
+      "id": "1783014565858-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2580",
+        "title": "refactor(api): hoist 7 dynamic await-import() reader defaults to static imports (closes #2579)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2580",
+        "task_id": "agent-adde65f1bdf337fee",
+        "head_branch": "worktree-agent-adde65f1bdf337fee",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565858-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2577",
+        "title": "fix(autopilot): seed retro_orch + 3 cooldown classes into signal_last_fired (closes #2575)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2577",
+        "task_id": "issue-2575",
+        "head_branch": "issue-2575-dev",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014565858-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2576",
+        "title": "fix(cost): decouple OAuth maxStale default from the TTL (closes #2574)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2576",
+        "task_id": "agent-a8c10b77b9003d1bc",
+        "head_branch": "worktree-agent-a8c10b77b9003d1bc",
+        "ts_epoch": "1783014565"
+      }
+    },
+    {
+      "id": "1783014566288-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "401",
+        "title": "fix(env): report HYDRA_PAPER_LLM_API_BASE_URL as requiredEnvVar label (item-663 / item-543)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/401",
+        "task_id": "head_branch",
+        "item-663-rename-required-envvar": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566288-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "400",
+        "title": "chore(cleanup): demote 3 dead kalshi handoff exports (item-677)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/400",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-1020": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566288-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "399",
+        "title": "feat(execution): route Polymarket paper candidates through Polymarket CLOB venue in directional-nomination-runner (item-727)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/399",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-0954-item727": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566288-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "398",
+        "title": "feat(execution): directional venue_orders CLV closing-line attribution (item-728)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/398",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-0925": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566289-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "397",
+        "title": "docs(execution): DirectionalClvAttribution glossary entry (item-728)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/397",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-0925-glossary": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566289-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "396",
+        "title": "feat(calibration): add KXNFL + KXCOPA sports series to scheduled paper-edge defaults (item-729)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/396",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-0854": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566289-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "395",
+        "title": "refactor(scheduled-cycle): re-home live-inference gate out of retired lib/arbitrage (item-732)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/395",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-0722": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566289-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "394",
+        "title": "feat(calibration): per-run directional-paper nomination outcome summary (item-731)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/394",
+        "task_id": "head_branch",
+        "item-731-calib-nomination-summary": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566289-4",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "393",
+        "title": "research(direction): refresh priorities + roadmap (2026-07-01)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/393",
+        "task_id": "head_branch",
+        "research/direction-2026-07-01-1782974819": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566289-5",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "392",
+        "title": "fix(calibration): resilient paper-edge feed — per-market LLM failure isolation + client-side request timeout",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/392",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-0457": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566290-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "391",
+        "title": "research(direction): refresh priorities + roadmap (2026-07-01)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/391",
+        "task_id": "head_branch",
+        "research/direction-2026-07-01-1782967931": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566290-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "390",
+        "title": "feat(markets): surface DirectionalPaperExitCriteria verdict on the markets review (item-702)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/390",
+        "task_id": "agent-3f9b8cd6",
+        "head_branch": "worktree-agent-3f9b8cd6-item702",
+        "ts_epoch": "1783014566"
+      }
+    },
+    {
+      "id": "1783014566290-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "389",
+        "title": "feat(calibration): wire evaluateOllamaForecastLift into GET /api/calibration/ollama-forecast-lift (item-701)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/389",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-02-0011": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566290-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "388",
+        "title": "feat(execution): extend directional single-leg path to nominate Polymarket CLOB venue (item-706)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/388",
+        "task_id": "head_branch",
+        "feat/item706-polymarket-directional": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566290-4",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "387",
+        "title": "feat(markets): extend WC pre-game grouper to R32/QF/SF/Final rounds (item-708)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/387",
+        "task_id": "head_branch",
+        "agent/item-708-wc-knockout-grouper-1782949409": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566291-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "386",
+        "title": "fix(calibration): name the yes-side outcome in buildLlmProbabilityPrompt (item-721)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/386",
+        "task_id": "head_branch",
+        "fix/item-721-name-yes-side-team-llm-prompt": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566291-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "385",
+        "title": "fix(calibration): use reasoning_effort:low (not none) for paper-edge estimates",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/385",
+        "task_id": "head_branch",
+        "fix/paper-edge-reasoning-effort-low": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566291-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "384",
+        "title": "fix(calibration): tolerate trailing prose in LLM JSON responses (paper-edge feed)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/384",
+        "task_id": "head_branch",
+        "fix/paper-edge-lenient-json-parse": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566291-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "383",
+        "title": "fix(calibration): disable LLM reasoning pass in paper-edge feed (reasoning_effort:none)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/383",
+        "task_id": "head_branch",
+        "fix/paper-edge-reasoning-effort-none": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566292-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "382",
+        "title": "fix(kalshi): drop malformed series fee-change rows instead of crashing (closes #720)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/382",
+        "task_id": "head_branch",
+        "fix/kalshi-fee-changes-nan-720": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566292-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "381",
+        "title": "feat(calibration): surface per-source Brier calibration panel on dashboard (item-707)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/381",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-1129": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566292-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "380",
+        "title": "fix(calibration): warm cold Ollama before paper-edge-feed batch (closes #2600)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/380",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-1055": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566292-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "379",
+        "title": "feat(execution): directional paper-nomination replay scorer (M13)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/379",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-0938": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566292-4",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "378",
+        "title": "chore(cleanup): demote 4 dead lib/execution exports flagged by knip (item-711)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/378",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-0858": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566293-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "377",
+        "title": "chore(cleanup): retire DASHBOARD_REQUESTED_MARKET_KEYS unused export (item-712)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/377",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-0845": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566293-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "376",
+        "title": "chore(cleanup): retire WorldCup2026GroupStage1X2OutcomeContract + WORLD_CUP_KALSHI_SOCCER_SERIES_PREFIX unused exports (item-713)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/376",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-0835": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566294-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "375",
+        "title": "fix(ops): paper-edge-feed cap batch to 18 markets + bump TimeoutStartSec to 1800 (closes #2595)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/375",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-0723": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566294-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "374",
+        "title": "cleanup(nav): retire dead default export + duplicate export in circuit-breaker-nav-indicator.tsx (item-714)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/374",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-0225": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566295-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "373",
+        "title": "feat(calibration): schedule paper LLM edge-feed runner — M13 forecast-pipeline headwater (item-718)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/373",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-07-01-0123": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566295-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "372",
+        "title": "cleanup(providers): demote 9 dead Kalshi runtime schema exports in kalshi-runtime/",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/372",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-28-0847": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566295-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "371",
+        "title": "cleanup(providers): demote 10 dead provider type exports in polymarket.ts",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/371",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-28-0834": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566296-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "opened",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "370",
+        "title": "research(direction): refresh priorities + roadmap (2026-06-28)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/370",
+        "task_id": "head_branch",
+        "research/direction-2026-06-28-1782634219": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566297-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "369",
+        "title": "feat(calibration): deploy pre-game directional scanner as scheduled bin runner (epic #2394 slice 5)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/369",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-28-0134": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566298-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "368",
+        "title": "feat(execution): deploy directional nomination runner + scheduled cadence (M13 step-5 keystone)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/368",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-28-0053": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566299-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "367",
+        "title": "research(direction): refresh priorities + roadmap (2026-06-27)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/367",
+        "task_id": "head_branch",
+        "research/direction-2026-06-27-1782607710": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566299-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "366",
+        "title": "feat(execution): define directional paper-stage exit/kill criteria before live-proof promotion (item-667)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/366",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-2105": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566299-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "365",
+        "title": "feat(calibration): wire Brier trend accumulation chart on calibration dashboard (item-668)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/365",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-2045": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566299-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "364",
+        "title": "refactor(execution): relocate fill-symmetry + fill-rate-discrepancy out of lib/arbitrage (ADR-0002 step 3)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/364",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-2002": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566300-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "363",
+        "title": "fix(markets): audit duplicate-conflicting Kalshi anchors in buildPregameFairProbabilityMap",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/363",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1929": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566300-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "362",
+        "title": "feat(markets): discover World Cup round-of-16 bundles via KXWC ticker round classifier (item-670)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/362",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1857": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566300-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "361",
+        "title": "docs(markets): add Bundle round to markets glossary (item-670)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/361",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1857-glossary": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566300-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "360",
+        "title": "feat(execution): wire cross-venue disagreement oracle into directional nomination scoring (item-671, M13)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/360",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1825": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566301-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "359",
+        "title": "feat(execution): directional paper-execution review surface on /markets (item-672, M13)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/359",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1743": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566301-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "358",
+        "title": "feat(calibration): surface forecast_outcomes accumulation count + last-recorded timestamp (item-674)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/358",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1709": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566301-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "357",
+        "title": "cleanup(arbitrage): retire dead execution + correlation bin runners (ADR-0002 Step 4)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/357",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1652": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566301-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "356",
+        "title": "feat(execution): wire scan-time CLV cohort signal into directional nomination sizing (M13)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/356",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1620": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566302-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "355",
+        "title": "docs(execution): add DirectionalClvSizing to lib/execution glossary",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/355",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1620-glossary": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566302-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "opened",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "354",
+        "title": "research(direction): refresh priorities + roadmap (2026-06-27)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/354",
+        "task_id": "head_branch",
+        "research/direction-2026-06-27-1782576773": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566302-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "353",
+        "title": "feat(execution): directional single-leg execute() orchestrator (M13 step 5 keystone — slice 4)",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/353",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1533": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783014566302-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra-betting",
+        "pr_number": "352",
+        "title": "docs(execution): add DirectionalSingleLegExecute to lib/execution glossary",
+        "url": "https://github.com/gaberoo322/hydra-betting/pull/352",
+        "task_id": "head_branch",
+        "feature/claude-cycle-2026-06-27-1533-glossary": "ts_epoch",
+        "1783014566": ""
+      }
+    },
+    {
+      "id": "1783016245772-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2688",
+        "title": "cleanup(src/backlog): demote 2 unused exports in reconciler.ts",
+        "url": "https://github.com/gaberoo322/hydra/pull/2688",
+        "task_id": "agent-ac0f556506186744e",
+        "head_branch": "worktree-agent-ac0f556506186744e",
+        "ts_epoch": "1783016245"
+      }
+    },
+    {
+      "id": "1783016531645-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2688",
+        "title": "cleanup(src/backlog): demote 2 unused exports in reconciler.ts",
+        "url": "https://github.com/gaberoo322/hydra/pull/2688",
+        "task_id": "agent-ac0f556506186744e",
+        "head_branch": "worktree-agent-ac0f556506186744e",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531645-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2685",
+        "title": "feat(metrics): expose honest-none discriminator + guard reflection failure-path writer (closes #2670)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2685",
+        "task_id": "agent-ad1b552a4c0774af0",
+        "head_branch": "worktree-agent-ad1b552a4c0774af0",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531646-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2682",
+        "title": "refactor(backlog): extract pure merged-ref token algebra to src/backlog/token-algebra.ts (closes #2677)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2682",
+        "task_id": "agent-a80cf4af847a90ccf",
+        "head_branch": "worktree-agent-a80cf4af847a90ccf",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531646-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2681",
+        "title": "refactor(backlog): extract pure escalation-policy leaf from stale-escalation Redis coordinator (closes #2678)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2681",
+        "task_id": "agent-abe032a980eb48fcf",
+        "head_branch": "worktree-agent-abe032a980eb48fcf",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531646-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2680",
+        "title": "refactor(autopilot-health): static-import listRecentMergeCommits instead of await import() DI fallback (closes #2679)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2680",
+        "task_id": "head_branch",
+        "chore/2679-autopilot-health-static-import": "ts_epoch",
+        "1783016531": ""
+      }
+    },
+    {
+      "id": "1783016531646-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2676",
+        "title": "refactor(chores): convert 8 housekeeping chores from await import() DI fallbacks to static imports",
+        "url": "https://github.com/gaberoo322/hydra/pull/2676",
+        "task_id": "issue-2672",
+        "head_branch": "issue-2672-static-chore-imports",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531647-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2675",
+        "title": "refactor(holdback): extract tier-enrollment policy to src/holdback-policy.ts (closes #2671)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2675",
+        "task_id": "issue-2671",
+        "head_branch": "issue-2671-holdback-policy",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531647-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2674",
+        "title": "refactor(autopilot): consolidate autopilot read seams into shared AutopilotStatus accessor (closes #2673)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2674",
+        "task_id": "issue-2673",
+        "head_branch": "issue-2673-autopilot-status-seam",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531647-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2669",
+        "title": "fix(cost): single-flight OAuth GET + distinct 429 classification with Retry-After honor (closes #2666)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2669",
+        "task_id": "agent-abf995555132812fd",
+        "head_branch": "worktree-agent-abf995555132812fd",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531647-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2664",
+        "title": "feat(health): add deployed-build drift check to hydra-doctor (closes #2663)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2664",
+        "task_id": "head_branch",
+        "fix/2663-doctor-deploy-drift-check": "ts_epoch",
+        "1783016531": ""
+      }
+    },
+    {
+      "id": "1783016531648-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2662",
+        "title": "fix(indexer): bounded backoff-with-jitter retry for OV point-lock contention (closes #2658)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2662",
+        "task_id": "issue-2658",
+        "head_branch": "issue-2658-ov-point-lock-retry",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531648-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2661",
+        "title": "cleanup(src/backlog): demote/remove 2 unused exports (closes #2655)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2661",
+        "task_id": "agent-ac77f353ba9758e0d",
+        "head_branch": "worktree-agent-ac77f353ba9758e0d",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531649-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2660",
+        "title": "cleanup(src/health): demote unused export StripHttpProbe (closes #2657)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2660",
+        "task_id": "agent-ab697ce5487d6b880",
+        "head_branch": "worktree-agent-ab697ce5487d6b880",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531649-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2659",
+        "title": "cleanup(consumer-session): demote unused export ConsumerSessionDlqPublisher (closes #2656)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2659",
+        "task_id": "head_branch",
+        "cleanup/2656-demote-consumer-session-dlq-publisher": "ts_epoch",
+        "1783016531": ""
+      }
+    },
+    {
+      "id": "1783016531649-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2653",
+        "title": "refactor(autopilot): collapse auto-merge handler to register handoff, delete merge-coupled Phase-6 prose (closes #2624)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2653",
+        "task_id": "agent-a0820e881da95ab5b",
+        "head_branch": "worktree-agent-a0820e881da95ab5b",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531649-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2652",
+        "title": "feat(learning): dispatch-served plan-time knowledge fetch records cyclesWithContext (closes #2647)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2652",
+        "task_id": "agent-ac79448182c7547aa",
+        "head_branch": "worktree-agent-ac79448182c7547aa",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531649-4",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2651",
+        "title": "feat(attribution): read-only GET /api/attribution marginal-effect view (closes #2631)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2651",
+        "task_id": "agent-ab4179bbccac4568f",
+        "head_branch": "worktree-agent-ab4179bbccac4568f",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531650-0",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2646",
+        "title": "fix(attribution): live merge-landing recorder chore + per-metric windows + Holdback revert→void wiring (closes #2632)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2646",
+        "task_id": "agent-a3f633acb2edacc43",
+        "head_branch": "worktree-agent-a3f633acb2edacc43",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531650-1",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2645",
+        "title": "feat(candidates): operator-priority intra-lane tiebreak in getCandidateFeed",
+        "url": "https://github.com/gaberoo322/hydra/pull/2645",
+        "task_id": "head_branch",
+        "feat/priority-tiebreak": "ts_epoch",
+        "1783016531": ""
+      }
+    },
+    {
+      "id": "1783016531650-2",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2644",
+        "title": "refactor(aggregators): digest-issue seam owns multi-source merge/dedup (closes #2639)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2644",
+        "task_id": "agent-a79cea89df4e51430",
+        "head_branch": "worktree-agent-a79cea89df4e51430",
+        "ts_epoch": "1783016531"
+      }
+    },
+    {
+      "id": "1783016531650-3",
+      "fields": {
+        "event": "pr_lifecycle",
+        "transition": "merged",
+        "repo": "gaberoo322/hydra",
+        "pr_number": "2643",
+        "title": "refactor(autopilot): expose getRunDispatchClasses projection, eliminate dynamic-import workaround in behavior-gallery (closes #2640)",
+        "url": "https://github.com/gaberoo322/hydra/pull/2643",
+        "task_id": "issue-2640",
+        "head_branch": "issue-2640-dispatch-class-projection",
+        "ts_epoch": "1783016531"
+      }
+    }
+  ],
+  "slot_events_last_id": "1783016531650-3",
+  "scout_spend_usd_today": 0.0,
+  "dev_target_spend_usd_cycle": 0.0
+}

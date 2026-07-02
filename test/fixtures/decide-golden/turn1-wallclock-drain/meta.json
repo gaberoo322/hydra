@@ -1,0 +1,5 @@
+{
+  "now": 1783063556,
+  "capturedAt": "2026-07-02",
+  "note": "Same live run-3626c94b turn-1 triple as turn1-dev-in-flight, replayed past the 28800s wall-clock budget: the termination rule must trip."
+}

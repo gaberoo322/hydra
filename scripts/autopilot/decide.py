@@ -1846,12 +1846,24 @@ def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
 # The main decision function
 # ---------------------------------------------------------------------------
 
-def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None = None) -> Plan:
+def decide(
+    state: dict,
+    candidates: dict | None,
+    events: Iterable[dict] | None = None,
+    now: int | None = None,
+) -> Plan:
     """Return a Plan (typed action list) for this tick.
 
     Pure: no side effects. Reads `state`, `candidates`, and `events` and
     returns a fresh Plan. The caller (the playbook / model) executes the
     actions in order.
+
+    `now` (issue #2713) is the decision clock as a unix epoch. Injecting it
+    makes decide() a reproducibly pure function of its arguments, so the
+    golden-plan regression suite (test/decide-golden.test.mts) can replay
+    captured production `(state, candidates, events)` triples and assert the
+    verbatim Plan. `main()` supplies real wall-clock time; when omitted
+    (legacy in-process callers), decide() falls back to `time.time()`.
 
     Decision order (each step appends 0+ actions):
 
@@ -1893,7 +1905,7 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     if not isinstance(state, dict):
         raise TypeError("decide(): state must be a dict")
     events = list(events or [])
-    now = int(time.time())
+    now = int(time.time()) if now is None else int(now)
 
     # Issue #1732 — stamp the plan with the (run_id, turn) identity of the
     # state it was decided against, so heartbeat.py can verify the plan file
@@ -2962,9 +2974,26 @@ def _persist_state_writeback(
 
 
 def main(argv: list[str]) -> int:
+    # Issue #2713 — optional frozen decision clock for golden/regression
+    # fixtures: `--now=<epoch>` (anywhere after the program name) pins the
+    # `now` decide() receives so a captured production triple replays
+    # deterministically. Absent → real wall clock (production behavior
+    # unchanged). Parsed and stripped BEFORE positional handling so the
+    # `decide <state> [cands] [events]` contract is untouched.
+    frozen_now: int | None = None
+    argv = [a for a in argv]
+    for i, arg in enumerate(argv[1:], start=1):
+        if arg.startswith("--now="):
+            try:
+                frozen_now = int(arg.split("=", 1)[1])
+            except ValueError:
+                print(f"decide.py: invalid --now value {arg!r}", file=sys.stderr)
+                return 2
+            del argv[i]
+            break
     if len(argv) <= 1:
         print(
-            "usage: decide.py decide <state.json> [candidates.json] [events.json]\n"
+            "usage: decide.py [--now=<epoch>] decide <state.json> [candidates.json] [events.json]\n"
             "       decide.py smoke",
             file=sys.stderr,
         )
@@ -3000,7 +3029,11 @@ def main(argv: list[str]) -> int:
         force_counter_before = json.dumps(
             state.get("research_force_counter"), sort_keys=True,
         )
-        plan = decide(state, candidates, events)
+        # Issue #2713 — main() owns the clock: real time in production, the
+        # frozen --now epoch when replaying a captured fixture. decide()
+        # itself never reads the wall clock when `now` is supplied.
+        now_epoch = frozen_now if frozen_now is not None else int(time.time())
+        plan = decide(state, candidates, events, now=now_epoch)
         _xadd_observability_events(plan.events)
         # Issue #1352: record a clean run-end for any decide-side terminate
         # BEFORE the print-mode session exits (reap would stamp `interrupted`).
