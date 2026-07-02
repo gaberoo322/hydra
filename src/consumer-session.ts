@@ -63,7 +63,7 @@ export interface ConsumerSessionOptions {
  * stream key or the envelope shape — it only knows "forward the exhausted
  * entry".
  */
-export type ConsumerSessionDlqPublisher = (entry: {
+type ConsumerSessionDlqPublisher = (entry: {
   originalStream: string;
   originalGroup: string;
   originalEvent: ConsumedEvent;
