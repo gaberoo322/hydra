@@ -24,6 +24,10 @@ import {
   digestRefsFromRows,
   labeledItemsFromRows,
   datedTitle,
+  addDays,
+  mergeBySource,
+  type RawDigestInput,
+  type MergedBySource,
 } from "../src/aggregators/digest-issue.ts";
 import type { IssueRow } from "../src/github/issues.ts";
 
@@ -163,6 +167,120 @@ describe("mergeDecisionItems — pure helper", () => {
       ],
     });
     assert.deepEqual(merged.map((i) => i.number), [1, 2]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mergeBySource — the shared multi-source dedup skeleton (issue #2639)
+// ---------------------------------------------------------------------------
+
+describe("mergeBySource — seam dedup skeleton", () => {
+  function raw(over: Partial<RawDigestInput> & { number: number }): RawDigestInput {
+    return {
+      number: over.number,
+      title: over.title ?? `#${over.number}`,
+      url: over.url ?? `u${over.number}`,
+      createdAt: over.createdAt ?? "",
+      labels: over.labels ?? [],
+    };
+  }
+
+  const ORDER = ["a", "b", "c"] as const;
+  type S = (typeof ORDER)[number];
+
+  test("first-write-wins by ORDER priority, not input-record order", () => {
+    // "b" is listed first in the input record but "a" precedes it in ORDER;
+    // the primary source must be "a" (order-priority, per invariant 4).
+    const merged = mergeBySource<S>(
+      { b: [raw({ number: 10 })], a: [raw({ number: 10 })] },
+      ORDER,
+    );
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].source, "a");
+    assert.deepEqual(merged[0].sources, ["a", "b"]);
+  });
+
+  test("sources[] accumulates every source, deduped, in ORDER order", () => {
+    const merged = mergeBySource<S>(
+      {
+        a: [raw({ number: 1 })],
+        b: [raw({ number: 1 })],
+        c: [raw({ number: 1 })],
+      },
+      ORDER,
+    );
+    assert.equal(merged.length, 1);
+    assert.deepEqual(merged[0].sources, ["a", "b", "c"]);
+  });
+
+  test("preserves first-seen (ORDER-driven) emission order across numbers", () => {
+    const merged = mergeBySource<S>(
+      { c: [raw({ number: 99 })], a: [raw({ number: 5 })] },
+      ORDER,
+    );
+    // "a" iterates before "c" in ORDER, so #5 emits before #99.
+    assert.deepEqual(merged.map((m) => m.row.number), [5, 99]);
+  });
+
+  test("onDuplicate folds caller state onto the kept row", () => {
+    const merged = mergeBySource<S>(
+      { a: [raw({ number: 7, labels: ["x"] })], b: [raw({ number: 7, labels: ["y", "x"] })] },
+      ORDER,
+      (existing, incoming) => {
+        for (const l of incoming.labels) {
+          if (!existing.row.labels.includes(l)) existing.row.labels.push(l);
+        }
+      },
+    );
+    assert.deepEqual(merged[0].row.labels, ["x", "y"]);
+  });
+
+  test("omitting onDuplicate is a clean no-op on duplicates", () => {
+    const merged = mergeBySource<S>(
+      { a: [raw({ number: 3, labels: ["x"] })], b: [raw({ number: 3, labels: ["z"] })] },
+      ORDER,
+    );
+    // No fold: the kept row keeps only its own labels.
+    assert.deepEqual(merged[0].row.labels, ["x"]);
+    assert.deepEqual(merged[0].sources, ["a", "b"]);
+  });
+
+  test("clones labels — never mutates the caller's input array", () => {
+    const input = raw({ number: 4, labels: ["orig"] });
+    const merged = mergeBySource<S>({ a: [input], b: [raw({ number: 4, labels: ["extra"] })] }, ORDER, (e, i) => {
+      for (const l of i.labels) if (!e.row.labels.includes(l)) e.row.labels.push(l);
+    });
+    assert.deepEqual(merged[0].row.labels, ["orig", "extra"]);
+    // The caller's original input array is untouched.
+    assert.deepEqual(input.labels, ["orig"]);
+  });
+
+  test("empty / missing sources yield an empty result", () => {
+    const merged: MergedBySource<S>[] = mergeBySource<S>({}, ORDER);
+    assert.deepEqual(merged, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addDays — pure UTC calendar primitive (issue #2639)
+// ---------------------------------------------------------------------------
+
+describe("addDays — pure UTC calendar primitive", () => {
+  test("subtracts a day for the 'yesterday' digest candidate", () => {
+    const yesterday = addDays(NOW, -1);
+    assert.equal(datedTitle(yesterday), "Operator decision queue 2026-05-25");
+  });
+
+  test("adds days across a month boundary in UTC", () => {
+    const d = addDays(new Date("2026-01-31T00:00:00.000Z"), 1);
+    assert.equal(datedTitle(d), "Operator decision queue 2026-02-01");
+  });
+
+  test("does not mutate the input Date", () => {
+    const base = new Date("2026-05-26T12:00:00.000Z");
+    const beforeMs = base.getTime();
+    addDays(base, 5);
+    assert.equal(base.getTime(), beforeMs);
   });
 });
 

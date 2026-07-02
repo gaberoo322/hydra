@@ -31,10 +31,13 @@
  */
 
 import {
+  addDays,
   extractIssueRefs,
   digestRefsFromRows,
   labeledItemsFromRows,
   datedTitle,
+  mergeBySource,
+  type RawDigestInput,
 } from "./aggregators/digest-issue.ts";
 import {
   listIssuesByLabelOrEmpty,
@@ -147,33 +150,52 @@ interface RawPickupInput {
  * Pure merge — dedupes by issue number, preserving the bucket priority order
  * (digest first so it wins as the primary `source`), and returns the combined
  * list sorted by ascending issue number.
+ *
+ * The dedup skeleton (keying, first-write-wins by order priority, sources
+ * accumulation) is owned by the digest-issue seam's {@link mergeBySource};
+ * this function owns the review-pickup *policy*: the fixed bucket order, the
+ * lean `PickupItem` projection (no createdAt, no labels), the absence of any
+ * label-union (`onDuplicate` is omitted — PickupItem carries no labels), and
+ * the number-ascending sort. The lean `RawPickupInput` rows are widened to the
+ * seam's `RawDigestInput` shape at the merge boundary (createdAt/labels are
+ * synthesized-and-ignored — the projection drops them).
  */
 export function mergePickupItems(
   bySource: Partial<Record<PickupSource, RawPickupInput[]>>,
 ): PickupItem[] {
-  const byNumber = new Map<number, PickupItem>();
   const order: PickupSource[] = [
     "operator-decision-queue",
     "ready-for-human",
     "stale-blocked",
   ];
+
+  // Widen the lean pickup rows to the seam's raw shape (the projection below
+  // drops the synthesized createdAt/labels — pickup items carry neither).
+  const wide: Partial<Record<PickupSource, RawDigestInput[]>> = {};
   for (const source of order) {
-    for (const item of bySource[source] ?? []) {
-      const existing = byNumber.get(item.number);
-      if (existing) {
-        if (!existing.sources.includes(source)) existing.sources.push(source);
-        continue;
-      }
-      byNumber.set(item.number, {
-        number: item.number,
-        title: item.title,
-        url: item.url,
-        source,
-        sources: [source],
-      });
-    }
+    const rows = bySource[source];
+    if (!rows) continue;
+    wide[source] = rows.map((r) => ({
+      number: r.number,
+      title: r.title,
+      url: r.url,
+      createdAt: "",
+      labels: [],
+    }));
   }
-  return Array.from(byNumber.values()).sort((a, b) => a.number - b.number);
+
+  // No onDuplicate: PickupItem has no labels field, so nothing to union.
+  const merged = mergeBySource(wide, order);
+
+  return merged
+    .map(({ row, source, sources }): PickupItem => ({
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      source,
+      sources,
+    }))
+    .sort((a, b) => a.number - b.number);
 }
 
 // ---------------------------------------------------------------------------
@@ -357,12 +379,3 @@ export function openNumbersFromRows(
   return open;
 }
 
-// ---------------------------------------------------------------------------
-// Small date helper (mirrors decision-queue.ts)
-// ---------------------------------------------------------------------------
-
-function addDays(d: Date, n: number): Date {
-  const out = new Date(d.getTime());
-  out.setUTCDate(out.getUTCDate() + n);
-  return out;
-}
