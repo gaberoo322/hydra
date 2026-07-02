@@ -40,7 +40,15 @@ import { createHash } from "node:crypto";
 // which owns the URL join + auth headers + timeout + error classification +
 // JSON/text unwrap. This cluster keeps its #313 temp_path unwrap and the
 // multipart upload shape — pure domain behaviour layered on the transport.
-import { ovPostJson, ovPostForm, isOvFailure } from "./ov-request.ts";
+import {
+  ovPostJson,
+  ovPostForm,
+  isOvFailure,
+  isOvServerTimeout,
+  isOvPointLockConflict,
+} from "./ov-request.ts";
+import type { OvErrorCode } from "./ov-request.ts";
+import { recordIndexerError, recordIndexerRetry } from "../scheduler/heartbeat.ts";
 import { trackedOvSearch } from "./ov-search.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import {
@@ -58,6 +66,86 @@ const CONFIG_PATH =
 const OV_CONFIG_MOUNT = process.env.OV_CONFIG_MOUNT || "/config";
 const SKIP_DIRS = new Set([".git", "node_modules"]);
 const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
+
+// ---------------------------------------------------------------------------
+// Add-resource retry policy (issue #2658)
+// ---------------------------------------------------------------------------
+//
+// Under concurrent semantic-indexing writes (startup / large-recompile bursts)
+// OpenViking's lock manager cannot grant the point lock on the `hydra-memory`
+// resource collection and 500s with an INTERNAL/"Failed to acquire point lock"
+// body — a TRANSIENT contention condition on a HEALTHY container, not a payload
+// rejection. Before #2658 `indexText` gave up on the first such failure, leaving
+// stale embeddings silently (the grounding phase then misses context).
+//
+// We now wrap the `/api/v1/resources` add-resource POST in a bounded client-side
+// exponential-backoff-WITH-JITTER retry loop, reusing the skill-registration.ts
+// (#1828/#2250) retry idiom — NOT a global write-path mutex (throughput collapse,
+// no cross-process help) and NOT a durable queue (over-engineering for ~6
+// best-effort failures/hour). Jitter decorrelates a bulk-index burst so the
+// whole burst does not retry in lockstep and re-collide on the same point lock
+// (thundering-herd avoidance — the one deliberate deviation from the fixed-set
+// skill-registration precedent).
+//
+// The #1828 do-not-mask guard is preserved: only the transient transport/timeout
+// codes, an OV server-side-timeout body, OR an OV point-lock body are retried; a
+// genuine 4xx/5xx, UNAUTHENTICATED, or malformed-JSON stays non-retryable and
+// surfaces on attempt 1.
+
+/** Per-attempt add-resource timeout (mirrors the historical 60s add-resource budget). */
+const ADD_RESOURCE_TIMEOUT_MS = 60_000;
+
+/** Max attempts for the add-resource POST (1 initial + retries). */
+const ADD_RESOURCE_MAX_ATTEMPTS = 4;
+
+/** Base backoff between attempts; doubles each retry (250ms, 500ms, 1s, …). */
+const ADD_RESOURCE_BACKOFF_BASE_MS = 250;
+
+/**
+ * Only the transient transport/timeout codes are retryable on `code` alone (same
+ * as skill-registration). An `ov-non-2xx` is layered on top via the body
+ * classifiers (server-timeout / point-lock) so a real payload rejection stays
+ * non-retryable and surfaces on attempt 1 (#1828 do-not-mask guard).
+ */
+const RETRYABLE_OV_CODES: ReadonlySet<OvErrorCode> = new Set<OvErrorCode>([
+  "ov-timeout",
+  "ov-service-down",
+]);
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Tunables for {@link indexText}'s add-resource retry loop. Production calls
+ * `indexText` argument-free (the constants above apply); tests pass a tiny
+ * `backoffBaseMs` (and a deterministic `jitter`) so the retry path is exercised
+ * without real second-long sleeps or nondeterministic timing.
+ */
+export interface IndexTextOptions {
+  /** Base backoff in ms (doubles each retry). Defaults to {@link ADD_RESOURCE_BACKOFF_BASE_MS}. */
+  backoffBaseMs?: number;
+  /** Max attempts for the add-resource POST. Defaults to {@link ADD_RESOURCE_MAX_ATTEMPTS}. */
+  maxAttempts?: number;
+  /**
+   * Jitter source in [0,1). Defaults to `Math.random`. Injected by tests to make
+   * the backoff deterministic. Multiplied into the computed backoff so a bulk
+   * burst decorrelates its retries (thundering-herd avoidance).
+   */
+  jitter?: () => number;
+}
+
+/**
+ * Is this add-resource failure worth retrying? True for the transient transport/
+ * timeout codes, OR an `ov-non-2xx` whose BODY is OV's own server-side-timeout
+ * (#2250) or point-lock-contention (#2658) shape — both transient load
+ * conditions, not payload rejections. Every other non-2xx (a real 4xx/5xx,
+ * UNAUTHENTICATED, malformed JSON) stays non-retryable, preserving the #1828
+ * do-not-mask guard.
+ */
+function isRetryableAddResource(result: { ok: false; code: OvErrorCode; body?: string }): boolean {
+  if (RETRYABLE_OV_CODES.has(result.code)) return true;
+  if (result.code !== "ov-non-2xx") return false;
+  return isOvServerTimeout(result.body) || isOvPointLockConflict(result.body);
+}
 
 // ===========================================================================
 // SECTION 1 — OV upload helpers (formerly ov-upload.ts).
@@ -82,7 +170,11 @@ export function indexerTargetUri(rel: string): string {
  * registering it as a hydra-memory resource. Used for Redis-derived
  * content (reality reports, memory patterns) and source-file payloads.
  */
-export async function indexText(title: string, content: string): Promise<void> {
+export async function indexText(
+  title: string,
+  content: string,
+  opts: IndexTextOptions = {},
+): Promise<void> {
   const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
   const tmpFile = join(tmpdir(), `hydra-indexer-${safeName}-${Date.now()}.md`);
   try {
@@ -117,23 +209,68 @@ export async function indexText(title: string, content: string): Promise<void> {
         result.temp_path ?? result.path ?? uploadData.temp_path ?? uploadData.path;
 
       if (tempPath) {
-        const addResult = await ovPostJson(
-          "/api/v1/resources",
-          {
-            temp_path: tempPath,
-            to: `viking://resources/hydra-memory/${safeName}`,
-          },
-          { timeout: 60000 },
-        );
-        if (!isOvFailure(addResult)) {
-          console.log(`[Learning:Indexer] Indexed text: ${title}`);
-        } else {
-          console.error(
-            `[Learning:Indexer] Failed to add text "${title}": ${addResult.code} body=${(addResult.body ?? "").slice(
-              0,
-              200
-            )}`
+        // Bounded exponential-backoff-with-jitter retry (issue #2658). Retries
+        // ONLY transient failures (transport/timeout codes, or an ov-non-2xx
+        // whose body is OV's server-timeout / point-lock shape); a genuine
+        // rejection surfaces on attempt 1. Jitter decorrelates a bulk-index
+        // burst so it does not re-collide on the same OV point lock.
+        const backoffBaseMs = opts.backoffBaseMs ?? ADD_RESOURCE_BACKOFF_BASE_MS;
+        const maxAttempts = opts.maxAttempts ?? ADD_RESOURCE_MAX_ATTEMPTS;
+        const jitter = opts.jitter ?? Math.random;
+
+        let addSucceeded = false;
+        let lastFailure: { code: OvErrorCode; body?: string } | null = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          const addResult = await ovPostJson(
+            "/api/v1/resources",
+            {
+              temp_path: tempPath,
+              to: `viking://resources/hydra-memory/${safeName}`,
+            },
+            { timeout: ADD_RESOURCE_TIMEOUT_MS },
           );
+          if (!isOvFailure(addResult)) {
+            console.log(`[Learning:Indexer] Indexed text: ${title}`);
+            addSucceeded = true;
+            break;
+          }
+          // `isOvFailure` narrows away the optional `body`, so read the failure
+          // arm explicitly (present only on ov-non-2xx; undefined otherwise).
+          const failure = addResult as { ok: false; code: OvErrorCode; body?: string };
+          lastFailure = { code: failure.code, body: failure.body };
+
+          const lastAttempt = attempt === maxAttempts;
+          if (!isRetryableAddResource(failure) || lastAttempt) {
+            const retryable = isRetryableAddResource(failure);
+            // Fail loud (CLAUDE.md): a give-up stays an error line, now naming the
+            // attempt budget so an exhausted transient failure is legible.
+            console.error(
+              `[Learning:Indexer] Failed to add text "${title}": ${failure.code} body=${(failure.body ?? "").slice(
+                0,
+                200
+              )}` + (retryable ? ` (gave up after ${attempt} attempts)` : "")
+            );
+            break;
+          }
+
+          // Exponential backoff WITH jitter before the next attempt. The jitter
+          // factor in [0.5, 1.0) decorrelates a lockstep bulk-index burst.
+          const base = backoffBaseMs * 2 ** (attempt - 1);
+          const backoff = Math.round(base * (0.5 + jitter() * 0.5));
+          recordIndexerRetry();
+          console.warn(
+            `[Learning:Indexer] Transient OV conflict adding "${title}": ${failure.code} — ` +
+              `retrying in ${backoff}ms (attempt ${attempt}/${maxAttempts})`
+          );
+          await sleep(backoff);
+        }
+        if (!addSucceeded) {
+          // Surface the exhausted/non-retryable failure UPSTREAM (issue #2658)
+          // so the autopilot can gate on semantic-indexing health instead of it
+          // being invisible in a console.error. Best-effort — the counter bump
+          // never throws into this best-effort indexing path.
+          recordIndexerError();
+          void lastFailure; // captured for the logged give-up above
         }
       } else {
         // Fail loud (CLAUDE.md convention): log the full response body so a

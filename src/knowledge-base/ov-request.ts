@@ -130,6 +130,59 @@ export function isOvServerTimeout(body: string | undefined | null): boolean {
 }
 
 /**
+ * Classify an `ov-non-2xx` failure-arm `body` as OpenViking's own POINT-LOCK
+ * contention (issue #2658). Under concurrent semantic-indexing writes OV's lock
+ * manager cannot grant the point lock on the `hydra-memory` resource collection
+ * and surfaces a 500 whose body is
+ * `{"status":"error","error":{"code":"INTERNAL","message":"Failed to acquire
+ * point lock for ['/local/hydra/resources/hydra-memory']"}}` — structurally an
+ * `ov-non-2xx` (the adapter keys on `!res.ok`, not the body), so it falls
+ * OUTSIDE the transient-retry codes and a naive retry loop would abandon it on
+ * the first attempt. Yet the container itself is HEALTHY (FailingStreak=0); the
+ * failure is transient write contention, the exact profile a bounded client-side
+ * backoff heals — NOT a payload rejection.
+ *
+ * This predicate returns true ONLY when the body matches OV's point-lock shape —
+ * `error.code === "INTERNAL"` AND the message mentions a point-lock acquisition
+ * failure. Parsed defensively (try `JSON.parse`, fall back to a substring scan of
+ * the raw text) so a malformed or truncated body never throws. Pure and total:
+ * any other body (a genuine 4xx/5xx payload rejection, UNAUTHENTICATED, malformed
+ * JSON, a non-lock INTERNAL error) returns false and stays non-retryable,
+ * preserving the #1828 do-not-mask-real-bugs guard — only OV's explicit
+ * "point lock" body widens the retry set.
+ *
+ * Sibling to {@link isOvServerTimeout}: same seam, same never-throw contract,
+ * same failure-arm `body` it classifies. This is OV transport-response
+ * classification (the Request Adapter seam's concern), not an
+ * indexer-lifecycle concern — the indexer retry loop imports it from here.
+ */
+export function isOvPointLockConflict(body: string | undefined | null): boolean {
+  if (!body) return false;
+  // Primary path: parse the structured OV error envelope.
+  try {
+    const parsed = JSON.parse(body);
+    const errCode = parsed?.error?.code;
+    const errMsg = parsed?.error?.message;
+    if (
+      errCode === "INTERNAL" &&
+      typeof errMsg === "string" &&
+      /point\s*lock/i.test(errMsg)
+    ) {
+      return true;
+    }
+    // Parsed cleanly but did NOT match the point-lock shape → a genuine
+    // non-lock rejection. Do NOT fall through to the substring scan (a body
+    // that merely mentions "point lock" in unrelated prose must not be retried).
+    return false;
+  } catch {
+    /* intentional: body wasn't valid JSON — fall back to a substring scan below. */
+  }
+  // Fallback: a non-JSON / truncated body. Require BOTH the INTERNAL marker and
+  // a point-lock phrase so an arbitrary error body can't masquerade as one.
+  return /INTERNAL/.test(body) && /point\s*lock/i.test(body);
+}
+
+/**
  * Resolve the OpenViking base URL — the single owner of base-URL resolution.
  * ALWAYS flows from `OPENVIKING_URL` (via `ov-config.ts`); a hardcoded
  * `localhost:1933` literal must never appear at a call site again (the
