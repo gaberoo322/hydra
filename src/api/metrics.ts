@@ -8,6 +8,7 @@ import {
   projectAnchorDistribution,
 } from "../metrics/aggregate.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
+import { CycleRecordBodySchema } from "../autopilot/schemas.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
@@ -293,14 +294,29 @@ export function createMetricsRouter() {
     }
   });
 
-  // POST /metrics/record — Record cycle metrics from external sources
+  // POST /metrics/record — Record cycle metrics from external sources.
+  // Validates through CycleRecordBodySchema (the same loose-object contract the
+  // sibling POST /autopilot/cycle-record uses) per the CLAUDE.md § HTTP
+  // validation convention: on a schema miss, return 400 with the machine-
+  // readable {code:"schema-validation-failed", issues} shape (issue #2636).
   router.post("/metrics/record", async (req, res) => {
     try {
-      const { cycleId, ...metrics } = req.body || {};
-      if (!cycleId) {
-        return res.status(400).json({ error: "Missing cycleId" });
+      const parsed = CycleRecordBodySchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          code: "schema-validation-failed",
+          issues: parsed.error.issues,
+        });
       }
-      await recordCycleMetrics(cycleId, metrics);
+      // `parsed.data` is a CycleRecordBody (loose object): its `cycleId` is a
+      // validated non-empty string; the remaining fields are the ad-hoc metrics
+      // this endpoint forwards verbatim. recordCycleMetrics accepts any
+      // stringifiable field via CycleMetricsInput's `[key: string]: unknown`
+      // index signature, so the rest passes through as a Record<string, unknown>
+      // (the union number|string field types on CycleRecordBody are a superset
+      // of what the writer flattens — it String()s every value regardless).
+      const { cycleId, ...metrics } = parsed.data;
+      await recordCycleMetrics(cycleId, metrics as Record<string, unknown>);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
