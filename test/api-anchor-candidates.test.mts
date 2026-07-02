@@ -249,6 +249,41 @@ describe("getCandidateFeed — scoring signals through the feed", () => {
   });
 });
 
+describe("getCandidateFeed — operator-priority tiebreak", () => {
+  test("higher operator priority sorts first among same-score items", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [
+          { id: 1, title: "Low prio", movedAt: isoAgo(0), priority: 1 },
+          { id: 2, title: "High prio", movedAt: isoAgo(0), priority: 5 },
+        ],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    // Both are fresh kanban → identical 0.85 score; priority breaks the tie.
+    assert.equal(feed.candidates[0].score, feed.candidates[1].score);
+    assert.equal(feed.candidates[0].title, "High prio");
+    assert.equal(feed.candidates[1].title, "Low prio");
+  });
+
+  test("priority is a tiebreak only — it never crosses a score band", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        // High-priority but stale (0.85 − 0.15 = 0.70) vs fresh zero-priority (0.85).
+        queued: [{ id: 1, title: "Fresh low prio", movedAt: isoAgo(0), priority: 0 }],
+        backlog: [{ id: 2, title: "Stale high prio", movedAt: isoAgo(30 * 24 * 60 * 60 * 1000), priority: 99 }],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates[0].title, "Fresh low prio");
+    assert.equal(feed.candidates[0].score, 0.85);
+    assert.equal(feed.candidates[1].title, "Stale high prio");
+  });
+});
+
 describe("getCandidateFeed — eligibility", () => {
   test("in-flight PR claim (fresh) suppresses the candidate by default (#640)", async () => {
     const deps = makeDeps({

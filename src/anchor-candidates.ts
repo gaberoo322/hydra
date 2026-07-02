@@ -479,6 +479,13 @@ async function getCandidateFeedImpl(
   // Score + annotate each candidate.
   // -------------------------------------------------------------------------
   const scored: ScoredCandidate[] = [];
+  // Operator-set priority, held off the public shape and used only as an
+  // intra-lane sort tiebreak (below). Kanban items carry `extras.priority`
+  // (`item.priority ?? 0`); work-queue entries carry none and read 0, so the
+  // tiebreak only reorders operator-prioritized items within the same score
+  // band — it can never invert the tier hierarchy (kanban 0.85 > work-queue
+  // 0.70). A non-numeric priority degrades to 0 rather than poisoning the sort.
+  const priorityOf = new WeakMap<ScoredCandidate, number>();
   for (const c of candidates) {
     // A failing annotation degrades that one field — it must NEVER drop a
     // candidate (ADR-0016 invariant). The production readers already catch
@@ -514,7 +521,7 @@ async function getCandidateFeedImpl(
       }
     }
 
-    scored.push({
+    const candidate: ScoredCandidate = {
       issue: c.issue,
       title: c.title,
       score: Math.round(score * 1000) / 1000,
@@ -523,12 +530,20 @@ async function getCandidateFeedImpl(
       last_updated: c.last_updated,
       anchorRef: c.anchorRef,
       designConcept,
-    });
+    };
+    scored.push(candidate);
+    const p = Number(c.extras?.priority);
+    priorityOf.set(candidate, Number.isFinite(p) ? p : 0);
   }
 
-  // Sort by score desc, tiebreak by last_updated desc (fresher first).
+  // Sort by score desc, then operator priority desc (intra-lane tiebreak —
+  // surfaces operator-prioritized items within a score band without letting
+  // priority cross the tier gap), then last_updated desc (fresher first).
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
+    const ap = priorityOf.get(a) ?? 0;
+    const bp = priorityOf.get(b) ?? 0;
+    if (bp !== ap) return bp - ap;
     const at = a.last_updated ? new Date(a.last_updated).getTime() : 0;
     const bt = b.last_updated ? new Date(b.last_updated).getTime() : 0;
     return bt - at;
