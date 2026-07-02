@@ -55,11 +55,10 @@ import {
   type AutopilotHealthDeps,
 } from "../aggregators/autopilot-health.ts";
 
-import { getStatus as defaultGetSchedulerStatus } from "../scheduler/heartbeat.ts";
 import {
-  getCurrentRun as defaultGetCurrentRun,
-  getCurrentLifecycle as defaultGetCurrentLifecycle,
-} from "../autopilot/runs.ts";
+  getAutopilotStatusSnapshot,
+  type AutopilotStatusSnapshot,
+} from "../autopilot/status.ts";
 import { readRecentAlerts as defaultReadRecentAlerts } from "../redis/alerts.ts";
 
 // ---------------------------------------------------------------------------
@@ -116,6 +115,15 @@ export interface NowPageRouterDeps {
    * thin call into `autopilot/runs.getCurrentLifecycle()`.
    */
   readAutopilotLifecycle?: AutopilotLifecycleReader;
+  /**
+   * Builder for the shared AutopilotStatus snapshot (issue #2673). When a
+   * per-slice reader above is overridden, that reader wins for its slice;
+   * otherwise the slice is projected off this snapshot. Defaults to
+   * `getAutopilotStatusSnapshot()` (no `eligibility`/`history` — the tick route
+   * needs neither, so it issues no extra read). Overridable so a test can
+   * exercise the shared-read projection path directly.
+   */
+  snapshot?: () => Promise<AutopilotStatusSnapshot>;
   /** Reader for raw alert JSON strings, newest first. */
   readRecentAlertsJson?: AlertsReader;
   /** Clock — defaults to `() => new Date()`. */
@@ -129,11 +137,14 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   const aggregateCostBurn = deps.getCostBurn ?? getCostBurn;
   const aggregateAutopilotHealth =
     deps.getAutopilotHealth ?? getAutopilotHealth;
-  const readSchedStatus =
-    deps.readSchedulerStatus ?? defaultReadSchedulerStatus;
-  const readCurrentRun = deps.readCurrentAutopilotRun ?? defaultReadCurrentRun;
-  const readLifecycle =
-    deps.readAutopilotLifecycle ?? defaultReadAutopilotLifecycle;
+  // Autopilot-tick readers. When a caller (a test) overrides one, that reader
+  // wins; otherwise the slice is projected off a single shared snapshot the
+  // handler builds once per request (issue #2673). `snapshot` overrides the
+  // snapshot builder for tests exercising the shared-read path directly.
+  const overrideSchedStatus = deps.readSchedulerStatus;
+  const overrideCurrentRun = deps.readCurrentAutopilotRun;
+  const overrideLifecycle = deps.readAutopilotLifecycle;
+  const buildSnapshot = deps.snapshot ?? (() => getAutopilotStatusSnapshot());
   const readAlertsJson = deps.readRecentAlertsJson ?? defaultReadAlertsJson;
   const clock = deps.now ?? (() => new Date());
 
@@ -156,6 +167,23 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   // -------------------------------------------------------------------------
   router.get("/now/autopilot-tick", async (_req, res) => {
     try {
+      // One composed read per request (issue #2673). Each slice honours its
+      // explicit override (tests) if present, else projects off the shared
+      // snapshot. The snapshot is read once and lazily — a slice that is
+      // overridden never touches it.
+      let snapPromise: ReturnType<typeof buildSnapshot> | null = null;
+      const snapshot = () => (snapPromise ??= buildSnapshot());
+
+      const readSchedStatus = overrideSchedStatus
+        ? overrideSchedStatus
+        : async () => defaultReadSchedulerStatus(await snapshot());
+      const readCurrentRun = overrideCurrentRun
+        ? overrideCurrentRun
+        : async () => defaultReadCurrentRun(await snapshot());
+      const readLifecycle = overrideLifecycle
+        ? overrideLifecycle
+        : async () => defaultReadAutopilotLifecycle(await snapshot());
+
       const [schedSettled, runSettled, lifecycleSettled] =
         await Promise.allSettled([
           readSchedStatus(),
@@ -326,25 +354,34 @@ export function parseAlertsWindow(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Default wiring
+// Default wiring — projected off the shared AutopilotStatus seam (issue #2673).
+//
+// The three autopilot-tick default readers below derive from ONE composed
+// snapshot per invocation instead of three independent fan-outs. Each reader
+// takes the snapshot the handler already built, so a single request issues one
+// `getAutopilotStatusSnapshot()` read. The tick route requests neither
+// `eligibility` nor `history`, so it issues no `getUsage()` / `listRuns()` read
+// it did not do before (issue #2673 invariant).
+//
+// These are exported as the default `deps` hooks so a test that stubs any of the
+// three readers keeps overriding exactly the slice it did before; production
+// wiring shares the one snapshot via `defaultAutopilotStatusSnapshot`.
 // ---------------------------------------------------------------------------
 
-async function defaultReadSchedulerStatus(): Promise<{
-  running: boolean;
-  lastTickAt: string | null;
-}> {
-  const status = await defaultGetSchedulerStatus();
+function defaultReadSchedulerStatus(
+  snap: AutopilotStatusSnapshot,
+): { running: boolean; lastTickAt: string | null } {
   return {
-    running: !!status.running,
-    lastTickAt:
-      typeof status.lastTickAt === "string" ? status.lastTickAt : null,
+    running: snap.scheduler.running,
+    lastTickAt: snap.scheduler.lastTickAt,
   };
 }
 
-async function defaultReadCurrentRun(): Promise<AutopilotCurrentRun | null> {
-  const result = await defaultGetCurrentRun();
-  if (!result.ok) return null;
-  const view = result.view as Record<string, unknown>;
+function defaultReadCurrentRun(
+  snap: AutopilotStatusSnapshot,
+): AutopilotCurrentRun | null {
+  const view = snap.currentRun;
+  if (!view) return null;
   const id = typeof view.run_id === "string" ? view.run_id : "";
   const startedAt = typeof view.started === "string" ? view.started : "";
   if (!id || !startedAt) return null;
@@ -359,12 +396,10 @@ async function defaultReadCurrentRun(): Promise<AutopilotCurrentRun | null> {
   };
 }
 
-async function defaultReadAutopilotLifecycle(): Promise<AutopilotLifecyclePayload> {
-  const result = await defaultGetCurrentLifecycle();
-  if (!result.ok) {
-    return { state: "idle", runId: null, termReason: null, endedEpoch: null };
-  }
-  const lc = result.lifecycle;
+function defaultReadAutopilotLifecycle(
+  snap: AutopilotStatusSnapshot,
+): AutopilotLifecyclePayload {
+  const lc = snap.lifecycle;
   return {
     state: lc.state,
     runId: lc.run_id,
