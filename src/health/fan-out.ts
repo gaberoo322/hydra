@@ -492,7 +492,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
  * the strip to a real `fetch`-based probe; injectable for tests. The 3s cap the
  * strip contract guarantees is applied by the caller passing `timeoutMs`.
  */
-export type StripHttpProbe = (url: string, timeoutMs: number) => Promise<ProbeOutcome>;
+type StripHttpProbe = (url: string, timeoutMs: number) => Promise<ProbeOutcome>;
 
 /**
  * The minimal dependency bag a strip probe descriptor's `run` closure consumes.
