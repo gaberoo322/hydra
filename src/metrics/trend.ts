@@ -204,6 +204,43 @@ export function projectReflectionHealth(
 }
 
 /**
+ * Honest-none discriminator (issue #2670): does this reflection-health report
+ * describe a state that a discover / health filing decision must NOT flag as an
+ * anomaly?
+ *
+ * The `reflectionMatchSource == none` signal has re-filed the SAME false alarm
+ * repeatedly (#1912 → #2450 → #2467 → #2492 → #2336 → #2648) because the raw
+ * bucket alone cannot tell an HONEST empty-store `none` (the expected steady
+ * state of a high-merge run — reflections are produced only on a non-merged
+ * failure, so a merged first attempt structurally serves nothing) apart from a
+ * genuinely-broken deposit path. `projectReflectionHealth` already resolves that
+ * ambiguity into a verdict via the `reflectionSourcesPresent` discriminator; this
+ * predicate exposes the "safe to ignore" half of that verdict as a single call so
+ * the code that DECIDES whether to file (hydra-discover, any health check) can
+ * consult it directly instead of re-deriving the string comparison at each site
+ * (the gap #2670 names: the discriminator existed but was not consulted at the
+ * filing point).
+ *
+ * Returns `true` for every honest / non-actionable verdict —
+ *   - `no-data`              (nothing recorded yet),
+ *   - `healthy`              (a non-none bucket is present; deposit plumbing live),
+ *   - `all-none-empty-store` (100%-`none` with no deposit served — the EXPECTED
+ *                             high-merge steady state, explicitly not an alarm) —
+ * and `false` ONLY for `served-but-bucketed-none`, the genuine candidate false-none
+ * (a deposit landed yet still bucketed `none`) that warrants an operator's eye.
+ * A merged-first-attempt `none` therefore classifies as honest-none and must not
+ * be re-filed as "reflection silenced".
+ *
+ * Never throws; a report whose verdict is missing/unrecognised is treated as
+ * honest-none (fail-safe: an unknown state defaults to "do not file the alarm").
+ */
+export function isHonestNoneVerdict(
+  report: Pick<ReflectionHealthReport, "verdict">,
+): boolean {
+  return report.verdict !== "served-but-bucketed-none";
+}
+
+/**
  * Get metrics for the N most recent cycles, with all known numeric fields
  * parsed back from their Redis string form.
  */
