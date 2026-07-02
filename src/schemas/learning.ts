@@ -64,3 +64,18 @@ export const ContextTraceQuerySchema = z.object({
 export const ReflectionHealthQuerySchema = z.object({
   count: countQuerySchema(20, 200).shape.count,
 });
+
+/**
+ * `GET /learning/knowledge?agent=` (issue #2647).
+ *
+ * The dispatch-served, plan-time knowledge fetch. `agent` is a REQUIRED
+ * non-empty string (the skill name, e.g. `hydra-dev`) — it scopes the
+ * OpenViking search (`loadKnowledgeBaseForPrompt`) to that agent's learned
+ * patterns. An absent/whitespace-only value can never address a real knowledge
+ * search, so the route rejects it at the boundary (bespoke 400) — mirroring the
+ * `ContextTraceQuerySchema` required-string idiom. Non-strict so any other
+ * query param is ignored.
+ */
+export const KnowledgeQuerySchema = z.object({
+  agent: z.string().trim().min(1),
+});

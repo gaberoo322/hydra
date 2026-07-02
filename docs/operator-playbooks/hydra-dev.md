@@ -278,6 +278,53 @@ populated during a diagnosis.
 architecture), so a `hit` there is not proof of delivery — `/api/reflections`
 is the live path a dispatch actually consumes.
 
+### Knowledge context — live API (issue #2647)
+
+At the **same planning-time seam** as the reflections + design-concept + tier
+reads, fetch the agent-scoped **knowledge context** — the learned patterns
+(prior-cycle failures, successful tactics) that OpenViking has indexed for your
+skill — and weave it into your implementation plan. This is the content the
+learning subsystem accumulates across cycles; consulting it at plan time is how
+a dispatch benefits from prior-cycle knowledge (before #2647 no skill fetched
+it, so `knowledgeContext.cyclesWithContext` read 0% on the health surface).
+
+**Endpoint contract:**
+
+- Method: `GET`
+- Path: `/api/learning/knowledge`
+- Query:
+  - `agent=<skill name>` (required) — your skill name, `hydra-dev`. It scopes
+    the OpenViking search to this agent's learned patterns.
+- Response (200): `{ agent, content, itemCount }`
+  - `content` is prompt-ready markdown (a `# <agent> — Learned Patterns` block).
+    `itemCount: 0` / `content: ""` means no knowledge context — a clean no-op.
+
+**Use this route, NOT `/api/learning/context-trace`.** context-trace is a
+counts-only diagnostic composer that deliberately omits block `.content`
+(#804/#841) — it returns `itemCount`/`contentBytes`, never the prompt text, so
+there is nothing to weave into a plan. This route SERVES the content (the same
+way `/api/reflections` serves `formatted`) AND records the #1440 per-cycle
+availability metric server-side on its success path — so the record can never
+desync from an actual served fetch, and you never touch the metric from a shell
+block (which the single-quoted PR-body heredoc quoting would make fragile).
+
+**Required child-side recipe (at planning time, before writing code):**
+
+```bash
+KB_JSON=$(curl -sf --max-time 5 \
+  "http://localhost:4000/api/learning/knowledge?agent=hydra-dev")
+
+KB_CONTENT=$(printf '%s' "$KB_JSON" | jq -r '.content // ""')
+if [ -n "$KB_CONTENT" ]; then
+  # Prepend KB_CONTENT to your implementation-planning context — these are
+  # learned patterns from prior cycles for this agent. Read them and avoid
+  # repeating known failures / reuse known-good tactics.
+  printf '%s\n' "$KB_CONTENT"
+fi
+# Empty / unreachable → graceful no-op. Never fail the dispatch over a
+# knowledge-context miss; the availability record is server-side and best-effort.
+```
+
 ### Design-concept artifact — live API (cue: design-concept-endpoint-path-plural)
 
 A grilled anchor carries a **design-concept artifact**. When the dispatch

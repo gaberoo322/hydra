@@ -6,12 +6,21 @@
 // `LearningContextBlock`, `GetContextDeps`, `SourceRead`) and helpers
 // (`runSource()`, `buildContext()`) — relocated here OUT of the HTTP route
 // module `src/api/learning.ts`. This module is PURE domain: it imports the
-// three learning clusters (pattern-memory, reflections, knowledge-base) plus
-// the #1440 availability record, and has ZERO imports from `src/api/`. The
+// three learning clusters (pattern-memory, reflections, knowledge-base) and has
+// ZERO imports from `src/api/`. The
 // route file re-exports these symbols for back-compat so import sites outside
 // it (and the dynamic-import path in tests) do not need to change. "How the
 // orchestrator composes learning context for a dispatch" now has a real
 // domain home rather than being trapped inside an Express route.
+//
+// Issue #2647: `getContext()` is a PURE diagnostic composer with NO metric side
+// effect. The per-cycle knowledge-context-availability record (issue #1440) was
+// MOVED OUT of the knowledge-base thunk here into the dispatch-served plan-time
+// fetch route (`GET /api/learning/knowledge`, src/api/learning.ts). Recording it
+// here polluted the real-cycle `cyclesWithContext` metric with diagnostic-trace
+// hits (context-trace is `getContext`'s only live caller, so the counter only
+// ever moved on an operator diagnostic — never on an actual dispatch). The
+// record now fires ONLY on a dispatch-served knowledge fetch.
 //
 // Issue #2333 (prior home): folded from src/learning-context.ts into
 // src/api/learning.ts (its sole live consumer at the time). The motivating
@@ -67,11 +76,6 @@ import {
   loadReflectionsForAnchor,
   type ReflectionBlock,
 } from "../reflections/index.ts";
-// Issue #1440: per-cycle knowledge-context-availability tracking. The
-// knowledge-base block below records whether the OV search produced non-empty
-// context, so the health surface can trend it. Behind a best-effort wrapper so
-// a Redis error never breaks trace composition.
-import { recordKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 
 /**
  * The sources getContext() composes. The names appear in the public trace,
@@ -189,24 +193,11 @@ async function runSource(
 }
 
 /**
- * Best-effort, never-throw wrapper around the per-cycle context-availability
- * record (issue #1440). Observability must never break trace composition, so a
- * Redis error here is logged and swallowed.
- */
-async function recordContextAvailability(hadContext: boolean): Promise<void> {
-  try {
-    await recordKnowledgeContextAvailability(hadContext);
-  } catch (err: any) {
-    console.error(`[Learning] knowledge-context availability record failed: ${err?.message ?? err}`);
-  }
-}
-
-/**
  * Issue #2141 — the injectable dependency surface for `getContext`. The four
  * fields are the PRIMITIVE source-loaders the per-source thunks call, NOT the
  * thunks themselves: injecting the primitives keeps the production composition
  * logic (formatMemoryForPrompt adaptation, the two-axis reflection composition
- * via loadReflectionsForAnchor, the #1440 availability record) under test while
+ * via loadReflectionsForAnchor) under test while
  * the Redis / OpenViking boundary drops out behind a stub. The two reflection
  * loaders are forwarded into the coordinator's own deps bag (issue #2238).
  *
@@ -256,8 +247,12 @@ export interface GetContextDeps {
  *                                 not a regex over the markdown).
  *   2. knowledge-base           — OpenViking memory search (lifted out of the
  *                                 agent-memory block so OV is honestly
- *                                 attributed in the trace); the thunk also
- *                                 records #1440 context availability.
+ *                                 attributed in the trace). Issue #2647: this
+ *                                 thunk no longer records #1440 context
+ *                                 availability — that record moved to the
+ *                                 dispatch-served GET /api/learning/knowledge
+ *                                 route so the metric tracks real cycles, not
+ *                                 diagnostic-trace hits.
  *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`,
  *                                 projected from the coordinator's `perAnchor`
  *                                 sub-block (a pure read; issue #2238 deleted
@@ -302,13 +297,11 @@ export async function getContext(
   }));
 
   blocks.push(await runSource("knowledge-base", async () => {
-    const read = await loadKnowledgeBaseForPromptFn(agent);
-    // Issue #1440: record per-cycle knowledge-context availability so the
-    // operator can trend "what fraction of planned cycles saw non-empty
-    // knowledge context". itemCount > 0 ⇔ the block had content. Best-effort
-    // and never-throws — a Redis hiccup must not break trace composition.
-    await recordContextAvailability(read.itemCount > 0);
-    return read;
+    // Issue #2647: no per-cycle availability record here. getContext is a pure
+    // diagnostic composer; the #1440 `cyclesWithContext` record now fires only
+    // on the dispatch-served GET /api/learning/knowledge fetch, so a diagnostic
+    // context-trace hit no longer pollutes the real-cycle metric.
+    return loadKnowledgeBaseForPromptFn(agent);
   }));
 
   // Issue #2238: delegate the two reflection axes to the coordinator. It reads
