@@ -38,7 +38,7 @@
 
 import type { StuckSignal } from "../schemas/now-page.ts";
 import { settledOr, settledOrEmpty, settledOrNull } from "./settle.ts";
-import { osHeartbeatAgeS } from "../autopilot/os-heartbeat.ts";
+import { getAutopilotStatusSnapshot } from "../autopilot/status.ts";
 import {
   DEFAULT_HEALTH_THRESHOLDS,
   detectStalledDispatch,
@@ -111,11 +111,34 @@ export async function getAutopilotHealth(
     ...(deps.thresholds ?? {}),
   };
   const historyWindow = deps.historyWindow ?? 14;
-  const readLiveRun = deps.readLiveRun ?? defaultReadLiveRun;
-  const readRecentRuns = deps.readRecentRuns ?? defaultReadRecentRuns;
   const readWindowMergeCount =
     deps.readWindowMergeCount ?? defaultReadWindowMergeCount;
-  const readOsHeartbeatAgeS = deps.readOsHeartbeatAgeS ?? osHeartbeatAgeS;
+  const nowS = Math.floor((deps.now ?? new Date()).getTime() / 1000);
+
+  // The live-run + run-history + os-heartbeat slices are the AutopilotStatus
+  // seam's `history` field-group (issue #2673). When NONE of those three
+  // readers is overridden, they are all projected off ONE seam call — a single
+  // composed read instead of three independent fan-outs. A test that stubs any
+  // of the three still overrides exactly its slice; the seam is only consulted
+  // for the slices left at their defaults, and only then (opt-in `history`).
+  let historySnapPromise: ReturnType<typeof getAutopilotStatusSnapshot> | null =
+    null;
+  const historySnap = () =>
+    (historySnapPromise ??= getAutopilotStatusSnapshot(
+      {},
+      {
+        history: true,
+        historyWindow,
+        now: deps.now ?? new Date(),
+      },
+    ));
+
+  const readLiveRun =
+    deps.readLiveRun ??
+    (async () => (await historySnap()).history?.liveRun ?? null);
+  const readRecentRuns =
+    deps.readRecentRuns ??
+    (async () => (await historySnap()).history?.recentRuns ?? []);
 
   const [liveResult, historyResult] = await Promise.allSettled([
     readLiveRun(),
@@ -151,16 +174,23 @@ export async function getAutopilotHealth(
 
   // OS-heartbeat cross-check (#1091). Read once, fail open: any error in the
   // reader is treated as "stale" inside detectStalledDispatch so a genuinely
-  // hung run isn't silently un-flagged. nowS anchored to deps.now for tests.
-  const nowS = Math.floor((deps.now ?? new Date()).getTime() / 1000);
+  // hung run isn't silently un-flagged. When the os-heartbeat reader is NOT
+  // overridden, the age is taken from the shared seam's `history` slice (which
+  // reads it against the same `deps.now`-anchored clock, and fails open to
+  // `null` internally). An explicit `deps.readOsHeartbeatAgeS` override still
+  // wins and is anchored to `nowS` exactly as before.
   let osHbAgeS: number | null = null;
-  try {
-    osHbAgeS = readOsHeartbeatAgeS(nowS);
-  } catch (err: any) {
-    console.error(
-      `[autopilot-health] os-heartbeat read failed: ${err?.message || err}`,
-    );
-    osHbAgeS = null; // fail open → treated as stale
+  if (deps.readOsHeartbeatAgeS) {
+    try {
+      osHbAgeS = deps.readOsHeartbeatAgeS(nowS);
+    } catch (err: any) {
+      console.error(
+        `[autopilot-health] os-heartbeat read failed: ${err?.message || err}`,
+      );
+      osHbAgeS = null; // fail open → treated as stale
+    }
+  } else {
+    osHbAgeS = (await historySnap()).history?.osHeartbeatAgeS ?? null;
   }
 
   const signals: StuckSignal[] = [
@@ -174,22 +204,11 @@ export async function getAutopilotHealth(
 }
 
 // ---------------------------------------------------------------------------
-// Default wiring — thin read-only consumption of autopilot/runs.ts
+// Default wiring — the live-run / run-history / os-heartbeat slices are
+// projected off the shared AutopilotStatus seam (issue #2673); only the
+// window-merge-count delivery proxy (a git-log read, not an autopilot-status
+// read) remains a local reader.
 // ---------------------------------------------------------------------------
-
-async function defaultReadLiveRun(): Promise<LiveRunView | null> {
-  const { getCurrentRun } = await import("../autopilot/runs.ts");
-  const result = await getCurrentRun();
-  if (!result.ok) return null;
-  return result.view as LiveRunView;
-}
-
-async function defaultReadRecentRuns(limit: number): Promise<RunDigest[]> {
-  const { listRuns } = await import("../autopilot/runs.ts");
-  const result = await listRuns(limit);
-  if (!result.ok) return [];
-  return result.runs as RunDigest[];
-}
 
 /**
  * Default `readWindowMergeCount` — counts master merges that landed at or after

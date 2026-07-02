@@ -33,7 +33,7 @@ import {
   getUsage as defaultGetUsage,
   projectEligibility as defaultProjectEligibility,
 } from "../cost/index.ts";
-import { getCurrentLifecycle as defaultGetCurrentLifecycle } from "../autopilot/runs.ts";
+import { getAutopilotStatusSnapshot } from "../autopilot/status.ts";
 
 // ---------------------------------------------------------------------------
 // Sub-source readers (all overridable for tests)
@@ -276,10 +276,19 @@ async function defaultReadEligibility(): Promise<EligibilityView> {
   };
 }
 
+/**
+ * Default liveness reader — projects the shared AutopilotStatus snapshot's
+ * lifecycle slice (issue #2673). `getCurrentLifecycle()` is the single source
+ * of truth shared by all three autopilot read surfaces, so the liveness view is
+ * derived through the seam (`getAutopilotStatusSnapshot()`), NOT a bespoke
+ * `getCurrentLifecycle()` call. The idle route reads neither `eligibility` nor
+ * `history` from the snapshot — eligibility stays its own reader (below), whose
+ * REJECTION is load-bearing for the `endpoint-error` verdict; the seam's
+ * never-throw eligibility slot would swallow that signal.
+ */
 async function defaultReadAutopilotLiveness(): Promise<IdleAutopilotLiveness> {
-  const result = await defaultGetCurrentLifecycle();
-  if (!result.ok) return IDLE_LIVENESS_DEFAULT;
-  const lc = result.lifecycle;
+  const snap = await getAutopilotStatusSnapshot();
+  const lc = snap.lifecycle;
   return {
     alive: lc.state === "running",
     state: lc.state,
