@@ -342,6 +342,45 @@ function numberOrDefault(v: unknown, fallback: number): number {
 }
 
 /**
+ * Sentinel anchorType for a cycle-record whose caller supplied no explicit,
+ * non-empty anchorType (issue #2689). Making classification EXPLICIT here is
+ * the server-side backstop that stops a cycle from silently bucketing as
+ * "unknown" in the metrics aggregator (`src/metrics/aggregate.ts`, which maps
+ * an absent/empty/whitespace anchorType to the literal string "unknown").
+ *
+ * Before this, `recordCycle` passed `anchorType: body.anchorType` straight
+ * through and the field-stripping loop below deleted it when absent — so any
+ * cycle-record POST that arrived without an anchorType (the schema field is
+ * `.optional()`) landed as "unknown", a data-quality black hole invisible to
+ * metrics-driven decisions (24% of recent cycles). "unknown" is a data-quality
+ * FAILURE, not a valid terminal state; an explicit "unclassified" sentinel
+ * makes the gap visible and attributable (and distinct from the aggregator's
+ * catch-all "unknown", so a post-fix "unknown" bucket now means the record
+ * predates this fix, never that classification silently fell through).
+ */
+export const UNCLASSIFIED_ANCHOR_TYPE = "unclassified";
+
+/**
+ * Classify a cycle-record body's anchorType EXPLICITLY (issue #2689). Returns
+ * the trimmed body value when the caller supplied a non-empty one; otherwise
+ * returns the {@link UNCLASSIFIED_ANCHOR_TYPE} sentinel — never `undefined`,
+ * so the metrics record always carries an explicit, non-empty anchorType and
+ * can never fall into the aggregator's "unknown" bucket. A `console.warn`
+ * surfaces the gap (fail-loud convention) so an unclassified cycle is visible
+ * rather than silently swallowed.
+ */
+function classifyAnchorType(cycleId: string, raw: unknown): string {
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  console.warn(
+    `[autopilot] recordCycle: cycle '${cycleId}' has no explicit anchorType — recording '${UNCLASSIFIED_ANCHOR_TYPE}' (data-quality gap; the caller should send a mapped anchorType)`,
+  );
+  return UNCLASSIFIED_ANCHOR_TYPE;
+}
+
+/**
  * Coerce a `filesChanged` body value (number | numeric-string | absent) into a
  * non-negative integer COUNT, or `undefined` when the field is absent/garbage
  * (issue #2063). Returning `undefined` — never 0 — for an absent field is what
@@ -514,7 +553,13 @@ export async function recordCycle(
 
     const metrics: CycleMetricsInput = {
       source,
-      anchorType: body.anchorType,
+      // Issue #2689: classify EXPLICITLY. An absent/empty anchorType would be
+      // stripped by the field-cleanup loop below and then bucket as "unknown"
+      // in the aggregator — the data-quality failure that made 24% of cycles
+      // invisible to metrics. classifyAnchorType always returns a non-empty
+      // string (the caller's value, or the "unclassified" sentinel), so the
+      // metrics record can never carry an absent anchorType.
+      anchorType: classifyAnchorType(cycleId, body.anchorType),
       anchorReference: body.anchorReference,
       taskTitle: body.taskTitle,
       tasksAttempted: numberOrDefault(body.tasksAttempted, total),

@@ -98,11 +98,35 @@ print(json.dumps({
     # Anchor type is derived from the skill: dev_orch / dev_target subagents
     # consume work-queue anchors; QA / research / discover have their own
     # anchor vocabulary which the autopilot can fill in if needed.
+    #
+    # Issue #2689: every cycle-record MUST carry an EXPLICIT, mapped anchorType.
+    # `hydra-grill` is the third skill reap.py's CYCLE_RECORD_SKILLS forwards, so
+    # it gets a first-class `grill` mapping here rather than falling through. The
+    # `*)` fallback no longer emits the bare `$skill` (or, worse, an empty string
+    # when $skill is somehow blank) — an empty/whitespace anchorType is what the
+    # metrics aggregator (src/metrics/aggregate.ts) buckets as "unknown", the
+    # data-quality failure this change exists to eliminate (24% of cycles were
+    # invisible to metrics). Instead the fallback emits a diagnostic on stderr AND
+    # a self-describing `unmapped:<skill>` sentinel — never empty, always traceable
+    # back to the exact skill that needs a first-class mapping added above.
     case "$skill" in
       hydra-dev|hydra-target-build) anchor_type="work-queue" ;;
       hydra-qa) anchor_type="qa-review" ;;
+      hydra-grill) anchor_type="grill" ;;
       hydra-research|hydra-issue-research|hydra-target-research) anchor_type="research" ;;
-      *) anchor_type="$skill" ;;
+      *)
+        # A skill with no first-class mapping. Emit a diagnostic so the gap is
+        # visible (and actionable — add a case above), and record a non-empty,
+        # self-describing sentinel so the cycle is NEVER bucketed as "unknown".
+        # A blank $skill (shouldn't happen — it's validated non-empty above)
+        # degrades to a bare "unmapped" rather than an empty string.
+        echo "[autopilot] dispatch: cycle-record skill '$skill' has no anchor_type mapping — recording 'unmapped:$skill' (add a case in dispatch.sh)" >&2
+        if [ -n "$skill" ]; then
+          anchor_type="unmapped:$skill"
+        else
+          anchor_type="unmapped"
+        fi
+        ;;
     esac
     # Map status → task-counter buckets so /api/metrics sees the right
     # tasksMerged / tasksFailed / tasksAbandoned numbers without the caller
