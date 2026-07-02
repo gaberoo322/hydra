@@ -54,7 +54,7 @@ import {
 } from "../../redis/holdback.ts";
 import { enrollHoldback, type EnrollResult } from "../../holdback.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/runs.ts";
-import { isEnrolledTier } from "../../redis/holdback.ts";
+import { isEnrolledTier } from "../../holdback-policy.ts";
 import { viewPr } from "../../github/issues.ts";
 
 /**
