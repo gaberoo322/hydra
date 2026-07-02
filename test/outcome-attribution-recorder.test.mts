@@ -56,6 +56,9 @@ function makeFakeLedger(): AttributionLedger & { rows: AttributionObservation[] 
       rows.push(obs);
       return { ok: true };
     },
+    async appendVoidMarker(): Promise<AppendObservationResult> {
+      return { ok: true };
+    },
     async getObservations(): Promise<LoadObservationsResult> {
       return { ok: true, observations: [...rows] };
     },
@@ -66,6 +69,9 @@ function makeFakeLedger(): AttributionLedger & { rows: AttributionObservation[] 
 function makeFailingLedger(): AttributionLedger {
   return {
     async appendObservation(): Promise<AppendObservationResult> {
+      return { ok: false, error: "boom" };
+    },
+    async appendVoidMarker(): Promise<AppendObservationResult> {
       return { ok: false, error: "boom" };
     },
     async getObservations(): Promise<LoadObservationsResult> {
