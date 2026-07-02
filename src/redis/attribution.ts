@@ -171,7 +171,7 @@ export function attributionLedgerKey(): string {
  * (windows are transient — closed windows are DELETED from here after their
  * observation rows land in the ledger).
  */
-export function attributionWindowsKey(): string {
+function attributionWindowsKey(): string {
   return "hydra:attribution:windows";
 }
 
