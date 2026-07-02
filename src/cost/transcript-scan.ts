@@ -309,15 +309,33 @@ interface OAuthBackoffState {
 let oauthBackoff: OAuthBackoffState | null = null;
 
 /**
+ * Single-flight guard for the OAuth meter GET (issue #2666). Before this, two
+ * scans arriving in the same instant past TTL expiry EACH fired their own GET
+ * (journalctl 2026-07-02 shows every 429 as a same-second duplicate pair) —
+ * burning two rate-limit bucket slots per TTL expiry and double-arming the
+ * backoff (instantly advancing it to consecutive-failure #2). Now the first
+ * post-TTL caller launches the read and stores its promise here; concurrent
+ * callers AWAIT AND SHARE that in-flight outcome instead of launching a second
+ * GET. Semantically safe: both scans would have received the same meter value
+ * anyway, and ageMs skew is bounded by the GET duration (≤5s timeout). Applies
+ * ONLY to the production cached path (`readOAuthCached`) — the
+ * `bypassOAuthCache` test path keeps the #1083 deterministic fresh-each-call
+ * contract. Nulled by {@link clearOAuthCache} for test isolation.
+ */
+let oauthInFlight: Promise<CachedOAuthRead> | null = null;
+
+/**
  * Null the module-level OAuth last-good cache AND the backoff state (issue
- * #2619). `clearUsageCache()` in `usage-tracker.ts` calls this so its single
+ * #2619) AND the single-flight in-flight promise (issue #2666).
+ * `clearUsageCache()` in `usage-tracker.ts` calls this so its single
  * reset entry point continues to null the snapshot cache, the oauthCache, and
  * the backoff clock, even though the latter two now live here (issue #1971).
- * Test isolation depends on this. (issue #1090, #2619)
+ * Test isolation depends on this. (issue #1090, #2619, #2666)
  */
 export function clearOAuthCache(): void {
   oauthCache = null;
   oauthBackoff = null;
+  oauthInFlight = null;
 }
 
 /**
@@ -374,6 +392,13 @@ export interface CachedOAuthRead {
  * re-probed on an exponential-backoff cadence (`base * 2^(failures-1)`, capped)
  * rather than being hammered ~1–2×/min. A SUCCESSFUL read clears the gate,
  * restoring the healthy fixed-TTL cadence immediately.
+ *
+ * Single-flight (issue #2666): concurrent post-TTL callers no longer each fire
+ * a GET — the first launches {@link attemptOAuthRead} and parks its promise in
+ * {@link oauthInFlight}; the rest await and share that outcome. Retry-After
+ * honor (issue #2666): a rate-limited (429) failure whose parsed `retryAfterMs`
+ * exceeds the exponential delay LENGTHENS the backoff gate to the server hint —
+ * the hint can never shorten the exponential curve.
  */
 async function readOAuthCached(
   readUsage: () => Promise<OAuthUsageResult>,
@@ -415,7 +440,35 @@ async function readOAuthCached(
     };
   }
 
-  // TTL expired (and not gated by backoff): attempt a fresh read.
+  // Single-flight guard (issue #2666): a GET is already in flight — await and
+  // share its outcome instead of launching a duplicate. This kills the
+  // same-second duplicate 429 pairs (two bucket slots burned + backoff
+  // double-armed) observed in journalctl 2026-07-02.
+  if (oauthInFlight !== null) {
+    return oauthInFlight;
+  }
+
+  const attempt = attemptOAuthRead(readUsage, nowMs, ttlMs);
+  oauthInFlight = attempt;
+  try {
+    return await attempt;
+  } finally {
+    oauthInFlight = null;
+  }
+}
+
+/**
+ * The post-TTL, post-gate OAuth read attempt — the GET plus the
+ * success/failure cache + backoff bookkeeping (lifted verbatim from
+ * `readOAuthCached` for the issue #2666 single-flight wrapper; exactly one
+ * invocation of this function is in flight process-wide on the production
+ * cached path). Never throws — `readUsage` returns result objects.
+ */
+async function attemptOAuthRead(
+  readUsage: () => Promise<OAuthUsageResult>,
+  nowMs: number,
+  ttlMs: number,
+): Promise<CachedOAuthRead> {
   const result = await readUsage();
   if (isOAuthUsageOk(result)) {
     // Success — refresh the cache AND reset the backoff clock so the next reads
@@ -434,16 +487,25 @@ async function readOAuthCached(
   // Read failed. Arm/advance the exponential-backoff gate so subsequent scans
   // do NOT re-GET until the delay elapses (issue #2619). Each consecutive
   // failure doubles the delay up to the ceiling; a later success resets it.
+  // Retry-After honor (issue #2666): a rate-limited (429) failure may carry the
+  // server's parsed hint — it can only LENGTHEN the delay past the exponential
+  // curve, never shorten it, so a lying `retry-after: 0` cannot restore
+  // hammering. The hint is already clamped to the maxStale ceiling adapter-side.
   const failures = (oauthBackoff?.failures ?? 0) + 1;
-  const delayMs = oauthBackoffDelayMs(
+  const exponentialMs = oauthBackoffDelayMs(
     failures,
     getOAuthUsageBackoffBaseMs(),
     getOAuthUsageBackoffMaxMs(),
   );
+  const retryAfterMs = result.retryAfterMs;
+  const delayMs = Math.max(retryAfterMs ?? 0, exponentialMs);
   oauthBackoff = { failures, nextAttemptMs: nowMs + delayMs };
   console.error(
     `[usage-tracker] OAuth meter read failed (${result.code}); backing off ` +
-      `${delayMs}ms before next GET (consecutive failure #${failures})`,
+      `${delayMs}ms before next GET (consecutive failure #${failures})` +
+      (retryAfterMs !== undefined && retryAfterMs > exponentialMs
+        ? ` — server Retry-After ${retryAfterMs}ms lengthened the ${exponentialMs}ms exponential delay`
+        : ""),
   );
 
   // Serve the last-good value (now stale) instead of flipping to the estimate —

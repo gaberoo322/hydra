@@ -98,7 +98,8 @@ export type HydraErrorCode =
   // outage). No thrown subclass — the adapter returns, never raises.
   | "oauth-usage-no-credentials" // no credentials file / no claudeAiOauth.accessToken
   | "oauth-usage-token-expired" // the endpoint reported 401/403 (token expired/revoked)
-  | "oauth-usage-non-2xx" // the endpoint answered with a non-2xx status other than 401/403
+  | "oauth-usage-rate-limited" // the endpoint reported 429; the optional Retry-After hint rides the failure arm (issue #2666)
+  | "oauth-usage-non-2xx" // the endpoint answered with a non-2xx status other than 401/403/429
   | "oauth-usage-parse" // a 2xx body failed JSON.parse OR was missing a usable window
   | "oauth-usage-timeout" // the request exceeded its AbortSignal timeout and was aborted
   | "oauth-usage-network" // transport failed (DNS/ECONNREFUSED/offline)
