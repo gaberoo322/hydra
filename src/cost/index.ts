@@ -36,7 +36,6 @@
 export {
   recordSubagentTokens,
   getDailyTokenCounter,
-  getRollingTokenCounter,
   todayDateString,
   yesterdayDateString,
   // Re-export key helpers so tests that probe Redis directly stay on the
@@ -69,10 +68,6 @@ export {
   DEFAULT_DRIFT_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
-  getFiveHourThrottleT1,
-  getFiveHourThrottleT2,
-  DEFAULT_FIVE_HOUR_THROTTLE_T1,
-  DEFAULT_FIVE_HOUR_THROTTLE_T2,
 } from "./config.ts";
 
 // ---------------------------------------------------------------------------
