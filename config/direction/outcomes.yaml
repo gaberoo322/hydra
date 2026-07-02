@@ -25,6 +25,19 @@
 #   target         goal value; numeric
 #   noise_epsilon  (optional, default 0) absolute change below
 #                  this is treated as no-move
+#   attribution_window_ms
+#                  (optional; issue #2632) per-metric attribution-window
+#                  duration in milliseconds. The outcome-attribution recorder
+#                  (src/outcome-attribution/subscribe.ts) opens one window per
+#                  live leading metric when a merge lands and closes each on
+#                  ITS OWN duration — a fast metric (test-count) settles in
+#                  minutes, a slow one (Brier) needs days. This is keyed on how
+#                  fast the metric MOVES, distinct from the per-MERGE tier watch
+#                  windows above (HYDRA_HOLDBACK_WINDOW_CYCLES_*) keyed on blast
+#                  radius. Omit ⇒ the recorder applies a conservative long
+#                  default (HYDRA_ATTRIBUTION_DEFAULT_WINDOW_MS, 7d) so an
+#                  unconfigured metric still closes eventually. Only meaningful
+#                  for `kind: leading` outcomes.
 #
 # Historical note: `stuckness_threshold_cycles` was a schema field for the
 # automated stuckness detector. The detector was retired in ADR-0010 (the

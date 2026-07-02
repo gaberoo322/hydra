@@ -53,6 +53,7 @@ import {
   decideHoldback,
   type LeadingOutcomeSample,
 } from "./outcome-regression.ts";
+import { markMergeReverted } from "./redis/attribution.ts";
 
 /** Stream the digest consumer reads from (see src/index.ts startConsumers). */
 const NOTIFICATIONS_STREAM = "hydra:notifications";
@@ -271,6 +272,28 @@ export async function checkHoldback(
       // baseline (the merge is leaving probation either way), and emit.
       await incrRevertCount(day);
       await clearBaseline(baseline.commitSha);
+      // Durably register the revert on the attribution reverted-merge registry
+      // so the attribution recorder chore (#2632) voids this PR's ledger rows
+      // (AC3). Outcome Holdback is the sole revert authority (design-concept
+      // invariant #8: the recorder reverts nothing), so this write MUST
+      // originate here — the recorder only DRAINS the registry and appends the
+      // compensating void tombstone. Fail-loud + never-throw: markMergeReverted
+      // logs `[attribution] …` and returns a structured result on error; we
+      // surface a non-fatal `[holdback]` line and continue (the revert itself
+      // already happened — a registry miss must not break the revert flow).
+      {
+        const marked = await markMergeReverted({
+          commitSha: baseline.commitSha,
+          prNumber: baseline.prNumber,
+          revertedAt: Date.now(),
+        });
+        if (marked.ok === false) {
+          console.error(
+            `[holdback] check: failed to register reverted merge for attribution void ` +
+              `(commitSha=${baseline.commitSha} prNumber=${baseline.prNumber ?? "null"}): ${marked.error}`,
+          );
+        }
+      }
       await publishSafe(eventBus, "holdback.reverted", {
         commitSha: baseline.commitSha,
         prNumber: baseline.prNumber,

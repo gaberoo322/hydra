@@ -67,6 +67,7 @@ import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts"
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
+import { runAttributionRecord } from "../outcome-attribution/subscribe.ts";
 
 // ---------------------------------------------------------------------------
 // Re-exports (issue #2090): keep the pre-split public surface stable so
@@ -370,6 +371,23 @@ async function runHousekeeping(
       name: "holdback-merge-watch",
       work: async () => {
         await runHoldbackMergeWatch();
+      },
+    },
+
+    {
+      // Issue #2632: outcome-attribution recorder. Reacts to merge LANDINGS off
+      // the same pending-enroll substrate as holdback-merge-watch — opens a
+      // per-metric window on landing, closes each on its own configured duration
+      // (appending an observation row), and voids reverted merges. No Redis
+      // time-guard — intrinsically idempotent (windows are upserted by
+      // metric+merge id; closes/voids are drained and removed), so an hourly
+      // tick with nothing due is a guaranteed no-op. Never throws — every
+      // failure is logged with the [attribution] prefix and counted, not raised.
+      // This is the sanctioned periodic-job substrate for the recorder, NOT a
+      // long-lived EventBus consumer (ADR-0010/0012).
+      name: "attribution-record",
+      work: async () => {
+        await runAttributionRecord();
       },
     },
   ];
