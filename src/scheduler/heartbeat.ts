@@ -71,6 +71,71 @@ import {
 } from "../redis/scheduler.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getReconcilerHealth } from "../redis/reconciler.ts";
+// ---------------------------------------------------------------------------
+// Learning-indexer error observability (issue #2658)
+// ---------------------------------------------------------------------------
+//
+// The OpenViking source/config indexer (`src/knowledge-base/indexer.ts`) is a
+// best-effort background subsystem: a failed index leaves stale embeddings but
+// never fails a cycle. Before #2658 an exhausted index attempt (e.g. OV point-
+// lock contention that survived the bounded client-side backoff) only emitted a
+// console.error nobody watched — invisible UPSTREAM, so the autopilot could not
+// gate dispatch on semantic-indexing health.
+//
+// These two MONOTONIC in-process counters (reset on process restart, like the
+// #1968 skill-catalog state, not the Redis-persisted cycle counters) make that
+// visible on `GET /api/scheduler/status`:
+//   - indexerErrors  — count of index attempts that EXHAUSTED their retry budget
+//                      (or hit a non-retryable failure) and gave up.
+//   - indexerRetries — count of individual transient retries performed (a load
+//                      signal; a spike here without indexerErrors means the
+//                      backoff is absorbing contention, which is the goal).
+//
+// The heartbeat is observability-only (it makes NO policy decisions — ADR-0012);
+// it merely surfaces the counter. The indexer is the sole writer, via the
+// best-effort {@link recordIndexerError} / {@link recordIndexerRetry} helpers
+// below, which never throw into the indexing hot path.
+let indexerErrors = 0;
+let indexerRetries = 0;
+
+/**
+ * Increment the monotonic indexer-error counter (issue #2658). Best-effort and
+ * TOTAL: it can never throw into the indexer's hot path — a counter bump must
+ * not be able to turn a best-effort index miss into a thrown exception. Called
+ * once per index attempt that exhausted its retry budget or hit a non-retryable
+ * failure.
+ */
+export function recordIndexerError(): void {
+  indexerErrors++;
+}
+
+/**
+ * Increment the monotonic indexer-retry counter (issue #2658). Best-effort and
+ * total (see {@link recordIndexerError}). Called once per transient retry the
+ * indexer's backoff loop performs, as a load signal.
+ */
+export function recordIndexerRetry(): void {
+  indexerRetries++;
+}
+
+/**
+ * Read the current indexer observability counters (issue #2658). Pure read —
+ * never throws, never touches Redis or OV. Surfaced on
+ * `GET /api/scheduler/status` via {@link HeartbeatController.getStatus}.
+ */
+export function getIndexerErrorStats(): { indexerErrors: number; indexerRetries: number } {
+  return { indexerErrors, indexerRetries };
+}
+
+/**
+ * Reset the in-process indexer counters. Test-only — production counters are
+ * monotonic for the process lifetime and reset naturally on restart.
+ */
+export function resetIndexerErrorStats(): void {
+  indexerErrors = 0;
+  indexerRetries = 0;
+}
+
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (issue #725: slowed from 2min; watchdog staleness threshold is 15min = 3x margin)
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
@@ -635,6 +700,14 @@ export class HeartbeatController {
       // Lifetime counter ratio — kept for audit / debugging only. Do not use
       // for alerts, stall detection, or operator dashboards (see issue #232).
       mergeRateLifetime: lifetimeMergeRate,
+      // Issue #2658: OpenViking learning-indexer error observability. Monotonic
+      // in-process counters (reset on restart) so an exhausted background index
+      // attempt — e.g. OV point-lock contention that survived the client-side
+      // backoff — is visible UPSTREAM instead of only in a console.error the
+      // autopilot cannot gate on. `indexerErrors` counts give-ups;
+      // `indexerRetries` counts transient retries (a load signal). Advisory only.
+      indexerErrors,
+      indexerRetries,
       // Issue #397: heartbeat for the housekeeping tick. The watchdog
       // reads this to distinguish "scheduler alive" from "scheduler wedged".
       // Always present, always advancing when running=true.

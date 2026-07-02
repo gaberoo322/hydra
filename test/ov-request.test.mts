@@ -21,6 +21,7 @@ const {
   isOvFailure,
   isOvOk,
   isOvServerTimeout,
+  isOvPointLockConflict,
   ovBaseUrl,
 } = await import("../src/knowledge-base/ov-request.ts");
 
@@ -272,5 +273,70 @@ describe("isOvServerTimeout: body classifier (#2250, moved here in #2373)", () =
     assert.equal(isOvServerTimeout("502 Bad Gateway INTERNAL: request timed out"), true);
     assert.equal(isOvServerTimeout("502 Bad Gateway: upstream unavailable"), false);
     assert.equal(isOvServerTimeout("connection timed out"), false); // no INTERNAL marker
+  });
+});
+
+describe("isOvPointLockConflict: body classifier (#2658)", () => {
+  /** OV's own point-lock 500 body under concurrent-indexing contention. */
+  const OV_POINT_LOCK_BODY =
+    '{"status":"error","result":null,"error":{"code":"INTERNAL","message":"Failed to acquire point lock for [\'/local/hydra/resources/hydra-memory\']"}}';
+
+  test("classifies OV's INTERNAL/'Failed to acquire point lock' 500 body as contention", () => {
+    assert.equal(isOvPointLockConflict(OV_POINT_LOCK_BODY), true);
+  });
+
+  test("accepts a 'point lock' message variant (spacing tolerated)", () => {
+    assert.equal(
+      isOvPointLockConflict('{"error":{"code":"INTERNAL","message":"could not obtain pointlock on collection"}}'),
+      true,
+    );
+  });
+
+  test("does NOT classify a genuine 4xx payload rejection as a point-lock conflict", () => {
+    assert.equal(
+      isOvPointLockConflict('{"error":{"code":"INVALID_ARGUMENT","message":"missing field: temp_path"}}'),
+      false,
+    );
+  });
+
+  test("does NOT classify an UNAUTHENTICATED rejection as a point-lock conflict", () => {
+    assert.equal(
+      isOvPointLockConflict('{"error":{"code":"UNAUTHENTICATED","message":"missing X-Api-Key"}}'),
+      false,
+    );
+  });
+
+  test("does NOT classify a non-lock INTERNAL error as a point-lock conflict", () => {
+    assert.equal(
+      isOvPointLockConflict('{"error":{"code":"INTERNAL","message":"index corruption detected"}}'),
+      false,
+    );
+  });
+
+  test("does NOT confuse a server-timeout body with a point-lock body (disjoint classifiers)", () => {
+    // The two sibling classifiers must not overlap: a timeout is not a lock.
+    assert.equal(isOvPointLockConflict(OV_SERVER_TIMEOUT_BODY), false);
+    assert.equal(isOvServerTimeout(OV_POINT_LOCK_BODY), false);
+  });
+
+  test("a non-lock body that merely mentions 'point lock' in prose is not retried", () => {
+    // Parses cleanly but error.code !== INTERNAL → must NOT fall through to a
+    // substring scan and false-positive on the prose mention.
+    assert.equal(
+      isOvPointLockConflict('{"error":{"code":"INVALID_ARGUMENT","message":"point lock field must be a bool"}}'),
+      false,
+    );
+  });
+
+  test("empty / null / undefined body is not a conflict (pure, total, never throws)", () => {
+    assert.equal(isOvPointLockConflict(""), false);
+    assert.equal(isOvPointLockConflict(null), false);
+    assert.equal(isOvPointLockConflict(undefined), false);
+  });
+
+  test("a malformed / truncated body falls back to a substring scan requiring BOTH markers", () => {
+    assert.equal(isOvPointLockConflict("500 INTERNAL Failed to acquire point lock"), true);
+    assert.equal(isOvPointLockConflict("500 Bad Gateway: upstream unavailable"), false);
+    assert.equal(isOvPointLockConflict("point lock unavailable"), false); // no INTERNAL marker
   });
 });
