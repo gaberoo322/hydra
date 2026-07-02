@@ -66,6 +66,7 @@ import { runLaneIndexReconcile } from "./chores/lane-index-reconcile.ts";
 import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
+import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
 
 // ---------------------------------------------------------------------------
 // Re-exports (issue #2090): keep the pre-split public surface stable so
@@ -356,6 +357,19 @@ async function runHousekeeping(
       name: "wiring-liveness",
       work: async () => {
         await runWiringLiveness();
+      },
+    },
+
+    {
+      // Issue #2623: merge-completion watcher. No Redis time-guard — the chore
+      // is intrinsically idempotent (it consumes the pending-enroll registry and
+      // guards each PR's enroll + cycle-record enrichment behind a per-PR marker,
+      // so an hourly tick against a landed-and-processed / all-still-open set is a
+      // guaranteed no-op). Never throws — per-PR gh/API failures are logged and
+      // the entry is retried next tick.
+      name: "holdback-merge-watch",
+      work: async () => {
+        await runHoldbackMergeWatch();
       },
     },
   ];
