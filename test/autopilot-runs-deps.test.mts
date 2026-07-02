@@ -36,6 +36,7 @@ import {
   recordCycle,
   recordTurn,
   getRunDispatchClasses,
+  UNCLASSIFIED_ANCHOR_TYPE,
   type AutopilotRunsDeps,
 } from "../src/autopilot/runs.ts";
 // sweepRunIfDead was extracted into the sibling sweep-reader Module (#2568).
@@ -582,5 +583,99 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
       },
     });
     assert.equal(seenLimit, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recordCycle — anchorType is ALWAYS classified explicitly (issue #2689)
+//
+// A cycle-record whose body carries no explicit, non-empty anchorType must NOT
+// leave the metrics record with an absent anchorType — that is exactly what the
+// aggregator (src/metrics/aggregate.ts) buckets as "unknown", the data-quality
+// black hole that made 24% of recent cycles invisible to metrics-driven
+// decisions. recordCycle now records the `unclassified` sentinel instead, so
+// the field is always present and non-empty, and "unknown" is never produced by
+// a fall-through. A caller-supplied anchorType is passed through verbatim.
+// ---------------------------------------------------------------------------
+
+describe("recordCycle — anchorType classification (#2689)", () => {
+  // Suppress the intentional fail-loud console.warn for the unclassified cases
+  // so the suite output stays clean; restore after each test.
+  function withSilencedWarn<T>(fn: () => Promise<T>): Promise<T> {
+    const orig = console.warn;
+    console.warn = () => {};
+    return fn().finally(() => {
+      console.warn = orig;
+    });
+  }
+
+  test("passes a caller-supplied anchorType through verbatim", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle(
+      { cycleId: "c-at-explicit", status: "merged", anchorType: "work-queue" } as any,
+      deps,
+    );
+    assert.equal(store.metrics.get("c-at-explicit")!.anchorType, "work-queue");
+  });
+
+  test("records the 'unclassified' sentinel — NOT 'unknown', NOT absent — when anchorType is omitted", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await withSilencedWarn(() =>
+      recordCycle({ cycleId: "c-at-absent", status: "completed" } as any, deps),
+    );
+    const m = store.metrics.get("c-at-absent")!;
+    // The field is PRESENT and non-empty — the whole point of #2689: an absent
+    // field would be stripped and bucket as "unknown" downstream.
+    assert.ok("anchorType" in m, "anchorType must be written, never stripped");
+    assert.equal(m.anchorType, UNCLASSIFIED_ANCHOR_TYPE);
+    assert.notEqual(m.anchorType, "unknown");
+  });
+
+  test("records the sentinel for an empty-string anchorType (would-be 'unknown')", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await withSilencedWarn(() =>
+      recordCycle({ cycleId: "c-at-empty", status: "completed", anchorType: "" } as any, deps),
+    );
+    assert.equal(store.metrics.get("c-at-empty")!.anchorType, UNCLASSIFIED_ANCHOR_TYPE);
+  });
+
+  test("records the sentinel for a whitespace-only anchorType", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await withSilencedWarn(() =>
+      recordCycle({ cycleId: "c-at-ws", status: "completed", anchorType: "   " } as any, deps),
+    );
+    assert.equal(store.metrics.get("c-at-ws")!.anchorType, UNCLASSIFIED_ANCHOR_TYPE);
+  });
+
+  test("trims surrounding whitespace on a non-empty anchorType", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle(
+      { cycleId: "c-at-trim", status: "merged", anchorType: "  grill  " } as any,
+      deps,
+    );
+    assert.equal(store.metrics.get("c-at-trim")!.anchorType, "grill");
+  });
+
+  test("emits a fail-loud console.warn naming the cycle when classification falls back", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    const orig = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      await recordCycle({ cycleId: "c-at-warn", status: "completed" } as any, deps);
+    } finally {
+      console.warn = orig;
+    }
+    assert.equal(warnings.length, 1, "exactly one warning for one unclassified cycle");
+    assert.match(warnings[0], /c-at-warn/, "warning names the offending cycleId");
+    assert.match(warnings[0], /anchorType/i);
   });
 });
