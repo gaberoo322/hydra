@@ -40,7 +40,7 @@
  *   stays in one place.
  */
 
-import { listRuns } from "../autopilot/runs.ts";
+import { listRuns, getRunDispatchClasses } from "../autopilot/runs.ts";
 import type { AutopilotRunOutcome } from "../schemas/explore-page.ts";
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,11 @@ export interface BehaviorFilters {
 export interface BehaviorGalleryDeps {
   /** Override the runs fetcher for tests so they don't need a Redis. */
   listRuns?: (limit: number) => Promise<ListRunsLike>;
-  /** Resolve dispatch classes per runId. Defaults to scanning `actions` on each turn. */
+  /**
+   * Resolve dispatch classes per runId. Defaults to `getRunDispatchClasses`
+   * (the AutopilotRun-domain projection in `src/autopilot/runs.ts`), which
+   * scans `actions[].class` on each turn. Public shape unchanged.
+   */
   fetchClasses?: (runId: string) => Promise<string[]>;
 }
 
@@ -117,7 +121,7 @@ export async function getBehaviorGallery(
     return [];
   }
 
-  const fetchClasses = deps.fetchClasses ?? defaultFetchClasses;
+  const fetchClasses = deps.fetchClasses ?? getRunDispatchClasses;
 
   const rows: BehaviorRow[] = [];
   for (const raw of result.runs) {
@@ -221,27 +225,4 @@ async function liftRunDigest(
     classes,
     detailHref: `/autopilot/${runId}`,
   };
-}
-
-/**
- * Default class resolver — pulls the turn list off Redis and harvests
- * `dispatch.class` from each turn's `actions` array. Returns a deduped,
- * alphabetised list.
- */
-async function defaultFetchClasses(runId: string): Promise<string[]> {
-  const { listAutopilotRunTurnsDesc } = await import("../redis/autopilot-runs.ts");
-  const members = await listAutopilotRunTurnsDesc(runId, 200);
-  const classes = new Set<string>();
-  for (const member of members) {
-    try {
-      const turn = JSON.parse(member);
-      const actions = Array.isArray(turn?.actions) ? turn.actions : [];
-      for (const a of actions) {
-        if (a && a.type === "dispatch" && typeof a.class === "string") {
-          classes.add(a.class);
-        }
-      }
-    } catch { /* intentional: skip malformed turn rows — caller treats absent classes as "no signal" */ }
-  }
-  return [...classes].sort();
 }

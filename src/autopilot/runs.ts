@@ -60,6 +60,7 @@ import {
   addAutopilotRunTurn,
   hasAutopilotRunTurnAt,
   putAutopilotPrLink,
+  listAutopilotRunTurnsDesc,
 } from "../redis/autopilot-runs.ts";
 import {
   initCycleHash,
@@ -1023,4 +1024,71 @@ export async function listRuns(limit: number): Promise<ListRunsResult> {
   } catch (err: any) {
     return errRedis(err);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reader: dispatch-class projection (issue #2640)
+//
+// "Which autopilot dispatch classes did run X use?" is a domain question for
+// this Module — it already owns the turn lifecycle + recording — so it lives
+// here rather than in the behavior-gallery aggregator, which previously reached
+// across the boundary into `src/redis/autopilot-runs.ts` via a dynamic
+// `await import(...)` to run its own turn-scan. The aggregator now calls this
+// typed function through its `deps.fetchClasses` injection point, and the
+// dynamic import disappears (the module graph stays fully static).
+// ---------------------------------------------------------------------------
+
+/**
+ * Soft cap on turns scanned per run for the dispatch-class projection. Matches
+ * the value the retired `defaultFetchClasses` used in behavior-gallery.ts — a
+ * run's dispatch classes stabilise well within its first couple hundred turns,
+ * and the projection is a coarse "which classes appeared", not a per-turn read.
+ */
+const DISPATCH_CLASSES_TURN_SCAN = 200;
+
+/**
+ * Narrow, injectable reader seam for {@link getRunDispatchClasses}. Mirrors the
+ * `ProjectionDeps` pattern in `run-projections.ts` (issue #1183): defaults to
+ * the real typed accessor, but a test passes a stub so the turn-scan / dedup /
+ * sort logic is exercisable without a live Redis.
+ */
+export interface DispatchClassesDeps {
+  listTurnsDesc: (runId: string, limit: number) => Promise<string[]>;
+}
+
+const defaultDispatchClassesDeps: DispatchClassesDeps = {
+  listTurnsDesc: listAutopilotRunTurnsDesc,
+};
+
+/**
+ * Resolve the distinct autopilot dispatch classes a run used — the canonical
+ * query behind the Explore Behavior tab's `class` filter. Pulls the turn list
+ * off Redis (newest-first, capped) and harvests `actions[].class` from each
+ * turn's `type === "dispatch"` actions. Returns a deduped, alphabetically
+ * sorted `string[]`.
+ *
+ * Tolerant parse: a malformed turn member (unparseable JSON, non-array
+ * `actions`, missing `class`) is silently skipped — a run's class set is a
+ * "no signal" projection, not a correctness surface, so a single bad row must
+ * not blank the whole result. This is identical to the behaviour of the retired
+ * `defaultFetchClasses` this function replaces.
+ */
+export async function getRunDispatchClasses(
+  runId: string,
+  deps: DispatchClassesDeps = defaultDispatchClassesDeps,
+): Promise<string[]> {
+  const members = await deps.listTurnsDesc(runId, DISPATCH_CLASSES_TURN_SCAN);
+  const classes = new Set<string>();
+  for (const member of members) {
+    try {
+      const turn = JSON.parse(member);
+      const actions = Array.isArray(turn?.actions) ? turn.actions : [];
+      for (const a of actions) {
+        if (a && a.type === "dispatch" && typeof a.class === "string") {
+          classes.add(a.class);
+        }
+      }
+    } catch { /* intentional: skip malformed turn rows — caller treats absent classes as "no signal" */ }
+  }
+  return [...classes].sort();
 }
