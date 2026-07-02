@@ -85,9 +85,10 @@ export type { MergedRef };
 
 // `RECONCILE_LANES` moved to the leaf `reconcile-constants.ts` (issue #2387) to
 // break the mutual import with `stale-escalation.ts` (which imported the
-// constant back from here). Re-export it for back-compat so existing import
-// sites that referenced `reconciler.RECONCILE_LANES` do not churn.
-export { RECONCILE_LANES };
+// constant back from here). Kept module-private here (issue #2683) — the
+// back-compat re-export was unused (external sites import it straight from
+// `reconcile-constants.ts`), so `reconciler.ts` only needs it for its own
+// internal `RECONCILE_LANES` lane sweep below.
 
 /**
  * Alert code raised when BOTH feeds are unavailable in a single run (issue
@@ -96,7 +97,7 @@ export { RECONCILE_LANES };
  * blind for hours because gh is down". A single-feed failure is only
  * WARN-logged (the other feed still gives partial coverage).
  */
-export const RECONCILER_BOTH_FEEDS_DOWN_ALERT = "reconciler:both-feeds-down";
+const RECONCILER_BOTH_FEEDS_DOWN_ALERT = "reconciler:both-feeds-down";
 
 /**
  * One feed's outcome for a run: how many artifacts it examined and, on
