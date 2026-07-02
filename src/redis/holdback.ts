@@ -98,7 +98,7 @@ function holdbackRevertCountKey(date: string): string {
  * the same field overwrites in place, `HGETALL` lists all in one call, `HDEL`
  * removes one. Mirrors the `src/redis/autopilot-runs.ts` hash pattern.
  */
-export function holdbackPendingEnrollKey(): string {
+function holdbackPendingEnrollKey(): string {
   return "hydra:holdback:pending-enroll";
 }
 
@@ -113,7 +113,7 @@ export function holdbackPendingEnrollKey(): string {
  * marker also guards the cycle-record enrichment, which is idempotent on cycleId
  * but which we still only want to fire once from this path.
  */
-export function holdbackEnrolledMarkerKey(): string {
+function holdbackEnrolledMarkerKey(): string {
   return "hydra:holdback:enrolled-marker";
 }
 
@@ -123,7 +123,7 @@ export function holdbackEnrolledMarkerKey(): string {
  * the last run's pending-depth + wall-clock stamp so the mechanism is observable
  * rather than silent (mirrors the reconciler-health pattern, #2057).
  */
-export function holdbackMergeWatchHealthKey(): string {
+function holdbackMergeWatchHealthKey(): string {
   return "hydra:holdback:merge-watch:health";
 }
 
