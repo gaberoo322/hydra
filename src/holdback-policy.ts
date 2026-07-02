@@ -54,7 +54,7 @@ export const HOLDBACK_WINDOW_CYCLES_T4 = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLE
  * (ADR-0004 reasoning, preserved by ADR-0015). The carry-up applies to
  * **T2, T3, T4 only**.
  */
-export const HOLDBACK_ENROLLED_TIERS: ReadonlyArray<number> = [2, 3, 4];
+const HOLDBACK_ENROLLED_TIERS: ReadonlyArray<number> = [2, 3, 4];
 
 /**
  * True when a merge of the given post-#767 monotonic tier enrolls in Outcome
