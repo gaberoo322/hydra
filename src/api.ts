@@ -18,6 +18,7 @@ import { createDigestRouter } from "./api/digest.ts";
 import { createOperationalRouter } from "./api/operational.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
+import { createAttributionRouter } from "./api/attribution.ts";
 import { createHoldbackRouter } from "./api/holdback.ts";
 import { createOpenVikingRouter } from "./api/openviking.ts";
 import { createGoalsRouter } from "./api/goals.ts";
@@ -157,6 +158,10 @@ function createApi(eventBus: EventBus) {
   // /api/checklist sub-router retired in slice 6 of the dashboard
   // simplification (issue #621). Only the deleted Checklist page consumed it.
   api.use(createOutcomesRouter());
+  // Attribution view (issue #2631, epic #2628) — read-only GET /api/attribution
+  // surfacing per-metric ranked producer-class marginal effects β_c from the
+  // #2630 estimator over the #2629 ledger. No eventBus: the view emits nothing.
+  api.use(createAttributionRouter());
   // Outcome Holdback producer (issue #786, ADR-0004 step 4) — the post-merge
   // regression-check write surface that finally feeds digest.ts's orphaned
   // holdback.* consumer. Needs eventBus to emit on hydra:notifications.
