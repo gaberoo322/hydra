@@ -43,6 +43,11 @@ import {
 } from "../src/holdback.ts";
 import type { HoldbackBaseline } from "../src/redis/holdback.ts";
 import {
+  listRevertedMerges,
+  removeRevertedMerge,
+  attributionRevertedKey,
+} from "../src/redis/attribution.ts";
+import {
   loadBaseline,
   getRevertCount,
   _resetRevertCount,
@@ -379,6 +384,9 @@ describe("Outcome Holdback producer (enroll → check)", () => {
 
   after(async () => {
     if (redis) {
+      // Hard-clean the attribution reverted-merge registry so a mid-test
+      // failure can't leak an entry into sibling live-Redis suites.
+      try { await redis.del(attributionRevertedKey()); } catch { /* intentional: best-effort cleanup */ }
       try { await redis.quit(); } catch { /* intentional: best-effort close */ }
     }
   });
@@ -503,6 +511,24 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     const loaded = await loadBaseline(sha);
     assert.equal((loaded as any).baseline, null);
     assert.equal(await getRevertCount(day), 1);
+
+    // AC3 end-to-end: the Holdback revert path (the sole revert authority)
+    // registers the reverted merge on the attribution reverted-merge registry
+    // so the recorder chore (#2632) later voids this PR's ledger rows. Before
+    // this remediation markMergeReverted was never called, so a Holdback revert
+    // left phantom credit in the ledger (the #2642 QA-FAIL blocker).
+    const reg = await listRevertedMerges();
+    assert.equal(reg.ok, true);
+    const entry = (reg as any).reverts.find(
+      (rv: any) => rv.commitSha === sha || rv.prNumber === 42,
+    );
+    assert.ok(entry, "Holdback revert must register the merge for attribution void (AC3)");
+    assert.equal(entry.commitSha, sha);
+    assert.equal(entry.prNumber, 42);
+    assert.equal(typeof entry.revertedAt, "number");
+
+    // Cleanup the registry entry so sibling live-Redis suites start clean.
+    await removeRevertedMerge({ commitSha: sha, prNumber: 42 });
     await _resetRevertCount(day);
   });
 
