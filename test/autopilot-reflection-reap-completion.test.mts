@@ -80,6 +80,10 @@ function runCompletion(
     env: {
       ...process.env,
       HYDRA_API_BASE: DEAD_API_BASE,
+      // Issue #2635: dispatch.sh's `hydra` CLI / curl fallback read HYDRA_BASE_URL
+      // / HYDRA_API, not HYDRA_API_BASE — pin them to the dead port too so the
+      // cycle-record POST can never leak to the live orchestrator on :4000.
+      HYDRA_BASE_URL: DEAD_API_BASE,
       HYDRA_AUTOPILOT_STATE: paths.state,
       HYDRA_AUTOPILOT_LOG: paths.log,
       // Keep the worktree-GC side-effect out of the test.
@@ -248,6 +252,10 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
       env: {
         ...process.env,
         HYDRA_API_BASE: DEAD_API_BASE,
+        // Issue #2635: dispatch.sh's `hydra` CLI / curl fallback read
+        // HYDRA_BASE_URL / HYDRA_API, not HYDRA_API_BASE — pin them to the dead
+        // port too so the cycle-record POST can never leak to :4000.
+        HYDRA_BASE_URL: DEAD_API_BASE,
         HYDRA_AUTOPILOT_STATE: paths.state,
         HYDRA_AUTOPILOT_LOG: paths.log,
         HYDRA_AUTOPILOT_REFL_DIR: reflDir,
