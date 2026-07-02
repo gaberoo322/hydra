@@ -48,16 +48,18 @@ import {
   attributionRevertedKey,
 } from "../src/redis/attribution.ts";
 import {
-  loadBaseline,
-  getRevertCount,
-  _resetRevertCount,
-  holdbackBaselineKey,
-  utcDateKey,
   isEnrolledTier,
   windowCyclesForTier,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
   HOLDBACK_WINDOW_CYCLES_T4,
+} from "../src/holdback-policy.ts";
+import {
+  loadBaseline,
+  getRevertCount,
+  _resetRevertCount,
+  holdbackBaselineKey,
+  utcDateKey,
   pendingEnrollAdd,
   pendingEnrollList,
   pendingEnrollRemove,

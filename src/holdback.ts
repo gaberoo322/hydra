@@ -44,10 +44,9 @@ import {
   getRevertCount,
   incrRevertCount,
   utcDateKey,
-  isEnrolledTier,
-  windowCyclesForTier,
   type HoldbackBaseline,
 } from "./redis/holdback.ts";
+import { isEnrolledTier, windowCyclesForTier } from "./holdback-policy.ts";
 import {
   snapshotLeadingOutcomes,
   decideHoldback,
