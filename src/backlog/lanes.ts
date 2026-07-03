@@ -235,6 +235,30 @@ async function moveItemToLaneImpl(
     }
   }
 
+  // wire-or-retire lane guard (issue #2721): a triage-origin wire-or-retire
+  // judgment item may NOT be laundered into the `backlog` lane (where no sweep
+  // looks). It must leave triage only as a WIRE task, a RETIRE task
+  // (triage->queued after the verdict rewrite), or ready-for-human
+  // (triage->blocked). The prompt-shaped protocol in the emitter item body was
+  // not a gate — item-685/687 slipped into backlog anyway — so enforce it here
+  // at the id-based lane-mutation boundary. Scoped to the exact triple
+  // (label 'wire-or-retire' AND source lane 'triage' AND target lane 'backlog')
+  // so a wire-or-retire item legitimately in any other lane is never trapped,
+  // and the backlog->triage migration direction stays open. The 'wire-or-retire'
+  // label is stamped by scripts/ci/hydra-target-wire-or-retire-emit.ts
+  // (WIRE_OR_RETIRE_LABEL); identify by label, never by title (Kanban pitfall).
+  // Returns a result object and never throws (CLAUDE.md lane-mutation convention).
+  if (
+    targetLane === "backlog" &&
+    item.lane === "triage" &&
+    item.labels?.includes("wire-or-retire")
+  ) {
+    return {
+      ok: false,
+      error: "wire-or-retire items leave triage only as a WIRE task, a RETIRE task, or ready-for-human",
+    };
+  }
+
   // Schedulability guard: a blocked item must be explained (issue #1920).
   const reason = typeof opts.reason === "string" ? opts.reason.trim() : "";
   if (targetLane === "blocked") {
