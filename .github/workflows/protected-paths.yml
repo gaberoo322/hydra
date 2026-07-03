@@ -1,0 +1,58 @@
+name: protected-paths
+
+# Target protected-paths guard (issue #2702, epic #2700).
+#
+# The deterministic trigger for hydra-target-qa's money-critical adversarial
+# fold. It classifies the PR's changed files with `classifyTargetRisk`
+# (src/target/money-critical.ts, keystone slice #2701) and, when the diff
+# touches money-critical Target surface (providers / execution / staking /
+# bet-math / arbitrage / markets / bin runners), REQUIRES a
+# `## Risk-core justification` section in the PR body. Standard (non-money-
+# critical) PRs pass trivially.
+#
+# This lives in its OWN workflow file — deliberately NOT inside ci.yml or
+# automerge.yml — because ci.yml is part of the Untouchable Core (ADR-0001:
+# "the gate that gates the gate", operator-only). A protected-paths guard is a
+# *new verification*, not a change to the merge gate, so it belongs in a
+# sibling workflow that lands as a normal (non-Tier-0) change. Only ci.yml /
+# deploy.yml are exact-match untouchable.
+
+on:
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: protected-paths-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  protected-paths:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Protected-paths guard (money-critical Target surface)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # Compute the PR's changed-file list. Prefer `gh pr diff` (robust to
+          # rebases); fall back to a base..head diff if the API call fails.
+          gh pr diff --name-only "${{ github.event.pull_request.number }}" > changed-files.txt || \
+            git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" > changed-files.txt
+          echo "Changed files:"
+          cat changed-files.txt
+
+          CHANGED_FILES="$(cat changed-files.txt)" \
+            npx tsx scripts/ci/target-risk-core-check.ts
+
+      - name: Self-test the guard (proves it catches an unjustified money-critical diff)
+        run: npx tsx scripts/ci/target-risk-core-check.ts --self-test
