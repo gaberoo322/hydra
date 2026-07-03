@@ -35,7 +35,7 @@ import {
   promoteToDlqIfExhausted,
   parseStreamFields,
   type ConsumedEvent,
-} from "./event-bus.ts";
+} from "./event-bus-mechanics.ts";
 
 /** The handler a producer registers for each consumed event. */
 export type ConsumerSessionHandler = (
@@ -190,8 +190,8 @@ export class ConsumerSession {
   /**
    * Apply the DLQ-promotion policy to a handler failure. Wires the transport's
    * injected `publishDlq` as the DLQ writer. See `promoteToDlqIfExhausted`
-   * (event-bus.ts) for the "secondary XPENDING → 3-attempt threshold → DLQ
-   * publish → xack" contract.
+   * (event-bus-mechanics.ts) for the "secondary XPENDING → 3-attempt threshold
+   * → DLQ publish → xack" contract.
    */
   private async _handleFailure(
     stream: string,
