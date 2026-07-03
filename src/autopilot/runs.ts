@@ -361,19 +361,69 @@ function numberOrDefault(v: unknown, fallback: number): number {
 export const UNCLASSIFIED_ANCHOR_TYPE = "unclassified";
 
 /**
+ * Map a dispatch-class slot name to its canonical anchorType, mirroring the
+ * `case` mapping in `scripts/autopilot/dispatch.sh` (issue #2762).
+ *
+ * Used as a last-resort inference inside {@link classifyAnchorType} when the
+ * caller did not supply an explicit anchorType but the cycleId embeds a slot
+ * suffix we can decode (the `worktree-agent-*-{slot}` synthesised-branch
+ * format that holdback-merge-watch.ts uses as its cycleId). The same mapping
+ * lives in `dispatch.sh` so both writers agree on the vocabulary.
+ */
+const SLOT_ANCHOR_TYPE: Readonly<Record<string, string>> = {
+  dev_orch: "work-queue",
+  dev_target: "work-queue",
+  qa_orch: "qa-review",
+  qa_target: "qa-review",
+  design_concept_orch: "grill",
+  research_orch: "research",
+  research_target: "research",
+};
+
+/**
+ * Attempt to infer an anchorType from a synthesised worktree-branch cycleId
+ * (format: `worktree-agent-{runToken}-t{N}-{slot}`). Returns the mapped
+ * anchorType when the suffix is a known slot; returns `undefined` when the
+ * cycleId does not match the pattern or the slot has no mapping.
+ *
+ * The `{runToken}` is `_synthesize_worktree_branch`'s (decide.py) shortened
+ * runId — normally the first 8 hex chars of the run UUID, but the literal
+ * `local` when `state.run_id` is absent (legacy/test callers). So the run-token
+ * class is `[0-9a-z]+` (hex OR the `local` fallback), not hex-only. The mandatory
+ * `-t{N}-` middle segment keeps this from matching the harness's own
+ * `worktree-agent-<longhash>` branch names, which carry no turn/slot suffix.
+ */
+function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
+  // Pattern: worktree-agent-<runToken>-t<N>-<slot>
+  const m = /^worktree-agent-[0-9a-z]+-t\d+-(.+)$/.exec(cycleId);
+  if (!m) return undefined;
+  return SLOT_ANCHOR_TYPE[m[1]];
+}
+
+/**
  * Classify a cycle-record body's anchorType EXPLICITLY (issue #2689). Returns
  * the trimmed body value when the caller supplied a non-empty one; otherwise
- * returns the {@link UNCLASSIFIED_ANCHOR_TYPE} sentinel — never `undefined`,
- * so the metrics record always carries an explicit, non-empty anchorType and
- * can never fall into the aggregator's "unknown" bucket. A `console.warn`
- * surfaces the gap (fail-loud convention) so an unclassified cycle is visible
- * rather than silently swallowed.
+ * tries to infer from the cycleId's slot suffix (issue #2762 — covers cycles
+ * written by holdback-merge-watch.ts, which uses the synthesised worktreeBranch
+ * as its cycleId and does not forward an anchorType). Falls back to
+ * {@link UNCLASSIFIED_ANCHOR_TYPE} when neither source yields a value — never
+ * `undefined`, so the metrics record always carries an explicit, non-empty
+ * anchorType and can never fall into the aggregator's "unknown" bucket. A
+ * `console.warn` surfaces the remaining gap (fail-loud convention) so a truly
+ * unclassifiable cycle is still visible.
  */
 function classifyAnchorType(cycleId: string, raw: unknown): string {
   if (typeof raw === "string") {
     const trimmed = raw.trim();
     if (trimmed.length > 0) return trimmed;
   }
+  // Issue #2762: holdback-merge-watch.ts calls recordCycle({cycleId, prNumber,
+  // filesChanged}) with no anchorType. Its cycleId is the autopilot's synthesised
+  // worktreeBranch (`worktree-agent-{8hex}-t{N}-{slot}`), whose slot suffix
+  // encodes the dispatch class. Decode it to recover the anchorType without
+  // requiring the caller to forward the field.
+  const inferred = inferAnchorTypeFromCycleId(cycleId);
+  if (inferred !== undefined) return inferred;
   console.warn(
     `[autopilot] recordCycle: cycle '${cycleId}' has no explicit anchorType — recording '${UNCLASSIFIED_ANCHOR_TYPE}' (data-quality gap; the caller should send a mapped anchorType)`,
   );
