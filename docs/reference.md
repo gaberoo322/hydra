@@ -571,6 +571,82 @@ Operator edits these (or uses the dashboard):
 
 Runtime state is all in Redis (see the **Redis Keys** section above). The legacy in-process agent personalities and `config/feedback/to-*.md` files were retired with the codex cut-over — see `docs/historical/`.
 
+## Backups
+
+Two nightly systemd timers copy the stateful stores off their docker volumes onto the SATA SSD at `/mnt/hydra-ssd/backups/` — a device physically distinct from the docker volumes, so a `docker volume rm`, a compose-recreate gone wrong, or volume corruption no longer loses the data:
+
+| Store | Timer / service | Script (in-repo) | Destination | Cadence |
+|-------|-----------------|------------------|-------------|---------|
+| Postgres (hydra-betting) | `hydra-pg-backup.{timer,service}` | `scripts/redis-backup.sh`'s sibling (host-only) | `/mnt/hydra-ssd/backups/postgres/hydra-<ts>.sql.gz` | daily 03:00 |
+| Redis (orchestrator) | `hydra-redis-backup.{timer,service}` | `scripts/redis-backup.sh` | `/mnt/hydra-ssd/backups/redis/hydra-redis-<ts>.rdb.gz` | daily 03:15 |
+
+Both keep a 7-day retention window (`find -mtime +7 -delete`), fail loud on empty/errored output (rm-on-fail, exit 1, `[…] FAILED` on stderr), print a `[…] OK: <file> (<size>)` line on success, and route `OnFailure=hydra-notify-failure@<unit>.service` to the shared Telegram-notify template (instance-parameterized `%i`, zero edits per new unit).
+
+**What is in-repo vs. host state.** Only `scripts/redis-backup.sh` and this doc live in the repo. The systemd `.service`/`.timer` units and the installed script copy are **host state**, mirroring the pg sibling split (script at `~/.local/bin/hydra-pg-backup.sh`, units under `~/.config/systemd/user/`). This keeps host-machine wiring out of version control and off the Tier-0/Verifier-Core surface.
+
+**Redis backup mechanism.** `scripts/redis-backup.sh` fires `BGSAVE` inside `hydra-redis-1`, then polls `INFO persistence` until the save has genuinely LANDED — `rdb_last_save_time` advanced past the pre-snapshot value **and** `rdb_bgsave_in_progress==0` **and** `rdb_last_bgsave_status==ok` (30s bounded, fail-loud on timeout or `err`) — before `docker cp`-ing `/data/dump.rdb` out of the volume (no sudo on `/var/lib/docker`) and gzipping it. This never races an in-flight or failed save and never copies a stale up-to-900s auto-RDB. RDB (`BGSAVE` + `dump.rdb`) was chosen over copying the AOF `appendonlydir/` because a single self-consistent `dump.rdb` is a simpler, atomic restore artifact than the multi-file `base + incr + manifest` layout (which can be captured mid-rewrite).
+
+**Host-state install (one-time, operator).** The units are not committed; install a copy of the script and the unit files on the host:
+
+```bash
+# Install the script copy the .service ExecStarts (mirrors ~/.local/bin/hydra-pg-backup.sh)
+install -m 0755 scripts/redis-backup.sh ~/.local/bin/hydra-redis-backup.sh
+
+# hydra-redis-backup.service (~/.config/systemd/user/hydra-redis-backup.service):
+#   [Unit]
+#   Description=Hydra Redis daily backup
+#   OnFailure=hydra-notify-failure@hydra-redis-backup.service
+#   [Service]
+#   Type=oneshot
+#   ExecStart=/home/gabe/.local/bin/hydra-redis-backup.sh
+#
+# hydra-redis-backup.timer (~/.config/systemd/user/hydra-redis-backup.timer):
+#   [Unit]
+#   Description=Daily Redis backup at 3:15 AM
+#   [Timer]
+#   OnCalendar=*-*-* 03:15:00
+#   Persistent=true
+#   [Install]
+#   WantedBy=timers.target
+
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-redis-backup.timer
+systemctl --user list-timers | grep hydra-redis-backup   # confirm it is scheduled
+systemctl --user start hydra-redis-backup.service         # manual smoke test → prints the OK line
+```
+
+**Restore procedure (Redis).** Because the orchestrator's Redis runs with `appendonly yes`, dropping a `dump.rdb` back into the volume is **not** sufficient on its own — on startup Redis prefers the AOF over the RDB, so a naive `dump.rdb` swap silently loads the *old* AOF, not the restored snapshot. Account for that load-precedence caveat:
+
+```bash
+# 1. Stop the writers so nothing races the restore.
+systemctl --user stop hydra-orchestrator.service
+docker stop hydra-redis-1
+
+# 2. Decompress the chosen snapshot.
+gunzip -k /mnt/hydra-ssd/backups/redis/hydra-redis-<ts>.rdb.gz   # -> hydra-redis-<ts>.rdb
+
+# 3. Put it back as /data/dump.rdb inside the volume (container stopped).
+docker cp /mnt/hydra-ssd/backups/redis/hydra-redis-<ts>.rdb hydra-redis-1:/data/dump.rdb
+
+# 4. AOF-vs-RDB load precedence — pick ONE:
+#    (a) Temporarily disable AOF so Redis loads the RDB, then rebuild the AOF:
+docker start hydra-redis-1
+docker exec hydra-redis-1 redis-cli CONFIG SET appendonly no        # forces RDB load path
+docker restart hydra-redis-1                                         # loads dump.rdb
+docker exec hydra-redis-1 redis-cli CONFIG SET appendonly yes        # re-enable durability
+docker exec hydra-redis-1 redis-cli BGREWRITEAOF                     # rebuild AOF from the loaded dataset
+#    (b) OR remove the stale AOF dir so only the RDB remains, then start normally:
+#        docker exec hydra-redis-1 rm -rf /data/appendonlydir && docker start hydra-redis-1
+#        (Redis rebuilds the AOF from the RDB on next BGREWRITEAOF.)
+
+# 5. Verify the keyspace, then bring the orchestrator back.
+docker exec hydra-redis-1 redis-cli DBSIZE
+systemctl --user start hydra-orchestrator.service
+curl -s http://localhost:4000/api/health
+```
+
+Off-BOX shipping (gaming PC via Tailscale, cloud object storage) is deliberately out of scope — it needs an external destination + credentials, which is ADR-0005 operator-escalation territory. The on-box second-disk copy captures the volume-loss failure mode today; off-box is a separate operator decision.
+
 ## Deploy recipe
 
 Runs automatically on merge to master via a self-hosted GitHub Actions runner on this server:
