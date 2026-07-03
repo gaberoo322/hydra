@@ -62,7 +62,7 @@ print(json.dumps({
     # data. Idempotent on cycleId — re-running with the same cycleId is a
     # no-op on the server, so retries don't double-count.
     #
-    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed]
+    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json]
     #
     # Issue #1136 (Slice 2 of #1119): the optional 8th positional arg
     # `reflection_sources` is the comma-separated reflection bucket tokens
@@ -82,6 +82,13 @@ print(json.dumps({
     # POST body (truthful "unknown/never-written"); an explicit 0 records a
     # measured zero-file cycle. This is the integer count the metrics trend
     # consumes — NOT the string[] path list capacity-writeback sends.
+    # Issue #2754: the optional 10th positional arg `grounding_tests` is a compact
+    # JSON object of the code-writing dispatch's grounding test-suite counts
+    # ({"testsBefore":N,"testsAfter":N,"testsPassingBefore":N,"testsPassingAfter":N};
+    # any subset). reap.py reads it from a task-scoped deposit and passes it here so
+    # `testsAfter` stops recording 0 on every cycle. Empty/absent → all four fields
+    # omitted from the POST body (truthful "unknown"); an explicit 0 records a
+    # measured zero-test cycle. NUMERIC on the read side (aggregate.ts / trend.ts).
     cycle_id="${1:-}"
     status="${2:-}"
     skill="${3:-}"
@@ -91,8 +98,9 @@ print(json.dumps({
     duration_ms="${7:-0}"
     reflection_sources="${8:-}"
     files_changed="${9:-}"
+    grounding_tests="${10:-}"
     if [ -z "$cycle_id" ] || [ -z "$status" ] || [ -z "$skill" ]; then
-      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed]" >&2
+      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json]" >&2
       exit 2
     fi
     # Anchor type is derived from the skill: dev_orch / dev_target subagents
@@ -139,7 +147,7 @@ print(json.dumps({
     esac
     payload=$(python3 -c "
 import json, sys
-cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed = sys.argv[1:14]
+cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed, grounding_tests = sys.argv[1:15]
 body = {
     'cycleId': cycle_id,
     'status': status,
@@ -172,8 +180,28 @@ if files_changed != '':
             body['filesChanged'] = fc
     except (TypeError, ValueError):
         pass
+# Issue #2754: merge the grounding test-suite counts. Empty/absent → all four
+# fields omitted (truthful 'unknown'); an explicit non-negative integer (incl. 0)
+# for any subset is recorded. A malformed JSON blob or a non-integer / negative
+# value for a key is silently dropped for that key — never blocks the write.
+if grounding_tests != '':
+    try:
+        gt = json.loads(grounding_tests)
+        if isinstance(gt, dict):
+            for key in ('testsBefore', 'testsAfter', 'testsPassingBefore', 'testsPassingAfter'):
+                val = gt.get(key)
+                if isinstance(val, bool):
+                    continue  # bool is an int subclass — reject it explicitly
+                try:
+                    n = int(val)
+                    if n >= 0:
+                        body[key] = n
+                except (TypeError, ValueError):
+                    pass
+    except (TypeError, ValueError):
+        pass
 print(json.dumps(body))
-" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed")
+" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests")
     # Issue #2635: the rest of the autopilot ecosystem (reap.py, heartbeat.py,
     # term-check.py, decide.py, bootstrap.sh, the hooks) resolves the API origin
     # from HYDRA_API_BASE, but the `hydra` CLI reads HYDRA_BASE_URL and the curl

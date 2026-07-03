@@ -149,6 +149,7 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
 6. Implements the issue — touching out-of-scope files only with a `scope-justification:` block in the PR body
 7. **Declares glossary/ADR impact** — per the `docs/agents/domain.md` WRITE contract, add a `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved or decision made (a `## Glossary delta` in the issue or referenced ADR names it). Do **not** edit `CONTEXT.md` in this code PR — the delta lands in a **separate `ubiquitous-language`-labelled PR**.
 8. Runs `npm test` + `npm run typecheck` + `npm run build`
+8a. **MANDATORY — deposits the grounding test-count telemetry file (issue #2754).** Immediately after `npm test` passes, run the "Grounding test-count deposit" recipe in the "Reflection injection — live API" section below — it writes `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-grounding-tests-<task_id>` (a small JSON object of the post-implementation test counts) so `reap.py` can stamp the `testsAfter` cycle metric. Before this deposit, reap had no test count to forward and `testsAfter` recorded `0` on every cycle (the coverage-trend observability regression). Best-effort on I/O error (never blocks work) but the step itself is mandatory: skipping it is the always-0 `testsAfter` failure mode this fixes.
 9. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
 9a. **Reconciles the diff against the design-concept artifact BEFORE opening the PR (issue #2537 — do-not-open-on-unmet-invariant).** If a design-concept artifact was fetched at planning time (step 4 region / "Design-concept artifact — live API" below), run the "Design-concept reconciliation gate" recipe in that section: for EACH invariant, cite the diff hunk that satisfies it; for each MUST-NOT invariant, confirm the diff does not introduce the forbidden behavior. If ANY invariant cannot be satisfied, do **NOT** open the PR — emit a `## Friction Report` naming the unmet invariant and stop. This closes the #2504 gap where the artifact was fetched but Invariant 7 ("MUST NOT fall back to a full scan") was violated anyway — the failure was verification-side, not authoring-side. When no artifact was fetched (404 at planning time), this gate is a clean no-op.
 10. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API. **Acceptance criteria MUST be written as checkboxes with a mechanical "verified by:" assertion** — each criterion must name the exact command or observable output a reviewer can check without reading code. Format:
@@ -243,6 +244,19 @@ authoritative and always present; only fall back to the env vars if the cwd is
 somehow not an `agent-<HASH>` worktree (e.g. a `/dev/shm` layout).
 
 @include _fragments/reflection-telemetry-deposit.md
+
+**Grounding test-count deposit (issue #2754 — MANDATORY, at child-step 8a,
+right after `npm test` passes):** the orchestrator service does NOT run the
+suite, so the ONLY actor that knows a cycle's test count is this dispatch. reap
+is the sole cycle-record writer but had no test count to forward, so `testsAfter`
+recorded `0` on every cycle (a coverage-trend observability regression). Deposit
+the post-implementation test counts to a task-scoped JSON file keyed on the SAME
+harness task_id as the reflection deposit above; reap reads it via
+`_read_grounding_tests` and forwards it on its single `cycle-record` write. Do
+**NOT** POST `cycle-record` yourself (reap is the sole writer). Best-effort on
+I/O error, but always run the recipe.
+
+@include _fragments/grounding-tests-deposit.md
 
 **Reading the deposit-presence diagnostic at reap time (issue #2020).** A
 `reflectionMatchSource` of `'none'` is ambiguous on its own — it can be an
