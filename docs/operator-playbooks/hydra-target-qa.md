@@ -39,7 +39,8 @@ it touches provider integrations, execution, staking, or bet-math
 | **money-critical** (providers / execution / staking / bet-math) | **Standards + Spec + a 2-reviewer adversarial fold** — all must pass |
 
 - **Standards** (every PR) — conventions, tests-present-and-non-empty, no
-  silent catch, no unjustified touch of money-critical paths.
+  silent catch, no unjustified touch of money-critical paths, and — on any
+  UI-touching PR — **render-robustness** (see below).
 - **Spec** (money-critical only) — diff vs. the design-concept artifact for the
   work item (the lightweight Target artifact from #1056; absent → treat the
   Spec axis as a hard finding so the heavier gate never passes by omission).
@@ -51,6 +52,36 @@ it touches provider integrations, execution, staking, or bet-math
 
 The pure folding rule is `classifyTargetQaVerdict()` in
 `scripts/target/target-qa-verdict.ts` — never re-derive the routing by hand.
+
+## Render-robustness — pages degrade on data gaps, never throw
+
+Every **UI-touching** PR (page/route components, server components, and their
+data loaders) must clear the Target's **degrade-never-throw** convention on the
+**Standards** axis: a route must **never `500` because of a data state**. When
+data is missing, stale, or carries an **unknown enum value**, the page must
+render a degraded state — a callout, an empty-state row, or a "data unavailable"
+panel — instead of throwing. This is the Target sibling of the Orchestrator's
+"never throw from merge/grounding/verification" convention.
+
+- **Recurrence class this catches** — new venues, sports, providers, and other
+  enum values **WILL** appear in production data before the UI knows them. A
+  loader that trusts the data shape (unchecked enum switch, `.find(...)!`,
+  non-null assertion on an optional row) is a latent `500` the first time an
+  unexpected value lands. Treat any un-guarded assumption about data
+  presence/shape on a render path as a **hard finding**.
+- **Exemplar fixes** — Target backlog **item-737** (a missing reconciliation
+  checkpoint that `500`ed the route) and **item-738** (an unknown sport key that
+  `500`ed the route). Four live production routes `500`ed this way (epic #2732);
+  the fixes render a degraded panel instead of throwing.
+- **What Standards checks on a UI PR** — for each touched render path, confirm
+  the loader/component tolerates: a missing row, an empty result set, a `null`
+  or stale value, and an **unrecognized enum/discriminant** — each producing a
+  visible degraded state, not an exception. A UI PR that adds or edits a render
+  path without this tolerance is a hard finding (FAIL → bounce-to-reframe).
+
+The authoritative statement of this rule lives in the Target repo's
+`CLAUDE.md` / `web/AGENTS.md`; this checklist is how QA enforces it on every
+UI-touching PR.
 
 ## Routing the outcome — bounce, never escalate
 
@@ -133,6 +164,10 @@ multi-check rollup).
   reviewer verdicts; it does not re-implement the AND/short-circuit logic.
 - **FAIL bounces to the reframe queue. Never escalates.** The only operator
   surface is the existing `hydra-target-review` drain of the reframe lane.
+- **Render-robustness is a Standards-axis requirement on every UI-touching PR**
+  — a render path that can `500` on a missing/stale/unknown-enum data state is a
+  hard finding. New venues/sports/enum values arrive in production before the UI
+  knows them; the page must degrade, never throw.
 - **No deep-QA remediation loop, no Verifier-Core checklist, no Outcome
   Holdback** — those are Orchestrator self-modification-containment gates the
   Target structurally does not need (epic #1052 rationale).
@@ -148,3 +183,6 @@ multi-check rollup).
 - `scripts/ci/qa-verdict.ts` — the Orchestrator's analogous one-pass verdict
   classifier (the shape this skill mirrors, minus the tier ladder).
 - `docs/operator-playbooks/hydra-target-review.md` — drains the reframe queue.
+- Issue #2734 / epic #2732 — the render-robustness (degrade-never-throw)
+  convention and the four live-`500` routes that motivated it; exemplar fixes
+  item-737 (missing reconciliation checkpoint) and item-738 (unknown sport key).
