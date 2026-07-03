@@ -212,6 +212,159 @@ Complexity:
 - **standard** (3–5 files, 4–8 criteria): full ceremony.
 - **complex** (>5 files): split.
 
+### 3.1. Grounding preflight — ledger intersection (issue #2727)
+
+**Run this BEFORE finalising the plan and before Step 3.5.** A plan built on a
+dead or awaiting-wiring module wastes the cycle and rebuilds what already
+exists. This step catches that in O(seconds) — before any code is written.
+
+**Two ledger reads, two distinct responses:**
+
+- **wire-or-retire** rows — a formal decision is pending; do NOT build on these
+  modules. Any hit is a hard STOP-AND-REFRAME.
+- **awaiting-wiring** rows — the module exists and is waiting for a runtime
+  hook; the right move is usually to wire the existing module, not write a new
+  one. Any overlap with `scopeBoundary.in` is a soft STOP-AND-REFRAME with a
+  wiring-steer verdict.
+- **protected-provider** rows — leave alone; protected-provider modules have
+  their own governance (CLAUDE.md rule 1) and are not a preflight concern.
+
+The ledger lives in the Target repo at `~/hydra-betting/docs/agents/wiring-status.md`
+(read-only, main checkout copy is fine for planning — no write needed).
+
+```bash
+# --- 1. Read the ledger rows ---
+WIRING_STATUS_PATH="$HOME/hydra-betting/docs/agents/wiring-status.md"
+
+# Extract wire-or-retire paths (table column 1, status column 2)
+WOR_ROWS=$(grep '| wire-or-retire |' "$WIRING_STATUS_PATH" \
+  | sed 's/.*`\(web\/[^`]*\)`.*/\1/')
+
+# Extract awaiting-wiring paths
+AW_ROWS=$(grep '| awaiting-wiring |' "$WIRING_STATUS_PATH" \
+  | sed 's/.*`\(web\/[^`]*\)`.*/\1/')
+
+# --- 2. Intersect against the plan's scopeBoundary.in ---
+# SCOPE_IN is the newline-separated list of files/prefixes from Step 3's plan.
+# Use a simple substring match: a scope entry S "hits" a ledger row L when
+# S is a prefix of L or L is a prefix of S (covers both file and directory
+# scope entries). This is intentionally broad — false positives stop the
+# cycle (cheap); false negatives let bad work through (expensive).
+
+HIT_WOR=""
+for row in $WOR_ROWS; do
+  while IFS= read -r scope_entry; do
+    # Strip leading/trailing whitespace and backticks from scope entry
+    clean_entry=$(printf '%s' "$scope_entry" | tr -d '`' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+    [ -z "$clean_entry" ] && continue
+    if printf '%s' "$row" | grep -qF "$clean_entry" || \
+       printf '%s' "$clean_entry" | grep -qF "$row"; then
+      HIT_WOR="$HIT_WOR  $row (hits scope: $clean_entry)\n"
+    fi
+  done <<EOF
+$SCOPE_IN
+EOF
+done
+
+HIT_AW=""
+for row in $AW_ROWS; do
+  while IFS= read -r scope_entry; do
+    clean_entry=$(printf '%s' "$scope_entry" | tr -d '`' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+    [ -z "$clean_entry" ] && continue
+    if printf '%s' "$row" | grep -qF "$clean_entry" || \
+       printf '%s' "$clean_entry" | grep -qF "$row"; then
+      HIT_AW="$HIT_AW  $row (hits scope: $clean_entry)\n"
+    fi
+  done <<EOF
+$SCOPE_IN
+EOF
+done
+
+# --- 3. Decision gate ---
+if [ -n "$HIT_WOR" ]; then
+  # HARD STOP-AND-REFRAME: wire-or-retire module in scope.
+  echo "GROUNDING PREFLIGHT STOP: wire-or-retire ledger hit(s):"
+  printf '%b\n' "$HIT_WOR"
+  echo "Action: STOP-AND-REFRAME — a wire-or-retire decision is pending for these modules."
+  echo "Do NOT build. Write the reframe verdict, move the backlog lane, emit the event."
+
+  # Move the item lane to match the verdict (lane-desync lesson):
+  # requeue into backlog with a reframe note so the next pick reads the context.
+  [ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" backlog 2>/dev/null || true
+
+  # Emit reframe-save event — this is the token-value receipt for the epic.
+  REFRAME_PAYLOAD=$(jq -n \
+    --arg anchorRef "${ANCHOR_REF:-unknown}" \
+    --arg reason "wire-or-retire ledger hit — grounding preflight stopped the build" \
+    --arg hits "$(printf '%b' "$HIT_WOR" | tr '\n' ';')" \
+    '{type: "target:reframe-save", payload: {anchorRef: $anchorRef, reason: $reason, hits: $hits}}')
+  hydra raw POST /events/publish "$REFRAME_PAYLOAD" 2>/dev/null || \
+    echo "warn: event publish failed (non-fatal)"
+
+  # Stop. The lane is updated; the decision loop will re-examine on the next tick.
+  exit 0
+
+elif [ -n "$HIT_AW" ]; then
+  # SOFT STOP-AND-REFRAME: awaiting-wiring module in scope.
+  echo "GROUNDING PREFLIGHT STOP: awaiting-wiring ledger hit(s):"
+  printf '%b\n' "$HIT_AW"
+  echo "Action: STOP-AND-REFRAME — these modules are awaiting-wiring (built but not yet wired)."
+  echo "The correct move is to wire the existing module, NOT rebuild it."
+  echo "Reframe the plan toward a wiring task (add the runtime import / route / API call)."
+
+  [ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" backlog 2>/dev/null || true
+
+  REFRAME_PAYLOAD=$(jq -n \
+    --arg anchorRef "${ANCHOR_REF:-unknown}" \
+    --arg reason "awaiting-wiring ledger hit — grounding preflight stopped rebuild, steering toward wiring" \
+    --arg hits "$(printf '%b' "$HIT_AW" | tr '\n' ';')" \
+    '{type: "target:reframe-save", payload: {anchorRef: $anchorRef, reason: $reason, hits: $hits}}')
+  hydra raw POST /events/publish "$REFRAME_PAYLOAD" 2>/dev/null || \
+    echo "warn: event publish failed (non-fatal)"
+
+  exit 0
+
+else
+  echo "Grounding preflight: no ledger hits — scope is clean, proceeding to Step 3.5."
+fi
+```
+
+**What `SCOPE_IN` should contain:** the newline-separated list of
+`web/`-relative file paths from the Step 3 plan boundary
+(`scopeBoundary.in`). Populate it from the plan before running the snippet
+above. Example:
+
+```bash
+SCOPE_IN="web/src/lib/execution/directional-clv-sizing.ts
+web/src/lib/execution/directional-disagreement-signal.ts"
+```
+
+**Failure modes:**
+- Ledger file missing (`wiring-status.md` not found) → `grep` exits non-zero
+  but the guard emits an empty `HIT_WOR`/`HIT_AW` — the preflight passes
+  silently. Log a friction cue (`grounding-preflight-ledger-missing`) so the
+  operator knows the file needs to exist. **Never fail the build on a missing
+  ledger — it is a read-only advisory check.**
+- `jq` unavailable → the event publish fails; log and continue (non-fatal).
+- `hydra backlog move` fails → log and continue (non-fatal; the lane remains
+  wherever it was — a manual fix is preferred over a blocked build).
+
+```bash
+# Ledger-missing guard (add just before the WOR_ROWS extraction):
+if [ ! -f "$WIRING_STATUS_PATH" ]; then
+  echo "warn: wiring-status.md not found at $WIRING_STATUS_PATH — grounding preflight skipped (cue: grounding-preflight-ledger-missing)"
+  # POST friction cue so the operator knows the ledger is missing.
+  hydra raw POST /memory/subagent-friction "{
+    \"skill\":\"hydra-target-build\",
+    \"cue\":\"grounding-preflight-ledger-missing\",
+    \"workaround\":\"skipped ledger intersection — wiring-status.md absent\",
+    \"context\":\"$WIRING_STATUS_PATH\",
+    \"cycleId\":\"${CYCLE_ID:-unknown}\"
+  }" 2>/dev/null || true
+  # Do not exit — proceed to Step 3.5 as if the preflight passed.
+fi
+```
+
 ### 3.5. Self-declare scope (issue #396)
 
 Because hydra-target-build picks its own task — there is no GitHub issue with a pre-existing scope contract — the child MUST write its own scope contract before opening the PR. This is the subagent-side replacement for the deleted `reconcilePlanVsActual()` step (control-loop step 6.5, removed in PR #400).
