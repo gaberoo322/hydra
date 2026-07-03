@@ -210,6 +210,97 @@ If operator gave a task, use it. Otherwise priority order:
 
 Cross-reference drift check. Skip if recently merged.
 
+#### 2.1. Shipped-anchor preflight (issue #2771) — reject a work-queue head already merged to origin/main
+
+The `work-queue-hygiene` reconciler (`src/backlog/work-queue-hygiene.ts`, cause
+`shipped-subject`, issue #2482) already evicts a queue entry whose subject is
+covered by a recently-merged PR/commit — but it runs **hourly / on
+`POST /api/queue/reconcile`**. A build that picks the work-queue head **between
+reconciles** still lands on a stale, already-shipped anchor (the exact
+`target-build-anchor-already-shipped-on-main` hits: item-666 / item-704 /
+item-718). This preflight closes that between-reconcile window at anchor-select
+time. Run it ONLY when the anchor came from the work queue (priority 1); a
+failing-test / typecheck / backlog / priorities anchor is not a work-queue entry
+and skips this check.
+
+**Invariants (do NOT weaken these):**
+- **Positive-evidence-only removal.** The *absence* of a matching `#NNN` /
+  `item-NNN` token or an `origin/main` commit is NEVER proof the anchor shipped
+  — that is the documented 92%-false-positive polarity (#2031 / #2110 / #2482).
+  Removal requires a POSITIVE subject-coverage hit: the anchor subject's
+  significant words (length > 3, ≥ 4 of them) must be ≥ 70% contained in a
+  concrete recent `origin/main` commit blob (the same asymmetric-containment
+  polarity as `subjectCoveredBy` in `src/backlog/token-algebra.ts`).
+- **Fail-open on uncertainty.** Any unreachable `git` / empty log / short-title
+  anchor (< 4 significant words) KEEPS the anchor — the preflight degrades to a
+  no-op, mirroring `reconcileWorkQueue` and `subjectCoveredBy`.
+- **Friction cue still emitted post-eviction.** On a positive shipped-on-main
+  hit, still record the `target-build-anchor-already-shipped-on-main` friction
+  cue (pattern-memory bookkeeping) even though the entry is LREM-evicted — this
+  is how the learning system keeps the recurrence signal alive.
+- **Worktree isolation preserved.** Read `origin/main` from **inside
+  `$TARGET_WT/web`** (the worktree is already branched off `origin/main` in Step
+  0.6) via `git log`. NEVER `git checkout` / `git pull` in the `~/hydra-betting`
+  main tree.
+
+```bash
+# Only meaningful for a WORK-QUEUE anchor. Set ANCHOR_FROM_WORK_QUEUE=1 when the
+# task came from priority 1, and ANCHOR_SUBJECT to the raw work-queue entry's
+# `reference` text (the descriptive title). WQ_RAW is the exact JSON element you
+# LRANGE'd at priority 1 (needed for a byte-exact LREM).
+if [ "${ANCHOR_FROM_WORK_QUEUE:-0}" = "1" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
+  # Significant-word guard: < 4 words of length > 3 → never subject-match
+  # (short/generic titles like "fix tests" would spuriously hit — the #2482
+  # SUBJECT_MATCH_MIN_WORDS guard, mirrored here).
+  SIG_WORDS=$(printf '%s' "$ANCHOR_SUBJECT" | tr 'A-Z' 'a-z' \
+    | tr -cs 'a-z0-9' '\n' | awk 'length>3' | sort -u | sed '/^$/d')
+  SIG_COUNT=$(printf '%s\n' "$SIG_WORDS" | sed '/^$/d' | wc -l | tr -d ' ')
+
+  SHIPPED_ON_MAIN=0
+  if [ "$SIG_COUNT" -ge 4 ]; then
+    # Recent origin/main commit blobs, read from INSIDE the worktree (never the
+    # main checkout). `git log` failing (detached/empty) → empty COMMIT_WORDS →
+    # zero coverage → fail-open keep.
+    COMMIT_WORDS=$(git -C "$TARGET_WT/web" log origin/main --format='%s%n%b' -n 100 2>/dev/null \
+      | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '\n' | sort -u | sed '/^$/d')
+    if [ -n "$COMMIT_WORDS" ]; then
+      # Asymmetric containment: fraction of the anchor's significant words present
+      # in the commit blob. score = |anchorWords ∩ commitWords| / |anchorWords|.
+      OVERLAP=$(comm -12 \
+        <(printf '%s\n' "$SIG_WORDS") \
+        <(printf '%s\n' "$COMMIT_WORDS") | wc -l | tr -d ' ')
+      # ≥ 0.70 coverage → positive shipped-on-main evidence (integer math: 100*overlap >= 70*count).
+      if [ $((100 * OVERLAP)) -ge $((70 * SIG_COUNT)) ]; then
+        SHIPPED_ON_MAIN=1
+      fi
+    fi
+  fi
+
+  if [ "$SHIPPED_ON_MAIN" = "1" ]; then
+    echo "shipped-on-main: anchor subject covered by recent origin/main — evicting + skipping"
+    # 1. LREM the stale entry (byte-exact — the raw JSON from the LRANGE above).
+    docker exec hydra-redis-1 redis-cli LREM hydra:anchors:work-queue 1 "$WQ_RAW"
+    # 2. Emit the friction cue (pattern-memory bookkeeping — MUST still fire).
+    hydra raw POST /memory/subagent-friction "{
+      \"skill\":\"hydra-target-build\",
+      \"cue\":\"target-build-anchor-already-shipped-on-main\",
+      \"workaround\":\"LREM stale work-queue head; selected next candidate\",
+      \"context\":\"origin/main subject-coverage hit at anchor-select preflight\",
+      \"cycleId\":\"$CYCLE_ID\"
+    }"
+    # 3. Fall through to the next candidate (re-run the priority order from the
+    #    top; the evicted entry is gone from the queue, so the next LRANGE head
+    #    is a fresh candidate).
+    echo "re-select the next candidate before proceeding to Step 3"
+  fi
+fi
+```
+
+Positive coverage evicts + re-selects; anything short of it (short title,
+unreachable `git`, empty log, < 70% coverage) keeps the anchor and proceeds. The
+reconciler still owns the durable hourly sweep — this is only the
+between-reconcile guard.
+
 ### 3. Plan (planner role)
 
 Read `~/hydra/config/agents/planner.md` and `~/hydra/config/feedback/to-planner.md`. Read relevant source. Design ONE bounded task:
