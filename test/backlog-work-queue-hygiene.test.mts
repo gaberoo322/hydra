@@ -331,3 +331,71 @@ describe("reconcileWorkQueue — shipped-subject reap (#2482)", () => {
     assert.equal(feedCalls, 1, "subject matching is pure in-memory after a single fetch");
   });
 });
+
+describe("reconcileWorkQueue — title-only shipped-subject via `reason` field (#2771)", () => {
+  // A shipped anchor whose descriptive subject lives in `reason`, while
+  // `reference` is a bare `item-NNN` with too few significant words to
+  // subject-match on its own. Before #2771 the reconciler only matched
+  // `reference`, so this entry resurfaced despite being covered on main.
+  const reasonOnlyRaw = JSON.stringify({
+    reference: "item-666",
+    reason: "reconcile work-queue head against shipped anchors",
+    queuedAt: isoAgo(0),
+  });
+  const mergedBlob: MergedRef = {
+    ref: "pr-2483",
+    blob: "feat(hygiene): reconcile the work queue head and drop already-shipped anchors that resurfaced",
+  };
+
+  function makeDeps(over: any = {}) {
+    const removed: string[] = [];
+    const deps = {
+      getWorkQueueItems: async () => [reasonOnlyRaw],
+      removeWorkQueueItem: async (raw: string) => { removed.push(raw); return 1; },
+      loadMergedAnchorRefs: async () => new Set<string>(),
+      getIssueState: async () => "open" as const,
+      fetchMergedRefs: async (): Promise<MergedRef[]> => [mergedBlob],
+      ...over,
+    };
+    return { deps, removed };
+  }
+
+  test("removes an entry whose `reason` subject is covered even when `reference` alone is too short", async () => {
+    const { deps, removed } = makeDeps();
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 1);
+    assert.deepEqual(removed, [reasonOnlyRaw]);
+    assert.deepEqual(result.details.map((d) => d.cause), ["shipped-subject"]);
+  });
+
+  test("a short/generic `reason` (<4 significant words) cannot spuriously evict live work", async () => {
+    const shortReasonRaw = JSON.stringify({
+      reference: "item-777",
+      reason: "fix tests",
+      queuedAt: isoAgo(0),
+    });
+    const { deps, removed } = makeDeps({
+      getWorkQueueItems: async () => [shortReasonRaw],
+      fetchMergedRefs: async (): Promise<MergedRef[]> => [
+        { ref: "pr-9", blob: "fix flaky tests across the suite to keep things green" },
+      ],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 0, "the 4-word guard still applies to the reason field");
+    assert.deepEqual(removed, []);
+  });
+
+  test("an unrelated `reason` does not subject-match", async () => {
+    const unrelatedReasonRaw = JSON.stringify({
+      reference: "item-888",
+      reason: "forecast directional execution graduated capital lever",
+      queuedAt: isoAgo(0),
+    });
+    const { deps, removed } = makeDeps({
+      getWorkQueueItems: async () => [unrelatedReasonRaw],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 0);
+    assert.deepEqual(removed, []);
+  });
+});

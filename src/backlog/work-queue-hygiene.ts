@@ -32,6 +32,10 @@
 // scan misses it and the stale work-queue entry resurfaces at tier 0.70,
 // burning a dev_target dispatch on no-op verify+LREM. This reuses the #2110
 // asymmetric-containment matcher (`subjectCoveredBy`, `merged-refs.ts`) against
+// BOTH the entry's `reference` AND its `reason` field (issue #2771 — a
+// title-only shipped anchor sometimes carries its descriptive subject in
+// `reason` while `reference` is a bare `item-NNN`, which alone has too few
+// significant words to subject-match), each matched independently against
 // the merged PR/commit blob feed (`fetchMergedTargetPrRefs` +
 // `fetchTargetMergeCommitRefs`, the merge-commit feed covering the
 // bare-commit-no-PR-token case). CRITICAL polarity (the #2031 / #2110 lesson):
@@ -299,13 +303,29 @@ export async function reconcileWorkQueue(
 
     // Shipped-subject (issue #2482): only when no earlier cause fired — the
     // entry is not a terminal marker, not a #882 token hit, and not all-closed.
-    // Removal requires POSITIVE evidence: the entry's title must be COVERED
+    // Removal requires POSITIVE evidence: the entry's subject must be COVERED
     // (>=0.70 asymmetric containment, >=4 significant words) by a CONCRETE
     // merged PR/commit blob. Absence of a token is NOT evidence (the #2031 /
     // #2110 92%-false-positive polarity); an empty `mergedBlobs` makes this a
     // no-op. Mirrors the `escalateStaleItems` usage in `stale-escalation.ts`.
+    //
+    // Title-only tightening (issue #2771): a shipped anchor sometimes carries
+    // its descriptive title in the `reason` field rather than `reference` (e.g.
+    // a bare `item-NNN` reference paired with a prose `reason`). The bare `ref`
+    // then has < 4 significant words and never subject-matches, so the entry
+    // resurfaces at tier 0.70 despite being covered on main. We therefore try
+    // subject-coverage against BOTH the primary `ref` AND the `reason` field.
+    // This stays positive-evidence-only: each candidate subject is matched
+    // independently against a concrete merged blob via `subjectCoveredBy`, which
+    // applies the same >=4-word guard, so a short/generic `reason` cannot
+    // spuriously evict live work.
     if (!cause && mergedBlobs.length > 0) {
-      const hit = mergedBlobs.find((r) => subjectCoveredBy(ref, r.blob));
+      const subjects = [ref];
+      const reason = typeof item.reason === "string" ? item.reason : "";
+      if (reason && reason !== ref) subjects.push(reason);
+      const hit = mergedBlobs.find((r) =>
+        subjects.some((subject) => subjectCoveredBy(subject, r.blob)),
+      );
       if (hit) cause = "shipped-subject";
     }
 
