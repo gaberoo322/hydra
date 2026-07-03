@@ -22,6 +22,16 @@ On `/loop`, run `/compact` (Claude) / restart context (Codex) at start.
 curl -s http://localhost:3333/api/health 2>/dev/null || echo "UNREACHABLE"
 systemctl --user status hydra-betting-web.service 2>&1 | head -5
 
+# Production route crawl (issue #2735) — curl every nav-registry route against
+# the LIVE service and report per-route status. This is the ONLY tier that
+# catches data-drift 500s: the four recent operator-visible outages
+# (item-737/738 and siblings) rendered fine in CI but crashed against real
+# production data. PR-time CI never sees the production database, so a runtime
+# curl crawl is the only place this class of failure surfaces. Curl-tier only —
+# no browser (browser smoke is the CI tier, #2733). Dry-run here just prints the
+# per-route table; --apply (step 3) files the deduped, capped target-backlog items.
+npx tsx ~/hydra/scripts/ci/target-route-crawl.ts
+
 # Recent API errors
 journalctl --user -u hydra-betting-web.service --since "30 min ago" --no-pager 2>&1 \
   | grep -iE "error|fail|reject|crash|500|404|timeout" | grep -v "DeprecationWarning" | tail -15
@@ -70,6 +80,7 @@ docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
 
 **Service:** unreachable / restart loop / build failures (>5 min activating) / high mem (>2GB)
 **API errors:** 500s in routes / timeout patterns (external API degradation) / auth failures
+**Route crawl:** any non-200 in the per-route table is a data-drift page crash — filed deterministically by the crawl runner (see step 3), one deduped item per route
 **DB:** connections approaching max / no recent ingest (timer failure) / size growing rapidly
 **Execution:** stuck arb runs (non-terminal >1h) / high venue-order failure rate / settlement orphans
 **Timers:** any inactive / last trigger >2× expected interval
@@ -77,7 +88,19 @@ docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
 
 ### 3. Create issues
 
-Only if ALL true:
+**Route crawl (deterministic, issue #2735).** For the production route crawl,
+do NOT hand-roll the issue creation — run the emitter, which owns the dedup,
+the per-run cap, and the error-digest body (the #1449 "invoke the runner, not a
+loop" lesson):
+
+```bash
+# files at most ROUTE_CRAWL_EMIT_CAP deduped target-backlog issues, one per
+# non-200 route; a healthy crawl files nothing; a downed service files nothing
+# (that's the health check's job, not per-route drift)
+npx tsx ~/hydra/scripts/ci/target-route-crawl.ts --apply
+```
+
+**Health / data / execution findings (judgment).** Only if ALL true:
 1. Quantitative — backed by number/count/measurement
 2. Persistent — not a one-time blip
 3. Actionable — concrete fix
