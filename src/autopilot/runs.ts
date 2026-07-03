@@ -574,6 +574,19 @@ export async function recordCycle(
       // 0 records a measured zero-file cycle. This is what makes the metrics
       // hash carry filesChanged instead of staying null on 95.6% of cycles.
       filesChanged: filesChangedCount(body.filesChanged),
+      // Issue #2754: the grounding test-suite counts the code-writing dispatch
+      // captured (total + passing, before + after). reap.py reads them from the
+      // dispatch's grounding deposit and forwards them here. `filesChangedCount`
+      // is reused as the non-negative-integer-or-undefined coercion: an absent
+      // field is stripped by the loop below and stays absent (truthful
+      // "unknown/never-written"), an explicit 0 records a measured zero-test
+      // cycle. This is what stops `testsAfter` recording 0 on every cycle (the
+      // coverage-trend observability regression the 2026-07-02 arch review
+      // flagged). NUMERIC on the read side (aggregate.ts / trend.ts).
+      testsBefore: filesChangedCount(body.testsBefore),
+      testsAfter: filesChangedCount(body.testsAfter),
+      testsPassingBefore: filesChangedCount(body.testsPassingBefore),
+      testsPassingAfter: filesChangedCount(body.testsPassingAfter),
       abandonReason: body.abandonReason,
       regressionIntroduced: body.regressionIntroduced === true ? true : undefined,
       autopilotTurnId: body.autopilotTurnId,

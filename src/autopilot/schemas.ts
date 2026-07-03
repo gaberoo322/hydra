@@ -59,6 +59,23 @@ export const CycleRecordBodySchema = z
     // loose-script-payload tolerance as the other count fields above; a genuine
     // zero-file cycle records 0 truthfully (distinguishable from never-written).
     filesChanged: z.union([z.number(), z.string()]).optional(),
+    // Issue #2754: the test-suite counts captured from the dispatch's grounding
+    // pass — `testsBefore`/`testsAfter` are the TOTAL test count (parseTestCounts'
+    // `total`) at grounding-start and cycle-completion, `testsPassingBefore`/
+    // `testsPassingAfter` the PASSING subset (`passed`). Plumbed exactly like
+    // `reflectionSources`/`filesChanged`: the code-writing dispatch deposits its
+    // grounding numbers to a task-scoped file, reap.py reads it and forwards it
+    // here, so `testsAfter` stops recording `0` on every cycle (the coverage-trend
+    // observability regression flagged by the 2026-07-02 architecture review).
+    // OPTIONAL + number|string for the same loose-script-payload tolerance as the
+    // other count fields; absent → stripped by recordCycle → the field stays
+    // absent (truthful "unknown/never-written"), an explicit 0 records a measured
+    // zero-test cycle. NUMERIC on the read side (NUMERIC_FIELD_NAMES in
+    // src/metrics/record.ts / aggregate.ts).
+    testsBefore: z.union([z.number(), z.string()]).optional(),
+    testsAfter: z.union([z.number(), z.string()]).optional(),
+    testsPassingBefore: z.union([z.number(), z.string()]).optional(),
+    testsPassingAfter: z.union([z.number(), z.string()]).optional(),
     // Issue #1136 (Slice 2 of #1119): the comma-separated reflection bucket
     // tokens (`per-anchor` / `by-file` / ...) the code-writing dispatch was
     // SERVED at planning time by `GET /api/reflections`, reported back so

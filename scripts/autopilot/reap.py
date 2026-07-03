@@ -363,6 +363,66 @@ def _read_anchor_deposit(task_id: str) -> str | None:
         return None
 
 
+def _read_grounding_tests(task_id: str) -> dict[str, int]:
+    """Read the grounding test-count deposit for `task_id` (issue #2754).
+
+    `testsAfter` was recorded as 0 on every cycle because reap — the SOLE
+    cycle-record writer — never carried a test count: the orchestrator service
+    doesn't run the suite, and the numbers exist only inside the code-writing
+    dispatch's grounding pass. So, exactly like the reflection-source deposit
+    (`_read_reflection_sources`), the dispatch deposits its parsed grounding
+    counts to a task-scoped JSON file and reap reads them here to forward on the
+    single cycle-record write.
+
+    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-grounding-tests-<task_id>
+    (same dir + task_id keying as the reflection deposit, so they travel together).
+    Expected JSON shape (any subset; each key optional):
+        {"testsBefore": N, "testsAfter": N,
+         "testsPassingBefore": N, "testsPassingAfter": N}
+
+    Returns a dict of the non-negative-integer values it could read. Best-effort
+    and fully non-fatal: a missing file (the common case for non-grounding
+    classes), an empty/garbage file, or any read/parse error all yield {} so the
+    cycle-record body simply omits the fields (truthful "unknown/never-written").
+    Never blocks the reap.
+    """
+    if not task_id:
+        return {}
+    try:
+        path = REFL_SOURCES_DIR / f"hydra-grounding-tests-{task_id}"
+        if not path.exists():
+            return {}
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return {}
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return {}
+        out: dict[str, int] = {}
+        for key in (
+            "testsBefore",
+            "testsAfter",
+            "testsPassingBefore",
+            "testsPassingAfter",
+        ):
+            val = parsed.get(key)
+            if isinstance(val, bool):
+                continue  # bool is an int subclass — reject it explicitly
+            if isinstance(val, int) and val >= 0:
+                out[key] = val
+            elif isinstance(val, (str, float)):
+                try:
+                    n = int(val)
+                    if n >= 0:
+                        out[key] = n
+                except (TypeError, ValueError):
+                    pass
+        return out
+    except (OSError, ValueError, TypeError) as exc:
+        _append_log(f"grounding_tests_read_skipped task_id={task_id} err={exc}")
+        return {}
+
+
 def _slot_started_epoch(slot: dict | None) -> int | None:
     """Best-effort dispatch-start epoch (seconds) for an occupied pipeline slot.
 
@@ -436,6 +496,7 @@ def _fire_cycle_record(
     duration_ms: int = 0,
     task_title: str = "",
     anchor_ref: str = "",
+    grounding_tests: dict[str, int] | None = None,
 ) -> None:
     """Best-effort POST to /api/autopilot/cycle-record (issue #430).
 
@@ -460,6 +521,15 @@ def _fire_cycle_record(
     non-zero for target/betting cycles too — not just orchestrator cycles that
     happened to get a model-fired auto-merge follow-up. 0 (the default) keeps
     the prior truthful "unknown" behaviour when no start stamp is available.
+
+    `grounding_tests` (issue #2754): the code-writing dispatch's grounding
+    test-suite counts (`testsBefore`/`testsAfter`/`testsPassingBefore`/
+    `testsPassingAfter`), read from a task-scoped deposit by
+    `_read_grounding_tests`. Forwarded as the 10th positional `cycle-record` arg
+    — a compact JSON object (or "" when the deposit was absent) — so `testsAfter`
+    stops recording 0 on every cycle. dispatch.sh merges the parsed integers into
+    the POST body; an empty/absent value omits all four fields (truthful
+    "unknown"), an explicit 0 records a measured zero-test cycle.
 
     `task_title` / `anchor_ref` (issue #2012): the per-cycle anchor reference
     recovered from the slot before it was nulled (e.g. "issue-2012"). reap is
@@ -490,6 +560,8 @@ def _fire_cycle_record(
                 anchor_ref or "",  # issue #2012: per-cycle anchor reference
                 str(duration_ms or 0),  # issue #1591: wall-clock cycle span (ms)
                 reflection_sources or "",  # issue #1136: served reflection buckets
+                "",  # files_changed — not known at reap time (merged-path enrich)
+                json.dumps(grounding_tests) if grounding_tests else "",  # issue #2754
             ],
             check=False,
             capture_output=True,
@@ -942,6 +1014,13 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # POST body and its truthful-'none' behaviour are untouched.
     reflection_sources, reflection_presence = _read_reflection_sources(task_id)
 
+    # Issue #2754: read the dispatch's grounding test-count deposit so the
+    # cycle-record write carries `testsAfter` (recorded as 0 on every cycle
+    # before this, because reap never had a test count to forward). Absent
+    # deposit (non-grounding classes, or the recipe not run) → {} → the four
+    # tests fields are omitted from the POST body (truthful "unknown").
+    grounding_tests = _read_grounding_tests(task_id)
+
     # Issue #2450: warn when a code-writing class completes with no deposit file
     # at all — deposit-absent on a REFLECTION_DEPOSIT_SKILLS slot means the
     # deposit recipe either did not run or deposited under a miskeyed path. This
@@ -995,6 +1074,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         duration_ms,
         task_title=anchor_ref or "",
         anchor_ref=anchor_ref or "",
+        grounding_tests=grounding_tests,
     )
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
