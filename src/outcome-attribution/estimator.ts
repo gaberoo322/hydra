@@ -76,21 +76,21 @@ import type { AttributionObservation } from "../redis/attribution.ts";
  * guarantee invertibility without materially shrinking well-identified effects.
  * Env-overridable.
  */
-export const RIDGE_LAMBDA = numFromEnv("HYDRA_ATTRIBUTION_RIDGE_LAMBDA", 0.1);
+const RIDGE_LAMBDA = numFromEnv("HYDRA_ATTRIBUTION_RIDGE_LAMBDA", 0.1);
 
 /**
  * Below-noise-floor multiplier k. A class effect with `|β_c| ≤ k · σ0` is marked
  * below-noise-floor — within `k` standard deviations of the empty-window
  * exogenous drift, so indistinguishable from noise. Env-overridable.
  */
-export const NOISE_FLOOR_K = numFromEnv("HYDRA_ATTRIBUTION_NOISE_FLOOR_K", 2);
+const NOISE_FLOOR_K = numFromEnv("HYDRA_ATTRIBUTION_NOISE_FLOOR_K", 2);
 
 /**
  * Variance floor for the low-identifiability (near-constant column) flag. A
  * class whose count column has (population) variance `≤` this is treated as
  * always-on / near-constant and flagged weakly-identified. Env-overridable.
  */
-export const LOW_VARIANCE_EPS = numFromEnv(
+const LOW_VARIANCE_EPS = numFromEnv(
   "HYDRA_ATTRIBUTION_LOW_VARIANCE_EPS",
   1e-9,
 );
@@ -100,7 +100,7 @@ export const LOW_VARIANCE_EPS = numFromEnv(
  * collinear (their shared effect is split arbitrarily by the ridge). Both
  * columns of such a pair are flagged. Env-overridable.
  */
-export const COLLINEARITY_THRESHOLD = numFromEnv(
+const COLLINEARITY_THRESHOLD = numFromEnv(
   "HYDRA_ATTRIBUTION_COLLINEARITY_THRESHOLD",
   0.999,
 );
