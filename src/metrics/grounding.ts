@@ -26,7 +26,7 @@
 import { percentileNearestRankFraction } from "./math.ts";
 
 /** One projected grounding/verification sample from a cycle metrics record. */
-export interface GroundingDurationSample {
+interface GroundingDurationSample {
   cycleId: any;
   groundingMode: string;
   groundingDurationMs: number;
@@ -35,14 +35,14 @@ export interface GroundingDurationSample {
 }
 
 /** p50/p95/mean rollup over one mode's grounding (or verification) samples. */
-export interface GroundingDurationStat {
+interface GroundingDurationStat {
   p50: number | null;
   p95: number | null;
   mean: number | null;
 }
 
 /** Per-mode bucket: cycle count + grounding & verification duration stats. */
-export interface GroundingDurationBucket {
+interface GroundingDurationBucket {
   cycles: number;
   grounding: GroundingDurationStat;
   verification: GroundingDurationStat;
