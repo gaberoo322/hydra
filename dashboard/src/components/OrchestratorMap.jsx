@@ -348,5 +348,3 @@ export function OrchestratorMap() {
     </div>
   );
 }
-
-export default OrchestratorMap;
