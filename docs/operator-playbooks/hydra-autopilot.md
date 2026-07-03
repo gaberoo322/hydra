@@ -55,7 +55,7 @@ Each tick:
 > surfaces loudly as a `plan-stale-skipped: ... exact off-by-one ...` reason
 > in the turn record.
 
-## Class taxonomy (7 pipeline slots + 8 signal classes)
+## Class taxonomy (7 pipeline slots + 11 signal classes)
 
 | Kind | Class | Skill |
 |---|---|---|
@@ -76,6 +76,7 @@ Each tick:
 | signal | `retro_orch` | hydra-retro (#919; daily per-run retrospective, issue-producing + ≤1 gated PR) |
 | signal | `cleanup_orch` | hydra-cleanup (#960; board-idle deterministic dead-code/simplification scan, issue-producing → `ready-for-agent`) |
 | signal | `cleanup_target` | hydra-target-cleanup (Target mirror of cleanup_orch; demote-only dead-export sweep over ~/hydra-betting, backlog-item-producing → `ready-for-agent` + `queued`) |
+| signal | `wire_or_retire_target` | hydra-wire-or-retire (#2722, epic #2720; judgment counterpart to cleanup_target — resolves triage `wire-or-retire` items into WIRE/RETIRE/UNCLEAR verdicts; 24h cooldown, ≤2 items/run, model param omitted) |
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
 > calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
@@ -345,6 +346,7 @@ on Fable 5 (the frontier model, replacing Opus as of 2026-06-10).
 | `scout_orch` | Sonnet | Search + rubric scoring (low frequency, modest ROI) |
 | `cleanup_orch` | Haiku | Deterministic knip output; LLM only formats findings into issues |
 | `cleanup_target` | Haiku | Deterministic knip output + tested emit runner; LLM only drives the two commands |
+| `wire_or_retire_target` | inherit parent (omit `model`) | Judgment work — recover a module's intent (git archaeology + vision/priorities/backlog cross-ref) and decide WIRE/RETIRE/UNCLEAR. NOT deterministic like `cleanup_target`; a low tier hits the documented Haiku-premature-exit failure mode (narrates "standing by", files nothing). Omit `model` so it inherits the parent (Fable 5), per #1093. |
 | `discover_orch` / `discover_target` | Haiku | Patrol/diagnostics, designed small/fast/cheap |
 
 Use the harness's model alias (`fable` / `sonnet` / `haiku` / `opus`) for the
@@ -555,10 +557,10 @@ run — `pid`, `turn`, `dispatches`, `slots`, `idle_turns`, `burned_classes`
 (the concurrent-run PID guard and the #1352 slot re-seeding DEPEND on those
 resetting). Only the **cross-run durable subset** must survive:
 
-- `signal_last_fired` (the per-class cooldown timestamps — the 4 long-cooldown
-  classes `retro_orch` / `architecture_orch` / `cleanup_orch` / `scout_orch`
-  are the load-bearing ones; the 5 always-on classes re-arm to 0 each run by
-  design)
+- `signal_last_fired` (the per-class cooldown timestamps — the 5 long-cooldown
+  classes `retro_orch` / `architecture_orch` / `cleanup_orch` / `scout_orch` /
+  `wire_or_retire_target` (the last added by #2722) are the load-bearing ones;
+  the 5 always-on classes re-arm to 0 each run by design)
 - `research_force_counter` (the 4/day forced-research cap, #1666)
 
 The #2575 prior-file carry-forward reseeds these from the *prior state.json*
@@ -932,6 +934,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `cleanup_board_open_scan > CLEANUP_BOARD_SATURATION_CAP (10)` → `cleanup_board_saturated` | `cleanup_board_saturated` | suppresses `cleanup_orch` (checked FIRST, mirrors `arch_board_saturated`) (issue #960) |
 | `target_backfill_idle` (target triage + queued lanes empty AND `work_queue==0`) | `target_backfill_idle` | drives `cleanup_target` (Target mirror of cleanup_orch; API-down degrades to `false`) |
 | `target_cleanup_board_open_scan > 10` → `target_cleanup_board_saturated` | `target_cleanup_board_saturated` | suppresses `cleanup_target` (checked FIRST; API-down degrades to `true` — fail closed) |
+| `wire_or_retire_target_triage > 0` (≥1 open `wire-or-retire`-labelled item in the Target `triage` lane) → `wire_or_retire_target_available` | `wire_or_retire_target_available` | drives `wire_or_retire_target` (issue #2722, epic #2720) — the judgment resolver; 24h class cooldown, ≤2 items/run; API-down degrades to `false` (fail closed) |
 | `/api/autopilot/runs` index has ≥1 non-`running` run | `retro_run_available` | `retro_orch` (issue #920) — daily per-run retrospective; 24h class cooldown enforces the once-per-day cadence |
 | `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1). `shed` is the UNION of the weekly-projection pacing shed (`pacingState==="over"`) and the graduated 5h-utilization throttle (issue #1087, keyed off `percentLast5h` against `HYDRA_USAGE_5H_THROTTLE_T1/T2`); `reasons.fiveHourThrottleShed` flags the latter |
 | `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
