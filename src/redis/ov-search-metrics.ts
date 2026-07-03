@@ -26,6 +26,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { boundedJsonList } from "./bounded-list.ts";
 
 /**
  * 7 days. A rolling-window read of the last N hours never needs more, and the
@@ -35,6 +36,20 @@ const OV_SEARCH_METRICS_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /** 30 days for the per-day context-availability counters (coarser, longer-lived). */
 const OV_CONTEXT_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * Cap for the per-fetch knowledge-retrieval ledger (issue #2717). One row is
+ * appended per served `/api/learning/knowledge` fetch; the shared
+ * `boundedJsonList` primitive (ADR-0017 Category C) keeps the newest N rows
+ * (lpush + ltrim) and drops the tail, so the ledger never grows unbounded. 5000
+ * rows is a few hundred KB and comfortably covers the volume needed before the
+ * deferred correlation slice (join against cycle outcomes) becomes worthwhile.
+ * Env-overridable via `HYDRA_KNOWLEDGE_FETCH_LEDGER_MAX` for a larger dwell.
+ */
+const KNOWLEDGE_FETCH_LEDGER_MAX = (() => {
+  const raw = Number(process.env.HYDRA_KNOWLEDGE_FETCH_LEDGER_MAX);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 5000;
+})();
 
 /** The metric fields persisted per hour bucket. Stable string keys (Redis hash fields). */
 export const OV_SEARCH_METRIC_FIELDS = [
@@ -89,6 +104,31 @@ export interface OvContextAvailability {
   days: Array<{ date: string; cyclesTotal: number; cyclesWithContext: number }>;
 }
 
+/**
+ * One raw observation row for the per-fetch knowledge-retrieval ledger
+ * (issue #2717). Written once per served `/api/learning/knowledge` fetch. It
+ * carries enough to JOIN a retrieval against a cycle outcome LATER (the deferred
+ * correlation slice) — the dark-tolerant-ledger philosophy of the #2628
+ * attribution spine: record the raw rows now, estimate later.
+ *
+ * - `ts`      — epoch millis the fetch was served.
+ * - `agent`   — the fetching agent/skill (`hydra-dev`, `hydra-target-build`, …).
+ * - `anchor`  — the anchor/cycle identifier the fetch was for (e.g. `issue-2717`),
+ *               when the dispatch sent one; `null` if the fetch was anchor-less.
+ *               This is the join key against the dispatch outcome.
+ * - `itemCount` — how many knowledge items were served (0 on a miss).
+ * - `itemIds` — stable per-item identifiers (content-hash of each served item),
+ *               so a later analysis can tell WHICH items appeared in a
+ *               successful dispatch, not merely how many.
+ */
+export interface KnowledgeLedgerRow {
+  ts: number;
+  agent: string;
+  anchor: string | null;
+  itemCount: number;
+  itemIds: string[];
+}
+
 // ===========================================================================
 // Pure key + time helpers (exported for tests — no Redis access)
 // ===========================================================================
@@ -116,6 +156,19 @@ function windowHashKey(hour: string): string {
 
 function contextDayKey(date: string): string {
   return `hydra:metrics:ov-search:context:daily:${date}`;
+}
+
+/** The single capped-list key holding the per-fetch knowledge-retrieval ledger (#2717). */
+function knowledgeFetchLedgerKey(): string {
+  return `hydra:metrics:ov-search:knowledge-fetch:ledger`;
+}
+
+/** The shared bounded-JSON-list handle for the knowledge-fetch ledger (ADR-0017 Category C). */
+function knowledgeFetchLedger() {
+  return boundedJsonList<KnowledgeLedgerRow>(
+    knowledgeFetchLedgerKey(),
+    KNOWLEDGE_FETCH_LEDGER_MAX,
+  );
 }
 
 /**
@@ -302,6 +355,32 @@ export async function getKnowledgeContextAvailability(
       cyclesTotal > 0 ? Math.round((cyclesWithContext / cyclesTotal) * 1000) / 1000 : 0,
     days: out,
   };
+}
+
+/**
+ * Append one row to the per-fetch knowledge-retrieval ledger (issue #2717).
+ * Each served `/api/learning/knowledge` fetch writes exactly one row through the
+ * shared `boundedJsonList` primitive (ADR-0017 Category C): lpush newest-first +
+ * ltrim to `KNOWLEDGE_FETCH_LEDGER_MAX`, so it never grows unbounded. Rows go to
+ * a dedicated key (`hydra:metrics:ov-search:knowledge-fetch:ledger`) — NEVER
+ * into `hydra:attribution:*`, whose LedgerRow union is the #2630 estimator's raw
+ * input and stays free of foreign row shapes.
+ *
+ * Best-effort: callers wrap this so a Redis error never breaks the plan-time
+ * fetch it observes — the same never-throw contract as the availability record.
+ */
+export async function appendKnowledgeFetch(row: KnowledgeLedgerRow): Promise<void> {
+  await knowledgeFetchLedger().push(row);
+}
+
+/**
+ * Read back the most recent `limit` knowledge-retrieval ledger rows, newest
+ * first, through the shared `boundedJsonList` primitive (whose read is tolerant
+ * of JSON-corrupt entries — one bad row can't break the whole read).
+ */
+export async function getKnowledgeFetchLedger(limit = 100): Promise<KnowledgeLedgerRow[]> {
+  const n = Math.max(1, Math.min(KNOWLEDGE_FETCH_LEDGER_MAX, Math.floor(limit)));
+  return knowledgeFetchLedger().read(n);
 }
 
 /** Coerce a Redis hash field string to a finite number, defaulting to 0. */

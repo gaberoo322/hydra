@@ -9,8 +9,9 @@
  *   getOvSearchMetrics, resetOvSearchMetrics — metrics for /api/health
  *   buildFallbackQuery                       — pure helper, exported for tests
  *   trackedOvSearch                          — used by codex-runner + this module
- *   loadKnowledgeBaseForPrompt               — {content,itemCount} read for the
- *                                              learning context seam (#1455)
+ *   loadKnowledgeBaseForPrompt               — {content,itemCount,itemIds} read
+ *                                              for the learning context seam
+ *                                              (#1455; itemIds added #2717)
  *
  * Behavior preserved 1:1 from the previous learning.ts implementation.
  *
@@ -34,6 +35,7 @@
 // OpenViking connection config — single source of truth in ov-config.ts (issue #231).
 // Re-exported under the historical OV_URL / OV_KEY names so existing
 // importers keep compiling without churn.
+import { createHash } from "node:crypto";
 import { OPENVIKING_URL, OPENVIKING_API_KEY } from "./ov-config.ts";
 // Issue #954: the OpenViking Request Adapter — all OV HTTP request mechanics
 // (URL join, auth headers, timeout, error classification, JSON unwrap) live
@@ -413,20 +415,35 @@ export async function trackedOvSearch(
  */
 export async function loadKnowledgeBaseForPrompt(
   agent: string,
-): Promise<{ content: string; itemCount: number }> {
+): Promise<{ content: string; itemCount: number; itemIds: string[] }> {
   const { memories } = await trackedOvSearch(
     `${agent} agent lessons failures prevention`,
     5,
   );
   const top = memories.slice(0, 5);
   const parts: string[] = [];
+  // Issue #2717: derive a STABLE per-item identifier for each served item from
+  // source DATA here (not by regex-scanning the rendered markdown at the route —
+  // the #804 count-from-data contract). Prefer the memory's own `uri` when it is
+  // a non-empty string (a real content-addressed OpenViking id); otherwise fall
+  // back to a sha256 hex prefix of the SAME 300-char abstract slice that renders
+  // into the bullet, so the same served item hashes to the same id across
+  // fetches — exactly the join key the deferred #2717 correlation slice needs.
+  const itemIds: string[] = [];
   for (const mem of top) {
     const abstract = mem.abstract || mem.content || "";
-    if (abstract.trim()) parts.push(`- ${abstract.slice(0, 300)}`);
+    if (!abstract.trim()) continue;
+    const slice = abstract.slice(0, 300);
+    parts.push(`- ${slice}`);
+    const uri = typeof mem.uri === "string" ? mem.uri.trim() : "";
+    itemIds.push(
+      uri || createHash("sha256").update(slice).digest("hex").slice(0, 16),
+    );
   }
-  if (parts.length === 0) return { content: "", itemCount: 0 };
+  if (parts.length === 0) return { content: "", itemCount: 0, itemIds: [] };
   return {
     content: `# ${agent} — Learned Patterns (from OpenViking)\n\n${parts.join("\n")}`,
     itemCount: parts.length,
+    itemIds,
   };
 }

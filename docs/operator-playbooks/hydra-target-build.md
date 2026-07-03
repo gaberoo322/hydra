@@ -327,7 +327,7 @@ into the plan you hand the executor role. Before #2647 no build fetched it, so
 
 ```bash
 KB_JSON=$(curl -sf --max-time 5 \
-  "http://localhost:4000/api/learning/knowledge?agent=hydra-target-build")
+  "http://localhost:4000/api/learning/knowledge?agent=hydra-target-build&anchor=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)")
 
 KB_CONTENT=$(printf '%s' "$KB_JSON" | jq -r '.content // ""')
 if [ -n "$KB_CONTENT" ]; then
@@ -339,13 +339,22 @@ fi
 # knowledge-context miss.
 ```
 
+The optional `anchor=<anchor.reference>` param (issue #2717 — e.g. the item id
+you are building) lets the per-fetch knowledge-retrieval ledger record the join
+key between this retrieval and the eventual cycle outcome; an anchor-less fetch
+still succeeds (the ledger records a `null` anchor).
+
 Use `/api/learning/knowledge`, NOT `/api/learning/context-trace`: the latter is
 a counts-only diagnostic that omits block `.content` by design (#804/#841), so
 there is nothing to weave into a plan. This route SERVES the content (like
 `/api/reflections` serves `formatted`) and records the #1440 per-cycle
 availability metric server-side on its success path — so the record stays
 co-located with a real served fetch and you never touch the metric from a shell
-block (which the single-quoted PR-body heredoc quoting would make fragile).
+block (which the single-quoted PR-body heredoc quoting would make fragile). It
+ALSO appends one raw row per served fetch to the per-fetch knowledge-retrieval
+ledger (issue #2717) — agent, anchor/cycle id, itemCount, and stable per-item
+content-hash ids — so retrieval→outcome attribution becomes possible later; the
+append is server-side and best-effort, exactly like the availability record.
 
 ### 4. Skeptic (skip for quick-fix)
 
