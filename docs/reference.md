@@ -628,16 +628,19 @@ gunzip -k /mnt/hydra-ssd/backups/redis/hydra-redis-<ts>.rdb.gz   # -> hydra-redi
 # 3. Put it back as /data/dump.rdb inside the volume (container stopped).
 docker cp /mnt/hydra-ssd/backups/redis/hydra-redis-<ts>.rdb hydra-redis-1:/data/dump.rdb
 
-# 4. AOF-vs-RDB load precedence — pick ONE:
-#    (a) Temporarily disable AOF so Redis loads the RDB, then rebuild the AOF:
-docker start hydra-redis-1
-docker exec hydra-redis-1 redis-cli CONFIG SET appendonly no        # forces RDB load path
-docker restart hydra-redis-1                                         # loads dump.rdb
-docker exec hydra-redis-1 redis-cli CONFIG SET appendonly yes        # re-enable durability
-docker exec hydra-redis-1 redis-cli BGREWRITEAOF                     # rebuild AOF from the loaded dataset
-#    (b) OR remove the stale AOF dir so only the RDB remains, then start normally:
-#        docker exec hydra-redis-1 rm -rf /data/appendonlydir && docker start hydra-redis-1
-#        (Redis rebuilds the AOF from the RDB on next BGREWRITEAOF.)
+# 4. AOF-vs-RDB load precedence — remove the stale AOF dir so the RDB is the
+#    only durable source on startup, then start normally. Redis loads
+#    /data/dump.rdb (no AOF to prefer) and rebuilds the AOF from it on step 5.
+#    The container is already stopped from step 1, so operate on the volume.
+#
+#    Do NOT try `CONFIG SET appendonly no` + `docker restart` instead: CONFIG
+#    SET is an ephemeral runtime change never written back to redis.conf, so the
+#    restart re-reads `appendonly yes`, finds the old appendonlydir/, and
+#    silently loads the STALE AOF — dump.rdb is never consulted. Removing the
+#    AOF dir while the container is stopped is the only reliable path.
+docker run --rm -v hydra_redis-data:/data busybox rm -rf /data/appendonlydir
+docker start hydra-redis-1                                            # loads dump.rdb (no AOF present)
+docker exec hydra-redis-1 redis-cli BGREWRITEAOF                      # rebuild the AOF from the loaded dataset
 
 # 5. Verify the keyspace, then bring the orchestrator back.
 docker exec hydra-redis-1 redis-cli DBSIZE
