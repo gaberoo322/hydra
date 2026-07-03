@@ -125,6 +125,22 @@ describe("GET /api/learning/knowledge (#2647 dispatch-served plan-time fetch)", 
     assert.equal(ledgerRows[0].anchor, "issue-2717", "the anchor param is recorded as the join key");
   });
 
+  test("#2717 INV-7: a blank/whitespace anchor degrades to a null anchor, never a 400", async () => {
+    // `.trim().min(1)` would run BEFORE `.optional()` and 400 an empty/whitespace
+    // anchor; the z.preprocess wrapper maps blank → undefined first so the fetch
+    // still serves 200 and records a null-anchor ledger row (an anchor-less caller).
+    for (const raw of ["", "   "]) {
+      recordCalls.length = 0;
+      ledgerRows.length = 0;
+      const res = await fetch(
+        `${baseUrl}/api/learning/knowledge?agent=hydra-dev&anchor=${encodeURIComponent(raw)}`,
+      );
+      assert.equal(res.status, 200, `anchor=${JSON.stringify(raw)} must serve 200, not 400`);
+      assert.equal(ledgerRows.length, 1, "a served fetch still appends one ledger row");
+      assert.equal(ledgerRows[0].anchor, null, "a blank/whitespace anchor is recorded as null");
+    }
+  });
+
   test("an empty (miss) result still records availability=false — a served fetch counts toward cyclesTotal", async () => {
     recordCalls.length = 0;
     ledgerRows.length = 0;

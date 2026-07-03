@@ -84,5 +84,8 @@ export const ReflectionHealthQuerySchema = z.object({
  */
 export const KnowledgeQuerySchema = z.object({
   agent: z.string().trim().min(1),
-  anchor: z.string().trim().min(1).optional(),
+  anchor: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().trim().min(1).optional(),
+  ),
 });
