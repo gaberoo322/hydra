@@ -1,5 +1,14 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreIssues": {
+    // src/redis/recommendations.ts exports 11 functions consumed only via a
+    // namespace import (`import * as ns`) by src/autopilot/recommendation-engine.ts
+    // and src/api/now-recommendations.ts. knip 6 does not trace namespace-member
+    // access as a use, so it false-flags all 11 as unused (burned #2693). Scope the
+    // suppression to the `exports` issue type for this one file — genuine unused
+    // exports elsewhere, and other issue types in this file, stay reported.
+    "src/redis/recommendations.ts": ["exports"]
+  },
   "workspaces": {
     ".": {
       "entry": ["src/index.ts", "scripts/**/*.{ts,mts}", "test/**/*.{test,spec}.{ts,mts}"],
