@@ -53,7 +53,10 @@ import {
   type MergeWatchHealthRecord,
 } from "../../redis/holdback.ts";
 import { enrollHoldback, type EnrollResult } from "../../holdback.ts";
-import { recordCycle, type CycleRecordResult } from "../../autopilot/runs.ts";
+// `recordCycle` + its `CycleRecordResult` type moved to the sibling
+// `cycle-close.ts` in issue #2768 — the call site is unchanged (it passes no
+// deps arg and relies on the module default deps); only the import path moves.
+import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
 import { isEnrolledTier } from "../../holdback-policy.ts";
 import { viewPr } from "../../github/issues.ts";
 

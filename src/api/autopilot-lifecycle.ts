@@ -30,12 +30,15 @@ import {
   ReflectionRecordBodySchema,
 } from "../autopilot/schemas.ts";
 import {
-  recordCycle,
   recordReflectionOutcome,
   startRun,
   endRun,
   recordTurn,
 } from "../autopilot/runs.ts";
+// `recordCycle` (the cross-domain cycle-close coordinator) moved to the sibling
+// `cycle-close.ts` in issue #2768 — the call site is unchanged (it passes no
+// deps arg and relies on the module default deps); only the import path moves.
+import { recordCycle } from "../autopilot/cycle-close.ts";
 
 export function createAutopilotLifecycleRouter() {
   const router = Router();
