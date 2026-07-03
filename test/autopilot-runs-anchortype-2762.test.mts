@@ -13,11 +13,15 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
+import type { AutopilotRunsDeps } from "../src/autopilot/runs.ts";
+// recordCycle + UNCLASSIFIED_ANCHOR_TYPE + the CycleCloseDeps bag moved to the
+// sibling cycle-close Module (#2768). The fixture builds a single object
+// satisfying both deps bags so it is passed to recordCycle unchanged.
 import {
   recordCycle,
   UNCLASSIFIED_ANCHOR_TYPE,
-  type AutopilotRunsDeps,
-} from "../src/autopilot/runs.ts";
+  type CycleCloseDeps,
+} from "../src/autopilot/cycle-close.ts";
 
 // ---------------------------------------------------------------------------
 // Minimal in-memory deps fixture (same shape as autopilot-runs-deps.test.mts,
@@ -48,7 +52,7 @@ function newStore(): MemStore {
 
 const FIXED_NOW_MS = 1_750_000_000_000;
 
-function makeDeps(store: MemStore): AutopilotRunsDeps {
+function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
   return {
     runs: {
       async getAutopilotRun(runId) {

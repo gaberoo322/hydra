@@ -33,15 +33,23 @@ import assert from "node:assert/strict";
 import {
   startRun,
   endRun,
-  recordCycle,
   recordTurn,
   getRunDispatchClasses,
-  UNCLASSIFIED_ANCHOR_TYPE,
   type AutopilotRunsDeps,
 } from "../src/autopilot/runs.ts";
+// recordCycle (the cross-domain cycle-close coordinator) + UNCLASSIFIED_ANCHOR_TYPE
+// + the CycleCloseDeps bag moved to the sibling cycle-close Module (#2768). The
+// fixture below builds a single object satisfying BOTH AutopilotRunsDeps (the
+// run/turn writers + sweeper) and CycleCloseDeps (recordCycle), so it is passed
+// to each writer unchanged — this suite exercises the same policy across both.
+import {
+  recordCycle,
+  UNCLASSIFIED_ANCHOR_TYPE,
+  type CycleCloseDeps,
+} from "../src/autopilot/cycle-close.ts";
 // sweepRunIfDead was extracted into the sibling sweep-reader Module (#2568).
-// The wide AutopilotRunsDeps the fixture builds still structurally satisfies
-// the sweeper's narrow SweepReaderDeps, so the fixture is passed unchanged.
+// The wide fixture makeDeps() builds still structurally satisfies the sweeper's
+// narrow SweepReaderDeps, so the fixture is passed unchanged.
 import { sweepRunIfDead } from "../src/autopilot/sweep-reader.ts";
 
 // ---------------------------------------------------------------------------
@@ -79,7 +87,7 @@ interface FixtureOpts {
 
 const FIXED_NOW_MS = 1_750_000_000_000; // 2025-06-15T14:13:20.000Z, stable.
 
-function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps {
+function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & CycleCloseDeps {
   const nowMs = opts.nowMs ?? FIXED_NOW_MS;
   return {
     runs: {
