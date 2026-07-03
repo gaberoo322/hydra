@@ -255,6 +255,60 @@ docker exec hydra-postgres-1 psql -U hydra -d hydra -t -c "
   FROM pg_stat_activity;" 2>/dev/null
 ```
 
+### Kill-chain wiring-ledger soft SLO (dead-code kill-chain epic #2720)
+```bash
+# SOFT SLO — surfaced-only, NEVER CI-blocking. Flags any module that has sat
+# wire-or-retire on the Target's committed ledger for >30 days past the 45-day
+# grace window WITHOUT a wire-or-retire verdict — i.e. a stale decision the
+# /hydra-wire-or-retire resolver (or the operator) has left unresolved. This is
+# an observability nudge, not a gate: staleness must never punish an unrelated
+# PR, so the check lives here, not in ci.yml.
+#
+# Read-only: parses the COMMITTED docs/agents/wiring-status.md; never regenerates
+# it (regeneration is a Target-side `npm run deadcode:ledger` concern). A missing
+# ledger degrades to a `quiet (ledger absent)` verdict and exits 0 — the check
+# never makes the doctor itself fail. The verdict line is load-bearing:
+#   quiet  — no wire-or-retire module >30d past grace (or ledger absent). Healthy.
+#   flag   — one or more wire-or-retire modules are >30d past grace without a
+#            verdict. Surface in the report; steer /hydra-wire-or-retire, do NOT
+#            block anything.
+python3 - "$HOME/hydra-betting/docs/agents/wiring-status.md" <<'PY'
+import sys, os, re, datetime
+ledger_path = sys.argv[1]
+GRACE_DAYS, SLO_DAYS = 45, 30
+today = datetime.date.today()
+if not os.path.exists(ledger_path):
+    print("kill-chain soft-SLO: quiet (ledger absent)")
+    sys.exit(0)
+breaches = []
+for line in open(ledger_path):
+    m = re.match(r'^\|\s*`([^`]+)`\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*$', line)
+    if not m or m.group(2).strip() != "wire-or-retire":
+        continue
+    try:
+        d = datetime.date.fromisoformat(m.group(4).strip())
+    except ValueError:
+        continue  # unparseable date → age unknown → never flagged
+    past_grace = (today - d).days - GRACE_DAYS
+    if past_grace > SLO_DAYS:
+        breaches.append((past_grace, m.group(1).strip()))
+if not breaches:
+    print("kill-chain soft-SLO: quiet (no wire-or-retire module >30d past grace)")
+else:
+    breaches.sort(reverse=True)
+    print(f"kill-chain soft-SLO: FLAG — {len(breaches)} wire-or-retire module(s) >{SLO_DAYS}d past grace without a verdict:")
+    for a, p in breaches[:5]:
+        print(f"  {a}d past grace — {p}")
+PY
+# To smoke-test the FLAG path without waiting for a real stale row (AC: "fires on a
+# synthetic >30-day stale row and stays quiet otherwise"), point it at a synthetic
+# ledger — a >30d-past-grace last-touched date FLAGs, a recent one stays quiet:
+#   printf '| `web/src/x.ts` | wire-or-retire | tests only | 2026-01-01 |\n' > /tmp/wl.md
+#   python3 - /tmp/wl.md <<'PY'  ...same script...  PY   # -> FLAG
+#   printf '| `web/src/x.ts` | wire-or-retire | tests only | '"$(date -I)"' |\n' > /tmp/wl.md
+#   ...                                                    # -> quiet
+```
+
 ### Timer Health
 ```bash
 for timer in hydra-betting-ingest hydra-betting-scan hydra-checkpoint-refresh; do
@@ -302,6 +356,7 @@ Only report issues actually present — don't speculate.
   - API validation error → upstream API changed? Test the API directly.
   - Module not found → broken dependency?
   - Rate limited → back off
+- **Kill-chain soft SLO**: Did the wiring-ledger check emit `FLAG`? One or more wire-or-retire modules have sat >30 days past grace without a verdict — the `/hydra-wire-or-retire` decision is overdue. Surface it in the report and (Phase 3) steer `/hydra-wire-or-retire`; this is a SURFACED-only nudge, NEVER a gate — do not block or fail the doctor on it. `quiet` (including "ledger absent") is healthy.
 - **Timer health**: Any timer not firing? Ingest not run in >15 min? Scanner not run in >35 min?
 - **Database health**: Postgres in the compose project? Data being written? Connections exhausted?
 - **External API health**: Polymarket/Kalshi/Odds API returning non-200? Explains service failures.
