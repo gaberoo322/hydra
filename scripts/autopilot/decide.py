@@ -473,6 +473,29 @@ DAILY_SPEND_CAP_USD_DEFAULT = 50.0
 # a clean no-op, so legacy state shapes keep today's behaviour.
 PER_CYCLE_COST_CAP_USD_DEFAULT = 25.0
 
+# Per-run cap on how many wire-or-retire items the resolver may advance
+# (design concept for #2722, epic #2720): "At most 2 items resolved per run,
+# oldest-first." Threaded into `prompt_args.max_items` on every
+# `wire_or_retire_target` dispatch so the cap is machine-enforceable at the
+# dispatch seam, not prose-only.
+WIRE_OR_RETIRE_MAX_ITEMS = 2
+
+# Interim risk carve-out for `wire_or_retire_target` (issue #2722, epic #2720):
+# modules under these prefixes / paths ALWAYS route ready-for-human and NEVER
+# get a WIRE/RETIRE verdict. It is a machine-readable module-level constant —
+# NOT prose in a comment — precisely because prose-only carve-outs are the
+# documented failure mode (item-685/687 were laundered past the prose
+# protocol). It is threaded verbatim into `prompt_args.risk_carveout` on every
+# dispatch so the guard is auditable in the dispatch record and unit-testable.
+# Deliberately a SUPERSET of TARGET_RISK_CORE's directories: over-routing to
+# human is safe, under-routing is not. Successor: #2701's classifyTargetRisk,
+# at which point this hardcoded list is retired.
+WIRE_OR_RETIRE_RISK_CARVEOUT = (
+    "web/src/lib/risk/",
+    "web/src/lib/execution/",
+    "web/src/lib/kalshi/kalshi-executor.ts",
+)
+
 # Slots that are scope-disallowed exclusion mask. Scope filter is an
 # exclusion mask (grilled decision 3); `health` and `qa_*` are always
 # allowed regardless of scope (qa reviews any PR, health is whole-system).
@@ -2555,9 +2578,25 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # decide.py reads the precomputed signal only — it never recomputes the
         # triage-lane membership here (the signal-seam discipline).
         if _signal_present(state, events, "wire_or_retire_target_available"):
+            # prompt_args stamps the three machine-enforceable dispatch
+            # parameters the design concept (Invariant 9) requires:
+            #   - apply: True    — the retro #1078 / cleanup_orch anti-dry-run-
+            #     no-op fix. The autopilot maps apply=true -> --apply; without
+            #     it every dispatched run is a silent headless dry-run that
+            #     resolves nothing (the skill has no default-apply mode).
+            #     Precedent: retro_orch and cleanup_target both stamp apply:True.
+            #   - max_items: 2   — the per-run resolution cap (oldest-first).
+            #   - risk_carveout  — the machine-readable carve-out list threaded
+            #     verbatim so the risk/live-execution guard is auditable in the
+            #     dispatch record, not prose-only (the item-685/687 failure mode).
             return make_dispatch(
                 sig,
                 "hydra-wire-or-retire",
+                prompt_args={
+                    "apply": True,
+                    "max_items": WIRE_OR_RETIRE_MAX_ITEMS,
+                    "risk_carveout": list(WIRE_OR_RETIRE_RISK_CARVEOUT),
+                },
                 reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
             )
         return None

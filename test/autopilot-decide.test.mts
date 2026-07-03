@@ -2893,6 +2893,44 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     assert.equal(a.prompt_args?.model, undefined, "no model in prompt_args either");
   });
 
+  test("stamps prompt_args {apply, max_items, risk_carveout} — design concept Invariant 9", () => {
+    // Regression pin for the QA-failed defect: the dispatch shipped with NO
+    // prompt_args, so the class ran as a silent dry-run no-op (the retro #1078 /
+    // cleanup_orch pattern) and its risk carve-out was prose-only (the exact
+    // item-685/687 laundering failure mode the epic exists to fix).
+    const plan = runDecide(worState(), null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
+    assert.ok(a, "expected a wire_or_retire_target dispatch");
+    assert.ok(a.prompt_args, "dispatch must carry prompt_args (never the empty-args dry-run no-op)");
+
+    // apply:true — the autopilot maps apply=true → --apply; without it every
+    // dispatched run is a headless dry-run that resolves nothing.
+    assert.equal(a.prompt_args.apply, true, "prompt_args.apply must be true (anti-dry-run-no-op, retro #1078)");
+
+    // max_items:2 — the per-run resolution cap (oldest-first).
+    assert.equal(a.prompt_args.max_items, 2, "prompt_args.max_items must be 2 (per-run cap)");
+
+    // risk_carveout — machine-readable carve-out list, not prose. Must contain
+    // the risk-core prefix so the risk/live-execution guard is auditable at the
+    // dispatch seam and unit-testable (design concept Invariant 3/9).
+    assert.ok(
+      Array.isArray(a.prompt_args.risk_carveout),
+      "prompt_args.risk_carveout must be a list, not prose",
+    );
+    assert.ok(
+      a.prompt_args.risk_carveout.includes("web/src/lib/risk/"),
+      "risk_carveout must include web/src/lib/risk/ (the risk-core carve-out prefix)",
+    );
+    assert.ok(
+      a.prompt_args.risk_carveout.includes("web/src/lib/execution/"),
+      "risk_carveout must include web/src/lib/execution/ (live-execution carve-out)",
+    );
+    assert.ok(
+      a.prompt_args.risk_carveout.includes("web/src/lib/kalshi/kalshi-executor.ts"),
+      "risk_carveout must include the kalshi-executor live-execution path",
+    );
+  });
+
   test("respects the 24h cooldown (SIGNAL_COOLDOWNS)", () => {
     // Fired 1h ago → still inside the 24h window → suppressed.
     const state = worState({
