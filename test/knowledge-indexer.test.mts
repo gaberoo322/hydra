@@ -413,3 +413,76 @@ describe("source-index persistence across restarts (issue #1123)", () => {
     assert.ok(liveHash, "sanity: a live hash existed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #2767: the pure enumeration helpers now live in source-enumerator.ts,
+// a ZERO-OpenViking module. This suite imports them from the enumerator
+// directly (INV-5: testable with a filesystem-only surface, no OV stubs) and
+// confirms the extraction preserved behavior 1:1. The re-export from
+// indexer.ts (exercised by the suites above) keeps existing callers zero-diff
+// (INV-2); this suite proves the new home works and stands alone.
+// ---------------------------------------------------------------------------
+import {
+  parseSourcePaths as enumParseSourcePaths,
+  shouldIndexSource as enumShouldIndexSource,
+  enumerateSourceFiles as enumEnumerateSourceFiles,
+  buildSourceTitle as enumBuildSourceTitle,
+  SKIP_DIRS as enumSkipDirs,
+} from "../src/knowledge-base/source-enumerator.ts";
+
+describe("source-enumerator.ts — pure helpers, zero-OV (issue #2767)", () => {
+  let root: string;
+  let src: string;
+
+  before(async () => {
+    root = await mkdtemp(join(tmpdir(), "hydra-src-enum-test-"));
+    src = join(root, "src");
+    await mkdir(join(src, "nested"), { recursive: true });
+    await mkdir(join(src, "node_modules"), { recursive: true });
+    await writeFile(join(src, "a.ts"), "export const a = 1;");
+    await writeFile(join(src, "nested", "b.ts"), "export const b = 2;");
+    await writeFile(join(src, "skip.md"), "# not a .ts file");
+    await writeFile(join(src, "node_modules", "dep.ts"), "should be skipped");
+  });
+
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("parseSourcePaths parses <root>:<ext> pairs and normalises the ext", () => {
+    const parsed = enumParseSourcePaths("src:.ts,docs:md");
+    assert.deepEqual(parsed, [
+      { root: "src", ext: ".ts" },
+      { root: "docs", ext: ".md" },
+    ]);
+  });
+
+  test("shouldIndexSource honours the extension filter and SKIP_DIRS", () => {
+    const source = { root: src, ext: ".ts" };
+    assert.equal(enumShouldIndexSource(join(src, "a.ts"), source), true);
+    assert.equal(enumShouldIndexSource(join(src, "skip.md"), source), false);
+    assert.equal(
+      enumShouldIndexSource(join(src, "node_modules", "dep.ts"), source),
+      false
+    );
+  });
+
+  test("enumerateSourceFiles recursively finds matching files, skipping ignore dirs", async () => {
+    const files = await enumEnumerateSourceFiles({ root: src, ext: ".ts" });
+    const rels = files.map((f) => f.slice(src.length + 1)).sort();
+    assert.deepEqual(rels, ["a.ts", "nested/b.ts"]);
+  });
+
+  test("buildSourceTitle produces the stable hydra-source: slug", () => {
+    const title = enumBuildSourceTitle(join(src, "nested", "b.ts"), {
+      root: src,
+      ext: ".ts",
+    });
+    assert.equal(title, "hydra-source:src__nested__b.ts");
+  });
+
+  test("SKIP_DIRS is the expected ignore set", () => {
+    assert.ok(enumSkipDirs.has(".git"));
+    assert.ok(enumSkipDirs.has("node_modules"));
+  });
+});

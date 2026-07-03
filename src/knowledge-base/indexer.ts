@@ -23,9 +23,8 @@
  * #965, #1123, #2267) are retained inline at each block.
  */
 
-import { readFile, readdir, stat, writeFile, unlink } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink } from "node:fs/promises";
 import {
-  extname,
   join,
   resolve,
   relative,
@@ -53,6 +52,18 @@ import {
   loadSourceHashes as redisLoadSourceHashes,
   persistSourceHash as redisPersistSourceHash,
 } from "../redis/source-index.ts";
+// Issue #2767: the pure source-file enumeration + path helpers were extracted
+// into source-enumerator.ts (a zero-OV, purely-filesystem module). Import them
+// back here; indexer.ts re-exports them below so all existing callers keep a
+// zero-diff import specifier (INV-2). Dependency flows enumerator <- indexer
+// only — never the reverse (INV-4, no circular import).
+import {
+  parseSourcePaths,
+  shouldIndexSource,
+  enumerateSourceFiles,
+  buildSourceTitle,
+  type SourcePath,
+} from "./source-enumerator.ts";
 
 // ---------------------------------------------------------------------------
 // Shared constants (deduped across the merged modules — identical definitions).
@@ -62,7 +73,8 @@ const CONFIG_PATH =
   process.env.HYDRA_CONFIG_PATH ||
   resolve(process.env.HOME!, "hydra", "config");
 const OV_CONFIG_MOUNT = process.env.OV_CONFIG_MOUNT || "/config";
-const SKIP_DIRS = new Set([".git", "node_modules"]);
+// SKIP_DIRS moved to source-enumerator.ts (issue #2767) with the pure walk/
+// filter helpers; indexer.ts no longer references it directly.
 const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
 
 // ---------------------------------------------------------------------------
@@ -322,28 +334,8 @@ const DEFAULT_SOURCE_SPEC = `${join(HYDRA_ROOT_FOR_SOURCE, "src")}:.ts,${join(
   "docs"
 )}:.md,${join(HYDRA_ROOT_FOR_SOURCE, "test")}:.mts`;
 
-export interface SourcePath {
-  root: string;
-  ext: string;
-}
-
-export function parseSourcePaths(spec: string): SourcePath[] {
-  const out: SourcePath[] = [];
-  if (!spec) return out;
-  for (const entry of spec
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)) {
-    const idx = entry.lastIndexOf(":");
-    if (idx <= 0) continue;
-    const root = entry.slice(0, idx);
-    let ext = entry.slice(idx + 1);
-    if (!root || !ext) continue;
-    if (!ext.startsWith(".")) ext = "." + ext;
-    out.push({ root, ext });
-  }
-  return out;
-}
+// SourcePath + parseSourcePaths moved to source-enumerator.ts (issue #2767);
+// imported back above and re-exported below for zero-diff callers (INV-2).
 
 const SOURCE_PATHS: SourcePath[] = parseSourcePaths(
   process.env.HYDRA_INDEX_SOURCE_PATHS || DEFAULT_SOURCE_SPEC
@@ -709,72 +701,20 @@ export function runSourceInitialPass(opts: {
   return defaultHashAdapter.runSourceInitialPass(opts);
 }
 
-// Issue #210: Source-file indexing helpers.
-// shouldIndexSource is exported for testing.
-export function shouldIndexSource(filePath: string, source: SourcePath): boolean {
-  if (!filePath.startsWith(source.root)) return false;
-  if (extname(filePath) !== source.ext) return false;
-  const rel = relative(source.root, filePath);
-  for (const skip of SKIP_DIRS) {
-    if (rel === skip || rel.startsWith(skip + "/")) return false;
-  }
-  // Skip dist/build/coverage and dotfile dirs commonly under src trees.
-  if (/(^|\/)(dist|build|coverage|\.next|\.vite|\.cache)(\/|$)/.test(rel))
-    return false;
-  return true;
-}
-
-// Recursively enumerate files under root, skipping standard ignore dirs and
-// matching the configured extension. Exported for tests.
-export async function enumerateSourceFiles(
-  source: SourcePath,
-  maxFiles = 2000
-): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    if (out.length >= maxFiles) return;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (err: any) {
-      // Missing directory is fine — operator may not have docs/ for example.
-      if (err.code !== "ENOENT") {
-        console.error(
-          `[Learning:Indexer] readdir failed for ${dir}: ${err.message}`
-        );
-      }
-      return;
-    }
-    for (const entry of entries) {
-      if (out.length >= maxFiles) return;
-      if (SKIP_DIRS.has(entry.name)) continue;
-      if (entry.name.startsWith(".")) continue;
-      if (
-        entry.name === "dist" ||
-        entry.name === "build" ||
-        entry.name === "coverage"
-      )
-        continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(full);
-      } else if (entry.isFile() && shouldIndexSource(full, source)) {
-        out.push(full);
-      }
-    }
-  }
-  await walk(source.root);
-  return out;
-}
-
-// Build a stable, OV-friendly title from an absolute source path.
-// The OV resource title acts as a logical key; same title -> overwrite.
-export function buildSourceTitle(filePath: string, source: SourcePath): string {
-  const rel = relative(source.root, filePath);
-  const folder = basename(source.root);
-  const slug = `${folder}/${rel}`.replace(/\//g, "__");
-  return `hydra-source:${slug}`;
-}
+// Issue #2767: shouldIndexSource / enumerateSourceFiles / buildSourceTitle
+// (the pure source-file enumeration + title helpers) moved to
+// source-enumerator.ts. Re-exported here (alongside parseSourcePaths +
+// SourcePath) so external callers (tests, indexer-lifecycle.ts) keep their
+// existing `from "./indexer.ts"` import specifiers unchanged (INV-2) — the
+// same facade-re-export idiom used for IndexerController below and the
+// coverage/source-pass delegators above.
+export {
+  parseSourcePaths,
+  shouldIndexSource,
+  enumerateSourceFiles,
+  buildSourceTitle,
+} from "./source-enumerator.ts";
+export type { SourcePath } from "./source-enumerator.ts";
 
 // ===========================================================================
 // SECTION 3 — Source-index staleness probe (formerly source-freshness.ts,
