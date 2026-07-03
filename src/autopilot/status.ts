@@ -71,7 +71,7 @@ import { getStatus as defaultGetSchedulerStatus } from "../scheduler/heartbeat.t
 // ---------------------------------------------------------------------------
 
 /** The scheduler housekeeping heartbeat (issue #397) — feeds `lastTickAt` only. */
-export interface SchedulerHeartbeatView {
+interface SchedulerHeartbeatView {
   running: boolean;
   lastTickAt: string | null;
 }
@@ -96,7 +96,7 @@ export interface EligibilityView {
  * The recent-run-history field-group. Consumed only by the autopilot-health
  * aggregator; opt-in via `options.history`.
  */
-export interface HistoryView {
+interface HistoryView {
   /** The live autopilot run's projected view (`getCurrentRun().view`), or `null`. */
   liveRun: LiveRunView | null;
   /** Recent run digests, newest-first (`listRuns(historyWindow)`). */
