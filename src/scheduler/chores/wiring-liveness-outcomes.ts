@@ -36,15 +36,49 @@ import {
   type LoadOutcomesResult,
 } from "../../outcomes.ts";
 
-/** Per-outcome verdict from evaluating a declared `kind: leading` outcome. */
+/**
+ * Grace window (ms) after which a present-but-old reading is STALE, not LIVE.
+ *
+ * Default >1 day, mirroring the timer `maxStaleMinutes` / NOT-YET-FIRED guard and
+ * the design-concept's success criterion (detect within 24h of going dark). A
+ * fresh window avoids alarming on an outcome that is legitimately slow-moving:
+ * only a reading whose file mtime is older than this counts as STALE. Injectable
+ * via {@link DarkOutcomesDeps.maxStaleMs} so tests pin the boundary deterministically.
+ */
+export const DEFAULT_OUTCOME_MAX_STALE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Per-outcome verdict from evaluating a declared `kind: leading` outcome.
+ *
+ * Invariant 3 (approved design concept, issue #2753): DARK (a `null` reading —
+ * no data ever produced) and STALE (a finite reading whose file mtime is older
+ * than the grace window) are DISTINCT verdicts. A present-but-old value is never
+ * conflated with a never-produced one.
+ */
 export type OutcomeVerdict =
-  | { name: string; kind: "leading"; status: "live"; value: number }
-  | { name: string; kind: "leading"; status: "dark"; query: string; producerHint: string };
+  | { name: string; kind: "leading"; status: "live"; value: number; ts: string; ageMs: number }
+  | { name: string; kind: "leading"; status: "dark"; query: string; producerHint: string }
+  | {
+      name: string;
+      kind: "leading";
+      status: "stale";
+      value: number;
+      ts: string;
+      ageMs: number;
+      maxStaleMs: number;
+      query: string;
+      producerHint: string;
+    };
 
 /** The aggregated verdicts a single dark-outcome pass produces. */
 export interface OutcomeEvaluation {
   /** Declared leading outcomes whose current reading is `null` (no data). */
   darkOutcomes: string[];
+  /**
+   * Declared leading outcomes with a finite reading whose file mtime is older
+   * than the grace window (present-but-old — a stalled producer, NOT no-data).
+   */
+  staleOutcomes: string[];
   /** Every per-outcome verdict, for diagnostics/tests. */
   outcomeVerdicts: OutcomeVerdict[];
 }
@@ -63,7 +97,9 @@ export type OutcomesLoader = (filePath?: string) => Promise<LoadOutcomesResult>;
  * source is unreachable / not-yet-produced. Tests inject a deterministic fake so
  * dark vs live cases are reproducible without touching the filesystem.
  */
-export type OutcomeValueReader = (outcome: Outcome) => Promise<{ value: number } | null>;
+export type OutcomeValueReader = (
+  outcome: Outcome,
+) => Promise<{ value: number; ts: string } | null>;
 
 /** The external touchpoints of the dark-outcome check. */
 export interface DarkOutcomesDeps {
@@ -73,6 +109,14 @@ export interface DarkOutcomesDeps {
   readOutcomeValue?: OutcomeValueReader;
   /** Path to the outcomes manifest; defaults to {@link DEFAULT_OUTCOMES_FILE}. */
   outcomesPath?: string;
+  /**
+   * Grace window (ms) beyond which a finite reading's file mtime marks it STALE.
+   * Defaults to {@link DEFAULT_OUTCOME_MAX_STALE_MS} (>1 day). Injected in tests
+   * to pin the DARK/STALE/LIVE boundary deterministically.
+   */
+  maxStaleMs?: number;
+  /** Injectable clock (ms) for a deterministic staleness boundary in tests. */
+  now?: () => number;
 }
 
 /**
@@ -113,9 +157,17 @@ function isLoadOutcomesFailure(
  * Pure-ish evaluation of declared `kind: leading` outcomes against their current
  * reading. Loads the outcomes manifest, filters to leading outcomes, and reads
  * each value through the injected reader:
- *   - LIVE  — the reader returned a finite numeric value.
+ *   - LIVE  — a finite numeric reading whose file mtime is within the grace window.
  *   - DARK  — the reader returned `null` (producer never wrote the file, or it is
- *             missing/unparseable). Advisory only; carries a producer hint.
+ *             missing/unparseable — NO data). Advisory only; carries a producer hint.
+ *   - STALE — a finite reading whose file mtime is OLDER than `maxStaleMs` (a
+ *             present-but-old value: the producer wrote once and then stalled).
+ *
+ * Invariant 3 (approved design concept, issue #2753): DARK and STALE are DISTINCT
+ * verdicts — a present-but-old value (STALE) is never conflated with a
+ * never-produced one (DARK). The grace window (default >1 day, mirroring the
+ * timer `maxStaleMinutes` guard) also keeps a legitimately slow-moving outcome
+ * from false-alarming inside its first day.
  *
  * `terminal` outcomes are intentionally skipped — they never drive a holdback
  * decision and are expected to move slowly, so a null terminal reading is not a
@@ -124,6 +176,8 @@ function isLoadOutcomesFailure(
  * Never throws: a manifest load failure returns an empty evaluation (nothing
  * flagged, no exception — the failure is logged by the caller), mirroring how a
  * failed timer probe routes to `evaluated: false` rather than fabricating alarms.
+ * A per-outcome mtime that fails to parse degrades to LIVE (the value is the
+ * load-bearing field; an unparseable ts is not evidence of staleness).
  */
 export async function evaluateDarkOutcomes(
   deps: DarkOutcomesDeps = {},
@@ -131,8 +185,11 @@ export async function evaluateDarkOutcomes(
   const load = deps.loadOutcomes ?? loadOutcomes;
   const readValue = deps.readOutcomeValue ?? getOutcomeValue;
   const outcomesPath = deps.outcomesPath ?? DEFAULT_OUTCOMES_FILE;
+  const maxStaleMs = deps.maxStaleMs ?? DEFAULT_OUTCOME_MAX_STALE_MS;
+  const nowMs = (deps.now ?? Date.now)();
 
   const darkOutcomes: string[] = [];
+  const staleOutcomes: string[] = [];
   const outcomeVerdicts: OutcomeVerdict[] = [];
 
   const loaded = await load(outcomesPath);
@@ -143,12 +200,13 @@ export async function evaluateDarkOutcomes(
     console.error(
       `[Housekeeping] wiring-liveness dark-outcome check: could not load outcomes — ${loaded.errors.join("; ")}`,
     );
-    return { darkOutcomes, outcomeVerdicts };
+    return { darkOutcomes, staleOutcomes, outcomeVerdicts };
   }
 
   for (const outcome of loaded.outcomes) {
     if (outcome.kind !== "leading") continue;
     const reading = await readValue(outcome);
+    // DARK: no reading at all (null / undefined / non-finite value).
     if (reading === null || reading === undefined || !Number.isFinite(reading.value)) {
       outcomeVerdicts.push({
         name: outcome.name,
@@ -160,13 +218,37 @@ export async function evaluateDarkOutcomes(
       darkOutcomes.push(outcome.name);
       continue;
     }
+
+    // Present reading: distinguish STALE (old mtime) from LIVE (fresh mtime).
+    // A ts that cannot be parsed degrades to LIVE — the value is the load-bearing
+    // field and an unparseable ts is not positive evidence of staleness.
+    const readingMs = Date.parse(reading.ts);
+    const ageMs = Number.isFinite(readingMs) ? nowMs - readingMs : 0;
+    if (Number.isFinite(readingMs) && ageMs > maxStaleMs) {
+      outcomeVerdicts.push({
+        name: outcome.name,
+        kind: "leading",
+        status: "stale",
+        value: reading.value,
+        ts: reading.ts,
+        ageMs,
+        maxStaleMs,
+        query: outcome.query,
+        producerHint: producerHintFor(outcome),
+      });
+      staleOutcomes.push(outcome.name);
+      continue;
+    }
+
     outcomeVerdicts.push({
       name: outcome.name,
       kind: "leading",
       status: "live",
       value: reading.value,
+      ts: reading.ts,
+      ageMs,
     });
   }
 
-  return { darkOutcomes, outcomeVerdicts };
+  return { darkOutcomes, staleOutcomes, outcomeVerdicts };
 }

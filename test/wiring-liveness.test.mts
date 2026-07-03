@@ -536,20 +536,45 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
     assert.equal(v.status === "dark" && v.producerHint.length > 0, true);
   });
 
-  test("a live leading outcome (finite reading) is NOT flagged", async () => {
+  test("a live leading outcome (fresh finite reading) is NOT flagged", async () => {
     const res = await runWiringLiveness({
       loadManifest: async () => okManifest,
       readTimers: freshTimers,
       readOutput: fakeReader([5, 5, 5]),
       darkOutcomes: {
         loadOutcomes: async () => ({ ok: true, outcomes: [leading("some-live-metric")] }),
-        readOutcomeValue: async () => ({ value: 0.42 }),
+        readOutcomeValue: async () => ({ value: 0.42, ts: new Date(NOW).toISOString() }),
+        now: () => NOW,
       },
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
     assert.deepEqual(res.darkOutcomes, []);
+    assert.deepEqual(res.staleOutcomes, []);
     assert.equal(res.outcomeVerdicts[0].status, "live");
+  });
+
+  test("flags a STALE leading outcome (old mtime) distinctly from DARK", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => okManifest,
+      readTimers: freshTimers,
+      readOutput: fakeReader([5, 5, 5]),
+      darkOutcomes: {
+        loadOutcomes: async () => ({ ok: true, outcomes: [leading("stalled-metric")] }),
+        // A present-but-old reading: written once (2 days ago) then the producer stalled.
+        readOutcomeValue: async () => ({
+          value: 0.3,
+          ts: new Date(NOW - 2 * 24 * 60 * 60 * 1000).toISOString(),
+        }),
+        now: () => NOW,
+      },
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    // Invariant 3: STALE is reported separately; darkOutcomes stays empty.
+    assert.deepEqual(res.darkOutcomes, []);
+    assert.deepEqual(res.staleOutcomes, ["stalled-metric"]);
+    assert.equal(res.outcomeVerdicts[0].status, "stale");
   });
 
   test("a dark-outcome loader failure never throws and flags nothing", async () => {

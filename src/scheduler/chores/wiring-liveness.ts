@@ -213,6 +213,13 @@ export interface WiringLivenessResult {
    * Advisory (issue #2753): a dark leading outcome is silent holdback blindness.
    */
   darkOutcomes: string[];
+  /**
+   * Declared `kind: leading` outcomes with a finite reading whose file mtime is
+   * OLDER than the grace window — a present-but-old value (a stalled producer),
+   * distinct from a `null` (never-produced) DARK outcome. Invariant 3 (issue
+   * #2753): STALE and DARK are separate verdicts, never conflated. Advisory only.
+   */
+  staleOutcomes: string[];
   /** Every per-entry timer verdict, for diagnostics/tests. */
   verdicts: TimerVerdict[];
   /** Every per-entry output verdict, for diagnostics/tests. */
@@ -285,6 +292,7 @@ export function diffTimers(
     belowFloor: [],
     unreadable: [],
     darkOutcomes: [],
+    staleOutcomes: [],
     verdicts,
     outputVerdicts: [],
     outcomeVerdicts: [],
@@ -382,13 +390,15 @@ export async function runWiringLiveness(
     // the timer verdicts.
     const outcomes = await evaluateDarkOutcomes(deps.darkOutcomes ?? {});
     result.darkOutcomes = outcomes.darkOutcomes;
+    result.staleOutcomes = outcomes.staleOutcomes;
     result.outcomeVerdicts = outcomes.outcomeVerdicts;
 
     if (
       result.missing.length > 0 ||
       result.stale.length > 0 ||
       result.belowFloor.length > 0 ||
-      result.darkOutcomes.length > 0
+      result.darkOutcomes.length > 0 ||
+      result.staleOutcomes.length > 0
     ) {
       const parts: string[] = [];
       if (result.missing.length > 0) parts.push(`missing timers: ${result.missing.join(", ")}`);
@@ -404,6 +414,16 @@ export async function runWiringLiveness(
           .filter((s) => s.length > 0)
           .join("; ");
         parts.push(`dark leading outcomes: ${darkDetail}`);
+      }
+      if (result.staleOutcomes.length > 0) {
+        // STALE (present-but-old) is distinct from DARK — surface it separately
+        // with the producer hint so the operator knows the producer stalled
+        // rather than never having written at all (Invariant 3, issue #2753).
+        const staleDetail = result.outcomeVerdicts
+          .map((v) => (v.status === "stale" ? `${v.name} (${v.producerHint})` : ""))
+          .filter((s) => s.length > 0)
+          .join("; ");
+        parts.push(`stale leading outcomes: ${staleDetail}`);
       }
       console.warn(
         `[Housekeeping] wiring-liveness flagged declared entrypoints — ${parts.join("; ")}`,
@@ -434,6 +454,7 @@ function emptyResult(header: {
     belowFloor: [],
     unreadable: [],
     darkOutcomes: [],
+    staleOutcomes: [],
     verdicts: [],
     outputVerdicts: [],
     outcomeVerdicts: [],
