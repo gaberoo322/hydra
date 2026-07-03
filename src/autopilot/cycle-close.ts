@@ -68,7 +68,7 @@ const CYCLE_TTL_SECONDS = 7 * 24 * 3600;
 // ---------------------------------------------------------------------------
 
 /** Cycle-hash + index accessors `recordCycle` touches. */
-export interface AutopilotRunsCycleFacade {
+interface AutopilotRunsCycleFacade {
   getCycleHash(cycleId: string): Promise<Record<string, string>>;
   initCycleHash(
     cycleId: string,
@@ -79,7 +79,7 @@ export interface AutopilotRunsCycleFacade {
 }
 
 /** Lifetime scheduler counters `recordCycle` bumps (the #1919 buckets). */
-export interface AutopilotRunsSchedulerFacade {
+interface AutopilotRunsSchedulerFacade {
   incrSchedulerCyclesRun(): Promise<number>;
   incrSchedulerCyclesMerged(): Promise<number>;
   incrSchedulerCyclesFailed(): Promise<number>;
@@ -87,7 +87,7 @@ export interface AutopilotRunsSchedulerFacade {
 }
 
 /** The per-cycle metrics writer `recordCycle` feeds. */
-export interface AutopilotRunsMetricsFacade {
+interface AutopilotRunsMetricsFacade {
   recordCycleMetrics(cycleId: string, metrics: CycleMetricsInput): Promise<void>;
 }
 
