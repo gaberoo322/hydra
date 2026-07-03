@@ -546,6 +546,52 @@ playbook, the handshake aborts and the operator re-runs after
 `bootstrap.sh` writes a fresh v2 state on next invocation. There is
 no in-place upgrader: bootstrap is the single writer for state.json.
 
+## Cross-run state: Redis mirror survives reboot (issue #2715)
+
+`/tmp/hydra-autopilot-state.json` is the run-local home of all autopilot
+state, but `/tmp` is boot-wiped by the host tmpfiles policy (`D /tmp …
+30d`). Most of state.json is **run-scoped** and legitimately dies with the
+run — `pid`, `turn`, `dispatches`, `slots`, `idle_turns`, `burned_classes`
+(the concurrent-run PID guard and the #1352 slot re-seeding DEPEND on those
+resetting). Only the **cross-run durable subset** must survive:
+
+- `signal_last_fired` (the per-class cooldown timestamps — the 4 long-cooldown
+  classes `retro_orch` / `architecture_orch` / `cleanup_orch` / `scout_orch`
+  are the load-bearing ones; the 5 always-on classes re-arm to 0 each run by
+  design)
+- `research_force_counter` (the 4/day forced-research cap, #1666)
+
+The #2575 prior-file carry-forward reseeds these from the *prior state.json*
+on each bootstrap — which survives a pace-gate relaunch (no `/tmp` wipe) but
+NOT a host **reboot** (which wipes `/tmp`, so there is no prior file). After a
+reboot the long-cooldown classes reset to epoch 0 and all fire in the first
+post-boot run — a per-reboot recurrence of the #2575 token churn.
+
+The durable fix mirrors the cross-run subset to **Redis** (which survives
+reboot via AOF + the docker volume) and reads it back as a seed tier:
+
+- **Keys** (bare `redis-cli`, matching collect-state.sh's seam):
+  `hydra:autopilot:signal-last-fired` — a **Hash** (field = signal class, value
+  = last-fired epoch); `hydra:autopilot:research-force-counter` — a **String**
+  holding the canonical-JSON date-keyed counter object.
+- **Seed order** (bootstrap.sh): prior state file → **Redis** → 0. The prior
+  file stays FIRST (fast local path, survives relaunches); Redis is the
+  reboot-survival backstop; 0 is the first-install default (no prior file AND
+  no Redis key — unchanged behaviour).
+- **Write seam**: `reap.py run_completion` mirrors the whole subset on EVERY
+  completion (the reliable "a signal class fired" executor seam — reap runs on
+  every terminal dispatch, signal classes included). `decide.py` additionally
+  mirrors `research_force_counter` on the same turn it stamps it (a force can
+  advance without a reap).
+- **decide.py's READ path is unchanged**: it reads `signal_last_fired` /
+  `research_force_counter` ONLY from the loaded state dict, never from Redis.
+  Redis is exclusively a bootstrap SEED source and an executor MIRROR sink.
+- **Fail-open everywhere**: every Redis read (seed) and write (mirror) is
+  best-effort — a Redis error logs and degrades to the pre-#2715 behaviour
+  (seed → 0, write → state.json only) and NEVER aborts bootstrap or a decision
+  turn. `HYDRA_AUTOPILOT_REDIS_CLI` overrides the `docker exec hydra-redis-1
+  redis-cli` prefix for hermetic tests.
+
 ## Termination
 
 `decide.py` emits a single `terminate` action when any of these trip:

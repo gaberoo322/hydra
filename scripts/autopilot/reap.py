@@ -68,6 +68,24 @@ HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 
 REAPED_TASK_IDS_CAP = 1000
 
+# Issue #2715 — Redis mirror of the cross-run cooldown subset.
+#
+# /tmp/hydra-autopilot-state.json is boot-wiped, so `signal_last_fired` /
+# `research_force_counter` are lost on host reboot and the long-cooldown classes
+# reset to epoch 0 (a per-reboot recurrence of the #2575 churn). Redis survives
+# reboot (AOF + docker volume), so reap mirrors the cross-run subset to Redis on
+# EVERY completion — the reliable executor-side "a class fired" seam (reap runs on
+# every terminal dispatch, including signal-class completions). bootstrap.sh reads
+# these keys back as a seed tier behind the prior file (prior-file → Redis → 0).
+#
+# The bash→Redis seam is `docker exec hydra-redis-1 redis-cli` — the exact pattern
+# collect-state.sh uses — not a typed accessor / HTTP route (design-concept #2715).
+# `HYDRA_AUTOPILOT_REDIS_CLI` overrides the argv prefix so tests inject a stub and
+# exercise the mirror hermetically. Every write is best-effort / fail-open: any
+# error logs to stderr and NEVER aborts the reap (design-concept #2715 Invariant 5).
+REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
+REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
+
 # Issue #1136 (Slice 2 of #1119): directory the code-writing dispatch deposits
 # its planning-time reflection-bucket string into, keyed by task_id, so reap can
 # forward it on the SINGLE authoritative cycle-record write. Overridable via
@@ -140,6 +158,86 @@ def _load_state() -> dict | None:
 
 def _save_state(s: dict) -> None:
     STATE_PATH.write_text(json.dumps(s))
+
+
+def _redis_cli(*args: str) -> None:
+    """Run one redis-cli command best-effort (issue #2715). Never raises.
+
+    Mirrors the docker-exec redis-cli seam collect-state.sh uses. The argv prefix
+    is `docker exec hydra-redis-1 redis-cli` unless HYDRA_AUTOPILOT_REDIS_CLI
+    overrides it (whitespace-split — a trusted test/override prefix, e.g.
+    `redis-cli -h 127.0.0.1 -p 6390`, or a stub recorder). Any failure (redis
+    down, docker absent, timeout) is logged to stderr and swallowed: the state
+    file is already the source of truth, so a missed mirror only costs one extra
+    post-reboot fire, never a crash.
+    """
+    override = os.environ.get("HYDRA_AUTOPILOT_REDIS_CLI", "").strip()
+    if override:
+        cmd = [*override.split(), *args]
+    else:
+        cmd = ["docker", "exec", "hydra-redis-1", "redis-cli", *args]
+    try:
+        subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: redis mirror {args[:2]} failed ({exc}); "
+            "state.json remains source of truth",
+            file=sys.stderr,
+        )
+
+
+def _mirror_cross_run_state_to_redis(s: dict) -> None:
+    """Mirror the cross-run durable subset of state to Redis (issue #2715).
+
+    ONLY the reboot-survival subset is mirrored — `signal_last_fired` (the 9
+    signal classes) and `research_force_counter`. Run-scoped fields
+    (pid/turn/dispatches/slots/idle_turns/burned_classes) are NEVER mirrored:
+    they legitimately die with the run and the concurrent-run PID guard + #1352
+    slot re-seeding DEPEND on them resetting (design-concept #2715 Invariant 4).
+
+    Called after `_save_state` in `run_completion`, so a Redis hiccup can never
+    lose the local write. Best-effort throughout — no exception escapes.
+    """
+    try:
+        slf = s.get("signal_last_fired")
+        if isinstance(slf, dict) and slf:
+            # HSET the hash field-by-field; each value is an epoch int (or 0).
+            # Skip non-int-coercible values rather than corrupting the field.
+            hset_args: list[str] = ["HSET", REDIS_SIGNAL_LAST_FIRED_KEY]
+            for cls, ts in slf.items():
+                try:
+                    hset_args.extend([str(cls), str(int(ts))])
+                except (TypeError, ValueError):
+                    continue
+            # Only issue the HSET when at least one field pair was collected.
+            if len(hset_args) > 2:
+                _redis_cli(*hset_args)
+
+        rfc = s.get("research_force_counter")
+        if isinstance(rfc, dict):
+            # Store as one canonical-JSON string (a date-keyed nested object) so
+            # bootstrap can prune it to today's key on read, mirroring the
+            # prior-file path. An empty {} is still written — it faithfully
+            # records "no forced-research today" and never resurrects a stale day.
+            _redis_cli(
+                "SET",
+                REDIS_RESEARCH_FORCE_KEY,
+                json.dumps(rfc, sort_keys=True),
+            )
+    except Exception as exc:  # pragma: no cover - defensive belt-and-braces
+        # The subset mirror is a pure best-effort side-effect; never let it
+        # bubble up and abort a reap that already persisted state locally.
+        print(
+            f"[autopilot] reap: cross-run redis mirror failed ({exc}); "
+            "state.json remains source of truth",
+            file=sys.stderr,
+        )
 
 
 def _ensure_reaped_list(s: dict) -> list[str]:
@@ -823,6 +921,12 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         s["slots"][cls] = None  # release the pipeline slot
 
     _save_state(s)
+
+    # Issue #2715: mirror the cross-run durable subset (signal_last_fired +
+    # research_force_counter) to Redis so a host reboot (which wipes /tmp) can
+    # reseed the long-cooldown timestamps instead of resetting them to epoch 0.
+    # AFTER _save_state so the local write is never at risk from a Redis hiccup.
+    _mirror_cross_run_state_to_redis(s)
 
     # Issue #1136 (Slice 2 of #1119): forward the planning-time reflection
     # buckets the dispatch deposited for this task_id so the cycle metric

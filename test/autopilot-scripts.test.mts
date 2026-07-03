@@ -47,6 +47,45 @@ function makeTempState(): { dir: string; state: string; heartbeat: string; log: 
   };
 }
 
+/**
+ * Issue #2715 — write an executable stub that impersonates `redis-cli` for the
+ * bootstrap Redis-seed fallback. The stub answers exactly the two read shapes
+ * bootstrap issues:
+ *   - `HGET hydra:autopilot:signal-last-fired <class>` → the class's epoch
+ *     from `signalHash` (empty output when absent, mirroring a missing field).
+ *   - `GET hydra:autopilot:research-force-counter` → the canonical JSON string
+ *     from `researchForce` (empty output when null).
+ * Any other command echoes nothing (best-effort no-op). Injected via
+ * HYDRA_AUTOPILOT_REDIS_CLI so the seed logic is exercised without a live Redis.
+ */
+function makeRedisStub(
+  dir: string,
+  opts: { signalHash?: Record<string, number>; researchForce?: unknown },
+): string {
+  const stubPath = join(dir, "redis-stub.sh");
+  const signal = JSON.stringify(opts.signalHash ?? {});
+  const research =
+    opts.researchForce === undefined ? "" : JSON.stringify(opts.researchForce);
+  // POSIX sh; reads argv the way `redis-cli <cmd> <key> [field]` is invoked.
+  const script = `#!/usr/bin/env bash
+cmd="$1"; key="$2"; field="$3"
+if [ "$cmd" = "HGET" ] && [ "$key" = "hydra:autopilot:signal-last-fired" ]; then
+  # Emit the field's value, or empty string when the field is absent (mirrors
+  # a real HGET miss). jq -e distinguishes present-vs-null so an absent field
+  # prints nothing rather than the literal "null".
+  printf '%s' ${JSON.stringify(signal)} | jq -er --arg f "$field" '.[$f] | tostring' 2>/dev/null || true
+  exit 0
+fi
+if [ "$cmd" = "GET" ] && [ "$key" = "hydra:autopilot:research-force-counter" ]; then
+  printf '%s' ${JSON.stringify(research)}
+  exit 0
+fi
+exit 0
+`;
+  writeFileSync(stubPath, script, { mode: 0o755 });
+  return stubPath;
+}
+
 function runBootstrap(env: Record<string, string>, tmp: { state: string; heartbeat: string; log: string }): {
   status: number;
   stdout: string;
@@ -726,6 +765,147 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       for (const sig of ["retro_orch", "architecture_orch", "cleanup_orch", "scout_orch"]) {
         assert.equal(s.signal_last_fired[sig], 0,
           `cooldown signal ${sig} must default to 0 on first-ever run`);
+      }
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2715 — reboot survival. /tmp is boot-wiped, so after a host reboot
+  // there is NO prior state file; the #2575 carry-forward falls to 0 and the
+  // long-cooldown classes all fire in the first post-boot run. With the Redis
+  // mirror in place, bootstrap seeds the 4 long-cooldown classes from Redis
+  // instead of 0 — the seed order is prior-file → Redis → 0. This test
+  // simulates the reboot: NO prior state file, but Redis holds the timestamps.
+  test("seeds the 4 long-cooldown classes from Redis when the prior state file is gone (issue #2715)", () => {
+    const tmp = makeTempState();
+    try {
+      const redisHash = {
+        retro_orch: 1_780_000_000,
+        architecture_orch: 1_780_000_100,
+        cleanup_orch: 1_780_000_200,
+        scout_orch: 1_780_000_300,
+      };
+      const stub = makeRedisStub(tmp.dir, { signalHash: redisHash });
+      // No prior state file written — this is the post-reboot condition.
+      const r = runBootstrap({ HYDRA_AUTOPILOT_REDIS_CLI: `bash ${stub}` }, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+
+      assert.equal(s.signal_last_fired.retro_orch, redisHash.retro_orch,
+        "retro_orch must seed from Redis after a reboot (NOT 0)");
+      assert.equal(s.signal_last_fired.architecture_orch, redisHash.architecture_orch,
+        "architecture_orch must seed from Redis after a reboot");
+      assert.equal(s.signal_last_fired.cleanup_orch, redisHash.cleanup_orch,
+        "cleanup_orch must seed from Redis after a reboot");
+      assert.equal(s.signal_last_fired.scout_orch, redisHash.scout_orch,
+        "scout_orch must seed from Redis after a reboot");
+      // Always-on classes still re-arm to 0 — Redis mirror never touches them.
+      for (const sig of ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"]) {
+        assert.equal(s.signal_last_fired[sig], 0, `always-on signal ${sig} must re-arm to 0`);
+      }
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2715 — the prior state file WINS over Redis (seed order prior → Redis
+  // → 0). Within a boot session /tmp survives, so the fast local prior-file tier
+  // must take precedence; Redis is only the reboot backstop. Verify a prior file
+  // with a fresher timestamp is preserved even when Redis holds a stale one.
+  test("prefers the prior state file over Redis for the long-cooldown classes (issue #2715)", () => {
+    const tmp = makeTempState();
+    try {
+      const priorTs = 1_790_000_000;
+      writeFileSync(tmp.state, JSON.stringify({
+        schema_version: 2,
+        slots: {},
+        signal_last_fired: {
+          retro_orch: priorTs,
+          architecture_orch: priorTs,
+          cleanup_orch: priorTs,
+          scout_orch: priorTs,
+        },
+      }));
+      // Redis holds an OLDER timestamp that must be ignored in favour of the file.
+      const stub = makeRedisStub(tmp.dir, {
+        signalHash: {
+          retro_orch: 1_700_000_000,
+          architecture_orch: 1_700_000_000,
+          cleanup_orch: 1_700_000_000,
+          scout_orch: 1_700_000_000,
+        },
+      });
+      const r = runBootstrap({ HYDRA_AUTOPILOT_REDIS_CLI: `bash ${stub}` }, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      for (const sig of ["retro_orch", "architecture_orch", "cleanup_orch", "scout_orch"]) {
+        assert.equal(s.signal_last_fired[sig], priorTs,
+          `${sig} must keep the prior-file timestamp, not fall through to the older Redis value`);
+      }
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2715 — first install: no prior file AND no Redis key still degrades
+  // to 0 (acceptance criterion — first-install behaviour unchanged). The stub
+  // returns empty for every field, simulating an empty Redis.
+  test("degrades to 0 when there is neither a prior state file nor a Redis key (issue #2715)", () => {
+    const tmp = makeTempState();
+    try {
+      const stub = makeRedisStub(tmp.dir, { signalHash: {} }); // empty Redis
+      const r = runBootstrap({ HYDRA_AUTOPILOT_REDIS_CLI: `bash ${stub}` }, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      for (const sig of ["retro_orch", "architecture_orch", "cleanup_orch", "scout_orch"]) {
+        assert.equal(s.signal_last_fired[sig], 0,
+          `${sig} must default to 0 when neither prior file nor Redis has a value`);
+      }
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2715 — research_force_counter also seeds from Redis after a reboot.
+  // The stored value is a date-keyed object; bootstrap prunes it to TODAY's UTC
+  // key exactly like the prior-file path, so a stale yesterday counter can't leak
+  // forward. Feed a Redis value that contains BOTH today and yesterday and assert
+  // only today's survives.
+  test("seeds research_force_counter from Redis (pruned to today) after a reboot (issue #2715)", () => {
+    const tmp = makeTempState();
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const yesterday = "2000-01-01";
+      const stub = makeRedisStub(tmp.dir, {
+        researchForce: { [today]: { orch: 2 }, [yesterday]: { orch: 9 } },
+      });
+      // No prior state file — post-reboot condition.
+      const r = runBootstrap({ HYDRA_AUTOPILOT_REDIS_CLI: `bash ${stub}` }, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.deepEqual(s.research_force_counter, { [today]: { orch: 2 } },
+        "research_force_counter must seed from Redis pruned to today's UTC key only");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2715 — the Redis seed is best-effort / fail-open: a redis-cli that
+  // exits non-zero (redis down) must NOT abort bootstrap; the classes fall back
+  // to 0 (design-concept #2715 Invariant 5).
+  test("Redis seed is fail-open — a failing redis-cli never aborts bootstrap (issue #2715)", () => {
+    const tmp = makeTempState();
+    try {
+      // A stub that always exits 1 (simulating docker/redis unavailable).
+      const stub = join(tmp.dir, "redis-fail.sh");
+      writeFileSync(stub, "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+      const r = runBootstrap({ HYDRA_AUTOPILOT_REDIS_CLI: `bash ${stub}` }, tmp);
+      assert.equal(r.status, 0, `bootstrap must not abort when redis-cli fails: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      for (const sig of ["retro_orch", "architecture_orch", "cleanup_orch", "scout_orch"]) {
+        assert.equal(s.signal_last_fired[sig], 0,
+          `${sig} must degrade to 0 when the Redis seed read fails`);
       }
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

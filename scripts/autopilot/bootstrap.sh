@@ -543,6 +543,42 @@ else
   ISOLATED_RUN=0
 fi
 
+# Issue #2715 — Redis-backed reboot-survival for the cross-run cooldown subset.
+#
+# /tmp is boot-wiped (tmpfiles `D /tmp … 30d`), so the #2575 prior-file
+# carry-forward survives pace-gate relaunches but NOT a host reboot: after a
+# reboot the prior state.json is gone and the long-cooldown classes reseed to
+# epoch 0, firing many times in the first post-boot run (a per-reboot recurrence
+# of the #2575 token churn). Redis survives reboot (AOF + docker volume), so the
+# durable fix mirrors the cross-run subset to Redis on write and reads it back as
+# a seed tier BEHIND the prior file (prior-file → Redis → 0).
+#
+# `redis_cooldown_cli` is the single bash→Redis seam. It follows the EXACT
+# docker-exec redis-cli pattern collect-state.sh already uses for every autopilot
+# cross-run Redis read/write — no new typed accessor, no HTTP route (bootstrap
+# runs in Phase 0 before the HTTP service is guaranteed up, so a curl seed would
+# be less robust; design-concept #2715 Invariant 6 + rejectedAlternatives).
+#
+# `HYDRA_AUTOPILOT_REDIS_CLI` overrides the command (tests inject a stub so the
+# seed logic is exercised hermetically without a live Redis). Every call is
+# best-effort / fail-open: any error (redis down, docker absent, timeout) yields
+# empty stdout and the caller falls back to the pre-#2715 behaviour — NEVER
+# aborts bootstrap (design-concept #2715 Invariant 5).
+REDIS_SIGNAL_LAST_FIRED_KEY="hydra:autopilot:signal-last-fired"
+REDIS_RESEARCH_FORCE_KEY="hydra:autopilot:research-force-counter"
+redis_cooldown_cli() {
+  # $@ = redis-cli argv (e.g. HGET <key> <field>). Emits stdout on success,
+  # nothing on any failure. Quotes are stripped by the caller as needed.
+  if [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; then
+    # Test/override seam: a whitespace-split command prefix. Word-split is
+    # intentional here (the override is a trusted test fixture, not user input).
+    # shellcheck disable=SC2086
+    ${HYDRA_AUTOPILOT_REDIS_CLI} "$@" 2>/dev/null || true
+  else
+    docker exec hydra-redis-1 redis-cli "$@" 2>/dev/null || true
+  fi
+}
+
 # Heartbeat — Phase 0 marker.
 #
 # This is the FIRST write; subsequent decision turns must call
@@ -731,6 +767,36 @@ if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
   esac
 fi
 
+# Issue #2715 — Redis fallback tier for research_force_counter.
+#
+# Fallback order is prior-file → Redis → {}. When the prior file was absent or
+# carried no counter for today (RESEARCH_FORCE_SEED is still the empty `{}`), try
+# the Redis mirror-write left by decide.py / reap.py — this is the reboot-survival
+# path (/tmp was wiped, so the prior file is gone, but Redis persists). The stored
+# value is the canonical-JSON research_force_counter (a date-keyed object); we
+# prune it to TODAY's UTC key exactly as the prior-file read does so a stale
+# yesterday counter can never leak forward. First install (Redis empty too) keeps
+# the `{}` default — first-install behaviour unchanged (design-concept #2715).
+if [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; then
+  if [ "${RESEARCH_FORCE_SEED}" = "{}" ] && command -v jq >/dev/null 2>&1; then
+    RFC_REDIS_RAW="$(redis_cooldown_cli GET "${REDIS_RESEARCH_FORCE_KEY}")"
+    if [ -n "${RFC_REDIS_RAW}" ]; then
+      SEED_TODAY_UTC="${SEED_TODAY_UTC:-$(date -u +%Y-%m-%d)}"
+      RFC_REDIS_SEED="$(printf '%s' "${RFC_REDIS_RAW}" | jq -c --arg today "${SEED_TODAY_UTC}" '
+        . as $c
+        | if ($c | type) == "object" and (($c[$today] // null) | type) == "object"
+          then { ($today): $c[$today] }
+          else {}
+          end
+      ' 2>/dev/null || echo "{}")"
+      case "${RFC_REDIS_SEED}" in
+        "{"*) RESEARCH_FORCE_SEED="${RFC_REDIS_SEED}" ;;
+        *) ;;  # keep {} on any parse failure
+      esac
+    fi
+  fi
+fi
+
 # Issue #2575 — carry the cooled-class last-fired timestamps across runs.
 #
 # Same hazard as RESEARCH_FORCE_SEED above: the state-file heredoc clobbers
@@ -766,6 +832,45 @@ if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
     "{"*) ;;
     *) COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0}' ;;
   esac
+fi
+
+# Issue #2715 — Redis fallback tier for the 4 long-cooldown signal classes.
+#
+# Fallback order is prior-file → Redis → 0, applied PER CLASS. For each of the 4
+# long-cooldown classes whose prior-file value came back as 0 (absent prior file
+# after a reboot, or a genuinely never-stamped class), read the class's field
+# from the Redis hash mirror. This is the reboot-survival path: /tmp was wiped so
+# the prior file is gone, but Redis persists the last-fired stamp reap.py wrote,
+# so the 24h/1h cooldowns hold across the reboot instead of resetting to epoch 0
+# and firing many times in the first post-boot run. First install (no prior file
+# AND no Redis key) keeps 0 — first-install behaviour unchanged. Best-effort: any
+# Redis error yields empty stdout, the class keeps its prior-file value (0), and
+# bootstrap never blocks (design-concept #2715 Invariants 2 + 5).
+if { [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; } \
+  && command -v jq >/dev/null 2>&1; then
+  for _cd_cls in retro_orch architecture_orch cleanup_orch scout_orch; do
+    # Only reach for Redis when the prior-file tier gave us 0 for this class.
+    _cd_prior="$(printf '%s' "${COOLDOWN_SIGNAL_SEED}" | jq -r --arg c "${_cd_cls}" '(.[$c] // 0)' 2>/dev/null || echo 0)"
+    case "${_cd_prior}" in
+      0|"") ;;               # prior-file value missing/zero → try Redis
+      *) continue ;;          # prior-file already has a real timestamp → keep it
+    esac
+    _cd_redis="$(redis_cooldown_cli HGET "${REDIS_SIGNAL_LAST_FIRED_KEY}" "${_cd_cls}" | tr -d '"')"
+    # Accept only a positive integer epoch; anything else (empty / non-numeric)
+    # leaves the class at its prior-file 0.
+    case "${_cd_redis}" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "${_cd_redis}" -gt 0 ] 2>/dev/null; then
+      _cd_merged="$(printf '%s' "${COOLDOWN_SIGNAL_SEED}" \
+        | jq -c --arg c "${_cd_cls}" --argjson v "${_cd_redis}" '.[$c] = $v' 2>/dev/null || echo "")"
+      case "${_cd_merged}" in
+        "{"*) COOLDOWN_SIGNAL_SEED="${_cd_merged}" ;;
+        *) ;;  # keep the prior seed on any jq failure
+      esac
+    fi
+  done
+  unset _cd_cls _cd_prior _cd_redis _cd_merged
 fi
 
 # Compose the full 9-key signal_last_fired object: the 5 always-on classes seeded
