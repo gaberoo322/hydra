@@ -67,6 +67,17 @@ export const NAV_REGISTRY_PATH =
  */
 export const ROUTE_CRAWL_EMIT_CAP = 3;
 
+/**
+ * The board-saturation floor (mirrors `TARGET_SATURATION_CAP = 10` in the
+ * cleanup emitter): if the target-backlog already carries MORE than this many
+ * open route-crawl issues, the run emits NOTHING at all — not even up to the
+ * per-run cap. Where {@link ROUTE_CRAWL_EMIT_CAP} bounds a *single* crawl's
+ * output, this bounds the *standing* board: once the operator is already
+ * sitting on a wall of unaddressed route-crawl issues, filing more is pure
+ * noise, so the run goes quiet until the board is drained back under the floor.
+ */
+export const ROUTE_CRAWL_SATURATION_CAP = 10;
+
 /** Label every crawl-filed issue carries — the target-backlog board + dedup seam. */
 export const ROUTE_CRAWL_LABELS = ["target-backlog"] as const;
 
@@ -225,17 +236,48 @@ export function renderRouteBody(
  * playbook's existing health check owns, not a per-route data-drift crash, and
  * filing one issue per route for a downed service is exactly the flood the cap
  * exists to prevent.
+ *
+ * BOARD-SATURATION FLOOR (mirrors the cleanup emitter's `TARGET_SATURATION_CAP`
+ * guard): before planning any emission, if the board already carries MORE than
+ * `saturationCap` open route-crawl issues, the plan emits nothing — every
+ * non-200 route is dropped with a saturation reason. This is the *standing*
+ * bound (distinct from the per-run `cap`): once the operator is sitting on a
+ * wall of unaddressed crawl issues, more filing is noise, so the run goes quiet
+ * until the board drains back under the floor. Healthy routes are still counted
+ * so the report stays truthful.
  */
 export function planRouteCrawlEmit(
   results: readonly RouteCrawlResult[],
   openIssueTitles: readonly string[],
   baseUrl: string = DEFAULT_BASE_URL,
   cap: number = ROUTE_CRAWL_EMIT_CAP,
+  saturationCap: number = ROUTE_CRAWL_SATURATION_CAP,
 ): RouteCrawlEmitPlan {
   const trackedRoutes = new Set<string>();
   for (const title of openIssueTitles) {
     const route = routeFromOpenIssueTitle(title);
     if (route) trackedRoutes.add(route);
+  }
+
+  // Board-saturation floor: too many open route-crawl issues already → emit
+  // nothing this run (mirrors hydra-target-cleanup-emit's TARGET_SATURATION_CAP
+  // guard). Every non-200 route is dropped with a saturation reason; healthy
+  // routes are still counted so the crawl report is honest.
+  if (trackedRoutes.size > saturationCap) {
+    let saturatedHealthy = 0;
+    const saturatedDropped: DroppedRouteFinding[] = [];
+    for (const r of results) {
+      if (r.status === 200 || r.status === 0) {
+        saturatedHealthy++;
+        continue;
+      }
+      saturatedDropped.push({
+        route: r.route,
+        status: r.status,
+        reason: `board saturated (${trackedRoutes.size} open route-crawl issues > ${saturationCap} cap) — emitting nothing`,
+      });
+    }
+    return { issues: [], dropped: saturatedDropped, healthy: saturatedHealthy };
   }
 
   let healthy = 0;
@@ -440,7 +482,9 @@ function main(): void {
 
   console.log("");
   console.log(`Healthy (200 / skipped): ${plan.healthy}`);
-  console.log(`To file:                 ${plan.issues.length} (cap ${ROUTE_CRAWL_EMIT_CAP})`);
+  console.log(
+    `To file:                 ${plan.issues.length} (per-run cap ${ROUTE_CRAWL_EMIT_CAP}, board-saturation floor ${ROUTE_CRAWL_SATURATION_CAP})`,
+  );
   console.log(`Dropped:                 ${plan.dropped.length}`);
   for (const d of plan.dropped) {
     console.log(`  - ${d.route} (${d.status}): ${d.reason}`);

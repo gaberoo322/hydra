@@ -18,6 +18,10 @@
  *      not filed — a downed service is a health problem, not per-route drift.
  *   7. TITLE/DEDUP COHERENCE: routeFromOpenIssueTitle round-trips renderRouteTitle
  *      and rejects foreign titles.
+ *   8. BOARD-SATURATION FLOOR: once MORE than ROUTE_CRAWL_SATURATION_CAP open
+ *      route-crawl issues stand on the board, the run emits nothing at all —
+ *      every non-200 is dropped with a saturation reason (mirrors the cleanup
+ *      emitter's TARGET_SATURATION_CAP guard).
  *
  * Pure planner — crawl results and the open board are injected — so these run in
  * milliseconds with zero fs/network setup.
@@ -31,6 +35,7 @@ import {
   renderRouteTitle,
   routeFromOpenIssueTitle,
   ROUTE_CRAWL_EMIT_CAP,
+  ROUTE_CRAWL_SATURATION_CAP,
   ROUTE_CRAWL_TITLE_PREFIX,
   type RouteCrawlResult,
 } from "../scripts/ci/target-route-crawl.ts";
@@ -163,5 +168,55 @@ describe("planRouteCrawlEmit", () => {
   test("a foreign open title does not suppress a genuine finding", () => {
     const plan = planRouteCrawlEmit([bad("/pnl", 500)], ["cleanup(target): unrelated"]);
     assert.equal(plan.issues.length, 1);
+  });
+});
+
+describe("planRouteCrawlEmit — board-saturation floor", () => {
+  /** N distinct open route-crawl issue titles (each a different tracked route). */
+  function saturatedBoard(n: number): string[] {
+    const titles: string[] = [];
+    for (let i = 0; i < n; i++) titles.push(renderRouteTitle(`/saturated-${i}`, 500));
+    return titles;
+  }
+
+  test("board over the saturation floor: a fresh non-200 route emits nothing, dropped with a saturation reason", () => {
+    // The board carries MORE than the floor of open crawl issues, and none of
+    // them is /pnl — without the floor, /pnl would file (it is not deduped).
+    const open = saturatedBoard(ROUTE_CRAWL_SATURATION_CAP + 1);
+    const plan = planRouteCrawlEmit([bad("/pnl", 500)], open);
+    assert.equal(plan.issues.length, 0, "saturated board emits nothing");
+    assert.equal(plan.dropped.length, 1);
+    assert.equal(plan.dropped[0].route, "/pnl");
+    assert.match(plan.dropped[0].reason, /board saturated/);
+    assert.match(plan.dropped[0].reason, /emitting nothing/);
+  });
+
+  test("saturation floor beats the per-run cap: many findings all suppressed, not just capped", () => {
+    const open = saturatedBoard(ROUTE_CRAWL_SATURATION_CAP + 5);
+    const many: RouteCrawlResult[] = [];
+    for (let i = 0; i < ROUTE_CRAWL_EMIT_CAP + 3; i++) many.push(bad(`/hot-${i}`, 500));
+    const plan = planRouteCrawlEmit(many, open);
+    assert.equal(plan.issues.length, 0, "nothing files while the board is saturated");
+    assert.equal(plan.dropped.length, many.length, "every finding is dropped, none capped-through");
+    for (const d of plan.dropped) assert.match(d.reason, /board saturated/);
+  });
+
+  test("saturation floor still counts healthy + status-0 routes so the report stays honest", () => {
+    const open = saturatedBoard(ROUTE_CRAWL_SATURATION_CAP + 1);
+    const plan = planRouteCrawlEmit([ok("/"), bad("/pnl", 0), bad("/markets", 500)], open);
+    assert.equal(plan.issues.length, 0);
+    assert.equal(plan.healthy, 2, "the 200 and the status-0 both count as not-a-finding");
+    assert.equal(plan.dropped.length, 1, "only the genuine non-200 is dropped");
+    assert.match(plan.dropped[0].reason, /board saturated/);
+  });
+
+  test("exactly at the saturation floor is NOT saturated — findings still file normally", () => {
+    // The guard is strictly `> cap`, mirroring TARGET_SATURATION_CAP: a board
+    // AT the floor still emits, so the run does not go quiet one issue too early.
+    const open = saturatedBoard(ROUTE_CRAWL_SATURATION_CAP);
+    const plan = planRouteCrawlEmit([bad("/pnl", 500)], open);
+    assert.equal(plan.issues.length, 1, "at the floor (not over it) a fresh route still files");
+    assert.equal(plan.dropped.length, 0);
+    assert.equal(plan.issues[0].route, "/pnl");
   });
 });
