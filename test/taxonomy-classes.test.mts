@@ -74,6 +74,8 @@ const EXPECTED_SIGNAL = [
   "retro_orch",
   "cleanup_orch",
   "cleanup_target",
+  // issue #2722, epic #2720 — the Target wire-or-retire resolver (24h).
+  "wire_or_retire_target",
 ];
 const EXPECTED_COOLDOWNS: Record<string, number> = {
   health: 0,
@@ -86,6 +88,7 @@ const EXPECTED_COOLDOWNS: Record<string, number> = {
   retro_orch: 24 * 60 * 60,
   cleanup_orch: 3600,
   cleanup_target: 3600,
+  wire_or_retire_target: 24 * 60 * 60,
 };
 
 const REQUIRED_COLUMNS = [
@@ -129,10 +132,10 @@ describe("taxonomy: TS view agrees with classes.json", () => {
     }
   });
 
-  test("exactly the 17 known classes, in dispatch order", () => {
+  test("exactly the 18 known classes, in dispatch order", () => {
     assert.deepEqual(PIPELINE_SLOT_NAMES, EXPECTED_PIPELINE);
     assert.deepEqual(SIGNAL_CLASS_NAMES, EXPECTED_SIGNAL);
-    assert.equal(DISPATCH_CLASSES.length, 17);
+    assert.equal(DISPATCH_CLASSES.length, 18);
   });
 
   test("cooldown values match the pre-#1670 embedded SIGNAL_COOLDOWNS", () => {
@@ -286,7 +289,7 @@ describe("taxonomy: TS parser hard-fails with InvariantViolationError", () => {
   }
 
   test("valid file parses clean", () => {
-    assert.equal(parseClassTaxonomy(validText).length, 17);
+    assert.equal(parseClassTaxonomy(validText).length, 18);
   });
 
   test("malformed JSON throws", () => {

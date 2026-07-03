@@ -2824,3 +2824,123 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// wire_or_retire_target signal class (issue #2722, epic #2720)
+// ---------------------------------------------------------------------------
+//
+// The JUDGMENT counterpart to cleanup_target's mechanical sweep. When the
+// Target triage lane holds open `wire-or-retire` decision items, collect-state.sh
+// emits `wire_or_retire_target_available`; decide.py dispatches the headless
+// /hydra-wire-or-retire resolver (24h cooldown, at most 2 items/run) to turn each
+// into a WIRE / RETIRE / UNCLEAR verdict.
+//
+// Contract points this suite pins:
+//  - fires on wire_or_retire_target_available, dispatching hydra-wire-or-retire
+//  - is a NO-OP without the signal
+//  - respects the 24h cooldown (SIGNAL_COOLDOWNS["wire_or_retire_target"])
+//  - is target-scope: EXCLUDED under orch-only, ALLOWED under target-only + all
+//  - OMITS the model param (inherit parent per #1093 — judgment work; the
+//    Haiku-premature-exit failure mode is documented)
+//
+// New TOP-LEVEL describe with its own lifecycle (no shared-Redis teardown to
+// piggyback on; decide.py is a pure CLI over temp files, so there is nothing to
+// tear down — but the suite is kept top-level per the CLAUDE.md authoring rule).
+// ---------------------------------------------------------------------------
+describe("decide.py — wire_or_retire_target signal class (issue #2722)", () => {
+  const DAY = 24 * 60 * 60;
+  const now = Math.floor(Date.now() / 1000);
+
+  function worState(over: Record<string, unknown> = {}): any {
+    // signal_last_fired must include the class key at 0 (cooled) by default so
+    // the cooldown gate does not spuriously suppress the dispatch.
+    return baseState({
+      signals: { wire_or_retire_target_available: true },
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wire_or_retire_target: 0,
+      },
+      ...over,
+    });
+  }
+
+  test("fires hydra-wire-or-retire on wire_or_retire_target_available", () => {
+    const plan = runDecide(worState(), null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
+    assert.ok(a, "wire_or_retire_target must dispatch when the signal is present and cooled");
+    assert.equal(a.skill, "hydra-wire-or-retire");
+  });
+
+  test("does NOT fire without the wire_or_retire_target_available signal", () => {
+    const state = worState({ signals: {} });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "no triage wire-or-retire items → no resolver dispatch",
+    );
+  });
+
+  test("OMITS the model param — inherit parent per #1093 (judgment work)", () => {
+    const plan = runDecide(worState(), null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
+    assert.ok(a, "expected a wire_or_retire_target dispatch");
+    // The dispatch action must carry NO `model` key at all — the resolver
+    // inherits the parent session's model. A pinned Haiku here is the
+    // documented premature-exit failure mode.
+    assert.equal("model" in a, false, "wire_or_retire_target dispatch must not pin a model (#1093)");
+    assert.equal(a.prompt_args?.model, undefined, "no model in prompt_args either");
+  });
+
+  test("respects the 24h cooldown (SIGNAL_COOLDOWNS)", () => {
+    // Fired 1h ago → still inside the 24h window → suppressed.
+    const state = worState({
+      started_epoch: now,
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wire_or_retire_target: now - 3600,
+      },
+    });
+    const plan = runDecide(state, null, [], undefined);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "within the 24h cooldown window the resolver must not re-dispatch",
+    );
+  });
+
+  test("fires again once the 24h cooldown has elapsed", () => {
+    const state = worState({
+      started_epoch: now,
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wire_or_retire_target: now - (DAY + 60),
+      },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
+    assert.ok(a, "past the 24h cooldown the resolver dispatches again");
+    assert.equal(a.skill, "hydra-wire-or-retire");
+  });
+
+  test("is EXCLUDED under orch-only scope (target-scope class)", () => {
+    const state = worState({ scope: "orch-only" });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wire_or_retire_target"),
+      undefined,
+      "orch-only scope must exclude the target-scope wire_or_retire_target class",
+    );
+  });
+
+  test("is ALLOWED under target-only scope", () => {
+    const state = worState({ scope: "target-only" });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wire_or_retire_target");
+    assert.ok(a, "target-only scope must allow the target-scope wire_or_retire_target class");
+    assert.equal(a.skill, "hydra-wire-or-retire");
+  });
+});

@@ -482,6 +482,11 @@ SCOPE_ORCH_ONLY_EXCLUDE = (
     # backlog items — target-scope by definition, so orch-only excludes it
     # (the mirror of cleanup_orch's place in SCOPE_TARGET_ONLY_EXCLUDE).
     "cleanup_target",
+    # wire_or_retire_target (issue #2722, epic #2720) resolves Target
+    # wire-or-retire backlog items (the judgment counterpart to
+    # cleanup_target's mechanical sweep) — target-scope by definition, so
+    # orch-only excludes it, mirroring cleanup_target above.
+    "wire_or_retire_target",
 )
 SCOPE_TARGET_ONLY_EXCLUDE = (
     "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
@@ -1581,6 +1586,13 @@ def _rule_signal_classes(
         # `target_backfill_idle`, capped by `target_cleanup_board_saturated`
         # (checked FIRST in the selector) + the 1h class cooldown.
         "cleanup_target",
+        # wire_or_retire_target (issue #2722, epic #2720) — the JUDGMENT
+        # counterpart to cleanup_target: resolves open `wire-or-retire`-labelled
+        # Target backlog items sitting in the triage lane into a WIRE / RETIRE /
+        # UNCLEAR verdict. Keyed off `wire_or_retire_target_available`; the 24h
+        # class cooldown (seeded in bootstrap.sh, #2575 class) enforces the
+        # once-per-day cadence. NOT in BACKFILL_SIGNAL_CLASSES.
+        "wire_or_retire_target",
     ):
         if dispatch_blocked:
             out.events.append(
@@ -2503,6 +2515,50 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 "hydra-target-cleanup",
                 prompt_args={"apply": True},
                 reason="target backlog idle — demote-only dead-export backfill",
+            )
+        return None
+    if sig == "wire_or_retire_target":
+        # Issue #2722 (epic #2720) — the JUDGMENT counterpart to cleanup_target's
+        # mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-
+        # labelled Target backlog items for modules past the 45-day wiring grace;
+        # those items are the DECISION queue. The prompt-shaped resolver protocol
+        # drafted in their bodies is what failed (items were laundered into the
+        # backlog lane where no sweep looks — hence the #2721 lane guard). This
+        # class dispatches the headless /hydra-wire-or-retire skill to actually
+        # RESOLVE those items: git-log archaeology + cross-ref of config/direction
+        # vision/priorities/roadmap + the Target backlog open AND done lanes →
+        # a WIRE (rewrite into a concrete ready-for-agent wiring task) / RETIRE
+        # (rewrite into a ready-for-agent retirement task citing the deadcode
+        # scan) / UNCLEAR (route ready-for-human and stop) verdict per module,
+        # resolving at most 2 items per run.
+        #
+        # Hard carve-out (enforced in the skill, restated here for the record):
+        # modules under web/src/lib/risk/ or live-execution paths ALWAYS route
+        # ready-for-human — an interim hardcoded list until #2701's
+        # classifyTargetRisk exists. Ambiguity never resolves to deletion
+        # (Target CLAUDE.md rule 6, fail closed).
+        #
+        # Fires on `wire_or_retire_target_available` — collect-state.sh emits it
+        # when >=1 open wire-or-retire-labelled item sits in the Target triage
+        # lane. The 24h class cooldown (SIGNAL_COOLDOWNS, honored by the shared
+        # signal_is_cooled guard at the top of this function) enforces the
+        # once-per-day cadence so the same triage queue isn't re-dispatched every
+        # idle turn; it is seeded in bootstrap.sh's signal_last_fired so it
+        # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class).
+        #
+        # The dispatch OMITS the model param (inherit the parent per the #1093
+        # fallback): this is judgment work, and the Haiku-premature-exit failure
+        # mode (a low-tier model narrates "standing by" and exits in seconds) is
+        # documented — so no `model` key is passed here, mirroring how the other
+        # judgment classes leave model resolution to the parent session.
+        #
+        # decide.py reads the precomputed signal only — it never recomputes the
+        # triage-lane membership here (the signal-seam discipline).
+        if _signal_present(state, events, "wire_or_retire_target_available"):
+            return make_dispatch(
+                sig,
+                "hydra-wire-or-retire",
+                reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
             )
         return None
     return None
