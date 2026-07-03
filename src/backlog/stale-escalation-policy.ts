@@ -38,9 +38,9 @@
  * still `claimedBy: codex` is from a pre-removal cycle and was either shipped
  * out-of-band or abandoned. Comma-separated, lower-cased, env-overridable.
  */
-export const STALE_ESCALATE_AFTER_MS =
+const STALE_ESCALATE_AFTER_MS =
   parseInt(process.env.HYDRA_RECONCILE_STALE_ESCALATE_MS) || 14 * 24 * 60 * 60 * 1000;
-export const RETIRED_CLAIMANTS: string[] = (process.env.HYDRA_RETIRED_CLAIMANTS ?? "codex")
+const RETIRED_CLAIMANTS: string[] = (process.env.HYDRA_RETIRED_CLAIMANTS ?? "codex")
   .split(",")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
