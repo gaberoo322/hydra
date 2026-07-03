@@ -33,6 +33,7 @@
 
 import type { LeadingOutcomeSample } from "../outcome-regression.ts";
 import type { AttributionWindow } from "../redis/attribution.ts";
+import type { PendingEnrollEntry } from "../redis/holdback.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables (ADR-0005 — named, env-overridable, not magic literals).
@@ -153,6 +154,58 @@ export function buildWindowsForMerge(
       sourceCommitSha: ctx.sourceCommitSha,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Open selection — the OPEN predicate (PURE)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalized merge-landing status for one PR. Owned here (rather than in the
+ * coordinator) so the {@link selectMergesToOpen} predicate can consume it
+ * without depending on the I/O module. Re-exported from `subscribe.ts` for the
+ * coordinator's fetch helper.
+ */
+export interface MergeStatus {
+  state: string | null;
+  mergeCommitSha: string | null;
+}
+
+/** A pending entry selected to open windows for, with its resolved landing SHA. */
+export interface MergeToOpen {
+  /** The pending-enroll entry whose merge has landed. */
+  entry: PendingEnrollEntry;
+  /** The landing commit SHA (never null for a selected entry). */
+  mergeCommitSha: string;
+}
+
+/**
+ * The OPEN predicate — decide which pending-enroll entries should have windows
+ * opened this pass. An entry is selected iff its merge has LANDED
+ * (`status.mergeCommitSha != null`) AND that commit does not already have a
+ * window open (`!commitsWithWindows.has(sha)`). PURE: takes the already-fetched
+ * merge statuses (keyed by PR number) + the set of commit SHAs that already
+ * have open windows, and returns the entries to open in input order.
+ *
+ * Entries with no fetched status (a fetch that failed / returned null upstream)
+ * are simply absent from `statusByPr` and thus excluded here — the fetch-error
+ * fail-loud handling stays in the coordinator, which is why this predicate is
+ * pure and independently testable without a `gh`/Redis fixture.
+ */
+export function selectMergesToOpen(
+  entries: PendingEnrollEntry[],
+  statusByPr: Map<number, MergeStatus>,
+  commitsWithWindows: ReadonlySet<string>,
+): MergeToOpen[] {
+  const toOpen: MergeToOpen[] = [];
+  for (const entry of entries) {
+    const status = statusByPr.get(entry.prNumber);
+    if (status == null) continue; // no status (not fetched / fetch failed) — skip
+    if (!status.mergeCommitSha) continue; // not landed yet — leave for later tick
+    if (commitsWithWindows.has(status.mergeCommitSha)) continue; // already opened
+    toOpen.push({ entry, mergeCommitSha: status.mergeCommitSha });
+  }
+  return toOpen;
 }
 
 // ---------------------------------------------------------------------------
