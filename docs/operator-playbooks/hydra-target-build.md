@@ -187,6 +187,14 @@ Load context (parallel):
 > cp "${HYDRA_TARGET_REPO:-$HOME/hydra-betting}"/direction/roadmap.md   ~/hydra/config/direction/roadmap.md
 > ```
 
+> **Superseded direction docs are non-groundable — check the banner before you plan from a doc (issue #2728).** A direction doc whose premise has been retired carries a machine-readable header banner as its first non-blank content line:
+>
+> ```
+> > **STATUS: superseded by <doc-or-ADR> on <YYYY-MM-DD>.** <one-line pointer to the current doc.>
+> ```
+>
+> (e.g. the Target's `north-star.md`, documented stale-not-deprecated, and any M12 / cross-venue-arb framing docs post hydra-betting ADR-0002.) A banner'd doc is a dead premise: **do NOT plan from it** — exactly as the Step 3.1 grounding preflight refuses to build on a wire-or-retire ledger row. Read the banner's pointer and ground on the doc it names instead. This is a thin banner slice, NOT a doc-lifecycle system — there is no freshness scoring and no staleness detector. A banner is applied only when an explicit supersession decision happens, under the same **ADR acceptance-checklist rule** that governs code ledger annotations: *when an ADR (or an equivalent operator supersession decision) retires a doc's premise, the acceptance checklist requires stamping the retired doc with the STATUS-superseded banner in that same change — code annotations and doc banners are the two arms of one rule.*
+
 ### 2. Anchor (select task)
 
 If operator gave a task, use it. Otherwise priority order:
@@ -379,6 +387,100 @@ intersection loops (an unset `SCOPE_IN` makes the preflight a silent no-op).
 The ledger-missing guard for the first case is woven into the snippet above
 (step 1, right after `WIRING_STATUS_PATH` is set and before the `WOR_ROWS`
 extraction) so it is always reached.
+
+### 3.2. Grounding preflight — doc banner check (issue #2728)
+
+**Run this alongside the ledger intersection (Step 3.1), before finalising the
+plan.** A superseded direction doc is a dead premise exactly like a
+wire-or-retire ledger row: planning from `north-star.md` or a retired M12 /
+cross-venue-arb framing doc (post hydra-betting ADR-0002) has burned whole build
+cycles. The doc-supersession slice makes that status machine-readable so the
+preflight can refuse to ground on it.
+
+**Banner format.** A superseded doc carries a machine-readable banner as its
+first non-blank content line:
+
+```
+> **STATUS: superseded by <doc-or-ADR> on <YYYY-MM-DD>.** <one-line pointer to the current doc.>
+```
+
+This is a thin banner slice, NOT a doc-lifecycle system — no freshness scoring,
+no staleness detector. The banner is stamped only when an explicit supersession
+decision happens (see the ADR acceptance-checklist rule below), so its presence
+is an authoritative "do-not-plan-from-me" signal.
+
+**Check every doc the plan intends to ground on** — the direction docs loaded
+in Step 1 (`priorities.md`, `vision.md`, roadmap, `north-star.md`) plus any doc
+the plan cites as its rationale source. A banner hit is a **hard
+STOP-AND-REFRAME**: read the banner's pointer and re-plan against the doc it
+names, never against the banner'd doc.
+
+```bash
+# --- Populate GROUND_DOCS from the plan's rationale sources ---
+# One doc path per line: the direction docs read in Step 1 plus any doc the
+# plan cites as its premise. Empty list ⇒ the check is a no-op (nothing planned
+# from a doc). SUBSTITUTE the real paths your plan grounds on:
+GROUND_DOCS="$HOME/hydra-betting/docs/north-star.md
+$HOME/hydra/config/direction/priorities.md
+$HOME/hydra/config/direction/vision.md"
+
+HIT_DOCS=""
+while IFS= read -r doc; do
+  clean_doc=$(printf '%s' "$doc" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+  [ -z "$clean_doc" ] && continue
+  [ -f "$clean_doc" ] || continue   # missing doc is not a banner hit — skip it
+  # Read the first non-blank content line and test for the banner marker.
+  first_line=$(grep -m1 -v '^[[:space:]]*$' "$clean_doc")
+  if printf '%s' "$first_line" | grep -qiE 'STATUS:[[:space:]]*superseded by'; then
+    HIT_DOCS="$HIT_DOCS  $clean_doc — $first_line\n"
+  fi
+done <<EOF
+$GROUND_DOCS
+EOF
+
+if [ -n "$HIT_DOCS" ]; then
+  # HARD STOP-AND-REFRAME: the plan grounds on a superseded doc.
+  echo "GROUNDING PREFLIGHT STOP: superseded doc banner hit(s):"
+  printf '%b\n' "$HIT_DOCS"
+  echo "Action: STOP-AND-REFRAME — these docs are superseded (dead premise)."
+  echo "Follow each banner's 'superseded by' pointer and re-plan against the current doc."
+
+  [ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" backlog 2>/dev/null || true
+
+  # Emit reframe-save event — same token-value receipt as the ledger gate.
+  REFRAME_PAYLOAD=$(jq -n \
+    --arg anchorRef "${ANCHOR_REF:-unknown}" \
+    --arg reason "superseded-doc banner hit — grounding preflight stopped the build" \
+    --arg hits "$(printf '%b' "$HIT_DOCS" | tr '\n' ';')" \
+    '{type: "target:reframe-save", payload: {anchorRef: $anchorRef, reason: $reason, hits: $hits}}')
+  hydra raw POST /events/publish "$REFRAME_PAYLOAD" 2>/dev/null || \
+    echo "warn: event publish failed (non-fatal)"
+
+  exit 0
+else
+  echo "Doc-banner check: no superseded docs in the plan's grounding set — proceeding."
+fi
+```
+
+**Failure modes:**
+- Doc file missing → skipped, never a hit (a doc that does not exist can't be a
+  dead premise). The check is read-only advisory, same as the ledger gate.
+- Banner not on the first non-blank line → not detected. The banner contract is
+  first-non-blank-line placement; the doc-supersession slice (#2725-style
+  generator) is responsible for stamping it there.
+- `GROUND_DOCS` empty/unset → the check is a silent no-op (the plan grounds on
+  no docs). Populate it from the plan's rationale sources, mirroring the
+  `SCOPE_IN` discipline in Step 3.1.
+
+**ADR acceptance-checklist rule (doc supersession).** Doc banners are the
+doc-side arm of the same rule that stamps code ledger annotations: **when an ADR
+(or equivalent operator supersession decision) retires a doc's premise, the
+acceptance checklist for that decision requires stamping the retired doc with
+the STATUS-superseded banner in the same change.** There is no separate
+doc-lifecycle process — the banner is a side effect of the supersession
+decision, exactly as a `retired`/`deprecated` ledger row is a side effect of a
+code supersession decision (#2724). Code annotations and doc banners are two
+arms of one acceptance-checklist rule, not two systems.
 
 ### 3.5. Self-declare scope (issue #396)
 
