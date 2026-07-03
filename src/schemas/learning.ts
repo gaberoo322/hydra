@@ -75,7 +75,14 @@ export const ReflectionHealthQuerySchema = z.object({
  * search, so the route rejects it at the boundary (bespoke 400) — mirroring the
  * `ContextTraceQuerySchema` required-string idiom. Non-strict so any other
  * query param is ignored.
+ *
+ * `anchor` (issue #2717) is an OPTIONAL anchor/cycle identifier (e.g.
+ * `issue-2717`) the dispatch may send so the per-fetch knowledge-retrieval
+ * ledger can record the join key between the retrieval and the eventual cycle
+ * outcome. It is optional so an anchor-less fetch (or a caller that predates the
+ * ledger) still succeeds — the ledger row records a `null` anchor in that case.
  */
 export const KnowledgeQuerySchema = z.object({
   agent: z.string().trim().min(1),
+  anchor: z.string().trim().min(1).optional(),
 });

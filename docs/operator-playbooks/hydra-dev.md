@@ -295,6 +295,11 @@ it, so `knowledgeContext.cyclesWithContext` read 0% on the health surface).
 - Query:
   - `agent=<skill name>` (required) — your skill name, `hydra-dev`. It scopes
     the OpenViking search to this agent's learned patterns.
+  - `anchor=<anchor.reference>` (optional, issue #2717) — the anchor/cycle id
+    you are working (e.g. `issue-2717`). Send it so the per-fetch
+    knowledge-retrieval ledger records the join key between this retrieval and
+    the eventual cycle outcome; an anchor-less fetch still succeeds (the ledger
+    records a `null` anchor).
 - Response (200): `{ agent, content, itemCount }`
   - `content` is prompt-ready markdown (a `# <agent> — Learned Patterns` block).
     `itemCount: 0` / `content: ""` means no knowledge context — a clean no-op.
@@ -306,13 +311,17 @@ there is nothing to weave into a plan. This route SERVES the content (the same
 way `/api/reflections` serves `formatted`) AND records the #1440 per-cycle
 availability metric server-side on its success path — so the record can never
 desync from an actual served fetch, and you never touch the metric from a shell
-block (which the single-quoted PR-body heredoc quoting would make fragile).
+block (which the single-quoted PR-body heredoc quoting would make fragile). It
+ALSO appends one raw row per served fetch to the per-fetch knowledge-retrieval
+ledger (issue #2717) — agent, anchor/cycle id, itemCount, and stable per-item
+content-hash ids — so retrieval→outcome attribution becomes possible later; the
+append is server-side and best-effort, exactly like the availability record.
 
 **Required child-side recipe (at planning time, before writing code):**
 
 ```bash
 KB_JSON=$(curl -sf --max-time 5 \
-  "http://localhost:4000/api/learning/knowledge?agent=hydra-dev")
+  "http://localhost:4000/api/learning/knowledge?agent=hydra-dev&anchor=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)")
 
 KB_CONTENT=$(printf '%s' "$KB_JSON" | jq -r '.content // ""')
 if [ -n "$KB_CONTENT" ]; then

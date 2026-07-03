@@ -18,7 +18,11 @@ import {
 // `cyclesWithContext` moves only on a real dispatch fetch, never on a diagnostic
 // context-trace hit (the metric side effect moved OUT of getContext, #2647).
 import { loadKnowledgeBaseForPrompt } from "../knowledge-base/ov-search.ts";
-import { recordKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
+import {
+  recordKnowledgeContextAvailability,
+  appendKnowledgeFetch,
+} from "../redis/ov-search-metrics.ts";
+import type { KnowledgeLedgerRow } from "../redis/ov-search-metrics.ts";
 // Issue #2467: the reflection-deposit observability surface reads the recent
 // cycle-metrics window (each row already carries a derived `reflectionMatchSource`
 // from `deriveReflectionMatchSource(reflectionSources)`) and projects the bucket
@@ -132,8 +136,11 @@ export { projectReflectionHealth } from "../metrics/trend.ts";
 export interface LearningRouterDeps {
   loadKnowledgeBaseForPrompt?: (
     agent: string,
-  ) => Promise<{ content: string; itemCount: number }>;
+  ) => Promise<{ content: string; itemCount: number; itemIds: string[] }>;
   recordKnowledgeContextAvailability?: (hadContext: boolean) => Promise<void>;
+  // Issue #2717: append one raw ledger row per served knowledge fetch. Injected
+  // for deterministic tests; production defaults to the real Redis accessor.
+  appendKnowledgeFetch?: (row: KnowledgeLedgerRow) => Promise<void>;
 }
 
 export function createLearningRouter(deps: LearningRouterDeps = {}) {
@@ -145,6 +152,8 @@ export function createLearningRouter(deps: LearningRouterDeps = {}) {
     deps.loadKnowledgeBaseForPrompt ?? loadKnowledgeBaseForPrompt;
   const recordKnowledgeContextAvailabilityFn =
     deps.recordKnowledgeContextAvailability ?? recordKnowledgeContextAvailability;
+  const appendKnowledgeFetchFn =
+    deps.appendKnowledgeFetch ?? appendKnowledgeFetch;
 
   router.get("/learning/ineffective-rules", async (_req, res) => {
     try {
@@ -326,8 +335,19 @@ export function createLearningRouter(deps: LearningRouterDeps = {}) {
    * logged and swallowed so it can never break the plan-time fetch the dispatch
    * depends on.
    *
-   * Query param (required):
-   *   agent — the agent/skill name (e.g. `hydra-dev`)
+   * Issue #2717: this route ALSO appends one raw row per served fetch to the
+   * per-fetch knowledge-retrieval ledger (`appendKnowledgeLedgerRow`) — the
+   * dark-tolerant-ledger slice that makes retrieval→outcome attribution possible
+   * later. The append is best-effort / never-throws (same contract as the
+   * availability record) and fires on EVERY 200 (including an itemCount:0 miss);
+   * a 400/500 appends nothing. The optional `anchor` query param is the join key
+   * the ledger records against the eventual cycle outcome.
+   *
+   * Query params:
+   *   agent  (required) — the agent/skill name (e.g. `hydra-dev`)
+   *   anchor (optional) — the anchor/cycle id (e.g. `issue-2717`) the ledger
+   *                       records as the retrieval→outcome join key; `null` when
+   *                       the dispatch sends no anchor.
    *
    * Response (200): { agent, content, itemCount }
    *   - `content` is prompt-ready markdown; `""` / `itemCount: 0` on a miss (OV
@@ -343,9 +363,10 @@ export function createLearningRouter(deps: LearningRouterDeps = {}) {
       return;
     }
     const { agent } = parsed.data;
+    const anchor = parsed.data.anchor ?? null;
 
     try {
-      const { content, itemCount } = await loadKnowledgeBaseForPromptFn(agent);
+      const { content, itemCount, itemIds } = await loadKnowledgeBaseForPromptFn(agent);
 
       // Issue #2647 / #1440: record per-cycle knowledge-context availability on
       // the SUCCESS path of this dispatch-served fetch. Best-effort and
@@ -357,6 +378,31 @@ export function createLearningRouter(deps: LearningRouterDeps = {}) {
       } catch (recErr: any) {
         console.error(
           `[learning-api] knowledge availability record failed: ${recErr?.message ?? recErr}`,
+        );
+      }
+
+      // Issue #2717: append exactly one raw observation row per served fetch to
+      // the per-fetch knowledge-retrieval ledger — the dark-tolerant-ledger
+      // slice that makes retrieval→outcome attribution possible later (the
+      // correlation slice is deferred until this has volume). The row carries
+      // the join key (agent + anchor/cycle id) plus which items were served
+      // (stable content-hash ids), so a later analysis can ask "did THESE
+      // OpenViking items appear in a successful dispatch?". Best-effort /
+      // never-throws — same contract as the availability record above; a Redis
+      // hiccup must not break the plan-time fetch. Fires on EVERY 200 (including
+      // an itemCount:0 miss, so the denominator is honest); a 400/500 appends
+      // nothing (this is on the success path only).
+      try {
+        await appendKnowledgeFetchFn({
+          ts: Date.now(),
+          agent,
+          anchor,
+          itemCount,
+          itemIds,
+        });
+      } catch (ledgerErr: any) {
+        console.error(
+          `[learning-api] knowledge ledger append failed: ${ledgerErr?.message ?? ledgerErr}`,
         );
       }
 
