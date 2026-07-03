@@ -233,8 +233,36 @@ The ledger lives in the Target repo at `~/hydra-betting/docs/agents/wiring-statu
 (read-only, main checkout copy is fine for planning — no write needed).
 
 ```bash
+# --- 0. Populate SCOPE_IN from the plan's scopeBoundary.in ---
+# SUBSTITUTE the real plan scope here: one web/-relative file OR directory
+# prefix per line, exactly as computed for scopeBoundary.in in Step 3. This
+# MUST be assigned before the intersection loops below use it — an empty
+# SCOPE_IN makes both read loops iterate once on a blank line, so every hit
+# list comes back empty and the preflight silently PASSES (a no-op). The two
+# lines below are a placeholder EXAMPLE — replace them with your plan's scope:
+SCOPE_IN="web/src/lib/execution/directional-clv-sizing.ts
+web/src/lib/execution/directional-disagreement-signal.ts"
+
 # --- 1. Read the ledger rows ---
 WIRING_STATUS_PATH="$HOME/hydra-betting/docs/agents/wiring-status.md"
+
+# Ledger-missing guard — degrade gracefully if the ledger file is absent.
+# A missing wiring-status.md must NOT block the build (read-only advisory
+# check); log a friction cue and proceed to Step 3.5 as if the preflight
+# passed. This guard MUST sit before the WOR_ROWS/AW_ROWS extraction so the
+# `grep`s below never run against a nonexistent path.
+if [ ! -f "$WIRING_STATUS_PATH" ]; then
+  echo "warn: wiring-status.md not found at $WIRING_STATUS_PATH — grounding preflight skipped (cue: grounding-preflight-ledger-missing)"
+  # POST friction cue so the operator knows the ledger is missing.
+  hydra raw POST /memory/subagent-friction "{
+    \"skill\":\"hydra-target-build\",
+    \"cue\":\"grounding-preflight-ledger-missing\",
+    \"workaround\":\"skipped ledger intersection — wiring-status.md absent\",
+    \"context\":\"$WIRING_STATUS_PATH\",
+    \"cycleId\":\"${CYCLE_ID:-unknown}\"
+  }" 2>/dev/null || true
+  # Do not exit the build — proceed to Step 3.5 as if the preflight passed.
+else
 
 # Extract wire-or-retire paths (table column 1, status column 2)
 WOR_ROWS=$(grep '| wire-or-retire |' "$WIRING_STATUS_PATH" \
@@ -245,7 +273,8 @@ AW_ROWS=$(grep '| awaiting-wiring |' "$WIRING_STATUS_PATH" \
   | sed 's/.*`\(web\/[^`]*\)`.*/\1/')
 
 # --- 2. Intersect against the plan's scopeBoundary.in ---
-# SCOPE_IN is the newline-separated list of files/prefixes from Step 3's plan.
+# SCOPE_IN was assigned at step 0 above (the newline-separated list of
+# files/prefixes from Step 3's plan).
 # Use a simple substring match: a scope entry S "hits" a ledger row L when
 # S is a prefix of L or L is a prefix of S (covers both file and directory
 # scope entries). This is intentionally broad — false positives stop the
@@ -327,17 +356,15 @@ elif [ -n "$HIT_AW" ]; then
 else
   echo "Grounding preflight: no ledger hits — scope is clean, proceeding to Step 3.5."
 fi
+
+fi   # end ledger-present branch (the `if [ ! -f "$WIRING_STATUS_PATH" ]` guard)
 ```
 
-**What `SCOPE_IN` should contain:** the newline-separated list of
-`web/`-relative file paths from the Step 3 plan boundary
-(`scopeBoundary.in`). Populate it from the plan before running the snippet
-above. Example:
-
-```bash
-SCOPE_IN="web/src/lib/execution/directional-clv-sizing.ts
-web/src/lib/execution/directional-disagreement-signal.ts"
-```
+`SCOPE_IN` is assigned at the top of the snippet above (step 0) — the
+newline-separated list of `web/`-relative file paths from the Step 3 plan
+boundary (`scopeBoundary.in`). Replace the placeholder example there with your
+plan's actual scope before running the snippet; the assignment must precede the
+intersection loops (an unset `SCOPE_IN` makes the preflight a silent no-op).
 
 **Failure modes:**
 - Ledger file missing (`wiring-status.md` not found) → `grep` exits non-zero
@@ -349,21 +376,9 @@ web/src/lib/execution/directional-disagreement-signal.ts"
 - `hydra backlog move` fails → log and continue (non-fatal; the lane remains
   wherever it was — a manual fix is preferred over a blocked build).
 
-```bash
-# Ledger-missing guard (add just before the WOR_ROWS extraction):
-if [ ! -f "$WIRING_STATUS_PATH" ]; then
-  echo "warn: wiring-status.md not found at $WIRING_STATUS_PATH — grounding preflight skipped (cue: grounding-preflight-ledger-missing)"
-  # POST friction cue so the operator knows the ledger is missing.
-  hydra raw POST /memory/subagent-friction "{
-    \"skill\":\"hydra-target-build\",
-    \"cue\":\"grounding-preflight-ledger-missing\",
-    \"workaround\":\"skipped ledger intersection — wiring-status.md absent\",
-    \"context\":\"$WIRING_STATUS_PATH\",
-    \"cycleId\":\"${CYCLE_ID:-unknown}\"
-  }" 2>/dev/null || true
-  # Do not exit — proceed to Step 3.5 as if the preflight passed.
-fi
-```
+The ledger-missing guard for the first case is woven into the snippet above
+(step 1, right after `WIRING_STATUS_PATH` is set and before the `WOR_ROWS`
+extraction) so it is always reached.
 
 ### 3.5. Self-declare scope (issue #396)
 
