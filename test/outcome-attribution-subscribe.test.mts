@@ -60,9 +60,11 @@ import {
   windowId,
   buildWindowsForMerge,
   dueWindows,
+  selectMergesToOpen,
   ATTRIBUTION_DEFAULT_WINDOW_MS,
   type MergeWindowContext,
 } from "../src/outcome-attribution/windows.ts";
+import type { PendingEnrollEntry } from "../src/redis/holdback.ts";
 import {
   runAttributionRecord,
   producerClassFromCycleId,
@@ -207,6 +209,47 @@ describe("windows.ts — pure window policy (#2632)", () => {
     const { due, stillOpen } = dueWindows([mk("a", 100), mk("b", 500)], 200);
     assert.deepEqual(due.map((w) => w.id), ["a"]);
     assert.deepEqual(stillOpen.map((w) => w.id), ["b"]);
+  });
+
+  test("selectMergesToOpen: landed AND not-already-opened, in input order", () => {
+    const mkEntry = (prNumber: number): PendingEnrollEntry => ({
+      prNumber,
+      tier: 3,
+      cycleId: `cycle-${prNumber}-dev_orch`,
+      registeredAt: 0,
+    });
+    const entries = [mkEntry(1), mkEntry(2), mkEntry(3), mkEntry(4)];
+    const statusByPr = new Map([
+      [1, { state: "MERGED", mergeCommitSha: "sha1" }], // landed, new → OPEN
+      [2, { state: "OPEN", mergeCommitSha: null }], // not landed → skip
+      [3, { state: "MERGED", mergeCommitSha: "sha3" }], // landed but already opened → skip
+      // pr 4 has NO status (fetch failed upstream) → skip
+    ]);
+    const commitsWithWindows = new Set<string>(["sha3"]);
+
+    const toOpen = selectMergesToOpen(entries, statusByPr, commitsWithWindows);
+
+    assert.deepEqual(
+      toOpen.map((m) => ({ pr: m.entry.prNumber, sha: m.mergeCommitSha })),
+      [{ pr: 1, sha: "sha1" }],
+    );
+  });
+
+  test("selectMergesToOpen: preserves input order across multiple opens", () => {
+    const mkEntry = (prNumber: number): PendingEnrollEntry => ({
+      prNumber,
+      tier: null,
+      cycleId: `cycle-${prNumber}`,
+      registeredAt: 0,
+    });
+    const entries = [mkEntry(10), mkEntry(20)];
+    const statusByPr = new Map([
+      [10, { state: "MERGED", mergeCommitSha: "shaA" }],
+      [20, { state: "MERGED", mergeCommitSha: "shaB" }],
+    ]);
+    const toOpen = selectMergesToOpen(entries, statusByPr, new Set());
+    assert.deepEqual(toOpen.map((m) => m.entry.prNumber), [10, 20]);
+    assert.deepEqual(toOpen.map((m) => m.mergeCommitSha), ["shaA", "shaB"]);
   });
 });
 

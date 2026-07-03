@@ -86,8 +86,15 @@ import { viewPr } from "../github/issues.ts";
 import {
   buildWindowsForMerge,
   dueWindows,
+  selectMergesToOpen,
   type MergeWindowContext,
+  type MergeStatus,
 } from "./windows.ts";
+
+// Re-exported so existing importers of the coordinator's `MergeStatus` (and the
+// injectable `fetchMergeStatus` dep signature) keep the same public surface —
+// the type now lives with the pure OPEN predicate in windows.ts.
+export type { MergeStatus };
 
 // ---------------------------------------------------------------------------
 // Producer-class derivation (PURE)
@@ -111,12 +118,6 @@ export function producerClassFromCycleId(cycleId: string | null | undefined): st
 // ---------------------------------------------------------------------------
 // Merge-landing status (mirrors holdback-merge-watch's fetch)
 // ---------------------------------------------------------------------------
-
-/** Normalized merge-landing status for one PR. */
-export interface MergeStatus {
-  state: string | null;
-  mergeCommitSha: string | null;
-}
 
 interface RawPrView {
   state?: string | null;
@@ -301,6 +302,12 @@ async function openWindowsForLandedMerges(ctx: {
   // failure logs and falls back to an empty map ⇒ every metric uses the default.
   const metricWindowMs = await loadMetricWindowMs(ctx.loadOutcomesFn, ctx.outcomesFile, ctx.result);
 
+  // Fetch each pending PR's merge status. This is the I/O + fail-loud concern
+  // (a null return logs with the [attribution] prefix and counts an error), so
+  // it stays in the coordinator; the map it builds feeds the PURE OPEN predicate
+  // (`selectMergesToOpen` in windows.ts), which owns the landed-AND-not-opened
+  // decision and is unit-tested without a gh/Redis fixture.
+  const statusByPr = new Map<number, MergeStatus>();
   for (const entry of listed.entries) {
     const status = await ctx.fetchMergeStatus(entry.prNumber);
     if (status == null) {
@@ -310,10 +317,15 @@ async function openWindowsForLandedMerges(ctx: {
       ctx.result.errors += 1;
       continue;
     }
-    if (!status.mergeCommitSha) continue; // not landed yet — leave for later tick
-    if (commitsWithWindows.has(status.mergeCommitSha)) continue; // already opened
+    statusByPr.set(entry.prNumber, status);
+  }
 
-    await openWindowsForOneMerge(entry, status.mergeCommitSha, metricWindowMs, ctx);
+  for (const { entry, mergeCommitSha } of selectMergesToOpen(
+    listed.entries,
+    statusByPr,
+    commitsWithWindows,
+  )) {
+    await openWindowsForOneMerge(entry, mergeCommitSha, metricWindowMs, ctx);
   }
 }
 
