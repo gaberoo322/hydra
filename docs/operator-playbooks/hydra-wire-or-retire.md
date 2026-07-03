@@ -100,13 +100,98 @@ human. (Target `CLAUDE.md` rule 6: ambiguity never resolves to deletion.)
   pass; the wiring-status ledger no longer lists it"). Set labels to **`ready-for-agent`**
   (drop `needs-triage`) and **move the item to `queued`**.
 - **(b) RETIRE** — the intent is gone (superseded, venue dropped, experiment concluded).
-  **Rewrite the item** into a retirement task: delete the module AND its test file, run
-  `npm run deadcode:update-baseline` (refreshes baseline + ledger), commit citing this scan
-  (module path, the original scan date from the item body, Target `CLAUDE.md` rule 3). Set
-  labels to **`ready-for-agent`** (drop `needs-triage`) and **move the item to `queued`**.
+  **Rewrite the item** into a retirement task using the **standard RETIRE-task body template**
+  below (delete the module AND its test files, sweep orphaned imports, run
+  `npm run deadcode:update-baseline`, verify with `npm run test:raw` + typecheck, commit citing
+  the scan per Target `CLAUDE.md` rule 3). Set labels to **`ready-for-agent`** (drop
+  `needs-triage`) and **move the item to `queued`**.
 - **(c) UNCLEAR** — the intent cannot be established either way. Set labels to
   **`ready-for-human`** (drop `needs-triage`), **move the item to `blocked`**, and STOP for
   this item. **Ambiguity never resolves to deletion** (Target `CLAUDE.md` rule 6, fail closed).
+
+## Standard RETIRE-task body template (issue #2723)
+
+When step 4(b) rewrites an item into a RETIRE task, use the template below verbatim as the
+item's description (substituting the bracketed values). It is the **only sanctioned deletion
+path** in the Target — it exists so `hydra-target-build` executes the deletion *safely*:
+deleting a module without sweeping its now-orphaned imports leaves the build red, and verifying
+against the wrong test script gives a false green. Both are documented Target failure modes the
+template forecloses.
+
+The template also encodes the two hard preconditions from this playbook: a RETIRE task is only
+ever written for a module that **passed the carve-out** (step 2 — nothing under
+`web/src/lib/risk/`, `web/src/lib/execution/`, or the money-movement record modules ever
+receives a RETIRE task; those route `ready-for-human`), and only after the module was
+**verified still dead** (step 1 — exists on `main`, no runtime importer). Do not emit this
+template for a module that failed either check.
+
+```markdown
+## RETIRE: delete `[web/src/lib/<path>.ts]`
+
+Verdict from `/hydra-wire-or-retire` ([ISO date]): the intent behind this module is gone
+([one-line reason — e.g. "cross-venue arbitrage retired, hydra-betting ADR-0002"]). Retire it.
+
+### Preconditions (already checked by the resolver — do NOT re-decide)
+- NOT a protected-provider / risk / live-execution path (rule 1 carve-out passed): the module
+  is not under web/src/lib/risk/, web/src/lib/execution/, web/src/lib/providers/, or a
+  web/src/lib/wagers/ record-* module. If your deletion would touch any of those, STOP and route
+  ready-for-human — protected paths NEVER receive a RETIRE task.
+- Verified still dead on current `main`: the module exists and has no runtime importer
+  (test-only importers do not count).
+
+### Steps
+1. **Delete the module AND its test file(s).** Remove `[web/src/lib/<path>.ts]` and every
+   co-located test that exercises only it (e.g. `[web/src/lib/<path>.test.ts]`,
+   `[<path>.spec.ts]`). A test that also exercises surviving code stays — excise only the
+   deleted module's cases from it.
+2. **Sweep orphaned imports.** Deleting the module orphans every `import` of it. **Both `knip`
+   and `tsc` miss these** — `knip` reports unused *exports/files*, not the dangling *import
+   statements* left behind, and `tsc` with `noUnusedLocals` off does not flag a now-unused
+   import (documented lesson: cleanup-leaves-orphaned-imports / "Cleanup leaves orphaned
+   imports"). So sweep them by hand: `rg` the deleted module's import path across `web/src`,
+   remove each dead `import` line, and remove any symbol that was only used to call into the
+   deleted module.
+3. **Tighten the ratchet + regenerate the ledger.** Run `npm run deadcode:update-baseline`.
+   This tightens `deadcode-baseline.json` (the baseline must end up strictly smaller — a
+   retirement that does not shrink it did not actually remove dead code) AND regenerates the
+   wiring-status ledger so this module no longer appears in the wire-or-retire queue.
+4. **Verify with the REAL suite + typecheck.** Run `npm run test:raw` and `npm run typecheck`.
+   NOTE: bare `npm test` in the Target `web/` is a count-gate plus 3 named sentinels, NOT the
+   suite (documented lesson: "In `~/hydra-betting/web`, `npm test` is a count-gate + 3
+   sentinels, NOT the full suite — the real suite is `test:raw`"). `npm run test:raw`
+   (`vitest run --config ./vitest.config.ts --dir ./src`) is the actual full vitest suite; a
+   green bare `npm test` proves nothing about the untested modules a deletion can break. Let CI's
+   vitest job be the merge gate.
+5. **Commit citing the scan (Target `CLAUDE.md` rule 3).** The commit message MUST cite the
+   deadcode scan that justified the deletion: the module path, the original scan date from this
+   item's body ([ISO date]), and this RETIRE verdict. Example:
+   `chore(deadcode): retire web/src/lib/<path> — dead since <scan-date> scan, wire-or-retire RETIRE (item-<N>)`.
+
+### Acceptance criteria
+- [ ] `[web/src/lib/<path>.ts]` and its test file(s) are deleted — verified by:
+      `git diff --name-only origin/main...HEAD` lists them under deletions.
+- [ ] No orphaned imports remain — verified by: `rg "<deleted-import-path>" web/src` returns no
+      hits, and `npm run typecheck` exits 0.
+- [ ] `deadcode-baseline.json` is strictly smaller and the wiring ledger is regenerated —
+      verified by: `git diff deadcode-baseline.json` shows a net reduction after
+      `npm run deadcode:update-baseline`.
+- [ ] `npm run test:raw` and `npm run typecheck` pass — verified by: both commands exit 0.
+- [ ] Commit message cites the scan (module path + scan date) per Target `CLAUDE.md` rule 3.
+```
+
+**Why this is the only sanctioned deletion path (rule 1 restated).** Protected-provider paths
+(and the risk / live-execution / money-movement carve-out of step 2) **NEVER** receive a RETIRE
+task — a deletion under `web/src/lib/providers/`, `web/src/lib/risk/`, `web/src/lib/execution/`,
+or a `web/src/lib/wagers/` record-* module is an operator-escalation-class decision (ADR-0005),
+so those modules route `ready-for-human` at step 2 and this template is never emitted for them.
+The template's precondition block re-states that carve-out so the follow-up
+`hydra-target-build` dispatch fails closed if a deletion would stray into a protected path.
+
+> **Cross-ref follow-up (out of scope of issue #2723 — different repo).** Target
+> `CLAUDE.md` (in `hydra-betting`) should cross-reference this template as the only sanctioned
+> deletion path. That edit lives in the `hydra-betting` repo and is intentionally NOT made in
+> this orchestrator PR (see the issue's "Related (Target repo)" note). Tracked as a follow-up
+> Target-repo change.
 
 ## The backlog API seam
 
