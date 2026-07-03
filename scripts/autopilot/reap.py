@@ -195,7 +195,7 @@ def _redis_cli(*args: str) -> None:
 def _mirror_cross_run_state_to_redis(s: dict) -> None:
     """Mirror the cross-run durable subset of state to Redis (issue #2715).
 
-    ONLY the reboot-survival subset is mirrored — `signal_last_fired` (the 9
+    ONLY the reboot-survival subset is mirrored — `signal_last_fired` (the 10
     signal classes) and `research_force_counter`. Run-scoped fields
     (pid/turn/dispatches/slots/idle_turns/burned_classes) are NEVER mirrored:
     they legitimately die with the run and the concurrent-run PID guard + #1352

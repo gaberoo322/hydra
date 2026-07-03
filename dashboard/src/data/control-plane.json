@@ -158,6 +158,15 @@
       "cooldownSeconds": 3600,
       "model": "haiku",
       "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "name": "wire_or_retire_target",
+      "kind": "signal",
+      "skill": "hydra-wire-or-retire",
+      "scope": "target",
+      "cooldownSeconds": 86400,
+      "model": null,
+      "sourcePath": "scripts/autopilot/classes.json"
     }
   ],
   "labels": [
@@ -361,6 +370,11 @@
     {
       "class": "cleanup_target",
       "skill": "hydra-target-cleanup",
+      "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "class": "wire_or_retire_target",
+      "skill": "hydra-wire-or-retire",
       "sourcePath": "scripts/autopilot/classes.json"
     }
   ]

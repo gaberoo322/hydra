@@ -187,6 +187,17 @@
       "scope": "target",
       "provenanceLabel": null,
       "notes": "The TARGET mirror of cleanup_orch — dispatches the headless /hydra-target-cleanup skill, a DETERMINISTIC demote-only dead-export sweep over ~/hydra-betting/web (knip is a Target devDependency since hydra-betting PR #93). Files Redis backlog items (the Target's tracker), NOT GitHub issues — hence provenanceLabel null — and emits ONLY demote-class findings in files past the Target's 45-day wiring grace period (the carve-out the Target's CLAUDE.md rule 3 authorises). Keyed off target_backfill_idle with target_cleanup_board_saturated as the anti-flood cap checked FIRST, mirroring cleanup_orch's signal discipline exactly. Same 1h cadence as cleanup_orch. NOTE for slice #1671: today's skillToCostClass in src/metrics/aggregate.ts omits hydra-target-cleanup (buckets to 'other'); this row records the intended 'cleanup' attribution — folding that projection onto this row is an intentional decision point."
+    },
+    {
+      "name": "wire_or_retire_target",
+      "kind": "signal",
+      "skill": "hydra-wire-or-retire",
+      "costClass": "cleanup",
+      "learningAgent": null,
+      "cooldownSeconds": 86400,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "issue #2722, epic #2720: the judgment counterpart to cleanup_target's mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-labelled Redis backlog items for Target modules past the 45-day wiring grace; those items are the DECISION queue, and the prompt-shaped resolver protocol drafted in their bodies is what failed (items were laundered into the backlog lane — hence the #2721 lane guard). This class dispatches the headless /hydra-wire-or-retire skill to actually RESOLVE those items: git-log archaeology + cross-ref of config/direction vision/priorities/roadmap + the Target backlog open AND done lanes -> a WIRE / RETIRE / UNCLEAR verdict per module (rewrite the item into a concrete ready-for-agent wiring/retirement task, or route ready-for-human on UNCLEAR). Hard carve-out: modules under web/src/lib/risk/ or live-execution paths ALWAYS route ready-for-human (interim hardcoded list until #2701 classifyTargetRisk exists). Ambiguity never resolves to deletion (Target CLAUDE.md rule 6). Fires on the `wire_or_retire_target_available` signal (collect-state.sh emits it when >=1 open wire-or-retire-labelled item sits in the Target triage lane); resolves at most 2 items per run. 24h class cooldown (SIGNAL_COOLDOWNS) enforces the once-per-day cadence and MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 retro-cooldown bootstrap bug class). Target-scope, so orch-only excludes it (mirror of cleanup_target). NOT in BACKFILL_SIGNAL_CLASSES. Dispatch OMITS the model param (inherit parent per #1093 — judgment work; the Haiku-premature-exit failure mode is documented)."
     }
   ]
 }

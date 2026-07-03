@@ -520,12 +520,26 @@ print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
 # back-stop. Orchestrator-API-down degrades to idle=false / saturated=true —
 # BOTH in the suppressing direction (fail closed: never dispatch a scan that
 # cannot read its own board).
+#
+# `wire_or_retire_target_available` — (issue #2722, epic #2720) true when >=1
+# open item carrying the stable `wire-or-retire` label sits in the Target
+# `triage` lane. These are the JUDGMENT items /hydra-target-cleanup files for
+# modules past the 45-day wiring grace (the decision queue). decide.py's
+# `wire_or_retire_target` signal class reads this and dispatches the headless
+# /hydra-wire-or-retire resolver (24h class cooldown, at most 2 items/run) to
+# turn each into a WIRE / RETIRE / UNCLEAR verdict. Only the `triage` lane is
+# read (the #2721 lane guard keeps unresolved wire-or-retire items IN triage;
+# a resolved item leaves as a queued WIRE/RETIRE task or a ready-for-human
+# backlog item). Orchestrator-API-down degrades to false — the suppressing
+# direction (never dispatch a resolver that cannot read its own queue).
 TARGET_CLEANUP_SCAN_LABEL="cleanup-scan"
 TARGET_CLEANUP_BOARD_SATURATION_CAP=10
+TARGET_WIRE_OR_RETIRE_LABEL="wire-or-retire"
 TARGET_BACKLOG_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/backlog" 2>/dev/null || echo '')
 if [ -n "$TARGET_BACKLOG_JSON" ]; then
   printf '%s' "$TARGET_BACKLOG_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
     TARGET_CLEANUP_SCAN_LABEL="$TARGET_CLEANUP_SCAN_LABEL" \
+    TARGET_WIRE_OR_RETIRE_LABEL="$TARGET_WIRE_OR_RETIRE_LABEL" \
     TARGET_CLEANUP_BOARD_SATURATION_CAP="$TARGET_CLEANUP_BOARD_SATURATION_CAP" python3 -c "
 import json, os, sys
 try:
@@ -533,6 +547,7 @@ try:
   triage = lanes.get('triage') or []
   queued = lanes.get('queued') or []
   label = os.environ.get('TARGET_CLEANUP_SCAN_LABEL', 'cleanup-scan')
+  wor_label = os.environ.get('TARGET_WIRE_OR_RETIRE_LABEL', 'wire-or-retire')
   cap = int(os.environ.get('TARGET_CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
   wq = int(os.environ.get('TARGET_WORK_QUEUE', '0') or 0)
   open_scan = 0
@@ -543,19 +558,30 @@ try:
       labels = row.get('labels') if isinstance(row, dict) else None
       if isinstance(labels, list) and label in labels:
         open_scan += 1
+  wor_triage = 0
+  for row in triage:
+    labels = row.get('labels') if isinstance(row, dict) else None
+    if isinstance(labels, list) and wor_label in labels:
+      wor_triage += 1
   idle = (len(triage) == 0 and len(queued) == 0 and wq == 0)
   print('target_backfill_idle=' + ('true' if idle else 'false'))
   print('target_cleanup_board_open_scan=' + str(open_scan))
   print('target_cleanup_board_saturated=' + ('true' if open_scan > cap else 'false'))
+  print('wire_or_retire_target_triage=' + str(wor_triage))
+  print('wire_or_retire_target_available=' + ('true' if wor_triage > 0 else 'false'))
 except Exception:
   print('target_backfill_idle=false')
   print('target_cleanup_board_open_scan=0')
   print('target_cleanup_board_saturated=true')
-" 2>/dev/null || { echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; }
+  print('wire_or_retire_target_triage=0')
+  print('wire_or_retire_target_available=false')
+" 2>/dev/null || { echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; }
 else
   echo "target_backfill_idle=false"
   echo "target_cleanup_board_open_scan=0"
   echo "target_cleanup_board_saturated=true"
+  echo "wire_or_retire_target_triage=0"
+  echo "wire_or_retire_target_available=false"
 fi
 
 # Per-run retrospective — daily trigger (issue #920, epic #917).
