@@ -55,6 +55,11 @@ import {
   type OutputVerdict,
   type OutputSourceReader,
 } from "./wiring-liveness-output.ts";
+import {
+  evaluateDarkOutcomes,
+  type OutcomeVerdict,
+  type DarkOutcomesDeps,
+} from "./wiring-liveness-outcomes.ts";
 
 // The output-series check (slice 2, #2288) lives in its own focused module
 // (`wiring-liveness-output.ts`, extracted by #2456 — one check type, one module).
@@ -202,10 +207,25 @@ export interface WiringLivenessResult {
   belowFloor: string[];
   /** Declared output sources whose live value could not be read this run. */
   unreadable: string[];
+  /**
+   * Declared `kind: leading` outcomes whose current reading is `null` — no data
+   * (producer never wrote the metric, or the file went missing/unparseable).
+   * Advisory (issue #2753): a dark leading outcome is silent holdback blindness.
+   */
+  darkOutcomes: string[];
+  /**
+   * Declared `kind: leading` outcomes with a finite reading whose file mtime is
+   * OLDER than the grace window — a present-but-old value (a stalled producer),
+   * distinct from a `null` (never-produced) DARK outcome. Invariant 3 (issue
+   * #2753): STALE and DARK are separate verdicts, never conflated. Advisory only.
+   */
+  staleOutcomes: string[];
   /** Every per-entry timer verdict, for diagnostics/tests. */
   verdicts: TimerVerdict[];
   /** Every per-entry output verdict, for diagnostics/tests. */
   outputVerdicts: OutputVerdict[];
+  /** Every per-outcome dark/live verdict, for diagnostics/tests (issue #2753). */
+  outcomeVerdicts: OutcomeVerdict[];
 }
 
 /**
@@ -271,8 +291,11 @@ export function diffTimers(
     notYetFired,
     belowFloor: [],
     unreadable: [],
+    darkOutcomes: [],
+    staleOutcomes: [],
     verdicts,
     outputVerdicts: [],
+    outcomeVerdicts: [],
   };
 }
 
@@ -298,6 +321,15 @@ export interface WiringLivenessDeps {
    * alarm), so a transient Target outage does not false-flag a below-floor output.
    */
   readOutput?: OutputSourceReader;
+  /**
+   * Injectable dark-outcome check deps (issue #2753). Tests pass a fake outcomes
+   * loader + value reader so dark vs live leading-outcome cases are reproducible
+   * without a real `config/direction/outcomes.yaml` or metric files. When omitted,
+   * the check uses the real outcomes loader + `getOutcomeValue` seam — it reads
+   * every declared `kind: leading` outcome and flags DARK when its reading is
+   * `null` (no data ever produced / file missing/unparseable).
+   */
+  darkOutcomes?: DarkOutcomesDeps;
   /** Injectable manifest loader so tests can point at a fixture. */
   loadManifest?: (filePath?: string) => Promise<LoadManifestResult>;
   /** Path to the manifest; defaults to {@link DEFAULT_LIVENESS_FILE}. */
@@ -348,12 +380,50 @@ export async function runWiringLiveness(
     result.unreadable = outputs.unreadable;
     result.outputVerdicts = outputs.outputVerdicts;
 
-    if (result.missing.length > 0 || result.stale.length > 0 || result.belowFloor.length > 0) {
+    // Issue #2753: dark leading-outcome check. Reads every declared
+    // `kind: leading` outcome from `config/direction/outcomes.yaml` and flags
+    // DARK when its current reading is null (no data ever produced / file
+    // missing). Advisory only — a dark leading outcome is silent holdback
+    // blindness (every baseline carries `value: null`), never a merge gate. Its
+    // data plane (outcomes loader) is fully independent of the timer/output
+    // checks, so a failure there routes to an empty evaluation without touching
+    // the timer verdicts.
+    const outcomes = await evaluateDarkOutcomes(deps.darkOutcomes ?? {});
+    result.darkOutcomes = outcomes.darkOutcomes;
+    result.staleOutcomes = outcomes.staleOutcomes;
+    result.outcomeVerdicts = outcomes.outcomeVerdicts;
+
+    if (
+      result.missing.length > 0 ||
+      result.stale.length > 0 ||
+      result.belowFloor.length > 0 ||
+      result.darkOutcomes.length > 0 ||
+      result.staleOutcomes.length > 0
+    ) {
       const parts: string[] = [];
       if (result.missing.length > 0) parts.push(`missing timers: ${result.missing.join(", ")}`);
       if (result.stale.length > 0) parts.push(`stale timers: ${result.stale.join(", ")}`);
       if (result.belowFloor.length > 0) {
         parts.push(`below-floor outputs: ${result.belowFloor.join(", ")}`);
+      }
+      if (result.darkOutcomes.length > 0) {
+        // Include the producer hint for each dark outcome so the operator can
+        // diagnose WHICH producer is dark, not just that a null exists.
+        const darkDetail = result.outcomeVerdicts
+          .map((v) => (v.status === "dark" ? `${v.name} (${v.producerHint})` : ""))
+          .filter((s) => s.length > 0)
+          .join("; ");
+        parts.push(`dark leading outcomes: ${darkDetail}`);
+      }
+      if (result.staleOutcomes.length > 0) {
+        // STALE (present-but-old) is distinct from DARK — surface it separately
+        // with the producer hint so the operator knows the producer stalled
+        // rather than never having written at all (Invariant 3, issue #2753).
+        const staleDetail = result.outcomeVerdicts
+          .map((v) => (v.status === "stale" ? `${v.name} (${v.producerHint})` : ""))
+          .filter((s) => s.length > 0)
+          .join("; ");
+        parts.push(`stale leading outcomes: ${staleDetail}`);
       }
       console.warn(
         `[Housekeeping] wiring-liveness flagged declared entrypoints — ${parts.join("; ")}`,
@@ -383,7 +453,10 @@ function emptyResult(header: {
     notYetFired: [],
     belowFloor: [],
     unreadable: [],
+    darkOutcomes: [],
+    staleOutcomes: [],
     verdicts: [],
     outputVerdicts: [],
+    outcomeVerdicts: [],
   };
 }

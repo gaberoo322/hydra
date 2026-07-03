@@ -55,6 +55,17 @@ function fakeReader(values: number[]): OutputSourceReader {
   return async (): Promise<OutputSeriesResult> => ({ ok: true, values });
 }
 
+/**
+ * Hermetic dark-outcome deps (issue #2753) for the timer/output integration
+ * cases that are NOT about the dark-outcome check — an empty outcomes manifest so
+ * `evaluateDarkOutcomes` does no real file I/O and flags nothing. Dedicated
+ * dark-outcome behavior is covered by its own describe block below and by
+ * test/wiring-liveness-outcomes.test.mts.
+ */
+const NO_OUTCOMES = {
+  loadOutcomes: async () => ({ ok: true as const, outcomes: [] }),
+};
+
 describe("wiring-liveness: YAML-subset parser", () => {
   test("parses entries with comments and quoted descriptions", () => {
     const raw = [
@@ -201,6 +212,7 @@ describe("wiring-liveness: runWiringLiveness (never-throws)", () => {
         ok: true,
         data: [liveTimer("a.timer", NOW - 10 * 60_000)],
       }),
+      darkOutcomes: NO_OUTCOMES,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
@@ -218,6 +230,7 @@ describe("wiring-liveness: runWiringLiveness (never-throws)", () => {
         ok: true,
         data: [liveTimer("a.timer", NOW - 999 * 60_000)],
       }),
+      darkOutcomes: NO_OUTCOMES,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
@@ -411,6 +424,7 @@ describe("wiring-liveness: runWiringLiveness (output integration)", () => {
       }),
       readTimers: freshTimers,
       readOutput: fakeReader([0, 0, 0]),
+      darkOutcomes: NO_OUTCOMES,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
@@ -429,6 +443,7 @@ describe("wiring-liveness: runWiringLiveness (output integration)", () => {
       }),
       readTimers: freshTimers,
       readOutput: fakeReader([0, 0, 12]),
+      darkOutcomes: NO_OUTCOMES,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
@@ -460,6 +475,7 @@ describe("wiring-liveness: runWiringLiveness (output integration)", () => {
       }),
       readTimers: freshTimers,
       readOutput: reader,
+      darkOutcomes: NO_OUTCOMES,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
@@ -468,5 +484,111 @@ describe("wiring-liveness: runWiringLiveness (output integration)", () => {
     assert.equal(res.outputVerdicts[0].status, "unreadable");
     // Outage appended NOTHING — no fabricated zero observation.
     assert.equal(appended, 0);
+  });
+});
+
+// ===========================================================================
+// Issue #2753: dark leading-outcome check — coordinator integration.
+// The pure evaluateDarkOutcomes verdict cases live in
+// test/wiring-liveness-outcomes.test.mts; these exercise the runWiringLiveness
+// coordinator folding the dark-outcome verdicts into its merged result.
+// ===========================================================================
+
+describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => {
+  const NOW = 1_700_000_000_000;
+  const okManifest = {
+    ok: true as const,
+    manifest: { entries: [timerEntry("a.timer", 60)] },
+  };
+  const freshTimers = async (): Promise<ProbeResult<TimerRecord[]>> => ({
+    ok: true,
+    data: [liveTimer("a.timer", NOW - 10 * 60_000)],
+  });
+
+  const leading = (name: string, query = `metrics/${name}.txt`) => ({
+    name,
+    kind: "leading" as const,
+    direction: "up" as const,
+    source: "file" as const,
+    query,
+    baseline: 0,
+    target: 1,
+    noise_epsilon: 0,
+  });
+
+  test("flags a dark leading outcome (null reading) alongside healthy timers", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => okManifest,
+      readTimers: freshTimers,
+      readOutput: fakeReader([5, 5, 5]),
+      darkOutcomes: {
+        loadOutcomes: async () => ({ ok: true, outcomes: [leading("forecast-calibration-brier")] }),
+        // Reader returns null — the metric file was never written (dark).
+        readOutcomeValue: async () => null,
+      },
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.darkOutcomes, ["forecast-calibration-brier"]);
+    assert.equal(res.outcomeVerdicts[0].status, "dark");
+    // The verdict carries a producer hint so the operator can diagnose the source.
+    const v = res.outcomeVerdicts[0];
+    assert.equal(v.status === "dark" && v.producerHint.length > 0, true);
+  });
+
+  test("a live leading outcome (fresh finite reading) is NOT flagged", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => okManifest,
+      readTimers: freshTimers,
+      readOutput: fakeReader([5, 5, 5]),
+      darkOutcomes: {
+        loadOutcomes: async () => ({ ok: true, outcomes: [leading("some-live-metric")] }),
+        readOutcomeValue: async () => ({ value: 0.42, ts: new Date(NOW).toISOString() }),
+        now: () => NOW,
+      },
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.darkOutcomes, []);
+    assert.deepEqual(res.staleOutcomes, []);
+    assert.equal(res.outcomeVerdicts[0].status, "live");
+  });
+
+  test("flags a STALE leading outcome (old mtime) distinctly from DARK", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => okManifest,
+      readTimers: freshTimers,
+      readOutput: fakeReader([5, 5, 5]),
+      darkOutcomes: {
+        loadOutcomes: async () => ({ ok: true, outcomes: [leading("stalled-metric")] }),
+        // A present-but-old reading: written once (2 days ago) then the producer stalled.
+        readOutcomeValue: async () => ({
+          value: 0.3,
+          ts: new Date(NOW - 2 * 24 * 60 * 60 * 1000).toISOString(),
+        }),
+        now: () => NOW,
+      },
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    // Invariant 3: STALE is reported separately; darkOutcomes stays empty.
+    assert.deepEqual(res.darkOutcomes, []);
+    assert.deepEqual(res.staleOutcomes, ["stalled-metric"]);
+    assert.equal(res.outcomeVerdicts[0].status, "stale");
+  });
+
+  test("a dark-outcome loader failure never throws and flags nothing", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => okManifest,
+      readTimers: freshTimers,
+      readOutput: fakeReader([5, 5, 5]),
+      darkOutcomes: {
+        loadOutcomes: async () => ({ ok: false, errors: ["parse error"] }),
+      },
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.darkOutcomes, []);
+    assert.deepEqual(res.outcomeVerdicts, []);
   });
 });
