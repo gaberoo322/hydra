@@ -28,13 +28,13 @@
 import { watch } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
-import {
-  indexText,
-  parseSourcePaths,
-  defaultHashAdapter,
-  HashDedupAdapter,
-  type SourcePath,
-} from "./indexer.ts";
+import { indexText, defaultHashAdapter, HashDedupAdapter } from "./indexer.ts";
+// Issue #2767: the pure enumeration helpers moved to source-enumerator.ts;
+// import parseSourcePaths + SourcePath directly from there to realize the
+// decoupling (the lifecycle controller no longer needs indexer.ts's OV
+// transport just to parse source specs). indexText / defaultHashAdapter /
+// HashDedupAdapter remain OV-coupled and stay imported from indexer.ts.
+import { parseSourcePaths, type SourcePath } from "./source-enumerator.ts";
 
 // ---------------------------------------------------------------------------
 // Internal constants (Section 4 — preserved 1:1 from indexer.ts)
