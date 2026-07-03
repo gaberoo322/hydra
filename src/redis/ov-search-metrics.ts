@@ -373,16 +373,6 @@ export async function appendKnowledgeFetch(row: KnowledgeLedgerRow): Promise<voi
   await knowledgeFetchLedger().push(row);
 }
 
-/**
- * Read back the most recent `limit` knowledge-retrieval ledger rows, newest
- * first, through the shared `boundedJsonList` primitive (whose read is tolerant
- * of JSON-corrupt entries — one bad row can't break the whole read).
- */
-export async function getKnowledgeFetchLedger(limit = 100): Promise<KnowledgeLedgerRow[]> {
-  const n = Math.max(1, Math.min(KNOWLEDGE_FETCH_LEDGER_MAX, Math.floor(limit)));
-  return knowledgeFetchLedger().read(n);
-}
-
 /** Coerce a Redis hash field string to a finite number, defaulting to 0. */
 function num(raw: unknown): number {
   const n = typeof raw === "string" ? Number(raw) : NaN;
