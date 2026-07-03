@@ -1,164 +1,137 @@
 ---
-date: 2026-04-30
+date: 2026-07-02
 reviewer: claude-architect
 focus: general
-overall_score: 6.1
+overall_score: 6.8
+previous_score: 6.1 (2026-04-30)
 ---
 
-# Hydra Architecture Review — 2026-04-30
+# Hydra Architecture Review — 2026-07-02
 
 ## Executive Summary
 
-Hydra is a working autonomous development system that has produced 2,810 merges with a 1.0% all-time revert rate, growing the target project from 154 to 3,041 tests. The core control loop (plan -> execute -> verify -> merge) is sound and produces correctly-scoped, tested code. However, **28% of cycles are wasted on "Planner produced no task"**, the knowledge system (OpenViking) returns zero results, the scheduler is stopped (not running autonomously), and research outpaces build capacity 3:1. The agent memory system works well (patterns auto-promote to feedback files) but the specs and Kanban systems are unused. Fixing the no-task waste alone would raise the effective merge rate from 56% to ~78%.
+Hydra has crossed the threshold the April review said it hadn't: it now **runs itself**. The scheduler has executed 7,710 cycles with zero consecutive errors; the autopilot fires on timers several times a day and terminates by handoff, not by crash; 98 PRs merged in the last 7 days with **zero open PRs and zero rollbacks**; operator commits are ~9% of target-repo activity. The verification stack (tier ladder, CI-as-merge-gate, mutation kill-rate, scope enforcement, deep-QA on T4, outcome holdback enrollment) is genuinely strong — 0 failed/abandoned/rolled-back cycles in the last 50, and the full suite is green (315 test files, 97.7k test LOC against 67.5k src LOC). OpenViking, dead in April, now returns relevant results.
+
+The machine is healthy. **What it optimizes against is dark.** The vision's primary-path metric — forecast calibration Brier — has *never had a value*: the Target's `/api/calibration/forecast-metrics` returns `totalForecasts: 0`, the Brier producer chore silently declines to write on failure (by design), `metrics/forecast-calibration-brier.txt` does not exist, and every holdback baseline carries `value: null` for it. The outcome-attribution spine (#2628) is built but has nothing terminal to attribute against. Meanwhile the direction docs the discovery classes steer by are internally inconsistent: `vision.md` retired cross-venue arbitrage on 2026-06-22, but `priorities.md` (last refreshed 2026-06-15) and `goals.md` (2026-06-10) still direct work at the retired arb funnel. A world-class execution engine is being steered by stale priorities toward an unmeasured goal. Closing that gap — not more execution machinery — is the entire frontier.
 
 ## Scorecard
 
-| # | Dimension | Score | Key Finding |
-|---|-----------|-------|-------------|
-| 1 | Control Loop | 7 | 56% merge rate, 1.8% revert rate, but 28% no-task waste |
-| 2 | Research Pipeline | 6 | 74% conversion rate, but 164 research cycles vs ~50 builds (3:1 imbalance) |
-| 3 | Grounding & Verification | 8 | npm test + tsc gates work; 3,041 tests; worktree isolation active |
-| 4 | Agent Quality | 6 | Good feedback files, but planner fails to produce a task 28% of the time |
-| 5 | Autonomy | 4 | Scheduler stopped; only 1 scheduled cycle ever run; system is manual |
-| 6 | Knowledge & Learning | 5 | Pattern memory works (91-hit scope-creep rule), but OpenViking returns empty |
-| 7 | Architecture Fitness | 7 | Clean stack (37 files, 2 deps, Redis+systemd), manageable and testable |
-| 8 | Cost Efficiency | 6 | $1.55/cycle avg, but 28% waste; $2.21 estimated per merged feature |
+| # | Dimension | Score | Apr | Key Finding |
+|---|-----------|-------|-----|-------------|
+| 1 | Control Loop Quality | 8 | 7 | 30/50 cycles merged, 0 failed/rolled; 98 PRs/7d, 0 open; known frictions (cooldown bootstrap #2575, dependency-blind anchors) are papered over, not fixed |
+| 2 | Research → Action Pipeline | 6 | 6 | Board nearly drained (5 ready-for-agent, queue depth 0) — throughput is now discovery-limited; priorities.md 17 days stale and contradicts vision.md |
+| 3 | Grounding & Verification | 8 | 8 | Deepest gate stack reviewed against SOTA (mutation ratchet ≈ Meta ACH); but QA FAIL can't block auto-merge and seam checks are advisory |
+| 4 | Agent Quality | 6 | 6 | Failure modes well-catalogued and alias-consolidated; but rule promotion is promote-then-demote — both recent promoted rules made post-rates 2.2–4.5× *worse* before demotion |
+| 5 | Autonomy Level | 8 | 4 | Biggest gain since April: timer-driven unattended 8h runs, scope=all, ~9% operator commit share, $0/$50 daily API spend |
+| 6 | Knowledge & Learning | 5 | 5 | OV search fixed and relevant; but the outcome side is dark — Brier never written, attribution ledger empty, reflection outcomes stale since 2026-05-13 |
+| 7 | Architecture Fitness | 8 | 7 | 26 domains, 26 ADRs, 5 runtime deps, 1.45:1 test:src, enforced Redis/schema seams, lean CLAUDE.md router — clean and AI-navigable |
+| 8 | Cost Efficiency | 5 | 6 | Cannot compute cost/merged-PR at all: cycle `costUsd` empty, run `cumulative_tokens: 0`, usage 100% unattributed; that opacity *is* the finding |
 
-**Overall: 6.1/10**
+**Overall: 6.8/10** (Apr: 6.1)
 
 ## Key Findings
 
-### What's Working
+### What's working
 
-1. **Hard verification gates** -- npm test + tsc as non-negotiable merge gates is the right architecture. The 1.8% revert rate (24/1,353 in 14 days) proves it catches nearly all regressions before merge.
+1. **Autonomy arrived.** April's #1 gap (scheduler stopped, everything manual) is closed: 7,710 scheduler cycles, timer-fired autopilot runs (1–8 turns, 2–11 dispatches each), handoff-terminated, 2-week unattended run in progress. Operator commits are 10 of 112 (~9%) on the target in 7 days.
 
-2. **Test growth is massive** -- From 154 to 3,041 passing tests. The executor is writing real, meaningful tests alongside features. This is rare in autonomous systems.
+2. **The verification ladder is state-of-the-art in shape.** Tier-classified blast radius → CI-as-the-only-merge-gate → mutation kill-rate + scope enforcement → T2+ outcome-holdback enrollment → deep-QA + remediation loop on T4. The published SOTA equivalents (Meta ACH mutation gating, layered gate stacks, progressive-delivery holdbacks) map one-to-one onto machinery Hydra already has. 0 rollbacks in the last 50 cycles; 1.0%-class revert rates sustained since April.
 
-3. **Agent memory pattern system** -- The two-tier architecture (Redis patterns -> feedback file promotion at 5 hits) is well-designed and actively working. The planner's `scope-creep` pattern at 91 hits with auto-promotion to `to-planner.md` shows the system learning from real failures. Executor's `no-diff` (14 hits) and `verification-failure` (25 hits) patterns are similarly valuable.
+3. **OpenViking is alive.** Search over accumulated knowledge returns relevant, scored results (verified with a live query against the worktree-write-fence cluster). April's "agents operate without any accumulated knowledge" no longer holds.
 
-4. **Scope-adaptive planning** -- Classifying tasks as quick-fix/standard/complex/high-risk and adjusting the pipeline (skip gates for quick-fix, add nano-model review for high-risk) is smart resource allocation.
+4. **Codebase health discipline is real.** 26 ADRs, enforced seams (`redis/<domain>` accessors, zod schema boundary, sub-router pattern), three complementary search lanes (ast-grep / comby / probe), dead-code kill-chain (#2720), and a test:src LOC ratio of 1.45:1. The repo is optimized for AI navigation, which is the correct optimization for this system.
 
-5. **Deterministic preflight replacing full skeptic** -- Removing the Codex-powered skeptic agent in favor of a deterministic 4-point checklist was a good efficiency move. The old skeptic had a rubber-stamping problem; deterministic checks are more reliable.
+5. **Issue-synthesis pipeline is ahead of published practice.** External research found no published equivalent of the hydra-prd research-finding → epic + dependency-ordered tracer-issues pipeline; the field's discovery→work-item tooling is thinner than Hydra's.
 
-6. **Research-to-queue conversion** -- 74% of research opportunities become queued work items. The research loop is productive at finding real work.
+### What's not working
 
-### What's Not Working
+1. **The terminal learning signal has never existed.** `totalForecasts: 0, brierScore: null` from the Target — the LLM edge-estimate headwater has no systemd unit, so `paper_llm_edge_estimates` has 0 rows ever, so no forecast ever resolves, so the Brier chore (which "never writes on failure") has never written its file. Downstream: holdback leading-metric `forecast-calibration-brier: value null` in every baseline; outcome-attribution spine (#2628 — estimator/recorder/subscribe/windows all built) has an empty ledger; vision.md's own vector 1 says an unread calibration metric "is itself a finding to research" — and no mechanism surfaces it. The silence is invisible by design: fail-quiet producer + no liveness alarm on `null` leading outcomes.
 
-1. **"Planner produced no task" -- 28% of all cycles (14/50)**
-   This is the single biggest efficiency problem. The planner is called with an anchor, spends ~61 seconds of frontier-model inference, and produces nothing. Most are `user-request` anchors. Root causes likely include:
-   - Queue items that are already completed or too vague for the planner to act on
-   - Anchors that reference completed priorities (the "completed" items in priorities.md)
-   - Insufficient pre-validation of anchor actionability before invoking the planner
+2. **Direction docs steer at a retired strategy.** `priorities.md` (2026-06-15) still names the WC pair-registry seeding and arb funnel as priorities 1–3; `goals.md` (2026-06-10) still frames the phase as "cross-venue arbitrage... first real-money dual-leg runs." Both predate ADR-0002's arb retirement (2026-06-22) and the M13 pivot. Discovery/research classes that read these files inherit the contradiction; the operator has been catching it via session memory instead.
 
-2. **OpenViking knowledge system is inert**
-   `searchKnowledge()` in `codex-runner.ts` calls `/api/v1/search/find` -- it returns empty results every time. OpenViking's `/health` says it's healthy, but the search index appears empty. The `knowledge-indexer.ts` (208 lines) exists but isn't populating data that agents can find. This means **agents operate without any accumulated knowledge context** -- they only see the current grounding snapshot and their personality/feedback files.
+3. **Learning promotion is uncalibrated.** The `rule-actions` log shows the only two recent promoted planner rules were demoted for making post-promotion failure rates 2.2× and 4.5× **worse**. Promote-then-observe-then-demote is the inverted form of the DGM/ExpeRepair lesson (empirically validate *before* adopting a self-modification). The promptfoo eval lane (`npm run eval`, golden tasks) exists but isn't wired into promotion. Meanwhile the legacy reflection loop is confirmed severed (reflection outcomes zset last entry 2026-05-13; consumers report `reflectionMatchSource: 'none'` — #1119).
 
-3. **Scheduler is effectively unused**
-   The scheduler shows `stopped` with only 1 cycle ever run. Despite 164 research cycles running, the build scheduler is not driving autonomous execution. The system requires manual `POST /cycle/start` to build anything. This undermines the core value proposition of an autonomous dev system.
+4. **The system cannot state its own cost.** Cycle metrics carry no `costUsd`; autopilot runs record `cumulative_tokens: 0`; usage attribution is 100% unattributed (SessionStart hook can't fire for Agent-tool dispatches; approved fix 99ef93a0 unimplemented). Model routing decisions (Haiku for cleanup, Sonnet escalation, subagent token caps) are therefore made on anecdote. SOTA reports 41–80% cost reductions from cache-stable prompting and cascade routing — none of it is verifiable here without measurement.
 
-4. **Research outpaces execution 3:1**
-   164 research cycles have produced opportunities, but only ~50 build cycles have consumed them. The work queue has 6 items including 3 duplicates of the same task. Research is producing faster than execution can consume, leading to stale queue items.
+5. **Observability of the loop itself is decaying.** The architect's own quantitative base is rotting: `testsAfter` always 0 in cycle metrics, 34% of anchors classified `unknown`/`unclassified`, `hydra research history` endpoint 404 (retired without a successor metric for research→queue conversion). The system that measures the Target's drift does not measure its own instrumentation drift.
 
-5. **Specs and Kanban are hollow**
-   Zero active specs. All Kanban lanes (queued, inProgress, blocked, triage, done) are at 0 items. These systems exist architecturally but aren't being used. Work flows through the queue and research loop, bypassing the Kanban entirely.
-
-6. **Work queue has duplicates**
-   "Add stream freshness route-quality scoring" appears 3 times in the queue. There's also a "COMPLETED:" item still in the queue. Queue hygiene is poor.
+6. **Discovery is now the bottleneck — and it's self-referential.** With 0 open PRs, queue depth 0, and 5 ready-for-agent issues, execution capacity exceeds discovery output. Discovery classes propose what agents *notice*, not what moves an outcome — which is exactly the gap #2628 exists to close, but see finding 1: attribution needs a live terminal signal first.
 
 ## Recommendations
 
-### Quick Wins (< 1 day)
+### Quick wins (< 1 day)
 
-**1. Pre-validate anchors before calling the planner**
-- **What**: Before invoking the frontier-model planner, check if the anchor reference matches a completed item in `priorities.md` (the "What's been completed" section) or if the queue item is stale/duplicate. Skip the cycle with a fast abort instead of burning $1.55 on a no-task result.
-- **Why**: Eliminates 28% waste -> improves effective merge rate from 56% to ~78%. Saves ~$21/50 cycles.
-- **Evidence**: 14/50 cycles produced "Planner produced no task", all consuming ~61s of frontier inference.
-- **Files**: `control-loop.ts` (before `runPlannerAgent`), `anchor-selection.ts` (add staleness check)
-- **Risk**: Low -- worst case is skipping a legitimate anchor, which circuit-breaker already handles via reframe.
-- **Dependency**: None.
+**1. Alarm on dark leading outcomes** ⭐ keystone quick-win
+- **What**: Extend `src/scheduler/chores/wiring-liveness.ts` (or add a sibling chore): if any `kind: leading` outcome in `outcomes.yaml` has resolved to `null`/missing-file for > N days, emit a health event and file/refresh a `needs-triage` issue. Include producer identity (`forecast-calibration-brier` chore) in the payload.
+- **Why**: Vision vector 1 explicitly declares an unread calibration metric a finding; today the fail-quiet producer makes 10 months of silence invisible. This converts the system's biggest blind spot into an autopilot-visible signal permanently.
+- **Evidence**: `metrics/forecast-calibration-brier.txt` missing; every `hydra:holdback:baseline:*` carries `value: null`; producer logs `console.error` into journal noise nobody reads.
+- **Risk**: None — additive, advisory. **Dependency**: none.
 
-**2. Deduplicate work queue on insertion**
-- **What**: Add a dedup check in `POST /queue` and in the research loop's auto-queue path. Compare `reference` field against existing queue items before inserting.
-- **Why**: Prevents wasted cycles on duplicate work. Currently 3/6 queue items are the same task.
-- **Evidence**: "Add stream freshness route-quality scoring" appears 3 times in the queue.
-- **Files**: `api.ts` (POST /queue handler), `research-loop.ts` (auto-queue logic)
-- **Risk**: None -- dedup is purely additive.
-- **Dependency**: None.
+**2. Refresh the direction docs to post-ADR-0002 reality**
+- **What**: Dispatch `research_target` (or hand-edit) to regenerate `config/direction/priorities.md` and update `goals.md`'s Current Phase to M13 Forecast-Directional Execution; strip the arb-funnel priorities 1–3 and the "dual-leg real-money" framing.
+- **Why**: Every discovery/research class reads these files; they currently steer at a strategy the vision retired 10 days ago. Session memory is compensating — that knowledge should live in the files.
+- **Evidence**: `priorities.md` header `updated: 2026-06-15`; `goals.md` 2026-06-10; vision.md arb retirement 2026-06-22.
+- **Risk**: Low. **Dependency**: none.
 
-**3. Diagnose and fix OpenViking search**
-- **What**: Check if the knowledge indexer is actually running and indexing documents. Verify the search endpoint `/api/v1/search/find` works. The indexer may have a configuration or API version mismatch.
-- **Why**: Agents currently operate without knowledge context. Fixing this means planners and executors get relevant prior work, reducing redundant proposals and improving code quality.
-- **Evidence**: `searchKnowledge()` returns empty; OpenViking `/health` is ok but search yields 0 results.
-- **Files**: `knowledge-indexer.ts`, `codex-runner.ts:374-406`
-- **Risk**: Low -- OpenViking is a separate service; fixing its integration doesn't affect the core loop.
-- **Dependency**: OpenViking must be running (it is).
+**3. Repair cycle-metrics recording**
+- **What**: Fix `testsAfter` (always 0), populate `costUsd`/token fields where obtainable, and close the 34% `unknown`/`unclassified` anchorType hole (likely a missing mapping after the autopilot class taxonomy replaced legacy anchor types).
+- **Why**: Trend analysis (including this review) is degrading; merge-rate and cost-per-merge are the SOTA fitness metrics and both are currently uncomputable.
+- **Evidence**: 50-cycle sample: tests 0→0, costs empty, 17/50 anchors unclassified.
+- **Risk**: Low. **Dependency**: none.
 
-### Medium Efforts (1-5 days)
+### Medium efforts (1–5 days)
 
-**4. Throttle research-to-build ratio**
-- **What**: Add a ratio constraint to the scheduler: don't run another research cycle until the build queue is below a threshold (e.g., 3 items). Currently research runs unthrottled while builds are manual.
-- **Why**: 164 research cycles vs ~50 builds creates a growing backlog of stale opportunities. Research should feed execution, not outrun it.
-- **Evidence**: 3:1 research-to-build ratio, duplicate queue items from repeated research.
-- **Files**: `scheduler.ts` (cycle selection logic), `research-loop.ts`
-- **Risk**: Could slow research discovery during active build periods. Mitigate with operator override.
-- **Dependency**: Queue dedup (recommendation #2) should land first.
+**4. Light the forecast headwater end-to-end** ⭐ highest-leverage item in the system
+- **What**: Target-side: install/enable the systemd unit for the paper LLM edge-estimate runner (the missing headwater), verify `paper_llm_edge_estimates` rows flow → directional timer consumes → `forecast_outcomes` resolves → `/api/calibration/forecast-metrics` returns a real Brier → orchestrator chore writes `metrics/forecast-calibration-brier.txt` → holdback baselines carry real values. Add a row-count liveness probe at each of the 3 stages (the pipeline has failed silently at each before).
+- **Why**: This single chain activates: the vision's primary metric, holdback's second leading outcome, and #2628's terminal attribution signal. Everything downstream of "make discovery goal-seeking" is blocked on it. The ongoing qwen-vs-Sonnet A/B (interim: local model incoherent) also needs settlement-time Brier to conclude.
+- **Evidence**: `totalForecasts: 0`; memory-confirmed 3-stage gap with headwater unit absent; brier producer verified fail-quiet.
+- **Risk**: Medium — local-Ollama-only constraint means forecast quality may be poor (interim A/B suggests so); but a *measured* bad Brier is infinitely more useful than no Brier. **Dependency**: none (pairs with #1 so future regressions self-report).
 
-**5. Wire mutation testing into the verification step**
-- **What**: `mutation-testing.ts` exists but it's unclear if it's actually called during cycles. Wire it into `runVerification()` for standard and complex tasks: after tests pass, inject a mutation into the changed files and verify tests catch it.
-- **Why**: Meta's JIT testing shows 4x higher bug detection with mutation-validated tests. This would catch the category of regressions that cause the 1.8% revert rate -- cases where tests pass but don't actually validate the change.
-- **Evidence**: Meta's paper (arXiv 2601.22832), Hydra's existing module, 24 reverts in 14 days.
-- **Files**: `mutation-testing.ts`, `verifier.ts`, `control-loop.ts` (verification step)
-- **Risk**: Medium -- mutation testing adds latency. Only run on standard/complex tasks, not quick-fix.
-- **Dependency**: None.
+**5. Implement in-transcript usage attribution (approved design 99ef93a0)**
+- **What**: Attribute subagent token usage per dispatch class from transcripts; surface cost/merged-PR and tokens/class/day on the dashboard; backfill `cumulative_tokens` in run hashes.
+- **Why**: Enables the two decisions currently made blind: model-tier routing per class, and research-vs-build budget split. SOTA cascade/caching wins (41–80%) are unverifiable without a baseline.
+- **Evidence**: 100% unattributed usage; `cumulative_tokens: 0` on every run.
+- **Risk**: Low. **Dependency**: none.
 
-**6. Activate the scheduler with build cycles**
-- **What**: Start the scheduler and configure it to alternate between research and build cycles based on queue depth. Build when queue > 0, research when queue <= 2.
-- **Why**: The system's autonomous value comes from running continuously. With fixes #1-#3 in place, the loop is reliable enough to run unattended.
-- **Evidence**: Scheduler has run only 1 cycle. All execution is manual POST /cycle/start.
-- **Files**: `scheduler.ts`
-- **Risk**: Medium -- need confidence in the pre-validation (fix #1) before auto-running. Start with a low cadence (15-min intervals).
-- **Dependency**: Fixes #1, #2, #3.
+**6. Cascade routing with the deterministic verifier as escalation trigger**
+- **What**: For mechanical classes (cleanup_orch dev work, doc-only dev), dispatch the cheap tier first and auto-escalate to the standard tier when CI goes red or the agent exits without a PR (the Haiku-premature-exit signature). Encode as dispatch policy in decide.py, not per-skill prose.
+- **Why**: Published result: cascades beat routers when a cheap deterministic verifier exists — Hydra has tests/tsc/CI free. Current experience (Haiku cleanup no-ops) failed because there was no escalate-on-fail wiring, not because tiering is wrong.
+- **Evidence**: RouteLLM/FrugalGPT numbers (85% cost cut at 95% quality); cleanup_orch Haiku memory.
+- **Risk**: Medium — wasted cheap attempts on hard tasks; bounded by escalation. **Dependency**: #5 (to measure whether it pays).
 
-### Strategic Shifts (1-2 weeks)
+### Strategic shifts (1–2 weeks)
 
-**7. Adopt Reflexion-style episodic memory for failed cycles**
-- **What**: When a cycle fails (no-task, abandoned, verification failure), generate a natural-language reflection: what was attempted, why it failed, what should be different next time. Store these reflections and inject them as context when the same anchor is retried.
-- **Why**: The Darwin Godel Machine improved from 20% to 50% on SWE-bench by adding "a history of what has been tried before and why it failed." Princeton's Reflexion framework shows that natural-language self-critique outperforms random retry. Hydra's current circuit-breaker escalates after 3 failures, but doesn't carry forward WHY something failed.
-- **Evidence**: 28% no-task rate, 12% other-abandoned rate. DGM paper (arXiv 2505.22954), Reflexion framework.
-- **Files**: New module or extension to `agent-memory.ts`, integration in `control-loop.ts`
-- **Risk**: Reflection quality depends on the model. Use nano-tier for cost efficiency.
-- **Dependency**: None, but benefits from fix #3 (knowledge system) for storage.
+**7. Finish the Outcome Attribution Spine (#2628) as the system's fitness function**
+- **What**: Complete ledger population (merge → per-metric attribution windows → ridge marginal-effect estimates) and feed the estimates back into discovery-class prompts and decide.py prioritization weights, replacing "what agents notice" with "what moved outcomes."
+- **Why**: External research confirms merge→outcome-delta credit assignment is the field's acknowledged open gap — no published system closes it; Hydra's design has no precedent to copy and is the durable differentiator for the swappable-builder end-goal (ADR-0013). DGM's 20%→50% SWE-bench gain came precisely from empirically gating self-modifications on measured fitness.
+- **Evidence**: `src/outcome-attribution/` built, ledger empty; discovery now the bottleneck (finding 6).
+- **Risk**: Estimator quality on sparse data; the dark-tolerant design already accounts for it. **Dependency**: #4 (a live terminal signal) and #1 (dark-signal alarms).
 
-**8. Implement diff-aware test generation at verification time**
-- **What**: Following Meta's JIT testing pattern: when the executor produces a diff, generate additional tests specifically targeting the changed code paths. Use mutation testing to validate these tests actually catch faults.
-- **Why**: The current verification only runs existing tests. Diff-aware generation ensures new code is tested for the specific behaviors it introduces, not just that it doesn't break existing tests. Meta reports 4x bug detection improvement.
-- **Evidence**: Meta's JIT testing (Engineering at Meta, Feb 2026), 22,126 tests evaluated with 4x catch rate.
-- **Files**: New module integrating `mutation-testing.ts` + `verifier.ts` + executor prompt
-- **Risk**: High cost per cycle (additional LLM call for test generation). Use codex-tier model. Only for standard/complex tasks.
-- **Dependency**: Fix #5 (mutation testing integration).
+**8. Validate-before-promote for learned rules (ablation-gated memory)**
+- **What**: Before a pattern-memory rule promotes into a feedback file, run the candidate rule through the promptfoo golden-task eval lane (`evals/`, `npm run eval`) as an A/B: prompt-with-rule vs prompt-without. Promote only on non-regression. Keep the existing demotion machinery as the backstop, not the primary control.
+- **Why**: Both recent promotions degraded post-rates (2.2×, 4.5×) before demotion caught them — live traffic is currently the eval set. ExpeRepair/ReasoningBank/DGM all show memory pays only with curation and empirical gating; SWE-Bench-CL now measures exactly this forward-transfer property.
+- **Evidence**: `hydra:learning:rule-actions` demotion log; existing but unwired eval lane.
+- **Risk**: Eval-set representativeness; start advisory (log the verdict) before making it blocking. **Dependency**: none technically; benefits from #3's metric hygiene.
 
 ## Comparison to State of the Art
 
-| Dimension | Hydra | State of Art | Gap |
-|-----------|-------|-------------|-----|
-| Merge rate | 56% (effective) | Aider 49.2%, OpenHands 77.6% (SWE-bench) | Comparable but different benchmarks |
-| Architecture | Planner/Executor/Verifier | Same triad pattern | Aligned |
-| Model routing | 3-tier (frontier/codex/nano) | 90/10 cascade (87% savings) | Hydra does this |
-| Verification | npm test + tsc | Meta JIT + mutation (4x detection) | Gap: no JIT testing |
-| Self-improvement | Pattern memory + promotion | Reflexion + DGM (episodic memory) | Gap: no episodic failure memory |
-| Knowledge | OpenViking (broken) | Continuum Memory / editable RAG | Gap: system is inert |
-| Research -> Code | 74% conversion | GROUNDING.md / epistemic docs | Hydra has priorities.md (similar) |
-| Autonomy | Manual (scheduler stopped) | Long-running autonomous loops | Gap: not running autonomously |
-| Cost | $1.55/cycle, $2.21/merge | 60-80% reduction possible with caching | Gap: no prompt caching |
-
-**Hydra's architectural choices are sound** -- the Planner/Executor/Verifier triad, model routing, deterministic preflight, and pattern memory all align with industry best practices. The gaps are primarily in **operational activation** (scheduler stopped, OpenViking dead, specs unused) rather than architectural design. The system has been carefully engineered but is underutilized.
+| Dimension | Hydra today | State of the art (2025–26) | Verdict |
+|-----------|-------------|---------------------------|---------|
+| Merge outcomes | 98 PRs/7d merged, 0 open, 0 rollbacks/50 cycles | Devin: 67% PR merge rate; industry 20–50% | **Ahead** (self-verified via CI gate) |
+| Verification stack | Tier ladder + mutation ratchet + scope gate + holdback + deep-QA | Meta ACH (73% test acceptance), layered gates, canary/progressive delivery | **At parity in shape**; holdback half-dark in signal |
+| Knowledge retrieval | OV semantic + ast-grep/comby/probe lanes | RepoGraph/CodexGraph structural-graph RAG (+32.8% relative) | Parity for search; **no repo-graph lane** — possible future scout |
+| Self-improvement | Pattern memory + promote/demote + retro caps | DGM/ExpeRepair: ablation-validated memory; ACE delta-updates | **Behind**: promote-then-demote inverts the SOTA gate |
+| Outcome attribution | #2628 built, ledger dark | Acknowledged open gap field-wide | **Ahead in design, unshipped in practice** |
+| Issue synthesis | hydra-prd epic + tracer-issue pipeline | Mostly bespoke; Spec Kit spec→plan→tasks | **Ahead** |
+| Autonomy | Timer-driven unattended 8h runs, ~9% operator share | Long-running harness patterns (init/progress-file/subagent summaries) | **At parity or ahead** |
+| Cost | Unmeasured (subscription, 0-attribution) | Cascades 60–85% savings; caching 41–80%; Agentless $0.34/issue floor | **Behind on measurement**, unknowable on efficiency |
 
 ## Next Review Triggers
 
-Re-run this assessment when:
-1. The scheduler has been running for 7+ continuous days
-2. 100+ additional build cycles have completed
-3. OpenViking is fixed and agents are getting knowledge context
-4. Mutation testing is wired into the verification loop
-5. The no-task rate drops below 10%
-6. Major architectural changes are proposed (new agent types, new model tiers, etc.)
+Re-run this assessment when any of:
+1. `forecast-calibration-brier.txt` exists with a real value (headwater lit) — re-score dimensions 2, 6.
+2. #2628 ledger has ≥30 attributed merges — evaluate whether discovery prioritization actually shifted.
+3. Usage attribution ships — first real cost/merged-PR number.
+4. 60+ days of unattended operation, or the 2-week unattended run ends — audit operator-intervention log.
+5. The Target swap (ADR-0013) is seriously proposed — this review's Target-coupling findings (Brier chore hardcodes the betting API shape) become blocking.
+6. Rule-promotion eval gating ships — re-score dimension 4.
