@@ -175,6 +175,16 @@ export interface PendingEnrollEntry {
   prNumber: number;
   tier: number | null;
   cycleId: string;
+  /**
+   * Explicit dispatch-class anchorType (issue #2800) the arming caller knew
+   * (`work-queue` / `qa-review` / ...). Optional — legacy entries persisted
+   * before #2800 (and callers that omit it) leave it `undefined`. The #2623
+   * merge-watch chore forwards it on the landing-time cycle-record enrichment so
+   * that a first-write enrichment (reap never wrote a record for this cycleId —
+   * the qa_orch relay case) still classifies explicitly instead of falling
+   * through the bare-UUID cycleId to the `unclassified` sentinel.
+   */
+  anchorType?: string;
   /** Epoch ms the entry was registered. */
   registeredAt: number;
 }

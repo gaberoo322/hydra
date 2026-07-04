@@ -52,11 +52,22 @@ export const HoldbackRevertFailedBodySchema = z
  * autopilot cycle armed it — both required. `tier` is nullable to mirror the
  * enroll schema: registration is permissive (records what was armed); the
  * tier-enrollment filter is a landing-time concern for the #2623 watcher.
+ *
+ * `anchorType` (issue #2800) is the explicit dispatch-class anchorType
+ * (`work-queue` / `qa-review` / ...) the arming caller knows. The #2623
+ * merge-watch chore forwards it on its landing-time cycle-record enrichment so
+ * that, when reap never wrote a cycle-record for this cycleId (the qa_orch relay
+ * case), the enrichment is the FIRST write yet still carries an explicit
+ * anchorType — instead of the bare-UUID cycleId falling through the slot-suffix
+ * inference to the `unclassified` sentinel (the 32%-unclassified data-quality
+ * gap). Optional: an arming caller that omits it degrades to the prior behaviour
+ * (inference, then `unclassified`).
  */
 export const HoldbackPendingBodySchema = z
   .object({
     prNumber: z.number().int().positive(),
     tier: z.number().int().min(1).max(4).nullable(),
     cycleId: z.string().min(1).max(200),
+    anchorType: z.string().min(1).max(200).optional(),
   })
   .strict();

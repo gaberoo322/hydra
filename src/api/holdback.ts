@@ -32,7 +32,7 @@ import {
   HoldbackPendingBodySchema,
 } from "../schemas/holdback.ts";
 import { enrollHoldback, checkHoldback, reportRevertFailed, type HoldbackEventBus } from "../holdback.ts";
-import { pendingEnrollAdd } from "../redis/holdback.ts";
+import { pendingEnrollAdd, type PendingEnrollEntry } from "../redis/holdback.ts";
 
 export function createHoldbackRouter(eventBus: HoldbackEventBus) {
   const router = Router();
@@ -92,12 +92,20 @@ export function createHoldbackRouter(eventBus: HoldbackEventBus) {
     if (!parsed.success) {
       return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
-    const entry = {
+    const entry: PendingEnrollEntry = {
       prNumber: parsed.data.prNumber,
       tier: parsed.data.tier,
       cycleId: parsed.data.cycleId,
       registeredAt: Date.now(),
     };
+    // Issue #2800: carry the explicit dispatch-class anchorType through to the
+    // merge-watch enrichment so a first-write enrichment classifies explicitly
+    // instead of bucketing to `unclassified`. Only set it when the arming caller
+    // supplied one — omit it (leaving the field absent from the persisted JSON)
+    // otherwise, so a legacy/omitting caller degrades to the prior behaviour.
+    if (parsed.data.anchorType !== undefined) {
+      entry.anchorType = parsed.data.anchorType;
+    }
     const result = await pendingEnrollAdd(entry);
     if (result.ok === false) {
       return res.status(500).json({ error: result.error });
