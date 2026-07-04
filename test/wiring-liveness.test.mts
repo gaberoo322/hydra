@@ -17,17 +17,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  parseLivenessYaml,
-  loadLivenessManifest,
-  diffTimers,
   runWiringLiveness,
-  type WiringLivenessResult,
-  // OutputSourceReader / OutputSeriesResult are re-exported from this module for
-  // the runWiringLiveness integration cases below; the pure-evaluator tests live
-  // in test/wiring-liveness-output.test.mts (#2456).
+  // OutputSourceReader / OutputSeriesResult are re-exported from the coordinator
+  // for the runWiringLiveness integration cases below; the pure-evaluator tests
+  // live in test/wiring-liveness-output.test.mts (#2456).
   type OutputSourceReader,
   type OutputSeriesResult,
 } from "../src/scheduler/chores/wiring-liveness.ts";
+// The pure timer-check primitives live in their own focused sibling module
+// (`wiring-liveness-timer.ts`, extracted by #2830 — one check type, one module).
+// The diffTimers / parser / loader unit cases import from the canonical owner;
+// the runWiringLiveness integration cases below import the coordinator itself.
+import {
+  parseLivenessYaml,
+  loadLivenessManifest,
+  diffTimers,
+  type WiringLivenessResult,
+} from "../src/scheduler/chores/wiring-liveness-timer.ts";
 import { productionOutputReader } from "../src/scheduler/chores/wiring-liveness-output.ts";
 import type { TimerRecord, ProbeResult } from "../src/host-probe/probe.ts";
 import type { LivenessEntry, OutputEntry } from "../src/schemas/liveness.ts";
