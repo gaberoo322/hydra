@@ -84,6 +84,21 @@ export function yesterdayDateString(now: Date = new Date()): string {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * The UTC date string YYYY-MM-DD `daysAgo` whole days before `now`.
+ *
+ * `daysAgo=0` is `todayDateString(now)`, `daysAgo=1` is `yesterdayDateString(now)`.
+ * Used by the multi-day cost readers (`getCostPerMergedPr`, issue #2807) that
+ * fold the per-UTC-day token buckets over a trailing N-day window. A negative
+ * or non-finite `daysAgo` is clamped to 0 (today) so a caller can never read a
+ * future bucket.
+ */
+export function dateStringDaysAgo(daysAgo: number, now: Date = new Date()): string {
+  const n = Number.isFinite(daysAgo) && daysAgo > 0 ? Math.floor(daysAgo) : 0;
+  const d = new Date(now.getTime() - n * 24 * 3600 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
 // ---------------------------------------------------------------------------
 // Write path
 // ---------------------------------------------------------------------------

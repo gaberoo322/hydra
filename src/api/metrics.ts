@@ -16,6 +16,8 @@ import { getWorkQueueLen } from "../redis/work-queue.ts";
 import {
   getCostByClass,
   getRollingCostByClass,
+  getCostPerMergedPr,
+  DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS,
   getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,
@@ -31,6 +33,19 @@ import { z } from "zod";
  */
 const CostQuerySchema = z.object({
   date: z.string().trim().min(1).optional(),
+});
+
+/**
+ * Query schema for `GET /metrics/cost-per-merged-pr?days=N&count=M` (issue #2807).
+ * `days` is the trailing UTC-day window the token total is summed over
+ * (defaults to the module's 30-day default); `count` is the recent-cycle window
+ * the merged-PR count is derived from. Both optional; non-strict so unknown
+ * params are ignored. `days` is coerced from the string query param and clamped
+ * to a sane 1..90 range so a hostile value can't fan out an unbounded number of
+ * per-day Redis reads.
+ */
+const CostPerMergedPrQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(90).optional(),
 });
 
 /**
@@ -239,6 +254,39 @@ export function createMetricsRouter() {
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       // Explicit date → single-day read; default → rolling trailing-24h window.
       return parsedDate ? getCostByClass(parsedDate) : getRollingCostByClass();
+    }),
+  );
+
+  // GET /metrics/cost-per-merged-pr — Derived cost-per-merged-PR ratio (issue #2807).
+  //
+  // Answers "how many subagent tokens does the system spend per merged PR?" —
+  // the cost/outcome unit-economics number the architecture review (2026-07-02
+  // Rec #5) flagged as missing. A PURE DERIVED read (design-concept 99ef93a0):
+  //   - token total: summed from the per-day surrogate buckets over a trailing
+  //     `days`-day UTC window (default 30), via the Cost module's
+  //     `getCostPerMergedPr`.
+  //   - merged-PR count: derived HERE from the existing cycle-metrics merged
+  //     feed (a cycle counts as a merged PR when its `tasksMerged > 0`, mirroring
+  //     `getAggregateStats`'s mergedRate), then injected into the Cost module.
+  // No new token-recording writer, no USD/dollar surface — the ratio is derived
+  // over totals the surrogate + cycle-metrics feed already record.
+  //
+  // Composition lives here (not in src/cost/) so the Cost module stays free of a
+  // src/metrics/ import — the single-public-Interface + no-cross-import invariant.
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/cost-per-merged-pr",
+    aggregatorRouteNoQuery("api/metrics/cost-per-merged-pr", async (req) => {
+      const days =
+        CostPerMergedPrQuerySchema.safeParse(req.query).data?.days ??
+        DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS;
+      // Merged-PR count over the recent cycle window (cycle-metrics carries a
+      // 7-day TTL, so this is a recent-window count; `count` bounds the read).
+      const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
+      const trend = await getMetricsTrend(count);
+      const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
+      return getCostPerMergedPr(mergedPrCount, days);
     }),
   );
 

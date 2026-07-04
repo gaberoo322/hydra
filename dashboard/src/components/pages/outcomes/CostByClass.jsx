@@ -43,9 +43,19 @@ function fmtTokens(n) {
 
 export function CostByClass() {
   const { data, error, loading } = useApi(`/metrics/cost-by-class`, { poll: 5 * 60_000 });
+  // Issue #2807: cost/merged-PR — the derived unit-economics ratio (tokens per
+  // merged PR) over a trailing 30-day UTC window. Read alongside cost-by-class
+  // so the operator can answer "what does a merged feature cost us?" and decide
+  // whether cascade-routing / caching pays. Best-effort: a null ratio (no merged
+  // PRs in the window) renders "—".
+  const { data: cpm } = useApi(`/metrics/cost-per-merged-pr`, { poll: 5 * 60_000 });
 
   const total = typeof data?.totalTokens === "number" ? data.totalTokens : 0;
   const byClass = data?.byClass || null;
+
+  const tokensPerMergedPr =
+    typeof cpm?.tokensPerMergedPr === "number" ? cpm.tokensPerMergedPr : null;
+  const mergedPrCount = typeof cpm?.mergedPrCount === "number" ? cpm.mergedPrCount : 0;
 
   return (
     <Section
@@ -100,6 +110,21 @@ export function CostByClass() {
           </div>
         </div>
       )}
+
+      {/* Cost per merged PR — derived unit-economics ratio (issue #2807). */}
+      <div className="mt-4 flex items-center justify-between gap-3 bg-zinc-900/40 rounded-md border border-zinc-700 px-3 py-2">
+        <div className="flex flex-col min-w-0">
+          <span className="text-sm text-zinc-100">Cost / merged PR</span>
+          <span className="text-[10px] text-zinc-500 truncate">
+            {cpm?.window || "trailing 30d (UTC)"} · {mergedPrCount} merged
+          </span>
+        </div>
+        <div className="text-right shrink-0">
+          <span className="text-sm font-mono text-sky-300">
+            {tokensPerMergedPr === null ? "—" : `${fmtTokens(tokensPerMergedPr)} tok`}
+          </span>
+        </div>
+      </div>
     </Section>
   );
 }
