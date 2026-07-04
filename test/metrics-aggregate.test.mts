@@ -27,7 +27,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { computeRollingMergeRateFromTrend } from "../src/metrics/aggregate.ts";
+import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../src/metrics/aggregate.ts";
 
 describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
   test("empty trend returns null (no data, not 0%)", () => {
@@ -86,5 +86,63 @@ describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
   test("all-merged trend returns 100", () => {
     const trend = [{ tasksMerged: 1 }, { tasksMerged: 4 }, { tasksMerged: 2 }];
     assert.strictEqual(computeRollingMergeRateFromTrend(trend), 100);
+  });
+});
+
+describe("computeEmptyRateFromTrend (issue #2818)", () => {
+  // An "empty" cycle = tasksAttempted>0 AND all three outcome counters 0 (the
+  // read-side mirror of the write-path `unaccounted` bucket, #1919).
+  const empty = { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 0 };
+  const merged = { tasksAttempted: 1, tasksMerged: 1, tasksFailed: 0, tasksAbandoned: 0 };
+  const failed = { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 1, tasksAbandoned: 0 };
+  const abandoned = { tasksAttempted: 1, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 1 };
+
+  test("empty trend returns null (no data, not 0%)", () => {
+    assert.strictEqual(computeEmptyRateFromTrend([]), null);
+  });
+
+  test("no empty cycles returns 0", () => {
+    assert.strictEqual(computeEmptyRateFromTrend([merged, failed, abandoned]), 0);
+  });
+
+  test("all-empty trend returns 100", () => {
+    assert.strictEqual(computeEmptyRateFromTrend([empty, empty, empty]), 100);
+  });
+
+  test("single empty cycle returns 100", () => {
+    assert.strictEqual(computeEmptyRateFromTrend([empty]), 100);
+  });
+
+  test("mixed trend rounds (empty/total)*100", () => {
+    // 1 empty of 3 → 33
+    assert.strictEqual(computeEmptyRateFromTrend([empty, merged, failed]), 33);
+    // 2 empty of 3 → 67
+    assert.strictEqual(computeEmptyRateFromTrend([empty, empty, merged]), 67);
+    // 1 empty of 2 → 50
+    assert.strictEqual(computeEmptyRateFromTrend([empty, merged]), 50);
+  });
+
+  test("a merged cycle is NOT empty even with tasksAttempted>0", () => {
+    assert.strictEqual(computeEmptyRateFromTrend([merged]), 0);
+  });
+
+  test("a failed cycle is NOT empty", () => {
+    assert.strictEqual(computeEmptyRateFromTrend([failed]), 0);
+  });
+
+  test("an abandoned cycle is NOT empty", () => {
+    assert.strictEqual(computeEmptyRateFromTrend([abandoned]), 0);
+  });
+
+  test("tasksAttempted==0 is NOT empty (no work attempted, not an empty outcome)", () => {
+    const noAttempt = { tasksAttempted: 0, tasksMerged: 0, tasksFailed: 0, tasksAbandoned: 0 };
+    assert.strictEqual(computeEmptyRateFromTrend([noAttempt]), 0);
+  });
+
+  test("null-safe: missing counter fields default to 0 (an empty cycle)", () => {
+    // Only tasksAttempted present, all outcome fields absent → treated as 0 → empty.
+    assert.strictEqual(computeEmptyRateFromTrend([{ tasksAttempted: 1 }]), 100);
+    // Entirely absent tasksAttempted → not empty (0 attempted).
+    assert.strictEqual(computeEmptyRateFromTrend([{}]), 0);
   });
 });

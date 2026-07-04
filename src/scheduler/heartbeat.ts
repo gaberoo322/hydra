@@ -58,7 +58,7 @@
  */
 
 import { getMetricsTrend } from "../metrics/trend.ts";
-import { computeRollingMergeRateFromTrend } from "../metrics/aggregate.ts";
+import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../metrics/aggregate.ts";
 import {
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
@@ -163,6 +163,14 @@ const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 // 14 hours) and trip stall-style alerts long after the underlying bug is fixed.
 const ROLLING_MERGE_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_MERGE_RATE_WINDOW) || 50;
 
+// Rolling empty-cycle-rate window (issue #2818): the operator-visible fraction
+// of recent cycles that attempted work but produced no terminal outcome (an
+// "empty" a.k.a. "unaccounted" cycle, #1919). Same rolling-window discipline as
+// the merge rate above — lifetime cyclesUnaccounted is skewed by the historical
+// 7772-cycle backlog, so a live signal needs a bounded window. Defaults to the
+// same window size as the merge rate unless overridden.
+const ROLLING_EMPTY_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_EMPTY_RATE_WINDOW) || ROLLING_MERGE_RATE_WINDOW;
+
 // Issue #381 (codex cut-over PR-1) introduced HYDRA_CODEX_CYCLE_ENABLED as a
 // kill-switch that prevented the scheduler from invoking the in-process
 // control loop. Issue #383 (PR-3) deleted the control loop entirely — the
@@ -204,6 +212,37 @@ async function defaultComputeRollingMergeRate(window: number = ROLLING_MERGE_RAT
   } catch (err: any) {
     console.error(`[Heartbeat] Rolling merge-rate computation failed: ${err?.message || err}`);
     return { mergeRate: null, cyclesInWindow: 0 };
+  }
+}
+
+/**
+ * Compute the rolling EMPTY-cycle rate from cycle-metrics history (issue #2818).
+ *
+ * An "empty cycle" is one that attempted work but produced no terminal outcome
+ * (the read-side mirror of the write-path `unaccounted` bucket, #1919). Counts a
+ * cycle as empty via the exact predicate in `computeEmptyRateFromTrend`.
+ *
+ * Returns null when there's no recent history yet (caller treats as "no data"
+ * rather than 0%, so a fresh start is never misreported) — mirrors the
+ * merge-rate reader's null-on-empty discipline (#232).
+ *
+ * Pure-ish: only side effect is a Redis read via getMetricsTrend. Free function
+ * (not a controller method) so it can be injected as the default
+ * `computeRollingEmptyRate` dep — tests swap in a deterministic stub.
+ */
+async function defaultComputeRollingEmptyRate(window: number = ROLLING_EMPTY_RATE_WINDOW): Promise<{ emptyRate: number | null; cyclesInWindow: number }> {
+  try {
+    const trend = await getMetricsTrend(window);
+    if (!Array.isArray(trend) || trend.length === 0) {
+      return { emptyRate: null, cyclesInWindow: 0 };
+    }
+    return {
+      emptyRate: computeEmptyRateFromTrend(trend),
+      cyclesInWindow: trend.length,
+    };
+  } catch (err: any) {
+    console.error(`[Heartbeat] Rolling empty-rate computation failed: ${err?.message || err}`);
+    return { emptyRate: null, cyclesInWindow: 0 };
   }
 }
 
@@ -297,6 +336,12 @@ export interface HeartbeatControllerDeps {
    * inject a deterministic stub so getStatus never touches Redis.
    */
   computeRollingMergeRate?: (window?: number) => Promise<{ mergeRate: number | null; cyclesInWindow: number }>;
+  /**
+   * Rolling-empty-rate reader (issue #2818). Defaults to the real
+   * `defaultComputeRollingEmptyRate` (a Redis read via getMetricsTrend). Tests
+   * inject a deterministic stub so getStatus never touches Redis.
+   */
+  computeRollingEmptyRate?: (window?: number) => Promise<{ emptyRate: number | null; cyclesInWindow: number }>;
 
   // --- Redis state-rehydration readers (loadSchedulerState) ---
   getSchedulerStateRaw?: () => Promise<string | null>;
@@ -330,6 +375,7 @@ export class HeartbeatController {
 
   private readonly now: () => Date;
   private readonly computeRollingMergeRate: (window?: number) => Promise<{ mergeRate: number | null; cyclesInWindow: number }>;
+  private readonly computeRollingEmptyRate: (window?: number) => Promise<{ emptyRate: number | null; cyclesInWindow: number }>;
   private readonly getSchedulerStateRaw: () => Promise<string | null>;
   private readonly getSchedulerCyclesRun: () => Promise<number>;
   private readonly getSchedulerCyclesMerged: () => Promise<number>;
@@ -346,6 +392,7 @@ export class HeartbeatController {
   constructor(deps: HeartbeatControllerDeps = {}) {
     this.now = deps.now ?? (() => new Date());
     this.computeRollingMergeRate = deps.computeRollingMergeRate ?? defaultComputeRollingMergeRate;
+    this.computeRollingEmptyRate = deps.computeRollingEmptyRate ?? defaultComputeRollingEmptyRate;
     this.getSchedulerStateRaw = deps.getSchedulerStateRaw ?? getSchedulerStateRaw;
     this.getSchedulerCyclesRun = deps.getSchedulerCyclesRun ?? getSchedulerCyclesRun;
     this.getSchedulerCyclesMerged = deps.getSchedulerCyclesMerged ?? getSchedulerCyclesMerged;
@@ -636,6 +683,11 @@ export class HeartbeatController {
     // `mergeRateLifetime` for audit but is heavily skewed by historical
     // regressions and should not drive alerts or dashboards.
     const rolling = await this.computeRollingMergeRate();
+    // Issue #2818: report a rolling-window empty-cycle rate alongside the merge
+    // rate so the empty-cycle rate is a permanent, self-monitoring signal (the
+    // read-side mirror of the write-path `unaccounted` bucket, #1919) instead of
+    // a one-off audit. Same rolling-window discipline as the merge rate above.
+    const emptyRolling = await this.computeRollingEmptyRate();
     const lifetimeMergeRate = state.cyclesRun > 0
       ? Math.round((state.cyclesMerged / state.cyclesRun) * 100)
       : 0;
@@ -697,6 +749,14 @@ export class HeartbeatController {
       mergeRate,
       mergeRateWindow: ROLLING_MERGE_RATE_WINDOW,
       mergeRateCyclesInWindow: rolling.cyclesInWindow,
+      // Issue #2818: rolling N-cycle empty-cycle rate — the fraction of recent
+      // cycles that attempted work but bucketed to neither merged nor failed nor
+      // abandoned (the read-side mirror of the #1919 `unaccounted` bucket).
+      // `null` when no rolling history is available yet (distinct from 0%).
+      // Rolling-window, never lifetime, for the same #232 skew reason as mergeRate.
+      emptyRate: emptyRolling.emptyRate,
+      emptyRateWindow: ROLLING_EMPTY_RATE_WINDOW,
+      emptyRateCyclesInWindow: emptyRolling.cyclesInWindow,
       // Lifetime counter ratio — kept for audit / debugging only. Do not use
       // for alerts, stall detection, or operator dashboards (see issue #232).
       mergeRateLifetime: lifetimeMergeRate,
