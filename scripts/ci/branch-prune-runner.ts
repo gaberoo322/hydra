@@ -77,6 +77,11 @@ import {
   DEFAULT_WORKTREE_MIN_AGE_SECONDS,
   type WorktreeRow,
 } from "./branch-prune.ts";
+// The runner is `npx tsx`-invoked (see scripts/branch-prune.sh), not
+// rootDir-constrained the way `src/` is — so it imports the ONE canonical
+// liveness predicate directly from src (consolidated in issue #2816),
+// retiring the private copy that formerly diverged on non-finite pids.
+import { isLivePid } from "../../src/worktree-orphan.ts";
 
 interface RunnerInput {
   branchesRaw?: string;
@@ -156,16 +161,6 @@ const minAgeSeconds =
   typeof input.minAgeSeconds === "number" && input.minAgeSeconds >= 0
     ? input.minAgeSeconds
     : DEFAULT_WORKTREE_MIN_AGE_SECONDS;
-
-function isLivePid(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: any) {
-    // EPERM means the process exists but we can't signal it — treat as live.
-    return err && err.code === "EPERM";
-  }
-}
 
 const buckets = classifyBatch(branches, {
   currentBranch,
