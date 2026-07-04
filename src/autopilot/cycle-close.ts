@@ -186,6 +186,37 @@ function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
 }
 
 /**
+ * Recognise a non-empty-but-MALFORMED anchorType — a string that is technically
+ * present yet carries no real classification and must NOT be trusted verbatim
+ * (issue #2806). Two garbage forms surfaced in the 50-cycle telemetry sample:
+ *
+ *   - `"--status"` (and any `-`/`--`-prefixed token): a caller-side positional
+ *     bug at a `dispatch.sh cycle-record` call site shifted a CLI flag into the
+ *     anchor-type slot. A flag is never a valid anchorType.
+ *   - `"unmapped:<skill>"` / bare `"unmapped"`: the SELF-DESCRIBING sentinel
+ *     dispatch.sh emits when a skill has no first-class `anchor_type` mapping
+ *     (its `*)` fallback). It is intentionally traceable, but it is a
+ *     data-quality *gap marker*, not a real anchor lane — letting it through
+ *     verbatim pollutes the anchorType distribution with per-skill garbage
+ *     buckets (e.g. `unmapped:completed`, itself a symptom of a positional
+ *     shift that put the *status* into the skill slot).
+ *
+ * Treating these as "no explicit value" lets {@link classifyAnchorType} fall
+ * through to cycleId-slot inference and, failing that, the honest
+ * `unclassified` sentinel — collapsing malformed rows into the single visible
+ * data-quality bucket instead of a long tail of untrusted strings. Genuine
+ * anchor types (`work-queue`, `qa-review`, `grill`, `research`, `backlog`, …)
+ * are unaffected.
+ */
+function isMalformedAnchorType(trimmed: string): boolean {
+  // Flag-shaped: a leading `-` can only be a leaked CLI token.
+  if (trimmed.startsWith("-")) return true;
+  // dispatch.sh's unmapped-skill sentinel (`unmapped` or `unmapped:<skill>`).
+  if (trimmed === "unmapped" || trimmed.startsWith("unmapped:")) return true;
+  return false;
+}
+
+/**
  * Classify a cycle-record body's anchorType EXPLICITLY (issue #2689). Returns
  * the trimmed body value when the caller supplied a non-empty one; otherwise
  * tries to infer from the cycleId's slot suffix (issue #2762 — covers cycles
@@ -205,7 +236,11 @@ function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
 export function classifyAnchorType(cycleId: string, raw: unknown): string {
   if (typeof raw === "string") {
     const trimmed = raw.trim();
-    if (trimmed.length > 0) return trimmed;
+    // Issue #2806: a non-empty but MALFORMED value (a leaked `--flag`, or
+    // dispatch.sh's `unmapped:<skill>` gap-marker sentinel) is NOT a real
+    // anchorType — fall through to cycleId-slot inference / the `unclassified`
+    // sentinel rather than persisting garbage into the metrics distribution.
+    if (trimmed.length > 0 && !isMalformedAnchorType(trimmed)) return trimmed;
   }
   // Issue #2762: holdback-merge-watch.ts calls recordCycle({cycleId, prNumber,
   // filesChanged}) with no anchorType. Its cycleId is the autopilot's synthesised
