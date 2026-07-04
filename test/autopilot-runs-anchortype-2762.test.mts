@@ -306,3 +306,120 @@ describe("recordCycle — worktreeBranch cycleId anchorType inference (#2762)", 
     assert.equal(warnings.length, 1, "still warns for unknown slot");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression tests for #2806 — reject MALFORMED anchorType values.
+//
+// The 50-cycle telemetry sample carried non-empty-but-garbage anchorTypes:
+// `"--status"` (a CLI flag shifted into the anchor slot by a positional bug at
+// a dispatch.sh call site) and `"unmapped:completed"` (dispatch.sh's
+// unmapped-skill sentinel, itself a symptom of the *status* landing in the
+// skill slot). classifyAnchorType now treats these as "no explicit value" and
+// falls through to cycleId-slot inference / the `unclassified` sentinel, so the
+// malformed tail collapses into the single honest data-quality bucket instead
+// of polluting the anchorType distribution.
+// ---------------------------------------------------------------------------
+
+describe("recordCycle — malformed anchorType rejection (#2806)", () => {
+  test("rejects a leaked `--status` flag and records unclassified", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    const warnings: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      await recordCycle(
+        {
+          // Bare UUID cycleId (no slot suffix) so inference can't rescue it —
+          // the malformed anchorType must fall through to the sentinel.
+          cycleId: "11111111-2222-3333-4444-555555555555",
+          status: "completed",
+          anchorType: "--status",
+        } as any,
+        deps,
+      );
+    } finally {
+      console.warn = orig;
+    }
+    assert.equal(
+      store.metrics.get("11111111-2222-3333-4444-555555555555")!.anchorType,
+      UNCLASSIFIED_ANCHOR_TYPE,
+    );
+    assert.equal(warnings.length, 1, "warns for the rejected malformed value");
+  });
+
+  test("rejects the `unmapped:<skill>` sentinel and records unclassified", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle(
+      {
+        cycleId: "22222222-3333-4444-5555-666666666666",
+        status: "completed",
+        anchorType: "unmapped:completed",
+      } as any,
+      deps,
+    );
+    assert.equal(
+      store.metrics.get("22222222-3333-4444-5555-666666666666")!.anchorType,
+      UNCLASSIFIED_ANCHOR_TYPE,
+    );
+  });
+
+  test("rejects the bare `unmapped` sentinel and records unclassified", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle(
+      {
+        cycleId: "33333333-4444-5555-6666-777777777777",
+        status: "completed",
+        anchorType: "unmapped",
+      } as any,
+      deps,
+    );
+    assert.equal(
+      store.metrics.get("33333333-4444-5555-6666-777777777777")!.anchorType,
+      UNCLASSIFIED_ANCHOR_TYPE,
+    );
+  });
+
+  test("a malformed anchorType still resolves via cycleId-slot inference when possible", async () => {
+    // A malformed explicit value must not block the cycleId-slot inference that
+    // would otherwise recover a real anchorType — the flag is discarded, then
+    // the `dev_orch` slot suffix decodes to `work-queue`.
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle(
+      {
+        cycleId: "worktree-agent-568fde2a-t9-dev_orch",
+        status: "completed",
+        anchorType: "--status",
+      } as any,
+      deps,
+    );
+    assert.equal(
+      store.metrics.get("worktree-agent-568fde2a-t9-dev_orch")!.anchorType,
+      "work-queue",
+    );
+  });
+
+  test("does NOT reject a legitimate anchorType that merely contains a colon", async () => {
+    // Only the `unmapped:` prefix (and leading `-`) are malformed; a real
+    // anchor lane with a colon namespace must pass through unchanged.
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle(
+      {
+        cycleId: "44444444-5555-6666-7777-888888888888",
+        status: "completed",
+        anchorType: "backlog:reframe",
+      } as any,
+      deps,
+    );
+    assert.equal(
+      store.metrics.get("44444444-5555-6666-7777-888888888888")!.anchorType,
+      "backlog:reframe",
+    );
+  });
+});
