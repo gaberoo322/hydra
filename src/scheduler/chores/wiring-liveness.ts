@@ -45,7 +45,6 @@ import {
 import {
   evaluateOutputs,
   productionOutputReader,
-  type OutputVerdict,
   type OutputSourceReader,
 } from "./wiring-liveness-output.ts";
 import {
