@@ -29,6 +29,14 @@ import Redis from "ioredis";
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
+// The pure classification policy (PATTERN_CATEGORY_MAP, the cooldown
+// constants, classifyAlert, categoriesForPattern, isCooledDownHours,
+// stripPatternPrefix) was extracted into the zero-IO leaf
+// `../src/scout/alert-classifier.ts` (issue #2785) — import the pure symbols
+// from there directly. The Redis-cursor coordinator (planAlertDispatches,
+// advanceAlertCursor, getAlertCursor) stays in alert-listener.ts. The pure
+// symbols are also still re-exported by alert-listener.ts for back-compat;
+// their dedicated unit coverage now lives in test/scout-alert-classifier.test.mts.
 const {
   PATTERN_CATEGORY_MAP,
   ALERT_PER_PATTERN_COOLDOWN_HOURS,
@@ -37,6 +45,9 @@ const {
   categoriesForPattern,
   isCooledDownHours,
   classifyAlert,
+} = await import("../src/scout/alert-classifier.ts");
+
+const {
   planAlertDispatches,
   advanceAlertCursor,
   getAlertCursor,
