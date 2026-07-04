@@ -1,6 +1,6 @@
 ---
 name: Algorithmic Betting Platform
-updated: 2026-06-10
+updated: 2026-07-03
 status: active
 owner: strategist
 tags: [hydra, hydra/direction]
@@ -10,11 +10,12 @@ tags: [hydra, hydra/direction]
 
 ## Current Phase
 
-The project is at the **real-money transition threshold**. The full pipeline — ingestion, cross-venue arbitrage scanning, dual-leg execution, reconciliation, P&L attribution — is built and verified through paper and demo runs (M1–M8 complete; see `roadmap.md`). The focus now:
+The project is executing **M13 — Forecast-Directional Execution**. Cross-venue arbitrage was retired as a strategy (ADR-0002, 2026-06-22); the full execution, risk, recovery, and settlement layer is retained as a **single-leg directional execution** surface that expresses forecast edge. The focus now:
 
-- Complete pre-live readiness wiring (M9: capital velocity, settlement verification, GTD maker order lifecycle, daily P&L accounting)
-- First real-money dual-leg runs at minimum stake under the Graduated Capital doctrine (`vision.md`)
-- Exploit the World Cup 2026 window (group stage opened June 12) with verified pairs and catalyst instrumentation
+- Accumulate Brier-scored paper-trade evidence on WC 2026 and sports fixtures via the calibrated forecast pipeline
+- Close the nomination timing gap so the directional nomination runner surfaces candidates consistently (freshness-window / timer alignment)
+- Deploy the pregame scanner to generate `forecast_outcomes` rows with `source: "scanner"` and close the calibration feedback loop
+- Complete the ADR-0002 step-3 tail (relocate remaining `lib/arbitrage/` imports in `lib/execution/` and `app/api/`) ahead of the step-4 deletion
 
 **For current execution state, `priorities.md` and `roadmap.md` are authoritative** — this file carries the durable goals, constraints, and infrastructure facts that change rarely.
 
