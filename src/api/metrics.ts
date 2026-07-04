@@ -48,21 +48,6 @@ const CostPerMergedPrQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(90).optional(),
 });
 
-/**
- * Abandonment-reason categorization + rollup (issue #195).
- *
- * Issue #2589: the pure domain logic (`categorizeAbandonReason` +
- * `getAbandonmentBreakdown`) relocated to `src/metrics/abandonment.ts` — its
- * domain home, alongside its `getMetricsTrend` data source in `trend.ts`
- * (mirrors the #2497 learning-composition extraction, reversing the #2382
- * collapse INTO this route file). The route imports `getAbandonmentBreakdown`
- * directly above; the re-exports below keep back-compat for import sites
- * (e.g. `test/abandonment-metrics.test.mts`) that historically imported these
- * symbols from `src/api/metrics.ts`. The domain module has ZERO imports from
- * `src/api/`.
- */
-export { categorizeAbandonReason, getAbandonmentBreakdown } from "../metrics/abandonment.ts";
-
 export function createMetricsRouter() {
   const router = Router();
 
