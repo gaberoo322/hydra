@@ -30,13 +30,16 @@ const noopBus: any = {};
 
 /**
  * Build a controller whose Redis-touching deps are all inert stubs. Callers
- * override individual deps per case. computeRollingMergeRate defaults to a
- * "no data yet" stub so getStatus never reaches real Redis.
+ * override individual deps per case. computeRollingMergeRate and
+ * computeRollingEmptyRate default to "no data yet" stubs so getStatus never
+ * reaches real Redis (both readers hit getMetricsTrend -> live Redis by
+ * default, so both must be stubbed to keep this a deterministic unit test).
  */
 function makeController(overrides: HeartbeatControllerDeps = {}): HeartbeatController {
   const inertDeps: HeartbeatControllerDeps = {
     now: fixedNow,
     computeRollingMergeRate: async () => ({ mergeRate: null, cyclesInWindow: 0 }),
+    computeRollingEmptyRate: async () => ({ emptyRate: null, cyclesInWindow: 0 }),
     getSchedulerStateRaw: async () => null,
     getSchedulerCyclesRun: async () => 0,
     getSchedulerCyclesMerged: async () => 0,
@@ -234,6 +237,38 @@ describe("HeartbeatController — getStatus composition (issues #232 / #208)", (
     assert.equal(status.mergeRate, 88); // rolling wins
     assert.equal(status.mergeRateCyclesInWindow, 25);
     assert.equal(status.mergeRateLifetime, 40); // lifetime preserved for audit
+
+    await controller.stop({ reason: "shutdown" });
+  });
+
+  it("surfaces the injected rolling empty-cycle rate on getStatus (issue #2818)", async () => {
+    // Proves the computeRollingEmptyRate seam is injected/exercised — with the
+    // stub in place getStatus reads it instead of falling through to live Redis
+    // via defaultComputeRollingEmptyRate -> getMetricsTrend.
+    const controller = makeController({
+      computeRollingEmptyRate: async () => ({ emptyRate: 28, cyclesInWindow: 50 }),
+    });
+
+    await controller.start(noopBus, { intervalMs: 60_000 });
+    const status = await controller.getStatus();
+
+    assert.equal(status.emptyRate, 28);
+    assert.equal(status.emptyRateCyclesInWindow, 50);
+    assert.equal(typeof status.emptyRateWindow, "number");
+
+    await controller.stop({ reason: "shutdown" });
+  });
+
+  it("reports emptyRate=null when no rolling empty-cycle history exists yet (issue #2818)", async () => {
+    // The inertDeps default stub returns null cyclesInWindow=0 — a fresh start
+    // reports "no data" (distinct from 0%) and still never touches Redis.
+    const controller = makeController();
+
+    await controller.start(noopBus, { intervalMs: 60_000 });
+    const status = await controller.getStatus();
+
+    assert.equal(status.emptyRate, null);
+    assert.equal(status.emptyRateCyclesInWindow, 0);
 
     await controller.stop({ reason: "shutdown" });
   });
