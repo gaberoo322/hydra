@@ -95,6 +95,20 @@ export const DEFAULT_CACHE_READ_WEIGHT = 1.0;
 export const DEFAULT_DRIFT_FACTOR = 2;
 
 /**
+ * Default factor by which the LIVE transcript estimate may diverge from the
+ * LAST-KNOWN OAuth utilization before the once-per-scan divergence warning fires
+ * (issue #2832 AC3). DISTINCT from {@link DEFAULT_DRIFT_FACTOR}: that compares the
+ * since-reset metric against an operator-SEEDED env reference (a calibration-rot
+ * signal); THIS compares the estimate the headline is CURRENTLY falling back to
+ * against the real meter's last-known value during an OAuth outage — a "your
+ * fail-open estimate has drifted far from the last real number, so the un-gated
+ * dispatch risk is real" signal. 1.5x in either direction, per the issue's
+ * ">1.5x" acceptance criterion — tighter than the 2x calibration-rot band because
+ * this fires only during an active outage where the gating stakes are higher.
+ */
+export const DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = 1.5;
+
+/**
  * Default **Pacing Ceiling** (issue #857, ADR-0021): the sub-100% fraction of
  * the weekly quota the **Pacing Curve** climbs to by the next **Weekly Reset
  * Anchor**. The ~8% gap below 1.0 is the **Operator Reserve** (CONTEXT.md).
@@ -307,6 +321,29 @@ export function getDriftFactor(): number {
         `> 1 (${JSON.stringify(raw)}); falling back to default ${DEFAULT_DRIFT_FACTOR}`,
     );
     return DEFAULT_DRIFT_FACTOR;
+  }
+  return parsed;
+}
+
+/**
+ * The estimate-vs-OAuth divergence factor from
+ * `HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR`, falling back to
+ * {@link DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR} (1.5, issue #2832). Must be
+ * > 1 to be meaningful; a value <= 1 (or non-finite) is logged (fail-loud) and
+ * falls back to the default, mirroring {@link getDriftFactor}'s discipline.
+ * Pure + env-only so the divergence math stays unit-testable.
+ */
+export function getOAuthEstimateDivergenceFactor(): number {
+  const raw = process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
+  if (raw === undefined || raw === "") return DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 1) {
+    console.error(
+      `[usage-tracker] HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR is set but not a ` +
+        `finite number > 1 (${JSON.stringify(raw)}); falling back to default ` +
+        `${DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR}`,
+    );
+    return DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
   }
   return parsed;
 }

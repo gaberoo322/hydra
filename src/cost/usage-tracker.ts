@@ -143,6 +143,7 @@ import {
   rebaseOnOAuth,
   deriveSinceReset,
   detectCalibrationDrift,
+  detectEstimateOAuthDivergence,
   deriveBySkillWoW,
   deriveAttributedPercent,
 } from "./snapshot-assembly.ts";
@@ -166,6 +167,7 @@ import {
   getCacheReadWeight,
   getDriftReferencePercent,
   getDriftFactor,
+  getOAuthEstimateDivergenceFactor,
   getQuotaWeightOpus,
   getQuotaWeightSonnet,
   getQuotaWeightHaiku,
@@ -810,6 +812,24 @@ function assembleSnapshot(
     anchorEnvMs,
     cacheReadWeight,
     weeklyQuota,
+  });
+
+  // Estimate-vs-OAuth divergence detector (issue #2832 AC3; pure side-effecting
+  // detector in {@link detectEstimateOAuthDivergence}). Fail-loud, ONCE per scan:
+  // when the headline has fallen back to the transcript estimate during an OAuth
+  // outage AND that estimate diverges from the LAST-KNOWN real OAuth utilization
+  // by more than the configured factor (default 1.5x), warn so the operator knows
+  // the number gating dispatch is a guess far from the last real reading. The
+  // baseline rides in on `scan.oauth.lastKnownOAuth` (surfaced by the #1090 cache
+  // layer even on the estimate-fallback path) so this stays a pure argument-fed
+  // detector — NO new read, no mutation of any gating scalar (invariant 1). Inert
+  // whenever the headline is on OAuth (fresh or served-stale) or no real meter
+  // value has ever been seen (null baseline — the #1083 silent-0 trap).
+  detectEstimateOAuthDivergence({
+    usageSource,
+    estimatePercentLast7d,
+    lastKnownOAuthPercent: scan.oauth.lastKnownOAuth?.sevenDay.utilization ?? null,
+    divergenceFactor: getOAuthEstimateDivergenceFactor(),
   });
 
   // (weeklyEmergencyStop was computed alongside emergencyStop above via the

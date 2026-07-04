@@ -367,6 +367,21 @@ export interface CachedOAuthRead {
   stale: boolean;
   /** Age in ms of the served OAuth value, or `null` when none was served (failure). */
   ageMs: number | null;
+  /**
+   * The LAST-KNOWN successful OAuth meter value at the time of this read (issue
+   * #2832 AC3), or `null` when the module has never seen a successful read (cold
+   * cache) OR the injected bypass path is in use. Populated on EVERY cached-path
+   * branch — fresh, served-stale, backoff-suppressed, and estimate-fallback —
+   * INCLUDING the too-stale case where the cache is about to be evicted from the
+   * HEADLINE (the value is captured BEFORE eviction). Distinct from what backs
+   * the headline: on the estimate-fallback path `result.ok === false` (the
+   * headline is the estimate) yet `lastKnownOAuth` can still carry the last real
+   * meter reading, which is exactly the baseline the AC3 divergence detector
+   * compares the fail-open estimate against. Carries the whole
+   * {@link OAuthUsageData} (both windows) so the detector can compare against the
+   * 7d utilization. A pure observability channel — nothing gates on it.
+   */
+  lastKnownOAuth: OAuthUsageData | null;
 }
 
 /**
@@ -414,6 +429,7 @@ async function readOAuthCached(
       result: { ok: true, data: oauthCache.data },
       stale: false,
       ageMs: nowMs - oauthCache.storedAt,
+      lastKnownOAuth: oauthCache.data,
     };
   }
 
@@ -424,19 +440,27 @@ async function readOAuthCached(
   // caller through to the estimate. This is the fix for the ~90–100 failed
   // reads/hour steady state: no GET is spent while backing off.
   if (oauthBackoff !== null && nowMs < oauthBackoff.nextAttemptMs) {
+    // Capture the last-known real meter value for the AC3 divergence detector
+    // (issue #2832) BEFORE any headline decision — it is the baseline the
+    // fail-open estimate is compared against, independent of whether it is
+    // fresh-enough to still back the headline.
+    const lastKnownOAuth = oauthCache !== null ? oauthCache.data : null;
     if (oauthCache !== null) {
       const ageMs = nowMs - oauthCache.storedAt;
       if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
-        return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs };
+        return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs, lastKnownOAuth };
       }
     }
-    // No trustworthy last-good to serve: report the backoff-suppressed state as
-    // a failure so the caller falls to the estimate (never a silent 0). No GET
-    // was made — the whole point of the gate.
+    // No trustworthy last-good to serve as the HEADLINE: report the
+    // backoff-suppressed state as a failure so the caller falls to the estimate
+    // (never a silent 0). No GET was made — the whole point of the gate. The
+    // last-known value (if any) still rides out on `lastKnownOAuth` for the
+    // divergence detector even though it no longer backs the headline.
     return {
       result: { ok: false, code: "oauth-usage-non-2xx" },
       stale: false,
       ageMs: null,
+      lastKnownOAuth,
     };
   }
 
@@ -481,7 +505,8 @@ async function attemptOAuthRead(
       );
       oauthBackoff = null;
     }
-    return { result, stale: false, ageMs: 0 };
+    // A fresh success IS the last-known value.
+    return { result, stale: false, ageMs: 0, lastKnownOAuth: result.data };
   }
 
   // Read failed. Arm/advance the exponential-backoff gate so subsequent scans
@@ -508,13 +533,19 @@ async function attemptOAuthRead(
         : ""),
   );
 
+  // Capture the last-known real meter value for the AC3 divergence detector
+  // (issue #2832) BEFORE any eviction below — it is the baseline the fail-open
+  // estimate is compared against, so it must survive even the too-stale eviction
+  // that drops the value from the HEADLINE.
+  const lastKnownOAuth = oauthCache !== null ? oauthCache.data : null;
+
   // Serve the last-good value (now stale) instead of flipping to the estimate —
   // UNLESS it is older than TTL + maxStale, in which case it is too stale to
   // trust and we let the failure fall through to the estimate.
   if (oauthCache !== null) {
     const ageMs = nowMs - oauthCache.storedAt;
     if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
-      return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs };
+      return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs, lastKnownOAuth };
     }
     // Too stale: evict so a future success starts a clean age clock, and fall
     // through to the failure (estimate). Logged so a sustained outage is visible.
@@ -524,7 +555,7 @@ async function attemptOAuthRead(
     );
     oauthCache = null;
   }
-  return { result, stale: false, ageMs: null };
+  return { result, stale: false, ageMs: null, lastKnownOAuth };
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +856,17 @@ export function makeReadOAuth(opts: {
   return opts.bypassOAuthCache
     ? async () => {
         const result = await opts.readUsage();
-        return { result, stale: false, ageMs: isOAuthUsageOk(result) ? 0 : null };
+        // The bypass path has NO module cache, so a fresh success is the only
+        // "last-known" value and a failure carries none (issue #2832). This keeps
+        // the #1083 deterministic fresh-each-call contract: the divergence
+        // detector sees a baseline only on a successful bypass read, never a
+        // phantom cached one.
+        return {
+          result,
+          stale: false,
+          ageMs: isOAuthUsageOk(result) ? 0 : null,
+          lastKnownOAuth: isOAuthUsageOk(result) ? result.data : null,
+        };
       }
     : () => readOAuthCached(opts.readUsage, opts.nowMs);
 }

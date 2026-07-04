@@ -66,6 +66,8 @@ export {
   getDriftReferencePercent,
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
+  getOAuthEstimateDivergenceFactor,
+  DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
 } from "./config.ts";

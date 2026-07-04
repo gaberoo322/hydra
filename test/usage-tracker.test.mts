@@ -22,6 +22,8 @@ import {
   getDriftReferencePercent,
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
+  getOAuthEstimateDivergenceFactor,
+  DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
   sessionIdFromPath,
@@ -100,6 +102,7 @@ import {
   rebaseOnOAuth,
   deriveSinceReset,
   detectCalibrationDrift,
+  detectEstimateOAuthDivergence,
   deriveWeightedBurns,
   deriveEstimatePercents,
   deriveQuotaWeightTotals,
@@ -194,6 +197,7 @@ function withEnvSnapshot() {
     "HYDRA_USAGE_CACHE_READ_WEIGHT",
     "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
     "HYDRA_USAGE_DRIFT_FACTOR",
+    "HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR",
     "HYDRA_OAUTH_USAGE_TTL_MS",
     "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
     "HYDRA_USAGE_5H_THROTTLE_T1",
@@ -2298,6 +2302,238 @@ describe("usage-tracker", () => {
     });
   });
 
+  describe("estimate/OAuth divergence env parsing (issue #2832 AC3)", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+    });
+    afterEach(() => restore());
+
+    test("factor defaults to 1.5 when unset", () => {
+      delete process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
+      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
+      assert.equal(DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR, 1.5);
+    });
+
+    test("factor falls back to default on <= 1 / non-finite", () => {
+      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "1";
+      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
+      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "0.5";
+      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
+      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "nope";
+      assert.equal(getOAuthEstimateDivergenceFactor(), DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR);
+    });
+
+    test("factor is the parsed value when > 1", () => {
+      process.env.HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = "2.5";
+      assert.equal(getOAuthEstimateDivergenceFactor(), 2.5);
+    });
+  });
+
+  // AC3: the pure estimate-vs-OAuth divergence detector (issue #2832). Fires a
+  // single console.warn when the fail-open transcript estimate has drifted far
+  // from the last-known real meter value DURING an OAuth outage.
+  describe("detectEstimateOAuthDivergence — pure detector (issue #2832 AC3)", () => {
+    let warnings: string[];
+    let origWarn: typeof console.warn;
+    beforeEach(() => {
+      warnings = [];
+      origWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.join(" "));
+      };
+    });
+    afterEach(() => {
+      console.warn = origWarn;
+    });
+
+    function divergenceWarnings(): string[] {
+      return warnings.filter((w) => w.includes("estimate/OAuth divergence"));
+    }
+
+    test("inert while the headline is on OAuth (never fires with a live/stale meter)", () => {
+      detectEstimateOAuthDivergence({
+        usageSource: "oauth",
+        estimatePercentLast7d: 95,
+        lastKnownOAuthPercent: 10, // wildly divergent, but usageSource is oauth
+        divergenceFactor: 1.5,
+      });
+      assert.equal(divergenceWarnings().length, 0);
+    });
+
+    test("inert when no last-known OAuth value exists (null baseline — #1083 silent-0 trap)", () => {
+      detectEstimateOAuthDivergence({
+        usageSource: "estimate",
+        estimatePercentLast7d: 95,
+        lastKnownOAuthPercent: null,
+        divergenceFactor: 1.5,
+      });
+      assert.equal(divergenceWarnings().length, 0);
+    });
+
+    test("inert when the last-known OAuth baseline is 0 (undefined ratio)", () => {
+      detectEstimateOAuthDivergence({
+        usageSource: "estimate",
+        estimatePercentLast7d: 40,
+        lastKnownOAuthPercent: 0,
+        divergenceFactor: 1.5,
+      });
+      assert.equal(divergenceWarnings().length, 0);
+    });
+
+    test("fires ONCE when the estimate is > factor ABOVE the last-known OAuth value", () => {
+      // estimate 60% vs last-known 20% = 3x > 1.5x -> warn.
+      detectEstimateOAuthDivergence({
+        usageSource: "estimate",
+        estimatePercentLast7d: 60,
+        lastKnownOAuthPercent: 20,
+        divergenceFactor: 1.5,
+      });
+      assert.equal(divergenceWarnings().length, 1);
+    });
+
+    test("fires when the estimate is > factor BELOW the last-known OAuth value", () => {
+      // estimate 10% vs last-known 40% = 0.25x < 1/1.5 -> warn.
+      detectEstimateOAuthDivergence({
+        usageSource: "estimate",
+        estimatePercentLast7d: 10,
+        lastKnownOAuthPercent: 40,
+        divergenceFactor: 1.5,
+      });
+      assert.equal(divergenceWarnings().length, 1);
+    });
+
+    test("does NOT fire when the estimate is within the factor band of the OAuth value", () => {
+      // estimate 25% vs last-known 20% = 1.25x, inside 1.5x -> no warn.
+      detectEstimateOAuthDivergence({
+        usageSource: "estimate",
+        estimatePercentLast7d: 25,
+        lastKnownOAuthPercent: 20,
+        divergenceFactor: 1.5,
+      });
+      assert.equal(divergenceWarnings().length, 0);
+    });
+  });
+
+  // AC3 end-to-end through getUsage: the divergence detector wired into
+  // assembleSnapshot fires exactly when the headline is on the estimate AND a
+  // last-known OAuth value exists that the estimate has drifted far from.
+  describe("estimate/OAuth divergence detector wired through getUsage (issue #2832 AC3)", () => {
+    let restore: () => void;
+    let warnings: string[];
+    let origWarn: typeof console.warn;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+      clearUsageCache();
+      warnings = [];
+      origWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.join(" "));
+      };
+    });
+    afterEach(() => {
+      console.warn = origWarn;
+      restore();
+      clearUsageCache();
+    });
+
+    function divergenceWarnings(): string[] {
+      return warnings.filter((w) => w.includes("estimate/OAuth divergence"));
+    }
+
+    function countingMeter(results: Array<{ ok: boolean; five?: number; seven?: number; code?: any }>) {
+      let calls = 0;
+      const reader = async () => {
+        const r = results[Math.min(calls, results.length - 1)];
+        calls++;
+        if (r.ok) {
+          return {
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: r.five ?? 0, resetsAt: null },
+              sevenDay: { utilization: r.seven ?? 0, resetsAt: null },
+            },
+          };
+        }
+        return { ok: false as const, code: r.code ?? "oauth-usage-non-2xx" };
+      };
+      return { reader, calls: () => calls };
+    }
+
+    test("fires ONCE after the OAuth meter goes too-stale and the estimate diverges > 1.5x from last-known", async () => {
+      // 7d weekly quota 1000; transcript burns 900 -> estimate 90%. Last-known
+      // OAuth 7d = 30% seeded, then a sustained outage takes it past TTL+maxStale
+      // so the headline falls to the 90% estimate — 3x the last-known 30% -> warn.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000"; // 1 min grace
+      const root = await mkdtemp(join(tmpdir(), "usage-2832-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:30:00Z", { in: 900 }),
+        ]);
+        const m = countingMeter([
+          { ok: true, five: 5, seven: 30 }, // seed last-good: real 7d = 30%
+          { ok: false, code: "oauth-usage-non-2xx" }, // sustained outage
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        const first = await getUsage({
+          now: t0,
+          projectsRoot: root,
+          force: true,
+          useOAuthCache: true,
+          readUsage: m.reader,
+        });
+        assert.equal(first.usageSource, "oauth"); // fresh meter backs the headline
+        assert.equal(divergenceWarnings().length, 0, "no divergence while OAuth backs the headline");
+
+        // 5 min later: age (300s) >= TTL(60s)+maxStale(60s) => too stale, falls
+        // to the 90% estimate; last-known 30% rides in on lastKnownOAuth.
+        const tFar = new Date(t0.getTime() + 300_000);
+        const second = await getUsage({
+          now: tFar,
+          projectsRoot: root,
+          force: true,
+          useOAuthCache: true,
+          readUsage: m.reader,
+        });
+        assert.equal(second.usageSource, "estimate", "too-stale meter falls to the estimate");
+        assert.equal(second.percentLast7d, 90, "estimate gauge stands (never silently 0)");
+        assert.equal(divergenceWarnings().length, 1, "fires once on the estimate/last-known divergence");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("does NOT fire when the estimate stays within 1.5x of the last-known OAuth value", async () => {
+      // estimate 40% vs last-known 7d 35% = ~1.14x, inside 1.5x -> no warn.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000";
+      const root = await mkdtemp(join(tmpdir(), "usage-2832-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:30:00Z", { in: 400 }),
+        ]);
+        const m = countingMeter([
+          { ok: true, five: 5, seven: 35 },
+          { ok: false, code: "oauth-usage-non-2xx" },
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        const tFar = new Date(t0.getTime() + 300_000);
+        const snap = await getUsage({ now: tFar, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(snap.usageSource, "estimate");
+        assert.equal(snap.percentLast7d, 40);
+        assert.equal(divergenceWarnings().length, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("weighted quota-burn percentages (issue #873)", () => {
     let restore: () => void;
     beforeEach(() => {
@@ -3839,6 +4075,10 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
     },
     stale: false,
     ageMs: 0,
+    lastKnownOAuth: {
+      fiveHour: { utilization: fiveHourPct, resetsAt: "2026-06-19T12:00:00.000Z" },
+      sevenDay: { utilization: sevenDayPct, resetsAt: "2026-06-25T12:00:00.000Z" },
+    },
   });
 
   test("a FRESH OAuth read rebases the headline onto real utilization", () => {
@@ -3864,6 +4104,10 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
       },
       stale: true,
       ageMs: 123_456,
+      lastKnownOAuth: {
+        fiveHour: { utilization: 30, resetsAt: null },
+        sevenDay: { utilization: 55, resetsAt: null },
+      },
     };
     const r = rebaseOnOAuth(stale, 9, 9);
     assert.equal(r.usageSource, "oauth"); // stale-but-real still backs the headline
@@ -3879,6 +4123,7 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
       result: { ok: false, code: "oauth-usage-token-expired" },
       stale: false,
       ageMs: null,
+      lastKnownOAuth: null,
     };
     const r = rebaseOnOAuth(failed, 17, 23);
     assert.equal(r.usageSource, "estimate");
