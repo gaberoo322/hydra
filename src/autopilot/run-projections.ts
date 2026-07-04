@@ -36,6 +36,7 @@ import {
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
+import { isLivePid } from "../worktree-orphan.ts";
 
 // ---------------------------------------------------------------------------
 // Constants (read-side)
@@ -65,20 +66,19 @@ export const WEDGE_AGE_THRESHOLD_S = 600;
 /**
  * `kill -0 pid` liveness probe. Returns true iff the pid is alive AND
  * we have permission to signal it (EPERM = alive-from-our-perspective).
- * pid <= 0 is treated as alive so the sweeper doesn't promote rows
- * from older writers that never stamped a pid.
+ * An invalid pid (`!Number.isFinite || pid <= 0`) is treated as alive so the
+ * sweeper doesn't promote rows from older writers that never stamped a pid.
+ *
+ * This is now a re-export of the canonical {@link isLivePid} predicate in
+ * src/worktree-orphan.ts (consolidated in issue #2816 — the semantics were
+ * already identical here; the two former unguarded copies in src/index.ts and
+ * scripts/ci/branch-prune-runner.ts diverged only on non-finite pids). The
+ * `isPidAlive` name is kept as an alias so the ~6 downstream deps-bag
+ * references (runs.ts, sweep-reader.ts, cycle-close.ts + their tests, all keyed
+ * on the field name `isPidAlive`) do not churn; the rename is an opportunistic
+ * follow-up, out of scope here.
  */
-export function isPidAlive(pid: number): boolean {
-  if (!Number.isFinite(pid) || pid <= 0) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: any) {
-    // ESRCH = no such process; EPERM = exists but unsignalable (alive).
-    if (err && err.code === "EPERM") return true;
-    return false;
-  }
-}
+export const isPidAlive = isLivePid;
 
 /**
  * Parse a persisted `crash_detail` JSON string back into an object for the

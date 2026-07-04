@@ -15,9 +15,12 @@ import {
   parseLockPid,
   parseWorktreeList,
   classifyOrphanWorktree,
+  isLivePid,
+  pruneOrphanedTargetWorktrees,
   DEFAULT_WORKTREE_MIN_AGE_SECONDS,
   type WorktreeRow,
   type OrphanContext,
+  type PruneDeps,
 } from "../src/worktree-orphan.ts";
 
 const SHM = "/dev/shm/hydra-worktrees/";
@@ -169,5 +172,166 @@ describe("worktree-orphan: classifyOrphanWorktree decision order", () => {
     // the prune is not over-eager.
     const r = classifyOrphanWorktree(orphan({ lockedByPid: null, ageSeconds: 3.2 * 3600 }), baseCtx());
     assert.equal(r.action, "skip-too-young");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isLivePid — the consolidated host-liveness predicate (issue #2816).
+//
+// Pins the CONTRACT: false (dead → reclaimable) ONLY for a finite, positive pid
+// whose process.kill(pid,0) throws a non-EPERM error (ESRCH). EVERY other input
+// — a live pid, EPERM, OR any invalid pid (!Number.isFinite || <=0) — is TRUE
+// (conservative-live). The invalid-pid → live rail is the latent-bug fix: the
+// two former unguarded copies returned false on a non-finite pid, which the
+// worktree-destroying caller would have read as "reclaim".
+// ---------------------------------------------------------------------------
+describe("worktree-orphan: isLivePid consolidated contract", () => {
+  test("a live pid — this test process — is live", () => {
+    assert.equal(isLivePid(process.pid), true);
+  });
+
+  test("a finite, positive, dead pid classifies dead (reclaimable)", () => {
+    // 2^30 is comfortably above any real pid on this host; kill(pid,0) throws
+    // ESRCH (no such process), the ONLY path that returns false.
+    assert.equal(isLivePid(1 << 30), false);
+  });
+
+  test("a non-finite pid (NaN) is conservative-live — the #2816 latent-bug fix", () => {
+    // The former unguarded copies returned FALSE here (would reclaim); the
+    // consolidated predicate returns TRUE (never reclaim on garbage input).
+    assert.equal(isLivePid(Number.NaN), true);
+    assert.equal(isLivePid(Number("")), true); // Number('') === NaN
+    assert.equal(isLivePid(Number.POSITIVE_INFINITY), true);
+  });
+
+  test("pid 0 and pid -1 are conservative-live (invalid → live)", () => {
+    assert.equal(isLivePid(0), true);
+    assert.equal(isLivePid(-1), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pruneOrphanedTargetWorktrees — the extracted impure orchestration, exercised
+// entirely through the injected PruneDeps bag (no real git / fs / clock / pid).
+// ---------------------------------------------------------------------------
+describe("worktree-orphan: pruneOrphanedTargetWorktrees (injected deps)", () => {
+  const WORKSPACE = "/home/gabe/hydra-betting";
+  const gitOpts = { cwd: WORKSPACE, timeout: 30_000 };
+  const ORPHAN = SHM + "hydra-betting-worktree-claude-cycle-9001";
+
+  // A recording git stub: replays canned stdout per subcommand and records the
+  // arg vectors it was called with. Any subcommand not in `responses` returns
+  // an ok-empty result (so `worktree prune`/`remove` default to success).
+  function makeGit(responses: Record<string, string>) {
+    const calls: string[][] = [];
+    const gitExec: PruneDeps["gitExec"] = async (args) => {
+      calls.push(args);
+      const key = args.join(" ");
+      for (const [prefix, stdout] of Object.entries(responses)) {
+        if (key.startsWith(prefix)) return { ok: true, data: { stdout, stderr: "" } };
+      }
+      return { ok: true, data: { stdout: "", stderr: "" } };
+    };
+    return { gitExec, calls };
+  }
+
+  // Two-stanza porcelain: the main tree first, then one in-scope orphan.
+  const porcelain = [
+    `worktree ${WORKSPACE}`,
+    "HEAD 0091486",
+    "branch refs/heads/main",
+    "",
+    `worktree ${ORPHAN}`,
+    "HEAD 8b923c2",
+    "branch refs/heads/feature/claude-cycle-9001",
+    "",
+  ].join("\n");
+
+  const baseDeps = (over: Partial<PruneDeps> = {}): PruneDeps => ({
+    gitExec: makeGit({}).gitExec,
+    readFileSync: () => { throw new Error("no lock file"); }, // default: unlocked
+    statSync: () => ({ mtimeMs: 0 }), // epoch-0 mtime → very old (past the floor)
+    isLivePid: () => false, // default: no pid is live
+    now: () => (DEFAULT_WORKTREE_MIN_AGE_SECONDS + 3600) * 1000, // well past the floor
+    ...over,
+  });
+
+  test("removes a dead-pid, past-age, in-scope orphan then prunes", async () => {
+    const git = makeGit({
+      "rev-parse --git-common-dir": `${WORKSPACE}/.git`,
+      "worktree list --porcelain": porcelain,
+    });
+    const reclaimed = await pruneOrphanedTargetWorktrees(WORKSPACE, gitOpts, baseDeps({ gitExec: git.gitExec }));
+    assert.equal(reclaimed, 1);
+    // The orphan (not the main tree) was the remove target.
+    const removed = git.calls.filter((c) => c[0] === "worktree" && c[1] === "remove");
+    assert.equal(removed.length, 1);
+    assert.equal(removed[0].at(-1), ORPHAN);
+    // The trailing `git worktree prune` always runs.
+    assert.ok(git.calls.some((c) => c[0] === "worktree" && c[1] === "prune"));
+  });
+
+  test("a LIVE-pid lock is skipped (0 reclaimed) — never destroys an active agent's worktree", async () => {
+    const git = makeGit({
+      "rev-parse --git-common-dir": `${WORKSPACE}/.git`,
+      "worktree list --porcelain": porcelain,
+    });
+    const reclaimed = await pruneOrphanedTargetWorktrees(
+      WORKSPACE,
+      gitOpts,
+      baseDeps({
+        gitExec: git.gitExec,
+        readFileSync: (p) => (p.includes("cycle-9001") ? "claude agent (pid 4242)" : (() => { throw new Error("no lock"); })()),
+        isLivePid: (pid) => pid === 4242, // the locked pid is live
+      }),
+    );
+    assert.equal(reclaimed, 0);
+    assert.equal(git.calls.filter((c) => c[1] === "remove").length, 0);
+  });
+
+  test("`git rev-parse --git-common-dir` failure → returns 0, no remove/prune", async () => {
+    const gitExec: PruneDeps["gitExec"] = async (args) => {
+      if (args[0] === "rev-parse") return { ok: false, code: "gh-unknown", stderr: "boom" };
+      throw new Error("should not reach further git calls");
+    };
+    const reclaimed = await pruneOrphanedTargetWorktrees(WORKSPACE, gitOpts, baseDeps({ gitExec }));
+    assert.equal(reclaimed, 0);
+  });
+
+  test("a vanished orphan dir (statSync throws) → unknown age → skip-too-young, but prune still runs", async () => {
+    const git = makeGit({
+      "rev-parse --git-common-dir": `${WORKSPACE}/.git`,
+      "worktree list --porcelain": porcelain,
+    });
+    const reclaimed = await pruneOrphanedTargetWorktrees(
+      WORKSPACE,
+      gitOpts,
+      baseDeps({
+        gitExec: git.gitExec,
+        statSync: () => { throw new Error("ENOENT: dir gone"); }, // ageSeconds → null
+      }),
+    );
+    assert.equal(reclaimed, 0); // unknown age defers (conservative)
+    assert.equal(git.calls.filter((c) => c[1] === "remove").length, 0);
+    // The registry-entry reclaim still fires so a stale entry can't block a branch.
+    assert.ok(git.calls.some((c) => c[0] === "worktree" && c[1] === "prune"));
+  });
+
+  test("a young in-scope orphan is deferred (skip-too-young), 0 reclaimed", async () => {
+    const git = makeGit({
+      "rev-parse --git-common-dir": `${WORKSPACE}/.git`,
+      "worktree list --porcelain": porcelain,
+    });
+    const reclaimed = await pruneOrphanedTargetWorktrees(
+      WORKSPACE,
+      gitOpts,
+      baseDeps({
+        gitExec: git.gitExec,
+        // mtime ~1 minute before `now` → well under the 6h floor.
+        statSync: () => ({ mtimeMs: (DEFAULT_WORKTREE_MIN_AGE_SECONDS + 3600) * 1000 - 60_000 }),
+      }),
+    );
+    assert.equal(reclaimed, 0);
+    assert.equal(git.calls.filter((c) => c[1] === "remove").length, 0);
   });
 });
