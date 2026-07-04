@@ -30,6 +30,7 @@
 // already runs probeEmbedBackend), and only fires when that probe reports
 // `failed`.
 import { createSocket } from "node:dgram";
+import type { ServiceProbeResult, OllamaVlmProbeResult } from "./probe.ts";
 
 /** A 6-octet MAC, lowercased and `:`-separated (the canonical form we emit). */
 const MAC_OCTET_COUNT = 6;
@@ -341,6 +342,116 @@ export async function attemptVlmHostWake(
   { send = sendMagicPacket }: { send?: typeof sendMagicPacket } = {},
 ): Promise<WakeOutcome> {
   return attemptHostWake(config, gate, now, "vlm-host", { send });
+}
+
+// ---- Probe-failure wake triggers — "did this probe fail? → fire a WoL wake" --
+//
+// These two wrappers are the RECOVERY-POLICY half of the WoL subsystem: they map a
+// probe result to a wake decision (`maybeWakeEmbedBackend` for the embed-backend
+// `ServiceProbeResult`, `maybeWakeVlmHost` for the VLM-host `OllamaVlmProbeResult`)
+// and fire the corresponding `attempt*Wake` orchestrator through the gate. They
+// live HERE (issue #2834) alongside the mechanism (`attempt*Wake`, `WakeGate`,
+// `sendMagicPacket`, `buildMagicPacket`) so that ALL WoL decisions — both WHEN to
+// trigger and HOW to send — concentrate in one module. The fan-out
+// (src/health/fan-out.ts) imports these and calls them from its probe steps; it no
+// longer owns a slice of the WoL policy itself.
+
+/**
+ * If the embed-backend probe reported `failed`, fire a best-effort WoL wake
+ * (respecting the module-level cooldown + max-attempt gate) and return the
+ * ORIGINAL probe result immediately. The wake is a fire-and-return side-effect:
+ * we never `sleep` + re-probe on the request path, so `GET /health/deep` is
+ * never blocked waiting for the box to POST (#2228 QA blocker — the old inline
+ * 45s reprobe wedged the fan-out for ~45s on every wake attempt). Recovery is
+ * observed by the NEXT scheduled health tick, which is sufficient: the magic
+ * packet has already been broadcast, and a powered-on box answers the next probe.
+ *
+ * Returning `initial` on a failed read means the existing #2131 alert still
+ * fires for THIS tick (the backend is, after all, still down at probe time) —
+ * that's the correct behavior; the wake is a recovery attempt for the NEXT tick,
+ * not a same-request heal. A healthy read resets the gate so the next outage
+ * starts fresh.
+ *
+ * NEVER throws — every failure path inside `attemptEmbedBackendWake` /
+ * `sendMagicPacket` already folds to a result object + fail-loud console.error.
+ *
+ * Injectable `config`, `gate`, and `wake` keep this unit-testable without a real
+ * socket, clock, or network — and there is no clock/sleep to inject anymore.
+ */
+export async function maybeWakeEmbedBackend(
+  initial: ServiceProbeResult,
+  {
+    config = readWolConfig(),
+    gate = getWolGates().embed,
+    wake = attemptEmbedBackendWake,
+  }: {
+    config?: WolConfig;
+    gate?: WakeGate;
+    wake?: typeof attemptEmbedBackendWake;
+  } = {},
+): Promise<ServiceProbeResult> {
+  if (initial.status !== "failed") {
+    // Backend healthy → clear the attempt budget so a later outage re-arms.
+    gate.reset();
+    return initial;
+  }
+  // Fire the wake (best-effort, never-throwing) and return immediately. We do
+  // NOT wait for the box to come up — the next scheduled health tick re-probes
+  // and observes recovery. `outcome` is consumed only for the fail-loud logging
+  // already done inside attemptEmbedBackendWake; nothing here blocks on it.
+  await wake(config, gate);
+  return initial;
+}
+
+/**
+ * If the Tailnet Ollama VLM-host probe reported `status:down`, fire a
+ * best-effort WoL wake of the gaming PC (respecting the module-level VLM-host
+ * cooldown + max-attempt gate) and return the ORIGINAL probe result
+ * immediately (issue #2335). This is the fan-out wiring half of the #2335 fix:
+ * the existing #2228 WoL recovery wakes the same physical host but was only
+ * triggered by the embed-backend probe — never by `probeOllamaVlm`, the VLM
+ * HOST that OpenViking's skill-registration handler actually blocks on. Wiring
+ * the wake here means a powered-off-but-LAN-present VLM host self-heals (the
+ * #1794-verified ~40s wake) and the FROZEN registration path re-registers the
+ * skill catalog on the NEXT hourly chore tick once the host answers again.
+ *
+ * Fire-and-return, exactly like {@link maybeWakeEmbedBackend}: we never `sleep`
+ * + re-probe on the request path, so `GET /health/deep` is never blocked
+ * waiting for the box to boot. THIS tick still surfaces `status:down` (so the
+ * existing #2278 `degraded` visibility signal + #2131 alert are preserved — the
+ * Visibility invariant from the #2335 design concept); the wake is a recovery
+ * attempt for the NEXT tick. A healthy (`status:ok`) read resets the gate so a
+ * future outage gets a fresh budget of wakes.
+ *
+ * NEVER throws — every failure path inside `attemptVlmHostWake` /
+ * `sendMagicPacket` folds to a result object + fail-loud console.error. When
+ * `config.enabled` is false the wake self-noops, so the default-off #2228 safety
+ * posture is preserved (enabling in prod is an operator/config action, never a
+ * code default flip). Injectable `config`, `gate`, and `wake` keep this
+ * unit-testable without a real socket, clock, or network.
+ */
+export async function maybeWakeVlmHost(
+  initial: OllamaVlmProbeResult,
+  {
+    config = readWolConfig(),
+    gate = getWolGates().vlm,
+    wake = attemptVlmHostWake,
+  }: {
+    config?: WolConfig;
+    gate?: WakeGate;
+    wake?: typeof attemptVlmHostWake;
+  } = {},
+): Promise<OllamaVlmProbeResult> {
+  if (initial.status !== "down") {
+    // VLM host healthy → clear the attempt budget so a later outage re-arms.
+    gate.reset();
+    return initial;
+  }
+  // Fire the wake (best-effort, never-throwing) and return immediately. The next
+  // scheduled health tick re-probes and observes recovery; the chore then
+  // re-registers the skill catalog. Nothing here blocks on the wake outcome.
+  await wake(config, gate);
+  return initial;
 }
 
 // ---- WoL Adapter — owns the cross-request WakeGate singleton lifecycle (#2570) --
