@@ -55,6 +55,14 @@ import type { OvSearchProbeStatus, OllamaVlmProbeResult } from "./probe.ts";
 // read happens once, in collectProbeInputs (the fan-out I/O owner), exactly
 // where every other in-process probe read already lives.
 import type { SkillCatalogState } from "../knowledge-base/skill-registration.ts";
+// Issue #2805: type-only import — HealthSnapshot.darkOutcomes carries the dark
+// leading-outcome verdicts (name + producerHint + metric file path) the
+// wiring-liveness dark-outcome check produces, so the deep-health dark-outcome
+// rule (rules.ts) is a pure function of the snapshot like every other rule. The
+// live read happens once, in collectProbeInputs (the fan-out I/O owner). `import
+// type` is erased at compile time — zero runtime coupling, mirroring the
+// SkillCatalogState / OvSearchProbeStatus type-only imports above.
+import type { OutcomeVerdict } from "../scheduler/chores/wiring-liveness-outcomes.ts";
 
 // Skill-catalog health gate moved to src/health/skill-catalog.ts (issue #1992).
 // It described a separate concern — the Knowledge Base's in-process skill
@@ -143,6 +151,13 @@ export interface HealthSnapshot {
   // rules read?" is answerable from HealthSnapshot alone. Joins patterns/reflCount
   // as the other in-process (non-deep-probe) reads that flow through the pipeline.
   skillCatalog: SkillCatalogState;
+  // Issue #2805: the dark leading-outcome verdicts from the wiring-liveness
+  // dark-outcome check, read live at fan-out time and carried here so the
+  // deep-health dark-outcome rule is pure over the snapshot. A `dark` verdict
+  // carries the producerHint + metric file path (`query`) the rule surfaces
+  // (success-criterion 2). An empty array is honest-none (no dark outcome, or the
+  // check could not run) — the rule no-ops, never a phantom alarm.
+  darkOutcomes: OutcomeVerdict[];
   ovSearch: { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number };
   // Issue #2278: the Tailnet Ollama VLM host (gabes-desktop-1:11434) liveness
   // probe. A DIRECT reachability check of the host OpenViking uses for its
@@ -299,6 +314,12 @@ export interface ProbeInputs {
   // parseProbes safe default (an un-run, empty catalog → the two skill-catalog
   // rules no-op) exactly as a rejected async probe would.
   skillCatalog: HealthSnapshot["skillCatalog"] | null;
+  // Issue #2805: the dark leading-outcome verdicts, read at fan-out time (NOT a
+  // Promise.allSettled probe — it is a direct never-throwing chore read like the
+  // skill-catalog state). `| null` so a fan-out that cannot resolve it degrades
+  // to the parseProbes empty-array default (the dark-outcome rule no-ops),
+  // honest-none exactly as a rejected async probe would.
+  darkOutcomes: HealthSnapshot["darkOutcomes"] | null;
   ovSearch: HealthSnapshot["ovSearch"] | null;
   // Issue #2278: the Tailnet Ollama VLM host liveness probe result. `| null` on a
   // rejected settle (the never-throwing probe folds its own failures to a `down`
@@ -415,6 +436,10 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     lastAttemptAt: null,
     vlmDeferred: false,
   };
+  // Issue #2805: a null darkOutcomes (the fan-out could not run the dark-outcome
+  // check) defaults to an empty array — honest-none, the dark-outcome rule
+  // no-ops. Never a phantom populated verdict.
+  const darkOutcomes = probes.darkOutcomes || [];
   const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
   // Issue #2278: a rejected settle (probes.ollamaVlm === null) defaults to a
   // `down` result — honest-none (the whole probe settle failed), never a phantom
@@ -461,6 +486,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     reflCount,
     reflectionHealth,
     skillCatalog,
+    darkOutcomes,
     ovSearch,
     ollamaVlm,
     redisInfo,

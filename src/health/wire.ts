@@ -138,6 +138,14 @@ export interface HealthDeepResponse {
     // pure read; `no-data` when the metrics probe rejected). Distinct from the
     // info-only deep-health diagnostic, which fires only on `served-but-bucketed-none`.
     reflectionHealth: HealthSnapshot["reflectionHealth"];
+    // Issue #2805: the dark leading-outcome verdicts, ALSO surfaced here so an
+    // operator checking /api/health/deep reads the producer identity + metric
+    // file path (query) for each dark/stale/live leading outcome inline
+    // (satisfying success-criterion 2 — the health-deep event carries the
+    // producer identity). Distinct from the warning deep-health diagnostic, which
+    // fires only when at least one outcome is dark; this always rides the envelope
+    // (empty array when nothing was evaluated).
+    darkOutcomes: HealthSnapshot["darkOutcomes"];
     ovSearch: HealthSnapshot["ovSearch"];
     ovSearchTrend: unknown;
     knowledgeContext: unknown;
@@ -154,7 +162,7 @@ export function projectHealthDeepResponse(
   checkedAt: string,
   probes: ProbeInputs,
 ): HealthDeepResponse {
-  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, reflectionHealth, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, reflectionHealth, darkOutcomes, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
 
   // Issue #1440: coalesce the two persisted OV-quality reads.
@@ -194,7 +202,7 @@ export function projectHealthDeepResponse(
     // (resets on restart). `ovSearchTrend` is the restart-surviving 24h
     // hour-bucketed rollup (zeroResultRate/fallbackSuccessRate trends) and
     // `knowledgeContext` the 7d per-day context-availability rate.
-    intelligence: { patterns, reflections: reflCount, reflectionHealth, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
+    intelligence: { patterns, reflections: reflCount, reflectionHealth, darkOutcomes, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
     diagnostics,
   };
 }

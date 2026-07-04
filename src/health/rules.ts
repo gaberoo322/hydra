@@ -428,6 +428,36 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: true,
         }
       : null,
+  // Issue #2805: surface a DARK leading outcome (a `kind: leading` outcome whose
+  // reading is null — no data ever produced) through the deep-health fold so an
+  // operator watching /api/health/deep sees the vision's primary-path blindness
+  // where they look. The full dark-outcome check runs at fan-out time and lands
+  // on the snapshot (s.darkOutcomes); this rule is a PURE function of the snapshot
+  // (Invariant 5) — no I/O. Advisory WARNING severity, never critical (Invariant
+  // 7): a dark leading outcome is silent Outcome-Holdback blindness (every
+  // baseline carries value:null), NOT a process fault. The why/action carry the
+  // producerHint + metric file path (query) so the operator knows WHICH producer
+  // is dark and where it should write (Invariant 6). Fires only when at least one
+  // leading outcome reads dark; an all-live (or empty) snapshot no-ops — honest-
+  // none, never a phantom alarm (mirrors the #2492/#2386 discipline).
+  (s) => {
+    const dark = (s.darkOutcomes || []).filter((v) => v.status === "dark");
+    if (dark.length === 0) return null;
+    const detail = dark
+      .map((v) => `${v.name} (${v.producerHint}) → should write ${v.query}`)
+      .join("; ");
+    return {
+      severity: "warning",
+      component: "intelligence",
+      what: `Dark leading outcome${dark.length > 1 ? "s" : ""}: ${dark.map((v) => v.name).join(", ")}`,
+      why: `A kind:leading outcome has read null (no data ever produced). ${detail}`,
+      impact:
+        "Silent Outcome-Holdback blindness — every holdback baseline carries value:null for this outcome, so the system cannot tell whether its learning improves the vision's primary-path metric.",
+      action:
+        "Diagnose the named producer chain and bring it live; the wiring-liveness dark-outcome alarm (issue #2805) auto-files a needs-triage issue once the outcome has been continuously dark for 7+ days.",
+      autoRecovery: false,
+    };
+  },
   // Issue #1968: surface the silent empty/partial OV skill catalog through the
   // deep-health Health Assessment fold so an operator watching /api/health/deep
   // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a

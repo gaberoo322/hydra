@@ -66,6 +66,24 @@ const NO_OUTCOMES = {
   loadOutcomes: async () => ({ ok: true as const, outcomes: [] }),
 };
 
+/**
+ * Hermetic dark-outcome ALARM deps (issue #2805) — an in-memory streak/marker +
+ * a no-op gh filer + a sub-threshold clock so the coordinator's alarm call in a
+ * dark-outcome integration case touches NO real Redis and files NO real issue.
+ * The alarm's own behavior is covered by test/wiring-liveness-dark-alarm.ts.
+ */
+const HERMETIC_DARK_ALARM = {
+  darkAlarmMs: Number.POSITIVE_INFINITY, // never crosses threshold in these cases
+  now: () => 1_700_000_000_000,
+  readDarkSince: async () => null as number | null,
+  writeDarkSince: async (_n: string, nowMs: number) => nowMs,
+  readFiled: async () => false,
+  writeFiled: async () => {},
+  clearStreak: async () => {},
+  fileIssue: async () =>
+    ({ ok: true as const, data: { stdout: "", stderr: "" } }),
+};
+
 describe("wiring-liveness: YAML-subset parser", () => {
   test("parses entries with comments and quoted descriptions", () => {
     const raw = [
@@ -526,6 +544,9 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
         // Reader returns null — the metric file was never written (dark).
         readOutcomeValue: async () => null,
       },
+      // Issue #2805: inject a hermetic alarm so the coordinator's alarm call
+      // touches no real Redis / files no real issue in this integration case.
+      darkAlarm: HERMETIC_DARK_ALARM,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);
@@ -534,6 +555,13 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
     // The verdict carries a producer hint so the operator can diagnose the source.
     const v = res.outcomeVerdicts[0];
     assert.equal(v.status === "dark" && v.producerHint.length > 0, true);
+    // Issue #2805: the alarm ran and, with an infinite threshold, held below-file.
+    assert.ok(res.darkAlarm, "the coordinator populates darkAlarm");
+    assert.deepEqual(res.darkAlarm!.filed, [], "infinite threshold files nothing");
+    assert.deepEqual(
+      res.darkAlarm!.outcomes.map((o) => o.action),
+      ["below-threshold"],
+    );
   });
 
   test("a live leading outcome (fresh finite reading) is NOT flagged", async () => {
@@ -546,6 +574,9 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
         readOutcomeValue: async () => ({ value: 0.42, ts: new Date(NOW).toISOString() }),
         now: () => NOW,
       },
+      // Issue #2805: a LIVE verdict drives the alarm's recovery-clear for that
+      // name — inject a hermetic alarm so it clears in-memory, not real Redis.
+      darkAlarm: HERMETIC_DARK_ALARM,
       now: () => NOW,
     });
     assert.equal(res.evaluated, true);

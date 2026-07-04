@@ -79,6 +79,10 @@ function healthySnapshot(): HealthSnapshot {
       lastAttemptAt: Date.now(),
       vlmDeferred: false,
     },
+    // Issue #2805: no dark leading outcomes by default — the dark-outcome rule
+    // fires ONLY when at least one verdict has status "dark", so an empty array
+    // keeps the baseline "fires zero diagnostics" assertion holding.
+    darkOutcomes: [],
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
     // Issue #2278: the Tailnet Ollama VLM-host liveness probe — healthy by default.
     ollamaVlm: { status: "ok", latencyMs: 12 },
@@ -677,6 +681,79 @@ describe("assessHealth — reflection-deposit health rule (#2492)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Dark leading-outcome rule (issue #2805)
+//
+// The deep-health rule surfaces a DARK leading outcome (null reading) as a
+// WARNING intelligence diagnostic (never critical — Invariant 7), pure over the
+// snapshot's `darkOutcomes` field (Invariant 5). It fires only when a verdict
+// has status "dark"; an all-live / empty array is honest-none (no diagnostic).
+// The why/action carry the producerHint + metric file path (Invariant 6).
+// ---------------------------------------------------------------------------
+
+describe("assessHealth — dark leading-outcome rule (#2805)", () => {
+  const darkDiag = (s: HealthSnapshot) =>
+    assessHealth(s).diagnostics.find((d) => d.component === "intelligence" && /Dark leading outcome/.test(d.what));
+
+  test("empty darkOutcomes does NOT fire and keeps status healthy (honest-none)", () => {
+    const a = assessHealth(clone((s) => (s.darkOutcomes = [])));
+    assert.equal(darkDiag(healthySnapshot()), undefined);
+    assert.equal(a.status, "healthy");
+  });
+
+  test("a live-only verdict does NOT fire (only status:dark trips the rule)", () => {
+    const d = darkDiag(
+      clone((s) => {
+        s.darkOutcomes = [
+          { name: "forecast-calibration-brier", kind: "leading", status: "live", value: 0.2, ts: new Date().toISOString(), ageMs: 1000 },
+        ];
+      }),
+    );
+    assert.equal(d, undefined);
+  });
+
+  test("a dark verdict → WARNING intelligence diagnostic carrying producerHint + query", () => {
+    const a = assessHealth(
+      clone((s) => {
+        s.darkOutcomes = [
+          {
+            name: "forecast-calibration-brier",
+            kind: "leading",
+            status: "dark",
+            query: "metrics/forecast-calibration-brier.txt",
+            producerHint: "producer chain: the Target's directional runner → forecast-outcome settlement",
+          },
+        ];
+      }),
+    );
+    const d = a.diagnostics.find((x) => x.component === "intelligence" && /Dark leading outcome/.test(x.what));
+    assert.ok(d, "a dark leading outcome must surface a diagnostic");
+    assert.equal(d!.severity, "warning", "advisory WARNING, never critical (Invariant 7)");
+    assert.match(d!.what, /forecast-calibration-brier/);
+    // Invariant 6: the producer identity + metric file path ride the why.
+    assert.match(d!.why, /producer chain/);
+    assert.match(d!.why, /metrics\/forecast-calibration-brier\.txt/);
+    assert.equal(d!.autoRecovery, false);
+    // A warning (no critical/error sibling) folds status to degraded, not critical.
+    assert.equal(a.status, "degraded");
+  });
+
+  test("multiple dark verdicts pluralize the headline and list all names", () => {
+    const d = darkDiag(
+      clone((s) => {
+        s.darkOutcomes = [
+          { name: "a-metric", kind: "leading", status: "dark", query: "metrics/a.txt", producerHint: "hint-a" },
+          { name: "b-metric", kind: "leading", status: "dark", query: "metrics/b.txt", producerHint: "hint-b" },
+        ];
+      }),
+    );
+    assert.ok(d);
+    assert.match(d!.what, /Dark leading outcomes:/);
+    assert.match(d!.what, /a-metric/);
+    assert.match(d!.what, /b-metric/);
+  });
+});
+
 // Issue #2023: the `classifyOvSearchProbe` describe block moved to
 // test/health-probe.test.mts, tracking the classifier's move into the
 // ServiceProbe Adapter Seam (src/health/probe.ts).
@@ -852,6 +929,9 @@ describe("parseProbes", () => {
       // read; parseProbes defaults it to an un-run empty catalog so both
       // skill-catalog rules no-op (honest-none, never a phantom populated catalog).
       skillCatalog: null,
+      // Issue #2805: null = the fan-out could not run the dark-outcome check;
+      // parseProbes defaults it to [] so the dark-outcome rule no-ops (honest-none).
+      darkOutcomes: null,
     };
   }
 
@@ -953,6 +1033,9 @@ describe("parseProbes", () => {
         lastAttemptAt: Date.now(),
         vlmDeferred: false,
       },
+      // Issue #2805: no dark outcomes in this fan-out — the dark-outcome rule
+      // must not add a diagnostic to the degraded-fan-out assertion below.
+      darkOutcomes: [],
     });
     const a = assessHealth(snap);
     assert.equal(a.status, "degraded"); // only warnings
@@ -1184,6 +1267,9 @@ describe("projectHealthDeepResponse", () => {
     // The #1513 friction: a `ovSeachTrend` typo or a 17/18 swap silently nulls a
     // field. Pin the exact key set so a rename/typo fails the test, not the UI.
     assert.deepEqual(Object.keys(r.intelligence).sort(), [
+      // Issue #2805: the dark leading-outcome verdicts ride the intelligence
+      // block so /api/health/deep surfaces the producer identity + metric path.
+      "darkOutcomes",
       "knowledgeContext",
       "ovSearch",
       "ovSearchTrend",
@@ -1201,6 +1287,22 @@ describe("projectHealthDeepResponse", () => {
     // when no deep-health diagnostic fires — that always-on visibility is the
     // discoverability fix that stops the #1912→#2450→#2467→#2492 re-file loop.
     assert.deepEqual(r.intelligence.reflectionHealth, healthySnapshot().reflectionHealth);
+  });
+
+  test("intelligence.darkOutcomes rides the wire envelope carrying producer identity (issue #2805)", () => {
+    const verdicts = [
+      {
+        name: "forecast-calibration-brier",
+        kind: "leading" as const,
+        status: "dark" as const,
+        query: "metrics/forecast-calibration-brier.txt",
+        producerHint: "producer chain hint",
+      },
+    ];
+    const r = project(clone((s) => (s.darkOutcomes = verdicts)));
+    // Always-on visibility: the verdicts (with producerHint + query) ride the
+    // envelope so an operator reading /api/health/deep gets the producer identity.
+    assert.deepEqual(r.intelligence.darkOutcomes, verdicts);
   });
 
   test("ovSearchTrend/knowledgeContext coalesce to null when settled[17]/[18] rejected", () => {
