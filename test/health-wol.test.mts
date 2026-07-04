@@ -25,6 +25,8 @@ import {
   readWolConfig,
   attemptEmbedBackendWake,
   attemptVlmHostWake,
+  maybeWakeEmbedBackend,
+  maybeWakeVlmHost,
   getWolGates,
   resetWolGates,
   WOL_DEFAULT_MAC,
@@ -32,7 +34,6 @@ import {
   WOL_PORTS,
   type WolConfig,
 } from "../src/health/wol.ts";
-import { maybeWakeEmbedBackend, maybeWakeVlmHost } from "../src/health/fan-out.ts";
 
 describe("buildMagicPacket — packet layout (criterion 1)", () => {
   test("emits exactly 102 bytes: 6×0xFF sync header + 16× the MAC", () => {
