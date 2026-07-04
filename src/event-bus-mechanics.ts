@@ -47,7 +47,7 @@ export interface ConsumedEvent {
 export type RawStreamEntry = [string, string[]];
 
 /** A handler invoked with each parsed inbound event. */
-export type EventHandler = (event: ConsumedEvent) => void | Promise<void>;
+type EventHandler = (event: ConsumedEvent) => void | Promise<void>;
 
 // ---------------------------------------------------------------------------
 // Zombie-consumer reaper — folded in from event-bus-lifecycle.ts (#2340).
@@ -57,14 +57,14 @@ export type EventHandler = (event: ConsumedEvent) => void | Promise<void>;
  * The XINFO-CONSUMERS row shape after a flat field/value list is folded into an
  * object. Only `name`/`idle` matter to the reaper; the rest are passed through.
  */
-export interface ParsedConsumerInfo {
+interface ParsedConsumerInfo {
   name?: unknown;
   idle?: unknown;
   [field: string]: unknown;
 }
 
 /** Folds a flat `[k0, v0, k1, v1, ...]` Redis field list into an object. */
-export type FieldParser = (fields: string[]) => ParsedConsumerInfo;
+type FieldParser = (fields: string[]) => ParsedConsumerInfo;
 
 /**
  * Reap STALE (zombie) consumers from a consumer group via XINFO CONSUMERS +
