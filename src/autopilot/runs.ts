@@ -155,13 +155,15 @@ const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 // Result type
 // ---------------------------------------------------------------------------
 
-// Shared result-type primitives + the `errRedis` helper. Exported so the
-// sibling `cycle-close.ts` (issue #2768 — where `recordCycle` was relocated)
-// imports them from here rather than duplicating them: a single source of
-// truth for the run/turn writers AND the cycle-close coordinator. The
-// `cycle-close → runs` import edge is one-directional (runs never imports
-// cycle-close), so no import cycle is introduced.
-export type ErrorCode = "duplicate" | "not-found" | "invalid" | "redis";
+// Shared result-type primitives + the `errRedis` helper. `Ok`/`Err`/`errRedis`
+// are exported so the sibling `cycle-close.ts` (issue #2768 — where
+// `recordCycle` was relocated) imports them from here rather than duplicating
+// them: a single source of truth for the run/turn writers AND the cycle-close
+// coordinator. The `cycle-close → runs` import edge is one-directional (runs
+// never imports cycle-close), so no import cycle is introduced. `ErrorCode`
+// itself is module-internal — it feeds the `Ok`/`Err` shapes here but has no
+// external importer, so it stays unexported (cleanup-scan #2788).
+type ErrorCode = "duplicate" | "not-found" | "invalid" | "redis";
 
 export type Ok<T> = { ok: true; code?: undefined; detail?: undefined } & T;
 export type Err = { ok: false; code: ErrorCode; detail?: string };
