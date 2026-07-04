@@ -9,6 +9,7 @@ import {
 } from "../metrics/aggregate.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
 import { CycleRecordBodySchema } from "../autopilot/schemas.ts";
+import { classifyAnchorType } from "../autopilot/cycle-close.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
@@ -316,7 +317,19 @@ export function createMetricsRouter() {
       // (the union number|string field types on CycleRecordBody are a superset
       // of what the writer flattens — it String()s every value regardless).
       const { cycleId, ...metrics } = parsed.data;
-      await recordCycleMetrics(cycleId, metrics as Record<string, unknown>);
+      // Issue #2803: classify anchorType EXPLICITLY, mirroring the sibling
+      // recordCycle() write path (src/autopilot/cycle-close.ts). This direct
+      // write bypasses recordCycle, so without this call an absent/empty
+      // anchorType is written through verbatim and then bucketed as "unknown"
+      // by the aggregator (src/metrics/aggregate.ts) — ~30% of cycles landed
+      // "unclassified". classifyAnchorType always returns a non-empty string
+      // (the caller's trimmed value, a cycleId-slot inference, or the
+      // "unclassified" sentinel), so every /metrics/record write now classifies
+      // consistently with the recordCycle path.
+      await recordCycleMetrics(cycleId, {
+        ...(metrics as Record<string, unknown>),
+        anchorType: classifyAnchorType(cycleId, metrics.anchorType),
+      });
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
