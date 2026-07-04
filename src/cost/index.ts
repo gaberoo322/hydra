@@ -127,3 +127,18 @@ export {
   getCostByClass,
   getRollingCostByClass,
 } from "./cost-attribution.ts";
+
+// ---------------------------------------------------------------------------
+// Cost per merged PR — pure derived ratio over recorded totals (issue #2807)
+// ---------------------------------------------------------------------------
+// A DERIVED read: token totals summed from the per-day surrogate buckets +
+// a merged-PR count injected by the API route from the existing cycle-metrics
+// merged feed. No new token-recording writer; accounting/projection only.
+export {
+  DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS,
+  projectCostPerMergedPr,
+  sumTokensOverWindow,
+  getCostPerMergedPr,
+} from "./cost-attribution.ts";
+
+export type { CostPerMergedPrResult } from "./cost-attribution.ts";

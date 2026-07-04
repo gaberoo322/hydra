@@ -34,9 +34,15 @@ const {
   getRollingCostByClass,
   yesterdayDateString,
   COST_CLASS_ORDER,
+  projectCostPerMergedPr,
+  sumTokensOverWindow,
+  getCostPerMergedPr,
+  DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS,
 } = await import("../src/cost/index.ts");
 
-const { recordSubagentTokens, todayDateString } = await import("../src/cost/surrogate.ts");
+const { recordSubagentTokens, todayDateString, dateStringDaysAgo } = await import(
+  "../src/cost/surrogate.ts"
+);
 const { tokensAutopilotDailyKey, tokensBySkillDailyKey } = await import("../src/redis/cost.ts");
 
 // ---------------------------------------------------------------------------
@@ -348,5 +354,121 @@ describe("getRollingCostByClass (Redis-backed, issue #2427)", () => {
       assert.equal(rolling.byClass[c].tokens, 0);
       assert.equal(rolling.byClass[c].fraction, 0);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure: projectCostPerMergedPr — the derived ratio (issue #2807)
+// ---------------------------------------------------------------------------
+
+describe("projectCostPerMergedPr", () => {
+  test("divides tokens by merged count and rounds to the nearest token", () => {
+    const r = projectCostPerMergedPr(30000, 4, 30);
+    assert.equal(r.totalTokens, 30000);
+    assert.equal(r.mergedPrCount, 4);
+    assert.equal(r.tokensPerMergedPr, 7500);
+    assert.equal(r.windowDays, 30);
+  });
+
+  test("rounds a non-integer ratio to the nearest whole token", () => {
+    // 10000 / 3 = 3333.33… -> 3333
+    assert.equal(projectCostPerMergedPr(10000, 3, 7).tokensPerMergedPr, 3333);
+    // 10000 / 6 = 1666.66… -> 1667
+    assert.equal(projectCostPerMergedPr(10000, 6, 7).tokensPerMergedPr, 1667);
+  });
+
+  test("zero merged PRs => null ratio (never Infinity/NaN)", () => {
+    const r = projectCostPerMergedPr(12345, 0, 30);
+    assert.equal(r.tokensPerMergedPr, null);
+    assert.equal(r.mergedPrCount, 0);
+    assert.equal(r.totalTokens, 12345);
+  });
+
+  test("clamps negative / non-finite inputs to safe zeros", () => {
+    const r = projectCostPerMergedPr(-5, -2, -10);
+    assert.equal(r.totalTokens, 0);
+    assert.equal(r.mergedPrCount, 0);
+    assert.equal(r.windowDays, 0);
+    assert.equal(r.tokensPerMergedPr, null);
+  });
+
+  test("floors fractional token/merged/day inputs", () => {
+    const r = projectCostPerMergedPr(100.9, 2.9, 30.9);
+    assert.equal(r.totalTokens, 100);
+    assert.equal(r.mergedPrCount, 2);
+    assert.equal(r.windowDays, 30);
+    assert.equal(r.tokensPerMergedPr, 50);
+  });
+
+  test("defaults the window label from windowDays when none supplied", () => {
+    assert.equal(projectCostPerMergedPr(100, 1, 30).window, "last 30d (UTC)");
+  });
+
+  test("uses an explicit window label when supplied", () => {
+    const r = projectCostPerMergedPr(100, 1, 30, "last 30d (UTC) · a → b");
+    assert.equal(r.window, "last 30d (UTC) · a → b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Redis-backed: sumTokensOverWindow + getCostPerMergedPr (issue #2807)
+// ---------------------------------------------------------------------------
+
+describe("cost-per-merged-pr (Redis-backed, issue #2807)", () => {
+  let testRedis: any;
+  // A fixed `now` so the trailing-window date math is deterministic.
+  const NOW = new Date("2026-06-15T12:00:00.000Z");
+
+  async function cleanKeys() {
+    const keys = await testRedis.keys("hydra:metrics:tokens:*");
+    if (keys.length > 0) await testRedis.del(...keys);
+  }
+
+  before(async () => {
+    testRedis = new Redis(process.env.REDIS_URL);
+  });
+  beforeEach(async () => {
+    await cleanKeys();
+  });
+  after(async () => {
+    await cleanKeys();
+    await testRedis.quit();
+  });
+
+  test("sumTokensOverWindow folds the per-day surrogate buckets over the window", async () => {
+    // today, yesterday, 2 days ago (all inside a 3-day window).
+    await recordSubagentTokens("hydra-dev", 1000, { date: dateStringDaysAgo(0, NOW) });
+    await recordSubagentTokens("hydra-qa", 500, { date: dateStringDaysAgo(1, NOW) });
+    await recordSubagentTokens("hydra-research", 300, { date: dateStringDaysAgo(2, NOW) });
+    // 3 days ago is OUTSIDE a 3-day window -> excluded.
+    await recordSubagentTokens("hydra-cleanup", 999, { date: dateStringDaysAgo(3, NOW) });
+
+    const r = await sumTokensOverWindow(3, NOW);
+    assert.equal(r.totalTokens, 1800);
+    assert.equal(r.dates[1], dateStringDaysAgo(0, NOW)); // newest = today
+    assert.equal(r.dates[0], dateStringDaysAgo(2, NOW)); // oldest = 2 days ago
+    assert.ok(/3d/.test(r.window), "window labels the 3-day span");
+  });
+
+  test("getCostPerMergedPr composes the summed tokens with the injected merged count", async () => {
+    await recordSubagentTokens("hydra-dev", 6000, { date: dateStringDaysAgo(0, NOW) });
+    await recordSubagentTokens("hydra-qa", 2000, { date: dateStringDaysAgo(1, NOW) });
+
+    const r = await getCostPerMergedPr(4, 2, NOW);
+    assert.equal(r.totalTokens, 8000);
+    assert.equal(r.mergedPrCount, 4);
+    assert.equal(r.tokensPerMergedPr, 2000);
+    assert.equal(r.windowDays, 2);
+  });
+
+  test("zero merged PRs => null ratio even with recorded tokens", async () => {
+    await recordSubagentTokens("hydra-dev", 5000, { date: dateStringDaysAgo(0, NOW) });
+    const r = await getCostPerMergedPr(0, 1, NOW);
+    assert.equal(r.totalTokens, 5000);
+    assert.equal(r.tokensPerMergedPr, null);
+  });
+
+  test("default window days is the module default", () => {
+    assert.equal(DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS, 30);
   });
 });
