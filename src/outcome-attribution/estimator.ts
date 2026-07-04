@@ -120,7 +120,7 @@ function numFromEnv(name: string, fallback: number): number {
  * The estimated marginal effect of one producer class on one metric, plus the
  * identifiability flags a reader MUST consult before trusting `beta`.
  */
-export interface ClassEffect {
+interface ClassEffect {
   /** Producer class name (a column of the design matrix). */
   producerClass: string;
   /** Estimated marginal effect β_c (raw, signed, direction-neutral). */
