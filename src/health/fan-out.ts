@@ -54,6 +54,12 @@ import { ovPostJson } from "../knowledge-base/ov-request.ts";
 // happens HERE (next to the other probe reads) and is carried onto the snapshot
 // via ProbeInputs.skillCatalog — rules.ts no longer reads it out-of-band.
 import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
+// Issue #2805: the live dark leading-outcome check. Like the skill-catalog read
+// above, this is a direct never-throwing read (not a Promise.allSettled probe),
+// so it runs in the fan-out I/O owner and is carried onto the snapshot via
+// ProbeInputs.darkOutcomes — the deep-health dark-outcome rule then reads it from
+// the snapshot, staying pure. `evaluateDarkOutcomes` is contractually never-throw.
+import { evaluateDarkOutcomes } from "../scheduler/chores/wiring-liveness-outcomes.ts";
 import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult, type ProbeOutcome } from "./probe.ts";
 import { parseRedisInfoSnapshot, type ProbeInputs } from "./diagnostics.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
@@ -249,6 +255,12 @@ export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
     // default — the two skill-catalog rules no-op, matching the prior behaviour
     // where assembleProbeInputs carried no catalog at all.
     skillCatalog: null,
+    // Issue #2805: like skillCatalog, the dark-outcome verdicts are a direct
+    // never-throw read (not an async settle-array probe), so assembleProbeInputs
+    // sets null and collectProbeInputs overrides it with the live read. A direct
+    // caller gets null → parseProbes coalesces to [] → the dark-outcome rule
+    // no-ops (honest-none).
+    darkOutcomes: null,
   };
 }
 
@@ -296,6 +308,14 @@ export interface CollectProbeDeps {
    * state, no module-singleton reset and no registerSkills lifecycle dependency.
    */
   skillCatalogState?: typeof getSkillCatalogState;
+  /**
+   * Issue #2805: the live dark leading-outcome check (default: the real
+   * evaluateDarkOutcomes). A never-throwing read — NOT a Promise.allSettled probe
+   * — so the full fan-out pipeline (and the deep-health dark-outcome rule
+   * downstream) is testable with an injected evaluation, no real outcomes.yaml or
+   * metric files.
+   */
+  darkOutcomesEval?: typeof evaluateDarkOutcomes;
   targetServiceName?: () => string;
   /**
    * Issue #2498/#2570: the embed-backend Wake-on-LAN gate forwarded to
@@ -341,6 +361,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeEmbedBackendImpl = probeEmbedBackend,
     probeOllamaVlmImpl = probeOllamaVlm,
     skillCatalogState = getSkillCatalogState,
+    darkOutcomesEval = evaluateDarkOutcomes,
     targetServiceName = getTargetServiceName,
     // Issue #2498/#2570: default to the WoL Adapter's process-lifetime gate pair
     // (src/health/wol.ts getWolGates()) so a no-gate production caller is
@@ -456,7 +477,26 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
   // position) and merged onto the assembled named record. parseProbes copies it
   // onto HealthSnapshot.skillCatalog; the two skill-catalog rules read it from the
   // snapshot, so this fan-out is the single place the live read happens.
-  return { ...assembleProbeInputs(settled), skillCatalog: skillCatalogState() };
+  // Issue #2805: the dark leading-outcome verdicts are a direct never-throw read
+  // (like the skill-catalog state), merged onto the assembled record. A defensive
+  // catch folds any unexpected error to null → parseProbes coalesces to [] → the
+  // dark-outcome rule no-ops (honest-none), so a dark-outcome-check hiccup never
+  // breaks /health/deep. Only `outcomeVerdicts` is carried (it holds the dark
+  // verdicts with producerHint + query the rule surfaces).
+  let darkOutcomes: ProbeInputs["darkOutcomes"] = null;
+  try {
+    const evaluated = await darkOutcomesEval({});
+    darkOutcomes = evaluated.outcomeVerdicts;
+  } catch (err: any) {
+    console.error(
+      `[health/fan-out] dark-outcome check failed (folding to honest-none): ${err?.message || err}`,
+    );
+  }
+  return {
+    ...assembleProbeInputs(settled),
+    skillCatalog: skillCatalogState(),
+    darkOutcomes,
+  };
 }
 
 // ---- Now-page strip probe enumeration (issue #2597) ------------------------

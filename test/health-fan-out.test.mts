@@ -60,6 +60,22 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
       lastAttemptAt: 1234,
       vlmDeferred: false,
     })) as any,
+    // Issue #2805: stub the dark-outcome check so collectProbeInputs' merged
+    // darkOutcomes is deterministic (no dependency on the real outcomes.yaml or
+    // metric files). One dark verdict so the merge is observable.
+    darkOutcomesEval: (async () => ({
+      darkOutcomes: ["forecast-calibration-brier"],
+      staleOutcomes: [],
+      outcomeVerdicts: [
+        {
+          name: "forecast-calibration-brier",
+          kind: "leading",
+          status: "dark",
+          query: "metrics/forecast-calibration-brier.txt",
+          producerHint: "producer must write metrics/forecast-calibration-brier.txt",
+        },
+      ],
+    })) as any,
     targetServiceName: () => "hydra-betting-web.service",
     ...overrides,
   };
@@ -116,6 +132,12 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.skillCatalog as any)?.registered, 4);
     assert.equal((probes.skillCatalog as any)?.total, 4);
     assert.equal((probes.skillCatalog as any)?.completed, true);
+
+    // Issue #2805 — the dark-outcome verdicts (a direct never-throw read, like the
+    // skill-catalog state) are merged onto the named record by collectProbeInputs.
+    assert.equal((probes.darkOutcomes as any)?.length, 1);
+    assert.equal((probes.darkOutcomes as any)?.[0]?.status, "dark");
+    assert.equal((probes.darkOutcomes as any)?.[0]?.name, "forecast-calibration-brier");
   });
 
   test("the injected skill-catalog state flows into ProbeInputs.skillCatalog (issue #2386)", async () => {

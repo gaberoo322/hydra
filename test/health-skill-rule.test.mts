@@ -73,6 +73,9 @@ function healthySnapshot(): HealthSnapshot {
       lastAttemptAt: Date.now(),
       vlmDeferred: false,
     },
+    // Issue #2805: no dark leading outcomes by default — the dark-outcome rule
+    // no-ops, keeping this baseline clean for skill-catalog-rule assertions.
+    darkOutcomes: [],
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
     ollamaVlm: { status: "ok", latencyMs: 12 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },

@@ -60,6 +60,11 @@ import {
   type OutcomeVerdict,
   type DarkOutcomesDeps,
 } from "./wiring-liveness-outcomes.ts";
+import {
+  runDarkOutcomeAlarm,
+  type DarkAlarmDeps,
+  type DarkAlarmResult,
+} from "./wiring-liveness-dark-alarm.ts";
 
 // The output-series check (slice 2, #2288) lives in its own focused module
 // (`wiring-liveness-output.ts`, extracted by #2456 — one check type, one module).
@@ -226,6 +231,14 @@ export interface WiringLivenessResult {
   outputVerdicts: OutputVerdict[];
   /** Every per-outcome dark/live verdict, for diagnostics/tests (issue #2753). */
   outcomeVerdicts: OutcomeVerdict[];
+  /**
+   * Outcome-alarm result (issue #2805): which dark leading outcomes crossed the
+   * 7-day sustained-dark threshold and got a fresh `needs-triage` issue filed
+   * this tick, plus the per-outcome alarm actions (below-threshold / already-filed
+   * / filed / file-failed). `undefined` when the alarm did not run (e.g. an
+   * evaluation short-circuit). Advisory — a file failure never aborts the chore.
+   */
+  darkAlarm?: DarkAlarmResult;
 }
 
 /**
@@ -330,6 +343,15 @@ export interface WiringLivenessDeps {
    * `null` (no data ever produced / file missing/unparseable).
    */
   darkOutcomes?: DarkOutcomesDeps;
+  /**
+   * Injectable dark-outcome ALARM deps (issue #2805). Tests pass a fake clock +
+   * threshold + gh filer + Redis streak accessors so the "file only after 7 days
+   * continuously dark, idempotent, clears on recovery" policy is reproducible
+   * without a real gh spawn or Redis. When omitted, the alarm uses the real gh
+   * CLI Adapter + the wiring-liveness-dark-outcomes Redis seam. The alarm is
+   * advisory — a file failure is logged, never thrown, never aborts the chore.
+   */
+  darkAlarm?: DarkAlarmDeps;
   /** Injectable manifest loader so tests can point at a fixture. */
   loadManifest?: (filePath?: string) => Promise<LoadManifestResult>;
   /** Path to the manifest; defaults to {@link DEFAULT_LIVENESS_FILE}. */
@@ -392,6 +414,26 @@ export async function runWiringLiveness(
     result.darkOutcomes = outcomes.darkOutcomes;
     result.staleOutcomes = outcomes.staleOutcomes;
     result.outcomeVerdicts = outcomes.outcomeVerdicts;
+
+    // Issue #2805: the dark-outcome ALARM. #2753 makes a dark leading outcome
+    // VISIBLE per-tick; this turns a SUSTAINED (>=7-day) dark streak into a filed
+    // `needs-triage` issue, deduped per streak and cleared on recovery. Fed the
+    // dark-arm verdicts (with producerHint + query for the issue body) and the
+    // set of outcomes that read LIVE this tick (so their streak/marker clears —
+    // stateless recovery). Never throws: a gh/Redis failure inside the alarm
+    // folds to a per-outcome `file-failed` action, so the alarm can no more abort
+    // the chore than the detection can.
+    const darkVerdicts = outcomes.outcomeVerdicts.filter(
+      (v): v is Extract<OutcomeVerdict, { status: "dark" }> => v.status === "dark",
+    );
+    const liveOrRecoveredNames = outcomes.outcomeVerdicts
+      .filter((v) => v.status === "live")
+      .map((v) => v.name);
+    result.darkAlarm = await runDarkOutcomeAlarm(
+      darkVerdicts,
+      liveOrRecoveredNames,
+      deps.darkAlarm ?? {},
+    );
 
     if (
       result.missing.length > 0 ||
