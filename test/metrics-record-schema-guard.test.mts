@@ -121,6 +121,52 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
     assert.equal(hash.cycleId, cycleId);
   });
 
+  test("classifies explicit anchorType through verbatim (issue #2803)", async () => {
+    const router = createMetricsRouter();
+    const post = findHandler(router, "POST", "/metrics/record");
+    const cycleId = `test-metrics-record-2803-explicit-${Date.now()}`;
+    const res = mockRes();
+    await post!(mockReq({ cycleId, status: "completed", anchorType: "work-queue" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ok, true);
+    const hash = await redis.hgetall(`hydra:metrics:${cycleId}`);
+    assert.equal(hash.anchorType, "work-queue");
+  });
+
+  test("classifies absent anchorType to the 'unclassified' sentinel, never 'unknown' (issue #2803)", async () => {
+    const router = createMetricsRouter();
+    const post = findHandler(router, "POST", "/metrics/record");
+    const cycleId = `test-metrics-record-2803-absent-${Date.now()}`;
+    const res = mockRes();
+    // No anchorType, and a cycleId that does NOT match the worktree-agent slot
+    // pattern → classifyAnchorType falls back to the "unclassified" sentinel.
+    await post!(mockReq({ cycleId, status: "completed" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ok, true);
+    const hash = await redis.hgetall(`hydra:metrics:${cycleId}`);
+    // The endpoint now ALWAYS writes an explicit, non-empty anchorType — the
+    // aggregator (src/metrics/aggregate.ts) can never bucket this as "unknown".
+    assert.equal(hash.anchorType, "unclassified");
+  });
+
+  test("infers anchorType from a worktree-agent-slot cycleId when absent (issue #2803)", async () => {
+    const router = createMetricsRouter();
+    const post = findHandler(router, "POST", "/metrics/record");
+    // The synthesised worktree-branch cycleId format decodes to a slot → anchorType.
+    const cycleId = `worktree-agent-abc12345-t3-dev_orch`;
+    const res = mockRes();
+    await post!(mockReq({ cycleId, status: "completed" }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ok, true);
+    const hash = await redis.hgetall(`hydra:metrics:${cycleId}`);
+    assert.equal(hash.anchorType, "work-queue");
+    // cleanTestKeys globs hydra:metrics:* so this key is swept too, but be explicit.
+    await redis.del(`hydra:metrics:${cycleId}`);
+  });
+
   test("validation failure: missing cycleId returns 400 schema-validation-failed", async () => {
     const router = createMetricsRouter();
     const post = findHandler(router, "POST", "/metrics/record");

@@ -196,8 +196,13 @@ function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
  * anchorType and can never fall into the aggregator's "unknown" bucket. A
  * `console.warn` surfaces the remaining gap (fail-loud convention) so a truly
  * unclassifiable cycle is still visible.
+ *
+ * Exported (issue #2803) so the direct-write path — POST /metrics/record in
+ * `src/api/metrics.ts`, which calls `recordCycleMetrics` WITHOUT going through
+ * `recordCycle` — can apply the identical classification and stop leaving its
+ * cycles in the aggregator's "unknown" bucket (~30% of cycles).
  */
-function classifyAnchorType(cycleId: string, raw: unknown): string {
+export function classifyAnchorType(cycleId: string, raw: unknown): string {
   if (typeof raw === "string") {
     const trimmed = raw.trim();
     if (trimmed.length > 0) return trimmed;
