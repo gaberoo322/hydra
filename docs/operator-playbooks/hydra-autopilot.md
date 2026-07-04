@@ -437,11 +437,23 @@ After `gh pr review --approve && gh pr merge --auto --squash` succeeds for an
 # (state.actions[].tier, 1–4 per ADR-0015, or null); $task_id is the autopilot
 # cycleId. Best-effort: a non-2xx or unreachable endpoint is logged and the
 # autopilot cycle proceeds — registration NEVER blocks or delays a merge.
+#
+# Issue #2800: pass an EXPLICIT anchorType so the merge-watch enrichment
+# classifies the cycle even when it becomes the FIRST cycle-record write (the
+# qa_orch relay case, where reap never wrote a record for this cycleId). Without
+# it, the bare-UUID cycleId falls through the slot-suffix inference to the
+# `unclassified` sentinel — the 32%-unclassified data-quality gap. Map the
+# auto-merge action's dispatch class to its anchorType, mirroring
+# `scripts/autopilot/dispatch.sh`: code-writing dispatches (dev_orch/dev_target)
+# are `work-queue`; a bare `auto-merge` action with no resolvable class defaults
+# to `work-queue` (the dominant armed-PR case). The field is optional — omitting
+# it degrades to the prior inference-then-`unclassified` behaviour.
+pr_anchor_type="${pr_anchor_type:-work-queue}"
 curl -fsS -X POST http://localhost:4000/api/holdback/pending \
   -H 'content-type: application/json' \
   -d "$(jq -n --argjson pr "$pr_number" --argjson tier "${pr_tier:-null}" \
-        --arg cycleId "$task_id" \
-        '{prNumber:$pr, tier:$tier, cycleId:$cycleId}')" \
+        --arg cycleId "$task_id" --arg anchorType "$pr_anchor_type" \
+        '{prNumber:$pr, tier:$tier, cycleId:$cycleId, anchorType:$anchorType}')" \
   || echo "[autopilot] holdback pending register failed for PR #${pr_number} (non-fatal — merge already armed)" >&2
 ```
 

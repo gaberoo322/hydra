@@ -703,13 +703,13 @@ describe("Outcome Holdback pending-enroll registry (#2622)", () => {
 
 /** Build a fake dep harness around an in-memory pending registry + marker set. */
 function makeWatchHarness(
-  pending: Array<{ prNumber: number; tier: number | null; cycleId: string; registeredAt: number }>,
+  pending: Array<{ prNumber: number; tier: number | null; cycleId: string; registeredAt: number; anchorType?: string }>,
   merge: Record<number, MergeStatus | null>,
 ) {
   const registry = new Map(pending.map((e) => [e.prNumber, e]));
   const marked = new Set<number>();
   const enrollCalls: Array<{ commitSha: string; prNumber?: number | null; tier?: number | null }> = [];
-  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number }> = [];
+  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string }> = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
 
@@ -751,6 +751,39 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.deepEqual(h.cycleCalls, [{ cycleId: "cyc-501", prNumber: 501, filesChanged: 7 }]);
     assert.deepEqual(h.removeCalls, [501], "landed entry is dropped from the registry");
     assert.equal(h.registry.has(501), false);
+  });
+
+  test("#2800: an explicit anchorType on the pending entry is forwarded onto the cycle-record enrichment body", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 521, tier: 3, cycleId: "cyc-521", registeredAt: 1, anchorType: "work-queue" }],
+      { 521: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 4 } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    // The anchorType the arming caller recorded rides along on the enrichment
+    // body, so a first-write enrichment classifies explicitly instead of
+    // bucketing to the `unclassified` sentinel.
+    assert.deepEqual(h.cycleCalls, [
+      { cycleId: "cyc-521", prNumber: 521, filesChanged: 4, anchorType: "work-queue" },
+    ]);
+  });
+
+  test("#2800: a pending entry WITHOUT an anchorType omits the field (degrades to prior inference behaviour)", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 522, tier: 3, cycleId: "cyc-522", registeredAt: 1 }],
+      { 522: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 4 } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    // No anchorType on the entry ⇒ no anchorType key on the enrichment body
+    // (the field must be ABSENT, not present-and-undefined, so classifyAnchorType
+    // falls back to slot-suffix inference exactly as before #2800).
+    assert.deepEqual(h.cycleCalls, [{ cycleId: "cyc-522", prNumber: 522, filesChanged: 4 }]);
+    assert.equal("anchorType" in h.cycleCalls[0], false, "anchorType key is absent");
   });
 
   test("AC2: a still-open PR (no merge commit) is left in the registry and NOT enrolled", async () => {

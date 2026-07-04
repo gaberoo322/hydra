@@ -121,6 +121,11 @@ export interface HoldbackMergeWatchDeps {
     cycleId: string;
     prNumber: number;
     filesChanged?: number;
+    // Issue #2800: the explicit dispatch-class anchorType, forwarded from the
+    // pending-enroll entry. Ensures a first-write enrichment (reap never wrote a
+    // record for this cycleId) classifies explicitly instead of bucketing to
+    // `unclassified`. Absent for pre-#2800 entries → prior inference behaviour.
+    anchorType?: string;
   }) => Promise<CycleRecordResult>;
   /** Persist the last-run health snapshot. Defaults to `setMergeWatchHealth`. */
   setHealth?: (record: MergeWatchHealthRecord) => Promise<void>;
@@ -222,6 +227,7 @@ async function processOne(
       cycleId: string;
       prNumber: number;
       filesChanged?: number;
+      anchorType?: string;
     }) => Promise<CycleRecordResult>;
     result: HoldbackMergeWatchResult;
   },
@@ -271,11 +277,24 @@ async function processOne(
     // without re-firing any counter. Best-effort — a non-ok result is logged but
     // does NOT block dropping the entry: the enrollment (the correctness-bearing
     // write) already succeeded, and cycle-record enrichment is observability.
-    const cycleBody: { cycleId: string; prNumber: number; filesChanged?: number } = {
+    const cycleBody: {
+      cycleId: string;
+      prNumber: number;
+      filesChanged?: number;
+      anchorType?: string;
+    } = {
       cycleId: entry.cycleId,
       prNumber,
     };
     if (status.changedFiles != null) cycleBody.filesChanged = status.changedFiles;
+    // Issue #2800: forward the explicit anchorType the arming caller recorded on
+    // the pending entry. When reap never wrote a cycle-record for this cycleId
+    // (the qa_orch relay case), this enrichment is the FIRST write — so without
+    // an explicit anchorType the bare-UUID cycleId falls through the slot-suffix
+    // inference to the `unclassified` sentinel (the 32%-unclassified gap). A
+    // pre-#2800 entry (no anchorType) omits the field and degrades to the prior
+    // inference behaviour. classifyAnchorType (cycle-close.ts) trims the value.
+    if (entry.anchorType) cycleBody.anchorType = entry.anchorType;
     const cycleRes = await ctx.recordCycleRecord(cycleBody);
     if (cycleRes.ok === false) {
       console.error(`[Housekeeping] merge-watch: cycle-record enrichment failed for pr ${prNumber} (cycle ${entry.cycleId}): ${cycleRes.detail || cycleRes.code}`);
