@@ -493,3 +493,61 @@ export function detectCalibrationDrift(input: {
     );
   }
 }
+
+/**
+ * Estimate-vs-OAuth divergence detector (issue #2832 AC3). Fail-loud, ONCE per
+ * scan: while the headline has fallen back to the transcript estimate during an
+ * OAuth outage, warn if that fail-open estimate has diverged from the LAST-KNOWN
+ * real OAuth utilization by more than `divergenceFactor` in either direction — a
+ * "the number gating dispatch is a guess that no longer matches the last real
+ * meter reading, so the un-gated-dispatch risk during this outage is real"
+ * signal the operator can act on.
+ *
+ * DISTINCT from {@link detectCalibrationDrift}: that compares the since-reset
+ * metric against an operator-SEEDED env reference (a slow calibration-rot
+ * signal); THIS compares the live estimate against the meter's own last-known
+ * value, and fires only DURING an active OAuth fallback where the stakes are
+ * higher.
+ *
+ * INERT unless ALL of (issue #2832 invariant 4):
+ *   - `usageSource === "estimate"` — the headline is CURRENTLY on the fail-open
+ *     estimate (never fires while OAuth — fresh or served-stale — backs the
+ *     headline; the meter is then ground truth and there is nothing to diverge
+ *     from).
+ *   - `lastKnownOAuthPercent !== null` — a real meter value was actually seen at
+ *     some point (a null/absent baseline is the #1083 silent-0 trap — comparing
+ *     against nothing would be a false alarm, so we stay silent).
+ *   - `lastKnownOAuthPercent > 0` — a 0% baseline makes the ratio undefined; skip
+ *     (a genuinely 0% real meter with a non-zero estimate is a distinct, rarer
+ *     signal not worth a divide-by-zero).
+ *
+ * The comparison uses the 7d (weekly) axis — the window the emergencyBrake /
+ * weekly gating keys off and the one the issue's "weekly utilization" framing
+ * names. Read-time detection ONLY: persists nothing, self-recalibrates nothing,
+ * mutates NO gating scalar (ADR-0021 pure read-side projection; issue #2832
+ * invariant 1). A pure side-effecting detector — returns nothing — over
+ * already-computed scalars; no I/O. Exported for direct unit test, NOT added to
+ * the `index.ts` public barrel.
+ */
+export function detectEstimateOAuthDivergence(input: {
+  usageSource: "oauth" | "estimate";
+  estimatePercentLast7d: number;
+  lastKnownOAuthPercent: number | null;
+  divergenceFactor: number;
+}): void {
+  const { usageSource, estimatePercentLast7d, lastKnownOAuthPercent, divergenceFactor } = input;
+  if (usageSource !== "estimate") return;
+  if (lastKnownOAuthPercent === null || lastKnownOAuthPercent <= 0) return;
+  const tooHigh = estimatePercentLast7d > lastKnownOAuthPercent * divergenceFactor;
+  const tooLow = estimatePercentLast7d < lastKnownOAuthPercent / divergenceFactor;
+  if (tooHigh || tooLow) {
+    console.warn(
+      `[usage-tracker] estimate/OAuth divergence: transcript estimate ` +
+        `${estimatePercentLast7d.toFixed(2)}% (7d) diverges from the last-known OAuth ` +
+        `utilization ${lastKnownOAuthPercent.toFixed(2)}% by more than ${divergenceFactor}x ` +
+        `during an OAuth outage — dispatch gating is currently on the fail-open ` +
+        `estimate; verify real weekly utilization at claude.ai before the next ` +
+        `autopilot window`,
+    );
+  }
+}
