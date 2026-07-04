@@ -49,7 +49,6 @@
  * overhead) is acceptable because dispatches are at-most weekly.
  */
 
-import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 import {
   getScoutCategoryLastWalked,
@@ -61,6 +60,25 @@ import {
 } from "../redis/scout.ts";
 import { classByName } from "../taxonomy/classes.ts";
 import { InvariantViolationError } from "../errors.ts";
+// Walk-surface enumeration (FS-I/O leaf) lives in a sibling module (issue
+// #2826). Re-exported below so existing importers of these symbols from
+// calendar-walk.ts keep working unchanged.
+import {
+  listCategories,
+  listRuntimeDependencies,
+  parseCategorySlugs,
+  type WalkTarget,
+} from "./calendar-walk-surface.ts";
+
+// Re-export the walk-surface enumeration so `calendar-walk.ts` remains the
+// stable import site for callers (interfaceImpact=none, design-concept
+// invariant 3).
+export {
+  listCategories,
+  listRuntimeDependencies,
+  parseCategorySlugs,
+  type WalkTarget,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -106,16 +124,6 @@ const SCOUT_SPEND_DAILY_TTL_SECONDS = 7 * 24 * 60 * 60;
 // Types
 // ---------------------------------------------------------------------------
 
-/** A single target the walk surfaces — either a category slug or a dep name. */
-export interface WalkTarget {
-  /** Stable identifier the dispatch uses (category slug OR `dep:<name>`). */
-  slug: string;
-  /** Whether this comes from `docs/ai-leverage-categories.md` or `package.json`. */
-  kind: "category" | "dependency";
-  /** Free-text source label for diagnostics (file path or section). */
-  source: string;
-}
-
 /** Output of the walk decision step. */
 export interface WalkPlan {
   /** True when the per-class (`scout_orch`) cooldown has elapsed. */
@@ -129,98 +137,6 @@ export interface WalkPlan {
    * here so callers can record it on dispatch without redundant clock reads.
    */
   computedAt: string;
-}
-
-// ---------------------------------------------------------------------------
-// Discovery: build the target list from disk
-// ---------------------------------------------------------------------------
-
-/**
- * Parse the orchestrator + dashboard `package.json` runtime deps. Excludes
- * `devDependencies` — those don't ship in the running process and aren't
- * load-bearing for AI-agent leverage. Pure async I/O; no Redis.
- */
-export async function listRuntimeDependencies(
-  hydraRoot: string,
-): Promise<WalkTarget[]> {
-  const out: WalkTarget[] = [];
-
-  async function readDeps(path: string, sourceLabel: string): Promise<void> {
-    let raw: string;
-    try {
-      raw = await fs.readFile(path, "utf-8");
-    } catch (err) {
-      // Best-effort — log + skip rather than throw. A missing manifest is a
-      // diagnostic, not a fatal walk error.
-      console.error(`calendar-walk: failed to read ${path}:`, err);
-      return;
-    }
-    let parsed: { dependencies?: Record<string, unknown> };
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      console.error(`calendar-walk: failed to parse ${path}:`, err);
-      return;
-    }
-    const deps = parsed.dependencies ?? {};
-    for (const name of Object.keys(deps).sort()) {
-      out.push({
-        slug: `dep:${name}`,
-        kind: "dependency",
-        source: sourceLabel,
-      });
-    }
-  }
-
-  await readDeps(resolve(hydraRoot, "package.json"), "package.json");
-  await readDeps(
-    resolve(hydraRoot, "dashboard", "package.json"),
-    "dashboard/package.json",
-  );
-  return out;
-}
-
-/**
- * Parse `docs/ai-leverage-categories.md` and extract each H2 heading as a
- * category slug. Format: `## <N>. <slug>` (matches the Phase A doc).
- *
- * Pure parser — no Redis, no network. Tests pass a fixture instead of the
- * real file to pin behaviour without coupling to doc edits.
- */
-export function parseCategorySlugs(markdown: string): WalkTarget[] {
-  const out: WalkTarget[] = [];
-  const seen = new Set<string>();
-  // Match lines of the form `## 1. typed-schemas` or `## typed-schemas`
-  // (the leading number-and-dot is optional so a future doc edit that drops
-  // the numbering still works).
-  const re = /^##\s+(?:\d+\.\s+)?([a-z0-9][a-z0-9-]*)\s*$/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(markdown)) !== null) {
-    const slug = m[1];
-    if (!slug || seen.has(slug)) continue;
-    seen.add(slug);
-    out.push({
-      slug,
-      kind: "category",
-      source: "docs/ai-leverage-categories.md",
-    });
-  }
-  return out;
-}
-
-/**
- * Convenience: read + parse `docs/ai-leverage-categories.md` from disk.
- */
-async function listCategories(hydraRoot: string): Promise<WalkTarget[]> {
-  const path = resolve(hydraRoot, "docs", "ai-leverage-categories.md");
-  let raw: string;
-  try {
-    raw = await fs.readFile(path, "utf-8");
-  } catch (err) {
-    console.error(`calendar-walk: failed to read ${path}:`, err);
-    return [];
-  }
-  return parseCategorySlugs(raw);
 }
 
 // ---------------------------------------------------------------------------
