@@ -21,9 +21,10 @@
  *
  * Errors are returned as result objects, never thrown, matching the
  * `merge/grounding/verification` convention in CLAUDE.md — the shared
- * `Ok`/`Err`/`ErrorCode` primitives and the `errRedis`/`numberOrDefault`
- * helpers live in `runs.ts` (their single source of truth, shared with the
- * run/turn writers) and are imported here.
+ * `Ok`/`Err` result types and the `errRedis`/`numberOrDefault` helpers live in
+ * `runs.ts` (their single source of truth, shared with the run/turn writers)
+ * and are imported here. (The `ErrorCode` union that `Err` is built from stays
+ * module-internal to `runs.ts` — it has no external importer.)
  */
 
 import {
