@@ -89,7 +89,7 @@ export interface OutcomeEvaluation {
  * config file. Never throws — a load failure is a `{ ok: false, errors }`
  * result.
  */
-export type OutcomesLoader = (filePath?: string) => Promise<LoadOutcomesResult>;
+type OutcomesLoader = (filePath?: string) => Promise<LoadOutcomesResult>;
 
 /**
  * Injectable per-outcome value reader (defaults to the real
@@ -97,7 +97,7 @@ export type OutcomesLoader = (filePath?: string) => Promise<LoadOutcomesResult>;
  * source is unreachable / not-yet-produced. Tests inject a deterministic fake so
  * dark vs live cases are reproducible without touching the filesystem.
  */
-export type OutcomeValueReader = (
+type OutcomeValueReader = (
   outcome: Outcome,
 ) => Promise<{ value: number; ts: string } | null>;
 
