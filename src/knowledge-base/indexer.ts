@@ -46,7 +46,7 @@ import {
   isOvPointLockConflict,
 } from "./ov-request.ts";
 import type { OvErrorCode } from "./ov-request.ts";
-import { recordIndexerError, recordIndexerRetry } from "../scheduler/heartbeat.ts";
+import { recordIndexerError, recordIndexerRetry } from "./indexer-stats.ts";
 import { trackedOvSearch } from "./ov-search.ts";
 import {
   loadSourceHashes as redisLoadSourceHashes,

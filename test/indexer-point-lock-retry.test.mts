@@ -24,7 +24,7 @@ import { indexText } from "../src/knowledge-base/indexer.ts";
 import {
   getIndexerErrorStats,
   resetIndexerErrorStats,
-} from "../src/scheduler/heartbeat.ts";
+} from "../src/knowledge-base/indexer-stats.ts";
 
 /** OV's own point-lock 500 body under concurrent-indexing contention. */
 const OV_POINT_LOCK_BODY =
