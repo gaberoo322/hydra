@@ -513,4 +513,4 @@ export {
   runAutoclaimRecovery,
   runLongPollLoop,
 };
-export type { ConsumedEvent, RawStreamEntry };
+export type { ConsumedEvent };
