@@ -207,8 +207,18 @@ function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
  * data-quality bucket instead of a long tail of untrusted strings. Genuine
  * anchor types (`work-queue`, `qa-review`, `grill`, `research`, `backlog`, …)
  * are unaffected.
+ *
+ * Exported (issue #2824) so the metrics READ path — `normalizeAnchorType` in
+ * `src/metrics/trend.ts` — can apply the IDENTICAL malformed-value rejection.
+ * The write path (`classifyAnchorType`) collapses these malformed forms to
+ * `unclassified`, but pre-fix rows already persisted in Redis carry the raw
+ * `--status` / `unmapped:*` string; sharing this predicate as the single
+ * source of truth keeps the read path from resurfacing them as distinct
+ * garbage buckets and prevents write/read drift.
+ *
+ * @param trimmed a whitespace-trimmed anchorType candidate.
  */
-function isMalformedAnchorType(trimmed: string): boolean {
+export function isMalformedAnchorType(trimmed: string): boolean {
   // Flag-shaped: a leading `-` can only be a leaked CLI token.
   if (trimmed.startsWith("-")) return true;
   // dispatch.sh's unmapped-skill sentinel (`unmapped` or `unmapped:<skill>`).

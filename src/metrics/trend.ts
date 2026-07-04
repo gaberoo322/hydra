@@ -13,6 +13,10 @@ import {
   getCycleMetrics,
 } from "../redis/cycle-metrics.ts";
 import { NUMERIC_FIELD_NAMES } from "./record.ts";
+import {
+  isMalformedAnchorType,
+  UNCLASSIFIED_ANCHOR_TYPE,
+} from "../autopilot/cycle-close.ts";
 
 /**
  * Numeric fields known to live on the cycle-metrics hash. Parsed back from
@@ -253,6 +257,16 @@ export function isHonestNoneVerdict(
  * array. This helper collapses absent, empty, and the "null"/"undefined"
  * stringified sentinels to "unknown"; any genuine anchor type passes through
  * unchanged. Pure and exported so the test suite can pin it without Redis.
+ *
+ * Issue #2824: the read path must ALSO reject the non-empty-but-MALFORMED forms
+ * the write path already rejects — flag-shaped values (`--status`) and the
+ * `unmapped:<skill>` sentinel — so pre-fix rows persisted in Redis before
+ * `classifyAnchorType` (#2806) landed don't resurface here as distinct garbage
+ * buckets. We reuse `isMalformedAnchorType` from cycle-close.ts (the write
+ * path's own predicate) as the single source of truth to prevent write/read
+ * drift, and fold those values to `UNCLASSIFIED_ANCHOR_TYPE` — the SAME bucket
+ * the write path collapses them into — rather than "unknown". "unknown" stays
+ * reserved for the absent/empty/`null`/`undefined` no-value forms.
  */
 export function normalizeAnchorType(raw: unknown): string {
   if (typeof raw !== "string") return "unknown";
@@ -260,6 +274,10 @@ export function normalizeAnchorType(raw: unknown): string {
   if (trimmed.length === 0 || trimmed === "null" || trimmed === "undefined") {
     return "unknown";
   }
+  // Issue #2824: mirror the write-path malformed-value rejection so stale
+  // `--status` / `unmapped:*` rows collapse into the visible `unclassified`
+  // data-quality bucket instead of surfacing as raw garbage strings.
+  if (isMalformedAnchorType(trimmed)) return UNCLASSIFIED_ANCHOR_TYPE;
   return trimmed;
 }
 

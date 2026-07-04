@@ -189,3 +189,90 @@ describe("trend read-path anchorType normalization (issue #2699)", () => {
     assert.strictEqual(normalizeAnchorType("  failing-test  "), "failing-test");
   });
 });
+
+/**
+ * Issue #2824: the metrics READ path must mirror the WRITE path's malformed-
+ * anchorType rejection. `classifyAnchorType`/`isMalformedAnchorType` in
+ * cycle-close.ts (#2806) collapse flag-shaped (`--*`) and `unmapped:*` values
+ * to `unclassified`, but rows persisted BEFORE that fix carry the raw garbage
+ * string; `normalizeAnchorType` now reuses the write path's own predicate as
+ * the single source of truth so those stale rows fold into the same
+ * `unclassified` bucket instead of surfacing as distinct garbage buckets.
+ *
+ * Own top-level describe with its own before/after lifecycle (CLAUDE.md
+ * authoring rule — never piggyback on a sibling's shared-Redis teardown).
+ */
+describe("trend read-path malformed anchorType rejection (issue #2824)", () => {
+  let redis: any;
+
+  async function cleanKeys() {
+    const keys = await redis.keys("hydra:metrics:*");
+    if (keys.length > 0) await redis.del(...keys);
+    await redis.del("hydra:metrics:index");
+  }
+
+  beforeEach(async () => {
+    if (!redis) redis = new Redis(process.env.REDIS_URL);
+    await cleanKeys();
+  });
+
+  after(async () => {
+    await cleanKeys();
+    if (redis) redis.disconnect();
+  });
+
+  async function seedLegacyCycle(cycleId: string, anchorTypeRaw: string) {
+    await redis.hset(
+      redisKeys.metrics(cycleId),
+      ...Object.entries({
+        cycleId,
+        recordedAt: new Date().toISOString(),
+        tasksMerged: "0",
+        anchorType: anchorTypeRaw,
+      }).flat(),
+    );
+    await redis.zadd(redisKeys.metricsIndex(), Date.now(), cycleId);
+  }
+
+  test('a stored flag-shaped "--status" anchorType surfaces as "unclassified" in the trend', async () => {
+    // Reproduces the issue #2824 evidence: hydra:metrics:--cycle-id carried
+    // anchorType "--status", a leaked CLI flag from a positional-arg bug.
+    await seedLegacyCycle("cycle-2824-flag", "--status");
+    const trend = await getMetricsTrend(1);
+    assert.equal(trend.length, 1, "expected the one seeded legacy cycle");
+    assert.strictEqual(
+      trend[0].anchorType,
+      "unclassified",
+      'a stored "--status" anchorType must render as "unclassified", not "--status"',
+    );
+  });
+
+  test('a stored "unmapped:<skill>" anchorType surfaces as "unclassified" in the trend', async () => {
+    await seedLegacyCycle("cycle-2824-unmapped", "unmapped:completed");
+    const trend = await getMetricsTrend(1);
+    assert.strictEqual(
+      trend[0].anchorType,
+      "unclassified",
+      'a stored "unmapped:*" sentinel must render as "unclassified", not the raw string',
+    );
+  });
+
+  test("normalizeAnchorType folds malformed forms to unclassified, keeps real values (pure)", () => {
+    // Flag-shaped: any leading-dash token is a leaked CLI flag, never a lane.
+    assert.strictEqual(normalizeAnchorType("--status"), "unclassified");
+    assert.strictEqual(normalizeAnchorType("-x"), "unclassified");
+    assert.strictEqual(normalizeAnchorType("  --apply  "), "unclassified");
+    // dispatch.sh's unmapped-skill gap-marker sentinel.
+    assert.strictEqual(normalizeAnchorType("unmapped"), "unclassified");
+    assert.strictEqual(normalizeAnchorType("unmapped:completed"), "unclassified");
+    assert.strictEqual(normalizeAnchorType("unmapped:grill"), "unclassified");
+    // Genuine anchor types (including ones that merely CONTAIN a dash) pass through.
+    assert.strictEqual(normalizeAnchorType("work-queue"), "work-queue");
+    assert.strictEqual(normalizeAnchorType("qa-review"), "qa-review");
+    assert.strictEqual(normalizeAnchorType("failing-test"), "failing-test");
+    // No-value forms still fold to "unknown", NOT "unclassified".
+    assert.strictEqual(normalizeAnchorType(""), "unknown");
+    assert.strictEqual(normalizeAnchorType("null"), "unknown");
+    assert.strictEqual(normalizeAnchorType(undefined), "unknown");
+  });
+});
