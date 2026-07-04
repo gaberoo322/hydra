@@ -42,6 +42,41 @@ export function computeRollingMergeRateFromTrend(
 }
 
 /**
+ * Pure projection: the rolling EMPTY-cycle rate of a metrics-trend window, as a
+ * rounded percentage (`Math.round((emptyCount / total) * 100)`).
+ *
+ * An "empty cycle" (a.k.a. "unaccounted cycle", issue #1919) is a cycle that
+ * attempted work but produced no terminal outcome — the read-side mirror of the
+ * write-side `bucketCycleStatus() === null` bucket. The predicate is EXACTLY
+ * `tasksAttempted>0 && tasksMerged==0 && tasksFailed==0 && tasksAbandoned==0`,
+ * null-safe on missing entries (`m?.field ?? 0`). This 1:1 correspondence with
+ * the write-path `unaccounted` bucket is an invariant: if a status is ever added
+ * to `MERGED_STATUSES`/`FAILED_STATUSES`, the two definitions must stay aligned.
+ *
+ * Returns `null` on an empty trend (not `0`): callers must treat "no data" as
+ * distinct from "0% empty" so a healthy fresh start is never misreported (the
+ * same #232 null-on-empty discipline `computeRollingMergeRateFromTrend` uses).
+ *
+ * Rolling WINDOW gauge, never lifetime — historical unaccounted cycles (the
+ * 7772-cycle skew that motivated the #232 merge-rate window) must not distort
+ * the live empty-rate signal. Consumed by `scheduler/heartbeat.ts` for the
+ * `/api/scheduler/status` `emptyRateWindow` surface (issue #2818).
+ */
+export function computeEmptyRateFromTrend(
+  trend: Array<Record<string, any>>,
+): number | null {
+  if (trend.length === 0) return null;
+  const empty = trend.filter(
+    (m) =>
+      (m?.tasksAttempted ?? 0) > 0 &&
+      (m?.tasksMerged ?? 0) === 0 &&
+      (m?.tasksFailed ?? 0) === 0 &&
+      (m?.tasksAbandoned ?? 0) === 0,
+  ).length;
+  return Math.round((empty / trend.length) * 100);
+}
+
+/**
  * Pure projection: fold an already-fetched metrics-trend array into the
  * aggregate-stats shape (`mergedRate` / `regressionRate` / `noOpMergeRate` /
  * the duration averages / the anchor distribution).
