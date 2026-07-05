@@ -22,6 +22,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,50 @@ const repoRoot = path.resolve(here, "..");
 const script = path.join(repoRoot, "dashboard/scripts/build-spritesheet.js");
 const fixtures = path.join(repoRoot, "test/fixtures");
 
+/**
+ * The generator imports `pngjs`, a `dashboard/`-scoped runtime dependency
+ * (declared in dashboard/package.json, installed into dashboard/node_modules).
+ * CI runs `npm ci` in dashboard/, so the module resolves and this whole test
+ * runs at full strength — including the byte-for-byte golden assertion below.
+ *
+ * A git worktree, however, does not carry dashboard/node_modules (the
+ * .claude/worktrees/* layout relies on Node's upward directory walk to the
+ * MAIN tree's root node_modules, which does NOT contain the dashboard-scoped
+ * pngjs). So `node dashboard/scripts/build-spritesheet.js` there dies with
+ * ERR_MODULE_NOT_FOUND before it emits a single byte — a pure module-resolution
+ * failure, not encoder byte-drift. That misdiagnosed "golden-byte drift" flake
+ * false-failed this suite in worktrees 3× (issue #2881) while CI stayed green.
+ *
+ * Guard the environment precondition instead of weakening the assertion: if the
+ * generator's own pngjs dependency is not resolvable from the script's location,
+ * the generator cannot run here at all, so skip cleanly with a clear reason. The
+ * golden bytes are genuinely stable (pngjs is deterministic across environments,
+ * verified: the same fixtures produce byte-equal output wherever pngjs resolves),
+ * so we keep the strict byte comparison as coverage where it can actually run.
+ */
+function spritesheetDepsResolvable(): boolean {
+  try {
+    // Resolve exactly as the script would: relative to its own location, so we
+    // exercise the same dashboard/node_modules → root node_modules walk Node
+    // uses when the generator runs.
+    createRequire(script).resolve("pngjs");
+    return true;
+  } catch {
+    /* intentional: any resolution error means pngjs is not usable from the
+       script's location, so the generator cannot run here — skip cleanly */
+    return false;
+  }
+}
+
+const depsResolvable = spritesheetDepsResolvable();
+const skipReason = depsResolvable
+  ? false
+  : "generator dependency 'pngjs' not resolvable from " +
+    "dashboard/scripts/ (dashboard/node_modules absent — e.g. a git worktree " +
+    "without a dashboard install); generator cannot run, so skipping. This is a " +
+    "worktree-environment gap, NOT byte-drift — CI installs dashboard deps and " +
+    "runs this test at full strength (issue #2881).";
+
 function runScript(inDir: string, outPng: string, outManifest: string): void {
   execFileSync(
     process.execPath,
@@ -39,7 +84,7 @@ function runScript(inDir: string, outPng: string, outManifest: string): void {
   );
 }
 
-test("build-spritesheet: two-frame horizontal strip matches golden bytes", () => {
+test("build-spritesheet: two-frame horizontal strip matches golden bytes", { skip: skipReason }, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), "spritesheet-"));
   try {
     const outPng = path.join(tmp, "out.png");
@@ -64,7 +109,7 @@ test("build-spritesheet: two-frame horizontal strip matches golden bytes", () =>
   }
 });
 
-test("build-spritesheet: trivial single-frame case produces a 1-frame strip", () => {
+test("build-spritesheet: trivial single-frame case produces a 1-frame strip", { skip: skipReason }, () => {
   // Acceptance criterion #4: "handles the trivial single-frame case (produces
   // a 1-frame strip)." Use a fresh tmpdir with one PNG to keep the test self-
   // contained. We parse the manifest and check shape; the script's
