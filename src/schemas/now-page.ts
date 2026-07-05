@@ -16,6 +16,12 @@
 
 import { z } from "zod";
 
+import type {
+  StuckSignal,
+  StuckSignalSeverity,
+  StuckSignalType,
+} from "../autopilot/run-health.ts";
+
 // ---------------------------------------------------------------------------
 // Service strip
 // ---------------------------------------------------------------------------
@@ -230,8 +236,15 @@ export const AutopilotHealthQuerySchema = z
   .strict();
 
 /**
- * The four stuck-signal heuristic types the autopilot-health aggregator
- * computes (issue #890):
+ * Wire schema for the stuck-signal shape. The domain type
+ * (`StuckSignal` / `StuckSignalType` / `StuckSignalSeverity`) is owned by
+ * `src/autopilot/run-health.ts` — the analysis core that produces and ranks
+ * these values (issue #2838). This schema is the HTTP validator only; the
+ * `satisfies` guards below hold it in lock-step with the domain type at
+ * compile time, so a drift between the wire shape and the domain shape is a
+ * typecheck error rather than a silent runtime divergence.
+ *
+ * The four stuck-signal heuristic types (issue #890):
  *   - `stalled-dispatch`   — a live dispatch running past a threshold with no
  *                            fresh tool-call / turn activity.
  *   - `unproductive-loop`  — a class dispatched repeatedly across the history
@@ -245,9 +258,13 @@ const StuckSignalTypeSchema = z.enum([
   "unproductive-loop",
   "idle-streak",
   "issue-pr-churn",
-]);
+]) satisfies z.ZodType<StuckSignalType>;
 
-const StuckSignalSeveritySchema = z.enum(["info", "warn", "critical"]);
+const StuckSignalSeveritySchema = z.enum([
+  "info",
+  "warn",
+  "critical",
+]) satisfies z.ZodType<StuckSignalSeverity>;
 
 /**
  * One ranked stuck signal. `evidence` is an open key/value bag carrying the
@@ -262,7 +279,7 @@ export const StuckSignalSchema = z
     summary: z.string(),
     evidence: z.record(z.string(), z.unknown()),
   })
-  .strict();
+  .strict() satisfies z.ZodType<StuckSignal>;
 
 export const AutopilotHealthResponseSchema = z
   .object({
@@ -272,6 +289,8 @@ export const AutopilotHealthResponseSchema = z
   })
   .strict();
 
-export type StuckSignalSeverity = z.infer<typeof StuckSignalSeveritySchema>;
-export type StuckSignal = z.infer<typeof StuckSignalSchema>;
+// `StuckSignal` / `StuckSignalSeverity` are re-exported from their canonical
+// domain owner (`src/autopilot/run-health.ts`, issue #2838) so existing
+// importers of `schemas/now-page.ts` keep resolving the same type identity.
+export type { StuckSignal, StuckSignalSeverity } from "../autopilot/run-health.ts";
 export type AutopilotHealthResponse = z.infer<typeof AutopilotHealthResponseSchema>;

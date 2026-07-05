@@ -36,7 +36,6 @@
  *   info), then by type for a deterministic order.
  */
 
-import type { StuckSignal } from "../schemas/now-page.ts";
 import { settledOr, settledOrEmpty, settledOrNull } from "./settle.ts";
 import { getAutopilotStatusSnapshot } from "../autopilot/status.ts";
 import { listRecentMergeCommits } from "./recent-merges.ts";
@@ -51,6 +50,7 @@ import {
   type AutopilotHealthThresholds,
   type LiveRunView,
   type RunDigest,
+  type StuckSignal,
 } from "../autopilot/run-health.ts";
 
 // ---------------------------------------------------------------------------
