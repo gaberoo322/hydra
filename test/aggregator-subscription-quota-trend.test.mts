@@ -76,48 +76,38 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-describe("computeQuotaPoints — pure helper", () => {
+describe("computeQuotaPoints — pure helper (current-only)", () => {
   const start = new Date(NOW.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  test("[] when no historical and no current", () => {
-    assert.deepEqual(computeQuotaPoints([], null, start, NOW), []);
+  test("[] when no current snapshot", () => {
+    assert.deepEqual(computeQuotaPoints(null, start, NOW), []);
   });
 
-  test("returns single point with current snapshot only", () => {
-    const out = computeQuotaPoints([], fakeSnapshot(), start, NOW);
+  test("returns single point with current snapshot", () => {
+    const out = computeQuotaPoints(fakeSnapshot(), start, NOW);
     assert.equal(out.length, 1);
     assert.equal(out[0].v, 40);
   });
 
-  test("drops historical points outside the window", () => {
+  test("drops the current snapshot when its timestamp falls outside the window", () => {
     const before = new Date(start.getTime() - 60_000).toISOString();
+    const out = computeQuotaPoints(
+      fakeSnapshot({ generatedAt: before, percentLast7d: 10 }),
+      start,
+      NOW,
+    );
+    assert.deepEqual(out, []);
+  });
+
+  test("keeps a current snapshot just inside the window", () => {
     const inside = new Date(start.getTime() + 60_000).toISOString();
     const out = computeQuotaPoints(
-      [
-        { t: before, percentLast7d: 10 },
-        { t: inside, percentLast7d: 20 },
-      ],
-      null,
+      fakeSnapshot({ generatedAt: inside, percentLast7d: 20 }),
       start,
       NOW,
     );
     assert.equal(out.length, 1);
     assert.equal(out[0].v, 20);
-  });
-
-  test("sorts oldest → newest", () => {
-    const t1 = new Date(start.getTime() + 60_000).toISOString();
-    const t2 = new Date(start.getTime() + 120_000).toISOString();
-    const out = computeQuotaPoints(
-      [
-        { t: t2, percentLast7d: 50 },
-        { t: t1, percentLast7d: 20 },
-      ],
-      null,
-      start,
-      NOW,
-    );
-    assert.deepEqual(out.map((p) => p.v), [20, 50]);
   });
 });
 
@@ -165,35 +155,28 @@ describe("getQuotaTrend — empty state", () => {
   });
 });
 
-describe("getQuotaTrend — window boundary", () => {
-  test("historical point just inside window is kept", async () => {
+describe("getQuotaTrend — window boundary (current snapshot only)", () => {
+  test("current snapshot just inside window is kept", async () => {
     const start = new Date(NOW.getTime() - 7 * 24 * 60 * 60 * 1000);
     const justInside = new Date(start.getTime() + 1_000).toISOString();
     const response = await getQuotaTrend(7, {
       now: NOW,
-      readCurrentSnapshot: async () => fakeSnapshot(),
-      readHistoricalSnapshots: async () => [
-        { t: justInside, percentLast7d: 15 },
-      ],
+      readCurrentSnapshot: async () =>
+        fakeSnapshot({ generatedAt: justInside, percentLast7d: 15 }),
     });
-    // historical + current
-    assert.equal(response.percentBurned.points.length, 2);
+    assert.equal(response.percentBurned.points.length, 1);
     assert.equal(response.percentBurned.points[0].v, 15);
   });
 
-  test("historical point just outside window is dropped", async () => {
+  test("current snapshot just outside window is dropped", async () => {
     const start = new Date(NOW.getTime() - 7 * 24 * 60 * 60 * 1000);
     const justOutside = new Date(start.getTime() - 1_000).toISOString();
     const response = await getQuotaTrend(7, {
       now: NOW,
-      readCurrentSnapshot: async () => fakeSnapshot(),
-      readHistoricalSnapshots: async () => [
-        { t: justOutside, percentLast7d: 15 },
-      ],
+      readCurrentSnapshot: async () =>
+        fakeSnapshot({ generatedAt: justOutside, percentLast7d: 15 }),
     });
-    // only current remains
-    assert.equal(response.percentBurned.points.length, 1);
-    assert.equal(response.percentBurned.points[0].v, 40);
+    assert.deepEqual(response.percentBurned.points, []);
   });
 });
 

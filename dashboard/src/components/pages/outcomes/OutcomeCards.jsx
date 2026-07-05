@@ -19,7 +19,7 @@ export function OutcomeCards({ windowDays = 7 }) {
   return (
     <Section
       title="Outcome trends"
-      subtitle={`Per-outcome 7-day trend vs baseline.`}
+      subtitle={`Per-outcome current reading vs baseline.`}
       right={data?.generatedAt && `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`}
       loading={loading}
       error={error}

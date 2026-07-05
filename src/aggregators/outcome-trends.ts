@@ -10,11 +10,11 @@
  *    list of declared outcomes (baseline, target, direction).
  * 2. For each outcome, `getOutcomeValue()` produces a single current
  *    reading from its source adapter (`file` — the only implemented source
- *    since #933). The
- *    orchestrator does NOT yet persist a per-day history of outcome
- *    evaluations — when history-storage lands, the `readHistoricalPoints`
- *    dep on this aggregator is the seam to plug it into. Until then the
- *    trend renders as a single point with `baseline` shown alongside.
+ *    since #933). The orchestrator does NOT persist a per-day history of
+ *    outcome evaluations, so each outcome renders as a single current point
+ *    with `baseline` shown alongside — an honest "current reading", not a
+ *    rolling trend. (The former `readHistoricalPoints` future-seam was
+ *    retired in #2877: it had no live writer and none was on the roadmap.)
  * 3. `deltaPct` is computed against `baseline` so the dashboard can render
  *    "+12% from baseline" with the right sign per outcome `direction`.
  *
@@ -53,10 +53,10 @@ interface OutcomeTrend {
   name: string;
   direction: "up" | "down";
   /**
-   * One point per available evaluation inside the window. Today the
-   * orchestrator only persists the latest reading, so this is typically a
-   * single point. The seam (`readHistoricalPoints` dep) is ready for a
-   * future PR that adds rolling-window persistence.
+   * The current reading, projected as a single windowed point (or `[]` when
+   * the reading is absent / outside the window). The orchestrator persists
+   * no per-day history, so this is always at most one point — an honest
+   * current reading, not a rolling window (#2877).
    */
   points: TrendPoint[];
   baseline: number;
@@ -81,18 +81,6 @@ export interface OutcomeTrendsDeps {
   loadOutcomes?: () => Promise<Outcome[]>;
   /** Override the per-outcome value reader — defaults to `getOutcomeValue`. */
   readCurrentValue?: (outcome: Outcome) => Promise<OutcomeReading | null>;
-  /**
-   * Seam for a future history-storage backend. Returns an ordered list of
-   * `TrendPoint`s inside the window (oldest → newest). Defaults to `[]`
-   * — combined with the current reading from `readCurrentValue` so the
-   * dashboard still has at least one point. When history storage lands,
-   * pass it here; nothing in the aggregator shape changes.
-   */
-  readHistoricalPoints?: (
-    outcome: Outcome,
-    windowStart: Date,
-    now: Date,
-  ) => Promise<TrendPoint[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +96,6 @@ export async function getOutcomeTrends(
 
   const loader = deps.loadOutcomes ?? defaultLoadOutcomes;
   const reader = deps.readCurrentValue ?? getOutcomeValue;
-  const history = deps.readHistoricalPoints ?? (async () => []);
 
   let outcomes: Outcome[] = [];
   try {
@@ -119,7 +106,7 @@ export async function getOutcomeTrends(
   }
 
   const results = await Promise.allSettled(
-    outcomes.map((o) => buildTrend(o, windowStart, now, reader, history)),
+    outcomes.map((o) => buildTrend(o, windowStart, now, reader)),
   );
 
   const trends: OutcomeTrend[] = [];
@@ -163,18 +150,10 @@ async function buildTrend(
   windowStart: Date,
   now: Date,
   readCurrentValue: (o: Outcome) => Promise<OutcomeReading | null>,
-  readHistoricalPoints: (
-    o: Outcome,
-    s: Date,
-    n: Date,
-  ) => Promise<TrendPoint[]>,
 ): Promise<OutcomeTrend> {
-  const [historical, current] = await Promise.all([
-    readHistoricalPoints(outcome, windowStart, now),
-    readCurrentValue(outcome),
-  ]);
+  const current = await readCurrentValue(outcome);
 
-  const points = bucketPoints(historical, current, windowStart, now);
+  const points = bucketPoints(current, windowStart, now);
   const deltaPct = computeDeltaPct(points, outcome.baseline);
 
   return {
@@ -192,20 +171,20 @@ async function buildTrend(
 // ---------------------------------------------------------------------------
 
 /**
- * Pure helper — exported for tests. Combines a list of historical points
- * with the optional current reading, drops points outside the window, and
- * returns the result sorted oldest → newest. Current reading is appended
- * at `now` if not already covered by a historical point at the same ts.
+ * Pure helper — exported for tests. Projects the current reading into a
+ * single windowed `{ t, v }` point: `[point]` when the reading is present
+ * and inside the window, `[]` otherwise. The orchestrator persists no
+ * per-day history (the `readHistoricalPoints` future-seam was retired in
+ * #2877), so the output is always at most one point.
  */
 export function bucketPoints(
-  historical: TrendPoint[],
   current: OutcomeReading | null,
   windowStart: Date,
   now: Date,
 ): TrendPoint[] {
   // Project the current reading into the canonical `{ t, v }` shape, then
-  // defer the window-clamp + at-now append + oldest→newest sort to the
-  // shared fold.
+  // defer the window-clamp + at-now default + sort to the shared fold with
+  // an empty historical list (the grammar reuse invariant, #956/#2877).
   const currentPoint: TrendPoint | null =
     current && typeof current.value === "number"
       ? {
@@ -213,7 +192,7 @@ export function bucketPoints(
           v: current.value,
         }
       : null;
-  return mergeWindowedPoints(historical, currentPoint, windowStart, now);
+  return mergeWindowedPoints([], currentPoint, windowStart, now);
 }
 
 /**

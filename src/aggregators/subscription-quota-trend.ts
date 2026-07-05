@@ -10,11 +10,13 @@
  *     number from the inverse angle.
  *
  * Both series read from the Subscription Usage Tracker
- * (`src/cost/usage-tracker.ts`, PR A/B series). The tracker today only
- * exposes a single rolling snapshot — there's no persisted per-day
- * history yet. The aggregator includes a `readHistoricalSnapshots` seam
- * so when history-storage lands, the trend extends seamlessly. Until
- * then both series are a single point at `now`.
+ * (`src/cost/usage-tracker.ts`, PR A/B series). The tracker exposes a single
+ * rolling snapshot and the orchestrator persists no per-day history, so both
+ * series are a single current point at `now` — an honest current reading,
+ * not a rolling trend. (The former `readHistoricalSnapshots` future-seam +
+ * `HistoricalSnapshot` type were retired in #2877: no live writer existed —
+ * the usage-weekly-snapshot store is per-ISO-week raw-token data, the wrong
+ * shape/granularity for this per-day `percentLast7d` series.)
  *
  * # Design contract
  *
@@ -55,23 +57,6 @@ export interface QuotaTrendDeps {
   now?: Date;
   /** Override the current snapshot reader — defaults to `getUsage()`. */
   readCurrentSnapshot?: () => Promise<UsageSnapshot>;
-  /**
-   * Seam for a future history-storage backend. Returns ordered usage
-   * snapshots inside the window (oldest → newest). Default is `[]`,
-   * which produces a single-point trend (the current snapshot). When
-   * snapshot persistence lands, plug it in here without touching the
-   * aggregator shape.
-   */
-  readHistoricalSnapshots?: (
-    windowStart: Date,
-    now: Date,
-  ) => Promise<HistoricalSnapshot[]>;
-}
-
-/** Minimal shape needed to plot a historical point. */
-export interface HistoricalSnapshot {
-  t: string;
-  percentLast7d: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,12 +71,8 @@ export async function getQuotaTrend(
   const windowStart = trendWindowStart(now, windowDays);
 
   const reader = deps.readCurrentSnapshot ?? (() => getUsage());
-  const history = deps.readHistoricalSnapshots ?? (async () => []);
 
-  const [snapshotResult, historicalResult] = await Promise.allSettled([
-    reader(),
-    history(windowStart, now),
-  ]);
+  const [snapshotResult] = await Promise.allSettled([reader()]);
 
   let snapshot: UsageSnapshot | null = null;
   if (snapshotResult.status === "fulfilled") {
@@ -101,15 +82,8 @@ export async function getQuotaTrend(
       `[subscription-quota-trend] current snapshot failed: ${snapshotResult.reason?.message || snapshotResult.reason}`,
     );
   }
-  const historical =
-    historicalResult.status === "fulfilled" ? historicalResult.value : [];
-  if (historicalResult.status === "rejected") {
-    console.error(
-      `[subscription-quota-trend] historical fetch failed: ${historicalResult.reason?.message || historicalResult.reason}`,
-    );
-  }
 
-  const points = computeQuotaPoints(historical, snapshot, windowStart, now);
+  const points = computeQuotaPoints(snapshot, windowStart, now);
   const percentBurned = points.map((p) => ({ t: p.t, v: p.v }));
   const headroom = points.map((p) => ({
     t: p.t,
@@ -130,35 +104,21 @@ export async function getQuotaTrend(
 // ---------------------------------------------------------------------------
 
 /**
- * Pure helper — exported for tests. Combines historical snapshots with the
- * current snapshot, drops out-of-window points, and returns the result
- * sorted oldest → newest.
- *
- * - Filters historical points to those whose `t` is inside the window.
- * - Appends the current snapshot at `now` if not already represented.
- * - Returns `[]` when there are no in-window points AND no current
- *   snapshot (the dashboard renders an "uncalibrated / no data" state).
+ * Pure helper — exported for tests. Projects the current usage snapshot into
+ * a single windowed `{ t, v }` point: `[point]` when the snapshot is present
+ * and inside the window, `[]` otherwise (the dashboard renders an
+ * "uncalibrated / no data" state). The orchestrator persists no per-day
+ * snapshot history (the `readHistoricalSnapshots` future-seam was retired in
+ * #2877), so the output is always at most one point.
  */
 export function computeQuotaPoints(
-  historical: HistoricalSnapshot[],
   current: UsageSnapshot | null,
   windowStart: Date,
   now: Date,
 ): QuotaPoint[] {
-  // Project both sources into the canonical `{ t, v }` shape, then defer the
-  // window-clamp + at-now append + oldest→newest sort to the shared fold.
-  const historicalPoints: TrendPoint[] = Array.isArray(historical)
-    ? historical
-        .filter(
-          (h): h is HistoricalSnapshot =>
-            !!h &&
-            typeof h.t === "string" &&
-            typeof h.percentLast7d === "number" &&
-            Number.isFinite(h.percentLast7d),
-        )
-        .map((h) => ({ t: h.t, v: h.percentLast7d }))
-    : [];
-
+  // Project the current snapshot into the canonical `{ t, v }` shape, then
+  // defer the window-clamp + at-now default + sort to the shared fold with
+  // an empty historical list (the grammar reuse invariant, #956/#2877).
   const currentPoint: TrendPoint | null =
     current && typeof current.percentLast7d === "number"
       ? {
@@ -170,7 +130,7 @@ export function computeQuotaPoints(
         }
       : null;
 
-  return mergeWindowedPoints(historicalPoints, currentPoint, windowStart, now);
+  return mergeWindowedPoints([], currentPoint, windowStart, now);
 }
 
 function clamp01(n: number): number {
