@@ -189,6 +189,71 @@ export interface AttributionRecordResult {
 }
 
 // ---------------------------------------------------------------------------
+// Phase-context contracts (named seams — issue #2845)
+// ---------------------------------------------------------------------------
+//
+// Each of the three phase functions accepts a NAMED slice of the resolved
+// `AttributionRecordDeps` plus the shared `result` accumulator, rather than an
+// anonymous inline struct. `runAttributionRecord` is the single place these are
+// assembled from the resolved deps, so adding a field to a phase context surfaces
+// a compile error at that assembly point. The per-item helper contexts are
+// derived (`Pick`) from their phase context so their field lists are never
+// re-spelled. These are exported so the test suite can construct a phase context
+// directly (the minimum fields for that phase) without building a full
+// `AttributionRecordDeps`; the phase functions themselves stay private.
+
+/** Context for the OPEN phase ({@link openWindowsForLandedMerges}). */
+export interface OpenWindowsCtx {
+  listPending: typeof pendingEnrollList;
+  fetchMergeStatus: (prNumber: number) => Promise<MergeStatus | null>;
+  snapshot: (filePath?: string) => Promise<LeadingOutcomeSample[]>;
+  loadOutcomesFn: typeof loadOutcomes;
+  openWindowFn: typeof openWindow;
+  listWindowsFn: typeof listOpenWindows;
+  outcomesFile: string;
+  nowMs: number;
+  result: AttributionRecordResult;
+}
+
+/** Per-merge slice of {@link OpenWindowsCtx} used by {@link openWindowsForOneMerge}. */
+export type OpenOneMergeCtx = Pick<
+  OpenWindowsCtx,
+  "snapshot" | "openWindowFn" | "outcomesFile" | "nowMs" | "result"
+>;
+
+/** Context for the CLOSE phase ({@link closeDueWindows}). */
+export interface CloseWindowsCtx {
+  ledger: AttributionLedger;
+  snapshot: (filePath?: string) => Promise<LeadingOutcomeSample[]>;
+  listWindowsFn: typeof listOpenWindows;
+  closeWindowFn: typeof closeWindow;
+  outcomesFile: string;
+  nowMs: number;
+  result: AttributionRecordResult;
+}
+
+/** Per-window slice of {@link CloseWindowsCtx} used by {@link closeOneWindow}. */
+export type CloseOneWindowCtx = Pick<
+  CloseWindowsCtx,
+  "ledger" | "closeWindowFn" | "nowMs" | "result"
+>;
+
+/** Context for the VOID phase ({@link voidRevertedMerges}). */
+export interface VoidRevertsCtx {
+  ledger: AttributionLedger;
+  listRevertedFn: typeof listRevertedMerges;
+  removeRevertedFn: typeof removeRevertedMerge;
+  nowMs: number;
+  result: AttributionRecordResult;
+}
+
+/** Per-revert slice of {@link VoidRevertsCtx} used by {@link voidOneRevert}. */
+export type VoidOneRevertCtx = Pick<
+  VoidRevertsCtx,
+  "ledger" | "removeRevertedFn" | "nowMs" | "result"
+>;
+
+// ---------------------------------------------------------------------------
 // Chore runner
 // ---------------------------------------------------------------------------
 
@@ -265,17 +330,7 @@ export async function runAttributionRecord(
 // Phase 1: open windows for newly-landed merges
 // ---------------------------------------------------------------------------
 
-async function openWindowsForLandedMerges(ctx: {
-  listPending: typeof pendingEnrollList;
-  fetchMergeStatus: (prNumber: number) => Promise<MergeStatus | null>;
-  snapshot: (filePath?: string) => Promise<LeadingOutcomeSample[]>;
-  loadOutcomesFn: typeof loadOutcomes;
-  openWindowFn: typeof openWindow;
-  listWindowsFn: typeof listOpenWindows;
-  outcomesFile: string;
-  nowMs: number;
-  result: AttributionRecordResult;
-}): Promise<void> {
+async function openWindowsForLandedMerges(ctx: OpenWindowsCtx): Promise<void> {
   const listed = await ctx.listPending();
   if (listed.ok === false) {
     console.error(`[attribution] record: pendingEnrollList failed: ${listed.error}`);
@@ -333,13 +388,7 @@ async function openWindowsForOneMerge(
   entry: PendingEnrollEntry,
   mergeCommitSha: string,
   metricWindowMs: Map<string, number | undefined>,
-  ctx: {
-    snapshot: (filePath?: string) => Promise<LeadingOutcomeSample[]>;
-    openWindowFn: typeof openWindow;
-    outcomesFile: string;
-    nowMs: number;
-    result: AttributionRecordResult;
-  },
+  ctx: OpenOneMergeCtx,
 ): Promise<void> {
   let leading: LeadingOutcomeSample[];
   try {
@@ -377,15 +426,7 @@ async function openWindowsForOneMerge(
 // Phase 2: close due windows → append observations
 // ---------------------------------------------------------------------------
 
-async function closeDueWindows(ctx: {
-  ledger: AttributionLedger;
-  snapshot: (filePath?: string) => Promise<LeadingOutcomeSample[]>;
-  listWindowsFn: typeof listOpenWindows;
-  closeWindowFn: typeof closeWindow;
-  outcomesFile: string;
-  nowMs: number;
-  result: AttributionRecordResult;
-}): Promise<void> {
+async function closeDueWindows(ctx: CloseWindowsCtx): Promise<void> {
   const openListed = await ctx.listWindowsFn();
   if (openListed.ok === false) {
     console.error(`[attribution] record: listOpenWindows failed (close phase): ${openListed.error}`);
@@ -418,12 +459,7 @@ async function closeDueWindows(ctx: {
 async function closeOneWindow(
   window: AttributionWindow,
   currentByName: Map<string, number | null>,
-  ctx: {
-    ledger: AttributionLedger;
-    closeWindowFn: typeof closeWindow;
-    nowMs: number;
-    result: AttributionRecordResult;
-  },
+  ctx: CloseOneWindowCtx,
 ): Promise<void> {
   const curValue = currentByName.has(window.metric)
     ? currentByName.get(window.metric)!
@@ -492,13 +528,7 @@ function ledgerWithIdentity(ledger: AttributionLedger, window: AttributionWindow
 // Phase 3: void reverted merges
 // ---------------------------------------------------------------------------
 
-async function voidRevertedMerges(ctx: {
-  ledger: AttributionLedger;
-  listRevertedFn: typeof listRevertedMerges;
-  removeRevertedFn: typeof removeRevertedMerge;
-  nowMs: number;
-  result: AttributionRecordResult;
-}): Promise<void> {
+async function voidRevertedMerges(ctx: VoidRevertsCtx): Promise<void> {
   const listed = await ctx.listRevertedFn();
   if (listed.ok === false) {
     console.error(`[attribution] record: listRevertedMerges failed: ${listed.error}`);
@@ -514,12 +544,7 @@ async function voidRevertedMerges(ctx: {
 
 async function voidOneRevert(
   revert: RevertedMerge,
-  ctx: {
-    ledger: AttributionLedger;
-    removeRevertedFn: typeof removeRevertedMerge;
-    nowMs: number;
-    result: AttributionRecordResult;
-  },
+  ctx: VoidOneRevertCtx,
 ): Promise<void> {
   const marker: VoidMarker = {
     kind: "void",
