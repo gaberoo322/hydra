@@ -61,6 +61,8 @@ function spritesheetDepsResolvable(): boolean {
     createRequire(script).resolve("pngjs");
     return true;
   } catch {
+    /* intentional: any resolution error means pngjs is not usable from the
+       script's location, so the generator cannot run here — skip cleanly */
     return false;
   }
 }
