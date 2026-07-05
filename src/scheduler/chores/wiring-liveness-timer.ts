@@ -33,9 +33,6 @@ import {
 } from "../../schemas/liveness.ts";
 import { type TimerRecord } from "../../host-probe/probe.ts";
 import { parseConfigYaml, type YamlValue } from "../../config-yaml.ts";
-import type { OutputVerdict } from "./wiring-liveness-output.ts";
-import type { OutcomeVerdict } from "./wiring-liveness-outcomes.ts";
-import type { DarkAlarmResult } from "./wiring-liveness-dark-alarm.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
@@ -156,8 +153,18 @@ type TimerVerdict =
   | { unit: string; status: "not-yet-fired" }
   | { unit: string; status: "stale"; lastFiredMsAgo: number; maxStaleMinutes: number };
 
-/** The chore's never-throwing result object. */
-export interface WiringLivenessResult {
+/**
+ * The timer-check-only result returned by {@link diffTimers}. Contains only the
+ * fields this leaf knows: the timer evaluation verdict, the missing/stale/notYetFired
+ * summaries, and the per-entry verdicts array.
+ *
+ * This is the narrower type that replaces the old `WiringLivenessResult` return of
+ * `diffTimers`. The aggregate chore result ({@link WiringLivenessResult}) now lives
+ * in the coordinator (`wiring-liveness.ts`), which assembles all four check-family
+ * results — timer, output, dark-outcomes, dark-alarm — into a single constructed
+ * object (issue #2844: move aggregate type to coordinator).
+ */
+export interface TimerDiffResult {
   /** True when the manifest loaded and the live timers were read. */
   evaluated: boolean;
   /** When `evaluated` is false, why (load/probe failure). */
@@ -168,37 +175,8 @@ export interface WiringLivenessResult {
   stale: string[];
   /** Declared timers present but never-fired-yet (false-positive guard). */
   notYetFired: string[];
-  /** Declared output sources pinned at/below their floor across the run window. */
-  belowFloor: string[];
-  /** Declared output sources whose live value could not be read this run. */
-  unreadable: string[];
-  /**
-   * Declared `kind: leading` outcomes whose current reading is `null` — no data
-   * (producer never wrote the metric, or the file went missing/unparseable).
-   * Advisory (issue #2753): a dark leading outcome is silent holdback blindness.
-   */
-  darkOutcomes: string[];
-  /**
-   * Declared `kind: leading` outcomes with a finite reading whose file mtime is
-   * OLDER than the grace window — a present-but-old value (a stalled producer),
-   * distinct from a `null` (never-produced) DARK outcome. Invariant 3 (issue
-   * #2753): STALE and DARK are separate verdicts, never conflated. Advisory only.
-   */
-  staleOutcomes: string[];
   /** Every per-entry timer verdict, for diagnostics/tests. */
   verdicts: TimerVerdict[];
-  /** Every per-entry output verdict, for diagnostics/tests. */
-  outputVerdicts: OutputVerdict[];
-  /** Every per-outcome dark/live verdict, for diagnostics/tests (issue #2753). */
-  outcomeVerdicts: OutcomeVerdict[];
-  /**
-   * Outcome-alarm result (issue #2805): which dark leading outcomes crossed the
-   * 7-day sustained-dark threshold and got a fresh `needs-triage` issue filed
-   * this tick, plus the per-outcome alarm actions (below-threshold / already-filed
-   * / filed / file-failed). `undefined` when the alarm did not run (e.g. an
-   * evaluation short-circuit). Advisory — a file failure never aborts the chore.
-   */
-  darkAlarm?: DarkAlarmResult;
 }
 
 /**
@@ -220,7 +198,7 @@ export function diffTimers(
   entries: LivenessEntry[],
   live: TimerRecord[],
   nowMs: number = Date.now(),
-): WiringLivenessResult {
+): TimerDiffResult {
   const byUnit = new Map<string, TimerRecord>();
   for (const rec of live) byUnit.set(rec.unit, rec);
 
@@ -262,12 +240,6 @@ export function diffTimers(
     missing,
     stale,
     notYetFired,
-    belowFloor: [],
-    unreadable: [],
-    darkOutcomes: [],
-    staleOutcomes: [],
     verdicts,
-    outputVerdicts: [],
-    outcomeVerdicts: [],
   };
 }
