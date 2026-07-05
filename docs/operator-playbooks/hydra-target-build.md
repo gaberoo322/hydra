@@ -1097,7 +1097,36 @@ PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MER
   wider.
 
 ### 7.5. Deploy + post-deploy health
+
+**Fast-forward the local main checkout FIRST — mandatory on the auto-merge/PR path (issue #2848).**
+`hydra-betting-web.service` has `WorkingDirectory=/home/gabe/hydra-betting/web` and an
+`ExecStartPre=/usr/bin/npx next build`, so the restart below **builds from the local
+`~/hydra-betting` main checkout, not a worktree.** On the auto-merge/PR path the squash
+landed on `origin/main` via `automerge.yml` (a GitHub-hosted runner with its own
+ephemeral workspace) — no mechanism fast-forwards the local checkout, so without this
+step the restart rebuilds *stale* code that is several commits behind `origin/main`
+(friction cue `betting-deploy-checkout-lags-origin-after-automerge`, 3-hit-escalated).
+The **direct-to-main path already pulls** in Step 7 (`git checkout main && git pull
+--ff-only origin main`, line ~1030), so this block is the auto-merge/PR path's equivalent
+and is a benign no-op there (already current → nothing to fast-forward).
+
+Guard the fast-forward against a dirty or diverged local main: **fail loud and skip the
+merge rather than clobbering local state — never force.** A non-fast-forward means the
+local main diverged from `origin/main` (it should never, since all work is done in
+worktrees) — surface it for operator triage instead of merging or resetting.
+
 ```bash
+# Bring the local main checkout current after the emulated auto-merge (issue #2848).
+# Only fast-forwards; fails loud + skips on a dirty/diverged tree (never force-resets).
+if git -C ~/hydra-betting diff --quiet && git -C ~/hydra-betting diff --cached --quiet; then
+  git -C ~/hydra-betting fetch origin main
+  if ! git -C ~/hydra-betting merge --ff-only origin/main; then
+    echo "WARN: ~/hydra-betting main is not fast-forwardable to origin/main (diverged) — skipping ff, restarting stale. Surface for operator triage; do NOT force-reset."
+  fi
+else
+  echo "WARN: ~/hydra-betting main checkout is dirty — skipping fast-forward, restarting from current tree. Surface for operator triage; do NOT stash/reset autonomously."
+fi
+
 systemctl --user restart hydra-betting-web.service
 
 for i in $(seq 1 18); do
