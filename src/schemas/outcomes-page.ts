@@ -1,18 +1,21 @@
 /**
  * Schemas for the Dashboard v2 Outcomes page (issue #619, PRD #615).
  *
- * Slice 4 — four 7-day-trend aggregators with their HTTP boundary schemas:
+ * Slice 4 — three 7-day-trend aggregators with their HTTP boundary schemas:
  *
  *   GET /api/v2/outcomes/trends      — per-outcome time series + delta
- *   GET /api/v2/outcomes/calibration — tier + cost accuracy time series
  *   GET /api/v2/outcomes/lessons     — promotion rate + top friction
  *   GET /api/v2/outcomes/quota       — subscription quota burn/headroom
+ *
+ * NB: the `GET /api/v2/outcomes/calibration` schema (tier + cost accuracy
+ * time series) was removed with the endpoint in issue #2876 — its backing
+ * lane (`hydra:anchors:calibration:*`) has had no writer since ADR-0016.
  *
  * Schema discipline follows the queue.ts seed (see ADR-0011): `.strict()`
  * objects, trimmed validators, `z.infer<>` for canonical TypeScript types,
  * structured `schema-validation-failed` error envelope at the route.
  *
- * All four endpoints share a `window=7d`-style query — parsed via
+ * All three endpoints share a `window=7d`-style query — parsed via
  * `WindowedDaysQuerySchema`. The dashboard polls every 5min (slow review).
  */
 import { z } from "zod";
@@ -50,20 +53,13 @@ export const WindowedDaysQuerySchema = z
   .strict();
 
 // ---------------------------------------------------------------------------
-// Shared time-series shape — reused by trends, calibration, lessons, quota
+// Shared time-series point — reused by trends, lessons, quota
 // ---------------------------------------------------------------------------
 
 const TrendPointSchema = z
   .object({
     t: z.string(),
     v: z.number(),
-  })
-  .strict();
-
-const TimeSeriesSchema = z
-  .object({
-    points: z.array(TrendPointSchema),
-    sampleSize: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -91,23 +87,6 @@ const OutcomeTrendsResponseSchema = z
   .strict();
 
 export type OutcomeTrendsResponse = z.infer<typeof OutcomeTrendsResponseSchema>;
-
-// ---------------------------------------------------------------------------
-// GET /api/v2/outcomes/calibration
-// ---------------------------------------------------------------------------
-
-const CalibrationTrendResponseSchema = z
-  .object({
-    windowDays: z.number().int().positive(),
-    generatedAt: z.string(),
-    tierAccuracy: TimeSeriesSchema,
-    costAccuracy: TimeSeriesSchema,
-  })
-  .strict();
-
-export type CalibrationTrendResponse = z.infer<
-  typeof CalibrationTrendResponseSchema
->;
 
 // ---------------------------------------------------------------------------
 // GET /api/v2/outcomes/lessons
