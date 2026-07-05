@@ -58,10 +58,10 @@ import {
 // zero-diff import specifier (INV-2). Dependency flows enumerator <- indexer
 // only — never the reverse (INV-4, no circular import).
 import {
-  parseSourcePaths,
   shouldIndexSource,
   enumerateSourceFiles,
   buildSourceTitle,
+  DEFAULT_SOURCE_PATHS,
   type SourcePath,
 } from "./source-enumerator.ts";
 
@@ -324,22 +324,17 @@ export async function indexText(
 
 // Issue #210: Source-file indexing. Indexer also watches src/ (*.ts) and
 // docs/ (*.md) so agents can semantically retrieve actual implementation
-// context, not just config + reports. Comma-separated list of <path>:<ext>
-// entries (extension is glob-less). Defaults to <hydra-root>/src:.ts and
-// <hydra-root>/docs:.md. Override with HYDRA_INDEX_SOURCE_PATHS.
-const HYDRA_ROOT_FOR_SOURCE =
-  process.env.HYDRA_ROOT || resolve(process.env.HOME!, "hydra");
-const DEFAULT_SOURCE_SPEC = `${join(HYDRA_ROOT_FOR_SOURCE, "src")}:.ts,${join(
-  HYDRA_ROOT_FOR_SOURCE,
-  "docs"
-)}:.md,${join(HYDRA_ROOT_FOR_SOURCE, "test")}:.mts`;
+// context, not just config + reports. The env-derived default spec + its
+// parsed SourcePath[] (HYDRA_ROOT_FOR_SOURCE / DEFAULT_SOURCE_SPEC /
+// DEFAULT_SOURCE_PATHS) moved to source-enumerator.ts (issue #2850) so this
+// module and indexer-lifecycle.ts share a single definition instead of each
+// re-deriving it from process.env. SourcePath + parseSourcePaths already moved
+// there in #2767 (imported back above, re-exported below for zero-diff callers,
+// INV-2).
 
-// SourcePath + parseSourcePaths moved to source-enumerator.ts (issue #2767);
-// imported back above and re-exported below for zero-diff callers (INV-2).
-
-const SOURCE_PATHS: SourcePath[] = parseSourcePaths(
-  process.env.HYDRA_INDEX_SOURCE_PATHS || DEFAULT_SOURCE_SPEC
-);
+// SOURCE_PATHS is the module-private alias for the shared default the initial
+// pass falls back to when no explicit `paths` override is supplied.
+const SOURCE_PATHS: SourcePath[] = DEFAULT_SOURCE_PATHS;
 // Files modified within this window get the initial-index pass on startup.
 const SOURCE_INITIAL_WINDOW_MS =
   parseInt(process.env.HYDRA_INDEX_INITIAL_DAYS as any) > 0
@@ -713,6 +708,9 @@ export {
   shouldIndexSource,
   enumerateSourceFiles,
   buildSourceTitle,
+  HYDRA_ROOT_FOR_SOURCE,
+  DEFAULT_SOURCE_SPEC,
+  DEFAULT_SOURCE_PATHS,
 } from "./source-enumerator.ts";
 export type { SourcePath } from "./source-enumerator.ts";
 

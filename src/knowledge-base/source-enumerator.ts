@@ -25,7 +25,7 @@
  * History references preserved from the original indexer.ts Section 2 (#210).
  */
 
-import { extname, join, relative, basename } from "node:path";
+import { extname, join, relative, basename, resolve } from "node:path";
 import { readdir } from "node:fs/promises";
 
 /** Directory names never descended into / never indexed. */
@@ -55,6 +55,46 @@ export function parseSourcePaths(spec: string): SourcePath[] {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Env-derived default source-path configuration (issue #2850).
+//
+// The canonical answer to "what is the default indexer source-path spec, and
+// which SourcePath[] does it parse to?" lives HERE, next to parseSourcePaths —
+// the pure parser the spec flows through. Both OV-coupled consumers
+// (indexer.ts's private SOURCE_PATHS, indexer-lifecycle.ts's IndexerController
+// default) import these instead of each re-deriving them from process.env, so a
+// change to the default spec (e.g. adding a new source tree) is a one-file edit
+// with compiler enforcement that both callers stay in sync.
+//
+// Previously these were duplicated across indexer.ts and indexer-lifecycle.ts
+// with a silent divergence: indexer.ts used `join()` (OS-native separator)
+// while indexer-lifecycle.ts used a forward-slash template literal — equivalent
+// on Linux, divergent on Windows. This single definition uses `join()` (the
+// OS-native, portable form).
+
+/** Hydra root the default source-path spec is derived under. Override with HYDRA_ROOT. */
+export const HYDRA_ROOT_FOR_SOURCE =
+  process.env.HYDRA_ROOT || resolve(process.env.HOME!, "hydra");
+
+/**
+ * Default `<path>:<ext>` spec: <hydra-root>/src:.ts, /docs:.md, /test:.mts.
+ * Built with `join()` so the path separator is OS-native. Override the whole
+ * default set with HYDRA_INDEX_SOURCE_PATHS.
+ */
+export const DEFAULT_SOURCE_SPEC = `${join(HYDRA_ROOT_FOR_SOURCE, "src")}:.ts,${join(
+  HYDRA_ROOT_FOR_SOURCE,
+  "docs"
+)}:.md,${join(HYDRA_ROOT_FOR_SOURCE, "test")}:.mts`;
+
+/**
+ * The parsed default SourcePath[] the production indexer watches when
+ * HYDRA_INDEX_SOURCE_PATHS is unset. The single source of truth both indexer.ts
+ * and indexer-lifecycle.ts import (issue #2850).
+ */
+export const DEFAULT_SOURCE_PATHS: SourcePath[] = parseSourcePaths(
+  process.env.HYDRA_INDEX_SOURCE_PATHS || DEFAULT_SOURCE_SPEC
+);
 
 // Issue #210: Source-file indexing helpers.
 // shouldIndexSource is exported for testing.

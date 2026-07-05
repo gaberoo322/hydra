@@ -29,12 +29,14 @@ import { watch } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { indexText, defaultHashAdapter, HashDedupAdapter } from "./indexer.ts";
-// Issue #2767: the pure enumeration helpers moved to source-enumerator.ts;
-// import parseSourcePaths + SourcePath directly from there to realize the
-// decoupling (the lifecycle controller no longer needs indexer.ts's OV
-// transport just to parse source specs). indexText / defaultHashAdapter /
-// HashDedupAdapter remain OV-coupled and stay imported from indexer.ts.
-import { parseSourcePaths, type SourcePath } from "./source-enumerator.ts";
+// Issue #2767: the pure enumeration helpers moved to source-enumerator.ts.
+// Issue #2850: the env-derived default source-path set (DEFAULT_SOURCE_PATHS)
+// now lives there too, so this module imports the shared default instead of
+// re-deriving it from process.env (dropping the local HYDRA_ROOT_FOR_SOURCE /
+// DEFAULT_SOURCE_SPEC_LC duplicates and their silent forward-slash-vs-join()
+// divergence). indexText / defaultHashAdapter / HashDedupAdapter remain
+// OV-coupled and stay imported from indexer.ts.
+import { DEFAULT_SOURCE_PATHS, type SourcePath } from "./source-enumerator.ts";
 
 // ---------------------------------------------------------------------------
 // Internal constants (Section 4 — preserved 1:1 from indexer.ts)
@@ -48,15 +50,11 @@ const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
 const INDEXABLE_EXTS = new Set([".md", ".txt", ".json", ".yaml", ".yml"]);
 const REDIS_POLL_MS = parseInt(process.env.INDEXER_POLL_MS as any) || 30000;
 
-// Derive the default source paths the same way indexer.ts Section 2 does
-// (reading HYDRA_INDEX_SOURCE_PATHS from env). This avoids exporting the
-// private SOURCE_PATHS constant from indexer.ts.
-const HYDRA_ROOT_FOR_SOURCE =
-  process.env.HYDRA_ROOT || resolve(process.env.HOME!, "hydra");
-const DEFAULT_SOURCE_SPEC_LC = `${HYDRA_ROOT_FOR_SOURCE}/src:.ts,${HYDRA_ROOT_FOR_SOURCE}/docs:.md,${HYDRA_ROOT_FOR_SOURCE}/test:.mts`;
-const DEFAULT_SOURCE_PATHS: SourcePath[] = parseSourcePaths(
-  process.env.HYDRA_INDEX_SOURCE_PATHS || DEFAULT_SOURCE_SPEC_LC
-);
+// The default source-path set (HYDRA_ROOT_FOR_SOURCE / DEFAULT_SOURCE_SPEC /
+// DEFAULT_SOURCE_PATHS) now lives in source-enumerator.ts (issue #2850),
+// imported above. Previously this module re-derived it from env with a
+// forward-slash template literal while indexer.ts used join() — a silent
+// Windows divergence the shared definition eliminates.
 
 // ---------------------------------------------------------------------------
 // Injectable deps surface
