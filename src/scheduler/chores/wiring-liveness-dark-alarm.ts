@@ -52,7 +52,7 @@ export const DEFAULT_DARK_ALARM_MS = 7 * 24 * 60 * 60 * 1000;
 type DarkVerdict = Extract<OutcomeVerdict, { status: "dark" }>;
 
 /** Per-outcome outcome of one alarm pass, for diagnostics/tests. */
-export type DarkAlarmOutcome =
+type DarkAlarmOutcome =
   /** Dark, but the streak has not yet reached the threshold — nothing filed. */
   | { name: string; action: "below-threshold"; darkForMs: number }
   /** Dark past threshold, but an issue was already filed this streak — deduped. */
