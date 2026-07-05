@@ -126,6 +126,14 @@ export interface HoldbackMergeWatchDeps {
     // record for this cycleId) classifies explicitly instead of bucketing to
     // `unclassified`. Absent for pre-#2800 entries → prior inference behaviour.
     anchorType?: string;
+    // Issue #2854: a landed PR merged. For the qa_orch relay case (reap never
+    // wrote a prior cycle-record) this enrichment is the FIRST write, so it must
+    // carry the merged status + counters or recordCycle defaults them to 0 and
+    // buckets the cycle `unaccounted`/empty. On the dedup path recordCycle reads
+    // `existing.status` and ignores these, so already-recorded cycles are safe.
+    status?: string;
+    tasksMerged?: number;
+    tasksAttempted?: number;
   }) => Promise<CycleRecordResult>;
   /** Persist the last-run health snapshot. Defaults to `setMergeWatchHealth`. */
   setHealth?: (record: MergeWatchHealthRecord) => Promise<void>;
@@ -228,6 +236,9 @@ async function processOne(
       prNumber: number;
       filesChanged?: number;
       anchorType?: string;
+      status?: string;
+      tasksMerged?: number;
+      tasksAttempted?: number;
     }) => Promise<CycleRecordResult>;
     result: HoldbackMergeWatchResult;
   },
@@ -282,9 +293,23 @@ async function processOne(
       prNumber: number;
       filesChanged?: number;
       anchorType?: string;
+      status?: string;
+      tasksMerged?: number;
+      tasksAttempted?: number;
     } = {
       cycleId: entry.cycleId,
       prNumber,
+      // Issue #2854: a merge-watch enrichment fires exactly when a PR has LANDED,
+      // so the terminal status is `merged` with one task attempted+merged. For
+      // the qa_orch relay case (reap never wrote a cycle-record for this cycleId)
+      // this is the FIRST write — without these fields recordCycle defaults the
+      // counters to 0 and buckets the cycle `unaccounted`/empty, inflating the
+      // empty-cycle rate. On the dedup path recordCycle short-circuits on
+      // `existing.status` and never reads these, so already-recorded cycles are
+      // unaffected (no double-count).
+      status: "merged",
+      tasksMerged: 1,
+      tasksAttempted: 1,
     };
     if (status.changedFiles != null) cycleBody.filesChanged = status.changedFiles;
     // Issue #2800: forward the explicit anchorType the arming caller recorded on
