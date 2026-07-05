@@ -89,6 +89,32 @@ describe("run-health seam (issue #1378) — pure heuristics, no aggregator deps"
     assert.equal(sig[0].evidence.streak, 3);
   });
 
+  test("detectIdleStreak: a productive run (dispatches>0) breaks the streak even when term_reason is idle", () => {
+    // term_reason "idle" is the normal clean idle-drain exit, NOT a
+    // productivity measure — a run that dispatched work is not idle (#2864).
+    const history: RunDigest[] = [
+      { term_reason: "idle", dispatches: 2 },
+      { term_reason: "idle", dispatches: 0 },
+      { term_reason: "idle", dispatches: 0 },
+    ];
+    const sig = detectIdleStreak(history, T);
+    assert.deepEqual(sig, []);
+  });
+
+  test("detectIdleStreak: only leading dispatches===0 runs count; a productive run cuts the streak at 1", () => {
+    const history: RunDigest[] = [
+      { term_reason: "idle", dispatches: 0 },
+      { term_reason: "idle", dispatches: 2 },
+      { dispatches: 0 },
+    ];
+    // Lower idleStreakMin to 1 so the sub-threshold streak is observable —
+    // proving the count stops at the first productive (dispatches>0) run
+    // rather than crediting the trailing dispatches===0 run.
+    const sig = detectIdleStreak(history, { ...T, idleStreakMin: 1 });
+    assert.equal(sig.length, 1);
+    assert.equal(sig[0].evidence.streak, 1);
+  });
+
   test("detectIssuePrChurn flags a recurring unresolved ref", () => {
     // issue_ref is read defensively (extractRefs) and not a declared RunDigest
     // field, so the fixture casts through unknown — same pattern as

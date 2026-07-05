@@ -367,9 +367,10 @@ export function detectUnproductiveLoops(
 // ---------------------------------------------------------------------------
 // Heuristic 3: idle streak — pure, exported for tests
 //
-// A run is "idle/no-op" when it terminated with term_reason "idle" OR
-// produced zero dispatches. We count the leading streak of such runs from the
-// newest end of the window (history is newest-first).
+// A run is "idle/no-op" when it produced zero dispatches. We count the leading
+// streak of such runs from the newest end of the window (history is
+// newest-first). term_reason "idle" is the normal clean idle-drain exit (a
+// termination cause, not a productivity measure), so it must NOT gate idle-ness.
 // ---------------------------------------------------------------------------
 
 export function detectIdleStreak(
@@ -378,8 +379,7 @@ export function detectIdleStreak(
 ): StuckSignal[] {
   let streak = 0;
   for (const run of history) {
-    const idle =
-      toStr(run.term_reason) === "idle" || toNum(run.dispatches) === 0;
+    const idle = toNum(run.dispatches) === 0;
     if (!idle) break;
     streak += 1;
   }
