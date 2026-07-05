@@ -117,7 +117,7 @@ export function parseWorktreeList(
 }
 
 /** Live-PID predicate — true iff the given PID is currently running on this host. */
-export type LivePidCheck = (pid: number) => boolean;
+type LivePidCheck = (pid: number) => boolean;
 
 /**
  * Canonical host liveness predicate — the ONE `kill -0` probe the orchestrator
