@@ -31,6 +31,7 @@ import {
   initCycleHash,
   getCycleHash,
   addCycleToIndex,
+  updateCycleHash,
 } from "../redis/cycle-tracking.ts";
 import {
   incrSchedulerCyclesRun,
@@ -99,6 +100,13 @@ interface AutopilotRunsCycleFacade {
     ttlSeconds: number,
   ): Promise<void>;
   addCycleToIndex(cycleId: string, score: number): Promise<void>;
+  /**
+   * Additive HSET of cycle-hash fields (issue #2860). Used ONLY by the
+   * `completed→merged` status-upgrade on the dedup/enrichment path so the
+   * cycle-hash `status` stays consistent with the metrics-hash `tasksMerged`
+   * bump. Never re-initialises the hash and never fires a counter.
+   */
+  updateCycleHash(cycleId: string, fields: Record<string, string>): Promise<void>;
 }
 
 /** Lifetime scheduler counters `recordCycle` bumps (the #1919 buckets). */
@@ -131,6 +139,7 @@ const defaultCycleCloseDeps: CycleCloseDeps = {
     getCycleHash,
     initCycleHash,
     addCycleToIndex,
+    updateCycleHash,
   },
   scheduler: {
     incrSchedulerCyclesRun,
@@ -231,6 +240,39 @@ export async function recordCycle(
     // (enriched:false), preserving AC4/AC9's "re-post does not double-count".
     const existing = await deps.cycle.getCycleHash(cycleId);
     if (existing && existing.status) {
+      // Issue #2860: the `completed → merged` status UPGRADE.
+      //
+      // reap.py is the SOLE first-writer and always files a record at
+      // status='completed' with tasksMerged UNSET (it runs BEFORE the merge
+      // decision is known, #430). When that PR later lands, the merge-watch
+      // enrichment (or the reconcile backstop) re-posts with status='merged' +
+      // tasksMerged=1. But the pre-#2860 dedup branch only ever enriched
+      // filesChanged/prNumber/duration and DROPPED the status + tasksMerged, so
+      // an already-`completed` record's `tasksMerged` stayed 0 forever — and the
+      // dashboard trend/aggregate reads `tasksMerged>0` as its SINGLE merged
+      // predicate (metrics/aggregate.ts), so merged cycles showed 0% merged.
+      //
+      // This upgrades the metrics `tasksMerged` (and the cycle-hash `status`, so
+      // the two stay consistent) WITHOUT touching any lifetime scheduler counter.
+      // The counter invariant is preserved for free: 'completed' is already in
+      // MERGED_STATUSES (cycle-status.ts), so the first write ALREADY bumped
+      // `cyclesMerged` once — re-firing it here would double-count. The upgrade
+      // is therefore metrics-hash-only, keeping "counters fire exactly once per
+      // cycleId" intact. It fires ONLY for a `completed → merged` transition; an
+      // existing 'merged'/'failed'/other status is terminal and never mutated.
+      const incomingStatus =
+        typeof body.status === "string" ? body.status.trim().toLowerCase() : "";
+      const existingStatus = existing.status.trim().toLowerCase();
+      let statusUpgraded = false;
+      if (existingStatus === "completed" && incomingStatus === "merged") {
+        const upgradeMerged = numberOrDefault(body.tasksMerged, 1);
+        await deps.metrics.recordCycleMetrics(cycleId, {
+          tasksMerged: upgradeMerged > 0 ? upgradeMerged : 1,
+        });
+        await deps.cycle.updateCycleHash(cycleId, { status: "merged" });
+        statusUpgraded = true;
+      }
+
       const enrichFiles = filesChangedCount(body.filesChanged);
       const enrichPr = body.prNumber !== undefined ? String(body.prNumber) : undefined;
       const enrichment: CycleMetricsInput = {};
@@ -248,7 +290,7 @@ export async function recordCycle(
       const enrichDuration = numberOrDefault(body.totalDurationMs, 0);
       if (enrichDuration > 0) enrichment.totalDurationMs = enrichDuration;
 
-      let enriched = false;
+      let enriched = statusUpgraded;
       if (Object.keys(enrichment).length > 0) {
         // recordCycleMetrics does an additive HSET, so this updates only the
         // enriched fields on the existing metrics hash — counters untouched.
@@ -258,7 +300,10 @@ export async function recordCycle(
       return {
         ok: true,
         cycleId,
-        status: existing.status,
+        // Issue #2860: surface the upgraded status so a caller that just bumped
+        // completed→merged observes 'merged', while a plain dedup still reports
+        // the stored status.
+        status: statusUpgraded ? "merged" : existing.status,
         bucketed: null,
         deduped: true,
         enriched,

@@ -67,6 +67,7 @@ import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts"
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
+import { runCycleMergeReconcile } from "./chores/cycle-merge-reconcile.ts";
 import { runAttributionRecord } from "../outcome-attribution/subscribe.ts";
 
 // ---------------------------------------------------------------------------
@@ -375,6 +376,27 @@ async function runHousekeeping(
     },
 
     {
+      // Issue #2860: cycle-record merged-status reconciliation BACKSTOP — the
+      // second layer of the merged-status enrichment path, sibling to
+      // holdback-merge-watch. It scans recent `status=completed` cycle records
+      // carrying a prNumber, confirms the PR merged via `gh pr view`, and re-posts
+      // through recordCycle to perform the `completed→merged` upgrade (bumping the
+      // metrics tasksMerged without re-firing any lifetime counter). This
+      // self-heals cycles the primary merge-watch path missed — PRs that were
+      // never armed into the pending-enroll registry (a dropped POST / crash
+      // mid-arm), the dominant failure that left 0/50 recent cycles with
+      // tasksMerged>0 despite merging. No Redis time-guard — intrinsically
+      // idempotent (an upgraded record no longer matches the `completed` filter),
+      // and bounded per-tick (scanLimit records, confirmLimit gh calls) so a
+      // historical backlog drains gradually. Never throws — per-PR gh failures
+      // are logged and retried next tick.
+      name: "cycle-merge-reconcile",
+      work: async () => {
+        await runCycleMergeReconcile();
+      },
+    },
+
+    {
       // Issue #2632: outcome-attribution recorder. Reacts to merge LANDINGS off
       // the same pending-enroll substrate as holdback-merge-watch — opens a
       // per-metric window on landing, closes each on its own configured duration
@@ -410,4 +432,8 @@ export {
   // fake `setReconcilerHealth` and assert the last-run health snapshot is
   // persisted (feed liveness + batch metrics) without standing up Redis.
   runMergedItemReconciler,
+  // Issue #2860: exported so a unit test can inject the cycle-merge-reconcile
+  // chore's deps (recent-id list, metrics getter, gh state fetch, recordCycle)
+  // and assert the completed→merged upgrade path without standing up Redis / gh.
+  runCycleMergeReconcile,
 };

@@ -136,6 +136,12 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
       async addCycleToIndex(cycleId, score) {
         store.cycleIndex.set(cycleId, score);
       },
+      // Issue #2860: additive HSET onto the cycle-hash, used only by the
+      // completed→merged status upgrade on the dedup path.
+      async updateCycleHash(cycleId, fields) {
+        const existing = store.cycles.get(cycleId) ?? {};
+        store.cycles.set(cycleId, { ...existing, ...fields });
+      },
     },
     scheduler: {
       async incrSchedulerCyclesRun() {
@@ -405,8 +411,12 @@ describe("recordCycle — injected deps (#2158)", () => {
 
     // A follow-up carrying duration 0 and no other new data must stay a true
     // no-op — it must NOT enrich (and the real first-write duration is untouched).
+    // NOTE (#2860): the status is kept `completed` here (not `merged`) so this
+    // case isolates the #2364 DURATION-forwarding policy from the #2860
+    // completed→merged status upgrade — a `merged` re-post would legitimately
+    // enrich via the status bump, which is asserted separately in the #2860 block.
     const r2 = await recordCycle(
-      { cycleId: "c-dur0", status: "merged", totalDurationMs: 0 } as any,
+      { cycleId: "c-dur0", status: "completed", totalDurationMs: 0 } as any,
       deps,
     );
     assert.equal((r2 as any).deduped, true);
@@ -466,6 +476,89 @@ describe("recordCycle — injected deps (#2158)", () => {
     assert.equal(store.counters.failed, 1, "failed counter did NOT re-fire");
     assert.equal(store.counters.merged, 0, "the merged counter is NOT bumped by the ignored status");
     assert.equal(store.cycles.get("c-relay-dedup")!.status, "failed", "stored status unchanged");
+  });
+
+  // Issue #2860: the `completed → merged` UPGRADE on the dedup path. reap.py
+  // files EVERY cycle at status='completed' with tasksMerged UNSET (it runs
+  // before the merge decision, #430). Before #2860 the dedup branch enriched
+  // only filesChanged/prNumber/duration and DROPPED the incoming merged status +
+  // tasksMerged — so an already-`completed` record's tasksMerged stayed 0 forever
+  // and the dashboard trend (which reads tasksMerged>0 as its SINGLE merged
+  // predicate) showed merged cycles as 0% merged. This asserts the upgrade bumps
+  // the metrics tasksMerged (and the cycle-hash status) WITHOUT re-firing any
+  // lifetime counter — 'completed' is already in MERGED_STATUSES, so the first
+  // write already bumped cyclesMerged once; the upgrade must not double-count.
+  test("#2860: a completed→merged enrichment upgrades tasksMerged to 1 WITHOUT re-firing a counter", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    // Phase 1 — reap-time first write: completed, tasksMerged unset (defaults 0).
+    await recordCycle({ cycleId: "c-2860", status: "completed" } as any, deps);
+    assert.equal(store.counters.run, 1);
+    assert.equal(store.counters.merged, 1, "completed is a MERGED_STATUS ⇒ counter fired once");
+    assert.equal(store.metrics.get("c-2860")!.tasksMerged, "0", "reap-time record has 0 merged");
+    assert.equal(store.cycles.get("c-2860")!.status, "completed");
+
+    // Phase 2 — the PR merged; merge-watch/reconciler re-posts status:'merged'.
+    const r2 = await recordCycle(
+      { cycleId: "c-2860", status: "merged", tasksMerged: 1, prNumber: 2860 } as any,
+      deps,
+    );
+    assert.equal((r2 as any).deduped, true, "still a dedup on the count/bucket surface");
+    assert.equal((r2 as any).bucketed, null, "no re-bucket");
+    assert.equal((r2 as any).enriched, true, "the metrics hash was upgraded");
+    assert.equal((r2 as any).status, "merged", "returned status reflects the upgrade");
+    // The merged predicate is now satisfied.
+    assert.equal(store.metrics.get("c-2860")!.tasksMerged, "1", "tasksMerged upgraded to 1");
+    assert.equal(store.metrics.get("c-2860")!.prNumber, "2860", "prNumber also enriched");
+    assert.equal(store.cycles.get("c-2860")!.status, "merged", "cycle-hash status upgraded");
+    // The invariant that matters: NO counter re-fire (fire-exactly-once).
+    assert.equal(store.counters.run, 1, "run counter did NOT re-fire");
+    assert.equal(store.counters.merged, 1, "merged counter did NOT re-fire on the upgrade");
+    assert.equal(store.counters.unaccounted, 0);
+  });
+
+  // Issue #2860: the upgrade is idempotent — once a record is at 'merged',
+  // re-observing a merged re-post is a plain dedup no-op (no further mutation,
+  // no counter). This proves a reconciler that re-scans an already-upgraded
+  // record does not double-anything.
+  test("#2860: re-posting merged onto an already-merged record is an idempotent no-op", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle({ cycleId: "c-2860-idem", status: "completed" } as any, deps);
+    // First upgrade.
+    await recordCycle({ cycleId: "c-2860-idem", status: "merged", tasksMerged: 1 } as any, deps);
+    assert.equal(store.metrics.get("c-2860-idem")!.tasksMerged, "1");
+    assert.equal(store.counters.merged, 1);
+
+    // Second merged re-post — existing status is now 'merged' (terminal), so no
+    // upgrade branch fires and nothing carrying new data means enriched:false.
+    const r3 = await recordCycle(
+      { cycleId: "c-2860-idem", status: "merged", tasksMerged: 1 } as any,
+      deps,
+    );
+    assert.equal((r3 as any).deduped, true);
+    assert.equal((r3 as any).enriched, false, "no new data ⇒ plain dedup, not a re-upgrade");
+    assert.equal((r3 as any).status, "merged");
+    assert.equal(store.counters.merged, 1, "merged counter still fired exactly once");
+  });
+
+  // Issue #2860: the upgrade fires ONLY for completed→merged. A completed record
+  // that receives a NON-merged re-post (e.g. a plain filesChanged enrichment)
+  // must NOT be flipped to merged and must NOT gain a tasksMerged. This guards
+  // against a stray enrichment silently marking a not-yet-landed cycle merged.
+  test("#2860: a completed record is NOT upgraded when the re-post status is not 'merged'", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await recordCycle({ cycleId: "c-2860-noup", status: "completed" } as any, deps);
+    const r2 = await recordCycle(
+      { cycleId: "c-2860-noup", status: "completed", filesChanged: 3 } as any,
+      deps,
+    );
+    assert.equal((r2 as any).enriched, true, "filesChanged still enriches");
+    assert.equal((r2 as any).status, "completed", "status stays completed, not upgraded");
+    assert.equal(store.cycles.get("c-2860-noup")!.status, "completed");
+    assert.equal(store.metrics.get("c-2860-noup")!.tasksMerged, "0", "no spurious tasksMerged bump");
+    assert.equal(store.metrics.get("c-2860-noup")!.filesChanged, "3");
   });
 });
 

@@ -100,6 +100,11 @@ function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
       async addCycleToIndex(cycleId, score) {
         store.cycleIndex.set(cycleId, score);
       },
+      // Issue #2860: additive HSET onto the cycle-hash (completed→merged upgrade).
+      async updateCycleHash(cycleId, fields) {
+        const existing = store.cycles.get(cycleId) ?? {};
+        store.cycles.set(cycleId, { ...existing, ...fields });
+      },
     },
     scheduler: {
       async incrSchedulerCyclesRun() {
