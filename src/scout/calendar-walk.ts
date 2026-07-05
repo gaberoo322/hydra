@@ -61,8 +61,11 @@ import {
 import { classByName } from "../taxonomy/classes.ts";
 import { InvariantViolationError } from "../errors.ts";
 // Walk-surface enumeration (FS-I/O leaf) lives in a sibling module (issue
-// #2826). Re-exported below so existing importers of these symbols from
-// calendar-walk.ts keep working unchanged.
+// #2826). `listRuntimeDependencies` / `parseCategorySlugs` are re-exported
+// below so existing importers of those symbols from calendar-walk.ts keep
+// working unchanged; `listCategories` / `WalkTarget` are imported for
+// in-file use only (their re-exports had no external consumers — demoted
+// per the #2873 cleanup scan).
 import {
   listCategories,
   listRuntimeDependencies,
@@ -70,15 +73,10 @@ import {
   type WalkTarget,
 } from "./calendar-walk-surface.ts";
 
-// Re-export the walk-surface enumeration so `calendar-walk.ts` remains the
-// stable import site for callers (interfaceImpact=none, design-concept
-// invariant 3).
-export {
-  listCategories,
-  listRuntimeDependencies,
-  parseCategorySlugs,
-  type WalkTarget,
-};
+// Re-export the externally-consumed walk-surface enumeration so
+// `calendar-walk.ts` remains the stable import site for callers
+// (interfaceImpact=none, design-concept invariant 3).
+export { listRuntimeDependencies, parseCategorySlugs };
 
 // ---------------------------------------------------------------------------
 // Constants
