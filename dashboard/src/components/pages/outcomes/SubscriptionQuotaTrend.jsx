@@ -24,7 +24,7 @@ export function SubscriptionQuotaTrend({ windowDays = 7 }) {
       title="Subscription quota"
       subtitle={
         calibrated
-          ? `Weekly burn vs headroom (last ${windowDays}d).`
+          ? `Weekly burn vs headroom (current reading).`
           : `Uncalibrated — set HYDRA_USAGE_WEEKLY_QUOTA_TOKENS and HYDRA_USAGE_5H_QUOTA_TOKENS to enable.`
       }
       right={data?.generatedAt && `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`}

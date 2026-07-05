@@ -33,16 +33,15 @@ const SAMPLE_OUTCOME: Outcome = {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-describe("bucketPoints — pure helper", () => {
+describe("bucketPoints — pure helper (current-only)", () => {
   const start = new Date(NOW.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  test("returns [] when no historical and no current", () => {
-    assert.deepEqual(bucketPoints([], null, start, NOW), []);
+  test("returns [] when no current reading", () => {
+    assert.deepEqual(bucketPoints(null, start, NOW), []);
   });
 
-  test("returns [current] when only current reading is present", () => {
+  test("returns [current] when a current reading is present", () => {
     const result = bucketPoints(
-      [],
       { value: 0.4, ts: NOW.toISOString() },
       start,
       NOW,
@@ -51,50 +50,16 @@ describe("bucketPoints — pure helper", () => {
     assert.equal(result[0].v, 0.4);
   });
 
-  test("drops points outside the window", () => {
+  test("drops the current reading when it falls outside the window", () => {
     const before = new Date(start.getTime() - 60_000).toISOString();
+    const result = bucketPoints({ value: 0.1, ts: before }, start, NOW);
+    assert.deepEqual(result, []);
+  });
+
+  test("keeps a current reading just inside the window", () => {
     const inside = new Date(start.getTime() + 60_000).toISOString();
-    const result = bucketPoints(
-      [
-        { t: before, v: 0.1 },
-        { t: inside, v: 0.2 },
-      ],
-      null,
-      start,
-      NOW,
-    );
+    const result = bucketPoints({ value: 0.2, ts: inside }, start, NOW);
     assert.equal(result.length, 1);
-    assert.equal(result[0].v, 0.2);
-  });
-
-  test("sorts oldest → newest", () => {
-    const t1 = new Date(start.getTime() + 60_000).toISOString();
-    const t2 = new Date(start.getTime() + 120_000).toISOString();
-    const result = bucketPoints(
-      [
-        { t: t2, v: 0.3 },
-        { t: t1, v: 0.2 },
-      ],
-      null,
-      start,
-      NOW,
-    );
-    assert.deepEqual(
-      result.map((p) => p.v),
-      [0.2, 0.3],
-    );
-  });
-
-  test("dedupes current ts already in historical", () => {
-    const ts = new Date(start.getTime() + 60_000).toISOString();
-    const result = bucketPoints(
-      [{ t: ts, v: 0.2 }],
-      { value: 0.999, ts },
-      start,
-      NOW,
-    );
-    assert.equal(result.length, 1);
-    // First write wins (historical). Current does not duplicate.
     assert.equal(result[0].v, 0.2);
   });
 });
@@ -207,27 +172,26 @@ describe("getOutcomeTrends — empty state", () => {
 // Window boundary
 // ---------------------------------------------------------------------------
 
-describe("getOutcomeTrends — window boundary", () => {
-  test("historical point just inside window is kept", async () => {
+describe("getOutcomeTrends — window boundary (current reading only)", () => {
+  test("current reading just inside window is kept", async () => {
     const start = new Date(NOW.getTime() - 7 * 24 * 60 * 60 * 1000);
     const justInside = new Date(start.getTime() + 1_000).toISOString();
     const response = await getOutcomeTrends(7, {
       now: NOW,
       loadOutcomes: async () => [SAMPLE_OUTCOME],
-      readCurrentValue: async () => null,
-      readHistoricalPoints: async () => [{ t: justInside, v: 0.27 }],
+      readCurrentValue: async () => ({ value: 0.27, ts: justInside }),
     });
     assert.equal(response.outcomes[0].points.length, 1);
+    assert.equal(response.outcomes[0].points[0].v, 0.27);
   });
 
-  test("historical point just outside window is dropped", async () => {
+  test("current reading just outside window is dropped", async () => {
     const start = new Date(NOW.getTime() - 7 * 24 * 60 * 60 * 1000);
     const justOutside = new Date(start.getTime() - 1_000).toISOString();
     const response = await getOutcomeTrends(7, {
       now: NOW,
       loadOutcomes: async () => [SAMPLE_OUTCOME],
-      readCurrentValue: async () => null,
-      readHistoricalPoints: async () => [{ t: justOutside, v: 0.27 }],
+      readCurrentValue: async () => ({ value: 0.27, ts: justOutside }),
     });
     assert.deepEqual(response.outcomes[0].points, []);
   });
