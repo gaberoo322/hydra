@@ -9,7 +9,7 @@ import {
 } from "../metrics/aggregate.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
 import { CycleRecordBodySchema } from "../autopilot/schemas.ts";
-import { classifyAnchorType } from "../autopilot/cycle-close.ts";
+import { classifyAnchorType } from "../autopilot/anchor-type.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";

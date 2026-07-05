@@ -16,7 +16,7 @@ import { NUMERIC_FIELD_NAMES } from "./record.ts";
 import {
   isMalformedAnchorType,
   UNCLASSIFIED_ANCHOR_TYPE,
-} from "../autopilot/cycle-close.ts";
+} from "../autopilot/anchor-type.ts";
 
 /**
  * Numeric fields known to live on the cycle-metrics hash. Parsed back from
@@ -262,8 +262,9 @@ export function isHonestNoneVerdict(
  * the write path already rejects — flag-shaped values (`--status`) and the
  * `unmapped:<skill>` sentinel — so pre-fix rows persisted in Redis before
  * `classifyAnchorType` (#2806) landed don't resurface here as distinct garbage
- * buckets. We reuse `isMalformedAnchorType` from cycle-close.ts (the write
- * path's own predicate) as the single source of truth to prevent write/read
+ * buckets. We reuse `isMalformedAnchorType` from the shared anchor-type policy
+ * leaf (`src/autopilot/anchor-type.ts`, extracted from the write coordinator in
+ * #2858) as the single source of truth to prevent write/read
  * drift, and fold those values to `UNCLASSIFIED_ANCHOR_TYPE` — the SAME bucket
  * the write path collapses them into — rather than "unknown". "unknown" stays
  * reserved for the absent/empty/`null`/`undefined` no-value forms.
