@@ -1,6 +1,6 @@
 /**
- * Tiny inline SVG sparkline — used by the OutcomeCards, CalibrationTrend,
- * LessonsTrend, and SubscriptionQuotaTrend sections. Pure presentational:
+ * Tiny inline SVG sparkline — used by the OutcomeCards, LessonsTrend,
+ * and SubscriptionQuotaTrend sections. Pure presentational:
  * takes a list of `{t, v}` points and renders a polyline scaled to its
  * width/height. Renders gracefully with 0 or 1 points (single dot for
  * one point, nothing for zero).

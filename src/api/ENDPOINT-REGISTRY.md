@@ -375,7 +375,6 @@ broad consumers are:
 
 | Method | Path | Stability |
 |---|---|---|
-| GET | `/api/outcomes/calibration` | stable |
 | GET | `/api/outcomes/lessons` | stable |
 | GET | `/api/outcomes/quota` | stable |
 | GET | `/api/outcomes/trends` | stable |

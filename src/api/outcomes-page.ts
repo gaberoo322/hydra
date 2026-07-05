@@ -1,15 +1,23 @@
 /**
  * Dashboard v2 — Outcomes page HTTP surface (issue #619, PRD #615 slice 4).
  *
- * Four 7-day trend endpoints, each a thin adapter over a dedicated
+ * Three 7-day trend endpoints, each a thin adapter over a dedicated
  * aggregator under `src/aggregators/`:
  *
  *   GET /api/v2/outcomes/trends       — outcome-trends.ts
- *   GET /api/v2/outcomes/calibration  — calibration-trend.ts
  *   GET /api/v2/outcomes/lessons      — lessons-trend.ts
  *   GET /api/v2/outcomes/quota        — subscription-quota-trend.ts
  *
- * All four share the `WindowedDaysQuerySchema` query — `?window=7d` style.
+ * NB: `GET /api/v2/outcomes/calibration` + its `calibration-trend`
+ * aggregator were DECOMMISSIONED (issue #2876). The lane it read
+ * (`hydra:anchors:calibration:*`) has had no writer since ADR-0016
+ * retired `anchor-scorer.ts`, so the endpoint always returned empty
+ * sparklines — a live-looking-but-empty dead lane. Removed rather than
+ * rerouted onto the attribution ledger (`hydra:attribution:*`), which is
+ * currently also empty; the reroute is deferred to a future issue gated
+ * on that ledger having rows.
+ *
+ * All three share the `WindowedDaysQuerySchema` query — `?window=7d` style.
  * Each route follows the same shape: parse the query through zod, return
  * `schema-validation-failed` on bad input, delegate to the pure aggregator
  * otherwise. Aggregators are overridable via the `deps` factory parameter
@@ -25,7 +33,6 @@ import { aggregatorRoute } from "./route-helpers.ts";
 import {
   WindowedDaysQuerySchema,
   type OutcomeTrendsResponse,
-  type CalibrationTrendResponse,
   type LessonsTrendResponse,
   type QuotaTrendResponse,
 } from "../schemas/outcomes-page.ts";
@@ -33,10 +40,6 @@ import {
   getOutcomeTrends,
   type OutcomeTrendsDeps,
 } from "../aggregators/outcome-trends.ts";
-import {
-  getCalibrationTrend,
-  type CalibrationTrendDeps,
-} from "../aggregators/calibration-trend.ts";
 import {
   getLessonsTrend,
   type LessonsTrendDeps,
@@ -56,10 +59,6 @@ export interface OutcomesPageRouterDeps {
     windowDays: number,
     deps?: OutcomeTrendsDeps,
   ) => Promise<OutcomeTrendsResponse>;
-  getCalibrationTrend?: (
-    windowDays: number,
-    deps?: CalibrationTrendDeps,
-  ) => Promise<CalibrationTrendResponse>;
   getLessonsTrend?: (
     windowDays: number,
     deps?: LessonsTrendDeps,
@@ -73,7 +72,6 @@ export interface OutcomesPageRouterDeps {
 export function createOutcomesPageRouter(deps: OutcomesPageRouterDeps = {}) {
   const router = Router();
   const aggregateTrends = deps.getOutcomeTrends ?? getOutcomeTrends;
-  const aggregateCalibration = deps.getCalibrationTrend ?? getCalibrationTrend;
   const aggregateLessons = deps.getLessonsTrend ?? getLessonsTrend;
   const aggregateQuota = deps.getQuotaTrend ?? getQuotaTrend;
 
@@ -84,18 +82,6 @@ export function createOutcomesPageRouter(deps: OutcomesPageRouterDeps = {}) {
     "/outcomes/trends",
     aggregatorRoute(WindowedDaysQuerySchema, "v2/outcomes/trends", (data) =>
       aggregateTrends(data.window),
-    ),
-  );
-
-  // -------------------------------------------------------------------------
-  // GET /v2/outcomes/calibration
-  // -------------------------------------------------------------------------
-  router.get(
-    "/outcomes/calibration",
-    aggregatorRoute(
-      WindowedDaysQuerySchema,
-      "v2/outcomes/calibration",
-      (data) => aggregateCalibration(data.window),
     ),
   );
 
