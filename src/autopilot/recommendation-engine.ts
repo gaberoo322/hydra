@@ -21,103 +21,84 @@
  * record so the unit tests can inject a fake clock, a fake LLM, a fake
  * Redis seam, and a fake event broadcaster.
  *
- * ## Module shape (issue #2317)
+ * ## Module shape (issue #2317, #2867)
  *
- * This module is the single, deep composition point for the recs engine. It
- * was decomposed into five sibling files via successive extraction PRs (#1986
+ * This module is the deep composition point for the recs engine. It was
+ * decomposed into five sibling files via successive extraction PRs (#1986
  * materiality, #2240 prompt, #2119 cap, #2024 consumer), which produced a
- * shallow pass-through: the engine re-exported its own materiality and prompt
- * grammar, so a reader scanning the engine body saw imports + re-exports
- * rather than the firing logic. #2317 folded the four PURE concerns back into
- * one module organised by concern SECTION rather than by file — the
- * materiality gate, the prompt grammar, the daily-cap ledger, and the engine's
- * own firing decision now live side by side here, so editing the firing chain
- * (threshold, cap, prompt-size budget) is a single-file change.
+ * shallow pass-through; #2317 folded the four PURE concerns back into one
+ * module organised by concern SECTION rather than by file. #2867 then
+ * RE-EXTRACTED the prompt-grammar concern to a focused leaf
+ * (`recommendation-prompt.ts`) because that concern has an independent caller
+ * shape — a promptfoo A/B eval (`evals/`) imports `buildPrompt` directly, and
+ * dragging in the materiality gate, the cap ledger, and the Anthropic Request
+ * Adapter at module-load time is friction a scorer should not pay. The
+ * materiality gate and the daily-cap ledger stay HERE: they are internally
+ * cohesive with the engine factory and have no independent caller.
  *
- * The one sibling that stays a separate file is `recommendation-consumer.ts`:
- * it owns the process-level stream lifecycle (the XREADGROUP polling loop, the
- * consumer-group registration, the SIGTERM ACK/DELCONSUMER path, the
- * Redis-backed prompt readers) — the real Seam between the bus and this
- * engine's call surface. It imports the engine's interface from here.
+ * The engine imports the prompt grammar (types + `buildPrompt` +
+ * `parseLlmResponse` + `PROMPT_SIZE_BUDGET_BYTES`) from the leaf and RE-EXPORTS
+ * the types + functions it needs, so the `EngineDeps` / `LlmResult` surface
+ * `recommendation-consumer.ts` consumes stays byte-identical — no interface
+ * change is visible to the consumer.
+ *
+ * The one sibling that stays a separate stream-lifecycle file is
+ * `recommendation-consumer.ts`: it owns the process-level stream lifecycle (the
+ * XREADGROUP polling loop, the consumer-group registration, the SIGTERM
+ * ACK/DELCONSUMER path, the Redis-backed prompt readers) — the real Seam
+ * between the bus and this engine's call surface. It imports the engine's
+ * interface from here.
  *
  * Section map (top → bottom):
- *   1. Public types — the prompt input, the recommendation shape, the deps record
+ *   1. Prompt-grammar re-exports — the types + prompt builder/parser from the
+ *      `recommendation-prompt.ts` leaf (#2867), re-exported to keep the
+ *      consumer-facing surface stable.
  *   2. Materiality gate — the pure fire-decision logic (was recommendation-materiality.ts)
- *   3. Prompt grammar — the pure prompt builder + response parser (was recommendation-prompt.ts)
  *   4. Daily-cap ledger — the billing concern + oak_resting latch (was recommendation-cap.ts)
- *   5. Engine factory — `createRecommendationEngine` composing 2-4 with the Redis/LLM deps
+ *   5. Engine factory — `createRecommendationEngine` composing 2+4 + the prompt leaf with the Redis/LLM deps
  *   6. Production LLM client — the thin Anthropic Request Adapter wrapper
  */
 
 import { RUN_TTL_SECONDS } from "./sweep-reader.ts";
 import * as defaultRedis from "../redis/recommendations.ts";
 import { anthropicMessages, isAnthropicFailure } from "../anthropic/request.ts";
+import {
+  buildPrompt,
+  parseLlmResponse,
+  MAX_RECS_PER_CALL,
+  type Recommendation,
+  type TurnEndPayload,
+  type RecentTurn,
+  type SlotSnapshot,
+  type SignalsSnapshot,
+  type PermissionWaitEvent,
+  type EnginePromptInput,
+} from "./recommendation-prompt.ts";
 
 // ---------------------------------------------------------------------------
-// SECTION 1 — Public types
+// SECTION 1 — Prompt-grammar re-exports (leaf: recommendation-prompt.ts, #2867)
+//
+// The prompt-grammar concern (the prompt builder, the response parser, the
+// prompt-size budget, and the input/output types they operate over) lives in
+// the `recommendation-prompt.ts` leaf so a promptfoo scorer can import
+// `buildPrompt` without the engine's Redis/Anthropic transitive deps loading.
+// We re-export the types + functions the consumer + tests already import from
+// here so their surface is unchanged.
 // ---------------------------------------------------------------------------
 
-type RecSeverity = "info" | "warn" | "critical";
-
-export interface Recommendation {
-  id: string;
-  severity: RecSeverity;
-  message: string;
-  evidence_id: string;
-  run_id: string;
-  created_at: string;
-}
-
-export interface TurnEndPayload {
-  event: "turn_end";
-  run_id: string;
-  turn_n: number;
-  dispatches: number;
-  skipped: number;
-  idle: number;
-  tokens_after: number;
-  ts_epoch: number;
-}
-
-export interface RecentTurn {
-  turn_n: number;
-  dispatches: number;
-  skipped: number;
-  idle: number;
-  ts_epoch: number;
-}
-
-export interface SlotSnapshot {
-  /** Map of slot label → {status, since_epoch}. */
-  [slot: string]: { status: string; since_epoch?: number };
-}
-
-export interface SignalsSnapshot {
-  /** Map of signal class → free-form payload from decide.py. */
-  [signal: string]: unknown;
-}
-
-export interface PermissionWaitEvent {
-  slot: string;
-  subagent_type?: string;
-  tool?: string;
-  ts_epoch: number;
-}
-
-export interface EnginePromptInput {
-  /** Last ≤3 turns for this run, newest first. */
-  recent_turns: RecentTurn[];
-  /** Current slot snapshot (one row per known slot). */
-  slot_snapshot: SlotSnapshot;
-  /** Current signals snapshot (decide.py state). */
-  signals_snapshot: SignalsSnapshot;
-  /** Recent permission-wait events (≤10, newest first). */
-  recent_permission_waits: PermissionWaitEvent[];
-  /** Current recs-engine daily spend in USD. */
-  daily_spend_usd: number;
-  /** The triggering turn — included verbatim so the prompt has it. */
-  turn_end: TurnEndPayload;
-}
+export {
+  buildPrompt,
+  parseLlmResponse,
+  PROMPT_SIZE_BUDGET_BYTES,
+  type RecSeverity,
+  type Recommendation,
+  type TurnEndPayload,
+  type RecentTurn,
+  type SlotSnapshot,
+  type SignalsSnapshot,
+  type PermissionWaitEvent,
+  type EnginePromptInput,
+} from "./recommendation-prompt.ts";
 
 /**
  * The LLM call abstraction. The engine doesn't know how the call is made;
@@ -294,154 +275,6 @@ export function shouldFire(input: {
 }
 
 // ---------------------------------------------------------------------------
-// SECTION 3 — Prompt grammar (was recommendation-prompt.ts, issue #2240)
-//
-// The two pure, side-effect-free halves of the recs engine's grammar: the
-// prompt builder (`buildPrompt`) and the response parser (`parseLlmResponse`).
-//
-// Everything in this section is pure: no Redis, no network, no clock, no
-// import-time side effects. `buildPrompt` is a total function of an
-// `EnginePromptInput` literal; `parseLlmResponse` is a total function of a raw
-// completion string plus the engine-derived stamping context. That lets a
-// future promptfoo A/B eval (CONTEXT.md / `evals/`) import `buildPrompt`
-// directly.
-// ---------------------------------------------------------------------------
-
-/**
- * Prompt-size budget in bytes. The "small prompt" AC is that the engine
- * never has to truncate at the call site — `buildPrompt` is bounded by
- * construction (turn/wait/slot/signal clipping), so any reasonable input
- * produces a prompt at or under this budget. Tests assert it.
- */
-export const PROMPT_SIZE_BUDGET_BYTES = 4 * 1024;
-
-/** Hard ceiling on recommendations stamped per LLM call. */
-const MAX_RECS_PER_CALL = 3;
-
-/**
- * Build the prompt text that the LLM receives. The whole point of the
- * "small prompt" AC is that the engine never has to truncate at the
- * call site — the prompt is bounded by construction. We:
- *
- *   - keep at most 3 recent turns (older context is in past recs)
- *   - keep at most 5 recent permission-waits (older waits resolved or are stale)
- *   - keep the slot snapshot to one line per slot
- *   - emit signals as `key=value` lines with values clipped to 80 chars
- *
- * Tests assert that any reasonable input produces a prompt ≤ 4KB.
- */
-export function buildPrompt(input: EnginePromptInput): string {
-  const lines: string[] = [];
-  lines.push(
-    "You are Oak, the autopilot observability assistant. Given the latest" +
-      " autopilot turn-end snapshot, emit 1-3 short recommendations for the" +
-      " operator. Each recommendation MUST be a single English sentence.",
-  );
-  lines.push("");
-  lines.push(`# Turn ${input.turn_end.turn_n} (run ${input.turn_end.run_id})`);
-  lines.push(
-    `dispatches=${input.turn_end.dispatches} skipped=${input.turn_end.skipped}` +
-      ` idle=${input.turn_end.idle} tokens=${input.turn_end.tokens_after}` +
-      ` daily_spend_usd=${input.daily_spend_usd.toFixed(4)}`,
-  );
-
-  lines.push("");
-  lines.push("# Recent turns (newest first)");
-  for (const t of input.recent_turns.slice(0, 3)) {
-    lines.push(
-      `- turn_n=${t.turn_n} dispatches=${t.dispatches} skipped=${t.skipped}` +
-        ` idle=${t.idle} ts_epoch=${t.ts_epoch}`,
-    );
-  }
-
-  lines.push("");
-  lines.push("# Slot snapshot");
-  const slotEntries = Object.entries(input.slot_snapshot).slice(0, 12);
-  for (const [slot, info] of slotEntries) {
-    const since = info?.since_epoch ? ` since=${info.since_epoch}` : "";
-    lines.push(`- ${slot}: ${info?.status ?? "?"}${since}`);
-  }
-
-  lines.push("");
-  lines.push("# Signals");
-  const signalEntries = Object.entries(input.signals_snapshot).slice(0, 12);
-  for (const [k, v] of signalEntries) {
-    const valStr = typeof v === "string" ? v : JSON.stringify(v);
-    const clipped = valStr.length > 80 ? `${valStr.slice(0, 77)}...` : valStr;
-    lines.push(`- ${k}=${clipped}`);
-  }
-
-  lines.push("");
-  lines.push("# Recent permission-waits");
-  for (const e of input.recent_permission_waits.slice(0, 5)) {
-    const tool = e.tool ? ` tool=${e.tool}` : "";
-    lines.push(`- ${e.slot} at ${e.ts_epoch}${tool}`);
-  }
-
-  lines.push("");
-  lines.push(
-    "Respond with a single JSON object: {\"recommendations\":[{\"severity\":" +
-      "\"info|warn|critical\", \"message\":\"...\"} ...]}." +
-      " Emit 1-3 recommendations. Keep each message under 140 characters.",
-  );
-
-  return lines.join("\n");
-}
-
-/**
- * Parse the LLM's JSON response into typed Recommendations. The LLM is
- * told to return `{recommendations: [...]}`; we extract that array, take
- * the first 3, and stamp ids/timestamps/evidence_id from the engine's
- * authoritative context. A malformed response yields an empty array (the
- * engine still charges the spend for the call — that's a defect on the
- * model side, not ours).
- *
- * `evidenceId` is the engine-derived evidence handle — typically the
- * turn_n of the triggering turn so the UI can link back to the journal row.
- */
-export function parseLlmResponse(input: {
-  rawJsonText: string;
-  runId: string;
-  evidenceId: string;
-  nowIso: string;
-  turnN: number;
-}): Recommendation[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input.rawJsonText);
-  } catch {
-    /* intentional: malformed JSON returns empty recommendations */
-    return [];
-  }
-  if (!parsed || typeof parsed !== "object") return [];
-  const recs = (parsed as any).recommendations;
-  if (!Array.isArray(recs)) return [];
-
-  const out: Recommendation[] = [];
-  for (let i = 0; i < recs.length && out.length < MAX_RECS_PER_CALL; i++) {
-    const raw = recs[i];
-    if (!raw || typeof raw !== "object") continue;
-    const severity = String(raw.severity ?? "info");
-    if (severity !== "info" && severity !== "warn" && severity !== "critical") {
-      continue;
-    }
-    const message = typeof raw.message === "string" ? raw.message.trim() : "";
-    if (!message) continue;
-    // Stable id: run + turn + index — retries collapse cleanly.
-    const id = `${input.runId}:${input.turnN}:${i}`;
-    out.push({
-      id,
-      severity,
-      message: message.slice(0, 200),
-      evidence_id: input.evidenceId,
-      run_id: input.runId,
-      created_at: input.nowIso,
-    });
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
 // SECTION 4 — Daily-cap ledger (was recommendation-cap.ts, issue #2119)
 //
 // The recs-engine's **billing concern** — the single sanctioned real-USD
@@ -607,8 +440,9 @@ export function createCapEnforcer(deps: CapEnforcerDeps = {}): CapEnforcer {
 // SECTION 5 — Engine factory
 //
 // `createRecommendationEngine` composes the materiality gate (SECTION 2), the
-// prompt grammar (SECTION 3) and the cap ledger (SECTION 4) with the
-// injected Redis/LLM deps. The returned object has a single hot path,
+// prompt grammar (the `recommendation-prompt.ts` leaf, #2867) and the cap
+// ledger (SECTION 4) with the injected Redis/LLM deps. The returned object
+// has a single hot path,
 // `onTurnEnd`, which `recommendation-consumer.ts` wires to the
 // `hydra:autopilot:slot-events` stream.
 // ---------------------------------------------------------------------------
