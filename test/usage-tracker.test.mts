@@ -44,7 +44,10 @@ import {
   oauthBackoffDelayMs,
   makeReadOAuth,
   DISPATCH_KINDS,
+  setOAuthBackoffPersistence,
 } from "../src/cost/transcript-scan.ts";
+import type { OAuthBackoffPersistence } from "../src/cost/transcript-scan.ts";
+import type { PersistedOAuthBackoff } from "../src/redis/oauth-backoff.ts";
 // Attribution coverage % pure fold (issue #2403) lives on the snapshot-assembly
 // leaf; imported directly for unit test without the JSONL-scan machinery.
 import { deriveAttributedPercent } from "../src/cost/snapshot-assembly.ts";
@@ -3952,6 +3955,261 @@ describe("usage-tracker", () => {
       overlaySessionBlockEligibility(base, nowMs + 1000, nowMs);
       assert.equal(JSON.stringify(base), snapshot);
     });
+  });
+});
+
+// OAuth-meter backoff PERSISTENCE across restart (issue #2840). The #2619
+// exponential-backoff gate lived only in process memory, so every service
+// restart reset the consecutive-failure counter to #1 — the next scan
+// immediately re-GET the still-rate-limited endpoint and re-armed the ladder
+// from 30s (the 429 recurrence #2840 reports despite the #2669 single-flight
+// fix). The gate is now HYDRATED from a Redis side-channel on the first
+// cached-path read after a process start and MIRRORED on every change, so a
+// restart RESUMES the ladder. A top-level describe with its own lifecycle (per
+// the shared-teardown authoring rule) that injects a FAKE store — no live Redis.
+describe("OAuth meter backoff persistence across restart (issue #2840)", () => {
+  let restoreEnv: () => void;
+  beforeEach(() => {
+    restoreEnv = withEnvSnapshot();
+    clearUsageCache();
+  });
+  afterEach(() => {
+    restoreEnv();
+    clearUsageCache();
+    // Always restore the production Redis seam so a leaked fake store cannot
+    // contaminate a sibling suite that drives the cached path.
+    setOAuthBackoffPersistence();
+  });
+
+  // An in-memory fake of the persistence side-channel that records every call,
+  // so a test can assert write-on-change / clear-on-recovery AND pre-seed a
+  // persisted gate to simulate a restart mid-outage. Mirrors the never-throw
+  // contract of the real ../src/redis/oauth-backoff.ts seam.
+  function fakeStore(initial: PersistedOAuthBackoff | null = null): {
+    persistence: OAuthBackoffPersistence;
+    reads: () => number;
+    writes: PersistedOAuthBackoff[];
+    clears: () => number;
+    current: () => PersistedOAuthBackoff | null;
+  } {
+    let value: PersistedOAuthBackoff | null = initial;
+    // Live counters exposed via getters — never spread by value, so an assertion
+    // reads the count AT assertion time, not a frozen snapshot from return time.
+    const state = { reads: 0, writes: [] as PersistedOAuthBackoff[], clears: 0 };
+    const persistence: OAuthBackoffPersistence = {
+      read: async () => {
+        state.reads++;
+        return value;
+      },
+      write: async (s) => {
+        state.writes.push(s);
+        value = s;
+      },
+      clear: async () => {
+        state.clears++;
+        value = null;
+      },
+    };
+    return {
+      persistence,
+      reads: () => state.reads,
+      writes: state.writes,
+      clears: () => state.clears,
+      current: () => value,
+    };
+  }
+
+  function countingMeter(
+    results: Array<{ ok: boolean; five?: number; seven?: number; code?: any }>,
+  ) {
+    let calls = 0;
+    const reader = async () => {
+      const r = results[Math.min(calls, results.length - 1)];
+      calls++;
+      if (r.ok) {
+        return {
+          ok: true as const,
+          data: {
+            fiveHour: { utilization: r.five ?? 0, resetsAt: null },
+            sevenDay: { utilization: r.seven ?? 0, resetsAt: null },
+          },
+        };
+      }
+      return { ok: false as const, code: r.code ?? "oauth-usage-non-2xx" };
+    };
+    return { reader, calls: () => calls };
+  }
+
+  test("a restart mid-outage RESUMES the ladder (no immediate re-GET, no reset to #1)", async () => {
+    // Simulate a restart: a persisted gate is present, its window still open.
+    // The FIRST cached-path read of the "new process" must hydrate that gate and
+    // SUPPRESS the GET (the whole point of #2840) rather than re-hammer the
+    // endpoint and reset the ladder to failure #1.
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "600000"; // 10 min grace
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = "900000"; // 15 min ceiling
+    const root = await mkdtemp(join(tmpdir(), "usage-2840-"));
+    try {
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+      const t0 = new Date("2026-05-25T12:00:00Z");
+      // Persisted: consecutive failure #4, next GET not until t0+120s (still open).
+      const store = fakeStore({ failures: 4, nextAttemptMs: t0.getTime() + 120_000 });
+      setOAuthBackoffPersistence(store.persistence);
+      clearUsageCache(); // re-arm hydrate so the next read re-seeds from the store
+
+      const m = countingMeter([{ ok: false, code: "oauth-usage-non-2xx" }]);
+      // First read of the "restarted" process, INSIDE the resumed window.
+      const snap = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(store.reads(), 1, "hydrated from the persistence side-channel exactly once");
+      assert.equal(m.calls(), 0, "resumed gate SUPPRESSES the GET — no immediate re-hammer after restart");
+      assert.equal(snap.usageSource, "estimate", "no last-good in the fresh process → estimate, never a silent 0");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("arming the backoff WRITES the gate through to persistence", async () => {
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "600000";
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "120000"; // 2 min
+    const root = await mkdtemp(join(tmpdir(), "usage-2840-"));
+    try {
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+      const store = fakeStore(null); // fresh process, nothing persisted yet
+      setOAuthBackoffPersistence(store.persistence);
+      clearUsageCache();
+      const m = countingMeter([
+        { ok: true, five: 55, seven: 33 }, // scan 1 seeds last-good
+        { ok: false, code: "oauth-usage-non-2xx" }, // scan 2 429 → arms backoff
+      ]);
+      const t0 = new Date("2026-05-25T12:00:00Z");
+      await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(store.writes.length, 0, "a healthy read writes no backoff gate");
+      // +90s (> TTL): 429 arms the 2-min backoff → written through.
+      await getUsage({ now: new Date(t0.getTime() + 90_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(store.writes.length, 1, "arming the backoff writes it through to persistence");
+      assert.equal(store.writes[0].failures, 1, "consecutive failure #1 persisted");
+      assert.equal(
+        store.writes[0].nextAttemptMs,
+        t0.getTime() + 90_000 + 120_000,
+        "persisted nextAttemptMs = failure instant + exponential delay",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("recovery CLEARS the persisted gate", async () => {
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "600000";
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = "120000";
+    const root = await mkdtemp(join(tmpdir(), "usage-2840-"));
+    try {
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+      const store = fakeStore(null);
+      setOAuthBackoffPersistence(store.persistence);
+      clearUsageCache();
+      const m = countingMeter([
+        { ok: true, five: 40, seven: 20 }, // seed
+        { ok: false, code: "oauth-usage-non-2xx" }, // 429 → arms + persists
+        { ok: true, five: 70, seven: 50 }, // recovers
+      ]);
+      const t0 = new Date("2026-05-25T12:00:00Z");
+      await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      // +90s: 429 arms + persists.
+      await getUsage({ now: new Date(t0.getTime() + 90_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(store.writes.length, 1, "backoff armed + persisted");
+      assert.ok(store.current() !== null, "gate is present in the store while backing off");
+      // +250s: past the 90s+120s=210s window → re-GET succeeds → clears persisted gate.
+      const recovered = await getUsage({ now: new Date(t0.getTime() + 250_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(recovered.usageSource, "oauth");
+      assert.equal(recovered.oauthStale, false, "fresh recovered reading");
+      assert.ok(store.clears() >= 1, "recovery cleared the persisted gate");
+      assert.equal(store.current(), null, "persisted gate is gone after recovery");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a persisted nextAttemptMs beyond the MAX ceiling is CLAMPED on hydrate (no extended staleness)", async () => {
+    // Invariant 8: persistence must not extend the staleness ceiling. A hostile /
+    // stale stored gate parked hours out is clamped down to now + backoff MAX,
+    // so the meter re-probes within one ceiling interval regardless.
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "600000";
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = "900000"; // 15 min ceiling
+    const root = await mkdtemp(join(tmpdir(), "usage-2840-"));
+    try {
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+      const t0 = new Date("2026-05-25T12:00:00Z");
+      // Persisted gate parked 6h out — far past the 15-min ceiling.
+      const store = fakeStore({ failures: 9, nextAttemptMs: t0.getTime() + 6 * 60 * 60_000 });
+      setOAuthBackoffPersistence(store.persistence);
+      clearUsageCache();
+      const m = countingMeter([{ ok: true, five: 12, seven: 8 }]); // recovers on the post-ceiling probe
+      // Scan 1 at t0: hydrates the persisted gate. The clamp caps the resumed
+      // nextAttemptMs at (hydrate instant t0) + backoff MAX = t0 + 900s — NOT the
+      // raw persisted t0 + 6h. Inside the clamped window → GET suppressed.
+      const first = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(m.calls(), 0, "inside the CLAMPED window the GET is still suppressed");
+      assert.equal(first.usageSource, "estimate", "no last-good in the fresh process → estimate");
+      // Scan 2 at t0 + 900s + 1s: past the CLAMPED ceiling but NOWHERE near the raw
+      // persisted 6h. A re-probe MUST fire — proving the clamp took hold (invariant 8).
+      const afterCeiling = new Date(t0.getTime() + 900_000 + 1000);
+      const snap = await getUsage({ now: afterCeiling, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(m.calls(), 1, "clamped gate lets the meter re-probe within one ceiling interval, not 6h");
+      assert.equal(snap.usageSource, "oauth", "the post-ceiling probe recovered onto the meter");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("hydrate FAILS OPEN: a throwing store degrades to in-memory-only, meter still reads", async () => {
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
+    const root = await mkdtemp(join(tmpdir(), "usage-2840-"));
+    try {
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+      let reads = 0;
+      const throwing: OAuthBackoffPersistence = {
+        read: async () => {
+          reads++;
+          throw new Error("redis down");
+        },
+        write: async () => {},
+        clear: async () => {},
+      };
+      setOAuthBackoffPersistence(throwing);
+      clearUsageCache();
+      const m = countingMeter([{ ok: true, five: 21, seven: 9 }]);
+      const t0 = new Date("2026-05-25T12:00:00Z");
+      // A hydrate throw must NOT break the read — the scan degrades to
+      // in-memory-only (pre-#2840 behaviour) and the meter still succeeds.
+      const snap = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(reads, 1, "hydrate attempted exactly once");
+      assert.equal(snap.usageSource, "oauth", "meter read succeeds despite the persistence outage");
+      assert.equal(snap.percentLast5h, 21);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("hydrate runs at most ONCE per process (subsequent cached-path reads do not re-read the store)", async () => {
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
+    const root = await mkdtemp(join(tmpdir(), "usage-2840-"));
+    try {
+      await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+      const store = fakeStore(null);
+      setOAuthBackoffPersistence(store.persistence);
+      clearUsageCache();
+      const m = countingMeter([{ ok: true, five: 5, seven: 5 }]);
+      const t0 = new Date("2026-05-25T12:00:00Z");
+      await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      // A second post-TTL scan in the SAME process must NOT re-hydrate.
+      await getUsage({ now: new Date(t0.getTime() + 90_000), projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+      assert.equal(store.reads(), 1, "hydrate is once-per-process, not once-per-scan");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

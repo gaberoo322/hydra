@@ -590,7 +590,13 @@ export async function getUsage(opts: {
   // contract) — unless `useOAuthCache` is explicitly set, which the #1090 tests
   // use to drive the cache with a pinned reader.
   const bypassOAuthCache = (overrideMeter || overrideRoot) && opts.useOAuthCache !== true;
-  const readOAuth = makeReadOAuth({ readUsage, nowMs, bypassOAuthCache });
+  // Backoff-state persistence (issue #2840): install the live Redis side-channel
+  // ONLY on the pure production path (no injected reader, no fixture root), so the
+  // ladder survives a restart. The deterministic test path (an injected reader or
+  // fixture root) stays on the no-op persistence default (invariant 5) unless a
+  // test explicitly injects a fake store via `setOAuthBackoffPersistence`.
+  const persistBackoff = !overrideMeter && !overrideRoot;
+  const readOAuth = makeReadOAuth({ readUsage, nowMs, bypassOAuthCache, persistBackoff });
 
   // Coordinate the two halves (issue #1971): the TranscriptScan seam owns the
   // JSONL walk + OAuth read and returns the raw accumulation; the pure

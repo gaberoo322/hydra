@@ -48,6 +48,12 @@ import {
   getOAuthUsageBackoffMaxMs,
   getWeeklyResetAnchorMs,
 } from "./config.ts";
+import {
+  readOAuthBackoff,
+  writeOAuthBackoff,
+  clearOAuthBackoff,
+} from "../redis/oauth-backoff.ts";
+import type { PersistedOAuthBackoff } from "../redis/oauth-backoff.ts";
 
 const MS_PER_HOUR = 3_600_000;
 const MS_PER_DAY = 86_400_000;
@@ -309,6 +315,134 @@ interface OAuthBackoffState {
 let oauthBackoff: OAuthBackoffState | null = null;
 
 /**
+ * Backoff-state persistence side-channel (issue #2840). The exponential-backoff
+ * gate above is process-in-memory only, so every `systemctl restart` (deploy,
+ * crash-recovery, cooldown) wiped it — a sustained 429 wave that had backed off
+ * to the ceiling was RESET to consecutive-failure #1 on the next boot, which
+ * immediately re-GET the still-rate-limited endpoint and re-armed from 30s (the
+ * recurrence #2840 reports despite the #2669 single-flight fix). This adapter
+ * HYDRATES the in-memory gate from Redis on the first cached-path read after a
+ * process start and MIRRORS every change (arm/advance/clear) back, so a restart
+ * RESUMES the ladder. It is a pure side-channel: the cadence decision stays
+ * driven by the in-memory `oauthBackoff`; this only seeds it at boot and writes
+ * through.
+ *
+ * ONLY the PURE PRODUCTION cached path persists (invariant 5): the deterministic
+ * `bypassOAuthCache` / injected-reader test path is untouched by persistence. So
+ * the default adapter is a NO-OP; `getUsage`/`makeReadOAuth` install the real
+ * {@link ../redis/oauth-backoff.ts} seam only when no reader/root is injected.
+ * Tests that want to assert persistence explicitly inject a fake store via
+ * {@link setOAuthBackoffPersistence}.
+ */
+export interface OAuthBackoffPersistence {
+  read: () => Promise<PersistedOAuthBackoff | null>;
+  write: (state: PersistedOAuthBackoff) => Promise<void>;
+  clear: () => Promise<void>;
+}
+
+/** The live {@link ../redis/oauth-backoff.ts} seam — installed on the pure production path. */
+export const REDIS_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
+  read: readOAuthBackoff,
+  write: writeOAuthBackoff,
+  clear: clearOAuthBackoff,
+};
+
+/**
+ * The no-op persistence adapter — the DEFAULT. Keeps the injected-reader /
+ * fixture-root test path Redis-free (invariant 5): hydrate reads nothing, writes
+ * and clears are no-ops. The pre-existing #1090/#1124/#2832 tests drive the
+ * `useOAuthCache:true` cached path with an injected reader and MUST NOT touch
+ * Redis; this default guarantees that unless a test opts in.
+ */
+const NOOP_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
+  read: async () => null,
+  write: async () => {},
+  clear: async () => {},
+};
+
+let oauthBackoffPersistence: OAuthBackoffPersistence = NOOP_OAUTH_BACKOFF_PERSISTENCE;
+
+/**
+ * True once the in-memory gate has been seeded from the persistence side-channel
+ * for THIS process (issue #2840). Hydrate runs at most once per process (reset
+ * by {@link clearOAuthCache} for test isolation); after that the in-memory gate
+ * is authoritative and every mutation writes through. A hydrate FAILURE still
+ * flips this true (fail-open: we tried once, degrade to in-memory-only), so a
+ * Redis outage costs exactly one best-effort read, never a per-scan retry.
+ */
+let oauthBackoffHydrated = false;
+
+/**
+ * Install the backoff-persistence side-channel (issue #2840). Called by
+ * `getUsage()` with {@link REDIS_OAUTH_BACKOFF_PERSISTENCE} ONLY on the pure
+ * production path, so the injected-reader / fixture-root test path stays on the
+ * default no-op adapter (invariant 5). Tests may inject a fake store to assert
+ * hydrate-on-start / write-on-change without a live Redis; passing nothing
+ * restores the no-op default. Always resets the per-process hydrate flag so the
+ * next cached-path read re-seeds from the (possibly newly-installed) store —
+ * mirroring a fresh process boot.
+ */
+export function setOAuthBackoffPersistence(store?: OAuthBackoffPersistence): void {
+  installOAuthBackoffPersistence(store ?? NOOP_OAUTH_BACKOFF_PERSISTENCE);
+}
+
+/**
+ * Install a persistence adapter, re-arming the per-process hydrate ONLY when the
+ * adapter reference actually changes (issue #2840). `getUsage()` calls this every
+ * scan with the same production-seam reference, so hydrate stays a genuine
+ * once-per-process seed rather than re-firing every 60s — while a test swapping
+ * in a fresh fake store (a distinct reference) correctly re-hydrates.
+ */
+function installOAuthBackoffPersistence(store: OAuthBackoffPersistence): void {
+  if (store === oauthBackoffPersistence) return;
+  oauthBackoffPersistence = store;
+  oauthBackoffHydrated = false;
+}
+
+/**
+ * Hydrate the in-memory backoff gate from the persistence side-channel, ONCE per
+ * process (issue #2840). No-op after the first call (or after a `clearOAuthCache`
+ * reset). Fails OPEN: any read error degrades to no persisted state (the
+ * pre-#2840 fresh-start behaviour) and still marks hydrated so we never retry
+ * per-scan. Clamps a persisted `nextAttemptMs` to the CURRENT backoff MAX
+ * ceiling (`nowMs + maxMs`) so a stale/hostile stored value can never park the
+ * meter longer than a freshly-armed max-backoff would — persistence resumes the
+ * ladder, it never EXTENDS the staleness ceiling. Only seeds when the in-memory
+ * gate is still null (never overwrites an already-armed live gate) AND the
+ * persisted gate is still in the future (a resumed gate whose window already
+ * elapsed is dropped so the next scan re-probes immediately).
+ */
+async function hydrateOAuthBackoff(nowMs: number): Promise<void> {
+  if (oauthBackoffHydrated) return;
+  oauthBackoffHydrated = true; // fail-open: one attempt, then in-memory-only
+  let persisted: PersistedOAuthBackoff | null;
+  try {
+    persisted = await oauthBackoffPersistence.read();
+  } catch (err: any) {
+    // Defence-in-depth: the seam already never throws, but a test double might.
+    console.error(`[usage-tracker] OAuth backoff hydrate failed (in-memory-only): ${err?.message || err}`);
+    return;
+  }
+  if (persisted === null) return;
+  if (oauthBackoff !== null) return; // a live gate already armed this process — don't clobber it
+  const maxMs = getOAuthUsageBackoffMaxMs();
+  // Clamp the resumed gate so persistence can never extend the staleness ceiling
+  // past a freshly-armed max backoff.
+  const clampedNext = Math.min(persisted.nextAttemptMs, nowMs + maxMs);
+  if (clampedNext <= nowMs) {
+    // The persisted window has already elapsed — the next scan should re-probe
+    // now, not resume a spent gate. Drop it (and clear the stale key).
+    void oauthBackoffPersistence.clear();
+    return;
+  }
+  oauthBackoff = { failures: persisted.failures, nextAttemptMs: clampedNext };
+  console.error(
+    `[usage-tracker] OAuth backoff resumed from persistence: failure #${persisted.failures}, ` +
+      `next GET in ${clampedNext - nowMs}ms (restart did not reset the ladder — issue #2840)`,
+  );
+}
+
+/**
  * Single-flight guard for the OAuth meter GET (issue #2666). Before this, two
  * scans arriving in the same instant past TTL expiry EACH fired their own GET
  * (journalctl 2026-07-02 shows every 429 as a same-second duplicate pair) —
@@ -336,6 +470,11 @@ export function clearOAuthCache(): void {
   oauthCache = null;
   oauthBackoff = null;
   oauthInFlight = null;
+  // Re-arm the per-process hydrate so the next cached-path read re-seeds the
+  // gate from the persistence side-channel (issue #2840). Test isolation relies
+  // on this: each test that drives the cached path re-hydrates from its own
+  // injected store rather than inheriting a prior test's seeded gate.
+  oauthBackoffHydrated = false;
 }
 
 /**
@@ -421,6 +560,12 @@ async function readOAuthCached(
 ): Promise<CachedOAuthRead> {
   const ttlMs = getOAuthUsageTtlMs();
 
+  // Seed the in-memory backoff gate from the persistence side-channel on the
+  // first cached-path read of this process (issue #2840). No-op after the first
+  // call; fails open to in-memory-only on any error. Done BEFORE the backoff-gate
+  // check below so a restart mid-outage RESUMES the ladder (does not reset it).
+  await hydrateOAuthBackoff(nowMs);
+
   // Fresh cache hit: serve without an external GET. This is the cadence
   // decoupling — within the TTL the snapshot scan reuses the cached OAuth value
   // instead of GETting on every 60s refresh.
@@ -504,6 +649,10 @@ async function attemptOAuthRead(
           `consecutive failure(s); backoff cleared, resuming fixed-TTL cadence`,
       );
       oauthBackoff = null;
+      // Clear the persisted gate too (issue #2840) so a restart right after
+      // recovery does not resume a now-obsolete ladder. Fire-and-forget,
+      // fail-open — the seam never throws and a stale key self-expires at TTL.
+      void oauthBackoffPersistence.clear();
     }
     // A fresh success IS the last-known value.
     return { result, stale: false, ageMs: 0, lastKnownOAuth: result.data };
@@ -525,6 +674,10 @@ async function attemptOAuthRead(
   const retryAfterMs = result.retryAfterMs;
   const delayMs = Math.max(retryAfterMs ?? 0, exponentialMs);
   oauthBackoff = { failures, nextAttemptMs: nowMs + delayMs };
+  // Mirror the armed/advanced gate to the persistence side-channel (issue #2840)
+  // so a restart while inside this window RESUMES the ladder instead of resetting
+  // it to failure #1. Fire-and-forget, fail-open — the seam never throws.
+  void oauthBackoffPersistence.write({ failures, nextAttemptMs: oauthBackoff.nextAttemptMs });
   console.error(
     `[usage-tracker] OAuth meter read failed (${result.code}); backing off ` +
       `${delayMs}ms before next GET (consecutive failure #${failures})` +
@@ -852,7 +1005,26 @@ export function makeReadOAuth(opts: {
   readUsage: () => Promise<OAuthUsageResult>;
   nowMs: number;
   bypassOAuthCache: boolean;
+  /**
+   * Install the live Redis backoff-persistence side-channel (issue #2840). True
+   * ONLY on the pure production path (no injected reader, no fixture root); false
+   * on the deterministic test path, which stays on the no-op default (invariant
+   * 5) unless a test explicitly injected a fake store via
+   * {@link setOAuthBackoffPersistence}. `getUsage` computes this.
+   */
+  persistBackoff?: boolean;
 }): () => Promise<CachedOAuthRead> {
+  // Pure production path: wire the Redis persistence seam so the backoff ladder
+  // survives a restart. The deterministic test path installs the no-op adapter
+  // instead — UNLESS a test explicitly injected a fake store (a non-Redis, non-
+  // no-op reference), which we must not clobber. This also prevents a pure-
+  // production `getUsage()` in one test from LEAKING the Redis seam into a later
+  // cached-path test that would then hydrate from real Redis (invariant 5).
+  if (opts.persistBackoff) {
+    installOAuthBackoffPersistence(REDIS_OAUTH_BACKOFF_PERSISTENCE);
+  } else if (oauthBackoffPersistence === REDIS_OAUTH_BACKOFF_PERSISTENCE) {
+    installOAuthBackoffPersistence(NOOP_OAUTH_BACKOFF_PERSISTENCE);
+  }
   return opts.bypassOAuthCache
     ? async () => {
         const result = await opts.readUsage();
