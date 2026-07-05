@@ -12,11 +12,11 @@ import assert from "node:assert/strict";
 
 import {
   getAnomalies,
-  meanStd,
-  zScore,
-  classifyZ,
   type SeriesInput,
 } from "../src/aggregators/anomaly-detector.ts";
+// Z-score primitives were relocated to the canonical metrics-math leaf (#2883);
+// exercising them here needs no Redis stub in scope.
+import { classifyZ, meanStd, zScore } from "../src/metrics/math.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
 
