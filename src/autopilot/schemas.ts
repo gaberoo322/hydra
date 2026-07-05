@@ -89,6 +89,55 @@ export const CycleRecordBodySchema = z
     // knowledge) stays intact because the string crosses the gap via the
     // dispatch's deposit file, not reap's own knowledge.
     reflectionSources: z.string().optional(),
+  })
+  // Issue #2852: reject cycle-record bodies whose IDENTITY-field VALUES are
+  // CLI-flag tokens (a value literally beginning with `--`, e.g. `--cycle-id`,
+  // `--status`, `--skill`). This is the argument-parsing-failure corruption
+  // class the issue observed — a caller that used flag-style syntax against
+  // dispatch.sh's positional parser (or a dropped shell interpolation that
+  // shifted flag names left) POSTs the flag TOKENS as field values, and today
+  // this z.looseObject accepts them cleanly (every identity field is a plain
+  // optional string/union). Those records land in the metrics store as 100%-
+  // empty phantom cycles keyed on `--cycle-id`, polluting anchorType/cost
+  // observability (~12% of cycles when observed).
+  //
+  // This .superRefine() is the SINGLE defensive chokepoint per CLAUDE.md's
+  // "HTTP request bodies validate through a zod schema" rule: it fires at the
+  // CycleRecordBodySchema boundary, so it catches EVERY caller — dispatch.sh,
+  // `hydra raw POST /autopilot/cycle-record`, reap.py, and direct curl — before
+  // the record reaches recordCycle / recordCycleMetrics.
+  //
+  // The predicate is deliberately narrow (invariants 2-3 of the design-concept
+  // artifact): it fires ONLY on a leading `--` in a field VALUE, never on the
+  // presence of a flag-NAMED key and never on any broader format constraint. A
+  // legitimate cycleId — a UUID, a worktree branch name (`agent-a3e14d2e…`), an
+  // `issue-NNN` reference — lacks a `--` prefix and still passes; only a value
+  // literally starting with `--` is refused. On failure the standard 400
+  // `{code:"schema-validation-failed", issues}` response is produced by the
+  // route handlers (which safeParse and forward `.error.issues`).
+  .superRefine((body, ctx) => {
+    const FLAG_SHAPED = /^--/;
+    // The identity fields the corruption class overwrites. prNumber is a
+    // union(number|string); the flag check only applies to its string form.
+    const identityFields = [
+      "cycleId",
+      "anchorType",
+      "anchorReference",
+      "taskTitle",
+      "prNumber",
+    ] as const;
+    for (const field of identityFields) {
+      const value = (body as Record<string, unknown>)[field];
+      if (typeof value === "string" && FLAG_SHAPED.test(value)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [field],
+          message: `${field} value ${JSON.stringify(
+            value,
+          )} looks like a CLI flag token (starts with '--'); a leaked argument-parsing failure, not real data`,
+        });
+      }
+    }
   });
 
 export type CycleRecordBody = z.infer<typeof CycleRecordBodySchema>;

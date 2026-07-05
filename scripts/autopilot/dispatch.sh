@@ -103,6 +103,24 @@ print(json.dumps({
       echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json]" >&2
       exit 2
     fi
+    # Issue #2852: defence-in-depth — fail loud at the shell BEFORE building the
+    # POST body if any of the three REQUIRED positional args resolved to a
+    # `--`-prefixed CLI-flag token. This is the argument-parsing-failure class
+    # the issue observed: a dropped/empty interpolation shifts flag names left so
+    # `--cycle-id` / `--status` / `--skill` land in the value slots. The durable
+    # fix is the CycleRecordBodySchema `.superRefine()` (every HTTP caller funnels
+    # through it); this guard mirrors the empty-arg check above so a malformed
+    # LOCAL invocation fails non-zero here instead of silently POSTing garbage
+    # (friction cue: metrics-record-cli-arg-leak).
+    for _arg_name in cycle_id status skill; do
+      eval "_arg_val=\${$_arg_name}"
+      case "$_arg_val" in
+        --*)
+          echo "dispatch.sh: cycle-record $_arg_name value '$_arg_val' looks like a CLI flag (starts with '--') — refusing to record a malformed cycle (issue #2852)" >&2
+          exit 2
+          ;;
+      esac
+    done
     # Anchor type is derived from the skill: dev_orch / dev_target subagents
     # consume work-queue anchors; QA / research / discover have their own
     # anchor vocabulary which the autopilot can fill in if needed.
