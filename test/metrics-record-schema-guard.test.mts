@@ -32,6 +32,7 @@ const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
 
 const { createMetricsRouter } = await import("../src/api/metrics.ts");
+const { CycleRecordBodySchema } = await import("../src/autopilot/schemas.ts");
 
 let redis: any;
 
@@ -198,5 +199,114 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
 
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
+  });
+});
+
+/**
+ * Issue #2852 — CLI-flag-token corruption guard on CycleRecordBodySchema.
+ *
+ * ~12% of recent cycle records stored CLI flag tokens (`--cycle-id`,
+ * `--status`, `--skill`) as field VALUES — an argument-parsing failure in the
+ * dispatch pipeline shifted flag names into value slots, and the loose-object
+ * schema accepted them cleanly, landing 100%-empty phantom cycles in the
+ * metrics store keyed on `--cycle-id`.
+ *
+ * This suite pins the `.superRefine()` that rejects any identity-field VALUE
+ * beginning with `--` at the schema boundary (the single defensive chokepoint
+ * every HTTP caller funnels through), while confirming legitimate values —
+ * UUIDs, worktree branch names, issue-NNN refs, numeric prNumbers, mapped
+ * anchorTypes — still pass.
+ *
+ * Schema-only (no Redis) so it lives in its own top-level describe with no
+ * before/after lifecycle (per the CLAUDE.md test-authoring rules — never
+ * piggyback on a sibling suite's shared-Redis teardown).
+ */
+describe("CycleRecordBodySchema — CLI-flag-token value guard (issue #2852)", () => {
+  test("rejects a cycleId that is a literal CLI flag token", () => {
+    const result = CycleRecordBodySchema.safeParse({ cycleId: "--cycle-id" });
+    assert.equal(result.success, false);
+    assert.ok(
+      !result.success && result.error.issues.some((i) => i.path[0] === "cycleId"),
+      "the flag-shaped cycleId is the rejected field",
+    );
+  });
+
+  test("rejects each flag-shaped identity field VALUE independently", () => {
+    for (const [field, value] of [
+      ["cycleId", "--cycle-id"],
+      ["anchorType", "--status"],
+      ["anchorReference", "--anchor"],
+      ["taskTitle", "--skill"],
+      ["prNumber", "--pr"],
+    ] as const) {
+      const body: Record<string, unknown> = { cycleId: "valid-cycle-id" };
+      body[field] = value;
+      const result = CycleRecordBodySchema.safeParse(body);
+      assert.equal(result.success, false, `${field}=${value} should be rejected`);
+      assert.ok(
+        !result.success && result.error.issues.some((i) => i.path[0] === field),
+        `${field} is flagged in the issues array`,
+      );
+    }
+  });
+
+  test("rejects the six real corruption samples from the issue evidence", () => {
+    // The observed malformed records: flag tokens leaked into value slots.
+    const corruptionSamples = [
+      { cycleId: "--cycle-id", anchorType: "--status", taskTitle: "--skill" },
+      { cycleId: "--cycle-id=a675d44e17fbcc82e" },
+      { cycleId: "77d5c14c-0a6d-43ff-9fd4-d7c527964008", anchorType: "--status" },
+      { cycleId: "ab07ae73cbba50381", taskTitle: "--skill" },
+      { cycleId: "53bf2557-30a7-4605-a3f2-d033e8bf208d", anchorReference: "--anchor" },
+      { cycleId: "aa6380135cb0ec4ba", prNumber: "--pr" },
+    ];
+    for (const sample of corruptionSamples) {
+      const result = CycleRecordBodySchema.safeParse(sample);
+      assert.equal(
+        result.success,
+        false,
+        `corruption sample ${JSON.stringify(sample)} should be rejected`,
+      );
+    }
+  });
+
+  test("accepts a legitimate UUID cycleId (no false rejection)", () => {
+    const result = CycleRecordBodySchema.safeParse({
+      cycleId: "53bf2557-30a7-4605-a3f2-d033e8bf208d",
+      status: "completed",
+      anchorType: "work-queue",
+    });
+    assert.equal(result.success, true);
+  });
+
+  test("accepts a legitimate worktree-branch cycleId and issue-NNN anchorReference", () => {
+    const result = CycleRecordBodySchema.safeParse({
+      cycleId: "worktree-agent-abc12345-t3-dev_orch",
+      status: "merged",
+      anchorType: "work-queue",
+      anchorReference: "issue-2852",
+      taskTitle: "Fix the malformed cycle-record dispatch",
+      prNumber: 2853,
+    });
+    assert.equal(result.success, true);
+  });
+
+  test("accepts a numeric prNumber and a string prNumber that is not flag-shaped", () => {
+    for (const prNumber of [2853, "2853"]) {
+      const result = CycleRecordBodySchema.safeParse({
+        cycleId: "valid-cycle-id",
+        prNumber,
+      });
+      assert.equal(result.success, true, `prNumber=${prNumber} should pass`);
+    }
+  });
+
+  test("a single leading dash is NOT flag-shaped (only '--' prefix is refused)", () => {
+    // The predicate is `/^--/`, so a single '-' or a mid-string '--' passes.
+    const result = CycleRecordBodySchema.safeParse({
+      cycleId: "-single-dash",
+      anchorReference: "issue--with-double-dash-inside",
+    });
+    assert.equal(result.success, true);
   });
 });
