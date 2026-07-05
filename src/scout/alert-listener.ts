@@ -95,22 +95,10 @@ import {
 // constants, classifyAlert, categoriesForPattern, isCooledDownHours,
 // stripPatternPrefix, and the RawAlert / AlertDispatchTarget / AlertSkipRecord
 // types) was extracted into the zero-IO leaf ./alert-classifier.ts (issue
-// #2785). The re-exports below preserve the historical import surface — existing
-// callers/tests that import those pure symbols from alert-listener.ts continue
-// to resolve during the transition window. New code should import the pure
-// policy directly from ./alert-classifier.ts.
-export {
-  PATTERN_CATEGORY_MAP,
-  ALERT_PER_PATTERN_COOLDOWN_HOURS,
-  ALERT_PER_CATEGORY_COOLDOWN_HOURS,
-  categoriesForPattern,
-  classifyAlert,
-  isCooledDownHours,
-  stripPatternPrefix,
-  type AlertDispatchTarget,
-  type AlertSkipRecord,
-  type RawAlert,
-} from "./alert-classifier.ts";
+// #2785). The transition-window compatibility re-export bridge that used to
+// live here has been dropped (issue #2842) — every remaining consumer now
+// imports the pure policy directly from ./alert-classifier.ts. This coordinator
+// still imports the subset it needs for its own fan-out (see the top import).
 
 // The dispatch audit stream surface (recordDispatch, listDispatchAudits,
 // DispatchAuditEntry, SCOUT_DISPATCHES_MAXLEN) lives in the ScoutDispatchAudit
