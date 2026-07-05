@@ -34,6 +34,7 @@
  */
 
 import { getAutopilotDailyTokensRaw } from "../redis/cost.ts";
+import { classifyZ, meanStd, zScore } from "../metrics/math.ts";
 
 import type { AnomalyDirection, AnomalyMetric } from "../schemas/explore-page.ts";
 
@@ -148,56 +149,6 @@ function sanitizeWindowDays(w: number | undefined): number {
   if (n < 2) return 2; // need at least 2 baseline points
   if (n > 90) return 90;
   return n;
-}
-
-// ---------------------------------------------------------------------------
-// Pure math — exported for tests
-// ---------------------------------------------------------------------------
-
-/**
- * Pure helper — exported for tests. Returns the arithmetic mean and the
- * population standard deviation of `values`. Returns `{ mean: 0, std: 0 }`
- * for empty input. Drops non-finite values silently.
- */
-export function meanStd(values: readonly number[]): { mean: number; std: number } {
-  const finite = values.filter((v) => Number.isFinite(v));
-  if (finite.length === 0) return { mean: 0, std: 0 };
-  const sum = finite.reduce((a, b) => a + b, 0);
-  const mean = sum / finite.length;
-  const variance =
-    finite.reduce((a, b) => a + (b - mean) * (b - mean), 0) / finite.length;
-  const std = Math.sqrt(variance);
-  return { mean, std };
-}
-
-/**
- * Pure helper — exported for tests. Returns the z-score of `value` against
- * a baseline `mean` + `std`. When `std` is 0, returns 0 (a constant series
- * has no anomaly information, no matter what the new sample looks like —
- * we prefer "no signal" over an Infinity that would always trip the
- * threshold).
- */
-export function zScore(value: number, mean: number, std: number): number {
-  if (!Number.isFinite(value) || !Number.isFinite(mean) || !Number.isFinite(std)) return 0;
-  if (std === 0) return 0;
-  return (value - mean) / std;
-}
-
-/**
- * Pure helper — exported for tests. Returns `"high" | "low" | null`:
- *
- *   - `"high"` when `z >= threshold`
- *   - `"low"` when `z <= -threshold`
- *   - `null` when `|z| < threshold`
- *
- * Equality counts as anomalous (consistent with the documented "≥ 2σ"
- * rendering on the UI).
- */
-export function classifyZ(z: number, threshold: number): AnomalyDirection | null {
-  if (!Number.isFinite(z) || !Number.isFinite(threshold) || threshold < 0) return null;
-  if (z >= threshold) return "high";
-  if (z <= -threshold) return "low";
-  return null;
 }
 
 // ---------------------------------------------------------------------------

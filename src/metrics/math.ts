@@ -13,6 +13,12 @@
  * Pure module: no Redis, no Express, no module-level state. Independently
  * testable on synthetic numeric arrays.
  *
+ * The z-score statistics (`meanStd`, `zScore`, `classifyZ`) were relocated here
+ * verbatim from `src/aggregators/anomaly-detector.ts` (issue #2883) so a second
+ * anomaly-detection aggregator can import them without pulling in the Redis-cost
+ * chain. `classifyZ` returns `AnomalyDirection`; that type is imported as a
+ * COMPILE-ERASED `import type` so this leaf gains no runtime schema/zod coupling.
+ *
  * The variants differ along three axes, each pinned by an existing caller/test:
  *   - `p` domain: nearest-rank-fraction takes p in 0..1; the others take p in
  *     0..100.
@@ -22,6 +28,8 @@
  *     pre-filtered) input; `percentileNearestRank` and the interpolated variant
  *     filter non-finite values first.
  */
+
+import type { AnomalyDirection } from "../schemas/explore-page.ts";
 
 /**
  * Nearest-rank percentile where `p` is a FRACTION in 0..1 (e.g. 0.5, 0.95).
@@ -111,4 +119,57 @@ export function percentileInterpolated(
 ): number {
   const xs = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
   return percentileInterpolatedSorted(xs, p, decimals);
+}
+
+// ---------------------------------------------------------------------------
+// Z-score statistics — relocated verbatim from aggregators/anomaly-detector.ts
+// (issue #2883). Pure arithmetic; no Redis, no async. `classifyZ` returns
+// AnomalyDirection via the compile-erased import type above, so this leaf gains
+// no runtime schema/zod coupling.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure helper — exported for tests. Returns the arithmetic mean and the
+ * population standard deviation of `values`. Returns `{ mean: 0, std: 0 }`
+ * for empty input. Drops non-finite values silently.
+ */
+export function meanStd(values: readonly number[]): { mean: number; std: number } {
+  const finite = values.filter((v) => Number.isFinite(v));
+  if (finite.length === 0) return { mean: 0, std: 0 };
+  const sum = finite.reduce((a, b) => a + b, 0);
+  const mean = sum / finite.length;
+  const variance =
+    finite.reduce((a, b) => a + (b - mean) * (b - mean), 0) / finite.length;
+  const std = Math.sqrt(variance);
+  return { mean, std };
+}
+
+/**
+ * Pure helper — exported for tests. Returns the z-score of `value` against
+ * a baseline `mean` + `std`. When `std` is 0, returns 0 (a constant series
+ * has no anomaly information, no matter what the new sample looks like —
+ * we prefer "no signal" over an Infinity that would always trip the
+ * threshold).
+ */
+export function zScore(value: number, mean: number, std: number): number {
+  if (!Number.isFinite(value) || !Number.isFinite(mean) || !Number.isFinite(std)) return 0;
+  if (std === 0) return 0;
+  return (value - mean) / std;
+}
+
+/**
+ * Pure helper — exported for tests. Returns `"high" | "low" | null`:
+ *
+ *   - `"high"` when `z >= threshold`
+ *   - `"low"` when `z <= -threshold`
+ *   - `null` when `|z| < threshold`
+ *
+ * Equality counts as anomalous (consistent with the documented "≥ 2σ"
+ * rendering on the UI).
+ */
+export function classifyZ(z: number, threshold: number): AnomalyDirection | null {
+  if (!Number.isFinite(z) || !Number.isFinite(threshold) || threshold < 0) return null;
+  if (z >= threshold) return "high";
+  if (z <= -threshold) return "low";
+  return null;
 }
