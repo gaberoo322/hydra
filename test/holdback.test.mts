@@ -709,7 +709,7 @@ function makeWatchHarness(
   const registry = new Map(pending.map((e) => [e.prNumber, e]));
   const marked = new Set<number>();
   const enrollCalls: Array<{ commitSha: string; prNumber?: number | null; tier?: number | null }> = [];
-  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string }> = [];
+  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string; status?: string; tasksMerged?: number; tasksAttempted?: number }> = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
 
@@ -748,7 +748,11 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
 
     assert.equal(res.landed, 1);
     assert.deepEqual(h.enrollCalls, [{ commitSha: "abc1234def", prNumber: 501, tier: 3 }]);
-    assert.deepEqual(h.cycleCalls, [{ cycleId: "cyc-501", prNumber: 501, filesChanged: 7 }]);
+    // #2854: a merge-watch enrichment always carries the merged status + counters
+    // so a first-write (qa_orch relay) case buckets `merged`, not `unaccounted`.
+    assert.deepEqual(h.cycleCalls, [
+      { cycleId: "cyc-501", prNumber: 501, filesChanged: 7, status: "merged", tasksMerged: 1, tasksAttempted: 1 },
+    ]);
     assert.deepEqual(h.removeCalls, [501], "landed entry is dropped from the registry");
     assert.equal(h.registry.has(501), false);
   });
@@ -766,7 +770,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     // body, so a first-write enrichment classifies explicitly instead of
     // bucketing to the `unclassified` sentinel.
     assert.deepEqual(h.cycleCalls, [
-      { cycleId: "cyc-521", prNumber: 521, filesChanged: 4, anchorType: "work-queue" },
+      { cycleId: "cyc-521", prNumber: 521, filesChanged: 4, anchorType: "work-queue", status: "merged", tasksMerged: 1, tasksAttempted: 1 },
     ]);
   });
 
@@ -782,7 +786,9 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     // No anchorType on the entry ⇒ no anchorType key on the enrichment body
     // (the field must be ABSENT, not present-and-undefined, so classifyAnchorType
     // falls back to slot-suffix inference exactly as before #2800).
-    assert.deepEqual(h.cycleCalls, [{ cycleId: "cyc-522", prNumber: 522, filesChanged: 4 }]);
+    assert.deepEqual(h.cycleCalls, [
+      { cycleId: "cyc-522", prNumber: 522, filesChanged: 4, status: "merged", tasksMerged: 1, tasksAttempted: 1 },
+    ]);
     assert.equal("anchorType" in h.cycleCalls[0], false, "anchorType key is absent");
   });
 
@@ -912,7 +918,9 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     const res = await runHoldbackMergeWatch(h.deps);
 
     assert.equal(res.landed, 1);
-    assert.deepEqual(h.cycleCalls, [{ cycleId: "cyc-510", prNumber: 510 }], "no filesChanged key when the view didn't report one");
+    assert.deepEqual(h.cycleCalls, [
+      { cycleId: "cyc-510", prNumber: 510, status: "merged", tasksMerged: 1, tasksAttempted: 1 },
+    ], "no filesChanged key when the view didn't report one");
   });
 
   test("summary counts + a health snapshot are produced every run", async () => {

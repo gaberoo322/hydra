@@ -413,6 +413,60 @@ describe("recordCycle — injected deps (#2158)", () => {
     assert.equal((r2 as any).enriched, false, "a 0 duration is not an enrichment");
     assert.equal(store.metrics.get("c-dur0")!.totalDurationMs, "12345", "real span preserved");
   });
+
+  // Issue #2854: the merge-watch cycle-record enrichment now carries
+  // status:'merged' + tasksMerged/tasksAttempted:1. For the qa_orch RELAY case —
+  // where reap.py never wrote a prior cycle-record for this cycleId — that
+  // enrichment is the FIRST write. Before #2854 the body carried no status/
+  // counters, so recordCycle defaulted the counters to 0 and the "completed"
+  // status fallback bucketed the cycle `unaccounted`/empty, inflating the
+  // empty-cycle rate. This asserts the first-write body now buckets `merged`
+  // with tasksMerged=1 (this is the exact shape holdback-merge-watch.ts sends).
+  test("#2854: a first-write merge-watch enrichment (no prior record) buckets merged with tasksMerged=1, NOT unaccounted", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    // The exact cycleBody holdback-merge-watch.ts sends for a landed PR whose
+    // cycleId reap.py never recorded (the qa_orch relay first-write case).
+    const r = await recordCycle(
+      { cycleId: "c-relay", prNumber: 88, filesChanged: 5, status: "merged", tasksMerged: 1, tasksAttempted: 1 } as any,
+      deps,
+    );
+    assert.equal((r as any).bucketed, "merged", "first write buckets merged, not unaccounted");
+    assert.equal((r as any).deduped, false, "no prior record ⇒ genuine first write");
+    assert.equal(store.counters.merged, 1);
+    assert.equal(store.counters.unaccounted, 0, "the empty-cycle bucket is NOT bumped");
+    assert.equal(store.cycles.get("c-relay")!.status, "merged");
+    assert.equal(store.metrics.get("c-relay")!.tasksMerged, "1");
+    assert.equal(store.metrics.get("c-relay")!.tasksAttempted, "1");
+  });
+
+  // Issue #2854 safety: on the dedup path recordCycle short-circuits on
+  // `existing.status`, so the new status/tasksMerged/tasksAttempted fields the
+  // merge-watch now sends are IGNORED for an already-recorded cycle — no
+  // re-bucket, no counter re-fire. This proves the fix does not disturb the
+  // already-recorded (reap-then-merge) case.
+  test("#2854: the dedup path ignores the new status/counter fields (already-recorded cycle unaffected)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    // Phase 1 — reap-time write buckets the cycle as `failed`.
+    await recordCycle({ cycleId: "c-relay-dedup", status: "failed", tasksMerged: 0 } as any, deps);
+    assert.equal(store.counters.failed, 1);
+    assert.equal(store.counters.merged, 0);
+
+    // Phase 2 — the merge-watch enrichment arrives with status:'merged' etc. The
+    // dedup early-return keys on existing.status, so the record stays `failed`
+    // and no counter re-fires.
+    const r2 = await recordCycle(
+      { cycleId: "c-relay-dedup", prNumber: 88, filesChanged: 2, status: "merged", tasksMerged: 1, tasksAttempted: 1 } as any,
+      deps,
+    );
+    assert.equal((r2 as any).deduped, true, "already-recorded ⇒ dedup");
+    assert.equal((r2 as any).bucketed, null, "no re-bucket on the dedup path");
+    assert.equal((r2 as any).status, "failed", "returned status is the pre-existing one");
+    assert.equal(store.counters.failed, 1, "failed counter did NOT re-fire");
+    assert.equal(store.counters.merged, 0, "the merged counter is NOT bumped by the ignored status");
+    assert.equal(store.cycles.get("c-relay-dedup")!.status, "failed", "stored status unchanged");
+  });
 });
 
 // ---------------------------------------------------------------------------
