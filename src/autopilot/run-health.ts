@@ -25,8 +25,48 @@
  *   info), then by type for a deterministic order.
  */
 
-import type { StuckSignal, StuckSignalSeverity } from "../schemas/now-page.ts";
 import { isOsHeartbeatStale } from "./os-heartbeat.ts";
+
+// ---------------------------------------------------------------------------
+// StuckSignal domain types (issue #2838 — relocated from schemas/now-page.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * The four stuck-signal heuristic types this analysis core computes:
+ *   - `stalled-dispatch`   — a live dispatch running past a threshold with no
+ *                            fresh tool-call / turn activity.
+ *   - `unproductive-loop`  — a class dispatched repeatedly across the history
+ *                            window with zero merges or a high failed count.
+ *   - `idle-streak`        — consecutive no-op turns / runs terminating idle.
+ *   - `issue-pr-churn`     — the same issue or PR re-dispatched repeatedly
+ *                            without resolving.
+ *
+ * This is the canonical domain owner of the stuck-signal shape: `run-health.ts`
+ * produces and ranks every `StuckSignal`, so the type lives here. The HTTP wire
+ * schema in `schemas/now-page.ts` (`StuckSignalSchema`) validates this shape and
+ * imports the types FROM this module — the correct domain → schema direction.
+ */
+export type StuckSignalType =
+  | "stalled-dispatch"
+  | "unproductive-loop"
+  | "idle-streak"
+  | "issue-pr-churn";
+
+/** Severity ranking a heuristic assigns to a stuck signal. */
+export type StuckSignalSeverity = "info" | "warn" | "critical";
+
+/**
+ * One ranked stuck signal. `evidence` is an open key/value bag carrying the
+ * class, counts, and issue/PR refs the operator needs to act on the signal —
+ * an `unknown`-valued record so a heuristic can attach extra evidence (a
+ * count, a class label, an array of refs) without a schema change.
+ */
+export interface StuckSignal {
+  type: StuckSignalType;
+  severity: StuckSignalSeverity;
+  summary: string;
+  evidence: Record<string, unknown>;
+}
 
 // ---------------------------------------------------------------------------
 // Tunable thresholds
