@@ -18,7 +18,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  PROMPT_SIZE_BUDGET_BYTES,
   MIN_CALL_INTERVAL_SECONDS,
   DEFAULT_DAILY_CAP_USD,
   envDailyCap,
@@ -26,7 +25,6 @@ import {
   buildPrompt,
   computeMaterialChangeSignature,
   summariseSlotStatus,
-  parseLlmResponse,
   shouldFire,
   createRecommendationEngine,
   createCapEnforcer,
@@ -191,107 +189,11 @@ function makeTurnEnd(overrides: Partial<TurnEndPayload> = {}): TurnEndPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers — buildPrompt, parseLlmResponse
+// Pure helpers — materiality gate (buildPrompt / parseLlmResponse / the
+// prompt-size budget now live in test/recommendation-prompt.test.mts, the
+// focused leaf test extracted by #2867; the engine still re-exports them and
+// makeFakeLlm above exercises buildPrompt through the engine surface).
 // ---------------------------------------------------------------------------
-
-test("buildPrompt stays under the 4KB prompt-size budget for a saturated input", () => {
-  const prompt = buildPrompt({
-    recent_turns: Array.from({ length: 3 }, (_, i) => ({
-      turn_n: i + 1,
-      dispatches: 5,
-      skipped: 2,
-      idle: 0,
-      ts_epoch: 1_000_000 + i,
-    })),
-    slot_snapshot: Object.fromEntries(
-      Array.from({ length: 12 }, (_, i) => [
-        `dev_orch_slot_${i}`,
-        { status: "dispatched", since_epoch: 1_000_000 },
-      ]),
-    ),
-    signals_snapshot: Object.fromEntries(
-      Array.from({ length: 12 }, (_, i) => [
-        `signal_${i}`,
-        `pretty long value with random padding to test the clip ${"x".repeat(50)}`,
-      ]),
-    ),
-    recent_permission_waits: Array.from({ length: 5 }, (_, i) => ({
-      slot: `dev_target_${i}`,
-      tool: "Bash",
-      ts_epoch: 1_000_000 + i * 10,
-    })),
-    daily_spend_usd: 0.42,
-    turn_end: makeTurnEnd({ dispatches: 5, skipped: 2 }),
-  });
-  const size = Buffer.byteLength(prompt, "utf8");
-  assert.ok(
-    size <= PROMPT_SIZE_BUDGET_BYTES,
-    `prompt was ${size} bytes, budget is ${PROMPT_SIZE_BUDGET_BYTES}`,
-  );
-});
-
-test("buildPrompt is far under budget for a minimal input", () => {
-  const prompt = buildPrompt({
-    recent_turns: [],
-    slot_snapshot: {},
-    signals_snapshot: {},
-    recent_permission_waits: [],
-    daily_spend_usd: 0,
-    turn_end: makeTurnEnd(),
-  });
-  assert.ok(Buffer.byteLength(prompt, "utf8") < 1024);
-});
-
-test("parseLlmResponse extracts valid recommendations and clips to 3", () => {
-  const recs = parseLlmResponse({
-    rawJsonText: JSON.stringify({
-      recommendations: [
-        { severity: "info", message: "first" },
-        { severity: "warn", message: "second" },
-        { severity: "critical", message: "third" },
-        { severity: "info", message: "fourth — should be dropped" },
-      ],
-    }),
-    runId: "run-A",
-    evidenceId: "turn:1",
-    nowIso: "2026-05-28T00:00:00Z",
-    turnN: 1,
-  });
-  assert.equal(recs.length, 3);
-  assert.equal(recs[0].id, "run-A:1:0");
-  assert.equal(recs[0].run_id, "run-A");
-  assert.equal(recs[0].evidence_id, "turn:1");
-  assert.equal(recs[0].severity, "info");
-  assert.equal(recs[2].severity, "critical");
-});
-
-test("parseLlmResponse rejects malformed json and unknown severities", () => {
-  assert.deepEqual(
-    parseLlmResponse({
-      rawJsonText: "not json{",
-      runId: "x",
-      evidenceId: "y",
-      nowIso: "",
-      turnN: 0,
-    }),
-    [],
-  );
-  const recs = parseLlmResponse({
-    rawJsonText: JSON.stringify({
-      recommendations: [
-        { severity: "panic", message: "drop" },
-        { severity: "info", message: "" },
-        { severity: "info", message: "keep" },
-      ],
-    }),
-    runId: "x",
-    evidenceId: "y",
-    nowIso: "2026-05-28T00:00:00Z",
-    turnN: 0,
-  });
-  assert.equal(recs.length, 1);
-  assert.equal(recs[0].message, "keep");
-});
 
 test("summariseSlotStatus is deterministic regardless of input key order", () => {
   const a = summariseSlotStatus({ b: { status: "x" }, a: { status: "y" } });
