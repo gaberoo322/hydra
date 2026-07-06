@@ -94,30 +94,20 @@ import {
   type MergeWindowContext,
   type MergeStatus,
 } from "./windows.ts";
+import { producerClassFromCycleId } from "../taxonomy/classes.ts";
 
 // Re-exported so existing importers of the coordinator's `MergeStatus` (and the
 // injectable `fetchMergeStatus` dep signature) keep the same public surface —
 // the type now lives with the pure OPEN predicate in windows.ts.
 export type { MergeStatus };
 
-// ---------------------------------------------------------------------------
-// Producer-class derivation (PURE)
-// ---------------------------------------------------------------------------
-
-/**
- * Derive the producer class from a dispatch `cycleId`. Autopilot cycle ids end
- * with the signal class token (e.g. `worktree-agent-<uuid>-t8-dev_orch` →
- * `dev_orch`). We take the trailing `_orch` / `_target` token; anything we can't
- * parse maps to `"unknown"` so a merge is still counted (never dropped). PURE.
- *
- * `classCounts` stays RAW — one merge contributes one count to its class; there
- * is NO write-time credit split (the epic assigns credit later via regression).
- */
-export function producerClassFromCycleId(cycleId: string | null | undefined): string {
-  if (!cycleId) return "unknown";
-  const m = cycleId.match(/([a-z0-9]+_(?:orch|target))\s*$/i);
-  return m ? m[1].toLowerCase() : "unknown";
-}
+// The pure "cycleId → producer class name" lookup now lives with the class
+// alphabet in the Dispatch-Class Taxonomy Module (`src/taxonomy/classes.ts`),
+// next to classByName / classBySkill (issue #2920) — imported above. The
+// coordinator delegates classification exactly as it already delegates window
+// policy to windows.ts. `classCounts` stays RAW — one merge contributes one
+// count to its class; there is NO write-time credit split (the epic assigns
+// credit later via regression).
 
 // ---------------------------------------------------------------------------
 // Merge-landing status (mirrors holdback-merge-watch's fetch)

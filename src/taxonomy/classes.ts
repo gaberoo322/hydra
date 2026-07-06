@@ -248,6 +248,31 @@ export function classBySkill(skill: string): DispatchClassRow | undefined {
   return BY_SKILL.get(skill);
 }
 
+/**
+ * The trailing `_orch` / `_target` class token an autopilot `cycleId` ends with
+ * (e.g. `worktree-agent-<uuid>-t8-dev_orch` → `dev_orch`). The third class
+ * lookup alongside {@link classByName} / {@link classBySkill}: it names a class
+ * by the cycleId format the dispatch harness stamps.
+ */
+const CYCLE_ID_CLASS_SUFFIX = /([a-z0-9]+_(?:orch|target))\s*$/i;
+
+/**
+ * Derive the producer class from a dispatch `cycleId`. Autopilot cycle ids end
+ * with the signal class token (e.g. `worktree-agent-<uuid>-t8-dev_orch` →
+ * `dev_orch`). We take the trailing `_orch` / `_target` token; anything we can't
+ * parse maps to `"unknown"` so a merge is still counted (never dropped). PURE.
+ *
+ * The complement of {@link classByName} / {@link classBySkill}: this is the
+ * "cycleId → class name" lookup, keeping all three ways to name a Dispatch Class
+ * in the Taxonomy Module (issue #2920). Callers that want the full row can pass
+ * the result to `classByName`.
+ */
+export function producerClassFromCycleId(cycleId: string | null | undefined): string {
+  if (!cycleId) return "unknown";
+  const m = cycleId.match(CYCLE_ID_CLASS_SUFFIX);
+  return m ? m[1].toLowerCase() : "unknown";
+}
+
 // ---------------------------------------------------------------------------
 // Provenance labels (slice #1672)
 // ---------------------------------------------------------------------------

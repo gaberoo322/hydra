@@ -45,6 +45,7 @@ import {
   classByName,
   classBySkill,
   parseClassTaxonomy,
+  producerClassFromCycleId,
   provenanceFromLabels,
 } from "../src/taxonomy/classes.ts";
 
@@ -472,5 +473,26 @@ describe("taxonomy: provenance labels derive from the provenanceLabel column (sl
       provenanceFromLabels([undefined as unknown as string, "sentry"]),
       "sentry",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// producerClassFromCycleId — the third class lookup (cycleId → class name).
+// Relocated here from test/outcome-attribution-subscribe.test.mts (issue #2920),
+// so the pure classification invariant lives with the Taxonomy Module it now
+// belongs to — no I/O-coordinator dependency graph loaded to assert it.
+// ---------------------------------------------------------------------------
+
+describe("taxonomy: producerClassFromCycleId (cycleId → class name, #2920)", () => {
+  test("extracts the trailing signal-class token", () => {
+    assert.equal(producerClassFromCycleId("worktree-agent-abc-t8-dev_orch"), "dev_orch");
+    assert.equal(producerClassFromCycleId("run-1-dev_target"), "dev_target");
+    assert.equal(producerClassFromCycleId("sweep_orch"), "sweep_orch");
+  });
+  test("defaults to unknown for unparseable / empty", () => {
+    assert.equal(producerClassFromCycleId("random-id"), "unknown");
+    assert.equal(producerClassFromCycleId(""), "unknown");
+    assert.equal(producerClassFromCycleId(null), "unknown");
+    assert.equal(producerClassFromCycleId(undefined), "unknown");
   });
 });
