@@ -173,3 +173,119 @@ export function classifyZ(z: number, threshold: number): AnomalyDirection | null
   if (z <= -threshold) return "low";
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Ridge-regression linear algebra — relocated verbatim from
+// src/outcome-attribution/estimator.ts (issue #2917). Domain-neutral numeric
+// primitives: they take and return plain number[][] / number[], carry no
+// attribution-domain knowledge, and are hand-rolled (≤16 cols) to stay off the
+// ADR-0005 runtime-dependency allowlist. Same relocation direction as the
+// #2883 z-score move above.
+// ---------------------------------------------------------------------------
+
+/**
+ * Solve the ridge normal equations `(XᵀX + λ·D) β = Xᵀy` where
+ * `D = diag(0, 1, …, 1)` leaves the intercept (column 0) unregularized.
+ *
+ * With `λ > 0` the regressed diagonal is strictly positive, so the system is
+ * non-singular even under perfectly collinear class columns — the solve returns
+ * finite β, never throws. The intercept column is 1s (non-degenerate) so its
+ * unregularized diagonal entry is `n > 0`.
+ */
+export function solveRidge(X: number[][], y: number[], lambda: number): number[] {
+  const n = X.length;
+  const m = n > 0 ? X[0].length : 0; // intercept + P class columns
+  if (m === 0) return [];
+
+  // A = XᵀX + λ·D ; b = Xᵀy
+  const A: number[][] = Array.from({ length: m }, () => new Array(m).fill(0));
+  const b: number[] = new Array(m).fill(0);
+  for (let i = 0; i < n; i++) {
+    const row = X[i];
+    const yi = y[i];
+    for (let a = 0; a < m; a++) {
+      b[a] += row[a] * yi;
+      for (let c = 0; c < m; c++) {
+        A[a][c] += row[a] * row[c];
+      }
+    }
+  }
+  // Regularize every column EXCEPT the intercept (index 0).
+  for (let d = 1; d < m; d++) {
+    A[d][d] += lambda;
+  }
+
+  return gaussianSolve(A, b);
+}
+
+/**
+ * Solve `A x = b` for a small square system by Gaussian elimination with partial
+ * pivoting. `A` is (with `λ > 0` on the class diagonal + a 1s intercept column)
+ * non-singular; the pivot guard below is a numerical safety net that returns a
+ * finite (0-filled) fallback rather than dividing by zero — the invariant is
+ * "never throw".
+ */
+export function gaussianSolve(A: number[][], b: number[]): number[] {
+  const n = b.length;
+  // Work on copies (purity: never mutate caller arrays).
+  const M = A.map((row, i) => [...row, b[i]]);
+
+  for (let col = 0; col < n; col++) {
+    // Partial pivot: swap in the row with the largest |value| in this column.
+    let pivot = col;
+    let best = Math.abs(M[col][col]);
+    for (let r = col + 1; r < n; r++) {
+      const v = Math.abs(M[r][col]);
+      if (v > best) {
+        best = v;
+        pivot = r;
+      }
+    }
+    if (best === 0) {
+      /* intentional: a zero pivot means this column is fully degenerate even
+         after ridge regularization (should not happen for λ>0, but never throw)
+         — leave the corresponding unknown at 0 and continue. */
+      continue;
+    }
+    if (pivot !== col) {
+      const tmp = M[col];
+      M[col] = M[pivot];
+      M[pivot] = tmp;
+    }
+    // Eliminate below.
+    for (let r = col + 1; r < n; r++) {
+      const factor = M[r][col] / M[col][col];
+      if (factor === 0) continue;
+      for (let c = col; c <= n; c++) {
+        M[r][c] -= factor * M[col][c];
+      }
+    }
+  }
+
+  // Back-substitution.
+  const x = new Array<number>(n).fill(0);
+  for (let row = n - 1; row >= 0; row--) {
+    let sum = M[row][n];
+    for (let c = row + 1; c < n; c++) {
+      sum -= M[row][c] * x[c];
+    }
+    const diag = M[row][row];
+    x[row] = diag !== 0 ? sum / diag : 0;
+  }
+  return x;
+}
+
+/** Population standard deviation (÷N). Returns 0 for <2 samples. */
+export function populationStd(values: number[]): number {
+  const n = values.length;
+  if (n < 2) return 0;
+  let mean = 0;
+  for (const v of values) mean += v;
+  mean /= n;
+  let ss = 0;
+  for (const v of values) {
+    const d = v - mean;
+    ss += d * d;
+  }
+  return Math.sqrt(ss / n);
+}

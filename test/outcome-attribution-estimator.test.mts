@@ -24,12 +24,12 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import type { AttributionObservation } from "../src/redis/attribution.ts";
+import { estimateMarginalEffects } from "../src/outcome-attribution/estimator.ts";
 import {
-  estimateMarginalEffects,
   solveRidge,
   gaussianSolve,
   populationStd,
-} from "../src/outcome-attribution/estimator.ts";
+} from "../src/metrics/math.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
