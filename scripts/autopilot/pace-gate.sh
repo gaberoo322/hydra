@@ -272,6 +272,15 @@ fi
 if [[ "$MODE" == "exec" ]]; then
   log "eligible (paceState=$PACE_STATE, emergencyStop=$EMERGENCY_STOP) — exec'ing autopilot session"
 
+  # Issue #2955 — stamp the launch mechanism for the run-start trigger field.
+  # Every systemd-mediated start (pace-gate timer AND Restart= relaunch) routes
+  # through this exec branch (issue #1089), so exporting here makes
+  # bootstrap.sh's run-start POST report trigger=pace-gate instead of the
+  # retired hour-of-day heuristic values. exec preserves the environment, so
+  # the claude CLI (and its Bash-tool children, where bootstrap.sh runs)
+  # inherit it. Ineligible exits (Steps 1-3) never reach this export.
+  export HYDRA_AUTOPILOT_TRIGGER="pace-gate"
+
   if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then
     log "would-exec autopilot session (DRY_RUN=1, test mode)"
     exit 0

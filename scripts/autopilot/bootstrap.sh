@@ -1127,16 +1127,20 @@ python3 "$(dirname "$0")/heartbeat.py" --last-action=bootstrap || \
   echo "[autopilot] heartbeat.py initial write failed; continuing"
 
 # Issue #497 — register this run with the orchestrator's autopilot-runs
-# dashboard surface. Posts run-start with the limits payload + trigger from
-# hour-of-day heuristic (UTC). Best-effort: orchestrator-down must not block
-# bootstrap, so a curl failure is logged but ignored. The endpoint is
-# idempotent on run_id, so a transient failure followed by a manual retry is
-# safe.
+# dashboard surface. Posts run-start with the limits payload + trigger.
+# Best-effort: orchestrator-down must not block bootstrap, so a curl failure
+# is logged but ignored. The endpoint is idempotent on run_id, so a transient
+# failure followed by a manual retry is safe.
 #
-# Trigger heuristic (UTC):
-#   09:00–11:59 → morning-timer
-#   21:00–23:59 → overnight-timer
-#   else         → manual
+# Trigger env contract (issue #2955): pace-gate.sh's eligible exec branch
+# exports HYDRA_AUTOPILOT_TRIGGER=pace-gate before exec'ing the claude CLI,
+# and every systemd-mediated launch (timer start AND Restart= relaunch)
+# routes through that branch (issue #1089). So:
+#   HYDRA_AUTOPILOT_TRIGGER set (non-empty) → its value (pace-gate)
+#   unset or empty                          → manual (a hand-launched session)
+# The old hour-of-day heuristic (morning-timer/overnight-timer) was deleted:
+# ADR-0021 retired those timers, so the labels were phantoms stamped by clock
+# coincidence.
 #
 # Isolated runs (non-default STATE/HEARTBEAT/LOG path) skip this POST
 # entirely. The test suite frequently invokes bootstrap.sh and was
@@ -1146,15 +1150,8 @@ python3 "$(dirname "$0")/heartbeat.py" --last-action=bootstrap || \
 if [ "${ISOLATED_RUN}" = "1" ]; then
   echo "[autopilot] isolated run (non-default state/heartbeat/log path) — skipping run-start POST"
 else
-  HOUR_UTC=$(date -u +%H)
-  HOUR_NUM=$((10#${HOUR_UTC}))
-  if [ "${HOUR_NUM}" -ge 9 ] && [ "${HOUR_NUM}" -lt 12 ]; then
-    TRIGGER="morning-timer"
-  elif [ "${HOUR_NUM}" -ge 21 ] && [ "${HOUR_NUM}" -le 23 ]; then
-    TRIGGER="overnight-timer"
-  else
-    TRIGGER="manual"
-  fi
+  # Colon-dash so an EMPTY export also falls back to manual (issue #2955).
+  TRIGGER="${HYDRA_AUTOPILOT_TRIGGER:-manual}"
 
   HYDRA_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
   RUN_START_PAYLOAD=$(cat <<JSON

@@ -178,4 +178,53 @@ describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
       srv.close();
     }
   });
+
+  test("exec mode eligible branch exports HYDRA_AUTOPILOT_TRIGGER=pace-gate to the exec'd command (issue #2955)", async () => {
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"], {
+        // The runPaceGate fixture defaults DRY_RUN=1, whose early-exit
+        // precedes the EXEC_CMD hook — override to 0 so the hook execs.
+        HYDRA_PACE_GATE_DRY_RUN: "0",
+        // EXEC_CMD is intentionally word-split with NO quote re-parsing, so
+        // keep it to plain words (`sh -c '...'` would shatter). printenv
+        // observes exactly what the exec'd claude CLI would inherit.
+        HYDRA_PACE_GATE_EXEC_CMD: "printenv HYDRA_AUTOPILOT_TRIGGER",
+        // Prove the SCRIPT stamps the value (not env inheritance): seed a
+        // decoy that the eligible branch's export must overwrite.
+        HYDRA_AUTOPILOT_TRIGGER: "decoy-not-from-gate",
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^pace-gate$/m);
+      assert.doesNotMatch(r.stdout, /decoy-not-from-gate/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("exec mode ineligible exit does NOT reach the trigger export (issue #2955)", async () => {
+    const srv = await eligibilityServer({
+      allow: false,
+      shed: [],
+      reasons: { ...baseReasons, weeklyEmergencyStop: true },
+      paceState: "behind",
+    });
+    try {
+      // DRY_RUN=0 + a printenv EXEC_CMD: if the ineligible path ever fell
+      // through to the export+exec, "pace-gate" would appear on stdout.
+      const r = await runPaceGate(srv.url, ["--exec-autopilot"], {
+        HYDRA_PACE_GATE_DRY_RUN: "0",
+        HYDRA_PACE_GATE_EXEC_CMD: "printenv HYDRA_AUTOPILOT_TRIGGER",
+      });
+      assert.equal(r.status, 0); // still the clean skip exit
+      assert.doesNotMatch(r.stdout, /^pace-gate$/m);
+    } finally {
+      srv.close();
+    }
+  });
 });
