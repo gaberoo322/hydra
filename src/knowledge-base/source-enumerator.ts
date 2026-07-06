@@ -74,7 +74,7 @@ export function parseSourcePaths(spec: string): SourcePath[] {
 // OS-native, portable form).
 
 /** Hydra root the default source-path spec is derived under. Override with HYDRA_ROOT. */
-export const HYDRA_ROOT_FOR_SOURCE =
+const HYDRA_ROOT_FOR_SOURCE =
   process.env.HYDRA_ROOT || resolve(process.env.HOME!, "hydra");
 
 /**
@@ -82,7 +82,7 @@ export const HYDRA_ROOT_FOR_SOURCE =
  * Built with `join()` so the path separator is OS-native. Override the whole
  * default set with HYDRA_INDEX_SOURCE_PATHS.
  */
-export const DEFAULT_SOURCE_SPEC = `${join(HYDRA_ROOT_FOR_SOURCE, "src")}:.ts,${join(
+const DEFAULT_SOURCE_SPEC = `${join(HYDRA_ROOT_FOR_SOURCE, "src")}:.ts,${join(
   HYDRA_ROOT_FOR_SOURCE,
   "docs"
 )}:.md,${join(HYDRA_ROOT_FOR_SOURCE, "test")}:.mts`;
