@@ -34,7 +34,7 @@
 import { getRedisConnection } from "./connection.ts";
 
 /** Redis key for the persisted OAuth-meter backoff gate. */
-export const OAUTH_BACKOFF_KEY = "hydra:metrics:oauth-usage:backoff";
+const OAUTH_BACKOFF_KEY = "hydra:metrics:oauth-usage:backoff";
 
 /**
  * TTL for the persisted backoff state — 24h. Long enough to survive any normal
@@ -43,7 +43,7 @@ export const OAUTH_BACKOFF_KEY = "hydra:metrics:oauth-usage:backoff";
  * the outage and a fresh one starts a day later) self-expires rather than
  * resuming a stale ladder against an endpoint that has long since recovered.
  */
-export const OAUTH_BACKOFF_TTL_SECONDS = 24 * 60 * 60;
+const OAUTH_BACKOFF_TTL_SECONDS = 24 * 60 * 60;
 
 /**
  * The persisted backoff gate. Identical shape to the in-memory
