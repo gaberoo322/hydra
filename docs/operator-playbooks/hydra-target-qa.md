@@ -1,6 +1,6 @@
 ---
 name: hydra-target-qa
-description: Independent QA verification for Target (hydra-betting) PRs — Standards on every PR, plus Spec + a 2-reviewer adversarial fold on money-critical changes. Bounces hard findings to the reframe queue. No deep-QA remediation loop, no operator escalation.
+description: Independent QA verification for Target (hydra-betting) PRs — Standards on every PR, plus Spec + a 2-reviewer adversarial fold on money-critical changes, plus a per-PR visual QA pass (before/after screenshots graded against the design ADR) on UI-touching PRs. Bounces hard findings to the reframe queue. No deep-QA remediation loop, no operator escalation.
 when_to_use: "When a Target build opens a PR and needs an independent reviewer (today the executor grades its own work), the operator says 'QA the target PR', or hydra-autopilot dispatches Target QA."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*)
 arguments: [pr_ref]
@@ -82,6 +82,110 @@ panel — instead of throwing. This is the Target sibling of the Orchestrator's
 The authoritative statement of this rule lives in the Target repo's
 `CLAUDE.md` / `web/AGENTS.md`; this checklist is how QA enforces it on every
 UI-touching PR.
+
+## Per-PR visual QA — screenshot the affected routes on UI-touching PRs
+
+A UI-touching PR gets a **visual QA pass** on the **Standards** axis, over and
+above the render-robustness check above: QA renders the affected routes in the
+PR's own worktree, captures **before/after** screenshots, and reviews the
+after-state against the Target design ADR
+(`hydra-betting/docs/adr/0005-design-language.md`, epic #2732) — the ADR's
+**[mechanical]** rules hard-verified, its **[judgment]** rules flagged in the
+verdict comment for the operator's design read. **Non-UI PRs skip this step
+entirely** — zero added cost on the common ~90% path (issue #2740).
+
+### The UI-touching trigger
+
+Run the visual pass **iff** the PR's changed paths (Target-repo-relative)
+include a rendered surface — a page/route, a component, or a global style:
+
+- `web/src/app/**` (App-Router pages, layouts, and their server components /
+  loaders), OR
+- `web/src/components/**` (shared render components, including
+  `nav-registry.ts`), OR
+- `web/src/app/globals.css` / the design tokens the ADR pins.
+
+Any other PR (API routes under `web/src/app/api/**` that render nothing,
+`web/src/lib/**`, tests, config, docs) is **not** UI-touching — skip the visual
+pass and note `visual-qa: skipped (non-UI)` in the verdict so the skip is
+auditable. Decide the trigger from the changed-path set only; never infer it
+from PR size or description.
+
+**Deriving the affected routes.** Map the touched files to the nav-registry
+routes they render:
+
+- a `web/src/app/<route>/**` change → that `<route>` (and any route whose layout
+  it is);
+- a `web/src/components/**` or `globals.css` change is **cross-cutting** — it can
+  affect every page, so screenshot the **full** nav-registry route set (same set
+  the slice-1 route-smoke suite renders), not a guessed subset.
+
+### The screenshot procedure
+
+Reuse the **slice-1 route-smoke Playwright helper** (issue #2733:
+`web/e2e/route-smoke.spec.ts`'s per-route PNG capture, driven by
+`npm run e2e:smoke` against a **seeded-empty** DB) — do NOT hand-roll a second
+screenshot path. Capture **before** (base = `origin/main`) and **after**
+(PR `HEAD`) for each affected route:
+
+```bash
+# In the PR's Target worktree. Non-UI PRs never reach this block.
+AFFECTED=$(...)   # routes from the mapping above (or the full nav set for a cross-cutting change)
+
+# BEFORE — base state
+git stash --include-untracked >/dev/null 2>&1 || true   # or check out origin/main in a scratch worktree
+ROUTES="$AFFECTED" SHOT_DIR=.qa-shots/before npm run e2e:smoke
+
+# AFTER — PR HEAD state
+git stash pop >/dev/null 2>&1 || true
+ROUTES="$AFFECTED" SHOT_DIR=.qa-shots/after  npm run e2e:smoke
+```
+
+If the smoke helper is unavailable in the worktree (missing Playwright browser,
+`e2e:smoke` script absent), record `visual-qa: unavailable (<reason>)` in the
+verdict and fall back to the render-robustness static review — **never** silently
+skip and report a clean visual pass. A UI PR whose affected route **`500`s or
+logs a console error** in the after-capture is a hard finding (that is exactly
+the four-live-`500` failure mode from epic #2732) → FAIL → bounce-to-reframe.
+
+### Reviewing against the design ADR
+
+Grade each after-screenshot against ADR-0005's decisions, respecting the ADR's
+own **[mechanical]** vs **[judgment]** tags:
+
+- **[mechanical] rules — hard-verify (a violation is a FAIL, bounce-to-reframe):**
+  - a rendered nav source other than the four-tab `PortfolioShellNav` +
+    `/system` index, or a nav-registry `href` containing a `#fragment`
+    (decision 1);
+  - a nav label that does not match its destination page's `h1` and is not in
+    the ADR alias table (decision 4);
+  - more than **4 top-level sections** on a page, or a rendered-HTML weight over
+    the **100KB/route** ceiling (decision 3);
+  - a section that renders **blank** instead of the shared `EmptyState` /
+    degraded idiom in the seeded-empty capture (decision 5).
+
+  These are the same rules the `nav-completeness` suite (#2737), the color-literal
+  lint ratchet (#2738), and the route-smoke ceilings enforce in Target CI — QA
+  re-checks them on the screenshot so a visual regression can't ride in on a
+  green mechanical gate.
+
+- **[judgment] rules — FLAG in the verdict comment, do NOT FAIL:** whether the
+  page *looks* consistent with the hand-rolled idiom (spacing, hierarchy, pill
+  usage — decision 2), whether each section actually serves the page's declared
+  question (decision 3), and whether empty-state wording is honest (decision 5).
+  These are the `design_qa_target` dispatch's remit (#2739) and the operator's
+  design read — QA surfaces them with the screenshot but never blocks the merge
+  on a judgment call. (Confidence-routing discipline: mechanical → block;
+  judgment → surface.)
+
+### The verdict on a UI PR
+
+The Standards reviewer's verdict comment on a UI-touching PR **embeds the
+before/after screenshots** (attach the PNGs or link the CI artifacts) and lists
+**per-rule findings** — each mechanical rule marked PASS/FAIL, each judgment rule
+flagged for the operator. A mechanical violation folds into the Standards axis as
+a hard finding (FAIL → bounce-to-reframe, per the routing below); judgment flags
+travel with the PASS/FAIL but never change it.
 
 ## Routing the outcome — bounce, never escalate
 
@@ -168,6 +272,13 @@ multi-check rollup).
   — a render path that can `500` on a missing/stale/unknown-enum data state is a
   hard finding. New venues/sports/enum values arrive in production before the UI
   knows them; the page must degrade, never throw.
+- **Per-PR visual QA runs only on UI-touching PRs, and only its [mechanical]
+  ADR rules block.** A UI PR is screenshotted (before/after, via the slice-1
+  route-smoke helper) and graded against ADR-0005; a **[mechanical]** violation
+  (nav spine, label↔h1, section/weight ceilings, blank-instead-of-empty-state) is
+  a hard finding, while **[judgment]** findings are flagged for the operator and
+  never change the verdict. Non-UI PRs skip the pass entirely (auditable
+  `visual-qa: skipped`), so the common path pays zero added cost.
 - **No deep-QA remediation loop, no Verifier-Core checklist, no Outcome
   Holdback** — those are Orchestrator self-modification-containment gates the
   Target structurally does not need (epic #1052 rationale).
@@ -186,3 +297,13 @@ multi-check rollup).
 - Issue #2734 / epic #2732 — the render-robustness (degrade-never-throw)
   convention and the four live-`500` routes that motivated it; exemplar fixes
   item-737 (missing reconciliation checkpoint) and item-738 (unknown sport key).
+- Issue #2740 / epic #2732 — the per-PR visual QA pass this section defines.
+- `hydra-betting/docs/adr/0005-design-language.md` — the Target design-language
+  rubric (operator-grilled, #2736) whose **[mechanical]** rules this pass
+  hard-verifies and whose **[judgment]** rules it flags.
+- Issue #2733 — the slice-1 route-smoke Playwright suite + per-route screenshot
+  helper (`npm run e2e:smoke`) this pass reuses; #2737 (nav + label checks) and
+  #2738 (color-literal lint ratchet) are the CI arms of the same rubric.
+- Issue #2739 — the low-cadence `design_qa_target` dispatch that owns the
+  **[judgment]** ADR review across all routes (the periodic sibling of this
+  per-PR pass).
