@@ -289,8 +289,8 @@ export const AutopilotHealthResponseSchema = z
   })
   .strict();
 
-// `StuckSignal` / `StuckSignalSeverity` are re-exported from their canonical
-// domain owner (`src/autopilot/run-health.ts`, issue #2838) so existing
-// importers of `schemas/now-page.ts` keep resolving the same type identity.
-export type { StuckSignal, StuckSignalSeverity } from "../autopilot/run-health.ts";
+// `StuckSignal` is re-exported from its canonical domain owner
+// (`src/autopilot/run-health.ts`, issue #2838) so existing importers of
+// `schemas/now-page.ts` keep resolving the same type identity.
+export type { StuckSignal } from "../autopilot/run-health.ts";
 export type AutopilotHealthResponse = z.infer<typeof AutopilotHealthResponseSchema>;
