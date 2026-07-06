@@ -46,7 +46,7 @@ export const HOLDBACK_WINDOW_CYCLES = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLES",
  * not magic literals), documented in `config/direction/outcomes.yaml`.
  */
 export const HOLDBACK_WINDOW_CYCLES_T3 = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLES_T3", 7);
-export const HOLDBACK_WINDOW_CYCLES_T4 = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLES_T4", 10);
+const HOLDBACK_WINDOW_CYCLES_T4 = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLES_T4", 10);
 
 /**
  * The tiers that enroll in Outcome Holdback. T1 (prompt-shaped) is exempt — too
