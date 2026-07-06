@@ -63,7 +63,7 @@
  * live metric) simply yields an empty / all-flagged result.
  */
 
-import type { AttributionObservation } from "../redis/attribution.ts";
+import type { AttributionObservation } from "../redis/attribution-ledger.ts";
 import { solveRidge, populationStd } from "../metrics/math.ts";
 
 // ---------------------------------------------------------------------------

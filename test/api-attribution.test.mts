@@ -26,7 +26,7 @@ import { createAttributionRouter } from "../src/api/attribution.ts";
 import type {
   AttributionObservation,
   LoadObservationsResult,
-} from "../src/redis/attribution.ts";
+} from "../src/redis/attribution-ledger.ts";
 
 function mockReq(): any {
   return {

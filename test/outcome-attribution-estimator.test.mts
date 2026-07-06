@@ -23,7 +23,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import type { AttributionObservation } from "../src/redis/attribution.ts";
+import type { AttributionObservation } from "../src/redis/attribution-ledger.ts";
 import { estimateMarginalEffects } from "../src/outcome-attribution/estimator.ts";
 import {
   solveRidge,

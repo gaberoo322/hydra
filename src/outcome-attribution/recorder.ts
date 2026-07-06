@@ -6,7 +6,7 @@
  * (captured at window open, exactly what `enrollHoldback` captures) and a
  * **current** snapshot (re-sampled at window close, exactly what `checkHoldback`
  * re-samples) — it derives ONE raw observation per LIVE metric and appends it to
- * the append-only ledger (`src/redis/attribution.ts`).
+ * the append-only ledger (`src/redis/attribution-ledger.ts`).
  *
  * The two snapshots come from `snapshotLeadingOutcomes`
  * (`src/outcome-regression.ts`), reused **read-only** — its signature and
@@ -35,7 +35,7 @@ import type { LeadingOutcomeSample } from "../outcome-regression.ts";
 import type {
   AttributionLedger,
   AttributionObservation,
-} from "../redis/attribution.ts";
+} from "../redis/attribution-ledger.ts";
 
 /**
  * Metadata describing the closed window's producer activity. Supplied by the
@@ -101,7 +101,7 @@ export interface RecordWindowResult {
  * injected append-only `ledger`. Returns a structured result — never throws.
  *
  * The `ledger` is injected so the policy is unit-testable against a fake seam;
- * production passes `redisAttributionLedger` from `src/redis/attribution.ts`.
+ * production passes `redisAttributionLedger` from `src/redis/attribution-ledger.ts`.
  */
 export async function recordWindow(
   ledger: AttributionLedger,

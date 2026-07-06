@@ -1,6 +1,6 @@
 /**
  * Regression tests for the outcome-attribution spine (issue #2629, epic #2628):
- * the append-only ledger seam (`src/redis/attribution.ts`) + the window recorder
+ * the append-only ledger seam (`src/redis/attribution-ledger.ts`) + the window recorder
  * (`src/outcome-attribution/recorder.ts`).
  *
  * Two layers, mirroring holdback.test.mts:
@@ -34,14 +34,13 @@ import type {
   AttributionObservation,
   AppendObservationResult,
   LoadObservationsResult,
-} from "../src/redis/attribution.ts";
+} from "../src/redis/attribution-ledger.ts";
 import {
   appendObservation,
   getObservations,
-  attributionLedgerKey,
   _resetLedger,
   redisAttributionLedger,
-} from "../src/redis/attribution.ts";
+} from "../src/redis/attribution-ledger.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
