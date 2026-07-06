@@ -273,6 +273,57 @@ export function producerClassFromCycleId(cycleId: string | null | undefined): st
   return m ? m[1].toLowerCase() : "unknown";
 }
 
+/**
+ * The full structured parse of a dispatch cycleId (issue #2942). The dispatch
+ * harness stamps `worktree-agent-<8-hex-run-prefix>-t<turnN>-<class>` (e.g.
+ * runId `277e4476-…` at turn 4 dispatching dev_orch →
+ * `worktree-agent-277e4476-t4-dev_orch`), so the cycleId itself carries the
+ * dispatch-attribution triple the cycle-record POST body never did.
+ */
+export interface ParsedDispatchCycleId {
+  /** First 8 hex chars of the DISPATCHING run's run_id, lowercased. */
+  runIdPrefix: string;
+  /** Autopilot turn number the dispatch was made on. */
+  turn: number;
+  /** Dispatch class name (`dev_orch`, `dev_target`, ...), lowercased. */
+  className: string;
+}
+
+/**
+ * Fully-anchored form of the dispatch cycleId. Stricter than
+ * {@link CYCLE_ID_CLASS_SUFFIX} (which suffix-matches for the class token
+ * alone): here the whole id must match so runIdPrefix/turn are trustworthy.
+ * The class token allows interior underscores (`wire_or_retire_target`),
+ * which the suffix regex's `[a-z0-9]+` deliberately under-matches.
+ */
+const DISPATCH_CYCLE_ID =
+  /^worktree-agent-([0-9a-f]{8})-t(\d+)-([a-z][a-z0-9_]*_(?:orch|target))$/i;
+
+/**
+ * Parse a dispatch `cycleId` into its `{runIdPrefix, turn, className}` triple,
+ * or `null` when the id is not harness-stamped (e.g. the bare-UUID qa_orch
+ * relay cycleIds, legacy codex ids). PURE — no IO, no clock.
+ *
+ * The fourth cycleId lookup alongside {@link classByName} /
+ * {@link classBySkill} / {@link producerClassFromCycleId}, keeping all
+ * cycleId-to-class naming in the Taxonomy Module (issue #2920 precedent).
+ * Callers that want the full class row pass `className` to `classByName`.
+ * A `null` parse is the dark-tolerant arm (issue #2942): the caller records
+ * null attribution fields rather than dropping or fabricating a record.
+ */
+export function parseDispatchCycleId(
+  cycleId: string | null | undefined,
+): ParsedDispatchCycleId | null {
+  if (!cycleId) return null;
+  const m = cycleId.trim().match(DISPATCH_CYCLE_ID);
+  if (!m) return null;
+  return {
+    runIdPrefix: m[1].toLowerCase(),
+    turn: Number(m[2]),
+    className: m[3].toLowerCase(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Provenance labels (slice #1672)
 // ---------------------------------------------------------------------------

@@ -531,6 +531,15 @@ def _fire_cycle_record(
     the POST body; an empty/absent value omits all four fields (truthful
     "unknown"), an explicit 0 records a measured zero-test cycle.
 
+    `total_tokens` (issue #2942): reap's authoritative per-dispatch token
+    figure (already a parameter here since #430, previously unforwarded).
+    Passed as the 11th positional `cycle-record` arg so the durable
+    per-dispatch outcome record (`recordCycle` →
+    `src/redis/dispatch-outcomes.ts`) carries a cost figure. dispatch.sh
+    emits it only when POSITIVE — 0 means "no usage parsed" (unknown), and
+    recordCycle then falls back to the per-cycle token hash before recording
+    a truthful null.
+
     `task_title` / `anchor_ref` (issue #2012): the per-cycle anchor reference
     recovered from the slot before it was nulled (e.g. "issue-2012"). reap is
     the SOLE cycle-record writer, but it previously hardcoded both to "" — so
@@ -562,6 +571,12 @@ def _fire_cycle_record(
                 reflection_sources or "",  # issue #1136: served reflection buckets
                 "",  # files_changed — not known at reap time (merged-path enrich)
                 json.dumps(grounding_tests) if grounding_tests else "",  # issue #2754
+                # Issue #2942: forward reap's authoritative total_tokens as the
+                # 11th positional so the durable per-dispatch outcome record
+                # carries a cost figure. dispatch.sh only emits a POSITIVE
+                # integer (0 = "no usage parsed" = unknown, omitted so
+                # recordCycle's per-cycle-token-hash fallback gets its chance).
+                str(total_tokens or 0),
             ],
             check=False,
             capture_output=True,

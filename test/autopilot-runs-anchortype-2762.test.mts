@@ -36,6 +36,8 @@ interface MemStore {
   cycleIndex: Map<string, number>;
   metrics: Map<string, Record<string, string>>;
   counters: Record<string, number>;
+  /** Issue #2942: the per-dispatch outcome-record store fake. */
+  outcomes: Map<string, Record<string, unknown>>;
 }
 
 function newStore(): MemStore {
@@ -47,6 +49,7 @@ function newStore(): MemStore {
     cycleIndex: new Map(),
     metrics: new Map(),
     counters: { run: 0, merged: 0, failed: 0, unaccounted: 0 },
+    outcomes: new Map(),
   };
 }
 
@@ -129,6 +132,21 @@ function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
             typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
         }
         store.metrics.set(cycleId, existing);
+      },
+    },
+    // Issue #2942: the per-dispatch outcome-record seam fake.
+    dispatchOutcomes: {
+      async put(record) {
+        store.outcomes.set(record.cycleId, { ...record });
+        return { ok: true as const };
+      },
+      async upgrade(cycleId, patch) {
+        const existing = store.outcomes.get(cycleId) ?? { cycleId };
+        store.outcomes.set(cycleId, { ...existing, ...patch });
+        return { ok: true as const };
+      },
+      async readCycleTokens() {
+        return null;
       },
     },
     isPidAlive: () => true,

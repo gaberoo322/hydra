@@ -62,7 +62,7 @@ print(json.dumps({
     # data. Idempotent on cycleId — re-running with the same cycleId is a
     # no-op on the server, so retries don't double-count.
     #
-    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json]
+    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens]
     #
     # Issue #1136 (Slice 2 of #1119): the optional 8th positional arg
     # `reflection_sources` is the comma-separated reflection bucket tokens
@@ -89,6 +89,14 @@ print(json.dumps({
     # `testsAfter` stops recording 0 on every cycle. Empty/absent → all four fields
     # omitted from the POST body (truthful "unknown"); an explicit 0 records a
     # measured zero-test cycle. NUMERIC on the read side (aggregate.ts / trend.ts).
+    # Issue #2942: the optional 11th positional arg `tokens` is the dispatch's
+    # total token spend — reap.py's run_completion already holds the
+    # authoritative total_tokens and forwards it here so the durable
+    # per-dispatch outcome record (recordCycle → src/redis/dispatch-outcomes.ts)
+    # carries a cost figure. Only a POSITIVE integer is emitted: reap reports 0
+    # when no usage was parsed, which is "unknown" not "measured zero", so 0/
+    # empty/absent are all omitted and recordCycle falls back to the per-cycle
+    # token hash before recording a truthful null.
     cycle_id="${1:-}"
     status="${2:-}"
     skill="${3:-}"
@@ -99,8 +107,9 @@ print(json.dumps({
     reflection_sources="${8:-}"
     files_changed="${9:-}"
     grounding_tests="${10:-}"
+    tokens="${11:-}"
     if [ -z "$cycle_id" ] || [ -z "$status" ] || [ -z "$skill" ]; then
-      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json]" >&2
+      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens]" >&2
       exit 2
     fi
     # Issue #2852: defence-in-depth — fail loud at the shell BEFORE building the
@@ -165,7 +174,7 @@ print(json.dumps({
     esac
     payload=$(python3 -c "
 import json, sys
-cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed, grounding_tests = sys.argv[1:15]
+cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed, grounding_tests, tokens = sys.argv[1:16]
 body = {
     'cycleId': cycle_id,
     'status': status,
@@ -218,8 +227,19 @@ if grounding_tests != '':
                     pass
     except (TypeError, ValueError):
         pass
+# Issue #2942: only emit tokens when the caller passed a parseable POSITIVE
+# integer. reap reports 0 when no usage was parsed — that is 'unknown', not a
+# measured zero, so 0/empty/absent are all omitted and recordCycle's write-time
+# fallback (the per-cycle token hash) gets its chance before a truthful null.
+if tokens != '':
+    try:
+        tk = int(tokens)
+        if tk > 0:
+            body['tokens'] = tk
+    except (TypeError, ValueError):
+        pass
 print(json.dumps(body))
-" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests")
+" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests" "$tokens")
     # Issue #2635: the rest of the autopilot ecosystem (reap.py, heartbeat.py,
     # term-check.py, decide.py, bootstrap.sh, the hooks) resolves the API origin
     # from HYDRA_API_BASE, but the `hydra` CLI reads HYDRA_BASE_URL and the curl
@@ -257,7 +277,7 @@ print(json.dumps(body))
 Usage:
   dispatch.sh log <class> <skill> [ts]
   dispatch.sh capacity-writeback <pr_number> <commit_sha> <skill> <files_json>
-  dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed]
+  dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens]
 
 Environment:
   HYDRA_AUTOPILOT_LOG   Path to the nightly run log

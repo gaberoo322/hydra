@@ -40,8 +40,20 @@ import {
   incrSchedulerCyclesUnaccounted,
 } from "../redis/scheduler.ts";
 import { recordCycleMetrics, type CycleMetricsInput } from "../metrics/record.ts";
+import {
+  putDispatchOutcome,
+  upgradeDispatchOutcome,
+  type DispatchOutcomeRecord,
+  type DispatchOutcomePatch,
+  type DispatchOutcomeWriteResult,
+} from "../redis/dispatch-outcomes.ts";
+import { getCycleTokensRaw } from "../redis/cost.ts";
 import type { CycleRecordBody } from "./schemas.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
+// cycleId → {runIdPrefix, turn, className} parse + class-row join for the
+// per-dispatch outcome record (issue #2942). Both PURE lookups live in the
+// Taxonomy Module (issue #2920 precedent).
+import { parseDispatchCycleId, classByName } from "../taxonomy/classes.ts";
 // Shared result-type primitives + coercion helpers (single source of truth in
 // runs.ts, used by both the run/turn writers and this cycle-close coordinator).
 // One-directional edge: runs.ts never imports cycle-close.ts.
@@ -122,10 +134,29 @@ interface AutopilotRunsMetricsFacade {
   recordCycleMetrics(cycleId: string, metrics: CycleMetricsInput): Promise<void>;
 }
 
+/**
+ * The durable per-dispatch outcome-record seam (issue #2942). `put` fires on
+ * the FIRST cycle-record write, `upgrade` on the issue-2860 completed→merged
+ * dedup/enrichment path — so exactly one record exists per cycleId and its
+ * `outcome` stays in lockstep with the cycle-hash `status`. `readCycleTokens`
+ * is the write-time token fallback (the per-cycle token hash in
+ * `src/redis/cost.ts`) when the POST body carried no `tokens` figure.
+ *
+ * The record write is ADDITIVE and BEST-EFFORT: a failure logs
+ * `console.error` and never alters `CycleRecordResult` or blocks the reap
+ * path (observability, not correctness).
+ */
+interface AutopilotDispatchOutcomesFacade {
+  put(record: DispatchOutcomeRecord): Promise<DispatchOutcomeWriteResult>;
+  upgrade(cycleId: string, patch: DispatchOutcomePatch): Promise<DispatchOutcomeWriteResult>;
+  readCycleTokens(cycleId: string): Promise<string | null>;
+}
+
 export interface CycleCloseDeps {
   cycle: AutopilotRunsCycleFacade;
   scheduler: AutopilotRunsSchedulerFacade;
   metrics: AutopilotRunsMetricsFacade;
+  dispatchOutcomes: AutopilotDispatchOutcomesFacade;
   /**
    * Epoch-MS clock. A single source of truth: `*_epoch` seconds fields derive
    * via `Math.floor(now()/1000)` and ISO strings via `new Date(now())`.
@@ -149,6 +180,11 @@ const defaultCycleCloseDeps: CycleCloseDeps = {
   },
   metrics: {
     recordCycleMetrics,
+  },
+  dispatchOutcomes: {
+    put: putDispatchOutcome,
+    upgrade: upgradeDispatchOutcome,
+    readCycleTokens: getCycleTokensRaw,
   },
   now: Date.now,
 };
@@ -180,6 +216,69 @@ function filesChangedCount(v: unknown): number | undefined {
     return Math.floor(n);
   }
   return undefined;
+}
+
+/**
+ * Resolve the per-dispatch token figure for the outcome record (issue #2942):
+ * the POST body's `tokens` (reap's authoritative total) when present, else the
+ * per-cycle token hash (`hydra:metrics:tokens:by-cycle:<id>`, the write-time
+ * fallback), else a truthful `null` — never a fabricated 0. Reuses
+ * `filesChangedCount` as the non-negative-integer-or-undefined coercion.
+ */
+async function resolveDispatchTokens(
+  body: CycleRecordBody,
+  cycleId: string,
+  deps: CycleCloseDeps,
+): Promise<number | null> {
+  const fromBody = filesChangedCount(body.tokens);
+  if (fromBody !== undefined) return fromBody;
+  const raw = await deps.dispatchOutcomes.readCycleTokens(cycleId);
+  const fromHash = filesChangedCount(raw ?? undefined);
+  return fromHash !== undefined ? fromHash : null;
+}
+
+/**
+ * First-write per-dispatch outcome record (issue #2942). Fires exactly once
+ * per cycleId (the caller's first-write path — duplicate posts route through
+ * the upgrade arm instead). Additive + best-effort: any failure logs and
+ * returns; it never alters the caller's `CycleRecordResult`.
+ *
+ * Dark-tolerant: an unparseable cycleId (bare-UUID qa relay ids) records null
+ * run/turn/class attribution; an unknown class records a null skill; absent
+ * tokens record null. A record is never dropped and never fabricated.
+ */
+async function writeDispatchOutcomeRecord(
+  body: CycleRecordBody,
+  cycleId: string,
+  status: string,
+  deps: CycleCloseDeps,
+): Promise<void> {
+  try {
+    const parsed = parseDispatchCycleId(cycleId);
+    const classRow = parsed ? classByName(parsed.className) : undefined;
+    const tokens = await resolveDispatchTokens(body, cycleId, deps);
+    const durationMs = numberOrDefault(body.totalDurationMs, 0);
+    const result = await deps.dispatchOutcomes.put({
+      cycleId,
+      runIdPrefix: parsed?.runIdPrefix ?? null,
+      turn: parsed?.turn ?? null,
+      className: parsed?.className ?? null,
+      skill: classRow?.skill ?? null,
+      outcome: status,
+      tokens,
+      durationMs: durationMs > 0 ? durationMs : null,
+      recordedAt: deps.now(),
+    });
+    if (result.ok === false) {
+      console.error(
+        `[cycle-close] dispatch-outcome record write failed for cycle=${cycleId}: ${result.error}`,
+      );
+    }
+  } catch (err: any) {
+    console.error(
+      `[cycle-close] dispatch-outcome record write threw for cycle=${cycleId}: ${err?.message || String(err)}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +396,31 @@ export async function recordCycle(
         await deps.metrics.recordCycleMetrics(cycleId, enrichment);
         enriched = true;
       }
+
+      // Issue #2942: keep the durable per-dispatch outcome record's `outcome`
+      // in lockstep with the cycle-hash status upgrade above. Fires ONLY on
+      // the completed→merged transition (a plain dedup/enrichment post leaves
+      // the record untouched — exactly one record per cycleId, put on the
+      // first write below, upgraded in place here). Additive + best-effort:
+      // a failure logs and never alters the returned CycleRecordResult.
+      if (statusUpgraded) {
+        try {
+          const patch: DispatchOutcomePatch = { outcome: "merged" };
+          const upgradeTokens = filesChangedCount(body.tokens);
+          if (upgradeTokens !== undefined) patch.tokens = upgradeTokens;
+          if (enrichDuration > 0) patch.durationMs = enrichDuration;
+          const upgradeResult = await deps.dispatchOutcomes.upgrade(cycleId, patch);
+          if (upgradeResult.ok === false) {
+            console.error(
+              `[cycle-close] dispatch-outcome record upgrade failed for cycle=${cycleId}: ${upgradeResult.error}`,
+            );
+          }
+        } catch (err: any) {
+          console.error(
+            `[cycle-close] dispatch-outcome record upgrade threw for cycle=${cycleId}: ${err?.message || String(err)}`,
+          );
+        }
+      }
       return {
         ok: true,
         cycleId,
@@ -409,6 +533,15 @@ export async function recordCycle(
       await deps.scheduler.incrSchedulerCyclesUnaccounted();
       bucketed = "unaccounted";
     }
+
+    // Issue #2942: persist the durable per-dispatch outcome record — the
+    // write-time join of {run, turn, class} (parsed from the cycleId), skill
+    // (taxonomy row), outcome (the cycle-hash status verbatim), tokens
+    // (body → per-cycle token hash → null), and duration. AFTER the existing
+    // hash/metrics/counter writes so recordCycle's pre-existing side effects
+    // are byte-for-byte unchanged; best-effort so a record failure can never
+    // alter the CycleRecordResult or block the reap path.
+    await writeDispatchOutcomeRecord(body, cycleId, status, deps);
 
     return { ok: true, cycleId, status, bucketed, deduped: false, enriched: false };
   } catch (err: any) {

@@ -89,6 +89,15 @@ export const CycleRecordBodySchema = z
     // knowledge) stays intact because the string crosses the gap via the
     // dispatch's deposit file, not reap's own knowledge.
     reflectionSources: z.string().optional(),
+    // Issue #2942: the dispatch's total token spend, forwarded by reap.py
+    // (whose run_completion already holds the authoritative total_tokens) as
+    // the 11th positional cycle-record arg. recordCycle stores it on the
+    // durable per-dispatch outcome record. OPTIONAL on purpose: reap omits it
+    // when no usage was parsed (0), and recordCycle then falls back to the
+    // per-cycle token hash (src/redis/cost.ts) before recording a truthful
+    // null. Accepts number|string for the same loose-script-payload tolerance
+    // as the other count fields.
+    tokens: z.union([z.number(), z.string()]).optional(),
   })
   // Issue #2852: reject cycle-record bodies whose IDENTITY-field VALUES are
   // CLI-flag tokens (a value literally beginning with `--`, e.g. `--cycle-id`,
