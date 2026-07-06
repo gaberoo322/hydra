@@ -1534,3 +1534,35 @@ describe("scripts/autopilot/* executable bit", () => {
     }
   });
 });
+
+describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () => {
+  // collect-state.sh is network-dependent (live gh), so this pins the SOURCE:
+  // the jq exclusion array must contain every operator-wait / lifecycle label.
+  // Missing `ready-for-human` (#2828) and `needs-info` (#2958) each caused
+  // sweep_orch re-triage churn against issues sweep cannot advance.
+  test("exclusion array contains all lifecycle + operator-wait labels", () => {
+    const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+    const required = [
+      "ready-for-agent",
+      "in-progress",
+      "blocked",
+      "needs-qa",
+      "needs-triage",
+      "needs-research",
+      "target-backlog",
+      "ready-for-human",
+      "needs-info",
+    ];
+    // Isolate the untriaged_orphans jq filter block so a label mentioned only
+    // in a comment elsewhere can't satisfy the assertion.
+    const start = src.indexOf('echo -n "untriaged_orphans="');
+    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
+    const block = src.slice(start, src.indexOf("| length", start));
+    for (const label of required) {
+      assert.ok(
+        block.includes(`"${label}"`),
+        `untriaged_orphans exclusion array missing "${label}"`,
+      );
+    }
+  });
+});
