@@ -31,8 +31,10 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -577,5 +579,179 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #2954 — bounded run-end POST retry (`__reap_post_run_end` via the
+// `--reap-post-run-end` dry-run flag).
+//
+// Motivating incident (run 3e2ac66d, 2026-07-06): a run that merged PRs
+// triggered the deploy, the deploy restarted hydra-orchestrator.service
+// (~10s window), and reap's single run-end POST fired inside that window and
+// failed — so the dead-pid sweeper backstop stamped the clean handoff exit
+// as status=killed / term_reason=crash. The fix is a bounded client-side
+// retry loop shared between the live --reap path and this dry-run flag, so
+// these cases pin exactly the production assembly:
+//   1. 500-then-200 — curl -sf treats 5xx as failure, so this pins
+//      retry-on-HTTP-error; success line names the winning attempt.
+//   2. connection-refused exhaustion — pins retry-on-connect-refused, the
+//      EXACT pre-existing "sweeper will backstop" line (the sweeper backstop
+//      contract is unchanged), and exit 0 (reap NEVER aborts the unit stop).
+//   3. first-attempt success — exactly one POST, no retry lines, and the
+//      success line stays byte-compatible with the pre-#2954 format.
+//
+// All cases run with HYDRA_AUTOPILOT_REAP_POST_BACKOFFS='0 0 0' (4 attempts,
+// zero sleeps) so the suite stays fast. Top-level describe with per-test
+// server lifecycle — no shared state with the sibling suites above.
+// ---------------------------------------------------------------------------
+describe("scripts/autopilot/bootstrap.sh --reap-post-run-end — bounded run-end POST retry (issue #2954)", () => {
+  // Async spawn (NOT spawnSync): the dry-run curls the in-process test HTTP
+  // server, and spawnSync would block the event loop — the server could never
+  // answer and every attempt would burn its full --max-time (a 20s hang that
+  // looks like a retry bug but is a test-harness deadlock).
+  function runPostRunEnd(
+    apiBase: string,
+    payload: string,
+    backoffs = "0 0 0",
+  ): Promise<{ status: number; stdout: string; stderr: string }> {
+    return new Promise((resolveRun, rejectRun) => {
+      const child = spawn(BOOTSTRAP, ["--reap-post-run-end", payload], {
+        env: {
+          ...process.env,
+          HYDRA_API_BASE: apiBase,
+          HYDRA_AUTOPILOT_REAP_POST_BACKOFFS: backoffs,
+        },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf-8").on("data", (d: string) => (stdout += d));
+      child.stderr.setEncoding("utf-8").on("data", (d: string) => (stderr += d));
+      child.on("error", rejectRun);
+      child.on("close", (code) => resolveRun({ status: code ?? -1, stdout, stderr }));
+    });
+  }
+
+  function listen(server: Server): Promise<number> {
+    return new Promise((resolvePort) => {
+      server.listen(0, "127.0.0.1", () => {
+        resolvePort((server.address() as AddressInfo).port);
+      });
+    });
+  }
+
+  function close(server: Server): Promise<void> {
+    return new Promise((resolveClose) => server.close(() => resolveClose()));
+  }
+
+  test("500-then-200: retries past transient HTTP errors and reports the winning attempt", async () => {
+    let posts = 0;
+    const server = createServer((req, res) => {
+      posts += 1;
+      const failThisOne = posts <= 2;
+      req.resume();
+      req.on("end", () => {
+        res.statusCode = failThisOne ? 500 : 200;
+        res.setHeader("content-type", "application/json");
+        res.end(failThisOne ? '{"error":"restarting"}' : '{"ok":true}');
+      });
+    });
+    const port = await listen(server);
+    try {
+      const r = await runPostRunEnd(
+        `http://127.0.0.1:${port}`,
+        '{"run_id":"r-2954-500","cause":"handoff","ended_epoch":0,"exit_code":0}',
+      );
+      assert.equal(r.status, 0, `dry-run exited non-zero: ${r.stderr}`);
+      assert.equal(posts, 3, "server must see exactly 3 POSTs (two 500s, then the 200)");
+      assert.match(
+        r.stdout,
+        /reap: recorded run-end run_id=r-2954-500 cause=handoff exit_code=0 \(idempotent\) attempt=3\/4/,
+        "success line must name the winning attempt when it was not the first",
+      );
+      assert.match(r.stdout, /run-end POST attempt 1\/4 failed/, "attempt 1 failure must be logged");
+      assert.match(r.stdout, /run-end POST attempt 2\/4 failed/, "attempt 2 failure must be logged");
+      assert.ok(
+        !r.stdout.includes("sweeper will backstop"),
+        "a run that eventually succeeded must NOT emit the exhaustion line",
+      );
+    } finally {
+      await close(server);
+    }
+  });
+
+  test("connection-refused exhaustion: exits 0 and keeps the exact 'sweeper will backstop' line", async () => {
+    // Grab a just-freed ephemeral port so the connection is refused instantly
+    // (the deploy-restart window's closed-port shape — no listener at all).
+    const probe = createServer(() => {});
+    const port = await listen(probe);
+    await close(probe);
+
+    const r = await runPostRunEnd(
+      `http://127.0.0.1:${port}`,
+      '{"run_id":"r-2954-refused","cause":"handoff","ended_epoch":0,"exit_code":0}',
+    );
+    assert.equal(r.status, 0, `reap must NEVER abort the unit stop, got: ${r.stderr}`);
+    assert.ok(
+      r.stdout.includes(
+        "[autopilot] reap: run-end POST failed (orchestrator down?) run_id=r-2954-refused cause=handoff — sweeper will backstop",
+      ),
+      `exhaustion must emit the EXACT pre-existing backstop line, got: ${r.stdout}`,
+    );
+    // Attempt count equals the configured schedule: 3 backoffs → 4 attempts,
+    // i.e. 3 logged retry-failures before the exhaustion line.
+    for (const n of [1, 2, 3]) {
+      assert.match(
+        r.stdout,
+        new RegExp(`run-end POST attempt ${n}/4 failed — retrying in 0s`),
+        `attempt ${n}/4 retry line must be logged`,
+      );
+    }
+    assert.ok(
+      !r.stdout.includes("attempt 4/4 failed"),
+      "the final attempt exhausts (backstop line), it does not log another retry",
+    );
+  });
+
+  test("first-attempt success: exactly one POST and the pre-#2954 success line unchanged", async () => {
+    let posts = 0;
+    const server = createServer((req, res) => {
+      posts += 1;
+      req.resume();
+      req.on("end", () => {
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json");
+        res.end('{"ok":true,"deduped":false}');
+      });
+    });
+    const port = await listen(server);
+    try {
+      const r = await runPostRunEnd(
+        `http://127.0.0.1:${port}`,
+        '{"run_id":"r-2954-first","cause":"interrupted","ended_epoch":0,"exit_code":0}',
+      );
+      assert.equal(r.status, 0, `dry-run exited non-zero: ${r.stderr}`);
+      assert.equal(posts, 1, "first-attempt success must POST exactly once");
+      assert.match(
+        r.stdout,
+        /reap: recorded run-end run_id=r-2954-first cause=interrupted exit_code=0 \(idempotent\)\s*$/m,
+        "first-attempt success line must stay byte-compatible (no attempt= suffix)",
+      );
+      assert.ok(!r.stdout.includes("attempt="), "no attempt suffix on a first-try success");
+      assert.ok(!r.stdout.includes("retrying"), "no retry lines on a first-try success");
+    } finally {
+      await close(server);
+    }
+  });
+
+  test("refuses to run without HYDRA_API_BASE (can never POST a fake run-end to the live API)", () => {
+    const env = { ...process.env, HYDRA_AUTOPILOT_REAP_POST_BACKOFFS: "0 0 0" };
+    delete (env as Record<string, string | undefined>).HYDRA_API_BASE;
+    const r = spawnSync(BOOTSTRAP, ["--reap-post-run-end", "{}"], {
+      env,
+      encoding: "utf-8",
+    });
+    assert.notEqual(r.status, 0, "missing HYDRA_API_BASE must fail loud, not default to localhost:4000");
+    assert.match(r.stderr ?? "", /requires HYDRA_API_BASE/);
   });
 });
