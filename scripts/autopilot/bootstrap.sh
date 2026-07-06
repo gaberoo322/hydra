@@ -309,6 +309,70 @@ __reap_build_crash_detail() {
       + (if $log_tail == "" then {} else {log_tail: $log_tail} end)'
 }
 
+# Issue #2954: bounded client-side retry for the run-end POST. A run that
+# merges PRs triggers the deploy, the deploy restarts
+# hydra-orchestrator.service, and the reap's run-end POST fires within
+# seconds of the session exiting — frequently inside the ~10s restart
+# window. A single POST then failed, the dead-pid sweeper backstop could
+# only stamp status=killed / term_reason=crash, and a clean handoff exit
+# was mislabeled as a crash on the behavior gallery (run 3e2ac66d,
+# 2026-07-06).
+#
+# Policy: attempts = backoffs + 1 (default schedule '4 8 16' → 4 attempts),
+# each curl bounded by --max-time 5, sleeping between attempts. Worst case
+# 4x5 + 28 = 48s — inside the issue's ~30-60s band and far below the
+# unit's TimeoutStopSec=600 that governs ExecStopPost, so the reap can
+# never hang the stop path. The schedule is injectable via
+# HYDRA_AUTOPILOT_REAP_POST_BACKOFFS (space-separated seconds; the attempt
+# count derives from it, so a single knob can never produce an
+# inconsistent attempts/backoff combo — tests use '0 0 0').
+#
+# Retrying is idempotent-safe (endRun dedups on a terminal status and the
+# API returns 2xx for deduped, so re-POSTing a succeeded-but-timed-out
+# attempt is a no-op); any 2xx stops the loop. On final exhaustion the
+# EXACT pre-existing "sweeper will backstop" line is emitted, keeping the
+# dead-pid sweeper backstop contract unchanged. Reads REAP_PAYLOAD,
+# REAP_API_BASE, REAP_RUN_ID, REAP_CAUSE, REAP_EXIT_NUM. Returns 0 on
+# success, 1 on exhaustion — the caller never aborts the unit stop either
+# way. Shared by the live --reap path and the --reap-post-run-end dry-run
+# so the test pins exactly the live assembly.
+__reap_post_run_end() {
+  # Deliberate word-split of the backoff schedule into positional params.
+  # shellcheck disable=SC2086
+  set -- ${HYDRA_AUTOPILOT_REAP_POST_BACKOFFS:-4 8 16}
+  __rpre_total=$(( $# + 1 ))
+  __rpre_attempt=1
+  while :; do
+    if curl -sf --max-time 5 -X POST \
+        -H "content-type: application/json" \
+        -d "${REAP_PAYLOAD}" \
+        "${REAP_API_BASE}/api/autopilot/run-end" >/dev/null 2>&1; then
+      if [ "${__rpre_attempt}" -gt 1 ]; then
+        echo "[autopilot] reap: recorded run-end run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM} (idempotent) attempt=${__rpre_attempt}/${__rpre_total}"
+      else
+        # Byte-compatible with the pre-#2954 first-attempt success line so
+        # existing log consumers keyed on it are unaffected.
+        echo "[autopilot] reap: recorded run-end run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM} (idempotent)"
+      fi
+      return 0
+    fi
+    if [ "$#" -eq 0 ]; then
+      # EXACT pre-existing exhaustion line — the dead-pid sweeper backstop
+      # contract (sweep-reader.ts) is unchanged (issue #2954 AC2).
+      echo "[autopilot] reap: run-end POST failed (orchestrator down?) run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} — sweeper will backstop"
+      return 1
+    fi
+    __rpre_delay="$1"
+    shift
+    # Sanitize so a garbage schedule entry can neither trip `set -e` via
+    # sleep nor unbound the total wall-clock.
+    case "${__rpre_delay}" in ''|*[!0-9]*) __rpre_delay=0 ;; esac
+    echo "[autopilot] reap: run-end POST attempt ${__rpre_attempt}/${__rpre_total} failed — retrying in ${__rpre_delay}s"
+    sleep "${__rpre_delay}"
+    __rpre_attempt=$(( __rpre_attempt + 1 ))
+  done
+}
+
 # Dry-run (issue #2479): echo the assembled crash_detail JSON for the current
 # $EXIT_CODE/$EXIT_STATUS plus injected log/journal inputs. No POST — purely the
 # crash_detail assembly + log_tail capture+fallback under test. Reads the same
@@ -352,6 +416,34 @@ if [ "${1:-}" = "--reap-session-decision" ]; then
   REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
   __reap_session_should_post
   echo "cause=${REAP_CAUSE} post=${REAP_SESSION_SHOULD_POST}"
+  exit 0
+fi
+
+# Dry-run (issue #2954): run the exact live run-end POST retry loop
+# (__reap_post_run_end) against ${HYDRA_API_BASE} with a caller-supplied
+# payload (arg 2; a minimal placeholder when omitted). No state read, no
+# cause derivation, no session-block — purely the retry/backoff/logging
+# assembly under test, so a test HTTP server (or a closed port) can pin
+# retry-on-5xx, retry-on-connection-refused, and the exhaustion line.
+# Mirrors the live --reap contract on outcomes: ALWAYS exits 0 whether the
+# POST succeeded or exhausted (the reap never aborts the unit stop); the
+# echoed log lines carry the attempt count + outcome. HYDRA_API_BASE is
+# REQUIRED here (no localhost:4000 default) so a mis-invoked dry-run can
+# never POST a fake run-end to the live prod API.
+if [ "${1:-}" = "--reap-post-run-end" ]; then
+  if [ -z "${HYDRA_API_BASE:-}" ]; then
+    echo "[autopilot] reap: --reap-post-run-end requires HYDRA_API_BASE (refusing to default to the live API)" >&2
+    exit 2
+  fi
+  REAP_API_BASE="${HYDRA_API_BASE}"
+  REAP_PAYLOAD="${2:-}"
+  if [ -z "${REAP_PAYLOAD}" ]; then
+    REAP_PAYLOAD='{"run_id":"dry-run","cause":"interrupted","ended_epoch":0,"exit_code":0}'
+  fi
+  REAP_RUN_ID="$(printf '%s' "${REAP_PAYLOAD}" | jq -r '.run_id // "dry-run"' 2>/dev/null || echo "dry-run")"
+  REAP_CAUSE="$(printf '%s' "${REAP_PAYLOAD}" | jq -r '.cause // "unknown"' 2>/dev/null || echo "unknown")"
+  REAP_EXIT_NUM="$(printf '%s' "${REAP_PAYLOAD}" | jq -r '.exit_code // 0' 2>/dev/null || echo 0)"
+  __reap_post_run_end || true
   exit 0
 fi
 
@@ -509,14 +601,15 @@ if [ "${1:-}" = "--reap" ]; then
   # endRun is idempotent: if term-check.py already POSTed run-end this turn,
   # the row is already terminal and this POST is a no-op (deduped=true). A
   # failed POST is logged but never aborts the unit stop.
-  if curl -sf --max-time 5 -X POST \
-      -H "content-type: application/json" \
-      -d "${REAP_PAYLOAD}" \
-      "${REAP_API_BASE}/api/autopilot/run-end" >/dev/null 2>&1; then
-    echo "[autopilot] reap: recorded run-end run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM} (idempotent)"
-  else
-    echo "[autopilot] reap: run-end POST failed (orchestrator down?) run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} — sweeper will backstop"
-  fi
+  #
+  # Issue #2954: the POST retries with bounded backoff (see
+  # __reap_post_run_end) — a run that merges PRs triggers the deploy, whose
+  # hydra-orchestrator.service restart (~10s) races this very POST; a
+  # single attempt then failed and the dead-pid sweeper mislabeled the
+  # clean handoff exit as status=killed / term_reason=crash. The
+  # session-block POST above deliberately stays single-attempt (it only
+  # fires on cause=crash, disjoint from the clean-merge deploy race).
+  __reap_post_run_end || true
   exit 0
 fi
 
