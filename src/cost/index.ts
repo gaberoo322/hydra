@@ -143,4 +143,3 @@ export {
   getCostPerMergedPr,
 } from "./cost-attribution.ts";
 
-export type { CostPerMergedPrResult } from "./cost-attribution.ts";
