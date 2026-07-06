@@ -432,8 +432,4 @@ export {
   // fake `setReconcilerHealth` and assert the last-run health snapshot is
   // persisted (feed liveness + batch metrics) without standing up Redis.
   runMergedItemReconciler,
-  // Issue #2860: exported so a unit test can inject the cycle-merge-reconcile
-  // chore's deps (recent-id list, metrics getter, gh state fetch, recordCycle)
-  // and assert the completed→merged upgrade path without standing up Redis / gh.
-  runCycleMergeReconcile,
 };
