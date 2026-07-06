@@ -341,7 +341,7 @@ export interface OAuthBackoffPersistence {
 }
 
 /** The live {@link ../redis/oauth-backoff.ts} seam — installed on the pure production path. */
-export const REDIS_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
+const REDIS_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
   read: readOAuthBackoff,
   write: writeOAuthBackoff,
   clear: clearOAuthBackoff,
