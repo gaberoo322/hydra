@@ -40,7 +40,7 @@
  *   stays in one place.
  */
 
-import { listRuns, getRunDispatchClasses } from "../autopilot/runs.ts";
+import { listRuns, getRunDispatchClasses } from "../autopilot/run-reads.ts";
 import type { AutopilotRunOutcome } from "../schemas/explore-page.ts";
 
 // ---------------------------------------------------------------------------

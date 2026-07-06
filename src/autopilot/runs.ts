@@ -1,23 +1,33 @@
 /**
  * Autopilot Run + Turn lifecycle **WRITES** — the orchestrator-side Module
- * that owns the contract behind `POST /api/autopilot/*` and the high-level
- * readers that power `GET /api/autopilot/runs(/...)`.
+ * that owns the contract behind `POST /api/autopilot/*`.
  *
  * The read-only **projections** were split into the sibling
  * `run-projections.ts` (issue #1183), which is their canonical home. The
  * back-compat re-export relay was retired (issue #2125), so callers import
- * projection symbols from `run-projections.ts` directly; this Module imports
- * them only for the high-level readers below, which compose Redis reads + the
- * dead-pid sweeper with those projections.
+ * projection symbols from `run-projections.ts` directly.
  *
  * The **sweep-composite-reader idiom** (the dead-pid sweeper `sweepRunIfDead`
  * plus the `readAndSweepAutopilotRun` / `readLifecycleState` / `sweepLoadedRow`
  * readers that pair a Redis load with that sweep, and the `RUN_TTL_SECONDS`
  * constant) was likewise extracted into the sibling `sweep-reader.ts`
  * (issue #2568): one Module per concern. This write Module imports only the
- * sweep predicate + TTL it needs along the single `runs → sweep-reader` edge;
- * it does NOT re-export that surface (AC2 / #2125 precedent), so external
+ * `RUN_TTL_SECONDS` constant it needs along the single `runs → sweep-reader`
+ * edge; it does NOT re-export that surface (AC2 / #2125 precedent), so external
  * callers import the sweep helpers from `sweep-reader.ts` directly.
+ *
+ * The **composite READ orchestrators** — the high-level readers
+ * (`getCurrentLifecycle` / `getCurrentRun` / `getRun` / `getRunRow` /
+ * `listRuns` / `readInflightSlotSeed` / `getRunDispatchClasses`) that DRIVE the
+ * projections + sweep readers to assemble caller-facing views — were finally
+ * split into the sibling `run-reads.ts`, completing the write/read separation
+ * #1183 began and #2568 extended (one Module per concern). This write Module
+ * exposes only the lifecycle WRITE methods; callers import the readers from
+ * `run-reads.ts` directly (no back-compat re-export here — the #2125 precedent).
+ * The shared result-type primitives (`Ok` / `Err` / `errRedis` / `numberOrDefault`)
+ * remain exported here as the single source of truth; `run-reads.ts` and the
+ * sibling `cycle-close.ts` import them from here (a one-directional edge, so no
+ * import cycle).
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
@@ -56,16 +66,11 @@ import {
   incrAutopilotRunField,
   refreshAutopilotRunTTL,
   addAutopilotRunToIndex,
-  listRecentAutopilotRunIds,
   addAutopilotRunTurn,
   hasAutopilotRunTurnAt,
   putAutopilotPrLink,
-  listAutopilotRunTurnsDesc,
 } from "../redis/autopilot-runs.ts";
 import { recordAnchorReflection } from "../reflections/per-anchor.ts";
-import {
-  listActiveSubagentDispatches,
-} from "../redis/dispatches.ts";
 import type {
   CrashDetail,
   RunStartBody,
@@ -73,32 +78,17 @@ import type {
   TurnBody,
   ReflectionRecordBody,
 } from "./schemas.ts";
-// Read-projection surface — moved to `run-projections.ts` (issue #1183). The
-// Redis-touching readers below compose these pure projections; they are
-// imported here for that internal use only. The back-compat re-export relay
-// was retired (issue #2125): `run-projections.ts` is the canonical home for
-// every projection symbol, so callers import them from there directly.
-import {
-  RUN_TURNS_MAX_FETCH,
-  isPidAlive,
-  fetchTurnsWithJoins,
-  projectRunView,
-  projectRunDigest,
-  deriveInflightSlotSeed,
-} from "./run-projections.ts";
-import type { AutopilotLifecycle, InflightSlotSeed } from "./run-projections.ts";
+// `isPidAlive` (the liveness probe the injectable deps bag defaults to) is
+// imported from `run-projections.ts` (issue #1183); the composite READ
+// projections moved to `run-reads.ts` along with the readers that drove them.
+import { isPidAlive } from "./run-projections.ts";
 // The sweep-composite-reader idiom was extracted into the sibling
-// `sweep-reader.ts` (issue #2568): the dead-pid sweeper plus the composed
-// readers that pair a Redis load with that sweep. The write lifecycle below
-// imports only the `RUN_TTL_SECONDS` constant + the sweep predicate it needs
-// along this single `runs → sweep-reader` edge (one-directional, acyclic).
-// There is NO re-export of the sweep surface here (AC2, #2125 precedent):
-// external callers import the sweep helpers from `sweep-reader.ts` directly.
-import {
-  RUN_TTL_SECONDS,
-  readLifecycleState,
-  sweepLoadedRow,
-} from "./sweep-reader.ts";
+// `sweep-reader.ts` (issue #2568). The write lifecycle below imports only the
+// `RUN_TTL_SECONDS` constant it needs along this single `runs → sweep-reader`
+// edge (one-directional, acyclic). There is NO re-export of the sweep surface
+// here (AC2, #2125 precedent): external callers import the sweep helpers from
+// `sweep-reader.ts` directly.
+import { RUN_TTL_SECONDS } from "./sweep-reader.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -635,211 +625,3 @@ export async function recordTurn(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Reader: high-level — compose Redis reads + the projections moved to
-// `run-projections.ts` (issue #1183).
-// ---------------------------------------------------------------------------
-
-export type GetCurrentLifecycleResult = Ok<{ lifecycle: AutopilotLifecycle }> | Err;
-
-/**
- * Read the most-recent run, apply the dead-pid sweeper, and derive the
- * discriminated lifecycle state. Unlike {@link getCurrentRun}, this never
- * 404s on a terminal most-recent run — it reports `idle` / `ended` /
- * `crashed` for it. When no run has ever been recorded, returns the
- * `idle` shape with `run_id: null`.
- */
-export async function getCurrentLifecycle(): Promise<GetCurrentLifecycleResult> {
-  try {
-    const recent = await listRecentAutopilotRunIds(1);
-    if (!recent || recent.length === 0) {
-      return {
-        ok: true,
-        lifecycle: { state: "idle", run_id: null, term_reason: null, ended_epoch: null },
-      };
-    }
-    const runId = recent[0];
-    const row = await getAutopilotRun(runId);
-    if (!row || !row.started) {
-      return {
-        ok: true,
-        lifecycle: { state: "idle", run_id: null, term_reason: null, ended_epoch: null },
-      };
-    }
-    return { ok: true, lifecycle: await readLifecycleState(runId, row) };
-  } catch (err: any) {
-    return errRedis(err);
-  }
-}
-
-export type GetCurrentRunResult =
-  | Ok<{ view: Record<string, unknown> }>
-  | Err;
-
-/**
- * Read the most recent run, apply the dead-pid sweeper, project, and
- * attach the latest 50 turns with cycle joins. 404 surfaces as
- * `{ ok: false, code: "not-found" }`.
- */
-export async function getCurrentRun(): Promise<GetCurrentRunResult> {
-  try {
-    const recent = await listRecentAutopilotRunIds(1);
-    if (!recent || recent.length === 0) {
-      return { ok: false, code: "not-found", detail: "no autopilot runs recorded yet" };
-    }
-    const runId = recent[0];
-    const row = await getAutopilotRun(runId);
-    if (!row || !row.started) {
-      return { ok: false, code: "not-found", detail: "no autopilot runs recorded yet" };
-    }
-    const view = projectRunView(await sweepLoadedRow(runId, row));
-    const turns = await fetchTurnsWithJoins(runId, 50);
-    (view as any).turns = turns;
-    return { ok: true, view };
-  } catch (err: any) {
-    return errRedis(err);
-  }
-}
-
-export type GetRunResult =
-  | Ok<{ run: Record<string, unknown>; turns: Array<Record<string, unknown>> }>
-  | Err;
-
-/** Read one run by id with the FULL turn timeline (no 50 cap). */
-export async function getRun(runId: string): Promise<GetRunResult> {
-  try {
-    const row = await getAutopilotRun(runId);
-    if (!row || !row.started) {
-      return { ok: false, code: "not-found", detail: `unknown run_id: ${runId}` };
-    }
-    const view = projectRunView(await sweepLoadedRow(runId, row));
-    const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH);
-    return { ok: true, run: view, turns };
-  } catch (err: any) {
-    return errRedis(err);
-  }
-}
-
-export type GetRunRowResult =
-  | Ok<{ row: Record<string, string> }>
-  | Err;
-
-/** Read the raw run hash (for the log/journal endpoints' lookups). */
-export async function getRunRow(runId: string): Promise<GetRunRowResult> {
-  try {
-    const row = await getAutopilotRun(runId);
-    if (!row || !row.started) {
-      return { ok: false, code: "not-found", detail: `unknown run_id: ${runId}` };
-    }
-    return { ok: true, row };
-  } catch (err: any) {
-    return errRedis(err);
-  }
-}
-
-/**
- * Async wrapper around {@link deriveInflightSlotSeed}: reads the live in-flight
- * subagent dispatch ledger and returns the slot seed. Powers
- * `GET /api/autopilot/inflight-slots`, which `bootstrap.sh` curls to seed
- * `state.json.slots` on relaunch (issue #1352). Never throws — a Redis failure
- * degrades to an empty seed (all-null slots, the pre-#1352 behaviour) so a
- * bootstrap can never be blocked by this read.
- */
-export async function readInflightSlotSeed(): Promise<
-  Record<string, InflightSlotSeed>
-> {
-  try {
-    const dispatches = await listActiveSubagentDispatches();
-    return deriveInflightSlotSeed(dispatches);
-  } catch (err) {
-    console.error("[autopilot] readInflightSlotSeed failed:", err);
-    return {};
-  }
-}
-
-export type ListRunsResult = Ok<{ runs: Array<Record<string, unknown>> }> | Err;
-
-/** List recent runs as digests for the history table. */
-export async function listRuns(limit: number): Promise<ListRunsResult> {
-  try {
-    const runIds = await listRecentAutopilotRunIds(limit);
-    if (!runIds || runIds.length === 0) return { ok: true, runs: [] };
-    const digests: Array<Record<string, unknown>> = [];
-    for (const runId of runIds) {
-      const row = await getAutopilotRun(runId);
-      if (!row || !row.started) continue;
-      const digest = await projectRunDigest(runId, await sweepLoadedRow(runId, row));
-      digests.push(digest);
-    }
-    return { ok: true, runs: digests };
-  } catch (err: any) {
-    return errRedis(err);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Reader: dispatch-class projection (issue #2640)
-//
-// "Which autopilot dispatch classes did run X use?" is a domain question for
-// this Module — it already owns the turn lifecycle + recording — so it lives
-// here rather than in the behavior-gallery aggregator, which previously reached
-// across the boundary into `src/redis/autopilot-runs.ts` via a dynamic
-// `await import(...)` to run its own turn-scan. The aggregator now calls this
-// typed function through its `deps.fetchClasses` injection point, and the
-// dynamic import disappears (the module graph stays fully static).
-// ---------------------------------------------------------------------------
-
-/**
- * Soft cap on turns scanned per run for the dispatch-class projection. Matches
- * the value the retired `defaultFetchClasses` used in behavior-gallery.ts — a
- * run's dispatch classes stabilise well within its first couple hundred turns,
- * and the projection is a coarse "which classes appeared", not a per-turn read.
- */
-const DISPATCH_CLASSES_TURN_SCAN = 200;
-
-/**
- * Narrow, injectable reader seam for {@link getRunDispatchClasses}. Mirrors the
- * `ProjectionDeps` pattern in `run-projections.ts` (issue #1183): defaults to
- * the real typed accessor, but a test passes a stub so the turn-scan / dedup /
- * sort logic is exercisable without a live Redis.
- */
-export interface DispatchClassesDeps {
-  listTurnsDesc: (runId: string, limit: number) => Promise<string[]>;
-}
-
-const defaultDispatchClassesDeps: DispatchClassesDeps = {
-  listTurnsDesc: listAutopilotRunTurnsDesc,
-};
-
-/**
- * Resolve the distinct autopilot dispatch classes a run used — the canonical
- * query behind the Explore Behavior tab's `class` filter. Pulls the turn list
- * off Redis (newest-first, capped) and harvests `actions[].class` from each
- * turn's `type === "dispatch"` actions. Returns a deduped, alphabetically
- * sorted `string[]`.
- *
- * Tolerant parse: a malformed turn member (unparseable JSON, non-array
- * `actions`, missing `class`) is silently skipped — a run's class set is a
- * "no signal" projection, not a correctness surface, so a single bad row must
- * not blank the whole result. This is identical to the behaviour of the retired
- * `defaultFetchClasses` this function replaces.
- */
-export async function getRunDispatchClasses(
-  runId: string,
-  deps: DispatchClassesDeps = defaultDispatchClassesDeps,
-): Promise<string[]> {
-  const members = await deps.listTurnsDesc(runId, DISPATCH_CLASSES_TURN_SCAN);
-  const classes = new Set<string>();
-  for (const member of members) {
-    try {
-      const turn = JSON.parse(member);
-      const actions = Array.isArray(turn?.actions) ? turn.actions : [];
-      for (const a of actions) {
-        if (a && a.type === "dispatch" && typeof a.class === "string") {
-          classes.add(a.class);
-        }
-      }
-    } catch { /* intentional: skip malformed turn rows — caller treats absent classes as "no signal" */ }
-  }
-  return [...classes].sort();
-}
