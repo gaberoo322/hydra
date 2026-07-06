@@ -36,6 +36,17 @@ const METRICS_KEY_PREFIX = "hydra:metrics:";
 const CYCLE_ACTIVE_KEY = "hydra:cycle:active";
 const CYCLE_LAST_KEY = "hydra:cycle:last";
 
+/**
+ * Legacy bare metrics list key (issue #2927). A fossil of an earlier metrics
+ * implementation with no active writer or reader — the live metrics plane is
+ * `hydra:metrics:index` (a zset) + `hydra:metrics:<cycleId>` (hashes). The bare
+ * key has no trailing colon, so the `hydra:metrics:*` scan below never matches
+ * it and it accumulates forever with no TTL, tripping false-positive discover
+ * alerts. Deleted by a dedicated existence-guarded branch that only fires when
+ * the key is genuinely the legacy `list` type (never the live index/hashes).
+ */
+const LEGACY_METRICS_LIST_KEY = "hydra:metrics";
+
 const STALE_KEY_RETENTION_DAYS = 7;
 const METRICS_INDEX_MAX_ENTRIES = 500;
 
@@ -151,6 +162,26 @@ export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): P
     } catch (err: any) {
       console.error(`[Housekeeping] ${prefix}* prune failed: ${err.message}`);
     }
+  }
+
+  // Issue #2927: one-time targeted removal of the legacy bare `hydra:metrics`
+  // list key. The `hydra:metrics:*` scan above never matches it (no trailing
+  // colon), so it is invisible to the age-based sweep and accumulates with no
+  // TTL, tripping false-positive discover alerts. Guard on the Redis type being
+  // exactly "list" so the live metrics plane is untouchable:
+  //   - `hydra:metrics:index` is a zset  → type "zset"  → skipped
+  //   - `hydra:metrics:<cycleId>` are hashes → type "hash" → skipped
+  //   - the fossil is a "list" → deleted
+  //   - an already-absent fossil → type "none" → no-op (idempotent).
+  try {
+    const legacyType = await getKeyTypeFn(LEGACY_METRICS_LIST_KEY);
+    if (legacyType === "list") {
+      await deleteKeysBatchFn([LEGACY_METRICS_LIST_KEY]);
+      totalPruned += 1;
+      console.log(`[Housekeeping] Removed legacy metrics list key ${LEGACY_METRICS_LIST_KEY} (issue #2927)`);
+    }
+  } catch (err: any) {
+    console.error(`[Housekeeping] Legacy metrics list prune failed: ${err.message}`);
   }
 
   if (totalPruned > 0) {
