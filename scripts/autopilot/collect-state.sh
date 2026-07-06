@@ -139,7 +139,8 @@ fi
 # The dev_orch dispatch path keys ONLY on `ready-for-agent` and the triage
 # path keys ONLY on `needs-triage`, so an open issue carrying NONE of the
 # actionable/lifecycle labels {ready-for-agent, in-progress, blocked,
-# needs-qa, needs-triage, needs-research, target-backlog, ready-for-human}
+# needs-qa, needs-triage, needs-research, target-backlog, ready-for-human,
+# needs-info}
 # is invisible to BOTH — nothing re-triages an issue that landed with the
 # wrong label (e.g. only `enhancement` / `meta-friction` / `backlog`).
 # Observed live 2026-06-24: 7 open issues sat in this blind spot with no
@@ -149,6 +150,12 @@ fi
 # issue carrying it is NOT an orphan, it is parked awaiting a human decision
 # (e.g. the daily `Operator decision queue YYYY-MM-DD` issue). Excluding it
 # stops `sweep_orch` from re-triaging the operator queue every idle turn.
+#
+# `needs-info` (issue #2958) is the same shape: the triage bot parks an issue
+# `needs-info` when the OPERATOR must supply ACs / a design pick before dev
+# can run. Counting it as an orphan made decide.py dispatch `sweep_orch`
+# every turn against an issue sweep cannot advance — pure churn (observed
+# run 038937ae, 2026-07-06, issue #2956).
 #
 # This emits `untriaged_orphans` = the count of open issues carrying NONE of
 # that label set. The autopilot turn maps `untriaged_orphans > 0` → the
@@ -167,7 +174,7 @@ gh issue list --repo gaberoo322/hydra --state open --json number,labels --jq '
         (.labels | map(.name)) as $n
         | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
              "needs-triage", "needs-research", "target-backlog",
-             "ready-for-human" ]
+             "ready-for-human", "needs-info" ]
            | any(. as $lbl | $n | index($lbl))) | not
       )
   ] | length' 2>/dev/null || echo 0
