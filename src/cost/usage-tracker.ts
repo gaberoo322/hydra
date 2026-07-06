@@ -179,7 +179,6 @@ import {
 import {
   transcriptScan,
   makeReadOAuth,
-  clearOAuthCache,
   projectsRoot,
   readOAuthUsage,
   deriveSkill,
@@ -188,6 +187,9 @@ import {
   sessionIdFromPath as transcriptScanSessionIdFromPath,
 } from "./transcript-scan.ts";
 import type { ScanResult, SkillResolver, DispatchKind } from "./transcript-scan.ts";
+// The OAuth backoff/cache seam moved to its own focused leaf (issue #2923);
+// `clearUsageCache()` reaches its reset through the seam's `clearOAuthCache()`.
+import { clearOAuthCache } from "./oauth-read-cache.ts";
 
 // `INTERACTIVE_SKILL` (and its back-compat alias `UNATTRIBUTED_SKILL`),
 // `SkillResolver`, and `sessionIdFromPath` live in the TranscriptScan seam
