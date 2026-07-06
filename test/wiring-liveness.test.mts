@@ -14,7 +14,8 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   runWiringLiveness,
@@ -628,5 +629,141 @@ describe("wiring-liveness: runWiringLiveness (dark-outcome integration)", () => 
     assert.equal(res.evaluated, true);
     assert.deepEqual(res.darkOutcomes, []);
     assert.deepEqual(res.outcomeVerdicts, []);
+  });
+});
+
+// ===========================================================================
+// Issue #2887: forecast-pipeline liveness — the SHIPPED manifest must declare
+// the paper-edge-feed headwater timer + the resolved-forecast-outcome output
+// check, and both must validate against the schema. These load the REAL
+// config/direction/liveness.yaml (not a fixture) so a future edit that drops
+// the headwater declaration — the exact regression that let brierScore sit null
+// for ~10 months with nothing alarming — is caught by the suite.
+// ===========================================================================
+
+describe("wiring-liveness: shipped manifest declares the forecast-pipeline entrypoints (#2887)", () => {
+  // Resolve the real manifest relative to this test file so the assertion holds
+  // regardless of HYDRA_ROOT (a worktree run has none set).
+  const REAL_MANIFEST = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "config",
+    "direction",
+    "liveness.yaml",
+  );
+
+  test("the real manifest loads and validates against the schema", async () => {
+    const res = await loadLivenessManifest(REAL_MANIFEST);
+    assert.equal(res.ok, true, res.ok ? "" : (res as { reason: string }).reason);
+    if (res.ok) assert.ok(res.manifest.entries.length > 0);
+  });
+
+  test("declares the paper-edge-feed HEADWATER timer (the ~10-month dark-pipeline root cause)", async () => {
+    const res = await loadLivenessManifest(REAL_MANIFEST);
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    const feed = res.manifest.entries.find(
+      (e) => e.type === "timer" && e.unit === "hydra-betting-paper-edge-feed.timer",
+    );
+    assert.ok(feed, "manifest must declare hydra-betting-paper-edge-feed.timer");
+    if (feed && feed.type === "timer") {
+      // Hourly cadence → a generous 120-minute freshness window (mirrors the
+      // sibling nomination entry) so normal jitter never false-alarms.
+      assert.equal(feed.maxStaleMinutes, 120);
+    }
+  });
+
+  test("declares the resolved-forecast-outcome OUTPUT check on totalForecasts", async () => {
+    const res = await loadLivenessManifest(REAL_MANIFEST);
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    const outputs = res.manifest.entries.filter((e) => e.type === "output");
+    const forecast = outputs.find(
+      (e) => e.type === "output" && e.source === "/api/calibration/forecast-metrics",
+    );
+    assert.ok(forecast, "manifest must declare a forecast-metrics output check");
+    if (forecast && forecast.type === "output") {
+      assert.equal(forecast.jsonPath, "totalForecasts");
+      // Floor 0 across 3 runs: BELOW-FLOOR only when totalForecasts stays 0 for
+      // three consecutive ticks (a steady dark-pipe signal, not a page-storm).
+      assert.deepEqual(forecast.minOverRuns, { value: 0, runs: 3 });
+    }
+  });
+
+  test("does NOT duplicate the Brier metric as an output check (stage 3 is the dark-outcome check's job)", async () => {
+    // brierScore is number|null; the output reader maps null → UNREADABLE, a
+    // strictly weaker signal than the dark-outcome DARK verdict. So no output
+    // entry should target brierScore — Stage 3 stays with wiring-liveness-outcomes.
+    const res = await loadLivenessManifest(REAL_MANIFEST);
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    const brierOutput = res.manifest.entries.find(
+      (e) => e.type === "output" && e.jsonPath === "brierScore",
+    );
+    assert.equal(brierOutput, undefined);
+  });
+});
+
+describe("wiring-liveness: forecast-outcome output-check coordinator integration (#2887)", () => {
+  const NOW = 1_700_000_000_000;
+  const freshTimers = async (): Promise<ProbeResult<TimerRecord[]>> => ({
+    ok: true,
+    data: [liveTimer("hydra-betting-paper-edge-feed.timer", NOW - 10 * 60_000)],
+  });
+
+  test("totalForecasts pinned at 0 across the window flags BELOW-FLOOR (dark forecast pipe)", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => ({
+        ok: true,
+        manifest: {
+          entries: [
+            timerEntry("hydra-betting-paper-edge-feed.timer", 120),
+            outputEntry("/api/calibration/forecast-metrics", "totalForecasts", 0, 3),
+          ],
+        },
+      }),
+      readTimers: freshTimers,
+      readOutput: fakeReader([0, 0, 0]),
+      darkOutcomes: NO_OUTCOMES,
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.missing, []);
+    assert.deepEqual(res.belowFloor, ["/api/calibration/forecast-metrics"]);
+  });
+
+  test("a single non-zero totalForecasts clears the alert (settled forecasts flowing)", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => ({
+        ok: true,
+        manifest: {
+          entries: [outputEntry("/api/calibration/forecast-metrics", "totalForecasts", 0, 3)],
+        },
+      }),
+      readTimers: freshTimers,
+      readOutput: fakeReader([0, 0, 4]),
+      darkOutcomes: NO_OUTCOMES,
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.belowFloor, []);
+    assert.equal(res.outputVerdicts[0].status, "ok");
+  });
+
+  test("a missing paper-edge-feed timer is flagged MISSING (headwater never went live)", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => ({
+        ok: true,
+        manifest: {
+          entries: [timerEntry("hydra-betting-paper-edge-feed.timer", 120)],
+        },
+      }),
+      // The live set does NOT contain the headwater timer.
+      readTimers: async (): Promise<ProbeResult<TimerRecord[]>> => ({ ok: true, data: [] }),
+      darkOutcomes: NO_OUTCOMES,
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.missing, ["hydra-betting-paper-edge-feed.timer"]);
   });
 });
