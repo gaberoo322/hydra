@@ -814,13 +814,18 @@ fi
 # MUST be seeded here too, otherwise its 24h cadence would silently degrade to
 # fire-every-turn across the ~15-min pace-gate relaunch.
 #
+# `design_qa_target` (issue #2739, parent #2732) is the 6th long-cooldown class —
+# a 7d cooldown (the scout_orch-style calendar cadence) — so it MUST be seeded
+# here too, otherwise its weekly cadence would silently degrade to fire-every-
+# turn across the pace-gate relaunch (the same #2575 bug class).
+#
 # Seed = the prior state file's timestamp for each class (carried forward so the
 # cooldown survives the relaunch), defaulting to 0 only when there is no prior
 # value (first-ever run). Missing prior file, missing jq, unparseable JSON, or a
 # non-object shape all degrade to all-0 — fail-open (at worst one extra fire),
 # and a seed failure must never block bootstrap. Read happens BEFORE the heredoc
 # clobbers the file, mirroring RESEARCH_FORCE_SEED.
-COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0}'
+COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0}'
 if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
   COOLDOWN_SIGNAL_SEED="$(jq -c '
     (.signal_last_fired // {}) as $s
@@ -829,14 +834,15 @@ if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
         architecture_orch:    (($s.architecture_orch    // 0) | if type == "number" then . else 0 end),
         cleanup_orch:         (($s.cleanup_orch         // 0) | if type == "number" then . else 0 end),
         scout_orch:           (($s.scout_orch           // 0) | if type == "number" then . else 0 end),
-        wire_or_retire_target: (($s.wire_or_retire_target // 0) | if type == "number" then . else 0 end)
+        wire_or_retire_target: (($s.wire_or_retire_target // 0) | if type == "number" then . else 0 end),
+        design_qa_target:     (($s.design_qa_target     // 0) | if type == "number" then . else 0 end)
       }
-  ' "${STATE_PATH}" 2>/dev/null || echo '{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0}')"
+  ' "${STATE_PATH}" 2>/dev/null || echo '{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0}')"
   # Belt-and-braces: anything that does not look like a JSON object would
   # corrupt the heredoc below into invalid JSON — degrade to all-0.
   case "${COOLDOWN_SIGNAL_SEED}" in
     "{"*) ;;
-    *) COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0}' ;;
+    *) COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0}' ;;
   esac
 fi
 
@@ -854,7 +860,7 @@ fi
 # bootstrap never blocks (design-concept #2715 Invariants 2 + 5).
 if { [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; } \
   && command -v jq >/dev/null 2>&1; then
-  for _cd_cls in retro_orch architecture_orch cleanup_orch scout_orch wire_or_retire_target; do
+  for _cd_cls in retro_orch architecture_orch cleanup_orch scout_orch wire_or_retire_target design_qa_target; do
     # Only reach for Redis when the prior-file tier gave us 0 for this class.
     _cd_prior="$(printf '%s' "${COOLDOWN_SIGNAL_SEED}" | jq -r --arg c "${_cd_cls}" '(.[$c] // 0)' 2>/dev/null || echo 0)"
     case "${_cd_prior}" in
@@ -879,13 +885,13 @@ if { [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; } 
   unset _cd_cls _cd_prior _cd_redis _cd_merged
 fi
 
-# Compose the full 10-key signal_last_fired object: the 5 always-on classes seeded
-# at 0 (re-armed each run by design) plus the 5 long-cooldown classes carried
+# Compose the full 11-key signal_last_fired object: the 5 always-on classes seeded
+# at 0 (re-armed each run by design) plus the 6 long-cooldown classes carried
 # forward from the prior state (COOLDOWN_SIGNAL_SEED — retro_orch /
-# architecture_orch / cleanup_orch / scout_orch / wire_or_retire_target). Prefer
-# jq for the merge; fall back to a manual splice if jq is unavailable so
-# bootstrap never blocks.
-SIGNAL_LAST_FIRED_JSON='{"health":0,"sweep_orch":0,"sweep_target":0,"discover_orch":0,"discover_target":0,"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0}'
+# architecture_orch / cleanup_orch / scout_orch / wire_or_retire_target /
+# design_qa_target). Prefer jq for the merge; fall back to a manual splice if jq
+# is unavailable so bootstrap never blocks.
+SIGNAL_LAST_FIRED_JSON='{"health":0,"sweep_orch":0,"sweep_target":0,"discover_orch":0,"discover_target":0,"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0}'
 if command -v jq >/dev/null 2>&1; then
   SIGNAL_LAST_FIRED_MERGED="$(jq -cn --argjson cooled "${COOLDOWN_SIGNAL_SEED}" '
     {health:0, sweep_orch:0, sweep_target:0, discover_orch:0, discover_target:0} + $cooled
@@ -951,17 +957,17 @@ fi
 #     test/autopilot-invariants.test.mts enforce both shapes.
 #   - The signal-driven classes no longer occupy slots; they track only
 #     their last-fired timestamp under `signal_last_fired`, replacing the
-#     legacy `/tmp/hydra-last-*.txt` files. ALL TEN KEYS MUST BE PRESENT
+#     legacy `/tmp/hydra-last-*.txt` files. ALL ELEVEN KEYS MUST BE PRESENT
 #     for the same reason: the 5 always-on classes
 #     (health / sweep_* / discover_*) seeded at `0` (re-armed each run),
-#     plus the 5 long-cooldown classes (retro_orch / architecture_orch /
-#     cleanup_orch / scout_orch / wire_or_retire_target, the last added by
-#     issue #2722) which are SEEDED FROM THE PRIOR STATE FILE (issue #2575 —
-#     COOLDOWN_SIGNAL_SEED above) so their 24h cooldown survives the
-#     pace-gate's ~15-min relaunch cadence. Before #2575 these were
-#     omitted entirely, so decide.py's `signal_is_cooled()` read a missing
-#     key as epoch 0 (permanently cooled) and retro_orch fired 5–8×/day
-#     instead of the designed 1×/day.
+#     plus the 6 long-cooldown classes (retro_orch / architecture_orch /
+#     cleanup_orch / scout_orch / wire_or_retire_target / design_qa_target,
+#     the last two added by issues #2722 and #2739) which are SEEDED FROM THE
+#     PRIOR STATE FILE (issue #2575 — COOLDOWN_SIGNAL_SEED above) so their
+#     24h/7d cooldown survives the pace-gate's ~15-min relaunch cadence.
+#     Before #2575 these were omitted entirely, so decide.py's
+#     `signal_is_cooled()` read a missing key as epoch 0 (permanently cooled)
+#     and retro_orch fired 5–8×/day instead of the designed 1×/day.
 #   - `failure_log` is a new ring buffer of structured failure records
 #     consumed by `self_heal.py` (issue #426 self-heal table).
 #   - `reaped_task_ids` (issue #411) and `burned_classes` (issue #395)

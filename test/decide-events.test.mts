@@ -65,6 +65,9 @@ const SIGNAL_CLASSES = [
   // wire_or_retire_target (issue #2722) — the judgment counterpart to
   // cleanup_target: resolves triage wire-or-retire items (WIRE/RETIRE/UNCLEAR).
   "wire_or_retire_target",
+  // design_qa_target (issue #2739, parent #2732) — periodic visual QA of the
+  // Target UI: screenshot review vs the design-language ADR (7d cadence).
+  "design_qa_target",
 ] as const;
 const ALL_CLASSES = [...PIPELINE_CLASSES, ...SIGNAL_CLASSES];
 

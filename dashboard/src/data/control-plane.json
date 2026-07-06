@@ -167,6 +167,15 @@
       "cooldownSeconds": 86400,
       "model": null,
       "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "name": "design_qa_target",
+      "kind": "signal",
+      "skill": "hydra-design-qa",
+      "scope": "target",
+      "cooldownSeconds": 604800,
+      "model": null,
+      "sourcePath": "scripts/autopilot/classes.json"
     }
   ],
   "labels": [
@@ -375,6 +384,11 @@
     {
       "class": "wire_or_retire_target",
       "skill": "hydra-wire-or-retire",
+      "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "class": "design_qa_target",
+      "skill": "hydra-design-qa",
       "sourcePath": "scripts/autopilot/classes.json"
     }
   ]
