@@ -88,16 +88,11 @@ import {
 
 export {
   buildPrompt,
-  parseLlmResponse,
-  PROMPT_SIZE_BUDGET_BYTES,
-  type RecSeverity,
-  type Recommendation,
   type TurnEndPayload,
   type RecentTurn,
   type SlotSnapshot,
   type SignalsSnapshot,
   type PermissionWaitEvent,
-  type EnginePromptInput,
 } from "./recommendation-prompt.ts";
 
 /**
