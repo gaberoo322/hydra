@@ -45,6 +45,7 @@ import {
   classByName,
   classBySkill,
   parseClassTaxonomy,
+  parseDispatchCycleId,
   producerClassFromCycleId,
   provenanceFromLabels,
 } from "../src/taxonomy/classes.ts";
@@ -494,5 +495,52 @@ describe("taxonomy: producerClassFromCycleId (cycleId → class name, #2920)", (
     assert.equal(producerClassFromCycleId(""), "unknown");
     assert.equal(producerClassFromCycleId(null), "unknown");
     assert.equal(producerClassFromCycleId(undefined), "unknown");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseDispatchCycleId — the fourth cycleId lookup (issue #2942): the full
+// {runIdPrefix, turn, className} attribution triple the per-dispatch outcome
+// record persists. PURE — string in, parsed triple or null out.
+// ---------------------------------------------------------------------------
+
+describe("taxonomy: parseDispatchCycleId (cycleId → attribution triple, #2942)", () => {
+  test("parses the harness-stamped worktree-agent-<prefix>-t<N>-<class> form", () => {
+    assert.deepEqual(parseDispatchCycleId("worktree-agent-277e4476-t4-dev_orch"), {
+      runIdPrefix: "277e4476",
+      turn: 4,
+      className: "dev_orch",
+    });
+    assert.deepEqual(parseDispatchCycleId("worktree-agent-deadbeef-t12-dev_target"), {
+      runIdPrefix: "deadbeef",
+      turn: 12,
+      className: "dev_target",
+    });
+  });
+
+  test("captures multi-underscore class tokens in full (unlike the suffix regex)", () => {
+    assert.deepEqual(
+      parseDispatchCycleId("worktree-agent-0a1b2c3d-t2-wire_or_retire_target"),
+      { runIdPrefix: "0a1b2c3d", turn: 2, className: "wire_or_retire_target" },
+    );
+  });
+
+  test("lowercases prefix + class and tolerates surrounding whitespace", () => {
+    assert.deepEqual(parseDispatchCycleId("  worktree-agent-ABCDEF01-t7-QA_ORCH "), {
+      runIdPrefix: "abcdef01",
+      turn: 7,
+      className: "qa_orch",
+    });
+  });
+
+  test("returns null for bare-UUID / legacy / malformed ids (dark-tolerant arm)", () => {
+    assert.equal(parseDispatchCycleId("8f1c2d3e-aaaa-bbbb-cccc-000000000000"), null);
+    assert.equal(parseDispatchCycleId("worktree-agent-277e4476-dev_orch"), null); // no -t<N>-
+    assert.equal(parseDispatchCycleId("worktree-agent-277e447-t4-dev_orch"), null); // 7-char prefix
+    assert.equal(parseDispatchCycleId("worktree-agent-277e4476-t4-devorch"), null); // no _orch/_target
+    assert.equal(parseDispatchCycleId("cycle-2026-05-01T00:00:00"), null);
+    assert.equal(parseDispatchCycleId(""), null);
+    assert.equal(parseDispatchCycleId(null), null);
+    assert.equal(parseDispatchCycleId(undefined), null);
   });
 });
