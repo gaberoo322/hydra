@@ -14,7 +14,7 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { getRunRow } from "../autopilot/runs.ts";
+import { getRunRow } from "../autopilot/run-reads.ts";
 import {
   readLogTail,
   LOG_TAIL_DEFAULT,

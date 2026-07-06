@@ -34,9 +34,13 @@ import {
   startRun,
   endRun,
   recordTurn,
-  getRunDispatchClasses,
   type AutopilotRunsDeps,
 } from "../src/autopilot/runs.ts";
+// getRunDispatchClasses (a composite READ orchestrator) was extracted into the
+// sibling run-reads Module (issue #2904 — completing the write/read split #1183
+// began and #2568 extended). Its injectable DispatchClassesDeps seam is
+// unchanged, so the getRunDispatchClasses cases below pass their stub as before.
+import { getRunDispatchClasses } from "../src/autopilot/run-reads.ts";
 // recordCycle (the cross-domain cycle-close coordinator) + UNCLASSIFIED_ANCHOR_TYPE
 // + the CycleCloseDeps bag moved to the sibling cycle-close Module (#2768). The
 // fixture below builds a single object satisfying BOTH AutopilotRunsDeps (the

@@ -23,7 +23,7 @@ import { z } from "zod";
 
 import * as defaultRecsRedis from "../redis/recommendations.ts";
 import { RUN_TTL_SECONDS } from "../autopilot/sweep-reader.ts";
-import { getCurrentRun as defaultGetCurrentRun } from "../autopilot/runs.ts";
+import { getCurrentRun as defaultGetCurrentRun } from "../autopilot/run-reads.ts";
 
 // ---------------------------------------------------------------------------
 // Recommendations sub-router schemas (issue #674)
