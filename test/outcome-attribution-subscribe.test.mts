@@ -33,28 +33,32 @@ import type { LoadOutcomesResult } from "../src/outcomes.ts";
 import type {
   AttributionLedger,
   AttributionObservation,
-  AttributionWindow,
   VoidMarker,
-  RevertedMerge,
   AppendObservationResult,
   LoadObservationsResult,
-} from "../src/redis/attribution.ts";
+} from "../src/redis/attribution-ledger.ts";
+import type { AttributionWindow } from "../src/redis/attribution-windows.ts";
+import type { RevertedMerge } from "../src/redis/attribution-reverted.ts";
 import {
   appendObservation,
   appendVoidMarker,
   getObservations,
   getLedger,
   isVoidMarker,
+  _resetLedger,
+} from "../src/redis/attribution-ledger.ts";
+import {
   openWindow,
   listOpenWindows,
   closeWindow,
+  _resetWindows,
+} from "../src/redis/attribution-windows.ts";
+import {
   markMergeReverted,
   listRevertedMerges,
   removeRevertedMerge,
-  _resetLedger,
-  _resetWindows,
   _resetReverted,
-} from "../src/redis/attribution.ts";
+} from "../src/redis/attribution-reverted.ts";
 import {
   windowDurationMs,
   windowId,

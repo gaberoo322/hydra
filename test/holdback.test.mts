@@ -46,13 +46,12 @@ import {
   listRevertedMerges,
   removeRevertedMerge,
   attributionRevertedKey,
-} from "../src/redis/attribution.ts";
+} from "../src/redis/attribution-reverted.ts";
 import {
   isEnrolledTier,
   windowCyclesForTier,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
-  HOLDBACK_WINDOW_CYCLES_T4,
 } from "../src/holdback-policy.ts";
 import {
   loadBaseline,

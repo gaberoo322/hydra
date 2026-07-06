@@ -52,7 +52,7 @@ import {
   decideHoldback,
   type LeadingOutcomeSample,
 } from "./outcome-regression.ts";
-import { markMergeReverted } from "./redis/attribution.ts";
+import { markMergeReverted } from "./redis/attribution-reverted.ts";
 
 /** Stream the digest consumer reads from (see src/index.ts startConsumers). */
 const NOTIFICATIONS_STREAM = "hydra:notifications";

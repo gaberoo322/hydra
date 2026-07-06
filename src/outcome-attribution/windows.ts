@@ -23,7 +23,7 @@
  *   - {@link dueWindows} — PURE: given the open windows + "now", partition into
  *     those due to close (`closesAt <= now`) and those still open.
  *
- * Window STATE lives in Redis (via the `src/redis/attribution.ts` seam) so an
+ * Window STATE lives in Redis (via the `src/redis/attribution-windows.ts` seam) so an
  * open window survives a housekeeping-process restart — the same durability
  * rationale as the pending-enroll registry. This module never touches Redis
  * directly; the chore passes the seam in.
@@ -32,7 +32,7 @@
  */
 
 import type { LeadingOutcomeSample } from "../outcome-regression.ts";
-import type { AttributionWindow } from "../redis/attribution.ts";
+import type { AttributionWindow } from "../redis/attribution-windows.ts";
 import type { PendingEnrollEntry } from "../redis/holdback.ts";
 
 // ---------------------------------------------------------------------------

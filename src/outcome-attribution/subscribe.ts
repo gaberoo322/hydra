@@ -68,16 +68,20 @@ import {
 } from "./recorder.ts";
 import {
   redisAttributionLedger,
+  type AttributionLedger,
+  type VoidMarker,
+} from "../redis/attribution-ledger.ts";
+import {
   openWindow,
   listOpenWindows,
   closeWindow,
+  type AttributionWindow,
+} from "../redis/attribution-windows.ts";
+import {
   listRevertedMerges,
   removeRevertedMerge,
-  type AttributionLedger,
-  type AttributionWindow,
-  type VoidMarker,
   type RevertedMerge,
-} from "../redis/attribution.ts";
+} from "../redis/attribution-reverted.ts";
 import {
   pendingEnrollList,
   type PendingEnrollEntry,

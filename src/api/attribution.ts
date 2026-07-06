@@ -16,7 +16,7 @@
  *     takes no `eventBus` — it emits nothing.
  *
  *   - **Consumes the spine read-only.** It loads rows via `getObservations()`
- *     (`src/redis/attribution.ts`, the sole seam) and fits them with
+ *     (`src/redis/attribution-ledger.ts`, the ledger seam) and fits them with
  *     `estimateMarginalEffects()` (the pure #2630 estimator). Both are shipped
  *     upstream and stay out of scope — this view mutates neither.
  *
@@ -43,7 +43,7 @@ import { Router } from "express";
 import {
   getObservations as defaultGetObservations,
   type LoadObservationsResult,
-} from "../redis/attribution.ts";
+} from "../redis/attribution-ledger.ts";
 import {
   estimateMarginalEffects,
   type MetricEstimate,
