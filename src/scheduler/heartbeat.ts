@@ -71,6 +71,7 @@ import {
 } from "../redis/scheduler.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getReconcilerHealth } from "../redis/reconciler.ts";
+import type { ReconcilerHealthRecord } from "../redis/reconciler.ts";
 // ---------------------------------------------------------------------------
 // Learning-indexer error observability (issue #2658, relocated in #2835)
 // ---------------------------------------------------------------------------
@@ -86,6 +87,208 @@ import { getReconcilerHealth } from "../redis/reconciler.ts";
 // counters via {@link getIndexerErrorStats} and surfaces them on
 // `GET /api/scheduler/status`.
 import { getIndexerErrorStats } from "../knowledge-base/indexer-stats.ts";
+
+// ---------------------------------------------------------------------------
+// Duration formatter — used by buildSchedulerStatus (below) and start().
+// Declared before the free-function section so TypeScript resolves it at all
+// call sites; formerly at module bottom (after the class), which forced a
+// hoisting dependency on the class being parsed first. Function declarations
+// hoist in JS/TS but this is a plain function expression-like declaration
+// (function statement) so it hoists fine — we move it here for clarity.
+// ---------------------------------------------------------------------------
+
+function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3600_000) return `${Math.round(ms / 60_000)}m`;
+  return `${(ms / 3600_000).toFixed(1)}h`;
+}
+
+// ---------------------------------------------------------------------------
+// SchedulerStatus — the named return type of getStatus() (issue #2935)
+//
+// Before this type existed, every caller read `getStatus()` without
+// compile-time enforcement of which fields are present. A field rename (e.g.
+// `cyclesMerged` → `mergeCount`) was silently a runtime gap across all five
+// call sites. The `SchedulerStatus` interface makes the contract explicit so
+// a rename is a compile error at every call site, not a silent miss.
+// ---------------------------------------------------------------------------
+
+/**
+ * The named return type of `getStatus()` / `buildSchedulerStatus()`.
+ *
+ * Export this type from the module so callers (src/api/scheduler.ts,
+ * src/api/now-page.ts, src/autopilot/status.ts, src/api/recommendations.ts,
+ * src/health/fan-out.ts) can reference the exact shape without re-deriving it
+ * from an untyped `Record<string, any>` return. A field rename in this
+ * interface is a compile error at all five call sites (issue #2935 AC1).
+ */
+export interface SchedulerStatus {
+  // --- Advisory cross-subsystem reads (issue #988, #2057) ---
+  /** Merge→done reconciler last-run health. null when no run recorded yet. */
+  reconciler: ReconcilerHealthRecord | null;
+  /** Autopilot-pause state. {paused:false} by default; {paused:true, since} when paused. */
+  autopilotPause: { paused: boolean; since?: number };
+
+  // --- Lifecycle counters (sourced from HeartbeatState) ---
+  running: boolean;
+  /** Why the scheduler is stopped. null when running or when start() was the last action. */
+  stopReason: "deliberate" | "circuit-breaker" | "error-cap" | null;
+  deliberateStoppedAt: string | null;
+  intervalMs: number;
+  intervalHuman: string | null;
+  cyclesRun: number;
+  cyclesMerged: number;
+  cyclesFailed: number;
+  /** Cycles whose status was in neither MERGED_STATUSES nor FAILED_STATUSES (issue #1919). */
+  cyclesUnaccounted: number;
+
+  // --- Rolling merge rate (issue #232) ---
+  mergeRate: number;
+  mergeRateWindow: number;
+  mergeRateCyclesInWindow: number;
+
+  // --- Rolling empty-cycle rate (issue #2818) ---
+  emptyRate: number | null;
+  emptyRateWindow: number;
+  emptyRateCyclesInWindow: number;
+
+  // --- Lifetime ratio (audit/debug only — do not drive alerts) ---
+  mergeRateLifetime: number;
+
+  // --- Indexer observability (issue #2658) ---
+  indexerErrors: number;
+  indexerRetries: number;
+
+  // --- Heartbeat liveness (issue #397) ---
+  lastTickAt: string | null;
+  lastError: string | null;
+  startedAt: string | null;
+  consecutiveErrors: number;
+}
+
+/**
+ * The advisory cross-subsystem readers consumed only by the status-projection
+ * path (not the timer lifecycle). Separated from `HeartbeatControllerDeps` as
+ * a named interface so `buildSchedulerStatus` can be called without
+ * constructing a full `HeartbeatController` — tests exercise the projection
+ * logic directly (issue #2935 AC2).
+ *
+ * These deps have no effect on `start()` / `stop()` / `runScheduledCycle()` —
+ * they are status-projection concerns sharing the constructor historically
+ * only because `getStatus()` was a class method.
+ */
+export interface StatusProjectionDeps {
+  getAutopilotPaused?: () => Promise<{ paused: boolean; since?: number }>;
+  getReconcilerHealth?: () => Promise<ReconcilerHealthRecord | null>;
+}
+
+/**
+ * The in-memory state fields that `buildSchedulerStatus` reads from
+ * `HeartbeatState`. Declared as a separate interface so the free function can
+ * accept a plain struct in tests — no full `HeartbeatController` required.
+ */
+export interface SchedulerStateSnapshot {
+  running: boolean;
+  stopReason: "deliberate" | "circuit-breaker" | "error-cap" | null;
+  deliberateStoppedAt: string | null;
+  intervalMs: number;
+  cyclesRun: number;
+  cyclesMerged: number;
+  cyclesFailed: number;
+  cyclesUnaccounted: number;
+  lastTickAt: string | null;
+  lastError: string | null;
+  startedAt: string | null;
+  consecutiveErrors: number;
+}
+
+/**
+ * Compose the `SchedulerStatus` projection from the in-memory state snapshot
+ * and pre-computed rate data, plus the advisory cross-subsystem readers.
+ *
+ * This is the single place that assembles the `getStatus()` response shape.
+ * Extracting it as a free function (issue #2935):
+ *
+ * - Makes the contract compiler-enforced: the return type is `SchedulerStatus`,
+ *   so a field rename at the declaration site is a compile error at all 5
+ *   call sites that destructure or assign the result.
+ * - Lets a test exercise the projection without constructing a full
+ *   `HeartbeatController` with all 13 deps — inject a plain `SchedulerStateSnapshot`
+ *   and deterministic rate stubs, and the test covers the field-assembly
+ *   logic with no Redis and no timer fixture.
+ * - Separates the advisory cross-subsystem reads (autopilotPause, reconciler)
+ *   from the timer-lifecycle concerns structurally: they live in
+ *   `StatusProjectionDeps`, not `HeartbeatControllerDeps`.
+ *
+ * Production callers: `HeartbeatController.getStatus()` is the only caller.
+ * The module-level `getStatus` delegator returns `Promise<SchedulerStatus>`.
+ *
+ * @param state - In-memory lifecycle counters from `HeartbeatState`.
+ * @param rates - Pre-computed rolling rates (merge + empty).
+ * @param deps  - Advisory readers. Defaults to the real Redis-backed readers.
+ */
+export async function buildSchedulerStatus(
+  state: SchedulerStateSnapshot,
+  rates: {
+    rolling: { mergeRate: number | null; cyclesInWindow: number };
+    emptyRolling: { emptyRate: number | null; cyclesInWindow: number };
+    mergeRateWindow: number;
+    emptyRateWindow: number;
+  },
+  deps: StatusProjectionDeps = {},
+): Promise<SchedulerStatus> {
+  const resolveAutopilotPaused = deps.getAutopilotPaused ?? getAutopilotPaused;
+  const resolveReconcilerHealth = deps.getReconcilerHealth ?? getReconcilerHealth;
+
+  const lifetimeMergeRate = state.cyclesRun > 0
+    ? Math.round((state.cyclesMerged / state.cyclesRun) * 100)
+    : 0;
+  const mergeRate = rates.rolling.mergeRate ?? lifetimeMergeRate;
+
+  // Advisory reads — fail safe (log, never propagate to callers).
+  let autopilotPause: { paused: boolean; since?: number } = { paused: false };
+  try {
+    autopilotPause = await resolveAutopilotPaused();
+  } catch (err: any) {
+    console.error(`[Heartbeat] getStatus autopilot-pause read failed: ${err?.message ?? err}`);
+  }
+
+  let reconciler: ReconcilerHealthRecord | null = null;
+  try {
+    reconciler = await resolveReconcilerHealth();
+  } catch (err: any) {
+    console.error(`[Heartbeat] getStatus reconciler-health read failed: ${err?.message ?? err}`);
+  }
+
+  const { indexerErrors, indexerRetries } = getIndexerErrorStats();
+
+  return {
+    reconciler,
+    running: state.running,
+    autopilotPause,
+    stopReason: state.stopReason,
+    deliberateStoppedAt: state.deliberateStoppedAt,
+    intervalMs: state.intervalMs,
+    intervalHuman: state.intervalMs ? formatDuration(state.intervalMs) : null,
+    cyclesRun: state.cyclesRun,
+    cyclesMerged: state.cyclesMerged,
+    cyclesFailed: state.cyclesFailed,
+    cyclesUnaccounted: state.cyclesUnaccounted,
+    mergeRate,
+    mergeRateWindow: rates.mergeRateWindow,
+    mergeRateCyclesInWindow: rates.rolling.cyclesInWindow,
+    emptyRate: rates.emptyRolling.emptyRate,
+    emptyRateWindow: rates.emptyRateWindow,
+    emptyRateCyclesInWindow: rates.emptyRolling.cyclesInWindow,
+    mergeRateLifetime: lifetimeMergeRate,
+    indexerErrors,
+    indexerRetries,
+    lastTickAt: state.lastTickAt,
+    lastError: state.lastError,
+    startedAt: state.startedAt,
+    consecutiveErrors: state.consecutiveErrors,
+  };
+}
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (issue #725: slowed from 2min; watchdog staleness threshold is 15min = 3x margin)
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
@@ -627,123 +830,29 @@ export class HeartbeatController {
     };
   }
 
-  async getStatus(): Promise<Record<string, any>> {
-    const state = this.state;
-    // Issue #232: report a rolling-window merge rate as the primary
-    // operator-visible metric. The lifetime ratio is preserved as
-    // `mergeRateLifetime` for audit but is heavily skewed by historical
-    // regressions and should not drive alerts or dashboards.
+  async getStatus(): Promise<SchedulerStatus> {
+    // Issue #2935: delegate to the exported `buildSchedulerStatus` free function
+    // so the projection logic (advisory reads, field assembly) is testable
+    // without constructing a full HeartbeatController. The controller passes its
+    // in-memory state snapshot and pre-computes the rolling rates here — the
+    // advisory reader deps come from the controller's injected deps (so tests
+    // that stub getAutopilotPaused / getReconcilerHealth still work through the
+    // existing HeartbeatControllerDeps seam).
     const rolling = await this.computeRollingMergeRate();
-    // Issue #2818: report a rolling-window empty-cycle rate alongside the merge
-    // rate so the empty-cycle rate is a permanent, self-monitoring signal (the
-    // read-side mirror of the write-path `unaccounted` bucket, #1919) instead of
-    // a one-off audit. Same rolling-window discipline as the merge rate above.
     const emptyRolling = await this.computeRollingEmptyRate();
-    const lifetimeMergeRate = state.cyclesRun > 0
-      ? Math.round((state.cyclesMerged / state.cyclesRun) * 100)
-      : 0;
-    // When no rolling history is available yet, fall back to the lifetime ratio
-    // so existing consumers that read `mergeRate` keep getting a number.
-    const mergeRate = rolling.mergeRate ?? lifetimeMergeRate;
-
-    // Issue #988: operator-only autopilot-pause state. A deliberate pause is a
-    // HEALTHY/expected state — surfaced so hydra-doctor / the watchdog can
-    // distinguish "operator paused autopilot on purpose" from "scheduler
-    // wedged". Fail-safe to not-paused if Redis is unreachable; advisory only.
-    let autopilotPause: { paused: boolean; since?: number } = { paused: false };
-    try {
-      autopilotPause = await this.getAutopilotPaused();
-    } catch (err: any) {
-      console.error(`[Heartbeat] getStatus autopilot-pause read failed: ${err?.message ?? err}`);
-    }
-
-    // Issue #2057: surface merge→done reconciler liveness on the status page so a
-    // stalled/blind reconciler (both gh feeds down) is operator-visible without
-    // grepping the journal. Advisory only — a missing record (no run yet, or the
-    // 2-day TTL aged out a long-stopped scheduler's record) reports `null`, and a
-    // Redis read failure degrades to `null` rather than failing the status call.
-    let reconciler: import("../redis/reconciler.ts").ReconcilerHealthRecord | null = null;
-    try {
-      reconciler = await this.getReconcilerHealth();
-    } catch (err: any) {
-      console.error(`[Heartbeat] getStatus reconciler-health read failed: ${err?.message ?? err}`);
-    }
-
-    // Issue #2835: the indexer-observability counters were relocated out of this
-    // module into `src/knowledge-base/indexer-stats.ts` (ownership follows the
-    // sole writer, the indexer). This reader is now a cross-module read via the
-    // exported getter rather than the former same-module bare-var access; the
-    // heartbeat stays a pure surfacer (ADR-0012).
-    const { indexerErrors, indexerRetries } = getIndexerErrorStats();
-
-    return {
-      // Issue #2057: merge→done reconciler last-run health (feed liveness + batch
-      // metrics). `null` when no run is recorded yet or the record aged out.
-      reconciler,
-      running: state.running,
-      // Issue #988: autopilot-pause state. `{paused:false}` by default;
-      // `{paused:true, since}` while the operator has paused autopilot. A
-      // HEALTHY/expected state — NOT degraded.
-      autopilotPause,
-      // Issue #388: surface why the scheduler is stopped so consumers
-      // (especially the watchdog) can distinguish operator-deliberate stops
-      // from self-stops. `null` when running, or when start() was the last
-      // action. See the `stop()` JSDoc for the closed-list of values.
-      stopReason: state.stopReason,
-      deliberateStoppedAt: state.deliberateStoppedAt,
-      intervalMs: state.intervalMs,
-      intervalHuman: state.intervalMs ? formatDuration(state.intervalMs) : null,
-      cyclesRun: state.cyclesRun,
-      cyclesMerged: state.cyclesMerged,
-      cyclesFailed: state.cyclesFailed,
-      // Issue #1919: cycles whose status was in NEITHER MERGED_STATUSES nor
-      // FAILED_STATUSES (no-op / idle-drain / dry-run / unknown). Read-only here
-      // (recordCycle is the sole writer per ADR-0012). Makes the
-      // cyclesRun == cyclesMerged + cyclesFailed + cyclesUnaccounted identity
-      // queryable instead of an inferred (run - merged - failed) subtraction.
-      cyclesUnaccounted: state.cyclesUnaccounted,
-      // Rolling N-cycle merge rate (default 50) — same source as
-      // `hydra metrics --count N`. Operator-visible primary metric.
-      mergeRate,
-      mergeRateWindow: ROLLING_MERGE_RATE_WINDOW,
-      mergeRateCyclesInWindow: rolling.cyclesInWindow,
-      // Issue #2818: rolling N-cycle empty-cycle rate — the fraction of recent
-      // cycles that attempted work but bucketed to neither merged nor failed nor
-      // abandoned (the read-side mirror of the #1919 `unaccounted` bucket).
-      // `null` when no rolling history is available yet (distinct from 0%).
-      // Rolling-window, never lifetime, for the same #232 skew reason as mergeRate.
-      emptyRate: emptyRolling.emptyRate,
-      emptyRateWindow: ROLLING_EMPTY_RATE_WINDOW,
-      emptyRateCyclesInWindow: emptyRolling.cyclesInWindow,
-      // Lifetime counter ratio — kept for audit / debugging only. Do not use
-      // for alerts, stall detection, or operator dashboards (see issue #232).
-      mergeRateLifetime: lifetimeMergeRate,
-      // Issue #2658: OpenViking learning-indexer error observability. Monotonic
-      // in-process counters (reset on restart) so an exhausted background index
-      // attempt — e.g. OV point-lock contention that survived the client-side
-      // backoff — is visible UPSTREAM instead of only in a console.error the
-      // autopilot cannot gate on. `indexerErrors` counts give-ups;
-      // `indexerRetries` counts transient retries (a load signal). Advisory only.
-      indexerErrors,
-      indexerRetries,
-      // Issue #397: heartbeat for the housekeeping tick. The watchdog
-      // reads this to distinguish "scheduler alive" from "scheduler wedged".
-      // Always present, always advancing when running=true.
-      lastTickAt: state.lastTickAt,
-      lastError: state.lastError,
-      startedAt: state.startedAt,
-      consecutiveErrors: state.consecutiveErrors,
-      // Issue #576: per-cycle cost cap (the codex-era circuit breaker) was
-      // retired with `src/cost/cap.ts`. Quota gating now lives in the
-      // Subscription Usage Tracker (`/api/usage`, `/api/usage/eligibility`).
-      //
-      // #706 (scheduler fold PR-1/4): the `research` sub-object (queueThreshold,
-      // buildRatioMax/Min, currentRatio, queueDepth*, floor telemetry,
-      // lastResearchDecision) was removed along with the in-process
-      // research-decision plane. No dashboard reader consumed it. The
-      // research-force policy now lives in the autopilot brain
-      // (`scripts/autopilot/decide.py` `_research_force_allowed`).
-    };
+    return buildSchedulerStatus(
+      this.state,
+      {
+        rolling,
+        emptyRolling,
+        mergeRateWindow: ROLLING_MERGE_RATE_WINDOW,
+        emptyRateWindow: ROLLING_EMPTY_RATE_WINDOW,
+      },
+      {
+        getAutopilotPaused: this.getAutopilotPaused,
+        getReconcilerHealth: this.getReconcilerHealth,
+      },
+    );
   }
 
   /**
@@ -757,12 +866,6 @@ export class HeartbeatController {
     }
     return null;
   }
-}
-
-function formatDuration(ms) {
-  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-  if (ms < 3600_000) return `${Math.round(ms / 60_000)}m`;
-  return `${(ms / 3600_000).toFixed(1)}h`;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,7 +905,7 @@ async function stop(opts: { reason?: "deliberate" | "circuit-breaker" | "error-c
   return defaultController.stop(opts);
 }
 
-async function getStatus() {
+async function getStatus(): Promise<SchedulerStatus> {
   return defaultController.getStatus();
 }
 
