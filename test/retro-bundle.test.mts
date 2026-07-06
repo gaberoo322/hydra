@@ -85,6 +85,9 @@ function baseDeps(over: Partial<RetroBundleDeps> = {}): RetroBundleDeps {
       }) as any,
     readCycleHash: async () => ({ status: "merged" }),
     readCycleMetrics: async () => ({}),
+    // Issue #2942: default to "no durable records" so pre-existing cases keep
+    // exercising the getCycleHash fallback join unchanged (and stay Redis-free).
+    readDispatchOutcomes: async () => ({ ok: true as const, records: [] }),
     readRecommendations: async () => ({}),
     readAnchorReflections: async () => ({ content: "", count: 0 }),
     readFrictionPatterns: async () => [],
@@ -1419,5 +1422,159 @@ describe("assembleRetroBundle — never-throw contract", () => {
     });
     const bundle = await assembleRetroBundle("run-1", deps);
     assert.equal(bundle.recommendations.length, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #2942 — the durable per-dispatch outcome record as a bundle sub-source
+// ---------------------------------------------------------------------------
+
+function outcomeRecord(over: Record<string, unknown> = {}) {
+  return {
+    cycleId: "c1",
+    runIdPrefix: "run-1".slice(0, 8),
+    turn: 2,
+    className: "dev_orch",
+    skill: "hydra-dev",
+    outcome: "merged",
+    tokens: 120_000,
+    durationMs: 90_000,
+    recordedAt: 1_750_000_000_000,
+    ...over,
+  } as any;
+}
+
+describe("assembleRetroBundle — durable dispatch-outcome records (#2942)", () => {
+  test("exposes the run's durable records on bundle.dispatchOutcomes", async () => {
+    const records = [outcomeRecord()];
+    let requestedRunId = "";
+    const deps = baseDeps({
+      readDispatchOutcomes: async (runId: string) => {
+        requestedRunId = runId;
+        return { ok: true as const, records };
+      },
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.equal(requestedRunId, "run-1");
+    assert.equal(bundle.dispatchOutcomes.length, 1);
+    assert.equal(bundle.dispatchOutcomes[0].outcome, "merged");
+    assert.equal(bundle.dispatchOutcomes[0].tokens, 120_000);
+    assert.deepEqual(bundle.errors, []);
+  });
+
+  test("a status-less dispatch backfills from the durable record INSTEAD of the cycle-hash join", async () => {
+    let hashReads = 0;
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 2,
+              actions: [
+                {
+                  type: "dispatch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-2942",
+                  // No terminal status on the action — the join must backfill.
+                  outcome: { cycleId: "c1" },
+                },
+              ],
+            },
+          ],
+        }) as any,
+      // The sidecar must report a terminal-shaped field so the provisional
+      // candidate is confirmable, mirroring the pre-existing fallback cases.
+      readCycleMetrics: async () => ({ abandonReason: "" }),
+      readDispatchOutcomes: async () => ({
+        ok: true as const,
+        records: [outcomeRecord({ outcome: "failed" })],
+      }),
+      readCycleHash: async () => {
+        hashReads += 1;
+        return { status: "failed" };
+      },
+    });
+
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    assert.equal(bundle.dispatches[0].status, "failed");
+    assert.equal(bundle.dispatches[0].bucket, "failed");
+    // The durable record served the status — the re-derived join was not read.
+    assert.equal(hashReads, 0);
+  });
+
+  test("a cycle that predates the record store still falls back to the cycle-hash join (dark tolerance)", async () => {
+    let hashReads = 0;
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 2,
+              actions: [
+                {
+                  type: "dispatch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-2942",
+                  outcome: { cycleId: "legacy-cycle" },
+                },
+              ],
+            },
+          ],
+        }) as any,
+      readDispatchOutcomes: async () => ({ ok: true as const, records: [] }),
+      readCycleHash: async () => {
+        hashReads += 1;
+        return { status: "completed" };
+      },
+    });
+
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.equal(bundle.dispatches[0].status, "completed");
+    assert.equal(hashReads, 1);
+  });
+
+  test("never-throw: a rejecting record read lands in errors[], bundle still assembles", async () => {
+    const deps = baseDeps({
+      readDispatchOutcomes: async () => {
+        throw new Error("outcomes boom");
+      },
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.equal(bundle.runFound, true);
+    assert.deepEqual(bundle.dispatchOutcomes, []);
+    assert.ok(
+      bundle.errors.some((e) => e.source === "dispatch-outcomes" && /outcomes boom/.test(e.detail)),
+    );
+  });
+
+  test("never-throw: a structured ok:false read lands in errors[], bundle still assembles", async () => {
+    const deps = baseDeps({
+      readDispatchOutcomes: async () => ({ ok: false as const, error: "redis sad" }),
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.deepEqual(bundle.dispatchOutcomes, []);
+    assert.ok(
+      bundle.errors.some((e) => e.source === "dispatch-outcomes" && /redis sad/.test(e.detail)),
+    );
+  });
+
+  test("an unknown run skips the run-scoped record read entirely", async () => {
+    let reads = 0;
+    const deps = baseDeps({
+      readRun: async () => ({ ok: false, code: "not-found", detail: "unknown run_id" }) as any,
+      readDispatchOutcomes: async () => {
+        reads += 1;
+        return { ok: true as const, records: [] };
+      },
+    });
+    const bundle = await assembleRetroBundle("nope", deps);
+    assert.equal(bundle.runFound, false);
+    assert.equal(reads, 0);
+    assert.deepEqual(bundle.dispatchOutcomes, []);
   });
 });

@@ -49,6 +49,14 @@ import {
 } from "./run-reads.ts";
 import { getCycleHash } from "../redis/cycle-tracking.ts";
 import { getCycleMetrics } from "../redis/cycle-metrics.ts";
+// Issue #2942: the durable per-dispatch outcome record recordCycle writes at
+// reap time — the bundle reads it instead of re-deriving outcome/tokens
+// through the per-dispatch getCycleHash join wherever a record exists.
+import {
+  getDispatchOutcomesForRun,
+  type DispatchOutcomeRecord,
+  type DispatchOutcomeListResult,
+} from "../redis/dispatch-outcomes.ts";
 import { getAllRecommendations } from "../redis/recommendations.ts";
 import { loadAnchorReflections } from "../reflections/per-anchor.ts";
 import { listFrictionPatterns } from "../pattern-memory/agent-memory.ts";
@@ -107,6 +115,15 @@ export interface RetroBundle {
   /** Per-dispatch outcomes, projected + joined from the turn timeline. */
   dispatches: RetroDispatch[];
   /**
+   * The durable per-dispatch outcome records for this run (issue #2942) —
+   * the reap-time `{run, turn, class, skill, outcome, tokens, durationMs}`
+   * join recordCycle persists, read via `getDispatchOutcomesForRun` instead
+   * of being re-derived per retro. Empty when the run predates the record
+   * store (dark-tolerant: the getCycleHash fallback join above still fills
+   * `dispatches[]`).
+   */
+  dispatchOutcomes: DispatchOutcomeRecord[];
+  /**
    * Per-anchor reflection narratives for the FLAGGED dispatches only — the
    * "QA verdict / why it failed" signal a retrospective acts on. Bounded to
    * the drill subset so we don't fan out a reflection read per dispatch.
@@ -132,6 +149,8 @@ export interface RetroBundleDeps {
   readRun?: typeof getRun;
   readCycleHash?: typeof getCycleHash;
   readCycleMetrics?: typeof getCycleMetrics;
+  /** Issue #2942: the durable per-dispatch outcome-record read. */
+  readDispatchOutcomes?: typeof getDispatchOutcomesForRun;
   readRecommendations?: typeof getAllRecommendations;
   readAnchorReflections?: typeof loadAnchorReflections;
   readFrictionPatterns?: typeof listFrictionPatterns;
@@ -222,6 +241,7 @@ export async function assembleRetroBundle(
   const readRun = deps.readRun ?? getRun;
   const readCycleHash = deps.readCycleHash ?? getCycleHash;
   const readCycleMetrics = deps.readCycleMetrics ?? getCycleMetrics;
+  const readDispatchOutcomes = deps.readDispatchOutcomes ?? getDispatchOutcomesForRun;
   const readRecommendations = deps.readRecommendations ?? getAllRecommendations;
   const readAnchorReflections = deps.readAnchorReflections ?? loadAnchorReflections;
   const readFrictionPatterns = deps.readFrictionPatterns ?? listFrictionPatterns;
@@ -251,6 +271,34 @@ export async function assembleRetroBundle(
     // partial-ness is legible. A `not-found` is a normal empty bundle.
     errors.push({ source: "run-record", detail: runResult.detail || runResult.code });
   }
+
+  // 1a. The durable per-dispatch outcome records for this run (issue #2942).
+  //     Run-scoped like the cycle joins, so skipped when the run is unknown.
+  //     Never-throw: the accessor returns a result object, and an ok:false
+  //     lands in bundle.errors[] like any other failed sub-source. Records are
+  //     BOTH exposed on the bundle (the retro's per-dispatch outcome + tokens
+  //     source, replacing the re-derived join) AND used below as the primary
+  //     status-backfill source (the getCycleHash read stays as the
+  //     dark-tolerant fallback for cycles that predate the record store).
+  let dispatchOutcomes: DispatchOutcomeRecord[] = [];
+  if (runFound) {
+    const outcomesResult = await safeSource<DispatchOutcomeListResult>(
+      "dispatch-outcomes",
+      errors,
+      { ok: true, records: [] },
+      () => readDispatchOutcomes(runId),
+    );
+    if (outcomesResult.ok === true) {
+      dispatchOutcomes = outcomesResult.records;
+    } else {
+      // The accessor is itself never-throw and surfaced a structured failure —
+      // record it like any other failed sub-source (partial bundle, no throw).
+      errors.push({ source: "dispatch-outcomes", detail: outcomesResult.error });
+    }
+  }
+  const outcomeByCycleId = new Map<string, DispatchOutcomeRecord>(
+    dispatchOutcomes.map((rec) => [rec.cycleId, rec]),
+  );
 
   // 2. Per-dispatch projection from the turn timeline. `let`, because the
   //    post-enrichment identity dedup (step 3c, issue #1823) returns a filtered
@@ -301,20 +349,32 @@ export async function assembleRetroBundle(
       }
       d.regressionIntroduced = metrics.regressionIntroduced === "true";
       if (d.regressionIntroduced) terminalRecordSeen = true;
-      // Backfill status/anchor from the metrics sidecar when the turn join
-      // didn't carry them (e.g. a cycle recorded out-of-band of a turn, OR a
-      // snapshot-only dispatch whose cycleId we recovered from the task_id).
+      // Backfill status/anchor from the durable dispatch-outcome record
+      // (issue #2942) when the turn join didn't carry them (e.g. a cycle
+      // recorded out-of-band of a turn, OR a snapshot-only dispatch whose
+      // cycleId we recovered from the task_id). The record's `outcome` IS the
+      // cycle-hash status (recordCycle keeps them in lockstep, including the
+      // completed→merged upgrade), so it replaces the per-dispatch
+      // getCycleHash read; the hash read stays as the dark-tolerant fallback
+      // for cycles that predate the record store.
       if (!d.status) {
-        const hash = await safeSource(
-          "cycle-record",
-          errors,
-          {} as Record<string, string>,
-          () => readCycleHash(d.cycleId),
-        );
-        if (hash && typeof hash.status === "string" && hash.status.length > 0) {
-          d.status = hash.status;
+        const durable = outcomeByCycleId.get(d.cycleId);
+        if (durable) {
+          d.status = durable.outcome;
           d.bucket = bucketOf(d.status);
           terminalRecordSeen = true;
+        } else {
+          const hash = await safeSource(
+            "cycle-record",
+            errors,
+            {} as Record<string, string>,
+            () => readCycleHash(d.cycleId),
+          );
+          if (hash && typeof hash.status === "string" && hash.status.length > 0) {
+            d.status = hash.status;
+            d.bucket = bucketOf(d.status);
+            terminalRecordSeen = true;
+          }
         }
       }
       if (!d.anchorReference && typeof metrics.anchorReference === "string") {
@@ -482,6 +542,7 @@ export async function assembleRetroBundle(
     run: runView,
     turns,
     dispatches,
+    dispatchOutcomes,
     reflections,
     stuckSignals,
     recommendations,
