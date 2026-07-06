@@ -77,6 +77,19 @@ entries:
     type: timer
     maxStaleMinutes: 120
     description: "M13 directional/paper-execution runner (item-718/item-611) — the PRODUCER of paper directional venue_orders the forecast-outcomes timer scores; without it live, forecast_outcomes never accumulates and brierScore stays null. Hourly, default-off until installed+enabled (first run NOT-YET-FIRED, never STALE). Paper-only."
+  # Forecast-pipeline HEADWATER (issue #2887, epic #2286). The paper LLM
+  # edge-estimate feed writes paper_llm_edge_estimates — the FIRST stage of the
+  # forecast pipeline (feed -> directional nomination -> forecast-outcome
+  # settlement -> Brier). Its months-long ABSENCE from any manifest is exactly the
+  # MISSING-timer mode this check exists for: the vision's primary metric
+  # (forecast-calibration-brier) sat null for ~10 months and nothing alarmed,
+  # because the headwater timer was never declared. Now live, firing hourly at
+  # :00, so maxStaleMinutes: 120 matches the sibling hourly nomination entry
+  # (generous over the hourly cadence so normal jitter never false-alarms).
+  - unit: hydra-betting-paper-edge-feed.timer
+    type: timer
+    maxStaleMinutes: 120
+    description: "Paper LLM edge-estimate feed (issue #2887) — the forecast-pipeline HEADWATER that writes paper_llm_edge_estimates; the directional nomination timer consumes its rows. Without it live, the whole forecast pipeline is dry and brierScore stays null (the ~10-month dark-pipeline root cause). Hourly at :00 -> maxStaleMinutes: 120, matching the sibling nomination entry."
 
   # Output checks (slice 2, #2288) — live-but-inert detection.
   #
@@ -92,3 +105,42 @@ entries:
       value: 0
       runs: 3
     description: Scanner funnel registry gate — must produce >0 registry pairs (registry-seed regression guard).
+
+  # Forecast-pipeline OUTPUT check — resolved forecast outcomes (issue #2887).
+  #
+  # Stage 2 of the forecast pipeline: once the headwater feed (the timer above)
+  # produces edge estimates and the directional nomination timer consumes them,
+  # settled forecasts must ACCUMULATE. The Target exposes the running count on
+  # `GET /api/calibration/forecast-metrics` as `totalForecasts` (a finite number,
+  # 0 when the pipe is dry) — the same route the Brier metric-publisher already
+  # reads (src/metrics/publish.ts). A floor of value:0 over runs:3 flags only a
+  # source pinned at zero resolved forecasts across three consecutive hourly chore
+  # ticks; the first run with totalForecasts>0 clears it.
+  #
+  # This legitimately alarms BELOW-FLOOR while the pipe is dark (0 nominations
+  # today — see #2885/#2886). That is CORRECT: the pipe IS inert. runs:3 keeps the
+  # alarm a steady signal (three consecutive dark ticks), not a per-tick page-storm.
+  - type: output
+    source: /api/calibration/forecast-metrics
+    jsonPath: totalForecasts
+    minOverRuns:
+      value: 0
+      runs: 3
+    description: "Forecast-outcome resolution — totalForecasts must climb above 0 (settled forecasts accumulating). Pinned at 0 across 3 runs = the calibration loop has no Brier signal (the ~10-month dark-pipeline mode). Reads GET /api/calibration/forecast-metrics on the Target."
+
+  # Stage 3 — the Brier metric itself — is DELIBERATELY NOT an output check here.
+  #
+  # `brierScore` on GET /api/calibration/forecast-metrics is `number | null`: it is
+  # null (not zero) until enough resolved forecasts exist (src/metrics/publish.ts
+  # returns reason:"no-score" on null). The output reader
+  # (wiring-liveness-output.ts extractNumericPath) maps a null/non-numeric leaf to
+  # UNREADABLE, NOT to a floor hit — so an output check on brierScore would surface
+  # the dark pipe as merely "unreadable" (informational), a strictly WEAKER signal
+  # than the dedicated dark-outcome check already gives it.
+  #
+  # The Brier metric is instead covered by the DARK-OUTCOME check
+  # (wiring-liveness-outcomes.ts): forecast-calibration-brier is declared
+  # `kind: leading` in config/direction/outcomes.yaml, so a null reading is a DARK
+  # verdict with a producer hint, and a sustained (>=7-day) dark streak files a
+  # needs-triage issue (the dark-alarm, #2805). Duplicating it as an output check
+  # would add noise, not coverage. (Issue #2887 — stage-3 reachability rationale.)
