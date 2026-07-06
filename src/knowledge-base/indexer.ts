@@ -708,9 +708,6 @@ export {
   shouldIndexSource,
   enumerateSourceFiles,
   buildSourceTitle,
-  HYDRA_ROOT_FOR_SOURCE,
-  DEFAULT_SOURCE_SPEC,
-  DEFAULT_SOURCE_PATHS,
 } from "./source-enumerator.ts";
 export type { SourcePath } from "./source-enumerator.ts";
 
