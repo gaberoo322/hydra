@@ -71,7 +71,6 @@ import {
 import type { PendingEnrollEntry } from "../src/redis/holdback.ts";
 import {
   runAttributionRecord,
-  producerClassFromCycleId,
   type AttributionRecordDeps,
   type MergeStatus,
 } from "../src/outcome-attribution/subscribe.ts";
@@ -257,23 +256,9 @@ describe("windows.ts — pure window policy (#2632)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Layer 1b — producer-class derivation
-// ---------------------------------------------------------------------------
-
-describe("subscribe.ts — producer-class derivation (#2632)", () => {
-  test("extracts the trailing signal-class token", () => {
-    assert.equal(producerClassFromCycleId("worktree-agent-abc-t8-dev_orch"), "dev_orch");
-    assert.equal(producerClassFromCycleId("run-1-dev_target"), "dev_target");
-    assert.equal(producerClassFromCycleId("sweep_orch"), "sweep_orch");
-  });
-  test("defaults to unknown for unparseable / empty", () => {
-    assert.equal(producerClassFromCycleId("random-id"), "unknown");
-    assert.equal(producerClassFromCycleId(""), "unknown");
-    assert.equal(producerClassFromCycleId(null), "unknown");
-    assert.equal(producerClassFromCycleId(undefined), "unknown");
-  });
-});
+// The pure producer-class derivation (producerClassFromCycleId) moved to the
+// Dispatch-Class Taxonomy Module in issue #2920; its unit tests now live in
+// test/taxonomy-classes.test.mts, next to classByName / classBySkill.
 
 // ---------------------------------------------------------------------------
 // Layer 1c — chore decision logic against fakes
