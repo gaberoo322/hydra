@@ -60,6 +60,14 @@ Read the Orchestrator's domain glossary and ADRs first so candidates are named i
 - `~/hydra/CONTEXT.md` — the canonical glossary (Target, Orchestrator, Untouchable Core, Pre-merge Gate, Modification Tier, Outcome Holdback, Operator-Required Intervention). Use these terms exactly.
 - `~/hydra/docs/adr/` — architectural decision records. **Do not re-litigate a decided ADR.** A candidate may only contradict an ADR when the friction is real enough to warrant reopening it, and then it must say so explicitly (`contradicts ADR-NNNN — but worth reopening because …`).
 
+**Seed the exploration from the import graph, not from file size (issue #2939).** Before walking the tree, generate the deterministic coupling summary and let it target your search at the real seam hubs and cross-group tension:
+
+```bash
+npx tsx -e "import('/home/gabe/hydra/src/knowledge-base/repo-graph.ts').then(m => m.getCouplingReport().then(r => { process.stdout.write(r); process.exit(0); })).catch(e => { console.error(e); process.exit(1); });"
+```
+
+This prints a markdown block with the top ≥10 modules ranked by fan-in and the top-5 cross-group coupling pairs — the seam-hub / cross-group-tension signals worth deepening. Prioritise candidates that sit on a high-fan-in hub or straddle a heavy cross-group edge over ones surfaced purely by file size. (The report is a READ-ONLY view over the existing `scanArchitecture()` import graph — it opens no Redis/OpenViking connection and is safe to run headless.)
+
 Then use the **Agent tool with `subagent_type=Explore`** to walk `~/hydra/src/`, `~/hydra/dashboard/src/`, and `~/hydra/scripts/`. Explore organically — note where you experience friction, following the upstream skill's prompts:
 
 - Where does understanding one concept require bouncing between many small modules?
