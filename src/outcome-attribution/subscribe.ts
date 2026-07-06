@@ -198,12 +198,11 @@ export interface AttributionRecordResult {
 // assembled from the resolved deps, so adding a field to a phase context surfaces
 // a compile error at that assembly point. The per-item helper contexts are
 // derived (`Pick`) from their phase context so their field lists are never
-// re-spelled. These are exported so the test suite can construct a phase context
-// directly (the minimum fields for that phase) without building a full
-// `AttributionRecordDeps`; the phase functions themselves stay private.
+// re-spelled. These context types are module-private (no external consumer
+// references them); the phase functions themselves stay private too.
 
 /** Context for the OPEN phase ({@link openWindowsForLandedMerges}). */
-export interface OpenWindowsCtx {
+interface OpenWindowsCtx {
   listPending: typeof pendingEnrollList;
   fetchMergeStatus: (prNumber: number) => Promise<MergeStatus | null>;
   snapshot: (filePath?: string) => Promise<LeadingOutcomeSample[]>;
@@ -216,13 +215,13 @@ export interface OpenWindowsCtx {
 }
 
 /** Per-merge slice of {@link OpenWindowsCtx} used by {@link openWindowsForOneMerge}. */
-export type OpenOneMergeCtx = Pick<
+type OpenOneMergeCtx = Pick<
   OpenWindowsCtx,
   "snapshot" | "openWindowFn" | "outcomesFile" | "nowMs" | "result"
 >;
 
 /** Context for the CLOSE phase ({@link closeDueWindows}). */
-export interface CloseWindowsCtx {
+interface CloseWindowsCtx {
   ledger: AttributionLedger;
   snapshot: (filePath?: string) => Promise<LeadingOutcomeSample[]>;
   listWindowsFn: typeof listOpenWindows;
@@ -233,13 +232,13 @@ export interface CloseWindowsCtx {
 }
 
 /** Per-window slice of {@link CloseWindowsCtx} used by {@link closeOneWindow}. */
-export type CloseOneWindowCtx = Pick<
+type CloseOneWindowCtx = Pick<
   CloseWindowsCtx,
   "ledger" | "closeWindowFn" | "nowMs" | "result"
 >;
 
 /** Context for the VOID phase ({@link voidRevertedMerges}). */
-export interface VoidRevertsCtx {
+interface VoidRevertsCtx {
   ledger: AttributionLedger;
   listRevertedFn: typeof listRevertedMerges;
   removeRevertedFn: typeof removeRevertedMerge;
@@ -248,7 +247,7 @@ export interface VoidRevertsCtx {
 }
 
 /** Per-revert slice of {@link VoidRevertsCtx} used by {@link voidOneRevert}. */
-export type VoidOneRevertCtx = Pick<
+type VoidOneRevertCtx = Pick<
   VoidRevertsCtx,
   "ledger" | "removeRevertedFn" | "nowMs" | "result"
 >;
