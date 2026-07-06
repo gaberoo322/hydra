@@ -198,6 +198,17 @@
       "scope": "target",
       "provenanceLabel": null,
       "notes": "issue #2722, epic #2720: the judgment counterpart to cleanup_target's mechanical sweep. cleanup_target files needs-triage `wire-or-retire`-labelled Redis backlog items for Target modules past the 45-day wiring grace; those items are the DECISION queue, and the prompt-shaped resolver protocol drafted in their bodies is what failed (items were laundered into the backlog lane — hence the #2721 lane guard). This class dispatches the headless /hydra-wire-or-retire skill to actually RESOLVE those items: git-log archaeology + cross-ref of config/direction vision/priorities/roadmap + the Target backlog open AND done lanes -> a WIRE / RETIRE / UNCLEAR verdict per module (rewrite the item into a concrete ready-for-agent wiring/retirement task, or route ready-for-human on UNCLEAR). Hard carve-out: modules under web/src/lib/risk/ or live-execution paths ALWAYS route ready-for-human (interim hardcoded list until #2701 classifyTargetRisk exists). Ambiguity never resolves to deletion (Target CLAUDE.md rule 6). Fires on the `wire_or_retire_target_available` signal (collect-state.sh emits it when >=1 open wire-or-retire-labelled item sits in the Target triage lane); resolves at most 2 items per run. 24h class cooldown (SIGNAL_COOLDOWNS) enforces the once-per-day cadence and MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 retro-cooldown bootstrap bug class). Target-scope, so orch-only excludes it (mirror of cleanup_target). NOT in BACKFILL_SIGNAL_CLASSES. Dispatch OMITS the model param (inherit parent per #1093 — judgment work; the Haiku-premature-exit failure mode is documented)."
+    },
+    {
+      "name": "design_qa_target",
+      "kind": "signal",
+      "skill": "hydra-design-qa",
+      "costClass": "cleanup",
+      "learningAgent": null,
+      "cooldownSeconds": 604800,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "issue #2739, parent #2732 (Target UI-quality loop). Periodic visual QA of the Target's UI: dispatches the headless /hydra-design-qa skill (7d class cooldown, mirroring scout_orch's weekly calendar discipline) to capture the slice-1 screenshot set of every nav-registry route on ~/hydra-betting/web, judge each page against the Target design-language ADR's judgment rules (hydra-betting/docs/adr/0005-design-language.md — density budget, clutter, consistency), and file AT MOST 3 deduped needs-triage Target-backlog items per run, each citing the specific ADR rule violated + screenshot evidence. JUDGMENT work, so findings route needs-triage (NOT ready-for-agent), mirroring wire_or_retire_target's confidence-routing discipline (epic #2720). Fires on `design_qa_target_due` (collect-state.sh emits it true whenever the Target board is reachable AND not saturated); the 7d SIGNAL_COOLDOWNS cadence is the calendar back-stop and MUST be seeded in bootstrap.sh signal_last_fired so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug class). `design_qa_target_saturated` is the anti-flood cap checked FIRST — skip when >5 open `design-qa`-labelled Target-backlog items already await triage. Target-scope, so orch-only excludes it (mirror of cleanup_target / wire_or_retire_target). NOT in BACKFILL_SIGNAL_CLASSES. Dispatch OMITS the model param (inherit parent per #1093 — judgment work; the Haiku-premature-exit failure mode is documented)."
     }
   ]
 }

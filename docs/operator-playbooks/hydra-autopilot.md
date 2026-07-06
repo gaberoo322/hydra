@@ -55,7 +55,7 @@ Each tick:
 > surfaces loudly as a `plan-stale-skipped: ... exact off-by-one ...` reason
 > in the turn record.
 
-## Class taxonomy (7 pipeline slots + 11 signal classes)
+## Class taxonomy (7 pipeline slots + 12 signal classes)
 
 | Kind | Class | Skill |
 |---|---|---|
@@ -77,6 +77,7 @@ Each tick:
 | signal | `cleanup_orch` | hydra-cleanup (#960; board-idle deterministic dead-code/simplification scan, issue-producing → `ready-for-agent`) |
 | signal | `cleanup_target` | hydra-target-cleanup (Target mirror of cleanup_orch; demote-only dead-export sweep over ~/hydra-betting, backlog-item-producing → `ready-for-agent` + `queued`) |
 | signal | `wire_or_retire_target` | hydra-wire-or-retire (#2722, epic #2720; judgment counterpart to cleanup_target — resolves triage `wire-or-retire` items into WIRE/RETIRE/UNCLEAR verdicts; 24h cooldown, ≤2 items/run, model param omitted) |
+| signal | `design_qa_target` | hydra-design-qa (#2739, parent #2732; periodic VISUAL QA — screenshots every nav-registry route + judges vs the Target design ADR's [judgment] rules, files ≤3 deduped `needs-triage` design-qa items/run; 7d calendar cooldown, >5-open saturation backstop, model param omitted) |
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
 > calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
@@ -347,6 +348,7 @@ on Fable 5 (the frontier model, replacing Opus as of 2026-06-10).
 | `cleanup_orch` | Haiku | Deterministic knip output; LLM only formats findings into issues |
 | `cleanup_target` | Haiku | Deterministic knip output + tested emit runner; LLM only drives the two commands |
 | `wire_or_retire_target` | inherit parent (omit `model`) | Judgment work — recover a module's intent (git archaeology + vision/priorities/backlog cross-ref) and decide WIRE/RETIRE/UNCLEAR. NOT deterministic like `cleanup_target`; a low tier hits the documented Haiku-premature-exit failure mode (narrates "standing by", files nothing). Omit `model` so it inherits the parent (Fable 5), per #1093. |
+| `design_qa_target` | inherit parent (omit `model`) | Visual judgment work — grade every route's screenshot against the Target design ADR's [judgment] rules (consistency / density / empty-state honesty). Like `wire_or_retire_target` it is an opinion, not a deterministic check; omit `model` so it inherits the parent (Fable 5), per #1093, to avoid the Haiku-premature-exit failure mode. |
 | `discover_orch` / `discover_target` | Haiku | Patrol/diagnostics, designed small/fast/cheap |
 
 Use the harness's model alias (`fable` / `sonnet` / `haiku` / `opus`) for the

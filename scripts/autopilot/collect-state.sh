@@ -538,14 +538,30 @@ print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
 # a resolved item leaves as a queued WIRE/RETIRE task or a ready-for-human
 # backlog item). Orchestrator-API-down degrades to false — the suppressing
 # direction (never dispatch a resolver that cannot read its own queue).
+#
+# `design_qa_target_due` / `design_qa_target_saturated` — (issue #2739, parent
+# #2732, the Target UI-quality loop) drive the periodic visual-QA pass. This is
+# a CALENDAR-cadence class like scout_orch: decide.py's 7d class cooldown owns
+# the cadence, so `design_qa_target_due` is simply "board reachable AND not
+# saturated" — there is always UI to review. `design_qa_target_saturated` is the
+# anti-flood cap: true when more than DESIGN_QA_BOARD_SATURATION_CAP (5) open
+# items carrying the stable `design-qa` label sit in any lane except `done`
+# (the /hydra-design-qa emit runner stamps every finding with this label).
+# Orchestrator-API-down degrades to due=false / saturated=true — BOTH the
+# suppressing direction (fail closed: never dispatch a visual pass that cannot
+# read its own board to dedup against).
 TARGET_CLEANUP_SCAN_LABEL="cleanup-scan"
 TARGET_CLEANUP_BOARD_SATURATION_CAP=10
 TARGET_WIRE_OR_RETIRE_LABEL="wire-or-retire"
+TARGET_DESIGN_QA_LABEL="design-qa"
+TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
 TARGET_BACKLOG_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/backlog" 2>/dev/null || echo '')
 if [ -n "$TARGET_BACKLOG_JSON" ]; then
   printf '%s' "$TARGET_BACKLOG_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
     TARGET_CLEANUP_SCAN_LABEL="$TARGET_CLEANUP_SCAN_LABEL" \
     TARGET_WIRE_OR_RETIRE_LABEL="$TARGET_WIRE_OR_RETIRE_LABEL" \
+    TARGET_DESIGN_QA_LABEL="$TARGET_DESIGN_QA_LABEL" \
+    TARGET_DESIGN_QA_BOARD_SATURATION_CAP="$TARGET_DESIGN_QA_BOARD_SATURATION_CAP" \
     TARGET_CLEANUP_BOARD_SATURATION_CAP="$TARGET_CLEANUP_BOARD_SATURATION_CAP" python3 -c "
 import json, os, sys
 try:
@@ -554,40 +570,57 @@ try:
   queued = lanes.get('queued') or []
   label = os.environ.get('TARGET_CLEANUP_SCAN_LABEL', 'cleanup-scan')
   wor_label = os.environ.get('TARGET_WIRE_OR_RETIRE_LABEL', 'wire-or-retire')
+  dqa_label = os.environ.get('TARGET_DESIGN_QA_LABEL', 'design-qa')
   cap = int(os.environ.get('TARGET_CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
+  dqa_cap = int(os.environ.get('TARGET_DESIGN_QA_BOARD_SATURATION_CAP', '5') or 5)
   wq = int(os.environ.get('TARGET_WORK_QUEUE', '0') or 0)
   open_scan = 0
+  open_design_qa = 0
   for lane, rows in lanes.items():
     if lane in ('done', 'counts') or not isinstance(rows, list):
       continue
     for row in rows:
       labels = row.get('labels') if isinstance(row, dict) else None
-      if isinstance(labels, list) and label in labels:
+      if not isinstance(labels, list):
+        continue
+      if label in labels:
         open_scan += 1
+      if dqa_label in labels:
+        open_design_qa += 1
   wor_triage = 0
   for row in triage:
     labels = row.get('labels') if isinstance(row, dict) else None
     if isinstance(labels, list) and wor_label in labels:
       wor_triage += 1
   idle = (len(triage) == 0 and len(queued) == 0 and wq == 0)
+  dqa_saturated = (open_design_qa > dqa_cap)
   print('target_backfill_idle=' + ('true' if idle else 'false'))
   print('target_cleanup_board_open_scan=' + str(open_scan))
   print('target_cleanup_board_saturated=' + ('true' if open_scan > cap else 'false'))
   print('wire_or_retire_target_triage=' + str(wor_triage))
   print('wire_or_retire_target_available=' + ('true' if wor_triage > 0 else 'false'))
+  print('design_qa_target_open=' + str(open_design_qa))
+  print('design_qa_target_saturated=' + ('true' if dqa_saturated else 'false'))
+  print('design_qa_target_due=' + ('false' if dqa_saturated else 'true'))
 except Exception:
   print('target_backfill_idle=false')
   print('target_cleanup_board_open_scan=0')
   print('target_cleanup_board_saturated=true')
   print('wire_or_retire_target_triage=0')
   print('wire_or_retire_target_available=false')
-" 2>/dev/null || { echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; }
+  print('design_qa_target_open=0')
+  print('design_qa_target_saturated=true')
+  print('design_qa_target_due=false')
+" 2>/dev/null || { echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
 else
   echo "target_backfill_idle=false"
   echo "target_cleanup_board_open_scan=0"
   echo "target_cleanup_board_saturated=true"
   echo "wire_or_retire_target_triage=0"
   echo "wire_or_retire_target_available=false"
+  echo "design_qa_target_open=0"
+  echo "design_qa_target_saturated=true"
+  echo "design_qa_target_due=false"
 fi
 
 # Per-run retrospective — daily trigger (issue #920, epic #917).

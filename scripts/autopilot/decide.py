@@ -496,6 +496,13 @@ WIRE_OR_RETIRE_RISK_CARVEOUT = (
     "web/src/lib/kalshi/kalshi-executor.ts",
 )
 
+# Per-run cap on how many design-QA findings the visual-review pass may file
+# (issue #2739, parent #2732): "file AT MOST 3 deduped needs-triage items per
+# run". Threaded into `prompt_args.max_items` on every design_qa_target
+# dispatch so the cap is machine-enforceable at the dispatch seam, not
+# prose-only — the same discipline as WIRE_OR_RETIRE_MAX_ITEMS above.
+DESIGN_QA_TARGET_MAX_ITEMS = 3
+
 # Slots that are scope-disallowed exclusion mask. Scope filter is an
 # exclusion mask (grilled decision 3); `health` and `qa_*` are always
 # allowed regardless of scope (qa reviews any PR, health is whole-system).
@@ -510,6 +517,12 @@ SCOPE_ORCH_ONLY_EXCLUDE = (
     # cleanup_target's mechanical sweep) — target-scope by definition, so
     # orch-only excludes it, mirroring cleanup_target above.
     "wire_or_retire_target",
+    # design_qa_target (issue #2739, parent #2732) captures the Target's
+    # nav-registry screenshot set and judges each page against the Target
+    # design-language ADR, filing Target-backlog items — target-scope by
+    # definition, so orch-only excludes it, mirroring cleanup_target /
+    # wire_or_retire_target above.
+    "design_qa_target",
 )
 SCOPE_TARGET_ONLY_EXCLUDE = (
     "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
@@ -1616,6 +1629,16 @@ def _rule_signal_classes(
         # class cooldown (seeded in bootstrap.sh, #2575 class) enforces the
         # once-per-day cadence. NOT in BACKFILL_SIGNAL_CLASSES.
         "wire_or_retire_target",
+        # design_qa_target (issue #2739, parent #2732) — periodic VISUAL QA of
+        # the Target UI: captures the nav-registry screenshot set and judges each
+        # page against the Target design-language ADR, filing at most 3 deduped
+        # needs-triage Target-backlog items per run. Calendar cadence like
+        # scout_orch: the 7d class cooldown (seeded in bootstrap.sh, #2575 class)
+        # owns cadence; `design_qa_target_saturated` is the anti-flood cap checked
+        # FIRST in the selector, `design_qa_target_due` the presence signal. NOT
+        # in BACKFILL_SIGNAL_CLASSES. Registered last as the lowest-priority
+        # signal class — spare capacity only.
+        "design_qa_target",
     ):
         if dispatch_blocked:
             out.events.append(
@@ -2598,6 +2621,60 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                     "risk_carveout": list(WIRE_OR_RETIRE_RISK_CARVEOUT),
                 },
                 reason="target triage has wire-or-retire items — resolve WIRE/RETIRE/UNCLEAR",
+            )
+        return None
+    if sig == "design_qa_target":
+        # Issue #2739 (parent #2732, the Target UI-quality loop). Periodic
+        # VISUAL QA of the Target UI: dispatches the headless /hydra-design-qa
+        # skill to capture the slice-1 screenshot set of every nav-registry
+        # route on ~/hydra-betting/web, judge each page against the Target
+        # design-language ADR (hydra-betting/docs/adr/0005-design-language.md —
+        # density budget, clutter, consistency), and file AT MOST 3 deduped
+        # needs-triage Target-backlog items per run, each citing the specific
+        # ADR rule violated plus screenshot evidence.
+        #
+        # This is JUDGMENT work, so findings route needs-triage (NOT
+        # ready-for-agent) — mirroring wire_or_retire_target's confidence-routing
+        # discipline (epic #2720): an autonomous visual verdict is a candidate
+        # for a human/triage pass, never a self-authorised code task.
+        #
+        # Calendar cadence like scout_orch: the 7d class cooldown
+        # (SIGNAL_COOLDOWNS["design_qa_target"], honored by the shared
+        # signal_is_cooled guard at the top of this function) is the primary
+        # cadence control and is seeded in bootstrap.sh's signal_last_fired so it
+        # survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
+        # class). collect-state.sh emits `design_qa_target_due` true whenever the
+        # Target board is reachable AND not saturated — there is always UI to
+        # review, so the "due" predicate is just "board reachable + capacity".
+        #
+        # `design_qa_target_saturated` is the anti-flood cap, checked FIRST
+        # (before the cooldown, exactly like cleanup_target /
+        # target_cleanup_board_saturated): a board already holding >5 open
+        # `design-qa`-labelled Target-backlog items suppresses the pass so a
+        # healthy UI isn't re-reviewed into an ever-growing triage pile.
+        #
+        # The dispatch OMITS the model param (inherit the parent per #1093):
+        # judgment work, and the Haiku-premature-exit failure mode is documented
+        # — so no `model` key is passed here, mirroring the other judgment
+        # classes (wire_or_retire_target).
+        #
+        # decide.py reads the precomputed signals only — it never captures
+        # screenshots or reads the Target board here (the signal-seam
+        # discipline). `apply: True` follows the #1078 retro_orch lesson: a
+        # dry-run-default skill dispatched headlessly without it is a silent
+        # no-op that files nothing. `max_items` threads the per-run cap so the
+        # "≤3 findings" contract is machine-enforceable at the dispatch seam.
+        if _signal_present(state, events, "design_qa_target_saturated"):
+            return None
+        if _signal_present(state, events, "design_qa_target_due"):
+            return make_dispatch(
+                sig,
+                "hydra-design-qa",
+                prompt_args={
+                    "apply": True,
+                    "max_items": DESIGN_QA_TARGET_MAX_ITEMS,
+                },
+                reason="target design-QA cadence due — screenshot review vs design ADR",
             )
         return None
     return None
