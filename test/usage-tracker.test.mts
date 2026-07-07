@@ -3915,6 +3915,7 @@ describe("usage-tracker", () => {
         calibrated: true,
         paused: false,
         sessionBlockedUntil: null,
+        worklessUntil: null,
       },
       paceState: "on",
       targetPercent: 0,

@@ -70,6 +70,12 @@ interface MemStore {
   counters: Record<string, number>;
   /** Issue #2942: the per-dispatch outcome-record store fake. */
   outcomes: Map<string, Record<string, unknown>>;
+  /**
+   * Issue #2956: captures the args of each stampWorklessHint call so endRun's
+   * zero-dispatch idle-stamp path is assertable without Redis. Empty = never
+   * stamped.
+   */
+  worklessStamps: Array<{ worklessUntilMs: number; nowMs: number }>;
 }
 
 function newStore(): MemStore {
@@ -82,6 +88,7 @@ function newStore(): MemStore {
     metrics: new Map(),
     counters: { run: 0, merged: 0, failed: 0, unaccounted: 0 },
     outcomes: new Map(),
+    worklessStamps: [],
   };
 }
 
@@ -191,6 +198,12 @@ function makeDeps(store: MemStore, opts: FixtureOpts = {}): AutopilotRunsDeps & 
     },
     isPidAlive: opts.isPidAlive ?? (() => true),
     now: () => nowMs,
+    // Issue #2956: capture-only fake for the workless-hint stamp so endRun's
+    // idle path is assertable without Redis.
+    async stampWorklessHint(worklessUntilMs, nowMsArg) {
+      store.worklessStamps.push({ worklessUntilMs, nowMs: nowMsArg });
+      return worklessUntilMs;
+    },
   };
 }
 
@@ -295,6 +308,50 @@ describe("endRun — injected deps (#2158)", () => {
       deps,
     );
     assert.equal(store.runs.get("run-clean")!.crash_detail, undefined);
+  });
+
+  // Issue #2956 — workless-board backoff hint stamped on a zero-dispatch idle exit.
+  test("idle exit with ZERO dispatches stamps a future workless hint", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-idle0", limits: {} } as any, deps); // seeds dispatches:"0"
+
+    await endRun({ run_id: "run-idle0", cause: "idle" } as any, deps);
+    assert.equal(store.worklessStamps.length, 1, "should stamp exactly once");
+    const stamp = store.worklessStamps[0];
+    assert.equal(stamp.nowMs, FIXED_NOW_MS);
+    // A FUTURE instant (now + the backoff window).
+    assert.ok(stamp.worklessUntilMs > FIXED_NOW_MS, "hint must be in the future");
+  });
+
+  test("idle exit WITH dispatches (>0) does NOT stamp — real work was available", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-idleN", limits: {} } as any, deps);
+    // Simulate a run that dispatched during its life.
+    store.runs.get("run-idleN")!.dispatches = "3";
+
+    await endRun({ run_id: "run-idleN", cause: "idle" } as any, deps);
+    assert.equal(store.worklessStamps.length, 0, "a run that dispatched must launch normally");
+  });
+
+  test("a NON-idle exit (budget) never stamps a workless hint", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-budget", limits: {} } as any, deps);
+
+    await endRun({ run_id: "run-budget", cause: "budget" } as any, deps);
+    assert.equal(store.worklessStamps.length, 0);
+  });
+
+  test("an unparseable dispatches count fails SAFE to had-work (no stamp)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-garbage", limits: {} } as any, deps);
+    store.runs.get("run-garbage")!.dispatches = "not-a-number";
+
+    await endRun({ run_id: "run-garbage", cause: "idle" } as any, deps);
+    assert.equal(store.worklessStamps.length, 0, "garbage count must not suppress launch");
   });
 });
 

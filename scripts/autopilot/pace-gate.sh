@@ -189,6 +189,15 @@ SESSION_BLOCKED_UNTIL=$(jq -r '.reasons.sessionBlockedUntil // ""' <<<"$ELIGIBIL
 # hard-stops in decide.py within seconds, so launching is pure churn until the
 # Weekly Reset Anchor passes.
 WEEKLY_EMERGENCY_STOP=$(jq -r '.reasons.weeklyEmergencyStop // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #2956: workless-board backoff hint. The route overlays
+# `.reasons.worklessUntil` (ISO-8601) when the autopilot last exited cause=idle
+# having dispatched NOTHING — i.e. the board was fully workless (every class on
+# cooldown, no signals). UNLIKE session-block/paused it does NOT flip `.allow`
+# (decide.py must not drain an in-flight/operator session on it), so this
+# LAUNCHER-ONLY arm skips relaunch while the instant is future, sparing the
+# ~2-min zero-dispatch idle exits. `null`/absent => launch normally; the hint
+# self-clears by TTL so a stale value can never wedge the gate off.
+WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 # Issue #1790: the composed verdict. projectEligibility() + the route's
 # overlays fold EVERY hard-stop reason (5h emergencyStop, weeklyEmergencyStop,
 # paused, future sessionBlockedUntil — and any future reason) into this single
@@ -203,7 +212,7 @@ WEEKLY_EMERGENCY_STOP=$(jq -r '.reasons.weeklyEmergencyStop // false' <<<"$ELIGI
 # field => "null", garbage, parse failure) fails safe.
 ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   exit 0
 fi
@@ -265,6 +274,24 @@ fi
 if [[ "$PACE_STATE" == "ahead" ]]; then
   log "ahead of pacing curve — pausing (skip)"
   exit 0
+fi
+
+# Issue #2956: workless-board backoff. Placed LAST among the skip arms — every
+# hard-stop above (paused / session-block / emergencyStop / weekly / allow=false
+# / pace-ahead) takes precedence and is logged on its own terms. This is the
+# final soft gate before launch: if the last run ended cause=idle with zero
+# dispatches, the board is expected to stay workless until this instant, so
+# relaunching now would only spawn another ~2-min zero-dispatch idle exit. We
+# re-check against now defensively (mirrors the session-block arm) so a
+# clock-skewed/stale value can never wedge the gate off; a non-future or
+# unparseable value falls through to launch.
+if [[ -n "$WORKLESS_UNTIL" ]]; then
+  WORKLESS_EPOCH=$(date -d "$WORKLESS_UNTIL" +%s 2>/dev/null || echo "")
+  NOW_EPOCH=$(date -u +%s)
+  if [[ -n "$WORKLESS_EPOCH" && "$WORKLESS_EPOCH" -gt "$NOW_EPOCH" ]]; then
+    log "workless-board backoff until $WORKLESS_UNTIL — skip (last run idle with zero dispatches, #2956)"
+    exit 0
+  fi
 fi
 
 # --- Step 4: eligible (paceState on/behind, not emergency) — launch/exec ---

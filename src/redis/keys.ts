@@ -240,6 +240,18 @@ export const redisKeys = {
   // exhausted quota. Absent => no block (default-off, fail-safe to running).
   autopilotSessionBlock: () => "hydra:autopilot:session-blocked-until",
 
+  // Issue #2956: workless-board backoff hint. Stamped by endRun when a run
+  // terminates cause=idle having dispatched NOTHING (the fully-idle board:
+  // every class on cooldown, no signals firing). The value is the epoch-ms
+  // until which the board is expected to stay workless. UNLIKE the session
+  // block (which forces allow=false), this hint is LAUNCHER-ONLY advisory —
+  // folded into /api/usage/eligibility as `reasons.worklessUntil` and acted on
+  // ONLY by the pace-gate (skip relaunch while future). decide.py never reads
+  // it, so an already-launched or operator session is never drained by it.
+  // Carries a TTL to the hint instant so it SELF-CLEARS; a stale/past value
+  // fails safe to "not workless". Absent => launch normally.
+  autopilotWorklessUntil: () => "hydra:autopilot:workless-until",
+
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled
   // `hydra:scheduler:daily-spend` (no live writer) and never emitted.
