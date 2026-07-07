@@ -71,12 +71,36 @@ describe("cycle metrics write-read numeric contract (issue #1890)", () => {
 
     const m = trend[0];
     NUMERIC_FIELD_NAMES.forEach((name, i) => {
+      // Issue #2930: `tokenCost` is no longer read back from the cycle-metrics
+      // hash — it is JOINED at read time from the separate per-cycle token key
+      // (`hydra:metrics:tokens:by-cycle:<id>`) via getCycleTokensRaw. This test
+      // seeds no such key, so the joined value is the truthful null sentinel
+      // (asserted in the dedicated case below), NOT the value written into the
+      // hash here. Exclude it from the hash round-trip assertion; the write→read
+      // hash contract this test guards still holds for every other numeric field.
+      if (name === "tokenCost") return;
       assert.strictEqual(
         m[name],
         i + 1,
         `field "${name}" must round-trip as the number ${i + 1}, got ${JSON.stringify(m[name])} (${typeof m[name]})`,
       );
     });
+  });
+
+  test("tokenCost is a read-time join, not a hash round-trip (issue #2930)", async () => {
+    // A value written into the `tokenCost` slot of the cycle-metrics HASH is
+    // deliberately overridden by the read-time join from the separate per-cycle
+    // token key. With no token key seeded, the trend row reads the null
+    // unattributed sentinel regardless of any stale hash value.
+    const cycleId = "cycle-2930-hash-override";
+    await recordCycleMetrics(cycleId, { tasksMerged: 1, tokenCost: 999 });
+
+    const trend = await getMetricsTrend(1);
+    assert.strictEqual(
+      trend[0].tokenCost,
+      null,
+      "tokenCost must reflect the joined per-cycle token key (null when absent), not a value stored on the metrics hash",
+    );
   });
 
   test("a numeric field absent at the write site reads as null (not a stale string)", async () => {

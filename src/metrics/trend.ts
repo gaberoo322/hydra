@@ -12,6 +12,7 @@ import {
   getRecentMetricIds,
   getCycleMetrics,
 } from "../redis/cycle-metrics.ts";
+import { getCycleTokensRaw } from "../redis/cost.ts";
 import { NUMERIC_FIELD_NAMES } from "./record.ts";
 import {
   isMalformedAnchorType,
@@ -283,6 +284,36 @@ export function normalizeAnchorType(raw: unknown): string {
 }
 
 /**
+ * Issue #2930: parse a per-cycle token total read from the separate
+ * `hydra:metrics:tokens:cycle:<id>` key (via the `getCycleTokensRaw` accessor)
+ * into the trend row's `tokenCost` field.
+ *
+ * The per-cycle token count is NOT stored on the cycle-metrics hash — it lives
+ * in its own Redis key written by `recordSubagentTokens` (src/cost/surrogate.ts)
+ * on an independent, unordered path. `tokenCost` is declared in
+ * `NUMERIC_FIELD_NAMES` but no writer ever populates it on the hash, so the trend
+ * joins it at READ time (order-independent, unlike a write-time join that would
+ * miss late-arriving token POSTs — see the rejected write-time alternative in
+ * design-concept issue-2930).
+ *
+ * Truthful-sentinel discipline (the same rule that fixed filesChanged #2063 and
+ * anchorType #2689): a cycle with no recorded token key reads `null`, NEVER a
+ * fabricated `0`. A fake 0 would poison the tokens-per-merged-PR trend. A stored
+ * value of literally `0` is a real recorded zero and passes through as `0`.
+ *
+ * Pure and exported so the test suite can pin the parse without a Redis fetch.
+ * Returns `null` for any absent/empty/non-numeric raw value (fail-safe: an
+ * unparseable token key degrades to the unattributed sentinel, never throws).
+ */
+export function parseCycleTokenTotal(raw: unknown): number | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
  * Get metrics for the N most recent cycles, with all known numeric fields
  * parsed back from their Redis string form.
  */
@@ -319,6 +350,18 @@ export async function getMetricsTrend(count = 20) {
     // form (absent, empty, the "null"/"undefined" sentinels) to "unknown" so
     // the trend output matches the aggregator's honest bucket.
     parsed.anchorType = normalizeAnchorType(parsed.anchorType);
+
+    // Issue #2930: join the per-cycle token total from the separate
+    // `hydra:metrics:tokens:cycle:<id>` key (read ONLY through the src/redis/cost.ts
+    // typed accessor — the ADR-0009 Redis seam is preserved and the Tier-0 Cost
+    // accounting seam is read, never mutated). `tokenCost` is declared in
+    // NUMERIC_FIELD_NAMES but no writer populates it on the metrics hash, so the
+    // numeric parse loop above leaves it undefined; this read-time join sets it
+    // to the real token total or `null` when no key exists (truthful
+    // unattributed sentinel — never a fabricated 0). Overriding any hash value
+    // here is intentional: the per-cycle token key is the source of truth for
+    // this field, not the never-written hash slot.
+    parsed.tokenCost = parseCycleTokenTotal(await getCycleTokensRaw(cycleId));
 
     results.push(parsed);
   }
