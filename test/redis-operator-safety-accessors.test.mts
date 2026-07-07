@@ -70,11 +70,10 @@ function getTestRedis(): any {
   if (!testRedis) {
     // lazyConnect + no auto-retry so an unreachable Redis fails fast in the
     // reachability probe below instead of hanging the suite.
-    testRedis = new Redis(process.env.REDIS_URL!, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 1,
-      retryStrategy: () => null,
-    });
+    // Single-string-arg ioredis overload (`new Redis(url)`) — the only
+    // constructor form the default import exposes here (an options object /
+    // `(url, options)` do not resolve), matching the rest of the test suite.
+    testRedis = new Redis(process.env.REDIS_URL!);
     // Swallow post-probe connection errors: once we've decided Redis is down we
     // skip every case, and a late 'error' with no listener would crash the run.
     testRedis.on("error", () => {});
@@ -88,7 +87,6 @@ async function redisReachable(): Promise<boolean> {
   if (redisUp !== null) return redisUp;
   try {
     const r = getTestRedis();
-    await r.connect();
     await r.ping();
     redisUp = true;
   } catch (err) {
