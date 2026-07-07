@@ -29,7 +29,18 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PLAYBOOK_PATH = resolve(__dirname, "..", "docs", "operator-playbooks", "hydra-dev.md");
+// Issue #2947 split the hydra-dev playbook: the child execution contract —
+// including the live /api/tier classification recipe — moved into the
+// _fragments/hydra-dev-child-flow.md reference file that sync-skills.sh emits
+// as a sibling of SKILL.md. The tier-classifier obligation now lives there.
+const PLAYBOOK_PATH = resolve(
+  __dirname,
+  "..",
+  "docs",
+  "operator-playbooks",
+  "_fragments",
+  "hydra-dev-child-flow.md",
+);
 const playbook = readFileSync(PLAYBOOK_PATH, "utf8");
 
 describe("hydra-dev playbook — live tier classifier (issue #406)", () => {
