@@ -1,7 +1,7 @@
 ---
 name: hydra-wire-or-retire
-description: Non-interactive resolver for the Target's wire-or-retire decision queue. Reads the open `wire-or-retire`-labelled items sitting in the Target (~/hydra-betting) triage lane — modules built with intent that either stalled or died, filed by /hydra-target-cleanup — and turns each into a verdict: WIRE (rewrite into a concrete ready-for-agent wiring task, move to queued), RETIRE (rewrite into a ready-for-agent retirement task citing the deadcode scan, move to queued), or UNCLEAR (route ready-for-human and stop). Recovers intent via git-log archaeology + a cross-ref of config/direction vision/priorities/roadmap + the Target backlog open AND done lanes. Resolves at most 2 items per run. Hard carve-out — modules under web/src/lib/risk/ or live-execution paths ALWAYS route ready-for-human. Ambiguity never resolves to deletion. Zero AskUserQuestion.
-when_to_use: "When the Target triage lane holds open `wire-or-retire` decision items and the autopilot wants to actually make the wire-vs-retire call, or when the operator says 'resolve wire-or-retire', '/hydra-wire-or-retire', or 'make the wiring decisions'. Dispatched by the autopilot `wire_or_retire_target` signal class on the `wire_or_retire_target_available` signal, at a 24h cooldown (issue #2722, epic #2720)."
+description: Non-interactive resolver that turns the Target's open wire-or-retire decision items into WIRE, RETIRE, or UNCLEAR verdicts, recovering intent from git history and vision docs; risk and live-execution modules always route to a human, and ambiguity never deletes.
+when_to_use: "When the Target triage lane holds open wire-or-retire decision items, or the operator says 'resolve wire-or-retire' or 'make the wiring decisions'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 claude_only: true
 ---
@@ -273,3 +273,10 @@ Expected: reads the Target triage lane, resolves ≤2 open `wire-or-retire` item
 rest for the next 24h tick, and reports the verdicts. A triage lane with no open
 `wire-or-retire` items is a no-op (the `wire_or_retire_target_available` signal is false, so
 the autopilot never dispatches this in the first place).
+
+## Dispatch wiring
+
+Dispatched by the autopilot `wire_or_retire_target` signal class on the
+`wire_or_retire_target_available` signal, at a 24h cooldown. Tracked by issue
+#2722 under epic #2720. Items are filed into the Target triage lane by
+`/hydra-target-cleanup`; this skill resolves at most 2 per run.

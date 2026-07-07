@@ -1,7 +1,7 @@
 ---
 name: hydra-design-qa
-description: Non-interactive periodic VISUAL QA of the Target (~/hydra-betting/web) UI. Captures the nav-registry screenshot set of every rendered route, judges each page against the Target design-language ADR's [judgment] rules (styling consistency, density / one-question-per-page, empty-state honesty), and files AT MOST 3 deduped needs-triage Target-backlog items per run — each citing the specific ADR rule violated plus screenshot evidence. Judgment findings route needs-triage (NOT ready-for-agent), mirroring the wire-or-retire confidence-routing discipline. Saturation backstop: skip when >5 open design-qa items already await triage. A healthy UI files nothing. Zero AskUserQuestion.
-when_to_use: "When the autopilot's periodic 7-day design-QA cadence is due and the Target UI has not been visually reviewed against the design ADR this week, or when the operator says 'design QA the target', '/hydra-design-qa', or 'review the UI against the ADR'. Dispatched by the autopilot `design_qa_target` signal class on the `design_qa_target_due` signal, at a 7d cooldown (issue #2739, parent #2732, the Target UI-quality loop)."
+description: Non-interactive visual QA of the Target UI that screenshots every rendered route, judges each against the design-language ADR rules, and files at most three deduped needs-triage backlog items citing the rule violated; a healthy UI files nothing.
+when_to_use: "When the periodic design-QA cadence is due, or the operator says 'design QA the target' or 'review the UI against the ADR'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 claude_only: true
 ---
@@ -103,3 +103,9 @@ Single realm: **`~/hydra-betting/web`** (the Target code root; anchor paths are 
 - **Only the mechanical rules belong in CI.** If a finding is really a mechanical violation
   (nav spine, label mismatch, ad-hoc color, weight ceiling), note that it belongs to
   #2737/#2738/#2733 — do not duplicate a CI-owned check as a judgment item.
+
+## Dispatch wiring
+
+Dispatched by the autopilot `design_qa_target` signal class on the
+`design_qa_target_due` signal, at a 7-day cooldown. Tracked by issue #2739 under
+parent #2732 (the Target UI-quality loop).

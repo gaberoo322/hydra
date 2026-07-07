@@ -6,6 +6,20 @@
 # - Generated files have a "DO NOT EDIT" banner.
 # - Existing skills outside the managed set are left alone.
 # - Skills matching `claude_only: true` are NOT generated for Codex.
+#
+# disable-model-invocation forwarding (issue #2945):
+#   The optional `disable-model-invocation: true` playbook-frontmatter key is
+#   forwarded verbatim (kebab-case, same spelling) into the generated Claude
+#   SKILL.md frontmatter, and omitted entirely when absent. It is NEVER emitted
+#   into the Codex output (Codex has no such concept).
+#   FAIL-SAFE FLAG RULE — a playbook may carry disable-model-invocation ONLY when
+#   EVERY live invocation path is an explicit slash launch (`claude -p "/name"`
+#   or an operator `/name`). Any skill named in scripts/autopilot/classes.json's
+#   dispatched-skill column, or invoked from another skill's session, is reached
+#   through the Skill tool (model invocation) and the harness HARD-ERRORS on a
+#   flagged skill even when the prompt names it by /slug — flagging it would halt
+#   every such dispatch. Today only hydra-autopilot qualifies: it is launched
+#   solely by pace-gate's `claude -p "/hydra-autopilot"` and by the operator.
 
 set -euo pipefail
 
@@ -152,6 +166,10 @@ elif a: print(a)
 else: print("")')
   claude_only=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("claude_only") else "0")')
   codex_delegation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["fm"].get("codex_delegation","none"))')
+  # disable-model-invocation (issue #2945): the frontmatter parser coerces the
+  # kebab-case key's true/false value to a Python bool, so print "1" only when it
+  # is truthy — never the literal Python "True". "1" here means "emit the key".
+  disable_model_invocation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("disable-model-invocation") else "0")')
   body=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["body"])')
 
   if [ -z "$name" ] || [ -z "$desc" ]; then
@@ -171,6 +189,10 @@ else: print("")')
     echo "description: $desc"
     [ -n "$when" ] && echo "when_to_use: \"$when\""
     echo "allowed-tools: $allowed_claude"
+    # Emit disable-model-invocation only when the playbook opted in; lowercase
+    # `true` (never Python's "True"). Omitted entirely otherwise so untouched
+    # playbooks regenerate byte-identical (issue #2945).
+    [ "$disable_model_invocation" = "1" ] && echo "disable-model-invocation: true"
     [ -n "$args_yaml" ] && echo "arguments: $args_yaml"
     echo "---"
     echo

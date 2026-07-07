@@ -1,7 +1,7 @@
 ---
 name: hydra-target-cleanup
-description: Non-interactive deterministic dead-code pass over the Target (~/hydra-betting/web), in two phases. Phase 1 (mechanical): knip-driven demote-only dead-export sweep — one ready-for-agent backlog item per file whose acceptance criterion is "drop the export keyword AND npm test/typecheck/deadcode:check still pass with a tightened baseline". Phase 2 (judgment): reads the Target's wiring-status ledger and files needs-triage wire-or-retire decision items for modules past the grace period. Dry-run by default; --apply files backlog items. Zero AskUserQuestion.
-when_to_use: "When the Target backlog is idle and the autopilot wants to turn spare capacity into high-confidence dead-code hygiene on hydra-betting, or when the operator says 'target cleanup scan', '/hydra-target-cleanup', or 'sweep target dead code'. Dispatched by the autopilot `cleanup_target` signal class on the `target_backfill_idle` signal, suppressed first by `target_cleanup_board_saturated`."
+description: Non-interactive two-phase dead-code pass over the Target — a knip-driven demote-only dead-export sweep that files self-checking ready-for-agent backlog items, plus a wiring-ledger phase that files needs-triage wire-or-retire items for stalled modules. Dry-run by default.
+when_to_use: "When the Target backlog is idle, or the operator says 'target cleanup scan' or 'sweep target dead code'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
 claude_only: true
@@ -156,3 +156,9 @@ Expected: demote-class findings batch one-item-per-file with the symbol-led titl
 ## Tier
 
 Tier 3 (autopilot wiring in `scripts/autopilot/` + a new `scripts/ci/` runner; no Verifier Core change; no runtime dependency change). The backlog items this skill emits are each picked up by `hydra-target-build` under the Target's own CI gate (test + typecheck + deadcode ratchet).
+
+## Dispatch wiring
+
+Dispatched by the autopilot `cleanup_target` signal class on the
+`target_backfill_idle` signal, suppressed first by the
+`target_cleanup_board_saturated` signal.
