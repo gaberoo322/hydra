@@ -3194,6 +3194,121 @@ def _persist_state_writeback(
                 pass  # intentional: tmp file may never have been created
 
 
+# ---------------------------------------------------------------------------
+# Per-class yield scoreboard — SHADOW MODE (issue #2943)
+# ---------------------------------------------------------------------------
+#
+# decide.py is stateless for LEARNING: it re-decides every run from cooldowns +
+# current candidate scores and never reads how a class has actually PERFORMED
+# across runs. Issue #2943 closes that loop — but v1 actuates NOTHING. The
+# scoreboard + the per-class cadence multiplier are computed ORCHESTRATOR-SIDE
+# (src/autopilot/class-stats.ts, served at GET /api/autopilot/class-stats) and
+# INJECTED into state.json as `state.class_stats` by collect-state.sh. This
+# shadow path only READS that injected verdict and LOGS the multiplier decide.py
+# WOULD apply — it changes NO dispatch decision.
+#
+# Two invariants this code guards (the #2943 grill 2026-07-06):
+#   1. decide() stays a PURE function of state.json: it NEVER fetches dispatch
+#      history itself; the verdict arrives via collect-state.sh injection only.
+#      So the shadow read + log live HERE in main()'s side-effect region, never
+#      inside decide().
+#   2. decide() output (actions/events) is BYTE-IDENTICAL with the shadow
+#      computation present vs absent. The shadow path runs AFTER the plan is
+#      computed + printed and touches neither `plan` nor `state`.
+
+# Where the shadow log lands. Env-overridable (tests point it at a tmp file);
+# defaults alongside the autopilot run log so an operator can eyeball what the
+# dampener WOULD have done during the >=2-week shadow-validation window that
+# gates the flip to live (a documented, separate acceptance gate — issue #2943).
+CLASS_STATS_SHADOW_LOG = os.environ.get(
+    "HYDRA_CLASS_STATS_SHADOW_LOG", "/tmp/hydra-class-stats-shadow.log"
+)
+
+
+def compute_shadow_dampener_lines(state: dict, now: int | None = None) -> list[dict]:
+    """Read the INJECTED class-stats verdict and return the shadow-log rows.
+
+    PURE: reads only `state.class_stats` (the collect-state.sh injection) — it
+    NEVER fetches dispatch history, never touches Redis/GitHub, never mutates
+    `state`. Returns one dict per class whose shadow multiplier != 1.0 (the
+    classes a future LIVE mode would dampen); an empty list when the scoreboard
+    is absent / empty / all-healthy. This is the ONLY thing the shadow path
+    computes — and its result is LOGGED, never applied.
+
+    The multipliers are computed server-side (shadowDampener in
+    src/autopilot/class-stats.ts) and arrive pre-computed under
+    `class_stats.shadow.verdicts`; we re-emit them verbatim so the log records
+    exactly what the orchestrator-side verdict said (no re-derivation drift).
+    """
+    if not isinstance(state, dict):
+        return []
+    cs = state.get("class_stats")
+    if not isinstance(cs, dict):
+        return []
+    shadow = cs.get("shadow")
+    if not isinstance(shadow, dict):
+        return []
+    verdicts = shadow.get("verdicts")
+    if not isinstance(verdicts, list):
+        return []
+    stamp = int(time.time()) if now is None else int(now)
+    turn = int(state.get("turn", 0) or 0)
+    run_id = str(state.get("run_id") or "")
+    rows: list[dict] = []
+    for v in verdicts:
+        if not isinstance(v, dict):
+            continue
+        try:
+            mult = float(v.get("multiplier", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            continue
+        # Only log classes the dampener WOULD actually slow down (mult != 1.0):
+        # a 1.0 multiplier is "no change", which is the vast majority of rows and
+        # would drown the shadow log. The scoreboard itself (all classes) stays
+        # available via the API for the full picture.
+        if mult == 1.0:
+            continue
+        rows.append(
+            {
+                "ts": stamp,
+                "run_id": run_id,
+                "turn": turn,
+                "class": str(v.get("className") or "?"),
+                "would_apply_multiplier": mult,
+                "verdict": str(v.get("verdict") or "?"),
+                "reprobe_at": v.get("reprobeAt"),
+                # Explicit marker: this is SHADOW mode — nothing was actuated.
+                "actuated": False,
+            }
+        )
+    return rows
+
+
+def write_class_stats_shadow_log(state: dict, now: int | None = None) -> None:
+    """Append the shadow-mode dampener rows to the shadow log (side-effect).
+
+    A main()-side effect ONLY — decide() never calls this, so the plan output
+    stays byte-identical with the shadow computation on/off (issue #2943
+    invariant 1). Best-effort: an I/O error is logged loud but never aborts the
+    turn (the autopilot must not wedge on a shadow-log write); an absent /
+    empty / all-healthy scoreboard writes nothing.
+    """
+    try:
+        rows = compute_shadow_dampener_lines(state, now=now)
+        if not rows:
+            return
+        with open(CLASS_STATS_SHADOW_LOG, "a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError as exc:
+        print(
+            f"decide.py: class-stats shadow-log write to "
+            f"{CLASS_STATS_SHADOW_LOG} failed ({exc}); shadow verdict NOT logged "
+            f"this turn (dispatch behavior unaffected — shadow mode)",
+            file=sys.stderr,
+        )
+
+
 def main(argv: list[str]) -> int:
     # Issue #2713 — optional frozen decision clock for golden/regression
     # fixtures: `--now=<epoch>` (anywhere after the program name) pins the
@@ -3269,6 +3384,14 @@ def main(argv: list[str]) -> int:
             # force-counter-changed gate → fires once per stamping turn.
             _mirror_research_force_counter_to_redis(state)
         print(plan.to_json())
+        # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
+        # per-class cadence multiplier decide.py WOULD apply in a future live
+        # mode. This is a main()-side effect that touches NEITHER `plan` NOR the
+        # dispatch decision — the plan above is byte-identical whether or not the
+        # scoreboard was injected (invariant: no dispatch behavior changes in this
+        # issue). decide() itself never reads class_stats, so it stays a pure
+        # function of state.json. Best-effort; a write failure never aborts.
+        write_class_stats_shadow_log(state, now=now_epoch)
         return 0
     print(f"decide.py: unknown subcommand {sub!r}", file=sys.stderr)
     return 2

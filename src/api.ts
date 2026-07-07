@@ -41,6 +41,7 @@ import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
 import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
 import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
+import { createAutopilotClassStatsRouter } from "./api/class-stats.ts";
 import { createTaxonomyRouter } from "./api/taxonomy.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
 import { createNowPageRouter } from "./api/now-page.ts";
@@ -125,6 +126,11 @@ function createApi(eventBus: EventBus) {
   // the GitHub-Read seam so collect-state.sh stops re-spelling the repo handle,
   // the --json field set, and the label vocabulary in bash.
   api.use(createAutopilotBoardRouter());
+  // Per-class yield scoreboard + shadow-mode dampener (issue #2943) — the
+  // class-appropriate yield metric + the cadence multiplier decide.py WOULD
+  // apply in a future live mode. Read-only; collect-state.sh injects it into
+  // state.class_stats and decide.py logs the shadow verdict (actuates nothing).
+  api.use(createAutopilotClassStatsRouter());
   // Dispatch-class taxonomy (issue #2524) — the autopilot class alphabet
   // (pipeline slots, signal classes, per-signal cooldowns) served read-only on
   // top of the typed `src/taxonomy/classes.ts` views so the dashboard fetches
