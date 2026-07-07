@@ -84,6 +84,7 @@ const baseReasons = {
   calibrated: true,
   paused: false,
   sessionBlockedUntil: null as string | null,
+  worklessUntil: null as string | null,
 };
 
 describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
@@ -202,6 +203,46 @@ describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
       assert.equal(r.status, 0);
       assert.match(r.stdout, /^pace-gate$/m);
       assert.doesNotMatch(r.stdout, /decoy-not-from-gate/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("workless-board hint in the FUTURE => skip (no launch), NOT flipping allow (#2956)", async () => {
+    // allow stays TRUE (the workless hint is launcher-only advisory, never a
+    // hard stop) but the future worklessUntil must still skip the launch.
+    const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, worklessUntil: future },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /workless-board backoff/);
+      assert.doesNotMatch(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("workless-board hint in the PAST => launch normally (self-heals) (#2956)", async () => {
+    // A stale hint (past instant) must fall through to launch — the belt-and-
+    // braces read-side guard that pairs with the Redis TTL self-clear.
+    const past = new Date(Date.now() - 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      allow: true,
+      shed: [],
+      reasons: { ...baseReasons, worklessUntil: past },
+      paceState: "behind",
+    });
+    try {
+      const r = await runPaceGate(srv.url);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /would-start/);
+      assert.doesNotMatch(r.stdout, /workless-board backoff/);
     } finally {
       srv.close();
     }

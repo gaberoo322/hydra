@@ -20,6 +20,7 @@ import {
   projectEligibility,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
+  overlayWorklessEligibility,
   parseSessionLimitReset,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
@@ -27,6 +28,7 @@ import {
   getSessionBlockedUntil,
   setSessionBlockedUntil,
 } from "../redis/session-block.ts";
+import { getWorklessUntil } from "../redis/workless-hint.ts";
 import { booleanFlag } from "../schemas/common.ts";
 
 /**
@@ -96,6 +98,14 @@ export function createUsageRouter() {
    * undershoots the true session limit). Fails SAFE to no-block on a read
    * error, and the block self-clears (TTL + past-instant read guard) once the
    * reset passes, so admission resumes automatically.
+   *
+   * Issue #2956: the workless-board backoff hint is overlaid last, the same way
+   * — but UNLIKE the two above it does NOT flip `allow`. Stamped by endRun when
+   * a run terminates cause=idle having dispatched nothing, it surfaces under
+   * `reasons.worklessUntil` and is consumed ONLY by the launcher (pace-gate.sh
+   * skips relaunch while future) — decide.py never drains on it. Fails SAFE to
+   * not-workless and self-clears by TTL, so a stale hint can never wedge the
+   * launcher off.
    */
   router.get("/usage/eligibility", async (req, res) => {
     const force = ForceQuerySchema.parse(req.query).force;
@@ -121,10 +131,25 @@ export function createUsageRouter() {
           `[usage] /api/usage/eligibility session-block read failed (treating as no block): ${err?.message || err}`,
         );
       }
-      const eligibility = overlaySessionBlockEligibility(
-        overlayPauseEligibility(projectEligibility(snapshot), paused),
-        sessionBlockedUntilMs,
-        Date.now(),
+      let worklessUntilMs: number | null = null;
+      try {
+        worklessUntilMs = await getWorklessUntil();
+      } catch (err: any) {
+        // Fail-safe to not-workless: a workless-hint read error must not block
+        // the eligibility projection. Logged so the bad read is visible.
+        console.error(
+          `[usage] /api/usage/eligibility workless-hint read failed (treating as not workless): ${err?.message || err}`,
+        );
+      }
+      const now = Date.now();
+      const eligibility = overlayWorklessEligibility(
+        overlaySessionBlockEligibility(
+          overlayPauseEligibility(projectEligibility(snapshot), paused),
+          sessionBlockedUntilMs,
+          now,
+        ),
+        worklessUntilMs,
+        now,
       );
       return res.json(eligibility);
     } catch (err: any) {

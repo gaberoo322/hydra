@@ -107,6 +107,7 @@ export {
   projectEligibility,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
+  overlayWorklessEligibility,
 } from "./eligibility.ts";
 
 // ---------------------------------------------------------------------------

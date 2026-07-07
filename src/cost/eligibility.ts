@@ -291,6 +291,20 @@ export interface UsageEligibility {
      * (NOT inside the pure `projectEligibility`), mirroring the pause flag.
      */
     sessionBlockedUntil: string | null;
+    /**
+     * Workless-board backoff hint (issue #2956). ISO-8601 of the instant until
+     * which the board is expected to stay workless, recorded when the autopilot
+     * last terminated cause=idle having dispatched NOTHING. `null` when no
+     * future hint is recorded. UNLIKE `sessionBlockedUntil`/`paused` this is a
+     * LAUNCHER-ONLY advisory: it does NOT force `allow=false`, so decide.py
+     * (which drains on `!allow`) never sees it and an in-flight/operator session
+     * is never drained. Only the pace-gate acts on it — while it is a FUTURE
+     * instant the gate skips relaunch into a workless board, sparing the ~2-min
+     * zero-dispatch idle exits. Overlaid at the route/collector seam by
+     * {@link overlayWorklessEligibility} (NOT inside the pure
+     * `projectEligibility`), mirroring the pause + session-block flags.
+     */
+    worklessUntil: string | null;
   };
   /**
    * Position of total burn relative to the **Pacing Curve** for this instant
@@ -436,6 +450,10 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
       // Redis read overlaid at the route/collector seam via
       // overlaySessionBlockEligibility() — not inside this pure projection.
       sessionBlockedUntil: null,
+      // Default no workless hint (issue #2956). A Redis read overlaid at the
+      // route/collector seam via overlayWorklessEligibility() — not inside this
+      // pure projection, mirroring the pause + session-block flags.
+      worklessUntil: null,
     },
     paceState,
     targetPercent,
@@ -511,6 +529,49 @@ export function overlaySessionBlockEligibility(
     reasons: {
       ...eligibility.reasons,
       sessionBlockedUntil: new Date(blockedUntilMs).toISOString(),
+    },
+  };
+}
+
+/**
+ * Overlay the workless-board backoff hint (issue #2956) onto an eligibility
+ * projection, at the caller/route seam.
+ *
+ * When every autopilot class is on cooldown and no signals fire, a launched
+ * session's first decide.py turn is wait-only with zero occupied slots and it
+ * terminates cause=idle after ~2 minutes, having dispatched nothing. This
+ * overlay surfaces the recorded backoff instant under `reasons.worklessUntil`
+ * so the pace-gate can skip relaunch into that still-workless board.
+ *
+ * CRUCIALLY, unlike {@link overlaySessionBlockEligibility} and
+ * {@link overlayPauseEligibility}, this overlay does NOT flip `allow`. decide.py
+ * gates ALL dispatch on `!allow`, so forcing `allow=false` would drain an
+ * already-launched or operator-launched session the instant a workless hint were
+ * set — collapsing the ADMISSION-vs-work-selection boundary. The hint is a pure
+ * ADVISORY consumed ONLY by the launcher (pace-gate.sh), leaving `allow` and the
+ * pacing verdict untouched.
+ *
+ * `worklessUntilMs` is a Redis read (durable across the process exit), kept OUT
+ * of the pure `projectEligibility` exactly like the pause + session-block flags.
+ * `nowMs` is injected so the future-vs-past comparison stays
+ * deterministic/testable. A `null` hint, or a hint whose instant is already in
+ * the past, returns the input UNCHANGED — the hint self-clears the moment the
+ * window passes, so a stale hint can never wedge the launcher off. Pure: no IO,
+ * no mutation.
+ */
+export function overlayWorklessEligibility(
+  eligibility: UsageEligibility,
+  worklessUntilMs: number | null,
+  nowMs: number,
+): UsageEligibility {
+  if (worklessUntilMs === null || !Number.isFinite(worklessUntilMs) || worklessUntilMs <= nowMs) {
+    return eligibility;
+  }
+  return {
+    ...eligibility,
+    reasons: {
+      ...eligibility.reasons,
+      worklessUntil: new Date(worklessUntilMs).toISOString(),
     },
   };
 }

@@ -151,6 +151,11 @@ function makeDeps(store: MemStore): AutopilotRunsDeps & CycleCloseDeps {
     },
     isPidAlive: () => true,
     now: () => FIXED_NOW_MS,
+    // Issue #2956: no-op workless-hint stamp (this suite never exercises the
+    // idle path; the endRun stamp is pinned in autopilot-runs-deps.test.mts).
+    async stampWorklessHint(worklessUntilMs) {
+      return worklessUntilMs;
+    },
   };
 }
 

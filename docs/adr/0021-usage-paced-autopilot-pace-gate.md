@@ -43,6 +43,7 @@ Concretely:
 - **Eligibility:** extend `/api/usage/eligibility` with a curve verdict `{ paceState: behind|on|ahead, target%, sinceReset%, anchor }`.
 - **Pace Gate:** new `scripts/autopilot/pace-gate.sh` + `hydra-pace-gate.timer`.
 - **Per-run limits** (wall-clock, idle-drain, token budget) remain as hygiene caps, subordinate to the Gate, which is the real governor.
+- **Workless-board backoff** (issue #2956, a later refinement): the Gate's admission check is usage-only, so when every class is on cooldown and no signals fire it still launches a run whose first `decide.py` turn is wait-only, terminating `cause=idle` in ~2 minutes with zero dispatches (~14% of runs). When a run ends `cause=idle` having dispatched nothing, `endRun` stamps a short temporal `worklessUntil` hint (Redis, self-clearing by TTL; default 45 min, `HYDRA_WORKLESS_BACKOFF_SEC`); the eligibility route surfaces it under `reasons.worklessUntil` and the Gate skips relaunch while it is future. Purely temporal — it stays inside the D5 boundary because it holds NO work-selection knowledge (that remains in `decide.py`) and, unlike `paused`/`sessionBlockedUntil`, it does NOT flip `allow`, so `decide.py` never drains an in-flight or operator session on it. Launcher-only advisory; self-heals if stale.
 
 ## Considered options
 

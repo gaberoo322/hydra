@@ -89,6 +89,11 @@ import { isPidAlive } from "./run-projections.ts";
 // here (AC2, #2125 precedent): external callers import the sweep helpers from
 // `sweep-reader.ts` directly.
 import { RUN_TTL_SECONDS } from "./sweep-reader.ts";
+// Issue #2956: workless-board backoff hint. endRun stamps it on a zero-dispatch
+// idle exit so the pace-gate skips relaunch into a still-workless board. The
+// setter is injected via the deps bag (defaulting to the real Redis write) so
+// the endRun path stays testable without Redis.
+import { setWorklessUntil, worklessBackoffSec } from "../redis/workless-hint.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -250,6 +255,15 @@ export interface AutopilotRunsDeps {
    * Defaults to `Date.now`.
    */
   now: () => number;
+  /**
+   * Stamp the workless-board backoff hint (issue #2956). Called by {@link endRun}
+   * ONLY when a run terminates cause=idle having dispatched nothing. Given the
+   * hint instant (epoch-ms) and `nowMs`, records it (self-clearing by TTL) and
+   * returns the stored instant, or `null` when nothing was stored. Defaults to
+   * the real Redis write (`setWorklessUntil`); injected so the endRun idle path
+   * is testable without Redis. NEVER throws to endRun — the write is best-effort.
+   */
+  stampWorklessHint: (worklessUntilMs: number, nowMs: number) => Promise<number | null>;
 }
 
 const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
@@ -266,6 +280,7 @@ const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
   },
   isPidAlive,
   now: Date.now,
+  stampWorklessHint: setWorklessUntil,
 };
 
 // ---------------------------------------------------------------------------
@@ -532,6 +547,34 @@ export async function endRun(
     }
 
     await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
+
+    // Issue #2956 — workless-board backoff hint. When a run terminates
+    // cause=idle having dispatched NOTHING, the board was fully workless (every
+    // class on cooldown, no signals firing): decide.py's first wait-only turn
+    // tripped `_rule_idle_fallback` and ended the run in ~2 minutes. Stamp a
+    // short temporal hint so the pace-gate skips relaunch into that same
+    // workless board instead of spawning another zero-dispatch idle exit
+    // (~14% of runs). ONLY on idle + zero-dispatch: any dispatch (or a
+    // budget/wall_clock/crash exit) means real work was available, so we must
+    // launch normally next cadence. Best-effort — a write failure must never
+    // change the run-end verdict, so its own catch swallows and logs.
+    if (termReason === "idle") {
+      // Fail SAFE to "had work" on an unparseable count: only an AFFIRMATIVE
+      // zero suppresses the next launch, so a garbage `dispatches` field can
+      // never wrongly hold the launcher off.
+      const dispatches = Number(existing.dispatches || "0");
+      if (Number.isFinite(dispatches) && dispatches === 0) {
+        try {
+          const nowMs = deps.now();
+          const worklessUntilMs = nowMs + worklessBackoffSec() * 1000;
+          await deps.stampWorklessHint(worklessUntilMs, nowMs);
+        } catch (err: any) {
+          console.error(
+            `[autopilot] endRun workless-hint stamp failed (run_id=${runId}); pace-gate will launch normally: ${err?.message || err}`,
+          );
+        }
+      }
+    }
 
     return {
       ok: true,
