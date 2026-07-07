@@ -12,17 +12,15 @@
  *   1. `qualifiesForRuleAction()` distinguishes "surface in diagnostic"
  *      (postRate >= preRate) from "auto-demote-worthy" (postRate >= preRate*1.5
  *      OR absolute postRate >= 5/day with daysSincePromotion >= 14).
- *   2. `processPromotedPatternEffectiveness()` walks promoted patterns,
+ *   2. `processPromotedPatternEffectiveness()` walks promoted patterns and
  *      mutates the Redis record (`promoted: false`, `demoted: true`,
- *      `demotedReason: "ineffective"`), and rewrites the feedback file to
- *      remove the rule block.
+ *      `demotedReason: "ineffective"`). (Issue #2962 retired the
+ *      `config/feedback/to-*.md` rewrite this used to also perform — the mirror
+ *      was write-only.)
  *   3. `lastEffectivenessCheckAt` throttles re-evaluation so we don't spam
  *      the operator on every cycle.
  *   4. `HYDRA_RULE_AUTO_DEMOTE=false` disables the mutation; the check still
  *      logs an "alerted" entry to the rule-action audit log.
- *   5. `removePromotedRuleFromFeedback()` is pure — given the feedback file
- *      content + category, it strips the `### <category> (...)` block from
- *      the Auto-Promoted Rules section.
  *
  * These tests cover the pure helpers + the in-memory orchestration around
  * Redis. They do not exercise actual Redis writes — the integration with
@@ -41,7 +39,6 @@ import {
   isAutoDemoteEnabled,
   isEffectivenessCooldownExpired,
   qualifiesForRuleAction,
-  removePromotedRuleFromFeedback,
   type IneffectivePromotedPattern,
 } from "../src/pattern-memory/rule-effectiveness.ts";
 import { type MemoryPattern } from "../src/pattern-memory/agent-memory.ts";
@@ -260,81 +257,8 @@ describe("isEffectivenessCooldownExpired (#365)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// removePromotedRuleFromFeedback — pure feedback-file rewrite
-// ---------------------------------------------------------------------------
-
-describe("removePromotedRuleFromFeedback — strip a single rule block (#365)", () => {
-  const SAMPLE = `# Planner Guidance
-
-## Some Other Section
-
-Body content.
-
-## Auto-Promoted Rules
-
-Rules below were auto-promoted from agent memory after proving themselves
-across multiple cycles.
-
-### scope-creep (231x since 2026-04-27)
-The executor consistently touches files beyond scope.
-Last: cycle-2026-05-07-1219
-<!-- auto-promoted 2026-04-28, last hit 2026-05-07 -->
-
-### verification-failure (438x since 2026-04-27)
-Ensure verification will pass before proposing.
-Last: cycle-2026-05-07-1026
-<!-- auto-promoted 2026-04-28, last hit 2026-05-07 -->
-
-### broad-scope-success (17x since 2026-04-28)
-Broad scope can work when each file is needed.
-Last: cycle-2026-05-07-2125
-<!-- auto-promoted 2026-04-29, last hit 2026-05-07 -->
-`;
-
-  test("removes the requested rule block, leaves the others intact", () => {
-    const { newContent, removed } = removePromotedRuleFromFeedback(SAMPLE, "verification-failure");
-    assert.equal(removed, true);
-    assert.ok(!newContent.includes("verification-failure (438x"));
-    assert.ok(newContent.includes("scope-creep (231x"));
-    assert.ok(newContent.includes("broad-scope-success (17x"));
-    // No triple blank lines left behind.
-    assert.ok(!/\n{3,}/.test(newContent));
-  });
-
-  test("removes the LAST rule block (edge case: no following ### terminator)", () => {
-    const { newContent, removed } = removePromotedRuleFromFeedback(SAMPLE, "broad-scope-success");
-    assert.equal(removed, true);
-    assert.ok(!newContent.includes("broad-scope-success"));
-    // The preceding rule must be preserved.
-    assert.ok(newContent.includes("verification-failure (438x"));
-  });
-
-  test("unknown category → no change, removed=false", () => {
-    const { newContent, removed } = removePromotedRuleFromFeedback(SAMPLE, "no-such-rule");
-    assert.equal(removed, false);
-    assert.equal(newContent, SAMPLE);
-  });
-
-  test("file has no Auto-Promoted Rules section → no change", () => {
-    const without = `# Planner Guidance\n\n## Other\nbody\n`;
-    const { newContent, removed } = removePromotedRuleFromFeedback(without, "scope-creep");
-    assert.equal(removed, false);
-    assert.equal(newContent, without);
-  });
-
-  test("does not cross into the 'Stale Rules (review needed)' section", () => {
-    const withStale =
-      SAMPLE +
-      `\n## Stale Rules (review needed)\n\n### scope-creep (5x since 2026-01-01)\nold body\n<!-- auto-promoted 2026-01-01, last hit 2026-01-05 -->\n`;
-    // Removing scope-creep should only affect the Auto-Promoted block, not the
-    // identically-named heading inside Stale Rules.
-    const { newContent, removed } = removePromotedRuleFromFeedback(withStale, "scope-creep");
-    assert.equal(removed, true);
-    // Stale section + its scope-creep block survives.
-    assert.ok(newContent.includes("## Stale Rules (review needed)"));
-    assert.ok(newContent.includes("### scope-creep (5x since 2026-01-01)"));
-    // Auto-promoted scope-creep is gone.
-    assert.ok(!newContent.includes("scope-creep (231x"));
-  });
-});
+// Issue #2962 — the `removePromotedRuleFromFeedback` pure-rewrite tests were
+// removed with the function itself: the `config/feedback/to-*.md` mirror that
+// demotion used to strip a rule block out of was write-only and is gone.
+// Demotion now clears the Redis promotion stamp only (see
+// `applyDemotionToPattern` above).

@@ -3,11 +3,15 @@
  *
  * `decideRecordActions` is the pure spine extracted from
  * `agent-memory.ts::recordPattern` — it answers "given a pattern's post-hit
- * state, which side effects should fire (promote / write the feedback file /
- * escalate)?" without any Redis, filesystem, or `gh`. These tests exercise the
- * three sub-decisions and their composition directly, no store fixture needed —
- * the exact leverage the extraction buys (the prior surface was `recordPattern`
- * with injected Redis/escalation stubs).
+ * state, which side effects should fire (promote / escalate)?" without any
+ * Redis, filesystem, or `gh`. These tests exercise the two sub-decisions and
+ * their composition directly, no store fixture needed — the exact leverage the
+ * extraction buys (the prior surface was `recordPattern` with injected
+ * Redis/escalation stubs).
+ *
+ * Issue #2962 — the third sub-decision, `writeFeedbackFile`, was retired with
+ * the dead `config/feedback/to-*.md` mirror it gated. The cases that pinned it
+ * were removed; promotion now yields exactly `{ promote, escalate }`.
  */
 
 import { test, describe } from "node:test";
@@ -25,7 +29,6 @@ describe("decideRecordActions — promotion sub-decision (issue #2178)", () => {
       T,
     );
     assert.equal(d.promote, false);
-    assert.equal(d.writeFeedbackFile, false);
   });
 
   test("promotes exactly at the threshold when not yet promoted", () => {
@@ -44,47 +47,27 @@ describe("decideRecordActions — promotion sub-decision (issue #2178)", () => {
       T,
     );
     assert.equal(d.promote, false);
-    assert.equal(d.writeFeedbackFile, false);
-  });
-});
-
-describe("decideRecordActions — writeFeedbackFile sub-decision (issue #2178)", () => {
-  test("memory namespace + ordinary cue writes the feedback file on promotion", () => {
-    const d = decideRecordActions(
-      { category: "some-cue", hitCount: T, promoted: false },
-      "memory",
-      T,
-    );
-    assert.equal(d.promote, true);
-    assert.equal(d.writeFeedbackFile, true);
   });
 
-  test("metadata cue promotes but SKIPS the feedback-file write (issue #524)", () => {
+  test("metadata cue still promotes at its promotion threshold (issue #2962)", () => {
+    // The retired writeFeedbackFile decision used to skip the file write for
+    // metadata cues; promotion itself was never gated on cue kind. A metadata
+    // cue at/above the promotion threshold still promotes.
     const d = decideRecordActions(
       { category: "acceptance-criterion-deferred", hitCount: 20, promoted: false },
       "memory",
       T,
     );
     assert.equal(d.promote, true);
-    assert.equal(
-      d.writeFeedbackFile,
-      false,
-      "metadata cues are not defects — no to-{agent}.md write",
-    );
   });
 
-  test("friction namespace promotes but never writes a feedback file", () => {
+  test("friction namespace still promotes at the threshold (issue #2962)", () => {
     const d = decideRecordActions(
       { category: "some-cue", hitCount: T, promoted: false },
       "friction",
       T,
     );
     assert.equal(d.promote, true);
-    assert.equal(
-      d.writeFeedbackFile,
-      false,
-      "no to-{skill}.md for arbitrary friction skills",
-    );
   });
 });
 
@@ -164,7 +147,6 @@ describe("decideRecordActions — promote and escalate are independent (issue #2
       T,
     );
     assert.equal(d.promote, true);
-    assert.equal(d.writeFeedbackFile, false);
     assert.equal(d.escalate, false);
   });
 

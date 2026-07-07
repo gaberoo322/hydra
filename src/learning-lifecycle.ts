@@ -22,7 +22,6 @@
  */
 
 import { consolidateAgentPatterns } from "./pattern-memory/agent-memory.ts";
-import { consolidateStalePromotedRules } from "./pattern-memory/feedback-file.ts";
 import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/indexer.ts";
@@ -48,12 +47,10 @@ export async function consolidate(): Promise<void> {
   // recordAnchorReflection on the live #841 path.
   await consolidateAgentPatterns();
 
-  // Detect and process stale auto-promoted rules in feedback files
-  try {
-    await consolidateStalePromotedRules();
-  } catch (err: any) {
-    console.error(`[Learning] Stale rule consolidation failed: ${err.message}`);
-  }
+  // Issue #2962 — the stale auto-promoted-rule sweep over
+  // `config/feedback/to-*.md` was retired with `feedback-file.ts`; those files
+  // were write-only (no dispatch prompt read them after ADR-0006 / #710), so
+  // there is nothing left to consolidate there.
 
   // Issue #365 — auto-demote rules whose post-promotion firing rate proves
   // the promotion never closed the loop. Best-effort; never throws.

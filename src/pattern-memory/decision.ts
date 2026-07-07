@@ -26,7 +26,6 @@
 
 import {
   escalationThresholdForCue,
-  isMetadataCue,
   shouldEscalateAtHitCount,
 } from "./cue-policy.ts";
 // Type-only import: erased at runtime, so this introduces NO circular runtime
@@ -54,6 +53,14 @@ export type PatternDecisionState = {
  * The set of side-effecting actions a single `recordPattern` hit should fire.
  * Every field is a plain boolean the orchestrator dispatches on — the predicate
  * makes the choice, the orchestrator performs the I/O.
+ *
+ * Issue #2962 — the `writeFeedbackFile` action was retired. The
+ * promote→observe→demote lifecycle over `config/feedback/to-*.md` was write-only
+ * (no path injected those files into any dispatch prompt after the Codex planner/
+ * executor/skeptic consumers were deleted — ADR-0006 / #710), so the file-write
+ * seam it gated is gone. Promotion still stamps `promoted/promotedAt` in the
+ * Redis pattern store (which drives escalation and the effectiveness API); it
+ * simply no longer mirrors a rule block into a dead markdown file.
  */
 export type RecordPatternDecision = {
   /**
@@ -62,13 +69,6 @@ export type RecordPatternDecision = {
    * stamps `promoted/promotedAt/hitsAtPromotion` and sets `crossedThreshold`.
    */
   promote: boolean;
-  /**
-   * True when the promotion should ALSO write through to the `to-{agent}.md`
-   * feedback file. Only meaningful when `promote` is true. The feedback-file
-   * write is skipped for metadata cues (issue #524 — `isMetadataCue`) and for
-   * the `friction` namespace (there is no `to-{skill}.md` for arbitrary skills).
-   */
-  writeFeedbackFile: boolean;
   /**
    * True when this hit count merits a GitHub-issue escalation: the per-cue
    * escalation threshold-cross plus every multiple of 10 thereafter
@@ -86,9 +86,8 @@ export type RecordPatternDecision = {
  * calls this once after computing the post-hit `hitCount`, reads the returned
  * flags, and dispatches to the feedback-file / escalation seams accordingly.
  *
- * The three sub-decisions and how they compose:
+ * The two sub-decisions and how they compose:
  *  - `promote`            — `hitCount >= promotionThreshold && !promoted`
- *  - `writeFeedbackFile`  — `promote && namespace === "memory" && !isMetadataCue(category)`
  *  - `escalate`           — `shouldEscalateAtHitCount(hitCount, escalationThresholdForCue(category, promotionThreshold))`
  *
  * `escalate` keys on the per-cue threshold override (issue #524 raises
@@ -104,18 +103,11 @@ export function decideRecordActions(
 ): RecordPatternDecision {
   const promote = state.hitCount >= promotionThreshold && !state.promoted;
 
-  // The feedback-file write is gated on the SAME metadata/namespace conditions
-  // the orchestration used to inline. Judged on the canonical category so a
-  // fuzzy-merged variant can't dodge or trigger the metadata classification
-  // (issue #1667).
-  const writeFeedbackFile =
-    promote && namespace === "memory" && !isMetadataCue(state.category);
-
   const escalationThreshold = escalationThresholdForCue(
     state.category,
     promotionThreshold,
   );
   const escalate = shouldEscalateAtHitCount(state.hitCount, escalationThreshold);
 
-  return { promote, writeFeedbackFile, escalate };
+  return { promote, escalate };
 }

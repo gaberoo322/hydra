@@ -7,16 +7,16 @@
  * new producers of cycle-level evidence and need a learning hook.
  *
  * captureSubagentLesson() wraps recordPattern() 1:1 so the existing 3-hit
- * auto-promotion pipeline keeps producing durable rules in
- * config/feedback/to-{agent}.md.
+ * auto-promotion pipeline keeps stamping durable rules on the Redis pattern
+ * record. (Issue #2962 retired the config/feedback/to-{agent}.md mirror those
+ * rules used to also write — it was write-only, read by no dispatch prompt.)
  *
  * What this test proves:
  *   1. A "qa-fail" lesson from hydra-qa lands in the planner pattern set.
  *   2. A "verification-failure" lesson from hydra-dev lands in the executor
  *      pattern set.
- *   3. The 3rd occurrence of the same cue auto-promotes to the feedback
- *      file — i.e. the existing promotion path is unchanged by the new
- *      writer.
+ *   3. The 3rd occurrence of the same cue stamps the pattern as promoted in
+ *      Redis (and, per #2962, writes NO feedback file).
  *   4. Invalid skill / outcome / cue inputs are rejected loudly so the API
  *      endpoint can return 400.
  *   5. The skill→agent mapping is stable (hydra-qa → planner, hydra-dev and
@@ -71,7 +71,8 @@ describe("subagent lesson capture (issue #392)", () => {
   before(async () => {
     tempConfigRoot = await mkdtemp(join(tmpdir(), "hydra-subagent-capture-"));
     await mkdir(join(tempConfigRoot, "feedback"), { recursive: true });
-    // Seed feedback files so promoteToFeedback() has something to append to.
+    // Seed feedback files so the promotion tests can assert they stay UNTOUCHED
+    // (issue #2962 retired the mirror that promotion used to append to).
     for (const agent of ["planner", "executor", "skeptic"]) {
       await writeFile(
         join(tempConfigRoot, "feedback", `to-${agent}.md`),
@@ -95,7 +96,8 @@ describe("subagent lesson capture (issue #392)", () => {
 
   beforeEach(async () => {
     await cleanKeys();
-    // Reset feedback files to a known state — the promotion test rewrites them.
+    // Reset feedback files to a known state so each case starts from the same
+    // seed and can assert the file is NOT modified by promotion (issue #2962).
     for (const agent of ["planner", "executor", "skeptic"]) {
       await writeFile(
         join(tempConfigRoot, "feedback", `to-${agent}.md`),
@@ -196,18 +198,20 @@ describe("subagent lesson capture (issue #392)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Acceptance criterion #5: 3rd occurrence promotes to feedback file
+  // Acceptance criterion #5: 3rd occurrence stamps the pattern as promoted.
   //
   // PROMOTION_THRESHOLD is 3 (test/learning-promotion-threshold.test.mts).
   // This test proves the pipeline fires through captureSubagentLesson().
+  //
+  // Issue #2962 — promotion used to ALSO mirror a rule block into
+  // `config/feedback/to-planner.md`; that file was write-only (read by no
+  // dispatch prompt) and was retired. Promotion is now Redis-record-only, so
+  // these tests assert the `promoted/promotedAt/hitsAtPromotion` stamp and that
+  // NO feedback file is written.
   // -------------------------------------------------------------------------
 
-  test("3rd lesson with the same cue auto-promotes to to-planner.md (5-hit AC is satisfied at threshold)", async () => {
+  test("3rd lesson with the same cue stamps the Redis record as promoted", async () => {
     const feedbackPath = join(tempConfigRoot, "feedback", "to-planner.md");
-
-    // Before any hits: feedback file is the initial seed.
-    const before = await readFile(feedbackPath, "utf-8");
-    assert.equal(before.includes("Auto-Promoted Rules"), false);
 
     // Hit 1 + Hit 2: pattern exists but not promoted.
     for (let i = 1; i <= 2; i++) {
@@ -223,10 +227,7 @@ describe("subagent lesson capture (issue #392)", () => {
     assert.equal(patterns[0].hitCount, 2);
     assert.equal(patterns[0].promoted, false);
 
-    const beforePromote = await readFile(feedbackPath, "utf-8");
-    assert.equal(beforePromote.includes("Auto-Promoted Rules"), false);
-
-    // Hit 3: PROMOTION_THRESHOLD reached → feedback file is rewritten.
+    // Hit 3: PROMOTION_THRESHOLD reached → the Redis record is stamped.
     await captureSubagentLesson({
       skill: "hydra-qa",
       outcome: "qa-fail",
@@ -241,33 +242,31 @@ describe("subagent lesson capture (issue #392)", () => {
     assert.equal(typeof patterns[0].promotedAt, "string");
     assert.equal(patterns[0].hitsAtPromotion, 3);
 
+    // Issue #2962 — the seeded feedback file is left untouched: no rule block
+    // is ever mirrored into it any more.
     const after = await readFile(feedbackPath, "utf-8");
-    assert.ok(
+    assert.equal(
       after.includes("Auto-Promoted Rules"),
-      "feedback file should contain the auto-promoted section",
+      false,
+      "promotion must NOT write an Auto-Promoted Rules section (feedback file retired, #2962)",
     );
-    assert.ok(
+    assert.equal(
       after.includes("acceptance-criterion-unmet"),
-      "feedback file should mention the promoted category",
-    );
-    assert.ok(
-      after.includes("(3x"),
-      "feedback file should record the hit count at promotion",
+      false,
+      "promoted category must NOT leak into to-planner.md (feedback file retired, #2962)",
     );
   });
 
   // -------------------------------------------------------------------------
   // Issue #524 — acceptance-criterion-deferred is metadata, not a defect.
-  // The pattern is recorded and hit count climbs, but the auto-promotion
-  // to to-planner.md must NOT happen at the 3-hit unmet threshold.
+  // Promotion (the Redis stamp) still fires at the threshold; the file-write
+  // skip that used to distinguish it is moot now that no file is written at all
+  // (issue #2962).
   // -------------------------------------------------------------------------
 
-  test("acceptance-criterion-deferred records hits but does NOT auto-promote at 3 hits", async () => {
+  test("acceptance-criterion-deferred records hits and stamps promoted, writing no feedback file", async () => {
     const feedbackPath = join(tempConfigRoot, "feedback", "to-planner.md");
 
-    // 3 hits with the deferred cue. Same shape as the unmet test above,
-    // except the cue string changes — the writer should classify this as
-    // metadata and skip the feedback-file write.
     for (let i = 1; i <= 3; i++) {
       await captureSubagentLesson({
         skill: "hydra-qa",
@@ -282,15 +281,15 @@ describe("subagent lesson capture (issue #392)", () => {
     assert.equal(patterns.length, 1);
     assert.equal(patterns[0].category, "acceptance-criterion-deferred");
     assert.equal(patterns[0].hitCount, 3);
-    // `promoted: true` is stamped so we don't re-evaluate, but the feedback
-    // file write was skipped (the cue is metadata).
+    // `promoted: true` is stamped so we don't re-evaluate.
     assert.equal(patterns[0].promoted, true);
 
+    // No feedback file is written for any cue (issue #2962).
     const after = await readFile(feedbackPath, "utf-8");
     assert.equal(
       after.includes("Auto-Promoted Rules"),
       false,
-      "deferred cue must NOT add an Auto-Promoted Rules section",
+      "no cue adds an Auto-Promoted Rules section — feedback file retired (#2962)",
     );
     assert.equal(
       after.includes("acceptance-criterion-deferred"),
@@ -299,7 +298,7 @@ describe("subagent lesson capture (issue #392)", () => {
     );
   });
 
-  test("acceptance-criterion-unmet still auto-promotes at 3 hits (regression guard)", async () => {
+  test("acceptance-criterion-unmet still stamps promoted at 3 hits (regression guard)", async () => {
     // Same flow as the unmet test above — duplicated here so this test file
     // can be read as a single before/after for the cue split.
     const feedbackPath = join(tempConfigRoot, "feedback", "to-planner.md");
@@ -317,11 +316,11 @@ describe("subagent lesson capture (issue #392)", () => {
     const patterns = await loadPatterns("planner");
     assert.equal(patterns[0].promoted, true);
     const after = await readFile(feedbackPath, "utf-8");
-    assert.ok(
+    assert.equal(
       after.includes("Auto-Promoted Rules"),
-      "unmet cue MUST still promote — only deferred is metadata",
+      false,
+      "promotion is Redis-record-only — no feedback file written (#2962)",
     );
-    assert.ok(after.includes("acceptance-criterion-unmet"));
   });
 
   // -------------------------------------------------------------------------
