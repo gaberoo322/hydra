@@ -125,6 +125,14 @@ export { projectReflectionHealth } from "../metrics/trend.ts";
  *
  * Each entry includes pre/post firing rates, promotion date, and the ratio
  * between them so reviewers can prioritise the worst offenders.
+ *
+ * UNIT CLARIFICATION (issue #2950): the `preRate`/`postRate`/`rateRatio` fields
+ * on each entry are cue-FIRING rates — friction-cue firings per day recorded via
+ * Pattern Memory's `recordPattern` — NOT merge/QA/build failure rates. A
+ * flat-or-rising postRate flags a promoted rule whose text is not preventing the
+ * friction it describes; promotion is correlated with, not causal of, a rate
+ * rise (issue #2933 was falsified on exactly this misread). Do not read this
+ * endpoint as evidence that a promotion "caused" more failures.
  */
 /**
  * Issue #2647 — injectable deps for the plan-time knowledge route. Both
