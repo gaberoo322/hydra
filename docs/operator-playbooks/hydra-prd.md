@@ -1,7 +1,7 @@
 ---
 name: hydra-prd
 description: Non-interactive PRD-as-epic producer. Converts a structured research finding into one parent epic issue + N tracer-bullet child issues on gaberoo322/hydra, in dependency order, stamped with `Expected tier: N` from `/api/tier` and parseable by hydra-epic-close.
-when_to_use: "When the operator (or a future autopilot dispatch) has a multi-issue research finding or discover anchor that needs to become tracked work on `gaberoo322/hydra`. Replaces the role the retired Specs subsystem (#513) used to play. NOT a chat interview — input is structured JSON; the skill emits GitHub issues, no questions asked."
+when_to_use: "When a multi-issue research finding or discover anchor needs to become tracked work on gaberoo322/hydra. Input is structured JSON, not a chat interview."
 allowed_tools_claude: Read(*) Write(*) Bash(*) Glob(*) Grep(*)
 claude_only: true
 arguments: [apply, --input]

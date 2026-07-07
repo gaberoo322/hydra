@@ -1,9 +1,10 @@
 ---
 name: hydra-autopilot
-description: Event-driven autonomous decision loop. A single Claude Code session orchestrates Hydra work via decide.py — the L2 decision brain — and executes typed action plans. Token-budgeted; each invocation runs unattended for up to ~8 hours. Invoked manually by the operator OR fired on a schedule (multiple times per day — not night-only).
-when_to_use: "When the user wants an autonomous decision loop to advance Hydra work, says 'autopilot', 'autonomous mode', or wants a single skill to manage all hydra operations. Also fired by the systemd timers documented in the Scheduling section."
+description: Event-driven autonomous decision loop that orchestrates all Hydra work in one Claude Code session via decide.py, executing typed action plans unattended for hours per run.
+when_to_use: "When the operator says 'autopilot' or 'autonomous mode', or a scheduled launch fires."
 allowed-tools: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 claude_only: true
+disable-model-invocation: true
 ---
 
 # Hydra Autopilot

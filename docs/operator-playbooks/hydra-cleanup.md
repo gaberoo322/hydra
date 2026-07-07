@@ -1,7 +1,7 @@
 ---
 name: hydra-cleanup
 description: Non-interactive deterministic dead-code + simplification detector. Runs a static-analysis tool (knip) over the Orchestrator to find provably-unused exports/files, then files high-confidence findings as ready-for-agent GitHub issues whose acceptance criterion is "remove X AND npm test/tsc still pass". Dry-run by default; --apply creates issues. Zero AskUserQuestion.
-when_to_use: "When the Orchestrator's hydra-autopilot board is idle and it wants to turn spare capacity into high-confidence dead-code / simplification work, or when the operator says 'cleanup scan', '/hydra-cleanup', or 'find dead code'. Dispatched by the autopilot `cleanup_orch` signal class (issue #960, parent #958) on the unified `orch_backfill_idle` signal at a 1h cadence."
+when_to_use: "When the Orchestrator board is idle, or the operator says 'cleanup scan' or 'find dead code'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
 claude_only: true
@@ -348,3 +348,9 @@ Expected:
 ## Tier
 
 Tier 3 (ships as a new operator playbook + autopilot wiring in `scripts/autopilot/`; no Verifier Core change, `knip` is a devDependency not a runtime dep). The PR body carries the live tier classifier's verdict; this footer is informational. The issues this skill later *emits* are each picked up under the normal tier gate, and the deletion only merges if `npm test` / `tsc` stay green.
+
+## Dispatch wiring
+
+Dispatched by the autopilot `cleanup_orch` signal class on the unified
+`orch_backfill_idle` signal at a 1h cadence. Tracked by issue #960 under parent
+epic #958.
