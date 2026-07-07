@@ -31,7 +31,9 @@
 // Public types — the prompt input, the recommendation shape
 // ---------------------------------------------------------------------------
 
-export type RecSeverity = "info" | "warn" | "critical";
+// Demoted to module-private (issue #2969): no external importer — knip flagged
+// the `export`. Still consumed in-file by `Recommendation.severity` below.
+type RecSeverity = "info" | "warn" | "critical";
 
 export interface Recommendation {
   id: string;
