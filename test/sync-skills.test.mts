@@ -338,6 +338,171 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
   });
 });
 
+describe("scripts/sync-skills.sh — disable-model-invocation propagation + byte-identical regen (issue #2945)", () => {
+  /**
+   * Regression-locks the two invariants the #2945 design-concept required
+   * (design-concept artifact invariants [3] and [4]):
+   *
+   *   [propagation] sync-skills.sh forwards the optional
+   *     `disable-model-invocation` playbook-frontmatter key VERBATIM (kebab-case,
+   *     lowercase `true`) into the generated *Claude* SKILL.md frontmatter,
+   *     omits it entirely when the playbook doesn't declare it, and NEVER emits
+   *     it into the *Codex* SKILL.md output.
+   *
+   *   [byte-identical] a playbook that does NOT declare the key regenerates
+   *     byte-for-byte identically before and after the sync change — i.e.
+   *     running sync twice against an untouched playbook produces no diff.
+   *
+   * Hermetic: builds a throwaway repo layout (REPO_ROOT = script dir's parent,
+   * playbooks at docs/operator-playbooks/) and copies the REAL sync-skills.sh
+   * in, so the resolver under test is production. Mirrors the makeFragRepo
+   * idiom already used by the @include suite above.
+   */
+  function makeRepo(): { dir: string; script: string; playbooks: string } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-dmi-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(playbooks, { recursive: true });
+    const script = join(scripts, "sync-skills.sh");
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    return { dir, script, playbooks };
+  }
+
+  function runSyncIn(repo: {
+    dir: string;
+    script: string;
+  }): {
+    status: number | null;
+    stderr: string;
+    claudeDir: string;
+    codexDir: string;
+  } {
+    const claudeDir = join(repo.dir, "out-claude");
+    const codexDir = join(repo.dir, "out-codex");
+    const r = spawnSync("bash", [repo.script], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: codexDir,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stderr: r.stderr, claudeDir, codexDir };
+  }
+
+  test("propagates disable-model-invocation into the Claude mirror, but NOT into a Codex sibling, and omits it when the playbook doesn't declare it", () => {
+    const repo = makeRepo();
+    try {
+      // A playbook that DECLARES the flag but is NOT claude_only — so it also
+      // produces a Codex output we can assert the flag is absent from. (The
+      // real hydra-autopilot is claude_only, which would suppress the Codex
+      // file entirely; using a non-claude_only fixture lets us positively
+      // prove the "never in Codex" half of the invariant.)
+      writeFileSync(
+        join(repo.playbooks, "flagged.md"),
+        "---\nname: flagged\ndescription: a flagged skill\ndisable-model-invocation: true\n---\n\n# Flagged\n\nbody\n",
+      );
+      // A sibling playbook that does NOT declare the flag — the key must be
+      // omitted entirely from its generated Claude skill.
+      writeFileSync(
+        join(repo.playbooks, "plain.md"),
+        "---\nname: plain\ndescription: a plain skill\n---\n\n# Plain\n\nbody\n",
+      );
+      const r = runSyncIn(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+
+      const flaggedClaude = readFileSync(
+        join(r.claudeDir, "flagged", "SKILL.md"),
+        "utf-8",
+      );
+      // The flag lands in the Claude frontmatter, spelled kebab-case with a
+      // lowercase `true` — never Python's "True".
+      assert.match(
+        flaggedClaude,
+        /^disable-model-invocation: true$/m,
+        "the flag must be forwarded verbatim (kebab-case, lowercase true) into the Claude SKILL.md frontmatter",
+      );
+      assert.doesNotMatch(
+        flaggedClaude,
+        /disable-model-invocation:\s*True/,
+        "must emit lowercase `true`, never the Python bool `True`",
+      );
+
+      // It must NOT appear in the Codex mirror of the same skill — Codex has no
+      // such concept.
+      const flaggedCodex = readFileSync(
+        join(r.codexDir, "flagged", "SKILL.md"),
+        "utf-8",
+      );
+      assert.doesNotMatch(
+        flaggedCodex,
+        /disable-model-invocation/,
+        "disable-model-invocation must NEVER be emitted into the Codex SKILL.md output",
+      );
+
+      // And a playbook that doesn't declare the key must not have it injected.
+      const plainClaude = readFileSync(
+        join(r.claudeDir, "plain", "SKILL.md"),
+        "utf-8",
+      );
+      assert.doesNotMatch(
+        plainClaude,
+        /disable-model-invocation/,
+        "a playbook that doesn't declare the key must omit it entirely — never inject a default",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a playbook that does not declare the key regenerates byte-identically (running sync twice produces no diff)", () => {
+    const repo = makeRepo();
+    try {
+      // An untouched, flag-free playbook — the case the byte-identical
+      // invariant protects: the #2945 change must not perturb the output of
+      // playbooks that never opted in.
+      writeFileSync(
+        join(repo.playbooks, "untouched.md"),
+        "---\nname: untouched\ndescription: an untouched skill\nwhen_to_use: when idle\n---\n\n# Untouched\n\nstable body\n",
+      );
+
+      const first = runSyncIn(repo);
+      assert.equal(first.status, 0, `first sync failed: ${first.stderr}`);
+      const claudeTarget = join(first.claudeDir, "untouched", "SKILL.md");
+      const codexTarget = join(first.codexDir, "untouched", "SKILL.md");
+      const claudeA = readFileSync(claudeTarget, "utf-8");
+      const codexA = readFileSync(codexTarget, "utf-8");
+
+      // Re-run against the SAME (unchanged) playbook — output must be byte-for-
+      // byte identical (no diff), and must never carry the new key.
+      const second = runSyncIn(repo);
+      assert.equal(second.status, 0, `second sync failed: ${second.stderr}`);
+      const claudeB = readFileSync(claudeTarget, "utf-8");
+      const codexB = readFileSync(codexTarget, "utf-8");
+
+      assert.equal(
+        claudeB,
+        claudeA,
+        "regenerating an untouched playbook must produce a byte-identical Claude SKILL.md",
+      );
+      assert.equal(
+        codexB,
+        codexA,
+        "regenerating an untouched playbook must produce a byte-identical Codex SKILL.md",
+      );
+      assert.doesNotMatch(
+        claudeA,
+        /disable-model-invocation/,
+        "a flag-free playbook's generated skill must not contain the key",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/setup-git-hooks.sh (issue #433)", () => {
   /**
    * Create a throwaway git repo with a `scripts/sync-skills.sh` stub and a
