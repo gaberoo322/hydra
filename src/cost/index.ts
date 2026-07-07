@@ -144,3 +144,15 @@ export {
   getCostPerMergedPr,
 } from "./cost-attribution.ts";
 
+// ---------------------------------------------------------------------------
+// Per-class cost efficiency — the QA-cost-dominance audit read (issue #2971)
+// ---------------------------------------------------------------------------
+// A DERIVED read reframing a class's raw token share into its falsifiable
+// unit-economics (tokens per merged PR). Composes the per-class token rollup
+// with a merged-PR count injected by the API route from the cycle-metrics
+// merged feed. No new token-recording writer, no USD surface; accounting only.
+export {
+  projectClassCostEfficiency,
+  getClassCostEfficiency,
+} from "./cost-attribution.ts";
+

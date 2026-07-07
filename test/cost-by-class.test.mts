@@ -38,6 +38,8 @@ const {
   sumTokensOverWindow,
   getCostPerMergedPr,
   DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS,
+  projectClassCostEfficiency,
+  getClassCostEfficiency,
 } = await import("../src/cost/index.ts");
 
 const { recordSubagentTokens, todayDateString, dateStringDaysAgo } = await import(
@@ -470,5 +472,138 @@ describe("cost-per-merged-pr (Redis-backed, issue #2807)", () => {
 
   test("default window days is the module default", () => {
     assert.equal(DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS, 30);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure: projectClassCostEfficiency (the QA-cost-dominance audit read, #2971)
+// ---------------------------------------------------------------------------
+
+describe("projectClassCostEfficiency", () => {
+  // A hand-built CostByClassResult fixture (the shape projectCostByClass emits),
+  // so the efficiency fold is testable without touching Redis or the surrogate.
+  function fixtureCostByClass(): any {
+    return projectCostByClass(
+      [
+        { skill: "hydra-qa", tokens: 13700000 },
+        { skill: "hydra-research", tokens: 11500000 },
+        { skill: "hydra-dev", tokens: 5000000 },
+      ],
+      "2026-07-07",
+      "last 24h (UTC) · 2026-07-06 + 2026-07-07",
+    );
+  }
+
+  test("derives tokens-per-merged-PR for QA (the falsifiable efficiency number)", () => {
+    const r = projectClassCostEfficiency(fixtureCostByClass(), 47);
+    // 13,700,000 QA tokens / 47 merges = 291,489 (rounded).
+    assert.equal(r.qa.tokens, 13700000);
+    assert.equal(r.qa.tokensPerMergedPr, Math.round(13700000 / 47));
+    assert.equal(r.mergedPrCount, 47);
+  });
+
+  test("surfaces the QA entry both at top level and under byClass identically", () => {
+    const r = projectClassCostEfficiency(fixtureCostByClass(), 47);
+    assert.deepEqual(r.qa, r.byClass.qa);
+  });
+
+  test("computes the per-merge ratio for every class on the same basis", () => {
+    const r = projectClassCostEfficiency(fixtureCostByClass(), 10);
+    assert.equal(r.byClass.qa.tokensPerMergedPr, 1370000);
+    assert.equal(r.byClass.research.tokensPerMergedPr, 1150000);
+    assert.equal(r.byClass["dev-orch"].tokensPerMergedPr, 500000);
+    // A class that ran zero tokens still appears (zero, not absent).
+    assert.equal(r.byClass.retro.tokens, 0);
+    assert.equal(r.byClass.retro.tokensPerMergedPr, 0);
+  });
+
+  test("every COST_CLASS_ORDER class is present (comparative baseline)", () => {
+    const r = projectClassCostEfficiency(fixtureCostByClass(), 5);
+    for (const cls of COST_CLASS_ORDER) {
+      assert.ok(cls in r.byClass, `class ${cls} present`);
+    }
+  });
+
+  test("zero merged PRs => null ratio (undefined, not a misleading 0/Infinity)", () => {
+    const r = projectClassCostEfficiency(fixtureCostByClass(), 0);
+    assert.equal(r.mergedPrCount, 0);
+    assert.equal(r.qa.tokensPerMergedPr, null);
+    for (const cls of COST_CLASS_ORDER) {
+      assert.equal(r.byClass[cls].tokensPerMergedPr, null);
+    }
+  });
+
+  test("non-finite / negative merged count clamps to 0 => null ratios", () => {
+    for (const bad of [-3, NaN, Infinity]) {
+      const r = projectClassCostEfficiency(fixtureCostByClass(), bad as number);
+      assert.equal(r.mergedPrCount, 0);
+      assert.equal(r.qa.tokensPerMergedPr, null);
+    }
+  });
+
+  test("preserves the source share (fraction) and window label unchanged", () => {
+    const src = fixtureCostByClass();
+    const r = projectClassCostEfficiency(src, 47);
+    assert.equal(r.window, src.window);
+    assert.equal(r.totalTokens, src.totalTokens);
+    // fraction carried through verbatim from the per-class rollup.
+    assert.equal(r.qa.fraction, src.byClass.qa.fraction);
+  });
+
+  test("per-class token sum equals the total (no spend disappears — invariant 1)", () => {
+    const r = projectClassCostEfficiency(fixtureCostByClass(), 47);
+    const sum = COST_CLASS_ORDER.reduce(
+      (acc: number, cls: any) => acc + r.byClass[cls].tokens,
+      0,
+    );
+    assert.equal(sum, r.totalTokens);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getClassCostEfficiency (Redis-backed, issue #2971)
+// ---------------------------------------------------------------------------
+
+describe("getClassCostEfficiency (Redis-backed, issue #2971)", () => {
+  let testRedis: any;
+  // Fixed `now` so the rolling-window (yesterday + today) date math is stable.
+  const NOW = new Date("2026-06-15T12:00:00.000Z");
+
+  async function cleanKeys() {
+    const keys = await testRedis.keys("hydra:metrics:tokens:*");
+    if (keys.length > 0) await testRedis.del(...keys);
+  }
+
+  before(async () => {
+    testRedis = new Redis(process.env.REDIS_URL);
+  });
+  beforeEach(async () => {
+    await cleanKeys();
+  });
+  after(async () => {
+    await cleanKeys();
+    await testRedis.quit();
+  });
+
+  test("composes the rolling per-class rollup with the injected merged count", async () => {
+    // QA spend split across today + yesterday (both inside the rolling window).
+    await recordSubagentTokens("hydra-qa", 6000, { date: todayDateString(NOW) });
+    await recordSubagentTokens("hydra-qa", 4000, { date: yesterdayDateString(NOW) });
+    await recordSubagentTokens("hydra-dev", 2000, { date: todayDateString(NOW) });
+
+    const r = await getClassCostEfficiency(5, NOW);
+    assert.equal(r.qa.tokens, 10000);
+    assert.equal(r.qa.tokensPerMergedPr, 2000); // 10000 / 5
+    assert.equal(r.byClass["dev-orch"].tokens, 2000);
+    assert.equal(r.byClass["dev-orch"].tokensPerMergedPr, 400);
+    assert.equal(r.mergedPrCount, 5);
+    assert.equal(r.totalTokens, 12000);
+  });
+
+  test("zero merged PRs => null ratios even with recorded QA spend", async () => {
+    await recordSubagentTokens("hydra-qa", 8000, { date: todayDateString(NOW) });
+    const r = await getClassCostEfficiency(0, NOW);
+    assert.equal(r.qa.tokens, 8000);
+    assert.equal(r.qa.tokensPerMergedPr, null);
   });
 });

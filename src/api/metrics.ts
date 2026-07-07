@@ -17,6 +17,7 @@ import {
   getCostByClass,
   getRollingCostByClass,
   getCostPerMergedPr,
+  getClassCostEfficiency,
   DEFAULT_COST_PER_MERGED_PR_WINDOW_DAYS,
   getDailyTokenCounter,
   recordSubagentTokens,
@@ -272,6 +273,40 @@ export function createMetricsRouter() {
       const trend = await getMetricsTrend(count);
       const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
       return getCostPerMergedPr(mergedPrCount, days);
+    }),
+  );
+
+  // GET /metrics/cost-efficiency — Per-class cost efficiency: the QA-cost-dominance audit read (issue #2971).
+  //
+  // The discover finding #2971 flagged QA as ~38% of daily tokens and asked
+  // whether validation scope is appropriately scoped. This route answers that
+  // with the FALSIFIABLE number the raw share hides: QA tokens PER MERGED PR
+  // (surfaced at `.qa.tokensPerMergedPr`), plus the same per-merge ratio for
+  // every sibling class under `byClass` so QA is judged against a comparative
+  // baseline rather than in isolation. A high raw share is expected of a class
+  // whose work scales with dev output (QA does); the per-merge cost is what
+  // tells an over-scoped class apart from a merely busy one.
+  //
+  // A PURE DERIVED read (design-concept 4d98ab3d, invariant 6): it composes the
+  // per-class token rollup (rolling trailing-24h UTC window, issue #2427 window
+  // semantics) with a merged-PR count derived HERE from the cycle-metrics merged
+  // feed (a cycle counts as a merged PR when `tasksMerged > 0`, mirroring
+  // getAggregateStats + the sibling /metrics/cost-per-merged-pr route), then
+  // folds them through the Cost module's pure projectClassCostEfficiency. No new
+  // token-recording writer, no USD/dollar surface, no gating — the per-class
+  // buckets still sum to the daily total (invariants 1–5).
+  //
+  // Composition lives here (not in src/cost/) so the Cost module stays free of a
+  // src/metrics/ import — the single-public-Interface + no-cross-import invariant.
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/cost-efficiency",
+    aggregatorRouteNoQuery("api/metrics/cost-efficiency", async (req) => {
+      const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
+      const trend = await getMetricsTrend(count);
+      const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
+      return getClassCostEfficiency(mergedPrCount);
     }),
   );
 
