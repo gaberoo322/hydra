@@ -41,7 +41,7 @@ import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
 import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
 import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
-import { createAutopilotClassStatsRouter } from "./api/autopilot-class-stats.ts";
+import { createAutopilotClassStatsRouter } from "./api/class-stats.ts";
 import { createTaxonomyRouter } from "./api/taxonomy.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
 import { createNowPageRouter } from "./api/now-page.ts";

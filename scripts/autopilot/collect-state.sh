@@ -710,7 +710,7 @@ hydra raw GET /autopilot/emergency-brake 2>/dev/null || echo '{"engaged":false}'
 
 # Per-class yield scoreboard + shadow-mode dampener — issue #2943.
 #
-# `GET /api/autopilot/class-stats` (src/api/autopilot-class-stats.ts) returns
+# `GET /api/autopilot/class-stats` (src/api/class-stats.ts) returns
 # the cross-run per-class yield scoreboard + the SHADOW-MODE cadence multipliers
 # decide.py WOULD apply in a future live mode:
 #

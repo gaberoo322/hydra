@@ -1,5 +1,5 @@
 /**
- * test/api-autopilot-class-stats.test.mts — pin the read-only
+ * test/api-class-stats.test.mts — pin the read-only
  * GET /api/autopilot/class-stats view (issue #2943).
  *
  * The view composes the per-dispatch outcome records (#2942) + the spine
@@ -21,7 +21,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { createAutopilotClassStatsRouter } from "../src/api/autopilot-class-stats.ts";
+import { createAutopilotClassStatsRouter } from "../src/api/class-stats.ts";
 import {
   computeClassScoreboard,
   type ClassScoreboard,

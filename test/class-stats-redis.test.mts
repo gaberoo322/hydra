@@ -36,7 +36,12 @@ function sampleBoard(): ClassScoreboard {
 }
 
 describe("class-stats Redis seam (issue #2943)", () => {
-  let redis: Redis;
+  // Typed `any` (not `Redis`) so `redis.ttl(...)` resolves — ioredis's
+  // declaration-merged command methods (`ttl`/`pttl`/`expire`) do not surface on
+  // the concrete `Redis` type under `tsconfig.test.json`, so a `Redis`-typed
+  // handle trips TS2339. Every other TTL-asserting test here (dispatches,
+  // cost-surrogate, backlog-stale-claim-reaper) uses the same `any` pattern.
+  let redis: any;
 
   before(() => {
     redis = new Redis(REDIS_URL);
