@@ -708,6 +708,27 @@ hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"r
 echo -n "emergency_brake_json="
 hydra raw GET /autopilot/emergency-brake 2>/dev/null || echo '{"engaged":false}'
 
+# Per-class yield scoreboard + shadow-mode dampener — issue #2943.
+#
+# `GET /api/autopilot/class-stats` (src/api/autopilot-class-stats.ts) returns
+# the cross-run per-class yield scoreboard + the SHADOW-MODE cadence multipliers
+# decide.py WOULD apply in a future live mode:
+#
+#   {"scoreboard": {...classes:[{className,role,verdict,mergeRate,beta,...}]},
+#    "shadow": {"verdicts":[{className,multiplier,reprobeAt,verdict}], ...},
+#    "generatedAt": "..."}
+#
+# The playbook merges this into state.json as `state.class_stats`. decide.py's
+# shadow path reads `state.class_stats.shadow.verdicts` and LOGS the multipliers
+# it would apply — it actuates NOTHING (the #2943 byte-identical-dispatch
+# invariant): decide.py stays a pure function of state.json and the scoreboard is
+# computed orchestrator-side here, never fetched inside decide.py. Read-only
+# collector; a snapshot cache write happens server-side, not here. Orchestrator-
+# down degrades to an empty scoreboard so a transient outage never wedges the
+# turn (decide.py's shadow path no-ops on an empty/absent class_stats).
+echo -n "class_stats_json="
+hydra raw GET /autopilot/class-stats 2>/dev/null || echo '{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}'
+
 # capacity-floor (orchestrator self-improvement share)
 hydra raw GET /capacity 2>/dev/null | python3 -c "
 import json,sys
