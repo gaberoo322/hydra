@@ -1,6 +1,6 @@
 ---
 name: hydra-doctor
-description: Comprehensive Hydra system health check — diagnoses orchestrator, services, cycles, backlog, infrastructure, and applies fixes.
+description: Comprehensive Hydra system health check that diagnoses the orchestrator, services, cycles, backlog, and infrastructure, then applies fixes.
 when_to_use: "When the user wants a health check, asks what's wrong, says 'fix hydra', or wants to know the system status"
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [focus]

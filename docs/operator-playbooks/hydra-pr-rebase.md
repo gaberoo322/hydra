@@ -1,6 +1,7 @@
 ---
 name: hydra-pr-rebase
-description: Auto-rebase OPEN PRs that are BEHIND master, and surface DIRTY (conflicting) PRs for operator review.
+disable_model_invocation: true
+description: Auto-rebase open PRs that are behind master and surface conflicting PRs for operator review.
 when_to_use: "When the user says 'rebase PRs', 'check stale PRs', 'unblock the merge queue', or autopilot wants to clear BEHIND PRs after a master merge. Safe to run on a cron / from autopilot Phase 4."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 claude_only: true

@@ -1,6 +1,7 @@
 ---
 name: hydra-auto-merge-window
-description: "Dormant batch-campaign template — a time-bounded auto-merger for any labeled issue batch (e.g. a future bulk-refactor wave). When a window is open, classifies open hydra-dev PRs linked to the configured batch-label issues, applies operator-approved to Tier-0 PRs, and enables auto-merge on Tier 1/2/3. Audit-only outside the window. Activated only when the operator points HYDRA_BATCH_LABEL at a live campaign label; idle otherwise."
+disable_model_invocation: true
+description: Dormant time-bounded auto-merger for a labeled bulk-PR campaign that, when a window is open, tiers and auto-merges the batch's eligible PRs and is audit-only otherwise.
 when_to_use: "When the operator is running a labeled bulk-PR campaign and says 'open the merge window', 'close the merge window', 'auto-merge the batch', or wants to manage bulk approval of a labeled issue batch — first set HYDRA_BATCH_LABEL to the campaign's label. Also invoked on a /loop interval to process eligible PRs. Dormant (no live campaign) by default."
 allowed_tools_claude: Read(*) Bash(*) Write(*)
 arguments: [action]

@@ -1,6 +1,7 @@
 ---
 name: hydra-target-qa
-description: Independent QA verification for Target (hydra-betting) PRs — Standards on every PR, plus Spec + a 2-reviewer adversarial fold on money-critical changes, plus a per-PR visual QA pass (before/after screenshots graded against the design ADR) on UI-touching PRs. Bounces hard findings to the reframe queue. No deep-QA remediation loop, no operator escalation.
+disable_model_invocation: true
+description: Independent QA verification for Target PRs — Standards on every PR, deeper adversarial and visual review on money-critical and UI changes, bouncing hard findings to the reframe queue.
 when_to_use: "When a Target build opens a PR and needs an independent reviewer (today the executor grades its own work), the operator says 'QA the target PR', or hydra-autopilot dispatches Target QA."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*)
 arguments: [pr_ref]

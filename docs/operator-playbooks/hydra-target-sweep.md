@@ -1,6 +1,7 @@
 ---
 name: hydra-target-sweep
-description: Autonomous target project board processor. Scans Redis backlog triage/blocked/reframe lanes and advances items that can be progressed without operator input.
+disable_model_invocation: true
+description: Autonomous Target board processor that scans the triage, blocked, and reframe lanes and advances items that can be progressed without operator input.
 when_to_use: "When the user says 'sweep target', 'process backlog', 'advance target items', or wants to clean up the target project work queue. Also dispatched by hydra-autopilot."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 ---

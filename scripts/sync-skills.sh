@@ -151,6 +151,11 @@ if isinstance(a,list): print("[" + ", ".join(a) + "]")
 elif a: print(a)
 else: print("")')
   claude_only=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("claude_only") else "0")')
+  # disable-model-invocation (issue #2945): a name-dispatched skill declares
+  # `disable_model_invocation: true` in its playbook frontmatter; we forward it
+  # verbatim as the standard Claude Code `disable-model-invocation: true`
+  # frontmatter key so the harness never model-selects it. Absent → omit the key.
+  disable_model_invocation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("disable_model_invocation") else "0")')
   codex_delegation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["fm"].get("codex_delegation","none"))')
   body=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["body"])')
 
@@ -170,6 +175,7 @@ else: print("")')
     echo "name: $name"
     echo "description: $desc"
     [ -n "$when" ] && echo "when_to_use: \"$when\""
+    [ "$disable_model_invocation" = "1" ] && echo "disable-model-invocation: true"
     echo "allowed-tools: $allowed_claude"
     [ -n "$args_yaml" ] && echo "arguments: $args_yaml"
     echo "---"

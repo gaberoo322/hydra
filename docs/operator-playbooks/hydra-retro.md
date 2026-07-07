@@ -1,6 +1,7 @@
 ---
 name: hydra-retro
-description: Per-run retrospective for hydra-autopilot — consumes the retro bundle, deep-reads only the flagged transcripts, synthesises findings, drops speculative/duplicate ones via an adversarial self-check, then emits a tiered + capped set of improvement proposals (≤2 GitHub issues, ≤1 gated PR, artifact-only notes).
+disable_model_invocation: true
+description: Per-run retrospective that deep-reads flagged transcripts, self-checks against duplicates, and emits a small capped set of conservative improvement proposals.
 when_to_use: "When the user says 'retro', 'retrospective', 'analyze the last run', or autopilot wants to turn a completed run into conservative, recurrence-gated improvement proposals. Invoked as /hydra-retro [run_id] (default: latest completed run)."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 ---

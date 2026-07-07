@@ -1,6 +1,7 @@
 ---
 name: hydra-target-retro
-description: Per-run (or daily) Target retrospective — deep-reads failed and reframed Target builds plus subagent friction reports, extracts recurring failure patterns, and routes them — capped ≤2/run, deduped — into the Target planner/executor feedback surface (prompt-shaped) and Redis Target-backlog (code-shaped). NO gated PR, NO tier machinery.
+disable_model_invocation: true
+description: Per-run Target retrospective that deep-reads failed and reframed builds plus friction reports and routes recurring failure patterns into the planner/executor feedback surface and Target backlog.
 when_to_use: "When the user says 'target retro', 'retro the target', 'analyze target builds', or hydra-autopilot wants to turn completed Target builds into conservative cross-build learning. Invoked as /hydra-target-retro [run_id] (default: latest completed run)."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 ---

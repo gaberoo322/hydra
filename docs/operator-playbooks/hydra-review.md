@@ -1,6 +1,6 @@
 ---
 name: hydra-review
-description: Interactive operator review of issues needing human attention — drains the overnight `Operator decision queue YYYY-MM-DD` first, then walks `ready-for-human` and stale-blocked issues one at a time with recommended resolutions.
+description: Interactive operator review that drains the overnight decision queue and walks ready-for-human and stale-blocked issues one at a time with recommended resolutions.
 when_to_use: "When the user says 'review issues', 'what needs my attention', 'check blocked issues', or wants to clear the ready-for-human queue. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 claude_only: true

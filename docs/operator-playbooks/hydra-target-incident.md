@@ -1,6 +1,7 @@
 ---
 name: hydra-target-incident
-description: Automated incident response for the Target project (hydra-betting) — post-merge regressions, web-service crashes, and deploy failures. Single-realm to ~/hydra-betting/web; investigates root cause, attempts fix or revert, files a post-mortem. Target sibling of hydra-incident (which is Orchestrator-only).
+disable_model_invocation: true
+description: Automated incident response for Target post-merge regressions, web-service crashes, and deploy failures — investigate, attempt a fix or revert, and file a post-mortem.
 when_to_use: "When hydra-target-build's Step 8.6 post-merge health watcher alarms on a Target regression, a hydra-betting-web service crashes, a Target deploy fails, or the user says 'target incident', 'what broke on the target', 'investigate the betting failure'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 arguments: [context]

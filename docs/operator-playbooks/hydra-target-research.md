@@ -1,6 +1,7 @@
 ---
 name: hydra-target-research
-description: Run a full Hydra research cycle using Claude as the researcher instead of Codex agents. Reads the operator vision, grounds the project, researches opportunities across domain/technical/market dimensions, writes updated priorities.md and roadmap.md, and queues work items.
+disable_model_invocation: true
+description: Run a full Target research cycle — ground the project, research opportunities across domain, technical, and market dimensions, update priorities and roadmap, and queue work items.
 when_to_use: "When the user wants to run a research cycle, reprioritize work, or discover new opportunities for hydra-betting."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [focus]

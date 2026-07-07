@@ -1,6 +1,7 @@
 ---
 name: hydra-tool-scout
-description: Scout for new tools/libraries/skills that would amplify Hydra's autonomous coding leverage. Discovers candidates in a named category, filters them through a three-gate rubric (AI-leverage score, maintenance gate, dedup seen-list), and files GitHub issues for the survivors.
+disable_model_invocation: true
+description: Scout new tools, libraries, and skills that amplify Hydra's autonomous coding leverage, filter them through an AI-leverage and maintenance rubric, and file GitHub issues for the survivors.
 when_to_use: "When the operator says 'scout tools', '/hydra-tool-scout <category>', or wants to discover new tooling that would make the AI agents faster/safer/more capable in a specific category. Phase B (issue #485) wires this into the autopilot via the `scout_orch` signal class — calendar-driven, 7-day cooldown."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebFetch(*) WebSearch(*)
 arguments: [category]

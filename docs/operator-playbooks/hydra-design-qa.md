@@ -1,6 +1,7 @@
 ---
 name: hydra-design-qa
-description: Non-interactive periodic VISUAL QA of the Target (~/hydra-betting/web) UI. Captures the nav-registry screenshot set of every rendered route, judges each page against the Target design-language ADR's [judgment] rules (styling consistency, density / one-question-per-page, empty-state honesty), and files AT MOST 3 deduped needs-triage Target-backlog items per run — each citing the specific ADR rule violated plus screenshot evidence. Judgment findings route needs-triage (NOT ready-for-agent), mirroring the wire-or-retire confidence-routing discipline. Saturation backstop: skip when >5 open design-qa items already await triage. A healthy UI files nothing. Zero AskUserQuestion.
+disable_model_invocation: true
+description: Non-interactive visual QA that screenshots every Target UI route, judges each against the design ADR, and files a capped set of deduped needs-triage findings citing the rule violated.
 when_to_use: "When the autopilot's periodic 7-day design-QA cadence is due and the Target UI has not been visually reviewed against the design ADR this week, or when the operator says 'design QA the target', '/hydra-design-qa', or 'review the UI against the ADR'. Dispatched by the autopilot `design_qa_target` signal class on the `design_qa_target_due` signal, at a 7d cooldown (issue #2739, parent #2732, the Target UI-quality loop)."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 claude_only: true

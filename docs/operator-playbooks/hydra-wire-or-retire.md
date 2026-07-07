@@ -1,6 +1,7 @@
 ---
 name: hydra-wire-or-retire
-description: Non-interactive resolver for the Target's wire-or-retire decision queue. Reads the open `wire-or-retire`-labelled items sitting in the Target (~/hydra-betting) triage lane — modules built with intent that either stalled or died, filed by /hydra-target-cleanup — and turns each into a verdict: WIRE (rewrite into a concrete ready-for-agent wiring task, move to queued), RETIRE (rewrite into a ready-for-agent retirement task citing the deadcode scan, move to queued), or UNCLEAR (route ready-for-human and stop). Recovers intent via git-log archaeology + a cross-ref of config/direction vision/priorities/roadmap + the Target backlog open AND done lanes. Resolves at most 2 items per run. Hard carve-out — modules under web/src/lib/risk/ or live-execution paths ALWAYS route ready-for-human. Ambiguity never resolves to deletion. Zero AskUserQuestion.
+disable_model_invocation: true
+description: Non-interactive resolver that turns each open Target wire-or-retire decision item into a WIRE, RETIRE, or UNCLEAR verdict, always routing risk-core and live-execution modules to a human.
 when_to_use: "When the Target triage lane holds open `wire-or-retire` decision items and the autopilot wants to actually make the wire-vs-retire call, or when the operator says 'resolve wire-or-retire', '/hydra-wire-or-retire', or 'make the wiring decisions'. Dispatched by the autopilot `wire_or_retire_target` signal class on the `wire_or_retire_target_available` signal, at a 24h cooldown (issue #2722, epic #2720)."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 claude_only: true

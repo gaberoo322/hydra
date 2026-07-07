@@ -1,6 +1,7 @@
 ---
 name: hydra-target-discover
-description: Runtime diagnostic discovery for the target project (hydra-betting). Checks API health, execution metrics, database state, and production logs to find anomalies. Creates target-backlog issues for findings.
+disable_model_invocation: true
+description: Runtime diagnostic discovery for the Target that checks API health, execution metrics, database state, and logs, then files target-backlog items for anomalies.
 when_to_use: "When the user says 'check target health', 'target discover', 'production health', or wants runtime diagnostics on the hydra-betting project. Also dispatched by hydra-autopilot."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 ---

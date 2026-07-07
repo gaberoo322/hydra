@@ -1,6 +1,6 @@
 ---
 name: hydra-digest
-description: Generate a daily or on-demand summary of Hydra system activity — merges, failures, test growth, cost, backlog flow, and priority progress.
+description: Generate a daily or on-demand summary of recent Hydra activity — merges, failures, test growth, cost, backlog flow, and priority progress.
 when_to_use: "When the user says 'digest', 'summary', 'what happened', 'daily report', 'overnight report', or wants to understand recent system activity."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 arguments: [period]

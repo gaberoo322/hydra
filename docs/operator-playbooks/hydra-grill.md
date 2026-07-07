@@ -1,6 +1,7 @@
 ---
 name: hydra-grill
-description: Produce a design-concept artifact for a Hydra anchor — runs a Q&A loop against CONTEXT.md/ADRs/research, sub-dispatches the prototype skill for hard logic questions, emits a handoff doc for unresolvable gaps. - When the autopilot needs a design concept before dispatching dev_orch/dev_target, or the operator wants to grill an issue before implementation.
+disable_model_invocation: true
+description: Produce a design-concept artifact for an anchor by running a Q&A loop against the domain docs and research before an issue is implemented.
 when_to_use: "When the autopilot needs a design concept before dispatching dev_orch/dev_target, the operator says 'grill issue #N' / 'design-concept #N', or an issue is labelled needs-design-concept."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [anchor, scope]

@@ -1,6 +1,6 @@
 ---
 name: hydra-target-review
-description: Interactive operator review of target project work items needing human attention — triage lane, blocked items, reframe queue, and prior failures. Presents items one-by-one with recommended resolutions.
+description: Interactive operator review of Target work items needing human attention — the triage lane, blocked items, reframe queue, and prior failures — presented one at a time.
 when_to_use: "When user says 'review target work', 'what's stuck', 'check blocked items', 'review backlog', or wants to clear items needing operator decisions."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 ---

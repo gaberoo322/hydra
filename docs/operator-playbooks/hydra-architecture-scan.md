@@ -1,6 +1,7 @@
 ---
 name: hydra-architecture-scan
-description: Non-interactive architecture-scan wrapper. Runs the improve-codebase-architecture skill's Explore + Present-candidates phases (steps 1–2 only) against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-issues — never entering the interactive operator grilling loop.
+disable_model_invocation: true
+description: Non-interactive architecture-scan wrapper that surfaces codebase-deepening candidates in the Orchestrator and files them as GitHub issues, never entering the interactive operator grilling loop.
 when_to_use: "When the Orchestrator's hydra-autopilot runs out of eligible work and wants to turn idle capacity into self-improvement by surfacing architecture-deepening candidates as tracked issues, or when the operator says 'architecture scan', '/hydra-architecture-scan', or 'find architecture work'. Phase A (issue #788) is the headless wrapper skill; the autopilot `architecture_orch` signal class that dispatches it is wired by #789/#790/#791."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Task(*)
 arguments: [apply]

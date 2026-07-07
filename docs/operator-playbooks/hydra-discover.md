@@ -1,6 +1,7 @@
 ---
 name: hydra-discover
-description: Autonomous deep-discovery loop for the Hydra orchestrator — three-tier analysis (runtime diagnostics, behavioral cross-referencing, codebase + research deep dives) that publishes findings as structured GitHub issues.
+disable_model_invocation: true
+description: Autonomous deep-discovery loop that cross-references runtime diagnostics, behavior, and the codebase to publish Orchestrator-improvement findings as structured GitHub issues.
 when_to_use: "When the user says 'discover', 'find improvements', 'research hydra issues', 'patrol', or wants a discovery loop alongside /hydra-sweep."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) WebSearch(*) WebFetch(*)
 ---

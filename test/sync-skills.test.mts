@@ -338,6 +338,181 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
   });
 });
 
+describe("scripts/sync-skills.sh — disable-model-invocation forwarding (issue #2945)", () => {
+  /**
+   * A name-dispatched skill declares `disable_model_invocation: true` in its
+   * playbook frontmatter; sync-skills.sh must forward it to the generated
+   * Claude SKILL.md as the standard `disable-model-invocation: true` key so the
+   * harness never model-selects it. When the field is absent the key must be
+   * OMITTED entirely (an operator-conversational skill stays model-invocable).
+   */
+  function makeRepo(): { dir: string; script: string; playbooks: string } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-dmi-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(playbooks, { recursive: true });
+    const script = join(scripts, "sync-skills.sh");
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    return { dir, script, playbooks };
+  }
+
+  function runSync(repo: { dir: string; script: string }): {
+    status: number | null;
+    stderr: string;
+    claudeDir: string;
+    codexDir: string;
+  } {
+    const claudeDir = join(repo.dir, "out-claude");
+    const codexDir = join(repo.dir, "out-codex");
+    const r = spawnSync("bash", [repo.script], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: codexDir,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stderr: r.stderr, claudeDir, codexDir };
+  }
+
+  test("forwards disable_model_invocation: true to the generated Claude SKILL.md", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "name-dispatched.md"),
+        "---\nname: name-dispatched\ndisable_model_invocation: true\ndescription: a name-only skill\n---\n\n# Name Dispatched\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(
+        join(r.claudeDir, "name-dispatched", "SKILL.md"),
+        "utf-8",
+      );
+      assert.match(
+        out,
+        /^disable-model-invocation: true$/m,
+        "the standard hyphenated key must appear in the generated SKILL.md frontmatter",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("OMITS the key entirely when the playbook does not set it", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "conversational.md"),
+        "---\nname: conversational\ndescription: an operator-conversational skill\n---\n\n# Conversational\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(
+        join(r.claudeDir, "conversational", "SKILL.md"),
+        "utf-8",
+      );
+      assert.doesNotMatch(
+        out,
+        /disable-model-invocation/,
+        "absent field must omit the key — the skill stays model-invocable",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a false value also omits the key (only true forwards)", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "explicit-false.md"),
+        "---\nname: explicit-false\ndisable_model_invocation: false\ndescription: explicitly model-invocable\n---\n\n# Explicit False\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(
+        join(r.claudeDir, "explicit-false", "SKILL.md"),
+        "utf-8",
+      );
+      assert.doesNotMatch(
+        out,
+        /disable-model-invocation/,
+        "disable_model_invocation: false must NOT emit the key",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the Codex SKILL.md never carries the Claude-only key", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "codex-target.md"),
+        "---\nname: codex-target\ndisable_model_invocation: true\ndescription: a name-only skill\n---\n\n# Codex Target\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const codexOut = join(r.codexDir, "codex-target", "SKILL.md");
+      assert.ok(existsSync(codexOut), "codex skill should have been generated");
+      assert.doesNotMatch(
+        readFileSync(codexOut, "utf-8"),
+        /disable-model-invocation/,
+        "disable-model-invocation is a Claude Code harness concept — never emit it to Codex",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("every live name-dispatched playbook carries the flag; conversational ones do not", () => {
+    // Golden check against the REAL playbooks (issue #2945 set membership).
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-dmi-live-"));
+    try {
+      const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+        env: {
+          ...process.env,
+          CLAUDE_SKILLS_DIR: join(dir, "claude"),
+          CODEX_SKILLS_DIR: join(dir, "codex"),
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+      const hasFlag = (skill: string): boolean =>
+        /^disable-model-invocation: true$/m.test(
+          readFileSync(join(dir, "claude", skill, "SKILL.md"), "utf-8"),
+        );
+      // A representative slice of the name-dispatched set.
+      for (const skill of [
+        "hydra-dev",
+        "hydra-qa",
+        "hydra-cleanup",
+        "hydra-autopilot",
+        "hydra-wire-or-retire",
+      ]) {
+        assert.ok(hasFlag(skill), `${skill} must carry disable-model-invocation: true`);
+      }
+      // The operator-conversational set must stay model-invocable.
+      for (const skill of [
+        "hydra-doctor",
+        "hydra-digest",
+        "hydra-review",
+        "hydra-target-review",
+      ]) {
+        assert.ok(
+          !hasFlag(skill),
+          `${skill} is operator-conversational — must NOT carry the flag`,
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/setup-git-hooks.sh (issue #433)", () => {
   /**
    * Create a throwaway git repo with a `scripts/sync-skills.sh` stub and a

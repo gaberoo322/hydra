@@ -1,6 +1,7 @@
 ---
 name: hydra-incident
-description: Automated incident response for regressions, service crashes, and deployment failures. Investigates root cause, attempts fix or revert, creates post-mortem.
+disable_model_invocation: true
+description: Automated incident response for Orchestrator regressions, service crashes, and deploy failures — investigate root cause, attempt a fix or revert, and file a post-mortem.
 when_to_use: "When hydra-doctor finds a regression, hydra-target-build rolls back, tests collapse, a service crashes, or the user says 'incident', 'regression', 'what broke', 'investigate failure'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 arguments: [context]

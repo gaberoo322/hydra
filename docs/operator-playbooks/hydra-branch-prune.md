@@ -1,6 +1,7 @@
 ---
 name: hydra-branch-prune
-description: Periodic cleanup of stale local branches and worktrees from completed agent dispatches. Detects [gone]-upstream branches, force-unlocks stale worktree locks (skipping live Claude agents), removes the worktrees, and deletes the branches.
+disable_model_invocation: true
+description: Periodic cleanup that reclaims stale local branches and leaked worktrees left behind by completed or crashed agent dispatches.
 when_to_use: "When the user says 'prune branches', 'clean stale worktrees', or autopilot wants to garbage-collect after the daily merge wave. Safe to run on a cron from autopilot Phase 4."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 claude_only: true

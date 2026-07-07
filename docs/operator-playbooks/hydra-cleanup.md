@@ -1,6 +1,7 @@
 ---
 name: hydra-cleanup
-description: Non-interactive deterministic dead-code + simplification detector. Runs a static-analysis tool (knip) over the Orchestrator to find provably-unused exports/files, then files high-confidence findings as ready-for-agent GitHub issues whose acceptance criterion is "remove X AND npm test/tsc still pass". Dry-run by default; --apply creates issues. Zero AskUserQuestion.
+disable_model_invocation: true
+description: Non-interactive dead-code detector that runs static analysis over the Orchestrator and files high-confidence unused-export findings as ready-for-agent GitHub issues.
 when_to_use: "When the Orchestrator's hydra-autopilot board is idle and it wants to turn spare capacity into high-confidence dead-code / simplification work, or when the operator says 'cleanup scan', '/hydra-cleanup', or 'find dead code'. Dispatched by the autopilot `cleanup_orch` signal class (issue #960, parent #958) on the unified `orch_backfill_idle` signal at a 1h cadence."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]

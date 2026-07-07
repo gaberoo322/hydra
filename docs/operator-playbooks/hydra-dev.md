@@ -1,6 +1,7 @@
 ---
 name: hydra-dev
-description: Pick up a GitHub issue from gaberoo322/hydra and autonomously implement it in a worktree — research the codebase, implement, verify, and open a PR.
+disable_model_invocation: true
+description: Autonomously implement a GitHub issue in a fresh worktree — research the codebase, write the change, verify it, and open a PR.
 when_to_use: "When the user wants to work on a Hydra orchestrator issue, says 'pick up an issue', 'work on issue #N', 'develop'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [issue_number]

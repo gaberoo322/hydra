@@ -1,6 +1,7 @@
 ---
 name: hydra-issue-research
-description: Research a Hydra orchestrator GitHub issue — search the codebase and web for context, then enrich the issue description with findings.
+disable_model_invocation: true
+description: Enrich a GitHub issue by searching the codebase and web for context and writing the findings back into the issue description.
 when_to_use: "When the user says 'research issue #N', an issue has needs-research label, or more context is needed before an issue can be implemented."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebSearch(*) WebFetch(*)
 arguments: [issue_number]

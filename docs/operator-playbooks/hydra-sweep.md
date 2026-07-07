@@ -1,6 +1,7 @@
 ---
 name: hydra-sweep
-description: Scan the Hydra issue board and autonomously advance every issue that can be progressed — triage routing, research, development, QA, blocker checks. Can be used with /loop for continuous processing.
+disable_model_invocation: true
+description: Scan the Orchestrator issue board and autonomously advance every issue that can be progressed — triage, research, development, QA, and blocker checks.
 when_to_use: "When the user says 'sweep the board', 'process issues', 'what needs attention', or wants to advance all issues."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 ---

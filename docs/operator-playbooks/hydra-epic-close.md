@@ -1,6 +1,7 @@
 ---
 name: hydra-epic-close
-description: Auto-close epic issues in gaberoo322/hydra once every referenced sub-issue has been CLOSED.
+disable_model_invocation: true
+description: Auto-close epic issues once every one of their referenced sub-issues has been closed.
 when_to_use: "When the user says 'close completed epics', 'sweep epics', or autopilot wants to garbage-collect epics whose sub-issues have all merged. Safe to run on a cron / from autopilot Phase 4."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 claude_only: true

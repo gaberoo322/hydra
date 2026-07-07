@@ -1,6 +1,7 @@
 ---
 name: hydra-research
-description: Research improvement opportunities for the Hydra orchestrator itself. Analyzes codebase architecture, control loop efficiency, learning system, agent quality, and infrastructure to produce actionable GitHub issues.
+disable_model_invocation: true
+description: Research self-improvement opportunities for the Orchestrator across architecture, control loop, learning system, and infrastructure, and file them as actionable GitHub issues.
 when_to_use: "When the user says 'research hydra', 'improve the orchestrator', 'find orchestrator work', or when hydra-autopilot detects the orchestrator issue board is empty and the system has capacity."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*) WebSearch(*) WebFetch(*)
 arguments: [focus]

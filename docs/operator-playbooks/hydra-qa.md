@@ -1,6 +1,7 @@
 ---
 name: hydra-qa
-description: Automated QA verification for Hydra orchestrator PRs — thin wrapper over the upstream `review` skill that runs Standards + Spec sub-agents in parallel against the design-concept artifact.
+disable_model_invocation: true
+description: Automated QA verification for Orchestrator PRs, running Standards and Spec sub-agent reviews in parallel against the design-concept artifact.
 when_to_use: "When the user says 'QA issue #N', 'verify', 'check the PR', or an issue has the needs-qa label."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [issue_number]
