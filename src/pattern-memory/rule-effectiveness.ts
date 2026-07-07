@@ -79,8 +79,8 @@ export type IneffectivePromotedPattern = {
   hitsSincePromotion: number;
   daysToPromotion: number;
   daysSincePromotion: number;
-  preRate: number; // hits/day before promotion
-  postRate: number; // hits/day after promotion
+  preRate: number; // cue-firings/day before promotion — NOT a failure rate (#2950)
+  postRate: number; // cue-firings/day after promotion — NOT a failure rate (#2950)
   rateRatio: number; // postRate / preRate (Infinity when preRate === 0)
   rateRatioLabel: string; // "infinite" or "N.NN" — usable in JSON output
   reasonCode: "rate-ratio" | "absolute-postrate" | "no-baseline";
@@ -94,7 +94,17 @@ export type RuleActionLogEntry = {
   category: string;
   action: "demoted" | "alerted" | "skipped-cooldown" | "skipped-disabled";
   reasonCode: IneffectivePromotedPattern["reasonCode"];
-  /** Snapshot of the metric envelope at the time of action. */
+  /**
+   * Snapshot of the metric envelope at the time of action.
+   *
+   * UNIT NOTE (issue #2950): `preRate`/`postRate` here — and the
+   * `rateRatioLabel` derived from them — are cue-firing rates
+   * (friction-cue firings/day recorded via Pattern Memory's `recordPattern`),
+   * NOT merge/QA/build failure rates. A high or rising `rateRatioLabel` marks
+   * a promoted rule whose text is not preventing the friction it describes; it
+   * is correlated with, not causal of, the underlying failure rate. See the
+   * unit comment at the postRate computation site above.
+   */
   metrics: {
     hitsSincePromotion: number;
     daysSincePromotion: number;
@@ -167,6 +177,20 @@ export function evaluatePromotedPatternEffectiveness(
   if (daysSincePromotion < MIN_DAYS_POST_PROMOTION) return null;
 
   const hitsSincePromotion = Math.max(0, p.hitCount - p.hitsAtPromotion);
+  // UNIT — READ BEFORE INTERPRETING preRate/postRate (issue #2950, spun out of
+  // #2933):
+  //   (a) `hitCount` / `hitsAtPromotion` count how many times this friction CUE
+  //       FIRED — i.e. how many `recordPattern` friction reports named this cue.
+  //       So both rates below are in units of *cue-firings per day*.
+  //   (b) preRate/postRate are therefore NOT merge/QA/build failure rates. A
+  //       rising postRate does NOT mean promotion caused more underlying
+  //       failures — a promoted lesson cannot causally raise the failure rate.
+  //   (c) A flat-or-rising postRate is exactly the "the promoted rule text is
+  //       not preventing the friction it describes" signal the demotion
+  //       machinery below is designed to catch. Promotion is CORRELATED WITH,
+  //       not CAUSAL OF, a rate rise. #2933 mis-read this as a "2.2–4.5x
+  //       failure-rate regression caused by promotion" and was falsified on
+  //       precisely this point.
   const preRate = p.hitsAtPromotion / daysToPromotion;
   const postRate = hitsSincePromotion / Math.max(1, daysSincePromotion);
   const rateRatio = preRate === 0 ? (hitsSincePromotion > 0 ? Infinity : 0) : postRate / preRate;
