@@ -703,6 +703,60 @@ def _fire_reflection_record(
         _append_log(msg)
 
 
+def _fire_token_record(task_id: str, skill: str | None, total_tokens: int) -> None:
+    """Best-effort POST to /api/metrics/tokens — the per-CYCLE token producer (issue #2952).
+
+    THE producer for the `hydra:metrics:tokens:by-cycle:<id>` hash (written by
+    `recordSubagentTokens`, read by `getCycleTokensRaw`). Before this, that key
+    family was near-empty: `recordSubagentTokens` had exactly one caller (the
+    POST /api/metrics/tokens handler) and NOTHING posted to it — so the #2930
+    read-time cycle-trend join (#2964) read null for almost every cycle, and the
+    #2942 per-dispatch outcome record's per-cycle-token FALLBACK (`resolveDispatchTokens`
+    → `getCycleTokensRaw`) never had data to fall back to.
+
+    reap already holds its authoritative `total_tokens` at completion and is the
+    SINGLE subprocess that runs on EVERY terminal dispatch, so it is the right
+    producer. Fires ONCE per task_id: it runs after `run_completion`'s
+    `reaped_task_ids` dup-guard, so a retried reap for the same task_id short-
+    circuits before reaching here — this matters because the underlying write is
+    an `hincrby` (a second post would double-count).
+
+    Fired for EVERY completed class (not just code-writing) — the per-cycle key
+    is keyed on the harness task_id, which the #2964 trend join and the #2942
+    fallback both key on regardless of class.
+
+    Posted ONLY when `total_tokens > 0` — mirrors `_fire_cycle_record`'s
+    "0 == no usage parsed == unknown" semantics: a 0 write would fabricate a
+    zero-token key where the truthful state is "unattributed" (null). The
+    consumers (#2964 join, #2942 fallback) treat an absent key as a truthful null.
+
+    Best-effort: a non-2xx, an unreachable orchestrator, or any network error is
+    logged to the run-log and SWALLOWED. Token accounting is observability, NOT
+    correctness — it must never block or fail the reap path. `date` is omitted so
+    the handler defaults to the server's UTC today (matches the daily-rollup
+    semantics `recordSubagentTokens` already uses).
+    """
+    if not skill:
+        return
+    if total_tokens <= 0:
+        return
+    payload = {"skill": skill, "tokens": int(total_tokens), "cycleId": task_id}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/metrics/tokens",
+        data=data,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        msg = f"token_record_skipped task_id={task_id} skill={skill} tokens={total_tokens} err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+
+
 def _classify_failure_pattern(cue: str) -> str:
     """Map a free-form failure cue to a stable self-heal pattern ID (issue #1820).
 
@@ -1091,6 +1145,16 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         anchor_ref=anchor_ref or "",
         grounding_tests=grounding_tests,
     )
+
+    # Issue #2952: fire the per-CYCLE token record so the near-empty
+    # `hydra:metrics:tokens:by-cycle:<id>` key family gets a producer. Unlike
+    # the cycle-record above (code-writing classes only), this fires for EVERY
+    # completed class — the per-cycle key is keyed on the harness task_id, which
+    # the #2964 cycle-trend join and the #2942 outcome-record fallback both key
+    # on regardless of class. The helper is best-effort, guards tokens>0, and
+    # runs after the `reaped_task_ids` dup-guard so the underlying hincrby fires
+    # exactly once per task_id.
+    _fire_token_record(task_id, skill, total_tokens)
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
