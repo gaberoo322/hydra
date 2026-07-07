@@ -27,13 +27,22 @@
  * Pinning the playbooks pins what gets synced downstream — so the deposit
  * obligation can't silently erode back into optional prose.
  *
- * Issue #2552: the deposit bash recipe was extracted into a shared fragment
- * (`docs/operator-playbooks/_fragments/reflection-telemetry-deposit.md`)
- * that both build playbooks pull in via an `@include` directive resolved at
- * sync time. The deposit obligation is therefore present in the EFFECTIVE
- * synced source (playbook body + its included fragments), not necessarily in
- * the raw playbook `.md`. We resolve includes here exactly as sync-skills.sh
- * does so the lint still pins what actually ships downstream.
+ * Issue #2552: the deposit bash recipe was first extracted into a shared
+ * fragment (`_fragments/reflection-telemetry-deposit.md`) that both build
+ * playbooks pull in via `@include`.
+ *
+ * Issue #2947: the deposit *mechanics* — task_id derivation, the #1945
+ * agent-<HASH> cwd key, the per-anchor/by-file bucket mapping, the fail-loud
+ * cues, the #2112 unconditional anchor deposit — were lifted OUT of the
+ * fragment prose into a deterministic helper `scripts/reflection-deposit.sh`.
+ * So the lint now has two surfaces:
+ *   - the EFFECTIVE shipped playbook surface (SKILL.md body + its @included
+ *     fragments + its reference_files, resolved exactly as sync-skills.sh does)
+ *     must still carry the deposit OBLIGATION (MANDATORY, cites the issues, runs
+ *     even on served-nothing, forbids POSTing cycle-record), and
+ *   - the helper SCRIPT must carry the key-derivation MECHANICS.
+ * This keeps the obligation un-erodable in the playbook while pinning the
+ * behavior-preserving mechanics in the one place they now live.
  */
 
 import test, { describe } from "node:test";
@@ -44,16 +53,28 @@ import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLAYBOOK_DIR = resolve(__dirname, "..", "docs", "operator-playbooks");
+const SCRIPTS_DIR = resolve(__dirname, "..", "scripts");
 
-// Resolve `@include _fragments/<name>.md` directives the same way
-// scripts/sync-skills.sh does (issue #2552): a whole-line `@include` is
-// replaced by the fragment's content, with `{{SKILL_NAME}}` substituted by the
-// skill name. This is non-recursive (one level) — matching the resolver — and
-// lets the lint below assert against the EFFECTIVE synced source.
-function resolveIncludes(playbookFile: string, skillName: string): string {
+// The deterministic deposit helper the fragments now invoke (issue #2947).
+const depositScript = readFileSync(
+  resolve(SCRIPTS_DIR, "reflection-deposit.sh"),
+  "utf8",
+);
+
+// Resolve `@include _fragments/<name>.md` (issue #2552) AND `reference_files:`
+// frontmatter fragments (issue #2947) the same way scripts/sync-skills.sh does:
+// an @include line is replaced by the fragment's content; each reference_files
+// entry is appended (it ships as a sibling of SKILL.md). {{SKILL_NAME}} is
+// substituted by the skill name. This gives us the EFFECTIVE shipped surface
+// (SKILL.md body + fragments + reference files) that the deposit obligation
+// must live somewhere within.
+function resolveEffectiveSource(
+  playbookFile: string,
+  skillName: string,
+): string {
   const raw = readFileSync(resolve(PLAYBOOK_DIR, playbookFile), "utf8");
   const includeRe = /^[ \t]*@include[ \t]+(\S+)[ \t]*$/;
-  return raw
+  const inlined = raw
     .split("\n")
     .map((line) => {
       const m = line.match(includeRe);
@@ -63,93 +84,82 @@ function resolveIncludes(playbookFile: string, skillName: string): string {
       return frag.split("{{SKILL_NAME}}").join(skillName);
     })
     .join("\n");
+
+  // Append every reference_files fragment (sibling files sync-skills emits).
+  const refMatch = inlined.match(/^reference_files:\s*\[([^\]]*)\]/m);
+  let refText = "";
+  if (refMatch) {
+    const entries = refMatch[1]
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const rel of entries) {
+      const frag = readFileSync(resolve(PLAYBOOK_DIR, rel), "utf8");
+      refText += "\n" + frag.split("{{SKILL_NAME}}").join(skillName);
+    }
+  }
+  return inlined + refText;
 }
 
 const playbooks: Record<string, string> = {
-  "hydra-dev.md": resolveIncludes("hydra-dev.md", "hydra-dev"),
-  "hydra-target-build.md": resolveIncludes(
+  "hydra-dev.md": resolveEffectiveSource("hydra-dev.md", "hydra-dev"),
+  "hydra-target-build.md": resolveEffectiveSource(
     "hydra-target-build.md",
     "hydra-target-build",
   ),
 };
 
+// ---------------------------------------------------------------------------
+// Playbook-surface obligations (issue #1912) — the deposit must stay a loud,
+// MANDATORY, un-erodable step in the EFFECTIVE shipped playbook surface. Post
+// #2947 the mechanics moved to the helper script (asserted separately below),
+// but the OBLIGATION to run the deposit must remain in the playbook.
+// ---------------------------------------------------------------------------
 for (const [name, playbook] of Object.entries(playbooks)) {
-  describe(`${name} — reflection-source deposit is mandatory (issue #1912)`, () => {
+  describe(`${name} — reflection-source deposit obligation is mandatory (issue #1912)`, () => {
     test("documents the deterministic deposit path reap.py reads", () => {
-      // The deposit path must match exactly what reap.py reads:
-      // ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>.
+      // The deposit filename reap.py reads must be named in the shipped surface.
+      // (The HYDRA_AUTOPILOT_REFL_DIR deposit-dir env var now lives in the
+      // helper script — asserted in the helper-script suite below — since the
+      // deposit fragment INVOKES the helper rather than re-inlining the bash.)
       assert.ok(
         /hydra-refl-sources-/.test(playbook),
         `${name} must reference the hydra-refl-sources-<task_id> deposit filename reap.py reads`,
       );
+    });
+
+    test("invokes the deterministic deposit helper (issue #2947)", () => {
+      // Post-#2947 the deposit mechanics live in scripts/reflection-deposit.sh;
+      // the playbook must INVOKE it (not re-inline the bash), so the key
+      // derivation stays in one testable place.
       assert.ok(
-        /HYDRA_AUTOPILOT_REFL_DIR/.test(playbook),
-        `${name} must reference HYDRA_AUTOPILOT_REFL_DIR (the deposit dir reap.py mirrors)`,
+        /reflection-deposit\.sh/.test(playbook),
+        `${name} must invoke scripts/reflection-deposit.sh rather than re-inlining the deposit bash (issue #2947)`,
       );
     });
 
-    test("keys the deposit on the dispatch task_id", () => {
-      assert.ok(
-        /HYDRA_AUTOPILOT_TASK_ID/.test(playbook),
-        `${name} must key the deposit on HYDRA_AUTOPILOT_TASK_ID so reap.py (which holds the same id) can read it`,
-      );
-    });
-
-    // Issue #1945: the env vars alone are the WRONG key inside a worktree
-    // subagent — HYDRA_AUTOPILOT_TASK_ID is unset and CLAUDE_CODE_SESSION_ID is
-    // the child's session UUID, neither of which equals the harness task id reap
-    // reads. The harness embeds its task id in the `agent-<HASH>` worktree dir,
-    // so the deposit MUST derive the key from cwd as the primary source.
-    test("derives the deposit key from the agent-<HASH> worktree cwd (issue #1945)", () => {
-      assert.ok(
-        /agent-/.test(playbook) && /\$PWD|basename/.test(playbook),
-        `${name} must derive the harness task_id from the agent-<HASH> worktree cwd (the key reap actually reads), not solely from env vars (issue #1945)`,
-      );
-    });
-
-    test("warns that env-var-only keys are wrong inside the worktree (issue #1945)", () => {
+    test("cites the #1945 key-source rationale so a future edit can't lose it", () => {
       assert.ok(
         /#1945/.test(playbook),
-        `${name} must cite issue #1945 explaining the env-var-only deposit landed under the wrong key`,
+        `${name} must cite issue #1945 (the env-var-only deposit landed under the wrong key)`,
       );
     });
 
-    // The #1945 fix replaces the silent `|| true` swallow with a loud stderr
-    // warning when the deposit cannot determine a key or the write fails, per
-    // the repo "fail loud" convention.
-    test("fails loud (stderr WARN) on a missing key or write error (issue #1945)", () => {
-      assert.ok(
-        /refl-deposit-no-task-id/.test(playbook) &&
-          /refl-deposit-write-failed/.test(playbook),
-        `${name} must surface a loud WARN (cues refl-deposit-no-task-id / refl-deposit-write-failed) instead of silently swallowing a deposit miss (issue #1945)`,
-      );
-    });
-
-    test("maps API block sources to the bare bucket tokens deriveReflectionMatchSource matches", () => {
-      // The API emits per-anchor-reflections / by-file-reflections, but
-      // deriveReflectionMatchSource matches the BARE tokens per-anchor / by-file.
-      // A regression that emits the raw API strings mis-buckets to mixed/none.
+    test("maps served blocks to the bare per-anchor / by-file bucket tokens", () => {
       assert.ok(
         /per-anchor/.test(playbook) && /by-file/.test(playbook),
-        `${name} must map served blocks to the bare per-anchor / by-file bucket tokens`,
+        `${name} must name the bare per-anchor / by-file bucket tokens deriveReflectionMatchSource matches`,
       );
     });
 
     test("marks the deposit MANDATORY so it can't be read as optional prose (the #1912 root cause)", () => {
-      // The #1912 failure was discoverability: the recipe existed but the
-      // numbered child contract never flagged it as a required step, so it
-      // read as supplementary reference prose. The fix must say MANDATORY
-      // loudly enough that a future edit can't quietly soften it.
       assert.ok(
         /MANDATORY/.test(playbook),
         `${name} must mark the reflection-source deposit MANDATORY (the #1912 root cause was it reading as optional)`,
       );
     });
 
-    test("warns the deposit must run even when zero reflections were served", () => {
-      // The deposit block must ALWAYS run; an empty result writes no file,
-      // which reap.py correctly buckets to 'none'. Gating the whole block on
-      // "reflections were served" is a subtle re-introduction of the bug.
+    test("explains a served-nothing result truthfully buckets to 'none'", () => {
       assert.ok(
         /\bnone\b/.test(playbook),
         `${name} must explain that an empty/served-nothing result truthfully buckets to 'none'`,
@@ -171,3 +181,92 @@ for (const [name, playbook] of Object.entries(playbooks)) {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Helper-script mechanics (issue #2947) — the deposit key-derivation and
+// fail-loud semantics now live in scripts/reflection-deposit.sh. These pin the
+// behavior-preserving invariants the design-concept required: the same deposit
+// keys, the #1945 agent-<HASH> key source, the #2112 unconditional anchor
+// deposit, and the FAIL-LOUD-on-stderr cues.
+// ---------------------------------------------------------------------------
+describe("scripts/reflection-deposit.sh — deposit mechanics preserved (issue #2947)", () => {
+  test("writes the three deposit files reap.py reads, keyed on task_id", () => {
+    for (const key of [
+      "hydra-refl-sources-",
+      "hydra-refl-anchor-",
+      "hydra-grounding-tests-",
+    ]) {
+      assert.ok(
+        depositScript.includes(key),
+        `helper must write the ${key}<task_id> deposit reap.py reads`,
+      );
+    }
+    assert.ok(
+      /HYDRA_AUTOPILOT_REFL_DIR/.test(depositScript),
+      "helper must honor the HYDRA_AUTOPILOT_REFL_DIR deposit dir reap.py mirrors",
+    );
+  });
+
+  test("derives the deposit key from the agent-<HASH> worktree cwd (issue #1945)", () => {
+    assert.ok(
+      /agent-/.test(depositScript) && /\$PWD|basename|PWD/.test(depositScript),
+      "helper must derive the harness task_id from the agent-<HASH> worktree cwd (the key reap reads), not solely from env vars (issue #1945)",
+    );
+    assert.ok(
+      /HYDRA_AUTOPILOT_TASK_ID/.test(depositScript) &&
+        /CLAUDE_CODE_SESSION_ID/.test(depositScript),
+      "helper must keep the env-var fallback chain (HYDRA_AUTOPILOT_TASK_ID → CLAUDE_CODE_SESSION_ID) only as a fallback",
+    );
+  });
+
+  test("maps API block sources to the bare per-anchor / by-file bucket tokens", () => {
+    assert.ok(
+      /per-anchor/.test(depositScript) && /by-file/.test(depositScript),
+      "helper must map served blocks to the bare per-anchor / by-file bucket tokens deriveReflectionMatchSource matches",
+    );
+  });
+
+  test("deposits the anchor UNCONDITIONALLY, even when zero reflections were served (issue #2112)", () => {
+    // The refl-sources deposit is gated on refl_sources; the anchor deposit is
+    // NOT — it must fire even on a served-nothing cycle so reap can write the
+    // first-failure reflection. Pin the #2112 rationale + the anchor path.
+    assert.ok(
+      /#2112/.test(depositScript),
+      "helper must cite issue #2112 (the unconditional anchor deposit)",
+    );
+    assert.ok(
+      /hydra-refl-anchor-/.test(depositScript),
+      "helper must always write the hydra-refl-anchor-<task_id> deposit",
+    );
+  });
+
+  test("fails loud (stderr WARN) on a missing key or write error (issue #1945)", () => {
+    for (const cue of [
+      "refl-deposit-no-task-id",
+      "refl-deposit-write-failed",
+      "refl-anchor-deposit-write-failed",
+      "grounding-tests-deposit-write-failed",
+    ]) {
+      assert.ok(
+        depositScript.includes(cue),
+        `helper must surface a loud WARN (cue ${cue}) instead of silently swallowing a deposit miss (issue #1945)`,
+      );
+    }
+  });
+
+  test("does NOT run under set -e (graceful no-op must never abort the caller)", () => {
+    // Design-concept invariant: the helper must be best-effort — an I/O error,
+    // a missing footer, or an unreachable reflection API must never take down
+    // the build. `set -e`/`set -euo pipefail` would violate that.
+    assert.doesNotMatch(
+      depositScript,
+      /^\s*set -e(uo)?\b/m,
+      "helper must NOT set -e / set -euo pipefail — it is best-effort telemetry that must never abort the caller",
+    );
+    assert.match(
+      depositScript,
+      /exit 0/,
+      "helper must always exit 0 (best-effort telemetry never fails the caller)",
+    );
+  });
+});

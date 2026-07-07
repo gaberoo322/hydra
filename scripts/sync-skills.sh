@@ -170,6 +170,21 @@ else: print("")')
   # kebab-case key's true/false value to a Python bool, so print "1" only when it
   # is truthy — never the literal Python "True". "1" here means "emit the key".
   disable_model_invocation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("disable-model-invocation") else "0")')
+  # reference_files (issue #2947): an optional list of _fragments/<name>.md files
+  # COPIED VERBATIM into the generated skill folder as siblings of SKILL.md — the
+  # progressive-disclosure escape valve that keeps the SKILL.md body small
+  # (parent-flow / child-flow reference files that SKILL.md POINTS to behind a
+  # context pointer, never @includes — @include grows the body, it cannot shrink
+  # it). One fragment path per line for the shell loop below. FAIL LOUD on a
+  # missing/escaping fragment, mirroring the @include contract.
+  reference_files=$(echo "$parsed" | python3 -c '
+import sys,json
+d=json.load(sys.stdin)
+r=d["fm"].get("reference_files")
+if isinstance(r,list):
+    for x in r: print(x)
+elif r:
+    print(r)')
   body=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["body"])')
 
   if [ -z "$name" ] || [ -z "$desc" ]; then
@@ -225,6 +240,51 @@ else: print("")')
       mkdir -p "$(dirname "$settings_target")"
       cp "$settings_src" "$settings_target"
     fi
+  fi
+
+  # ---- Reference files (issue #2947) ----
+  # Copy each `reference_files:` fragment VERBATIM into the generated skill
+  # folder as a sibling of SKILL.md. This is the progressive-disclosure path:
+  # SKILL.md stays small and POINTS to these files behind a context pointer,
+  # rather than @include-ing them (which would grow the body). Substitutes
+  # {{SKILL_NAME}} exactly as @include does so a shared reference fragment can
+  # carry a per-skill log tag. FAIL LOUD (aborting the sync, and via the #433
+  # deploy contract the deploy) on a missing fragment or a path that escapes
+  # operator-playbooks/ — a broken reference pointer must never ship silently.
+  if [ -n "$reference_files" ]; then
+    while IFS= read -r ref_rel; do
+      [ -z "$ref_rel" ] && continue
+      ref_out=$(REPO_ROOT="$REPO_ROOT" PLAYBOOKS="$PLAYBOOKS" NAME="$name" \
+        REF_REL="$ref_rel" python3 - <<'PY'
+import os, sys
+playbooks = os.environ["PLAYBOOKS"]
+ref_rel = os.environ["REF_REL"]
+skill_name = os.environ["NAME"]
+frag_path = os.path.normpath(os.path.join(playbooks, ref_rel))
+if not frag_path.startswith(os.path.normpath(playbooks) + os.sep):
+    sys.stderr.write(
+        "sync-skills: reference_files path escapes operator-playbooks/: "
+        + ref_rel + " (in " + skill_name + ")\n")
+    sys.exit(3)
+if not os.path.isfile(frag_path):
+    sys.stderr.write(
+        "sync-skills: unresolved reference_files " + ref_rel
+        + " (in " + skill_name + "): no such fragment at " + frag_path + "\n")
+    sys.exit(3)
+with open(frag_path, "r", encoding="utf-8") as f:
+    content = f.read()
+sys.stdout.write(content.replace("{{SKILL_NAME}}", skill_name))
+PY
+      ) || { echo "sync-skills: reference_files emission failed for $name" >&2; errors=$((errors+1)); exit 3; }
+      ref_basename=$(basename "$ref_rel")
+      ref_target="$CLAUDE_DIR/$name/$ref_basename"
+      if [ "$DRY_RUN" = 1 ]; then
+        echo "would write $ref_target (reference file from $ref_rel)"
+      else
+        mkdir -p "$(dirname "$ref_target")"
+        printf '%s' "$ref_out" > "$ref_target"
+      fi
+    done <<< "$reference_files"
   fi
 
   # ---- Codex SKILL.md ----

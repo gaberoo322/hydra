@@ -302,6 +302,13 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
     // Golden check against the REAL repo: sync the real playbooks, then assert
     // both build skills inlined the shared deposit fragment with their own log
     // tag and no leftover directive/token. This pins the issue #2552 wiring.
+    //
+    // Issue #2947: the deposit fragment now INVOKES scripts/reflection-deposit.sh
+    // (the mechanics moved into the helper) rather than re-inlining the bash, and
+    // it still carries the {{SKILL_NAME}} → skill-name log-tag substitution as
+    // the helper's first argument. So the golden assertion moved from an inlined
+    // "[<skill>] refl-anchor-deposit ok" log line to the helper invocation with
+    // the skill's own tag argument.
     const dir = mkdtempSync(join(tmpdir(), "sync-skills-live-"));
     try {
       const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
@@ -315,25 +322,100 @@ describe("scripts/sync-skills.sh — @include fragment mechanism (issue #2552)",
       });
       assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
       for (const skill of ["hydra-dev", "hydra-target-build"]) {
-        const out = readFileSync(join(dir, "claude", skill, "SKILL.md"), "utf-8");
+        // The deposit surface for hydra-dev now ships in its child-flow
+        // reference file (reference_files), for hydra-target-build inline in
+        // SKILL.md. Union both so the assertion is branch-agnostic.
+        const skillDir = join(dir, "claude", skill);
+        let surface = readFileSync(join(skillDir, "SKILL.md"), "utf-8");
+        for (const ref of ["hydra-dev-child-flow.md", "hydra-dev-parent-flow.md"]) {
+          const refPath = join(skillDir, ref);
+          if (existsSync(refPath)) surface += "\n" + readFileSync(refPath, "utf-8");
+        }
         assert.match(
-          out,
-          new RegExp(`\\[${skill}\\] refl-anchor-deposit ok`),
-          `${skill} must inline the shared deposit fragment with its own [${skill}] log tag`,
+          surface,
+          /reflection-deposit\.sh" reflect "hydra-/,
+          `${skill} must invoke the deposit helper with its own skill-name tag argument`,
+        );
+        assert.match(
+          surface,
+          new RegExp(`reflection-deposit\\.sh" reflect "${skill}"`),
+          `${skill} must pass its own name as the deposit helper log tag (the {{SKILL_NAME}} substitution)`,
         );
         assert.doesNotMatch(
-          out,
+          surface,
           /^[ \t]*@include\b/m,
           `${skill} must not ship a literal @include directive`,
         );
         assert.doesNotMatch(
-          out,
+          surface,
           /\{\{SKILL_NAME\}\}/,
           `${skill} must not ship an unsubstituted {{SKILL_NAME}} token`,
         );
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2947: reference_files copies named fragments into the generated skill
+  // folder as siblings of SKILL.md (progressive disclosure) rather than
+  // @include-ing them (which grows the body).
+  test("reference_files fragments are emitted as siblings of SKILL.md, verbatim, with {{SKILL_NAME}} substituted", () => {
+    const repo = makeFragRepo();
+    try {
+      writeFileSync(
+        join(repo.fragments, "parent-flow.md"),
+        "PARENT-FLOW for [{{SKILL_NAME}}]\n",
+      );
+      writeFileSync(
+        join(repo.fragments, "child-flow.md"),
+        "CHILD-FLOW for [{{SKILL_NAME}}]\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "demo.md"),
+        "---\nname: demo\ndescription: demo\nreference_files: [_fragments/parent-flow.md, _fragments/child-flow.md]\n---\n\n# Demo\n\nsee the reference files\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const skillDir = join(r.claudeDir, "demo");
+      const skill = readFileSync(join(skillDir, "SKILL.md"), "utf-8");
+      // The reference material must NOT be inlined into SKILL.md.
+      assert.doesNotMatch(
+        skill,
+        /PARENT-FLOW|CHILD-FLOW/,
+        "reference_files content must NOT be inlined into SKILL.md (progressive disclosure)",
+      );
+      // It must be emitted as sibling files, verbatim, with the skill name substituted.
+      const parent = readFileSync(join(skillDir, "parent-flow.md"), "utf-8");
+      const child = readFileSync(join(skillDir, "child-flow.md"), "utf-8");
+      assert.match(parent, /PARENT-FLOW for \[demo\]/, "parent-flow sibling must carry the skill name");
+      assert.match(child, /CHILD-FLOW for \[demo\]/, "child-flow sibling must carry the skill name");
+      assert.doesNotMatch(parent, /\{\{SKILL_NAME\}\}/, "no unsubstituted token in emitted reference file");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing reference_files fragment FAILS LOUD (non-zero exit, aborts the sync)", () => {
+    const repo = makeFragRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "demo.md"),
+        "---\nname: demo\ndescription: demo\nreference_files: [_fragments/does-not-exist.md]\n---\n\n# Demo\n",
+      );
+      const r = runSync(repo);
+      assert.notEqual(
+        r.status,
+        0,
+        "a missing reference_files fragment must abort the sync (fail loud, like @include)",
+      );
+      assert.match(
+        r.stderr + r.stdout,
+        /unresolved reference_files/i,
+        "the failure must name the unresolved reference_files fragment",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
     }
   });
 });

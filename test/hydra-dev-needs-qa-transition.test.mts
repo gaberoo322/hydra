@@ -34,12 +34,17 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// Issue #2947 split the hydra-dev playbook: the parent-flow reaping steps
+// (including the Step 6 Success needs-qa transition) moved into the
+// _fragments/hydra-dev-parent-flow.md reference file that sync-skills.sh emits
+// as a sibling of SKILL.md. The obligation now lives there.
 const PLAYBOOK_PATH = join(
   __dirname,
   "..",
   "docs",
   "operator-playbooks",
-  "hydra-dev.md",
+  "_fragments",
+  "hydra-dev-parent-flow.md",
 );
 
 /**
