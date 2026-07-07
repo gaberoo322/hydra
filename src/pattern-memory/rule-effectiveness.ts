@@ -5,24 +5,29 @@
  * Lifted out of `agent-memory.ts` (issue #900) as a sibling module, mirroring
  * the escalation split (#823). `agent-memory.ts` keeps the core Pattern Memory
  * store + promotion; this module owns the self-contained behavioural subsystem
- * that answers "after a pattern was promoted to a `config/feedback/to-{agent}.md`
- * file, is it actually working — and if not, auto-demote it."
+ * that answers "after a pattern was promoted, is it actually working — and if
+ * not, auto-demote it."
  *
  * Everything that decision needs lives here: the tuning thresholds, the
- * effectiveness math, the post-promotion cooldown, the demotion side-effect on
- * the feedback file, and the bounded rule-action audit log. `learning.ts` calls
- * one entry point (`consolidatePromotedRuleEffectiveness`) from the daily
- * `consolidate()`; `api/learning.ts` calls `getIneffectivePromotedPatterns`
- * and `getRuleActionLog` for its diagnostic endpoints.
+ * effectiveness math, the post-promotion cooldown, the Redis-side demotion, and
+ * the bounded rule-action audit log. `learning.ts` calls one entry point
+ * (`consolidatePromotedRuleEffectiveness`) from the daily `consolidate()`;
+ * `api/learning.ts` calls `getIneffectivePromotedPatterns` and
+ * `getRuleActionLog` for its diagnostic endpoints.
+ *
+ * Issue #2962 — the demotion side-effect used to also rewrite the promoted rule
+ * out of `config/feedback/to-{agent}.md`. That feedback-file mirror was
+ * write-only (no dispatch prompt read it after the Codex consumers were deleted —
+ * ADR-0006 / #710) and was retired along with `feedback-file.ts`. Demotion now
+ * clears the Redis promotion stamp only.
  *
  * Pure-for-test functions (`evaluatePromotedPatternEffectiveness`,
  * `qualifiesForRuleAction`, `applyDemotionToPattern`,
- * `isEffectivenessCooldownExpired`, `removePromotedRuleFromFeedback`) are now
- * internals of THIS module's Interface rather than part of `agent-memory.ts`'s
- * ~30-export public surface. They remain exported because the unit tests
- * exercise them directly, but the orchestration that wires them together
- * (`processPromotedPatternEffectiveness` → `consolidatePromotedRuleEffectiveness`)
- * is now co-located with them.
+ * `isEffectivenessCooldownExpired`) are now internals of THIS module's Interface
+ * rather than part of `agent-memory.ts`'s public surface. They remain exported
+ * because the unit tests exercise them directly, but the orchestration that
+ * wires them together (`processPromotedPatternEffectiveness` →
+ * `consolidatePromotedRuleEffectiveness`) is now co-located with them.
  *
  * Storage seam
  * ------------
@@ -35,23 +40,12 @@
 
 import { appendRuleAction, readRecentRuleActions } from "../redis/agent-memory.ts";
 import { loadPatterns, savePatterns, type MemoryPattern } from "./agent-memory.ts";
-import {
-  demotePromotedRuleFromFeedbackFile,
-  removePromotedRuleBlock,
-} from "./feedback-file.ts";
 
-// Issue #940 — the demote-side feedback-file grammar (`removePromotedRuleBlock`
-// + the side-effecting `demotePromotedRuleFromFeedbackFile`) is now owned by the
-// `feedback-file.ts` Module, co-located with the matching append/render grammar
-// it parses against (the writer/reader coupling is now structural, not a doc
-// comment). `demotePromotedRuleFromFeedbackFile` is imported above and used by
-// the demotion caller below; it no longer needs to be re-exported (no external
-// importer resolves it through `rule-effectiveness.ts` — issue #1612).
-// `removePromotedRuleBlock` is re-exported under its historical name
-// `removePromotedRuleFromFeedback` so the existing test import
-// (test/promoted-rule-effectiveness.test.mts) keeps resolving against
-// `rule-effectiveness.ts`.
-export { removePromotedRuleBlock as removePromotedRuleFromFeedback };
+// Issue #2962 — the demote-side feedback-file grammar
+// (`removePromotedRuleBlock` / `demotePromotedRuleFromFeedbackFile`) was retired
+// with `feedback-file.ts`. The auto-demote pass below now demotes the Redis
+// pattern record only (`applyDemotionToPattern`) — the write-only
+// `config/feedback/to-*.md` mirror it used to rewrite is gone.
 
 // ===========================================================================
 // Types
@@ -112,8 +106,6 @@ export type RuleActionLogEntry = {
     postRate: number;
     rateRatioLabel: string;
   };
-  /** Set when `action === "demoted"` and the feedback-file rewrite succeeded. */
-  feedbackFileRewritten?: boolean;
   /** Free-form note (e.g. "auto-demote disabled via HYDRA_RULE_AUTO_DEMOTE"). */
   note?: string;
 };
@@ -288,14 +280,10 @@ export async function getIneffectivePromotedPatterns(
 // Issue #365 — Auto-demote / alert action on ineffective promoted rules
 // ===========================================================================
 
-// Issue #940 — the demote-side feedback-file grammar (the pure
-// `removePromotedRuleBlock` transform, re-exported here under its historical
-// name `removePromotedRuleFromFeedback`, and the side-effecting
-// `demotePromotedRuleFromFeedbackFile` wrapper) moved verbatim into the
-// `feedback-file.ts` Module. `removePromotedRuleBlock` is re-exported at the
-// top of this file (under its historical name); `demotePromotedRuleFromFeedbackFile`
-// is now only imported there (issue #1612 dropped its redundant re-export). The
-// auto-demote orchestration below calls the imported wrapper directly.
+// Issue #2962 — the demote-side feedback-file grammar
+// (`removePromotedRuleBlock` / `demotePromotedRuleFromFeedbackFile`, formerly in
+// `feedback-file.ts`) was retired: the auto-demote pass below now clears the
+// Redis promotion stamp only, with no `config/feedback/to-*.md` rewrite.
 
 /**
  * Append a rule-action audit entry to the bounded Redis list. Tail entries
@@ -352,7 +340,7 @@ export function isAutoDemoteEnabled(env: NodeJS.ProcessEnv = process.env): boole
 /**
  * Pure helper — given a single pattern that has already been classified
  * ineffective + action-worthy, mutate it in place to reflect a demotion.
- * Caller is responsible for the feedback-file rewrite + audit log.
+ * Caller is responsible for the audit log.
  */
 export function applyDemotionToPattern(p: MemoryPattern, todayIso: string): void {
   p.promoted = false;
@@ -371,8 +359,8 @@ export function applyDemotionToPattern(p: MemoryPattern, todayIso: string): void
 /**
  * Run the effectiveness check across all promoted patterns for a single
  * agent. For each pattern that `qualifiesForRuleAction()` flags:
- *   - if auto-demote is enabled, demote the pattern (Redis) + remove from
- *     the feedback file + record `action: "demoted"`.
+ *   - if auto-demote is enabled, demote the pattern (Redis promotion stamp
+ *     cleared) + record `action: "demoted"`.
  *   - if auto-demote is disabled, record `action: "alerted"` only.
  *   - if the same pattern was already checked within the cooldown window,
  *     record `action: "skipped-cooldown"` and move on.
@@ -449,14 +437,11 @@ async function processPromotedPatternEffectiveness(
       continue;
     }
 
-    // Auto-demote path.
+    // Auto-demote path. Issue #2962 — demotion now only clears the Redis
+    // pattern record's promotion stamp (`applyDemotionToPattern`); the
+    // write-only `config/feedback/to-*.md` rewrite it used to perform was
+    // retired with `feedback-file.ts`.
     applyDemotionToPattern(p, today);
-    let feedbackFileRewritten = false;
-    try {
-      feedbackFileRewritten = await demotePromotedRuleFromFeedbackFile(agentName, p.category);
-    } catch (err: any) {
-      console.error(`[Learning] demote feedback rewrite failed for ${agentName}/${p.category}: ${err.message}`);
-    }
     const entry: RuleActionLogEntry = {
       ts: nowIso,
       agent: agentName,
@@ -470,7 +455,6 @@ async function processPromotedPatternEffectiveness(
         postRate: ev.postRate,
         rateRatioLabel: ev.rateRatioLabel,
       },
-      feedbackFileRewritten,
     };
     actions.push(entry);
     await recordRuleAction(entry);
@@ -491,7 +475,7 @@ async function processPromotedPatternEffectiveness(
 /**
  * Entry point invoked from `consolidate()` once per day. Runs the
  * effectiveness check across planner/executor/skeptic. Always returns
- * cleanly — Redis or feedback-file errors are logged but never thrown.
+ * cleanly — Redis errors are logged but never thrown.
  */
 export async function consolidatePromotedRuleEffectiveness(
   now: Date = new Date(),

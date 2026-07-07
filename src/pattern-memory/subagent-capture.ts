@@ -6,15 +6,15 @@
  * to `hydra:memory:{agent}:patterns` from the in-process control loop. The
  * autopilot-dispatched subagents (`hydra-dev`, `hydra-qa`,
  * `hydra-target-build`) are the new producers of cycle-level evidence, but
- * each one is amnesic — they read `config/feedback/to-*.md` and never
- * contribute back.
+ * each one is amnesic and never contributes back on its own.
  *
  * `captureSubagentLesson()` is the single entry point those subagents use
  * (directly when running in-process, or transitively via
  * `POST /api/memory/subagent-lesson` when they run in a worktree subprocess).
  * It wraps `recordPattern()` 1:1 so the existing 3-hit auto-promotion
- * pipeline keeps producing durable cardinal rules in
- * `config/feedback/to-{agent}.md`.
+ * pipeline keeps stamping durable cardinal rules on the Redis pattern record.
+ * (Issue #2962 retired the `config/feedback/to-*.md` mirror those rules used to
+ * also write to — it was write-only and read by no dispatch prompt.)
  *
  * Design notes:
  *   - The writer interface mirrors the codex-cycle writer (same pattern
@@ -165,8 +165,9 @@ export function isValidOutcome(o: unknown): o is SubagentOutcome {
 
 /**
  * Capture one lesson from a Claude-driven subagent run. Wraps
- * `recordPattern()` 1:1 so the auto-promotion pipeline (3-hit → write to
- * `config/feedback/to-{agent}.md`) keeps working unchanged.
+ * `recordPattern()` 1:1 so the auto-promotion pipeline (3-hit → stamp the Redis
+ * pattern record as promoted) keeps working unchanged. (Issue #2962 retired the
+ * `config/feedback/to-{agent}.md` mirror that promotion used to also write.)
  *
  * Safe to call from inside an autopilot dispatch (in-process) or from an
  * HTTP handler (`/api/memory/subagent-lesson`).
@@ -233,9 +234,10 @@ export type SubagentFriction = {
 };
 
 /**
- * Capture a soft-friction item from a subagent run. Friction items don't
- * promote to feedback files (there is no per-skill feedback file) but they
- * DO escalate to GitHub when the same cue crosses the promotion threshold.
+ * Capture a soft-friction item from a subagent run. Friction items are stamped
+ * on the friction pattern store but DO escalate to GitHub when the same cue
+ * crosses the promotion threshold. (Friction patterns never mirrored to a
+ * feedback file even before issue #2962 retired that mirror for lessons.)
  *
  * Idempotent on `(skill, cue)` — multiple calls merge into one pattern
  * (hit count increments, workarounds roll into the examples list).

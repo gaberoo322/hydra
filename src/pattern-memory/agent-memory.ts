@@ -17,10 +17,14 @@
  *   consolidateAgentPatterns       — daily prune driven by consolidate()
  *
  * Issue #2342 — the back-compat re-export relay was removed: external callers
- * now import `PROMOTION_THRESHOLD` from `./constants.ts` and the stale-rule
- * maintenance functions (`consolidateStalePromotedRules`,
- * `detectStalePromotedRules`, `processStaleRules`, `StaleRule`) from
- * `./feedback-file.ts` directly, so the import path names the canonical owner.
+ * now import `PROMOTION_THRESHOLD` from `./constants.ts` directly, so the import
+ * path names the canonical owner.
+ *
+ * Issue #2962 — the promote→observe→demote lifecycle over
+ * `config/feedback/to-*.md` was retired (write-only after the Codex consumers
+ * were deleted — ADR-0006 / #710). Promotion now stamps `promoted/promotedAt` in
+ * the Redis pattern store only; it no longer mirrors a rule block into a dead
+ * markdown file, and `feedback-file.ts` was removed.
  */
 
 import {
@@ -36,11 +40,11 @@ import {
 import { canonicalizeCue } from "./cue-policy.ts";
 // Issue #2178 — the promotion/escalation decision spine extracted from this
 // file's `recordPattern` orchestration. `decideRecordActions` is a pure
-// predicate: given a pattern's post-hit state it answers "promote? write the
-// feedback file? escalate?", so the "when to call the seams" choice is named
-// and testable on its own instead of inlined across `recordPattern`'s branches.
+// predicate: given a pattern's post-hit state it answers "promote? escalate?",
+// so the "when to call the seams" choice is named and testable on its own
+// instead of inlined across `recordPattern`'s branches. (Issue #2962 retired the
+// third sub-decision, `writeFeedbackFile`, along with the dead feedback file.)
 import { decideRecordActions } from "./decision.ts";
-import { promoteToFeedbackFile } from "./feedback-file.ts";
 // Issue #2108 — the fuzzy cue-deduplication algorithm (stemming, tokenization,
 // the overlap-coefficient `cueSimilarity`, the `findPatternForCue` resolver, and
 // the `CUE_MERGE_THRESHOLD` constant) now lives in the sibling `cue-matcher.ts`
@@ -243,26 +247,17 @@ async function sweepStalePromotions(agentName: string) {
 
   for (const p of patterns) {
     // Issue #2178 — the retroactive-promotion decision shares the same pure
-    // predicate as `recordPattern`. This sweep is memory-namespace only
-    // (loadPatterns defaults to "memory"), so `decision.writeFeedbackFile`
-    // folds in the #524 metadata-cue skip exactly as the inline check did.
+    // predicate as `recordPattern`. Issue #2962 retired the feedback-file write:
+    // promotion now only stamps the Redis pattern record (`promoted/promotedAt/
+    // hitsAtPromotion`), which is what drives escalation and the effectiveness
+    // API — nothing is mirrored into a markdown file any more.
     const decision = decideRecordActions(p, "memory", PROMOTION_THRESHOLD);
     if (decision.promote) {
-      try {
-        if (decision.writeFeedbackFile) {
-          await promoteToFeedback(agentName, p);
-        }
-        p.promoted = true;
-        p.promotedAt = new Date().toISOString().split("T")[0];
-        p.hitsAtPromotion = p.hitCount;
-        changed = true;
-        const target = decision.writeFeedbackFile
-          ? `to-${agentName}.md`
-          : "(metadata-only — feedback-file write skipped)";
-        console.log(`[Learning] Retroactive promotion: "${p.category}" to ${target} (${p.hitCount} hits)`);
-      } catch (err: any) {
-        console.error(`[Learning] Retroactive promotion failed for "${p.category}": ${err.message}`);
-      }
+      p.promoted = true;
+      p.promotedAt = new Date().toISOString().split("T")[0];
+      p.hitsAtPromotion = p.hitCount;
+      changed = true;
+      console.log(`[Learning] Retroactive promotion: "${p.category}" (${p.hitCount} hits)`);
     }
   }
 
@@ -270,28 +265,6 @@ async function sweepStalePromotions(agentName: string) {
     await savePatterns(agentName, patterns);
   }
 }
-
-/**
- * Issue #940 — thin delegate to the Feedback File grammar Module. The
- * `MemoryPattern` carries more than the block needs, so we hand the
- * `feedback-file.ts` operation only the `PromotedRuleInput` fields it renders.
- * The append grammar (heading format, section header, preamble) lives there.
- */
-async function promoteToFeedback(agentName: string, pattern: MemoryPattern) {
-  await promoteToFeedbackFile(agentName, {
-    category: pattern.category,
-    hitCount: pattern.hitCount,
-    firstSeen: pattern.firstSeen,
-    action: pattern.action,
-    lastCycleId: pattern.lastCycleId,
-    examples: pattern.examples,
-    lastSeen: pattern.lastSeen,
-  });
-}
-
-// Issue #940 — the stale-rule grammar (`StaleRule`, `detectStalePromotedRules`,
-// `processStaleRules`, `consolidateStalePromotedRules`) moved verbatim into the
-// `feedback-file.ts` Module and is re-exported at the top of this file.
 
 // ===========================================================================
 // Agent memory loading + formatting
@@ -453,25 +426,19 @@ export async function recordPattern(
     if (details.source) existing.source = details.source;
 
     // Issue #2178 — the promotion decision moves to the named pure predicate.
-    // `decision.promote` answers "crossed threshold, not yet promoted?" and
-    // `decision.writeFeedbackFile` folds in the #524 metadata-cue skip and the
-    // namespace gate. Judged on the CANONICAL category (issue #1667) so a
-    // fuzzy-merged variant can't dodge or trigger the metadata classification.
+    // `decision.promote` answers "crossed threshold, not yet promoted?". Judged
+    // on the CANONICAL category (issue #1667) so a fuzzy-merged variant can't
+    // dodge the classification. Issue #2962 retired the feedback-file write
+    // that promotion used to gate: promotion now only stamps the Redis pattern
+    // record (`promoted/promotedAt/hitsAtPromotion`) — the signal escalation and
+    // the effectiveness API read — without mirroring a dead markdown file.
     const decision = decideRecordActions(existing, namespace, PROMOTION_THRESHOLD);
     if (decision.promote) {
-      if (decision.writeFeedbackFile) {
-        await promoteToFeedback(agentName, existing);
-      }
       existing.promoted = true;
       existing.promotedAt = today;
       existing.hitsAtPromotion = existing.hitCount;
       crossedThreshold = true;
-      const target = decision.writeFeedbackFile
-        ? `to-${agentName}.md`
-        : namespace === "memory"
-          ? `(metadata-only — feedback-file write skipped)`
-          : `friction:${agentName}`;
-      console.log(`[Learning] Promoted "${existing.category}" to ${target} (${existing.hitCount} hits)`);
+      console.log(`[Learning] Promoted "${existing.category}" (${existing.hitCount} hits)`);
     }
     pattern = existing;
   } else {
