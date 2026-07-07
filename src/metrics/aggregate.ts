@@ -77,6 +77,43 @@ export function computeEmptyRateFromTrend(
 }
 
 /**
+ * Pure projection: tokens-per-merged-PR over a metrics-trend window — the
+ * sanctioned cost-per-merge fitness metric under the token plane (ADR-0016;
+ * Quota-Weighted Burn). Cost is TOKENS, never dollars (costUsd is retired,
+ * #1651/#704) — this projection reads only the `tokenCost` field the trend
+ * joins from `hydra:metrics:tokens:cycle:<id>` (issue #2930).
+ *
+ * A cycle contributes only when it BOTH merged (`tasksMerged > 0`) AND carries a
+ * non-null joined `tokenCost` (a real per-cycle token record). Cycles whose
+ * `tokenCost` is null are UNATTRIBUTED — they are excluded from both the token
+ * sum and the merged-cycle count, so the average is over the attributed subset,
+ * never diluted by a fabricated 0 (truthful-sentinel discipline).
+ *
+ * Returns `null` (not 0) when no merged cycle in the window carries a token
+ * record — "unattributed" stays distinct from "0 tokens per merge", mirroring
+ * the null-on-empty discipline of `computeRollingMergeRateFromTrend`.
+ *
+ * Exported so the test suite can pin the arithmetic on a synthetic trend array
+ * without a live Redis fetch.
+ */
+export function projectTokensPerMergedPR(
+  trend: Array<Record<string, any>>,
+): number | null {
+  let tokenSum = 0;
+  let mergedWithTokens = 0;
+  for (const m of trend) {
+    const merged = (m?.tasksMerged ?? 0) > 0;
+    const tokenCost = m?.tokenCost;
+    if (merged && typeof tokenCost === "number" && Number.isFinite(tokenCost)) {
+      tokenSum += tokenCost;
+      mergedWithTokens += 1;
+    }
+  }
+  if (mergedWithTokens === 0) return null;
+  return Math.round(tokenSum / mergedWithTokens);
+}
+
+/**
  * Pure projection: fold an already-fetched metrics-trend array into the
  * aggregate-stats shape (`mergedRate` / `regressionRate` / `noOpMergeRate` /
  * the duration averages / the anchor distribution).
@@ -137,6 +174,10 @@ export function projectAggregateStats(trend: Array<Record<string, any>>) {
     avgGroundingMs: groundingDurations.length > 0
       ? Math.round(groundingDurations.reduce((a, b) => a + b, 0) / groundingDurations.length) : 0,
     totalFilesChanged: filesChangedTotal,
+    // Issue #2930: sanctioned cost-per-merge fitness metric in TOKENS (never
+    // USD). null when no merged cycle in the window carries a joined token
+    // record — the truthful unattributed sentinel, not a fabricated 0.
+    tokensPerMergedPR: projectTokensPerMergedPR(trend),
     anchorDistribution: anchorDist,
     falseCompletionRate: 0,
     anchoredRate: 100,
