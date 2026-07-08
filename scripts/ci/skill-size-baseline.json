@@ -4,6 +4,24 @@
     "docs/operator-playbooks/_fragments/grounding-tests-deposit.md": {
       "body": 104
     },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-class-wiring.md": {
+      "body": 1982
+    },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-ops-reference.md": {
+      "body": 2199
+    },
+    "docs/operator-playbooks/_fragments/hydra-autopilot-phase6-ops.md": {
+      "body": 1086
+    },
+    "docs/operator-playbooks/_fragments/hydra-target-build-anchor-preflight.md": {
+      "body": 2588
+    },
+    "docs/operator-playbooks/_fragments/hydra-target-build-inline-mode.md": {
+      "body": 477
+    },
+    "docs/operator-playbooks/_fragments/hydra-target-build-merge-flow.md": {
+      "body": 3503
+    },
     "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md": {
       "body": 1704
     },
@@ -26,7 +44,7 @@
       "description": 40
     },
     "docs/operator-playbooks/hydra-autopilot.md": {
-      "body": 9739,
+      "body": 4838,
       "description": 25
     },
     "docs/operator-playbooks/hydra-branch-prune.md": {
@@ -106,7 +124,7 @@
       "description": 30
     },
     "docs/operator-playbooks/hydra-target-build.md": {
-      "body": 11522,
+      "body": 4473,
       "description": 38
     },
     "docs/operator-playbooks/hydra-target-cleanup.md": {
