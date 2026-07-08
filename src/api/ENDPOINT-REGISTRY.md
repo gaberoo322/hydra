@@ -299,9 +299,7 @@ broad consumers are:
 | Method | Path | Stability |
 |---|---|---|
 | GET | `/api/learning/context-trace` | stable |
-| GET | `/api/learning/friction-patterns` | stable |
-| GET | `/api/learning/ineffective-rules` | stable |
-| GET | `/api/learning/rule-action-log` | stable |
+| GET | `/api/learning/reflection-health` | stable |
 
 ### `src/api/maintenance.ts`
 
@@ -362,6 +360,7 @@ broad consumers are:
 | Method | Path | Stability |
 |---|---|---|
 | GET | `/api/learning/coverage` | stable |
+| GET | `/api/learning/knowledge` | stable |
 | GET | `/api/openviking-stats` | stable |
 | GET | `/api/openviking/search` | stable |
 
@@ -389,6 +388,9 @@ broad consumers are:
 
 | Method | Path | Stability |
 |---|---|---|
+| GET | `/api/learning/friction-patterns` | stable |
+| GET | `/api/learning/ineffective-rules` | stable |
+| GET | `/api/learning/rule-action-log` | stable |
 | GET | `/api/memory/:agent` | stable |
 | POST | `/api/memory/:agent/pattern` | stable |
 | POST | `/api/memory/subagent-friction` | stable |

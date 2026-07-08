@@ -8,11 +8,19 @@
  * `cyclesWithContext` availability metric is recorded (moved OUT of getContext,
  * so a diagnostic context-trace hit no longer pollutes the real-cycle metric).
  *
- * The route accepts an injectable deps bag (`LearningRouterDeps`), so these
+ * The route accepts an injectable deps bag (`OpenVikingRouterDeps`), so these
  * cases drive the record-on-success invariant deterministically with NO live
  * OpenViking / Redis connection — every dependency is a stub. This is a NEW
  * top-level describe with its own server lifecycle (no shared-Redis teardown),
  * per the CLAUDE.md authoring rule.
+ *
+ * Issue #3006: the knowledge route + its two telemetry side effects were split
+ * out of the catch-all `src/api/learning.ts` router and folded into the
+ * existing `src/api/openviking.ts` router (`createOpenVikingRouter`), which
+ * already owns the Knowledge-Base HTTP surface. The route path
+ * (`GET /api/learning/knowledge`) is byte-identical; only the factory this test
+ * mounts changed. The three knowledge-route stubs are supplied via the
+ * `OpenVikingRouterDeps` bag (same three fields as before).
  */
 
 import { test, describe, before, after } from "node:test";
@@ -20,13 +28,13 @@ import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
 
-const { createLearningRouter } = await import("../src/api/learning.ts");
+const { createOpenVikingRouter } = await import("../src/api/openviking.ts");
 
-/** Spin up an express app mounting the learning router with the given deps. */
+/** Spin up an express app mounting the OpenViking router with the given deps. */
 async function startApi(deps: any): Promise<{ server: any; baseUrl: string }> {
   const app = express();
   app.use(express.json());
-  app.use("/api", createLearningRouter(deps));
+  app.use("/api", createOpenVikingRouter(deps));
   return new Promise((resolve) => {
     const server = app.listen(0, () => {
       const addr = server.address() as AddressInfo;

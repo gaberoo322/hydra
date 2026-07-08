@@ -105,6 +105,11 @@ function createApi(eventBus: EventBus) {
   api.use(createCapacityRouter());
   api.use(createObservabilityRouter());
   api.use(createLearningRouter());
+  // Issue #3006: the plan-time knowledge fetch (GET /api/learning/knowledge)
+  // moved out of the learning router into createOpenVikingRouter (its
+  // Knowledge-Base domain home); the read-side pattern-memory diagnostics moved
+  // into createPatternMemoryRouter. Route paths unchanged; src/api.ts stays a
+  // thin mount point with the same three zero-arg factory calls.
   api.use(createPatternMemoryRouter());
   api.use(createAnchorRouter());
   // Autopilot HTTP surface — split by domain concern (#2034) into four focused
