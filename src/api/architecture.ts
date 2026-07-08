@@ -5,7 +5,7 @@ import {
   scanArchitecture,
   type ArchitectureGraph,
 } from "../aggregators/architecture-graph.ts";
-import type { PingableBus } from "./event-bus-types.ts";
+import type { PingableBus } from "../event-bus-seams.ts";
 
 const CACHE_TTL = 60_000;
 

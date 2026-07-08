@@ -55,7 +55,7 @@ import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // repair lives in the lifecycle path (learning-lifecycle.ts), not the probe.
 import { countSourceHashes } from "../redis/source-index.ts";
 import { probeOvSourceResourcesPresent } from "../knowledge-base/indexer.ts";
-import type { PingableBus } from "./event-bus-types.ts";
+import type { PingableBus } from "../event-bus-seams.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");

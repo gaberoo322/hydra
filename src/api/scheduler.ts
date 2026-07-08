@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
-import type { PingableBus } from "./event-bus-types.ts";
+import type { PingableBus } from "../event-bus-seams.ts";
 
 // The scheduler router only forwards the bus to `heartbeat.start()` (whose
 // `eventBus` param is still implicit-any); it never publishes itself. The seam
