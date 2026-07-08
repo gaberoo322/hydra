@@ -1,6 +1,19 @@
 /**
- * Minimal structural seams for the event bus, as consumed by the `src/api/`
- * sub-router factories (issue #1897).
+ * Structural seams over the event bus — the narrow interfaces naming only the
+ * members a given caller needs from the concrete `EventBus` class
+ * (`src/event-bus.ts`). Consumed by the `src/api/` sub-router factories and by
+ * the `src/scheduler/` chores that publish notifications (issue #1897, #2998).
+ *
+ * # Why this is a root-level leaf, not part of `src/event-bus.ts` or `src/api/`
+ *
+ * These seams describe what a *caller* needs from the bus, so they belong to
+ * the event-bus domain — alongside `event-bus-vocabulary.ts` and
+ * `event-bus-stream-keys.ts`, the sibling zero-Redis-side-effect leaves. They
+ * are NOT inlined into `src/event-bus.ts` because that module imports
+ * `getRedisConnection` at top level; a scheduler chore importing a seam type
+ * from it would pull the Redis connection into parse-time scope — exactly the
+ * zero-import-side-effect hazard the sibling leaves were extracted to avoid.
+ * This pure-type leaf keeps that property (issue #2998).
  *
  * # Why structural interfaces, not the concrete `EventBus` class
  *

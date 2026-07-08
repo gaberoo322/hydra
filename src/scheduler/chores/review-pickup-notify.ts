@@ -23,7 +23,7 @@ import {
   clearReviewPickupNotified,
 } from "../../redis/review.ts";
 import { getReviewPickupSet } from "../../review-pickup.ts";
-import type { PublishableBus } from "../../api/event-bus-types.ts";
+import type { PublishableBus } from "../../event-bus-seams.ts";
 
 /**
  * External touchpoints of the review-pickup-notify chore. `deps` is injectable

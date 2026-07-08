@@ -49,7 +49,7 @@ import {
   getCleanupLastDaily,
   getUsageSnapshotLastWeekly,
 } from "../redis/housekeeping.ts";
-import type { PublishableBus } from "../api/event-bus-types.ts";
+import type { PublishableBus } from "../event-bus-seams.ts";
 
 import { runBlockedItemEscalation } from "./chores/blocked-escalation.ts";
 import { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
