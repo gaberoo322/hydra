@@ -336,7 +336,7 @@ export async function getCostPerMergedPr(
 // buckets still sum to the daily total; this read is additive.
 
 /** One class's efficiency line in the audit read. */
-export interface ClassCostEfficiencyEntry {
+interface ClassCostEfficiencyEntry {
   /** Total tokens attributed to this class over the window. */
   tokens: number;
   /** Fraction of the window's total tokens (0..1, 2dp) — the raw "share". */
