@@ -544,6 +544,13 @@ function createIssue(title: string, body: string): void {
       "cleanup-scan",
       "--label",
       "ready-for-agent",
+      // Cleanup-scan findings are mechanically-verifiable dead-code deletions that
+      // never go through hydra-grill, so they carry no design-concept artifact.
+      // The design-concept-exempt label tells hydra-qa to skip the Spec axis rather
+      // than logging a QA resolve MISS and falling through in Phase A shadow mode
+      // (issue #3013).
+      "--label",
+      "design-concept-exempt",
       "--body-file",
       "-",
     ],

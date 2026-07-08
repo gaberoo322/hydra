@@ -159,9 +159,17 @@ Decide what to do with the result:
 
 ```bash
 MODE="${DESIGN_CONCEPT_MODE:-warn}"   # warn (Phase A) | enforce (Phase B/C)
-HAS_EXEMPT_LABEL=$(gh pr view $pr_number --repo gaberoo322/hydra \
-  --json labels --jq '.labels[].name' | grep -Fxq 'design-concept-exempt' \
-  && echo 1 || echo 0)
+# Check the PR label first (operator override path), then fall back to the
+# parent issue label — hydra-cleanup-scan issues carry design-concept-exempt
+# at filing time so QA skips the Spec axis cleanly instead of logging a resolve
+# MISS and falling through to Phase A shadow mode (issue #3013).
+HAS_EXEMPT_LABEL=$(
+  { gh pr view $pr_number --repo gaberoo322/hydra \
+      --json labels --jq '.labels[].name' | grep -Fxq 'design-concept-exempt'; } \
+  || { [ -n "$PARENT_ISSUE" ] && gh issue view $PARENT_ISSUE --repo gaberoo322/hydra \
+      --json labels --jq '.labels[].name' | grep -Fxq 'design-concept-exempt'; } \
+  && echo 1 || echo 0
+)
 SPEC_SKIPPED_REASON=""
 
 if [ "$RESOLVE_FOUND" = "true" ]; then
@@ -169,8 +177,10 @@ if [ "$RESOLVE_FOUND" = "true" ]; then
   # sub-agent (unless exempt-labelled).
   SPEC_INPUT_JSON=$(printf '%s' "$RESOLVE_JSON" | jq -c '.concept')
 elif [ "$HAS_EXEMPT_LABEL" = "1" ]; then
-  # Operator override — skip Spec axis with audit log.
-  SPEC_SKIPPED_REASON="design-concept-exempt label present (operator override)"
+  # Operator override (PR label) or deterministic-exempt class (issue label —
+  # e.g. cleanup-scan findings carry design-concept-exempt at filing time).
+  # Skip Spec axis with audit log.
+  SPEC_SKIPPED_REASON="design-concept-exempt label present (operator override or deterministic-exempt class)"
 elif [ "$MODE" = "enforce" ]; then
   # Phase B/C — hard fail. Surface the resolver's loud, handle-named reason so
   # the operator sees exactly WHERE the artifact was looked for (issue #1450).
