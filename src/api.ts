@@ -56,7 +56,7 @@ const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
 // `eventBus` is the concrete in-process bus (src/event-bus.ts), constructed in
 // src/index.ts. It structurally satisfies every router seam in
-// src/api/event-bus-types.ts (PingableBus / PublishableBus / EventReaderBus),
+// src/event-bus-seams.ts (PingableBus / PublishableBus / EventReaderBus),
 // so the typed mount points below need no cast. The routers that never touch
 // the bus (research, cycles, alerts, tier, digest, operational, …) take no
 // parameter.

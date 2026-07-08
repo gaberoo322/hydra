@@ -18,7 +18,7 @@ import {
   getBlockedLastEscalation,
   setBlockedLastEscalation,
 } from "../../redis/housekeeping.ts";
-import type { PublishableBus } from "../../api/event-bus-types.ts";
+import type { PublishableBus } from "../../event-bus-seams.ts";
 
 // Generate actionable unblock commands based on the blocked reason.
 function generateUnblockCommands(blockedReason: string, title: string): string[] {

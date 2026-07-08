@@ -31,7 +31,7 @@ convention. So the full path of any route is `/api` + the path string passed to
 `router.<verb>(...)` inside its module.
 
 The table below was extracted by scanning `src/api.ts` and `src/api/*.ts`
-(excluding the non-router helpers `route-helpers.ts` and `event-bus-types.ts`)
+(excluding the non-router helper `route-helpers.ts`)
 for `(router|app).(get|post|put|delete|patch)(` registrations whose first
 argument is a quoted path literal — including multi-line registrations where the
 path sits on the line after the `(`. To regenerate after the surface changes:
@@ -43,7 +43,7 @@ npx tsx -e '
 const fs=require("fs"),path=require("path");
 const dir="src/api";
 const files=["src/api.ts",...fs.readdirSync(dir).filter(f=>f.endsWith(".ts")).map(f=>path.join(dir,f))];
-const exclude=new Set(["src/api/route-helpers.ts","src/api/event-bus-types.ts"]);
+const exclude=new Set(["src/api/route-helpers.ts"]);
 const re=/\b(router|app)\.(get|post|put|delete|patch)\(\s*["\x60'"'"']([^"\x60'"'"']+)["\x60'"'"']/g;
 let total=0;
 for(const f of files){ if(exclude.has(f))continue;

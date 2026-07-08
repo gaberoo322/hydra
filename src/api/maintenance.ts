@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { runHousekeeping } from "../scheduler/housekeeping.ts";
-import type { PublishableBus } from "./event-bus-types.ts";
+import type { PublishableBus } from "../event-bus-seams.ts";
 
 /**
  * Maintenance sub-router (issue #723 — scheduler fold PR-3/4).

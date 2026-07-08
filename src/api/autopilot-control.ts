@@ -32,7 +32,7 @@ import {
   setAutopilotPaused,
   clearAutopilotPaused,
 } from "../redis/autopilot-pause.ts";
-import type { PublishableBus } from "./event-bus-types.ts";
+import type { PublishableBus } from "../event-bus-seams.ts";
 
 /**
  * @param eventBus - optional; when provided, pause/resume emit a
