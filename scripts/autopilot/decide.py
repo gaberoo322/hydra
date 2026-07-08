@@ -555,6 +555,13 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # the #718 PR-backlog blocker that deferred it is resolved) is target-scope
     # and so lives in SCOPE_ORCH_ONLY_EXCLUDE instead.
     "cleanup_orch",
+    # skill_prune (issue #2949, epic #2944) prunes the ORCHESTRATOR's own
+    # playbook-generated skills (docs/operator-playbooks/*.md) — orch-scope by
+    # definition, the eval-gated prompt counterpart to cleanup_orch's mechanical
+    # code sweep. Under `target-only` the autopilot stays out of orch work, so
+    # skill_prune is excluded, mirroring scout_orch / architecture_orch /
+    # retro_orch / cleanup_orch above.
+    "skill_prune",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -1639,6 +1646,17 @@ def _rule_signal_classes(
         # in BACKFILL_SIGNAL_CLASSES. Registered last as the lowest-priority
         # signal class — spare capacity only.
         "design_qa_target",
+        # skill_prune (issue #2949, epic #2944) — the eval-gated PROMPT
+        # counterpart to cleanup_orch's mechanical dead-CODE sweep: prunes the
+        # Orchestrator's playbook-generated skills one at a time along the Pocock
+        # taxonomy. Keyed off the same `orch_backfill_idle` spare-capacity signal
+        # as architecture_orch/cleanup_orch, but the 7d class cooldown
+        # (scout_orch's calendar discipline) is the primary cadence and
+        # `skill_prune_board_saturated` is the anti-flood cap checked FIRST in the
+        # selector. NOT in BACKFILL_SIGNAL_CLASSES (rate-limits on its own 7d
+        # cooldown, not the one-per-turn stagger — like cleanup_orch). Registered
+        # last as a lowest-priority signal class — spare capacity only.
+        "skill_prune",
     ):
         if dispatch_blocked:
             out.events.append(
@@ -2675,6 +2693,55 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                     "max_items": DESIGN_QA_TARGET_MAX_ITEMS,
                 },
                 reason="target design-QA cadence due — screenshot review vs design ADR",
+            )
+        return None
+    if sig == "skill_prune":
+        # Issue #2949 (epic #2944, the skill-quality overhaul). The recurring,
+        # eval-gated PROMPT counterpart to cleanup_orch's mechanical dead-CODE
+        # sweep: dispatch the headless /hydra-skill-prune skill to prune the
+        # Orchestrator's playbook-generated skills. Each run picks EXACTLY ONE
+        # generated skill (largest-over-baseline first, else round-robin) and
+        # proposes deletions along the Pocock pruning taxonomy (duplication /
+        # sediment / no-op). The deletion test is made deterministic — candidates
+        # are validated by running the promptfoo eval (evals/skill-prune.yaml,
+        # offline echo provider) and requiring golden-task contract-token parity
+        # before a PR opens; a failing eval aborts the PR and files a needs-triage
+        # issue listing the candidates instead. Output is AT MOST one T1/T2 PR per
+        # run editing only that playbook (plus its regenerated skill + its
+        # shrink-only-tightened skill-size-baseline.json entry).
+        #
+        # Spare-capacity backfill: keyed off the same `orch_backfill_idle` signal
+        # as architecture_orch / cleanup_orch (collect-state.sh emits it when the
+        # orchestrator board has gone idle). The 7d class cooldown
+        # (SIGNAL_COOLDOWNS["skill_prune"], honored by the shared signal_is_cooled
+        # guard at the top of this function) is the primary cadence control — the
+        # scout_orch calendar discipline, since the accretion worth pruning takes
+        # a week to accumulate — and is seeded in bootstrap.sh's signal_last_fired
+        # so it survives the pace-gate relaunch (the #2575 cooldown-bootstrap bug
+        # class). NOT in BACKFILL_SIGNAL_CLASSES: like cleanup_orch it rides the
+        # idle signal but rate-limits on its own cooldown, not the one-per-turn
+        # stagger.
+        #
+        # `skill_prune_board_saturated` is the anti-flood cap, checked FIRST
+        # (before the cooldown, exactly like cleanup_orch / cleanup_board_saturated
+        # and design_qa_target / design_qa_target_saturated): once the board
+        # already holds enough open skill-prune proposal work the pass suppresses
+        # itself so a healthy skill set isn't re-pruned into churn.
+        #
+        # The dispatch stamps `apply: true` (the #1078 retro/cleanup anti-dry-run-
+        # no-op lesson: the skill is dry-run by default, so a headless dispatch
+        # without it files/opens NOTHING) and OMITS the model param (inherit the
+        # parent per #1093 — judgment work; the Haiku-premature-exit failure mode
+        # is documented). decide.py reads the precomputed signals only — it never
+        # reads the playbooks or runs the eval here (the signal-seam discipline).
+        if _signal_present(state, events, "skill_prune_board_saturated"):
+            return None
+        if _signal_present(state, events, "orch_backfill_idle"):
+            return make_dispatch(
+                sig,
+                "hydra-skill-prune",
+                prompt_args={"apply": True},
+                reason="orch board idle — eval-gated skill prune backfill",
             )
         return None
     return None

@@ -176,6 +176,15 @@
       "cooldownSeconds": 604800,
       "model": null,
       "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "name": "skill_prune",
+      "kind": "signal",
+      "skill": "hydra-skill-prune",
+      "scope": "orch",
+      "cooldownSeconds": 604800,
+      "model": null,
+      "sourcePath": "scripts/autopilot/classes.json"
     }
   ],
   "labels": [
@@ -389,6 +398,11 @@
     {
       "class": "design_qa_target",
       "skill": "hydra-design-qa",
+      "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "class": "skill_prune",
+      "skill": "hydra-skill-prune",
       "sourcePath": "scripts/autopilot/classes.json"
     }
   ]

@@ -280,16 +280,16 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       for (const cls of expectedSlots) {
         assert.equal(s.slots[cls], null, `slot ${cls} should be null`);
       }
-      // 11 signal classes (issue #2575 + #2722 + #2739): the 5 always-on classes
-      // seeded at 0 (re-armed each run) plus the 6 long-cooldown classes that,
-      // with no prior state file, also default to 0. The carry-forward behaviour
-      // for the cooldown classes is pinned separately below. #2722 added
-      // `wire_or_retire_target` (24h); #2739 added `design_qa_target` (7d) — both
-      // the same #2575 bootstrap bug class.
+      // 12 signal classes (issue #2575 + #2722 + #2739 + #2949): the 5 always-on
+      // classes seeded at 0 (re-armed each run) plus the 7 long-cooldown classes
+      // that, with no prior state file, also default to 0. The carry-forward
+      // behaviour for the cooldown classes is pinned separately below. #2722 added
+      // `wire_or_retire_target` (24h); #2739 added `design_qa_target` (7d); #2949
+      // added `skill_prune` (7d) — all the same #2575 bootstrap bug class.
       const expectedSignals = [
         "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
         "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
-        "wire_or_retire_target", "design_qa_target",
+        "wire_or_retire_target", "design_qa_target", "skill_prune",
       ];
       for (const sig of expectedSignals) {
         assert.equal(s.signal_last_fired[sig], 0, `signal ${sig} should start at 0`);
@@ -677,8 +677,10 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // `wire_or_retire_target` (24h — same bug class), bumping the total to 17
   // (7 pipeline + 10 signal). #2739 added the 6th long-cooldown signal class
   // `design_qa_target` (7d — same bug class), bumping the total to 18
-  // (7 pipeline + 11 signal).
-  test("emits exactly 7 pipeline slot names + 11 signal_last_fired names (18 keys total)", () => {
+  // (7 pipeline + 11 signal). #2949 added the 7th long-cooldown signal class
+  // `skill_prune` (7d — same bug class), bumping the total to 19
+  // (7 pipeline + 12 signal).
+  test("emits exactly 7 pipeline slot names + 12 signal_last_fired names (19 keys total)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
@@ -693,17 +695,17 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       const signalKeys = [
         "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
         "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
-        "wire_or_retire_target", "design_qa_target",
+        "wire_or_retire_target", "design_qa_target", "skill_prune",
       ];
 
       assert.deepEqual(Object.keys(s.slots).sort(), [...pipelineSlots].sort(),
         "slots dict must contain exactly the 7 named pipeline keys");
       assert.deepEqual(Object.keys(s.signal_last_fired).sort(), [...signalKeys].sort(),
-        "signal_last_fired dict must contain exactly the 11 named signal keys");
+        "signal_last_fired dict must contain exactly the 12 named signal keys");
       assert.equal(
         Object.keys(s.slots).length + Object.keys(s.signal_last_fired).length,
-        18,
-        "schema must declare 18 named keys (7 pipeline + 11 signal) — see issues #431, #466, #2575, #2722, #2739"
+        19,
+        "schema must declare 19 named keys (7 pipeline + 12 signal) — see issues #431, #466, #2575, #2722, #2739, #2949"
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -717,10 +719,10 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // epoch 0 (permanently cooled) and retro_orch fired 5–8×/day instead of the
   // designed 1×/day. With a prior state.json present, bootstrap must preserve
   // the timestamps while still re-arming the 5 always-on classes to 0.
-  test("carries prior signal_last_fired timestamps forward for the 4 long-cooldown classes (issue #2575)", () => {
+  test("carries prior signal_last_fired timestamps forward for the 7 long-cooldown classes (issue #2575)", () => {
     const tmp = makeTempState();
     try {
-      // A prior run's state: the 4 cooldown classes fired recently; the
+      // A prior run's state: the 7 cooldown classes fired recently; the
       // always-on classes also carry stale values that must be re-armed to 0.
       const priorRetro = 1_700_000_000;
       writeFileSync(tmp.state, JSON.stringify({
@@ -738,13 +740,14 @@ describe("scripts/autopilot/bootstrap.sh", () => {
           scout_orch: 1_700_000_300,
           wire_or_retire_target: 1_700_000_400,
           design_qa_target: 1_700_000_500,
+          skill_prune: 1_700_000_600,
         },
       }));
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
 
-      // The 5 long-cooldown classes carry their prior timestamp forward — this
+      // The 7 long-cooldown classes carry their prior timestamp forward — this
       // is the core of the fix; a reset-to-0 here is the #2575 bug.
       assert.equal(s.signal_last_fired.retro_orch, priorRetro,
         "retro_orch must carry its prior last-fired timestamp forward (NOT reset to 0)");
@@ -760,6 +763,9 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       // #2739 — design_qa_target is the 6th long-cooldown class (7d).
       assert.equal(s.signal_last_fired.design_qa_target, 1_700_000_500,
         "design_qa_target must carry its prior last-fired timestamp forward (#2739)");
+      // #2949 — skill_prune is the 7th long-cooldown class (7d).
+      assert.equal(s.signal_last_fired.skill_prune, 1_700_000_600,
+        "skill_prune must carry its prior last-fired timestamp forward (#2949)");
 
       // The 5 always-on classes are re-armed to 0 each run by design.
       for (const sig of ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"]) {
@@ -770,15 +776,15 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #2575 (+ #2722, #2739) — first-ever run (no prior state file) defaults
-  // the 6 long-cooldown classes to 0, exactly like the 5 always-on classes.
-  test("defaults the 6 long-cooldown signal classes to 0 when there is no prior state (issue #2575, #2722, #2739)", () => {
+  // Issue #2575 (+ #2722, #2739, #2949) — first-ever run (no prior state file)
+  // defaults the 7 long-cooldown classes to 0, exactly like the 5 always-on ones.
+  test("defaults the 7 long-cooldown signal classes to 0 when there is no prior state (issue #2575, #2722, #2739, #2949)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      for (const sig of ["retro_orch", "architecture_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target"]) {
+      for (const sig of ["retro_orch", "architecture_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target", "skill_prune"]) {
         assert.equal(s.signal_last_fired[sig], 0,
           `cooldown signal ${sig} must default to 0 on first-ever run`);
       }
@@ -954,7 +960,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal((s as Record<string, unknown>).pipeline, undefined,
         "legacy `pipeline` key must not survive the overwrite — canonical key is `slots`");
       assert.equal(Object.keys(s.slots).length, 7, "slots must be re-initialized with 7 named keys (post-#466)");
-      assert.equal(Object.keys(s.signal_last_fired).length, 11, "signal_last_fired must be re-initialized with 11 named keys (post-#2575, #2722, #2739)");
+      assert.equal(Object.keys(s.signal_last_fired).length, 12, "signal_last_fired must be re-initialized with 12 named keys (post-#2575, #2722, #2739, #2949)");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

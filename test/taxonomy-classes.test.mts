@@ -80,6 +80,8 @@ const EXPECTED_SIGNAL = [
   "wire_or_retire_target",
   // issue #2739, parent #2732 — the Target design-QA visual pass (7d).
   "design_qa_target",
+  // issue #2949, epic #2944 — the eval-gated skill pruner (orch, 7d).
+  "skill_prune",
 ];
 const EXPECTED_COOLDOWNS: Record<string, number> = {
   health: 0,
@@ -94,6 +96,7 @@ const EXPECTED_COOLDOWNS: Record<string, number> = {
   cleanup_target: 3600,
   wire_or_retire_target: 24 * 60 * 60,
   design_qa_target: 7 * 24 * 60 * 60,
+  skill_prune: 7 * 24 * 60 * 60,
 };
 
 const REQUIRED_COLUMNS = [
@@ -108,7 +111,7 @@ const REQUIRED_COLUMNS = [
 ];
 
 // ---------------------------------------------------------------------------
-// 1. TS view ↔ JSON row set agreement + the pinned 19-class alphabet
+// 1. TS view ↔ JSON row set agreement + the pinned 20-class alphabet
 // ---------------------------------------------------------------------------
 
 describe("taxonomy: TS view agrees with classes.json", () => {
@@ -137,10 +140,10 @@ describe("taxonomy: TS view agrees with classes.json", () => {
     }
   });
 
-  test("exactly the 19 known classes, in dispatch order", () => {
+  test("exactly the 20 known classes, in dispatch order", () => {
     assert.deepEqual(PIPELINE_SLOT_NAMES, EXPECTED_PIPELINE);
     assert.deepEqual(SIGNAL_CLASS_NAMES, EXPECTED_SIGNAL);
-    assert.equal(DISPATCH_CLASSES.length, 19);
+    assert.equal(DISPATCH_CLASSES.length, 20);
   });
 
   test("cooldown values match the pre-#1670 embedded SIGNAL_COOLDOWNS", () => {
@@ -294,7 +297,7 @@ describe("taxonomy: TS parser hard-fails with InvariantViolationError", () => {
   }
 
   test("valid file parses clean", () => {
-    assert.equal(parseClassTaxonomy(validText).length, 19);
+    assert.equal(parseClassTaxonomy(validText).length, 20);
   });
 
   test("malformed JSON throws", () => {

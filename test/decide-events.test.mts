@@ -68,6 +68,9 @@ const SIGNAL_CLASSES = [
   // design_qa_target (issue #2739, parent #2732) — periodic visual QA of the
   // Target UI: screenshot review vs the design-language ADR (7d cadence).
   "design_qa_target",
+  // skill_prune (issue #2949, epic #2944) — eval-gated PROMPT pruner: prunes ONE
+  // playbook-generated skill/run along the Pocock taxonomy (orch, 7d cadence).
+  "skill_prune",
 ] as const;
 const ALL_CLASSES = [...PIPELINE_CLASSES, ...SIGNAL_CLASSES];
 
@@ -272,7 +275,7 @@ describe("decide.py — dispatch_decision per candidate class", () => {
   test("emits exactly one dispatch_decision per candidate class on an idle turn", () => {
     const plan = runDecide(baseState());
     const decisions = eventsOfType(plan, "dispatch_decision");
-    // ALL_CLASSES = 7 pipeline + 11 signal = 18 total.
+    // ALL_CLASSES = 7 pipeline + 12 signal = 19 total.
     assert.equal(
       decisions.length,
       ALL_CLASSES.length,
