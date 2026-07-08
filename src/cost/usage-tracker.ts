@@ -107,46 +107,27 @@
  */
 
 import type { OAuthUsageResult } from "./oauth-usage.ts";
-// Pure hard-stop threshold predicate (issue #2041): the two-line fold that says
-// "≥90% OAuth utilization is a hard stop" lives with the dispatch-gating policy
-// in `./eligibility.ts`, not inline in this snapshot-assembly IO. This is the
-// one deliberate VALUE import from eligibility.ts (it otherwise only imports
-// TYPES from here); `deriveHardStop` is an IO-free scalar leaf called inside the
-// assembly function below, so the value+type edge cannot initialise a cycle.
-// See the eligibility.ts header for the full one-way-rule exception rationale.
-import { deriveHardStop } from "./eligibility.ts";
 // Pure math leaf (issue #1909): the model-family classifier, JSONL-line parser,
 // quota-weight / cache-hit formulas, and weekly-reset / session-limit time math
-// were extracted into `./token-math.ts`. The snapshot-assembly logic below
-// consumes them; `index.ts` re-exports them so the public surface is unchanged.
-// One-way import: this module imports FROM token-math.ts; token-math.ts imports
-// nothing from src/cost/.
-import {
-  cacheHitRatio,
-} from "./token-math.ts";
+// live in `./token-math.ts`. Only the `TokenBreakdown` / `ModelFamily` TYPES are
+// still needed here (for the `UsageSnapshot` interface below) — the value
+// consumers (`cacheHitRatio` &c.) moved with `assembleSnapshot` to the
+// `./snapshot-assembly.ts` leaf (issue #2988). `index.ts` re-exports the leaf's
+// public surface so it is unchanged.
 import type {
   TokenBreakdown,
   ModelFamily,
 } from "./token-math.ts";
-// Pure snapshot-slice leaf (issue #2279): the snapshot-assembly fold helpers
-// (weighted burns, estimate percents, Quota-Weight totals, pacing state, OAuth
-// headline rebase, since-reset fixed-window math, calibration-drift detection)
-// were extracted into `./snapshot-assembly.ts`. `assembleSnapshot` below
-// consumes them; they are NOT re-exported through `index.ts` (module-internal,
-// for direct unit test only). One-way import: this module imports FROM
-// snapshot-assembly.ts; snapshot-assembly.ts imports nothing from here.
-import {
-  deriveWeightedBurns,
-  deriveEstimatePercents,
-  deriveQuotaWeightTotals,
-  derivePacingState,
-  rebaseOnOAuth,
-  deriveSinceReset,
-  detectCalibrationDrift,
-  detectEstimateOAuthDivergence,
-  deriveBySkillWoW,
-  deriveAttributedPercent,
-} from "./snapshot-assembly.ts";
+// Pure snapshot-slice leaf (issue #2279, #2988): the snapshot-assembly fold
+// helpers (weighted burns, estimate percents, Quota-Weight totals, pacing state,
+// OAuth headline rebase, since-reset fixed-window math, calibration-drift
+// detection) AND the `assembleSnapshot` coordinator that composes them now BOTH
+// live in `./snapshot-assembly.ts`. `getUsage()` below imports only
+// `assembleSnapshot` (the fold helpers are module-internal to that leaf, NOT
+// re-exported through `index.ts`). One-way import: this module imports FROM
+// snapshot-assembly.ts; snapshot-assembly.ts imports no VALUE back from here
+// (it imports the `UsageSnapshot` TYPE only, runtime-erased — no cycle).
+import { assembleSnapshot } from "./snapshot-assembly.ts";
 import type { SkillWoWEntry } from "./snapshot-assembly.ts";
 // Weekly Usage Snapshot seam (issue #2404): the typed Redis accessor for the
 // persisted per-ISO-week per-skill rollup. The ONLY Redis touch on the read
@@ -158,20 +139,10 @@ import type { SkillWoWEntry } from "./snapshot-assembly.ts";
 import { readPriorWeekUsageSnapshot } from "../redis/usage-snapshots.ts";
 import type { WeeklyUsageSnapshot } from "../redis/usage-snapshots.ts";
 // Env-config readers + their DEFAULT_* constants live in the pure leaf
-// `./config.ts` (issue #1896). The snapshot-assembly logic below consumes them;
-// `index.ts` re-exports them so the public surface is unchanged.
-import {
-  getWeeklyQuotaTokens,
-  getFiveHourQuotaTokens,
-  getWeeklyResetAnchorMs,
-  getCacheReadWeight,
-  getDriftReferencePercent,
-  getDriftFactor,
-  getOAuthEstimateDivergenceFactor,
-  getQuotaWeightOpus,
-  getQuotaWeightSonnet,
-  getQuotaWeightHaiku,
-} from "./config.ts";
+// `./config.ts` (issue #1896). They are consumed by the `assembleSnapshot`
+// coordinator, which moved to `./snapshot-assembly.ts` (issue #2988) — so this
+// coordinator no longer imports them directly. `index.ts` re-exports them so the
+// public surface is unchanged.
 // TranscriptScan seam (issue #1971): the JSONL transcript walk + the
 // independent-TTL OAuth cached meter read. `usage-tracker.ts` is now the pure
 // coordinator/assembler over the `ScanResult` this module returns. The
@@ -186,7 +157,7 @@ import {
   UNATTRIBUTED_SKILL,
   sessionIdFromPath as transcriptScanSessionIdFromPath,
 } from "./transcript-scan.ts";
-import type { ScanResult, SkillResolver, DispatchKind } from "./transcript-scan.ts";
+import type { SkillResolver, DispatchKind } from "./transcript-scan.ts";
 // The OAuth backoff/cache seam moved to its own focused leaf (issue #2923);
 // `clearUsageCache()` reaches its reset through the seam's `clearOAuthCache()`.
 import { clearOAuthCache } from "./oauth-read-cache.ts";
@@ -470,20 +441,20 @@ let cache: CacheEntry | null = null;
 // The hard-stop threshold constant `EMERGENCY_STOP_PERCENT` and the two-line
 // `deriveHardStop` predicate it parameterises moved to `./eligibility.ts`
 // (issue #2041) so the threshold POLICY lives with the dispatch-gating fold and
-// is independently unit-testable. `deriveHardStop` is imported at the top of
-// this file; `EMERGENCY_STOP_PERCENT` is consumed directly from
-// `./eligibility.ts` by its callers (and `test/usage-tracker.test.mts`).
+// is independently unit-testable. Both are now consumed by the `assembleSnapshot`
+// coordinator in `./snapshot-assembly.ts` (issue #2988), not by this file
+// directly; `EMERGENCY_STOP_PERCENT` is also consumed from `./eligibility.ts` by
+// its other callers (and `test/usage-tracker.test.mts`).
 
-// `familyWeight`, `MODEL_FAMILIES`, `weightedQuotaBurn`, and the seven pure
+// `familyWeight`, `MODEL_FAMILIES`, `weightedQuotaBurn`, the seven pure
 // snapshot-assembly slice helpers (`deriveWeightedBurns`, `deriveEstimatePercents`,
 // `deriveQuotaWeightTotals`, `derivePacingState`, `rebaseOnOAuth`, `deriveSinceReset`,
-// `detectCalibrationDrift`) + their slice interfaces moved to the pure leaves
-// `./token-math.ts` (the two shared primitives) and `./snapshot-assembly.ts` (the
-// folds) — issue #2279. `projectResetWindow` / `modelToFamily` moved to
-// `./token-math.ts` (issue #1909). All are imported at the top of this file;
-// `assembleSnapshot` below wires them together. The relocated folds stay
-// exported-for-direct-unit-test on `snapshot-assembly.ts`, NOT on the `index.ts`
-// public barrel.
+// `detectCalibrationDrift`) + their slice interfaces, AND the `assembleSnapshot`
+// coordinator that composes them, moved to the pure leaves `./token-math.ts` (the
+// shared primitives, issue #1909/#2279) and `./snapshot-assembly.ts` (the folds +
+// coordinator, issue #2279 finished by #2988). `getUsage()` below imports only
+// `assembleSnapshot` from that leaf; the folds stay exported-for-direct-unit-test
+// on `snapshot-assembly.ts`, NOT on the `index.ts` public barrel.
 
 export function clearUsageCache(): void {
   cache = null;
@@ -644,254 +615,19 @@ export async function getUsage(opts: {
  */
 export const sessionIdFromPath = transcriptScanSessionIdFromPath;
 
-/**
- * The pure snapshot-assembly phase (issue #1971): given the raw {@link
- * ScanResult} from the TranscriptScan seam and the anchor `now`, compute the
- * quota math (weighted burn numerators, estimate percents, pacingState, OAuth
- * rebase, drift detection, since-reset derivation) and build the final
- * {@link UsageSnapshot}. NO I/O — every input is in `scan` or read from the
- * pure env-config leaf. Behaviour-neutral with the former inline tail of
- * `scanUsage()`; the emitted snapshot is identical field-for-field for any
- * given scan input.
- *
- * `priorBySkill` (issue #2404) is the immediately-prior **Weekly Usage
- * Snapshot**'s per-skill raw totals, fetched by `getUsage()` via the typed
- * Redis accessor and INJECTED here so the assembler reads NO Redis itself
- * (ADR-0021). `null` means no prior week — every WoW entry is then "new".
- */
-function assembleSnapshot(
-  scan: ScanResult,
-  now: Date,
-  priorBySkill: Record<string, number> | null = null,
-): UsageSnapshot {
-  const nowMs = now.getTime();
-  const {
-    acc5h,
-    acc7d,
-    byModel5h,
-    byModel7d,
-    byModel24h,
-    bySkillByModel,
-    byDispatchKind,
-    tokens24h,
-    mostRecentObservedResetMs,
-    sinceResetEntries,
-    filesScanned,
-    filesSkippedByMtime,
-    linesParsed,
-    linesWithUsage,
-    parseErrors,
-  } = scan;
-
-  const weeklyQuota = getWeeklyQuotaTokens();
-  const fiveHourQuota = getFiveHourQuotaTokens();
-  const calibrated = weeklyQuota > 0 && fiveHourQuota > 0;
-
-  const weights = {
-    opus: getQuotaWeightOpus(),
-    sonnet: getQuotaWeightSonnet(),
-    haiku: getQuotaWeightHaiku(),
-  };
-  const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
-
-  // Weekly Reset Anchor env (issue #856): needed by the since-reset math below.
-  // The scan already buffered `sinceResetEntries` only when this was set; here
-  // we re-read it to gate the since-reset assembly (zero work when unset).
-  const anchorEnvMs = getWeeklyResetAnchorMs();
-
-  // Quota-burn numerator weighting (issue #873). The burn PERCENTAGES are
-  // computed on the WEIGHTED unit `input + output + cacheCreation +
-  // w_cache*cacheRead`, composed with the per-model-family Quota Weight. When
-  // quota weights are uncalibrated (the default) the family multipliers are all
-  // 1.0 (identity) so the result reduces to the single-axis cache-weighted
-  // total; with `w_cache = 1.0` (the default) it reduces further to the raw
-  // .total — i.e. byte-for-byte the pre-#873 behaviour. Raw `.total` fields are
-  // untouched; only these numerators change.
-  const cacheReadWeight = getCacheReadWeight();
-  const burnWeights = quotaWeightCalibrated ? weights : { opus: 1, sonnet: 1, haiku: 1 };
-  // The weighted-burn NUMERATOR triple — composed pure fold extracted to
-  // {@link deriveWeightedBurns} (issue #2247).
-  const weightedBurns = deriveWeightedBurns(
-    byModel5h,
-    byModel7d,
-    byModel24h,
-    cacheReadWeight,
-    burnWeights,
-  );
-
-  // Transcript+calibration ESTIMATE (the historical headline + fallback path).
-  // Pure derivation extracted to {@link deriveEstimatePercents} (issue #2247).
-  const { estimatePercentLast5h, estimatePercentLast7d, projectedWeeklyPercent } =
-    deriveEstimatePercents(weightedBurns, weeklyQuota, fiveHourQuota, calibrated);
-
-  // `pacingState` keys off the transcript-derived 24h projection (NOT the OAuth
-  // headline) — it is part of the ADR-0021 projection family this seam leaves
-  // intact. Pure fold extracted to {@link derivePacingState} (issue #2188).
-  const pacingState = derivePacingState(calibrated, projectedWeeklyPercent);
-
-  // OAuth rebase (issue #1083). When the authoritative meter read succeeds, the
-  // headline `percentLast5h`/`percentLast7d` and the 5h `emergencyStop` are
-  // rebased onto the real utilization — the meter IS the ground-truth 5h/7d
-  // utilization, strictly better than a calibration guess. HARD INVARIANT: on
-  // ANY failed/expired/garbage read the estimate stands; the headline NEVER
-  // silently reads 0 (which would unblock dispatch during an outage). Since
-  // #1124 BOTH hard-stops (5h `emergencyStop` and `weeklyEmergencyStop`) are
-  // gated on `usageSource === "oauth"` so a failed read can no longer trigger a
-  // stop on the estimate — autopilot fails open and defers to Claude's own
-  // session-limit enforcement (#1089) + the operator. The ADR-0021 since-reset /
-  // Pace-Gate PACING machinery (percentSinceReset, projectPacingCurve) is
-  // byte-for-byte untouched — only the two hard-stops + rolling headline move.
-  // The OAuth read was fired + awaited inside the TranscriptScan seam (issue
-  // #1971) and arrives here already resolved on `scan.oauth` — same
-  // fire-then-await-after-walk ordering, just owned by the I/O module now. The
-  // rebase + fail-loud fallback is the pure {@link rebaseOnOAuth} helper (#2188).
-  const {
-    percentLast5h,
-    percentLast7d,
-    usageSource,
-    oauthError,
-    oauthStale,
-    oauthAgeMs,
-    oauthFiveHourResetsAt,
-    oauthSevenDayResetsAt,
-  } = rebaseOnOAuth(scan.oauth, estimatePercentLast5h, estimatePercentLast7d);
-
-  // Both hard-stops (the 5h `emergencyStop` and the weekly `weeklyEmergencyStop`)
-  // are derived by the pure `deriveHardStop` threshold predicate (issue #2041),
-  // folding over the three scalars now in hand. They are driven EXCLUSIVELY by
-  // the real OAuth meter (issue #1124): on the OAuth path the meter is a real
-  // 0–100 utilization (a served-stale last-good is `usageSource === "oauth"` too
-  // — stale-but-real still stops), so the >=90 gate fires on ground truth. On the
-  // estimate fallback path the headline is the transcript+calibration guess
-  // (~half-of-real, #1083), which caused FALSE stops during OAuth outages — so
-  // the estimate NEVER triggers either stop regardless of percent. During a
-  // prolonged OAuth outage autopilot does not self-stop on usage; it fails open
-  // and defers to Claude's own session-limit enforcement (the #1089 pace-gate
-  // block) plus the operator. The estimate is still surfaced as the displayed
-  // headline (#1090) — only the STOP decision is decoupled from it. The weekly
-  // analogue previously rode `percentSinceReset` (the ADR-0021 since-reset
-  // CALIBRATION estimate) before #1124 moved it onto the real `percentLast7d`
-  // meter; the ADR-0021 since-reset machinery (Pacing Curve) is untouched and
-  // remains the pacing signal.
-  const { emergencyStop, weeklyEmergencyStop } = deriveHardStop({
-    percentLast5h,
-    percentLast7d,
-    usageSource,
-  });
-
-  // Quota-Weight burn totals (issue #691). Raw `.total` per family scaled ONLY by
-  // the per-model-family Quota Weight (no cache-read weight); 0 unless all three
-  // weights are positive. Pure derivation extracted to {@link deriveQuotaWeightTotals}
-  // (issue #2247).
-  const { quotaWeightLast5h, quotaWeightLast7d } = deriveQuotaWeightTotals(
-    byModel5h,
-    byModel7d,
-    weights,
-    quotaWeightCalibrated,
-  );
-
-  // Weekly Reset Anchor / since-reset fixed window (issue #856, ADR-0021).
-  // Pure read-side projection extracted to {@link deriveSinceReset} (issue
-  // #2188): the effective boundary is derived ON READ from the env projection,
-  // overridden by a more recent observed reset. Nothing is persisted. Neutral
-  // (null/0/all-zero) when the env Anchor is unset.
-  const { tokensSinceReset, percentSinceReset, weeklyResetAnchor } = deriveSinceReset({
-    anchorEnvMs,
-    mostRecentObservedResetMs,
-    nowMs,
-    sinceResetEntries,
-    cacheReadWeight,
-    burnWeights,
-    calibrated,
-    weeklyQuota,
-  });
-
-  // Drift detector (issue #873; pure side-effecting detector extracted to
-  // {@link detectCalibrationDrift} in #2188). Fail-loud, ONCE per scan: when an
-  // operator has seeded a reference `percentSinceReset` reading AND the quota is
-  // calibrated AND the Anchor is set, warn if the tracker's `percentSinceReset`
-  // diverges from the reference by more than `driftFactor`. Read-time detection
-  // only — nothing is persisted, nothing self-recalibrates. Inert when unset.
-  detectCalibrationDrift({
-    driftReference: getDriftReferencePercent(),
-    driftFactor: getDriftFactor(),
-    percentSinceReset,
-    calibrated,
-    anchorEnvMs,
-    cacheReadWeight,
-    weeklyQuota,
-  });
-
-  // Estimate-vs-OAuth divergence detector (issue #2832 AC3; pure side-effecting
-  // detector in {@link detectEstimateOAuthDivergence}). Fail-loud, ONCE per scan:
-  // when the headline has fallen back to the transcript estimate during an OAuth
-  // outage AND that estimate diverges from the LAST-KNOWN real OAuth utilization
-  // by more than the configured factor (default 1.5x), warn so the operator knows
-  // the number gating dispatch is a guess far from the last real reading. The
-  // baseline rides in on `scan.oauth.lastKnownOAuth` (surfaced by the #1090 cache
-  // layer even on the estimate-fallback path) so this stays a pure argument-fed
-  // detector — NO new read, no mutation of any gating scalar (invariant 1). Inert
-  // whenever the headline is on OAuth (fresh or served-stale) or no real meter
-  // value has ever been seen (null baseline — the #1083 silent-0 trap).
-  detectEstimateOAuthDivergence({
-    usageSource,
-    estimatePercentLast7d,
-    lastKnownOAuthPercent: scan.oauth.lastKnownOAuth?.sevenDay.utilization ?? null,
-    divergenceFactor: getOAuthEstimateDivergenceFactor(),
-  });
-
-  // (weeklyEmergencyStop was computed alongside emergencyStop above via the
-  // shared `deriveHardStop` predicate — issue #2041.)
-
-  return {
-    tokensLast5h: acc5h,
-    tokensLast7d: acc7d,
-    tokensLast24h: tokens24h,
-    percentLast5h,
-    percentLast7d,
-    usageSource,
-    oauthError,
-    oauthStale,
-    oauthAgeMs,
-    oauthFiveHourResetsAt,
-    oauthSevenDayResetsAt,
-    projectedWeeklyPercent,
-    pacingState,
-    emergencyStop,
-    weeklyEmergencyStop,
-    calibrated,
-    byModel: byModel7d,
-    bySkillByModel,
-    // Per-skill week-over-week trend (issue #2404). Pure fold over the current
-    // cross-tab + the injected prior-week per-skill totals — no Redis here.
-    bySkillWoW: deriveBySkillWoW(bySkillByModel, priorBySkill),
-    // Dispatch-kind split + attribution coverage % (issue #2403). Pure
-    // projections over the SAME per-file tokens as the per-skill cross-tab.
-    byDispatchKind,
-    attributedPercent: deriveAttributedPercent(byDispatchKind),
-    quotaWeightLast5h,
-    quotaWeightLast7d,
-    quotaWeightCalibrated,
-    weeklyQuotaTokens: weeklyQuota,
-    fiveHourQuotaTokens: fiveHourQuota,
-    filesScanned,
-    filesSkippedByMtime,
-    linesParsed,
-    linesWithUsage,
-    parseErrors,
-    generatedAt: now.toISOString(),
-    cacheHitRatioLast5h: cacheHitRatio(acc5h),
-    cacheHitRatioLast7d: cacheHitRatio(acc7d),
-    tokensSinceReset,
-    percentSinceReset,
-    weeklyResetAnchor,
-  };
-}
+// `assembleSnapshot` — the pure snapshot-assembly coordinator that folds the
+// helper slices into a `UsageSnapshot` — moved to the `./snapshot-assembly.ts`
+// leaf (issue #2988), completing the IO/pure split issue #2279 began. The
+// complete assembly story (the fold helpers AND their composition) now lives in
+// that one leaf named for the concern; `getUsage()` above imports it and injects
+// the prior-week per-skill totals it read from Redis, preserving the assembler's
+// no-IO contract (ADR-0021). It is exported from `snapshot-assembly.ts` for
+// direct unit test but NOT re-exported through the `index.ts` public barrel.
 
 // `parseUsageLine`, `parseObservedResetMs` (+ its `coerceInstantMs` helper),
 // `parseSessionLimitReset` (+ its `SESSION_LIMIT_RE` / `resolveWallClockInZone`
 // helpers), and `cacheHitRatio` moved to `./token-math.ts` (issue #1909).
 // `addBreakdown` + `emptyByModel` + `EMPTY_BREAKDOWN` moved to the TranscriptScan
-// seam `./transcript-scan.ts` (issue #1971) — now consumed by the
-// `./snapshot-assembly.ts` leaf (issue #2279), not directly by this coordinator.
-// `cacheHitRatio` is imported at the top of this file for the assembler below.
+// seam `./transcript-scan.ts` (issue #1971). All three are consumed by the
+// `./snapshot-assembly.ts` leaf (issue #2279/#2988, which now owns `assembleSnapshot`),
+// not directly by this coordinator.

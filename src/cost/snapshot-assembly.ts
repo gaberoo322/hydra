@@ -33,14 +33,17 @@
 
 import { isOAuthUsageOk } from "./oauth-usage.ts";
 // Pure math leaf (issue #1909 / #2279): the weighted-token unit, the reset-window
-// projection, and the shared family primitives (`familyWeight`, `MODEL_FAMILIES`)
-// live in `./token-math.ts`. The snapshot-assembly folds below consume them
-// one-way; token-math.ts imports nothing from src/cost/.
+// projection, the cache-hit ratio, and the shared family primitives
+// (`familyWeight`, `MODEL_FAMILIES`) live in `./token-math.ts`. The
+// snapshot-assembly folds below consume them one-way; token-math.ts imports
+// nothing from src/cost/. `cacheHitRatio` joined this import list when the
+// `assembleSnapshot` coordinator moved here (issue #2988).
 import {
   weightedTokens,
   projectResetWindow,
   familyWeight,
   MODEL_FAMILIES,
+  cacheHitRatio,
 } from "./token-math.ts";
 import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
 // TranscriptScan seam (issue #1971): the empty-breakdown constants + per-family
@@ -48,6 +51,39 @@ import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
 // since-reset folds read slices of. One-way import (this leaf never imports back).
 import { EMPTY_BREAKDOWN, emptyByModel, addBreakdown, DISPATCH_KINDS } from "./transcript-scan.ts";
 import type { ScanResult, DispatchKind } from "./transcript-scan.ts";
+// Env-config readers (issue #1896) the relocated `assembleSnapshot` (issue #2988)
+// consumes to gate the quota math on the calibration env vars. Pure, IO-free
+// leaf — importing VALUES from it introduces no cycle (config.ts imports nothing
+// from src/cost/).
+import {
+  getWeeklyQuotaTokens,
+  getFiveHourQuotaTokens,
+  getWeeklyResetAnchorMs,
+  getCacheReadWeight,
+  getDriftReferencePercent,
+  getDriftFactor,
+  getOAuthEstimateDivergenceFactor,
+  getQuotaWeightOpus,
+  getQuotaWeightSonnet,
+  getQuotaWeightHaiku,
+} from "./config.ts";
+// The hard-stop threshold predicate `deriveHardStop` (issue #2041) lives with the
+// dispatch-gating fold in `./eligibility.ts`. The relocated `assembleSnapshot`
+// (issue #2988) folds it over the three headline scalars, exactly as the tracker
+// did inline. This is a VALUE import; `eligibility.ts` imports only the
+// `UsageSnapshot` TYPE (type-only, runtime-erased) back from `usage-tracker.ts`,
+// so no runtime cycle forms — the same acyclic value+type edge the tracker relied
+// on before the move.
+import { deriveHardStop } from "./eligibility.ts";
+// `UsageSnapshot` — the assembled snapshot shape — stays DEFINED in
+// `usage-tracker.ts` so the `cost/index.ts` barrel + every existing
+// `from "usage-tracker.ts"` import site (eligibility.ts, cost-burn.ts,
+// subscription-quota-trend.ts, tests) resolve unchanged (issue #2988). This leaf
+// imports it TYPE-ONLY: `import type` is fully erased at compile, so it adds NO
+// runtime edge — the one-way runtime-import rule (this leaf imports no VALUE from
+// usage-tracker.ts) is preserved. Same precedent as eligibility.ts's type-only
+// back-import of the same type.
+import type { UsageSnapshot } from "./usage-tracker.ts";
 
 /**
  * The composed two-axis quota-burn numerator over a per-family accumulator
@@ -550,4 +586,258 @@ export function detectEstimateOAuthDivergence(input: {
         `autopilot window`,
     );
   }
+}
+
+/**
+ * The pure snapshot-assembly phase (issue #1971): given the raw {@link
+ * ScanResult} from the TranscriptScan seam and the anchor `now`, compute the
+ * quota math (weighted burn numerators, estimate percents, pacingState, OAuth
+ * rebase, drift detection, since-reset derivation) and build the final
+ * {@link UsageSnapshot}. NO I/O — every input is in `scan` or read from the
+ * pure env-config leaf. Behaviour-neutral with the former inline tail of
+ * `scanUsage()`; the emitted snapshot is identical field-for-field for any
+ * given scan input.
+ *
+ * `priorBySkill` (issue #2404) is the immediately-prior **Weekly Usage
+ * Snapshot**'s per-skill raw totals, fetched by `getUsage()` via the typed
+ * Redis accessor and INJECTED here so the assembler reads NO Redis itself
+ * (ADR-0021). `null` means no prior week — every WoW entry is then "new".
+ *
+ * Relocated from `usage-tracker.ts` (issue #2988) so the COMPLETE assembly
+ * story — the helper folds above AND this coordinator that composes them —
+ * lives in the one leaf named for the concern. It reads its calibration env via
+ * the `config.ts` readers, folds the two hard-stops via `eligibility.ts`'s
+ * `deriveHardStop`, and composes the pure fold helpers above — all one-way
+ * imports (no runtime cycle). Exported for direct unit test AND consumed by the
+ * `getUsage()` I/O coordinator in `usage-tracker.ts`; deliberately NOT added to
+ * the `cost/index.ts` public barrel (module-internal, same posture as the fold
+ * helpers).
+ */
+export function assembleSnapshot(
+  scan: ScanResult,
+  now: Date,
+  priorBySkill: Record<string, number> | null = null,
+): UsageSnapshot {
+  const nowMs = now.getTime();
+  const {
+    acc5h,
+    acc7d,
+    byModel5h,
+    byModel7d,
+    byModel24h,
+    bySkillByModel,
+    byDispatchKind,
+    tokens24h,
+    mostRecentObservedResetMs,
+    sinceResetEntries,
+    filesScanned,
+    filesSkippedByMtime,
+    linesParsed,
+    linesWithUsage,
+    parseErrors,
+  } = scan;
+
+  const weeklyQuota = getWeeklyQuotaTokens();
+  const fiveHourQuota = getFiveHourQuotaTokens();
+  const calibrated = weeklyQuota > 0 && fiveHourQuota > 0;
+
+  const weights = {
+    opus: getQuotaWeightOpus(),
+    sonnet: getQuotaWeightSonnet(),
+    haiku: getQuotaWeightHaiku(),
+  };
+  const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
+
+  // Weekly Reset Anchor env (issue #856): needed by the since-reset math below.
+  // The scan already buffered `sinceResetEntries` only when this was set; here
+  // we re-read it to gate the since-reset assembly (zero work when unset).
+  const anchorEnvMs = getWeeklyResetAnchorMs();
+
+  // Quota-burn numerator weighting (issue #873). The burn PERCENTAGES are
+  // computed on the WEIGHTED unit `input + output + cacheCreation +
+  // w_cache*cacheRead`, composed with the per-model-family Quota Weight. When
+  // quota weights are uncalibrated (the default) the family multipliers are all
+  // 1.0 (identity) so the result reduces to the single-axis cache-weighted
+  // total; with `w_cache = 1.0` (the default) it reduces further to the raw
+  // .total — i.e. byte-for-byte the pre-#873 behaviour. Raw `.total` fields are
+  // untouched; only these numerators change.
+  const cacheReadWeight = getCacheReadWeight();
+  const burnWeights = quotaWeightCalibrated ? weights : { opus: 1, sonnet: 1, haiku: 1 };
+  // The weighted-burn NUMERATOR triple — composed pure fold extracted to
+  // {@link deriveWeightedBurns} (issue #2247).
+  const weightedBurns = deriveWeightedBurns(
+    byModel5h,
+    byModel7d,
+    byModel24h,
+    cacheReadWeight,
+    burnWeights,
+  );
+
+  // Transcript+calibration ESTIMATE (the historical headline + fallback path).
+  // Pure derivation extracted to {@link deriveEstimatePercents} (issue #2247).
+  const { estimatePercentLast5h, estimatePercentLast7d, projectedWeeklyPercent } =
+    deriveEstimatePercents(weightedBurns, weeklyQuota, fiveHourQuota, calibrated);
+
+  // `pacingState` keys off the transcript-derived 24h projection (NOT the OAuth
+  // headline) — it is part of the ADR-0021 projection family this seam leaves
+  // intact. Pure fold extracted to {@link derivePacingState} (issue #2188).
+  const pacingState = derivePacingState(calibrated, projectedWeeklyPercent);
+
+  // OAuth rebase (issue #1083). When the authoritative meter read succeeds, the
+  // headline `percentLast5h`/`percentLast7d` and the 5h `emergencyStop` are
+  // rebased onto the real utilization — the meter IS the ground-truth 5h/7d
+  // utilization, strictly better than a calibration guess. HARD INVARIANT: on
+  // ANY failed/expired/garbage read the estimate stands; the headline NEVER
+  // silently reads 0 (which would unblock dispatch during an outage). Since
+  // #1124 BOTH hard-stops (5h `emergencyStop` and `weeklyEmergencyStop`) are
+  // gated on `usageSource === "oauth"` so a failed read can no longer trigger a
+  // stop on the estimate — autopilot fails open and defers to Claude's own
+  // session-limit enforcement (#1089) + the operator. The ADR-0021 since-reset /
+  // Pace-Gate PACING machinery (percentSinceReset, projectPacingCurve) is
+  // byte-for-byte untouched — only the two hard-stops + rolling headline move.
+  // The OAuth read was fired + awaited inside the TranscriptScan seam (issue
+  // #1971) and arrives here already resolved on `scan.oauth` — same
+  // fire-then-await-after-walk ordering, just owned by the I/O module now. The
+  // rebase + fail-loud fallback is the pure {@link rebaseOnOAuth} helper (#2188).
+  const {
+    percentLast5h,
+    percentLast7d,
+    usageSource,
+    oauthError,
+    oauthStale,
+    oauthAgeMs,
+    oauthFiveHourResetsAt,
+    oauthSevenDayResetsAt,
+  } = rebaseOnOAuth(scan.oauth, estimatePercentLast5h, estimatePercentLast7d);
+
+  // Both hard-stops (the 5h `emergencyStop` and the weekly `weeklyEmergencyStop`)
+  // are derived by the pure `deriveHardStop` threshold predicate (issue #2041),
+  // folding over the three scalars now in hand. They are driven EXCLUSIVELY by
+  // the real OAuth meter (issue #1124): on the OAuth path the meter is a real
+  // 0–100 utilization (a served-stale last-good is `usageSource === "oauth"` too
+  // — stale-but-real still stops), so the >=90 gate fires on ground truth. On the
+  // estimate fallback path the headline is the transcript+calibration guess
+  // (~half-of-real, #1083), which caused FALSE stops during OAuth outages — so
+  // the estimate NEVER triggers either stop regardless of percent. During a
+  // prolonged OAuth outage autopilot does not self-stop on usage; it fails open
+  // and defers to Claude's own session-limit enforcement (the #1089 pace-gate
+  // block) plus the operator. The estimate is still surfaced as the displayed
+  // headline (#1090) — only the STOP decision is decoupled from it. The weekly
+  // analogue previously rode `percentSinceReset` (the ADR-0021 since-reset
+  // CALIBRATION estimate) before #1124 moved it onto the real `percentLast7d`
+  // meter; the ADR-0021 since-reset machinery (Pacing Curve) is untouched and
+  // remains the pacing signal.
+  const { emergencyStop, weeklyEmergencyStop } = deriveHardStop({
+    percentLast5h,
+    percentLast7d,
+    usageSource,
+  });
+
+  // Quota-Weight burn totals (issue #691). Raw `.total` per family scaled ONLY by
+  // the per-model-family Quota Weight (no cache-read weight); 0 unless all three
+  // weights are positive. Pure derivation extracted to {@link deriveQuotaWeightTotals}
+  // (issue #2247).
+  const { quotaWeightLast5h, quotaWeightLast7d } = deriveQuotaWeightTotals(
+    byModel5h,
+    byModel7d,
+    weights,
+    quotaWeightCalibrated,
+  );
+
+  // Weekly Reset Anchor / since-reset fixed window (issue #856, ADR-0021).
+  // Pure read-side projection extracted to {@link deriveSinceReset} (issue
+  // #2188): the effective boundary is derived ON READ from the env projection,
+  // overridden by a more recent observed reset. Nothing is persisted. Neutral
+  // (null/0/all-zero) when the env Anchor is unset.
+  const { tokensSinceReset, percentSinceReset, weeklyResetAnchor } = deriveSinceReset({
+    anchorEnvMs,
+    mostRecentObservedResetMs,
+    nowMs,
+    sinceResetEntries,
+    cacheReadWeight,
+    burnWeights,
+    calibrated,
+    weeklyQuota,
+  });
+
+  // Drift detector (issue #873; pure side-effecting detector extracted to
+  // {@link detectCalibrationDrift} in #2188). Fail-loud, ONCE per scan: when an
+  // operator has seeded a reference `percentSinceReset` reading AND the quota is
+  // calibrated AND the Anchor is set, warn if the tracker's `percentSinceReset`
+  // diverges from the reference by more than `driftFactor`. Read-time detection
+  // only — nothing is persisted, nothing self-recalibrates. Inert when unset.
+  detectCalibrationDrift({
+    driftReference: getDriftReferencePercent(),
+    driftFactor: getDriftFactor(),
+    percentSinceReset,
+    calibrated,
+    anchorEnvMs,
+    cacheReadWeight,
+    weeklyQuota,
+  });
+
+  // Estimate-vs-OAuth divergence detector (issue #2832 AC3; pure side-effecting
+  // detector in {@link detectEstimateOAuthDivergence}). Fail-loud, ONCE per scan:
+  // when the headline has fallen back to the transcript estimate during an OAuth
+  // outage AND that estimate diverges from the LAST-KNOWN real OAuth utilization
+  // by more than the configured factor (default 1.5x), warn so the operator knows
+  // the number gating dispatch is a guess far from the last real reading. The
+  // baseline rides in on `scan.oauth.lastKnownOAuth` (surfaced by the #1090 cache
+  // layer even on the estimate-fallback path) so this stays a pure argument-fed
+  // detector — NO new read, no mutation of any gating scalar (invariant 1). Inert
+  // whenever the headline is on OAuth (fresh or served-stale) or no real meter
+  // value has ever been seen (null baseline — the #1083 silent-0 trap).
+  detectEstimateOAuthDivergence({
+    usageSource,
+    estimatePercentLast7d,
+    lastKnownOAuthPercent: scan.oauth.lastKnownOAuth?.sevenDay.utilization ?? null,
+    divergenceFactor: getOAuthEstimateDivergenceFactor(),
+  });
+
+  // (weeklyEmergencyStop was computed alongside emergencyStop above via the
+  // shared `deriveHardStop` predicate — issue #2041.)
+
+  return {
+    tokensLast5h: acc5h,
+    tokensLast7d: acc7d,
+    tokensLast24h: tokens24h,
+    percentLast5h,
+    percentLast7d,
+    usageSource,
+    oauthError,
+    oauthStale,
+    oauthAgeMs,
+    oauthFiveHourResetsAt,
+    oauthSevenDayResetsAt,
+    projectedWeeklyPercent,
+    pacingState,
+    emergencyStop,
+    weeklyEmergencyStop,
+    calibrated,
+    byModel: byModel7d,
+    bySkillByModel,
+    // Per-skill week-over-week trend (issue #2404). Pure fold over the current
+    // cross-tab + the injected prior-week per-skill totals — no Redis here.
+    bySkillWoW: deriveBySkillWoW(bySkillByModel, priorBySkill),
+    // Dispatch-kind split + attribution coverage % (issue #2403). Pure
+    // projections over the SAME per-file tokens as the per-skill cross-tab.
+    byDispatchKind,
+    attributedPercent: deriveAttributedPercent(byDispatchKind),
+    quotaWeightLast5h,
+    quotaWeightLast7d,
+    quotaWeightCalibrated,
+    weeklyQuotaTokens: weeklyQuota,
+    fiveHourQuotaTokens: fiveHourQuota,
+    filesScanned,
+    filesSkippedByMtime,
+    linesParsed,
+    linesWithUsage,
+    parseErrors,
+    generatedAt: now.toISOString(),
+    cacheHitRatioLast5h: cacheHitRatio(acc5h),
+    cacheHitRatioLast7d: cacheHitRatio(acc7d),
+    tokensSinceReset,
+    percentSinceReset,
+    weeklyResetAnchor,
+  };
 }
