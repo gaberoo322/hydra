@@ -117,7 +117,7 @@ export function dispatchOutcomesIndexKey(): string {
 export const DISPATCH_OUTCOME_TTL_SECONDS = 14 * 24 * 3600;
 
 /** Index hard cap — newest N members survive the write-time trim. */
-export const DISPATCH_OUTCOMES_INDEX_MAX = 2000;
+const DISPATCH_OUTCOMES_INDEX_MAX = 2000;
 
 // ---------------------------------------------------------------------------
 // Encode / decode
