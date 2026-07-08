@@ -58,7 +58,7 @@ import {
   type AttributionEstimate,
 } from "../outcome-attribution/estimator.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
-import { DISPATCH_CLASSES, classByName } from "../taxonomy/classes.ts";
+import { DISPATCH_CLASSES } from "../taxonomy/classes.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables (named constants, not magic literals — mirrors the estimator's
@@ -92,7 +92,7 @@ export const DAMPENER_MAX_MULTIPLIER = 2.0;
  * and produces fresh evidence, regardless of the still-stale scoreboard. Encoded
  * + tested here even though inert in v1 (the issue's soft+time-boxed AC).
  */
-export const DAMPENER_REPROBE_HOURS = 24;
+const DAMPENER_REPROBE_HOURS = 24;
 
 /**
  * Yield thresholds that would (in a future live mode) mark a class
@@ -101,7 +101,7 @@ export const DAMPENER_REPROBE_HOURS = 24;
  * is a weak class. These are DELIBERATELY conservative — v1 never acts on them.
  */
 export const DEV_WEAK_MERGE_RATE = 0.1;
-export const PRODUCER_WEAK_BETA = 0;
+const PRODUCER_WEAK_BETA = 0;
 
 // ---------------------------------------------------------------------------
 // Class role — which yield metric is appropriate for a given class
@@ -162,7 +162,7 @@ export function classRole(className: string): ClassRole {
 // ---------------------------------------------------------------------------
 
 /** The verdict for a single class over the window. */
-export type ClassVerdict =
+type ClassVerdict =
   /** Enough sample + a healthy yield — full cadence recommended. */
   | "healthy"
   /** Enough sample but a weak yield — a future live mode would dampen. */
@@ -225,7 +225,7 @@ export interface ClassScoreboard {
  * future live mode WOULD apply, plus the re-probe deadline. In v1 this is
  * LOGGED and never applied (the byte-identical-dispatch invariant).
  */
-export interface ShadowDampenerVerdict {
+interface ShadowDampenerVerdict {
   className: string;
   /**
    * The cadence multiplier that WOULD be applied to this class's cooldown.
@@ -529,9 +529,4 @@ export async function buildClassScoreboard(
     minSample: opts.minSample,
     windowMs,
   });
-}
-
-/** True when `className` is a known dispatch class (guards the shadow log). */
-export function isKnownClass(className: string): boolean {
-  return classByName(className) !== undefined;
 }
