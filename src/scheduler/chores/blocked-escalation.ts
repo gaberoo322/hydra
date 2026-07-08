@@ -83,7 +83,7 @@ export async function runBlockedItemEscalation(
       await setLastEscalation(String(item.id), now.toString());
       const ageDays = Math.round(age / (24 * 60 * 60 * 1000));
 
-      const { STREAMS } = await import("../../event-bus.ts");
+      const { STREAMS } = await import("../../event-bus-stream-keys.ts");
       await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type: "cycle:operator_blocked",
         source: "scheduler",

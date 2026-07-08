@@ -30,7 +30,8 @@
 // same restart/backoff sequence.
 // ---------------------------------------------------------------------------
 
-import { EventBus, STREAMS } from "./event-bus.ts";
+import { EventBus } from "./event-bus.ts";
+import { STREAMS } from "./event-bus-stream-keys.ts";
 import {
   NOTIFICATION_EVENT_TYPES as E,
   type NotificationEventPayload,

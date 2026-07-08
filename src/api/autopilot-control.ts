@@ -17,7 +17,7 @@
  */
 
 import { Router } from "express";
-import { STREAMS } from "../event-bus.ts";
+import { STREAMS } from "../event-bus-stream-keys.ts";
 import {
   EmergencyBrakeBodySchema,
   AutopilotPauseBodySchema,

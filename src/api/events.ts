@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { STREAMS, streamKey } from "../event-bus.ts";
+import { STREAMS, streamKey } from "../event-bus-stream-keys.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 import type { EventReaderBus } from "./event-bus-types.ts";
