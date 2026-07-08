@@ -49,7 +49,11 @@
  *                planted money-critical-without-justification case).
  */
 
-import { classifyTargetRisk } from "../../src/target/money-critical.ts";
+import { classifyRisk } from "../../src/target/risk-critical.ts";
+import {
+  BETTING_RISK_SURFACE,
+  BETTING_APP_SUBDIR,
+} from "../target/betting-risk-surface.ts";
 
 /**
  * The PR-body section that a money-critical Target PR must contain. Matched
@@ -93,8 +97,17 @@ interface CheckResult {
  * files and the PR body, decide whether the guard passes.
  */
 export function evaluate(changed: readonly string[], prBody: string): CheckResult {
-  const classification = classifyTargetRisk(changed);
-  if (!classification.moneyCritical) {
+  // The public `CheckResult.moneyCritical` field here is consumed by
+  // target-risk-core-check.test.mts; its rename to "risk-critical" is sibling
+  // slice #3018. This slice (#3017) only swaps the underlying classifier to the
+  // manifest-sourced `classifyRisk`, mapping its `riskCritical` result to the
+  // unchanged local field.
+  const classification = classifyRisk(
+    changed,
+    BETTING_RISK_SURFACE,
+    BETTING_APP_SUBDIR,
+  );
+  if (!classification.riskCritical) {
     return {
       status: "pass",
       reason: "not money-critical — guard passes trivially",

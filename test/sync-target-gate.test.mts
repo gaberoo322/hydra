@@ -56,7 +56,8 @@ const EXPECTED_MIRROR_FILES = [
   "scripts/target/post-merge-health.ts",
   "src/mutation.ts",
   "src/exec-with-timeout.ts",
-  "src/target/money-critical.ts",
+  "scripts/target/betting-risk-surface.ts",
+  "src/target/risk-critical.ts",
 ];
 
 /**
@@ -229,7 +230,7 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     try {
       assert.equal(runSync(wt).status, 0);
       // No changed files → fast skip path, exits 0. This is the cheap proof
-      // that `../../src/mutation.ts` + `../../src/target/money-critical.ts`
+      // that `../../src/mutation.ts` + `../../src/target/risk-critical.ts`
       // resolve from the worktree (the ERR_MODULE_NOT_FOUND friction is gone).
       const r = spawnSync(
         "npx",
@@ -251,27 +252,30 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     const { wt, cleanup } = makeFakeWorktree();
     try {
       assert.equal(runSync(wt).status, 0);
-      // Feed a raw web/-rooted money-critical path + a safe UI path. The
+      // Feed a raw web/-rooted risk-critical path + a safe UI path. The
       // mirrored classifier must flag the staking path WITHOUT the caller
-      // stripping web/ — exactly what kills the hand-rolled friction.
+      // stripping web/ — exactly what kills the hand-rolled friction. The
+      // surface + appSubdir come from the mirrored betting-risk-surface module
+      // (ADR-0026: the surface is an argument, not a hardcoded const).
       const r = spawnSync(
         "node",
         [
           "--input-type=module",
           "-e",
-          `import { classifyTargetRisk } from "./.hydra-gate/src/target/money-critical.ts";` +
-            `const r = classifyTargetRisk(["web/src/lib/staking/kelly.ts","web/src/components/Foo.tsx"]);` +
+          `import { classifyRisk } from "./.hydra-gate/src/target/risk-critical.ts";` +
+            `import { BETTING_RISK_SURFACE, BETTING_APP_SUBDIR } from "./.hydra-gate/scripts/target/betting-risk-surface.ts";` +
+            `const r = classifyRisk(["web/src/lib/staking/kelly.ts","web/src/components/Foo.tsx"], BETTING_RISK_SURFACE, BETTING_APP_SUBDIR);` +
             `process.stdout.write(JSON.stringify(r));`,
         ],
         { cwd: wt, encoding: "utf-8" },
       );
       assert.equal(r.status, 0, `classifier run failed: ${r.stderr}`);
       const parsed = JSON.parse(r.stdout);
-      assert.equal(parsed.moneyCritical, true, "web/-rooted staking path must classify money-critical");
+      assert.equal(parsed.riskCritical, true, "web/-rooted staking path must classify risk-critical");
       assert.deepEqual(
         parsed.matchedPaths,
         ["web/src/lib/staking/kelly.ts"],
-        "only the money-critical web/ path matches; the safe UI path is dropped",
+        "only the risk-critical web/ path matches; the safe UI path is dropped",
       );
     } finally {
       cleanup();

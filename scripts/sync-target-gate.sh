@@ -8,14 +8,14 @@
 # THE PROBLEM (issue #1451):
 #   scripts/target/{mutation-check,target-design-concept,post-merge-health}.ts
 #   are authored in THIS repo (~/hydra, the orchestrator) and import from
-#   ../../src/ (mutation.ts, exec-with-timeout.ts, target/money-critical.ts).
+#   ../../src/ (mutation.ts, exec-with-timeout.ts, target/risk-critical.ts).
 #   A hydra-target-build runs in a hydra-betting worktree where neither the
 #   scripts nor src/ exist, so:
 #     - running the gate from the worktree → ERR_MODULE_NOT_FOUND,
 #     - running it from ~/hydra (orchestrator main tree) is path-fragile and was
 #       the recurring friction the agents worked around by hand-rolling the
-#       money-critical classification (re-introducing the web/-prefix bug that
-#       classifyTargetRisk() already strips, #1235).
+#       risk-critical classification (re-introducing the web/-prefix bug that
+#       classifyRisk()'s appSubdir strip already handles, #1235).
 #   The fix is purely deployment/mirroring: make the scripts + their small,
 #   self-contained src closure present INSIDE the betting worktree so the gate
 #   runs locally with classifyTargetRisk() doing the web/ normalization.
@@ -60,22 +60,25 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # dot-dir + git-excluded so it never shows up in the Target PR diff.
 GATE_DIR_NAME=".hydra-gate"
 
-# The exact dependency closure (verified for issue #1451):
-#   scripts/target/mutation-check.ts        → src/mutation.ts, src/target/money-critical.ts
-#   scripts/target/target-design-concept.ts → src/target/money-critical.ts
+# The exact dependency closure (verified for issue #1451; risk-critical rename
+# per ADR-0026 / epic #3014):
+#   scripts/target/mutation-check.ts        → src/mutation.ts, src/target/risk-critical.ts, scripts/target/betting-risk-surface.ts
+#   scripts/target/target-design-concept.ts → src/target/risk-critical.ts, scripts/target/betting-risk-surface.ts
 #   scripts/target/post-merge-health.ts     → (stdlib only)
 #   src/mutation.ts                         → src/exec-with-timeout.ts
 #   src/exec-with-timeout.ts                → (stdlib only)
-#   src/target/money-critical.ts            → (no imports)
+#   src/target/risk-critical.ts             → (no imports)
+#   scripts/target/betting-risk-surface.ts  → src/target/risk-critical.ts (type-only)
 # Paths are repo-relative; the layout is preserved under $GATE_DIR_NAME so the
 # scripts' `../../src/...` relative imports resolve unchanged.
 GATE_FILES=(
   "scripts/target/mutation-check.ts"
   "scripts/target/target-design-concept.ts"
   "scripts/target/post-merge-health.ts"
+  "scripts/target/betting-risk-surface.ts"
   "src/mutation.ts"
   "src/exec-with-timeout.ts"
-  "src/target/money-critical.ts"
+  "src/target/risk-critical.ts"
 )
 
 usage() {
