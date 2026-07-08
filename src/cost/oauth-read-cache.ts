@@ -113,7 +113,7 @@ export interface OAuthBackoffPersistence {
 }
 
 /** The live {@link ../redis/oauth-backoff.ts} seam — installed on the pure production path. */
-export const REDIS_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
+const REDIS_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
   read: readOAuthBackoff,
   write: writeOAuthBackoff,
   clear: clearOAuthBackoff,
@@ -126,7 +126,7 @@ export const REDIS_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
  * `useOAuthCache:true` cached path with an injected reader and MUST NOT touch
  * Redis; this default guarantees that unless a test opts in.
  */
-export const NOOP_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
+const NOOP_OAUTH_BACKOFF_PERSISTENCE: OAuthBackoffPersistence = {
   read: async () => null,
   write: async () => {},
   clear: async () => {},
@@ -165,7 +165,7 @@ export function setOAuthBackoffPersistence(store?: OAuthBackoffPersistence): voi
  * once-per-process seed rather than re-firing every 60s — while a test swapping
  * in a fresh fake store (a distinct reference) correctly re-hydrates.
  */
-export function installOAuthBackoffPersistence(store: OAuthBackoffPersistence): void {
+function installOAuthBackoffPersistence(store: OAuthBackoffPersistence): void {
   if (store === oauthBackoffPersistence) return;
   oauthBackoffPersistence = store;
   oauthBackoffHydrated = false;
