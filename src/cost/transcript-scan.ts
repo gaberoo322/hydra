@@ -607,7 +607,6 @@ export { projectsRoot, readOAuthUsage };
 // — keep resolving unchanged. The canonical owner is now `./oauth-read-cache.ts`;
 // new code should import directly from there.
 export {
-  clearOAuthCache,
   setOAuthBackoffPersistence,
   oauthBackoffDelayMs,
 } from "./oauth-read-cache.ts";
