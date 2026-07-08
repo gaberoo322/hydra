@@ -1,0 +1,91 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Hydra eval: the skill_prune DELETION TEST, made deterministic (issue #2949,
+# epic #2944). The eval CONTRACT lives in docs/evals.md — read it before editing.
+#
+# WHY THIS FILE EXISTS
+# ====================================================================
+# hydra-skill-prune proposes deletions to a generated skill along the Pocock
+# pruning taxonomy (duplication / sediment / no-op). A deletion is only valid if
+# the PRUNED skill still preserves the LOAD-BEARING CONTRACT TOKENS the skill
+# must always carry. This eval IS that deletion test: it renders a pruned skill
+# body and asserts the safety-critical contract tokens survived the prune. A
+# failing assertion is a NON-PARITY prune — the skill_prune run aborts the PR and
+# files a needs-triage issue listing the candidates instead (AC #2).
+#
+# DELIBERATELY OFFLINE — NO LIVE PROVIDER CALLS (same contract as golden.yaml).
+# ====================================================================
+# The `echo` provider returns the rendered prompt VERBATIM and makes ZERO
+# network/LLM calls; no ANTHROPIC_API_KEY (no such CI secret exists — adding one
+# is an ADR-0005 operator escalation). This eval verifies contract-token
+# PRESERVATION across a prune, NOT live behavioral parity — behavioral
+# golden-task replay against real Anthropic calls is the operator-gated
+# live-provider follow-up (see golden.yaml + eval-gate.yml headers,
+# docs/evals.md § "Live-provider follow-up"), explicitly out of Phase A scope.
+
+description: >-
+  Hydra skill_prune deletion-test eval — offline parity guard. Asserts a pruned
+  generated skill still carries the load-bearing contract tokens it must always
+  preserve (worktree isolation, never-push-to-master, verification command,
+  ADR-0005 escalation, closes-#). A failing assertion means the prune is
+  non-parity and the skill_prune PR must abort. echo provider = no LLM calls.
+
+prompts:
+  # {{skill_body}} stands in for the PRUNED skill body under test — the concrete
+  # diff hydra-skill-prune would apply. The eval asserts the load-bearing tokens
+  # survived; a prune that stripped one of them fails here and aborts the PR.
+  - "{{skill_body}}"
+
+providers:
+  # promptfoo built-in; returns the rendered prompt unchanged, no API key.
+  - id: echo
+
+# Pass when EVERY assertion across EVERY test passes. The advisory eval-gate
+# workflow treats a non-zero exit as a finding to annotate, never a hard merge
+# block (see .github/workflows/eval-gate.yml). hydra-skill-prune, in contrast,
+# treats a non-zero exit as a HARD abort of its own PR (AC #2) — the deletion
+# test is the arbiter of whether the prune preserved parity.
+tests:
+  - description: a valid prune preserves every load-bearing contract token
+    vars:
+      # A minimally-pruned skill body: motivational prose removed (a no-op
+      # deletion), but every safety-critical contract token retained.
+      skill_body: >-
+        Implement the issue in a fresh git worktree; never push directly to
+        master (always a feature branch). Before opening the PR run
+        npm run typecheck:test && npm test. Operator escalation is the closed
+        ADR-0005 list only. The PR body must carry closes #2949.
+    assert:
+      # Worktree-isolation invariant survives the prune.
+      - type: contains
+        value: "fresh git worktree"
+      # The never-push-to-master branch invariant survives.
+      - type: contains
+        value: "never push directly to master"
+      # The test-file typecheck variant survives (operator memory
+      # feedback_dev_run_test_typecheck_before_pr).
+      - type: contains
+        value: "npm run typecheck:test"
+      # The closed ADR-0005 escalation list survives (never invent one).
+      - type: contains
+        value: "ADR-0005"
+      # The closes-# PR-body invariant survives.
+      - type: contains
+        value: "closes #2949"
+
+  - description: an OVER-pruned skill that dropped a contract token fails parity
+    vars:
+      # This body was pruned too aggressively — the never-push-to-master
+      # invariant was stripped as if it were a no-op. The deletion test MUST
+      # catch this so the skill_prune run aborts its PR (AC #2).
+      skill_body: >-
+        Implement the issue in a fresh git worktree. Before opening the PR run
+        npm run typecheck:test && npm test. Operator escalation is the closed
+        ADR-0005 list only. The PR body must carry closes #2949.
+    assert:
+      # not-contains inverts the miss into a green verdict: the pruned body
+      # genuinely LACKS the branch invariant, proving the deletion test detects a
+      # non-parity prune rather than rubber-stamping it. In a real run this is the
+      # FAIL that aborts the PR and downgrades to a needs-triage issue.
+      - type: not-contains
+        value: "never push directly to master"
