@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { stripAnsi, truncate, runCmd } from "../src/grounding/cmd.ts";
 import { parseTestCounts, parseFailingTests } from "../src/grounding/parser.ts";
 import { groundProject, type GroundProjectDeps } from "../src/grounding/index.ts";
+import type { TargetManifest } from "../src/schemas/target-manifest.ts";
 
 /** Existence check for a list of PIDs — true if every PID is gone. */
 async function pidsDead(pids: number[]): Promise<boolean> {
@@ -374,6 +375,37 @@ function stubReadFile(
   }) as NonNullable<GroundProjectDeps["readFile"]>;
 }
 
+/**
+ * A `loadManifest`-shaped stub returning an OK manifest (issue #3019). Verify
+ * commands and `appSubdir` are the fields grounding consumes; the risk block is
+ * present (schema-required) but unread by grounding. Overrides let a test aim
+ * the resolved test/typecheck command or the app subdir.
+ */
+function stubManifestOk(
+  overrides: Partial<TargetManifest["verify"]> = {},
+): NonNullable<GroundProjectDeps["loadManifest"]> {
+  const manifest: TargetManifest = {
+    version: 1,
+    verify: {
+      install: "npm ci",
+      test: "npm test",
+      typecheck: "npm run typecheck",
+      build: "npm run build",
+      appSubdir: "",
+      ...overrides,
+    },
+    riskCritical: { surface: ["src/x/"], mutationKillFloor: 60 },
+  };
+  return ((_rootDir: string) => ({ ok: true as const, manifest }));
+}
+
+/** A `loadManifest`-shaped stub returning a fail-closed result (issue #3019). */
+function stubManifestFail(
+  errors: string[] = ["[target-manifest] manifest not found (stub)"],
+): NonNullable<GroundProjectDeps["loadManifest"]> {
+  return ((_rootDir: string) => ({ ok: false as const, errors }));
+}
+
 describe("groundProject (assembly via injected deps, issue #2182)", () => {
   test("byte-identical default: omitting deps does not change the call shape", async () => {
     // A no-deps call must still type-check and run; we drive it with stubs only
@@ -384,19 +416,24 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
       {
         runCmd: stubRunCmd({ "git branch": { stdout: "main\n" } }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.branch, "main");
   });
 
-  test("appDir subdirectory probe: root has no package.json → probes web/", async () => {
-    // package.json absent at root, present under web/. The test command must run
-    // from web/ — we assert by having the web/ package.json read succeed.
+  // REWRITTEN for issue #3019 (was: "appDir subdirectory probe: root has no
+  // package.json → probes web/"). The hardcoded ['web','app','packages/app']
+  // probe left the target flow — appDir is now derived from the manifest's
+  // verify.appSubdir. This case pins the NEW invariant: package.json is read
+  // from `<projectDir>/<appSubdir>/`, and the readFile probe never walks the
+  // old candidate list.
+  test("appDir sourced from manifest verify.appSubdir (no ['web','app',…] probe)", async () => {
     const reads: string[] = [];
     const readFile = (async (path: unknown) => {
       const p = String(path);
       reads.push(p);
-      if (p.includes("web/package.json")) return '{"name":"web-app"}';
+      if (p.includes("/fake/project/web/package.json")) return '{"name":"web-app"}';
       const err = new Error("ENOENT");
       (err as NodeJS.ErrnoException).code = "ENOENT";
       throw err;
@@ -405,18 +442,47 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
     const report = await groundProject(
       "/fake/project",
       {},
-      { runCmd: stubRunCmd({}), readFile },
+      { runCmd: stubRunCmd({}), readFile, loadManifest: stubManifestOk({ appSubdir: "web" }) },
     );
 
-    // The root probe failed, the web/ probe succeeded, so package.json read from web/.
+    // package.json read from the manifest-declared web/ appDir.
     assert.equal(report.packageJson, '{"name":"web-app"}');
     assert.ok(
-      reads.some((p) => p.endsWith("/fake/project/package.json")),
-      "must probe the root package.json first",
+      reads.some((p) => p.endsWith("/fake/project/web/package.json")),
+      "must read package.json from the manifest appSubdir (web/)",
+    );
+    // The old heuristic root-first probe is gone: there is NO read of the bare
+    // root package.json, and NO read of the app/ or packages/app/ candidates.
+    assert.ok(
+      !reads.some((p) => p.endsWith("/fake/project/package.json")),
+      "must NOT probe the root package.json (old heuristic removed)",
     );
     assert.ok(
-      reads.some((p) => p.includes("web/package.json")),
-      "must fall back to probing web/package.json",
+      !reads.some((p) => p.includes("packages/app/package.json") || p.endsWith("/app/package.json")),
+      "must NOT probe the old ['app','packages/app'] candidates",
+    );
+  });
+
+  test("appDir === projectDir when appSubdir is '' (repo-root target)", async () => {
+    const reads: string[] = [];
+    const readFile = (async (path: unknown) => {
+      const p = String(path);
+      reads.push(p);
+      if (p.endsWith("/fake/root/package.json")) return '{"name":"root-app"}';
+      const err = new Error("ENOENT");
+      (err as NodeJS.ErrnoException).code = "ENOENT";
+      throw err;
+    }) as NonNullable<GroundProjectDeps["readFile"]>;
+
+    const report = await groundProject(
+      "/fake/root",
+      {},
+      { runCmd: stubRunCmd({}), readFile, loadManifest: stubManifestOk({ appSubdir: "" }) },
+    );
+    assert.equal(report.packageJson, '{"name":"root-app"}');
+    assert.ok(
+      reads.some((p) => p.endsWith("/fake/root/package.json")),
+      "empty appSubdir => appDir === projectDir",
     );
   });
 
@@ -432,6 +498,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
           },
         }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.testReport.parseStatus, "ok");
@@ -449,6 +516,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
           "npm test": { exitCode: 0, stdout: "ran some stuff but no summary" },
         }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.testReport.parseStatus, "unrecognised");
@@ -467,6 +535,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
           },
         }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.testReport.parseStatus, "errored");
@@ -480,6 +549,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
       {
         runCmd: stubRunCmd({ "npm test": { exitCode: 127, stderr: "command not found" } }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.testReport.parseStatus, "not-run");
@@ -500,6 +570,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
           },
         }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.failingTests.length, 2);
@@ -515,6 +586,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
       {
         runCmd: stubRunCmd({ grep: { exitCode: 0, stdout: lines } }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.todoMarkers.length, 20, "todoMarkers must be capped at 20");
@@ -528,6 +600,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
         // grep exits 1 when it finds nothing.
         runCmd: stubRunCmd({ grep: { exitCode: 1, stdout: "" } }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.deepEqual(report.todoMarkers, []);
@@ -545,6 +618,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
           "git ls-files": { stdout: "src/a.ts\nsrc/b.ts\nsrc/c.ts\n" },
         }),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.branch, "feature/x");
@@ -568,6 +642,7 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
           { match: "package.json", content: "{}" },
           { match: "README.md", content: longReadme },
         ]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.equal(report.readme.length, 2000, "README must be capped at 2000 chars");
@@ -583,9 +658,165 @@ describe("groundProject (assembly via injected deps, issue #2182)", () => {
       {
         runCmd: stubRunCmd({}),
         readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
       },
     );
     assert.ok(typeof report.groundingDurationMs === "number");
     assert.ok(Date.now() - start < 1000, "stubbed grounding must be sub-second");
+  });
+});
+
+// -------------------------------------------------------------------------
+// groundProject — Target Manifest sourcing + fail-closed (issue #3019, ADR-0026)
+//
+// The verify commands (test, typecheck) and the app subdir are sourced from
+// `<projectDir>/.hydra/manifest.json` via the injected loadManifest, NOT
+// hardcoded. A missing/malformed manifest is FAIL-CLOSED: no test/typecheck
+// subprocess runs, `manifestError` is populated, and NO default `npm test` is
+// substituted (that default is the betting count-gate trap this slice kills).
+// grounding stays READ-ONLY and NEVER throws — a load failure returns a report.
+// -------------------------------------------------------------------------
+describe("groundProject Target Manifest sourcing (issue #3019)", () => {
+  test("manifest-sourced verify.test drives the test command (betting: test:raw, not npm test)", async () => {
+    const invoked: string[] = [];
+    const runCmd = (async (cmd: string, args: string[]) => {
+      invoked.push(`${cmd} ${args.join(" ")}`.trim());
+      if (cmd === "npm" && args.join(" ") === "run test:raw") {
+        return { exitCode: 0, stdout: "\n Test Files  1 passed (1)\n      Tests  5 passed (5)\n", stderr: "", durationMs: 1 };
+      }
+      return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+    }) as NonNullable<GroundProjectDeps["runCmd"]>;
+
+    const report = await groundProject(
+      "/fake/betting",
+      {},
+      {
+        runCmd,
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk({ test: "npm run test:raw" }),
+      },
+    );
+
+    assert.ok(
+      invoked.includes("npm run test:raw"),
+      "the manifest verify.test (npm run test:raw) must be the command grounding runs",
+    );
+    assert.ok(
+      !invoked.some((c) => c === "npm test"),
+      "grounding must NOT run the count-gate `npm test` — that is the trap this slice kills",
+    );
+    assert.equal(report.testReport.parseStatus, "ok");
+    assert.equal(report.testReport.passed, 5);
+    assert.equal(report.manifestError, null);
+  });
+
+  test("manifest-sourced verify.typecheck drives the typecheck command", async () => {
+    const invoked: string[] = [];
+    const runCmd = (async (cmd: string, args: string[]) => {
+      invoked.push(`${cmd} ${args.join(" ")}`.trim());
+      return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+    }) as NonNullable<GroundProjectDeps["runCmd"]>;
+
+    await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd,
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk({ typecheck: "npm run tc:strict" }),
+      },
+    );
+    assert.ok(
+      invoked.includes("npm run tc:strict"),
+      "the manifest verify.typecheck must be the command grounding runs (not a hardcoded `npm run typecheck`)",
+    );
+  });
+
+  test("fail-closed: missing/malformed manifest → no test or typecheck subprocess, manifestError populated", async () => {
+    const invoked: string[] = [];
+    const runCmd = (async (cmd: string, args: string[]) => {
+      invoked.push(`${cmd} ${args.join(" ")}`.trim());
+      return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+    }) as NonNullable<GroundProjectDeps["runCmd"]>;
+
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd,
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestFail(["[target-manifest] manifest not found (stub)"]),
+      },
+    );
+
+    // manifestError surfaces the load failure (fail loud, no throw).
+    assert.deepEqual(report.manifestError, ["[target-manifest] manifest not found (stub)"]);
+    // No test/typecheck subprocess ran, and crucially NO default `npm test`.
+    assert.ok(!invoked.some((c) => c.startsWith("npm test")), "must NOT default to `npm test`");
+    assert.ok(!invoked.some((c) => c === "npm run typecheck"), "must NOT default to `npm run typecheck`");
+    // Both reports classify as not-run (127 stand-in).
+    assert.equal(report.testReport.ran, false);
+    assert.equal(report.testReport.parseStatus, "not-run");
+    assert.equal(report.typecheckReport.ran, false);
+    assert.equal(report.typecheckReport.exitCode, 127);
+    // Grounding still returned a report (never threw) and still gathered git state.
+    assert.equal(typeof report.groundingDurationMs, "number");
+  });
+
+  test("ok path: manifestError is null", async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({}),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk(),
+      },
+    );
+    assert.equal(report.manifestError, null);
+  });
+
+  test("precedence: explicit opts.testCmd overrides the manifest verify.test", async () => {
+    const invoked: string[] = [];
+    const runCmd = (async (cmd: string, args: string[]) => {
+      invoked.push(`${cmd} ${args.join(" ")}`.trim());
+      return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+    }) as NonNullable<GroundProjectDeps["runCmd"]>;
+
+    await groundProject(
+      "/fake/project",
+      { testCmd: "yarn", testArgs: ["jest"] },
+      {
+        runCmd,
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+        loadManifest: stubManifestOk({ test: "npm run test:raw" }),
+      },
+    );
+    assert.ok(invoked.includes("yarn jest"), "explicit opts.testCmd wins over the manifest");
+    assert.ok(!invoked.includes("npm run test:raw"), "manifest verify.test is overridden by opts.testCmd");
+  });
+
+  test("real loadManifest default: no manifest on disk → fail-closed (no throw)", async () => {
+    // Omit the loadManifest stub so the REAL loader runs against a temp dir with
+    // no .hydra/manifest.json. It must fail-closed, not throw, not default.
+    const tmp = mkdtempSync(join(tmpdir(), "grounding-nomanifest-"));
+    try {
+      const invoked: string[] = [];
+      const runCmd = (async (cmd: string, args: string[]) => {
+        invoked.push(`${cmd} ${args.join(" ")}`.trim());
+        return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      }) as NonNullable<GroundProjectDeps["runCmd"]>;
+      const report = await groundProject(
+        tmp,
+        {},
+        { runCmd, readFile: stubReadFile([{ match: "package.json", content: "{}" }]) },
+      );
+      assert.ok(Array.isArray(report.manifestError) && report.manifestError.length >= 1);
+      assert.ok(report.manifestError![0].startsWith("[target-manifest]"));
+      assert.ok(!invoked.some((c) => c.startsWith("npm test")), "real loader path must not default to `npm test`");
+      assert.equal(report.testReport.parseStatus, "not-run");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CMD_TIMEOUT, runCmd } from "./cmd.ts";
 import { parseTestCounts, parseFailingTests } from "./parser.ts";
+import { loadManifest } from "../target/manifest.ts";
 
 /**
  * Options accepted by {@link groundProject}.
@@ -12,9 +13,14 @@ import { parseTestCounts, parseFailingTests } from "./parser.ts";
  * miss → reverts to `"npm"` with no error).
  */
 export interface GroundingOpts {
-  /** Test command to run. Default: `"npm"`. */
+  /**
+   * Explicit test-command OVERRIDE. When set it wins over the Target Manifest's
+   * `verify.test` (the injection seam existing tests rely on). When unset, the
+   * command is sourced from the manifest; there is NO hardcoded `npm test`
+   * fallback (issue #3019) — a missing/malformed manifest is fail-closed.
+   */
   testCmd?: string;
-  /** Arguments passed to {@link GroundingOpts.testCmd}. Default: `["test"]`. */
+  /** Arguments passed to {@link GroundingOpts.testCmd}. Default: `[]`. */
   testArgs?: string[];
   /**
    * Paths to focus the inspection on. Currently documented but UNREAD by the
@@ -56,6 +62,15 @@ export interface GroundProjectDeps {
    * `(path, "utf-8")` and relies on a rejected promise to signal "absent".
    */
   readFile?: typeof readFile;
+  /**
+   * Target Manifest loader (epic #3014, ADR-0026, issue #3019). Default: the
+   * real {@link loadManifest}, which reads `<projectDir>/.hydra/manifest.json`
+   * fresh and returns a result object (never throws). Tests inject a stub to
+   * exercise both the ok path (manifest-sourced verify commands + `appSubdir`)
+   * and the fail-closed path (`{ ok:false }` → no test/typecheck subprocess,
+   * `manifestError` populated) without a real manifest on disk.
+   */
+  loadManifest?: typeof loadManifest;
 }
 
 /** Classification of how the test output was parsed. See issue #456. */
@@ -105,6 +120,18 @@ export interface GroundingReport {
   todoMarkers: string[];
   readme: string;
   packageJson: string;
+  /**
+   * `[target-manifest]`-prefixed error strings when the Target Manifest failed
+   * to load (missing, malformed, or schema-invalid), else `null` (issue #3019,
+   * ADR-0026). When non-null, grounding ran NEITHER the test NOR the typecheck
+   * subprocess — it did not fall back to a default `npm test` (that silent
+   * default is the betting count-gate trap this slice kills). The BUILD layer
+   * aborts on a non-null `manifestError`; grounding itself never throws (it is
+   * READ-ONLY by contract). Additive/back-compatible: every pre-existing field
+   * keeps its name and runtime type so `GET /grounding/latest` stays
+   * byte-compatible.
+   */
+  manifestError: string[] | null;
   timestamp: number;
   groundingDurationMs: number;
 }
@@ -127,28 +154,70 @@ export async function groundProject(
 ): Promise<GroundingReport> {
   const runCmdImpl = deps.runCmd ?? runCmd;
   const readFileImpl = deps.readFile ?? readFile;
+  const loadManifestImpl = deps.loadManifest ?? loadManifest;
   const timestamp = Date.now();
-  const testCmd = opts.testCmd || "npm";
-  const testArgs = opts.testArgs || ["test"];
 
   // Grounding is READ-ONLY. Workspace cleanup (checkout main, discard
   // tracked changes, delete stale feature branches) now lives in
   // prepare-workspace.mjs — the control loop calls it explicitly BEFORE
   // grounding so "reading the truth" can never mutate that truth.
 
-  // Detect app directory — some projects have code in a subdirectory (e.g., web/)
-  let appDir = projectDir;
-  try {
-    await readFileImpl(join(projectDir, "package.json"), "utf-8");
-  } catch { /* intentional: no package.json at root — probe subdirs */
-    for (const sub of ["web", "app", "packages/app"]) {
-      try {
-        await readFileImpl(join(projectDir, sub, "package.json"), "utf-8");
-        appDir = join(projectDir, sub);
-        break;
-      } catch { /* intentional: sub-dir does not have package.json, try next */ }
-    }
+  // Target Manifest (epic #3014, ADR-0026, issue #3019): the verify commands
+  // and the app subdir are sourced from `<projectDir>/.hydra/manifest.json`,
+  // NOT hardcoded. `loadManifest` reads fresh and returns a result object; it
+  // never throws (grounding's never-throw + read-only contract is preserved).
+  //
+  // Fail-closed, no silent default: when the manifest is missing/malformed we
+  // populate `manifestError`, skip BOTH the test and typecheck subprocesses,
+  // and derive `appDir` from `projectDir` (no probe). We deliberately do NOT
+  // fall back to `npm test` — that default is the betting count-gate trap this
+  // slice exists to kill (`npm test` there is a count-guard, not the real
+  // suite). "Fail loud" is satisfied by surfacing `manifestError` in the report
+  // and the BUILD layer aborting on it, NOT by throwing here.
+  const manifestResult = loadManifestImpl(projectDir);
+  // NOTE: this repo compiles with `strict:false`, so discriminated-union
+  // narrowing on the `ok` literal is disabled — reaching `.errors` on the
+  // `{ ok:false }` member needs an explicit cast, matching the house pattern in
+  // `src/outcomes.ts` (`(v as { ok:false; errors:string[] }).errors`).
+  const manifestError: string[] | null = manifestResult.ok
+    ? null
+    : (manifestResult as { ok: false; errors: string[] }).errors;
+
+  // appDir: on the ok path, join `verify.appSubdir` (which may be '' for a
+  // repo-root target => appDir === projectDir). On the fail path we never run
+  // the app-directory commands, so appDir just falls back to projectDir. The
+  // old ['web','app','packages/app'] probe leaves the target flow entirely —
+  // realizing ADR-0026's "the hardcoded web/ strip leaves src/".
+  const appDir = manifestResult.ok
+    ? join(projectDir, manifestResult.manifest.verify.appSubdir)
+    : projectDir;
+
+  // Verify command resolution. Precedence:
+  //   explicit opts.testCmd  >  manifest verify.test  >  (fail-closed: no run)
+  // The `opts.testCmd`/`testArgs` override is kept as the existing test-
+  // injection seam; the manifest is the authoritative source for the target
+  // flow. Manifest commands are whitespace-tokenized simple argv (no `sh -c`),
+  // run via the existing shell-less runCmd — anything needing a pipe/redirect
+  // must be a package.json script the manifest points at (as `test:raw` is).
+  let testCmd: string | null = null;
+  let testArgs: string[] = [];
+  let typecheckCmd: string | null = null;
+  let typecheckArgs: string[] = [];
+  if (opts.testCmd) {
+    testCmd = opts.testCmd;
+    testArgs = opts.testArgs ?? [];
+  } else if (manifestResult.ok) {
+    [testCmd, ...testArgs] = manifestResult.manifest.verify.test.split(/\s+/).filter(Boolean);
   }
+  if (manifestResult.ok) {
+    [typecheckCmd, ...typecheckArgs] =
+      manifestResult.manifest.verify.typecheck.split(/\s+/).filter(Boolean);
+  }
+  // A 127 (command-not-found) result stands in for "not run" so downstream
+  // classification (testReport.ran = exitCode !== 127, parseStatus = "not-run")
+  // treats a fail-closed manifest identically to a missing binary — no default
+  // command is substituted.
+  const NOT_RUN = { exitCode: 127, stdout: "", stderr: "", durationMs: 0 } as const;
 
   // Run all inspections in parallel
   const [
@@ -173,10 +242,17 @@ export async function groundProject(
     runCmdImpl("git", ["diff", "--stat", "HEAD~3"], { cwd: projectDir, timeout: 10000 }).catch(() => ({
       exitCode: 1, stdout: "", stderr: "not enough history", durationMs: 0,
     })),
-    // Tests (from app directory where package.json lives)
-    runCmdImpl(testCmd, testArgs, { cwd: appDir, timeout: CMD_TIMEOUT }),
-    // Typecheck (from app directory — use project's own script if available)
-    runCmdImpl("npm", ["run", "typecheck"], { cwd: appDir, timeout: 60_000 }),
+    // Tests (from app directory where package.json lives). Fail-closed: when no
+    // command resolved (missing/malformed manifest AND no opts override), we run
+    // NOTHING and stand in a 127 result — never a default `npm test`.
+    testCmd
+      ? runCmdImpl(testCmd, testArgs, { cwd: appDir, timeout: CMD_TIMEOUT })
+      : Promise.resolve({ ...NOT_RUN }),
+    // Typecheck (from app directory) — the manifest-declared `verify.typecheck`,
+    // not a hardcoded `npm run typecheck`. Fail-closed identically.
+    typecheckCmd
+      ? runCmdImpl(typecheckCmd, typecheckArgs, { cwd: appDir, timeout: 60_000 })
+      : Promise.resolve({ ...NOT_RUN }),
     // Package.json
     readFileImpl(join(appDir, "package.json"), "utf-8").catch(() => "{}"),
     // TODO/FIXME markers — cheap signal for known gaps (exclude build artifacts)
@@ -255,6 +331,10 @@ export async function groundProject(
     readme: typeof readmeContent === "string" ? readmeContent.slice(0, 2000) : "",
 
     packageJson: pkgResult,
+
+    // Non-null => manifest load failed; grounding ran no test/typecheck and the
+    // build layer must abort (fail-closed, no silent default). null => ok.
+    manifestError,
 
     timestamp,
     groundingDurationMs: Date.now() - timestamp,
