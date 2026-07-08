@@ -145,7 +145,7 @@ export interface AttributionLedger {
 // ---------------------------------------------------------------------------
 
 /** The single append-only ledger list key. JSON {@link LedgerRow} rows. */
-export function attributionLedgerKey(): string {
+function attributionLedgerKey(): string {
   return "hydra:attribution:ledger";
 }
 
