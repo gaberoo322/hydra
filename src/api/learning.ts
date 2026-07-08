@@ -1,28 +1,8 @@
 import { Router } from "express";
-import { listFrictionPatterns } from "../pattern-memory/agent-memory.ts";
 import {
-  getIneffectivePromotedPatterns,
-  getRuleActionLog,
-} from "../pattern-memory/rule-effectiveness.ts";
-import {
-  RuleActionLogQuerySchema,
   ContextTraceQuerySchema,
   ReflectionHealthQuerySchema,
-  KnowledgeQuerySchema,
 } from "../schemas/learning.ts";
-// Issue #2647: the dispatch-served, plan-time knowledge fetch. This route is
-// the CONTENT-serving counterpart to the counts-only context-trace: it returns
-// the rendered agent-scoped knowledge block (`loadKnowledgeBaseForPrompt`) that
-// the dispatch playbooks weave into the implementation plan, and it records the
-// #1440 per-cycle availability metric ON ITS SUCCESS PATH — so
-// `cyclesWithContext` moves only on a real dispatch fetch, never on a diagnostic
-// context-trace hit (the metric side effect moved OUT of getContext, #2647).
-import { loadKnowledgeBaseForPrompt } from "../knowledge-base/ov-search.ts";
-import {
-  recordKnowledgeContextAvailability,
-  appendKnowledgeFetch,
-} from "../redis/ov-search-metrics.ts";
-import type { KnowledgeLedgerRow } from "../redis/ov-search-metrics.ts";
 // Issue #2467: the reflection-deposit observability surface reads the recent
 // cycle-metrics window (each row already carries a derived `reflectionMatchSource`
 // from `deriveReflectionMatchSource(reflectionSources)`) and projects the bucket
@@ -51,6 +31,30 @@ import { getMetricsTrend, projectReflectionHealth } from "../metrics/trend.ts";
 // #2225 → #2333 → #2497 lineage).
 import { getContext } from "../learning/composition.ts";
 
+/**
+ * Learning-composition diagnostics router.
+ *
+ * Issue #3006: this file shrank from a six-concern catch-all to the two routes
+ * that are genuinely about the learning-composition domain:
+ *
+ *   - `GET /learning/context-trace`     — what learning context getContext()
+ *     WOULD compose for an agent+anchor (composition, not delivery — #841)
+ *   - `GET /learning/reflection-health` — the reflection-deposit health verdict
+ *     over the recent cycle-metrics window (#2467)
+ *
+ * The concerns that used to share this router moved to their domain homes, URL
+ * paths byte-identical (they are stable dispatch/operator contracts):
+ *
+ *   - Pattern-memory read diagnostics (`/learning/ineffective-rules`,
+ *     `/learning/rule-action-log`, `/learning/friction-patterns`)
+ *     → `src/api/pattern-memory.ts`, beside the `/memory/*` write routes for
+ *     the same domain (#2280 split the writes; #3006 reunited the reads).
+ *   - The dispatch-served plan-time knowledge fetch (`/learning/knowledge`,
+ *     #2647/#2717, with its two best-effort side effects)
+ *     → `src/api/openviking.ts`, the router already fronting the
+ *     knowledge-base/OpenViking domain it wraps.
+ */
+
 // Issue #2497: re-export the learning-composition domain for back-compat. The
 // route below imports `getContext` directly above; these re-exports keep the
 // historical `src/api/learning.ts` import surface stable for any consumer (and
@@ -64,8 +68,6 @@ export type {
   GetContextDeps,
 } from "../learning/composition.ts";
 export { getContext } from "../learning/composition.ts";
-
-const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const;
 
 // ===========================================================================
 // Reflection-deposit health (issue #2467; projection relocated to metrics #2492)
@@ -105,131 +107,8 @@ export type {
 // health.test.mts import it FROM here — keep that import site stable.
 export { projectReflectionHealth } from "../metrics/trend.ts";
 
-/**
- * GET /learning/ineffective-rules — patterns that were auto-promoted to a
- * feedback file but keep firing at the same (or higher) rate post-promotion.
- *
- * Issue #289: promotion is supposed to durably change agent behavior, but the
- * observed reality is `scope-creep` at 231 hits and `verification-failure` at
- * 438 hits long after promotion. This endpoint surfaces those rules so an
- * operator (or a prompt-evolution agent — see #7) can rewrite or split them
- * into more specific sub-patterns.
- *
- * Response:
- *   {
- *     planner:  IneffectivePromotedPattern[],
- *     executor: IneffectivePromotedPattern[],
- *     skeptic:  IneffectivePromotedPattern[],
- *     totalIneffective: number,
- *   }
- *
- * Each entry includes pre/post firing rates, promotion date, and the ratio
- * between them so reviewers can prioritise the worst offenders.
- *
- * UNIT CLARIFICATION (issue #2950): the `preRate`/`postRate`/`rateRatio` fields
- * on each entry are cue-FIRING rates — friction-cue firings per day recorded via
- * Pattern Memory's `recordPattern` — NOT merge/QA/build failure rates. A
- * flat-or-rising postRate flags a promoted rule whose text is not preventing the
- * friction it describes; promotion is correlated with, not causal of, a rate
- * rise (issue #2933 was falsified on exactly this misread). Do not read this
- * endpoint as evidence that a promotion "caused" more failures.
- */
-/**
- * Issue #2647 — injectable deps for the plan-time knowledge route. Both
- * optional; each defaults to the real implementation (`deps?.field ?? realImpl`)
- * so production mounts `createLearningRouter()` with no args and observes
- * byte-identical behaviour, while a test can drive the record-on-success
- * invariant deterministically without a live OpenViking / Redis connection.
- */
-export interface LearningRouterDeps {
-  loadKnowledgeBaseForPrompt?: (
-    agent: string,
-  ) => Promise<{ content: string; itemCount: number; itemIds: string[] }>;
-  recordKnowledgeContextAvailability?: (hadContext: boolean) => Promise<void>;
-  // Issue #2717: append one raw ledger row per served knowledge fetch. Injected
-  // for deterministic tests; production defaults to the real Redis accessor.
-  appendKnowledgeFetch?: (row: KnowledgeLedgerRow) => Promise<void>;
-}
-
-export function createLearningRouter(deps: LearningRouterDeps = {}) {
+export function createLearningRouter() {
   const router = Router();
-
-  // Issue #2647: resolve the two knowledge-route primitives from the optional
-  // deps bag, defaulting to the real implementations. Production passes no deps.
-  const loadKnowledgeBaseForPromptFn =
-    deps.loadKnowledgeBaseForPrompt ?? loadKnowledgeBaseForPrompt;
-  const recordKnowledgeContextAvailabilityFn =
-    deps.recordKnowledgeContextAvailability ?? recordKnowledgeContextAvailability;
-  const appendKnowledgeFetchFn =
-    deps.appendKnowledgeFetch ?? appendKnowledgeFetch;
-
-  router.get("/learning/ineffective-rules", async (_req, res) => {
-    try {
-      const [planner, executor, skeptic] = await Promise.all([
-        getIneffectivePromotedPatterns("planner"),
-        getIneffectivePromotedPatterns("executor"),
-        getIneffectivePromotedPatterns("skeptic"),
-      ]);
-      const totalIneffective = planner.length + executor.length + skeptic.length;
-      res.json({ planner, executor, skeptic, totalIneffective });
-    } catch (err: any) {
-      console.error(`[learning-api] ineffective-rules failed: ${err?.message || String(err)}`);
-      res.status(500).json({
-        planner: [],
-        executor: [],
-        skeptic: [],
-        totalIneffective: 0,
-        errors: [err?.message || String(err)],
-      });
-    }
-  });
-
-  /**
-   * GET /learning/rule-action-log — audit trail of auto-demote / alert
-   * actions taken by the daily effectiveness check (issue #365). Newest
-   * first; capped at RULE_ACTION_LOG_CAP entries.
-   *
-   * Query param `limit` (default 50, max 200).
-   */
-  router.get("/learning/rule-action-log", async (req, res) => {
-    try {
-      // ADR-0022: read `limit` through the Schemas seam (safeParse on the whole
-      // req.query). The schema reuses countQuerySchema's coercion, which
-      // collapses bad/absent/out-of-range input to the default (50) and clamps
-      // to [1, 200] — exactly the legacy `parseInt(...) || 50` + clamp.
-      const limit = RuleActionLogQuerySchema.safeParse(req.query).data?.limit ?? 50;
-      const entries = await getRuleActionLog(limit);
-      res.json({ entries, count: entries.length });
-    } catch (err: any) {
-      console.error(`[learning-api] rule-action-log failed: ${err?.message || String(err)}`);
-      res.status(500).json({ entries: [], count: 0, errors: [err?.message || String(err)] });
-    }
-  });
-
-  /**
-   * GET /learning/friction-patterns — observability surface for the soft
-   * friction items captured from subagent runs (issue #512). Returns the
-   * aggregated friction patterns keyed by skill, mirroring the shape of
-   * `/learning/ineffective-rules` for symmetry.
-   */
-  router.get("/learning/friction-patterns", async (_req, res) => {
-    try {
-      const out: Record<string, unknown[]> = {};
-      let total = 0;
-      for (const skill of FRICTION_SKILLS) {
-        const patterns = await listFrictionPatterns(skill);
-        out[skill] = patterns;
-        total += patterns.length;
-      }
-      res.json({ ...out, totalPatterns: total });
-    } catch (err: any) {
-      console.error(`[learning-api] friction-patterns failed: ${err?.message || String(err)}`);
-      res.status(500).json({
-        totalPatterns: 0,
-        errors: [err?.message || String(err)],
-      });
-    }
-  });
 
   /**
    * GET /learning/context-trace — diagnostic view of `getContext()`'s
@@ -311,112 +190,6 @@ export function createLearningRouter(deps: LearningRouterDeps = {}) {
       });
     } catch (err: any) {
       console.error(`[learning-api] context-trace failed: ${err?.message || String(err)}`);
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
-
-  /**
-   * GET /learning/knowledge?agent= — the dispatch-served, plan-time knowledge
-   * fetch (issue #2647).
-   *
-   * This is the CONTENT-serving knowledge route the dispatch playbooks
-   * (`hydra-dev`, `hydra-target-build`) fetch at planning time — the same seam
-   * where they already read `/api/reflections`, `/api/design-concepts/<ref>`,
-   * and `/api/tier`. It wraps `loadKnowledgeBaseForPrompt` (the agent-scoped
-   * OpenViking search, top-5 rendered into a prompt block) and returns real
-   * `content` the agent weaves into its implementation plan — deliberately NOT
-   * the counts-only `/api/learning/context-trace` shape, which omits block
-   * `.content` by design (#804/#841) and is a diagnostic composer no dispatch
-   * consumes.
-   *
-   * CRITICAL (issue #2647): this route is the SINGLE place the #1440 per-cycle
-   * knowledge-context-availability metric is recorded. The record fires
-   * SERVER-SIDE on the success path — any served fetch increments `cyclesTotal`,
-   * a non-empty result (`itemCount > 0`) also increments `cyclesWithContext` —
-   * so the metric tracks actual dispatch-served fetches, never a diagnostic
-   * context-trace hit (the side effect was MOVED here out of `getContext()`).
-   * Recording server-side (rather than from a playbook shell block) keeps the
-   * record co-located with a real served fetch and sidesteps the single-quoted
-   * heredoc / `$VAR`-expansion fragility the dispatch PR-body quoting has.
-   *
-   * The availability record is best-effort / never-throw: a Redis error is
-   * logged and swallowed so it can never break the plan-time fetch the dispatch
-   * depends on.
-   *
-   * Issue #2717: this route ALSO appends one raw row per served fetch to the
-   * per-fetch knowledge-retrieval ledger (`appendKnowledgeLedgerRow`) — the
-   * dark-tolerant-ledger slice that makes retrieval→outcome attribution possible
-   * later. The append is best-effort / never-throws (same contract as the
-   * availability record) and fires on EVERY 200 (including an itemCount:0 miss);
-   * a 400/500 appends nothing. The optional `anchor` query param is the join key
-   * the ledger records against the eventual cycle outcome.
-   *
-   * Query params:
-   *   agent  (required) — the agent/skill name (e.g. `hydra-dev`)
-   *   anchor (optional) — the anchor/cycle id (e.g. `issue-2717`) the ledger
-   *                       records as the retrieval→outcome join key; `null` when
-   *                       the dispatch sends no anchor.
-   *
-   * Response (200): { agent, content, itemCount }
-   *   - `content` is prompt-ready markdown; `""` / `itemCount: 0` on a miss (OV
-   *     returned nothing) — a clean no-op the dispatch degrades over silently.
-   * Response (400): { error } when `agent` is absent/blank.
-   */
-  router.get("/learning/knowledge", async (req, res) => {
-    // ADR-0022: read query through the Schemas seam. This route owns a bespoke
-    // 400 (mirroring context-trace), so it safeParses inline.
-    const parsed = KnowledgeQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({ error: "agent query param is required" });
-      return;
-    }
-    const { agent } = parsed.data;
-    const anchor = parsed.data.anchor ?? null;
-
-    try {
-      const { content, itemCount, itemIds } = await loadKnowledgeBaseForPromptFn(agent);
-
-      // Issue #2647 / #1440: record per-cycle knowledge-context availability on
-      // the SUCCESS path of this dispatch-served fetch. Best-effort and
-      // never-throws — a Redis hiccup must not break the plan-time fetch. Any
-      // served fetch counts toward cyclesTotal; a non-empty result also counts
-      // toward cyclesWithContext (itemCount > 0 ⇔ the block had content).
-      try {
-        await recordKnowledgeContextAvailabilityFn(itemCount > 0);
-      } catch (recErr: any) {
-        console.error(
-          `[learning-api] knowledge availability record failed: ${recErr?.message ?? recErr}`,
-        );
-      }
-
-      // Issue #2717: append exactly one raw observation row per served fetch to
-      // the per-fetch knowledge-retrieval ledger — the dark-tolerant-ledger
-      // slice that makes retrieval→outcome attribution possible later (the
-      // correlation slice is deferred until this has volume). The row carries
-      // the join key (agent + anchor/cycle id) plus which items were served
-      // (stable content-hash ids), so a later analysis can ask "did THESE
-      // OpenViking items appear in a successful dispatch?". Best-effort /
-      // never-throws — same contract as the availability record above; a Redis
-      // hiccup must not break the plan-time fetch. Fires on EVERY 200 (including
-      // an itemCount:0 miss, so the denominator is honest); a 400/500 appends
-      // nothing (this is on the success path only).
-      try {
-        await appendKnowledgeFetchFn({
-          ts: Date.now(),
-          agent,
-          anchor,
-          itemCount,
-          itemIds,
-        });
-      } catch (ledgerErr: any) {
-        console.error(
-          `[learning-api] knowledge ledger append failed: ${ledgerErr?.message ?? ledgerErr}`,
-        );
-      }
-
-      res.json({ agent, content, itemCount });
-    } catch (err: any) {
-      console.error(`[learning-api] knowledge failed: ${err?.message || String(err)}`);
       res.status(500).json({ error: err?.message || String(err) });
     }
   });
