@@ -75,7 +75,7 @@ export async function runReviewPickupNotify(
 
   // Empty -> non-empty edge: fire exactly one notification, then arm-spent.
   const first = items[0];
-  const { STREAMS } = await import("../../event-bus.ts");
+  const { STREAMS } = await import("../../event-bus-stream-keys.ts");
   await eventBus.publish(STREAMS.NOTIFICATIONS, {
     type: "review:pickup_ready",
     source: "scheduler",

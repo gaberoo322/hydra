@@ -12,6 +12,19 @@ import { makeWsBroadcastRegistry, type WsBroadcastRegistry } from "./ws-broadcas
 // `NotificationEventType` is the type `EventInput.type` widens from.
 import { NOTIFICATION_EVENT_TYPES } from "./event-bus-vocabulary.ts";
 import type { NotificationEventType } from "./event-bus-vocabulary.ts";
+// The stream-key vocabulary (STREAMS / RETAINED_STREAMS / StreamKey /
+// streamKey() / CONSUMER_GROUPS) was extracted into the zero-Redis-side-effect
+// leaf `./event-bus-stream-keys.ts` (issue #2989), mirroring the notification
+// vocabulary Seam above. `event-bus.ts` imports the symbols BACK and re-exports
+// them below so external callers/tests that already import them FROM here stay
+// zero-diff.
+import {
+  STREAMS,
+  RETAINED_STREAMS,
+  streamKey,
+  CONSUMER_GROUPS,
+} from "./event-bus-stream-keys.ts";
+import type { StreamKey } from "./event-bus-stream-keys.ts";
 // The consumer open/stop/recover lifecycle (the former `consume()` coordinator,
 // `_consuming` flag, `stopConsuming()`, and the `_handleFailure` DLQ delegator)
 // was extracted into its own Seam (issue #2592). EventBus keeps a delegating
@@ -140,49 +153,14 @@ export async function initConsumerGroups(
 // ---------------------------------------------------------------------------
 // Stream topology — the Event Bus alphabet (CONTEXT.md).
 //
-// Stream key shapes live here (not in redis-keys.ts) because the event bus
-// IS the owner of these names — every reader/writer goes through the bus,
-// not through the key registry. Adding a new stream means adding it here
-// AND wiring a publisher/consumer, not just registering a key.
+// The stream-key vocabulary (`STREAMS` / `RETAINED_STREAMS` / `StreamKey` /
+// `streamKey()` / `CONSUMER_GROUPS`) was extracted into the zero-Redis-side-
+// effect leaf `./event-bus-stream-keys.ts` (issue #2989) and is imported back
+// at the top of this file. Stream key shapes live in that leaf (not in
+// redis-keys.ts) because the event bus IS the owner of these names — every
+// reader/writer goes through the bus, not through the key registry. Adding a
+// new stream means adding it there AND wiring a publisher/consumer here.
 // ---------------------------------------------------------------------------
-
-/**
- * The live stream set — streams a current consumer actually reads. Typed as
- * a frozen `const` map so `StreamKey` (below) is the closed union of values
- * the bus owns; a caller cannot publish to a stream that is not in this set
- * without a compile error.
- */
-const STREAMS = {
-  NOTIFICATIONS: "hydra:notifications",
-  DLQ: "hydra:dlq",
-} as const;
-
-/**
- * Streams retained for back-compat only — NO live consumer reads them. Kept
- * as a separate, explicitly-named map (not folded into `STREAMS`) so the
- * advertised live set matches reality, while the names survive for any
- * external listener:
- *
- *   - `CYCLE` — cycle-start events; no in-process bus consumer today.
- *
- * (`TASKS` / `META` were deleted in #1655 — zero producers and zero consumers
- * after the #345 / legacy-pipeline retirements left nothing writing them.)
- *
- * Producing to these is intentionally NOT type-checked against `StreamKey`;
- * a caller that needs one passes the literal explicitly via `RETAINED_STREAMS`.
- */
-const RETAINED_STREAMS = {
-  CYCLE: "hydra:cycle",
-} as const;
-
-/**
- * A stream the bus owns and a live consumer reads. The closed union of
- * `STREAMS` values — `publish()`/`consume()` accept this so callers cannot
- * target a stream the bus does not advertise. `streamKey()` widens to
- * `string` for the dynamic `/events/:stream` surface; that is the one
- * sanctioned escape hatch.
- */
-type StreamKey = (typeof STREAMS)[keyof typeof STREAMS];
 
 // The notification event vocabulary (NOTIFICATION_EVENT_TYPES /
 // NotificationEventType / NotificationEventPayload) was extracted into the
@@ -242,18 +220,6 @@ interface ConsumeOptions {
   reapStale?: boolean;
 }
 
-/** Dynamic stream name lookup for `/events/:stream` and similar surfaces. */
-export function streamKey(name: string): string {
-  return `hydra:${name}`;
-}
-
-// Consumer groups — only streams with active consumers.
-// META consumer removed in #345 (meta agent deleted); its stream name now
-// lives in RETAINED_STREAMS, so it no longer appears here.
-const CONSUMER_GROUPS: Record<StreamKey, string[]> = {
-  [STREAMS.NOTIFICATIONS]: ["telegram"],
-  [STREAMS.DLQ]: ["dlq-processor"],
-};
 
 class EventBus {
   publisher: Redis;
@@ -499,7 +465,11 @@ class EventBus {
   }
 }
 
-export { EventBus, STREAMS, RETAINED_STREAMS, CONSUMER_GROUPS };
+// Re-export the stream-key vocabulary relocated to `event-bus-stream-keys.ts`
+// (issue #2989) so callers/tests that already import them FROM `event-bus.ts`
+// stay zero-diff.
+export { EventBus, STREAMS, RETAINED_STREAMS, streamKey, CONSUMER_GROUPS };
+export type { StreamKey };
 
 // Re-export the stream-consume mechanics relocated to `event-bus-mechanics.ts`
 // (issue #2759) so callers/tests that already import them FROM `event-bus.ts`
