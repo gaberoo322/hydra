@@ -106,7 +106,12 @@ esac
 
 # Worktrees do not share node_modules with the main checkout — install once per worktree.
 # Cost: ~30–60s. Acceptable; this is the price of parallel-safe target builds.
-(cd "$TARGET_WT/web" && npm ci --prefer-offline --no-audit --no-fund)
+# The install command + appSubdir come from the Target Manifest (verify.install /
+# verify.appSubdir; epic #3014, ADR-0026, issue #3019) — not hardcoded. For
+# hydra-betting these resolve to `npm ci --prefer-offline` in `web/`.
+APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
+INSTALL_CMD=$(jq -r '.verify.install' "$TARGET_WT/.hydra/manifest.json")
+(cd "$TARGET_WT/$APP_SUBDIR" && $INSTALL_CMD --no-audit --no-fund)
 
 # Mirror the Target SDLC gate scripts into the worktree (issue #1451). The gate
 # scripts (mutation-check / target-design-concept / post-merge-health) and their
@@ -132,11 +137,20 @@ if recent:
 "
 ```
 
-### 1. Ground (read-only, in $TARGET_WT/web/)
+### 1. Ground (read-only, in the manifest's appSubdir)
+
+**Verify commands come from the Target Manifest, NOT hardcoded** (epic #3014, ADR-0026, issue #3019). Read `verify.test` / `verify.typecheck` / `verify.appSubdir` from `<TARGET_WT>/.hydra/manifest.json` and run *those* — never a hardcoded `npm test`. For hydra-betting the manifest declares `verify.test = "npm run test:raw"` (the **real** vitest suite), so grounding must run `test:raw`, NOT the bare `npm test` count-gate (which is a frozen-floor count ratchet + 3 sentinels, not the suite — an agent that reads its "X passed" footer as a green suite can ship a change that breaks untested betting modules). A missing/malformed manifest is **fail-closed**: abort with the `[target-manifest]` error, do NOT default to `npm test`.
+
 ```bash
-cd "$TARGET_WT/web"
-npm test
-npm run typecheck
+# Source the verify block from the Target Manifest (fail-closed on absence).
+MANIFEST="$TARGET_WT/.hydra/manifest.json"
+[ -f "$MANIFEST" ] || { echo "ABORT: [target-manifest] no manifest at $MANIFEST (see ADR-0026)" >&2; exit 1; }
+APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
+TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
+TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
+cd "$TARGET_WT/$APP_SUBDIR"     # appSubdir='' => repo root
+$TEST_CMD                        # betting: `npm run test:raw` (the real suite), NEVER bare `npm test`
+$TYPECHECK_CMD
 git log --oneline -5
 git status --short
 ```
@@ -365,10 +379,17 @@ Rules:
 - **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The money-critical design-concept artifact (if present at `hydra:target:design-concept:$ANCHOR_REF` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
 
 ### 6. Verify (NOT an agent)
+
+Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.appSubdir`; epic #3014, ADR-0026, issue #3019) — never hardcoded. For hydra-betting `verify.test` is `npm run test:raw` (the real vitest suite), so verify runs `test:raw`, NOT the bare `npm test` count-gate.
+
 ```bash
-cd "$TARGET_WT/web"
-npm run typecheck    # must pass
-npm test             # must pass; count must not decrease
+MANIFEST="$TARGET_WT/.hydra/manifest.json"
+APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
+TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
+TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
+cd "$TARGET_WT/$APP_SUBDIR"
+$TYPECHECK_CMD       # must pass
+$TEST_CMD            # betting: `npm run test:raw`; must pass; count must not decrease
 ```
 
 After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
