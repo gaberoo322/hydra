@@ -32,14 +32,16 @@
  * Storage seam
  * ------------
  * The lifecycle reads/writes the SAME `hydra:memory:{agent}:patterns` JSON via
- * `agent-memory.ts`'s `loadPatterns`/`savePatterns` internal helpers (imported
- * here). No new Redis key, no format change — this is a code-locality refactor,
- * not a storage change. The Redis-key shape behind `src/redis/agent-memory.ts`
- * stays byte-compatible.
+ * the shared `pattern-store.ts` leaf's `loadPatterns`/`savePatterns` helpers
+ * (imported here). Issue #2987 hoisted that seam out of the sibling
+ * `agent-memory.ts` into its own leaf so this module imports DOWNWARD from the
+ * store instead of sideways from its sibling. No new Redis key, no format
+ * change — the Redis-key shape behind `src/redis/agent-memory.ts` stays
+ * byte-compatible.
  */
 
 import { appendRuleAction, readRecentRuleActions } from "../redis/agent-memory.ts";
-import { loadPatterns, savePatterns, type MemoryPattern } from "./agent-memory.ts";
+import { loadPatterns, savePatterns, type MemoryPattern } from "./pattern-store.ts";
 
 // Issue #2962 — the demote-side feedback-file grammar
 // (`removePromotedRuleBlock` / `demotePromotedRuleFromFeedbackFile`) was retired

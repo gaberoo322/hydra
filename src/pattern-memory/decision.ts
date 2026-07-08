@@ -28,10 +28,10 @@ import {
   escalationThresholdForCue,
   shouldEscalateAtHitCount,
 } from "./cue-policy.ts";
-// Type-only import: erased at runtime, so this introduces NO circular runtime
-// dependency even though `agent-memory.ts` imports `decideRecordActions` from
-// here. `PatternNamespace` has its canonical definition there.
-import type { PatternNamespace } from "./agent-memory.ts";
+// Issue #2987 — `PatternNamespace` moved to the `pattern-store.ts` leaf (its
+// canonical owner is now the store, not `agent-memory.ts`). Type-only import,
+// erased at runtime.
+import type { PatternNamespace } from "./pattern-store.ts";
 
 /**
  * The minimal slice of a pattern's state the decision reads. Deliberately a

@@ -62,7 +62,7 @@ import { loadAnchorReflections } from "../reflections/per-anchor.ts";
 import { listFrictionPatterns } from "../pattern-memory/agent-memory.ts";
 import { getAutopilotHealth } from "../aggregators/autopilot-health.ts";
 import type { StuckSignal } from "./run-health.ts";
-import type { MemoryPattern } from "../pattern-memory/agent-memory.ts";
+import type { MemoryPattern } from "../pattern-memory/pattern-store.ts";
 // Pure projection surface — moved to `retro-projections.ts` (issue #1952). The
 // assembler below uses these directly from their canonical home; callers that
 // want the projections import them from `retro-projections.ts` too (issue

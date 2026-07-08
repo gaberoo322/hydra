@@ -21,7 +21,7 @@ import {
   evaluatePromotedPatternEffectiveness,
   MIN_DAYS_POST_PROMOTION,
 } from "../src/pattern-memory/rule-effectiveness.ts";
-import { type MemoryPattern } from "../src/pattern-memory/agent-memory.ts";
+import { type MemoryPattern } from "../src/pattern-memory/pattern-store.ts";
 
 function makePattern(overrides: Partial<MemoryPattern>): MemoryPattern {
   return {

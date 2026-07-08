@@ -8,8 +8,13 @@
  * used to live here (effectiveness math, thresholds, cooldown, the
  * feedback-file demotion side-effect, and the rule-action audit log) was lifted
  * into the sibling module `rule-effectiveness.ts`, mirroring the escalation
- * split (#823). This module keeps the core store + promotion and shares its
- * `loadPatterns`/`savePatterns` internal storage helpers with that sibling.
+ * split (#823). This module keeps the core record→promote lifecycle.
+ *
+ * Issue #2987 — the shared store seam (`loadPatterns`/`savePatterns`, the
+ * `MemoryPattern` type, the `PatternNamespace` selector) that this module used
+ * to export "only because the sibling needs it" now lives in its own leaf,
+ * `pattern-store.ts`. Both this module and `rule-effectiveness.ts` import
+ * DOWNWARD from that leaf, so neither sibling reaches sideways into the other.
  *
  * Public API used outside this module:
  *   recordPattern                  — POST /api/memory/:agent/pattern
@@ -27,10 +32,18 @@
  * markdown file, and `feedback-file.ts` was removed.
  */
 
+// Issue #2987 — the shared pattern-store seam (`loadPatterns`/`savePatterns`,
+// the `MemoryPattern` type, and the `PatternNamespace` selector) was hoisted out
+// of this module into the `pattern-store.ts` leaf. Both this module and the
+// sibling `rule-effectiveness.ts` now import DOWNWARD from that leaf instead of
+// `rule-effectiveness.ts` reaching sideways into this file's "internal"
+// helpers. Import direction: agent-memory.ts → pattern-store.ts → redis/agent-memory.ts.
 import {
-  loadPatternsRaw,
-  savePatternsRaw,
-} from "../redis/agent-memory.ts";
+  loadPatterns,
+  savePatterns,
+  type MemoryPattern,
+  type PatternNamespace,
+} from "./pattern-store.ts";
 import {
   escalateIfNeeded,
   type EscalationInput,
@@ -64,76 +77,14 @@ import { PROMOTION_THRESHOLD } from "./constants.ts";
 // Constants / types
 // ===========================================================================
 
-const MAX_PATTERNS = 15;
 const MAX_EXAMPLES = 3;
 /** Issue #1667 — cap on merged-spelling aliases retained per pattern. */
 const MAX_ALIASES = 5;
 
-export type MemoryPattern = {
-  category: string;
-  severity: "prevent" | "reinforce";
-  hitCount: number;
-  firstSeen: string;
-  lastSeen: string;
-  lastCycleId: string;
-  action: string;
-  examples: string[];
-  promoted: boolean;
-  /** ISO date (YYYY-MM-DD) the pattern was promoted to the feedback file. */
-  promotedAt?: string;
-  /** Hit count at the moment of promotion — baseline for post-promotion effectiveness. */
-  hitsAtPromotion?: number;
-  /**
-   * ISO timestamp (full ISO, not date) when the effectiveness check last
-   * evaluated this pattern. Used to throttle alert/demote actions so we don't
-   * spam the operator with the same finding every cycle (issue #365).
-   */
-  lastEffectivenessCheckAt?: string;
-  /** Set true when the pattern was previously promoted but later demoted. */
-  demoted?: boolean;
-  /** ISO date the pattern was auto-demoted. */
-  demotedAt?: string;
-  /** Short machine-readable reason: "ineffective" | "manual" | "stale". */
-  demotedReason?: string;
-  /**
-   * Issue #392 — discriminator identifying which call path produced this
-   * pattern. `codex-cycle` is the historical in-process control-loop writer
-   * (retired with ADR-0006) and `subagent` covers Claude-driven autopilot
-   * skills (hydra-dev / hydra-qa / hydra-target-build) that POST to
-   * /api/memory/subagent-lesson. Metadata only — does not alter the
-   * consolidation/promotion math.
-   */
-  source?: "codex-cycle" | "subagent";
-  /**
-   * Issue #843 — the **Escalation Outcome** of the most recent escalation that
-   * actually fired for this pattern. Stamped by `recordPattern()` via a
-   * best-effort SECOND save AFTER the GitHub-side dispatch, so it is written
-   * ONLY when an escalation fired (below-threshold hits leave it untouched).
-   *
-   * `at` is a full ISO timestamp (not a date) so a column of `error` statuses
-   * in the friction-patterns surface can be correlated with a systematic
-   * gh/auth outage. Optional + additive: it rides the existing
-   * `savePatternsRaw`/`loadPatternsRaw` JSON round-trip (no new key, no
-   * migration); records written before #843 simply lack the field.
-   */
-  lastEscalation?: {
-    status: EscalationResult["status"];
-    issueNumber?: number;
-    error?: string;
-    at: string;
-  };
-  /**
-   * Issue #1667 — alternate cue spellings that fuzzy-merged into this
-   * pattern (write-side normalization in `recordPattern`). Subagents
-   * free-author kebab-case cues, so the same gotcha used to land under
-   * several spellings, each stuck at hitCount:1 — starving the
-   * hitCount-based promotion/escalation machinery. The canonical spelling
-   * stays `category` (the OLDER spelling wins); merged variants are kept
-   * here, capped at MAX_ALIASES, purely for observability. Additive field:
-   * pre-#1667 records simply lack it.
-   */
-  aliases?: string[];
-};
+// Issue #2987 — `MemoryPattern` and the `PatternNamespace` selector moved to the
+// `pattern-store.ts` leaf (the store owns its own type); they are imported at
+// the top of this module. The `MAX_PATTERNS` cap moved with `savePatterns` into
+// the store, where the sort+cap now live.
 
 /**
  * Signature of the escalation dependency folded into `recordPattern()`
@@ -194,52 +145,11 @@ export type RecordPatternResult = {
 // Pattern storage
 // ===========================================================================
 
-/**
- * Issue #512 — pattern namespace. The legacy planner/executor/skeptic
- * patterns live under `hydra:memory:{agent}:patterns` (namespace="memory").
- * Friction patterns from subagent friction-reports live under
- * `hydra:friction:{skill}:patterns` (namespace="friction"). The two share
- * schema and promotion math, but only `memory` patterns write to the
- * `config/feedback/to-{agent}.md` files. Both fire the GitHub escalation
- * hook when their hit count crosses PROMOTION_THRESHOLD.
- */
-export type PatternNamespace = "memory" | "friction";
-
-/**
- * Internal storage helper — load the raw pattern array for an agent/skill.
- *
- * Issue #900 — exported (alongside `savePatterns`) so the sibling
- * `rule-effectiveness.ts` lifecycle module can read/write the SAME
- * `hydra:memory:{agent}:patterns` JSON without duplicating the JSON
- * parse/sort/cap logic or re-declaring `MAX_PATTERNS`. Not part of the public
- * API surface — it is a module-internal seam shared between the two
- * pattern-memory siblings, the same way `escalation.ts` is folded in.
- */
-export async function loadPatterns(
-  agentName: string,
-  namespace: PatternNamespace = "memory",
-): Promise<MemoryPattern[]> {
-  const raw = await loadPatternsRaw(agentName, namespace);
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
-/** Internal storage helper — see `loadPatterns` (issue #900). Exported for the
- *  `rule-effectiveness.ts` sibling; not a public-API export. */
-export async function savePatterns(
-  agentName: string,
-  patterns: MemoryPattern[],
-  namespace: PatternNamespace = "memory",
-) {
-  const sorted = patterns
-    .sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime())
-    .slice(0, MAX_PATTERNS);
-  await savePatternsRaw(agentName, JSON.stringify(sorted), namespace);
-}
+// Issue #2987 — the `loadPatterns`/`savePatterns` store helpers (and the
+// `PatternNamespace` selector they take) moved to the `pattern-store.ts` leaf,
+// which owns the JSON parse + sort + cap layer over `redis/agent-memory.ts`.
+// They are imported at the top of this module. The sibling `rule-effectiveness.ts`
+// now imports them from the same leaf rather than reaching sideways into this file.
 
 async function sweepStalePromotions(agentName: string) {
   const patterns = await loadPatterns(agentName);

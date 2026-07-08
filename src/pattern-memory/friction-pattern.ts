@@ -25,7 +25,7 @@
 
 /**
  * Minimal shape of one entry in a `hydra:friction:{skill}:patterns` JSON
- * array. Mirrors `MemoryPattern` from `pattern-memory/agent-memory.ts` but
+ * array. Mirrors `MemoryPattern` from `pattern-memory/pattern-store.ts` but
  * only the fields the display-tier aggregators read — keeping the type narrow
  * avoids a ts-only coupling on `MemoryPattern`'s growing field list.
  *
