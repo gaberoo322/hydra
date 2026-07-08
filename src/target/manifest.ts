@@ -26,7 +26,7 @@
  *
  * # Sync (ADR-0026 decision, dev choice)
  *
- * `readFileSync` matches the pure/sync sibling `src/target/money-critical.ts` and
+ * `readFileSync` matches the pure/sync sibling `src/target/risk-critical.ts` and
  * the synchronous gate-script call sites. The load is read-fresh with no
  * concurrency benefit, so sync is the simpler shape.
  *

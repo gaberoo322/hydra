@@ -52,7 +52,11 @@
  * rediscovering scope.
  */
 
-import { classifyTargetRisk } from "../../src/target/money-critical.ts";
+import { classifyRisk } from "../../src/target/risk-critical.ts";
+import {
+  BETTING_RISK_SURFACE,
+  BETTING_APP_SUBDIR,
+} from "./betting-risk-surface.ts";
 
 /**
  * One rejected alternative — what was considered and the one-line reason it
@@ -128,7 +132,8 @@ export interface TargetDesignConceptInput {
  *   to touch (repo-relative, Target repo).
  */
 export function shouldCaptureDesignConcept(expectedPaths: readonly string[]): boolean {
-  return classifyTargetRisk(expectedPaths).moneyCritical;
+  return classifyRisk(expectedPaths, BETTING_RISK_SURFACE, BETTING_APP_SUBDIR)
+    .riskCritical;
 }
 
 /**
@@ -150,7 +155,11 @@ export function buildDesignConcept(
   const modulesTouched = cleanStringList(input.modulesTouched);
   const invariants = cleanStringList(input.invariants);
   const rejectedAlternatives = cleanAlternatives(input.rejectedAlternatives);
-  const { matchedPaths } = classifyTargetRisk(modulesTouched);
+  const { matchedPaths } = classifyRisk(
+    modulesTouched,
+    BETTING_RISK_SURFACE,
+    BETTING_APP_SUBDIR,
+  );
 
   return {
     kind: "target-design-concept",

@@ -38,7 +38,11 @@
  * and for executing the routing this module decides.
  */
 
-import { classifyTargetRisk } from "../../src/target/money-critical.ts";
+import { classifyRisk } from "../../src/target/risk-critical.ts";
+import {
+  BETTING_RISK_SURFACE,
+  BETTING_APP_SUBDIR,
+} from "./betting-risk-surface.ts";
 
 /** A single reviewer's verdict — PASS unless it surfaced a real hard finding. */
 export type ReviewVerdict = "PASS" | "FAIL";
@@ -117,10 +121,19 @@ export function classifyTargetQaPath(changedPaths: readonly string[]): {
   moneyCritical: boolean;
   matchedPaths: string[];
 } {
-  const { moneyCritical, matchedPaths } = classifyTargetRisk(changedPaths);
+  // The public `moneyCritical` field/`"money-critical"` path label here is the
+  // Target-QA depth-routing name (consumed by target-qa-verdict.test.mts); its
+  // rename to "risk-critical" is sibling slice #3018. This slice (#3017) only
+  // swaps the underlying classifier to the manifest-sourced `classifyRisk`,
+  // mapping its `riskCritical` result back to the unchanged local name.
+  const { riskCritical, matchedPaths } = classifyRisk(
+    changedPaths,
+    BETTING_RISK_SURFACE,
+    BETTING_APP_SUBDIR,
+  );
   return {
-    path: moneyCritical ? "money-critical" : "safe",
-    moneyCritical,
+    path: riskCritical ? "money-critical" : "safe",
+    moneyCritical: riskCritical,
     matchedPaths,
   };
 }

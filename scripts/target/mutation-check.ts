@@ -91,7 +91,11 @@ import {
   shouldSkipMutation,
   type MutationTestReport,
 } from "../../src/mutation.ts";
-import { classifyTargetRisk } from "../../src/target/money-critical.ts";
+import { classifyRisk } from "../../src/target/risk-critical.ts";
+import {
+  BETTING_RISK_SURFACE,
+  BETTING_APP_SUBDIR,
+} from "./betting-risk-surface.ts";
 
 const DEFAULT_TARGET_KILL_FLOOR = 60;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
@@ -127,7 +131,11 @@ export function filterMoneyCriticalCandidates(changedFiles: string[]): string[] 
   const trimmed = changedFiles
     .map((f) => (typeof f === "string" ? f.trim() : ""))
     .filter((f) => f.length > 0);
-  const { matchedPaths } = classifyTargetRisk(trimmed);
+  const { matchedPaths } = classifyRisk(
+    trimmed,
+    BETTING_RISK_SURFACE,
+    BETTING_APP_SUBDIR,
+  );
   return matchedPaths
     .filter((f) => !shouldSkipMutation(f))
     // Strip a single leading `web/` (optionally behind `./`) so the path is
