@@ -54,7 +54,7 @@
       "cooldownSeconds": null,
       "scope": "target",
       "provenanceLabel": null,
-      "notes": "Independent Target PR review (money-critical Sonnet floor per the model-routing map). The autopilot playbook's older 'hydra-qa (target scope)' phrasing predates the dedicated hydra-target-qa playbook. NOTE for slice #1671: today's VALID_SKILLS in src/pattern-memory/subagent-capture.ts omits hydra-target-qa, so its planner lessons are not yet captured — folding that projection onto this row is an intentional decision point."
+      "notes": "Independent Target PR review (risk-critical Sonnet floor per the model-routing map). The autopilot playbook's older 'hydra-qa (target scope)' phrasing predates the dedicated hydra-target-qa playbook. NOTE for slice #1671: today's VALID_SKILLS in src/pattern-memory/subagent-capture.ts omits hydra-target-qa, so its planner lessons are not yet captured — folding that projection onto this row is an intentional decision point."
     },
     {
       "name": "research_target",

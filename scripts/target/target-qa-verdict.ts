@@ -15,9 +15,10 @@
  * self-modification-containment apparatus does not apply (epic #1052
  * rationale).
  *
- * Depth is routed on the **money-critical flag** from
- * `src/target/money-critical.ts` (`classifyTargetRisk`) — the single
- * organizing primitive shared by every Target gate:
+ * Depth is routed on the **risk-critical flag** from
+ * `src/target/risk-critical.ts` (`classifyRisk`, #3017) whose surface is
+ * sourced from `.hydra/manifest.json` (#3018) — the single organizing
+ * primitive shared by every Target gate:
  *
  *   - **safe path** (the ~90% of Target changes — UI / docs / config) — a
  *     SINGLE independent Standards pass (conventions, tests-present, no silent
@@ -38,11 +39,8 @@
  * and for executing the routing this module decides.
  */
 
-import { classifyRisk } from "../../src/target/risk-critical.ts";
-import {
-  BETTING_RISK_SURFACE,
-  BETTING_APP_SUBDIR,
-} from "./betting-risk-surface.ts";
+import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
+import { loadRiskSurface } from "./target-risk-surface.ts";
 
 /** A single reviewer's verdict — PASS unless it surfaced a real hard finding. */
 export type ReviewVerdict = "PASS" | "FAIL";
@@ -111,31 +109,71 @@ export interface TargetQaVerdict {
 /**
  * Decide which QA path a Target PR takes from its changed file paths.
  *
- * Pure delegation to `classifyTargetRisk` (the single source of truth for the
- * money-critical surface). A money-critical hit routes to the heavier
- * Standards + Spec + adversarial path; everything else takes the safe
- * Standards-only path.
+ * Delegation to `classifyRisk` against the manifest-sourced risk surface (issue
+ * #3018 — `surface`/`appSubdir` come from `.hydra/manifest.json` via
+ * `loadRiskSurface`, no hardcoded betting const). A risk-critical hit routes to
+ * the heavier Standards + Spec + adversarial path; everything else takes the
+ * safe Standards-only path.
+ *
+ * Surface resolution: callers pass an explicit `surface`/`appSubdir` (the
+ * hermetic test path); when omitted they are read from the target manifest.
+ * Fail-closed: if the manifest cannot be resolved the risk surface is UNKNOWN,
+ * so we route to the HEAVIER `money-critical` path — a QA gate must never
+ * DOWNGRADE its depth on a config error (an unresolvable surface must not
+ * silently skip the Spec + adversarial fold).
+ *
+ * @param changedPaths the PR's changed file paths (repo-relative, Target repo).
+ * @param surface   the target risk surface; defaults to the manifest-sourced value.
+ * @param appSubdir the target app subdir; defaults to the manifest-sourced value.
  */
-export function classifyTargetQaPath(changedPaths: readonly string[]): {
+export function classifyTargetQaPath(
+  changedPaths: readonly string[],
+  surface?: RiskSurface,
+  appSubdir?: string,
+): {
   path: TargetQaPath;
   moneyCritical: boolean;
   matchedPaths: string[];
 } {
-  // The public `moneyCritical` field/`"money-critical"` path label here is the
-  // Target-QA depth-routing name (consumed by target-qa-verdict.test.mts); its
-  // rename to "risk-critical" is sibling slice #3018. This slice (#3017) only
-  // swaps the underlying classifier to the manifest-sourced `classifyRisk`,
-  // mapping its `riskCritical` result back to the unchanged local name.
+  const resolved = resolveQaSurface(surface, appSubdir);
+  if (!resolved) {
+    // Fail-closed: an unresolvable manifest routes to the heavier path so QA
+    // depth is never silently downgraded by a config error.
+    return { path: "money-critical", moneyCritical: true, matchedPaths: [] };
+  }
+  // The public `moneyCritical` field / `"money-critical"` path label is the
+  // Target-QA depth-routing name (consumed by target-qa-verdict.test.mts). The
+  // underlying classifier now sources its surface from `.hydra/manifest.json`.
   const { riskCritical, matchedPaths } = classifyRisk(
     changedPaths,
-    BETTING_RISK_SURFACE,
-    BETTING_APP_SUBDIR,
+    resolved.surface,
+    resolved.appSubdir,
   );
   return {
     path: riskCritical ? "money-critical" : "safe",
     moneyCritical: riskCritical,
     matchedPaths,
   };
+}
+
+/**
+ * Resolve the risk `surface`/`appSubdir` for the QA-verdict helpers.
+ *
+ * Returns the explicit values when the caller supplied them (the hermetic test
+ * path). Otherwise reads them from the target manifest via `loadRiskSurface`;
+ * returns `null` when the manifest cannot be resolved so the caller can apply
+ * its own fail-closed policy (route to the heavier path). Never throws.
+ */
+function resolveQaSurface(
+  surface: RiskSurface | undefined,
+  appSubdir: string | undefined,
+): { surface: RiskSurface; appSubdir: string } | null {
+  if (surface !== undefined && appSubdir !== undefined) {
+    return { surface, appSubdir };
+  }
+  const result = loadRiskSurface();
+  if (!result.ok) return null;
+  return { surface: result.surface, appSubdir: result.appSubdir };
 }
 
 /**
@@ -158,12 +196,20 @@ export function classifyTargetQaPath(changedPaths: readonly string[]): {
  *
  * @param changedPaths the PR's changed file paths (repo-relative, Target repo).
  * @param verdicts the reviewer verdicts the playbook collected.
+ * @param surface   the target risk surface; defaults to the manifest-sourced value.
+ * @param appSubdir the target app subdir; defaults to the manifest-sourced value.
  */
 export function classifyTargetQaVerdict(
   changedPaths: readonly string[],
   verdicts: TargetReviewVerdicts,
+  surface?: RiskSurface,
+  appSubdir?: string,
 ): TargetQaVerdict {
-  const { path, moneyCritical, matchedPaths } = classifyTargetQaPath(changedPaths);
+  const { path, moneyCritical, matchedPaths } = classifyTargetQaPath(
+    changedPaths,
+    surface,
+    appSubdir,
+  );
 
   // Standards runs on every path.
   if (verdicts.standards === "FAIL") {

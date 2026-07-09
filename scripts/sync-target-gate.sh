@@ -60,25 +60,34 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # dot-dir + git-excluded so it never shows up in the Target PR diff.
 GATE_DIR_NAME=".hydra-gate"
 
-# The exact dependency closure (verified for issue #1451; risk-critical rename
-# per ADR-0026 / epic #3014):
-#   scripts/target/mutation-check.ts        → src/mutation.ts, src/target/risk-critical.ts, scripts/target/betting-risk-surface.ts
-#   scripts/target/target-design-concept.ts → src/target/risk-critical.ts, scripts/target/betting-risk-surface.ts
+# The exact dependency closure (verified for issue #1451; manifest wiring per
+# ADR-0026 / epic #3014, issue #3018 — the gate scripts now source the risk
+# surface from the worktree's .hydra/manifest.json via loadRiskSurface, so the
+# manifest loader + schema + resolver join the closure and the transitional
+# betting-risk-surface.ts const is gone):
+#   scripts/target/mutation-check.ts        → src/mutation.ts, src/target/risk-critical.ts, scripts/target/target-risk-surface.ts
+#   scripts/target/target-design-concept.ts → src/target/risk-critical.ts, scripts/target/target-risk-surface.ts
 #   scripts/target/post-merge-health.ts     → (stdlib only)
+#   scripts/target/target-risk-surface.ts   → src/target/manifest.ts, src/target/risk-critical.ts (type), src/target-config.ts
 #   src/mutation.ts                         → src/exec-with-timeout.ts
 #   src/exec-with-timeout.ts                → (stdlib only)
 #   src/target/risk-critical.ts             → (no imports)
-#   scripts/target/betting-risk-surface.ts  → src/target/risk-critical.ts (type-only)
+#   src/target/manifest.ts                  → src/schemas/target-manifest.ts
+#   src/schemas/target-manifest.ts          → zod (resolved via the web/node_modules symlink below)
+#   src/target-config.ts                    → (node: stdlib only)
 # Paths are repo-relative; the layout is preserved under $GATE_DIR_NAME so the
 # scripts' `../../src/...` relative imports resolve unchanged.
 GATE_FILES=(
   "scripts/target/mutation-check.ts"
   "scripts/target/target-design-concept.ts"
   "scripts/target/post-merge-health.ts"
-  "scripts/target/betting-risk-surface.ts"
+  "scripts/target/target-risk-surface.ts"
   "src/mutation.ts"
   "src/exec-with-timeout.ts"
   "src/target/risk-critical.ts"
+  "src/target/manifest.ts"
+  "src/schemas/target-manifest.ts"
+  "src/target-config.ts"
 )
 
 usage() {
@@ -139,6 +148,41 @@ done
 # /$GATE_DIR_NAME/ exclude line below covers it), so it never pollutes the
 # Target PR diff.
 printf '%s\n' '{ "type": "module" }' > "$GATE_ROOT/package.json"
+
+# Resolve bare npm imports for the mirror (issue #3018). The manifest schema
+# (src/schemas/target-manifest.ts, newly in the closure) imports `zod`. The
+# gate scripts run with cwd = the Target worktree root, whose node_modules does
+# NOT contain zod — only the app subdir's node_modules does (hydra-betting keeps
+# its deps under web/node_modules). Node resolves a bare import by walking
+# UPWARD from the importing file, so a `node_modules` symlink at the mirror root
+# ($GATE_ROOT) is found from .hydra-gate/src/schemas/target-manifest.ts before
+# the (zod-less) worktree-root node_modules. Symlink it to the app subdir's
+# node_modules so `zod` (and any future runtime dep in the closure) resolves.
+# The app subdir is read from the manifest's verify.appSubdir; we default to
+# "web" for the resolution symlink only when the manifest is unreadable here
+# (the gate itself fails loud on a bad manifest — this symlink is best-effort
+# plumbing so the loader can even run to produce that error).
+APP_SUBDIR="web"
+if [ -f "$TARGET_WT/.hydra/manifest.json" ]; then
+  # Extract verify.appSubdir without a JSON parser dep: grep the field.
+  parsed_subdir="$(sed -n 's/.*"appSubdir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$TARGET_WT/.hydra/manifest.json" | head -n1)"
+  # An empty appSubdir ("" for a repo-root target) means deps live at the
+  # worktree root; leave APP_SUBDIR empty so we symlink the root node_modules.
+  if grep -q '"appSubdir"' "$TARGET_WT/.hydra/manifest.json"; then
+    APP_SUBDIR="$parsed_subdir"
+  fi
+fi
+if [ -n "$APP_SUBDIR" ]; then
+  APP_NODE_MODULES="$TARGET_WT/$APP_SUBDIR/node_modules"
+else
+  APP_NODE_MODULES="$TARGET_WT/node_modules"
+fi
+if [ -d "$APP_NODE_MODULES" ]; then
+  ln -sfn "$APP_NODE_MODULES" "$GATE_ROOT/node_modules"
+else
+  echo "sync-target-gate: WARN — app node_modules '$APP_NODE_MODULES' not found;" \
+       "the manifest loader's zod import may fail from the mirror." >&2
+fi
 
 # Exclude the mirror from the betting worktree's git so it never pollutes the
 # Target PR diff. `.git/info/exclude` is local to this worktree's checkout and

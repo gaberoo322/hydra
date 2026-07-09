@@ -32,7 +32,8 @@
  *                            rejected them, so a retry does not re-litigate.
  *
  * Two organizing rules, both inherited from the keystone classifier in
- * `src/target/money-critical.ts` (`classifyTargetRisk`, #1053):
+ * `src/target/risk-critical.ts` (`classifyRisk`, #3017) whose surface is
+ * manifest-sourced (#3018):
  *
  *   1. **Money-critical-only.** `shouldCaptureDesignConcept(changedPaths)`
  *      gates artifact creation on the money-critical flag. Safe-path builds
@@ -52,11 +53,8 @@
  * rediscovering scope.
  */
 
-import { classifyRisk } from "../../src/target/risk-critical.ts";
-import {
-  BETTING_RISK_SURFACE,
-  BETTING_APP_SUBDIR,
-} from "./betting-risk-surface.ts";
+import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
+import { loadRiskSurface } from "./target-risk-surface.ts";
 
 /**
  * One rejected alternative — what was considered and the one-line reason it
@@ -121,45 +119,93 @@ export interface TargetDesignConceptInput {
 /**
  * Should the Target planner capture a design-concept artifact for this build?
  *
- * Pure delegation to `classifyTargetRisk` (the single source of truth for the
- * money-critical surface, #1053). Returns true iff ANY changed/expected path
- * touches money-critical surface — provider integrations, execution, staking,
- * or bet-math. Safe-path builds (UI / docs / config) return false and skip
- * artifact creation entirely (acceptance criterion: "safe-path anchors skip
- * artifact creation entirely").
+ * Delegation to `classifyRisk` against the manifest-sourced risk surface (issue
+ * #3018 — `surface`/`appSubdir` come from `.hydra/manifest.json` via
+ * `loadRiskSurface`, no hardcoded betting const). Returns true iff ANY
+ * changed/expected path touches the risk surface — provider integrations,
+ * execution, staking, or bet-math. Safe-path builds (UI / docs / config) return
+ * false and skip artifact creation entirely (acceptance criterion: "safe-path
+ * anchors skip artifact creation entirely").
  *
- * @param expectedPaths the money-critical paths the planner expects the build
- *   to touch (repo-relative, Target repo).
+ * Surface resolution: callers pass an explicit `surface`/`appSubdir` (the
+ * hermetic path the tests use); when omitted, they are resolved from the target
+ * manifest. Fail-closed-conservative: if the manifest cannot be resolved, the
+ * risk surface is UNKNOWN, so we CAPTURE (a spurious artifact is cheaper than a
+ * missed money-critical one — the design-concept artifact only ever *informs*,
+ * it never blocks a merge).
+ *
+ * @param expectedPaths the paths the planner expects the build to touch
+ *   (repo-relative, Target repo).
+ * @param surface   the target risk surface (manifest `riskCritical.surface`);
+ *   defaults to the manifest-sourced surface.
+ * @param appSubdir the target app subdir (manifest `verify.appSubdir`);
+ *   defaults to the manifest-sourced value.
  */
-export function shouldCaptureDesignConcept(expectedPaths: readonly string[]): boolean {
-  return classifyRisk(expectedPaths, BETTING_RISK_SURFACE, BETTING_APP_SUBDIR)
-    .riskCritical;
+export function shouldCaptureDesignConcept(
+  expectedPaths: readonly string[],
+  surface?: RiskSurface,
+  appSubdir?: string,
+): boolean {
+  const resolved = resolveSurface(surface, appSubdir);
+  // Fail-closed-conservative: an unresolvable manifest means we cannot rule the
+  // build safe, so capture rather than skip.
+  if (!resolved) return true;
+  return classifyRisk(expectedPaths, resolved.surface, resolved.appSubdir).riskCritical;
+}
+
+/**
+ * Resolve the risk `surface`/`appSubdir` for the design-concept helpers.
+ *
+ * Returns the explicit values when the caller supplied them (the hermetic test
+ * path). Otherwise reads them from the target manifest via `loadRiskSurface`;
+ * returns `null` when the manifest cannot be resolved so the caller can apply
+ * its own fail-closed policy. Never throws.
+ */
+function resolveSurface(
+  surface: RiskSurface | undefined,
+  appSubdir: string | undefined,
+): { surface: RiskSurface; appSubdir: string } | null {
+  if (surface !== undefined && appSubdir !== undefined) {
+    return { surface, appSubdir };
+  }
+  const result = loadRiskSurface();
+  if (!result.ok) return null;
+  return { surface: result.surface, appSubdir: result.appSubdir };
 }
 
 /**
  * Build a lightweight Target design-concept artifact from the planner's input.
  *
- * Derives `matchedPaths` from `modulesTouched` via `classifyTargetRisk` and
- * stamps `capturedAt`. Pure and total: never throws, never touches Redis /
- * network / fs. String inputs are trimmed; empty/whitespace-only invariant and
- * modulesTouched entries are dropped so a sloppy planner submission doesn't
- * persist noise.
+ * Derives `matchedPaths` from `modulesTouched` via `classifyRisk` against the
+ * manifest-sourced risk surface (issue #3018) and stamps `capturedAt`. Never
+ * throws; never touches Redis / network. String inputs are trimmed;
+ * empty/whitespace-only invariant and modulesTouched entries are dropped so a
+ * sloppy planner submission doesn't persist noise.
+ *
+ * Surface resolution mirrors `shouldCaptureDesignConcept`: an explicit
+ * `surface`/`appSubdir` is the hermetic test path; when omitted they are read
+ * from the target manifest. An unresolvable manifest yields an empty
+ * `matchedPaths` (the caller already gated on `shouldCaptureDesignConcept`, so a
+ * built artifact means the surface was resolvable in practice).
  *
  * @param input the planner-supplied fields.
  * @param now injectable clock for deterministic tests (defaults to `new Date()`).
+ * @param surface   the target risk surface; defaults to the manifest-sourced value.
+ * @param appSubdir the target app subdir; defaults to the manifest-sourced value.
  */
 export function buildDesignConcept(
   input: TargetDesignConceptInput,
   now: Date = new Date(),
+  surface?: RiskSurface,
+  appSubdir?: string,
 ): TargetDesignConcept {
   const modulesTouched = cleanStringList(input.modulesTouched);
   const invariants = cleanStringList(input.invariants);
   const rejectedAlternatives = cleanAlternatives(input.rejectedAlternatives);
-  const { matchedPaths } = classifyRisk(
-    modulesTouched,
-    BETTING_RISK_SURFACE,
-    BETTING_APP_SUBDIR,
-  );
+  const resolved = resolveSurface(surface, appSubdir);
+  const { matchedPaths } = resolved
+    ? classifyRisk(modulesTouched, resolved.surface, resolved.appSubdir)
+    : { matchedPaths: [] as string[] };
 
   return {
     kind: "target-design-concept",
