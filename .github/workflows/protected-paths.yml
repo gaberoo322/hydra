@@ -37,6 +37,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The guard now resolves the risk surface from `.hydra/manifest.json` via
+      # the zod-backed `src/schemas/target-manifest.ts` (issue #3018), so its
+      # import chain pulls a runtime dep. Install node_modules — unlike the
+      # dependency-free seam guards, this one needs `zod` at tsx-load time.
+      - name: Install deps (tsx + zod for the manifest schema)
+        run: npm ci
+
       - name: Protected-paths guard (money-critical Target surface)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

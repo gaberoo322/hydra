@@ -367,16 +367,21 @@ async function main(): Promise<number> {
   // at the worktree root (parent of the web/ appDir).
   const surfaceResult = loadRiskSurface();
   if (!surfaceResult.ok) {
+    // `strict:false` in the base tsconfig disables the discriminated-union
+    // narrowing that `!surfaceResult.ok` would give under strictNullChecks, so
+    // read `errors` through the error-variant cast — same idiom loadRiskSurface
+    // itself uses (target-risk-surface.ts).
+    const errors = (surfaceResult as { ok: false; errors: string[] }).errors;
     process.stdout.write(
       JSON.stringify({
         status: "error",
         reason: "risk surface unavailable — manifest missing or invalid",
-        errors: surfaceResult.errors,
+        errors,
       }) + "\n",
     );
     process.stderr.write(
       `TARGET MUTATION GATE ERROR: cannot resolve the risk surface from ` +
-        `.hydra/manifest.json (fail-closed):\n  ${surfaceResult.errors.join("\n  ")}\n`,
+        `.hydra/manifest.json (fail-closed):\n  ${errors.join("\n  ")}\n`,
     );
     return 1;
   }

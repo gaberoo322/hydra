@@ -141,16 +141,21 @@ function main(): number {
   // TARGET_MANIFEST_ROOT overrides it when set.
   const surfaceResult = loadRiskSurface();
   if (!surfaceResult.ok) {
+    // `strict:false` in the base tsconfig disables the discriminated-union
+    // narrowing that `!surfaceResult.ok` would give under strictNullChecks, so
+    // read `errors` through the error-variant cast — same idiom loadRiskSurface
+    // itself uses (target-risk-surface.ts).
+    const errors = (surfaceResult as { ok: false; errors: string[] }).errors;
     process.stdout.write(
       JSON.stringify({
         status: "error",
         reason: "risk surface unavailable — manifest missing or invalid",
-        errors: surfaceResult.errors,
+        errors,
       }) + "\n",
     );
     process.stderr.write(
       `PROTECTED-PATHS GUARD ERROR: cannot resolve the risk surface from ` +
-        `.hydra/manifest.json (fail-closed):\n  ${surfaceResult.errors.join("\n  ")}\n`,
+        `.hydra/manifest.json (fail-closed):\n  ${errors.join("\n  ")}\n`,
     );
     return 1;
   }
