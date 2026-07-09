@@ -27,7 +27,7 @@ import {
 import {
   computeClassScoreboard,
   type ClassScoreboard,
-} from "../src/autopilot/class-stats.ts";
+} from "../src/autopilot/class-stats-math.ts";
 
 const NOW = 1_800_000_000_000;
 

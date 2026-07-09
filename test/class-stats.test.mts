@@ -25,7 +25,6 @@ import assert from "node:assert/strict";
 import {
   computeClassScoreboard,
   shadowDampener,
-  buildClassScoreboard,
   classRole,
   CLASS_STATS_MIN_SAMPLE,
   CLASS_STATS_WINDOW_MS,
@@ -33,6 +32,9 @@ import {
   DAMPENER_MIN_MULTIPLIER,
   DEV_WEAK_MERGE_RATE,
   type ClassStat,
+} from "../src/autopilot/class-stats-math.ts";
+import {
+  buildClassScoreboard,
   type ClassScoreboardDeps,
 } from "../src/autopilot/class-stats.ts";
 import type { DispatchOutcomeRecord } from "../src/redis/dispatch-outcomes.ts";

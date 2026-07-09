@@ -25,7 +25,7 @@ import { createAutopilotClassStatsRouter } from "../src/api/class-stats.ts";
 import {
   computeClassScoreboard,
   type ClassScoreboard,
-} from "../src/autopilot/class-stats.ts";
+} from "../src/autopilot/class-stats-math.ts";
 import type { DispatchOutcomeRecord } from "../src/redis/dispatch-outcomes.ts";
 
 const NOW = 1_800_000_000_000;

@@ -22,7 +22,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
-import type { ClassScoreboard } from "../autopilot/class-stats.ts";
+import type { ClassScoreboard } from "../autopilot/class-stats-math.ts";
 
 /** The single snapshot key. JSON {@link ClassScoreboard}. */
 export function classStatsKey(): string {

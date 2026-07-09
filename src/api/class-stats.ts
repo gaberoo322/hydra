@@ -32,11 +32,11 @@
  */
 
 import { Router } from "express";
+import { buildClassScoreboard } from "../autopilot/class-stats.ts";
 import {
-  buildClassScoreboard,
   shadowDampener,
   type ClassScoreboard,
-} from "../autopilot/class-stats.ts";
+} from "../autopilot/class-stats-math.ts";
 import { putClassScoreboard } from "../redis/class-stats.ts";
 
 /** The one dependency the handler needs: the scoreboard composer (tests stub). */
