@@ -6,6 +6,7 @@ import {
   getAggregateStats,
   getCumulativeAccomplishments,
   projectAnchorDistribution,
+  getCostByOutcome,
 } from "../metrics/aggregate.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
 import { CycleRecordBodySchema } from "../autopilot/schemas.ts";
@@ -307,6 +308,31 @@ export function createMetricsRouter() {
       const trend = await getMetricsTrend(count);
       const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
       return getClassCostEfficiency(mergedPrCount);
+    }),
+  );
+
+  // GET /metrics/cost-by-outcome — Token cost split by cycle outcome (issue #3024).
+  //
+  // Answers "what is the token cost of empty cycles vs failed retries vs
+  // successful merges?" — the cost/outcome GRANULARITY #3024 asked for, the
+  // per-outcome sibling of /metrics/cost-per-merged-pr's single ratio.
+  //
+  // A PURE DERIVED read (design-concept c1644ee7): NO new `outcomeType` writer.
+  // Unlike the cost-per-merged-pr / cost-efficiency routes, no merged count is
+  // injected — BOTH the outcome (from tasksMerged/tasksFailed/tasksAbandoned/
+  // tasksAttempted) AND the per-cycle `tokenCost` are already joined into every
+  // trend row, so the whole split derives from the trend alone. The three-way
+  // split reuses the exact predicates of the merge-rate / empty-rate gauges
+  // (computeRollingMergeRateFromTrend / computeEmptyRateFromTrend) so it can
+  // never disagree with them. Cost is TOKENS, never USD (the dollar plane was
+  // retired, #1651). Additive — the default /metrics payload is unchanged.
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/cost-by-outcome",
+    aggregatorRouteNoQuery("api/metrics/cost-by-outcome", async (req) => {
+      const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
+      return getCostByOutcome(count);
     }),
   );
 

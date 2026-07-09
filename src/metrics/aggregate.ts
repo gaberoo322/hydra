@@ -113,6 +113,155 @@ export function projectTokensPerMergedPR(
   return Math.round(tokenSum / mergedWithTokens);
 }
 
+// ---------------------------------------------------------------------------
+// Cost-by-outcome — a pure DERIVED read: token cost split by cycle outcome
+// (issue #3024).
+// ---------------------------------------------------------------------------
+//
+// Answers "what is the token cost of empty cycles vs failed retries vs
+// successful merges?" — the cost/outcome granularity #3024 asked for. This is a
+// PURE DERIVED read sitting beside `projectTokensPerMergedPR`, matching the
+// token-plane "derive, don't record" invariant its two nearest precedents lock
+// (design-concept 99ef93a0 / #2807 cost-per-merged-PR and 4d98ab3d / #2971 QA
+// efficiency): NO new `outcomeType` writer, NO USD/dollar surface. Both inputs
+// are already persisted — per-cycle `tokenCost` is joined into every
+// getMetricsTrend() row, and the outcome is fully derivable from the
+// `tasksMerged`/`tasksFailed`/`tasksAbandoned`/`tasksAttempted` fields
+// recordCycleMetrics already stores.
+
+/** The three cycle-outcome buckets. Local type, no CONTEXT.md term (the concept
+ * already exists un-named as Empty Cycle + the merge/fail predicates). */
+export type CycleOutcome = "merged" | "empty" | "failed";
+
+/** Stable ordering for the buckets in the wire shape. */
+export const CYCLE_OUTCOME_ORDER: readonly CycleOutcome[] = Object.freeze([
+  "merged",
+  "empty",
+  "failed",
+]);
+
+/** One outcome bucket's cost line. */
+interface CostByOutcomeEntry {
+  /** Cycles that fell in this bucket over the window (attributed OR not). */
+  cycles: number;
+  /**
+   * Tokens summed over ONLY the cycles in this bucket that carry a finite joined
+   * `tokenCost`. A cycle whose `tokenCost` is null/absent counts toward `cycles`
+   * but contributes 0 here — the truthful-unattributed sentinel, never a
+   * fabricated 0 (identical to `projectTokensPerMergedPR`).
+   */
+  attributedTokens: number;
+  /** Count of cycles in this bucket that carried a finite `tokenCost` — the
+   * denominator of `tokensPerCycle` and the operator's coverage signal. */
+  attributedCycles: number;
+  /**
+   * Derived: `attributedTokens / attributedCycles`, rounded to the nearest
+   * integer token. `null` when `attributedCycles` is 0 — "unattributed" stays
+   * distinct from "0 tokens per cycle", mirroring `projectTokensPerMergedPR`'s
+   * null-on-no-attribution discipline. Consumers render `null` as "—".
+   */
+  tokensPerCycle: number | null;
+}
+
+export interface CostByOutcomeResult {
+  /** Total cycles in the window (sum of the three buckets' `cycles`). */
+  windowCycles: number;
+  /**
+   * Per-outcome cost keyed by CycleOutcome; every outcome present (zeros
+   * included, in `CYCLE_OUTCOME_ORDER`) so the operator can compare merged vs
+   * empty vs failed on the same basis even when a bucket is empty.
+   */
+  byOutcome: Record<CycleOutcome, CostByOutcomeEntry>;
+}
+
+/**
+ * Classify a single trend row into its cycle outcome, reusing the EXACT field
+ * checks the two live rate gauges use so the three-way split can never disagree
+ * with `computeRollingMergeRateFromTrend` / `computeEmptyRateFromTrend`:
+ *   - `merged` := tasksMerged>0                    (computeRollingMergeRateFromTrend)
+ *   - `empty`  := tasksAttempted>0 && merged==0 && failed==0 && abandoned==0
+ *                                                  (computeEmptyRateFromTrend / Empty Cycle)
+ *   - `failed` := everything else that attempted work (tasksFailed>0 || tasksAbandoned>0)
+ *
+ * Returns `null` for a row that attempted no work AND merged nothing (no
+ * terminal signal at all) — such rows contribute to no bucket, matching the
+ * "attempted work" gate the empty/failed predicates share. Null-safe on missing
+ * fields (`?? 0`), same as the sibling gauges.
+ */
+function classifyCycleOutcome(m: Record<string, any>): CycleOutcome | null {
+  const merged = (m?.tasksMerged ?? 0) > 0;
+  if (merged) return "merged";
+  const failed = (m?.tasksFailed ?? 0) > 0 || (m?.tasksAbandoned ?? 0) > 0;
+  if (failed) return "failed";
+  const attempted = (m?.tasksAttempted ?? 0) > 0;
+  if (attempted) return "empty";
+  return null;
+}
+
+/**
+ * Pure projection: split a metrics-trend window's token cost by cycle outcome
+ * (merged / empty / failed) — the #3024 cost-granularity read.
+ *
+ * For each outcome bucket it reports {cycles, attributedTokens, attributedCycles,
+ * tokensPerCycle}. `tokenCost` is read only when finite (the truthful sentinel):
+ * a cycle with null/absent `tokenCost` still counts toward its bucket's `cycles`
+ * but contributes 0 to `attributedTokens` and is excluded from the
+ * `tokensPerCycle` denominator — never diluting the average with a fabricated 0,
+ * exactly as `projectTokensPerMergedPR` handles unattributed cycles.
+ *
+ * Cost is TOKENS, never dollars (the USD attribution plane was retired, #1651;
+ * CONTEXT.md `Cost` / `Quota-Burn Weight`) — this reads only the `tokenCost`
+ * field the trend joins.
+ *
+ * Exported so the test suite can pin the arithmetic on a synthetic trend array
+ * without a live Redis fetch.
+ */
+export function projectCostByOutcome(
+  trend: Array<Record<string, any>>,
+): CostByOutcomeResult {
+  const byOutcome: Record<CycleOutcome, CostByOutcomeEntry> = {
+    merged: { cycles: 0, attributedTokens: 0, attributedCycles: 0, tokensPerCycle: null },
+    empty: { cycles: 0, attributedTokens: 0, attributedCycles: 0, tokensPerCycle: null },
+    failed: { cycles: 0, attributedTokens: 0, attributedCycles: 0, tokensPerCycle: null },
+  };
+
+  let windowCycles = 0;
+  for (const m of trend) {
+    const outcome = classifyCycleOutcome(m);
+    if (outcome === null) continue; // no terminal signal — attributed to no bucket
+    windowCycles += 1;
+    const entry = byOutcome[outcome];
+    entry.cycles += 1;
+    const tokenCost = m?.tokenCost;
+    if (typeof tokenCost === "number" && Number.isFinite(tokenCost)) {
+      entry.attributedTokens += tokenCost;
+      entry.attributedCycles += 1;
+    }
+  }
+
+  for (const outcome of CYCLE_OUTCOME_ORDER) {
+    const entry = byOutcome[outcome];
+    entry.tokensPerCycle =
+      entry.attributedCycles > 0
+        ? Math.round(entry.attributedTokens / entry.attributedCycles)
+        : null;
+  }
+
+  return { windowCycles, byOutcome };
+}
+
+/**
+ * Get the token cost broken down by cycle outcome over a recent trend window.
+ *
+ * Thin wrapper: fetch the trend (the `count` knob), then delegate the split to
+ * the pure `projectCostByOutcome`. No new Redis write path — a derived read over
+ * the `tokenCost` + outcome fields the trend already joins (issue #3024).
+ */
+export async function getCostByOutcome(count = 200): Promise<CostByOutcomeResult> {
+  const trend = await getMetricsTrend(count);
+  return projectCostByOutcome(trend);
+}
+
 /**
  * Pure projection: fold an already-fetched metrics-trend array into the
  * aggregate-stats shape (`mergedRate` / `regressionRate` / `noOpMergeRate` /
