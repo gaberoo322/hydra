@@ -8,9 +8,8 @@ import {
   projectAnchorDistribution,
   getCostByOutcome,
 } from "../metrics/aggregate.ts";
-import { recordCycleMetrics } from "../metrics/record.ts";
 import { CycleRecordBodySchema } from "../autopilot/schemas.ts";
-import { classifyAnchorType } from "../autopilot/anchor-type.ts";
+import { recordCycle } from "../autopilot/cycle-close.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
@@ -389,11 +388,37 @@ export function createMetricsRouter() {
     }
   });
 
-  // POST /metrics/record — Record cycle metrics from external sources.
-  // Validates through CycleRecordBodySchema (the same loose-object contract the
-  // sibling POST /autopilot/cycle-record uses) per the CLAUDE.md § HTTP
-  // validation convention: on a schema miss, return 400 with the machine-
-  // readable {code:"schema-validation-failed", issues} shape (issue #2636).
+  // POST /metrics/record — Record a completed cycle from external sources.
+  //
+  // Issue #3048 (architecture-scan deepening): this route now routes THROUGH the
+  // `recordCycle()` coordinator (src/autopilot/cycle-close.ts) — the SAME deep
+  // write path the sibling POST /autopilot/cycle-record uses — instead of
+  // calling `recordCycleMetrics()` directly. That restores the ADR-0016
+  // sole-writer invariant for this previously-shallow path: a cycle recorded
+  // here now gets the FULL record (the `hydra:cycle:<id>` hash, `hydra:cycle:index`
+  // ZSET membership, the per-status scheduler counters, the dispatch-outcome
+  // row, AND the metrics-hash feed), so it becomes visible to getMetricsTrend,
+  // buildClassScoreboard, and assembleRetroBundle — the three readers the
+  // shallow impl left blind.
+  //
+  // The #2803 `classifyAnchorType()` band-aid this handler used to carry is
+  // DROPPED, not lost: recordCycle calls the identical classifyAnchorType leaf,
+  // so every write still classifies to a non-empty anchorType (never buckets as
+  // "unknown"). Both routes already validate through the IDENTICAL
+  // CycleRecordBodySchema, so there is no schema change and the loose escape
+  // hatch stays reachable — recordCycle forwards ad-hoc fields verbatim into
+  // recordCycleMetrics.
+  //
+  // The sole live caller (the hydra-target-build merge-flow doc-fragment) writes
+  // a cycleId reap.py ALREADY records deeply, so that redundant write now lands
+  // as recordCycle's dedup/enrich arm (deduped:true, bucketed:null) — no
+  // scheduler counter is double-incremented.
+  //
+  // Response contract unchanged (CLAUDE.md § HTTP validation): 200 {ok:true} on
+  // success, 400 {code:"schema-validation-failed", issues} on a schema miss
+  // (issue #2636). recordCycle returns a result object (never throws); a
+  // result.ok:false maps to 500 (code:redis) / 400 exactly like the sibling
+  // /autopilot/cycle-record handler.
   router.post("/metrics/record", async (req, res) => {
     try {
       const parsed = CycleRecordBodySchema.safeParse(req.body ?? {});
@@ -403,28 +428,23 @@ export function createMetricsRouter() {
           issues: parsed.error.issues,
         });
       }
-      // `parsed.data` is a CycleRecordBody (loose object): its `cycleId` is a
-      // validated non-empty string; the remaining fields are the ad-hoc metrics
-      // this endpoint forwards verbatim. recordCycleMetrics accepts any
-      // stringifiable field via CycleMetricsInput's `[key: string]: unknown`
-      // index signature, so the rest passes through as a Record<string, unknown>
-      // (the union number|string field types on CycleRecordBody are a superset
-      // of what the writer flattens — it String()s every value regardless).
-      const { cycleId, ...metrics } = parsed.data;
-      // Issue #2803: classify anchorType EXPLICITLY, mirroring the sibling
-      // recordCycle() write path (src/autopilot/cycle-close.ts). This direct
-      // write bypasses recordCycle, so without this call an absent/empty
-      // anchorType is written through verbatim and then bucketed as "unknown"
-      // by the aggregator (src/metrics/aggregate.ts) — ~30% of cycles landed
-      // "unclassified". classifyAnchorType always returns a non-empty string
-      // (the caller's trimmed value, a cycleId-slot inference, or the
-      // "unclassified" sentinel), so every /metrics/record write now classifies
-      // consistently with the recordCycle path.
-      await recordCycleMetrics(cycleId, {
-        ...(metrics as Record<string, unknown>),
-        anchorType: classifyAnchorType(cycleId, metrics.anchorType),
+      const result = await recordCycle(parsed.data);
+      if (!result.ok) {
+        const status = result.code === "redis" ? 500 : 400;
+        return res.status(status).json({ error: result.detail || result.code });
+      }
+      // Preserve the {ok:true} response contract while surfacing the
+      // coordinator's dedup/enrich/bucket signal (matching the sibling
+      // /autopilot/cycle-record handler) so a redundant post on an
+      // already-recorded cycleId is observably a dedup, not a silent 200.
+      res.json({
+        ok: true,
+        cycleId: result.cycleId,
+        status: result.status,
+        bucketed: result.bucketed,
+        deduped: result.deduped,
+        enriched: result.enriched,
       });
-      res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
