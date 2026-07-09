@@ -25,12 +25,7 @@ export async function redisInfo(section: string): Promise<string> {
 export async function pingRedis(): Promise<boolean> {
   try {
     const reply = await getRedisConnection().ping();
-    return (
-      reply === "PONG" ||
-      reply === "PONG\n" ||
-      reply === "PONG\r\n" ||
-      reply === true
-    );
+    return reply === "PONG" || reply === "PONG\n" || reply === "PONG\r\n";
   } catch (err: any) {
     console.error(`[redis/utility] ping failed: ${err?.message || err}`);
     return false;
