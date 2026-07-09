@@ -28,14 +28,20 @@
 import { watch } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
-import { indexText, defaultHashAdapter, HashDedupAdapter } from "./indexer.ts";
+import { defaultHashAdapter, HashDedupAdapter } from "./indexer.ts";
+// Issue #3044: indexText is the low-level OV upload primitive — it moved to the
+// focused leaf ov-upload.ts, so this controller imports it from there directly
+// (a narrower dependency that does NOT drag in HashDedupAdapter / source-tree
+// enumeration / the freshness probe). defaultHashAdapter / HashDedupAdapter stay
+// in indexer.ts (the domain-orchestration surface that composes indexText).
+import { indexText } from "./ov-upload.ts";
 // Issue #2767: the pure enumeration helpers moved to source-enumerator.ts.
 // Issue #2850: the env-derived default source-path set (DEFAULT_SOURCE_PATHS)
 // now lives there too, so this module imports the shared default instead of
 // re-deriving it from process.env (dropping the local HYDRA_ROOT_FOR_SOURCE /
 // DEFAULT_SOURCE_SPEC_LC duplicates and their silent forward-slash-vs-join()
-// divergence). indexText / defaultHashAdapter / HashDedupAdapter remain
-// OV-coupled and stay imported from indexer.ts.
+// divergence). defaultHashAdapter / HashDedupAdapter remain OV-coupled and stay
+// imported from indexer.ts.
 import { DEFAULT_SOURCE_PATHS, type SourcePath } from "./source-enumerator.ts";
 
 // ---------------------------------------------------------------------------
