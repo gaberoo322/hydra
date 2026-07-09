@@ -51,17 +51,12 @@
 
 import { readdir as fsReaddir, readFile as fsReadFile } from "node:fs/promises";
 import { posix, resolve } from "node:path";
-import {
-  computeGroupLayout,
-  LAYOUT_DEFAULTS,
-  type GroupBounds,
-  type LayoutConstants,
-} from "./architecture-layout.ts";
+import { computeGroupLayout, LAYOUT_DEFAULTS } from "./architecture-layout.ts";
 
-// Re-export layout symbols so existing importers (e.g. the test suite) stay
-// zero-diff during the migration window. Direct imports from
+// Re-export layout value symbols so existing importers (e.g. the test suite)
+// stay zero-diff during the migration window. Direct imports from
 // `architecture-layout.ts` are preferred for new callers.
-export { computeGroupLayout, LAYOUT_DEFAULTS, type GroupBounds, type LayoutConstants };
+export { computeGroupLayout, LAYOUT_DEFAULTS };
 
 // ---------------------------------------------------------------------------
 // Group display metadata — label/color overrides only; membership is derived
