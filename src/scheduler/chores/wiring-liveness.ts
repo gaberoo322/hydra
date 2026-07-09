@@ -160,7 +160,7 @@ export interface WiringLivenessDeps {
    * Injectable output-source reader (slice 2). Tests pass a deterministic fake so
    * below-floor / at-floor / recovered cases are reproducible. When omitted, the
    * chore uses the live {@link productionOutputReader} (issue #2578) — it fetches
-   * each declared source from the Target via `HYDRA_BETTING_URL`, accumulates the
+   * each declared source from the Target via `getTargetWebUrl()`, accumulates the
    * per-source run-series in a bounded Redis list, and returns the trailing window
    * for `evaluateOutputs`. A failed read is UNREADABLE (informational, never an
    * alarm), so a transient Target outage does not false-flag a below-floor output.

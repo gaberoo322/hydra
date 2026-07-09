@@ -29,6 +29,7 @@ import {
   getSelfImprovementShare,
   type ShareResult,
 } from "../capacity-floor.ts";
+import { getTargetWebUrl } from "../target-config.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 
@@ -164,7 +165,8 @@ export interface PublishBrierResult {
  *
  * Source of truth: hydra-betting `GET /api/calibration/forecast-metrics`,
  * whose top-level `brierScore: number | null` is the aggregate over scoreable
- * resolved forecasts. Base URL comes from `HYDRA_BETTING_URL` (default
+ * resolved forecasts. Base URL comes from `getTargetWebUrl()`
+ * (`HYDRA_TARGET_WEB_URL`, legacy `HYDRA_BETTING_URL`, default
  * `http://localhost:3333`) — same precedent as `src/api/reflections.ts`.
  *
  * NEVER writes a fabricated value: on fetch failure, non-200, malformed JSON,
@@ -186,7 +188,7 @@ export async function publishForecastCalibrationBrierMetric(
 ): Promise<PublishBrierResult> {
   const filePath = opts.filePath || DEFAULT_BRIER_METRIC_PATH;
   const path = resolveMetricPath(filePath);
-  const baseUrl = opts.baseUrl || process.env.HYDRA_BETTING_URL || "http://localhost:3333";
+  const baseUrl = opts.baseUrl || getTargetWebUrl();
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_BRIER_FETCH_TIMEOUT_MS;
   const url = `${baseUrl}/api/calibration/forecast-metrics`;

@@ -22,7 +22,7 @@
  * PRODUCTION DATA PLANE (issue #2578): the single declared `output` entry's
  * source — `/api/scanner/latest @ funnelBreakdown.registryPairs` — lives on the
  * TARGET (`~/hydra-betting/web`), NOT in-process. The orchestrator reaches it
- * over HTTP via `HYDRA_BETTING_URL` (the established cross-process proxy seam,
+ * over HTTP via `getTargetWebUrl()` (the established cross-process proxy seam,
  * same precedent as `src/api/reflections.ts` / `src/metrics/publish.ts`). The
  * issue title's "metric-trend source" is a MISNOMER: `getMetricsTrend()`
  * (`src/metrics/trend.ts`) reads orchestrator CYCLE metrics, which have no
@@ -44,6 +44,7 @@ import {
   appendOutputObservation,
   readOutputSeries,
 } from "../../redis/wiring-liveness-output-series.ts";
+import { getTargetWebUrl } from "../../target-config.ts";
 
 /** Per-entry verdict from evaluating a declared output source (slice 2). */
 export type OutputVerdict =
@@ -177,13 +178,13 @@ const DEFAULT_OUTPUT_FETCH_TIMEOUT_MS = 10_000;
 
 /**
  * The injectable surface the {@link productionOutputReader} closes over. Real
- * production uses the module defaults (`fetch`, `HYDRA_BETTING_URL`, and the
+ * production uses the module defaults (`fetch`, `getTargetWebUrl()`, and the
  * `src/redis/wiring-liveness-output-series.ts` accessor); tests inject fakes so
  * the happy / non-2xx / missing-path / non-numeric / outage cases run without a
  * live Target or Redis.
  */
 export interface ProductionOutputReaderDeps {
-  /** Base URL of the Target web service. Defaults to `HYDRA_BETTING_URL`. */
+  /** Base URL of the Target web service. Defaults to `getTargetWebUrl()`. */
   baseUrl?: string;
   /** Fetch implementation. Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
@@ -215,7 +216,7 @@ export function extractNumericPath(body: unknown, jsonPath: string): number | un
  * The production {@link OutputSourceReader}. For one declared `output` entry it:
  *   1. fetches `${baseUrl}${entry.source}` from the Target (the
  *      `/api/scanner/latest` route lives in `~/hydra-betting/web`, reached via
- *      the `HYDRA_BETTING_URL` proxy seam — NOT an orchestrator self-call);
+ *      the `getTargetWebUrl()` proxy seam — NOT an orchestrator self-call);
  *   2. extracts `entry.jsonPath` as a finite number;
  *   3. APPENDS that one observation to the per-source bounded Redis series and
  *      reads the trailing series back, returning `{ ok: true, values }`
@@ -233,7 +234,7 @@ export function extractNumericPath(body: unknown, jsonPath: string): number | un
 export function productionOutputReader(
   deps: ProductionOutputReaderDeps = {},
 ): OutputSourceReader {
-  const baseUrl = deps.baseUrl ?? process.env.HYDRA_BETTING_URL ?? "http://localhost:3333";
+  const baseUrl = deps.baseUrl ?? getTargetWebUrl();
   const fetchImpl = deps.fetchImpl ?? fetch;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_OUTPUT_FETCH_TIMEOUT_MS;
   const appendObservation = deps.appendObservation ?? appendOutputObservation;
