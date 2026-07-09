@@ -469,7 +469,6 @@ class EventBus {
 // (issue #2989) so callers/tests that already import them FROM `event-bus.ts`
 // stay zero-diff.
 export { EventBus, STREAMS, RETAINED_STREAMS, streamKey, CONSUMER_GROUPS };
-export type { StreamKey };
 
 // Re-export the stream-consume mechanics relocated to `event-bus-mechanics.ts`
 // (issue #2759) so callers/tests that already import them FROM `event-bus.ts`
