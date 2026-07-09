@@ -478,7 +478,7 @@ describe("wiring-liveness: runWiringLiveness (output integration)", () => {
   });
 
   test("production reader (issue #2578 default) marks an unreachable-Target output UNREADABLE, never below-floor", async () => {
-    // The production default now hits the Target over HYDRA_BETTING_URL rather
+    // The production default now hits the Target over HYDRA_TARGET_WEB_URL rather
     // than a no-op. A Target outage must surface as UNREADABLE (informational) —
     // never a fabricated below-floor — so we inject the production reader with a
     // failing fetch + a redis accessor that is NEVER touched on a failed read.

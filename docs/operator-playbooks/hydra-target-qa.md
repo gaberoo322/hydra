@@ -1,6 +1,6 @@
 ---
 name: hydra-target-qa
-description: Independent QA for Target PRs — Standards on every PR, a Spec plus 2-reviewer adversarial fold on money-critical changes, and a before/after visual QA pass on UI PRs; hard findings bounce to the reframe queue.
+description: Independent QA for Target PRs — Standards on every PR, a Spec plus 2-reviewer adversarial fold on risk-critical changes, and a before/after visual QA pass on UI PRs; hard findings bounce to the reframe queue.
 when_to_use: "When a Target build opens a PR and needs an independent reviewer (today the executor grades its own work), the operator says 'QA the target PR', or hydra-autopilot dispatches Target QA."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*)
 arguments: [pr_ref]
@@ -11,7 +11,7 @@ claude_only: true
 
 The Target's first **independent reviewer**. Today the `hydra-target-build`
 executor grades its own work — there is no second set of eyes, so
-money-critical betting-math and execution paths merge through the same shallow
+risk-critical betting-math and execution paths merge through the same shallow
 gate (typecheck + test + emulated merge-on-green) as a copy tweak. This skill
 closes that gap with a proportionate, depth-routed QA pass (issue #1055, parent
 epic #1052).
@@ -24,27 +24,29 @@ break the builder, so that apparatus does not apply. What the Target gets here
 is an independent reviewer plus an adversarial fold on the dangerous ~10% of
 changes — and nothing more.
 
-## Depth routing — the money-critical flag
+## Depth routing — the risk-critical flag
 
-Verification depth is routed on the **money-critical flag**
-(`classifyTargetRisk` in `src/target/money-critical.ts`) — the single
-organizing primitive shared by every Target gate. A path is money-critical iff
-it touches provider integrations, execution, staking, or bet-math
-(`src/lib/providers/`, `src/lib/execution/`, `src/lib/staking/`,
-`src/lib/bet-math/` in the **Target** repo).
+Verification depth is routed on the **risk-critical flag**
+(`classifyRisk` in `src/target/risk-critical.ts`) — the single
+organizing primitive shared by every Target gate. A path is risk-critical iff
+it touches the Target's own declared risk surface: the classifier reads
+`riskCritical.surface` from the Target's `.hydra/manifest.json` (epic #3014,
+ADR-0026), so the specific betting paths (`src/lib/providers/`,
+`src/lib/execution/`, `src/lib/staking/`, `src/lib/bet-math/`) are declared in
+the **Target** repo, not hardcoded here.
 
 | Path | Verification depth |
 |------|--------------------|
 | **safe** (UI / docs / config — ~90% of changes) | a SINGLE independent **Standards** pass |
-| **money-critical** (providers / execution / staking / bet-math) | **Standards + Spec + a 2-reviewer adversarial fold** — all must pass |
+| **risk-critical** (the Target manifest's declared risk surface) | **Standards + Spec + a 2-reviewer adversarial fold** — all must pass |
 
 - **Standards** (every PR) — conventions, tests-present-and-non-empty, no
-  silent catch, no unjustified touch of money-critical paths, and — on any
+  silent catch, no unjustified touch of risk-critical paths, and — on any
   UI-touching PR — **render-robustness** (see below).
-- **Spec** (money-critical only) — diff vs. the design-concept artifact for the
+- **Spec** (risk-critical only) — diff vs. the design-concept artifact for the
   work item (the lightweight Target artifact from #1056; absent → treat the
   Spec axis as a hard finding so the heavier gate never passes by omission).
-- **Adversarial fold** (money-critical only) — TWO independent reviewers, each
+- **Adversarial fold** (risk-critical only) — TWO independent reviewers, each
   prompted in **refutation framing** (actively find a reason this change is
   wrong / regresses something), neither told the other exists. The change
   passes only if **both** find no real blocker; a single real blocker from
@@ -213,14 +215,19 @@ CHANGED=$(git diff --name-only origin/main...HEAD)
 ### 2. Classify the path
 
 Feed the changed paths to `classifyTargetQaPath()` (or call
-`classifyTargetRisk` directly) to decide `safe` vs. `money-critical`. Do NOT
+`classifyRisk` directly) to decide `safe` vs. risk-critical. Do NOT
 infer the path from a hand-maintained pattern list — the classifier in
-`src/target/money-critical.ts` is the single source of truth.
+`src/target/risk-critical.ts` (which reads the Target manifest's
+`riskCritical.surface`, ADR-0026) is the single source of truth. Note: the QA
+verdict layer (`scripts/target/target-qa-verdict.ts`) still exposes its result
+under the legacy `moneyCritical` field / `"money-critical"` path label — that
+public shape is unchanged; only the underlying classifier is now the
+manifest-sourced `classifyRisk`.
 
 ### 3. Run the reviewer sub-agents for the chosen path
 
 - **safe** — one **Standards** reviewer sub-agent. Collect its `PASS` / `FAIL`.
-- **money-critical** — run, in parallel independent sub-agents:
+- **risk-critical** — run, in parallel independent sub-agents:
   1. **Standards**,
   2. **Spec** (against the design-concept artifact),
   3. **adversarial reviewer A** (refutation framing),
@@ -233,9 +240,11 @@ infer the path from a hand-maintained pattern list — the classifier in
 
 Pass the changed paths and the collected reviewer verdicts to
 `classifyTargetQaVerdict()`. It returns `{ verdict, path, moneyCritical,
-action, reason, matchedPaths }`. The fold is pure and total — a missing
-money-critical-only verdict is treated as a FAIL (defensive: an absent reviewer
-must never let the heavier gate pass by omission).
+action, reason, matchedPaths }` (the `moneyCritical` field name is the layer's
+unchanged legacy label for the risk-critical result; ADR-0026). The fold is
+pure and total — a missing risk-critical-only verdict is treated as a FAIL
+(defensive: an absent reviewer must never let the heavier gate pass by
+omission).
 
 ### 5. Execute the routing
 
@@ -254,14 +263,14 @@ hydra backlog move <item-id> reframe
 ### 6. Report
 
 Emit the folded `verdict`, the `path` taken, the `reason`, and (on
-money-critical) the per-axis reviewer verdicts. The verdict literal is
+risk-critical) the per-axis reviewer verdicts. The verdict literal is
 `PASS` / `FAIL` — there is no tier-pending machinery here (the Target's CI is a
 single self-hosted runner with emulated merge-on-green, not the Orchestrator's
 multi-check rollup).
 
 ## Invariants
 
-- **Depth is routed only by the money-critical flag** — never by PR size, file
+- **Depth is routed only by the risk-critical flag** — never by PR size, file
   count, or a self-asserted level.
 - **The fold lives in one pure function** — `classifyTargetQaVerdict()`,
   unit-tested in `test/target-qa-verdict.test.mts`. The playbook collects
@@ -288,8 +297,11 @@ multi-check rollup).
 - Issue #1055 — this skill (independent Target QA).
 - Parent epic #1052 — selectively converge the Target SDLC with the
   Orchestrator's build-quality machinery.
-- `src/target/money-critical.ts` (issue #1053) — the money-critical classifier
-  this skill routes on.
+- `src/target/risk-critical.ts` (issue #1053, renamed in #3017) — the
+  risk-critical classifier (`classifyRisk`, reads the Target manifest's
+  `riskCritical.surface` per ADR-0026) this skill routes on.
+- ADR-0026 / epic #3014 — the Target Manifest that declares each target's own
+  `riskCritical.surface` and `verify` commands.
 - `scripts/target/target-qa-verdict.ts` — the pure verdict fold.
 - `scripts/ci/qa-verdict.ts` — the Orchestrator's analogous one-pass verdict
   classifier (the shape this skill mirrors, minus the tier ladder).

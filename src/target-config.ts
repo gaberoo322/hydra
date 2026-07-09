@@ -23,10 +23,17 @@ import os from "node:os";
 
 const DEFAULT_TARGET_NAME = "hydra-betting";
 const DEFAULT_TARGET_GITHUB_REPO = "gaberoo322/hydra-betting";
+const DEFAULT_TARGET_WEB_URL = "http://localhost:3333";
 
 // Module-level memoization for one-time warnings. Booleans (not Map) per ADR-0002
 // guidance — keep this leaf module deliberately minimal.
-let warned = { name: false, workspace: false, legacy: false, githubRepo: false };
+let warned = {
+  name: false,
+  workspace: false,
+  legacy: false,
+  githubRepo: false,
+  webUrlLegacy: false,
+};
 
 /**
  * Returns the target name slug (e.g. `hydra-betting`).
@@ -131,9 +138,50 @@ export function getTargetCommitUrl(sha: string): string {
 }
 
 /**
+ * Returns the base URL of the target project's web service, e.g.
+ * `http://localhost:3333`. This is runtime infrastructure (frequent, hot,
+ * service-read) — the cross-process proxy seam the long-running service uses
+ * to reach the Target for calibration/Brier metrics and wiring-liveness
+ * output. Per ADR-0026 it is a generic env var, NOT a Target Manifest field.
+ *
+ * Resolution order:
+ *   1. `HYDRA_TARGET_WEB_URL` (canonical)
+ *   2. `HYDRA_BETTING_URL` (legacy alias — emits one-time deprecation warning,
+ *      mirroring the `HYDRA_WORKSPACE`→`HYDRA_PROJECT_WORKSPACE` migration)
+ *   3. `http://localhost:3333` (soft default)
+ *
+ * Empty string env values are treated as unset. Does not warn on the default
+ * fallback — the localhost default is the ordinary single-host dev/prod case,
+ * not a migration hazard.
+ */
+export function getTargetWebUrl(): string {
+  const canonical = process.env.HYDRA_TARGET_WEB_URL;
+  if (canonical && canonical.trim()) return canonical.trim();
+
+  const legacy = process.env.HYDRA_BETTING_URL;
+  if (legacy && legacy.trim()) {
+    if (!warned.webUrlLegacy) {
+      warned.webUrlLegacy = true;
+      console.warn(
+        `[target-config] HYDRA_BETTING_URL is deprecated; rename to HYDRA_TARGET_WEB_URL (ADR-0026). The legacy alias is a transitional fallback.`,
+      );
+    }
+    return legacy.trim();
+  }
+
+  return DEFAULT_TARGET_WEB_URL;
+}
+
+/**
  * Test-only: reset the one-time warning flags so each test can assert
  * warning behavior in isolation. Not for production use.
  */
 export function __resetForTests(): void {
-  warned = { name: false, workspace: false, legacy: false, githubRepo: false };
+  warned = {
+    name: false,
+    workspace: false,
+    legacy: false,
+    githubRepo: false,
+    webUrlLegacy: false,
+  };
 }

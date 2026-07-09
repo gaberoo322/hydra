@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { loadReflectionsForAnchor } from "../reflections/index.ts";
-import { getTargetName } from "../target-config.ts";
+import { getTargetName, getTargetWebUrl } from "../target-config.ts";
 import { ReflectionsQuerySchema } from "../schemas/reflections.ts";
 import { aggregatorRoute } from "./route-helpers.ts";
 
@@ -14,7 +14,7 @@ import { aggregatorRoute } from "./route-helpers.ts";
 export function createReflectionsRouter() {
   const router = Router();
 
-  const HYDRA_BETTING_URL = process.env.HYDRA_BETTING_URL || "http://localhost:3333";
+  const targetWebUrl = getTargetWebUrl();
 
   // GET /reflections?anchor=&files= — per-anchor episodic reflections.
   //
@@ -87,7 +87,7 @@ export function createReflectionsRouter() {
   router.get("/calibration/outcomes", async (req, res) => {
     try {
       const qs = new URLSearchParams(req.query as Record<string, string>).toString();
-      const url = `${HYDRA_BETTING_URL}/api/calibration/outcomes${qs ? `?${qs}` : ""}`;
+      const url = `${targetWebUrl}/api/calibration/outcomes${qs ? `?${qs}` : ""}`;
       const response = await fetch(url);
       const data = await response.json();
       res.status(response.status).json(data);
@@ -98,7 +98,7 @@ export function createReflectionsRouter() {
 
   router.post("/calibration/outcomes/sync", async (req, res) => {
     try {
-      const response = await fetch(`${HYDRA_BETTING_URL}/api/calibration/outcomes/sync`, { method: "POST" });
+      const response = await fetch(`${targetWebUrl}/api/calibration/outcomes/sync`, { method: "POST" });
       const data = await response.json();
       res.status(response.status).json(data);
     } catch (err: any) {

@@ -10,6 +10,7 @@ import {
   getTargetWorktreePrefix,
   getTargetGithubRepo,
   getTargetCommitUrl,
+  getTargetWebUrl,
   __resetForTests,
 } from "../src/target-config.ts";
 
@@ -18,6 +19,8 @@ type EnvSnapshot = {
   HYDRA_PROJECT_WORKSPACE: string | undefined;
   HYDRA_WORKSPACE: string | undefined;
   HYDRA_TARGET_GITHUB_REPO: string | undefined;
+  HYDRA_TARGET_WEB_URL: string | undefined;
+  HYDRA_BETTING_URL: string | undefined;
 };
 
 let snapshot: EnvSnapshot;
@@ -30,6 +33,8 @@ function saveEnv(): EnvSnapshot {
     HYDRA_PROJECT_WORKSPACE: process.env.HYDRA_PROJECT_WORKSPACE,
     HYDRA_WORKSPACE: process.env.HYDRA_WORKSPACE,
     HYDRA_TARGET_GITHUB_REPO: process.env.HYDRA_TARGET_GITHUB_REPO,
+    HYDRA_TARGET_WEB_URL: process.env.HYDRA_TARGET_WEB_URL,
+    HYDRA_BETTING_URL: process.env.HYDRA_BETTING_URL,
   };
 }
 
@@ -39,6 +44,8 @@ function restoreEnv(snap: EnvSnapshot) {
     "HYDRA_PROJECT_WORKSPACE",
     "HYDRA_WORKSPACE",
     "HYDRA_TARGET_GITHUB_REPO",
+    "HYDRA_TARGET_WEB_URL",
+    "HYDRA_BETTING_URL",
   ] as const) {
     const v = snap[key];
     if (v === undefined) delete process.env[key];
@@ -52,6 +59,8 @@ function setup() {
   delete process.env.HYDRA_PROJECT_WORKSPACE;
   delete process.env.HYDRA_WORKSPACE;
   delete process.env.HYDRA_TARGET_GITHUB_REPO;
+  delete process.env.HYDRA_TARGET_WEB_URL;
+  delete process.env.HYDRA_BETTING_URL;
   warnCalls = [];
   originalWarn = console.warn;
   console.warn = (...args: unknown[]) => {
@@ -298,6 +307,87 @@ test("getTargetCommitUrl falls back to default repo with a one-time warn when en
       /HYDRA_TARGET_GITHUB_REPO is unset/.test(String(c[0])),
     );
     assert.equal(repoWarns.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetWebUrl reads HYDRA_TARGET_WEB_URL when set", () => {
+  setup();
+  try {
+    process.env.HYDRA_TARGET_WEB_URL = "https://target.example:8080";
+    assert.equal(getTargetWebUrl(), "https://target.example:8080");
+    assert.equal(warnCalls.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetWebUrl reads HYDRA_BETTING_URL legacy alias and warns once", () => {
+  setup();
+  try {
+    process.env.HYDRA_BETTING_URL = "http://legacy-betting:3333";
+    assert.equal(getTargetWebUrl(), "http://legacy-betting:3333");
+    assert.equal(getTargetWebUrl(), "http://legacy-betting:3333");
+    const legacyWarns = warnCalls.filter((c) =>
+      /HYDRA_BETTING_URL is deprecated/.test(String(c[0])),
+    );
+    assert.equal(legacyWarns.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetWebUrl canonical takes precedence over legacy", () => {
+  setup();
+  try {
+    process.env.HYDRA_TARGET_WEB_URL = "https://canonical:9000";
+    process.env.HYDRA_BETTING_URL = "http://legacy:3333";
+    assert.equal(getTargetWebUrl(), "https://canonical:9000");
+    assert.equal(warnCalls.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetWebUrl falls back to localhost default without warning when neither env is set", () => {
+  setup();
+  try {
+    assert.equal(getTargetWebUrl(), "http://localhost:3333");
+    // The localhost default is the ordinary single-host case, not a migration
+    // hazard, so it must NOT warn.
+    assert.equal(warnCalls.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetWebUrl treats empty strings as unset on both env vars", () => {
+  setup();
+  try {
+    process.env.HYDRA_TARGET_WEB_URL = "";
+    process.env.HYDRA_BETTING_URL = "";
+    assert.equal(getTargetWebUrl(), "http://localhost:3333");
+    const legacyWarns = warnCalls.filter((c) =>
+      /HYDRA_BETTING_URL is deprecated/.test(String(c[0])),
+    );
+    assert.equal(legacyWarns.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetWebUrl legacy deprecation warning fires at most once per process", () => {
+  setup();
+  try {
+    process.env.HYDRA_BETTING_URL = "http://legacy:3333";
+    getTargetWebUrl();
+    getTargetWebUrl();
+    getTargetWebUrl();
+    const legacyWarns = warnCalls.filter((c) =>
+      /HYDRA_BETTING_URL is deprecated/.test(String(c[0])),
+    );
+    assert.equal(legacyWarns.length, 1);
   } finally {
     teardown();
   }

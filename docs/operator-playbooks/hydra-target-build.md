@@ -119,7 +119,7 @@ INSTALL_CMD=$(jq -r '.verify.install' "$TARGET_WT/.hydra/manifest.json")
 # so they do not exist in the hydra-betting checkout. This sync copies them into
 # `$TARGET_WT/.hydra-gate/` (git-excluded, so it never pollutes the Target PR
 # diff) so Steps 4.5 / 6.6 / 8.6 run the REAL gate from the worktree — never from
-# ~/hydra, never by hand-rolling the money-critical classification.
+# ~/hydra, never by hand-rolling the risk-critical classification.
 bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 ```
 
@@ -281,9 +281,9 @@ Read `~/hydra/config/agents/skeptic.md`. Challenge:
 
 If rejected, replan narrower.
 
-### 4.5. Design-concept artifact (money-critical only — issue #1056)
+### 4.5. Design-concept artifact (risk-critical only — issue #1056)
 
-Before execute, money-critical Target builds capture a **lightweight
+Before execute, risk-critical Target builds capture a **lightweight
 design-concept artifact** and persist it per-anchor, so a retry on the same
 anchor reuses it instead of rediscovering scope every cycle. This is the
 Target analogue of the Orchestrator's `hydra-grill` design-concept — but
@@ -296,15 +296,19 @@ the worktree by Step 0.6, issue #1451); this step is the I/O wrapper. Run it
 from `$TARGET_WT` so the mirror's `../../src/…` imports resolve — never from
 `~/hydra`.
 
-**Gate on money-critical first — safe-path builds skip this step entirely.**
+**Gate on risk-critical first — safe-path builds skip this step entirely.**
 `shouldCaptureDesignConcept()` routes on the keystone classifier
-(`classifyTargetRisk`, #1053): if no expected path is money-critical
-(providers / execution / staking / bet-math), there is no artifact to create,
-persist, or diff against — proceed straight to Step 5.
+(`classifyRisk` in `src/target/risk-critical.ts`, #1053): a path is
+risk-critical iff it touches the Target's own declared risk surface
+(`riskCritical.surface` in `<TARGET_WT>/.hydra/manifest.json`, epic #3014 /
+ADR-0026 — the betting-specific "providers / execution / staking / bet-math"
+vocabulary now lives only in the target repo, no longer hardcoded here). If no
+expected path is risk-critical, there is no artifact to create, persist, or
+diff against — proceed straight to Step 5.
 
 ```bash
 cd "$TARGET_WT"   # the .hydra-gate mirror's ../../src imports resolve from here
-# EXPECTED_PATHS is the planner's `scopeBoundary.in` money-critical surface,
+# EXPECTED_PATHS is the planner's `scopeBoundary.in` risk-critical surface,
 # space- or newline-separated; ANCHOR_REF is anchor.reference (e.g. "issue-1056").
 DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
 
@@ -376,7 +380,7 @@ Rules:
 - `vi.mock("server-only", () => ({}))` in tests importing server modules.
 - Read `web/AGENTS.md` — Next.js 16 APIs may differ from training.
 - **Stay in scope.** If you must touch a file outside the Step 3.5 in-scope list, append it to `SCOPE_JUSTIFICATIONS` with a one-line reason before continuing.
-- **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The money-critical design-concept artifact (if present at `hydra:target:design-concept:$ANCHOR_REF` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
+- **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The risk-critical design-concept artifact (if present at `hydra:target:design-concept:$ANCHOR_REF` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
 
 ### 6. Verify (NOT an agent)
 
@@ -405,49 +409,52 @@ Fail → fix → re-verify. After 2 failed fixes, abandon branch.
 
 For orchestrator changes (~/hydra/): `node --check src/<file>.ts` + `npm test` + restart service.
 
-### 6.6. Money-critical mutation gate (issue #1057 — diff-scoped)
+### 6.6. Risk-critical mutation gate (issue #1057 — diff-scoped)
 
 After the test/typecheck gate passes (Step 6), the changed-file set runs through
-the **money-critical mutation gate**. This is the Target analogue of the
+the **risk-critical mutation gate**. This is the Target analogue of the
 Orchestrator's diff-scoped mutation gate, with two deliberate differences from
 epic #1052:
 
-- **Diff-scoped to money-critical paths only.** The gate mutates ONLY the
-  changed files that `classifyTargetRisk()` (the keystone classifier from
-  #1053) flags as money-critical — provider integrations, execution, staking,
-  bet-math. A green-but-empty suite over those paths costs real money; a
-  green-but-empty suite over UI/docs/config does not.
+- **Diff-scoped to risk-critical paths only.** The gate mutates ONLY the
+  changed files that `classifyRisk()` (the keystone classifier from #1053, in
+  `src/target/risk-critical.ts`) flags as risk-critical — the paths the
+  Target's own `.hydra/manifest.json` declares under `riskCritical.surface`
+  (epic #3014, ADR-0026; for hydra-betting that is provider integrations,
+  execution, staking, bet-math — but the vocabulary now lives in the target
+  repo, not here). A green-but-empty suite over those paths is high-risk; a
+  green-but-empty suite over UI/docs/config is not.
 - **Safe-path PRs skip mutation entirely.** When no changed file is
-  money-critical, the gate exits 0 with a `skipped` status and never spins up
+  risk-critical, the gate exits 0 with a `skipped` status and never spins up
   the runner — keeping the single hydra-server-betting runner fast for the
   common UI/docs change.
 - **A single kill-floor — NOT a tier ladder.** Either the changed
-  money-critical files clear the one floor or the build fails. Mirrors the
-  classifier's own two-level boolean (money-critical vs. safe).
+  risk-critical files clear the one floor or the build fails. Mirrors the
+  classifier's own two-level boolean (risk-critical vs. safe).
 
 Invoke the **mirrored** gate script from the target worktree (issue #1451 —
 synced into `$TARGET_WT/.hydra-gate/` by Step 0.6), feeding it the PR diff
 against the merge base. Do NOT run `scripts/target/mutation-check.ts` from
 `~/hydra`, and do NOT hand-strip the `web/` prefix from `CHANGED_FILES` — pass
-the raw `web/`-rooted diff paths straight through. `classifyTargetRisk()`
+the raw `web/`-rooted diff paths straight through. `classifyRisk()`
 (inside the mirrored script) already normalizes the `web/` prefix (#1235), so
 hand-stripping re-introduces an already-solved bug and runs the gate
 inconsistently.
 
 **Commit brand-new files BEFORE running the gate.** Mutant scoping follows the
-git diff, so an untracked (or unstaged-new) money-critical file produces
+git diff, so an untracked (or unstaged-new) risk-critical file produces
 **zero mutants** — the gate degrades to a non-blocking `0-mutant` warn instead
 of actually testing the new code (friction cue
 `stryker-no-mutants-on-untracked-files`, recurred 4×). The `CHANGED_FILES`
 computation below only sees committed work: run the gate only after every new
 file the cycle created is committed on the feature branch, and treat a
-`0-mutant` warn on a diff that adds money-critical files as a red flag, not a
+`0-mutant` warn on a diff that adds risk-critical files as a red flag, not a
 pass.
 
 **Large-scanner pure-enrichment diffs: the gate verdict is unreliable, not a
 pass to trust.** A second, opposite failure mode (friction cue
 `mutation-gate-timeout-on-large-scanner-file`, recurred 3×): when the changed
-file is a **large** money-critical module (e.g.
+file is a **large** risk-critical module (e.g.
 `web/src/lib/arbitrage/scanner.ts`, `web/src/lib/execution/kalshi-executor.ts`)
 and your diff is **pure enrichment** — it adds/annotates without changing the
 existing logic lines (a new field, a relocation, a comment-level tweak) — the
