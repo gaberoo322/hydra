@@ -11,12 +11,16 @@
  * rows — no Redis — so these cases pin the verdict logic directly without a
  * connection (this is a NEW top-level describe with no shared-Redis teardown,
  * per the CLAUDE.md authoring rule).
+ *
+ * Issue #3038: the projection was extracted from `metrics/trend.ts` into the
+ * focused `metrics/reflection-health.ts` leaf; this test now imports it from
+ * that leaf directly (zero Redis dependency — no cycle-trend fixture needed).
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-const { projectReflectionHealth } = await import("../src/api/learning.ts");
+const { projectReflectionHealth } = await import("../src/metrics/reflection-health.ts");
 
 describe("projectReflectionHealth — reflection-deposit health verdict (#2467)", () => {
   test("empty window → no-data verdict", () => {

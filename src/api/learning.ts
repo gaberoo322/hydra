@@ -11,9 +11,12 @@ import {
 // invariant) and NEVER fabricates a non-none bucket from an empty store.
 // Issue #2492: `projectReflectionHealth` (and its types) relocated to the
 // metrics domain alongside `deriveReflectionMatchSource`; re-exported below for
-// this router's existing callers. The route still reads `getMetricsTrend()` and
-// feeds the projection — a pure read, no second cycle-record writer.
-import { getMetricsTrend, projectReflectionHealth } from "../metrics/trend.ts";
+// this router's existing callers. Issue #3038: it was then extracted into a
+// focused `metrics/reflection-health.ts` leaf, so this route imports the
+// projection from there while still reading `getMetricsTrend()` (the Redis
+// read path) from `metrics/trend.ts` — a pure read, no second cycle-record writer.
+import { getMetricsTrend } from "../metrics/trend.ts";
+import { projectReflectionHealth } from "../metrics/reflection-health.ts";
 // Issue #2497: the pure learning-composition domain (`getContext` and its
 // supporting types/helpers) relocated OUT of this route module into
 // src/learning/composition.ts — "how the orchestrator composes learning
@@ -95,11 +98,12 @@ export { getContext } from "../learning/composition.ts";
 export type {
   ReflectionHealthSampleProjection,
   ReflectionHealthReport,
-} from "../metrics/trend.ts";
+} from "../metrics/reflection-health.ts";
 // Value re-export: the pure projection lives in the metrics domain now (#2492),
-// but `GET /learning/reflection-health` and the existing test/learning-reflection-
+// extracted into the `metrics/reflection-health.ts` leaf (#3038), but
+// `GET /learning/reflection-health` and the existing test/learning-reflection-
 // health.test.mts import it FROM here — keep that import site stable.
-export { projectReflectionHealth } from "../metrics/trend.ts";
+export { projectReflectionHealth } from "../metrics/reflection-health.ts";
 
 export function createLearningRouter() {
   const router = Router();

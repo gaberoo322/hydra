@@ -40,7 +40,7 @@ import { RULES, fmtUp } from "./rules.ts";
 // reflection rule surface the verdict where operators actually look, so the
 // recurring #1912→#2450→#2467→#2492 false-alarm re-file loop stops. parseProbes
 // runs it over the metrics-probe trend it already has; no new I/O, no writer.
-import { projectReflectionHealth, type ReflectionHealthReport } from "../metrics/trend.ts";
+import { projectReflectionHealth, type ReflectionHealthReport } from "../metrics/reflection-health.ts";
 // Issue #2023: type-only import — HealthSnapshot.ovSearch.status names the
 // OV-search probe's result vocabulary, owned by the ServiceProbe Adapter Seam.
 // `import type` is erased at compile time, so this is zero runtime coupling and

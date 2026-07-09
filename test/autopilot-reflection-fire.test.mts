@@ -62,7 +62,7 @@ import { join, resolve } from "node:path";
 // anomaly. Imported here (the same carve-out owns the failure-path writer guard
 // below) to pin that a `served-but-bucketed-none` verdict is the ONLY one it
 // treats as file-worthy.
-const { isHonestNoneVerdict } = await import("../src/metrics/trend.ts");
+const { isHonestNoneVerdict } = await import("../src/metrics/reflection-health.ts");
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SELF_HEAL = join(REPO_ROOT, "scripts", "autopilot", "self_heal.py");
