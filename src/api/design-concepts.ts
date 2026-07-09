@@ -23,7 +23,12 @@ import { Router } from "express";
 import { z } from "zod";
 
 import { countQuerySchema } from "../schemas/common.ts";
-// All design-concept domain symbols live in the single deep module (issue #2316).
+// Persistence + green-light symbols come from the persistence module; the pure
+// gate predicate + domain scope type come from the zero-Redis gate leaf
+// (issue #3039 re-extracted them from `design-concept.ts`). Both remain
+// re-exported by `design-concept.ts`, so this split is optional — the API layer
+// points at the leaf directly to document that the gate check needs no
+// persistence dependency.
 import {
   saveDesignConcept,
   getDesignConcept,
@@ -31,9 +36,11 @@ import {
   approveDesignConcept,
   resolveDesignConceptForQa,
   computeGreenLight,
+} from "../design-concept.ts";
+import {
   gateCheck,
   type DesignConceptScope,
-} from "../design-concept.ts";
+} from "../design-concept-gate.ts";
 import {
   appendExemptLogEntry,
   readRecentExemptLogEntries,

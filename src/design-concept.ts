@@ -1,6 +1,6 @@
 /**
- * Design Concept — the single deep module that owns the design-concept domain
- * (closes #2316, consolidating three shallow modules into one).
+ * Design Concept — the persistence + HTTP-surface module for the
+ * design-concept domain.
  *
  * A design-concept artifact is a structured record produced by the (future)
  * `hydra-grill` skill before any code-writing dispatch (`dev_orch` /
@@ -15,29 +15,35 @@
  *     and any prototype snippets that resolved hard logic/state questions.
  *
  * The artifact is the single source of truth consumed both by the gate
- * (`gateCheck()` here) and by PR-time review (the future two-axis
- * `hydra-qa` rewrite — sub-issue #440). See ADR-0008.
+ * (`gateCheck()`, which lives in the pure `design-concept-gate.ts` leaf and is
+ * re-exported here) and by PR-time review (the future two-axis `hydra-qa`
+ * rewrite — sub-issue #440). See ADR-0008.
  *
- * ## Module organisation (four concern sections)
+ * ## Module organisation (after the #3039 gate-leaf extraction)
  *
- * 1. **Domain value types** — the TypeScript types that describe the artifact
- *    shape (`DesignConcept`, `DesignConceptScope`, etc.). Pure — no imports
- *    from Redis or the tier-classifier.
+ * The pure, zero-Redis half of the domain — the domain value types
+ * (`DesignConcept`, `DesignConceptScope`), the artifact-identity hash
+ * (`computeArtifactHash`), and the gate predicates (`isFresh`, `gateCheck`,
+ * `DESIGN_CONCEPT_MAX_AGE_MS`) — was extracted to `src/design-concept-gate.ts`
+ * (issue #3039). That leaf imports only the tier-classifier, so gate/identity
+ * tests need zero Redis setup. This module imports the leaf and **re-exports**
+ * its public symbols, so a caller can still `import { gateCheck,
+ * getDesignConcept } from "./design-concept.ts"` on one line — preserving the
+ * single-source import surface that motivated the #2316 consolidation.
  *
- * 2. **Artifact identity** — `computeArtifactHash` (+ `canonicalJson`),
- *    `designConceptHandle`, and the green-light criterion (`computeGreenLight`
- *    + `GREEN_LIGHT_WINDOW_DAYS` / `GREEN_LIGHT_REQUIRED_DAYS`). Pure — no
- *    Redis IO.
+ * This module retains:
  *
- * 3. **Gate predicates** — `isFresh`, `gateCheck`, and
- *    `DESIGN_CONCEPT_MAX_AGE_MS`. Pure — no Redis IO, but imports the
- *    tier-classifier (`classifyChange`, `permitsBreakingChange`) for the
- *    breaking-impact rule.
+ * 1. **Artifact identity (Redis-adjacent)** — `designConceptHandle` and the
+ *    green-light criterion (`computeGreenLight` + `GREEN_LIGHT_WINDOW_DAYS` /
+ *    `GREEN_LIGHT_REQUIRED_DAYS`). Pure — no Redis IO, but domain-local to
+ *    persistence.
  *
- * 4. **Persistence** — `saveDesignConcept`, `getDesignConcept`,
+ * 2. **Persistence** — `saveDesignConcept`, `getDesignConcept`,
  *    `listDesignConcepts`, `approveDesignConcept`, `resolveDesignConceptForQa`,
  *    and `DesignConceptResolution`. Redis-backed; owns the Redis seam calls
- *    and the QA-time retrieval path.
+ *    and the QA-time retrieval path. Uses the gate leaf's
+ *    `DESIGN_CONCEPT_MAX_AGE_MS` for index pruning and `computeArtifactHash`
+ *    for the save path.
  *
  * Redis schema:
  *   hydra:design-concept:{anchorRef}  → Hash (full body, JSON-encoded fields)
@@ -52,9 +58,17 @@
  * of scope for this sub-issue.
  */
 
-import { createHash } from "node:crypto";
-
 import { InvalidArgumentError, NotFoundError } from "./errors.ts";
+import {
+  DESIGN_CONCEPT_MAX_AGE_MS,
+  computeArtifactHash,
+  type DesignConcept,
+  type DesignConceptScope,
+  type ModuleTouched,
+  type Prototype,
+  type QaTurn,
+  type RejectedAlternative,
+} from "./design-concept-gate.ts";
 import {
   getDesignConceptHash,
   listAllDesignConceptRefs,
@@ -67,111 +81,27 @@ import {
 import {
   type DesignConceptInput as DesignConceptInputType,
 } from "./schemas/design-concept.ts";
-import { classifyChange } from "./tier-classifier.ts";
-import { permitsBreakingChange } from "./tier-policy.ts";
 
 // ---------------------------------------------------------------------------
-// 1. Domain value types (no Redis dependency, no tier-classifier dependency)
+// Design-concept gate + identity leaf re-export (issue #3039)
 // ---------------------------------------------------------------------------
+//
+// The pure gate/identity leaf lives in `design-concept-gate.ts`. Re-export its
+// public surface here so existing callers keep their single-source import
+// (`import { gateCheck, getDesignConcept } from "./design-concept.ts"`) — this
+// is the back-compat relay that keeps the #3039 re-extraction from
+// reintroducing the 3-way import fan-out that motivated the #2316 re-merge.
+export {
+  computeArtifactHash,
+  isFresh,
+  gateCheck,
+  type DesignConcept,
+} from "./design-concept-gate.ts";
 
-export type DesignConceptScope = "orch" | "target";
-
-// File-private — used only within this module (DesignConcept, saveDesignConcept,
-// hydrate). Not exported (no external consumer; knip flagged the prior `export`
-// as dead surface, issue #2320).
+// File-private status alias — used by `saveDesignConcept` / `hydrate`. Kept
+// local to the persistence module because it is only meaningful when a record
+// is written or hydrated (the gate leaf treats status as a plain field value).
 type DesignConceptStatus = "draft" | "approved" | "stale";
-
-// File-private — used only by `ModuleTouched` below. Not exported (no external
-// consumer; knip flagged the prior `export` as dead surface, issue #2051).
-type InterfaceImpact = "none" | "extend" | "breaking";
-
-type DepthClassification = "deep" | "shallow" | "unknown";
-
-// File-private — used only within this module (the `DesignConcept` shape and
-// `hydrate`). Not exported (no external consumer; knip flagged the prior
-// `export` as dead surface, issue #2320).
-type ModuleTouched = {
-  path: string;
-  interfaceImpact: InterfaceImpact;
-  depthClassification: DepthClassification;
-};
-
-type RejectedAlternative = { alt: string; why: string };
-
-type QaTurn = { q: string; a: string };
-
-type Prototype = {
-  question: string;
-  branch: "logic" | "ui";
-  snippet: string;
-  answer: string;
-  workTreePath: string;
-};
-
-export type DesignConcept = {
-  anchorRef: string;
-  scope: DesignConceptScope;
-  createdAt: number;
-  artifactHash: string;
-  glossaryTerms: string[];
-  glossaryGaps: string[];
-  modulesTouched: ModuleTouched[];
-  invariants: string[];
-  rejectedAlternatives: RejectedAlternative[];
-  qaTrace: QaTurn[];
-  prototypes: Prototype[];
-  status: DesignConceptStatus;
-  approvedBy: "auto-gate" | `operator:${string}` | "";
-};
-
-// ---------------------------------------------------------------------------
-// 2. Artifact identity (pure — no Redis IO)
-// ---------------------------------------------------------------------------
-
-/**
- * Canonical-JSON encode an arbitrary value: object keys are emitted in
- * sorted order, no whitespace, primitives encoded as `JSON.stringify`
- * does. Used as the input to `sha256` for `artifactHash`, so two
- * artifacts with the same body always produce the same hash.
- */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return "[" + value.map(canonicalJson).join(",") + "]";
-  }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  const parts: string[] = [];
-  for (const k of keys) {
-    const v = obj[k];
-    if (v === undefined) continue;
-    parts.push(JSON.stringify(k) + ":" + canonicalJson(v));
-  }
-  return "{" + parts.join(",") + "}";
-}
-
-/**
- * Compute the `artifactHash` for a design concept. Hashes all body fields
- * EXCLUDING `artifactHash`, `createdAt`, `status`, and `approvedBy` — so
- * approving an artifact (or persisting it at a different timestamp) does
- * not change its content identity.
- */
-export function computeArtifactHash(d: Omit<DesignConcept, "artifactHash">): string {
-  const body = {
-    anchorRef: d.anchorRef,
-    scope: d.scope,
-    glossaryTerms: d.glossaryTerms,
-    glossaryGaps: d.glossaryGaps,
-    modulesTouched: d.modulesTouched,
-    invariants: d.invariants,
-    rejectedAlternatives: d.rejectedAlternatives,
-    qaTrace: d.qaTrace,
-    prototypes: d.prototypes,
-  };
-  return createHash("sha256").update(canonicalJson(body)).digest("hex");
-}
 
 // ---------------------------------------------------------------------------
 // QA-time retrievability handle (issue #1450)
@@ -283,112 +213,14 @@ export function computeGreenLight(
 }
 
 // ---------------------------------------------------------------------------
-// 3. Gate predicates (pure — no Redis IO; imports tier-classifier)
+// Persistence (Redis-backed)
 // ---------------------------------------------------------------------------
-
-/** 7 days, in milliseconds. */
-const DESIGN_CONCEPT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** Minimum Q&A trace depth for the gate. From the ADR-0008 schema. */
-const MIN_QA_TRACE_LENGTH = 6;
-
-/**
- * Return true iff the artifact was created within the freshness window
- * (7 days by default). Pure function — no Redis IO.
- */
-export function isFresh(
-  d: DesignConcept,
-  now: number,
-  maxAgeMs: number = DESIGN_CONCEPT_MAX_AGE_MS,
-): boolean {
-  if (!d || typeof d.createdAt !== "number" || d.createdAt <= 0) return false;
-  return now - d.createdAt <= maxAgeMs;
-}
-
-/**
- * Gate check — the 7 deterministic failure modes from ADR-0008 §"Gate
- * check". Returns `{ ok: true, reasons: [] }` only when EVERY rule
- * passes. Pure function — no Redis IO. The autopilot consumes this
- * verbatim in Phase B.
- *
- * For Phase A: `glossaryGaps` fails closed (any non-empty list is a
- * reject). The whitelist-via-Redis escape hatch lands later.
- *
- * For Phase A: `interfaceImpact: 'breaking'` cross-checks against the
- * existing tier classifier in `src/tier-classifier.ts` — every breaking
- * module path must classify to tier >= 2. Under the monotonic T1–T4
- * ladder (ADR-0015) a "breaking" declaration on a T1 (prompt-shaped,
- * auto-merge-trivial) path is the only gate failure here: T1 is the
- * shallowest, lowest-blast-radius tier and a breaking change there is a
- * contradiction. T2 (outcome-holdback), T3 (operator-review), and T4
- * (Verifier Core — the deepest tier, carrying the most verification) all
- * clear this check. NOTE (issue #737): under the old non-monotonic
- * numbering a breaking change on a Tier-0 path FAILED this rule
- * (0 < 2); under the monotonic ladder Verifier Core is T4 (deepest) and
- * now PASSES — this corrects a latent inversion (the deepest tier should
- * carry the most verification, not be rejected). Intended behavior delta,
- * not a regression.
- */
-export function gateCheck(
-  d: DesignConcept,
-  now: number,
-): { ok: boolean; reasons: string[] } {
-  const reasons: string[] = [];
-
-  // 1. No glossary gaps allowed in Phase A.
-  if (Array.isArray(d.glossaryGaps) && d.glossaryGaps.length > 0) {
-    reasons.push(
-      `glossaryGaps non-empty (${d.glossaryGaps.length}): ${d.glossaryGaps.join(", ")}`,
-    );
-  }
-
-  // 2. At least one invariant.
-  if (!Array.isArray(d.invariants) || d.invariants.length < 1) {
-    reasons.push("invariants must list at least 1 entry");
-  }
-
-  // 3. At least one modulesTouched.
-  if (!Array.isArray(d.modulesTouched) || d.modulesTouched.length < 1) {
-    reasons.push("modulesTouched must list at least 1 entry");
-  }
-
-  // 4. Breaking impact → tier ≥ 2.
-  const breakingPaths = (d.modulesTouched ?? [])
-    .filter((m) => m && m.interfaceImpact === "breaking")
-    .map((m) => m.path);
-  if (breakingPaths.length > 0) {
-    const cls = classifyChange(breakingPaths);
-    if (!permitsBreakingChange(cls.tier)) {
-      reasons.push(
-        `interfaceImpact: 'breaking' on tier-${cls.tier} path(s) — breaking change must classify to tier >= 2 ` +
-          `(got: ${cls.reason})`,
-      );
-    }
-  }
-
-  // 5. Q&A trace depth.
-  if (!Array.isArray(d.qaTrace) || d.qaTrace.length < MIN_QA_TRACE_LENGTH) {
-    reasons.push(
-      `qaTrace must have at least ${MIN_QA_TRACE_LENGTH} turns (got ${d.qaTrace?.length ?? 0})`,
-    );
-  }
-
-  // 6. Freshness.
-  if (!isFresh(d, now)) {
-    reasons.push("artifact is stale (older than 7 days)");
-  }
-
-  // 7. Status must be approved.
-  if (d.status !== "approved") {
-    reasons.push(`status must be 'approved' (got '${d.status}')`);
-  }
-
-  return { ok: reasons.length === 0, reasons };
-}
-
-// ---------------------------------------------------------------------------
-// 4. Persistence (Redis-backed)
-// ---------------------------------------------------------------------------
+//
+// The pure gate predicates (`isFresh`, `gateCheck`, `DESIGN_CONCEPT_MAX_AGE_MS`)
+// now live in `design-concept-gate.ts` and are re-exported at the top of this
+// module. The persistence path below consumes `DESIGN_CONCEPT_MAX_AGE_MS` (for
+// index pruning) and `computeArtifactHash` (for the save path) as imported
+// values from the leaf.
 
 /** 7 days, in seconds — for Redis EXPIRE. */
 const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
