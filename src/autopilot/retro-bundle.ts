@@ -42,6 +42,16 @@
  * {@link assembleRetroBundle} (the only thing that touches Redis); issue #2341
  * retired the back-compat re-export that once relayed the projections through
  * here once the migration window closed.
+ *
+ * The per-cycle dispatch enrichment join — the three-source terminal-record
+ * chain (durable outcome record → cycle-metrics sidecar → cycle-hash), the
+ * provisional-cycleId confirm-or-drop, the post-enrichment canonical-cycleId
+ * dedup, and the crash-term-reason backfill — lives in the sibling
+ * `retro-enrichment.ts` leaf (issue #3055). `assembleRetroBundle` supplies the
+ * pre-fetched outcome map + the two live readers + the never-throw
+ * `safeSource` wrapper and calls `enrichDispatchesWithCycleData` once, so the
+ * assembler stays a thin fan-out coordinator: project turns → fan out
+ * sub-sources → enrich → flag → drill reflections → build bundle.
  */
 
 import {
@@ -68,14 +78,16 @@ import type { MemoryPattern } from "../pattern-memory/pattern-store.ts";
 // want the projections import them from `retro-projections.ts` too (issue
 // #2341 retired the back-compat re-export that once relayed them through here).
 import {
-  bucketOf,
   projectDispatches,
-  dedupByCanonicalCycleId,
-  collectProvisionalCycleIds,
-  confirmDrillableCycleIds,
   flagDispatchesForDrill,
 } from "./retro-projections.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
+// Issue #3055: the per-cycle dispatch enrichment join — the three-source
+// terminal-record chain (durable outcome record → cycle-metrics sidecar →
+// cycle-hash), the provisional-cycleId confirm-or-drop, the post-enrichment
+// canonical-cycleId dedup, and the crash-term-reason backfill — is a focused
+// leaf so the assembler stays a thin fan-out coordinator + composition.
+import { enrichDispatchesWithCycleData } from "./retro-enrichment.ts";
 
 // ---------------------------------------------------------------------------
 // Bundle shape
@@ -167,29 +179,6 @@ const DEFAULT_FRICTION_SKILLS = [
   "hydra-qa",
   "hydra-target-build",
 ];
-
-/**
- * `term_reason` values that mark a non-clean run termination — the run died
- * before its dispatches' terminal cycle status could be written. For a
- * dispatch left status-less on such a run, the assembler derives a
- * failure-leaning `abandonReason` (`run-<reason>`) so a stalled dispatch is
- * still flagged for drill (issue #975). `crash` / `killed` are the abnormal
- * exits; `failure_backstop` is the reap-on-exit cause for a run that stopped
- * on a failure. `interrupted` is the SIGTERM/exit-143 truncation (the common
- * terminator — 36/39 ended runs at the time of #1168): it kills the session
- * mid-turn just like a crash, leaving occupied slots status-less, so its
- * dispatches must be drilled too rather than silently dropped (issue #1168 —
- * an interrupted run was producing a structurally-empty retro that flagged 0
- * dispatches and deep-read nothing). Genuinely-clean stops (`budget` /
- * `wall_clock` / `idle`) are NOT here — a status-less dispatch on a clean stop
- * is genuinely still pending and must stay unflagged.
- */
-const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
-  "crash",
-  "killed",
-  "failure_backstop",
-  "interrupted",
-]);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -300,147 +289,27 @@ export async function assembleRetroBundle(
     dispatchOutcomes.map((rec) => [rec.cycleId, rec]),
   );
 
-  // 2. Per-dispatch projection from the turn timeline. `let`, because the
-  //    post-enrichment identity dedup (step 3c, issue #1823) returns a filtered
-  //    array once the canonical cycleId has been backfilled onto each row.
-  let dispatches = projectDispatches(turns);
-
-  // 3. Enrich each dispatch from its cycle metrics sidecar (abandonReason,
-  //    regressionIntroduced) — getRun's join already attached status/PR, but
-  //    the sidecar carries the failure-shape fields the drill selector needs.
-  //
-  //    Issue #1352: a snapshot-only dispatch on an interrupted/crashed run
-  //    carries a CANDIDATE cycleId derived from the slot's task_id (the same id
-  //    reap uses on its durable cycle-record write). We must confirm a TERMINAL
-  //    cycle record actually exists for that candidate before trusting it as a
-  //    transcript handle — a slot still in-flight when the session died has a
-  //    task_id but no terminal record. The cycle hash's `status` is the
-  //    authoritative "this dispatch reached a terminal cycle state" marker; the
-  //    metrics sidecar's failure-shape fields (abandonReason / regression) are
-  //    a secondary terminal-record signal. We read the hash for a status-less
-  //    candidate so we can confirm-or-drop it (step 3a below resets an
-  //    unconfirmed candidate back to "" so it stays undrillable).
-  // A cycleId is "action-derived" — a clean transcript handle that needs no
-  // confirmation — when it came from a dispatch action/outcome. Those always
-  // carry a resolved `status`/`bucket` from the outcome join, so a non-empty
-  // cycleId paired with a non-null status at projection time is a real handle.
-  // A snapshot-derived CANDIDATE (recovered from the slot's task_id, issue
-  // #1352) starts status:null / bucket:null, so it is PROVISIONAL: we keep its
-  // handle only if the metrics-sidecar / cycle-hash read confirms a terminal
-  // cycle record was durably written (the genuinely-completed-but-interrupted
-  // dispatch). Capture provenance BEFORE enrichment mutates status — the
-  // `collectProvisionalCycleIds` stage names this rule in the projection
-  // Interface (issue #2547) instead of inlining it in the assembler's scope.
-  const provisionalCycleIds = collectProvisionalCycleIds(dispatches);
-  const confirmedCycleIds = new Set<string>();
-  for (const d of dispatches) {
-    if (!d.cycleId) continue;
-    const metrics = await safeSource(
-      "cycle-metrics",
-      errors,
-      {} as Record<string, string>,
-      () => readCycleMetrics(d.cycleId),
-    );
-    let terminalRecordSeen = d.status !== null; // action-join already terminal
-    if (metrics && typeof metrics === "object") {
-      if (typeof metrics.abandonReason === "string" && metrics.abandonReason.length > 0) {
-        d.abandonReason = metrics.abandonReason;
-        terminalRecordSeen = true;
-      }
-      d.regressionIntroduced = metrics.regressionIntroduced === "true";
-      if (d.regressionIntroduced) terminalRecordSeen = true;
-      // Backfill status/anchor from the durable dispatch-outcome record
-      // (issue #2942) when the turn join didn't carry them (e.g. a cycle
-      // recorded out-of-band of a turn, OR a snapshot-only dispatch whose
-      // cycleId we recovered from the task_id). The record's `outcome` IS the
-      // cycle-hash status (recordCycle keeps them in lockstep, including the
-      // completed→merged upgrade), so it replaces the per-dispatch
-      // getCycleHash read; the hash read stays as the dark-tolerant fallback
-      // for cycles that predate the record store.
-      if (!d.status) {
-        const durable = outcomeByCycleId.get(d.cycleId);
-        if (durable) {
-          d.status = durable.outcome;
-          d.bucket = bucketOf(d.status);
-          terminalRecordSeen = true;
-        } else {
-          const hash = await safeSource(
-            "cycle-record",
-            errors,
-            {} as Record<string, string>,
-            () => readCycleHash(d.cycleId),
-          );
-          if (hash && typeof hash.status === "string" && hash.status.length > 0) {
-            d.status = hash.status;
-            d.bucket = bucketOf(d.status);
-            terminalRecordSeen = true;
-          }
-        }
-      }
-      if (!d.anchorReference && typeof metrics.anchorReference === "string") {
-        d.anchorReference = metrics.anchorReference || null;
-      }
-      if (!d.prNumber && typeof metrics.prNumber === "string" && metrics.prNumber.length > 0) {
-        d.prNumber = metrics.prNumber;
-      }
-    }
-    if (terminalRecordSeen) confirmedCycleIds.add(d.cycleId);
-  }
-
-  // 3a. Confirm-or-drop PROVISIONAL candidate cycleIds (issue #1352). The
-  //     `confirmDrillableCycleIds` stage (issue #2547) names this confirm-or-
-  //     drop transition in the projection Interface: a snapshot-only dispatch
-  //     whose recovered task_id-cycleId pointed at NO terminal cycle record (the
-  //     slot was still in-flight when the run was interrupted) has its cycleId
-  //     reset to "" so it stays undrillable, exactly as before #1352; a
-  //     confirmed candidate (a genuinely-completed dispatch on an interrupted
-  //     run) keeps its cycleId and becomes drillable through the normal flag
-  //     machinery below; a NON-provisional (action-derived) cycleId is never
-  //     dropped (its handle came from a recorded outcome).
-  confirmDrillableCycleIds(dispatches, provisionalCycleIds, confirmedCycleIds);
-
-  // 3c. Post-enrichment identity dedup (issue #1823). The projection-time
-  //     `byIdentity` map deduped on the identity present ON THE ACTION; a
-  //     multi-turn cycle whose durable `cycleId` only resolves from the
-  //     cycle-metrics sidecar POST-HOC (the Target-build / sidecar-backfilled
-  //     path) was therefore projected as one row PER TURN — each turn's action
-  //     carried no shared action-time identity, so the action-time map never
-  //     merged them. Now that the enrichment loop above has stamped the
-  //     canonical cycleId / status / anchor / abandonReason onto every row, two
-  //     rows that resolved to the SAME real cycle share a non-empty cycleId, so
-  //     this final identity-keyed pass collapses them into one (earliest-turn
-  //     canonical, non-null fields unioned). Runs BEFORE the flag/undrillable
-  //     materialisation so each real failed cycle is flagged exactly once
-  //     instead of being double-counted (the #1776-incomplete defect). An
-  //     empty-cycleId row (undrillable / interrupted-run case) has no durable
-  //     identity and is left untouched.
-  dispatches = dedupByCanonicalCycleId(dispatches);
-
-  // 3b. Best-effort status derivation for a non-clean termination. When a run
-  //     crashed (term_reason=crash) or was killed, its dispatches' terminal
-  //     cycle status was never written, so they'd stay status=null and
-  //     flagDispatchesForDrill would skip them — exactly the run #975 hit. For
-  //     a still-occupied slot on a crashed run we derive a failure-leaning
-  //     status from the run term_reason so the stalled dispatch becomes
-  //     flaggable. We do NOT claim `merged` (that would be a false success on a
-  //     run whose terminal status was never recorded); we tag the safe
-  //     `errored` abandonReason instead, leaving the status itself null so we
-  //     never misreport a positive outcome. Genuinely-idle slots are absent
-  //     from slots_snapshot (null), so they were never projected and stay
-  //     unflagged.
+  // 2. Per-dispatch projection from the turn timeline, then the per-cycle
+  //    enrichment join (issue #3055 extracted the join into `retro-enrichment`).
+  //    The enricher owns the three-source terminal-record chain (durable
+  //    outcome record → cycle-metrics sidecar → cycle-hash), the #1352
+  //    provisional-cycleId confirm-or-drop, the #1823 post-enrichment
+  //    canonical-cycleId dedup, and the #975/#1168 crash-term-reason backfill,
+  //    returning the enriched + deduplicated dispatch array. It reads Redis
+  //    only through the never-throw `safeSource` (bound to `errors[]` here), so
+  //    a failing cycle read still yields a partial bundle, never a throw.
+  const projected = projectDispatches(turns);
   const termReason =
     runView && typeof (runView as any).term_reason === "string"
       ? ((runView as any).term_reason as string)
       : "";
-  if (CRASH_TERM_REASONS.has(termReason)) {
-    for (const d of dispatches) {
-      // Only fill dispatches whose terminal outcome was never resolved — an
-      // action/cycle that DID record a status keeps it (action-join wins).
-      if (d.status === null && d.bucket === null && !d.abandonReason) {
-        d.abandonReason = `run-${termReason}`;
-      }
-    }
-  }
+  const dispatches = await enrichDispatchesWithCycleData(projected, {
+    readCycleMetrics,
+    readCycleHash,
+    outcomeByCycleId,
+    termReason,
+    safeSource: (source, fallback, fn) => safeSource(source, errors, fallback, fn),
+  });
 
   // 4. Reflections — only for the FLAGGED (drill-worthy) dispatches that carry
   //    an anchor. This is the "QA verdict / why it failed" narrative and the
