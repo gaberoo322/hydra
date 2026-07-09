@@ -14,14 +14,27 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
-  shouldCaptureDesignConcept,
-  buildDesignConcept,
+  shouldCaptureDesignConcept as shouldCaptureRaw,
+  buildDesignConcept as buildRaw,
   serializeDesignConcept,
   parseDesignConcept,
   type TargetDesignConceptInput,
 } from "../scripts/target/target-design-concept.ts";
+import {
+  BETTING_RISK_SURFACE,
+  BETTING_APP_SUBDIR,
+} from "./_helpers/betting-risk-surface.mts";
 
 const NOW = new Date("2026-06-06T12:00:00.000Z");
+
+// Issue #3018: shouldCaptureDesignConcept / buildDesignConcept now take the
+// manifest-sourced risk surface as (optional) arguments. The tests pass the
+// betting fixture explicitly so they stay hermetic (no `.hydra/manifest.json`
+// on disk). These wrappers preserve the existing call shapes below.
+const shouldCaptureDesignConcept = (expectedPaths: readonly string[]) =>
+  shouldCaptureRaw(expectedPaths, BETTING_RISK_SURFACE, BETTING_APP_SUBDIR);
+const buildDesignConcept = (input: TargetDesignConceptInput, now?: Date) =>
+  buildRaw(input, now, BETTING_RISK_SURFACE, BETTING_APP_SUBDIR);
 
 function sampleInput(overrides: Partial<TargetDesignConceptInput> = {}): TargetDesignConceptInput {
   return {

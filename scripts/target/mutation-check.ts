@@ -91,11 +91,8 @@ import {
   shouldSkipMutation,
   type MutationTestReport,
 } from "../../src/mutation.ts";
-import { classifyRisk } from "../../src/target/risk-critical.ts";
-import {
-  BETTING_RISK_SURFACE,
-  BETTING_APP_SUBDIR,
-} from "./betting-risk-surface.ts";
+import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
+import { loadRiskSurface } from "./target-risk-surface.ts";
 
 const DEFAULT_TARGET_KILL_FLOOR = 60;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
@@ -104,11 +101,14 @@ const DEFAULT_TIME_BUDGET_MS = 540_000;
  * Filter a list of changed Target paths down to the files this gate should
  * actually mutate (issue #1057).
  *
- * The contract is: keep only files that `classifyTargetRisk()` flags as
- * money-critical, then drop anything `shouldSkipMutation()` excludes (co-located
- * tests, `.d.ts`, etc.) so a money-critical test file or declaration never
- * becomes a mutation target. Order and de-duplication follow `classifyTargetRisk`'s
- * matched-path contract (input order, de-duplicated).
+ * The contract is: keep only files that `classifyRisk()` flags as
+ * risk-critical against the manifest-sourced `surface`/`appSubdir`, then drop
+ * anything `shouldSkipMutation()` excludes (co-located tests, `.d.ts`, etc.) so a
+ * risk-critical test file or declaration never becomes a mutation target. Order
+ * and de-duplication follow `classifyRisk`'s matched-path contract (input order,
+ * de-duplicated). The caller sources `surface`/`appSubdir` from
+ * `.hydra/manifest.json` via `loadRiskSurface` (issue #3018) — no hardcoded
+ * betting const.
  *
  * hydra-betting roots its source tree at `web/`, so a real diff path is
  * `web/src/lib/providers/...`. `classifyTargetRisk().matchedPaths` deliberately
@@ -127,15 +127,15 @@ const DEFAULT_TIME_BUDGET_MS = 540_000;
  * lists. Mirrors `filterMutationCandidates` in the Orchestrator gate but routes
  * on the money-critical classifier instead of a `src/**\/*.ts` allowlist.
  */
-export function filterMoneyCriticalCandidates(changedFiles: string[]): string[] {
+export function filterMoneyCriticalCandidates(
+  changedFiles: string[],
+  surface: RiskSurface,
+  appSubdir: string,
+): string[] {
   const trimmed = changedFiles
     .map((f) => (typeof f === "string" ? f.trim() : ""))
     .filter((f) => f.length > 0);
-  const { matchedPaths } = classifyRisk(
-    trimmed,
-    BETTING_RISK_SURFACE,
-    BETTING_APP_SUBDIR,
-  );
+  const { matchedPaths } = classifyRisk(trimmed, surface, appSubdir);
   return matchedPaths
     .filter((f) => !shouldSkipMutation(f))
     // Strip a single leading `web/` (optionally behind `./`) so the path is
@@ -357,12 +357,40 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  // Issue #3018: source the risk surface from the target's
+  // `.hydra/manifest.json` (via loadRiskSurface) instead of a hardcoded const.
+  // Fail LOUD, fail CLOSED (ADR-0026 decision 7): a missing/malformed manifest
+  // aborts the gate with an operator-facing error rather than silently
+  // classifying every path as "safe" (which would skip mutation on a
+  // money-critical diff — the exact silent-bypass the risk gate must never
+  // allow). The runner runs in the Target worktree; TARGET_MANIFEST_ROOT points
+  // at the worktree root (parent of the web/ appDir).
+  const surfaceResult = loadRiskSurface();
+  if (!surfaceResult.ok) {
+    process.stdout.write(
+      JSON.stringify({
+        status: "error",
+        reason: "risk surface unavailable — manifest missing or invalid",
+        errors: surfaceResult.errors,
+      }) + "\n",
+    );
+    process.stderr.write(
+      `TARGET MUTATION GATE ERROR: cannot resolve the risk surface from ` +
+        `.hydra/manifest.json (fail-closed):\n  ${surfaceResult.errors.join("\n  ")}\n`,
+    );
+    return 1;
+  }
+
   // Issue #1057: diff-scope to money-critical paths only. A PR that touches no
   // money-critical surface (UI / docs / config — the "safe" half of the Target
   // risk boolean) collapses to an empty list and SKIPS mutation entirely. This
   // keeps the single hydra-server-betting runner fast for the common safe-path
   // change instead of paying the ~9-minute mutation cost on every PR.
-  const inspectable = filterMoneyCriticalCandidates(changed);
+  const inspectable = filterMoneyCriticalCandidates(
+    changed,
+    surfaceResult.surface,
+    surfaceResult.appSubdir,
+  );
   if (inspectable.length === 0) {
     process.stdout.write(
       JSON.stringify({

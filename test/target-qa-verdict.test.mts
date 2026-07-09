@@ -14,9 +14,25 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
-  classifyTargetQaPath,
-  classifyTargetQaVerdict,
+  classifyTargetQaPath as classifyPathRaw,
+  classifyTargetQaVerdict as classifyVerdictRaw,
+  type TargetReviewVerdicts,
 } from "../scripts/target/target-qa-verdict.ts";
+import {
+  BETTING_RISK_SURFACE,
+  BETTING_APP_SUBDIR,
+} from "./_helpers/betting-risk-surface.mts";
+
+// Issue #3018: the QA-path/verdict helpers now take the manifest-sourced risk
+// surface as (optional) arguments. The tests pass the betting fixture
+// explicitly so they stay hermetic. These wrappers preserve the existing call
+// shapes below.
+const classifyTargetQaPath = (changedPaths: readonly string[]) =>
+  classifyPathRaw(changedPaths, BETTING_RISK_SURFACE, BETTING_APP_SUBDIR);
+const classifyTargetQaVerdict = (
+  changedPaths: readonly string[],
+  verdicts: TargetReviewVerdicts,
+) => classifyVerdictRaw(changedPaths, verdicts, BETTING_RISK_SURFACE, BETTING_APP_SUBDIR);
 
 describe("classifyTargetQaPath — depth routing on the money-critical flag", () => {
   test("safe path for UI / docs / config changes", () => {

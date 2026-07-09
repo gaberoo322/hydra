@@ -49,11 +49,8 @@
  *                planted money-critical-without-justification case).
  */
 
-import { classifyRisk } from "../../src/target/risk-critical.ts";
-import {
-  BETTING_RISK_SURFACE,
-  BETTING_APP_SUBDIR,
-} from "../target/betting-risk-surface.ts";
+import { classifyRisk, type RiskSurface } from "../../src/target/risk-critical.ts";
+import { loadRiskSurface } from "../target/target-risk-surface.ts";
 
 /**
  * The PR-body section that a money-critical Target PR must contain. Matched
@@ -94,19 +91,22 @@ interface CheckResult {
 
 /**
  * Pure decision function — exported for tests / self-test. Given the changed
- * files and the PR body, decide whether the guard passes.
+ * files, the PR body, and the manifest-sourced risk `surface`/`appSubdir`,
+ * decide whether the guard passes. The surface is threaded in (issue #3018)
+ * rather than imported as a const, so the classifier reads the target's
+ * `.hydra/manifest.json` — `main()` resolves it via `loadRiskSurface`; tests
+ * pass a fixture explicitly.
  */
-export function evaluate(changed: readonly string[], prBody: string): CheckResult {
+export function evaluate(
+  changed: readonly string[],
+  prBody: string,
+  surface: RiskSurface,
+  appSubdir: string,
+): CheckResult {
   // The public `CheckResult.moneyCritical` field here is consumed by
-  // target-risk-core-check.test.mts; its rename to "risk-critical" is sibling
-  // slice #3018. This slice (#3017) only swaps the underlying classifier to the
-  // manifest-sourced `classifyRisk`, mapping its `riskCritical` result to the
-  // unchanged local field.
-  const classification = classifyRisk(
-    changed,
-    BETTING_RISK_SURFACE,
-    BETTING_APP_SUBDIR,
-  );
+  // target-risk-core-check.test.mts. The underlying classifier sources its
+  // surface from the manifest (#3018).
+  const classification = classifyRisk(changed, surface, appSubdir);
   if (!classification.riskCritical) {
     return {
       status: "pass",
@@ -132,7 +132,30 @@ function main(): number {
   const prBody = process.env.PR_BODY ?? "";
   const changed = readChangedFiles();
 
-  const result = evaluate(changed, prBody);
+  // Issue #3018: source the risk surface from the target's
+  // `.hydra/manifest.json` (via loadRiskSurface) instead of a hardcoded const.
+  // Fail LOUD, fail CLOSED (ADR-0026 decision 7): a missing/malformed manifest
+  // aborts the guard with exit 1 rather than silently passing every diff as
+  // "not money-critical" (which would disable the protected-paths gate). The
+  // self-hosted runner resolves the Target workspace via getTargetWorkspace();
+  // TARGET_MANIFEST_ROOT overrides it when set.
+  const surfaceResult = loadRiskSurface();
+  if (!surfaceResult.ok) {
+    process.stdout.write(
+      JSON.stringify({
+        status: "error",
+        reason: "risk surface unavailable — manifest missing or invalid",
+        errors: surfaceResult.errors,
+      }) + "\n",
+    );
+    process.stderr.write(
+      `PROTECTED-PATHS GUARD ERROR: cannot resolve the risk surface from ` +
+        `.hydra/manifest.json (fail-closed):\n  ${surfaceResult.errors.join("\n  ")}\n`,
+    );
+    return 1;
+  }
+
+  const result = evaluate(changed, prBody, surfaceResult.surface, surfaceResult.appSubdir);
 
   process.stdout.write(
     JSON.stringify(
@@ -176,15 +199,41 @@ function main(): number {
 }
 
 /**
+ * A synthetic betting-shaped risk surface for the hermetic `--self-test` path
+ * ONLY. The production `main()` sources the real surface from the target's
+ * `.hydra/manifest.json` (issue #3018); the self-test must stay filesystem-free
+ * (it runs as a standalone CI step with no manifest guaranteed), so it exercises
+ * the pure `evaluate` logic against this inline fixture. This is a TEST fixture,
+ * not the authoritative surface — betting globs here are fine (they are not in
+ * `src/`, and never feed a production classification).
+ */
+const SELF_TEST_SURFACE: RiskSurface = [
+  "src/lib/providers/",
+  "src/lib/execution/",
+  "src/lib/staking/",
+  "src/lib/bet-math/",
+  "src/lib/arbitrage/",
+  "src/lib/markets/",
+  "src/bin/",
+];
+const SELF_TEST_APP_SUBDIR = "web";
+
+/**
  * Self-test: prove the guard (a) passes a standard PR, (b) fails a
  * money-critical PR with no justification, and (c) passes a money-critical PR
  * that supplies one. Runs against synthetic fixtures — no env, no filesystem,
- * no network. Mirrors the --self-test convention of target-coupling-check.ts.
+ * no network (surface comes from the inline SELF_TEST_SURFACE fixture, not the
+ * manifest). Mirrors the --self-test convention of target-coupling-check.ts.
  */
 function selfTest(): number {
   const failures: string[] = [];
 
-  const standard = evaluate(["web/src/components/Foo.tsx", "docs/readme.md"], "no section here");
+  const standard = evaluate(
+    ["web/src/components/Foo.tsx", "docs/readme.md"],
+    "no section here",
+    SELF_TEST_SURFACE,
+    SELF_TEST_APP_SUBDIR,
+  );
   if (standard.status !== "pass" || standard.moneyCritical) {
     failures.push(`standard PR should pass trivially, got ${JSON.stringify(standard)}`);
   }
@@ -192,6 +241,8 @@ function selfTest(): number {
   const moneyNoJust = evaluate(
     ["web/src/lib/execution/place-bet.ts"],
     "## Summary\nRefactor.\n",
+    SELF_TEST_SURFACE,
+    SELF_TEST_APP_SUBDIR,
   );
   if (moneyNoJust.status !== "fail" || !moneyNoJust.moneyCritical) {
     failures.push(
@@ -202,6 +253,8 @@ function selfTest(): number {
   const moneyWithJust = evaluate(
     ["web/src/lib/staking/kelly.ts"],
     "## Risk-core justification\nTightens the Kelly clamp; property tests cover it.\n",
+    SELF_TEST_SURFACE,
+    SELF_TEST_APP_SUBDIR,
   );
   if (moneyWithJust.status !== "pass" || !moneyWithJust.moneyCritical) {
     failures.push(
@@ -212,6 +265,8 @@ function selfTest(): number {
   const emptySection = evaluate(
     ["web/src/lib/bet-math/edge.ts"],
     "## Risk-core justification\n\n## Next\n",
+    SELF_TEST_SURFACE,
+    SELF_TEST_APP_SUBDIR,
   );
   if (emptySection.status !== "fail") {
     failures.push(

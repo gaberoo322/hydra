@@ -2,9 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  evaluate,
+  evaluate as evaluateRaw,
   hasRiskCoreJustification,
 } from "../scripts/ci/target-risk-core-check.ts";
+import {
+  BETTING_RISK_SURFACE,
+  BETTING_APP_SUBDIR,
+} from "./_helpers/betting-risk-surface.mts";
+
+// Issue #3018: `evaluate` now takes the manifest-sourced risk surface as
+// arguments. The tests pass the betting fixture explicitly so they stay
+// hermetic (no `.hydra/manifest.json` on disk). This thin wrapper keeps the
+// existing call sites' (changed, prBody) shape unchanged.
+const evaluate = (changed: readonly string[], prBody: string) =>
+  evaluateRaw(changed, prBody, BETTING_RISK_SURFACE, BETTING_APP_SUBDIR);
 
 // Acceptance criteria (issue #2702, epic #2700): the protected-paths guard
 // FAILS a money-critical Target PR that lacks a `## Risk-core justification`

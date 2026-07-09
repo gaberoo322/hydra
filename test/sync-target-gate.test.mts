@@ -34,6 +34,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, basename } from "node:path";
 import {
   mkdtempSync,
   readFileSync,
@@ -41,23 +43,72 @@ import {
   rmSync,
   mkdirSync,
   writeFileSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+// The betting-shaped manifest the fake worktree ships at .hydra/manifest.json.
+// The synced gate scripts now source their risk surface from THIS file (issue
+// #3018), so a realistic fake worktree must provide it. Six risk globs +
+// appSubdir "web" mirror hydra-betting's real manifest.
+const FAKE_MANIFEST = {
+  version: 1,
+  verify: {
+    install: "npm ci",
+    test: "npm run test:raw",
+    typecheck: "npm run typecheck",
+    build: "npm run build",
+    appSubdir: "web",
+  },
+  riskCritical: {
+    surface: [
+      "src/lib/providers/",
+      "src/lib/execution/",
+      "src/lib/staking/",
+      "src/lib/bet-math/",
+      "src/lib/arbitrage/",
+      "src/lib/markets/",
+      "src/bin/",
+    ],
+    mutationKillFloor: 60,
+  },
+};
+
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SYNC_SCRIPT = join(REPO_ROOT, "scripts", "sync-target-gate.sh");
 
-// The exact files the mirror must contain (closure for issue #1451). If this
-// list drifts from the script's GATE_FILES, a test below will catch it.
+// The fake worktree's web/node_modules is symlinked to the REAL node_modules
+// dir that actually contains `zod` (imported by the manifest schema, newly in
+// the closure) so it resolves hermetically — no dependency on a hydra-betting
+// checkout. In a git worktree the repo's own `node_modules/` may not exist as a
+// real dir (deps resolve via Node's upward walk to an ancestor), so we resolve
+// zod's ACTUAL location rather than assuming `REPO_ROOT/node_modules`. zod is an
+// orchestrator runtime dep (ADR-0005), so it is always resolvable.
+const ORCH_NODE_MODULES = (() => {
+  const require = createRequire(import.meta.url);
+  let dir = dirname(require.resolve("zod"));
+  while (basename(dir) !== "node_modules" && dir !== "/") dir = dirname(dir);
+  return dir;
+})();
+
+// The exact files the mirror must contain (closure for issue #1451; manifest
+// wiring per issue #3018 — the gate scripts source the risk surface from the
+// worktree's .hydra/manifest.json via loadRiskSurface, so the manifest loader +
+// schema + resolver + target-config seam join the closure and the transitional
+// betting-risk-surface.ts const is gone). If this list drifts from the script's
+// GATE_FILES, a test below will catch it.
 const EXPECTED_MIRROR_FILES = [
   "scripts/target/mutation-check.ts",
   "scripts/target/target-design-concept.ts",
   "scripts/target/post-merge-health.ts",
+  "scripts/target/target-risk-surface.ts",
   "src/mutation.ts",
   "src/exec-with-timeout.ts",
-  "scripts/target/betting-risk-surface.ts",
   "src/target/risk-critical.ts",
+  "src/target/manifest.ts",
+  "src/schemas/target-manifest.ts",
+  "src/target-config.ts",
 ];
 
 /**
@@ -81,6 +132,20 @@ function makeFakeWorktree(): { wt: string; cleanup: () => void } {
   const wt = `${repo}-wt`;
   const add = run("worktree", "add", "-q", "-b", "feat", wt);
   assert.equal(add.status, 0, `worktree add failed: ${add.stderr}`);
+  // Ship a realistic Target Manifest (issue #3018): the synced gate scripts read
+  // the risk surface from <wt>/.hydra/manifest.json.
+  mkdirSync(join(wt, ".hydra"), { recursive: true });
+  writeFileSync(join(wt, ".hydra", "manifest.json"), JSON.stringify(FAKE_MANIFEST), "utf-8");
+  // Provide web/node_modules (the appSubdir the manifest declares) so the mirror
+  // can symlink it and `zod` resolves for the manifest schema. Symlink to the
+  // orchestrator's own node_modules — hermetic, no betting checkout needed.
+  mkdirSync(join(wt, "web"), { recursive: true });
+  try {
+    symlinkSync(ORCH_NODE_MODULES, join(wt, "web", "node_modules"), "dir");
+  } catch (err) {
+    // intentional: a pre-existing symlink (idempotent re-setup) is fine.
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
   return {
     wt,
     cleanup: () => {
@@ -248,26 +313,31 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     }
   });
 
-  test("the mirrored classifier normalizes web/ (no hand-strip needed — #1235)", () => {
+  test("the mirrored gate sources the surface from the worktree manifest + normalizes web/ (#1235, #3018)", () => {
     const { wt, cleanup } = makeFakeWorktree();
     try {
       assert.equal(runSync(wt).status, 0);
-      // Feed a raw web/-rooted risk-critical path + a safe UI path. The
-      // mirrored classifier must flag the staking path WITHOUT the caller
-      // stripping web/ — exactly what kills the hand-rolled friction. The
-      // surface + appSubdir come from the mirrored betting-risk-surface module
-      // (ADR-0026: the surface is an argument, not a hardcoded const).
+      // Feed a raw web/-rooted risk-critical path + a safe UI path. The mirrored
+      // classifier must flag the staking path WITHOUT the caller stripping web/
+      // (the hand-rolled friction #1235). The surface + appSubdir come from the
+      // mirrored loadRiskSurface reading <wt>/.hydra/manifest.json (issue #3018:
+      // the surface is manifest-sourced, not a hardcoded const). Run from the
+      // mirror root via `npx tsx` so zod resolves through the mirror's
+      // node_modules symlink.
       const r = spawnSync(
-        "node",
+        "npx",
         [
+          "tsx",
           "--input-type=module",
           "-e",
           `import { classifyRisk } from "./.hydra-gate/src/target/risk-critical.ts";` +
-            `import { BETTING_RISK_SURFACE, BETTING_APP_SUBDIR } from "./.hydra-gate/scripts/target/betting-risk-surface.ts";` +
-            `const r = classifyRisk(["web/src/lib/staking/kelly.ts","web/src/components/Foo.tsx"], BETTING_RISK_SURFACE, BETTING_APP_SUBDIR);` +
+            `import { loadRiskSurface } from "./.hydra-gate/scripts/target/target-risk-surface.ts";` +
+            `const s = loadRiskSurface(process.env.TARGET_MANIFEST_ROOT);` +
+            `if (!s.ok) { process.stderr.write("surface load failed: " + s.errors.join("; ")); process.exit(3); }` +
+            `const r = classifyRisk(["web/src/lib/staking/kelly.ts","web/src/components/Foo.tsx"], s.surface, s.appSubdir);` +
             `process.stdout.write(JSON.stringify(r));`,
         ],
-        { cwd: wt, encoding: "utf-8" },
+        { cwd: wt, encoding: "utf-8", env: { ...process.env, TARGET_MANIFEST_ROOT: wt } },
       );
       assert.equal(r.status, 0, `classifier run failed: ${r.stderr}`);
       const parsed = JSON.parse(r.stdout);
@@ -333,10 +403,21 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
 });
 
 describe("hydra-target-build playbook wiring (issue #1451)", () => {
-  const PLAYBOOK = readFileSync(
+  // The playbook's merge-flow steps (incl. the post-merge-health invocation)
+  // live in the _fragments/ include, so the wiring assertions read BOTH the
+  // top-level playbook and its merge-flow fragment as the effective source.
+  const PLAYBOOK = [
     join(REPO_ROOT, "docs", "operator-playbooks", "hydra-target-build.md"),
-    "utf-8",
-  );
+    join(
+      REPO_ROOT,
+      "docs",
+      "operator-playbooks",
+      "_fragments",
+      "hydra-target-build-merge-flow.md",
+    ),
+  ]
+    .map((p) => readFileSync(p, "utf-8"))
+    .join("\n");
 
   test("Step 0.6 invokes sync-target-gate.sh against the betting worktree", () => {
     assert.match(
