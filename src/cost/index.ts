@@ -92,7 +92,6 @@ export {
   clearUsageCache,
   sessionIdFromPath,
   INTERACTIVE_SKILL,
-  UNATTRIBUTED_SKILL,
 } from "./usage-tracker.ts";
 
 // `UsageSnapshot` — the assembled snapshot shape — moved to the pure
