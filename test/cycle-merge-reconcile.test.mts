@@ -30,7 +30,13 @@ interface Fixture {
   metrics: Map<string, Record<string, string>>;
   prState: Map<number, string | null>;
   /** Records of every recordCycle re-post the chore fired. */
-  reposts: Array<{ cycleId: string; status: string; tasksMerged: number; prNumber: number }>;
+  reposts: Array<{
+    cycleId: string;
+    status: string;
+    tasksMerged: number;
+    prNumber: number;
+    anchorType?: string;
+  }>;
   // --- Self-arm backstop fixture state (issue #3078) --------------------------
   // Optional so the pre-existing #2860 case literals ({ metrics, prState, reposts })
   // keep compiling; makeDeps defaults each to an empty container.
@@ -93,7 +99,15 @@ describe("cycle-merge-reconcile — completed→merged backstop (#2860)", () => 
     assert.equal(r.upgraded, 1);
     assert.equal(r.notMerged, 0);
     assert.equal(fx.reposts.length, 1);
-    assert.deepEqual(fx.reposts[0], { cycleId: "c1", status: "merged", tasksMerged: 1, prNumber: 100 });
+    // No anchorType on the metrics hash ⇒ forwarded as undefined so recordCycle
+    // re-infers from the cycleId (issue #3122).
+    assert.deepEqual(fx.reposts[0], {
+      cycleId: "c1",
+      status: "merged",
+      tasksMerged: 1,
+      prNumber: 100,
+      anchorType: undefined,
+    });
   });
 
   test("leaves a completed cycle whose PR is still OPEN (not a merged miss)", async () => {
@@ -220,6 +234,44 @@ describe("cycle-merge-reconcile — completed→merged backstop (#2860)", () => 
     );
     assert.equal(r.scanned, 0);
     assert.equal(r.upgraded, 0);
+  });
+
+  // Issue #3122: the merged-status re-post must PRESERVE the original cycle's
+  // anchorType (read back from the metrics hash), not drop it. Dropping it made
+  // classifyAnchorType re-infer from a bare-UUID cycleId, fail, and default to
+  // `unclassified` on ~12% of records.
+  test("forwards the metrics-hash anchorType through the merged-status re-post (#3122)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["c-typed", { status: "completed", prNumber: "300", tasksMerged: "0", anchorType: "grill" }],
+      ]),
+      prState: new Map([[300, "MERGED"]]),
+      reposts: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.upgraded, 1);
+    assert.equal(fx.reposts.length, 1);
+    assert.equal(
+      fx.reposts[0].anchorType,
+      "grill",
+      "the reap-time anchorType is preserved on re-post, not dropped to unclassified",
+    );
+  });
+
+  test("trims a whitespace-padded anchorType and drops an empty one to undefined (#3122)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["c-pad", { status: "completed", prNumber: "301", tasksMerged: "0", anchorType: "  work-queue  " }],
+        ["c-empty", { status: "completed", prNumber: "302", tasksMerged: "0", anchorType: "   " }],
+      ]),
+      prState: new Map([[301, "MERGED"], [302, "MERGED"]]),
+      reposts: [],
+    };
+    await runCycleMergeReconcile(makeDeps(fx));
+    const padded = fx.reposts.find((b) => b.cycleId === "c-pad");
+    const empty = fx.reposts.find((b) => b.cycleId === "c-empty");
+    assert.equal(padded?.anchorType, "work-queue", "padded anchorType is trimmed");
+    assert.equal(empty?.anchorType, undefined, "whitespace-only anchorType ⇒ undefined (re-infer)");
   });
 });
 

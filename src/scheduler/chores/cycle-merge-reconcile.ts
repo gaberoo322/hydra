@@ -109,6 +109,13 @@ export interface CycleMergeReconcileDeps {
     status: string;
     tasksMerged: number;
     prNumber: number;
+    /**
+     * The original cycle's anchorType, read back from the metrics hash and
+     * forwarded so the merged-status re-post does not drop it (issue #3122).
+     * Omitted (`undefined`) when the hash carried no explicit anchorType, in
+     * which case `classifyAnchorType` re-infers from the cycleId as before.
+     */
+    anchorType?: string;
   }) => Promise<CycleRecordResult>;
   /** Max recent records to scan this tick. Defaults to 50. */
   scanLimit?: number;
@@ -318,11 +325,21 @@ export async function runCycleMergeReconcile(
       // Confirmed merged — fire the completed→merged upgrade re-post. recordCycle's
       // dedup path bumps the metrics tasksMerged + cycle-hash status WITHOUT
       // re-firing any lifetime counter (issue #2860).
+      //
+      // Preserve the original anchorType (issue #3122): the reap-time first-write
+      // classified this cycle's anchorType and stored it on the metrics hash. If
+      // we omit it here, `classifyAnchorType` re-infers from the cycleId — which
+      // for a bare-UUID (non-worktree) cycleId fails and defaults to
+      // `unclassified`, silently dropping the real class on ~12% of records. Read
+      // it back from the hash and forward it; leave undefined (→ re-infer) only
+      // when the hash carried no explicit anchorType.
+      const anchorType = (m.anchorType || "").trim();
       const rec = await recordCycleRecord({
         cycleId,
         status: "merged",
         tasksMerged: 1,
         prNumber,
+        anchorType: anchorType || undefined,
       });
       if (rec.ok === false) {
         console.error(`[Housekeeping] cycle-merge-reconcile: upgrade re-post failed for pr ${prNumber} (cycle ${cycleId}): ${rec.detail || rec.code}`);
