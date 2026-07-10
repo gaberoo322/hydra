@@ -21,7 +21,7 @@
  * record so the unit tests can inject a fake clock, a fake LLM, a fake
  * Redis seam, and a fake event broadcaster.
  *
- * ## Module shape (issue #2317, #2867)
+ * ## Module shape (issue #2317, #2867, #3099)
  *
  * This module is the deep composition point for the recs engine. It was
  * decomposed into five sibling files via successive extraction PRs (#1986
@@ -31,16 +31,22 @@
  * RE-EXTRACTED the prompt-grammar concern to a focused leaf
  * (`recommendation-prompt.ts`) because that concern has an independent caller
  * shape — a promptfoo A/B eval (`evals/`) imports `buildPrompt` directly, and
- * dragging in the materiality gate, the cap ledger, and the Anthropic Request
- * Adapter at module-load time is friction a scorer should not pay. The
- * materiality gate and the daily-cap ledger stay HERE: they are internally
- * cohesive with the engine factory and have no independent caller.
+ * dragging in the cap ledger and the Anthropic Request Adapter at module-load
+ * time is friction a scorer should not pay. #3099 then RE-EXTRACTED the
+ * materiality gate to its own focused leaf (`recommendation-materiality.ts`):
+ * it is the highest-consequence concern (a false negative silently skips a call
+ * that should have fired, and it short-circuits on the sole sanctioned real-USD
+ * cap), so a pure leaf gives its policy an independent, narrow test surface that
+ * loads neither the Anthropic adapter nor Redis. The daily-cap ledger stays
+ * HERE: it is internally cohesive with the engine factory and has no
+ * independent caller.
  *
  * The engine imports the prompt grammar (types + `buildPrompt` +
- * `parseLlmResponse` + `PROMPT_SIZE_BUDGET_BYTES`) from the leaf and RE-EXPORTS
- * the types + functions it needs, so the `EngineDeps` / `LlmResult` surface
- * `recommendation-consumer.ts` consumes stays byte-identical — no interface
- * change is visible to the consumer.
+ * `parseLlmResponse` + `PROMPT_SIZE_BUDGET_BYTES`) from the prompt leaf and the
+ * materiality gate (`shouldFire` + the signature helpers) from the materiality
+ * leaf, and RE-EXPORTS the types + functions it needs, so the `EngineDeps` /
+ * `LlmResult` surface `recommendation-consumer.ts` consumes stays byte-identical
+ * — no interface change is visible to the consumer.
  *
  * The one sibling that stays a separate stream-lifecycle file is
  * `recommendation-consumer.ts`: it owns the process-level stream lifecycle (the
@@ -53,7 +59,9 @@
  *   1. Prompt-grammar re-exports — the types + prompt builder/parser from the
  *      `recommendation-prompt.ts` leaf (#2867), re-exported to keep the
  *      consumer-facing surface stable.
- *   2. Materiality gate — the pure fire-decision logic (was recommendation-materiality.ts)
+ *   2. Materiality-gate re-exports — the pure fire-decision logic from the
+ *      `recommendation-materiality.ts` leaf (#3099), re-exported to keep the
+ *      consumer-facing + test surface stable.
  *   4. Daily-cap ledger — the billing concern + oak_resting latch (was recommendation-cap.ts)
  *   5. Engine factory — `createRecommendationEngine` composing 2+4 + the prompt leaf with the Redis/LLM deps
  *   6. Production LLM client — the thin Anthropic Request Adapter wrapper
@@ -74,6 +82,13 @@ import {
   type PermissionWaitEvent,
   type EnginePromptInput,
 } from "./recommendation-prompt.ts";
+import {
+  MIN_CALL_INTERVAL_SECONDS,
+  computeMaterialChangeSignature,
+  summariseSlotStatus,
+  shouldFire,
+  type ShouldFireDecision,
+} from "./recommendation-materiality.ts";
 
 // ---------------------------------------------------------------------------
 // SECTION 1 — Prompt-grammar re-exports (leaf: recommendation-prompt.ts, #2867)
@@ -167,107 +182,31 @@ export interface EngineDeps {
 }
 
 // ---------------------------------------------------------------------------
-// SECTION 2 — Materiality gate (was recommendation-materiality.ts, issue #1986)
+// SECTION 2 — Materiality-gate re-exports (leaf: recommendation-materiality.ts, #3099)
 //
-// The pure, deterministic decision logic that gates whether the recs engine
-// fires a (daily-capped) LLM call this turn. This is the deepest concern: a
-// false negative here ("nothing changed") silently skips a call that should
-// have fired, and the daily-spend cap it short-circuits on is the sole
-// sanctioned real-USD surface (CONTEXT.md L203 / ADR-0005).
+// The pure, deterministic fire-decision logic — `shouldFire`,
+// `computeMaterialChangeSignature`, `summariseSlotStatus`, `ShouldFireDecision`,
+// and `MIN_CALL_INTERVAL_SECONDS` — lives in the `recommendation-materiality.ts`
+// leaf (#3099) so a test of this highest-consequence gate can import it without
+// pulling in the Anthropic Request Adapter, the Redis seam, or the prompt
+// builder at module-load time — the exact over-coupling #2867 extracted the
+// prompt-grammar concern to fix. We re-export the symbols the consumer + tests
+// already import from here so their surface is byte-identical.
 //
-// Everything in this section is pure: no I/O, no state mutation, no
-// import-time side effects. Identical input yields byte-identical output,
-// independent of slot key order.
-//
-// The gate has two halves:
-//   1. A material-change *signature* — `computeMaterialChangeSignature` +
-//      `summariseSlotStatus` — a stable string over the state that changes
-//      between material-change triggers (new dispatch, new permission-wait,
-//      new outcome, autopilot status flip).
-//   2. The *fire decision* — `shouldFire` — which orders cap > interval >
-//      no-change > proceed so the cap always short-circuits first.
+// The gate is the deepest concern: a false negative here ("nothing changed")
+// silently skips a call that should have fired, and the daily-spend cap it
+// short-circuits on is the sole sanctioned real-USD surface (CONTEXT.md L203 /
+// ADR-0005). The cap > interval > no-change ordering stays the SINGLE authority
+// of `shouldFire()` in the leaf.
 // ---------------------------------------------------------------------------
 
-/** Minimum seconds between LLM calls for a given run. */
-export const MIN_CALL_INTERVAL_SECONDS = 30;
-
-/**
- * Derive a deterministic material-change signature from the engine inputs.
- * The signature MUST be a function only of state that changes between
- * material-change triggers (new dispatch, new permission-wait, new outcome,
- * autopilot status flip). When the signature matches the last-call
- * signature, the engine skips this turn even if the 30s window has passed.
- *
- * Format: a short delimited string. We avoid JSON.stringify to keep the
- * comparison cheap and stable under key-order drift.
- */
-export function computeMaterialChangeSignature(input: {
-  dispatches: number;
-  permission_waits: PermissionWaitEvent[];
-  slot_status_summary: string;
-  autopilot_running: boolean;
-}): string {
-  const permParts = input.permission_waits
-    .slice(0, 5)
-    .map((e) => `${e.slot}@${e.ts_epoch}`)
-    .join(",");
-  return [
-    `d=${input.dispatches}`,
-    `r=${input.autopilot_running ? "1" : "0"}`,
-    `s=${input.slot_status_summary}`,
-    `p=${permParts}`,
-  ].join("|");
-}
-
-/**
- * Reduce a slot snapshot to a compact stable string for the signature
- * computation. Slots are sorted by name so the output is deterministic
- * regardless of iteration order.
- */
-export function summariseSlotStatus(snapshot: SlotSnapshot): string {
-  const entries = Object.entries(snapshot).sort(([a], [b]) => a.localeCompare(b));
-  return entries.map(([slot, info]) => `${slot}:${info?.status ?? "?"}`).join(",");
-}
-
-/**
- * Decision: should the engine fire this turn? Pure function — exported for
- * tests. Returns one of:
- *
- *   { proceed: true }                                                — fire
- *   { proceed: false, skip_reason: "cap" }                          — daily cap reached
- *   { proceed: false, skip_reason: "interval" }                     — too soon
- *   { proceed: false, skip_reason: "no-change" }                    — no material change
- *
- * The order matters: "cap" beats "interval" beats "no-change" so the
- * caller can surface the most specific reason. The cap MUST short-circuit
- * first so a capped day never fires an LLM call.
- */
-export type ShouldFireDecision =
-  | { proceed: true }
-  | { proceed: false; skip_reason: "cap" | "interval" | "no-change" };
-
-export function shouldFire(input: {
-  now_epoch: number;
-  last_call_epoch: number | null;
-  current_signature: string;
-  last_signature: string | null;
-  daily_spend_usd: number;
-  daily_cap_usd: number;
-}): ShouldFireDecision {
-  if (input.daily_spend_usd >= input.daily_cap_usd) {
-    return { proceed: false, skip_reason: "cap" };
-  }
-  if (input.last_call_epoch !== null) {
-    const since = input.now_epoch - input.last_call_epoch;
-    if (since < MIN_CALL_INTERVAL_SECONDS) {
-      return { proceed: false, skip_reason: "interval" };
-    }
-  }
-  if (input.last_signature !== null && input.last_signature === input.current_signature) {
-    return { proceed: false, skip_reason: "no-change" };
-  }
-  return { proceed: true };
-}
+export {
+  MIN_CALL_INTERVAL_SECONDS,
+  computeMaterialChangeSignature,
+  summariseSlotStatus,
+  shouldFire,
+  type ShouldFireDecision,
+} from "./recommendation-materiality.ts";
 
 // ---------------------------------------------------------------------------
 // SECTION 4 — Daily-cap ledger (was recommendation-cap.ts, issue #2119)
