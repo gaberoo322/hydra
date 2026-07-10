@@ -26,7 +26,7 @@ import {
   type AutopilotStatusDeps,
   type EligibilityView,
 } from "../src/autopilot/status.ts";
-import type { AutopilotLifecycle } from "../src/autopilot/run-projections.ts";
+import type { AutopilotLifecycle } from "../src/autopilot/run-lifecycle-state.ts";
 import type { LiveRunView, RunDigest } from "../src/autopilot/run-health.ts";
 
 // ---------------------------------------------------------------------------

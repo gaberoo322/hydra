@@ -24,7 +24,7 @@ import {
   listRuns,
   readInflightSlotSeed,
 } from "../autopilot/run-reads.ts";
-import { summarizeTerminationHealth } from "../autopilot/run-projections.ts";
+import { summarizeTerminationHealth } from "../autopilot/run-lifecycle-state.ts";
 import { assembleRetroBundle } from "../autopilot/retro-bundle.ts";
 import { RetroBundleParamsSchema, RecentRetrosQuerySchema } from "../schemas/retro.ts";
 import { listRecentRetroArtifacts } from "../redis/retro-artifacts.ts";

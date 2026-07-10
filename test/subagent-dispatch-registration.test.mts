@@ -364,7 +364,7 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 const { registerSubagentDispatch, listActiveSubagentDispatches } = await import(
   "../src/redis/dispatches.ts"
 );
-const { deriveInflightSlotSeed } = await import("../src/autopilot/run-projections.ts");
+const { deriveInflightSlotSeed } = await import("../src/autopilot/run-lifecycle-state.ts");
 
 describe("populated registry → in-flight slot seed is non-empty (#2406 acceptance)", () => {
   let redis: any;

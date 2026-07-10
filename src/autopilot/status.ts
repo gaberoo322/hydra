@@ -57,7 +57,7 @@ import {
   getCurrentRun as defaultGetCurrentRun,
   listRuns as defaultListRuns,
 } from "./run-reads.ts";
-import type { AutopilotLifecycle } from "./run-projections.ts";
+import type { AutopilotLifecycle } from "./run-lifecycle-state.ts";
 import { osHeartbeatAgeS as defaultOsHeartbeatAgeS } from "./os-heartbeat.ts";
 import type { LiveRunView, RunDigest } from "./run-health.ts";
 import {

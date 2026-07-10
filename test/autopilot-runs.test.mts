@@ -767,7 +767,7 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
 
   beforeEach(async () => {
     if (!summarizeTerminationHealth) {
-      const mod = await import("../src/autopilot/run-projections.ts");
+      const mod = await import("../src/autopilot/run-lifecycle-state.ts");
       summarizeTerminationHealth = mod.summarizeTerminationHealth;
     }
   });
@@ -1075,7 +1075,7 @@ describe("deriveInflightSlotSeed (issue #1352)", () => {
 
   beforeEach(async () => {
     if (!deriveInflightSlotSeed) {
-      const mod = await import("../src/autopilot/run-projections.ts");
+      const mod = await import("../src/autopilot/run-lifecycle-state.ts");
       deriveInflightSlotSeed = mod.deriveInflightSlotSeed;
     }
   });
