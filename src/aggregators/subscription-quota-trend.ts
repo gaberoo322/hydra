@@ -27,10 +27,10 @@
  *   dashboard can render "uncalibrated" instead of "0% used".
  */
 
-import {
-  getUsage,
-  type UsageSnapshot,
-} from "../cost/usage-tracker.ts";
+import { getUsage } from "../cost/usage-tracker.ts";
+// `UsageSnapshot` moved to the pure `./types.ts` leaf (issue #3071); imported via
+// the Cost barrel per the external-consumer convention.
+import type { UsageSnapshot } from "../cost/index.ts";
 import {
   windowStart as trendWindowStart,
   mergeWindowedPoints,

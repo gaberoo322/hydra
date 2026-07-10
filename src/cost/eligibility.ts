@@ -17,9 +17,12 @@
  *     session-limit hard-block ({@link overlayPauseEligibility} /
  *     {@link overlaySessionBlockEligibility}).
  *
- * Import direction is one-way w.r.t. the JSONL-scan machinery in spirit: this
- * module imports only the snapshot TYPES from `usage-tracker.ts` (type-only).
- * The one DELIBERATE value-import exception runs the other way — `usage-tracker.ts`
+ * Import direction is one-way and DOWNWARD: this module imports the snapshot
+ * TYPES ({@link UsageSnapshot}) type-only from the pure TYPE-vocabulary leaf
+ * `./types.ts` (issue #3071) — NOT from the `usage-tracker.ts` I/O coordinator
+ * that assembles it, so this pure fold no longer carries the coordinator (and its
+ * transcript-scan / OAuth-read I/O chain) in its import closure.
+ * The one DELIBERATE value-import exception runs the other way — `snapshot-assembly.ts`
  * imports the PURE, IO-free hard-stop predicate {@link deriveHardStop} (and the
  * {@link EMERGENCY_STOP_PERCENT} threshold it folds over) from here, because the
  * threshold POLICY that says "≥90% OAuth utilization is a hard stop" belongs with
@@ -41,7 +44,7 @@
  * symbol below at the same name — no external import line changes.
  */
 
-import type { UsageSnapshot } from "./usage-tracker.ts";
+import type { UsageSnapshot } from "./types.ts";
 // The **Pacing Ceiling** env reader moved to the pure-leaf config module
 // (issue #1896); we keep the Pacing-Curve math here and read the ceiling
 // fraction from there.
