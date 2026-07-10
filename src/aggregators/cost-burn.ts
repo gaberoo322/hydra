@@ -42,7 +42,7 @@
  *   whole payload.
  */
 
-import type { UsageSnapshot } from "../cost/usage-tracker.ts";
+import type { UsageSnapshot } from "../cost/index.ts";
 import { settledOr } from "./settle.ts";
 
 // ---------------------------------------------------------------------------

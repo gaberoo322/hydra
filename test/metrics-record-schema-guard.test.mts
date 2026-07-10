@@ -19,6 +19,17 @@
  *     with the machine-readable `{code:"schema-validation-failed", issues}`
  *     shape (NOT the old `{error:"Missing cycleId"}`).
  *
+ * Issue #3048 (architecture-scan deepening): POST /metrics/record now routes
+ * THROUGH the `recordCycle()` coordinator (src/autopilot/cycle-close.ts)
+ * instead of calling `recordCycleMetrics()` directly, restoring the ADR-0016
+ * sole-writer invariant for the previously-shallow path. So a cycle written via
+ * this endpoint now gets the FULL deep record — a `hydra:cycle:<id>` hash entry
+ * AND `hydra:cycle:index` ZSET membership — not just the metrics-hash write. The
+ * happy-path case below asserts that deep write. The #2803 `classifyAnchorType`
+ * band-aid in the handler is DROPPED; anchorType classification is preserved
+ * because recordCycle calls the same classifyAnchorType leaf, so the three
+ * anchorType cases still hold — the mechanism moved, the observable didn't.
+ *
  * Uses Redis DB 1 — never touches production (DB 0). A file-level `after()`
  * hook closes the Redis client so the runner emits `# pass N` lines and CI's
  * PASS_COUNT check doesn't blow up (PR #518 lesson).
@@ -40,6 +51,13 @@ async function cleanTestKeys() {
   const keys = await redis.keys("hydra:metrics:*");
   if (keys.length > 0) await redis.del(...keys);
   await redis.del("hydra:metrics:index");
+  // Issue #3048: /metrics/record now routes through recordCycle(), which writes
+  // a `hydra:cycle:<id>` hash + `hydra:cycle:index` ZSET membership, so sweep
+  // those between cases too. The per-test cycleIds are unique
+  // (`test-metrics-record-*-${Date.now()}`) — delete the whole test-key family
+  // rather than leak into a sibling case's index read.
+  const cycleKeys = await redis.keys("hydra:cycle:test-metrics-record-*");
+  if (cycleKeys.length > 0) await redis.del(...cycleKeys);
 }
 
 function mockReq(body: any = {}): any {
@@ -114,12 +132,56 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
     assert.equal(res._status, 200);
     assert.equal(res._body.ok, true);
 
-    // The metrics landed in the per-cycle Redis hash.
+    // The metrics landed in the per-cycle Redis hash. Issue #3048: the reroute
+    // through recordCycle carries `status` on the CYCLE-hash, not the
+    // metrics-hash — the metrics feed gets the task/anchor fields. (The old
+    // shallow impl leaked `status` into the metrics hash as an ad-hoc field;
+    // that pass-through is gone.)
     const hash = await redis.hgetall(`hydra:metrics:${cycleId}`);
-    assert.equal(hash.status, "completed");
     assert.equal(hash.tasksMerged, "3");
     // recordCycleMetrics stamps the cycleId back onto the hash (record.ts:194).
     assert.equal(hash.cycleId, cycleId);
+    // status now lives on the cycle-hash the coordinator writes.
+    const cycleHash = await redis.hgetall(`hydra:cycle:${cycleId}`);
+    assert.equal(cycleHash.status, "completed");
+  });
+
+  test("deep write (issue #3048): a valid record now writes a cycle-hash entry AND a ZSET index membership", async () => {
+    // The reroute through recordCycle() restores the ADR-0016 sole-writer
+    // invariant for this previously-shallow path: a cycle written via
+    // /metrics/record must now be a FULL cycle record — visible to
+    // getMetricsTrend / buildClassScoreboard / assembleRetroBundle — not just a
+    // metrics-hash write. Assert the two deep-path artifacts the shallow impl
+    // never produced: the `hydra:cycle:<id>` hash and `hydra:cycle:index`
+    // membership. Against the pre-#3048 shallow handler these assertions go red.
+    const router = createMetricsRouter();
+    const post = findHandler(router, "POST", "/metrics/record");
+    const cycleId = `test-metrics-record-3048-deep-${Date.now()}`;
+    const res = mockRes();
+    await post!(mockReq({ cycleId, status: "completed", tasksMerged: 1 }), res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ok, true);
+
+    // 1. The cycle-hash entry (`hydra:cycle:<id>`) exists with a status field —
+    //    the shallow path never wrote this key.
+    const cycleHash = await redis.hgetall(`hydra:cycle:${cycleId}`);
+    assert.equal(cycleHash.status, "completed", "cycle-hash status is written");
+
+    // 2. ZSET index membership (`hydra:cycle:index`) — the shallow path never
+    //    added the cycle to the index, so trend aggregation was blind to it.
+    const indexScore = await redis.zscore("hydra:cycle:index", cycleId);
+    assert.ok(indexScore !== null, "cycle is a member of hydra:cycle:index");
+
+    // The metrics-hash feed is still written (recordCycle calls
+    // recordCycleMetrics) — the deep path is a superset, not a replacement.
+    // Note: recordCycle carries `status` on the CYCLE-hash (asserted above), not
+    // the metrics-hash — the metrics feed gets the task/anchor fields. This is
+    // the intended split; the shallow impl used to leak `status` into the
+    // metrics hash as an ad-hoc pass-through field.
+    const metricsHash = await redis.hgetall(`hydra:metrics:${cycleId}`);
+    assert.equal(metricsHash.tasksMerged, "1", "metrics-hash carries the task counts");
+    assert.equal(metricsHash.cycleId, cycleId, "recordCycleMetrics stamps the cycleId");
   });
 
   test("classifies explicit anchorType through verbatim (issue #2803)", async () => {
@@ -157,6 +219,15 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
     const post = findHandler(router, "POST", "/metrics/record");
     // The synthesised worktree-branch cycleId format decodes to a slot → anchorType.
     const cycleId = `worktree-agent-abc12345-t3-dev_orch`;
+    // Issue #3048: recordCycle dedups on an existing `hydra:cycle:<id>` status,
+    // and a dedup post does NOT re-classify anchorType. This cycleId is a FIXED
+    // literal (not a `test-metrics-record-*` unique id swept by cleanTestKeys),
+    // so a leftover cycle-hash / index membership from a prior run would send
+    // this post down the dedup arm and the anchorType assertion would read the
+    // stale metrics hash. Pre-clean the cycle-hash + index membership so this
+    // post always takes recordCycle's first-write (classifying) path.
+    await redis.del(`hydra:cycle:${cycleId}`, `hydra:metrics:${cycleId}`);
+    await redis.zrem("hydra:cycle:index", cycleId);
     const res = mockRes();
     await post!(mockReq({ cycleId, status: "completed" }), res);
 
@@ -164,8 +235,11 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
     assert.equal(res._body.ok, true);
     const hash = await redis.hgetall(`hydra:metrics:${cycleId}`);
     assert.equal(hash.anchorType, "work-queue");
-    // cleanTestKeys globs hydra:metrics:* so this key is swept too, but be explicit.
-    await redis.del(`hydra:metrics:${cycleId}`);
+    // cleanTestKeys globs hydra:metrics:* so the metrics key is swept, but the
+    // cycle-hash + index membership are keyed on this literal and NOT under the
+    // test-metrics-record-* glob — clean them explicitly.
+    await redis.del(`hydra:metrics:${cycleId}`, `hydra:cycle:${cycleId}`);
+    await redis.zrem("hydra:cycle:index", cycleId);
   });
 
   test("validation failure: missing cycleId returns 400 schema-validation-failed", async () => {

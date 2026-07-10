@@ -109,7 +109,7 @@ type NumericMetrics = { [K in NumericFieldName]?: number };
 interface CategoricalMetrics {
   /** `regressionIntroduced` is parsed back to boolean at read time in trend.ts. */
   regressionIntroduced?: boolean;
-  /** Provenance: "claude" | "codex" | "work-queue" | … — defaults to "codex" if absent. */
+  /** Provenance: "claude" | "work-queue" | … — defaults to "claude" if absent (issue #3070; "codex" is a retired provider, ADR-0006). */
   source?: string;
   /** Priority lane the anchor came from (kanban | failing-test | work-queue | …). */
   anchorType?: string;
@@ -193,7 +193,20 @@ export async function recordCycleMetrics(
 
   flat.cycleId = cycleId;
   flat.recordedAt = new Date().toISOString();
-  if (!flat.source) flat.source = "codex"; // default source for Codex orchestrator cycles
+  // Issue #3070: the dispatch source defaults to "claude" — NEVER "codex". Codex
+  // was removed with ADR-0006 (the in-process codex control loop is gone), so no
+  // cycle can legitimately originate from codex anymore. The prior stale "codex"
+  // default silently mis-attributed every source-less write to a dead provider:
+  // the dedup/enrichment writes in cycle-close.ts (`recordCycleMetrics(cycleId,
+  // { tasksMerged })` / `{ filesChanged, prNumber }`) carry no `source`, and when
+  // one of those lands as the FIRST HSET for a cycleId (e.g. a qa_orch relay
+  // cycle reap never wrote a first record for) it minted a bogus `source:"codex"`
+  // row. Those codex-sourced rows were exactly the ones carrying the
+  // "unclassified"/"unknown" anchorType buckets in /api/metrics (issue #3070's
+  // 30% gap). Defaulting to "claude" agrees with recordCycle's own first-write
+  // default (cycle-close.ts:437) so the two writers can never disagree on
+  // provenance, and no future write can be attributed to the retired provider.
+  if (!flat.source) flat.source = "claude";
 
   await setCycleMetrics(cycleId, flat, CYCLE_KEY_TTL);
 

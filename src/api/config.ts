@@ -4,6 +4,7 @@ import { resolve, join } from "node:path";
 import { getTargetName, getTargetWorkspace } from "../target-config.ts";
 import { booleanFlag } from "../schemas/common.ts";
 import { z } from "zod";
+import { parseEnvFile, maskValue, makeEnvAuthGuard } from "./config-io.ts";
 
 /**
  * Config + env-var routes.
@@ -84,34 +85,12 @@ export function createConfigRouter() {
 
   const CRON_SECRET = process.env.CRON_SECRET || "";
 
-  function requireEnvAuth(req, res, next) {
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (!CRON_SECRET || token !== CRON_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-    next();
-  }
-
-  function parseEnvFile(raw: string): { key: string; value: string; line: string }[] {
-    return raw.split("\n").filter(l => l && !l.startsWith("#") && l.includes("=")).map(line => {
-      const eq = line.indexOf("=");
-      const key = line.slice(0, eq).trim();
-      let value = line.slice(eq + 1).trim();
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
-      }
-      return { key, value, line };
-    });
-  }
-
-  function maskValue(v: string): string {
-    if (v.length <= 6) return "••••••";
-    return v.slice(0, 3) + "•".repeat(Math.min(v.length - 6, 20)) + v.slice(-3);
-  }
+  // Pure `.env` parse/mask primitives + the Bearer-auth guard live in the
+  // `config-io.ts` leaf (issue #3056). The guard captures CRON_SECRET here.
+  const requireEnvAuth = makeEnvAuthGuard(CRON_SECRET);
 
   // GET /env/:project — List env vars
-  router.get("/env/:project", requireEnvAuth, async (req, res) => {
+  router.get<{ project: string }>("/env/:project", requireEnvAuth, async (req, res) => {
     const envPath = ENV_PROJECTS[req.params.project];
     if (!envPath) return res.status(404).json({ error: `Unknown project: ${req.params.project}` });
     try {
@@ -131,7 +110,7 @@ export function createConfigRouter() {
   });
 
   // PUT /env/:project — Set/update a variable
-  router.put("/env/:project", requireEnvAuth, async (req, res) => {
+  router.put<{ project: string }>("/env/:project", requireEnvAuth, async (req, res) => {
     const envPath = ENV_PROJECTS[req.params.project];
     if (!envPath) return res.status(404).json({ error: `Unknown project: ${req.params.project}` });
     const { key, value } = req.body || {};
@@ -163,7 +142,7 @@ export function createConfigRouter() {
   });
 
   // DELETE /env/:project/:key — Remove a variable
-  router.delete("/env/:project/:key", requireEnvAuth, async (req, res) => {
+  router.delete<{ project: string; key: string }>("/env/:project/:key", requireEnvAuth, async (req, res) => {
     const envPath = ENV_PROJECTS[req.params.project];
     if (!envPath) return res.status(404).json({ error: `Unknown project: ${req.params.project}` });
     const key = req.params.key;
