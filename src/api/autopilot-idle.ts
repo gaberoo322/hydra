@@ -5,27 +5,34 @@
  *
  * The data behind an IDLE verdict on the Now Console: *why* is the Pace Gate
  * (ADR-0021) not launching a `hydra-autopilot` run right now? This route joins
- * the three live facts the Gate's own admission check consults each ~15-min
- * tick (`scripts/autopilot/pace-gate.sh`) and projects them into one verdict
+ * the live facts the Gate's own admission check consults each ~15-min tick
+ * (`scripts/autopilot/pace-gate.sh`) and projects them into one verdict
  * (`blockedBy`) plus the numeric reasons behind it.
+ *
+ * This file is now a THIN ADAPTER (issue #3116, arch-scan #788). The pure
+ * multi-source composition — the `Promise.allSettled` fan-out, per-rejected
+ * logging, `deriveBlockedBy` verdict, and response-body assembly — lives in the
+ * `src/aggregators/autopilot-idle.ts` leaf as `getIdleDiagnostics(deps)`. This
+ * file owns only the IO/wiring layer: the express Router, the all-optional
+ * public `AutopilotIdleRouterDeps`, the default readers, and the `??`
+ * default-resolution. The shrunk handler delegates through `aggregatorRoute`
+ * (`route-helpers.ts`, issue #909), which owns the validate-or-400 envelope AND
+ * the never-throw-500 isolation — no hand-rolled safeParse or try/catch here.
+ *
+ * The two pure functions `deriveBlockedBy` and `estimateNextPaceGateCheck` are
+ * RE-EXPORTED from the leaf below (mirroring design-concept.ts re-exporting
+ * design-concept-gate.ts, #3039) so `test/autopilot-idle.test.mts` and any
+ * external caller keep a zero import-diff.
  *
  * The route is a thin adapter — like `now-page.ts`, every external read is an
  * overridable `deps` reader so tests stub the eligibility projection and the
  * autopilot lifecycle without a tracker scan, Redis, or the on-disk state file.
- *
- * Never-throw contract (ADR convention; AC #3): an unreachable eligibility
- * source or a missing run yields SAFE DEFAULTS plus a logged `console.error`,
- * NOT a 500. The only non-200 is a 400 `schema-validation-failed` for a
- * malformed query (AC #4).
  */
 
 import { Router } from "express";
 
 import {
   AutopilotIdleDiagnosticsQuerySchema,
-  type AutopilotIdleDiagnosticsResponse,
-  type IdleBlockedBy,
-  type IdlePace,
   type IdleAutopilotLiveness,
 } from "../schemas/autopilot-idle.ts";
 
@@ -36,10 +43,22 @@ import {
 } from "../cost/index.ts";
 import { getAutopilotStatusSnapshot } from "../autopilot/status.ts";
 
+import { getIdleDiagnostics } from "../aggregators/autopilot-idle.ts";
+import { aggregatorRoute } from "./route-helpers.ts";
+
 // Re-surface the canonical pacing-view type (issue #3108) so this route's own
 // consumers (deps typing, tests) keep importing it from here — the type is
 // OWNED by the Cost module now, no longer re-declared locally.
 export type { EligibilityView } from "../cost/index.ts";
+
+// Re-export the pure verdict + estimate functions from the aggregator leaf
+// (issue #3116). The leaf OWNS the definitions; this file re-exports them so
+// callers (test/autopilot-idle.test.mts, any future external consumer) keep a
+// single-source import surface with a zero diff — the #3039 pattern.
+export {
+  deriveBlockedBy,
+  estimateNextPaceGateCheck,
+} from "../aggregators/autopilot-idle.ts";
 
 // ---------------------------------------------------------------------------
 // Sub-source readers (all overridable for tests)
@@ -78,168 +97,38 @@ export interface AutopilotIdleRouterDeps {
 }
 
 // ---------------------------------------------------------------------------
-// Pure verdict derivation
-// ---------------------------------------------------------------------------
-
-/**
- * Derive the single launch-blocking verdict with the SAME precedence the Pace
- * Gate applies (`pace-gate.sh`):
- *
- *   1. A run is already live           → "running"   (the Gate never stacks).
- *   2. The eligibility source is down  → "endpoint-error" (Gate fails safe).
- *   3. The 5h emergency-stop tripped   → "emergency-stop".
- *   4. Burn is ahead of the curve      → "pacing-ahead".
- *   5. Otherwise                       → null (eligible — would launch).
- *
- * Pure (no I/O, no clock) so the route and tests can pin it.
- */
-export function deriveBlockedBy(input: {
-  autopilotAlive: boolean;
-  eligibilityReachable: boolean;
-  emergencyStop: boolean;
-  paceState: "behind" | "on" | "ahead";
-}): IdleBlockedBy {
-  if (input.autopilotAlive) return "running";
-  if (!input.eligibilityReachable) return "endpoint-error";
-  if (input.emergencyStop) return "emergency-stop";
-  if (input.paceState === "ahead") return "pacing-ahead";
-  return null;
-}
-
-// ---------------------------------------------------------------------------
 // Router factory
 // ---------------------------------------------------------------------------
-
-const IDLE_LIVENESS_DEFAULT: IdleAutopilotLiveness = {
-  alive: false,
-  state: "idle",
-  runId: null,
-  termReason: null,
-  endedEpoch: null,
-};
 
 export function createAutopilotIdleRouter(deps: AutopilotIdleRouterDeps = {}) {
   const router = Router();
   const readEligibility = deps.readEligibility ?? defaultReadEligibility;
-  const readLiveness = deps.readAutopilotLiveness ?? defaultReadAutopilotLiveness;
+  const readAutopilotLiveness =
+    deps.readAutopilotLiveness ?? defaultReadAutopilotLiveness;
   const clock = deps.now ?? (() => new Date());
   const paceGateIntervalSeconds =
     deps.paceGateIntervalSeconds ?? defaultPaceGateIntervalSeconds();
 
-  router.get("/autopilot/idle-diagnostics", async (req, res) => {
-    const parsed = AutopilotIdleDiagnosticsQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const [eligSettled, livenessSettled] = await Promise.allSettled([
-        readEligibility(),
-        readLiveness(),
-      ]);
-
-      // Eligibility — a rejected read is the Gate's fail-safe "blind to usage"
-      // state, surfaced as `endpoint-error`. Use neutral pacing numerics.
-      const eligibilityReachable = eligSettled.status === "fulfilled";
-      if (!eligibilityReachable) {
-        console.error(
-          `[autopilot/idle-diagnostics] eligibility read failed (never-throw → endpoint-error): ${
-            (eligSettled as PromiseRejectedResult).reason?.message ||
-            (eligSettled as PromiseRejectedResult).reason
-          }`,
-        );
-      }
-      const elig: EligibilityView | null = eligibilityReachable
-        ? eligSettled.value
-        : null;
-
-      // Liveness — a rejected read degrades to the idle safe default.
-      const liveness: IdleAutopilotLiveness =
-        livenessSettled.status === "fulfilled"
-          ? livenessSettled.value
-          : IDLE_LIVENESS_DEFAULT;
-      if (livenessSettled.status === "rejected") {
-        console.error(
-          `[autopilot/idle-diagnostics] autopilot-liveness read failed (never-throw → idle): ${livenessSettled.reason?.message || livenessSettled.reason}`,
-        );
-      }
-
-      const paceState = elig?.paceState ?? "on";
-      const emergencyStop = elig?.emergencyStop ?? false;
-
-      const blockedBy = deriveBlockedBy({
-        autopilotAlive: liveness.alive,
-        eligibilityReachable,
-        emergencyStop,
-        paceState,
-      });
-
-      const pace: IdlePace = {
-        state: paceState,
-        targetPercent: elig?.targetPercent ?? 0,
-        sinceResetPercent: elig?.sinceResetPercent ?? 0,
-        anchor: elig?.anchor ?? null,
-      };
-
-      const body: AutopilotIdleDiagnosticsResponse = {
-        isEligible: blockedBy === null,
-        blockedBy,
-        calibrated: elig?.calibrated ?? false,
-        emergencyStop,
-        percentLast5h: elig?.percentLast5h ?? 0,
-        pace,
-        autopilot: liveness,
-        nextPaceGateCheck: estimateNextPaceGateCheck(clock(), paceGateIntervalSeconds),
-        generatedAt: clock().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      // Defensive: the body above is allSettled-guarded and should never
-      // throw, but honour the never-throw contract belt-and-braces — log and
-      // return a safe-default payload rather than a 500.
-      console.error(
-        `[autopilot/idle-diagnostics] handler threw despite never-throw contract: ${err?.message || err}`,
-      );
-      const safe: AutopilotIdleDiagnosticsResponse = {
-        isEligible: false,
-        blockedBy: "endpoint-error",
-        calibrated: false,
-        emergencyStop: false,
-        percentLast5h: 0,
-        pace: { state: "on", targetPercent: 0, sinceResetPercent: 0, anchor: null },
-        autopilot: IDLE_LIVENESS_DEFAULT,
-        nextPaceGateCheck: null,
-        generatedAt: clock().toISOString(),
-      };
-      return res.json(safe);
-    }
-  });
+  // The shrunk handler: aggregatorRoute owns the safeParse → 400 envelope AND
+  // the never-throw → 500 isolation; the RESOLVED deps bag is handed to the
+  // pure aggregator. The query schema carries no fields the aggregator reads,
+  // so the (data, req) args are ignored (matches now-page's no-field usage).
+  router.get(
+    "/autopilot/idle-diagnostics",
+    aggregatorRoute(
+      AutopilotIdleDiagnosticsQuerySchema,
+      "autopilot/idle-diagnostics",
+      async () =>
+        getIdleDiagnostics({
+          readEligibility,
+          readAutopilotLiveness,
+          now: clock,
+          paceGateIntervalSeconds,
+        }),
+    ),
+  );
 
   return router;
-}
-
-// ---------------------------------------------------------------------------
-// nextPaceGateCheck estimate
-// ---------------------------------------------------------------------------
-
-/**
- * Coarse upper-bound estimate of the next Pace Gate admission check. The Gate
- * is a systemd timer firing every `OnUnitActiveSec` (~15 min), so the next
- * check is *no later than* `now + interval`. We have no in-process handle on
- * the timer's last-fire, so this is deliberately an upper bound, not exact.
- *
- * Returns `null` when the interval is non-finite/non-positive — better a null
- * than a bogus timestamp.
- */
-export function estimateNextPaceGateCheck(
-  now: Date,
-  intervalSeconds: number,
-): string | null {
-  if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) return null;
-  return new Date(now.getTime() + intervalSeconds * 1000).toISOString();
 }
 
 function defaultPaceGateIntervalSeconds(): number {
