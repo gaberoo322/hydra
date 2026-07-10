@@ -399,12 +399,44 @@ async function runHousekeeping(
     },
 
     {
+      // Issue #2632: outcome-attribution recorder. Reacts to merge LANDINGS off
+      // the same pending-enroll substrate as holdback-merge-watch — opens a
+      // per-metric window on landing, closes each on its own configured duration
+      // (appending an observation row), and voids reverted merges. No Redis
+      // time-guard — intrinsically idempotent (windows are upserted by
+      // metric+merge id; closes/voids are drained and removed), so an hourly
+      // tick with nothing due is a guaranteed no-op. Never throws — every
+      // failure is logged with the [attribution] prefix and counted, not raised.
+      // This is the sanctioned periodic-job substrate for the recorder, NOT a
+      // long-lived EventBus consumer (ADR-0010/0012).
+      //
+      // Issue #3113: MUST run BEFORE holdback-merge-watch. Both chores read the
+      // same pending-enroll registry (`pendingEnrollList`), but the recorder only
+      // READS it (opening attribution windows for landed merges) while
+      // holdback-merge-watch REMOVES each landed PR (`removePending`). When the
+      // watch ran first it drained the registry to empty before the recorder read
+      // it, so the recorder's OPEN phase always saw an empty list and no
+      // attribution window ever opened — the ledger stayed dark despite live
+      // holdback baselines. Placing the read-only recorder ahead of the
+      // registry-draining watch closes that ordering gap; the recorder never
+      // mutates the registry, so the watch still sees every landed PR after.
+      name: "attribution-record",
+      work: async () => {
+        await runAttributionRecord();
+      },
+    },
+
+    {
       // Issue #2623: merge-completion watcher. No Redis time-guard — the chore
       // is intrinsically idempotent (it consumes the pending-enroll registry and
       // guards each PR's enroll + cycle-record enrichment behind a per-PR marker,
       // so an hourly tick against a landed-and-processed / all-still-open set is a
       // guaranteed no-op). Never throws — per-PR gh/API failures are logged and
       // the entry is retried next tick.
+      //
+      // Issue #3113: runs AFTER attribution-record (above) — this chore calls
+      // `removePending` for each landed PR, draining the pending-enroll registry
+      // the read-only recorder depends on, so the recorder must read first.
       name: "holdback-merge-watch",
       work: async () => {
         await runHoldbackMergeWatch();
@@ -429,23 +461,6 @@ async function runHousekeeping(
       name: "cycle-merge-reconcile",
       work: async () => {
         await runCycleMergeReconcile();
-      },
-    },
-
-    {
-      // Issue #2632: outcome-attribution recorder. Reacts to merge LANDINGS off
-      // the same pending-enroll substrate as holdback-merge-watch — opens a
-      // per-metric window on landing, closes each on its own configured duration
-      // (appending an observation row), and voids reverted merges. No Redis
-      // time-guard — intrinsically idempotent (windows are upserted by
-      // metric+merge id; closes/voids are drained and removed), so an hourly
-      // tick with nothing due is a guaranteed no-op. Never throws — every
-      // failure is logged with the [attribution] prefix and counted, not raised.
-      // This is the sanctioned periodic-job substrate for the recorder, NOT a
-      // long-lived EventBus consumer (ADR-0010/0012).
-      name: "attribution-record",
-      work: async () => {
-        await runAttributionRecord();
       },
     },
   ];

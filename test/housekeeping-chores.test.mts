@@ -627,3 +627,58 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     assert.ok(Array.isArray(summary.skipped), "skipped is an array");
   });
 });
+
+describe("runHousekeeping — attribution-record runs before holdback-merge-watch (issue #3113)", () => {
+  function makeBus() {
+    return { async publish() { return "fake-id"; } };
+  }
+
+  // Both chores read the SAME pending-enroll registry (`pendingEnrollList`), but
+  // `holdback-merge-watch` REMOVES each landed PR (`removePending`) while
+  // `attribution-record` only READS it to open attribution windows. When the
+  // watch ran first it drained the registry to empty before the recorder read
+  // it, so no attribution window ever opened and the ledger stayed dark despite
+  // live holdback baselines. The recorder MUST therefore run first. This test
+  // pins that ordering so a future re-sequencing of the chore registry can't
+  // silently reintroduce the dark-ledger bug.
+  //
+  // `runChore` appends each chore's name to `ran` or `skipped` in the exact
+  // sequence `runHousekeeping` iterates the chore array, so relative position
+  // within whichever array holds a chore reflects its execution order. Both
+  // chores are unguarded and share the same pending-enroll substrate, so they
+  // classify together (both ran, or both skipped on the same Redis fault) —
+  // asserting the recorder's index precedes the watch's within that array is a
+  // faithful proxy for "the recorder executes first", independent of whether a
+  // live Redis makes them run or a Redis fault makes them skip.
+  test("recorder is sequenced ahead of the registry-draining watch", async () => {
+    const summary = await runHousekeeping(makeBus() as any, {
+      publishBrierMetric: async () => ({ ok: true }),
+    });
+
+    const bothInRan =
+      summary.ran.includes("attribution-record") &&
+      summary.ran.includes("holdback-merge-watch");
+    const bothInSkipped =
+      summary.skipped.includes("attribution-record") &&
+      summary.skipped.includes("holdback-merge-watch");
+
+    // The two chores share a substrate, so they must classify together — this
+    // guards against the assertion silently passing because one chore is absent.
+    assert.ok(
+      bothInRan || bothInSkipped,
+      "attribution-record and holdback-merge-watch must both be classified in " +
+        "the same array (both share the pending-enroll substrate); " +
+        `ran=${JSON.stringify(summary.ran)} skipped=${JSON.stringify(summary.skipped)}`,
+    );
+
+    const arr = bothInRan ? summary.ran : summary.skipped;
+    const recorderIdx = arr.indexOf("attribution-record");
+    const watchIdx = arr.indexOf("holdback-merge-watch");
+    assert.ok(
+      recorderIdx < watchIdx,
+      "attribution-record must be sequenced BEFORE holdback-merge-watch so the " +
+        "read-only recorder opens its windows before the watch drains the " +
+        `pending-enroll registry (issue #3113); order was ${JSON.stringify(arr)}`,
+    );
+  });
+});
