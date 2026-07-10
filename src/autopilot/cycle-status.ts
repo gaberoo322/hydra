@@ -6,7 +6,7 @@
  * originally defined in the read-projection module because the digests needed
  * them first, but "which statuses are merged vs failed" is a domain invariant
  * the WRITE path establishes (`recordCycle` in `runs.ts` buckets a cycle into a
- * terminal status) and BOTH read sides consume (`retro-projections.ts`'s
+ * terminal status) and BOTH read sides consume (`retro-dispatch-classifier.ts`'s
  * `bucketOf`, `run-projections.ts`'s `projectRunDigest`). Homing the taxonomy in
  * a neutral module flattens that backwards dependency — the writer no longer
  * reaches into a downstream read-projection module for a constant it owns the
