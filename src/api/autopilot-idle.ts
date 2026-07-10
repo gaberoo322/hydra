@@ -31,28 +31,19 @@ import {
 
 import {
   getUsage as defaultGetUsage,
-  projectEligibility as defaultProjectEligibility,
+  projectEligibilityView as defaultProjectEligibilityView,
+  type EligibilityView,
 } from "../cost/index.ts";
 import { getAutopilotStatusSnapshot } from "../autopilot/status.ts";
+
+// Re-surface the canonical pacing-view type (issue #3108) so this route's own
+// consumers (deps typing, tests) keep importing it from here — the type is
+// OWNED by the Cost module now, no longer re-declared locally.
+export type { EligibilityView } from "../cost/index.ts";
 
 // ---------------------------------------------------------------------------
 // Sub-source readers (all overridable for tests)
 // ---------------------------------------------------------------------------
-
-/**
- * The slice of `UsageEligibility` (`src/cost/usage-tracker.ts`) this endpoint
- * needs. Kept structural rather than importing the full type so the deps
- * surface is small and a test stub doesn't have to build a whole snapshot.
- */
-export interface EligibilityView {
-  paceState: "behind" | "on" | "ahead";
-  targetPercent: number;
-  sinceResetPercent: number;
-  anchor: string | null;
-  emergencyStop: boolean;
-  calibrated: boolean;
-  percentLast5h: number;
-}
 
 interface EligibilityReader {
   (): Promise<EligibilityView>;
@@ -263,17 +254,9 @@ function defaultPaceGateIntervalSeconds(): number {
 // ---------------------------------------------------------------------------
 
 async function defaultReadEligibility(): Promise<EligibilityView> {
-  const snapshot = await defaultGetUsage();
-  const e = defaultProjectEligibility(snapshot);
-  return {
-    paceState: e.paceState,
-    targetPercent: e.targetPercent,
-    sinceResetPercent: e.sinceResetPercent,
-    anchor: e.anchor,
-    emergencyStop: e.reasons.emergencyStop,
-    calibrated: e.reasons.calibrated,
-    percentLast5h: e.usage.percentLast5h,
-  };
+  // Compose the snapshot read with the canonical pacing-view projection owned
+  // by the Cost module (issue #3108) — the narrowing body no longer lives here.
+  return defaultProjectEligibilityView(await defaultGetUsage());
 }
 
 /**

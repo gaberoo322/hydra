@@ -109,10 +109,14 @@ export type {
 // ---------------------------------------------------------------------------
 export {
   projectEligibility,
+  projectEligibilityView,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
 } from "./eligibility.ts";
+// The narrowed pacing-dashboard read-model — the canonical view type the
+// autopilot-status seam + idle-diagnostics route both consume (issue #3108).
+export type { EligibilityView } from "./eligibility.ts";
 
 // ---------------------------------------------------------------------------
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
