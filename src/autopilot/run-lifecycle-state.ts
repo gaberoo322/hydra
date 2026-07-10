@@ -41,6 +41,7 @@ import {
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
 import { isLivePid } from "../worktree-orphan.ts";
+import { numberOrDefault } from "./run-result.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -170,22 +171,6 @@ export function deriveLifecycleState(
 // I/O projection coordinator. Callers import it from here directly (via the
 // back-compat re-export relay in `run-projections.ts`, #2125).
 // ---------------------------------------------------------------------------
-
-/**
- * Pure coercion helper — local copy of the same-named write-side helper in
- * `runs.ts` (issue #1964). It is COPIED rather than imported so this leaf
- * stays the lowest, dependency-free Module: importing it from `runs.ts` would
- * invert the dependency direction. The `runs.ts` copy (with its 18 write-side
- * digest-reader call sites) is unrelated to this move and stays put.
- */
-function numberOrDefault(v: unknown, fallback: number): number {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string" && v.length > 0) {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return fallback;
-}
 
 /**
  * `term_reason` values that mark a CLEAN self-termination — the run's own
@@ -336,7 +321,7 @@ export function summarizeTerminationHealth(
 // Moved here from `runs.ts` (issue #1993) into `run-projections.ts`, then into
 // this pure leaf (issue #3106): `deriveInflightSlotSeed` is a pure function
 // over the in-flight subagent dispatch ledger (no Redis, no clock, no await —
-// the async `readInflightSlotSeed` wrapper in `runs.ts` does the Redis read),
+// the async `readInflightSlotSeed` wrapper in `run-reads.ts` does the Redis read),
 // so its home is this zero-I/O state-machine leaf, not the I/O projection
 // coordinator. Callers import both symbols from here directly (via the
 // back-compat re-export relay in `run-projections.ts`, #2125).
