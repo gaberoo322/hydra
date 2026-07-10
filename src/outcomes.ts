@@ -27,6 +27,14 @@
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
 import { parseOutcomesYaml, type YamlScalar } from "./outcomes-yaml.ts";
+import type {
+  OutcomeKind,
+  OutcomeDirection,
+  OutcomeSource,
+  Outcome,
+  OutcomeReading,
+  LoadOutcomesResult,
+} from "./outcomes-types.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
@@ -39,49 +47,26 @@ export const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.ya
 
 // ---------------------------------------------------------------------------
 // Types
+//
+// The pure domain vocabulary (`Outcome`, `OutcomeKind`, `OutcomeDirection`,
+// `OutcomeSource`, `OutcomeReading`, `LoadOutcomesResult`) lives in the zero-I/O
+// leaf `src/outcomes-types.ts` (#3086), following the `outcomes-yaml.ts`
+// precedent (#933). They are re-exported here so every existing importer of
+// `./outcomes.ts` keeps its import specifier unchanged (back-compat); this
+// module owns only the I/O coordinators (`loadOutcomes`, `getOutcomeValue`) and
+// the outcome-specific schema validation that runs over the YAML parser's
+// records. A caller that needs only the type vocabulary imports the leaf
+// directly for a zero-I/O import.
 // ---------------------------------------------------------------------------
 
-type OutcomeKind = "leading" | "terminal";
-export type OutcomeDirection = "up" | "down";
-/**
- * Where an outcome's current value is read from. Today this is `file` only —
- * the single adapter that is actually implemented (#933). `prometheus | api |
- * sql` were live-looking stubs; they re-enter this union the day a real second
- * adapter lands (the "two adapters means a real seam" trigger, LANGUAGE.md).
- */
-type OutcomeSource = "file";
-
-export interface Outcome {
-  name: string;
-  kind: OutcomeKind;
-  direction: OutcomeDirection;
-  source: OutcomeSource;
-  query: string;
-  baseline: number;
-  target: number;
-  noise_epsilon: number;
-  /**
-   * Per-metric attribution-window duration in milliseconds (issue #2632,
-   * additive/optional). The outcome-attribution recorder opens one window per
-   * live leading metric when a merge lands and closes each on ITS OWN duration
-   * — a fast metric (test-count) settles in minutes, a slow one (Brier) needs
-   * days — so this is keyed on how fast the metric moves, distinct from the
-   * per-MERGE tier watch windows (`windowCyclesForTier`) keyed on blast radius.
-   * Undefined ⇒ the recorder applies a conservative long default so an
-   * unconfigured metric still closes eventually. Only meaningful for
-   * `kind: leading` outcomes (the attribution spine only watches those).
-   */
-  attribution_window_ms?: number;
-}
-
-export interface OutcomeReading {
-  value: number;
-  ts: string;
-}
-
-export type LoadOutcomesResult =
-  | { ok: true; outcomes: Outcome[] }
-  | { ok: false; errors: string[] };
+export type {
+  OutcomeKind,
+  OutcomeDirection,
+  OutcomeSource,
+  Outcome,
+  OutcomeReading,
+  LoadOutcomesResult,
+};
 
 // ---------------------------------------------------------------------------
 // Schema validation
