@@ -42,11 +42,36 @@
  * `confirmLimit` PRs per tick (the `gh` calls are the cost), so an hourly tick
  * against a large historical backlog drains it gradually rather than in one
  * unbounded burst. An already-drained window is a guaranteed no-op.
+ *
+ * **Self-arm backstop for the pending-enroll registry (issue #3078).** The
+ * arming of a PR into `hydra:holdback:pending-enroll` (the Outcome Attribution
+ * Spine ledger's ingress, #2622/#2628) is a best-effort `POST /api/holdback/pending`
+ * the autopilot session runs on an `auto-merge` action. When that POST is dropped
+ * (an LLM print-mode turn that forgets it, a crash mid-arm) the PR never reaches
+ * the merge-completion watcher and the ledger stays dark — observed at 7+ days of
+ * zero entries. This chore ALREADY confirms, per merged PR, exactly the signal the
+ * arming step needed (`gh pr view` → MERGED). So on a confirmed-merged candidate it
+ * ALSO self-arms: if that PR is absent from the pending-enroll registry AND not
+ * already enrolled-marked, it calls `pendingEnrollAdd` (records intent only — never
+ * arms/blocks/performs a merge) so the merge-watch chore enrolls it on the next
+ * tick. This recovers a dropped arming POST with NO new webhook/event surface,
+ * reusing the polling this chore already does. It is idempotent (skips a PR already
+ * in the registry or already enrolled), never-throws (a Redis error for one PR is
+ * logged and that PR left for the next tick), and NEVER filters by tier — the
+ * T1/unknown-tier carry-up exemption stays enforced server-side in `enrollHoldback`
+ * (which the merge-watch chore calls), not here at arm time.
  */
 
 import { getRecentMetricIdsDesc, getCycleMetrics } from "../../redis/cycle-metrics.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
 import { viewPr } from "../../github/issues.ts";
+import {
+  pendingEnrollList,
+  pendingEnrollAdd,
+  wasEnrolledMarked,
+  type PendingEnrollEntry,
+  type PendingEnrollAddResult,
+} from "../../redis/holdback.ts";
 
 /** How many recent cycle records to scan per tick (newest first). */
 const DEFAULT_SCAN_LIMIT = 50;
@@ -89,6 +114,18 @@ export interface CycleMergeReconcileDeps {
   scanLimit?: number;
   /** Max candidate PRs to confirm via gh this tick. Defaults to 10. */
   confirmLimit?: number;
+  // --- Self-arm backstop touchpoints (issue #3078; all injectable) ------------
+  /**
+   * List the prNumbers currently in the pending-enroll registry, as a Set for
+   * O(1) membership. Defaults to reading `pendingEnrollList` once per tick.
+   * A list failure disables self-arm for this tick (conservative — never arm
+   * blind, which would risk a duplicate the merge-watch is already handling).
+   */
+  listPending?: () => Promise<Set<number>>;
+  /** True when this PR's landing was already enroll-processed. Defaults to `wasEnrolledMarked`. */
+  wasEnrolled?: (prNumber: number) => Promise<boolean>;
+  /** Arm a confirmed-merged-but-unregistered PR into the registry. Defaults to `pendingEnrollAdd`. */
+  armPending?: (entry: PendingEnrollEntry) => Promise<PendingEnrollAddResult>;
 }
 
 /** Per-run summary the chore returns (never throws). */
@@ -105,6 +142,13 @@ export interface CycleMergeReconcileResult {
   fetchFailed: number;
   /** Candidates whose upgrade re-post returned a non-ok result — retried next tick. */
   upgradeFailed: number;
+  // --- Self-arm backstop counters (issue #3078) -------------------------------
+  /** Confirmed-merged PRs newly armed into the pending-enroll registry this tick. */
+  selfArmed: number;
+  /** Confirmed-merged PRs skipped by self-arm (already registered or already enrolled). */
+  selfArmSkipped: number;
+  /** Confirmed-merged PRs whose self-arm `pendingEnrollAdd` returned non-ok — retried next tick. */
+  selfArmFailed: number;
 }
 
 /**
@@ -123,6 +167,22 @@ export async function runCycleMergeReconcile(
   const recordCycleRecord = deps.recordCycleRecord ?? ((body) => recordCycle(body));
   const scanLimit = deps.scanLimit ?? DEFAULT_SCAN_LIMIT;
   const confirmLimit = deps.confirmLimit ?? DEFAULT_CONFIRM_LIMIT;
+  // Self-arm backstop touchpoints (issue #3078). `listPending` reads the whole
+  // registry ONCE per tick and returns a Set for O(1) membership — cheaper than a
+  // per-PR HGET and consistent with the bounded gh budget.
+  const listPending =
+    deps.listPending ??
+    (async () => {
+      const r = await pendingEnrollList();
+      if (r.ok === false) {
+        // Signal "unknown registry" to the caller by throwing — the caller
+        // disables self-arm for this tick rather than arming blind.
+        throw new Error(r.error);
+      }
+      return new Set(r.entries.map((e) => e.prNumber));
+    });
+  const wasEnrolled = deps.wasEnrolled ?? wasEnrolledMarked;
+  const armPending = deps.armPending ?? pendingEnrollAdd;
 
   const result: CycleMergeReconcileResult = {
     scanned: 0,
@@ -131,7 +191,23 @@ export async function runCycleMergeReconcile(
     notMerged: 0,
     fetchFailed: 0,
     upgradeFailed: 0,
+    selfArmed: 0,
+    selfArmSkipped: 0,
+    selfArmFailed: 0,
   };
+
+  // Snapshot the pending-enroll registry once per tick. A read failure disables
+  // self-arm for the tick (conservative — never arm blind, which would risk a
+  // duplicate the merge-watch is already about to enroll). `null` = disabled.
+  let pendingSet: Set<number> | null = null;
+  try {
+    pendingSet = await listPending();
+  } catch (err: any) {
+    console.error(
+      `[Housekeeping] cycle-merge-reconcile: pending-enroll list failed; self-arm disabled this tick: ${err?.message || String(err)}`,
+    );
+    pendingSet = null;
+  }
 
   let ids: string[];
   try {
@@ -181,6 +257,64 @@ export async function runCycleMergeReconcile(
         continue;
       }
 
+      // Confirmed merged — self-arm the pending-enroll registry (issue #3078)
+      // BEFORE the metrics upgrade. This recovers a dropped `POST /api/holdback/
+      // pending` arm: a merged PR absent from the registry AND not yet enrolled-
+      // marked is armed so the merge-watch chore enrolls it next tick. Skipped
+      // when the tick's registry read failed (pendingSet===null → arm-blind
+      // avoidance) or the PR is already registered/enrolled. Never filters by
+      // tier — the T1/unknown-tier exemption lives server-side in enrollHoldback.
+      // Best-effort: a failed arm is counted and retried next tick, never aborts
+      // the upgrade below.
+      if (pendingSet !== null && !pendingSet.has(prNumber)) {
+        let enrolledAlready = false;
+        try {
+          enrolledAlready = await wasEnrolled(prNumber);
+        } catch (err: any) {
+          // wasEnrolledMarked itself never throws (it fails closed to true), but
+          // an injected dep might — fail closed to "already enrolled" so we never
+          // double-arm on an unknown state.
+          console.error(
+            `[Housekeeping] cycle-merge-reconcile: self-arm enrolled-check failed for pr ${prNumber} (cycle ${cycleId}); skipping arm: ${err?.message || String(err)}`,
+          );
+          enrolledAlready = true;
+        }
+        if (enrolledAlready) {
+          result.selfArmSkipped += 1;
+        } else {
+          const armEntry: PendingEnrollEntry = {
+            prNumber,
+            // Tier is unknown from the cycle-metrics hash here; null is the
+            // permissive "unknown-tier" the enroll schema accepts. enrollHoldback
+            // resolves the real tier server-side at landing time.
+            tier: null,
+            cycleId,
+            anchorType: "work-queue",
+            registeredAt: Date.now(),
+          };
+          let armed: PendingEnrollAddResult;
+          try {
+            armed = await armPending(armEntry);
+          } catch (err: any) {
+            armed = { ok: false, error: err?.message || String(err) };
+          }
+          if (armed.ok === false) {
+            console.error(
+              `[Housekeeping] cycle-merge-reconcile: self-arm pendingEnrollAdd failed for pr ${prNumber} (cycle ${cycleId}); retrying next tick: ${armed.error}`,
+            );
+            result.selfArmFailed += 1;
+          } else {
+            // Keep the local snapshot consistent so a second merged cycle sharing
+            // this prNumber in the same tick isn't double-armed.
+            pendingSet.add(prNumber);
+            result.selfArmed += 1;
+          }
+        }
+      } else if (pendingSet !== null) {
+        // Already in the registry — the merge-watch will enroll it; nothing to do.
+        result.selfArmSkipped += 1;
+      }
+
       // Confirmed merged — fire the completed→merged upgrade re-post. recordCycle's
       // dedup path bumps the metrics tasksMerged + cycle-hash status WITHOUT
       // re-firing any lifetime counter (issue #2860).
@@ -203,9 +337,9 @@ export async function runCycleMergeReconcile(
     }
   }
 
-  if (result.upgraded > 0) {
+  if (result.upgraded > 0 || result.selfArmed > 0) {
     console.log(
-      `[Housekeeping] cycle-merge-reconcile: scanned=${result.scanned} candidates=${result.candidates} upgraded=${result.upgraded} notMerged=${result.notMerged} fetchFailed=${result.fetchFailed} upgradeFailed=${result.upgradeFailed}`,
+      `[Housekeeping] cycle-merge-reconcile: scanned=${result.scanned} candidates=${result.candidates} upgraded=${result.upgraded} notMerged=${result.notMerged} fetchFailed=${result.fetchFailed} upgradeFailed=${result.upgradeFailed} selfArmed=${result.selfArmed} selfArmSkipped=${result.selfArmSkipped} selfArmFailed=${result.selfArmFailed}`,
     );
   }
 

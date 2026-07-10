@@ -61,11 +61,21 @@ After `gh pr review --approve && gh pr merge --auto --squash` succeeds for an
 ```bash
 # The ONLY post-merge follow-up the handler makes. $pr_number is the just-armed
 # PR; $pr_tier is the integer tier from the auto-merge action payload
-# (state.actions[].tier, 1–4 per ADR-0015, or null); $task_id is the autopilot
-# cycleId. Best-effort: a non-2xx or unreachable endpoint is logged and the
-# autopilot cycle proceeds — registration NEVER blocks or delays a merge.
+# (state.actions[].tier, 1–4 per ADR-0015, or empty/`null` for unknown-tier);
+# $task_id is the autopilot cycleId. Best-effort: a non-2xx or unreachable
+# endpoint is logged and the autopilot cycle proceeds — registration NEVER blocks
+# or delays a merge.
 #
-# Issue #2800: pass an EXPLICIT anchorType so the merge-watch enrichment
+# Issue #3078: this arming step is now the AUDITED `dispatch.sh holdback-pending`
+# subcommand (mirroring `cycle-record` / `capacity-writeback`), NOT an inlined
+# `curl … | jq …`. That inlined step was the drop-prone spaghetti that left the
+# Outcome Attribution Spine ledger dark for 7+ days when a print-mode turn dropped
+# the POST. The subcommand centralises the body-shape + the HYDRA_API_BASE origin
+# resolution, and the cycle-merge-reconcile chore now self-arms any confirmed-
+# merged PR still missing from the registry — so a dropped arm is recovered on the
+# next housekeeping tick with no new event surface.
+#
+# Issue #2800: pass an EXPLICIT anchorType (4th arg) so the merge-watch enrichment
 # classifies the cycle even when it becomes the FIRST cycle-record write (the
 # qa_orch relay case, where reap never wrote a record for this cycleId). Without
 # it, the bare-UUID cycleId falls through the slot-suffix inference to the
@@ -73,15 +83,11 @@ After `gh pr review --approve && gh pr merge --auto --squash` succeeds for an
 # auto-merge action's dispatch class to its anchorType, mirroring
 # `scripts/autopilot/dispatch.sh`: code-writing dispatches (dev_orch/dev_target)
 # are `work-queue`; a bare `auto-merge` action with no resolvable class defaults
-# to `work-queue` (the dominant armed-PR case). The field is optional — omitting
-# it degrades to the prior inference-then-`unclassified` behaviour.
+# to `work-queue` (the dominant armed-PR case). Omitting the 4th arg degrades to
+# the prior inference-then-`unclassified` behaviour.
 pr_anchor_type="${pr_anchor_type:-work-queue}"
-curl -fsS -X POST http://localhost:4000/api/holdback/pending \
-  -H 'content-type: application/json' \
-  -d "$(jq -n --argjson pr "$pr_number" --argjson tier "${pr_tier:-null}" \
-        --arg cycleId "$task_id" --arg anchorType "$pr_anchor_type" \
-        '{prNumber:$pr, tier:$tier, cycleId:$cycleId, anchorType:$anchorType}')" \
-  || echo "[autopilot] holdback pending register failed for PR #${pr_number} (non-fatal — merge already armed)" >&2
+scripts/autopilot/dispatch.sh holdback-pending \
+  "$pr_number" "${pr_tier:-null}" "$task_id" "$pr_anchor_type"
 ```
 
 `POST /api/holdback/pending` (`src/api/holdback.ts`, issue #2622) records the
