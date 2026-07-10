@@ -182,3 +182,66 @@ describe("projectTokensPerMergedPR pure arithmetic (issue #2930)", () => {
     assert.strictEqual((stats as any).tokensPerMergedPR, 3000);
   });
 });
+
+/**
+ * Default dispatch source (issue #3070).
+ *
+ * `recordCycleMetrics` defaults a source-less write to "claude", NEVER "codex".
+ * Codex was removed with ADR-0006, so the old "codex" default silently
+ * mis-attributed every source-less write (the dedup/enrichment path in
+ * cycle-close.ts, and any direct recordCycleMetrics caller) to a dead provider —
+ * and those codex-sourced rows were the ones carrying the "unclassified"/"unknown"
+ * anchorType buckets in /api/metrics. This suite pins the "claude" default so the
+ * retired provider can never re-appear in a fresh write.
+ *
+ * Own top-level describe with its own before/after lifecycle so it never
+ * piggybacks on a sibling suite's shared-Redis teardown (CLAUDE.md authoring rule).
+ */
+describe("default dispatch source is 'claude', never 'codex' (issue #3070)", () => {
+  let redis: any;
+  let getCycleMetrics: (cycleId: string) => Promise<Record<string, string>>;
+
+  async function cleanKeys() {
+    const keys = await redis.keys("hydra:metrics:*");
+    if (keys.length > 0) await redis.del(...keys);
+    await redis.del("hydra:metrics:index");
+  }
+
+  beforeEach(async () => {
+    if (!redis) redis = new Redis(process.env.REDIS_URL);
+    if (!getCycleMetrics) {
+      ({ getCycleMetrics } = await import("../src/redis/cycle-metrics.ts"));
+    }
+    await cleanKeys();
+  });
+
+  after(async () => {
+    await cleanKeys();
+    if (redis) redis.disconnect();
+  });
+
+  test("a source-less write defaults to 'claude'", async () => {
+    const cycleId = "cycle-3070-no-source";
+    await recordCycleMetrics(cycleId, { tasksMerged: 1, anchorType: "work-queue" });
+    const stored = await getCycleMetrics(cycleId);
+    assert.strictEqual(stored.source, "claude");
+  });
+
+  test("the enrichment-shaped write (no source, no anchorType) still defaults to 'claude', never 'codex'", async () => {
+    // Mirrors cycle-close.ts's dedup/enrichment path: recordCycleMetrics is
+    // called with only counters/filesChanged and no source. When this lands as
+    // the first HSET for a cycleId, the prior code minted source:"codex".
+    const cycleId = "cycle-3070-enrichment-first-write";
+    await recordCycleMetrics(cycleId, { tasksMerged: 1 });
+    const stored = await getCycleMetrics(cycleId);
+    assert.strictEqual(stored.source, "claude");
+    assert.notStrictEqual(stored.source, "codex");
+  });
+
+  test("an explicit source is preserved (the default only fills an ABSENT source)", async () => {
+    const cycleId = "cycle-3070-explicit-source";
+    await recordCycleMetrics(cycleId, { tasksMerged: 1, source: "work-queue" });
+    const stored = await getCycleMetrics(cycleId);
+    assert.strictEqual(stored.source, "work-queue");
+  });
+});

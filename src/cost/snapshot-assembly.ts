@@ -71,19 +71,18 @@ import {
 // dispatch-gating fold in `./eligibility.ts`. The relocated `assembleSnapshot`
 // (issue #2988) folds it over the three headline scalars, exactly as the tracker
 // did inline. This is a VALUE import; `eligibility.ts` imports only the
-// `UsageSnapshot` TYPE (type-only, runtime-erased) back from `usage-tracker.ts`,
-// so no runtime cycle forms — the same acyclic value+type edge the tracker relied
-// on before the move.
+// `UsageSnapshot` TYPE (type-only, runtime-erased) from the pure `./types.ts`
+// leaf (issue #3071) — NOT back from this leaf — so no runtime cycle forms.
 import { deriveHardStop } from "./eligibility.ts";
-// `UsageSnapshot` — the assembled snapshot shape — stays DEFINED in
-// `usage-tracker.ts` so the `cost/index.ts` barrel + every existing
-// `from "usage-tracker.ts"` import site (eligibility.ts, cost-burn.ts,
-// subscription-quota-trend.ts, tests) resolve unchanged (issue #2988). This leaf
-// imports it TYPE-ONLY: `import type` is fully erased at compile, so it adds NO
-// runtime edge — the one-way runtime-import rule (this leaf imports no VALUE from
-// usage-tracker.ts) is preserved. Same precedent as eligibility.ts's type-only
-// back-import of the same type.
-import type { UsageSnapshot } from "./usage-tracker.ts";
+// `UsageSnapshot` — the assembled snapshot shape this leaf's `assembleSnapshot`
+// returns — and `SkillWoWEntry` (its per-skill week-over-week field type) live in
+// the pure TYPE-vocabulary leaf `./types.ts` (issue #3071). Importing them DOWNWARD
+// from that type root — instead of backwards from the `usage-tracker.ts` I/O
+// coordinator (the old #2988 arrangement) — restores the one-way import direction:
+// a pure leaf now depends only on the module's type vocabulary, never on the
+// coordinator that consumes it. `import type` is fully compile-erased, so no
+// runtime edge either way.
+import type { UsageSnapshot, SkillWoWEntry } from "./types.ts";
 
 /**
  * The composed two-axis quota-burn numerator over a per-family accumulator
@@ -408,23 +407,11 @@ export function deriveSinceReset(input: {
   return { tokensSinceReset, percentSinceReset, weeklyResetAnchor };
 }
 
-/** A single skill's week-over-week trend entry (issue #2404). */
-export interface SkillWoWEntry {
-  /** This week's RAW total tokens for the skill (sum over model families). */
-  current: number;
-  /**
-   * The SAME skill's RAW total in the immediately-prior stored Weekly Usage
-   * Snapshot, or `null` when no prior snapshot exists OR the skill is absent
-   * from it (a "new this week" skill).
-   */
-  prior: number | null;
-  /**
-   * Percentage change `(current - prior) / prior * 100`, or `null` when it
-   * cannot be meaningfully computed: no prior snapshot, the skill is new this
-   * week, or the prior total was 0 (avoids divide-by-zero / Infinity).
-   */
-  deltaPct: number | null;
-}
+// `SkillWoWEntry` — the per-skill week-over-week trend entry (issue #2404) —
+// moved to the pure TYPE-vocabulary leaf `./types.ts` (issue #3071), alongside
+// `UsageSnapshot` (which carries it as a field type). Imported type-only above;
+// `deriveBySkillWoW` below builds it. It was NOT on the `index.ts` public barrel
+// before the move and still isn't — same module-internal visibility.
 
 /**
  * Per-skill week-over-week trend (issue #2404).

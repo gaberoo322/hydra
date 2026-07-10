@@ -43,11 +43,20 @@
  *
  * Layout is computed dynamically (deterministic row-packing over the derived
  * group list, sorted by group id) — the former fixed 7-slot
- * `GROUP_POSITIONS` grid assumed a hand-maintained group count.
+ * `GROUP_POSITIONS` grid assumed a hand-maintained group count. The pure
+ * layout algorithm lives in the sibling `architecture-layout.ts` leaf
+ * (issue #3052) — zero-IO, independently testable, imported here as a
+ * downward edge.
  */
 
 import { readdir as fsReaddir, readFile as fsReadFile } from "node:fs/promises";
 import { posix, resolve } from "node:path";
+import { computeGroupLayout, LAYOUT_DEFAULTS } from "./architecture-layout.ts";
+
+// Re-export layout value symbols so existing importers (e.g. the test suite)
+// stay zero-diff during the migration window. Direct imports from
+// `architecture-layout.ts` are preferred for new callers.
+export { computeGroupLayout, LAYOUT_DEFAULTS };
 
 // ---------------------------------------------------------------------------
 // Group display metadata — label/color overrides only; membership is derived
@@ -173,6 +182,9 @@ export interface ArchitectureGraphDeps {
  *
  * Pure given the injected `readdir` / `readFile` — no cache, no Express.
  * The route caller owns response caching.
+ *
+ * Two-step composition: graph extraction (parse imports + derive group
+ * membership) → layout (pure 2D packing in `architecture-layout.ts`).
  */
 export async function scanArchitecture(
   deps: ArchitectureGraphDeps = {},
@@ -244,10 +256,11 @@ export async function scanArchitecture(
     (byGroup[n.group] ??= []).push(n);
   }
 
-  // Layout is now a pure, separately-testable step (issue #2246): the bucketed
-  // group map → node coordinates + group bounding boxes, with no filesystem,
-  // clock, or I/O. `scanArchitecture` is a two-step composition: graph
-  // extraction (above) → layout (below).
+  // Layout is now a pure, separately-testable step (issue #2246, leaf
+  // extracted in issue #3052): the bucketed group map → node coordinates +
+  // group bounding boxes, with no filesystem, clock, or I/O.
+  // `scanArchitecture` is a two-step composition: graph extraction (above)
+  // → layout (architecture-layout.ts).
   const { groupBounds } = computeGroupLayout(byGroup);
   const sortedGroupIds = Object.keys(byGroup).sort();
 
@@ -266,114 +279,6 @@ export async function scanArchitecture(
     edgeCount: edges.length,
     scannedAt: now.toISOString(),
   };
-}
-
-// ---------------------------------------------------------------------------
-// Pure layout algorithm (issue #2246; extracted from `scanArchitecture`).
-//
-// Takes the already-bucketed group map and packs the groups onto a bounded 2D
-// canvas — no filesystem, no clock, no I/O. The layout constants live here, in
-// the only scope that gives them meaning. `scanArchitecture` composes graph
-// extraction (parse imports + derive group membership) with this layout step.
-//
-// SIDE EFFECT, by design and unchanged from the inline original: this MUTATES
-// each node's `x`/`y` in place (the nodes are the same objects the caller put
-// into `byGroup`). The returned `groupBounds` is the per-group bounding box,
-// keyed by group id. Exported for direct unit test — NOT added to a public
-// barrel; the on-wire `ArchitectureGraph` shape is unchanged.
-// ---------------------------------------------------------------------------
-
-/** Tunable layout geometry — deterministic row-packing on a ~1400px canvas. */
-export interface LayoutConstants {
-  NODE_W: number;
-  NODE_H: number;
-  NODE_GAP_X: number;
-  NODE_GAP_Y: number;
-  GROUP_PAD: number;
-  GROUP_LABEL_H: number;
-  COLS_PER_GROUP: number;
-  CANVAS_W: number;
-  GROUP_GAP: number;
-}
-
-/** Default layout geometry. Callers may pass an override into the layout fn. */
-export const LAYOUT_DEFAULTS: LayoutConstants = {
-  NODE_W: 150,
-  NODE_H: 36,
-  NODE_GAP_X: 16,
-  NODE_GAP_Y: 12,
-  GROUP_PAD: 20,
-  GROUP_LABEL_H: 28,
-  COLS_PER_GROUP: 3,
-  CANVAS_W: 1400,
-  GROUP_GAP: 40,
-};
-
-export type GroupBounds = { x: number; y: number; w: number; h: number };
-
-/**
- * Pack the bucketed group map onto a bounded 2D canvas (issue #2246).
- *
- * Deterministic dynamic layout: groups sorted by id, row-packed left to right;
- * a group that would overflow the canvas wraps to a new row whose y-offset
- * clears the tallest group of the previous row. Non-overlap holds for ANY
- * derived group count by construction.
- *
- * Pure w.r.t. I/O — no filesystem, clock, or network. It DOES mutate each
- * node's `x`/`y` in place (the nodes are shared with the caller's `byGroup`),
- * exactly as the inline original did, and returns the per-group bounding boxes
- * plus the same mutated node list. Byte-for-byte the coordinates the inline
- * code produced.
- */
-export function computeGroupLayout(
-  byGroup: Record<string, ArchitectureNode[]>,
-  layout: LayoutConstants = LAYOUT_DEFAULTS,
-): { nodes: ArchitectureNode[]; groupBounds: Record<string, GroupBounds> } {
-  const {
-    NODE_W,
-    NODE_H,
-    NODE_GAP_X,
-    NODE_GAP_Y,
-    GROUP_PAD,
-    GROUP_LABEL_H,
-    COLS_PER_GROUP,
-    CANVAS_W,
-    GROUP_GAP,
-  } = layout;
-
-  const sortedGroupIds = Object.keys(byGroup).sort();
-  const groupBounds: Record<string, GroupBounds> = {};
-  let cursorX = 0;
-  let cursorY = 0;
-  let rowMaxH = 0;
-
-  for (const gid of sortedGroupIds) {
-    const members = byGroup[gid];
-    const cols = Math.min(members.length, COLS_PER_GROUP);
-    const rows = Math.ceil(members.length / COLS_PER_GROUP);
-    const w = GROUP_PAD * 2 + cols * NODE_W + (cols - 1) * NODE_GAP_X;
-    const h = GROUP_PAD * 2 + GROUP_LABEL_H + rows * NODE_H + (rows - 1) * NODE_GAP_Y;
-
-    if (cursorX > 0 && cursorX + w > CANVAS_W) {
-      cursorX = 0;
-      cursorY += rowMaxH + GROUP_GAP;
-      rowMaxH = 0;
-    }
-
-    members.forEach((n, i) => {
-      const col = i % COLS_PER_GROUP;
-      const row = Math.floor(i / COLS_PER_GROUP);
-      n.x = cursorX + GROUP_PAD + col * (NODE_W + NODE_GAP_X);
-      n.y = cursorY + GROUP_PAD + GROUP_LABEL_H + row * (NODE_H + NODE_GAP_Y);
-    });
-
-    groupBounds[gid] = { x: cursorX, y: cursorY, w, h };
-    cursorX += w + GROUP_GAP;
-    rowMaxH = Math.max(rowMaxH, h);
-  }
-
-  const nodes = sortedGroupIds.flatMap((gid) => byGroup[gid]);
-  return { nodes, groupBounds };
 }
 
 // ---------------------------------------------------------------------------

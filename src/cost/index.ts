@@ -95,8 +95,13 @@ export {
   UNATTRIBUTED_SKILL,
 } from "./usage-tracker.ts";
 
+// `UsageSnapshot` — the assembled snapshot shape — moved to the pure
+// TYPE-vocabulary leaf `./types.ts` (issue #3071); re-exported here from the leaf
+// so every `from "../cost/index.ts"` import site is unchanged. `SkillResolver`
+// stays sourced from `./usage-tracker.ts` (which itself re-exports it from the
+// transcript-scan seam).
+export type { UsageSnapshot } from "./types.ts";
 export type {
-  UsageSnapshot,
   SkillResolver,
 } from "./usage-tracker.ts";
 

@@ -24,7 +24,8 @@ import {
   todayDateString,
 } from "../cost/index.ts";
 import { countQuerySchema } from "../schemas/common.ts";
-import { aggregatorRouteNoQuery } from "./route-helpers.ts";
+import { SubagentTokensBodySchema } from "../schemas/metrics.ts";
+import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
 import { z } from "zod";
 
 /**
@@ -363,29 +364,30 @@ export function createMetricsRouter() {
   // Best-effort: returns 200 with the updated counters on success, 4xx on
   // shape errors. A 5xx is logged but the autopilot's `dispatch.sh` already
   // tolerates a non-2xx via the existing `|| { echo non-fatal }` pattern.
+  //
+  // Issue #3074 (architecture-scan deepening): the body validation now routes
+  // THROUGH the Schemas seam (`SubagentTokensBodySchema.safeParse`) instead of
+  // hand-rolled `typeof`/`parseInt` branches, and returns the canonical
+  // 400 `{code:"schema-validation-failed", issues}` envelope on a bad payload —
+  // matching the sibling `POST /metrics/record` handler and CLAUDE.md's HTTP
+  // validation rule. The string→number coercion and the optional-field policy
+  // are named Zod predicates in the schema, not inline handler branches. The
+  // never-throw 500 isolation is delegated to the `isolateAggregator` seam
+  // (route-helpers.ts, #909), also matching the sibling write handler.
   router.post("/metrics/tokens", async (req, res) => {
-    try {
-      const body = req.body || {};
-      const skill = typeof body.skill === "string" ? body.skill.trim() : "";
-      if (!skill) {
-        return res.status(400).json({ error: "Missing 'skill' (string)" });
-      }
-      const tokens = typeof body.tokens === "number"
-        ? body.tokens
-        : (typeof body.tokens === "string" ? parseInt(body.tokens, 10) : NaN);
-      if (!Number.isFinite(tokens) || tokens < 0) {
-        return res.status(400).json({ error: "Missing or invalid 'tokens' (non-negative number)" });
-      }
-      const opts: { date?: string; cycleId?: string } = {};
-      if (typeof body.date === "string" && body.date) opts.date = body.date;
-      if (typeof body.cycleId === "string" && body.cycleId) opts.cycleId = body.cycleId;
-
-      const result = await recordSubagentTokens(skill, tokens, opts);
-      res.json({ ok: true, ...result });
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/tokens failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
+    const parsed = SubagentTokensBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json(schemaValidationError(parsed.error));
     }
+    const { skill, tokens, date, cycleId } = parsed.data;
+    const opts: { date?: string; cycleId?: string } = {};
+    if (date) opts.date = date;
+    if (cycleId) opts.cycleId = cycleId;
+
+    return isolateAggregator(res, "api/metrics/tokens", async () => {
+      const result = await recordSubagentTokens(skill, tokens, opts);
+      return { ok: true, ...result };
+    });
   });
 
   // POST /metrics/record — Record a completed cycle from external sources.

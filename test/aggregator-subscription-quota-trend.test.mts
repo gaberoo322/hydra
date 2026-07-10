@@ -12,7 +12,7 @@ import {
   getQuotaTrend,
   computeQuotaPoints,
 } from "../src/aggregators/subscription-quota-trend.ts";
-import type { UsageSnapshot } from "../src/cost/usage-tracker.ts";
+import type { UsageSnapshot } from "../src/cost/index.ts";
 import { emptyByDispatchKind } from "../src/cost/transcript-scan.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");

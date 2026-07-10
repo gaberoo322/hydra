@@ -88,10 +88,10 @@ const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
 
 // Issue #3044: the add-resource retry policy + the OV upload helpers (indexText,
 // indexerTargetUri, IndexTextOptions, isRetryableAddResource, the retry-tuning
-// constants) were extracted into the focused leaf ov-upload.ts. They are
-// imported back at the top of this file and re-exported below so callers keep a
-// zero-diff import specifier. HashDedupAdapter (Section 1a) composes indexText /
-// indexerTargetUri from there.
+// constants) were extracted into the focused leaf ov-upload.ts. HashDedupAdapter
+// (Section 1a) composes indexText / indexerTargetUri from there, and those two are
+// re-exported below for zero-diff callers. isRetryableAddResource + IndexTextOptions
+// stay internal to ov-upload.ts — no caller imported them via this facade (#3062).
 
 // ===========================================================================
 // SECTION 2 — Source-file indexing (formerly source-indexer.ts, issue #210).
@@ -499,13 +499,13 @@ export type { SourcePath } from "./source-enumerator.ts";
 // (indexer-lifecycle.ts, learning-lifecycle.ts, tests) keep their existing
 // `from "./indexer.ts"` import specifiers unchanged (INV-2) — the same facade-
 // re-export idiom used for the source-enumerator helpers and the IndexerController
-// delegators. isRetryableAddResource is re-exported for its independent test surface.
+// delegators. Only the two symbols HashDedupAdapter actually composes (indexText,
+// indexerTargetUri) are re-exported; isRetryableAddResource + IndexTextOptions
+// import from ov-upload.ts directly (unused via this facade — issue #3062).
 export {
   indexText,
   indexerTargetUri,
-  isRetryableAddResource,
 } from "./ov-upload.ts";
-export type { IndexTextOptions } from "./ov-upload.ts";
 
 // ===========================================================================
 // SECTION 3 — Source-index staleness probe (formerly source-freshness.ts,

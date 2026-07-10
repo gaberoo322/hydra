@@ -33,27 +33,6 @@ import {
 import { computeClassScoreboard, CLASS_STATS_WINDOW_MS } from "./class-stats-math.ts";
 import type { ClassScoreboard } from "./class-stats-math.ts";
 
-// Re-export the pure scoreboard-math surface so existing importers of
-// `class-stats.ts` (the API view, the Redis snapshot seam, the test suites) keep
-// resolving the pure symbols through this module while new callers may import
-// them directly from the zero-IO leaf. No behavior change — pure pass-through.
-export {
-  computeClassScoreboard,
-  shadowDampener,
-  classRole,
-  CLASS_STATS_WINDOW_MS,
-  CLASS_STATS_MIN_SAMPLE,
-  DAMPENER_MIN_MULTIPLIER,
-  DAMPENER_MAX_MULTIPLIER,
-  DEV_WEAK_MERGE_RATE,
-} from "./class-stats-math.ts";
-export type {
-  ClassRole,
-  ClassStat,
-  ClassScoreboard,
-  ShadowDampenerPlan,
-} from "./class-stats-math.ts";
-
 // ---------------------------------------------------------------------------
 // Composer — the Redis reads (the API view calls this)
 // ---------------------------------------------------------------------------

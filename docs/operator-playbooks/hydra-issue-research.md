@@ -10,6 +10,13 @@ arguments: [issue_number]
 
 Research an issue to make it implementable. Searches the hydra codebase and web, then updates the issue with findings.
 
+**Research discipline (upstream `research` idiom, Pocock v1.1).** Investigate the
+open questions **against primary sources** — the actual codebase, official
+documentation, source, and first-party APIs — not against your prior. Write the
+findings as concise, **cited** notes and save them where this repo already keeps
+them: the issue body itself (this skill's convention), matching the existing
+issue structure rather than inventing a new artifact.
+
 ## Process
 
 ### 1. Select issue

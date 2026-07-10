@@ -128,7 +128,7 @@ export interface IndexTextOptions {
  * UNAUTHENTICATED, malformed JSON) stays non-retryable, preserving the #1828
  * do-not-mask guard.
  */
-export function isRetryableAddResource(result: { ok: false; code: OvErrorCode; body?: string }): boolean {
+function isRetryableAddResource(result: { ok: false; code: OvErrorCode; body?: string }): boolean {
   if (RETRYABLE_OV_CODES.has(result.code)) return true;
   if (result.code !== "ov-non-2xx") return false;
   return isOvServerTimeout(result.body) || isOvPointLockConflict(result.body);
