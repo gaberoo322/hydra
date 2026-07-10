@@ -42,6 +42,10 @@ import {
   type IssueRow,
   type IssueReadResult,
 } from "../github/issues.ts";
+import {
+  extractStrictBlockerRefs,
+  fetchOpenBlockerNumbers,
+} from "../github/blockers.ts";
 
 // ---------------------------------------------------------------------------
 // The orchestrator board label vocabulary — one authoritative copy
@@ -98,10 +102,22 @@ const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;
  * a row with an unparseable/absent `updatedAt` is treated as NOT stale (the
  * conservative default — an empty `updatedAt` produces `NaN` age, which fails
  * the `> window` comparison, exactly as the bash `fromdateiso8601` miss did).
+ *
+ * **Dependency-aware `ready_for_agent` filter (issue #3059).** A
+ * `ready-for-agent` issue whose body cites an OPEN strict blocker
+ * (`blocked by #N` / `depends on #N`) is EXCLUDED from the `ready_for_agent`
+ * count so `decide.py` (which consumes this filtered count) never dispatches
+ * onto an unmerged blocker. Openness is resolved async by the endpoint and
+ * injected here as `openBlockers` — keeping this function pure/sync and
+ * golden-fixture testable. An empty set (the default) means no strict-blocker
+ * filtering: every `ready-for-agent` issue counts, so callers that don't
+ * pre-resolve blockers get the pre-#3059 behavior. The filter is ADDITIVE to
+ * the manual `blocked` label — it never toggles that label.
  */
 export function deriveBoardState(
   rows: readonly IssueRow[],
   nowMs: number,
+  openBlockers: ReadonlySet<number> = new Set(),
 ): Omit<AutopilotBoardStateResponse, "degraded" | "generatedAt"> {
   let needs_qa = 0;
   let ready_for_agent = 0;
@@ -118,9 +134,13 @@ export function deriveBoardState(
     // Exclude `target-backlog` issues from the orch `ready_for_agent` count
     // (issue #2704): they are Target-scope routing, not orchestrator work, so
     // counting them mis-fires an orch-scope grill / dispatch on target code.
+    // ALSO exclude an issue that declares an OPEN strict blocker (issue #3059):
+    // `decide.py` consumes this count, so a dependency-blocked issue must not
+    // inflate the dispatchable pool until its blocker closes.
     if (
       labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
-      !labels.has(ORCH_BOARD_LABELS.target_backlog)
+      !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
+      !hasOpenStrictBlocker(row, openBlockers)
     )
       ready_for_agent++;
     if (labels.has(ORCH_BOARD_LABELS.needs_triage)) needs_triage++;
@@ -164,6 +184,55 @@ function issueAgeSeconds(updatedAtIso: string | undefined, nowMs: number): numbe
   return (nowMs - t) / 1000;
 }
 
+/**
+ * True when the issue's body cites at least one STRICT blocker
+ * (`blocked by #N` / `depends on #N`, via {@link extractStrictBlockerRefs})
+ * whose number is in the injected `openBlockers` set. Self-references are
+ * ignored (an issue can't block itself). Used to exclude a dependency-blocked
+ * issue from the dispatchable `ready_for_agent` pool (issue #3059).
+ */
+function hasOpenStrictBlocker(
+  row: IssueRow,
+  openBlockers: ReadonlySet<number>,
+): boolean {
+  if (openBlockers.size === 0) return false;
+  const refs = extractStrictBlockerRefs(row.body);
+  for (const n of refs) {
+    if (n !== row.number && openBlockers.has(n)) return true;
+  }
+  return false;
+}
+
+/**
+ * Pre-resolve the open-blocker set the endpoint injects into
+ * {@link deriveBoardState}. Collects the union of STRICT blocker refs across
+ * every `ready-for-agent` (non-`target-backlog`) row, then resolves their
+ * open/closed state in ONE batched `gh` query via the shared blockers leaf.
+ * Fail-safe: on lookup failure every referenced blocker is treated as OPEN
+ * (the issue waits a tick) — the shared conservative default (issue #3059).
+ * Returns an empty set when no candidate row declares a strict blocker (no
+ * `gh` round-trip needed).
+ */
+async function resolveOpenBlockers(
+  rows: readonly IssueRow[],
+  githubRepo?: string,
+): Promise<Set<number>> {
+  const referenced = new Set<number>();
+  for (const row of rows) {
+    const labels = new Set(row.labels);
+    if (
+      !labels.has(ORCH_BOARD_LABELS.ready_for_agent) ||
+      labels.has(ORCH_BOARD_LABELS.target_backlog)
+    )
+      continue;
+    for (const n of extractStrictBlockerRefs(row.body)) {
+      if (n !== row.number) referenced.add(n);
+    }
+  }
+  if (referenced.size === 0) return new Set();
+  return fetchOpenBlockerNumbers([...referenced], { githubRepo });
+}
+
 // ---------------------------------------------------------------------------
 // The all-zero safe default (degraded read)
 // ---------------------------------------------------------------------------
@@ -203,12 +272,25 @@ export interface AutopilotBoardRouterDeps {
   readOpenIssues?: OpenIssuesReader;
   /** Clock — defaults to `() => Date.now()`. Injected so staleness is testable. */
   now?: () => number;
+  /**
+   * Pre-resolve the OPEN strict-blocker set for the ready-for-agent rows
+   * (issue #3059). Defaults to {@link resolveOpenBlockers}, which batches one
+   * `gh` open/closed lookup through the shared blockers leaf. Injected so the
+   * dependency-aware filter is testable without a live `gh` — a resolver that
+   * throws or rejects degrades the WHOLE board to `degraded:true` (never a
+   * 500), same as a failed `readOpenIssues`.
+   */
+  resolveOpenBlockers?: (
+    rows: readonly IssueRow[],
+  ) => Promise<Set<number>>;
 }
 
 export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) {
   const router = Router();
   const readOpenIssues = deps.readOpenIssues ?? defaultReadOpenIssues;
   const clock = deps.now ?? (() => Date.now());
+  const resolveBlockers =
+    deps.resolveOpenBlockers ?? ((rows) => resolveOpenBlockers(rows));
 
   router.get("/autopilot/board-state", async (req, res) => {
     const parsed = AutopilotBoardStateQuerySchema.safeParse(req.query ?? {});
@@ -231,7 +313,11 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
           `[autopilot/board-state] gh issue list failed (${result.code}) — degraded all-zero board`,
         );
       } else {
-        counts = deriveBoardState(result.rows, nowMs);
+        // Pre-resolve the OPEN strict-blocker set (async) and inject it into
+        // the pure bucketer so the dependency-aware ready_for_agent filter
+        // (issue #3059) stays golden-fixture testable.
+        const openBlockers = await resolveBlockers(result.rows);
+        counts = deriveBoardState(result.rows, nowMs, openBlockers);
       }
     } catch (err: any) {
       // Belt-and-braces: the seam never throws, but honour the never-throw

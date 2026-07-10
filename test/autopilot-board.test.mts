@@ -179,6 +179,108 @@ describe("deriveBoardState — counts + stale lists (issue #934)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// deriveBoardState — dependency-aware ready_for_agent filter (issue #3059)
+// ---------------------------------------------------------------------------
+
+describe("deriveBoardState — dependency-aware ready_for_agent (issue #3059)", () => {
+  test("golden: a ready-for-agent issue with an OPEN strict blocker is NOT counted", () => {
+    const out = deriveBoardState(
+      [
+        // #1 declares `Blocked by #100`, and #100 is resolved OPEN → excluded.
+        row({
+          number: 1,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Blocked by #100",
+        }),
+        // #2 is a clean ready-for-agent issue → counted.
+        row({ number: 2, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+      ],
+      NOW_MS,
+      new Set([100]), // #100 open
+    );
+    // Only the unblocked issue counts.
+    assert.equal(out.ready_for_agent, 1);
+  });
+
+  test("golden: when the blocker flips CLOSED, the issue re-enters the pool", () => {
+    const rows = [
+      row({
+        number: 1,
+        labels: [ORCH_BOARD_LABELS.ready_for_agent],
+        body: "Blocked by #100",
+      }),
+    ];
+    // Blocker #100 still open → excluded.
+    assert.equal(deriveBoardState(rows, NOW_MS, new Set([100])).ready_for_agent, 0);
+    // Blocker #100 now closed (empty open-set) → included, no `blocked` label toggle.
+    assert.equal(deriveBoardState(rows, NOW_MS, new Set()).ready_for_agent, 1);
+  });
+
+  test("`depends on #N` gates dispatch the same as `blocked by #N`", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 1,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "This depends on #200 landing first.",
+        }),
+      ],
+      NOW_MS,
+      new Set([200]),
+    );
+    assert.equal(out.ready_for_agent, 0);
+  });
+
+  test("a bare `#N` mention does NOT exclude (strict parser, no false starve)", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 1,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Related work: see #300 (not a blocker).",
+        }),
+      ],
+      NOW_MS,
+      new Set([300]), // #300 is open, but only referenced as a bare mention
+    );
+    assert.equal(out.ready_for_agent, 1);
+  });
+
+  test("filter is ADDITIVE to the manual `blocked` label — counts are independent", () => {
+    const out = deriveBoardState(
+      [
+        // ready-for-agent + open strict blocker → excluded from ready_for_agent,
+        // but NOT auto-added to the `blocked` count (no label toggle).
+        row({
+          number: 1,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Blocked by #100",
+        }),
+      ],
+      NOW_MS,
+      new Set([100]),
+    );
+    assert.equal(out.ready_for_agent, 0);
+    assert.equal(out.blocked, 0); // never auto-toggles the manual label
+  });
+
+  test("default (no openBlockers arg) preserves pre-#3059 behavior — no filtering", () => {
+    const out = deriveBoardState(
+      [
+        row({
+          number: 1,
+          labels: [ORCH_BOARD_LABELS.ready_for_agent],
+          body: "Blocked by #100",
+        }),
+      ],
+      NOW_MS,
+      // no third arg → empty set → strict-blocker filter is a no-op
+    );
+    assert.equal(out.ready_for_agent, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Route harness (mirrors test/autopilot-idle.test.mts)
 // ---------------------------------------------------------------------------
 
@@ -284,6 +386,40 @@ describe("GET /autopilot/board-state — route (issue #934)", () => {
     assert.equal(res._status, 200);
     assert.equal(res._body.degraded, true);
     assert.equal(res._body.blocked, 0);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("endpoint pre-resolves open blockers and excludes a blocked issue (issue #3059)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () =>
+        okResult([
+          row({
+            number: 1,
+            labels: [ORCH_BOARD_LABELS.ready_for_agent],
+            body: "Blocked by #100",
+          }),
+          row({ number: 2, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+        ]),
+      // #100 resolves OPEN → issue #1 excluded from the dispatchable pool.
+      resolveOpenBlockers: async () => new Set([100]),
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ready_for_agent, 1);
+    assert.equal(res._body.degraded, false);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("a rejecting blocker resolver degrades the board, never 500s (issue #3059)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () =>
+        okResult([row({ number: 1, labels: [ORCH_BOARD_LABELS.ready_for_agent] })]),
+      resolveOpenBlockers: async () => {
+        throw new Error("gh blew up");
+      },
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.degraded, true);
+    assert.equal(res._body.ready_for_agent, 0);
     AutopilotBoardStateResponseSchema.parse(res._body);
   });
 
