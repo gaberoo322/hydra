@@ -1,10 +1,20 @@
 import { Router } from "express";
-import { readFile, writeFile, readdir } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { resolve } from "node:path";
 import { getTargetName, getTargetWorkspace } from "../target-config.ts";
 import { booleanFlag } from "../schemas/common.ts";
 import { z } from "zod";
-import { parseEnvFile, maskValue, makeEnvAuthGuard } from "./config-io.ts";
+import {
+  parseEnvFile,
+  maskValue,
+  makeEnvAuthGuard,
+  CONFIG_SECTIONS,
+  listConfigSection,
+  readConfigFile,
+  writeConfigFile,
+  readEnvFile,
+  upsertEnvVar,
+  deleteEnvVar,
+} from "./config-io.ts";
 
 /**
  * Config + env-var routes.
@@ -13,6 +23,13 @@ import { parseEnvFile, maskValue, makeEnvAuthGuard } from "./config-io.ts";
  * git-tracked markdown files under config/{agents,feedback,direction,research}.
  * Env-var endpoints read/write .env files for hydra and the target project, and
  * require Bearer auth via CRON_SECRET.
+ *
+ * Filesystem policy — the config-section registry, path construction, and the
+ * `.env` read/write+edit operations — lives in the `config-io.ts` leaf (issues
+ * #3056, #3104). This factory is a thin adapter: parse the request → call a leaf
+ * primitive → shape the response. It resolves the env-project and config-root
+ * paths (the only config the leaf refuses to read from `process.env`) and holds
+ * no `readFile`/`writeFile`/`readdir` of its own.
  */
 export function createConfigRouter() {
   const router = Router();
@@ -24,23 +41,13 @@ export function createConfigRouter() {
   // Config endpoints — read/write git-tracked config files
   // -----------------------------------------------------------------------
 
-  const CONFIG_SECTIONS = {
-    agents: { dir: "agents", ext: ".md" },
-    feedback: { dir: "feedback", ext: ".md" },
-    direction: { dir: "direction", ext: ".md" },
-    research: { dir: "research", ext: ".md" },
-  };
-
   // GET /config/:section — List files in a config section
   router.get("/config/:section", async (req, res) => {
     const section = CONFIG_SECTIONS[req.params.section];
     if (!section) return res.status(404).json({ error: `Unknown config section: ${req.params.section}` });
     try {
-      const dir = join(CONFIG_PATH, section.dir);
-      const files = (await readdir(dir)).filter(f => f.endsWith(section.ext));
-      res.json(files.map(f => f.replace(section.ext, "")));
+      res.json(await listConfigSection(CONFIG_PATH, section));
     } catch (err: any) {
-      if (err.code === "ENOENT") return res.json([]);
       res.status(500).json({ error: err.message });
     }
   });
@@ -49,12 +56,11 @@ export function createConfigRouter() {
   router.get("/config/:section/:name", async (req, res) => {
     const section = CONFIG_SECTIONS[req.params.section];
     if (!section) return res.status(404).json({ error: `Unknown config section: ${req.params.section}` });
-    const filePath = join(CONFIG_PATH, section.dir, `${req.params.name}${section.ext}`);
     try {
-      const content = await readFile(filePath, "utf-8");
+      const content = await readConfigFile(CONFIG_PATH, section, req.params.name);
+      if (content === null) return res.status(404).json({ error: `Not found: ${req.params.name}` });
       res.type("text/plain").send(content);
     } catch (err: any) {
-      if (err.code === "ENOENT") return res.status(404).json({ error: `Not found: ${req.params.name}` });
       res.status(500).json({ error: err.message });
     }
   });
@@ -65,10 +71,9 @@ export function createConfigRouter() {
     if (!section) return res.status(404).json({ error: `Unknown config section: ${req.params.section}` });
     const content = req.body?.content;
     if (typeof content !== "string") return res.status(400).json({ error: "Body must include 'content' string" });
-    const filePath = join(CONFIG_PATH, section.dir, `${req.params.name}${section.ext}`);
     try {
-      await writeFile(filePath, content);
-      res.json({ ok: true, path: filePath });
+      const path = await writeConfigFile(CONFIG_PATH, section, req.params.name, content);
+      res.json({ ok: true, path });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -94,8 +99,7 @@ export function createConfigRouter() {
     const envPath = ENV_PROJECTS[req.params.project];
     if (!envPath) return res.status(404).json({ error: `Unknown project: ${req.params.project}` });
     try {
-      const raw = await readFile(envPath, "utf-8");
-      const vars = parseEnvFile(raw);
+      const vars = parseEnvFile(await readEnvFile(envPath));
       // ADR-0022: read the `reveal` flag through the Schemas seam via the
       // common booleanFlag helper. Absent/unset => false (mask values).
       const reveal = z.object({ reveal: booleanFlag() }).parse(req.query).reveal;
@@ -104,7 +108,6 @@ export function createConfigRouter() {
         value: reveal ? v.value : maskValue(v.value),
       })));
     } catch (err: any) {
-      if (err.code === "ENOENT") return res.json([]);
       res.status(500).json({ error: err.message });
     }
   });
@@ -121,21 +124,8 @@ export function createConfigRouter() {
       return res.status(400).json({ error: "Value must be a string" });
     }
     try {
-      let raw = "";
-      try { raw = await readFile(envPath, "utf-8"); } catch { /* intentional: env file doesn't exist yet — initialize as empty */ }
-      const lines = raw.split("\n");
-      const needle = `${key}=`;
-      const idx = lines.findIndex(l => l.startsWith(needle) || l.startsWith(`${key} =`));
-      const needsQuotes = value.includes(" ") || value.includes("#") || value.includes('"') || value.includes("\n");
-      const formatted = needsQuotes ? `${key}="${value.replace(/"/g, '\\"')}"` : `${key}=${value}`;
-      if (idx >= 0) {
-        lines[idx] = formatted;
-      } else {
-        if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
-        lines.push(formatted);
-      }
-      await writeFile(envPath, lines.join("\n"));
-      res.json({ ok: true, key, action: idx >= 0 ? "updated" : "added" });
+      const action = await upsertEnvVar(envPath, key, value);
+      res.json({ ok: true, key, action });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -147,13 +137,8 @@ export function createConfigRouter() {
     if (!envPath) return res.status(404).json({ error: `Unknown project: ${req.params.project}` });
     const key = req.params.key;
     try {
-      const raw = await readFile(envPath, "utf-8");
-      const lines = raw.split("\n");
-      const filtered = lines.filter(l => !l.startsWith(`${key}=`) && !l.startsWith(`${key} =`));
-      if (filtered.length === lines.length) {
-        return res.status(404).json({ error: `Key not found: ${key}` });
-      }
-      await writeFile(envPath, filtered.join("\n"));
+      const removed = await deleteEnvVar(envPath, key);
+      if (!removed) return res.status(404).json({ error: `Key not found: ${key}` });
       res.json({ ok: true, key, action: "deleted" });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
