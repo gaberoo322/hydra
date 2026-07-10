@@ -43,6 +43,14 @@ the **Target** repo, not hardcoded here.
 - **Standards** (every PR) — conventions, tests-present-and-non-empty, no
   silent catch, no unjustified touch of risk-critical paths, and — on any
   UI-touching PR — **render-robustness** (see below).
+  - **Refactoring-smell battery (Martin Fowler, via upstream `code-review` v1.1).**
+    Beyond the documented conventions, scan the diff for these twelve smells and
+    **name each one you find** so the finding is actionable, applying them
+    universally **unless a Target-documented standard overrides**: Mysterious
+    Name, Duplicated Code, Feature Envy, Data Clumps, Primitive Obsession,
+    Repeated Switches, Shotgun Surgery, Divergent Change, Speculative Generality,
+    Message Chains, Middle Man, Refused Bequest. Report a smell only where you can
+    point at the specific hunk; do not invent speculative concerns.
 - **Spec** (risk-critical only) — diff vs. the design-concept artifact for the
   work item (the lightweight Target artifact from #1056; absent → treat the
   Spec axis as a hard finding so the heavier gate never passes by omission).
