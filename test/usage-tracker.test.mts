@@ -28,7 +28,6 @@ import {
   DEFAULT_WEEKLY_PACE_CEILING,
   sessionIdFromPath,
   INTERACTIVE_SKILL,
-  UNATTRIBUTED_SKILL,
   type UsageSnapshot,
   type SkillResolver,
   type OAuthUsageResult,
@@ -911,8 +910,6 @@ describe("usage-tracker", () => {
       assert.equal(deriveSkill(""), INTERACTIVE_SKILL);
       assert.equal(deriveSkill(null), INTERACTIVE_SKILL);
       assert.equal(INTERACTIVE_SKILL, "interactive");
-      // Back-compat alias still resolves to the same residual value.
-      assert.equal(UNATTRIBUTED_SKILL, INTERACTIVE_SKILL);
     });
   });
 

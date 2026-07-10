@@ -156,7 +156,6 @@ import {
   readOAuthUsage,
   deriveSkill,
   INTERACTIVE_SKILL,
-  UNATTRIBUTED_SKILL,
   sessionIdFromPath as transcriptScanSessionIdFromPath,
 } from "./transcript-scan.ts";
 import type { SkillResolver } from "./transcript-scan.ts";
@@ -164,12 +163,12 @@ import type { SkillResolver } from "./transcript-scan.ts";
 // `clearUsageCache()` reaches its reset through the seam's `clearOAuthCache()`.
 import { clearOAuthCache } from "./oauth-read-cache.ts";
 
-// `INTERACTIVE_SKILL` (and its back-compat alias `UNATTRIBUTED_SKILL`),
-// `SkillResolver`, and `sessionIdFromPath` live in the TranscriptScan seam
-// (issue #1971, #2402). Re-exported here at the SAME names so the `index.ts`
-// barrel and existing `from "./usage-tracker.ts"` imports keep resolving
-// unchanged.
-export { INTERACTIVE_SKILL, UNATTRIBUTED_SKILL };
+// `INTERACTIVE_SKILL`, `SkillResolver`, and `sessionIdFromPath` live in the
+// TranscriptScan seam (issue #1971, #2402). Re-exported here at the SAME names
+// so the `index.ts` barrel and existing `from "./usage-tracker.ts"` imports
+// keep resolving unchanged. (The `UNATTRIBUTED_SKILL` back-compat alias was
+// demoted to module-private in the seam — issue #3083.)
+export { INTERACTIVE_SKILL };
 export type { SkillResolver };
 
 // Production attribution resolver (issue #2402). Pure, Redis-free: derives the

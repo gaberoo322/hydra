@@ -70,19 +70,18 @@ const MODEL_FAMILIES: readonly ModelFamily[] = ["opus", "sonnet", "haiku", "unkn
  *
  * Renamed from the former `"unattributed"` value (issue #2402): in-transcript
  * derivation makes "no attribution signal" mean exactly "interactive", not
- * "registry empty". The exported NAME `UNATTRIBUTED_SKILL` is retained below as
- * a back-compat alias so `src/cost/index.ts` and existing tests keep resolving.
+ * "registry empty".
  */
 export const INTERACTIVE_SKILL = "interactive";
 
 /**
- * Back-compat alias for {@link INTERACTIVE_SKILL} (issue #2402). The pre-#2402
- * name for the residual bucket was `UNATTRIBUTED_SKILL` with the value
- * `"unattributed"`; the value is now `"interactive"`. Kept as an alias so the
- * `index.ts` barrel and existing `from "./usage-tracker.ts"` imports resolve
- * unchanged. New code should reference {@link INTERACTIVE_SKILL}.
+ * @deprecated Module-private back-compat alias for {@link INTERACTIVE_SKILL}
+ * (issue #2402, export demoted #3083). The pre-#2402 name for the residual
+ * bucket was `UNATTRIBUTED_SKILL` with the value `"unattributed"`; the value is
+ * now `"interactive"`. New code should reference {@link INTERACTIVE_SKILL}; this
+ * alias is no longer re-exported.
  */
-export const UNATTRIBUTED_SKILL = INTERACTIVE_SKILL;
+const UNATTRIBUTED_SKILL = INTERACTIVE_SKILL;
 
 /**
  * Resolves a transcript's FIRST user message text to the dispatching skill
