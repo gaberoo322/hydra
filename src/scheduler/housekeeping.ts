@@ -110,20 +110,26 @@ const WEEK_MS = 7 * DAY_MS;
  *
  * Reads the last-run timestamp from `getLastTs()` and returns `true` when the
  * chore should proceed: either no prior run is recorded, or `periodMs` has
- * elapsed since the last run. Centralises the `!lastTs || Date.now() -
+ * elapsed since the last run. Centralises the `!lastTs || now() -
  * parseInt(lastTs) >= periodMs` pattern that was previously spelled out inline
  * in every guard lambda.
  *
- * Pure function except for the injected Redis read — testable without a full
- * chore setup. Not exported as a public API surface; callers are the guard
- * lambdas in `runHousekeeping`.
+ * Both dependencies are injected — the Redis timestamp read (`getLastTs`) and
+ * the clock (`now`, defaulting to `Date.now`). That makes the cadence predicate
+ * pure time-arithmetic over injected inputs: a test can pass a stub `getLastTs`
+ * (return `null` = always-run, a stale epoch string = guard passes, a fresh
+ * epoch string = guard blocks) and a frozen `now` and assert the windowing
+ * decision without a Redis fixture (issue #3091). Exported for that unit
+ * coverage (mirroring `runChore`); its production callers are the guard lambdas
+ * in `runHousekeeping`.
  */
 async function choreGuard(
   getLastTs: () => Promise<string | null>,
   periodMs: number,
+  now: () => number = Date.now,
 ): Promise<boolean> {
   const lastTs = await getLastTs();
-  return !lastTs || Date.now() - parseInt(lastTs) >= periodMs;
+  return !lastTs || now() - parseInt(lastTs) >= periodMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +249,26 @@ async function runHousekeeping(
      * real `publishForecastCalibrationBrierMetric` from `src/metrics/publish.ts`.
      */
     publishBrierMetric?: () => Promise<{ ok: boolean }>;
+    /**
+     * Injectable cadence-guard Redis readers + clock (issue #3091). Each of the
+     * four time-windowed chores (`weekly-summary`, `usage-weekly-snapshot`,
+     * `memory-consolidation`, `stale-key-prune`) reads its last-run timestamp
+     * through one of these getters, defaulting to the real
+     * `src/redis/housekeeping.ts` accessor. Injecting a stub reader (return
+     * `null` = always-run, a stale epoch string = guard passes, a fresh epoch
+     * string = guard blocks) plus a frozen `now` lets a test assert the
+     * guard-windowing decision — "skipped because the window has not elapsed"
+     * vs. "ran because it has" — without standing up Redis. Making the readers
+     * visible here also turns the module's Interface into an honest statement of
+     * what the registry depends on externally (previously they were hidden
+     * module-level imports).
+     */
+    getDigestLastWeekly?: () => Promise<string | null>;
+    getUsageSnapshotLastWeekly?: () => Promise<string | null>;
+    getMemoryLastConsolidation?: () => Promise<string | null>;
+    getCleanupLastDaily?: () => Promise<string | null>;
+    /** Injectable clock for the cadence guards; defaults to `Date.now`. */
+    now?: () => number;
   } = {},
 ): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
@@ -259,6 +285,12 @@ async function runHousekeeping(
   // `!lastTs || Date.now() - parseInt(lastTs) >= periodMs` pattern. Period
   // constants (`WEEK_MS`, `DAY_MS`) are module-private consts hoisted above
   // `runHousekeeping` so the guards read a named cadence instead of inline math.
+  //
+  // Issue #3091: each cadence guard reads its Redis timestamp getter (and the
+  // clock) through `deps.<getter> ?? <import>` / `deps.now`, so the four
+  // time-windowed chores are testable without Redis. The default preserves all
+  // production behaviour — a caller that passes no cadence deps binds the real
+  // `src/redis/housekeeping.ts` accessors and `Date.now` exactly as before.
   const chores: Chore[] = [
     {
       name: "blocked-escalation",
@@ -279,7 +311,8 @@ async function runHousekeeping(
 
     {
       name: "weekly-summary",
-      guard: () => choreGuard(getDigestLastWeekly, WEEK_MS),
+      guard: () =>
+        choreGuard(deps.getDigestLastWeekly ?? getDigestLastWeekly, WEEK_MS, deps.now),
       work: () => runWeeklyDigest(),
     },
 
@@ -292,13 +325,15 @@ async function runHousekeeping(
       // `runUsageWeeklySnapshot` itself (consistent with `runWeeklyDigest` and
       // `runMemoryConsolidation`) — no stamp call at the registry level.
       name: "usage-weekly-snapshot",
-      guard: () => choreGuard(getUsageSnapshotLastWeekly, WEEK_MS),
+      guard: () =>
+        choreGuard(deps.getUsageSnapshotLastWeekly ?? getUsageSnapshotLastWeekly, WEEK_MS, deps.now),
       work: () => runUsageWeeklySnapshot(),
     },
 
     {
       name: "memory-consolidation",
-      guard: () => choreGuard(getMemoryLastConsolidation, DAY_MS),
+      guard: () =>
+        choreGuard(deps.getMemoryLastConsolidation ?? getMemoryLastConsolidation, DAY_MS, deps.now),
       work: () => runMemoryConsolidation(),
     },
 
@@ -327,7 +362,8 @@ async function runHousekeeping(
       // `pruneStaleRedisKeys` itself (consistent with `runWeeklyDigest` and
       // `runMemoryConsolidation`) — no stamp call at the registry level.
       name: "stale-key-prune",
-      guard: () => choreGuard(getCleanupLastDaily, DAY_MS),
+      guard: () =>
+        choreGuard(deps.getCleanupLastDaily ?? getCleanupLastDaily, DAY_MS, deps.now),
       work: () => pruneStaleRedisKeys(),
     },
 
@@ -432,4 +468,9 @@ export {
   // fake `setReconcilerHealth` and assert the last-run health snapshot is
   // persisted (feed liveness + batch metrics) without standing up Redis.
   runMergedItemReconciler,
+  // Issue #3091: the canonical cadence-check, exported so a unit test can assert
+  // the guard-windowing decision (null → always-run, stale ts → passes, fresh
+  // ts → blocks) as pure time-arithmetic over an injected getter + frozen clock,
+  // without a Redis fixture.
+  choreGuard,
 };

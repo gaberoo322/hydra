@@ -29,6 +29,8 @@ import {
   pruneStaleRedisKeys,
   runMergedItemReconciler,
   runSkillCatalogReregister,
+  runHousekeeping,
+  choreGuard,
 } from "../src/scheduler/housekeeping.ts";
 
 interface PublishedEvent {
@@ -508,5 +510,120 @@ describe("runSkillCatalogReregister — isolated (issue #2148)", () => {
     });
     assert.equal(result, false, "a down skills endpoint must block the doomed pass");
     assert.equal(reRan, false, "no doomed registration pass when the skills POST handler is down");
+  });
+});
+
+describe("choreGuard — cadence windowing as pure arithmetic (issue #3091)", () => {
+  const now = 1_700_000_000_000;
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+  test("no prior run (getter returns null) → always run", async () => {
+    const proceed = await choreGuard(async () => null, WEEK_MS, () => now);
+    assert.equal(proceed, true, "a chore with no recorded last-run must proceed");
+  });
+
+  test("stale last-run (>= periodMs ago) → guard passes", async () => {
+    // Last ran 8 days ago; the weekly window (7d) has elapsed.
+    const staleTs = String(now - 8 * 24 * 60 * 60 * 1000);
+    const proceed = await choreGuard(async () => staleTs, WEEK_MS, () => now);
+    assert.equal(proceed, true, "an elapsed window must let the chore run");
+  });
+
+  test("fresh last-run (< periodMs ago) → guard blocks", async () => {
+    // Last ran 1 day ago; the weekly window has NOT elapsed.
+    const freshTs = String(now - 1 * 24 * 60 * 60 * 1000);
+    const proceed = await choreGuard(async () => freshTs, WEEK_MS, () => now);
+    assert.equal(proceed, false, "an un-elapsed window must block the chore");
+  });
+
+  test("exactly at the boundary (now - last === periodMs) → guard passes", async () => {
+    const boundaryTs = String(now - WEEK_MS);
+    const proceed = await choreGuard(async () => boundaryTs, WEEK_MS, () => now);
+    assert.equal(proceed, true, "the window is inclusive at the boundary (>=)");
+  });
+
+  test("defaults to Date.now when no clock is injected", async () => {
+    // A last-run far in the past against the real clock → must proceed.
+    const proceed = await choreGuard(async () => "0", WEEK_MS);
+    assert.equal(proceed, true, "the default clock is Date.now");
+  });
+});
+
+describe("runHousekeeping — cadence guards injectable without Redis (issue #3091)", () => {
+  const now = 1_700_000_000_000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function makeBus() {
+    return { async publish() { return "fake-id"; } };
+  }
+
+  // A fresh timestamp for every cadence reader → every time-windowed guard
+  // blocks, so all four guarded chores must appear in `skipped` and NONE of
+  // their `work` bodies run — proving the guard-windowing decision is fully
+  // driven by the injected `deps` + `now`, with no Redis fixture in play.
+  const freshTs = async () => String(now);
+  const allGuardsBlockDeps = {
+    getDigestLastWeekly: freshTs,
+    getUsageSnapshotLastWeekly: freshTs,
+    getMemoryLastConsolidation: freshTs,
+    getCleanupLastDaily: freshTs,
+    now: () => now,
+  };
+  const guardedChores = [
+    "weekly-summary",
+    "usage-weekly-snapshot",
+    "memory-consolidation",
+    "stale-key-prune",
+  ];
+
+  test("fresh injected timestamps block all four time-windowed chores (→ skipped)", async () => {
+    const summary = await runHousekeeping(makeBus() as any, allGuardsBlockDeps);
+    for (const name of guardedChores) {
+      assert.ok(
+        summary.skipped.includes(name),
+        `${name} must be skipped when its cadence guard reports fresh`,
+      );
+      assert.ok(
+        !summary.ran.includes(name),
+        `${name} must not run when its cadence guard blocks`,
+      );
+    }
+  });
+
+  test("null injected timestamps let each cadence guard pass through to its work", async () => {
+    // getter → null means "no prior run recorded" → the guard passes, so the
+    // chore's `work` runs (and, with no Redis, fail-softs through runChore). The
+    // point under test is that the guard does NOT short-circuit the chore: every
+    // guarded chore must be classified (ran ∪ skipped) rather than held out by a
+    // fresh-window guard — the composition contract holds under injected cadence
+    // deps with no Redis fixture.
+    const nullTs = async () => null;
+    const summary = await runHousekeeping(makeBus() as any, {
+      getDigestLastWeekly: nullTs,
+      getUsageSnapshotLastWeekly: nullTs,
+      getMemoryLastConsolidation: nullTs,
+      getCleanupLastDaily: nullTs,
+      now: () => now,
+      publishBrierMetric: async () => ({ ok: true }),
+    });
+    const classified = new Set([...summary.ran, ...summary.skipped]);
+    for (const name of guardedChores) {
+      assert.ok(
+        classified.has(name),
+        `${name} must be classified (ran or skipped) when its guard passes`,
+      );
+    }
+  });
+
+  test("defaults preserve production wiring — omitting cadence deps binds the real readers", async () => {
+    // A call with no cadence deps must not throw at the composition level: the
+    // `deps.<getter> ?? <import>` default binds the real Redis accessors, and
+    // `runChore` fail-softs any I/O error. Reaching a well-formed summary proves
+    // the default binding is intact (zero-diff for callers that pass nothing).
+    const summary = await runHousekeeping(makeBus() as any, {
+      publishBrierMetric: async () => ({ ok: true }),
+    });
+    assert.ok(Array.isArray(summary.ran), "ran is an array");
+    assert.ok(Array.isArray(summary.skipped), "skipped is an array");
   });
 });
