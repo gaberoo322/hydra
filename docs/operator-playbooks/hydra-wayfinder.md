@@ -1,6 +1,6 @@
 ---
 name: hydra-wayfinder
-description: Plan a chunk of Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into blocking decision tickets, resolve them one at a time, then hand the cleared map to /to-spec. Adapts Matt Pocock's upstream `wayfinder` skill to Hydra's issue tracker, label vocabulary, and epic conventions.
+description: Plan a chunk of Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into blocking decision tickets, resolve them one at a time, then hand the cleared map to /to-spec. Adapts Matt Pocock's `wayfinder` skill to Hydra.
 when_to_use: "When the operator has a large, foggy Hydra initiative to plan (bigger than one session), says 'wayfind', 'chart a map', 'plan this big change', or wants to break a vague initiative into decision tickets before writing a spec. Interactive / operator-driven — not an autopilot dispatch class."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebSearch(*) WebFetch(*) Agent(*)
 claude_only: true
