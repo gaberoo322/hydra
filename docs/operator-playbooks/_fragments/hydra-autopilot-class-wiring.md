@@ -78,7 +78,7 @@ The authoritative source for dispatch policy is `scripts/autopilot/decide.py`.
 > orchestrator board has gone fully idle, it reclaims spare capacity by
 > dispatching the headless `/hydra-architecture-scan` wrapper (#788),
 > which runs explore + emit-issues and **files orch-scope GitHub issues**
-> via `hydra-prd` / `to-issues`. It is **issue-producing, not
+> via `hydra-prd` / `to-tickets`. It is **issue-producing, not
 > direct-dispatch** — it never dispatches `dev_orch` itself; the issues it
 > files re-enter the board as ordinary `ready-for-agent` work on a later
 > turn. `SIGNAL_COOLDOWNS["architecture_orch"] = 24h`

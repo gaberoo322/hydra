@@ -172,6 +172,30 @@ cap). Each question must close a branch of the design tree. Ask **one at a
 time**; do not batch. Each `qaTrace[i]` entry pairs the question with the
 agent's resolved answer — not a stream of options.
 
+**Ask one question at a time — and know why (upstream `grilling` v1.1).**
+Asking multiple questions at once is bewildering: the operator can only hold
+one open branch in their head, and a batched question gets a batched (and
+therefore shallow) answer. Resolve each branch fully before opening the next.
+
+**Facts vs decisions — do not grill yourself (upstream `grilling` v1.1).**
+Separate the two kinds of open question before you ask anything:
+
+- **Facts** — anything answerable by *reading the codebase, `CONTEXT.md`, the
+  ADRs, or the research report*. Resolve these yourself by exploring; **never**
+  spend a Q&A turn asking the operator (or, in the autopilot path, asking
+  yourself) a question you can answer from the sources in Step 2. Filling
+  `modulesTouched[].depthClassification` from `src/codebase-analyzer.ts`
+  heuristics is a fact, not a decision.
+- **Decisions** — anything that requires a *choice the sources don't settle*
+  (which alternative to take, what invariant to commit to, whether to break an
+  interface). These belong to the operator: present each with a recommended
+  answer and wait. In the non-interactive autopilot path, an unresolved
+  decision is a `glossaryGaps` / handoff escalation (Step 8), not a guess.
+
+This distinction is the fix for the "the skill grills itself by re-exploring
+the codebase as if it were the operator" failure mode (pronounced on Fable):
+facts get *explored*, decisions get *asked*.
+
 **Mandatory topics** (each one populates a specific artifact field):
 
 | Question theme | Field populated |
@@ -275,6 +299,20 @@ This step is opportunistic — if no findings surface, skip it. Do not
 generate findings for the sake of having any.
 
 ### Step 7 — Write the artifact
+
+**Confirmation gate (upstream `grilling` v1.1).** Do not write/approve the
+artifact until shared understanding is confirmed. Writing the artifact is the
+"enact" step here — an approved artifact unblocks `dev_orch` / `dev_target`
+dispatch — so the grill must not slide straight from the last Q&A answer into
+persisting an artifact without a confirmation beat.
+
+- **Operator-interactive runs** — summarise the resolved design (modules,
+  invariants, rejected alternatives) back in one short recap and get explicit
+  confirmation before the POST. If the operator amends, loop back to Step 3.
+- **Autopilot (non-interactive) runs** — there is no operator to confirm, so
+  the automated stand-in is the Step 8 `gateCheck()`: it is the shared-
+  understanding gate. Never hand-wave past a gate FAIL by approving anyway
+  (Safety rule 3); an unconfirmable design escalates via handoff (Step 8).
 
 POST the full body to `/api/design-concepts`. The store computes
 `createdAt` and `artifactHash` server-side; the skill MUST NOT supply

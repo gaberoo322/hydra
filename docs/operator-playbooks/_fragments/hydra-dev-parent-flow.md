@@ -25,7 +25,7 @@ one-liner → stop, tell operator to run `/triage` first.
 ### 3. Size check — decompose if too large
 
 If body has **>5 acceptance criteria** OR description suggests **>8 files changed**:
-1. `/to-issues $issue_number` to decompose (Claude) or `codex exec --skill to-issues` (Codex)
+1. `/to-tickets $issue_number` to decompose (Claude; upstream renamed `to-issues`→`to-tickets` in Pocock v1.1)
 2. `gh issue edit $issue_number --add-label blocked --remove-label ready-for-agent`
 3. Comment on parent listing children
 4. Stop — `/hydra-sweep` picks up children after triage

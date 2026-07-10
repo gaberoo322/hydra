@@ -27,7 +27,13 @@ Run these numbered steps.
    deposit is best-effort on I/O error but the step is mandatory.
 5. **Fetch the knowledge context** (see "Knowledge context" below) and weave it in.
 6. Grep/read the source for context, then implement — touching out-of-scope
-   files only with a `scope-justification:` block in the PR body.
+   files only with a `scope-justification:` block in the PR body. Follow the
+   upstream `implement` cadence (Pocock v1.1): use **TDD at pre-agreed seams**
+   where practical — **red before green, one slice at a time** (the `tdd` skill
+   is reference-only in v1.1: refactoring is NOT part of the loop, it belongs in
+   review) — and run `npm run typecheck` plus **single test files**
+   (`node --test --test-force-exit test/<name>.test.mts`) **regularly as you go**,
+   reserving the full `npm test` sweep for step 8.
 7. **Declare glossary/ADR impact** — per `docs/agents/domain.md`, add a
    `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved
    or decision made. Do NOT edit `CONTEXT.md` in the code PR — that delta lands

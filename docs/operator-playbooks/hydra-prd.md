@@ -16,7 +16,7 @@ Take a structured `PrdInput` and emit one **parent epic** issue plus **N tracer-
 
 This skill exists because the **Specs subsystem** (in-process multi-cycle task decomposition under `src/specs.ts`, the `/api/specs` endpoints, and the `spec-starvation` instrumentation) was retired in issue #513 — the in-process control loop that produced and consumed specs was already gone, and the autopilot's child-dispatch model superseded it. After #513, multi-issue research findings had nowhere durable to live. `hydra-prd` is the GitHub-native replacement: each slice becomes a separately mergeable issue that the **Orchestrator**'s autopilot can dispatch through `hydra-dev` / `hydra-target-build` independently, with the parent epic auto-closing once every child closes.
 
-Unlike the generic upstream `/to-prd` skill — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
+Unlike the generic upstream `/to-spec` skill (renamed from `/to-prd` in Pocock v1.1 — it was always a spec, not a PRD) — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
 
 The skill is **dry-run by default**. To actually create issues on `gaberoo322/hydra`, pass `--apply` (or `apply=true`). Dry-run prints the rendered parent and child bodies plus the validation report, so the operator can review before committing.
 
@@ -204,7 +204,7 @@ PARENT_BODY_FINAL=$(... renderParentBody(input, [SIBLING_NUMS[1], ..., SIBLING_N
 gh issue edit "$PARENT_NUM" --repo gaberoo322/hydra --body "$PARENT_BODY_FINAL"
 ```
 
-The two-pass approach (parent with placeholders → children → re-render parent with real numbers) is the same pattern `/to-issues` uses and the only one that keeps issue references resolvable without a back-edit per child.
+The two-pass approach (parent with placeholders → children → re-render parent with real numbers) is the same pattern `/to-tickets` uses and the only one that keeps issue references resolvable without a back-edit per child.
 
 ### 7. Report
 
