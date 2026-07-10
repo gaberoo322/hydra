@@ -36,11 +36,9 @@ import {
   getAutopilotRun,
   updateAutopilotRunFields,
 } from "../redis/autopilot-runs.ts";
-import {
-  isPidAlive,
-  deriveLifecycleState,
-} from "./run-projections.ts";
-import type { AutopilotLifecycle } from "./run-projections.ts";
+import { isPidAlive } from "./run-projections.ts";
+import { deriveLifecycleState } from "./run-lifecycle-state.ts";
+import type { AutopilotLifecycle } from "./run-lifecycle-state.ts";
 
 // ---------------------------------------------------------------------------
 // Constants

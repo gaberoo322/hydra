@@ -3,7 +3,7 @@
  *
  * Two layers:
  *   1. `deriveLifecycleState` — the pure discriminated-state derivation in
- *      src/autopilot/run-projections.ts (no Redis, no clock).
+ *      src/autopilot/run-lifecycle-state.ts (no Redis, no clock).
  *   2. The /now/autopilot-tick route handler — that `running` is now
  *      derived from `lifecycle.state === "running"`, NOT the scheduler
  *      housekeeping heartbeat, and that the `lifecycle` field rides the
@@ -17,7 +17,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveLifecycleState } from "../src/autopilot/run-projections.ts";
+import { deriveLifecycleState } from "../src/autopilot/run-lifecycle-state.ts";
 import { createNowPageRouter } from "../src/api/now-page.ts";
 import { AutopilotTickResponseSchema } from "../src/schemas/now-page.ts";
 

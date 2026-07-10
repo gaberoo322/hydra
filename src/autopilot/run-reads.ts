@@ -54,9 +54,9 @@ import {
   fetchTurnsWithJoins,
   projectRunView,
   projectRunDigest,
-  deriveInflightSlotSeed,
 } from "./run-projections.ts";
-import type { AutopilotLifecycle, InflightSlotSeed } from "./run-projections.ts";
+import { deriveInflightSlotSeed } from "./run-lifecycle-state.ts";
+import type { AutopilotLifecycle, InflightSlotSeed } from "./run-lifecycle-state.ts";
 // The sweep-composite-reader idiom lives in `sweep-reader.ts` (issue #2568):
 // the readers that pair a Redis load with the dead-pid sweep. The composite
 // readers below DRIVE these; imported here for that use.
