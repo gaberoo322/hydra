@@ -43,9 +43,12 @@ import {
   listIssuesByLabelOrEmpty,
   listIssuesBySearch,
   listIssuesBySearchOrEmpty,
-  isIssueReadFailure,
   type IssueRow,
 } from "./github/issues.ts";
+import {
+  fetchOpenBlockerNumbers,
+  openNumbersFromRows,
+} from "./github/blockers.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -288,7 +291,13 @@ async function fetchStaleBlockedItems(
 
   let openBlockers = new Set<number>();
   if (referenced.size > 0) {
-    openBlockers = await fetchOpenIssueNumbers(deps, [...referenced]);
+    // Shared batched resolver + conservative fail-safe (src/github/blockers.ts,
+    // issue #3059): on a lookup failure every referenced blocker is treated as
+    // still-open, so a transient gh outage yields FEWER stale-blocked items.
+    openBlockers = await fetchOpenBlockerNumbers([...referenced], {
+      githubRepo: deps.githubRepo,
+      listIssuesBySearch: deps.listIssuesBySearch,
+    });
   }
 
   return classifyStaleBlocked(blocked, openBlockers);
@@ -337,45 +346,10 @@ export function classifyStaleBlocked(
 }
 
 /**
- * Resolve which of the given issue numbers are currently OPEN. Batches into a
- * single `--state open --search "<n1> <n2> ..."` query through the seam's
- * *discriminated* reader.
- *
- * On a lookup FAILURE we conservatively return the full requested set (treat
- * every referenced blocker as still-open) so a transient gh outage yields FEWER
- * stale-blocked items, never a false notification.
+ * The batched open/closed resolver and its pure {@link openNumbersFromRows}
+ * helper now live in the shared `src/github/blockers.ts` leaf (issue #3059) so
+ * the autopilot dispatch filter reuses ONE conservative fail-safe. Re-exported
+ * here for the existing review-pickup test surface and back-compat callers.
  */
-async function fetchOpenIssueNumbers(
-  deps: PickupSetDeps,
-  numbers: number[],
-): Promise<Set<number>> {
-  if (numbers.length === 0) return new Set();
-  const search = numbers.map((n) => `${n}`).join(" ");
-  const read = deps.listIssuesBySearch ?? listIssuesBySearch;
-  const res = await read(search, { state: "open", repo: deps.githubRepo });
-  if (isIssueReadFailure(res)) {
-    console.error(`[review-pickup] open-blocker lookup failed (${res.code})`);
-    // Conservative: treat all referenced blockers as open (no false alert).
-    return new Set(numbers);
-  }
-  return openNumbersFromRows(res.rows, numbers);
-}
-
-/**
- * Pure helper — exported for tests. From the seam's {@link IssueRow} rows of an
- * open-state number search, return the subset of `requested` numbers reported
- * open. Intersecting with `requested` guards against the search matching
- * unrelated issues that merely mention the number.
- */
-export function openNumbersFromRows(
-  rows: readonly IssueRow[],
-  requested: number[],
-): Set<number> {
-  const requestedSet = new Set(requested);
-  const open = new Set<number>();
-  for (const row of rows) {
-    if (requestedSet.has(row.number)) open.add(row.number);
-  }
-  return open;
-}
+export { openNumbersFromRows };
 
