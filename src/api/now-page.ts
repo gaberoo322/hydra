@@ -24,7 +24,6 @@ import {
   AlertsNowQuerySchema,
   AutopilotHealthQuerySchema,
   type ServiceStripResponse,
-  type AutopilotTickResponse,
   type ActiveDispatchesResponse,
   type CostBurnResponse,
   type AlertsNowResponse,
@@ -54,6 +53,7 @@ import {
   getAutopilotHealth,
   type AutopilotHealthDeps,
 } from "../aggregators/autopilot-health.ts";
+import { getAutopilotTick } from "../aggregators/autopilot-tick.ts";
 
 import {
   getAutopilotStatusSnapshot,
@@ -163,10 +163,20 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   );
 
   // -------------------------------------------------------------------------
-  // GET /v2/now/autopilot-tick — thin wrapper over scheduler/autopilot data
+  // GET /v2/now/autopilot-tick — thin adapter over the autopilot-tick aggregator
   // -------------------------------------------------------------------------
-  router.get("/now/autopilot-tick", async (_req, res) => {
-    try {
+  //
+  // The composition (settled fan-out, per-source degradation, body assembly)
+  // lives in `src/aggregators/autopilot-tick.ts` (issue #3114). The route owns
+  // only the IO wiring: which-reader-wins (override vs snapshot projection) and
+  // the shared-snapshot memoization (issue #2673) — it hands the aggregator
+  // three resolved zero-arg reader thunks that share one memoized snapshot by
+  // reference, so a single request issues one `getAutopilotStatusSnapshot()`
+  // read. `aggregatorRouteNoQuery` supplies the never-throw 500 isolation, so
+  // no per-route try/catch is needed (the aggregator itself never throws).
+  router.get(
+    "/now/autopilot-tick",
+    aggregatorRouteNoQuery("v2/now/autopilot-tick", async () => {
       // One composed read per request (issue #2673). Each slice honours its
       // explicit override (tests) if present, else projects off the shared
       // snapshot. The snapshot is read once and lazily — a slice that is
@@ -174,7 +184,7 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
       let snapPromise: ReturnType<typeof buildSnapshot> | null = null;
       const snapshot = () => (snapPromise ??= buildSnapshot());
 
-      const readSchedStatus = overrideSchedStatus
+      const readSchedulerStatus = overrideSchedStatus
         ? overrideSchedStatus
         : async () => defaultReadSchedulerStatus(await snapshot());
       const readCurrentRun = overrideCurrentRun
@@ -184,57 +194,14 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
         ? overrideLifecycle
         : async () => defaultReadAutopilotLifecycle(await snapshot());
 
-      const [schedSettled, runSettled, lifecycleSettled] =
-        await Promise.allSettled([
-          readSchedStatus(),
-          readCurrentRun(),
-          readLifecycle(),
-        ]);
-      const sched =
-        schedSettled.status === "fulfilled"
-          ? schedSettled.value
-          : { running: false, lastTickAt: null };
-      const currentRun =
-        runSettled.status === "fulfilled" ? runSettled.value : null;
-      const lifecycle: AutopilotLifecyclePayload =
-        lifecycleSettled.status === "fulfilled"
-          ? lifecycleSettled.value
-          : { state: "idle", runId: null, termReason: null, endedEpoch: null };
-
-      if (schedSettled.status === "rejected") {
-        console.error(
-          `[v2/now/autopilot-tick] scheduler-status read failed: ${schedSettled.reason?.message || schedSettled.reason}`,
-        );
-      }
-      if (runSettled.status === "rejected") {
-        console.error(
-          `[v2/now/autopilot-tick] current-run read failed: ${runSettled.reason?.message || runSettled.reason}`,
-        );
-      }
-      if (lifecycleSettled.status === "rejected") {
-        console.error(
-          `[v2/now/autopilot-tick] lifecycle read failed: ${lifecycleSettled.reason?.message || lifecycleSettled.reason}`,
-        );
-      }
-
-      // `running` is autopilot lifecycle truth (issue #888) — NOT the
-      // scheduler housekeeping heartbeat (`sched.running`). The heartbeat
-      // is still surfaced as `lastTickAt`.
-      const body: AutopilotTickResponse = {
-        running: lifecycle.state === "running",
-        lastTickAt: sched.lastTickAt,
-        currentRun,
-        lifecycle,
-        generatedAt: clock().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/now/autopilot-tick] handler threw: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      return getAutopilotTick({
+        readSchedulerStatus,
+        readCurrentRun,
+        readLifecycle,
+        now: clock,
+      });
+    }),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/now/active-dispatches
