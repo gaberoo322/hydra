@@ -272,12 +272,93 @@ print(json.dumps(body))
       }
     fi
     ;;
+  holdback-pending)
+    # Phase 6 helper (issue #3078): register a PR the autopilot has ARMED for
+    # auto-merge but that has not yet landed into the pending-enroll registry
+    # (hydra:holdback:pending-enroll), via POST /api/holdback/pending. This is
+    # the deterministic replacement for the drop-prone inlined `curl … | jq …`
+    # arming step the phase6-ops fragment previously specified: the Outcome
+    # Attribution Spine ledger went 7+ days dark because that best-effort LLM-
+    # remembered POST was silently dropped with no backstop (#3078). Moving it
+    # behind a single audited subcommand (mirroring `cycle-record` /
+    # `capacity-writeback`) makes the common-path arming reliable; the
+    # cycle-merge-reconcile chore is the eventual-consistency backstop for any
+    # arm that is still dropped.
+    #
+    # Records intent ONLY — it never arms, blocks, delays, or performs a merge.
+    # Idempotent on prNumber server-side (HSET-in-place). Best-effort: a non-2xx
+    # or unreachable endpoint is logged non-fatally and the autopilot proceeds —
+    # arming NEVER blocks a merge (the merge is already armed by `gh pr merge`).
+    #
+    # Usage: dispatch.sh holdback-pending <pr_number> <tier> <cycle_id> [anchor_type]
+    #   <tier>       integer 1–4, or the literal `null` / empty for unknown-tier.
+    #                enrollHoldback enforces the T1/unknown-tier carry-up exemption
+    #                SERVER-SIDE — do NOT filter tiers here (invariant: no client-
+    #                side `if tier in {2,3,4}` guard, #3078).
+    #   [anchor_type] optional explicit dispatch-class anchorType (#2800); omitted
+    #                → the merge-watch enrichment infers, then `unclassified`.
+    pr_number="${1:-}"
+    tier="${2:-}"
+    cycle_id="${3:-}"
+    anchor_type="${4:-}"
+    if [ -z "$pr_number" ] || [ -z "$cycle_id" ]; then
+      echo "dispatch.sh: holdback-pending requires <pr_number> <tier> <cycle_id> [anchor_type]" >&2
+      exit 2
+    fi
+    payload=$(python3 -c "
+import json, sys
+pr_number, tier, cycle_id, anchor_type = sys.argv[1:5]
+try:
+    pr = int(pr_number)
+except (TypeError, ValueError):
+    sys.stderr.write('dispatch.sh: holdback-pending pr_number must be an integer\n')
+    sys.exit(2)
+# tier: the literal 'null' / '' → JSON null (unknown-tier, exempt server-side);
+# otherwise an integer that the schema (z.number().int().min(1).max(4).nullable())
+# validates — a bad value is surfaced as a 400, never silently coerced.
+if tier in ('', 'null', 'None'):
+    tier_val = None
+else:
+    try:
+        tier_val = int(tier)
+    except (TypeError, ValueError):
+        sys.stderr.write('dispatch.sh: holdback-pending tier must be an integer 1-4 or null\n')
+        sys.exit(2)
+body = {'prNumber': pr, 'tier': tier_val, 'cycleId': cycle_id}
+# Only emit anchorType when the caller supplied one — omitting the field lets a
+# legacy/omitting caller degrade to the prior inference-then-'unclassified' path.
+if anchor_type:
+    body['anchorType'] = anchor_type
+print(json.dumps(body))
+" "$pr_number" "$tier" "$cycle_id" "$anchor_type") || exit 2
+    # Same HYDRA_API_BASE / HYDRA_BASE_URL / HYDRA_API resolution as cycle-record
+    # (#2635): a single env var isolates every arming write in tests, and the
+    # bare-origin base needs the /api segment appended on the curl fallback.
+    if command -v hydra >/dev/null 2>&1; then
+      HYDRA_BASE_URL="${HYDRA_API_BASE:-${HYDRA_BASE_URL:-http://localhost:4000}}" \
+        hydra raw POST /holdback/pending --json "$payload" >/dev/null 2>&1 || {
+        echo "[autopilot] dispatch: holdback-pending post failed for pr=$pr_number (non-fatal — merge already armed)" >&2
+      }
+    else
+      if [ -n "${HYDRA_API_BASE:-}" ]; then
+        holdback_pending_url="${HYDRA_API_BASE}/api/holdback/pending"
+      else
+        holdback_pending_url="${HYDRA_API:-http://localhost:4000/api}/holdback/pending"
+      fi
+      curl -fsS -X POST -H "Content-Type: application/json" \
+        --data "$payload" \
+        "$holdback_pending_url" >/dev/null 2>&1 || {
+        echo "[autopilot] dispatch: holdback-pending curl failed for pr=$pr_number (non-fatal — merge already armed)" >&2
+      }
+    fi
+    ;;
   ""|help|-h|--help)
     cat <<'USAGE'
 Usage:
   dispatch.sh log <class> <skill> [ts]
   dispatch.sh capacity-writeback <pr_number> <commit_sha> <skill> <files_json>
   dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens]
+  dispatch.sh holdback-pending <pr_number> <tier> <cycle_id> [anchor_type]
 
 Environment:
   HYDRA_AUTOPILOT_LOG   Path to the nightly run log

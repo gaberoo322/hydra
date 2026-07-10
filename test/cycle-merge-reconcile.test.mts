@@ -31,9 +31,21 @@ interface Fixture {
   prState: Map<number, string | null>;
   /** Records of every recordCycle re-post the chore fired. */
   reposts: Array<{ cycleId: string; status: string; tasksMerged: number; prNumber: number }>;
+  // --- Self-arm backstop fixture state (issue #3078) --------------------------
+  // Optional so the pre-existing #2860 case literals ({ metrics, prState, reposts })
+  // keep compiling; makeDeps defaults each to an empty container.
+  /** prNumbers already in the pending-enroll registry at tick start. */
+  pending?: Set<number>;
+  /** prNumbers already enroll-processed (the per-PR enrolled marker). */
+  enrolled?: Set<number>;
+  /** Every pendingEnrollAdd the self-arm branch fired. */
+  arms?: Array<{ prNumber: number; cycleId: string; tier: number | null; anchorType?: string }>;
 }
 
 function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): CycleMergeReconcileDeps {
+  const pending = (fx.pending ??= new Set());
+  const enrolled = (fx.enrolled ??= new Set());
+  const arms = (fx.arms ??= []);
   return {
     listRecent: async (count) => Array.from(fx.metrics.keys()).slice(0, count),
     getMetrics: async (cycleId) => ({ ...(fx.metrics.get(cycleId) ?? {}) }),
@@ -49,6 +61,21 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
         m.tasksMerged = String(body.tasksMerged);
       }
       return { ok: true, cycleId: body.cycleId, status: "merged", bucketed: null, deduped: true, enriched: true } as any;
+    },
+    // Self-arm touchpoints (issue #3078): back them with the fixture Sets so the
+    // decision logic runs with NO live Redis. A fresh copy of `pending` each call
+    // mirrors the once-per-tick snapshot the real chore takes.
+    listPending: async () => new Set(pending),
+    wasEnrolled: async (prNumber) => enrolled.has(prNumber),
+    armPending: async (entry) => {
+      arms.push({
+        prNumber: entry.prNumber,
+        cycleId: entry.cycleId,
+        tier: entry.tier,
+        anchorType: entry.anchorType,
+      });
+      pending.add(entry.prNumber);
+      return { ok: true };
     },
     ...over,
   };
@@ -193,5 +220,147 @@ describe("cycle-merge-reconcile — completed→merged backstop (#2860)", () => 
     );
     assert.equal(r.scanned, 0);
     assert.equal(r.upgraded, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-arm backstop (#3078): a confirmed-merged PR absent from the pending-enroll
+// registry AND not yet enrolled-marked is armed via pendingEnrollAdd, so the
+// merge-watch chore enrolls it next tick — recovering a dropped `POST
+// /api/holdback/pending` arm with no new event surface. Idempotent (skips a PR
+// already registered or already enrolled), never-throws, never tier-filters.
+// New top-level suite (own lifecycle, pure per-case fixtures) per the CLAUDE.md
+// shared-Redis-teardown authoring rule.
+// ---------------------------------------------------------------------------
+describe("cycle-merge-reconcile — pending-enroll self-arm backstop (#3078)", () => {
+  test("arms a merged, unregistered, un-enrolled PR into the pending-enroll registry", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c1", { status: "completed", prNumber: "100", tasksMerged: "0" }]]),
+      prState: new Map([[100, "MERGED"]]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 1, "the dropped-arm PR is self-armed");
+    assert.equal(r.selfArmSkipped, 0);
+    assert.equal(r.selfArmFailed, 0);
+    assert.equal(fx.arms!.length, 1);
+    assert.deepEqual(fx.arms![0], {
+      prNumber: 100,
+      cycleId: "c1",
+      tier: null, // tier unknown from the metrics hash; enrollHoldback resolves it server-side
+      anchorType: "work-queue",
+    });
+    // The metrics upgrade still fires alongside the arm (both are merge-coupled).
+    assert.equal(r.upgraded, 1);
+  });
+
+  test("does NOT arm a PR already present in the pending-enroll registry (idempotent)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c2", { status: "completed", prNumber: "200", tasksMerged: "0" }]]),
+      prState: new Map([[200, "MERGED"]]),
+      reposts: [],
+      pending: new Set([200]),
+      enrolled: new Set(),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 0, "already in the registry ⇒ no re-arm");
+    assert.equal(r.selfArmSkipped, 1);
+    assert.equal(fx.arms!.length, 0);
+    assert.equal(r.upgraded, 1, "the metrics upgrade still runs");
+  });
+
+  test("does NOT arm a PR already enrolled-marked (idempotent against re-observation)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c3", { status: "completed", prNumber: "300", tasksMerged: "0" }]]),
+      prState: new Map([[300, "MERGED"]]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set([300]),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 0, "already enrolled ⇒ no re-arm");
+    assert.equal(r.selfArmSkipped, 1);
+    assert.equal(fx.arms!.length, 0);
+  });
+
+  test("does NOT arm a still-OPEN PR (self-arm only on confirmed merge)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-open", { status: "completed", prNumber: "400", tasksMerged: "0" }]]),
+      prState: new Map([[400, "OPEN"]]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.notMerged, 1);
+    assert.equal(r.selfArmed, 0, "an un-merged PR is never armed");
+    assert.equal(fx.arms!.length, 0);
+  });
+
+  test("a pendingEnrollAdd failure is counted and never aborts the metrics upgrade", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-armfail", { status: "completed", prNumber: "500", tasksMerged: "0" }]]),
+      prState: new Map([[500, "MERGED"]]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(
+      makeDeps(fx, {
+        armPending: async () => ({ ok: false, error: "redis down" }),
+      }),
+    );
+    assert.equal(r.selfArmFailed, 1);
+    assert.equal(r.selfArmed, 0);
+    // The completed→merged upgrade still fires — arming is decoupled from it.
+    assert.equal(r.upgraded, 1);
+    assert.equal(fx.reposts.length, 1);
+  });
+
+  test("a pending-enroll LIST failure disables self-arm for the tick (never arms blind)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-listfail", { status: "completed", prNumber: "600", tasksMerged: "0" }]]),
+      prState: new Map([[600, "MERGED"]]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(
+      makeDeps(fx, {
+        listPending: async () => {
+          throw new Error("registry read failed");
+        },
+      }),
+    );
+    assert.equal(r.selfArmed, 0, "no blind arming when the registry read failed");
+    assert.equal(r.selfArmSkipped, 0);
+    assert.equal(r.selfArmFailed, 0);
+    assert.equal(fx.arms!.length, 0);
+    // The metrics upgrade path is unaffected by a self-arm-only failure.
+    assert.equal(r.upgraded, 1);
+  });
+
+  test("arms each of several distinct merged unregistered PRs exactly once", async () => {
+    const metrics = new Map<string, Record<string, string>>();
+    const prState = new Map<number, string | null>();
+    for (let i = 0; i < 3; i++) {
+      metrics.set(`c-${i}`, { status: "completed", prNumber: String(700 + i), tasksMerged: "0" });
+      prState.set(700 + i, "MERGED");
+    }
+    const fx: Fixture = { metrics, prState, reposts: [], pending: new Set(), enrolled: new Set(), arms: [] };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 3);
+    assert.deepEqual(
+      fx.arms!.map((a) => a.prNumber).sort((a, b) => a - b),
+      [700, 701, 702],
+    );
   });
 });
