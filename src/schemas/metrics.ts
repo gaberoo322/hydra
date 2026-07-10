@@ -50,4 +50,3 @@ export const SubagentTokensBodySchema = z.looseObject({
   cycleId: z.string().trim().min(1).optional(),
 });
 
-export type SubagentTokensBody = z.infer<typeof SubagentTokensBodySchema>;
