@@ -467,6 +467,56 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
 }
 
 /**
+ * The narrowed pacing-dashboard read-model — the seven-field structural slice
+ * of {@link UsageEligibility} the Now-Console pacing surfaces consume (issue
+ * #3108). Both the autopilot-status seam (`src/autopilot/status.ts`) and the
+ * idle-diagnostics route (`src/api/autopilot-idle.ts`) surface exactly this
+ * slice; they used to re-declare it independently as byte-identical local
+ * interfaces. It is owned HERE — beside {@link projectEligibility}, the function
+ * that produces the data — so a change to the pacing projection's output shape
+ * surfaces the compile error in every importer, and a future consumer imports
+ * the canonical type rather than adding a third re-declaration.
+ *
+ * Kept small (a projection, not the whole {@link UsageEligibility}) so a test
+ * stub needn't build a whole {@link UsageSnapshot}.
+ */
+export interface EligibilityView {
+  paceState: PaceState;
+  targetPercent: number;
+  sinceResetPercent: number;
+  anchor: string | null;
+  emergencyStop: boolean;
+  calibrated: boolean;
+  percentLast5h: number;
+}
+
+/**
+ * Project a {@link UsageSnapshot} straight to the narrowed pacing-dashboard
+ * {@link EligibilityView} (issue #3108). This is `projectEligibility` composed
+ * with the seven-field narrowing both pacing surfaces need — the common body
+ * that `src/autopilot/status.ts` and `src/api/autopilot-idle.ts` each used to
+ * inline in their `defaultReadEligibility` helper (identical modulo `.then()`
+ * vs `await`). Naming it here gives it a single, independently-testable surface
+ * that does NOT require constructing a router or the status-seam deps bag.
+ *
+ * Pure (delegates to the pure {@link projectEligibility}): no IO, no Redis, no
+ * `Date.now()`. Callers that read the snapshot from `getUsage()` compose
+ * `getUsage()` → `projectEligibilityView()`.
+ */
+export function projectEligibilityView(snapshot: UsageSnapshot): EligibilityView {
+  const e = projectEligibility(snapshot);
+  return {
+    paceState: e.paceState,
+    targetPercent: e.targetPercent,
+    sinceResetPercent: e.sinceResetPercent,
+    anchor: e.anchor,
+    emergencyStop: e.reasons.emergencyStop,
+    calibrated: e.reasons.calibrated,
+    percentLast5h: e.usage.percentLast5h,
+  };
+}
+
+/**
  * Overlay the operator-only **Autopilot pause** flag (issue #988) onto an
  * eligibility projection, at the caller/route seam.
  *

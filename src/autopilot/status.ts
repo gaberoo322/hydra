@@ -62,8 +62,13 @@ import { osHeartbeatAgeS as defaultOsHeartbeatAgeS } from "./os-heartbeat.ts";
 import type { LiveRunView, RunDigest } from "./run-health.ts";
 import {
   getUsage as defaultGetUsage,
-  projectEligibility as defaultProjectEligibility,
+  projectEligibilityView as defaultProjectEligibilityView,
+  type EligibilityView,
 } from "../cost/index.ts";
+// Re-surface the canonical pacing-view type (issue #3108) so this seam's own
+// consumers keep importing it from here — the type is OWNED by the Cost module
+// (beside the projection that produces it), no longer re-declared locally.
+export type { EligibilityView } from "../cost/index.ts";
 import { getStatus as defaultGetSchedulerStatus } from "../scheduler/heartbeat.ts";
 
 // ---------------------------------------------------------------------------
@@ -74,22 +79,6 @@ import { getStatus as defaultGetSchedulerStatus } from "../scheduler/heartbeat.t
 interface SchedulerHeartbeatView {
   running: boolean;
   lastTickAt: string | null;
-}
-
-/**
- * The usage-eligibility pacing projection the Pace Gate consults (ADR-0021).
- * Structural slice of `UsageEligibility` (`src/cost/usage-tracker.ts`) — kept
- * small so a test stub needn't build a whole snapshot. Consumed only by the
- * idle-diagnostics site; opt-in via `options.eligibility`.
- */
-export interface EligibilityView {
-  paceState: "behind" | "on" | "ahead";
-  targetPercent: number;
-  sinceResetPercent: number;
-  anchor: string | null;
-  emergencyStop: boolean;
-  calibrated: boolean;
-  percentLast5h: number;
 }
 
 /**
@@ -286,17 +275,9 @@ async function defaultReadScheduler(): Promise<SchedulerHeartbeatView> {
 }
 
 async function defaultReadEligibility(): Promise<EligibilityView> {
-  const snapshot = await defaultGetUsage();
-  const e = defaultProjectEligibility(snapshot);
-  return {
-    paceState: e.paceState,
-    targetPercent: e.targetPercent,
-    sinceResetPercent: e.sinceResetPercent,
-    anchor: e.anchor,
-    emergencyStop: e.reasons.emergencyStop,
-    calibrated: e.reasons.calibrated,
-    percentLast5h: e.usage.percentLast5h,
-  };
+  // Compose the snapshot read with the canonical pacing-view projection owned
+  // by the Cost module (issue #3108) — the narrowing body no longer lives here.
+  return defaultProjectEligibilityView(await defaultGetUsage());
 }
 
 async function defaultReadLiveRun(): Promise<LiveRunView | null> {

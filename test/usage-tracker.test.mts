@@ -73,6 +73,8 @@ import {
 // in via the index re-export above.
 import {
   projectEligibility,
+  projectEligibilityView,
+  type EligibilityView,
   deriveHardStop,
   EMERGENCY_STOP_PERCENT,
   PACE_STATE_TOLERANCE_PERCENT,
@@ -1858,6 +1860,62 @@ describe("usage-tracker", () => {
         assert.equal(v.paceState, "ahead");
         assert.equal(v.allow, true);
         assert.deepEqual([...v.shed], []);
+      });
+    });
+
+    describe("projectEligibilityView — the narrowed pacing slice (issue #3108)", () => {
+      test("projects exactly the seven pacing-dashboard fields", () => {
+        const snapshot = snapshotWith({
+          calibrated: true,
+          percentLast5h: 42,
+          percentSinceReset: 30,
+          weeklyResetAnchor: null,
+        });
+        const view: EligibilityView = projectEligibilityView(snapshot);
+        // Exactly the seven-field slice — no extra keys leak from UsageEligibility.
+        assert.deepEqual(Object.keys(view).sort(), [
+          "anchor",
+          "calibrated",
+          "emergencyStop",
+          "paceState",
+          "percentLast5h",
+          "sinceResetPercent",
+          "targetPercent",
+        ]);
+      });
+
+      test("mirrors the projectEligibility source fields byte-for-byte", () => {
+        // The view MUST be the same narrowing both pacing surfaces used to inline,
+        // so it stays interchangeable with the old per-site defaultReadEligibility.
+        const snapshot = snapshotWith({
+          calibrated: true,
+          usageSource: "oauth",
+          percentLast5h: 95,
+          emergencyStop: true,
+          percentSinceReset: 55,
+          weeklyResetAnchor: null,
+        });
+        const full = projectEligibility(snapshot);
+        const view = projectEligibilityView(snapshot);
+        assert.deepEqual(view, {
+          paceState: full.paceState,
+          targetPercent: full.targetPercent,
+          sinceResetPercent: full.sinceResetPercent,
+          anchor: full.anchor,
+          emergencyStop: full.reasons.emergencyStop,
+          calibrated: full.reasons.calibrated,
+          percentLast5h: full.usage.percentLast5h,
+        });
+      });
+
+      test("emergencyStop reads the 5h hard-stop reason, not the raw snapshot flag", () => {
+        // The view surfaces reasons.emergencyStop (projectEligibility's derived
+        // hard-stop), which on an oauth 95% snapshot is true.
+        const view = projectEligibilityView(
+          snapshotWith({ usageSource: "oauth", percentLast5h: 95, emergencyStop: true }),
+        );
+        assert.equal(view.emergencyStop, true);
+        assert.equal(view.percentLast5h, 95);
       });
     });
   });
