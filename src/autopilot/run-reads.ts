@@ -28,9 +28,10 @@
  *   - `run-reads.ts` → `sweep-reader.ts` (the sweep-composite readers it drives)
  *   - `run-reads.ts` → `redis/autopilot-runs.ts` + `redis/dispatches.ts`
  *     (the typed Redis Adapters it composes)
- *   - `run-reads.ts` → `runs.ts` (the shared `Ok`/`Err`/`errRedis` result-type
- *     primitives ONLY — a one-directional edge; `runs.ts` never imports from
- *     `run-reads.ts`, so no import cycle is introduced).
+ *   - `run-reads.ts` → `run-result.ts` (the shared `Ok`/`Err`/`errRedis`
+ *     result-type primitives ONLY — a downward edge to the zero-I/O leaf that
+ *     the write module `runs.ts` also imports, so a read module no longer
+ *     depends on a write module for its result types; issue #3087).
  *
  * There is NO back-compat re-export of this read surface from `runs.ts` (the
  * #2125 precedent that #1183 and #2568 both followed): external callers import
@@ -60,11 +61,11 @@ import type { AutopilotLifecycle, InflightSlotSeed } from "./run-projections.ts"
 // the readers that pair a Redis load with the dead-pid sweep. The composite
 // readers below DRIVE these; imported here for that use.
 import { readLifecycleState, sweepLoadedRow } from "./sweep-reader.ts";
-// Shared result-type primitives. `Ok`/`Err`/`errRedis` are the single source of
-// truth on the WRITE Module (`runs.ts`); the read orchestrators import them from
-// there rather than re-declaring them. The edge is one-directional
-// (`runs.ts` never imports from here), so no import cycle is introduced.
-import { type Ok, type Err, errRedis } from "./runs.ts";
+// Shared result-type primitives. `Ok`/`Err`/`errRedis` live in the zero-I/O leaf
+// `run-result.ts` (issue #3087); the read orchestrators import them DOWN from
+// that leaf — the same leaf the write module `runs.ts` imports — so a read
+// module no longer depends sideways on the write module for its result types.
+import { type Ok, type Err, errRedis } from "./run-result.ts";
 
 // ---------------------------------------------------------------------------
 // Reader: high-level — compose Redis reads + the projections in
