@@ -9,8 +9,8 @@
  * `recordCycle` coordination, which pulls from three domains at once. It follows
  * the same per-concern sibling-extraction precedent as `run-projections.ts`
  * (read projections, #1183) and `sweep-reader.ts` (dead-pid sweep, #2568): one
- * Module per concern, a single one-directional `cycle-close → runs` import edge
- * for the shared result-type primitives.
+ * Module per concern, with a downward import edge into the zero-I/O leaf
+ * `run-result.ts` for the shared result-type primitives (issue #3087).
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Cycle record** — the per-dispatch outcome hash `hydra:cycle:<id>` plus
@@ -22,9 +22,10 @@
  * Errors are returned as result objects, never thrown, matching the
  * `merge/grounding/verification` convention in CLAUDE.md — the shared
  * `Ok`/`Err` result types and the `errRedis`/`numberOrDefault` helpers live in
- * `runs.ts` (their single source of truth, shared with the run/turn writers)
- * and are imported here. (The `ErrorCode` union that `Err` is built from stays
- * module-internal to `runs.ts` — it has no external importer.)
+ * the zero-I/O leaf `run-result.ts` (their single source of truth, shared with
+ * the run/turn writers and the read orchestrators; issue #3087) and are imported
+ * here. (The `ErrorCode` union that `Err` is built from stays module-internal to
+ * that leaf — it has no external importer.)
  */
 
 import {
@@ -54,10 +55,11 @@ import { bucketCycleStatus } from "./cycle-status.ts";
 // per-dispatch outcome record (issue #2942). Both PURE lookups live in the
 // Taxonomy Module (issue #2920 precedent).
 import { parseDispatchCycleId, classByName } from "../taxonomy/classes.ts";
-// Shared result-type primitives + coercion helpers (single source of truth in
-// runs.ts, used by both the run/turn writers and this cycle-close coordinator).
-// One-directional edge: runs.ts never imports cycle-close.ts.
-import { type Ok, type Err, errRedis, numberOrDefault } from "./runs.ts";
+// Shared result-type primitives + coercion helpers. They live in the zero-I/O
+// leaf `run-result.ts` (issue #3087), imported DOWN from here — the same leaf
+// the run/turn writers (`runs.ts`) import — so this write module no longer
+// reaches sideways into the write-lifecycle module for its result types.
+import { type Ok, type Err, errRedis, numberOrDefault } from "./run-result.ts";
 // Anchor-type classification POLICY — the pure, zero-I/O leaf extracted in
 // issue #2858. `recordCycle` uses `classifyAnchorType` (and, transitively,
 // `UNCLASSIFIED_ANCHOR_TYPE`) to classify a cycle-record's anchorType. The

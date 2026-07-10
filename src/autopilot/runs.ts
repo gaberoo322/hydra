@@ -25,9 +25,11 @@
  * exposes only the lifecycle WRITE methods; callers import the readers from
  * `run-reads.ts` directly (no back-compat re-export here — the #2125 precedent).
  * The shared result-type primitives (`Ok` / `Err` / `errRedis` / `numberOrDefault`)
- * remain exported here as the single source of truth; `run-reads.ts` and the
- * sibling `cycle-close.ts` import them from here (a one-directional edge, so no
- * import cycle).
+ * were extracted into the zero-I/O leaf `run-result.ts` (issue #3087) so BOTH
+ * the read module (`run-reads.ts`) and the sibling write module (`cycle-close.ts`)
+ * import them DOWN from that leaf rather than sideways from this write module.
+ * This write Module imports them from the leaf and RE-EXPORTS them for back-compat
+ * (INV-2), so `import { Ok, Err, ... } from "./runs.ts"` keeps working.
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
@@ -150,24 +152,17 @@ const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 // Result type
 // ---------------------------------------------------------------------------
 
-// Shared result-type primitives + the `errRedis` helper. `Ok`/`Err`/`errRedis`
-// are exported so the sibling `cycle-close.ts` (issue #2768 — where
-// `recordCycle` was relocated) imports them from here rather than duplicating
-// them: a single source of truth for the run/turn writers AND the cycle-close
-// coordinator. The `cycle-close → runs` import edge is one-directional (runs
-// never imports cycle-close), so no import cycle is introduced. `ErrorCode`
-// itself is module-internal — it feeds the `Ok`/`Err` shapes here but has no
-// external importer, so it stays unexported (cleanup-scan #2788).
-type ErrorCode = "duplicate" | "not-found" | "invalid" | "redis";
-
-export type Ok<T> = { ok: true; code?: undefined; detail?: undefined } & T;
-export type Err = { ok: false; code: ErrorCode; detail?: string };
-
-export function errRedis(err: any): Err {
-  const detail = err?.message || String(err);
-  console.error(`[autopilot] redis error: ${detail}`);
-  return { ok: false, code: "redis", detail };
-}
+// Shared result-type primitives + the `errRedis` helper now live in the zero-I/O
+// leaf `run-result.ts` (issue #3087). This write Module imports them and
+// RE-EXPORTS them for back-compat (INV-2), so every existing
+// `import { Ok, Err, errRedis, numberOrDefault } from "./runs.ts"` keeps working
+// while the read module (`run-reads.ts`) and the sibling write module
+// (`cycle-close.ts`) import DOWN from the leaf directly rather than sideways
+// from this write module. `ErrorCode` stays module-internal to the leaf.
+export { errRedis, numberOrDefault } from "./run-result.ts";
+export type { Ok, Err } from "./run-result.ts";
+import { errRedis, numberOrDefault } from "./run-result.ts";
+import type { Ok, Err } from "./run-result.ts";
 
 // ---------------------------------------------------------------------------
 // Injectable run/turn-lifecycle-write deps (issue #2158; narrowed by #2768)
@@ -286,20 +281,6 @@ const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Numeric coercion shared by the run/turn writers AND (imported) the sibling
- * `cycle-close.ts` (issue #2768). Exported as the single source of truth so the
- * relocated `recordCycle` does not duplicate it.
- */
-export function numberOrDefault(v: unknown, fallback: number): number {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string" && v.length > 0) {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return fallback;
-}
 
 /**
  * Normalise a `crash_detail` snapshot into the bounded, persistable shape
