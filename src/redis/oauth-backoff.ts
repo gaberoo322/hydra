@@ -325,7 +325,7 @@ function ghRateLimitCounterKey(hour: string): string {
 }
 
 /** Per-hour bucket for the gh-rate-limited counter window read. */
-export interface GhRateLimitedHourBucket {
+interface GhRateLimitedHourBucket {
   hour: string;
   count: number;
 }
