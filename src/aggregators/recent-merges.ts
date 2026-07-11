@@ -80,7 +80,6 @@ export {
   extractMergeCommitsFromGitLog,
   extractPrNumbersFromGitLog,
   prMetaFromView,
-  prNumberFromSubject,
   tierFromLabels,
 } from "./merge-commit-parser.ts";
 export type { MergeCommit, PrMeta } from "./merge-commit-parser.ts";
@@ -296,10 +295,11 @@ export async function listRecentMergeCommits(
 }
 
 // The pure git-log parsers (`extractMergeCommitsFromGitLog`,
-// `extractPrNumbersFromGitLog`, `prNumberFromSubject`) live in the
-// `merge-commit-parser.ts` leaf and are imported/re-exported above (issue
-// #3100). `listRecentMergeCommits` above calls the imported
-// `extractMergeCommitsFromGitLog`.
+// `extractPrNumbersFromGitLog`) live in the `merge-commit-parser.ts` leaf and
+// are imported/re-exported above (issue #3100). `prNumberFromSubject` also
+// lives there but is an internal parser detail with no external callers, so it
+// is no longer re-exported here (issue #3142). `listRecentMergeCommits` above
+// calls the imported `extractMergeCommitsFromGitLog`.
 
 // ---------------------------------------------------------------------------
 // Sub-source: per-PR metadata via `gh pr view`
