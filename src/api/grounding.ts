@@ -36,6 +36,7 @@ export function createGroundingRouter() {
       const testParseStatus = report?.testReport?.parseStatus ?? null;
       res.json({ ...report, testParseStatus });
     } catch (err: any) {
+      console.error(`[grounding-api] GET /grounding/latest failed: ${err?.message || err}`);
       res.status(500).json({ error: err.message });
     }
   });
