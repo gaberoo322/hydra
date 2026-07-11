@@ -23,11 +23,13 @@
  * precedent (#3090 / PR #3094): pure state-machine logic lives apart from the
  * I/O coordinator that calls it. This module imports DOWN from the leaf for the
  * `WEDGE_AGE_THRESHOLD_S` constant `projectRunView` still needs, and re-exports
- * that constant (plus the lifecycle types) below so callers already resolving
- * them through this path do not churn. The three lifecycle FUNCTION re-exports
- * (`deriveLifecycleState`, `summarizeTerminationHealth`, `deriveInflightSlotSeed`)
- * were dropped once every caller migrated to importing them from the leaf
- * directly (issue #3143).
+ * that constant below so callers already resolving it through this path do not
+ * churn. The three lifecycle FUNCTION re-exports (`deriveLifecycleState`,
+ * `summarizeTerminationHealth`, `deriveInflightSlotSeed`) were dropped once every
+ * caller migrated to importing them from the leaf directly (issue #3143), and the
+ * lifecycle TYPE re-exports (`AutopilotLifecycle`, `AutopilotLifecycleState`,
+ * `InflightSlotSeed`) followed for the same reason (issue #3147) — every caller
+ * now imports them from the leaf.
  *
  * This Module is the canonical home for the projection-coordinator symbols. The
  * back-compat re-export relay that once forwarded them through `runs.ts` was
@@ -50,18 +52,14 @@ import { WEDGE_AGE_THRESHOLD_S } from "./run-lifecycle-state.ts";
 //
 // The pure run-lifecycle state machine now lives in `run-lifecycle-state.ts`.
 // `projectRunView` in this module still reads `WEDGE_AGE_THRESHOLD_S`, so that
-// constant (and the lifecycle types) are re-exported here to preserve the
-// public surface at this import path. The three lifecycle FUNCTIONS were dropped
-// from the relay once every caller migrated to the leaf (issue #3143). New
-// callers of the state machine SHOULD import from `run-lifecycle-state.ts`.
+// constant is re-exported here to preserve the public surface at this import
+// path. The three lifecycle FUNCTIONS were dropped from the relay once every
+// caller migrated to the leaf (issue #3143); the lifecycle TYPES followed for
+// the same reason (issue #3147). New callers of the state machine SHOULD import
+// from `run-lifecycle-state.ts`.
 // ---------------------------------------------------------------------------
 export {
   WEDGE_AGE_THRESHOLD_S,
-} from "./run-lifecycle-state.ts";
-export type {
-  AutopilotLifecycle,
-  AutopilotLifecycleState,
-  InflightSlotSeed,
 } from "./run-lifecycle-state.ts";
 
 // ---------------------------------------------------------------------------
