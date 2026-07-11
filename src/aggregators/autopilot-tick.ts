@@ -40,6 +40,7 @@ import type {
   AutopilotLifecyclePayload,
   AutopilotCurrentRunSchema,
 } from "../schemas/now-page.ts";
+import type { AutopilotStatusSnapshot } from "../autopilot/status.ts";
 import type { z } from "zod";
 import { settledOr } from "./settle.ts";
 
@@ -124,5 +125,72 @@ export async function getAutopilotTick(
     currentRun,
     lifecycle,
     generatedAt: clock().toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Default snapshot projections (issue #3181; lifted from `src/api/now-page.ts`).
+//
+// These three pure, zero-IO helpers project an `AutopilotStatusSnapshot` (owned
+// by `src/autopilot/status.ts`) onto the three reader shapes {@link
+// getAutopilotTick} consumes. They previously lived at the bottom of the
+// `/now/autopilot-tick` route file, where the normalization logic (the `trigger`
+// fallback to `"manual"`, the `view.age_s` coerce-to-0, the `run_id`/`started`
+// guards) could only be exercised through a full Express request cycle.
+//
+// Re-homing them next to the aggregator they feed answers the "which shape does
+// each reader produce?" question inside this module, and makes the normalization
+// independently unit-testable (mirrors the `retro-projections.ts` precedent).
+// The route imports them back and passes them as the default `deps` thunks,
+// projected off the shared snapshot (issue #2673) — the external interface is
+// unchanged.
+// ---------------------------------------------------------------------------
+
+/** Project the scheduler heartbeat onto the tick route's scheduler-status shape. */
+export function defaultReadSchedulerStatus(snap: AutopilotStatusSnapshot): {
+  running: boolean;
+  lastTickAt: string | null;
+} {
+  return {
+    running: snap.scheduler.running,
+    lastTickAt: snap.scheduler.lastTickAt,
+  };
+}
+
+/**
+ * Project `snap.currentRun` onto the {@link AutopilotCurrentRun} shape.
+ * Returns `null` when the run view is absent or lacks a `run_id`/`started`;
+ * normalizes each optional field (e.g. `trigger` falls back to `"manual"`,
+ * numeric fields coerce a non-number to `0`).
+ */
+export function defaultReadCurrentRun(
+  snap: AutopilotStatusSnapshot,
+): AutopilotCurrentRun | null {
+  const view = snap.currentRun;
+  if (!view) return null;
+  const id = typeof view.run_id === "string" ? view.run_id : "";
+  const startedAt = typeof view.started === "string" ? view.started : "";
+  if (!id || !startedAt) return null;
+  return {
+    id,
+    startedAt,
+    trigger: typeof view.trigger === "string" ? view.trigger : "manual",
+    turns: typeof view.turns === "number" ? view.turns : 0,
+    dispatches: typeof view.dispatches === "number" ? view.dispatches : 0,
+    elapsedSeconds: typeof view.elapsed_s === "number" ? view.elapsed_s : 0,
+    ageSeconds: typeof view.age_s === "number" ? view.age_s : 0,
+  };
+}
+
+/** Project `snap.lifecycle` onto the {@link AutopilotLifecyclePayload} shape. */
+export function defaultReadAutopilotLifecycle(
+  snap: AutopilotStatusSnapshot,
+): AutopilotLifecyclePayload {
+  const lc = snap.lifecycle;
+  return {
+    state: lc.state,
+    runId: lc.run_id,
+    termReason: lc.term_reason,
+    endedEpoch: lc.ended_epoch,
   };
 }

@@ -14,8 +14,14 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { getAutopilotTick } from "../src/aggregators/autopilot-tick.ts";
+import {
+  getAutopilotTick,
+  defaultReadSchedulerStatus,
+  defaultReadCurrentRun,
+  defaultReadAutopilotLifecycle,
+} from "../src/aggregators/autopilot-tick.ts";
 import { AutopilotTickResponseSchema } from "../src/schemas/now-page.ts";
+import type { AutopilotStatusSnapshot } from "../src/autopilot/status.ts";
 
 const CLOCK = () => new Date("2026-06-02T12:00:00.000Z");
 
@@ -155,5 +161,155 @@ describe("getAutopilotTick — pure composition (issue #3114)", () => {
       "generatedAt parses as a date",
     );
     assert.equal(AutopilotTickResponseSchema.safeParse(result).success, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default snapshot projections (issue #3181).
+//
+// These call the three `defaultRead*` helpers DIRECTLY with a canned
+// `AutopilotStatusSnapshot` — no Express, no snapshot IO. Before #3181 this
+// normalization (the `trigger` fallback to `"manual"`, the `view.age_s`
+// coerce-to-0, the `run_id`/`started` guards) lived in the route file and could
+// only be exercised through a full request cycle.
+// ---------------------------------------------------------------------------
+
+function baseSnapshot(
+  over: Partial<AutopilotStatusSnapshot> = {},
+): AutopilotStatusSnapshot {
+  return {
+    lifecycle: {
+      state: "idle",
+      run_id: null,
+      term_reason: null,
+      ended_epoch: null,
+    },
+    currentRun: null,
+    scheduler: { running: false, lastTickAt: null },
+    eligibility: null,
+    history: null,
+    ...over,
+  };
+}
+
+describe("defaultReadSchedulerStatus — projection (issue #3181)", () => {
+  test("projects scheduler.{running,lastTickAt} verbatim", () => {
+    const out = defaultReadSchedulerStatus(
+      baseSnapshot({
+        scheduler: { running: true, lastTickAt: "2026-06-02T11:59:00Z" },
+      }),
+    );
+    assert.deepEqual(out, {
+      running: true,
+      lastTickAt: "2026-06-02T11:59:00Z",
+    });
+  });
+
+  test("carries a null lastTickAt through", () => {
+    const out = defaultReadSchedulerStatus(
+      baseSnapshot({ scheduler: { running: false, lastTickAt: null } }),
+    );
+    assert.deepEqual(out, { running: false, lastTickAt: null });
+  });
+});
+
+describe("defaultReadCurrentRun — projection + normalization (issue #3181)", () => {
+  test("null currentRun view → null", () => {
+    assert.equal(defaultReadCurrentRun(baseSnapshot({ currentRun: null })), null);
+  });
+
+  test("missing run_id → null (guard)", () => {
+    const out = defaultReadCurrentRun(
+      baseSnapshot({ currentRun: { started: "2026-06-02T11:30:00Z" } }),
+    );
+    assert.equal(out, null);
+  });
+
+  test("missing started → null (guard)", () => {
+    const out = defaultReadCurrentRun(
+      baseSnapshot({ currentRun: { run_id: "ap-1" } }),
+    );
+    assert.equal(out, null);
+  });
+
+  test("fully-populated view projects every field", () => {
+    const out = defaultReadCurrentRun(
+      baseSnapshot({
+        currentRun: {
+          run_id: "ap-2",
+          started: "2026-06-02T11:30:00Z",
+          trigger: "scheduled",
+          turns: 3,
+          dispatches: 1,
+          elapsed_s: 1800,
+          age_s: 5,
+        },
+      }),
+    );
+    assert.deepEqual(out, {
+      id: "ap-2",
+      startedAt: "2026-06-02T11:30:00Z",
+      trigger: "scheduled",
+      turns: 3,
+      dispatches: 1,
+      elapsedSeconds: 1800,
+      ageSeconds: 5,
+    });
+  });
+
+  test("missing/non-number optional fields normalize (trigger→manual, numbers→0)", () => {
+    const out = defaultReadCurrentRun(
+      baseSnapshot({
+        currentRun: {
+          run_id: "ap-3",
+          started: "2026-06-02T11:30:00Z",
+          // trigger absent, turns/dispatches/elapsed_s/age_s wrong-typed
+          turns: "3",
+          dispatches: null,
+          elapsed_s: undefined,
+          age_s: "5",
+        },
+      }),
+    );
+    assert.deepEqual(out, {
+      id: "ap-3",
+      startedAt: "2026-06-02T11:30:00Z",
+      trigger: "manual",
+      turns: 0,
+      dispatches: 0,
+      elapsedSeconds: 0,
+      ageSeconds: 0,
+    });
+  });
+});
+
+describe("defaultReadAutopilotLifecycle — projection (issue #3181)", () => {
+  test("renames snapshot lifecycle fields to the payload shape", () => {
+    const out = defaultReadAutopilotLifecycle(
+      baseSnapshot({
+        lifecycle: {
+          state: "crashed",
+          run_id: "ap-9",
+          term_reason: "crash",
+          ended_epoch: 1800,
+        },
+      }),
+    );
+    assert.deepEqual(out, {
+      state: "crashed",
+      runId: "ap-9",
+      termReason: "crash",
+      endedEpoch: 1800,
+    });
+  });
+
+  test("carries null lifecycle fields through (idle)", () => {
+    const out = defaultReadAutopilotLifecycle(baseSnapshot());
+    assert.deepEqual(out, {
+      state: "idle",
+      runId: null,
+      termReason: null,
+      endedEpoch: null,
+    });
   });
 });

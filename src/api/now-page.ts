@@ -53,7 +53,12 @@ import {
   getAutopilotHealth,
   type AutopilotHealthDeps,
 } from "../aggregators/autopilot-health.ts";
-import { getAutopilotTick } from "../aggregators/autopilot-tick.ts";
+import {
+  getAutopilotTick,
+  defaultReadSchedulerStatus,
+  defaultReadCurrentRun,
+  defaultReadAutopilotLifecycle,
+} from "../aggregators/autopilot-tick.ts";
 
 import {
   getAutopilotStatusSnapshot,
@@ -323,57 +328,22 @@ export function parseAlertsWindow(input: {
 // ---------------------------------------------------------------------------
 // Default wiring — projected off the shared AutopilotStatus seam (issue #2673).
 //
-// The three autopilot-tick default readers below derive from ONE composed
-// snapshot per invocation instead of three independent fan-outs. Each reader
-// takes the snapshot the handler already built, so a single request issues one
+// The three autopilot-tick default snapshot projections
+// (`defaultReadSchedulerStatus`, `defaultReadCurrentRun`,
+// `defaultReadAutopilotLifecycle`) were lifted out of this route file into
+// `aggregators/autopilot-tick.ts` (issue #3181), the aggregator they feed —
+// they are pure, zero-IO projections over `AutopilotStatusSnapshot` and belong
+// next to the composition, where the normalization is independently
+// unit-testable. They are imported back above and passed as the default `deps`
+// thunks, projected off the memoized shared snapshot: each reader takes the
+// snapshot the handler already built, so a single request issues one
 // `getAutopilotStatusSnapshot()` read. The tick route requests neither
 // `eligibility` nor `history`, so it issues no `getUsage()` / `listRuns()` read
-// it did not do before (issue #2673 invariant).
-//
-// These are exported as the default `deps` hooks so a test that stubs any of the
-// three readers keeps overriding exactly the slice it did before; production
-// wiring shares the one snapshot via `defaultAutopilotStatusSnapshot`.
+// it did not do before (issue #2673 invariant). A test that stubs any of the
+// three per-slice `deps` readers keeps overriding exactly the slice it did
+// before; the memoized-snapshot wiring (`snapPromise ??= buildSnapshot()`) stays
+// in the route as the IO-wiring layer it already is.
 // ---------------------------------------------------------------------------
-
-function defaultReadSchedulerStatus(
-  snap: AutopilotStatusSnapshot,
-): { running: boolean; lastTickAt: string | null } {
-  return {
-    running: snap.scheduler.running,
-    lastTickAt: snap.scheduler.lastTickAt,
-  };
-}
-
-function defaultReadCurrentRun(
-  snap: AutopilotStatusSnapshot,
-): AutopilotCurrentRun | null {
-  const view = snap.currentRun;
-  if (!view) return null;
-  const id = typeof view.run_id === "string" ? view.run_id : "";
-  const startedAt = typeof view.started === "string" ? view.started : "";
-  if (!id || !startedAt) return null;
-  return {
-    id,
-    startedAt,
-    trigger: typeof view.trigger === "string" ? view.trigger : "manual",
-    turns: typeof view.turns === "number" ? view.turns : 0,
-    dispatches: typeof view.dispatches === "number" ? view.dispatches : 0,
-    elapsedSeconds: typeof view.elapsed_s === "number" ? view.elapsed_s : 0,
-    ageSeconds: typeof view.age_s === "number" ? view.age_s : 0,
-  };
-}
-
-function defaultReadAutopilotLifecycle(
-  snap: AutopilotStatusSnapshot,
-): AutopilotLifecyclePayload {
-  const lc = snap.lifecycle;
-  return {
-    state: lc.state,
-    runId: lc.run_id,
-    termReason: lc.term_reason,
-    endedEpoch: lc.ended_epoch,
-  };
-}
 
 async function defaultReadAlertsJson(limit: number): Promise<string[]> {
   return defaultReadRecentAlerts(limit);
