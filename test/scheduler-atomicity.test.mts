@@ -7,10 +7,14 @@
  *
  * These tests verify:
  * - AC1: cyclesRun uses atomic Redis INCR (no lost increments under concurrency)
- * - AC2: lastResearchAt uses atomic Lua check-and-set (no double-claim)
+ * - AC2: lastResearchAt reader returns the raw epoch-ms value (or null)
  * - AC3: saveState uses optimistic locking (version conflict detected)
- * - AC4: concurrent cycle + research triggers produce correct state
+ * - AC4: concurrent cycle triggers produce correct state
  * - AC5: blocked reescalation uses a frozen snapshot
+ *
+ * The research-claim writers (atomicClaimResearch, setLastResearchAt) that AC2
+ * and AC4 previously exercised were removed in #3132 — they backed the
+ * in-process research-decision plane deleted in #706 and had zero live callers.
  *
  * Requires Redis running on localhost:6379 (default).
  * Uses Redis DB 1 for tests — never touches production (DB 0).
@@ -77,46 +81,27 @@ describe("scheduler atomicity (issue #140)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // AC2: Atomic lastResearchAt via Lua check-and-set
+  // AC2: lastResearchAt reader (issue #140)
+  //
+  // The research-claim writers (`atomicClaimResearch`, `setLastResearchAt`)
+  // were removed in #3132 — they backed the in-process research-decision plane
+  // deleted in #706 (scheduler fold PR-1/4) and had zero live callers (only
+  // test coverage). Only the reader survives, still consumed by the
+  // observability heartbeat (`src/scheduler/heartbeat.ts`); these cases pin the
+  // reader's contract (raw-key read, null when unset).
   // -------------------------------------------------------------------------
 
-  describe("AC2 — atomic lastResearchAt claim", () => {
-    test("first claim succeeds when no prior research", async () => {
-      const claimed = await adapter.atomicClaimResearch(60_000);
-      assert.equal(claimed, true);
-    });
-
-    test("second claim within interval is rejected", async () => {
-      const first = await adapter.atomicClaimResearch(60_000);
-      assert.equal(first, true);
-      const second = await adapter.atomicClaimResearch(60_000);
-      assert.equal(second, false);
-    });
-
-    test("claim succeeds after interval has elapsed", async () => {
-      // Claim with a very short interval (1ms)
-      const first = await adapter.atomicClaimResearch(1);
-      assert.equal(first, true);
-      // Wait a tiny bit to ensure ms has elapsed
-      await new Promise(resolve => setTimeout(resolve, 5));
-      const second = await adapter.atomicClaimResearch(1);
-      assert.equal(second, true);
-    });
-
-    test("concurrent claims — only one wins", async () => {
-      // Fire 10 concurrent claims, all with a long interval
-      const results = await Promise.all(
-        Array.from({ length: 10 }, () => adapter.atomicClaimResearch(60_000)),
-      );
-      const claimed = results.filter(r => r === true).length;
-      assert.equal(claimed, 1, `exactly 1 of 10 concurrent claims should succeed, got ${claimed}`);
-    });
-
-    test("setLastResearchAt updates the timestamp unconditionally", async () => {
-      await adapter.setLastResearchAt();
+  describe("AC2 — lastResearchAt reader", () => {
+    test("getLastResearchAtMs returns null when never set", async () => {
       const ms = await adapter.getLastResearchAtMs();
-      assert.ok(ms !== null);
-      assert.ok(Math.abs(ms! - Date.now()) < 5000, "timestamp should be recent");
+      assert.equal(ms, null);
+    });
+
+    test("getLastResearchAtMs reads a raw epoch-ms value", async () => {
+      const now = Date.now();
+      await testRedis.set("hydra:scheduler:state:lastResearchAt", now.toString());
+      const ms = await adapter.getLastResearchAtMs();
+      assert.equal(ms, now);
     });
   });
 
@@ -172,33 +157,26 @@ describe("scheduler atomicity (issue #140)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // AC4: Simulated concurrent cycle + research — no state corruption
+  // AC4: Simulated concurrent cycle completions — no state corruption
+  //
+  // The research-claim arm of this simulation was dropped in #3132 alongside
+  // `atomicClaimResearch`; the concurrent-INCR invariant it guarded is retained.
   // -------------------------------------------------------------------------
 
-  describe("AC4 — concurrent cycle + research simulation", () => {
-    test("concurrent INCR + claim produce correct final state", async () => {
-      // Simulate 5 concurrent "cycle completions" and 3 concurrent "research claims"
+  describe("AC4 — concurrent cycle simulation", () => {
+    test("concurrent INCR produce correct final state", async () => {
+      // Simulate 5 concurrent "cycle completions"
       const cyclePromises = Array.from({ length: 5 }, () =>
         adapter.incrSchedulerCyclesRun(),
       );
-      const researchPromises = Array.from({ length: 3 }, () =>
-        adapter.atomicClaimResearch(60_000),
-      );
 
-      const [cycleResults, researchResults] = await Promise.all([
-        Promise.all(cyclePromises),
-        Promise.all(researchPromises),
-      ]);
+      const cycleResults = await Promise.all(cyclePromises);
 
       // All cycle increments should succeed with unique values
       const sortedCycles = cycleResults.sort((a, b) => a - b);
       for (let i = 0; i < 5; i++) {
         assert.equal(sortedCycles[i], i + 1);
       }
-
-      // Exactly one research claim should win
-      const researchWins = researchResults.filter(r => r === true).length;
-      assert.equal(researchWins, 1, "exactly 1 research claim should succeed");
 
       // Verify final counter value
       const finalCycles = await adapter.getSchedulerCyclesRun();

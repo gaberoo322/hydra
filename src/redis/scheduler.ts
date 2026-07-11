@@ -96,43 +96,16 @@ export async function getSchedulerCyclesUnaccounted(): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Atomic research claim (Lua-scripted check-then-set)
+// Research timestamp reader (issue #140)
 // ---------------------------------------------------------------------------
-
-/**
- * Atomically claim research eligibility: checks if lastResearchAt is old enough,
- * and if so sets it to `now`. Returns true if claimed, false if throttled.
- *
- * Uses a Lua script so the check-then-set is atomic on the Redis server.
- */
-const CLAIM_RESEARCH_LUA = `
-  local key = KEYS[1]
-  local now_ms = tonumber(ARGV[1])
-  local min_interval_ms = tonumber(ARGV[2])
-  local now_iso = ARGV[3]
-  local current = redis.call('GET', key)
-  if current then
-    local last_ms = tonumber(current)
-    if last_ms and (now_ms - last_ms) < min_interval_ms then
-      return 0
-    end
-  end
-  redis.call('SET', key, tostring(now_ms))
-  return 1
-`;
-
-/**
- * Atomically check and claim research eligibility.
- * Stores the timestamp as epoch ms for easy comparison.
- * Returns true if claimed (caller should run research), false if throttled.
- */
-export async function atomicClaimResearch(minIntervalMs: number): Promise<boolean> {
-  const r = getRedisConnection();
-  const key = redisKeys.schedulerState() + ":lastResearchAt";
-  const nowMs = Date.now();
-  const result = await r.eval(CLAIM_RESEARCH_LUA, 1, key, nowMs, minIntervalMs, new Date().toISOString());
-  return result === 1;
-}
+//
+// The atomic-claim writer (`atomicClaimResearch`, Lua check-then-set) and the
+// unconditional writer (`setLastResearchAt`) were removed in #3132: they backed
+// the in-process research-decision plane deleted in #706 (scheduler fold PR-1/4)
+// and had zero live callers (only test coverage). The remaining reader,
+// `getLastResearchAtMs`, is still imported by the observability heartbeat
+// (`src/scheduler/heartbeat.ts`); its own removal is tracked by #3133, which
+// deletes that consumer wiring first.
 
 /** Read the last research timestamp (epoch ms). Returns null if never set. */
 export async function getLastResearchAtMs(): Promise<number | null> {
@@ -140,13 +113,6 @@ export async function getLastResearchAtMs(): Promise<number | null> {
   const key = redisKeys.schedulerState() + ":lastResearchAt";
   const val = await r.get(key);
   return val ? parseInt(val, 10) : null;
-}
-
-/** Unconditionally set the last research timestamp (for forced research). */
-export async function setLastResearchAt(): Promise<void> {
-  const r = getRedisConnection();
-  const key = redisKeys.schedulerState() + ":lastResearchAt";
-  await r.set(key, Date.now().toString());
 }
 
 // ---------------------------------------------------------------------------
