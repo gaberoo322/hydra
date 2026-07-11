@@ -37,7 +37,7 @@ import {
 // The three-way ok|degraded|down service DISPLAY classifiers (#2281) and the
 // OV-search deep-health probe classification (#2023) — plus the constants/types
 // they reason about (DEGRADED_LATENCY_THRESHOLD_MS, ProbeOutcome,
-// ProbeStatusClassification, OV_SEARCH_PROBE_TIMEOUT_MS, OvSearchProbeStatus) —
+// OV_SEARCH_PROBE_TIMEOUT_MS, OvSearchProbeStatus) —
 // were split out of this file into the zero-IO leaf src/health/probe-classify.ts
 // so a consumer needing only the classifiers pulls none of the OV/fetch adapter
 // machinery into module-load. They are re-exported here 1:1 so every existing
@@ -53,7 +53,6 @@ export {
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type ProbeStatus,
   type ProbeOutcome,
-  type ProbeStatusClassification,
   type OvSearchProbeStatus,
 } from "./probe-classify.ts";
 // The IO producers below (probeEmbedBackend, probeSkillsEndpoint) reference the
