@@ -24,6 +24,8 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:merge:lock` | Short-lived merge serialization lock (60s TTL) |
 | `hydra:metrics:{id}` | Cycle metrics hash |
 | `hydra:metrics:index` | Sorted set of cycle IDs by timestamp |
+| `hydra:metrics:oauth-usage:backoff` | Persisted OAuth-meter 429 backoff gate (`{failures, nextAttemptMs}`, 24h TTL, issue #2840) |
+| `hydra:metrics:github-api:rate-limit-backoff` | Persisted GitHub-API rate-limit backoff gate (`{failures, nextAttemptMs}`, 24h TTL, issue #3137) |
 | `hydra:scheduler:state` | Persisted scheduler throttle state |
 | `hydra:scheduler:daily-spend` | Daily token-spend counter. Historically codex; post-cut-over, populated only when the Claude Code harness exposes per-call token usage. |
 | `hydra:backlog:items` | Hash -- backlog item data |
@@ -470,6 +472,28 @@ If the CLI changes this schema, the parser at the top of `src/cost/reconciliatio
 - `cost.reconciliation.divergence` event published when any pair diverges by `> DIVERGENCE_THRESHOLD` (10%)
 - Digest section surfacing divergence events from the digest window
 - Dashboard panel with the three-number side-by-side and 30-day trend
+
+## GitHub API rate-limit handling (issue #3137)
+
+All `gh`/`git` invocations funnel through the **GitHub CLI Adapter** (`src/github/exec.ts` + `gh.ts`). Rate-limit handling lives on that seam.
+
+**Quota expectations.** The orchestrator authenticates `gh` with a subscription-backed token, so it draws on GitHub's per-user quotas:
+
+| Pool | Endpoint shape | Limit |
+|---|---|---|
+| REST `core` | `gh api repos/.../pulls/<n>` (the `viewPr` default, issue #968) | 5,000 requests/hour, per user |
+| GraphQL | `gh pr view --json`, `gh issue list --json` (legacy `viewPr` opt-out) | 5,000 points/hour, per user — a running autopilot drains this pool first |
+| Secondary / abuse | any burst of concurrent or rapid-fire mutations | undocumented dynamic limit; delivered as HTTP 403 "secondary rate limit" |
+
+Primary limits reset hourly; secondary limits are dynamic. A rate-limit response is always **HTTP 403** (not 429) and carries a structured `rate_limit_error` body.
+
+**Detection.** `classifyFailure` (in `exec.ts`) maps a rate-limit stderr to the `gh-rate-limited` `HydraErrorCode` — matched **before** the generic 403 auth check so it is not mis-classified as `gh-auth-failed`. The matcher (`isRateLimitStderr`) recognizes the primary limit (`API rate limit exceeded`), the secondary/abuse limit (`secondary rate limit`), and the JSON `rate_limit_error` token.
+
+**Adaptive backoff.** On a `gh-rate-limited` result, `gh.ts` arms an exponential-backoff gate persisted in Redis (`hydra:metrics:github-api:rate-limit-backoff`, `src/redis/oauth-backoff.ts`): base 30s, doubling per consecutive failure, capped at ~15min, 24h TTL. It is the `gh`-API sibling of the OAuth-meter ladder (issue #2840) — persisted so it survives a `systemctl restart`, fail-open (a Redis outage degrades to no gate), and hydrate-clamped (a stale/hostile `nextAttemptMs` can never park calls longer than a freshly-armed max backoff). A successful `gh` call clears the gate so recovery resets the ladder. Every rate-limit hit emits a structured `console.error` warning naming the consecutive-failure count and the next-attempt instant, so a sustained limit surfaces in `journalctl` instead of being a silent retry storm.
+
+**KNOWN CLI CONSTRAINT (why suggested-fix items #1/#2 are only partially met).** The `gh` CLI does **not** surface the raw HTTP response headers, so `x-ratelimit-remaining` / `x-ratelimit-reset` are **not readable** from a `gh` invocation. Consequences:
+- The exact quota-reset instant cannot be read — the backoff is therefore keyed off the structured `rate_limit_error` classification (which IS reliably present), not off `x-ratelimit-reset`. This is the correct-and-implementable design given the CLI boundary.
+- The "warn when quota drops below 20%" health check (which needs `x-ratelimit-remaining`) is **not implementable via the CLI** and is deferred. A future path is to reserve one `gh api rate_limit` probe (whose JSON body — distinct from the abstracted headers — does report `remaining`/`reset`) and surface that into `/api/health`; that is a follow-up, not this change.
 
 ## Model Tiers
 

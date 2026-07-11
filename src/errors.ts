@@ -49,6 +49,7 @@ export type HydraErrorCode =
   // No `GhSeamError` subclass exists by design: the seam returns, never raises.
   | "gh-not-installed" // the gh/git binary is not on PATH (spawn ENOENT)
   | "gh-auth-failed" // gh ran but reported an auth/permission failure
+  | "gh-rate-limited" // GitHub reported an API rate-limit / secondary-limit / rate_limit_error (issue #3137)
   | "gh-empty" // the command produced no stdout where output was required
   | "gh-malformed-json" // --json output failed to JSON.parse
   | "gh-timeout" // the command exceeded its timeout and was killed

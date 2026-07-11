@@ -226,10 +226,35 @@ export function runExec(
 export function classifyFailure(raw: RawExecResult): GhErrorCode {
   if (raw.spawnErrorCode === "ENOENT") return "gh-not-installed";
   if (raw.timedOut) return "gh-timeout";
+  // Rate-limit detection MUST precede the auth check (issue #3137): a GitHub
+  // rate-limit response is delivered as HTTP 403 and would otherwise be
+  // mis-classified as `gh-auth-failed`, so callers would never arm the adaptive
+  // backoff gate. The more specific rate-limit shape wins.
+  if (isRateLimitStderr(raw.stderr)) return "gh-rate-limited";
   // gh reports auth problems on stderr with a recognizable shape; git uses
   // "Authentication failed" / "Permission denied". Match conservatively.
   if (/\b(authentication|auth|not logged in|permission denied|403)\b/i.test(raw.stderr)) {
     return "gh-auth-failed";
   }
   return "gh-failed";
+}
+
+/**
+ * Recognize a GitHub API rate-limit failure from `gh` stderr (issue #3137).
+ *
+ * KNOWN CONSTRAINT: the `gh` CLI does not surface raw HTTP response headers, so
+ * `x-ratelimit-remaining` / `x-ratelimit-reset` are NOT readable from a `gh`
+ * invocation — header-keyed reset timing is infeasible via the CLI. What IS
+ * reliably present is the structured error text: the primary limit ("API rate
+ * limit exceeded"), the secondary/abuse limit ("secondary rate limit" /
+ * "exceeded a secondary rate limit"), and the JSON `rate_limit_error` token
+ * that `gh api` echoes from the response body. Detection keys off THAT text so
+ * the adaptive backoff is implementable without headers.
+ *
+ * Exported so callers/tests can discriminate before the generic 403 auth match.
+ */
+export function isRateLimitStderr(stderr: string): boolean {
+  return /\b(api rate limit exceeded|secondary rate limit|rate[_-]?limit[_-]?error|you have exceeded a secondary rate limit)\b/i.test(
+    stderr,
+  );
 }

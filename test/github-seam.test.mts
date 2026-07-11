@@ -69,6 +69,7 @@ case "$SCENARIO" in
   malformed) echo 'not json {'; exit 0 ;;
   fail)      echo "boom" >&2; exit 1 ;;
   auth)      echo "gh: authentication failed for github.com" >&2; exit 1 ;;
+  ratelimit) echo "gh: API rate limit exceeded for user ID 1. (HTTP 403)" >&2; exit 1 ;;
   slow)      sleep 5; echo "late"; exit 0 ;;
   *)         echo "OK https://github.com/gaberoo322/hydra/issues/42"; exit 0 ;;
 esac
@@ -156,6 +157,19 @@ describe("GitHub CLI Adapter seam (issue #896)", () => {
     if (!result.ok) {
       assert.equal(result.code, "gh-failed");
       assert.match(result.stderr, /boom/);
+    }
+  });
+
+  test("ghExec rate-limit stderr → code gh-rate-limited, never throws (issue #3137)", async () => {
+    process.env.FAKE_SCENARIO = "ratelimit";
+    const result = await ghExec(["issue", "list"]);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      // The rate-limit classification wins over the generic 403 auth match, so
+      // callers can arm the adaptive backoff gate instead of treating it as an
+      // auth failure.
+      assert.equal(result.code, "gh-rate-limited");
+      assert.match(result.stderr, /rate limit exceeded/i);
     }
   });
 
@@ -277,6 +291,59 @@ describe("GitHub CLI Adapter seam (issue #896)", () => {
       timedOut: false,
     };
     assert.equal(classifyFailure(raw), "gh-auth-failed");
+  });
+
+  test("classifyFailure: primary rate-limit stderr → gh-rate-limited (issue #3137)", () => {
+    const raw: RawExecResult = {
+      stdout: "",
+      stderr: "gh: API rate limit exceeded for user ID 12345. (HTTP 403)",
+      exitCode: 1,
+      timedOut: false,
+    };
+    assert.equal(classifyFailure(raw), "gh-rate-limited");
+  });
+
+  test("classifyFailure: secondary rate-limit stderr → gh-rate-limited (issue #3137)", () => {
+    const raw: RawExecResult = {
+      stdout: "",
+      stderr: "HTTP 403: You have exceeded a secondary rate limit.",
+      exitCode: 1,
+      timedOut: false,
+    };
+    assert.equal(classifyFailure(raw), "gh-rate-limited");
+  });
+
+  test("classifyFailure: rate_limit_error token → gh-rate-limited (issue #3137)", () => {
+    const raw: RawExecResult = {
+      stdout: "",
+      stderr: '{"type":"error","error":{"type":"rate_limit_error"}}',
+      exitCode: 1,
+      timedOut: false,
+    };
+    assert.equal(classifyFailure(raw), "gh-rate-limited");
+  });
+
+  test("classifyFailure: rate-limit wins over the generic 403 auth match (issue #3137)", () => {
+    // A rate-limit stderr also contains "403"; the more specific rate-limit
+    // classification must win so callers arm backoff rather than treat it as
+    // an auth failure.
+    const raw: RawExecResult = {
+      stdout: "",
+      stderr: "API rate limit exceeded (HTTP 403)",
+      exitCode: 1,
+      timedOut: false,
+    };
+    assert.equal(classifyFailure(raw), "gh-rate-limited");
+  });
+
+  test("classifyFailure: timeout still wins over rate-limit stderr (issue #3137)", () => {
+    const raw: RawExecResult = {
+      stdout: "",
+      stderr: "API rate limit exceeded",
+      exitCode: -1,
+      timedOut: true,
+    };
+    assert.equal(classifyFailure(raw), "gh-timeout");
   });
 
   test("classifyFailure: generic non-zero → gh-failed", () => {
