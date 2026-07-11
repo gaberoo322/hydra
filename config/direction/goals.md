@@ -1,6 +1,6 @@
 ---
 name: Algorithmic Betting Platform
-updated: 2026-07-03
+updated: 2026-07-11
 status: active
 owner: strategist
 tags: [hydra, hydra/direction]
@@ -18,6 +18,8 @@ The project is executing **M13 — Forecast-Directional Execution**. Cross-venue
 - Complete the ADR-0002 step-3 tail (relocate remaining `lib/arbitrage/` imports in `lib/execution/` and `app/api/`) ahead of the step-4 deletion
 
 **For current execution state, `priorities.md` and `roadmap.md` are authoritative** — this file carries the durable goals, constraints, and infrastructure facts that change rarely.
+
+> Re-verified 2026-07-11 (#3196): this phase framing remains consistent with `vision.md` and hydra-betting ADR-0002 (M13 active; cross-venue arbitrage retired 2026-06-22). No vision/goals contradiction found; content unchanged.
 
 ## Success Metrics
 
