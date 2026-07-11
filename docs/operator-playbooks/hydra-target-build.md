@@ -525,6 +525,19 @@ Gating discipline: the criteria are deliberately strict. **Both** ADR criteria m
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY on both direct-to-main AND auto-merge/PR paths), merge lock, direct-to-main git merge, auto-merge/PR path (already-merged-post-green is SUCCESS not friction), deploy + post-deploy health, post-merge verify (auto-rollback on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 
+### Step 8.5. Worktree cleanup (on success)
+
+On success, remove the hydra-betting worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `/dev/shm` does not fill with stale directories (issue #3173, issue #542):
+
+```bash
+git -C ~/hydra-betting worktree remove --force "$TARGET_WT" 2>&1 || \
+  echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
+# Prune stale metadata: $TARGET_WT lives on tmpfs and may vanish underneath the
+# remove, leaving an orphaned .git/worktrees/<id> entry that blocks the next
+# `git branch -d` with "branch ... used by worktree at '/dev/shm/...'".
+git -C ~/hydra-betting worktree prune 2>&1 || true
+```
+
 </child-prompt>
 
 ## Context
