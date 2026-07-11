@@ -154,6 +154,19 @@ The orchestrator builds one Target Project per instance. The operator switches t
 
 **Migration status:** issue #258 adds the helper module only — no existing callers are rewritten. The mechanical sweep of the ~17 callsites (and removal of the `HYDRA_WORKSPACE` shim) is tracked in issue #259.
 
+## Target `/dev/shm` worktree lifecycle (issue #2115 / #2465 / #3136)
+
+A code-writing dispatch into the Target (`hydra-target-build`) runs in a fresh worktree under `/dev/shm/hydra-worktrees/` (RAM-backed, so it is fast and disappears on reboot), on a branch named `feature/claude-cycle-<timestamp>`. On a **clean** finish the harness removes the worktree and the branch is deleted. When a dispatch **crashes or exits uncleanly**, the worktree dir *and* its `.git/worktrees/<id>` registry entry survive with the feature branch still checked out — and because git refuses `git branch -D` on a branch a registered worktree still holds, that stale branch cannot be reclaimed until its worktree is removed.
+
+Two reclaim paths remove those orphans, both delegating to the one pure classifier + orchestration in `src/worktree-orphan.ts` (`classifyOrphanWorktree` / `pruneOrphanedTargetWorktrees`):
+
+| Path | When | Where |
+|---|---|---|
+| Startup prune | Once per process boot, before the stale-branch sweep | `src/index.ts` |
+| Hourly housekeeping chore | Every housekeeping tick (`worktree-orphan-prune`) | `src/scheduler/chores/worktree-orphan-prune.ts` |
+
+The hourly chore (issue #3136) is the backstop for orphans created *between* restarts — a mid-cycle crash whose worktree only crosses the 6h age floor hours later would otherwise survive until the next boot and fail the branch-cleanup path on every tick. Both paths apply the **same never-touch-first liveness discipline**: a worktree is reclaimed ONLY when it is not the main tree, not the current branch, inside the `/dev/shm/hydra-worktrees/` scope prefix, not held by a **live** agent PID (`kill -0` probe; an invalid/unknown PID is treated as live), and past the **6h age floor** (`DEFAULT_WORKTREE_MIN_AGE_SECONDS`) — so an in-flight dispatch that has not yet written its lock file is never destroyed. The reclaim is idempotent (a second run over an already-clean set is a no-op) and never-throwing. Triggered cleanups surface on the `[Housekeeping]`/`[Hydra]` log channel (a clean tick is silent). Worktrees **outside** the `/dev/shm/hydra-worktrees/` prefix are deliberately left for the broader `hydra-branch-prune` skill's multi-pass GC.
+
 ## Codex OpenTelemetry (issue #199) — historical
 
 > **Historical, kept for trace lookup.** The Codex CLI runtime was removed on
