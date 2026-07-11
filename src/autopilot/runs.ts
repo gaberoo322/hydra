@@ -28,8 +28,10 @@
  * were extracted into the zero-I/O leaf `run-result.ts` (issue #3087) so BOTH
  * the read module (`run-reads.ts`) and the sibling write module (`cycle-close.ts`)
  * import them DOWN from that leaf rather than sideways from this write module.
- * This write Module imports them from the leaf and RE-EXPORTS them for back-compat
- * (INV-2), so `import { Ok, Err, ... } from "./runs.ts"` keeps working.
+ * This write Module imports the value helpers (`errRedis` / `numberOrDefault`) it
+ * uses internally and RE-EXPORTS the `Ok` / `Err` TYPES for back-compat (INV-2),
+ * so `import { Ok, Err } from "./runs.ts"` keeps working. The value-helper
+ * re-export was dropped (issue #3144) — no caller imported it from here.
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
@@ -153,13 +155,14 @@ const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 // ---------------------------------------------------------------------------
 
 // Shared result-type primitives + the `errRedis` helper now live in the zero-I/O
-// leaf `run-result.ts` (issue #3087). This write Module imports them and
-// RE-EXPORTS them for back-compat (INV-2), so every existing
-// `import { Ok, Err, errRedis, numberOrDefault } from "./runs.ts"` keeps working
-// while the read module (`run-reads.ts`) and the sibling write module
-// (`cycle-close.ts`) import DOWN from the leaf directly rather than sideways
-// from this write module. `ErrorCode` stays module-internal to the leaf.
-export { errRedis, numberOrDefault } from "./run-result.ts";
+// leaf `run-result.ts` (issue #3087). This write Module imports the value helpers
+// (`errRedis` / `numberOrDefault`) it uses internally, and RE-EXPORTS the `Ok` /
+// `Err` types for back-compat (INV-2) so `import { Ok, Err } from "./runs.ts"`
+// keeps working. The read module (`run-reads.ts`) and the sibling write module
+// (`cycle-close.ts`) import DOWN from the leaf directly rather than sideways from
+// this write module. The value-helper re-export was dropped (issue #3144) once no
+// caller imported `errRedis` / `numberOrDefault` from here — they all import from
+// the leaf. `ErrorCode` stays module-internal to the leaf.
 export type { Ok, Err } from "./run-result.ts";
 import { errRedis, numberOrDefault } from "./run-result.ts";
 import type { Ok, Err } from "./run-result.ts";
