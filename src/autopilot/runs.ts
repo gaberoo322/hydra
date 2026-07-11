@@ -28,10 +28,11 @@
  * were extracted into the zero-I/O leaf `run-result.ts` (issue #3087) so BOTH
  * the read module (`run-reads.ts`) and the sibling write module (`cycle-close.ts`)
  * import them DOWN from that leaf rather than sideways from this write module.
- * This write Module imports the value helpers (`errRedis` / `numberOrDefault`) it
- * uses internally and RE-EXPORTS the `Ok` / `Err` TYPES for back-compat (INV-2),
- * so `import { Ok, Err } from "./runs.ts"` keeps working. The value-helper
- * re-export was dropped (issue #3144) — no caller imported it from here.
+ * This write Module imports the value helpers (`errRedis` / `numberOrDefault`) and
+ * the `Ok` / `Err` types it uses internally; it no longer re-exports any of them.
+ * Both back-compat re-exports were dropped once no caller imported them from here —
+ * the value helpers in issue #3144 and the `Ok` / `Err` types in issue #3149; every
+ * caller imports these from the `run-result.ts` leaf directly.
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
@@ -156,14 +157,14 @@ const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 
 // Shared result-type primitives + the `errRedis` helper now live in the zero-I/O
 // leaf `run-result.ts` (issue #3087). This write Module imports the value helpers
-// (`errRedis` / `numberOrDefault`) it uses internally, and RE-EXPORTS the `Ok` /
-// `Err` types for back-compat (INV-2) so `import { Ok, Err } from "./runs.ts"`
-// keeps working. The read module (`run-reads.ts`) and the sibling write module
-// (`cycle-close.ts`) import DOWN from the leaf directly rather than sideways from
-// this write module. The value-helper re-export was dropped (issue #3144) once no
-// caller imported `errRedis` / `numberOrDefault` from here — they all import from
-// the leaf. `ErrorCode` stays module-internal to the leaf.
-export type { Ok, Err } from "./run-result.ts";
+// (`errRedis` / `numberOrDefault`) and the `Ok` / `Err` types it uses internally
+// (see `RecordReflectionOutcomeResult` / `RunStartResult` below). The read module
+// (`run-reads.ts`) and the sibling write module (`cycle-close.ts`) import DOWN from
+// the leaf directly rather than sideways from this write module. Both back-compat
+// re-exports through this module were dropped once no caller imported them from
+// here — the value helpers (`errRedis` / `numberOrDefault`) in issue #3144, and the
+// `Ok` / `Err` types in issue #3149; every caller imports from the leaf. `ErrorCode`
+// stays module-internal to the leaf.
 import { errRedis, numberOrDefault } from "./run-result.ts";
 import type { Ok, Err } from "./run-result.ts";
 
