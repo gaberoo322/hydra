@@ -63,6 +63,7 @@ import { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
 import { runLaneIndexReconcile } from "./chores/lane-index-reconcile.ts";
+import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
 import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
@@ -375,6 +376,23 @@ async function runHousekeeping(
     {
       name: "lane-index-reconcile",
       work: () => runLaneIndexReconcile(),
+    },
+
+    {
+      // Issue #3136: periodic reclaim of orphaned /dev/shm target worktrees.
+      // `pruneOrphanedTargetWorktrees` previously ran ONLY at boot (src/index.ts),
+      // so a mid-cycle crash that leaves a worktree pinning its
+      // `feature/claude-cycle-*` branch survived between restarts and made the
+      // branch-cleanup path fail on every tick. No Redis time-guard — the prune
+      // is intrinsically idempotent (only worktrees classified
+      // `delete-orphan-worktree` are removed; the 6h age floor + live-agent guard
+      // protect in-flight dispatches), so an hourly tick against an all-clean set
+      // is a silent no-op. Never throws — the chore wraps the already
+      // best-effort pruner and folds any fault to a logged 0.
+      name: "worktree-orphan-prune",
+      work: async () => {
+        await runWorktreeOrphanPrune();
+      },
     },
 
     {
