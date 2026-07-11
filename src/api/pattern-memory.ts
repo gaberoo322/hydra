@@ -1,16 +1,15 @@
 import { Router } from "express";
-import { recordPattern, loadAgentMemory } from "../pattern-memory/agent-memory.ts";
-import { listFrictionPatterns } from "../pattern-memory/agent-memory.ts";
 import {
+  recordPattern,
+  loadAgentMemory,
+  listFrictionPatterns,
   getIneffectivePromotedPatterns,
   getRuleActionLog,
-} from "../pattern-memory/rule-effectiveness.ts";
-import {
   captureSubagentLesson,
   captureSubagentFriction,
   isValidSkill,
   isValidOutcome,
-} from "../pattern-memory/subagent-capture.ts";
+} from "../pattern-memory/index.ts";
 import {
   PatternBodySchema,
   SubagentLessonBodySchema,

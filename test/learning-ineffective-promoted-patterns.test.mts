@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import {
   evaluatePromotedPatternEffectiveness,
   MIN_DAYS_POST_PROMOTION,
-} from "../src/pattern-memory/rule-effectiveness.ts";
-import { type MemoryPattern } from "../src/pattern-memory/pattern-store.ts";
+} from "../src/pattern-memory/index.ts";
+import { type MemoryPattern } from "../src/pattern-memory/index.ts";
 
 function makePattern(overrides: Partial<MemoryPattern>): MemoryPattern {
   return {

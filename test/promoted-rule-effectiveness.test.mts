@@ -40,8 +40,8 @@ import {
   isEffectivenessCooldownExpired,
   qualifiesForRuleAction,
   type IneffectivePromotedPattern,
-} from "../src/pattern-memory/rule-effectiveness.ts";
-import { type MemoryPattern } from "../src/pattern-memory/pattern-store.ts";
+} from "../src/pattern-memory/index.ts";
+import { type MemoryPattern } from "../src/pattern-memory/index.ts";
 
 function makePattern(overrides: Partial<MemoryPattern>): MemoryPattern {
   return {

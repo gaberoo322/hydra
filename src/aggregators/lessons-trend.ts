@@ -26,7 +26,7 @@
  *   total without a separate count parser.
  */
 
-import { PROMOTION_THRESHOLD } from "../pattern-memory/constants.ts";
+import { PROMOTION_THRESHOLD } from "../pattern-memory/index.ts";
 import {
   readFrictionPatterns,
   readMetaFrictionIssues,
@@ -38,7 +38,7 @@ import {
   type TrendPoint,
 } from "./trend-series.ts";
 import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
-import type { FrictionPattern } from "../pattern-memory/friction-pattern.ts";
+import type { FrictionPattern } from "../pattern-memory/index.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
