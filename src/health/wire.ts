@@ -91,7 +91,6 @@ export interface HealthDeepResponse {
       consecutiveErrors: number;
       lastError: string | null | undefined;
       lastCycleAt: string | null | undefined;
-      research: { lastResearchAt: string | null };
     };
     // Issue #1869: the wire contract still names these two services explicitly
     // (backward compatibility — out of scope to change the envelope shape). The
@@ -181,7 +180,7 @@ export function projectHealthDeepResponse(
     services: {
       orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
       redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
-      scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt, research: { lastResearchAt: sched.research?.lastResearchAt || null } },
+      scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt },
       // Issue #1869: keyed reads off the ServiceProbeMap. A missing key (e.g. a
       // probe failure that produced an empty map) coalesces to "failed" so the
       // wire field is always present, preserving the envelope contract.

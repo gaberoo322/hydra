@@ -45,7 +45,6 @@ function makeController(overrides: HeartbeatControllerDeps = {}): HeartbeatContr
     getSchedulerCyclesMerged: async () => 0,
     getSchedulerCyclesFailed: async () => 0,
     getSchedulerCyclesUnaccounted: async () => 0,
-    getLastResearchAtMs: async () => null,
     getSchedulerStateVersion: async () => 0,
     getSchedulerDeliberateStop: async () => null,
     setSchedulerDeliberateStop: async () => {},
