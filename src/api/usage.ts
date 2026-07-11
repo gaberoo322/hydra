@@ -17,10 +17,6 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   getUsage,
-  projectEligibility,
-  overlayPauseEligibility,
-  overlaySessionBlockEligibility,
-  overlayWorklessEligibility,
   parseSessionLimitReset,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
@@ -29,6 +25,7 @@ import {
   setSessionBlockedUntil,
 } from "../redis/session-block.ts";
 import { getWorklessUntil } from "../redis/workless-hint.ts";
+import { getEligibilityView } from "../aggregators/usage-eligibility.ts";
 import { booleanFlag } from "../schemas/common.ts";
 
 /**
@@ -106,51 +103,26 @@ export function createUsageRouter() {
    * skips relaunch while future) — decide.py never drains on it. Fails SAFE to
    * not-workless and self-clears by TTL, so a stale hint can never wedge the
    * launcher off.
+   *
+   * This handler is now a THIN ADAPTER (issue #3182, arch-scan #788). The pure
+   * multi-source composition — the three fail-safe overlay-input reads and the
+   * four-level `overlay*` chain — lives in `src/aggregators/usage-eligibility.ts`
+   * as `getEligibilityView(deps)`. This route owns only the IO/wiring layer: it
+   * reads the snapshot (OUTSIDE the fail-safe guards — a snapshot failure is a
+   * genuine 500, not a degradable slice), builds the resolved deps bag from the
+   * live Redis accessors, and formats the response.
    */
   router.get("/usage/eligibility", async (req, res) => {
     const force = ForceQuerySchema.parse(req.query).force;
     try {
       const snapshot = await getUsage({ force });
-      let paused = false;
-      try {
-        paused = (await getAutopilotPaused()).paused;
-      } catch (err: any) {
-        // Fail-safe to running: a pause-flag read error must not block the
-        // eligibility projection. Logged so the bad read is visible.
-        console.error(
-          `[usage] /api/usage/eligibility pause read failed (treating as not paused): ${err?.message || err}`,
-        );
-      }
-      let sessionBlockedUntilMs: number | null = null;
-      try {
-        sessionBlockedUntilMs = await getSessionBlockedUntil();
-      } catch (err: any) {
-        // Fail-safe to no-block: a session-block read error must not block the
-        // eligibility projection. Logged so the bad read is visible.
-        console.error(
-          `[usage] /api/usage/eligibility session-block read failed (treating as no block): ${err?.message || err}`,
-        );
-      }
-      let worklessUntilMs: number | null = null;
-      try {
-        worklessUntilMs = await getWorklessUntil();
-      } catch (err: any) {
-        // Fail-safe to not-workless: a workless-hint read error must not block
-        // the eligibility projection. Logged so the bad read is visible.
-        console.error(
-          `[usage] /api/usage/eligibility workless-hint read failed (treating as not workless): ${err?.message || err}`,
-        );
-      }
-      const now = Date.now();
-      const eligibility = overlayWorklessEligibility(
-        overlaySessionBlockEligibility(
-          overlayPauseEligibility(projectEligibility(snapshot), paused),
-          sessionBlockedUntilMs,
-          now,
-        ),
-        worklessUntilMs,
-        now,
-      );
+      const eligibility = await getEligibilityView({
+        snapshot,
+        readPaused: async () => (await getAutopilotPaused()).paused,
+        readSessionBlockedUntil: () => getSessionBlockedUntil(),
+        readWorklessUntil: () => getWorklessUntil(),
+        now: () => Date.now(),
+      });
       return res.json(eligibility);
     } catch (err: any) {
       console.error(`[usage] /api/usage/eligibility failed: ${err?.message || err}`);

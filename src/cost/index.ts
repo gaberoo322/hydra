@@ -117,6 +117,9 @@ export {
 // The narrowed pacing-dashboard read-model — the canonical view type the
 // autopilot-status seam + idle-diagnostics route both consume (issue #3108).
 export type { EligibilityView } from "./eligibility.ts";
+// The full dispatch-gating verdict the overlay chain returns — the type the
+// `/api/usage/eligibility` aggregator leaf composes and returns (issue #3182).
+export type { UsageEligibility } from "./eligibility.ts";
 
 // ---------------------------------------------------------------------------
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
