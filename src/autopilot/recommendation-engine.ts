@@ -87,7 +87,6 @@ import {
   computeMaterialChangeSignature,
   summariseSlotStatus,
   shouldFire,
-  type ShouldFireDecision,
 } from "./recommendation-materiality.ts";
 
 // ---------------------------------------------------------------------------
@@ -185,7 +184,7 @@ export interface EngineDeps {
 // SECTION 2 — Materiality-gate re-exports (leaf: recommendation-materiality.ts, #3099)
 //
 // The pure, deterministic fire-decision logic — `shouldFire`,
-// `computeMaterialChangeSignature`, `summariseSlotStatus`, `ShouldFireDecision`,
+// `computeMaterialChangeSignature`, `summariseSlotStatus`,
 // and `MIN_CALL_INTERVAL_SECONDS` — lives in the `recommendation-materiality.ts`
 // leaf (#3099) so a test of this highest-consequence gate can import it without
 // pulling in the Anthropic Request Adapter, the Redis seam, or the prompt
@@ -205,7 +204,6 @@ export {
   computeMaterialChangeSignature,
   summariseSlotStatus,
   shouldFire,
-  type ShouldFireDecision,
 } from "./recommendation-materiality.ts";
 
 // ---------------------------------------------------------------------------
