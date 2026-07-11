@@ -73,7 +73,7 @@ export interface ProbeOutcome {
 }
 
 /** A probe-status classification carrying the display status + the fields a row renders. */
-export interface ProbeStatusClassification {
+interface ProbeStatusClassification {
   status: ProbeStatus;
   lastError?: string;
   latencyMs?: number;
