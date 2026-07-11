@@ -160,3 +160,60 @@ test("default deps wire to the real writers (no-arg call does not throw on a min
     reactToCycleCompleted({ type: "cycle:completed", payload: { task: { finalState: "failed" } } }),
   );
 });
+
+test("wire-format merged:true at top level classifies side correctly (issue #3200)", async () => {
+  // The actual wire payload uses `merged: true` at the top level, NOT
+  // `task.finalState === "merged"`. This is the primary production code path.
+  const { deps, calls } = makeDeps("orchestrator");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-wire-1",
+      merged: true,
+      filesChanged: ["src/notification/cycle-completed-reactor.ts"],
+      commitSha: "d1afe3fb",
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.classifySide.length, 1, "classifySide must run for merged:true wire payload");
+  assert.deepEqual(calls.classifySide[0].files, ["src/notification/cycle-completed-reactor.ts"]);
+  assert.equal(calls.recordCycleSide[0].side, "orchestrator");
+  assert.equal(calls.recordCycleSide[0].cycleId, "cyc-wire-1");
+});
+
+test("wire-format merged:true with rolledBack:true is still idle (issue #3200)", async () => {
+  const { deps, calls } = makeDeps("orchestrator");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-wire-2",
+      merged: true,
+      rolledBack: true,
+      filesChanged: ["src/foo.ts"],
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.classifySide.length, 0, "rolledBack overrides merged:true → idle");
+  assert.equal(calls.recordCycleSide[0].side, "idle");
+});
+
+test("wire-format merged:false records idle side (issue #3200)", async () => {
+  const { deps, calls } = makeDeps("target");
+  const event: CycleCompletedEvent = {
+    type: "cycle:completed",
+    payload: {
+      cycleId: "cyc-wire-3",
+      merged: false,
+      filesChanged: ["src/foo.ts"],
+    },
+  };
+
+  await reactToCycleCompleted(event, deps);
+
+  assert.equal(calls.classifySide.length, 0, "merged:false is idle");
+  assert.equal(calls.recordCycleSide[0].side, "idle");
+});

@@ -180,6 +180,8 @@ type NotificationEventPayload = Record<string, unknown> & {
   executionCyclesReviewed?: number;
   updatesApplied?: number;
   calibration?: string;
+  // --- Cycle merge flag (top-level, as emitted by the reap path) ---
+  merged?: boolean;
   // --- DLQ ---
   originalStream?: string;
   eventType?: string;
