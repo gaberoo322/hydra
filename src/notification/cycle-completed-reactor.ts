@@ -51,7 +51,7 @@ export interface CycleCompletedEvent {
   payload?: Record<string, unknown> &
     Pick<
       NotificationEventPayload,
-      "cycleId" | "task" | "filesChanged" | "rolledBack" | "commitSha"
+      "cycleId" | "task" | "filesChanged" | "rolledBack" | "commitSha" | "merged"
     >;
 }
 
@@ -110,7 +110,7 @@ export async function reactToCycleCompleted(
   const files: string[] = Array.isArray(p.filesChanged)
     ? p.filesChanged.filter((f): f is string => typeof f === "string")
     : [];
-  const isMerged = finalState === "merged" && !p.rolledBack;
+  const isMerged = (p.merged === true || finalState === "merged") && !p.rolledBack;
   const side = isMerged ? deps.classifySide(files, { workspaceHint: "target" }) : "idle";
   await deps.recordCycleSide(p.cycleId || event.correlationId || `evt-${Date.now()}`, side, {
     commitSha: p.commitSha || undefined,
