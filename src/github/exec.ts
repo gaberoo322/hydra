@@ -251,9 +251,9 @@ export function classifyFailure(raw: RawExecResult): GhErrorCode {
  * that `gh api` echoes from the response body. Detection keys off THAT text so
  * the adaptive backoff is implementable without headers.
  *
- * Exported so callers/tests can discriminate before the generic 403 auth match.
+ * Used internally to discriminate before the generic 403 auth match.
  */
-export function isRateLimitStderr(stderr: string): boolean {
+function isRateLimitStderr(stderr: string): boolean {
   return /\b(api rate limit exceeded|secondary rate limit|rate[_-]?limit[_-]?error|you have exceeded a secondary rate limit)\b/i.test(
     stderr,
   );
