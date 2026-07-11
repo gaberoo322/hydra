@@ -20,8 +20,9 @@
  *   - `runs.ts` → `sweep-reader.ts` (one-directional; the write lifecycle
  *     imports the `RUN_TTL_SECONDS` constant + `sweepRunIfDead` predicate it
  *     needs).
- *   - `sweep-reader.ts` → `run-projections.ts` (`deriveLifecycleState`,
- *     `isPidAlive`, type `AutopilotLifecycle`) and
+ *   - `sweep-reader.ts` → `run-projections.ts` (`isPidAlive`),
+ *     `sweep-reader.ts` → `run-lifecycle-state.ts` (`deriveLifecycleState`,
+ *     type `AutopilotLifecycle`), and
  *     `sweep-reader.ts` → `redis/autopilot-runs.ts` (`getAutopilotRun`).
  *   - The leaf adapter `src/redis/autopilot-runs.ts` gains NO import of
  *     `src/autopilot/` (preserves the #2189 no-cycle guarantee).

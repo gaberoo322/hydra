@@ -23,8 +23,11 @@
  * precedent (#3090 / PR #3094): pure state-machine logic lives apart from the
  * I/O coordinator that calls it. This module imports DOWN from the leaf for the
  * `WEDGE_AGE_THRESHOLD_S` constant `projectRunView` still needs, and re-exports
- * every leaf symbol below for the #2125 back-compat migration window so callers
- * that still import lifecycle symbols from this path do not churn.
+ * that constant (plus the lifecycle types) below so callers already resolving
+ * them through this path do not churn. The three lifecycle FUNCTION re-exports
+ * (`deriveLifecycleState`, `summarizeTerminationHealth`, `deriveInflightSlotSeed`)
+ * were dropped once every caller migrated to importing them from the leaf
+ * directly (issue #3143).
  *
  * This Module is the canonical home for the projection-coordinator symbols. The
  * back-compat re-export relay that once forwarded them through `runs.ts` was
@@ -46,16 +49,14 @@ import { WEDGE_AGE_THRESHOLD_S } from "./run-lifecycle-state.ts";
 // Back-compat re-export relay (issue #3106, #2125 migration window)
 //
 // The pure run-lifecycle state machine now lives in `run-lifecycle-state.ts`.
-// These re-exports preserve the public surface at this import path so callers
-// (and tests) that resolve lifecycle symbols through `run-projections.ts` do
-// not churn while they migrate to the leaf. The relay holds no logic of its
-// own. New callers of the state machine SHOULD import from the leaf directly.
+// `projectRunView` in this module still reads `WEDGE_AGE_THRESHOLD_S`, so that
+// constant (and the lifecycle types) are re-exported here to preserve the
+// public surface at this import path. The three lifecycle FUNCTIONS were dropped
+// from the relay once every caller migrated to the leaf (issue #3143). New
+// callers of the state machine SHOULD import from `run-lifecycle-state.ts`.
 // ---------------------------------------------------------------------------
 export {
   WEDGE_AGE_THRESHOLD_S,
-  deriveLifecycleState,
-  summarizeTerminationHealth,
-  deriveInflightSlotSeed,
 } from "./run-lifecycle-state.ts";
 export type {
   AutopilotLifecycle,
