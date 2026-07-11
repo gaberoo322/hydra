@@ -69,7 +69,7 @@ import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
 import { runCycleMergeReconcile } from "./chores/cycle-merge-reconcile.ts";
-import { runAttributionRecord } from "../outcome-attribution/subscribe.ts";
+import { runAttributionRecord } from "../outcome-attribution/index.ts";
 
 // ---------------------------------------------------------------------------
 // Re-exports (issue #2090): keep the pre-split public surface stable so

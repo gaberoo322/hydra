@@ -47,7 +47,7 @@ import {
 import {
   estimateMarginalEffects,
   type MetricEstimate,
-} from "../outcome-attribution/estimator.ts";
+} from "../outcome-attribution/index.ts";
 
 /**
  * The one dependency the handler needs: the append-only ledger read. Defaults to
