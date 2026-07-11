@@ -8,7 +8,11 @@ import {
   getCycleHash,
 } from "../redis/cycle-tracking.ts";
 import { countQuerySchema } from "../schemas/common.ts";
-import { aggregatorRouteNoQuery } from "./route-helpers.ts";
+import {
+  CycleRegisterBodySchema,
+  CycleCompleteBodySchema,
+} from "../schemas/cycles.ts";
+import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
 
 export function createCyclesRouter() {
   const router = Router();
@@ -76,12 +80,17 @@ export function createCyclesRouter() {
   });
 
   // Register an external cycle (Claude Code)
+  //
+  // Body validated through the Schemas seam (ADR-0011 / issue #3170): both
+  // `cycleId` and `source` are required non-empty strings; a failure returns the
+  // shared 400 `{ code: "schema-validation-failed", issues }` envelope.
   router.post("/cycle/register", async (req, res) => {
+    const parsed = CycleRegisterBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json(schemaValidationError(parsed.error));
+    }
+    const { cycleId, source } = parsed.data;
     try {
-      const { cycleId, source } = req.body || {};
-      if (!cycleId || !source) {
-        return res.status(400).json({ error: "Missing cycleId or source" });
-      }
       await registerCycleSource(source, cycleId, 900);
       await initCycleHash(cycleId, {
         status: "running",
@@ -99,12 +108,17 @@ export function createCyclesRouter() {
   });
 
   // Complete an external cycle
+  //
+  // Body validated through the Schemas seam (ADR-0011 / issue #3170): `cycleId`
+  // is required non-empty; `source` and `status` stay optional and keep their
+  // handler defaults (`source || "claude"`, `status || "completed"`).
   router.post("/cycle/complete", async (req, res) => {
+    const parsed = CycleCompleteBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json(schemaValidationError(parsed.error));
+    }
+    const { cycleId, source, status } = parsed.data;
     try {
-      const { cycleId, source, status } = req.body || {};
-      if (!cycleId) {
-        return res.status(400).json({ error: "Missing cycleId" });
-      }
       await releaseCycleSource(source || "claude");
       await updateCycleHash(cycleId, {
         status: status || "completed",
