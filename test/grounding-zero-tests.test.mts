@@ -3,7 +3,7 @@
  * `{passed:0, failed:0, total:0}` when `npm test` exits 0 but its output
  * contains no recognisable vitest/jest summary line.
  *
- * Before this fix, `/api/tasks/grounding/latest` reported "0 tests ran"
+ * Before this fix, `/api/grounding/latest` reported "0 tests ran"
  * indistinguishable from "the harness crashed without erroring" or "the
  * loader silently no-op'd". Downstream metrics (priorities aggregator,
  * stuckness inputs) treated the zero as ground truth.
