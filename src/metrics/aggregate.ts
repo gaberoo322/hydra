@@ -99,18 +99,34 @@ export function computeEmptyRateFromTrend(
 export function projectTokensPerMergedPR(
   trend: Array<Record<string, any>>,
 ): number | null {
-  let tokenSum = 0;
-  let mergedWithTokens = 0;
+  // Collect attributed merged cycles (merged + finite tokenCost).
+  const attributed: number[] = [];
   for (const m of trend) {
     const merged = (m?.tasksMerged ?? 0) > 0;
     const tokenCost = m?.tokenCost;
     if (merged && typeof tokenCost === "number" && Number.isFinite(tokenCost)) {
-      tokenSum += tokenCost;
-      mergedWithTokens += 1;
+      attributed.push(tokenCost);
     }
   }
-  if (mergedWithTokens === 0) return null;
-  return Math.round(tokenSum / mergedWithTokens);
+  if (attributed.length === 0) return null;
+
+  // Outlier guard (issue #3201): exclude records whose tokenCost exceeds 10×
+  // the median of the attributed set. This prevents legacy/test M-scale records
+  // (e.g. 42M, 63M tokens) from inflating the aggregate average 109×. The guard
+  // applies only to the aggregate stat, never to individual cycle rows.
+  const sorted = attributed.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+  const outlierThreshold = median * 10;
+  const clean = attributed.filter((v) => v <= outlierThreshold);
+
+  // If every value is an outlier (e.g. trend has only legacy records), fall back
+  // to the full set so the gauge never silently returns null on non-empty data.
+  const effective = clean.length > 0 ? clean : attributed;
+  const tokenSum = effective.reduce((a, b) => a + b, 0);
+  return Math.round(tokenSum / effective.length);
 }
 
 // ---------------------------------------------------------------------------
