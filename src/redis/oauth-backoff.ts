@@ -128,3 +128,162 @@ export async function clearOAuthBackoff(): Promise<void> {
     console.error(`[oauth-backoff] clear failed (stale gate self-expires at TTL): ${err?.message || err}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// GitHub-API rate-limit backoff gate (issue #3137)
+// ---------------------------------------------------------------------------
+//
+// PROBLEM this closes: the orchestrator's `gh` calls (dispatch/reconciliation
+// cycles) periodically take a GitHub `rate_limit_error` (primary or secondary
+// limit). The `gh` CLI abstracts away the raw HTTP response headers, so the
+// exact `x-ratelimit-reset` instant is NOT readable — but the structured
+// rate-limit failure IS classifiable (`gh-rate-limited`, see
+// `src/github/exec.ts::isRateLimitStderr`). Without a gate, a rate-limited call
+// is naively retried on the next cycle against a still-limited endpoint,
+// worsening the limit. This gate is the `gh`-API sibling of the OAuth-meter
+// ladder above: an exponential backoff, persisted so it survives a restart, so
+// callers can SKIP a `gh` call while the gate is armed instead of hammering the
+// limited endpoint.
+//
+// Same contract as the OAuth gate: FAILS OPEN (Redis outage → no gate, the
+// pre-#3137 behaviour), NEVER throws, and the persisted `nextAttemptMs` is
+// clamped on hydrate against the current MAX ceiling so a stale/hostile write
+// can never park `gh` calls longer than a freshly-armed max backoff.
+
+/** Redis key for the persisted GitHub-API rate-limit backoff gate (issue #3137). */
+const GH_RATE_LIMIT_BACKOFF_KEY = "hydra:metrics:github-api:rate-limit-backoff";
+
+/**
+ * Exponential ladder for the `gh`-API gate. The base (30s) and ceiling (~15min)
+ * mirror the OAuth-meter ladder — a GitHub primary-limit window resets hourly,
+ * so a ~15min ceiling re-probes several times per window without hammering.
+ */
+const GH_BACKOFF_BASE_MS = 30_000; // first failure → 30s
+const GH_BACKOFF_MAX_MS = 15 * 60_000; // ceiling → ~15min
+
+/** TTL for the persisted gh-API gate. Same 24h self-expiry rationale as OAuth. */
+const GH_RATE_LIMIT_BACKOFF_TTL_SECONDS = 24 * 60 * 60;
+
+/**
+ * The persisted gh-API rate-limit gate. Same shape as {@link PersistedOAuthBackoff}:
+ *   - `failures` — consecutive `gh-rate-limited` failures since the last success (>= 1).
+ *   - `nextAttemptMs` — epoch-ms before which no gated `gh` call is attempted.
+ */
+export interface PersistedGhRateLimitBackoff {
+  failures: number;
+  nextAttemptMs: number;
+}
+
+/**
+ * Pure exponential-backoff ladder for the `gh`-API gate (issue #3137). Given the
+ * consecutive-failure count and `now`, return the next `{ failures, nextAttemptMs }`.
+ * Delay is `min(base * 2^(failures-1), max)`; `failures` is clamped >= 1 so the
+ * first observed failure arms the base delay. Deterministic and side-effect free
+ * so it is unit-testable without Redis.
+ */
+export function nextGhRateLimitBackoff(
+  failures: number,
+  now: number,
+): PersistedGhRateLimitBackoff {
+  const n = Math.max(1, Math.floor(Number.isFinite(failures) ? failures : 1));
+  // Guard the shift against overflow — cap the exponent so 2^exp stays finite.
+  const exp = Math.min(n - 1, 20);
+  const delay = Math.min(GH_BACKOFF_BASE_MS * 2 ** exp, GH_BACKOFF_MAX_MS);
+  return { failures: n, nextAttemptMs: now + delay };
+}
+
+/** Validate a parsed value as a well-formed {@link PersistedGhRateLimitBackoff}. */
+function isValidGhBackoff(value: unknown): value is PersistedGhRateLimitBackoff {
+  if (value === null || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.failures === "number" &&
+    Number.isFinite(v.failures) &&
+    v.failures >= 1 &&
+    typeof v.nextAttemptMs === "number" &&
+    Number.isFinite(v.nextAttemptMs)
+  );
+}
+
+/**
+ * Read the persisted gh-API rate-limit gate, clamping a stale/hostile
+ * `nextAttemptMs` down to `now + GH_BACKOFF_MAX_MS` so it can never park `gh`
+ * calls longer than a freshly-armed max backoff. Returns `null` when none is
+ * stored / corrupt / Redis is unreachable. NEVER throws (fails open).
+ */
+export async function readGhRateLimitBackoff(
+  now: number = Date.now(),
+): Promise<PersistedGhRateLimitBackoff | null> {
+  let raw: string | null;
+  try {
+    const r = getRedisConnection();
+    raw = await r.get(GH_RATE_LIMIT_BACKOFF_KEY);
+  } catch (err: any) {
+    console.error(
+      `[gh-rate-limit-backoff] read failed (degrading to no persisted state): ${err?.message || err}`,
+    );
+    return null;
+  }
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    console.error(
+      `[gh-rate-limit-backoff] stored value is not valid JSON (ignoring): ${err?.message || err}`,
+    );
+    return null;
+  }
+  if (!isValidGhBackoff(parsed)) {
+    console.error(
+      `[gh-rate-limit-backoff] stored value is malformed (ignoring): ${raw.slice(0, 120)}`,
+    );
+    return null;
+  }
+  // Clamp a value further out than a freshly-armed max backoff (persistence
+  // extends NO staleness ceiling — mirrors the OAuth gate's hydrate clamp).
+  const ceiling = now + GH_BACKOFF_MAX_MS;
+  if (parsed.nextAttemptMs > ceiling) {
+    return { failures: parsed.failures, nextAttemptMs: ceiling };
+  }
+  return parsed;
+}
+
+/**
+ * Persist the gh-API rate-limit gate, stamping the 24h TTL. Best-effort — NEVER
+ * throws: a Redis outage means the ladder won't survive the next restart (the
+ * pre-#3137 behaviour), strictly better than failing the `gh` call.
+ */
+export async function writeGhRateLimitBackoff(
+  state: PersistedGhRateLimitBackoff,
+): Promise<void> {
+  try {
+    const r = getRedisConnection();
+    await r.set(
+      GH_RATE_LIMIT_BACKOFF_KEY,
+      JSON.stringify(state),
+      "EX",
+      GH_RATE_LIMIT_BACKOFF_TTL_SECONDS,
+    );
+  } catch (err: any) {
+    console.error(
+      `[gh-rate-limit-backoff] write failed (ladder will reset on next restart): ${err?.message || err}`,
+    );
+  }
+}
+
+/**
+ * Clear the persisted gh-API rate-limit gate — called when a `gh` call SUCCEEDS
+ * after prior rate-limit failures, so a restart right after recovery does not
+ * resume a now-obsolete gate. Best-effort — NEVER throws.
+ */
+export async function clearGhRateLimitBackoff(): Promise<void> {
+  try {
+    const r = getRedisConnection();
+    await r.del(GH_RATE_LIMIT_BACKOFF_KEY);
+  } catch (err: any) {
+    console.error(
+      `[gh-rate-limit-backoff] clear failed (stale gate self-expires at TTL): ${err?.message || err}`,
+    );
+  }
+}

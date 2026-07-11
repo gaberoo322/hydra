@@ -23,11 +23,16 @@ const {
   readOAuthBackoff,
   writeOAuthBackoff,
   clearOAuthBackoff,
+  readGhRateLimitBackoff,
+  writeGhRateLimitBackoff,
+  clearGhRateLimitBackoff,
+  nextGhRateLimitBackoff,
 } = await import("../src/redis/oauth-backoff.ts");
 
 // The single key this module owns — mirrored here so the suite can seed
 // malformed values and clean up without importing module internals.
 const OAUTH_BACKOFF_KEY = "hydra:metrics:oauth-usage:backoff";
+const GH_RATE_LIMIT_BACKOFF_KEY = "hydra:metrics:github-api:rate-limit-backoff";
 
 describe("redis/oauth-backoff seam", () => {
   let raw: any;
@@ -119,6 +124,122 @@ describe("redis/oauth-backoff seam", () => {
     assert.deepEqual(await readOAuthBackoff(), {
       failures: 1,
       nextAttemptMs: 5,
+    });
+  });
+});
+
+// A separate top-level suite with its own before/after lifecycle (CLAUDE.md:
+// never nest under a sibling that owns a shared-Redis teardown).
+describe("redis/oauth-backoff — gh-API rate-limit gate (issue #3137)", () => {
+  let raw: any;
+
+  before(() => {
+    raw = new Redis(process.env.REDIS_URL as string);
+  });
+
+  beforeEach(async () => {
+    await raw.del(GH_RATE_LIMIT_BACKOFF_KEY);
+  });
+
+  after(async () => {
+    await raw.del(GH_RATE_LIMIT_BACKOFF_KEY);
+    raw.disconnect();
+  });
+
+  // --- pure ladder (no Redis) ---
+
+  test("nextGhRateLimitBackoff: first failure arms the 30s base", () => {
+    const now = 1_000_000;
+    assert.deepEqual(nextGhRateLimitBackoff(1, now), {
+      failures: 1,
+      nextAttemptMs: now + 30_000,
+    });
+  });
+
+  test("nextGhRateLimitBackoff: doubles per consecutive failure", () => {
+    const now = 0;
+    assert.equal(nextGhRateLimitBackoff(2, now).nextAttemptMs, 60_000);
+    assert.equal(nextGhRateLimitBackoff(3, now).nextAttemptMs, 120_000);
+    assert.equal(nextGhRateLimitBackoff(4, now).nextAttemptMs, 240_000);
+  });
+
+  test("nextGhRateLimitBackoff: clamps to the ~15min ceiling", () => {
+    const now = 0;
+    const MAX = 15 * 60_000;
+    assert.equal(nextGhRateLimitBackoff(50, now).nextAttemptMs, MAX);
+  });
+
+  test("nextGhRateLimitBackoff: clamps failures up to >= 1", () => {
+    const now = 0;
+    assert.deepEqual(nextGhRateLimitBackoff(0, now), {
+      failures: 1,
+      nextAttemptMs: 30_000,
+    });
+    assert.deepEqual(nextGhRateLimitBackoff(-5, now), {
+      failures: 1,
+      nextAttemptMs: 30_000,
+    });
+  });
+
+  // --- persisted gate round-trip ---
+
+  test("write → read round-trips the gh gate", async () => {
+    const now = Date.now();
+    const state = { failures: 2, nextAttemptMs: now + 60_000 };
+    await writeGhRateLimitBackoff(state);
+    assert.deepEqual(await readGhRateLimitBackoff(now), state);
+  });
+
+  test("write stamps a bounded TTL (<= 24h, > 0)", async () => {
+    await writeGhRateLimitBackoff({ failures: 1, nextAttemptMs: Date.now() });
+    const ttl = await raw.ttl(GH_RATE_LIMIT_BACKOFF_KEY);
+    const DAY = 24 * 60 * 60;
+    assert.ok(ttl > 0 && ttl <= DAY, `TTL should be 1..${DAY}, got ${ttl}`);
+  });
+
+  test("clear removes a stored gh gate", async () => {
+    await writeGhRateLimitBackoff({ failures: 2, nextAttemptMs: Date.now() + 1 });
+    assert.notEqual(await readGhRateLimitBackoff(), null);
+    await clearGhRateLimitBackoff();
+    assert.equal(await readGhRateLimitBackoff(), null);
+  });
+
+  test("clear on an absent key is a no-op (never throws)", async () => {
+    await clearGhRateLimitBackoff();
+    assert.equal(await readGhRateLimitBackoff(), null);
+  });
+
+  test("read fails open to null on a non-JSON value", async () => {
+    await raw.set(GH_RATE_LIMIT_BACKOFF_KEY, "not-json");
+    assert.equal(await readGhRateLimitBackoff(), null);
+  });
+
+  test("read rejects a malformed shape (missing nextAttemptMs)", async () => {
+    await raw.set(GH_RATE_LIMIT_BACKOFF_KEY, JSON.stringify({ failures: 3 }));
+    assert.equal(await readGhRateLimitBackoff(), null);
+  });
+
+  test("read clamps a stale nextAttemptMs down to the max ceiling", async () => {
+    const now = 1_000_000_000;
+    const MAX = 15 * 60_000;
+    // A hostile/stale writer parks the gate 10 days out — the hydrate clamp
+    // must pull it back to `now + MAX` so gh calls can never be parked longer
+    // than a freshly-armed max backoff.
+    await writeGhRateLimitBackoff({
+      failures: 3,
+      nextAttemptMs: now + 10 * 24 * 60 * 60_000,
+    });
+    const got = await readGhRateLimitBackoff(now);
+    assert.deepEqual(got, { failures: 3, nextAttemptMs: now + MAX });
+  });
+
+  test("read does NOT clamp a within-ceiling nextAttemptMs", async () => {
+    const now = 2_000_000;
+    const within = now + 30_000;
+    await writeGhRateLimitBackoff({ failures: 1, nextAttemptMs: within });
+    assert.deepEqual(await readGhRateLimitBackoff(now), {
+      failures: 1,
+      nextAttemptMs: within,
     });
   });
 });
