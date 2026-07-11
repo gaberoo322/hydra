@@ -1,9 +1,11 @@
 ---
-updated: 2026-07-01
+updated: 2026-07-11
 refreshedBy: claude-research
 researchCycle: research-target-2026-07-01b
 tags: [hydra, hydra/direction]
 ---
+> Re-verified 2026-07-11 (#3196): the priorities below remain consistent with `vision.md` and hydra-betting ADR-0002 (M13 Forecast-Directional Execution is the active program; cross-venue arbitrage was retired 2026-06-22). No active-arbitrage priority framing exists — the only `arbitrage` mentions are the legitimate ADR-0002 step-3/step-4 deletion tasks. No vision/priorities contradiction found; content unchanged.
+
 # Current state
 Hydra is sports-first, executing the M13 (Forecast-Directional Execution) program. Tests are green (6820 passing, 3 skipped — verified baseline 2026-07-01b). Active backlog is 9 items (all cleanup); work queue is empty (0). Backlog gap: 21 items to target of 30.
 
