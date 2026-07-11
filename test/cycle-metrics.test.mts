@@ -183,6 +183,48 @@ describe("projectTokensPerMergedPR pure arithmetic (issue #2930)", () => {
   });
 });
 
+describe("projectTokensPerMergedPR outlier guard (issue #3201)", () => {  test("outlier guard: excludes records >10x median, protecting average from M-scale legacy records (issue #3201)", () => {
+    // Real scenario: 14 clean records (~64-101k tokens) + 3 legacy M-scale records.
+    // Median of attributed set ≈ ~84k → threshold ≈ 840k → 42M/63M/12M all exceed it.
+    const clean = [
+      { tasksMerged: 1, tokenCost: 101287 },
+      { tasksMerged: 1, tokenCost: 84289 },
+      { tasksMerged: 1, tokenCost: 72463 },
+      { tasksMerged: 1, tokenCost: 65000 },
+      { tasksMerged: 1, tokenCost: 60000 },
+    ];
+    const outliers = [
+      { tasksMerged: 1, tokenCost: 42_000_000 }, // legacy-iso-task
+      { tasksMerged: 1, tokenCost: 63_120_000 }, // betting-build-1591
+      { tasksMerged: 1, tokenCost: 12_880_000 }, // task-B
+    ];
+    const trend = [...clean, ...outliers];
+    const result = projectTokensPerMergedPR(trend);
+    // Clean average ≈ (101287+84289+72463+65000+60000)/5 = 76608
+    // With 3 outliers the naïve average would be ~(76608*5 + 118000000) / 8 = ~14.8M
+    assert.ok(result !== null);
+    assert.ok(result! < 200_000, `tokensPerMergedPR ${result} should be under 200k (outliers excluded)`);
+    assert.ok(result! > 50_000, `tokensPerMergedPR ${result} should be over 50k (realistic clean average)`);
+  });
+
+  test("outlier guard: single M-scale record in a 1-record trend falls back to full set (no null)", () => {
+    // When every record is an outlier, return all of them rather than null.
+    const trend = [{ tasksMerged: 1, tokenCost: 50_000_000 }];
+    assert.strictEqual(projectTokensPerMergedPR(trend), 50_000_000);
+  });
+
+  test("outlier guard: does not drop legitimate high-cost cycles that are within 10x of median", () => {
+    // If median is 100k and one cycle costs 900k (9× median), it must stay in.
+    const trend = [
+      { tasksMerged: 1, tokenCost: 100_000 },
+      { tasksMerged: 1, tokenCost: 100_000 },
+      { tasksMerged: 1, tokenCost: 900_000 }, // 9× median, within threshold
+    ];
+    // Should include all three: (100000 + 100000 + 900000) / 3 = 366667
+    assert.strictEqual(projectTokensPerMergedPR(trend), 366667);
+  });
+});
+
 /**
  * Default dispatch source (issue #3070).
  *
