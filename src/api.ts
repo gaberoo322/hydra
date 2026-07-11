@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 import { createCyclesRouter } from "./api/cycles.ts";
 import { createQueueRouter } from "./api/queue.ts";
-import { createTasksRouter } from "./api/tasks.ts";
+import { createGroundingRouter } from "./api/grounding.ts";
 import { createHealthRouter } from "./api/health.ts";
 import { createRecommendationsRouter } from "./api/recommendations.ts";
 import { createResearchRouter } from "./api/research.ts";
@@ -81,7 +81,12 @@ function createApi(eventBus: EventBus) {
   // Mount domain sub-routers
   api.use(createCyclesRouter());
   api.use(createQueueRouter());
-  api.use(createTasksRouter());
+  // Grounding read surface (issue #3190) — re-homed from the retired
+  // `api/tasks.ts` router; mounts prefix-less so /api/grounding/latest stays
+  // byte-identical. The old router's always-dead /agents/status +
+  // /agents/:id/pause routes were retired (empty under the autopilot recorder,
+  // ADR-0016).
+  api.use(createGroundingRouter());
   api.use(createHealthRouter(eventBus));
   // Operator-action-items surface (issue #1322) — extracted out of the health
   // router; mounts prefix-less so /api/recommendations stays byte-identical.
