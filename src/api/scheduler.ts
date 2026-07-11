@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
 import type { PingableBus } from "../event-bus-seams.ts";
+import { SchedulerStartBodySchema } from "../schemas/scheduler.ts";
 
 // The scheduler router only forwards the bus to `heartbeat.start()` (whose
 // `eventBus` param is still implicit-any); it never publishes itself. The seam
@@ -12,7 +13,17 @@ export function createSchedulerRouter(eventBus: PingableBus) {
 
   // POST /scheduler/start — Start automatic cycle scheduling
   router.post("/scheduler/start", async (req, res) => {
-    const intervalMs = req.body?.intervalMs;
+    // Zod boundary parse (issue #3171, ADR-0011). `intervalMs` is an optional
+    // positive integer; the 30000ms MIN_INTERVAL_MS floor stays a 409 in
+    // startScheduler (single source of truth — schema does not duplicate it).
+    const parsed = SchedulerStartBodySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const { intervalMs } = parsed.data;
     const result = await startScheduler(eventBus, { intervalMs });
     if (result.error) {
       res.status(409).json(result);

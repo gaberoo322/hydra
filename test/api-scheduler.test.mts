@@ -300,6 +300,106 @@ describe("Scheduler API routes (issue #164)", () => {
       // Clean up: stop the scheduler
       stopScheduler();
     });
+
+    // ---------------------------------------------------------------------
+    // Schema validation (issue #3171, ADR-0011)
+    //
+    // The inline `intervalMs` guard was replaced with a zod safeParse against
+    // SchedulerStartBodySchema (src/schemas/scheduler.ts). Malformed bodies
+    // now get the shared 400 {code:"schema-validation-failed", issues} envelope
+    // BEFORE reaching startScheduler; the 30000ms MIN_INTERVAL_MS floor stays
+    // a 409 in startScheduler (positive-but-sub-floor intervals like 1ms are
+    // schema-valid and fall through to that 409 — see the "too-short interval"
+    // test above).
+    // ---------------------------------------------------------------------
+
+    test("empty body starts at the default interval (intervalMs optional)", async () => {
+      const eventBus = { publisher: redis };
+      const router = createSchedulerRouter(eventBus);
+      const startHandler = findHandler(router, "POST", "/scheduler/start");
+
+      // No intervalMs — must NOT 400; starts at stored/default cadence.
+      const req = mockReq({ method: "POST", body: {} });
+      const res = mockRes();
+      await startHandler(req, res);
+
+      assert.notEqual(res._status, 400, "empty body must not be a schema-validation 400");
+      assert.ok(res._body.started, "empty body should start the scheduler at the default interval");
+
+      // Clean up
+      stopScheduler();
+    });
+
+    test("returns 400 schema-validation-failed for non-numeric intervalMs", async () => {
+      const eventBus = { publisher: redis };
+      const router = createSchedulerRouter(eventBus);
+      const startHandler = findHandler(router, "POST", "/scheduler/start");
+
+      const req = mockReq({ method: "POST", body: { intervalMs: "600000" } });
+      const res = mockRes();
+      await startHandler(req, res);
+
+      assert.equal(res._status, 400, "non-numeric intervalMs should 400");
+      assert.equal(res._body.code, "schema-validation-failed", "should return the shared envelope code");
+      assert.ok(Array.isArray(res._body.issues), "should surface zod issues[]");
+      assert.ok(res._body.issues.length > 0, "issues[] should be non-empty");
+    });
+
+    test("returns 400 for negative intervalMs (positive-integer shape)", async () => {
+      const eventBus = { publisher: redis };
+      const router = createSchedulerRouter(eventBus);
+      const startHandler = findHandler(router, "POST", "/scheduler/start");
+
+      const req = mockReq({ method: "POST", body: { intervalMs: -5 } });
+      const res = mockRes();
+      await startHandler(req, res);
+
+      assert.equal(res._status, 400, "negative intervalMs should 400 at the schema boundary");
+      assert.equal(res._body.code, "schema-validation-failed");
+    });
+
+    test("returns 400 for non-integer intervalMs", async () => {
+      const eventBus = { publisher: redis };
+      const router = createSchedulerRouter(eventBus);
+      const startHandler = findHandler(router, "POST", "/scheduler/start");
+
+      const req = mockReq({ method: "POST", body: { intervalMs: 60000.5 } });
+      const res = mockRes();
+      await startHandler(req, res);
+
+      assert.equal(res._status, 400, "non-integer intervalMs should 400");
+      assert.equal(res._body.code, "schema-validation-failed");
+    });
+
+    test("rejects a typo'd key (.strict) with 400", async () => {
+      const eventBus = { publisher: redis };
+      const router = createSchedulerRouter(eventBus);
+      const startHandler = findHandler(router, "POST", "/scheduler/start");
+
+      // `intervalMS` (wrong casing) must be rejected, not silently ignored.
+      const req = mockReq({ method: "POST", body: { intervalMS: 600000 } });
+      const res = mockRes();
+      await startHandler(req, res);
+
+      assert.equal(res._status, 400, "unrecognized key should 400 under .strict()");
+      assert.equal(res._body.code, "schema-validation-failed");
+    });
+
+    test("sub-floor-but-positive interval still hits the 409 floor, not a 400", async () => {
+      const eventBus = { publisher: redis };
+      const router = createSchedulerRouter(eventBus);
+      const startHandler = findHandler(router, "POST", "/scheduler/start");
+
+      // 1ms is a valid positive integer (schema passes) but below
+      // MIN_INTERVAL_MS — the 30000ms floor stays a startScheduler 409.
+      const req = mockReq({ method: "POST", body: { intervalMs: 1 } });
+      const res = mockRes();
+      await startHandler(req, res);
+
+      assert.notEqual(res._status, 400, "sub-floor interval is schema-valid, not a 400");
+      assert.ok(res._body.error, "should return the floor error from startScheduler");
+      assert.ok(res._body.error.includes("at least"), "error should mention the minimum interval");
+    });
   });
 
   // -----------------------------------------------------------------------
