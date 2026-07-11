@@ -119,7 +119,6 @@ export interface HealthSnapshot {
     lastError?: string | null;
     lastCycleAt?: string | null;
     intervalHuman?: string;
-    research?: { lastResearchAt?: string | null };
   };
   // Issue #1869: extensible keyed map, not a fixed `{ vikingdb, openviking }`
   // struct — a new monitored service is a one-entry edit to the api/health.ts

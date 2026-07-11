@@ -62,7 +62,6 @@ import {
   getSchedulerCyclesMerged,
   getSchedulerCyclesFailed,
   getSchedulerCyclesUnaccounted,
-  getLastResearchAtMs,
   getSchedulerStateVersion,
   getSchedulerStateRaw,
   getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
@@ -155,8 +154,6 @@ interface HeartbeatState {
   lastError: string | null;
   startedAt: string | null;
   consecutiveErrors: number;
-  researchCyclesRun: number;
-  lastResearchAt: string | null;
   _stateVersion: number; // optimistic locking version (issue #140 — AC3)
   // Issue #388: distinguish operator-initiated stops from self-stops so the
   // watchdog can refuse to auto-restart deliberate stops.
@@ -184,8 +181,6 @@ function freshState(): HeartbeatState {
     lastError: null,
     startedAt: null,
     consecutiveErrors: 0,
-    researchCyclesRun: 0,
-    lastResearchAt: null,
     _stateVersion: 0,
     stopReason: null,
     deliberateStoppedAt: null,
@@ -231,7 +226,6 @@ export interface HeartbeatControllerDeps {
   getSchedulerCyclesMerged?: () => Promise<number>;
   getSchedulerCyclesFailed?: () => Promise<number>;
   getSchedulerCyclesUnaccounted?: () => Promise<number>;
-  getLastResearchAtMs?: () => Promise<number | null>;
   getSchedulerStateVersion?: () => Promise<number>;
   getSchedulerDeliberateStop?: () => Promise<string | null>;
 
@@ -263,7 +257,6 @@ export class HeartbeatController {
   private readonly getSchedulerCyclesMerged: () => Promise<number>;
   private readonly getSchedulerCyclesFailed: () => Promise<number>;
   private readonly getSchedulerCyclesUnaccounted: () => Promise<number>;
-  private readonly getLastResearchAtMs: () => Promise<number | null>;
   private readonly getSchedulerStateVersion: () => Promise<number>;
   private readonly getSchedulerDeliberateStop: () => Promise<string | null>;
   private readonly setSchedulerDeliberateStop: (payload: string, ttlSeconds: number) => Promise<void>;
@@ -280,7 +273,6 @@ export class HeartbeatController {
     this.getSchedulerCyclesMerged = deps.getSchedulerCyclesMerged ?? getSchedulerCyclesMerged;
     this.getSchedulerCyclesFailed = deps.getSchedulerCyclesFailed ?? getSchedulerCyclesFailed;
     this.getSchedulerCyclesUnaccounted = deps.getSchedulerCyclesUnaccounted ?? getSchedulerCyclesUnaccounted;
-    this.getLastResearchAtMs = deps.getLastResearchAtMs ?? getLastResearchAtMs;
     this.getSchedulerStateVersion = deps.getSchedulerStateVersion ?? getSchedulerStateVersion;
     this.getSchedulerDeliberateStop = deps.getSchedulerDeliberateStop ?? getSchedulerDeliberateStop;
     this.setSchedulerDeliberateStop = deps.setSchedulerDeliberateStop ?? setSchedulerDeliberateStop;
@@ -302,10 +294,11 @@ export class HeartbeatController {
   // reset `lastResearchAt` used to trigger an immediate unwanted research cycle
   // (~$3-8 in Codex). That writer was removed in #725 (scheduler fold PR-4/4)
   // once the research-decision plane that called it was deleted in #706
-  // (PR-1/4). The persisted `SCHEDULER_STATE_KEY` value is now read-only here —
-  // loadSchedulerState() still merges any historical value in, but nothing in
-  // this heartbeat writes it. The research-force policy lives in the autopilot
-  // brain (`scripts/autopilot/decide.py`).
+  // (PR-1/4). The vestigial read-back of those fields (the `SCHEDULER_STATE_KEY`
+  // research merge and the atomic `getLastResearchAtMs` load) was then removed in
+  // #3133 — nothing populated them and nothing projected them into
+  // SchedulerStatus. The research-force policy lives in the autopilot brain
+  // (`scripts/autopilot/decide.py`).
   //
   // Lifetime cycle counters (cyclesRun, cyclesMerged, cyclesFailed) are also
   // persisted via dedicated Redis atomic counters — see incrSchedulerCyclesRun /
@@ -322,12 +315,6 @@ export class HeartbeatController {
       const raw = await this.getSchedulerStateRaw();
       if (!raw) {
         console.log("[Heartbeat] No persisted state in Redis — starting fresh");
-      } else {
-        const stored = JSON.parse(raw);
-        if (stored.lastResearchAt) state.lastResearchAt = stored.lastResearchAt;
-        if (typeof stored.researchCyclesRun === "number") {
-          state.researchCyclesRun = stored.researchCyclesRun;
-        }
       }
 
       // Load atomic counter for cyclesRun (issue #140 — AC1)
@@ -365,12 +352,6 @@ export class HeartbeatController {
         );
       }
 
-      // Load atomic lastResearchAt (issue #140 — AC2)
-      const lastResearchMs = await this.getLastResearchAtMs();
-      if (lastResearchMs) {
-        state.lastResearchAt = new Date(lastResearchMs).toISOString();
-      }
-
       // Load state version for optimistic locking (issue #140 — AC3)
       state._stateVersion = await this.getSchedulerStateVersion();
 
@@ -393,7 +374,7 @@ export class HeartbeatController {
         console.error(`[Heartbeat] Failed to load deliberate-stop marker: ${err.message}`);
       }
 
-      console.log(`[Heartbeat] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}, stopReason=${state.stopReason ?? "none"}`);
+      console.log(`[Heartbeat] Loaded persisted state — cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}, stopReason=${state.stopReason ?? "none"}`);
     } catch (err: any) {
       console.error(`[Heartbeat] Failed to load persisted state: ${err.message}`);
     }

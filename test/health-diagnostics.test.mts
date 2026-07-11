@@ -1337,7 +1337,12 @@ describe("projectHealthDeepResponse", () => {
       uptimeSeconds: 9999,
     });
     assert.equal(r.services.scheduler.status, "running");
-    assert.deepEqual(r.services.scheduler.research, { lastResearchAt: null });
+    // Issue #3133: the vestigial always-null `scheduler.research` wire field was
+    // removed — the deep-health envelope must no longer carry it.
+    assert.ok(
+      !("research" in r.services.scheduler),
+      "scheduler wire object must not carry the removed `research` field",
+    );
     assert.deepEqual(r.services.vikingdb, { status: "running" });
     assert.deepEqual(r.services.openviking, { status: "running" });
   });
