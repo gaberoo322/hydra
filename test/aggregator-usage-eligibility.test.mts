@@ -124,7 +124,7 @@ function deps(overrides: Partial<EligibilityViewDeps> = {}): EligibilityViewDeps
 }
 
 // A rejecting reader that also proves the failMessage path is exercised.
-const boom = <T>() => async (): Promise<T> => {
+const boom = <T,>() => async (): Promise<T> => {
   throw new Error("redis-down");
 };
 
