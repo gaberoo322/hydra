@@ -21,7 +21,7 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { formatMemoryForPrompt } from "../src/pattern-memory/prompt-format.ts";
+import { formatMemoryForPrompt } from "../src/pattern-memory/index.ts";
 
 /** Build one rendered `### [severity] category (Nx)` block the way loadAgentMemory does. */
 function block(severity: string, category: string, hits: number, action: string): string {

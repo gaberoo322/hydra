@@ -33,8 +33,10 @@
  *   threshold flows through without a parallel edit here.
  */
 
-import { PROMOTION_THRESHOLD } from "../pattern-memory/constants.ts";
-import type { FrictionPattern } from "../pattern-memory/friction-pattern.ts";
+import {
+  PROMOTION_THRESHOLD,
+  type FrictionPattern,
+} from "../pattern-memory/index.ts";
 import {
   readFrictionPatterns,
   readMetaFrictionIssues,

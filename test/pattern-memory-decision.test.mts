@@ -17,7 +17,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { decideRecordActions } from "../src/pattern-memory/decision.ts";
-import { PROMOTION_THRESHOLD } from "../src/pattern-memory/constants.ts";
+import { PROMOTION_THRESHOLD } from "../src/pattern-memory/index.ts";
 
 const T = PROMOTION_THRESHOLD; // 3
 

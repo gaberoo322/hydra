@@ -16,9 +16,9 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { backfillPatternPromotionMetadata } from "../src/pattern-memory/agent-memory.ts";
-import { type MemoryPattern } from "../src/pattern-memory/pattern-store.ts";
-import { evaluatePromotedPatternEffectiveness } from "../src/pattern-memory/rule-effectiveness.ts";
+import { backfillPatternPromotionMetadata } from "../src/pattern-memory/index.ts";
+import { type MemoryPattern } from "../src/pattern-memory/index.ts";
+import { evaluatePromotedPatternEffectiveness } from "../src/pattern-memory/index.ts";
 
 function makePattern(overrides: Partial<MemoryPattern>): MemoryPattern {
   return {

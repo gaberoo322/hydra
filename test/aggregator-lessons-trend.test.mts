@@ -19,8 +19,8 @@ import {
   promotionsByDay,
   pickTopFriction,
 } from "../src/aggregators/lessons-trend.ts";
-import { PROMOTION_THRESHOLD } from "../src/pattern-memory/constants.ts";
-import type { FrictionPattern } from "../src/pattern-memory/friction-pattern.ts";
+import { PROMOTION_THRESHOLD } from "../src/pattern-memory/index.ts";
+import type { FrictionPattern } from "../src/pattern-memory/index.ts";
 import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");

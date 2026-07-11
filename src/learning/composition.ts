@@ -54,8 +54,10 @@
 // consolidate) lives in src/learning-lifecycle.ts, a one-way sibling that
 // imports NOTHING from this composer.
 // ===========================================================================
-import { loadAgentMemory } from "../pattern-memory/agent-memory.ts";
-import { formatMemoryForPrompt } from "../pattern-memory/prompt-format.ts";
+import {
+  loadAgentMemory,
+  formatMemoryForPrompt,
+} from "../pattern-memory/index.ts";
 // Issue #2232 / #2238: reach the reflections domain through its single entry
 // point (`./reflections/index.ts`) and delegate the two-axis composition to the
 // `loadReflectionsForAnchor` coordinator. The composer used to keep its own

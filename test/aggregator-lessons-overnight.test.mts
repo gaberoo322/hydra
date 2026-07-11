@@ -15,7 +15,7 @@ import {
   getOvernightLessons,
   filterNearPromotion,
 } from "../src/aggregators/lessons-overnight.ts";
-import { PROMOTION_THRESHOLD } from "../src/pattern-memory/constants.ts";
+import { PROMOTION_THRESHOLD } from "../src/pattern-memory/index.ts";
 import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
