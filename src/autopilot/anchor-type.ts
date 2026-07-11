@@ -64,21 +64,43 @@ export const SLOT_ANCHOR_TYPE: Readonly<Record<string, string>> = {
 };
 
 /**
- * Attempt to infer an anchorType from a synthesised worktree-branch cycleId
- * (format: `worktree-agent-{runToken}-t{N}-{slot}`). Returns the mapped
- * anchorType when the suffix is a known slot; returns `undefined` when the
- * cycleId does not match the pattern or the slot has no mapping.
+ * Attempt to infer an anchorType from a dispatch-relay cycleId. Returns the
+ * mapped anchorType when the trailing slot is a known dispatch slot; returns
+ * `undefined` when the cycleId does not match the pattern or the slot has no
+ * mapping.
+ *
+ * Two accepted shapes share one parser (issue #3138):
+ *   - the autopilot-synthesised worktree-branch id
+ *     `worktree-agent-{runToken}-t{N}-{slot}` (holdback-merge-watch.ts), and
+ *   - the PREFIX-LESS relay id `{runToken}-t{N}-{slot}` (e.g.
+ *     `6fd1300b-t1-qa_orch`) that the cycle-merge-reconcile / qa_orch relay
+ *     first-write path emits. The prefix-less form is already a first-class
+ *     shape elsewhere — `producerClassFromCycleId` in `src/taxonomy/classes.ts`
+ *     resolves it by trailing-slot suffix — so this leaf was the lone parser
+ *     rejecting a shape the rest of the system accepts. Making the
+ *     `worktree-agent-` prefix OPTIONAL brings the two parsers into agreement
+ *     without rewriting any emitter (rejected alternatives: design-concept
+ *     issue-3138).
  *
  * The `{runToken}` is `_synthesize_worktree_branch`'s (decide.py) shortened
  * runId — normally the first 8 hex chars of the run UUID, but the literal
  * `local` when `state.run_id` is absent (legacy/test callers). So the run-token
- * class is `[0-9a-z]+` (hex OR the `local` fallback), not hex-only. The mandatory
- * `-t{N}-` middle segment keeps this from matching the harness's own
- * `worktree-agent-<longhash>` branch names, which carry no turn/slot suffix.
+ * class is `[0-9a-z]+` (hex OR the `local` fallback), not hex-only.
+ *
+ * The regex is deliberately fenced so it can NEVER swallow a non-dispatch id
+ * (#2822 invariants): the mandatory `-t{N}-` middle plus a slot tail anchored on
+ * `_(orch|target)` are what exclude (a) bare-UUID / short-hex / `autopilot-…`
+ * cycleIds — none of which carry that middle+tail — and (b) the harness's own
+ * `worktree-agent-<longhash>` branch names, which carry no turn/slot suffix. The
+ * slot vocabulary `[a-z][a-z0-9_]*_(orch|target)` mirrors `DISPATCH_CYCLE_ID`'s
+ * class token in `src/taxonomy/classes.ts`, so the two cycleId parsers never
+ * disagree on what a slot is.
  */
 export function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
-  // Pattern: worktree-agent-<runToken>-t<N>-<slot>
-  const m = /^worktree-agent-[0-9a-z]+-t\d+-(.+)$/.exec(cycleId);
+  // Pattern: [worktree-agent-]<runToken>-t<N>-<slot>, slot ending in _orch|_target.
+  const m = /^(?:worktree-agent-)?[0-9a-z]+-t\d+-([a-z][a-z0-9_]*_(?:orch|target))$/.exec(
+    cycleId,
+  );
   if (!m) return undefined;
   return SLOT_ANCHOR_TYPE[m[1]];
 }
