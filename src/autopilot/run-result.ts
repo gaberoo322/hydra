@@ -16,10 +16,12 @@
  * `cycle-close.ts` (issue #2768) extractions, each of which correctly separated
  * concerns but left the shared type primitives in the wrong place.
  *
- * `runs.ts` imports these from here and RE-EXPORTS them for back-compat (INV-2),
- * so `import { Ok, Err, errRedis, numberOrDefault } from "./runs.ts"` keeps
- * working. This leaf has NO Redis dependency, no async I/O, and no module-level
- * side effects — it imports nothing from the autopilot domain.
+ * `runs.ts` imports the helpers and types it needs from here directly; the
+ * back-compat re-exports it once carried were dropped (the value helpers in issue
+ * #3144, the `Ok` / `Err` types in issue #3149) once no caller imported them from
+ * `runs.ts`, so every caller now imports from this leaf. This leaf has NO Redis
+ * dependency, no async I/O, and no module-level side effects — it imports nothing
+ * from the autopilot domain.
  *
  * Result-object shape (the contract every lifecycle writer/reader returns):
  *
