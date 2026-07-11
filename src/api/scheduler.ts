@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
 import type { PingableBus } from "../event-bus-seams.ts";
+import { SchedulerStartBodySchema } from "../schemas/scheduler.ts";
+import { schemaValidationError } from "./route-helpers.ts";
 
 // The scheduler router only forwards the bus to `heartbeat.start()` (whose
 // `eventBus` param is still implicit-any); it never publishes itself. The seam
@@ -11,8 +13,16 @@ export function createSchedulerRouter(eventBus: PingableBus) {
   const router = Router();
 
   // POST /scheduler/start — Start automatic cycle scheduling
+  //
+  // Body validated through the Schemas seam (ADR-0011 / issue #3171): `intervalMs`
+  // is an optional positive integer; a failure returns the shared 400
+  // `{ code: "schema-validation-failed", issues }` envelope.
   router.post("/scheduler/start", async (req, res) => {
-    const intervalMs = req.body?.intervalMs;
+    const parsed = SchedulerStartBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json(schemaValidationError(parsed.error));
+    }
+    const { intervalMs } = parsed.data;
     const result = await startScheduler(eventBus, { intervalMs });
     if (result.error) {
       res.status(409).json(result);
