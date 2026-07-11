@@ -82,7 +82,7 @@ export {
   prMetaFromView,
   tierFromLabels,
 } from "./merge-commit-parser.ts";
-export type { MergeCommit, PrMeta } from "./merge-commit-parser.ts";
+export type { MergeCommit } from "./merge-commit-parser.ts";
 
 // The production default routes the `git log` read through the GitHub CLI
 // Adapter seam (issue #899). Tests still inject `deps.execFileAsync` for the
@@ -128,8 +128,11 @@ export interface RecentMergesDeps {
 }
 
 // `PrMeta` and `MergeCommit` — the domain records the parsers produce — are
-// defined in the `merge-commit-parser.ts` leaf and imported/re-exported above
-// (issue #3100).
+// defined in the `merge-commit-parser.ts` leaf and imported above (issue #3100).
+// `MergeCommit` is re-exported for back-compat; `PrMeta` is imported for
+// internal use only (the `RecentMergesDeps.fetchPrMeta` field + the
+// `defaultFetchPrMeta` return type) — its re-export was unused and removed
+// (issue #3145).
 
 // The provenance vocabulary + classifier live in the Dispatch-Class Taxonomy
 // Module (`src/taxonomy/classes.ts`, #1672) — one authoritative copy derived
