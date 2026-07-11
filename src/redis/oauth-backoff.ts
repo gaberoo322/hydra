@@ -287,3 +287,120 @@ export async function clearGhRateLimitBackoff(): Promise<void> {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Hour-bucketed gh-rate-limited observability counter (issue #3137, artifact Q6)
+// ---------------------------------------------------------------------------
+//
+// The backoff gate above answers "should I skip the NEXT gh call?" but is a
+// consecutive-failure count that RESETS to 0 on the first success — it cannot
+// answer "how many gh calls were rate-limited this hour?" or trend the pressure
+// across restarts. The artifact's Q6 positively scoped an hour-bucketed counter
+// mirroring `src/redis/ov-search-metrics.ts`: one small Redis hash per UTC hour,
+// HINCRBY on each rate-limited event, a rolling TTL, and a never-throw write
+// contract (a metrics write must never break the `gh` call it observes). This is
+// the historical/observability counterpart to the (resettable) gate.
+
+/** Redis key prefix for the per-UTC-hour gh-rate-limited counter buckets. */
+const GH_RATE_LIMIT_COUNTER_PREFIX = "hydra:metrics:github-api:rate-limited:window-1h";
+
+/**
+ * 7 days, matching the ov-search-metrics window TTL. A rolling read of the last
+ * N hours never needs more, and each bucket is a tiny one-field hash.
+ */
+const GH_RATE_LIMIT_COUNTER_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+/** UTC YYYY-MM-DDTHH for a Date — the hour-bucket key suffix (mirrors ov-search-metrics). */
+export function utcHourKey(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const h = String(d.getUTCHours()).padStart(2, "0");
+  return `${y}-${m}-${day}T${h}`;
+}
+
+/** Full Redis hash key for a given UTC-hour bucket. */
+function ghRateLimitCounterKey(hour: string): string {
+  return `${GH_RATE_LIMIT_COUNTER_PREFIX}:${hour}`;
+}
+
+/** Per-hour bucket for the gh-rate-limited counter window read. */
+export interface GhRateLimitedHourBucket {
+  hour: string;
+  count: number;
+}
+
+/** Rolling-window rollup of the gh-rate-limited counter. */
+export interface GhRateLimitedWindow {
+  windowHours: number;
+  total: number;
+  buckets: GhRateLimitedHourBucket[];
+}
+
+/**
+ * Increment the current UTC-hour gh-rate-limited counter (HINCRBY) and stamp the
+ * rolling TTL. Called once per `gh-rate-limited` classification. Returns the hour
+ * key written (for logging/tests).
+ *
+ * Best-effort — NEVER throws: an observability write must not break the `gh`
+ * call it observes (same never-throw contract as the backoff gate and the
+ * ov-search-metrics flush it mirrors).
+ */
+export async function recordGhRateLimited(now: Date = new Date()): Promise<string> {
+  const hour = utcHourKey(now);
+  try {
+    const r = getRedisConnection();
+    const key = ghRateLimitCounterKey(hour);
+    const pipe = r.pipeline();
+    pipe.hincrby(key, "count", 1);
+    pipe.expire(key, GH_RATE_LIMIT_COUNTER_TTL_SECONDS);
+    await pipe.exec();
+  } catch (err: any) {
+    console.error(
+      `[gh-rate-limit-counter] increment failed (counter under-counts this hour): ${err?.message || err}`,
+    );
+  }
+  return hour;
+}
+
+/**
+ * Read the last `hours` UTC-hour gh-rate-limited buckets ending at `now`,
+ * newest-first, with the rolled-up total. Missing hours read as zero. Pipelined
+ * into a single round-trip. NEVER throws — a read failure degrades to an
+ * all-zero window (the observability surface renders empty, not broken).
+ */
+export async function getGhRateLimitedWindow(
+  hours = 24,
+  now: Date = new Date(),
+): Promise<GhRateLimitedWindow> {
+  const n = Math.max(1, Math.floor(hours));
+  const hourKeys: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const d = new Date(now.getTime() - i * 60 * 60 * 1000);
+    hourKeys.push(utcHourKey(d));
+  }
+
+  let results: unknown[] | null = null;
+  try {
+    const r = getRedisConnection();
+    const pipe = r.pipeline();
+    for (const hour of hourKeys) pipe.hget(ghRateLimitCounterKey(hour), "count");
+    results = await pipe.exec();
+  } catch (err: any) {
+    console.error(
+      `[gh-rate-limit-counter] window read failed (degrading to zero window): ${err?.message || err}`,
+    );
+    results = null;
+  }
+
+  let total = 0;
+  const buckets: GhRateLimitedHourBucket[] = [];
+  for (let i = 0; i < hourKeys.length; i++) {
+    const res = Array.isArray(results) ? results[i] : null;
+    const raw = Array.isArray(res) && res[0] == null ? res[1] : null;
+    const c = typeof raw === "string" && Number.isFinite(Number(raw)) ? Number(raw) : 0;
+    total += c;
+    buckets.push({ hour: hourKeys[i], count: c });
+  }
+  return { windowHours: n, total, buckets };
+}

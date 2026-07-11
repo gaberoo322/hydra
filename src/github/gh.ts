@@ -30,6 +30,7 @@ import {
   writeGhRateLimitBackoff,
   clearGhRateLimitBackoff,
   nextGhRateLimitBackoff,
+  recordGhRateLimited,
 } from "../redis/oauth-backoff.ts";
 
 /**
@@ -48,6 +49,10 @@ import {
  */
 async function armGhRateLimitGate(argsJoined: string): Promise<void> {
   try {
+    // Hour-bucketed observability counter (issue #3137, artifact Q6): trend how
+    // many gh calls were rate-limited per UTC hour, distinct from the (resettable)
+    // consecutive-failure gate below. Best-effort; never blocks the gate arm.
+    await recordGhRateLimited();
     const prior = await readGhRateLimitBackoff();
     const failures = (prior?.failures ?? 0) + 1;
     const next = nextGhRateLimitBackoff(failures, Date.now());
