@@ -60,9 +60,7 @@ export const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.ya
 // ---------------------------------------------------------------------------
 
 export type {
-  OutcomeKind,
   OutcomeDirection,
-  OutcomeSource,
   Outcome,
   OutcomeReading,
   LoadOutcomesResult,
