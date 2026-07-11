@@ -48,7 +48,7 @@
  */
 
 import type { DispatchOutcomeRecord } from "../redis/dispatch-outcomes.ts";
-import type { AttributionEstimate } from "../outcome-attribution/estimator.ts";
+import type { AttributionEstimate } from "../outcome-attribution/index.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
 import { DISPATCH_CLASSES } from "../taxonomy/classes.ts";
 
