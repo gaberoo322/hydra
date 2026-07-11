@@ -27,8 +27,10 @@
  * Follows the `retro-dispatch-classifier.ts` + `retro-dispatch-types.ts`
  * extraction precedent (issue #3090 / PR #3094): pure state-machine logic
  * separated from the I/O coordinator that calls it. `run-projections.ts`
- * imports DOWN from this leaf for the types + constants it references, and
- * re-exports every symbol here for the #2125 back-compat migration window.
+ * imports DOWN from this leaf for the `WEDGE_AGE_THRESHOLD_S` constant it still
+ * references and re-exports that constant for the #2125 back-compat migration
+ * window; the lifecycle-type re-exports it once carried were retired once every
+ * caller migrated to importing them from this leaf directly (issue #3147).
  *
  * The pid-liveness probe is imported directly from the canonical
  * {@link isLivePid} predicate in `worktree-orphan.ts` — the same source the
@@ -78,7 +80,7 @@ export const WEDGE_AGE_THRESHOLD_S = 600;
  *     in a way that is neither a clean end nor a crash (defensive
  *     fallback). The UI shows "last run ended N ago".
  */
-export type AutopilotLifecycleState = "running" | "idle" | "ended" | "crashed";
+type AutopilotLifecycleState = "running" | "idle" | "ended" | "crashed";
 
 export interface AutopilotLifecycle {
   state: AutopilotLifecycleState;
