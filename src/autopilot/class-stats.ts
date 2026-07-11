@@ -29,7 +29,7 @@ import {
 import {
   estimateMarginalEffects,
   type AttributionEstimate,
-} from "../outcome-attribution/estimator.ts";
+} from "../outcome-attribution/index.ts";
 import { computeClassScoreboard, CLASS_STATS_WINDOW_MS } from "./class-stats-math.ts";
 import type { ClassScoreboard } from "./class-stats-math.ts";
 
