@@ -68,6 +68,7 @@ function makeDeps(over: Partial<CandidateFeedDeps> = {}): CandidateFeedDeps {
     loadLastReflectionAt: async () => null,
     loadDesignConcept: async () => ABSENT_DC,
     loadMergedAnchorRefs: async () => new Set<string>(),
+    fetchMergedRefs: async () => [],
     ...over,
   };
 }
@@ -319,5 +320,139 @@ describe("getCandidateFeed — now defaulting (#3172)", () => {
     assert.equal(feed.candidates.length, 1);
     assert.equal(feed.candidates[0].score, 0.85, "fresh under the real clock → full kanban base");
     assert.ok(feed.candidates[0].reasons.includes("fresh"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shipped-subject suppression (issue #3208). The exact-token merged-by-cycle
+// gate (`isMergedWork`) misses a phantom whose code shipped under a
+// DIFFERENTLY-TITLED, non-claiming PR (no `item-NNN` / `#NNN` token intersects).
+// The feed now runs the asymmetric `subjectCoveredBy` matcher against the
+// merged PR/commit BLOB feed to catch it. These pin the fix AND the invariants
+// that keep it from ever evicting LIVE work (the #2110 positive-evidence-only
+// polarity): >=4-significant-word guard, empty-feed no-op, fail-open reader.
+// New top-level describe with its own lifecycle per the shared-Redis-teardown
+// authoring rule (all deps are stubbed — no Redis fixture is touched).
+// ---------------------------------------------------------------------------
+
+describe("getCandidateFeed — shipped-subject suppression (#3208)", () => {
+  // A merged PR whose title+body clearly cover the kanban item's SUBJECT but
+  // carry NO `item-764` / `#764` identity token — exactly the evidenced
+  // item-764 → PR #435 phantom (shipped under a differently-titled PR).
+  const SHIPPED_TITLE =
+    "Add settlement reconciliation trigger to daily forecast-outcomes runner poll Kalshi settled tickers";
+  const COVERING_PR_BLOB =
+    "feat(runner): wire Kalshi settled-ticker REST poll into the daily forecast-outcomes reconciliation runner\n" +
+    "Adds the settlement reconciliation trigger so the daily runner polls Kalshi for settled tickers and reconciles forecast outcomes.";
+
+  test("a kanban item covered by a non-claiming merged blob is suppressed", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: "item-764", title: SHIPPED_TITLE, movedAt: isoAgo(HOUR_MS) }],
+        backlog: [],
+      }),
+      // The exact-token gate sees NOTHING — the PR never cited item-764/#764.
+      loadMergedAnchorRefs: async () => new Set<string>(),
+      fetchMergedRefs: async () => [{ ref: "pr-435", blob: COVERING_PR_BLOB }],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 0, "the shipped phantom is not re-surfaced");
+    assert.equal(feed.shipped_subject_suppressed, 1);
+    assert.equal(feed.merged_suppressed, 0, "the exact-token gate did NOT fire (no identity token)");
+  });
+
+  test("a work-queue entry covered by a non-claiming merged blob is suppressed", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: SHIPPED_TITLE, queuedAt: isoAgo(HOUR_MS), source: "operator" }),
+      ],
+      loadMergedAnchorRefs: async () => new Set<string>(),
+      fetchMergedRefs: async () => [{ ref: "pr-435", blob: COVERING_PR_BLOB }],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 0, "the shipped work-queue phantom is not re-surfaced");
+    assert.equal(feed.shipped_subject_suppressed, 1);
+  });
+
+  test("an EMPTY merged-blob feed is a strict no-op — the candidate still surfaces", async () => {
+    // Positive-evidence-only (#2110): absence of a covering blob is NEVER proof
+    // the item shipped. An unreachable/empty feed suppresses nothing.
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: "item-764", title: SHIPPED_TITLE, movedAt: isoAgo(HOUR_MS) }],
+        backlog: [],
+      }),
+      fetchMergedRefs: async () => [],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 1, "no blob → suppress nothing");
+    assert.equal(feed.shipped_subject_suppressed, 0);
+  });
+
+  test("a throwing fetchMergedRefs fails open — the candidate still surfaces", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: "item-764", title: SHIPPED_TITLE, movedAt: isoAgo(HOUR_MS) }],
+        backlog: [],
+      }),
+      fetchMergedRefs: async () => {
+        throw new Error("gh unreachable");
+      },
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 1, "a failing blob feed degrades to [] and still serves");
+    assert.equal(feed.shipped_subject_suppressed, 0);
+  });
+
+  test("a SHORT (<4 significant-word) title is NOT subject-matched even against a covering blob", async () => {
+    // The >=4-significant-word SUBJECT_MATCH_MIN_WORDS guard: a short/generic
+    // title can never spuriously evict live work, even if every one of its
+    // words appears in the blob.
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: "item-900", title: "fix tests", movedAt: isoAgo(HOUR_MS) }],
+        backlog: [],
+      }),
+      fetchMergedRefs: async () => [
+        { ref: "pr-999", blob: "chore: fix tests across the runner suite and reconcile outcomes" },
+      ],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 1, "a short title is never subject-suppressed");
+    assert.equal(feed.shipped_subject_suppressed, 0);
+  });
+
+  test("an UNRELATED merged blob does not cover the candidate (below 0.70 containment)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: "item-764", title: SHIPPED_TITLE, movedAt: isoAgo(HOUR_MS) }],
+        backlog: [],
+      }),
+      fetchMergedRefs: async () => [
+        { ref: "pr-500", blob: "fix(dashboard): tweak the outcomes chart legend spacing and axis labels" },
+      ],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 1, "an unrelated blob covers < 0.70 of the item words");
+    assert.equal(feed.shipped_subject_suppressed, 0);
+  });
+
+  test("excludeMerged=false opts out of the shipped-subject gate (raw operator view)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: "item-764", title: SHIPPED_TITLE, movedAt: isoAgo(HOUR_MS) }],
+        backlog: [],
+      }),
+      fetchMergedRefs: async () => [{ ref: "pr-435", blob: COVERING_PR_BLOB }],
+    });
+    const feed = await getCandidateFeed({ now: NOW, excludeMerged: false }, deps);
+    assert.equal(feed.candidates.length, 1, "the raw view sees the covered candidate");
+    assert.equal(feed.shipped_subject_suppressed, 0);
   });
 });
