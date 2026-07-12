@@ -14,9 +14,9 @@
  * status composition seam (`src/autopilot/status.ts`), `src/review-pickup.ts`,
  * and any future caller. It was originally namespaced under `src/aggregators/`
  * (#916) because the ten aggregators were its first callers; #3216 relocated
- * it to the root since the fold is not an aggregators-domain concept. A
- * back-compat re-export remains at `src/aggregators/settle.ts` (per the #2125
- * precedent) so the historical `./settle.ts` import path keeps resolving.
+ * it to the root since the fold is not an aggregators-domain concept and
+ * migrated every caller to import from here directly (no back-compat shim —
+ * the aggregators-namespaced re-export was dead-on-arrival and removed).
  *
  * The originating copy-paste problem (#916): the same fold was independently
  * redeclared as a private `settledOrEmpty<T>` / `settledOr<T>` /
