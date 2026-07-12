@@ -8,8 +8,6 @@ import {
   getCostByOutcome,
 } from "../metrics/aggregate.ts";
 import { projectAnchorDistribution } from "../metrics/stats-projection.ts";
-import { CycleRecordBodySchema } from "../autopilot/schemas.ts";
-import { recordCycle } from "../autopilot/cycle-close.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
@@ -390,67 +388,13 @@ export function createMetricsRouter() {
     });
   });
 
-  // POST /metrics/record — Record a completed cycle from external sources.
-  //
-  // Issue #3048 (architecture-scan deepening): this route now routes THROUGH the
-  // `recordCycle()` coordinator (src/autopilot/cycle-close.ts) — the SAME deep
-  // write path the sibling POST /autopilot/cycle-record uses — instead of
-  // calling `recordCycleMetrics()` directly. That restores the ADR-0016
-  // sole-writer invariant for this previously-shallow path: a cycle recorded
-  // here now gets the FULL record (the `hydra:cycle:<id>` hash, `hydra:cycle:index`
-  // ZSET membership, the per-status scheduler counters, the dispatch-outcome
-  // row, AND the metrics-hash feed), so it becomes visible to getMetricsTrend,
-  // buildClassScoreboard, and assembleRetroBundle — the three readers the
-  // shallow impl left blind.
-  //
-  // The #2803 `classifyAnchorType()` band-aid this handler used to carry is
-  // DROPPED, not lost: recordCycle calls the identical classifyAnchorType leaf,
-  // so every write still classifies to a non-empty anchorType (never buckets as
-  // "unknown"). Both routes already validate through the IDENTICAL
-  // CycleRecordBodySchema, so there is no schema change and the loose escape
-  // hatch stays reachable — recordCycle forwards ad-hoc fields verbatim into
-  // recordCycleMetrics.
-  //
-  // The sole live caller (the hydra-target-build merge-flow doc-fragment) writes
-  // a cycleId reap.py ALREADY records deeply, so that redundant write now lands
-  // as recordCycle's dedup/enrich arm (deduped:true, bucketed:null) — no
-  // scheduler counter is double-incremented.
-  //
-  // Response contract unchanged (CLAUDE.md § HTTP validation): 200 {ok:true} on
-  // success, 400 {code:"schema-validation-failed", issues} on a schema miss
-  // (issue #2636). recordCycle returns a result object (never throws); a
-  // result.ok:false maps to 500 (code:redis) / 400 exactly like the sibling
-  // /autopilot/cycle-record handler.
-  router.post("/metrics/record", async (req, res) => {
-    try {
-      const parsed = CycleRecordBodySchema.safeParse(req.body ?? {});
-      if (!parsed.success) {
-        return res.status(400).json({
-          code: "schema-validation-failed",
-          issues: parsed.error.issues,
-        });
-      }
-      const result = await recordCycle(parsed.data);
-      if (!result.ok) {
-        const status = result.code === "redis" ? 500 : 400;
-        return res.status(status).json({ error: result.detail || result.code });
-      }
-      // Preserve the {ok:true} response contract while surfacing the
-      // coordinator's dedup/enrich/bucket signal (matching the sibling
-      // /autopilot/cycle-record handler) so a redundant post on an
-      // already-recorded cycleId is observably a dedup, not a silent 200.
-      res.json({
-        ok: true,
-        cycleId: result.cycleId,
-        status: result.status,
-        bucketed: result.bucketed,
-        deduped: result.deduped,
-        enriched: result.enriched,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+  // NOTE: POST /metrics/record was relocated to the autopilot lifecycle WRITE
+  // router (src/api/autopilot-lifecycle.ts) in issue #3220. It is a cycle-close
+  // write — the structural twin of POST /autopilot/cycle-record — so it belongs
+  // on the lifecycle write surface, not this read-aggregator router. The URL
+  // path is byte-identical (both routers mount at the same base in src/api.ts).
+  // This router is now a pure read surface plus the two token-recording write
+  // hooks (POST /metrics/tokens) that the Cost module owns.
 
   return router;
 }

@@ -366,6 +366,8 @@ hydra raw POST /metrics/record "{
 
 As of #3048 this endpoint routes through the `recordCycle()` coordinator (the same deep path `POST /autopilot/cycle-record` uses), so this inline merge-time write is now a FULL cycle record — a `hydra:cycle:<id>` hash + index membership + scheduler-counter bump, not just the metrics-hash feed the old shallow handler wrote. Because `reap.py` (`CYCLE_RECORD_SKILLS` includes `hydra-target-build`) ALSO fires `POST /autopilot/cycle-record` for this same `$CYCLE_ID`, whichever write lands first records the cycle deeply and the second dedup/enriches (`deduped:true`, `bucketed:null`) — the coordinator's idempotency guard fires each scheduler counter at most once per cycleId, so this write cannot double-count a merge.
 
+As of #3220 the `POST /metrics/record` handler was relocated out of the `src/api/metrics.ts` read-aggregator router into the `src/api/autopilot-lifecycle.ts` write router, where its structural twin `POST /autopilot/cycle-record` already lives. The URL path is byte-identical, so this `hydra raw POST /metrics/record` call is unaffected — only the handler's home file moved.
+
 Publish event:
 ```bash
 hydra raw POST /events/publish "{
