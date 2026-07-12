@@ -11,7 +11,7 @@
  */
 
 import { getMetricsTrend } from "../metrics/trend.ts";
-import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../metrics/aggregate.ts";
+import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../metrics/stats-projection.ts";
 
 // Rolling merge-rate window (issue #232): the operator-visible mergeRate is
 // computed from the last N cycles in cycle-history (same source as
