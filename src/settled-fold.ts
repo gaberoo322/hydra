@@ -1,19 +1,30 @@
 /**
- * Settled-fold contract for dashboard aggregators (issue #916).
+ * Settled-fold contract — a cross-cutting async utility (issues #916, #3216).
  *
- * Every dashboard aggregator shares one design contract: fan a set of
- * sub-reads out under `Promise.allSettled`, and on a *rejected* sub-read
- * log it (CLAUDE.md fail-loud) and degrade that slice to a fallback so the
- * aggregator itself never throws. A single slow `gh` call can't blank the
- * whole dashboard.
+ * The contract: fan a set of sub-reads out under `Promise.allSettled`, and on
+ * a *rejected* sub-read log it (CLAUDE.md fail-loud) and degrade that slice to
+ * a fallback so the composing read itself never throws. A single slow `gh`
+ * call can't blank the whole result.
  *
- * That contract is good, but before #916 its *implementation* was
- * copy-pasted: a private `settledOrEmpty<T>` / `settledOr<T>` /
- * `settledOrNull<T>` helper was independently redeclared in ten aggregators,
- * each re-deciding the log format and the `Array.isArray` defensiveness.
- * The copies had already drifted — `autopilot-health` added an
- * `Array.isArray` guard the others lacked; some logs carried a `(${label})`
- * suffix, some didn't; one variant swallowed `result.value ?? null`.
+ * This is a *general* async utility — "degrade a `Promise.allSettled` slice to
+ * a safe fallback while logging the rejection" — that belongs to no specific
+ * domain. It lives at the flat `src/` root (alongside `src/errors.ts`) so any
+ * module with a multi-source fan-out can import it without reaching across a
+ * group boundary: dashboard aggregators (`src/aggregators/`), the autopilot
+ * status composition seam (`src/autopilot/status.ts`), `src/review-pickup.ts`,
+ * and any future caller. It was originally namespaced under `src/aggregators/`
+ * (#916) because the ten aggregators were its first callers; #3216 relocated
+ * it to the root since the fold is not an aggregators-domain concept and
+ * migrated every caller to import from here directly (no back-compat shim —
+ * the aggregators-namespaced re-export was dead-on-arrival and removed).
+ *
+ * The originating copy-paste problem (#916): the same fold was independently
+ * redeclared as a private `settledOrEmpty<T>` / `settledOr<T>` /
+ * `settledOrNull<T>` helper in ten aggregators, each re-deciding the log
+ * format and the `Array.isArray` defensiveness. The copies had already
+ * drifted — `autopilot-health` added an `Array.isArray` guard the others
+ * lacked; some logs carried a `(${label})` suffix, some didn't; one variant
+ * swallowed `result.value ?? null`.
  *
  * This module is the single home for that fold. The three observed shapes
  * are the same fold parameterised by fallback:

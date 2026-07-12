@@ -41,7 +41,7 @@ import {
   type IssueRow,
 } from "../github/issues.ts";
 import { provenanceFromLabels } from "../taxonomy/classes.ts";
-import { settledOrEmpty } from "./settle.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 import { windowStart as trendWindowStart, dayKey } from "./trend-series.ts";
 
 // ---------------------------------------------------------------------------

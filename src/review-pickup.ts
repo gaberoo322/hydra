@@ -49,6 +49,7 @@ import {
   fetchOpenBlockerNumbers,
   openNumbersFromRows,
 } from "./github/blockers.ts";
+import { settledOrEmpty } from "./settled-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -126,17 +127,6 @@ export async function getReviewPickupSet(
     "ready-for-human": ready,
     "stale-blocked": blocked,
   });
-}
-
-function settledOrEmpty<T>(
-  result: PromiseSettledResult<T[]>,
-  label: string,
-): T[] {
-  if (result.status === "fulfilled") return result.value;
-  console.error(
-    `[review-pickup] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return [];
 }
 
 // ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@
  *   info), then by type for a deterministic order.
  */
 
-import { settledOr, settledOrEmpty, settledOrNull } from "./settle.ts";
+import { settledOr, settledOrEmpty, settledOrNull } from "../settled-fold.ts";
 import { getAutopilotStatusSnapshot } from "../autopilot/status.ts";
 import { listRecentMergeCommits } from "./recent-merges.ts";
 import {

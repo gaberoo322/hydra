@@ -30,7 +30,7 @@ import {
 } from "../redis/dispatches.ts";
 import { listRecentAutopilotRunIds } from "../redis/autopilot-runs.ts";
 import { readAndSweepAutopilotRun } from "../autopilot/sweep-reader.ts";
-import { settledOrEmpty } from "./settle.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
