@@ -44,7 +44,7 @@ import { getBacklogCounts } from "../backlog/reads.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { redisInfo as getRedisInfo } from "../redis/utility.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
-import { countReflectionKeys } from "../redis/reflections.ts";
+import { countReflectionKeys, probeReflectionOutcomesLedger } from "../redis/reflections.ts";
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
@@ -60,6 +60,13 @@ import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // ProbeInputs.darkOutcomes — the deep-health dark-outcome rule then reads it from
 // the snapshot, staying pure. `evaluateDarkOutcomes` is contractually never-throw.
 import { evaluateDarkOutcomes } from "../scheduler/chores/wiring-liveness-outcomes.ts";
+// Issue #3251: project the retired reflection-outcomes ledger's residual state
+// (read via probeReflectionOutcomesLedger) into a liveness report at fan-out
+// time. Like the darkOutcomes read above, this is a direct never-throwing read;
+// the projection needs a clock so it runs HERE (the I/O owner) and is carried
+// onto the snapshot via ProbeInputs.reflectionOutcomesLiveness — the deep-health
+// reflection-outcomes rule then reads it from the snapshot, staying pure.
+import { projectReflectionOutcomesLiveness } from "./reflection-outcomes-liveness.ts";
 import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult, type ProbeOutcome } from "./probe.ts";
 import { parseRedisInfoSnapshot } from "./diagnostics.ts";
 // Issue #3230: the ProbeInputs named-record type comes from the zero-logic leaf.
@@ -167,6 +174,12 @@ export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
     // caller gets null → parseProbes coalesces to [] → the dark-outcome rule
     // no-ops (honest-none).
     darkOutcomes: null,
+    // Issue #3251: like darkOutcomes, the reflection-outcomes ledger liveness is
+    // a direct never-throw read+projection (not an async settle-array probe), so
+    // assembleProbeInputs sets null and collectProbeInputs overrides it with the
+    // live projection. A direct caller gets null → parseProbes coalesces to the
+    // `retired-empty` honest-none default → the rule fires the plain retirement INFO.
+    reflectionOutcomesLiveness: null,
   };
 }
 
@@ -222,6 +235,22 @@ export interface CollectProbeDeps {
    * metric files.
    */
   darkOutcomesEval?: typeof evaluateDarkOutcomes;
+  /**
+   * Issue #3251: the read-only liveness probe of the RETIRED reflection-outcomes
+   * ledger (default: the real probeReflectionOutcomesLedger). A never-throwing
+   * ZSET read — NOT a Promise.allSettled probe — so the full fan-out pipeline (and
+   * the deep-health reflection-outcomes rule downstream) is testable with an
+   * injected ledger state, no real Redis. Its result is projected through
+   * projectReflectionOutcomesLiveness onto the snapshot.
+   */
+  reflectionOutcomesLedgerProbe?: typeof probeReflectionOutcomesLedger;
+  /**
+   * Issue #3251: injectable clock (ms) for the reflection-outcomes liveness
+   * projection's staleness boundary (defaults to Date.now via the projector). A
+   * test pins this to make the retired-frozen-tail vs unexpected-live-tail
+   * boundary deterministic without touching wall-clock.
+   */
+  reflectionOutcomesNow?: () => number;
   targetServiceName?: () => string;
   /**
    * Issue #2498/#2570: the embed-backend Wake-on-LAN gate forwarded to
@@ -268,6 +297,8 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeOllamaVlmImpl = probeOllamaVlm,
     skillCatalogState = getSkillCatalogState,
     darkOutcomesEval = evaluateDarkOutcomes,
+    reflectionOutcomesLedgerProbe = probeReflectionOutcomesLedger,
+    reflectionOutcomesNow,
     targetServiceName = getTargetServiceName,
     // Issue #2498/#2570: default to the WoL Adapter's process-lifetime gate pair
     // (src/health/wol.ts getWolGates()) so a no-gate production caller is
@@ -398,10 +429,28 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       `[health/fan-out] dark-outcome check failed (folding to honest-none): ${err?.message || err}`,
     );
   }
+  // Issue #3251: probe the retired reflection-outcomes ledger and project its
+  // residual state into a liveness report. The probe itself never throws (folds a
+  // Redis error to the absent state); a defensive catch here folds any unexpected
+  // error to null → parseProbes coalesces to `retired-empty` → the rule fires the
+  // plain retirement INFO. So a ledger-probe hiccup never breaks /health/deep.
+  let reflectionOutcomesLiveness: ProbeInputs["reflectionOutcomesLiveness"] = null;
+  try {
+    const ledger = await reflectionOutcomesLedgerProbe();
+    reflectionOutcomesLiveness = projectReflectionOutcomesLiveness(
+      ledger,
+      reflectionOutcomesNow ? { now: reflectionOutcomesNow } : {},
+    );
+  } catch (err: any) {
+    console.error(
+      `[health/fan-out] reflection-outcomes ledger probe failed (folding to retired-empty): ${err?.message || err}`,
+    );
+  }
   return {
     ...assembleProbeInputs(settled),
     skillCatalog: skillCatalogState(),
     darkOutcomes,
+    reflectionOutcomesLiveness,
   };
 }
 

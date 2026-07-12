@@ -76,6 +76,16 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
         },
       ],
     })) as any,
+    // Issue #3251: stub the retired reflection-outcomes ledger probe + pin the
+    // projection clock so collectProbeInputs' merged reflectionOutcomesLiveness is
+    // deterministic (no dependency on real Redis or wall-clock). A present, stale
+    // tail → `retired-frozen-tail` (the expected corpse), so the merge is observable.
+    reflectionOutcomesLedgerProbe: (async () => ({
+      present: true,
+      count: 3,
+      latestEntryMs: 1_000_000, // ancient — far older than the fresh window
+    })) as any,
+    reflectionOutcomesNow: () => 1_000_000 + 48 * 60 * 60 * 1000, // +48h
     targetServiceName: () => "hydra-betting-web.service",
     ...overrides,
   };
@@ -138,6 +148,13 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.darkOutcomes as any)?.length, 1);
     assert.equal((probes.darkOutcomes as any)?.[0]?.status, "dark");
     assert.equal((probes.darkOutcomes as any)?.[0]?.name, "forecast-calibration-brier");
+
+    // Issue #3251 — the retired reflection-outcomes ledger probe (a direct
+    // never-throw read + projection, like the dark-outcome read) is merged onto
+    // the named record. The stubbed present+stale tail projects to
+    // `retired-frozen-tail` (the expected corpse), NOT an alarm.
+    assert.equal((probes.reflectionOutcomesLiveness as any)?.verdict, "retired-frozen-tail");
+    assert.equal((probes.reflectionOutcomesLiveness as any)?.count, 3);
   });
 
   test("the injected skill-catalog state flows into ProbeInputs.skillCatalog (issue #2386)", async () => {
