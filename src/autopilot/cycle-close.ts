@@ -69,20 +69,6 @@ import { type Ok, type Err, errRedis, numberOrDefault } from "./run-result.ts";
 // coordinator. See `anchor-type.ts` for the split rationale.
 import { classifyAnchorType } from "./anchor-type.ts";
 
-// Back-compat re-export (issue #2858) so external callers/tests that import the
-// anchor-type policy symbols FROM this write coordinator keep resolving during
-// the migration window — the same pattern `stale-escalation.ts` uses after
-// #2678. `anchor-type.ts` is the canonical home; new importers should target it
-// directly, and these re-exports can be dropped once no `cycle-close.ts`
-// importer of them remains.
-export {
-  UNCLASSIFIED_ANCHOR_TYPE,
-  isMalformedAnchorType,
-  classifyAnchorType,
-  SLOT_ANCHOR_TYPE,
-  inferAnchorTypeFromCycleId,
-} from "./anchor-type.ts";
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
