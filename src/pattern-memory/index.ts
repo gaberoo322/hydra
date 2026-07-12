@@ -34,8 +34,6 @@ export {
   listFrictionPatterns,
   backfillPatternPromotionMetadata,
   consolidateAgentPatterns,
-  type EscalateFn,
-  type RecordPatternResult,
 } from "./agent-memory.ts";
 
 // --- Formatting (read path) -------------------------------------------------
@@ -49,11 +47,6 @@ export {
   captureSubagentFriction,
   isValidSkill,
   isValidOutcome,
-  agentForSkill,
-  type SubagentSkill,
-  type SubagentOutcome,
-  type SubagentLesson,
-  type SubagentFriction,
 } from "./subagent-capture.ts";
 
 // --- Rule effectiveness (auto-demotion lifecycle) ---------------------------
@@ -73,7 +66,6 @@ export {
   EFFECTIVENESS_CHECK_COOLDOWN_HOURS,
   MIN_DAYS_POST_PROMOTION,
   type IneffectivePromotedPattern,
-  type RuleActionLogEntry,
 } from "./rule-effectiveness.ts";
 
 // --- Constants --------------------------------------------------------------
@@ -82,5 +74,5 @@ export { PROMOTION_THRESHOLD } from "./constants.ts";
 
 // --- Types ------------------------------------------------------------------
 // The stored-pattern record and the friction-pattern shape the aggregators read.
-export type { MemoryPattern, PatternNamespace } from "./pattern-store.ts";
+export type { MemoryPattern } from "./pattern-store.ts";
 export type { FrictionPattern } from "./friction-pattern.ts";
