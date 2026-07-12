@@ -212,7 +212,7 @@ export const ExemptLogEntryInputSchema = z
 
 /** Maximum number of audit entries the exempt-log read endpoint returns. */
 export const EXEMPT_LOG_DEFAULT_LIMIT = 50;
-export const EXEMPT_LOG_MAX_LIMIT = 500;
+const EXEMPT_LOG_MAX_LIMIT = 500;
 
 /**
  * `GET /design-concepts/exempt-log?limit=N` — historic default 50, cap 500.
