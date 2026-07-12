@@ -31,8 +31,6 @@ export const CycleRegisterBodySchema = z
   })
   .strict();
 
-export type CycleRegisterBody = z.infer<typeof CycleRegisterBodySchema>;
-
 /**
  * Body for POST /cycle/complete — complete an external cycle.
  *
@@ -49,5 +47,3 @@ export const CycleCompleteBodySchema = z
     status: z.string().min(1).optional(),
   })
   .strict();
-
-export type CycleCompleteBody = z.infer<typeof CycleCompleteBodySchema>;
