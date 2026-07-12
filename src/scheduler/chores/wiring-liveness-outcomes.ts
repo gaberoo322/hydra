@@ -35,6 +35,7 @@ import {
   type Outcome,
   type LoadOutcomesResult,
 } from "../../outcomes.ts";
+import type { OutcomeVerdict } from "./wiring-liveness-types.ts";
 
 /**
  * Grace window (ms) after which a present-but-old reading is STALE, not LIVE.
@@ -47,28 +48,16 @@ import {
  */
 export const DEFAULT_OUTCOME_MAX_STALE_MS = 24 * 60 * 60 * 1000;
 
-/**
- * Per-outcome verdict from evaluating a declared `kind: leading` outcome.
- *
- * Invariant 3 (approved design concept, issue #2753): DARK (a `null` reading —
- * no data ever produced) and STALE (a finite reading whose file mtime is older
- * than the grace window) are DISTINCT verdicts. A present-but-old value is never
- * conflated with a never-produced one.
- */
-export type OutcomeVerdict =
-  | { name: string; kind: "leading"; status: "live"; value: number; ts: string; ageMs: number }
-  | { name: string; kind: "leading"; status: "dark"; query: string; producerHint: string }
-  | {
-      name: string;
-      kind: "leading";
-      status: "stale";
-      value: number;
-      ts: string;
-      ageMs: number;
-      maxStaleMs: number;
-      query: string;
-      producerHint: string;
-    };
+// `OutcomeVerdict` (the per-outcome verdict union) is owned by the shared
+// type-vocabulary leaf `wiring-liveness-types.ts` (issue #3241); this family
+// sibling no longer declares it locally. Re-exported so existing consumers that
+// import it from this module's surface (the coordinator, the dark-alarm sibling,
+// `src/health/types.ts`, and the dark-alarm test) keep working with zero call-site
+// churn. Invariant 3 (design concept #2753): DARK (a `null` reading — no data ever
+// produced) and STALE (a finite reading whose file mtime is older than the grace
+// window) remain DISTINCT verdicts; a present-but-old value is never conflated with
+// a never-produced one.
+export type { OutcomeVerdict } from "./wiring-liveness-types.ts";
 
 /** The aggregated verdicts a single dark-outcome pass produces. */
 export interface OutcomeEvaluation {

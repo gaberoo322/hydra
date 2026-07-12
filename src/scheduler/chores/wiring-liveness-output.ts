@@ -15,9 +15,10 @@
  * (#1979/#1983).
  *
  * It owns: the `OutputSourceReader` injection surface, the pure
- * {@link evaluateOutputs} evaluator, the `OutputVerdict` / `OutputSeriesResult`
- * shapes, and the {@link productionOutputReader} that wires the declared seed
- * source to its real data plane.
+ * {@link evaluateOutputs} evaluator, the `OutputSeriesResult` shape, and the
+ * {@link productionOutputReader} that wires the declared seed source to its real
+ * data plane. The per-entry `OutputVerdict` union is owned by the shared
+ * type-vocabulary leaf `wiring-liveness-types.ts` (#3241) and re-exported here.
  *
  * PRODUCTION DATA PLANE (issue #2578): the single declared `output` entry's
  * source — `/api/scanner/latest @ funnelBreakdown.registryPairs` — lives on the
@@ -45,19 +46,14 @@ import {
   readOutputSeries,
 } from "../../redis/wiring-liveness-output-series.ts";
 import { getTargetWebUrl } from "../../target-config.ts";
+import type { OutputVerdict } from "./wiring-liveness-types.ts";
 
-/** Per-entry verdict from evaluating a declared output source (slice 2). */
-export type OutputVerdict =
-  | { source: string; jsonPath: string; status: "ok"; latest: number }
-  | {
-      source: string;
-      jsonPath: string;
-      status: "below-floor";
-      window: number[];
-      floor: number;
-      runs: number;
-    }
-  | { source: string; jsonPath: string; status: "unreadable"; reason: string };
+// `OutputVerdict` (the per-entry output verdict union) is owned by the shared
+// type-vocabulary leaf `wiring-liveness-types.ts` (issue #3241); this family sibling
+// imports it from there for local use (in `OutputEvaluation` / `evaluateOutputs`)
+// and no longer declares it locally. Its live consumers (the coordinator, tests)
+// import it directly from the types leaf, so no re-export from this module surface
+// is needed — a re-export here would be dead surface (knip).
 
 /**
  * The trailing run-series for one output source, most-recent-LAST. The chore asks

@@ -28,7 +28,11 @@
  */
 
 import { ghExec } from "../../github/gh.ts";
-import type { OutcomeVerdict } from "./wiring-liveness-outcomes.ts";
+import type {
+  OutcomeVerdict,
+  DarkAlarmOutcome,
+  DarkAlarmResult,
+} from "./wiring-liveness-types.ts";
 import {
   getDarkSince,
   markDarkSince,
@@ -36,6 +40,14 @@ import {
   isDarkOutcomeFiled,
   markDarkOutcomeFiled,
 } from "../../redis/wiring-liveness-dark-outcomes.ts";
+
+// `DarkAlarmOutcome` (per-outcome alarm verdict) and `DarkAlarmResult` (the
+// aggregate alarm-pass result — the return type of `runDarkOutcomeAlarm` below) are
+// owned by the shared type-vocabulary leaf `wiring-liveness-types.ts` (issue #3241)
+// and imported above for local use; this family sibling no longer declares them
+// locally. The coordinator imports the aggregate `WiringLivenessResult` (which
+// embeds `DarkAlarmResult`) directly from the types leaf, so no re-export from this
+// module surface is needed.
 
 /** Repo the needs-triage issue is filed against (matches the rest of the repo). */
 const REPO = "gaberoo322/hydra";
@@ -51,24 +63,10 @@ export const DEFAULT_DARK_ALARM_MS = 7 * 24 * 60 * 60 * 1000;
 /** The dark-arm of {@link OutcomeVerdict} — the only verdict this alarm acts on. */
 type DarkVerdict = Extract<OutcomeVerdict, { status: "dark" }>;
 
-/** Per-outcome outcome of one alarm pass, for diagnostics/tests. */
-type DarkAlarmOutcome =
-  /** Dark, but the streak has not yet reached the threshold — nothing filed. */
-  | { name: string; action: "below-threshold"; darkForMs: number }
-  /** Dark past threshold, but an issue was already filed this streak — deduped. */
-  | { name: string; action: "already-filed"; darkForMs: number }
-  /** Dark past threshold and freshly filed — carries the new issue number (0 on parse miss). */
-  | { name: string; action: "filed"; darkForMs: number; issueNumber: number }
-  /** The gh file attempt failed — logged, never thrown (Invariant 3). */
-  | { name: string; action: "file-failed"; darkForMs: number; reason: string };
-
-/** The aggregated result of one dark-alarm pass. */
-export interface DarkAlarmResult {
-  /** Outcome names for which a NEW needs-triage issue was filed this pass. */
-  filed: string[];
-  /** Every per-outcome alarm outcome, for diagnostics/tests. */
-  outcomes: DarkAlarmOutcome[];
-}
+// `DarkAlarmOutcome` (the per-outcome alarm-pass verdict union) and
+// `DarkAlarmResult` (its aggregate) are owned by the shared type-vocabulary leaf
+// `wiring-liveness-types.ts` (issue #3241) and imported above; this family sibling
+// no longer declares them locally.
 
 /** The success arm of a gh filer result. */
 type FilerOk = { ok: true; data: { stdout: string; stderr: string } };

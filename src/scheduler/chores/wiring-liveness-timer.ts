@@ -11,7 +11,9 @@
  * NOT-YET-FIRED (present but never fired — the false-positive guard). It owns:
  * the liveness YAML-subset parser thin wrapper ({@link parseLivenessYaml}), the
  * manifest loader ({@link loadLivenessManifest}), and the pure timer-diff
- * evaluator ({@link diffTimers}) plus its result/verdict shapes.
+ * evaluator ({@link diffTimers}) plus its narrower {@link TimerDiffResult} shape.
+ * The per-entry `TimerVerdict` union and the aggregate `WiringLivenessResult` are
+ * owned by the shared type-vocabulary leaf `wiring-liveness-types.ts` (#3241).
  *
  * NOT-YET-FIRED is the timer false-positive guard: a timer that exists in the
  * live set but has never fired (`last: 0`, e.g. hydra-betting-nba-injuries before
@@ -33,6 +35,7 @@ import {
 } from "../../schemas/liveness.ts";
 import { type TimerRecord } from "../../host-probe/probe.ts";
 import { parseConfigYaml, type YamlValue } from "../../config-yaml.ts";
+import type { TimerVerdict } from "./wiring-liveness-types.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
@@ -146,12 +149,9 @@ export async function loadLivenessManifest(
 // Diff: declared vs live (timer check, slice 1)
 // ---------------------------------------------------------------------------
 
-/** Per-entry verdict from diffing a declared timer against the live set. */
-type TimerVerdict =
-  | { unit: string; status: "ok"; lastFiredMsAgo: number }
-  | { unit: string; status: "missing" }
-  | { unit: string; status: "not-yet-fired" }
-  | { unit: string; status: "stale"; lastFiredMsAgo: number; maxStaleMinutes: number };
+// `TimerVerdict` (the per-entry timer verdict union) is owned by the shared
+// type-vocabulary leaf `wiring-liveness-types.ts` (issue #3241) and imported above;
+// this family sibling no longer declares it locally.
 
 /**
  * The timer-check-only result returned by {@link diffTimers}. Contains only the
@@ -159,10 +159,11 @@ type TimerVerdict =
  * summaries, and the per-entry verdicts array.
  *
  * This is the narrower type that replaces the old `WiringLivenessResult` return of
- * `diffTimers`. The aggregate chore result ({@link WiringLivenessResult}) now lives
- * in the coordinator (`wiring-liveness.ts`), which assembles all four check-family
- * results — timer, output, dark-outcomes, dark-alarm — into a single constructed
- * object (issue #2844: move aggregate type to coordinator).
+ * `diffTimers`. The aggregate chore result (`WiringLivenessResult`) lives in the
+ * shared type-vocabulary leaf `wiring-liveness-types.ts` (issue #3241; originally
+ * relocated from the timer leaf to the coordinator by #2844) and is assembled by
+ * the coordinator (`wiring-liveness.ts`) from all four check-family results —
+ * timer, output, dark-outcomes, dark-alarm.
  */
 export interface TimerDiffResult {
   /** True when the manifest loaded and the live timers were read. */
