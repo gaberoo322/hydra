@@ -109,11 +109,15 @@ describe("anchor-type policy leaf — cycle-close.ts relay retired (#3225)", () 
     // re-export relay was retired from `cycle-close.ts` once no importer of the
     // policy symbols targeted the write coordinator. The canonical — and now
     // ONLY — home for the policy is `anchor-type.ts`, so the write coordinator's
-    // public surface no longer carries these pass-through symbols.
-    assert.equal(cycleClose.UNCLASSIFIED_ANCHOR_TYPE, undefined);
-    assert.equal(cycleClose.isMalformedAnchorType, undefined);
-    assert.equal(cycleClose.classifyAnchorType, undefined);
-    assert.equal(cycleClose.SLOT_ANCHOR_TYPE, undefined);
-    assert.equal(cycleClose.inferAnchorTypeFromCycleId, undefined);
+    // public surface no longer carries these pass-through symbols. The module
+    // no longer declares these properties, so probe the runtime namespace
+    // through an index signature (a direct `cycleClose.X` access is now a
+    // compile-time error — which is itself the retirement we are asserting).
+    const surface = cycleClose as Record<string, unknown>;
+    assert.equal(surface.UNCLASSIFIED_ANCHOR_TYPE, undefined);
+    assert.equal(surface.isMalformedAnchorType, undefined);
+    assert.equal(surface.classifyAnchorType, undefined);
+    assert.equal(surface.SLOT_ANCHOR_TYPE, undefined);
+    assert.equal(surface.inferAnchorTypeFromCycleId, undefined);
   });
 });
