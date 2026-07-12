@@ -28,7 +28,7 @@ import {
   listRecentAutopilotRunIds as defaultListRecentAutopilotRunIds,
   getAutopilotRun as defaultGetAutopilotRun,
 } from "./redis/autopilot-runs.ts";
-import { getUsage as defaultGetUsage } from "./cost/usage-tracker.ts";
+import { getUsage as defaultGetUsage } from "./cost/index.ts";
 import { getBacklogCounts as defaultGetBacklogCounts } from "./backlog/reads.ts";
 import { readRecentAlerts as defaultReadRecentAlerts } from "./redis/alerts.ts";
 import { getMetricsTrend as defaultGetMetricsTrend } from "./metrics/trend.ts";
