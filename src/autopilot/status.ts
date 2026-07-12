@@ -51,7 +51,7 @@
  * — analysis over the read-model, not the read-model itself.
  */
 
-import { settledOr, settledOrEmpty, settledOrNull } from "../aggregators/settle.ts";
+import { settledOr, settledOrEmpty, settledOrNull } from "../settled-fold.ts";
 import {
   getCurrentLifecycle as defaultGetCurrentLifecycle,
   getCurrentRun as defaultGetCurrentRun,

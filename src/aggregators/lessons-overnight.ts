@@ -43,7 +43,7 @@ import {
   type MetaFrictionIssue,
 } from "./friction-source.ts";
 import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
-import { settledOrEmpty } from "./settle.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Public types

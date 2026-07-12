@@ -70,7 +70,7 @@ import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
-import { settledOrNull } from "./settle.ts";
+import { settledOrNull } from "../settled-fold.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge

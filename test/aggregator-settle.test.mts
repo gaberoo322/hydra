@@ -24,7 +24,7 @@ import {
   settledOrEmpty,
   settledOr,
   settledOrNull,
-} from "../src/aggregators/settle.ts";
+} from "../src/settled-fold.ts";
 
 /** Build a fulfilled PromiseSettledResult without an await. */
 function fulfilled<T>(value: T): PromiseSettledResult<T> {

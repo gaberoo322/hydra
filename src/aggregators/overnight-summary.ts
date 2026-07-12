@@ -37,7 +37,7 @@ import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
 import { countAutopilotRunsSince as countAutopilotRunsSinceSeam } from "../redis/autopilot-runs.ts";
 
 import type { HeadroomLevel } from "../schemas/today-page.ts";
-import { settledOr } from "./settle.ts";
+import { settledOr } from "../settled-fold.ts";
 
 // The production default routes the `git log` merge count through the GitHub
 // CLI Adapter seam (issue #899). Tests still inject `deps.execFileAsync` for the

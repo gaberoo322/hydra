@@ -43,7 +43,7 @@
  */
 
 import type { UsageSnapshot } from "../cost/index.ts";
-import { settledOr } from "./settle.ts";
+import { settledOr } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Public types

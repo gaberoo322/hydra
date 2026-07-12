@@ -33,7 +33,7 @@ import {
 } from "../github/issues.ts";
 
 import type { DecisionItemSource } from "../schemas/today-page.ts";
-import { settledOrEmpty } from "./settle.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 import {
   addDays,
   datedTitle,

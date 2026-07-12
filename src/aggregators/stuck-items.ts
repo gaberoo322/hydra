@@ -26,7 +26,7 @@ import {
   type IssueRow,
   type PrRow,
 } from "../github/issues.ts";
-import { settledOrEmpty } from "./settle.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Public types

@@ -34,7 +34,7 @@ import {
 } from "../schemas/autopilot-idle.ts";
 import type { EligibilityView } from "../cost/index.ts";
 
-import { settledOr } from "./settle.ts";
+import { settledOr } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Resolved deps bag (the pure boundary)

@@ -42,7 +42,7 @@ import type {
 } from "../schemas/now-page.ts";
 import type { AutopilotStatusSnapshot } from "../autopilot/status.ts";
 import type { z } from "zod";
-import { settledOr } from "./settle.ts";
+import { settledOr } from "../settled-fold.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
