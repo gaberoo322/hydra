@@ -40,5 +40,3 @@ export const SchedulerStartBodySchema = z
     intervalMs: z.number().int().positive().optional(),
   })
   .strict();
-
-export type SchedulerStartBody = z.infer<typeof SchedulerStartBodySchema>;
