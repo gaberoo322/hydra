@@ -8,7 +8,8 @@ import {
 } from "../redis/alerts.ts";
 import { pushToWorkQueue } from "../redis/work-queue.ts";
 import { countQuerySchema } from "../schemas/common.ts";
-import { aggregatorRouteNoQuery } from "./route-helpers.ts";
+import { SentryWebhookPayloadSchema } from "../schemas/webhooks.ts";
+import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
 
 /**
  * Alerts + Sentry webhook routes.
@@ -70,9 +71,19 @@ export function createAlertsRouter() {
   });
 
   // POST /webhooks/sentry — Sentry alert webhook
+  //
+  // ADR-0022: validate the external webhook body through the Schemas seam
+  // (issue #3199). SentryWebhookPayloadSchema uses .passthrough() so unknown
+  // keys do not 400 (Sentry's payload shape varies by event type/SDK version);
+  // the guard only rejects payloads that are structurally not objects.
   router.post("/webhooks/sentry", async (req, res) => {
     try {
-      const payload = req.body;
+      const parseResult = SentryWebhookPayloadSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        console.error(`[Sentry Webhook] Schema validation failed: ${JSON.stringify(parseResult.error.issues)}`);
+        return res.status(400).json(schemaValidationError(parseResult.error));
+      }
+      const payload = parseResult.data;
       const action = payload?.action;
       const data = payload?.data || {};
       const issue = data.issue || data.event || {};
