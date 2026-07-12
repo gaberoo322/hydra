@@ -86,7 +86,6 @@ import {
 // is one consumer.
 import {
   isMergedWork,
-  subjectCoveredBy,
   loadMergedAnchorRefsImpl,
 } from "./backlog/merged-refs.ts";
 // Shipped-subject suppression (issue #3208). The exact-token `isMergedWork`
@@ -127,6 +126,7 @@ import {
   isBlockerJustCleared,
   requiresSpawnCapableDispatch,
   requiresNonPrDispatch,
+  isShippedSubject,
 } from "./backlog/candidate-eligibility.ts";
 
 // ---------------------------------------------------------------------------
@@ -397,18 +397,12 @@ async function getCandidateFeedImpl(
     }
   }
 
-  // Positive-evidence-only shipped-subject test: a candidate is suppressed only
-  // when a CONCRETE merged PR/commit blob COVERS its title at >=0.70 asymmetric
-  // containment with >=4 significant words (the SUBJECT_MATCH_MIN_WORDS guard
-  // inside `subjectCoveredBy`, so short/generic titles can never spuriously
-  // evict live work). An empty `mergedBlobs` short-circuits to false — suppress
-  // nothing. Never throws.
-  const isShippedSubject = (title: string): boolean => {
-    if (mergedBlobs.length === 0) return false;
-    const t = typeof title === "string" ? title : "";
-    if (!t) return false;
-    return mergedBlobs.some((r) => subjectCoveredBy(t, r.blob));
-  };
+  // Positive-evidence-only shipped-subject test now lives in its canonical home,
+  // `isShippedSubject(title, mergedBlobs)` in `candidate-eligibility.ts` (issue
+  // #3211): a candidate is suppressed only when a CONCRETE merged PR/commit blob
+  // COVERS its title at >=0.70 asymmetric containment with >=4 significant words,
+  // and an empty `mergedBlobs` short-circuits to false (suppress nothing). The
+  // two lane call-sites below invoke it with the resolved `mergedBlobs` array.
 
   const candidates: CandidateBase[] = [];
   let inFlightSuppressed = 0;
@@ -469,7 +463,7 @@ async function getCandidateFeedImpl(
         // blob still COVERS its title. Suppress on-read (the hourly reconciler
         // owns the Redis GC of the stale row; #2187 zero-writes invariant). The
         // >=4-word + >=0.70 guards keep this positive-evidence-only.
-        if (excludeMerged && isShippedSubject(item.title ?? "")) {
+        if (excludeMerged && isShippedSubject(item.title ?? "", mergedBlobs)) {
           shippedSubjectSuppressed++;
           continue;
         }
@@ -552,7 +546,7 @@ async function getCandidateFeedImpl(
       // it when a merged blob covers its subject. The reconciler's
       // `shipped-subject` cause (#2482) GCs the stale Redis entry out-of-band —
       // this read path stays write-free (#2187).
-      if (excludeMerged && isShippedSubject(ref)) {
+      if (excludeMerged && isShippedSubject(ref, mergedBlobs)) {
         shippedSubjectSuppressed++;
         continue;
       }

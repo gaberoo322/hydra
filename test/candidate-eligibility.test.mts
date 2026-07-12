@@ -10,10 +10,12 @@ import {
   isBlockerJustCleared,
   requiresSpawnCapableDispatch,
   requiresNonPrDispatch,
+  isShippedSubject,
   NON_PR_DELIVERABLE_LABELS,
   IN_FLIGHT_PR_FRESHNESS_MS,
   RECENT_UNBLOCK_THRESHOLD_MS,
 } from "../src/backlog/candidate-eligibility.ts";
+import type { MergedRef } from "../src/backlog/target-pr-feed.ts";
 
 // A fixed reference clock so every test is deterministic.
 const NOW = 1_700_000_000_000;
@@ -256,4 +258,60 @@ test("NON_PR_DELIVERABLE_LABELS keeps its canonical class set", () => {
     [...NON_PR_DELIVERABLE_LABELS].sort(),
     ["host-systemd", "live-data", "non-pr-deliverable", "operator-gated"],
   );
+});
+
+// --- isShippedSubject (issue #3208; extracted by #3211) --------------------
+//
+// The positive-evidence-only shipped-subject predicate. Focused cases the
+// #3211 extraction reclaims — testing the predicate directly with a resolved
+// `mergedBlobs` array, no `getCandidateFeed` fixture. Fixtures mirror the
+// evidenced item-764 → PR #435 phantom (a covering blob that carries NO
+// identity token) used end-to-end in `anchor-candidates.test.mts`.
+
+const SHIPPED_TITLE =
+  "Add settlement reconciliation trigger to daily forecast-outcomes runner poll Kalshi settled tickers";
+const COVERING_BLOB: MergedRef = {
+  ref: "pr-435",
+  blob:
+    "feat(runner): wire Kalshi settled-ticker REST poll into the daily forecast-outcomes reconciliation runner\n" +
+    "Adds the settlement reconciliation trigger so the daily runner polls Kalshi for settled tickers and reconciles forecast outcomes.",
+};
+
+test("isShippedSubject: a title covered by a merged blob is suppressed (true)", () => {
+  assert.equal(isShippedSubject(SHIPPED_TITLE, [COVERING_BLOB]), true);
+});
+
+test("isShippedSubject: an empty mergedBlobs feed short-circuits to false (positive-evidence-only)", () => {
+  // The #2110 92%-false-positive polarity: absence of a covering blob is NEVER
+  // proof a candidate shipped. Even a title that WOULD match must survive.
+  assert.equal(isShippedSubject(SHIPPED_TITLE, []), false);
+});
+
+test("isShippedSubject: an empty title is never a shipped subject (empty-title guard)", () => {
+  assert.equal(isShippedSubject("", [COVERING_BLOB]), false);
+});
+
+test("isShippedSubject: a non-string title degrades to false (non-string-title guard)", () => {
+  assert.equal(isShippedSubject(undefined as any, [COVERING_BLOB]), false);
+  assert.equal(isShippedSubject(null as any, [COVERING_BLOB]), false);
+  assert.equal(isShippedSubject(42 as any, [COVERING_BLOB]), false);
+});
+
+test("isShippedSubject: a SHORT (<4 significant-word) title is not subject-matched", () => {
+  // The SUBJECT_MATCH_MIN_WORDS guard inside subjectCoveredBy keeps short /
+  // generic titles from ever spuriously evicting live work.
+  assert.equal(isShippedSubject("fix tests", [COVERING_BLOB]), false);
+});
+
+test("isShippedSubject: an UNRELATED blob does not cover the title (below 0.70 containment)", () => {
+  const unrelated: MergedRef = {
+    ref: "pr-500",
+    blob: "fix(dashboard): tweak the outcomes chart legend spacing and axis labels",
+  };
+  assert.equal(isShippedSubject(SHIPPED_TITLE, [unrelated]), false);
+});
+
+test("isShippedSubject: a covering blob anywhere in a multi-blob feed suppresses", () => {
+  const noise: MergedRef = { ref: "pr-1", blob: "chore: bump lockfile and tidy imports" };
+  assert.equal(isShippedSubject(SHIPPED_TITLE, [noise, COVERING_BLOB]), true);
 });
