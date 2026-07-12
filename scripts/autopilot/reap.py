@@ -497,6 +497,7 @@ def _fire_cycle_record(
     task_title: str = "",
     anchor_ref: str = "",
     grounding_tests: dict[str, int] | None = None,
+    worktree_branch: str = "",
 ) -> None:
     """Best-effort POST to /api/autopilot/cycle-record (issue #430).
 
@@ -549,6 +550,15 @@ def _fire_cycle_record(
     (positional 5) and `anchor_ref` (positional 6) closes that metadata gap.
     Both default to "" — dispatch.sh omits an empty field, so a genuinely
     task-less dispatch stays null (the correct truthful behaviour).
+
+    `worktree_branch` (issue #3252): the slot's synthesised worktree branch
+    (`worktree-agent-<runToken>-t<N>-<slot>`). Forwarded as the 12th positional
+    `cycle-record` arg so `recordCycleMetrics` can mirror the grounding test
+    counts (which arrive keyed on THIS write's bare worktree-hash cycleId) onto
+    the SEPARATE branch-keyed record the merge-watch enrichment + dashboards
+    read — the two keys are otherwise un-joinable, so `testsAfter` recorded 0 on
+    the sampled record every cycle. Empty (signal class / cleared slot) →
+    dispatch.sh omits the field → no mirror (the prior behaviour).
     """
     if not skill or skill not in CYCLE_RECORD_SKILLS:
         return
@@ -577,6 +587,11 @@ def _fire_cycle_record(
                 # integer (0 = "no usage parsed" = unknown, omitted so
                 # recordCycle's per-cycle-token-hash fallback gets its chance).
                 str(total_tokens or 0),
+                # Issue #3252: the synthesised worktree branch as the 12th
+                # positional so recordCycleMetrics mirrors the grounding test
+                # counts onto the branch-keyed record dashboards read. Empty →
+                # dispatch.sh omits it → no mirror.
+                worktree_branch or "",
             ],
             check=False,
             capture_output=True,
@@ -1057,6 +1072,14 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     anchor_ref = slot.get("anchor") if isinstance(slot, dict) else None
     if not anchor_ref:
         anchor_ref = _read_anchor_deposit(task_id)
+    # Issue #3252: capture the slot's synthesised worktree branch BEFORE the slot
+    # is nulled below. reap's cycle-record is keyed on the bare worktree-hash
+    # task_id (the deposit key it reads the grounding test counts from), but the
+    # record the merge-watch enrichment + dashboards read is keyed on THIS branch
+    # (an un-joinable run-token-shaped id). Forwarding it lets recordCycleMetrics
+    # mirror the test counts onto the branch record so `testsAfter` stops
+    # recording 0 there. None when the slot is absent (signal class / cleared).
+    worktree_branch = slot.get("branch") if isinstance(slot, dict) else None
     if slot is not None:
         slot["tokens"] = total_tokens
         s["slots"][cls] = None  # release the pipeline slot
@@ -1144,6 +1167,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         task_title=anchor_ref or "",
         anchor_ref=anchor_ref or "",
         grounding_tests=grounding_tests,
+        worktree_branch=worktree_branch or "",
     )
 
     # Issue #2952: fire the per-CYCLE token record so the near-empty
