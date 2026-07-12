@@ -424,14 +424,33 @@ export async function startRun(
       turns: "0",
       dispatches: "0",
       // `cumulative_tokens` is a dashboard-facing MIRROR of state.json's
-      // per-turn token surrogate, advanced by `recordTurn` from each turn's
+      // per-turn token SURROGATE, advanced by `recordTurn` from each turn's
       // `tokens_after` POST (see the write below). It is NOT the autopilot's
       // budget gate: `TERM:budget` reads state.json directly in
       // scripts/autopilot/term-check.py (+ decide.py `_check_termination`), so
-      // a 0 here never disables termination (issue #2429). It stays 0 only for
-      // a run that never accumulates surrogate tokens — e.g. a 1-2-turn run
-      // that exits under the print-mode session model (#1352/#1903) before the
-      // surrogate grows. Multi-turn runs carry the real accumulated value.
+      // a 0 here never disables termination (issue #2429).
+      //
+      // WHY IT IS OFTEN 0 EVEN ON MULTI-TURN RUNS (issue #3250): state.json
+      // `cumulative_tokens` only grows when a completion carries a NON-ZERO
+      // `total_tokens`. On the PRIMARY (hook-driven) reap path, decide.py's
+      // `_rule_slot_events` synthesises each completion from a `subagent_stop`
+      // event whose token count it can only recover from `slot.partial_tokens`
+      // — and "the hook itself doesn't carry tokens (the harness payload
+      // doesn't expose them reliably)" (decide.py `_rule_slot_events`). When
+      // that floor is absent the synthesised `total_tokens` is 0, so the
+      // surrogate never advances and this mirror stays 0 regardless of turn
+      // count. It reliably carries a real value ONLY when reap ran the FALLBACK
+      // `reap.py completion` CLI (a wedged-slot recovery) with a stamped count.
+      // So a 0 here means "surrogate never advanced", NOT "no work happened".
+      //
+      // THIS FIELD IS NOT THE COST-ATTRIBUTION LEDGER. Authoritative per-class
+      // / per-cycle token attribution lives in `src/cost/` (the
+      // `hydra:metrics:tokens:by-cycle:<id>` family written by
+      // `recordSubagentTokens`, fed by reap's own `_fire_token_record` POST to
+      // /api/metrics/tokens) and is surfaced live at GET /api/metrics/cost-by-class
+      // and /api/metrics/cost-per-merged-pr (see `src/cost/cost-attribution.ts`).
+      // For cost-per-merged-PR, model-routing ROI, or per-class spend, read
+      // those endpoints — NOT this per-run surrogate mirror.
       cumulative_tokens: "0",
       idle_turns: "0",
       last_heartbeat_epoch: String(startedEpoch),
@@ -606,7 +625,10 @@ export async function recordTurn(
     // is the per-turn `tokens_after` POSTed by heartbeat.py, which sources it from
     // state.json `cumulative_tokens` — so this field tracks the same value the
     // live `TERM:budget` gate reads, NOT an independent accounting. See the
-    // init-site comment above for why this is dashboard-only and never the gate.
+    // init-site comment above for why this is dashboard-only, never the gate, and
+    // why it stays 0 on many multi-turn runs (issue #3250: the hook reap path
+    // can't recover a token floor) — the cost-attribution ledger is `src/cost/`,
+    // NOT this mirror.
     await deps.runs.setAutopilotRunField(runId, "cumulative_tokens", String(tokensAfter));
     await deps.runs.setAutopilotRunField(runId, "idle_turns", String(idleTurns));
     await deps.runs.setAutopilotRunField(runId, "last_heartbeat_epoch", String(epoch));

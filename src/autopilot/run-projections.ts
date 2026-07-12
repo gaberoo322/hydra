@@ -355,6 +355,11 @@ export async function projectRunDigest(
     dispatches: Number(row.dispatches || "0"),
     merged_count: merged,
     failed_count: failed,
+    // `total_tokens` is the per-run SURROGATE mirror (state.json `cumulative_tokens`),
+    // NOT cost attribution: it is often 0 even on multi-turn runs because the
+    // primary hook reap path can't recover a token floor (issue #3250; see the
+    // init-site comment in runs.ts). For real per-class / per-merged-PR spend,
+    // read GET /api/metrics/cost-by-class + /api/metrics/cost-per-merged-pr.
     total_tokens: Number(row.cumulative_tokens || "0"),
     exit_code: row.exit_code !== undefined ? Number(row.exit_code) : null,
   };
