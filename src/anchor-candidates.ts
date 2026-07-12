@@ -80,12 +80,12 @@ import {
   loadDesignConceptImpl,
 } from "./backlog/candidate-design-concept.ts";
 // MergedAnchorRefs — shared merged-by-cycle suppression Seam (issue #1880,
-// extracted from this module). The Candidate Feed below imports the suppression
-// predicate (`isMergedWork`) + production loader (`loadMergedAnchorRefsImpl`);
-// the canonical definitions live in `src/backlog/merged-refs.ts`, this module
-// is one consumer.
+// extracted from this module). The Candidate Feed below loads the merged-token
+// set via the production loader (`loadMergedAnchorRefsImpl`) and hands it to the
+// suppression coordinator, which owns the `isMergedWork` match (issue #3240); the
+// canonical definitions live in `src/backlog/merged-refs.ts`, this module is one
+// consumer.
 import {
-  isMergedWork,
   loadMergedAnchorRefsImpl,
 } from "./backlog/merged-refs.ts";
 // Shipped-subject suppression (issue #3208). The exact-token `isMergedWork`
@@ -113,21 +113,29 @@ import {
   scoreCandidate,
   type PriorityTier,
 } from "./backlog/candidate-scoring.ts";
-// Eligibility predicates — the two genuinely-private predicates (`isInFlightPR`,
-// `isBlockerJustCleared`) and their freshness-window policy now live in their own
-// sibling Module (`src/backlog/candidate-eligibility.ts`, issue #2066), mirroring
-// the #2040 (candidate-scoring), #1880 (merged-refs), and #1844 (work-queue-hygiene)
-// extractions from this same file. `getCandidateFeed` (enumeration + eligibility
-// composition) stays here and imports the predicates; consumers import the
-// eligibility symbols directly from the canonical home (the back-compat
-// re-exports were retired in issue #2077).
+// Eligibility predicates now live in their own sibling Module
+// (`src/backlog/candidate-eligibility.ts`, issue #2066), mirroring the #2040
+// (candidate-scoring), #1880 (merged-refs), and #1844 (work-queue-hygiene)
+// extractions from this same file. The five SUPPRESSION predicates
+// (`isInFlightPR`, `requiresSpawnCapableDispatch`, `requiresNonPrDispatch`,
+// `isMergedWork`, `isShippedSubject`) are now consumed indirectly through the
+// `candidateSuppressionDecision` coordinator (issue #3240, imported below); this
+// module still imports the SCORING-signal predicate `isBlockerJustCleared`
+// directly, since it feeds the score rather than the suppression cascade.
 import {
-  isInFlightPR,
   isBlockerJustCleared,
-  requiresSpawnCapableDispatch,
-  requiresNonPrDispatch,
-  isShippedSubject,
 } from "./backlog/candidate-eligibility.ts";
+// Suppression-decision coordinator (issue #3240). The five eligibility predicates
+// keep their home in `candidate-eligibility.ts`; the ORDERED cascade between them
+// (which gate fires first, which suppression counter it bumps) is extracted into
+// its own sibling Module `src/backlog/candidate-suppression.ts`. Both lane loops
+// build a `SuppressionInput` and call `candidateSuppressionDecision` once per
+// candidate, then bump `counters[decision.counter]` — replacing the five inline
+// `if (…) { counterN++; continue; }` blocks that were spelled out twice.
+import {
+  candidateSuppressionDecision,
+  type SuppressCounters,
+} from "./backlog/candidate-suppression.ts";
 
 // ---------------------------------------------------------------------------
 // Eligibility / feed thresholds — the stateful half that stays here.
@@ -397,19 +405,23 @@ async function getCandidateFeedImpl(
     }
   }
 
-  // Positive-evidence-only shipped-subject test now lives in its canonical home,
-  // `isShippedSubject(title, mergedBlobs)` in `candidate-eligibility.ts` (issue
-  // #3211): a candidate is suppressed only when a CONCRETE merged PR/commit blob
-  // COVERS its title at >=0.70 asymmetric containment with >=4 significant words,
-  // and an empty `mergedBlobs` short-circuits to false (suppress nothing). The
-  // two lane call-sites below invoke it with the resolved `mergedBlobs` array.
+  // The resolved `mergedRefs` token set and `mergedBlobs` blob feed are handed to
+  // the `candidateSuppressionDecision` coordinator (issue #3240) per candidate;
+  // the coordinator owns the merged-work token match and the positive-evidence-
+  // only shipped-subject blob cover (`isShippedSubject` in `candidate-eligibility.ts`,
+  // issue #3211), so an empty feed suppresses nothing without a special case here.
 
   const candidates: CandidateBase[] = [];
-  let inFlightSuppressed = 0;
-  let mergedSuppressed = 0;
-  let shippedSubjectSuppressed = 0;
-  let spawnSuppressed = 0;
-  let nonPrDeliverableSuppressed = 0;
+  // The five suppression counters, accumulated by the coordinator's per-candidate
+  // decision (issue #3240). The keys are the internal accumulator names; the
+  // return statement maps them onto the public `*_suppressed` wire fields.
+  const counters: SuppressCounters = {
+    inFlightSuppressed: 0,
+    spawnSuppressed: 0,
+    nonPrDeliverableSuppressed: 0,
+    mergedSuppressed: 0,
+    shippedSubjectSuppressed: 0,
+  };
 
   // -------------------------------------------------------------------------
   // Lane 1: Kanban backlog/queued/inProgress lanes.
@@ -425,46 +437,25 @@ async function getCandidateFeedImpl(
     for (const [lane, tier] of kanbanLanes) {
       const items: Partial<BacklogItem>[] = lanes[lane] || [];
       for (const item of items) {
-        if (excludeInFlight && isInFlightPR(item, now)) {
-          inFlightSuppressed++;
-          continue;
-        }
-        // Inline-buildability gate (issue #2075): an inline-mode caller cannot
-        // complete a `dispatch-spawn-capable` anchor (exceeds the >5-file cap),
-        // so hide it rather than re-serve it to a session that will only revert
-        // + requeue. No-op for spawn-capable callers (inlineMode false default).
-        if (inlineMode && requiresSpawnCapableDispatch(item)) {
-          spawnSuppressed++;
-          continue;
-        }
-        // PR-deliverability gate (issue #2282): an anchor whose artifact is
-        // host-systemd-only / operator-gated / live-data is deliverable by NO
-        // code-writing dispatch, so hide it for EVERY caller (not just inline)
-        // rather than burn a guaranteed ground+analyse+release cycle. It belongs
-        // on the operator/deploy path; the raw operator view opts out with
-        // excludeNonPrDeliverable=false.
-        if (excludeNonPrDeliverable && requiresNonPrDispatch(item)) {
-          nonPrDeliverableSuppressed++;
-          continue;
-        }
-        if (
-          excludeMerged &&
-          isMergedWork(
-            { issue: item.id, title: item.title ?? "", anchorRef: item.title ?? "" },
-            mergedRefs,
-          )
-        ) {
-          mergedSuppressed++;
-          continue;
-        }
-        // Shipped-subject gate (issue #3208): a kanban item whose code shipped
-        // under a differently-titled, non-claiming PR carries NO identity token,
-        // so `isMergedWork` above misses it — but a recently-merged PR/commit
-        // blob still COVERS its title. Suppress on-read (the hourly reconciler
-        // owns the Redis GC of the stale row; #2187 zero-writes invariant). The
-        // >=4-word + >=0.70 guards keep this positive-evidence-only.
-        if (excludeMerged && isShippedSubject(item.title ?? "", mergedBlobs)) {
-          shippedSubjectSuppressed++;
+        // Run the five-gate suppression cascade once (issue #3240). The gates —
+        // in-flight-PR freshness, inline-mode spawn-capability, PR-deliverability,
+        // merged-work token match, and shipped-subject blob cover — and their
+        // rationale now live behind the `candidateSuppressionDecision` coordinator
+        // in `candidate-suppression.ts`; a suppress bumps the named counter.
+        const decision = candidateSuppressionDecision({
+          item,
+          mergedIdentity: { issue: item.id, title: item.title ?? "", anchorRef: item.title ?? "" },
+          subjectTitle: item.title ?? "",
+          now,
+          excludeInFlight,
+          inlineMode,
+          excludeNonPrDeliverable,
+          excludeMerged,
+          mergedRefs,
+          mergedBlobs,
+        });
+        if (decision.suppressed && decision.counter) {
+          counters[decision.counter]++;
           continue;
         }
         candidates.push({
@@ -507,47 +498,28 @@ async function getCandidateFeedImpl(
       if (isTerminalMarker(ref)) {
         continue;
       }
-      // Inline-buildability gate (issue #2075): a `dispatch-spawn-capable`
-      // work-queue entry is not inline-buildable. For an inline-mode caller,
-      // hide it so the work-queue stops re-serving the 13-file atomic migration
-      // to a session that can only revert + requeue (the friction this fixes).
-      // The entry is NOT reaped — it remains valid work for a spawn-capable
-      // dispatch; it is only filtered from THIS inline caller's view.
-      if (inlineMode && requiresSpawnCapableDispatch(item)) {
-        spawnSuppressed++;
-        continue;
-      }
-      // PR-deliverability gate (issue #2282): a host-systemd-only / operator-
-      // gated / live-data work-queue entry is deliverable by no code-writing
-      // dispatch — hide it for every caller so the work-queue stops re-serving
-      // it (the friction this fixes: item-559 host-systemd, item-555 operator-
-      // gated secret, item-523 live-data). It is NOT reaped here (this read path
-      // performs zero writes, issue #2187); it stays visible to the raw operator
-      // view (excludeNonPrDeliverable=false) and to the operator/deploy path.
-      if (excludeNonPrDeliverable && requiresNonPrDispatch(item)) {
-        nonPrDeliverableSuppressed++;
-        continue;
-      }
-      if (
-        excludeMerged &&
-        isMergedWork({ issue: ref, title: ref, anchorRef: ref }, mergedRefs)
-      ) {
-        mergedSuppressed++;
-        // The stale Redis entry is REAPED out-of-band by the hourly Work-Queue
-        // Hygiene reconciler (`reconcileWorkQueue`, cause: "merged-work"), which
-        // already scans the whole queue on its tick (issue #2187 moved the reap
-        // there so this read path performs zero writes). Suppression keeps the
-        // entry off every served poll regardless of when that GC catches up.
-        continue;
-      }
-      // Shipped-subject gate (issue #3208): symmetric with the kanban lane. A
-      // work-queue entry whose code shipped under a differently-titled PR that
-      // never cites the entry's `reference` carries no matching token; suppress
-      // it when a merged blob covers its subject. The reconciler's
-      // `shipped-subject` cause (#2482) GCs the stale Redis entry out-of-band —
-      // this read path stays write-free (#2187).
-      if (excludeMerged && isShippedSubject(ref, mergedBlobs)) {
-        shippedSubjectSuppressed++;
+      // Run the same five-gate suppression cascade the kanban lane uses (issue
+      // #3240), via the shared `candidateSuppressionDecision` coordinator. The
+      // work-queue entry carries no `claimedBy`, so the in-flight-PR gate is a
+      // strict no-op here (excludeInFlight is passed but never fires); the other
+      // four gates (spawn-capable, PR-deliverability, merged-work, shipped-
+      // subject) fire identically to the kanban lane. A suppress bumps the named
+      // counter; the stale Redis entry is REAPED out-of-band by the hourly
+      // Work-Queue Hygiene reconciler (#2187 keeps this read path write-free).
+      const decision = candidateSuppressionDecision({
+        item,
+        mergedIdentity: { issue: ref, title: ref, anchorRef: ref },
+        subjectTitle: ref,
+        now,
+        excludeInFlight,
+        inlineMode,
+        excludeNonPrDeliverable,
+        excludeMerged,
+        mergedRefs,
+        mergedBlobs,
+      });
+      if (decision.suppressed && decision.counter) {
+        counters[decision.counter]++;
         continue;
       }
       candidates.push({
@@ -644,10 +616,10 @@ async function getCandidateFeedImpl(
     candidates: top,
     research_recommended,
     total_evaluated: scored.length,
-    in_flight_suppressed: inFlightSuppressed,
-    merged_suppressed: mergedSuppressed,
-    shipped_subject_suppressed: shippedSubjectSuppressed,
-    spawn_suppressed: spawnSuppressed,
-    non_pr_deliverable_suppressed: nonPrDeliverableSuppressed,
+    in_flight_suppressed: counters.inFlightSuppressed,
+    merged_suppressed: counters.mergedSuppressed,
+    shipped_subject_suppressed: counters.shippedSubjectSuppressed,
+    spawn_suppressed: counters.spawnSuppressed,
+    non_pr_deliverable_suppressed: counters.nonPrDeliverableSuppressed,
   };
 }
