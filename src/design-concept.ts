@@ -213,6 +213,50 @@ export function computeGreenLight(
 }
 
 // ---------------------------------------------------------------------------
+// Exempt-log audit record (issue #464)
+// ---------------------------------------------------------------------------
+//
+// The Redis-stored wire shape for the design-concept exemption-log audit
+// record. `appendExemptLogEntry` persists this shape (JSON-encoded) and
+// `readRecentExemptLogEntries` retrieves it; the `GET/POST
+// /api/design-concepts/exempt-log` handlers in `src/api/design-concepts.ts`
+// are the HTTP surface. The type + its parse guard live here — in the
+// persistence domain — rather than inline in the route layer, so a reader can
+// understand the audit-log wire format from the domain module without opening
+// an Express route file (issue #3226).
+
+/**
+ * One design-concept gate-exemption audit entry, as stored in Redis by
+ * `appendExemptLogEntry`. `gate_fail_reasons` is the (truncated) list of gate
+ * verdict reasons that were exempted for the PR.
+ */
+export type ExemptLogEntry = {
+  pr: number;
+  applier: string;
+  ts: number;
+  anchorRef: string;
+  gate_fail_reasons: string[];
+};
+
+/**
+ * Runtime type guard for `ExemptLogEntry` — the parse predicate for a JSON
+ * blob read back out of Redis. Used by the exempt-log read handler to reject
+ * schema-drifted entries without dropping the rest of the log.
+ */
+export function isExemptLogEntry(value: unknown): value is ExemptLogEntry {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.pr === "number" &&
+    typeof v.applier === "string" &&
+    typeof v.ts === "number" &&
+    typeof v.anchorRef === "string" &&
+    Array.isArray(v.gate_fail_reasons) &&
+    (v.gate_fail_reasons as unknown[]).every((r) => typeof r === "string")
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Persistence (Redis-backed)
 // ---------------------------------------------------------------------------
 //

@@ -20,15 +20,15 @@
  */
 
 import { Router } from "express";
-import { z } from "zod";
 
-import { countQuerySchema } from "../schemas/common.ts";
 // Persistence + green-light symbols come from the persistence module; the pure
 // gate predicate + domain scope type come from the zero-Redis gate leaf
 // (issue #3039 re-extracted them from `design-concept.ts`). Both remain
 // re-exported by `design-concept.ts`, so this split is optional — the API layer
 // points at the leaf directly to document that the gate check needs no
-// persistence dependency.
+// persistence dependency. The exempt-log audit type + its parse guard
+// (`ExemptLogEntry` / `isExemptLogEntry`) were relocated from this route file
+// to their persistence-domain home in `design-concept.ts` (issue #3226).
 import {
   saveDesignConcept,
   getDesignConcept,
@@ -36,6 +36,8 @@ import {
   approveDesignConcept,
   resolveDesignConceptForQa,
   computeGreenLight,
+  isExemptLogEntry,
+  type ExemptLogEntry,
 } from "../design-concept.ts";
 import {
   gateCheck,
@@ -47,43 +49,18 @@ import {
   readDailySnapshots,
   getDesignConceptIndexSize,
 } from "../redis/design-concept.ts";
+// Body schemas + the read-route query schemas (`ExemptLogQuerySchema` /
+// `DesignConceptListQuerySchema`) and their limit constants now all live in the
+// DC schemas module (issue #3226) — the route layer is pure HTTP wiring.
 import {
   DesignConceptInputSchema,
   DesignConceptApproveBodySchema,
   ExemptLogEntryInputSchema,
+  ExemptLogQuerySchema,
+  DesignConceptListQuerySchema,
+  EXEMPT_LOG_DEFAULT_LIMIT,
 } from "../schemas/design-concept.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
-
-/** Maximum number of audit entries the read endpoint will return. */
-const EXEMPT_LOG_DEFAULT_LIMIT = 50;
-const EXEMPT_LOG_MAX_LIMIT = 500;
-
-/**
- * Query schemas for the design-concept read routes (ADR-0022).
- *
- * Both reuse the shared `countQuerySchema` factory (the `parseInt(...) || N`
- * default-on-garbage + clamp idiom) under the wire-name `limit`:
- *
- *   - `GET /design-concepts/exempt-log?limit=N` — historic default 50, cap 500.
- *   - `GET /design-concepts?scope=&limit=N` — historic default 50 (no explicit
- *     cap previously; the factory's 1000 cap bounds an otherwise-unbounded
- *     slice). `scope` is an optional `"orch" | "target"` enum; any other value
- *     (or absence) collapses to `undefined`, exactly the legacy ternary.
- *
- * Non-strict (plain object schemas ignore unknown keys); the routes pass the
- * whole `req.query` to `safeParse` and read typed, always-present fields.
- */
-const ExemptLogQuerySchema = z.object({
-  limit: countQuerySchema(EXEMPT_LOG_DEFAULT_LIMIT, EXEMPT_LOG_MAX_LIMIT).shape.count,
-});
-
-const DesignConceptListQuerySchema = z.object({
-  scope: z
-    .enum(["orch", "target"])
-    .optional()
-    .catch(undefined),
-  limit: countQuerySchema(50).shape.count,
-});
 
 // ---------------------------------------------------------------------------
 // Green-light criterion (issue #736)
@@ -95,27 +72,6 @@ const DesignConceptListQuerySchema = z.object({
 // function is directly unit-testable and the policy thresholds are importable
 // without HTTP overhead. The `GET /design-concepts/snapshots` handler below
 // imports `computeGreenLight` from there — the wire behaviour is unchanged.
-
-export type ExemptLogEntry = {
-  pr: number;
-  applier: string;
-  ts: number;
-  anchorRef: string;
-  gate_fail_reasons: string[];
-};
-
-function isExemptLogEntry(value: unknown): value is ExemptLogEntry {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.pr === "number" &&
-    typeof v.applier === "string" &&
-    typeof v.ts === "number" &&
-    typeof v.anchorRef === "string" &&
-    Array.isArray(v.gate_fail_reasons) &&
-    (v.gate_fail_reasons as unknown[]).every((r) => typeof r === "string")
-  );
-}
 
 export function createDesignConceptsRouter() {
   const router = Router();

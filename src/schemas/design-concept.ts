@@ -9,10 +9,12 @@
  * return `400 {code: "schema-validation-failed", issues: result.error.issues}`
  * on failure.
  *
- * The domain types (`DesignConceptInput`, `ExemptLogEntry`, the nested
- * `ModuleTouched` / `RejectedAlternative` / `QaTurn` / `Prototype`) are
- * re-exported from `src/design-concept.ts` and `src/api/design-concepts.ts`
- * so this file is the single source of truth for the input contract.
+ * The domain type `DesignConceptInput` and the nested value-object types
+ * (`ModuleTouched` / `RejectedAlternative` / `QaTurn` / `Prototype`) are
+ * inferred here so this file is the single source of truth for the input
+ * contract. The `ExemptLogEntry` domain type + its `isExemptLogEntry` guard
+ * live in `src/design-concept.ts` (issue #3226) — this file owns only the
+ * `ExemptLogEntryInputSchema` wire-body parse, not the stored shape.
  *
  * See:
  *   - ADR-0011 — Schemas Seam for HTTP request bodies (slicing plan)
@@ -20,6 +22,8 @@
  *   - issue #562 — zod adoption + `src/schemas/queue.ts` seed
  */
 import { z } from "zod";
+
+import { countQuerySchema } from "./common.ts";
 
 // ---------------------------------------------------------------------------
 // Nested value-object schemas
@@ -193,3 +197,38 @@ export const ExemptLogEntryInputSchema = z
     gate_fail_reasons: z.array(z.string()),
   })
   .strict();
+
+// ---------------------------------------------------------------------------
+// Query schemas for the design-concept read routes (ADR-0022)
+// ---------------------------------------------------------------------------
+//
+// Relocated from `src/api/design-concepts.ts` (issue #3226) so the DC
+// validation grammar concentrates in this file and the route layer reduces to
+// pure HTTP wiring. Both reuse the shared `countQuerySchema` factory (the
+// `parseInt(...) || N` default-on-garbage + clamp idiom) under the wire-name
+// `limit`. Non-strict (plain object schemas ignore unknown keys); the routes
+// pass the whole `req.query` to `safeParse` and read typed, always-present
+// fields.
+
+/** Maximum number of audit entries the exempt-log read endpoint returns. */
+export const EXEMPT_LOG_DEFAULT_LIMIT = 50;
+export const EXEMPT_LOG_MAX_LIMIT = 500;
+
+/**
+ * `GET /design-concepts/exempt-log?limit=N` — historic default 50, cap 500.
+ */
+export const ExemptLogQuerySchema = z.object({
+  limit: countQuerySchema(EXEMPT_LOG_DEFAULT_LIMIT, EXEMPT_LOG_MAX_LIMIT).shape
+    .count,
+});
+
+/**
+ * `GET /design-concepts?scope=&limit=N` — historic default 50 (no explicit
+ * cap previously; the factory's 1000 cap bounds an otherwise-unbounded slice).
+ * `scope` is an optional `"orch" | "target"` enum; any other value (or absence)
+ * collapses to `undefined`, exactly the legacy ternary.
+ */
+export const DesignConceptListQuerySchema = z.object({
+  scope: z.enum(["orch", "target"]).optional().catch(undefined),
+  limit: countQuerySchema(50).shape.count,
+});
