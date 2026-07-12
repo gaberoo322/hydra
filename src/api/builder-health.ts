@@ -24,7 +24,7 @@ import {
   type BuilderHealthScorecard,
 } from "../aggregators/builder-health.ts";
 import { incrScopeViolation } from "../redis/scope-violations.ts";
-import { recordDispatchPr } from "../autopilot/runs.ts";
+import { recordDispatchPr } from "../autopilot/dispatch-pr-link.ts";
 import {
   BuilderHealthQuerySchema,
   ScopeViolationBodySchema,
