@@ -53,6 +53,7 @@ function makeDeps(over: Partial<CandidateFeedDeps> = {}): CandidateFeedDeps {
     loadLastReflectionAt: async () => null,
     loadDesignConcept: async () => ABSENT_DC,
     loadMergedAnchorRefs: async () => new Set<string>(),
+    fetchMergedRefs: async () => [],
     ...over,
   };
 }

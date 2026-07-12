@@ -29,8 +29,9 @@
 //      ADR-0016 Locality (scoring has exactly one home).
 //
 //   3. Eligibility — in-flight-PR 30-min suppression, merged-by-cycle
-//      suppression (issue #882), blocker-just-cleared detection,
-//      design-concept annotation, and the research_recommended threshold.
+//      suppression (issue #882), shipped-subject suppression (issue #3208),
+//      blocker-just-cleared detection, design-concept annotation, and the
+//      research_recommended threshold.
 //
 // This is a PURE read-and-score path: it performs ZERO Redis writes (issue
 // #2187). Stale work-queue entries (merged-work + terminal-markers) are
@@ -85,8 +86,24 @@ import {
 // is one consumer.
 import {
   isMergedWork,
+  subjectCoveredBy,
   loadMergedAnchorRefsImpl,
 } from "./backlog/merged-refs.ts";
+// Shipped-subject suppression (issue #3208). The exact-token `isMergedWork`
+// gate above misses a phantom whose code shipped under a DIFFERENTLY-TITLED PR
+// that never cites the kanban item id (item-764/767 shipped by #435/#433) — no
+// identity token intersects. The proven fix (#2110/#2482) is the ASYMMETRIC
+// `subjectCoveredBy` matcher (>=0.70 containment, >=4 significant words) run
+// against the merged PR/commit BLOB feed (`MergedRef.blob`), already load-bearing
+// in `work-queue-hygiene.ts` (reconcileWorkQueue) and `stale-escalation.ts`. This
+// module REUSES those seams — `subjectCoveredBy` from `merged-refs.ts` and the
+// `MergedRef` blob feeds from `target-pr-feed.ts` — never a bespoke matcher
+// (ADR-0016 Locality: do not duplicate the matching policy).
+import {
+  type MergedRef,
+  fetchMergedTargetPrRefs,
+  fetchTargetMergeCommitRefs,
+} from "./backlog/target-pr-feed.ts";
 // Scoring policy — the pure tier-ladder + penalty/bonus arithmetic — now lives
 // in its own sibling Module (`src/backlog/candidate-scoring.ts`, issue #2040),
 // mirroring the #1880 (merged-refs) and #1844 (work-queue-hygiene) extractions
@@ -171,6 +188,15 @@ export interface CandidateFeed {
    */
   merged_suppressed: number;
   /**
+   * Count of candidates suppressed because a recently-merged PR/commit SUBJECT
+   * covers the candidate's title (issue #3208), even though no exact identity
+   * token intersected (so `merged_suppressed` above missed it). Catches a
+   * kanban/work-queue item whose code shipped under a differently-titled,
+   * non-claiming PR. Positive-evidence-only: an empty/unreachable merged-blob
+   * feed makes this a strict no-op (never evicts live work).
+   */
+  shipped_subject_suppressed: number;
+  /**
    * Count of candidates suppressed because the caller is in inline mode and the
    * anchor is flagged `dispatch-spawn-capable` (not inline-buildable, issue
    * #2075). Always 0 when `inlineMode` is false (the default) — a spawn-capable
@@ -245,6 +271,17 @@ export interface CandidateFeedDeps {
    * set (suppress nothing) so the feed keeps serving.
    */
   loadMergedAnchorRefs: () => Promise<Set<string>>;
+  /**
+   * Merged PR/commit BLOB feed for the shipped-subject gate (issue #3208).
+   * Each `MergedRef.blob` is a merged PR/commit title+body against which the
+   * asymmetric `subjectCoveredBy` matcher runs. Defaults to `fetchMergedRefsImpl`
+   * (the union of `fetchMergedTargetPrRefs` + `fetchTargetMergeCommitRefs` — the
+   * same swap-seam target repo the `loadMergedAnchorRefs` token scan covers).
+   * Fetched ONCE per feed build, before the enumeration loop, so subject matching
+   * is pure in-memory. Must never throw — an unreachable feed degrades to `[]`
+   * (suppress nothing), preserving the positive-evidence-only invariant.
+   */
+  fetchMergedRefs: () => Promise<MergedRef[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +315,37 @@ async function loadLastReflectionAtImpl(anchorRef: string): Promise<string | nul
   }
 }
 
+/**
+ * Production merged-blob feed reader for the shipped-subject gate (issue #3208).
+ * Fetches the recently-merged target PR set AND the recent merge-commit set once
+ * per feed build and returns the union of their `MergedRef`s. Each underlying
+ * feed is fail-open (returns `null` on any failure, meaning "no information" —
+ * never "nothing merged"); a `null` feed contributes zero refs, so a total `gh`
+ * outage degrades to an empty set and yields ZERO shipped-subject suppressions
+ * (positive-evidence-only invariant). Never throws.
+ *
+ * The merge-commit feed is included deliberately: it covers the
+ * bare-commit-no-PR-token case (a cycle merge that lands without a PR), which
+ * the merged-PR feed alone would miss. This mirrors `fetchMergedRefsImpl` in
+ * `work-queue-hygiene.ts` (issue #2482) — the same seam, the same repos.
+ */
+async function fetchMergedRefsImpl(): Promise<MergedRef[]> {
+  const out: MergedRef[] = [];
+  try {
+    const prRefs = await fetchMergedTargetPrRefs();
+    if (prRefs) out.push(...prRefs);
+  } catch (err: any) {
+    console.error(`[CandidateFeed] merged-PR feed failed: ${err?.message || err}`);
+  }
+  try {
+    const commitRefs = await fetchTargetMergeCommitRefs();
+    if (commitRefs) out.push(...commitRefs);
+  } catch (err: any) {
+    console.error(`[CandidateFeed] merge-commit feed failed: ${err?.message || err}`);
+  }
+  return out;
+}
+
 function resolveDeps(deps?: Partial<CandidateFeedDeps>): CandidateFeedDeps {
   return {
     loadBacklog: deps?.loadBacklog ?? loadBacklog,
@@ -285,6 +353,7 @@ function resolveDeps(deps?: Partial<CandidateFeedDeps>): CandidateFeedDeps {
     loadLastReflectionAt: deps?.loadLastReflectionAt ?? loadLastReflectionAtImpl,
     loadDesignConcept: deps?.loadDesignConcept ?? loadDesignConceptImpl,
     loadMergedAnchorRefs: deps?.loadMergedAnchorRefs ?? (() => loadMergedAnchorRefsImpl()),
+    fetchMergedRefs: deps?.fetchMergedRefs ?? fetchMergedRefsImpl,
   };
 }
 
@@ -337,9 +406,40 @@ async function getCandidateFeedImpl(
     }
   }
 
+  // Load the merged-blob feed once up front for the shipped-subject gate (issue
+  // #3208), gated on the same `excludeMerged` flag as the token set above (the
+  // raw operator view opts out of BOTH). Fail-open: an unreachable/empty feed
+  // yields zero shipped-subject suppressions (positive-evidence-only invariant —
+  // absence of a covering blob is NEVER proof a candidate shipped, the #2110
+  // 92%-false-positive polarity). `subjectCoveredBy` already no-ops on an empty
+  // blob set; the empty-feed short-circuit below makes the no-op explicit.
+  let mergedBlobs: MergedRef[] = [];
+  if (excludeMerged) {
+    try {
+      mergedBlobs = await d.fetchMergedRefs();
+    } catch (err: any) {
+      console.error(`[CandidateFeed] merged-blob feed failed: ${err.message}`);
+      mergedBlobs = [];
+    }
+  }
+
+  // Positive-evidence-only shipped-subject test: a candidate is suppressed only
+  // when a CONCRETE merged PR/commit blob COVERS its title at >=0.70 asymmetric
+  // containment with >=4 significant words (the SUBJECT_MATCH_MIN_WORDS guard
+  // inside `subjectCoveredBy`, so short/generic titles can never spuriously
+  // evict live work). An empty `mergedBlobs` short-circuits to false — suppress
+  // nothing. Never throws.
+  const isShippedSubject = (title: string): boolean => {
+    if (mergedBlobs.length === 0) return false;
+    const t = typeof title === "string" ? title : "";
+    if (!t) return false;
+    return mergedBlobs.some((r) => subjectCoveredBy(t, r.blob));
+  };
+
   const candidates: CandidateBase[] = [];
   let inFlightSuppressed = 0;
   let mergedSuppressed = 0;
+  let shippedSubjectSuppressed = 0;
   let spawnSuppressed = 0;
   let nonPrDeliverableSuppressed = 0;
 
@@ -387,6 +487,16 @@ async function getCandidateFeedImpl(
           )
         ) {
           mergedSuppressed++;
+          continue;
+        }
+        // Shipped-subject gate (issue #3208): a kanban item whose code shipped
+        // under a differently-titled, non-claiming PR carries NO identity token,
+        // so `isMergedWork` above misses it — but a recently-merged PR/commit
+        // blob still COVERS its title. Suppress on-read (the hourly reconciler
+        // owns the Redis GC of the stale row; #2187 zero-writes invariant). The
+        // >=4-word + >=0.70 guards keep this positive-evidence-only.
+        if (excludeMerged && isShippedSubject(item.title ?? "")) {
+          shippedSubjectSuppressed++;
           continue;
         }
         candidates.push({
@@ -460,6 +570,16 @@ async function getCandidateFeedImpl(
         // already scans the whole queue on its tick (issue #2187 moved the reap
         // there so this read path performs zero writes). Suppression keeps the
         // entry off every served poll regardless of when that GC catches up.
+        continue;
+      }
+      // Shipped-subject gate (issue #3208): symmetric with the kanban lane. A
+      // work-queue entry whose code shipped under a differently-titled PR that
+      // never cites the entry's `reference` carries no matching token; suppress
+      // it when a merged blob covers its subject. The reconciler's
+      // `shipped-subject` cause (#2482) GCs the stale Redis entry out-of-band —
+      // this read path stays write-free (#2187).
+      if (excludeMerged && isShippedSubject(ref)) {
+        shippedSubjectSuppressed++;
         continue;
       }
       candidates.push({
@@ -558,6 +678,7 @@ async function getCandidateFeedImpl(
     total_evaluated: scored.length,
     in_flight_suppressed: inFlightSuppressed,
     merged_suppressed: mergedSuppressed,
+    shipped_subject_suppressed: shippedSubjectSuppressed,
     spawn_suppressed: spawnSuppressed,
     non_pr_deliverable_suppressed: nonPrDeliverableSuppressed,
   };
