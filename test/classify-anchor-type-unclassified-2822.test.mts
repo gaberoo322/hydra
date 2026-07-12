@@ -41,7 +41,7 @@ import assert from "node:assert/strict";
 import {
   classifyAnchorType,
   UNCLASSIFIED_ANCHOR_TYPE,
-} from "../src/autopilot/cycle-close.ts";
+} from "../src/autopilot/anchor-type.ts";
 
 // The literal the metrics aggregator (src/metrics/aggregate.ts) maps an
 // absent/empty/whitespace anchorType to. The whole point of the sentinel is

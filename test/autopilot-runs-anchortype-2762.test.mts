@@ -19,9 +19,9 @@ import type { AutopilotRunsDeps } from "../src/autopilot/runs.ts";
 // satisfying both deps bags so it is passed to recordCycle unchanged.
 import {
   recordCycle,
-  UNCLASSIFIED_ANCHOR_TYPE,
   type CycleCloseDeps,
 } from "../src/autopilot/cycle-close.ts";
+import { UNCLASSIFIED_ANCHOR_TYPE } from "../src/autopilot/anchor-type.ts";
 
 // ---------------------------------------------------------------------------
 // Minimal in-memory deps fixture (same shape as autopilot-runs-deps.test.mts,
