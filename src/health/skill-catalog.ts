@@ -17,14 +17,14 @@
 // than navigating the ~700-line pipeline module to find it.
 //
 // Coupling direction is one-way and correct: this module type-imports
-// `HealthDiagnostic` from the pipeline seam (it consumes the pipeline's output
-// type); the pipeline never imports back. The input is decoupled from the
-// producer's concrete type via the structural `SkillCatalogSnapshot` shape, so
-// this module is unit-testable without standing up OpenViking and never touches
-// the registry module — the I/O handler (api/health.ts) reads the live state
-// and passes it in.
+// `HealthDiagnostic` from the zero-logic type leaf (issue #3230: it consumes the
+// pipeline's output type); the pipeline never imports back. The input is
+// decoupled from the producer's concrete type via the structural
+// `SkillCatalogSnapshot` shape, so this module is unit-testable without standing
+// up OpenViking and never touches the registry module — the I/O handler
+// (api/health.ts) reads the live state and passes it in.
 
-import type { HealthDiagnostic } from "./diagnostics.ts";
+import type { HealthDiagnostic } from "./types.ts";
 
 /** The structural shape `assessSkillCatalog` reads off the catalog state. */
 export interface SkillCatalogSnapshot {
