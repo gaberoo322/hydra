@@ -30,6 +30,16 @@
  * because recordCycle calls the same classifyAnchorType leaf, so the three
  * anchorType cases still hold — the mechanism moved, the observable didn't.
  *
+ * Issue #3220 (architecture-scan deepening): the POST /metrics/record handler
+ * was RELOCATED out of the metrics read-aggregator router
+ * (src/api/metrics.ts) into the autopilot lifecycle WRITE router
+ * (src/api/autopilot-lifecycle.ts), where its structural twin
+ * POST /autopilot/cycle-record already lives. The URL path is byte-identical
+ * (both routers mount at the same base in src/api.ts). This suite therefore now
+ * resolves the handler off `createAutopilotLifecycleRouter()` and asserts it is
+ * NO LONGER mounted on the metrics read router — the response/write contract is
+ * unchanged, only the handler's home file moved.
+ *
  * Uses Redis DB 1 — never touches production (DB 0). A file-level `after()`
  * hook closes the Redis client so the runner emits `# pass N` lines and CI's
  * PASS_COUNT check doesn't blow up (PR #518 lesson).
@@ -42,7 +52,11 @@ import Redis from "ioredis";
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
 
+// Issue #3220: the handler now lives on the autopilot lifecycle write router.
+// The metrics router import is retained so the relocation test can assert the
+// handler is NO LONGER mounted there.
 const { createMetricsRouter } = await import("../src/api/metrics.ts");
+const { createAutopilotLifecycleRouter } = await import("../src/api/autopilot-lifecycle.ts");
 const { CycleRecordBodySchema } = await import("../src/autopilot/schemas.ts");
 
 let redis: any;
@@ -116,14 +130,22 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
     }
   });
 
-  test("handler is mounted on the metrics router", () => {
-    const router = createMetricsRouter();
-    const post = findHandler(router, "POST", "/metrics/record");
-    assert.ok(post, "POST /metrics/record handler should exist");
+  test("handler is mounted on the autopilot lifecycle router, not the metrics read router (issue #3220)", () => {
+    // Relocated in #3220: the write handler now lives on the lifecycle write
+    // surface next to its POST /autopilot/cycle-record twin.
+    const lifecycleRouter = createAutopilotLifecycleRouter();
+    const post = findHandler(lifecycleRouter, "POST", "/metrics/record");
+    assert.ok(post, "POST /metrics/record handler should exist on the lifecycle router");
+
+    // And it is NO LONGER on the metrics read-aggregator router — that surface
+    // is now read-only (plus the Cost module's /metrics/tokens write hook).
+    const metricsRouter = createMetricsRouter();
+    const stray = findHandler(metricsRouter, "POST", "/metrics/record");
+    assert.equal(stray, null, "POST /metrics/record must NOT remain on the metrics router");
   });
 
   test("happy path: valid {cycleId, ...metrics} returns 200 {ok:true} and persists", async () => {
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     const cycleId = `test-metrics-record-2636-${Date.now()}`;
     const res = mockRes();
@@ -154,7 +176,7 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
     // metrics-hash write. Assert the two deep-path artifacts the shallow impl
     // never produced: the `hydra:cycle:<id>` hash and `hydra:cycle:index`
     // membership. Against the pre-#3048 shallow handler these assertions go red.
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     const cycleId = `test-metrics-record-3048-deep-${Date.now()}`;
     const res = mockRes();
@@ -185,7 +207,7 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
   });
 
   test("classifies explicit anchorType through verbatim (issue #2803)", async () => {
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     const cycleId = `test-metrics-record-2803-explicit-${Date.now()}`;
     const res = mockRes();
@@ -198,7 +220,7 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
   });
 
   test("classifies absent anchorType to the 'unclassified' sentinel, never 'unknown' (issue #2803)", async () => {
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     const cycleId = `test-metrics-record-2803-absent-${Date.now()}`;
     const res = mockRes();
@@ -215,7 +237,7 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
   });
 
   test("infers anchorType from a worktree-agent-slot cycleId when absent (issue #2803)", async () => {
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     // The synthesised worktree-branch cycleId format decodes to a slot → anchorType.
     const cycleId = `worktree-agent-abc12345-t3-dev_orch`;
@@ -243,7 +265,7 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
   });
 
   test("validation failure: missing cycleId returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     const res = mockRes();
     await post!(mockReq({ status: "completed" }), res);
@@ -256,7 +278,7 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
   });
 
   test("validation failure: empty-string cycleId returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     const res = mockRes();
     await post!(mockReq({ cycleId: "   " }), res);
@@ -266,7 +288,7 @@ describe("POST /metrics/record zod schema guard (issue #2636)", () => {
   });
 
   test("validation failure: non-string cycleId returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createAutopilotLifecycleRouter();
     const post = findHandler(router, "POST", "/metrics/record");
     const res = mockRes();
     await post!(mockReq({ cycleId: 42 }), res);
