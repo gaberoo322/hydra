@@ -58,6 +58,7 @@ import os
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -703,6 +704,61 @@ def _fire_reflection_record(
         _append_log(msg)
 
 
+def _recover_tokens_from_transcript(task_id: str) -> int:
+    """Recover a completed dispatch's REAL token count from its transcript (issue #3250).
+
+    The autopilot's `cumulative_tokens` run field was permanently 0. The primary
+    reap path takes its count from the SubagentStop hook, but the Claude Code
+    SubagentStop payload does not expose the subagent's token usage
+    (on-subagent-stop.sh forwards event/slot/status/task_id/subagent_type/
+    summary only), so `total_tokens` arrives here as 0. The authoritative count
+    already lives inside the completed dispatch's JSONL transcript; the
+    orchestrator's `GET /api/metrics/session-tokens?session=<id>` route sums it
+    via the `tokensForSession` transcript-scan seam.
+
+    The join key is the dispatch's sessionId — the same UUID the hook derives
+    into `task_id` from `.session_id` (see on-subagent-stop.sh's
+    `.task.id // .task_id // .session_id // .id`). So `task_id` IS the sessionId
+    on the hook-driven path; we pass it straight through as `?session=`.
+
+    Best-effort and total (design invariants 3 + 4): an empty task_id, an
+    unresolvable transcript, a non-2xx, an unreachable orchestrator, or any
+    network error all return 0 — the honest "usage-not-parsed / unknown"
+    sentinel, NEVER a fabricated nonzero. Never raises into the reap path: token
+    accounting is observability, the reap is correctness. Called ONCE per
+    task_id (after the `reaped_task_ids` dup-guard), so it cannot double-count.
+    """
+    if not task_id:
+        return 0
+    url = (
+        f"{HYDRA_API_BASE}/api/metrics/session-tokens"
+        f"?session={urllib.parse.quote(task_id, safe='')}"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
+        msg = f"token_recover_skipped task_id={task_id} err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+        return 0
+    if not isinstance(body, dict):
+        return 0
+    recovered = body.get("tokens")
+    if isinstance(recovered, bool):  # bool is an int subclass — reject it
+        return 0
+    if isinstance(recovered, int) and recovered > 0:
+        return recovered
+    if isinstance(recovered, (str, float)):
+        try:
+            n = int(recovered)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def _fire_token_record(task_id: str, skill: str | None, total_tokens: int) -> None:
     """Best-effort POST to /api/metrics/tokens — the per-CYCLE token producer (issue #2952).
 
@@ -1017,6 +1073,28 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # crash mid-update doesn't leave us double-counting on retry.
     reaped.append(task_id)
     s["reaped_task_ids"] = _bound_reaped(reaped)
+
+    # Issue #3250: recover the REAL token count when the hook floor is 0. The
+    # SubagentStop hook cannot carry the subagent's usage, so `total_tokens`
+    # arrives 0 on the primary path — leaving `cumulative_tokens` permanently 0
+    # and cost attribution dark. Join the completing dispatch back to its
+    # transcript by sessionId (== task_id on the hook path) and sum its usage via
+    # the orchestrator's session-tokens route. The recovered value REPLACES the 0
+    # so it flows through the cumulative increment, the slot mirror, the
+    # slot_complete log, AND `_fire_token_record` below unchanged. Only kicks in
+    # when the incoming count is non-positive: a real hook/CLI count (the
+    # runaway hard-cap path, tests) is authoritative and never overridden.
+    # Best-effort + total: a miss returns 0 (honest "unknown" sentinel — never a
+    # fabricated nonzero, invariant 3) and never raises into the reap path
+    # (invariant 4). Runs ONCE per task_id (after the dup-guard) so it can't
+    # double-count.
+    if int(total_tokens) <= 0:
+        recovered = _recover_tokens_from_transcript(task_id)
+        if recovered > 0:
+            total_tokens = recovered
+            msg = f"token_recovered task_id={task_id} tokens={recovered} source=transcript-scan"
+            print(f"[autopilot] {msg}")
+            _append_log(msg)
 
     s["cumulative_tokens"] = int(s.get("cumulative_tokens", 0)) + int(total_tokens)
 
