@@ -31,7 +31,7 @@ const { getMetricsTrend, parseCycleTokenTotal } = await import(
   "../src/metrics/trend.ts"
 );
 const { projectTokensPerMergedPR, projectAggregateStats } = await import(
-  "../src/metrics/aggregate.ts"
+  "../src/metrics/stats-projection.ts"
 );
 const { tokensByCycleKey } = await import("../src/redis/cost.ts");
 

@@ -27,7 +27,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../src/metrics/aggregate.ts";
+import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../src/metrics/stats-projection.ts";
 
 describe("computeRollingMergeRateFromTrend (issue #2169)", () => {
   test("empty trend returns null (no data, not 0%)", () => {

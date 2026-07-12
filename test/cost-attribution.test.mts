@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import {
   projectCostByOutcome,
   CYCLE_OUTCOME_ORDER,
-} from "../src/metrics/aggregate.ts";
+} from "../src/metrics/stats-projection.ts";
 
 describe("projectCostByOutcome", () => {
   test("empty trend => zeroed buckets, null tokensPerCycle, windowCycles 0", () => {

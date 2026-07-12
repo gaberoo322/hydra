@@ -5,9 +5,9 @@ import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import {
   getAggregateStats,
   getCumulativeAccomplishments,
-  projectAnchorDistribution,
   getCostByOutcome,
 } from "../metrics/aggregate.ts";
+import { projectAnchorDistribution } from "../metrics/stats-projection.ts";
 import { CycleRecordBodySchema } from "../autopilot/schemas.ts";
 import { recordCycle } from "../autopilot/cycle-close.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
