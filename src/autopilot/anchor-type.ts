@@ -22,7 +22,19 @@
  * this codebase: `src/outcome-regression.ts` (from `holdback.ts`, #2507),
  * `src/backlog/stale-escalation-policy.ts` (from `stale-escalation.ts`, #2678),
  * and `capacity-floor-classifier.ts` (from `capacity-floor.ts`, #2211).
+ *
+ * The one exception to the zero-Redis / pure-string contract: this leaf reads
+ * the machine-readable dispatch-class alphabet (`DISPATCH_CLASSES` from
+ * `src/taxonomy/classes.ts`, a synchronous file read at module import — issue
+ * #3253). That import is what lets {@link SLOT_ANCHOR_TYPE} be DERIVED from the
+ * single taxonomy alphabet rather than hand-maintained, so a class added to
+ * `classes.json` can never again silently fall through to `unclassified`. It is
+ * still zero-Redis and zero-async — `DISPATCH_CLASSES` is a frozen array loaded
+ * once at import, no different from importing a constant.
  */
+
+import { DISPATCH_CLASSES } from "../taxonomy/classes.ts";
+import { InvariantViolationError } from "../errors.ts";
 
 /**
  * Sentinel anchorType for a cycle-record whose caller supplied no explicit,
@@ -44,24 +56,108 @@
 export const UNCLASSIFIED_ANCHOR_TYPE = "unclassified";
 
 /**
- * Map a dispatch-class slot name to its canonical anchorType, mirroring the
- * `case` mapping in `scripts/autopilot/dispatch.sh` (issue #2762).
+ * The canonical anchorType (metrics lane label) for every dispatch class in the
+ * taxonomy, keyed by class name (issue #3253).
  *
- * Used as a last-resort inference inside {@link classifyAnchorType} when the
- * caller did not supply an explicit anchorType but the cycleId embeds a slot
- * suffix we can decode (the `worktree-agent-*-{slot}` synthesised-branch
- * format that holdback-merge-watch.ts uses as its cycleId). The same mapping
- * lives in `dispatch.sh` so both writers agree on the vocabulary.
+ * # Why this exists — the taxonomy-drift gap it closes
+ *
+ * Before #3253, {@link SLOT_ANCHOR_TYPE} was a HAND-MAINTAINED map covering only
+ * the seven pipeline slots (`dev_*`, `qa_*`, `research_*`, `design_concept_orch`)
+ * and mirroring `dispatch.sh`'s `case`. The dispatch-class alphabet
+ * (`scripts/autopilot/classes.json`) meanwhile grew ~13 signal classes —
+ * `discover_*`, `architecture_orch`, `retro_orch`, `cleanup_*`, `sweep_*`,
+ * `scout_orch`, `wire_or_retire_target`, `design_qa_target`, `skill_prune`,
+ * `health` — none of which had a `SLOT_ANCHOR_TYPE` entry. A cycle whose cycleId
+ * embeds one of those slots (e.g. `worktree-agent-…-t2-cleanup_orch`) therefore
+ * decoded to `undefined` in {@link inferAnchorTypeFromCycleId} and fell through
+ * to the `unclassified` sentinel — the 34% unknown/unclassified rate the
+ * architecture review flagged (issue #3253). Hand-maintaining a slot→lane map
+ * beside a growing machine-readable alphabet is exactly the "silent fallthrough
+ * to `other`/`unclassified`" drift the taxonomy leaf exists to kill.
+ *
+ * # The fix: derive from the single alphabet, force an explicit decision
+ *
+ * This map assigns an anchorType lane to EVERY class name in the taxonomy, and
+ * the module-load invariant below fails loud if `DISPATCH_CLASSES` ever carries
+ * a class with no entry here. So adding a class to `classes.json` now forces an
+ * explicit anchorType decision at this seam instead of silently bucketing the
+ * class's cycles as `unclassified`. This mirrors the identical
+ * every-row-must-map completeness invariant in `src/cost/cost-attribution.ts`
+ * (slice #1671) and `src/pattern-memory/subagent-capture.ts`.
+ *
+ * The seven historical pipeline-slot values are preserved verbatim
+ * (`work-queue` / `qa-review` / `grill` / `research`) so existing metrics
+ * buckets are unchanged; the new signal-class lanes are named after the class's
+ * function (`cleanup`, `retro`, `discover`, …) so per-class merge-rate /
+ * empty-rate / cost breakdowns become visible on the dashboard. These are
+ * genuine (non-malformed) anchorType strings, so the metrics READ path
+ * (`normalizeAnchorType` in `src/metrics/trend.ts`) passes them through
+ * unchanged into their own buckets.
  */
-export const SLOT_ANCHOR_TYPE: Readonly<Record<string, string>> = {
+export const ANCHOR_TYPE_BY_CLASS: Readonly<Record<string, string>> = {
+  // Pipeline slots — historical values, preserved verbatim.
   dev_orch: "work-queue",
   dev_target: "work-queue",
   qa_orch: "qa-review",
   qa_target: "qa-review",
-  design_concept_orch: "grill",
   research_orch: "research",
   research_target: "research",
+  design_concept_orch: "grill",
+  // Signal classes — the lanes that were missing pre-#3253.
+  health: "health",
+  sweep_orch: "sweep",
+  sweep_target: "sweep",
+  discover_orch: "discover",
+  discover_target: "discover",
+  scout_orch: "scout",
+  architecture_orch: "architecture",
+  retro_orch: "retro",
+  cleanup_orch: "cleanup",
+  cleanup_target: "cleanup",
+  wire_or_retire_target: "wire-or-retire",
+  design_qa_target: "design-qa",
+  skill_prune: "skill-prune",
 };
+
+/**
+ * Module-load completeness invariant (issue #3253): every dispatch-class row in
+ * the taxonomy MUST have an anchorType lane in {@link ANCHOR_TYPE_BY_CLASS}, so
+ * a class added to `classes.json` can never again decode to `undefined` and
+ * fall through to the `unclassified` sentinel. Adding a class therefore forces
+ * an explicit edit here instead of a silent data-quality gap. This is a
+ * boundary/invariant guard, not merge/grounding/verification code, so throwing
+ * is the documented convention (CLAUDE.md; mirrors the fail-loud contract in
+ * `src/taxonomy/classes.ts` and the every-row-must-bucket invariant in
+ * `src/cost/cost-attribution.ts`).
+ */
+for (const row of DISPATCH_CLASSES) {
+  if (!(row.name in ANCHOR_TYPE_BY_CLASS)) {
+    throw new InvariantViolationError(
+      `anchor-type classification: dispatch class "${row.name}" has no ` +
+        `anchorType lane — add an entry to ANCHOR_TYPE_BY_CLASS in ` +
+        `src/autopilot/anchor-type.ts (issue #3253)`,
+    );
+  }
+}
+
+/**
+ * Map a dispatch-class slot name to its canonical anchorType — the DERIVED view
+ * over {@link ANCHOR_TYPE_BY_CLASS} restricted to the taxonomy's real class
+ * names (issue #3253; previously a hand-maintained seven-entry literal).
+ *
+ * Used as a last-resort inference inside {@link classifyAnchorType} when the
+ * caller did not supply an explicit anchorType but the cycleId embeds a slot
+ * suffix we can decode (the `worktree-agent-*-{slot}` synthesised-branch
+ * format that holdback-merge-watch.ts uses as its cycleId). Because it is now
+ * built from `DISPATCH_CLASSES`, it covers EVERY class the autopilot dispatches
+ * — the signal classes (`cleanup_orch`, `retro_orch`, `discover_*`, …) that
+ * used to fall through to `unclassified` are all present.
+ */
+export const SLOT_ANCHOR_TYPE: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(
+    DISPATCH_CLASSES.map((row) => [row.name, ANCHOR_TYPE_BY_CLASS[row.name]]),
+  ),
+);
 
 /**
  * Attempt to infer an anchorType from a dispatch-relay cycleId. Returns the
