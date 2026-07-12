@@ -60,5 +60,3 @@ export const SentryWebhookPayloadSchema = z
     project_slug: z.string().optional(),
   })
   .passthrough();
-
-export type SentryWebhookPayload = z.infer<typeof SentryWebhookPayloadSchema>;
