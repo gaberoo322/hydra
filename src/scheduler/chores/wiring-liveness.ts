@@ -46,34 +46,33 @@ import {
   evaluateOutputs,
   productionOutputReader,
   type OutputSourceReader,
-  type OutputVerdict,
 } from "./wiring-liveness-output.ts";
 import {
   evaluateDarkOutcomes,
-  type OutcomeVerdict,
   type DarkOutcomesDeps,
 } from "./wiring-liveness-outcomes.ts";
 import {
   runDarkOutcomeAlarm,
   type DarkAlarmDeps,
-  type DarkAlarmResult,
 } from "./wiring-liveness-dark-alarm.ts";
 // The timer-check family (slice 1, #2287) lives in its own focused sibling module
 // (`wiring-liveness-timer.ts`, extracted by #2830 — one check type, one module).
 // `runWiringLiveness` below imports the timer primitives from there: the manifest
-// loader + failure guard, and the pure timer diff. `diffTimers` now returns the
-// narrower `TimerDiffResult` (only timer-check fields). The coordinator assembles
-// all four check-family results into the aggregate `WiringLivenessResult` defined
-// and owned here (issue #2844 — moved from timer leaf to coordinator).
+// loader + failure guard, and the pure timer diff. `diffTimers` returns the
+// narrower `TimerDiffResult` (only timer-check fields).
 import {
   loadLivenessManifest,
   isLoadFailure,
   diffTimers,
   type LoadManifestResult,
-  type TimerDiffResult,
 } from "./wiring-liveness-timer.ts";
-// OutputVerdict is already imported above via the wiring-liveness-output.ts import block.
-// OutcomeVerdict is already imported above via the wiring-liveness-outcomes.ts import block.
+// The check-family verdict types + the aggregate `WiringLivenessResult` are owned
+// by the shared type-vocabulary leaf `wiring-liveness-types.ts` (issue #3241 —
+// deepening the chore cluster behind a clean seam; the aggregate originally lived
+// here after #2844 relocated it from the timer leaf). The coordinator imports the
+// aggregate DOWN from the leaf and assembles it from all four check-family results.
+// `OutcomeVerdict` is imported for the dark-arm filter/Extract in the body below.
+import type { OutcomeVerdict, WiringLivenessResult } from "./wiring-liveness-types.ts";
 
 // The two output-check type names `test/wiring-liveness.test.mts` consumes through
 // this module's surface (for its `runWiringLiveness` integration cases) are
@@ -84,65 +83,10 @@ export {
   type OutputSeriesResult,
 } from "./wiring-liveness-output.ts";
 
-// ---------------------------------------------------------------------------
-// Aggregate result type (issue #2844: moved here from wiring-liveness-timer.ts)
-//
-// `WiringLivenessResult` aggregates fields from all four check families: timer-diff
-// (slice 1, #2287), output-series (slice 2, #2288), dark-outcomes (#2753), and
-// dark-alarm (#2805). Its correct home is this coordinator — the module that
-// assembles all four results. Previously it lived in `wiring-liveness-timer.ts`
-// because it originated as the timer diff's return type, but as new check families
-// added their fields incrementally, the aggregate outgrew its leaf home.
-//
-// `TimerDiffResult` (the narrower timer-only type) remains in `wiring-liveness-timer.ts`
-// as the return type of `diffTimers`. The coordinator constructs `WiringLivenessResult`
-// from all assembled check-family results — construction, not in-place mutation.
-// ---------------------------------------------------------------------------
-
-/** The chore's aggregate never-throwing result object. Owned by the coordinator. */
-export interface WiringLivenessResult {
-  /** True when the manifest loaded and the live timers were read. */
-  evaluated: boolean;
-  /** When `evaluated` is false, why (load/probe failure). */
-  reason?: string;
-  /** Declared timers absent from the live set. */
-  missing: string[];
-  /** Declared timers present but staler than their window. */
-  stale: string[];
-  /** Declared timers present but never-fired-yet (false-positive guard). */
-  notYetFired: string[];
-  /** Declared output sources pinned at/below their floor across the run window. */
-  belowFloor: string[];
-  /** Declared output sources whose live value could not be read this run. */
-  unreadable: string[];
-  /**
-   * Declared `kind: leading` outcomes whose current reading is `null` — no data
-   * (producer never wrote the metric, or the file went missing/unparseable).
-   * Advisory (issue #2753): a dark leading outcome is silent holdback blindness.
-   */
-  darkOutcomes: string[];
-  /**
-   * Declared `kind: leading` outcomes with a finite reading whose file mtime is
-   * OLDER than the grace window — a present-but-old value (a stalled producer),
-   * distinct from a `null` (never-produced) DARK outcome. Invariant 3 (issue
-   * #2753): STALE and DARK are separate verdicts, never conflated. Advisory only.
-   */
-  staleOutcomes: string[];
-  /** Every per-entry timer verdict, for diagnostics/tests. */
-  verdicts: TimerDiffResult["verdicts"];
-  /** Every per-entry output verdict, for diagnostics/tests. */
-  outputVerdicts: OutputVerdict[];
-  /** Every per-outcome dark/live verdict, for diagnostics/tests (issue #2753). */
-  outcomeVerdicts: OutcomeVerdict[];
-  /**
-   * Outcome-alarm result (issue #2805): which dark leading outcomes crossed the
-   * 7-day sustained-dark threshold and got a fresh `needs-triage` issue filed
-   * this tick, plus the per-outcome alarm actions (below-threshold / already-filed
-   * / filed / file-failed). `undefined` when the alarm did not run (e.g. an
-   * evaluation short-circuit). Advisory — a file failure never aborts the chore.
-   */
-  darkAlarm?: DarkAlarmResult;
-}
+// The aggregate `WiringLivenessResult` is re-exported from this coordinator's
+// surface so existing consumers (`test/wiring-liveness.test.mts`) that import it
+// from here keep working with zero call-site churn (issue #3241).
+export type { WiringLivenessResult } from "./wiring-liveness-types.ts";
 
 // ---------------------------------------------------------------------------
 // Chore runner
