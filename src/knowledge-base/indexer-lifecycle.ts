@@ -28,20 +28,23 @@
 import { watch } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
-import { defaultHashAdapter, HashDedupAdapter } from "./indexer.ts";
+// Issue #3229: HashDedupAdapter + defaultHashAdapter moved to the focused leaf
+// hash-dedup.ts, breaking the bidirectional import cycle that caused the
+// ReferenceError. Import from the leaf directly — not from indexer.ts — so that
+// indexer-lifecycle.ts no longer forms a sideways edge back into the domain-
+// orchestration surface.
+import { defaultHashAdapter, HashDedupAdapter } from "./hash-dedup.ts";
 // Issue #3044: indexText is the low-level OV upload primitive — it moved to the
 // focused leaf ov-upload.ts, so this controller imports it from there directly
 // (a narrower dependency that does NOT drag in HashDedupAdapter / source-tree
-// enumeration / the freshness probe). defaultHashAdapter / HashDedupAdapter stay
-// in indexer.ts (the domain-orchestration surface that composes indexText).
+// enumeration / the freshness probe).
 import { indexText } from "./ov-upload.ts";
 // Issue #2767: the pure enumeration helpers moved to source-enumerator.ts.
 // Issue #2850: the env-derived default source-path set (DEFAULT_SOURCE_PATHS)
 // now lives there too, so this module imports the shared default instead of
 // re-deriving it from process.env (dropping the local HYDRA_ROOT_FOR_SOURCE /
 // DEFAULT_SOURCE_SPEC_LC duplicates and their silent forward-slash-vs-join()
-// divergence). defaultHashAdapter / HashDedupAdapter remain OV-coupled and stay
-// imported from indexer.ts.
+// divergence).
 import { DEFAULT_SOURCE_PATHS, type SourcePath } from "./source-enumerator.ts";
 
 // ---------------------------------------------------------------------------
@@ -78,13 +81,13 @@ export interface IndexerControllerDeps {
 
   /**
    * The dedup + coverage state boundary this controller drives (issue #2603).
-   * Defaults to the production-shared {@link defaultHashAdapter} so the running
-   * indexer and the controller-less API reader (getCoverageStats in
-   * src/api/openviking.ts) observe the SAME state (INV-4). Tests construct a
-   * fresh {@link HashDedupAdapter} (optionally with injected persistence) so
-   * each case starts with clean hash maps and no cross-case dedup leakage — the
-   * constructor-injection path that replaces the deleted _setHashPersistence
-   * escape-hatch (INV-6, INV-7).
+   * Defaults to the production-shared {@link defaultHashAdapter} (from
+   * hash-dedup.ts, issue #3229) so the running indexer and the controller-less
+   * API reader (getCoverageStats in src/api/openviking.ts) observe the SAME state
+   * (INV-4). Tests construct a fresh {@link HashDedupAdapter} (optionally with
+   * injected persistence) so each case starts with clean hash maps and no
+   * cross-case dedup leakage — the constructor-injection path that replaces the
+   * deleted _setHashPersistence escape-hatch (INV-6, INV-7).
    *
    * When set, this adapter's methods (indexFile, loadPersistedHashes,
    * runSourceInitialPass, setWatchedPaths, makeSourceWatcher) drive the config +
@@ -423,16 +426,14 @@ export class IndexerController {
 /**
  * The production IndexerController singleton, lazily constructed on first use.
  *
- * Lazy (not eager) because indexer.ts and indexer-lifecycle.ts form a circular
- * import: indexer.ts re-exports IndexerController from here, and this module
- * imports `defaultHashAdapter` back from indexer.ts. IndexerController's
- * constructor now reads `defaultHashAdapter` (issue #2603, INV-4) — a `const`
- * subject to the temporal dead zone. Eagerly running `new IndexerController()`
- * at module-init time can execute before indexer.ts finishes initializing
- * `defaultHashAdapter`, throwing `ReferenceError: Cannot access
- * 'defaultHashAdapter' before initialization`. Deferring construction to the
- * first startKnowledgeIndexer() call — long after both modules' top-level init
- * has completed — sidesteps the TDZ without changing the delegator API.
+ * Lazy construction is retained as belt-and-braces even though issue #3229
+ * eliminated the underlying circular import (defaultHashAdapter now lives in
+ * hash-dedup.ts, a leaf that neither indexer.ts nor indexer-lifecycle.ts
+ * imports FROM each other for). The historical note: before #3229, indexer.ts
+ * re-exported IndexerController from here while this module imported
+ * `defaultHashAdapter` back from indexer.ts — a TDZ hazard that caused
+ * `ReferenceError: Cannot access 'defaultHashAdapter' before initialization`.
+ * The cycle is now gone; lazy init is kept as a defensive pattern.
  */
 let defaultController: IndexerController | null = null;
 function getDefaultController(): IndexerController {
