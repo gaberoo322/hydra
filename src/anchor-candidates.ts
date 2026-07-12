@@ -101,8 +101,7 @@ import {
 // (ADR-0016 Locality: do not duplicate the matching policy).
 import {
   type MergedRef,
-  fetchMergedTargetPrRefs,
-  fetchTargetMergeCommitRefs,
+  fetchMergedRefsImpl,
 } from "./backlog/target-pr-feed.ts";
 // Scoring policy — the pure tier-ladder + penalty/bonus arithmetic — now lives
 // in its own sibling Module (`src/backlog/candidate-scoring.ts`, issue #2040),
@@ -315,36 +314,11 @@ async function loadLastReflectionAtImpl(anchorRef: string): Promise<string | nul
   }
 }
 
-/**
- * Production merged-blob feed reader for the shipped-subject gate (issue #3208).
- * Fetches the recently-merged target PR set AND the recent merge-commit set once
- * per feed build and returns the union of their `MergedRef`s. Each underlying
- * feed is fail-open (returns `null` on any failure, meaning "no information" —
- * never "nothing merged"); a `null` feed contributes zero refs, so a total `gh`
- * outage degrades to an empty set and yields ZERO shipped-subject suppressions
- * (positive-evidence-only invariant). Never throws.
- *
- * The merge-commit feed is included deliberately: it covers the
- * bare-commit-no-PR-token case (a cycle merge that lands without a PR), which
- * the merged-PR feed alone would miss. This mirrors `fetchMergedRefsImpl` in
- * `work-queue-hygiene.ts` (issue #2482) — the same seam, the same repos.
- */
-async function fetchMergedRefsImpl(): Promise<MergedRef[]> {
-  const out: MergedRef[] = [];
-  try {
-    const prRefs = await fetchMergedTargetPrRefs();
-    if (prRefs) out.push(...prRefs);
-  } catch (err: any) {
-    console.error(`[CandidateFeed] merged-PR feed failed: ${err?.message || err}`);
-  }
-  try {
-    const commitRefs = await fetchTargetMergeCommitRefs();
-    if (commitRefs) out.push(...commitRefs);
-  } catch (err: any) {
-    console.error(`[CandidateFeed] merge-commit feed failed: ${err?.message || err}`);
-  }
-  return out;
-}
+// The production merged-blob feed reader (`fetchMergedRefsImpl`) is the shared
+// seam in `src/backlog/target-pr-feed.ts` (issue #3208) — the SAME body the
+// Work-Queue Hygiene reconciler uses (#2482), so the union-of-feeds matching
+// policy has exactly one home (ADR-0016 Locality). Imported above and wired as
+// the `fetchMergedRefs` default in `resolveDeps` below.
 
 function resolveDeps(deps?: Partial<CandidateFeedDeps>): CandidateFeedDeps {
   return {

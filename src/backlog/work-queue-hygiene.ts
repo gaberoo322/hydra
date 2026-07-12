@@ -60,8 +60,7 @@ import {
 } from "../redis/work-queue.ts";
 import { isMergedWork, subjectCoveredBy, loadMergedAnchorRefsImpl } from "./merged-refs.ts";
 import {
-  fetchMergedTargetPrRefs,
-  fetchTargetMergeCommitRefs,
+  fetchMergedRefsImpl,
   type MergedRef,
 } from "./target-pr-feed.ts";
 
@@ -131,34 +130,11 @@ async function getIssueStateImpl(
   }
 }
 
-/**
- * Production merged-blob feed reader. Fetches the recently-merged target PR set
- * AND the recent merge-commit set ONCE per reconcile run and returns the union
- * of their `MergedRef`s. Each feed is fail-open (returns `null` on any failure,
- * meaning "no information" — never "nothing merged"); a `null` feed contributes
- * zero refs, so a total `gh` outage degrades to an empty set and yields ZERO
- * shipped-subject removals (positive-evidence-only invariant). Never throws.
- *
- * The merge-commit feed is included deliberately: it covers the
- * bare-commit-no-PR-token case (a cycle merge that lands without a PR), which
- * the merged-PR feed alone would miss.
- */
-async function fetchMergedRefsImpl(): Promise<MergedRef[]> {
-  const out: MergedRef[] = [];
-  try {
-    const prRefs = await fetchMergedTargetPrRefs();
-    if (prRefs) out.push(...prRefs);
-  } catch (err: any) {
-    console.error(`[WorkQueueHygiene] merged-PR feed failed: ${err?.message || err}`);
-  }
-  try {
-    const commitRefs = await fetchTargetMergeCommitRefs();
-    if (commitRefs) out.push(...commitRefs);
-  } catch (err: any) {
-    console.error(`[WorkQueueHygiene] merge-commit feed failed: ${err?.message || err}`);
-  }
-  return out;
-}
+// The production merged-blob feed reader (`fetchMergedRefsImpl`) is the shared
+// seam in `src/backlog/target-pr-feed.ts` (issue #3208) — the SAME body the
+// Candidate Feed shipped-subject gate uses, so the union-of-feeds matching
+// policy has exactly one home (ADR-0016 Locality). Imported above and wired as
+// the `fetchMergedRefs` default in `reconcileWorkQueue` below.
 
 /** Injectable dependencies for `reconcileWorkQueue` — the test surface. */
 export interface WorkQueueReconcileDeps {

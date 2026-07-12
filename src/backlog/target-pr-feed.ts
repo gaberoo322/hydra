@@ -160,6 +160,44 @@ export async function fetchTargetMergeCommitRefs(): Promise<MergedRef[] | null> 
 }
 
 /**
+ * Fetch the recently-merged target PR set AND the recent merge-commit set once
+ * and return the UNION of their `MergedRef`s — the merged-blob feed that the
+ * asymmetric shipped-subject matcher (`subjectCoveredBy`) runs against.
+ *
+ * This is the single shared body for the two consumers that used to each keep an
+ * identical private clone (ADR-0016 Locality, issue #3208): the Candidate Feed
+ * shipped-subject gate (`src/anchor-candidates.ts`) and the Work-Queue Hygiene
+ * reconciler (`src/backlog/work-queue-hygiene.ts`, cause "shipped-subject",
+ * #2482). Both import this function; neither holds a private copy.
+ *
+ * Each underlying feed is fail-open (returns `null` on any failure, meaning "no
+ * information" — never "nothing merged"); a `null` feed contributes zero refs, so
+ * a total `gh` outage degrades to an empty array and yields ZERO shipped-subject
+ * suppressions/removals (positive-evidence-only invariant — absence of a covering
+ * blob is NEVER proof a candidate shipped). Never throws.
+ *
+ * The merge-commit feed is included deliberately: it covers the
+ * bare-commit-no-PR-token case (a cycle merge that lands without a PR), which the
+ * merged-PR feed alone would miss.
+ */
+export async function fetchMergedRefsImpl(): Promise<MergedRef[]> {
+  const out: MergedRef[] = [];
+  try {
+    const prRefs = await fetchMergedTargetPrRefs();
+    if (prRefs) out.push(...prRefs);
+  } catch (err: any) {
+    console.error(`[TargetPrFeed] merged-PR feed failed: ${err?.message || err}`);
+  }
+  try {
+    const commitRefs = await fetchTargetMergeCommitRefs();
+    if (commitRefs) out.push(...commitRefs);
+  } catch (err: any) {
+    console.error(`[TargetPrFeed] merge-commit feed failed: ${err?.message || err}`);
+  }
+  return out;
+}
+
+/**
  * Decide whether a backlog item is already covered by a PR/commit in the target
  * repo. The same matcher serves the reaper's open-PR guard (#490), the reaper's
  * merged-PR guard (#1714), and the reconciler's merge→done sweep (#1715) — only
