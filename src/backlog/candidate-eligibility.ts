@@ -56,6 +56,12 @@
 // feed as part of the enumeration loop it owns.
 
 import type { BacklogItemLike } from "./types.ts";
+// Shipped-subject suppression (issue #3208, extracted here by #3211). REUSES the
+// asymmetric `subjectCoveredBy` matcher from its single home (`merged-refs.ts`
+// re-exports it from `token-algebra.ts`) — never a bespoke matcher (ADR-0016
+// Locality). The `MergedRef` blob feed type comes from `target-pr-feed.ts`.
+import { subjectCoveredBy } from "./merged-refs.ts";
+import type { MergedRef } from "./target-pr-feed.ts";
 
 // ---------------------------------------------------------------------------
 // Eligibility policy — the freshness windows.
@@ -216,4 +222,27 @@ export function requiresNonPrDispatch(item: BacklogItemLike): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Positive-evidence-only shipped-subject test (issue #3208; extracted from the
+ * inline `getCandidateFeed` closure by #3211). A candidate is suppressed only
+ * when a CONCRETE merged PR/commit blob COVERS its title at >=0.70 asymmetric
+ * containment with >=4 significant words (the SUBJECT_MATCH_MIN_WORDS guard
+ * inside `subjectCoveredBy`, so short/generic titles can never spuriously evict
+ * live work). An empty `mergedBlobs` feed short-circuits to `false` — suppress
+ * nothing (the #2110 92%-false-positive polarity: absence of a covering blob is
+ * NEVER proof a candidate shipped). Never throws.
+ *
+ * Pure: `mergedBlobs` is passed as a PARAMETER (not closed over) so the
+ * predicate is unit-testable without a full `getCandidateFeed` fixture, matching
+ * the injectable-deps shape of its four sibling predicates. `subjectCoveredBy`
+ * keeps exactly one home (`token-algebra.ts`, re-exported via `merged-refs.ts`);
+ * this predicate imports it, never re-implements it (ADR-0016 Locality).
+ */
+export function isShippedSubject(title: string, mergedBlobs: MergedRef[]): boolean {
+  if (mergedBlobs.length === 0) return false;
+  const t = typeof title === "string" ? title : "";
+  if (!t) return false;
+  return mergedBlobs.some((r) => subjectCoveredBy(t, r.blob));
 }
