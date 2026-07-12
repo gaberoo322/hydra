@@ -234,6 +234,18 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   // check) defaults to an empty array — honest-none, the dark-outcome rule
   // no-ops. Never a phantom populated verdict.
   const darkOutcomes = probes.darkOutcomes || [];
+  // Issue #3251: a null reflectionOutcomesLiveness (the fan-out could not project
+  // the retired-ledger probe) defaults to the `retired-empty` honest-none report
+  // — the reflection-outcomes rule then fires the plain retirement INFO, never a
+  // phantom alarm. Mirrors the darkOutcomes empty-array default above.
+  const reflectionOutcomesLiveness: HealthSnapshot["reflectionOutcomesLiveness"] =
+    probes.reflectionOutcomesLiveness || {
+      verdict: "retired-empty",
+      count: 0,
+      latestEntryMs: null,
+      ageMs: null,
+      note: "Retired reflection-outcomes ledger is empty/absent (writer removed #1006, reader swept #1655) — expected.",
+    };
   const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
   // Issue #2278: a rejected settle (probes.ollamaVlm === null) defaults to a
   // `down` result — honest-none (the whole probe settle failed), never a phantom
@@ -281,6 +293,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     reflectionHealth,
     skillCatalog,
     darkOutcomes,
+    reflectionOutcomesLiveness,
     ovSearch,
     ollamaVlm,
     redisInfo,

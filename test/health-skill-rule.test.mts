@@ -76,6 +76,16 @@ function healthySnapshot(): HealthSnapshot {
     // Issue #2805: no dark leading outcomes by default — the dark-outcome rule
     // no-ops, keeping this baseline clean for skill-catalog-rule assertions.
     darkOutcomes: [],
+    // Issue #3251: retired-empty reflection-outcomes ledger — the
+    // reflection-outcomes rule no-ops, keeping this baseline clean for the
+    // skill-catalog-rule assertions.
+    reflectionOutcomesLiveness: {
+      verdict: "retired-empty",
+      count: 0,
+      latestEntryMs: null,
+      ageMs: null,
+      note: "Retired reflection-outcomes ledger is empty/absent — expected.",
+    },
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
     ollamaVlm: { status: "ok", latencyMs: 12 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },
