@@ -24,13 +24,16 @@
 // `parseProbes`/`assessHealth`/`parseRedisInfoSnapshot` from
 // `diagnostics.ts`.
 import { fmtUp } from "./rules.ts";
+// Issue #3230: the type vocabulary now lives in the zero-logic leaf `types.ts`;
+// this projection module type-imports it directly (erased at compile time, zero
+// runtime coupling) instead of from the 551-line parse seam.
 import type {
   HealthSnapshot,
   HealthAssessment,
   HealthDiagnostic,
   ServiceProbe,
   ProbeInputs,
-} from "./diagnostics.ts";
+} from "./types.ts";
 
 // ---- projectHealthDeepResponse — the pure wire-projection ----------------
 //

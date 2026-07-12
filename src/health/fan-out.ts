@@ -61,7 +61,9 @@ import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // the snapshot, staying pure. `evaluateDarkOutcomes` is contractually never-throw.
 import { evaluateDarkOutcomes } from "../scheduler/chores/wiring-liveness-outcomes.ts";
 import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult, type ProbeOutcome } from "./probe.ts";
-import { parseRedisInfoSnapshot, type ProbeInputs } from "./diagnostics.ts";
+import { parseRedisInfoSnapshot } from "./diagnostics.ts";
+// Issue #3230: the ProbeInputs named-record type comes from the zero-logic leaf.
+import type { ProbeInputs } from "./types.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
 import {
   getWolGates,

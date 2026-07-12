@@ -3,17 +3,18 @@
 // The diagnostic rule set extracted from `src/health/diagnostics.ts` so the
 // rule-authoring surface is one focused file: open this module, append a
 // function literal to the `RULES` array. Each rule reads a Health Snapshot and
-// returns a Health Diagnostic when it fires, else null. The parse pipeline,
-// wire projection, and the structured-type definitions stay in
-// `diagnostics.ts`; this module only consumes the `HealthSnapshot` /
-// `HealthDiagnostic` types from that seam.
+// returns a Health Diagnostic when it fires, else null. The parse pipeline and
+// wire projection stay in `diagnostics.ts`; the structured type vocabulary was
+// extracted to the zero-logic leaf `types.ts` (issue #3230), so this module
+// consumes the `HealthSnapshot` / `HealthDiagnostic` types from the leaf
+// directly — no transitive dependency on the 551-line assessment pipeline.
 //
 // `assessHealth` (still in `diagnostics.ts`) imports `RULES` and runs
 // each rule in array order — see the runner there. Ordering is load-bearing:
 // `summary` quotes `diagnostics[0].what`, so RULES order is the diagnostics
 // order. Thresholds stay inline in each rule — co-located = locality.
 
-import type { HealthSnapshot, HealthDiagnostic } from "./diagnostics.ts";
+import type { HealthSnapshot, HealthDiagnostic } from "./types.ts";
 import { assessSkillCatalog, assessRegistrationFailureRate } from "./skill-catalog.ts";
 // Issue #2386: the OV skill-catalog state is now carried ON the HealthSnapshot
 // (`s.skillCatalog`), read live once at fan-out time in collectProbeInputs — the
