@@ -13,10 +13,11 @@
  *      bag. That the import resolves + the assertions pass IS the leaf's
  *      zero-I/O contract (the module cannot be loaded if it pulled in the Redis
  *      accessors the write coordinator carries).
- *   2. Pins the #2858 back-compat guarantee: the SAME symbols re-exported from
- *      `cycle-close.ts` are referentially identical to the leaf's exports, so
- *      any legacy importer that still targets the write coordinator keeps
- *      resolving to the one canonical implementation (no duplicated policy).
+ *   2. Pins the #3225 relay-retirement invariant: the #2858 back-compat
+ *      re-export relay has been dropped from `cycle-close.ts` now that no
+ *      importer targets the write coordinator for the policy symbols, so the
+ *      leaf (`anchor-type.ts`) is the one canonical home (no relay boilerplate
+ *      on the write coordinator's public surface).
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -102,15 +103,21 @@ describe("anchor-type policy leaf — pure classification (#2858)", () => {
   });
 });
 
-describe("anchor-type policy leaf — cycle-close.ts back-compat re-export (#2858)", () => {
-  test("the write coordinator re-exports the SAME implementations", () => {
-    // Referential identity: the re-export is a pass-through of the leaf's
-    // symbols, not a duplicated copy — so there is exactly one classification
-    // policy, importable from either home during the migration window.
-    assert.equal(cycleClose.UNCLASSIFIED_ANCHOR_TYPE, UNCLASSIFIED_ANCHOR_TYPE);
-    assert.equal(cycleClose.isMalformedAnchorType, isMalformedAnchorType);
-    assert.equal(cycleClose.classifyAnchorType, classifyAnchorType);
-    assert.equal(cycleClose.SLOT_ANCHOR_TYPE, SLOT_ANCHOR_TYPE);
-    assert.equal(cycleClose.inferAnchorTypeFromCycleId, inferAnchorTypeFromCycleId);
+describe("anchor-type policy leaf — cycle-close.ts relay retired (#3225)", () => {
+  test("the write coordinator no longer re-exports anchor-type policy symbols", () => {
+    // The #2858 migration window is closed (issue #3225): the back-compat
+    // re-export relay was retired from `cycle-close.ts` once no importer of the
+    // policy symbols targeted the write coordinator. The canonical — and now
+    // ONLY — home for the policy is `anchor-type.ts`, so the write coordinator's
+    // public surface no longer carries these pass-through symbols. The module
+    // no longer declares these properties, so probe the runtime namespace
+    // through an index signature (a direct `cycleClose.X` access is now a
+    // compile-time error — which is itself the retirement we are asserting).
+    const surface = cycleClose as Record<string, unknown>;
+    assert.equal(surface.UNCLASSIFIED_ANCHOR_TYPE, undefined);
+    assert.equal(surface.isMalformedAnchorType, undefined);
+    assert.equal(surface.classifyAnchorType, undefined);
+    assert.equal(surface.SLOT_ANCHOR_TYPE, undefined);
+    assert.equal(surface.inferAnchorTypeFromCycleId, undefined);
   });
 });

@@ -48,9 +48,9 @@ import { getRunDispatchClasses } from "../src/autopilot/run-reads.ts";
 // to each writer unchanged — this suite exercises the same policy across both.
 import {
   recordCycle,
-  UNCLASSIFIED_ANCHOR_TYPE,
   type CycleCloseDeps,
 } from "../src/autopilot/cycle-close.ts";
+import { UNCLASSIFIED_ANCHOR_TYPE } from "../src/autopilot/anchor-type.ts";
 // sweepRunIfDead was extracted into the sibling sweep-reader Module (#2568).
 // The wide fixture makeDeps() builds still structurally satisfies the sweeper's
 // narrow SweepReaderDeps, so the fixture is passed unchanged.

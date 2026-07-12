@@ -33,7 +33,7 @@ import {
   classifyAnchorType,
   inferAnchorTypeFromCycleId,
   UNCLASSIFIED_ANCHOR_TYPE,
-} from "../src/autopilot/cycle-close.ts";
+} from "../src/autopilot/anchor-type.ts";
 
 describe("classifyAnchorType — prefix-less relay cycleId inference (#3138)", () => {
   // (1) The reported id plus one variant per slot family. Each is the
