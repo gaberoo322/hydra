@@ -73,7 +73,7 @@ import {
   getDesignConceptHash,
   listAllDesignConceptRefs,
   listRecentDesignConceptRefs,
-  removeDesignConceptFromIndex,
+  removeExactDesignConceptFromIndex,
   saveDesignConceptHash,
   setDesignConceptField,
   normalizeAnchorRef,
@@ -486,7 +486,14 @@ async function pruneStaleIndex(now: number): Promise<number> {
     const createdAt = Number(raw?.createdAt) || 0;
     // Either the hash is gone (TTL'd out) or it's older than the cutoff.
     if (!raw?.anchorRef || createdAt < cutoff) {
-      await removeDesignConceptFromIndex(ref);
+      // Remove the member VERBATIM (issue #3236). `ref` came straight out of
+      // the ZSET via `listAllDesignConceptRefs`, so a legacy non-canonical
+      // member (bare `"705"` from before the #736 normalization) must be
+      // evicted by its stored string — the canonicalizing
+      // `removeDesignConceptFromIndex` would normalize `705`→`issue-705`,
+      // `zrem` a member that isn't there, and leave the orphan un-prunable
+      // (the index bloated to 168 members against 86 live hashes).
+      await removeExactDesignConceptFromIndex(ref);
       pruned += 1;
     }
   }

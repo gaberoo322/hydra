@@ -139,10 +139,44 @@ export async function listRecentDesignConceptRefs(limit: number): Promise<string
   return r.zrevrange(DC_INDEX_KEY, 0, Math.max(0, limit - 1));
 }
 
-/** Drop an anchorRef from the DC index (used by stale-entry prune). */
+/**
+ * Drop an anchorRef from the DC index (used by stale-entry prune).
+ *
+ * Normalizes the argument to the canonical member form (`issue-<N>`) before
+ * `zrem`, mirroring how every write path canonicalizes at the seam
+ * (ADR-0018 / #736). A caller that passes a bare/`#`-prefixed ref therefore
+ * evicts the canonically-stored member.
+ *
+ * NOTE (issue #3236): this canonicalizing removal cannot evict a **legacy
+ * non-canonical** member (a bare `"705"` written to the index *before* the
+ * #736 normalization landed) — normalizing `705`→`issue-705` targets a member
+ * that isn't in the index. The stale-index prune (`pruneStaleIndex` in
+ * `design-concept.ts`) handles that case directly via
+ * `removeExactDesignConceptFromIndex` below, which removes the raw member it
+ * read verbatim. Keep THIS accessor canonicalizing so anchor-shaped callers
+ * (approval, targeted deletes) hit the same member their save/get paths use.
+ */
 export async function removeDesignConceptFromIndex(anchorRef: string): Promise<void> {
   const r = getRedisConnection();
   await r.zrem(DC_INDEX_KEY, normalizeAnchorRef(anchorRef));
+}
+
+/**
+ * Remove an index member VERBATIM — no normalization (issue #3236).
+ *
+ * The prune path in `design-concept.ts` reads raw members straight out of the
+ * ZSET (`listAllDesignConceptRefs` → `zrevrange`); when it decides a member is
+ * stale it must remove *exactly that member string*, otherwise a legacy
+ * non-canonical member (bare `"705"` from before the #736 normalization) is
+ * un-prunable — `removeDesignConceptFromIndex` would normalize it to
+ * `issue-705` and silently miss, leaving the index to bloat unbounded (168
+ * members against 86 live hashes was the observed state). This accessor exists
+ * so what prune READ is exactly what prune REMOVES. `zrem` is a no-op on an
+ * absent member.
+ */
+export async function removeExactDesignConceptFromIndex(member: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.zrem(DC_INDEX_KEY, member);
 }
 
 /** Append an exempt-log entry (JSON-serialized) to the audit list. */
