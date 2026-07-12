@@ -184,6 +184,120 @@ export interface AttributionEstimate {
   metrics: MetricEstimate[];
 }
 
+/**
+ * One class's identifiability verdict, computed purely from the class count
+ * columns — the sub-record `fitMetric` folds into its `ClassEffect` alongside
+ * the ridge β. Deliberately carries NO β / noise-floor field: those belong to
+ * the fit, not to identifiability, and keeping this record fit-free is what lets
+ * {@link computeIdentifiabilityFlags} be a pure lens over the design columns.
+ */
+export interface IdentifiabilityFlags {
+  /** Producer class name (the class column these flags describe). */
+  producerClass: string;
+  /**
+   * `true` when the class column is near-constant (population variance
+   * `≤ lowVarianceEps`) — an always-on / never-seen producer whose β is weakly
+   * determined and must NOT be read as "no effect".
+   */
+  lowVariance: boolean;
+  /**
+   * `true` when the class column is (near-)perfectly collinear with another
+   * class column — the ridge splits their shared effect arbitrarily, so neither
+   * β is individually identifiable. A variance check alone MISSES this (both
+   * duplicate columns can have high variance).
+   */
+  collinear: boolean;
+  /**
+   * Names of the other class columns this one is collinear with (for the #2631
+   * view to surface the ambiguous cluster). Empty when `collinear` is `false`.
+   */
+  collinearWith: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Extracted lenses (issue #3242)
+//
+// The two identifiability/floor clusters that used to live inline in `fitMetric`
+// are surfaced here as named, independently-testable exports. Both are PURE
+// (zero-I/O, non-mutating) — they preserve the module's AC5 purity invariant.
+// ---------------------------------------------------------------------------
+
+/**
+ * σ0 lens — the exogenous-drift floor for ONE metric.
+ *
+ * Returns the population std-dev of the deltas over the EMPTY (zero-merge,
+ * `classCounts` all-zero) windows in the passed PER-METRIC row slice, or `null`
+ * when the slice has no empty windows (then no below-noise-floor marker can be
+ * set downstream). Callers pass a single metric's already-grouped rows —
+ * pooling empty windows ACROSS metrics would change behavior, since σ0 is
+ * per-metric (only that metric's empty windows anchor its floor).
+ *
+ * @param observations One metric's ledger rows (NOT the whole multi-metric
+ *   array). Consumed read-only.
+ */
+export function computeSigmaZero(
+  observations: AttributionObservation[],
+): number | null {
+  const emptyDeltas: number[] = [];
+  for (const r of observations) {
+    if (isEmptyWindow(r.classCounts)) emptyDeltas.push(r.delta);
+  }
+  return emptyDeltas.length > 0 ? populationStd(emptyDeltas) : null;
+}
+
+/**
+ * Identifiability lens — the per-class low-variance + collinearity verdicts for
+ * ONE metric's class columns.
+ *
+ * Takes the class count columns ONLY (the intercept column is EXCLUDED — this
+ * lens is decoupled from `fitMetric`'s intercept-at-column-0 internal layout):
+ * `classColumns[j]` is the count column for `classNames[j]`, one entry per
+ * observation row. Returns one {@link IdentifiabilityFlags} record per class, in
+ * the same order as `classNames`:
+ *
+ *   - `lowVariance` — population variance `≤ cfg.lowVarianceEps` (near-constant
+ *     always-on column).
+ *   - `collinear` / `collinearWith` — pairwise `|pearson| ≥ cfg.collinearityThreshold`.
+ *     Both columns of a collinear pair are flagged, mutually referencing each
+ *     other. This is the flag column-variance MISSES: two duplicate columns
+ *     correlate at 1.0 yet each has high variance.
+ *
+ * @param classColumns Per-class count columns (intercept EXCLUDED). Read-only.
+ * @param classNames Class names, index-aligned with `classColumns`.
+ */
+export function computeIdentifiabilityFlags(
+  classColumns: number[][],
+  classNames: string[],
+  cfg: { lowVarianceEps: number; collinearityThreshold: number },
+): IdentifiabilityFlags[] {
+  const P = classNames.length;
+
+  // Pairwise (near-)collinearity over the class columns.
+  const collinearGroups = new Map<string, string[]>();
+  for (let i = 0; i < P; i++) {
+    for (let j = i + 1; j < P; j++) {
+      if (
+        Math.abs(pearson(classColumns[i], classColumns[j])) >=
+        cfg.collinearityThreshold
+      ) {
+        addTo(collinearGroups, classNames[i], classNames[j]);
+        addTo(collinearGroups, classNames[j], classNames[i]);
+      }
+    }
+  }
+
+  return classNames.map((producerClass, j) => {
+    const variance = populationStd(classColumns[j]) ** 2;
+    const collinearWith = collinearGroups.get(producerClass) ?? [];
+    return {
+      producerClass,
+      lowVariance: variance <= cfg.lowVarianceEps,
+      collinear: collinearWith.length > 0,
+      collinearWith,
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -262,12 +376,12 @@ function fitMetric(
     }
   }
 
-  // σ0 + β0 anchor: the empty (zero-merge) windows.
-  const emptyDeltas: number[] = [];
-  for (const r of rows) {
-    if (isEmptyWindow(r.classCounts)) emptyDeltas.push(r.delta);
-  }
-  const sigma0 = emptyDeltas.length > 0 ? populationStd(emptyDeltas) : null;
+  // σ0 + β0 anchor: the empty (zero-merge) windows for THIS metric.
+  const sigma0 = computeSigmaZero(rows);
+  const emptyWindowCount = rows.reduce(
+    (n, r) => (isEmptyWindow(r.classCounts) ? n + 1 : n),
+    0,
+  );
 
   // Design matrix X (with a leading intercept column of 1s) and target y.
   //   column 0     = intercept (always 1)
@@ -287,33 +401,28 @@ function fitMetric(
   // intercept term (index 0) is NOT regularized.
   const beta = solveRidge(X, y, cfg.lambda);
 
-  // Identifiability: per-column variance (low-variance flag) + pairwise
-  // collinearity over the CLASS columns (indices 1..P of X).
-  const columnVariance = new Array<number>(P);
+  // Identifiability lens over the CLASS columns ONLY (intercept excluded).
+  const classColumns: number[][] = [];
   for (let j = 0; j < P; j++) {
-    columnVariance[j] = populationStd(X.map((row) => row[j + 1])) ** 2;
+    classColumns.push(X.map((row) => row[j + 1])); // +1: skip intercept column
   }
-  const collinearGroups = detectCollinearity(
-    X,
-    classOrder,
-    cfg.collinearityThreshold,
-  );
+  const flags = computeIdentifiabilityFlags(classColumns, classOrder, {
+    lowVarianceEps: cfg.lowVarianceEps,
+    collinearityThreshold: cfg.collinearityThreshold,
+  });
 
-  const effects: ClassEffect[] = classOrder.map((producerClass, j) => {
+  const effects: ClassEffect[] = flags.map((f, j) => {
     const b = beta[j + 1]; // +1: skip intercept
-    const lowVariance = columnVariance[j] <= cfg.lowVarianceEps;
-    const collinearWith = collinearGroups.get(producerClass) ?? [];
-    const collinear = collinearWith.length > 0;
     const belowNoiseFloor =
       sigma0 !== null && Math.abs(b) <= cfg.noiseFloorK * sigma0;
     return {
-      producerClass,
+      producerClass: f.producerClass,
       beta: b,
-      lowVariance,
-      collinear,
-      collinearWith,
+      lowVariance: f.lowVariance,
+      collinear: f.collinear,
+      collinearWith: f.collinearWith,
       belowNoiseFloor,
-      identifiabilitySuspect: lowVariance || collinear,
+      identifiabilitySuspect: f.lowVariance || f.collinear,
     };
   });
 
@@ -323,7 +432,7 @@ function fitMetric(
     effects,
     sigma0,
     observationCount: rows.length,
-    emptyWindowCount: emptyDeltas.length,
+    emptyWindowCount,
   };
 }
 
@@ -366,35 +475,6 @@ function pearson(a: number[], b: number[]): number {
   }
   if (va === 0 || vb === 0) return 0;
   return cov / Math.sqrt(va * vb);
-}
-
-/**
- * Detect (near-)perfectly collinear CLASS column pairs. Returns a map from a
- * class name to the OTHER class names it is collinear with. A pair `(i, j)` is
- * collinear when `|pearson(col_i, col_j)| ≥ threshold`. This is the flag that
- * column-variance alone MISSES: two duplicate high-variance columns correlate at
- * 1.0 yet each has high variance.
- */
-function detectCollinearity(
-  X: number[][],
-  classOrder: string[],
-  threshold: number,
-): Map<string, string[]> {
-  const P = classOrder.length;
-  const cols: number[][] = [];
-  for (let j = 0; j < P; j++) {
-    cols.push(X.map((row) => row[j + 1])); // +1: skip intercept column
-  }
-  const out = new Map<string, string[]>();
-  for (let i = 0; i < P; i++) {
-    for (let j = i + 1; j < P; j++) {
-      if (Math.abs(pearson(cols[i], cols[j])) >= threshold) {
-        addTo(out, classOrder[i], classOrder[j]);
-        addTo(out, classOrder[j], classOrder[i]);
-      }
-    }
-  }
-  return out;
 }
 
 function addTo(map: Map<string, string[]>, key: string, value: string): void {

@@ -24,7 +24,11 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import type { AttributionObservation } from "../src/redis/attribution-ledger.ts";
-import { estimateMarginalEffects } from "../src/outcome-attribution/estimator.ts";
+import {
+  estimateMarginalEffects,
+  computeSigmaZero,
+  computeIdentifiabilityFlags,
+} from "../src/outcome-attribution/estimator.ts";
 import {
   solveRidge,
   gaussianSolve,
@@ -293,5 +297,137 @@ describe("attribution estimator — solver primitives", () => {
     assert.equal(populationStd([]), 0);
     assert.equal(populationStd([5]), 0);
     assert.ok(Math.abs(populationStd([-1, 0, 1]) - 0.8164965809) < 1e-9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Extracted lenses (issue #3242) — the two clusters `fitMetric` used to inline
+// are now named exports; test them in isolation, imported DIRECTLY from
+// estimator.ts (NOT re-exported through index.ts, which is out of scope).
+// ---------------------------------------------------------------------------
+
+describe("computeSigmaZero — σ0 lens (issue #3242)", () => {
+  test("std-dev over empty-window deltas; matches the inline AC3 value (0.8165)", () => {
+    // Same empty windows as the AC3 fixture: deltas -1,0,1,-1,0,1 → std ~0.8165.
+    // Non-empty rows carry counts and MUST be excluded from σ0.
+    const rows: AttributionObservation[] = [
+      obs("edge", -1, {}),
+      obs("edge", 0, {}),
+      obs("edge", 1, {}),
+      obs("edge", -1, {}),
+      obs("edge", 0, {}),
+      obs("edge", 1, {}),
+      obs("edge", 99, { big: 2 }),
+      obs("edge", 42, { big: 4 }),
+    ];
+    const s = computeSigmaZero(rows);
+    assert.ok(s !== null, "σ0 computed from the empty windows");
+    assert.ok(Math.abs(s! - 0.8165) < 1e-3, `σ0 ~0.8165, got ${s}`);
+  });
+
+  test("treats an all-zero-count window as empty (not just literal {})", () => {
+    // A window whose counts are all 0 IS an empty window — σ0 must include it.
+    const rows: AttributionObservation[] = [
+      obs("edge", 2, { a: 0, b: 0 }),
+      obs("edge", 4, {}),
+      obs("edge", 6, { a: 0 }),
+    ];
+    const s = computeSigmaZero(rows);
+    // deltas 2,4,6 → mean 4, population std = sqrt(8/3) ≈ 1.63299.
+    assert.ok(s !== null);
+    assert.ok(Math.abs(s! - 1.6329931619) < 1e-6, `σ0 over all three, got ${s}`);
+  });
+
+  test("no empty windows → null", () => {
+    const rows: AttributionObservation[] = [
+      obs("edge", 5, { a: 1 }),
+      obs("edge", 9, { a: 2 }),
+    ];
+    assert.equal(computeSigmaZero(rows), null);
+  });
+
+  test("empty row set → null", () => {
+    assert.equal(computeSigmaZero([]), null);
+  });
+
+  test("does not mutate its input", () => {
+    const rows: AttributionObservation[] = [obs("edge", 1, {}), obs("edge", -1, {})];
+    const snap = JSON.stringify(rows);
+    computeSigmaZero(rows);
+    assert.equal(JSON.stringify(rows), snap, "input untouched");
+  });
+});
+
+describe("computeIdentifiabilityFlags — identifiability lens (issue #3242)", () => {
+  const cfg = { lowVarianceEps: 1e-9, collinearityThreshold: 0.999 };
+
+  test("takes CLASS columns only (intercept excluded) and returns per-class records in order", () => {
+    // Two independent, well-varying columns → neither flag fires; order preserved.
+    const flags = computeIdentifiabilityFlags(
+      [
+        [1, 2, 3, 4],
+        [4, 1, 3, 2],
+      ],
+      ["classA", "classB"],
+      cfg,
+    );
+    assert.deepEqual(
+      flags.map((f) => f.producerClass),
+      ["classA", "classB"],
+    );
+    for (const f of flags) {
+      assert.equal(f.lowVariance, false);
+      assert.equal(f.collinear, false);
+      assert.deepEqual(f.collinearWith, []);
+    }
+  });
+
+  test("collinear pair mutually flagged (matches AC2), variance-only would MISS it", () => {
+    // Duplicate columns: correlate at 1.0 yet each has HIGH variance.
+    const col = [1, 2, 3, 4, 5, 6];
+    const flags = computeIdentifiabilityFlags(
+      [[...col], [...col]],
+      ["classA", "classB"],
+      cfg,
+    );
+    const a = flags.find((f) => f.producerClass === "classA")!;
+    const b = flags.find((f) => f.producerClass === "classB")!;
+    assert.equal(a.collinear, true);
+    assert.equal(b.collinear, true);
+    assert.deepEqual(a.collinearWith, ["classB"]);
+    assert.deepEqual(b.collinearWith, ["classA"]);
+    // High-variance columns → the low-variance flag does NOT fire (two distinct flags).
+    assert.equal(a.lowVariance, false);
+    assert.equal(b.lowVariance, false);
+  });
+
+  test("constant column flagged low-variance, not collinear (matches AC4)", () => {
+    const flags = computeIdentifiabilityFlags(
+      [
+        [1, 1, 1, 1, 1], // always-on / constant
+        [1, 2, 3, 4, 5], // varies
+      ],
+      ["classAlways", "classVar"],
+      cfg,
+    );
+    const always = flags.find((f) => f.producerClass === "classAlways")!;
+    const varying = flags.find((f) => f.producerClass === "classVar")!;
+    assert.equal(always.lowVariance, true, "constant column low-variance");
+    assert.equal(always.collinear, false, "constant column not collinear");
+    assert.equal(varying.lowVariance, false);
+  });
+
+  test("empty class set → no flags", () => {
+    assert.deepEqual(computeIdentifiabilityFlags([], [], cfg), []);
+  });
+
+  test("does not mutate its input columns", () => {
+    const cols = [
+      [1, 2, 3],
+      [3, 2, 1],
+    ];
+    const snap = JSON.stringify(cols);
+    computeIdentifiabilityFlags(cols, ["a", "b"], cfg);
+    assert.equal(JSON.stringify(cols), snap, "columns untouched");
   });
 });
