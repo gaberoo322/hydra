@@ -34,6 +34,17 @@
  * the value helpers in issue #3144 and the `Ok` / `Err` types in issue #3149; every
  * caller imports these from the `run-result.ts` leaf directly.
  *
+ * The **dispatch → PR link** writer `recordDispatchPr` (plus its
+ * `RecordDispatchPrBody` / `RecordDispatchPrResult` types) was extracted into the
+ * sibling `dispatch-pr-link.ts` (issue #3205). That write is NOT part of the
+ * run/turn lifecycle — it feeds the Builder-Health Scorecard's Autonomy Rate /
+ * time-to-merge and its only live caller is `src/api/builder-health.ts` — so it
+ * now lives in the Builder Health instrumentation domain, symmetric with its
+ * reader sibling `aggregators/autonomy-rate.ts`. This completes the future
+ * clean-up the `run-reads.ts` header anticipated; callers import
+ * `recordDispatchPr` from `dispatch-pr-link.ts` directly (no re-export here,
+ * the #2125 precedent).
+ *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
  *     bookended by run-start / run-end, persisted as
@@ -73,7 +84,6 @@ import {
   addAutopilotRunToIndex,
   addAutopilotRunTurn,
   hasAutopilotRunTurnAt,
-  putAutopilotPrLink,
 } from "../redis/autopilot-runs.ts";
 import { recordAnchorReflection } from "../reflections/per-anchor.ts";
 import type {
@@ -374,51 +384,6 @@ export async function recordReflectionOutcome(
     // Never throw out of this path — reflection writes are best-effort
     // learning, not correctness. Surface the failure as an Err so the route
     // can answer 500 without crashing the reap-side POST.
-    return errRedis(err);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Lifecycle: dispatch -> PR link (issue #732)
-// ---------------------------------------------------------------------------
-
-export interface RecordDispatchPrBody {
-  prNumber: number;
-  runId?: string;
-  dispatchId?: string;
-  skill?: string;
-  issueRef?: string;
-  openedAt?: string;
-}
-
-export type RecordDispatchPrResult =
-  | Ok<{ prNumber: number; openedAtMs: number }>
-  | Err;
-
-/**
- * Stamp a dispatch->PR link when a dispatched subagent opens a PR. The
- * Builder-Health Scorecard derives Autonomy Rate + time-to-merge from this
- * link (the open timestamp + PR number) joined against GitHub on read; no
- * per-dispatch intervention flag is stored. Idempotent on `prNumber`.
- */
-export async function recordDispatchPr(
-  body: RecordDispatchPrBody,
-): Promise<RecordDispatchPrResult> {
-  try {
-    const prNumber = Number(body.prNumber);
-    if (!Number.isInteger(prNumber) || prNumber <= 0) {
-      return { ok: false, code: "invalid", detail: "prNumber must be a positive integer" };
-    }
-    const openedAtMs = body.openedAt ? Date.parse(body.openedAt) : Date.now();
-    const resolvedMs = Number.isFinite(openedAtMs) ? openedAtMs : Date.now();
-    const fields: Record<string, string> = {};
-    if (body.runId) fields.runId = String(body.runId);
-    if (body.dispatchId) fields.dispatchId = String(body.dispatchId);
-    if (body.skill) fields.skill = String(body.skill);
-    if (body.issueRef) fields.issueRef = String(body.issueRef);
-    await putAutopilotPrLink(prNumber, fields, resolvedMs);
-    return { ok: true, prNumber, openedAtMs: resolvedMs };
-  } catch (err: any) {
     return errRedis(err);
   }
 }
