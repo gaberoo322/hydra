@@ -38,17 +38,19 @@ import {
   computeGreenLight,
   isExemptLogEntry,
   type ExemptLogEntry,
+  // Exempt-log + daily-snapshot + index-size persistence ops now flow through
+  // the domain module (issue #3280) — this route no longer reaches past the
+  // domain boundary into `../redis/design-concept.ts`. `design-concept.ts` is
+  // now the single import surface for the whole design-concept domain.
+  appendExemptLogEntry,
+  readRecentExemptLogEntries,
+  readDailySnapshots,
+  getDesignConceptIndexSize,
 } from "../design-concept.ts";
 import {
   gateCheck,
   type DesignConceptScope,
 } from "../design-concept-gate.ts";
-import {
-  appendExemptLogEntry,
-  readRecentExemptLogEntries,
-  readDailySnapshots,
-  getDesignConceptIndexSize,
-} from "../redis/design-concept.ts";
 // Body schemas + the read-route query schemas (`ExemptLogQuerySchema` /
 // `DesignConceptListQuerySchema`) and their limit constants now all live in the
 // DC schemas module (issue #3226) — the route layer is pure HTTP wiring.
