@@ -58,6 +58,10 @@ function healthySnapshot(): HealthSnapshot {
     blCounts: { triage: 0, backlog: 2, inProgress: 1, blocked: 0, done: 5, total: 3 },
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
+    // Issue #3270: a non-zero ledger count — the attribution-ledger-dark rule
+    // fires ONLY when count === 0, so any positive value keeps the baseline
+    // "fires zero diagnostics" assertion holding.
+    attributionLedgerCount: 14,
     // Issue #2492: a `healthy` reflection-deposit verdict — the reflection rule
     // fires ONLY on `served-but-bucketed-none`, so this keeps the baseline
     // "fires zero diagnostics" assertion holding while exercising the field.
@@ -947,6 +951,10 @@ describe("parseProbes", () => {
       // parseProbes defaults it to the `retired-empty` report so the
       // reflection-outcomes rule no-ops (honest-none).
       reflectionOutcomesLiveness: null,
+      // Issue #3270: null = the ledger LLEN probe settle rejected; parseProbes
+      // coalesces to 0 (honest-zero → empty-ledger) so the attribution-ledger-dark
+      // rule fires. This is intentional in the "all probes failed" baseline.
+      attributionLedgerCount: null,
     };
   }
 
@@ -1055,6 +1063,9 @@ describe("parseProbes", () => {
       // reflection-outcomes rule adds no diagnostic to this degraded-fan-out
       // assertion (it fires only on frozen-tail INFO / live-tail WARNING).
       reflectionOutcomesLiveness: null,
+      // Issue #3270: non-zero count keeps the attribution-ledger-dark rule silent
+      // in this degraded-fan-out test (only other degraded-path rules are expected).
+      attributionLedgerCount: 1,
     });
     const a = assessHealth(snap);
     assert.equal(a.status, "degraded"); // only warnings

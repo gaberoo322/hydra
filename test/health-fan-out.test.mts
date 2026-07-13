@@ -86,6 +86,9 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
       latestEntryMs: 1_000_000, // ancient — far older than the fresh window
     })) as any,
     reflectionOutcomesNow: () => 1_000_000 + 48 * 60 * 60 * 1000, // +48h
+    // Issue #3270: stub the attribution ledger LLEN probe so the fan-out never
+    // hits real Redis in tests. A non-zero count (7) makes the merge observable.
+    attributionLedgerLen: (async () => 7) as any,
     targetServiceName: () => "hydra-betting-web.service",
     ...overrides,
   };
@@ -155,6 +158,9 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     // `retired-frozen-tail` (the expected corpse), NOT an alarm.
     assert.equal((probes.reflectionOutcomesLiveness as any)?.verdict, "retired-frozen-tail");
     assert.equal((probes.reflectionOutcomesLiveness as any)?.count, 3);
+
+    // Issue #3270 — the attribution ledger LLEN (an async settle-array probe).
+    assert.equal(probes.attributionLedgerCount, 7);
   });
 
   test("the injected skill-catalog state flows into ProbeInputs.skillCatalog (issue #2386)", async () => {
@@ -176,6 +182,14 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.skillCatalog as any)?.total, 4);
     assert.equal((probes.skillCatalog as any)?.completed, true);
     assert.equal((probes.skillCatalog as any)?.lastAttemptAt, 9999);
+  });
+
+
+  test("empty attribution ledger (count 0) flows into attributionLedgerCount (issue #3270)", async () => {
+    const probes = await collectProbeInputs(happyDeps({
+      attributionLedgerLen: (async () => 0) as any,
+    }));
+    assert.equal(probes.attributionLedgerCount, 0);
   });
 
   test("a down VLM host flows into ollamaVlm (issue #2278)", async () => {

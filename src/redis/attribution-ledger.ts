@@ -252,6 +252,22 @@ export const redisAttributionLedger: AttributionLedger = {
   appendVoidMarker,
 };
 
+
+/**
+ * Return the current ledger row count (LLEN) without fetching the rows.
+ * Used by the health fan-out to probe ledger liveness (issue #3270).
+ * Best-effort — returns 0 on any error rather than throwing.
+ */
+export async function getLedgerLen(): Promise<number> {
+  try {
+    const r = getRedisConnection();
+    return await r.llen(attributionLedgerKey());
+  } catch (err: any) {
+    console.error(`[attribution] getLedgerLen failed: ${err?.message || String(err)}`);
+    return 0;
+  }
+}
+
 /** Test-only: clear the ledger. */
 export async function _resetLedger(): Promise<void> {
   const r = getRedisConnection();
