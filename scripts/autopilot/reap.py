@@ -844,7 +844,36 @@ def _recover_tokens_from_transcript(task_id: str) -> int:
     return 0
 
 
-def _fire_token_record(task_id: str, skill: str | None, total_tokens: int) -> None:
+def _post_token_record(cycle_id: str, skill: str, total_tokens: int) -> None:
+    """POST a single per-cycle token record for `cycle_id`. Best-effort; swallows all errors.
+
+    Extracted from `_fire_token_record` so the same POST can fire under BOTH the
+    task_id key and the branch-keyed id (issue #3187) without duplicating the
+    request/error-handling boilerplate. Callers guard `skill`/`total_tokens`.
+    """
+    payload = {"skill": skill, "tokens": int(total_tokens), "cycleId": cycle_id}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/metrics/tokens",
+        data=data,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        msg = f"token_record_skipped cycleId={cycle_id} skill={skill} tokens={total_tokens} err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+
+
+def _fire_token_record(
+    task_id: str,
+    skill: str | None,
+    total_tokens: int,
+    worktree_branch: str | None = None,
+) -> None:
     """Best-effort POST to /api/metrics/tokens — the per-CYCLE token producer (issue #2952).
 
     THE producer for the `hydra:metrics:tokens:by-cycle:<id>` hash (written by
@@ -866,6 +895,21 @@ def _fire_token_record(task_id: str, skill: str | None, total_tokens: int) -> No
     is keyed on the harness task_id, which the #2964 trend join and the #2942
     fallback both key on regardless of class.
 
+    Issue #3187 — branch-keyed mirror: `getMetricsTrend` (src/metrics/trend.ts)
+    iterates the metrics INDEX cycleIds and reads `getCycleTokensRaw(cycleId)`
+    with the BRANCH-keyed id (`worktree-agent-XXX-tN-dev_orch`), because the
+    metrics record itself is keyed on the synthesised worktree branch — NOT the
+    bare worktree-hash `task_id`. So a token record keyed only on `task_id` is
+    un-joinable for every pipeline class that has a branch-keyed metrics record
+    (the same key split that required the `TEST_COUNT_MIRROR_FIELDS` patch in
+    #3252 / #3255): signal classes whose cycleId IS the task_id got their tokens;
+    pipeline classes did NOT (only 56% of cycles carried `tokenCost`). Fix: when
+    a `worktree_branch` is known AND differs from `task_id`, ALSO post a token
+    record keyed on the branch so the trend's branch-keyed lookup resolves. The
+    two writes hit DISTINCT keys (`by-cycle:<task_id>` vs `by-cycle:<branch>`),
+    so this never double-counts within a key — mirrors the additive cross-key
+    copy `recordCycleMetrics` does for the test counts.
+
     Posted ONLY when `total_tokens > 0` — mirrors `_fire_cycle_record`'s
     "0 == no usage parsed == unknown" semantics: a 0 write would fabricate a
     zero-token key where the truthful state is "unattributed" (null). The
@@ -881,21 +925,13 @@ def _fire_token_record(task_id: str, skill: str | None, total_tokens: int) -> No
         return
     if total_tokens <= 0:
         return
-    payload = {"skill": skill, "tokens": int(total_tokens), "cycleId": task_id}
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{HYDRA_API_BASE}/api/metrics/tokens",
-        data=data,
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            resp.read()
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        msg = f"token_record_skipped task_id={task_id} skill={skill} tokens={total_tokens} err={exc}"
-        print(f"[autopilot] reap: {msg}", file=sys.stderr)
-        _append_log(msg)
+    _post_token_record(task_id, skill, total_tokens)
+    # Issue #3187: mirror onto the branch-keyed id the trend reader joins on.
+    # Distinct key, so no double-count; only when the branch is known and is a
+    # DIFFERENT id from task_id (a signal-class cycleId that equals task_id needs
+    # no second write).
+    if worktree_branch and worktree_branch != task_id:
+        _post_token_record(worktree_branch, skill, total_tokens)
 
 
 def _classify_failure_pattern(cue: str) -> str:
@@ -1333,7 +1369,12 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # on regardless of class. The helper is best-effort, guards tokens>0, and
     # runs after the `reaped_task_ids` dup-guard so the underlying hincrby fires
     # exactly once per task_id.
-    _fire_token_record(task_id, skill, total_tokens)
+    #
+    # Issue #3187: forward the synthesised worktree branch (captured above before
+    # the slot was nulled) so the record ALSO lands under the branch-keyed id the
+    # #2964 trend join reads by — closing the ~56% tokenCost coverage gap for
+    # pipeline classes whose metrics record is branch-keyed, not task_id-keyed.
+    _fire_token_record(task_id, skill, total_tokens, worktree_branch=worktree_branch)
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live

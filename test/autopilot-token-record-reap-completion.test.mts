@@ -122,7 +122,7 @@ describe("reap.py completion → per-cycle token-record live fire (issue #2952)"
       const log = runLog(tmp);
       assert.match(
         log,
-        /token_record_skipped task_id=tTok skill=hydra-dev tokens=12345/,
+        /token_record_skipped cycleId=tTok skill=hydra-dev tokens=12345/,
         "a positive-token completion must attempt a per-cycle token POST keyed on task_id",
       );
       // The slot must still reap normally.
@@ -176,9 +176,13 @@ describe("reap.py completion → per-cycle token-record live fire (issue #2952)"
       const log = runLog(tmp);
       assert.match(
         log,
-        /token_record_skipped task_id=tSig skill=hydra-research tokens=5000/,
+        /token_record_skipped cycleId=tSig skill=hydra-research tokens=5000/,
         "a signal-class completion must still attempt a per-cycle token POST",
       );
+      // A signal class has no pipeline slot / branch, so exactly ONE token POST
+      // fires (keyed on the task_id) — no branch mirror.
+      const sigPosts = (log.match(/token_record_skipped cycleId=/g) || []).length;
+      assert.equal(sigPosts, 1, "no branch mirror for a slot-less signal-class completion");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -210,6 +214,79 @@ describe("reap.py completion → per-cycle token-record live fire (issue #2952)"
         /token_record_skipped/,
         "a dup reap must NOT re-fire the token POST (hincrby would double-count)",
       );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a pipeline completion with a worktree branch fires a SECOND token POST keyed on the branch (issue #3187)", () => {
+    const tmp = makeTmp();
+    try {
+      // The slot carries a synthesised worktree branch — the id the #2964 trend
+      // join reads token counts by (the metrics record is branch-keyed, not
+      // task_id-keyed). Before #3187 the token POST fired only under the bare
+      // task_id, so the trend's branch-keyed lookup missed and tokenCost was
+      // null on ~44% of pipeline cycles.
+      const branch = "worktree-agent-3187ffff-t1-dev_orch";
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tBranch",
+            anchor: "issue-3187",
+            branch,
+          },
+        },
+      });
+
+      const r = runCompletion(["dev_orch", "tBranch", "7777", "hydra-dev"], tmp);
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      // Both POSTs are attempted (and swallowed against the dead port): one keyed
+      // on the bare task_id, one on the branch-keyed id the trend reads by.
+      assert.match(
+        log,
+        /token_record_skipped cycleId=tBranch skill=hydra-dev tokens=7777/,
+        "the task_id-keyed token POST still fires (unchanged)",
+      );
+      assert.match(
+        log,
+        new RegExp(`token_record_skipped cycleId=${branch} skill=hydra-dev tokens=7777`),
+        "a SECOND token POST fires keyed on the branch the trend join reads (issue #3187)",
+      );
+      // Exactly two POSTs — the task_id write plus the branch mirror, never more.
+      const posts = (log.match(/token_record_skipped cycleId=/g) || []).length;
+      assert.equal(posts, 2, "exactly two token POSTs: task_id + branch mirror");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a pipeline completion whose branch EQUALS the task_id fires only ONE token POST (no redundant self-mirror)", () => {
+    const tmp = makeTmp();
+    try {
+      // Defensive: if the synthesised branch happens to equal the task_id, the
+      // mirror must not fan out a redundant identical-key POST.
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tSame",
+            anchor: "issue-3187",
+            branch: "tSame",
+          },
+        },
+      });
+
+      const r = runCompletion(["dev_orch", "tSame", "4242", "hydra-dev"], tmp);
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      const posts = (log.match(/token_record_skipped cycleId=tSame/g) || []).length;
+      assert.equal(posts, 1, "branch == task_id → a single token POST, no self-mirror");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
