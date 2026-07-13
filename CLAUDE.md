@@ -39,7 +39,7 @@ curl http://localhost:4000/api/scheduler/status
 ## Coding Conventions
 
 - **TypeScript** (`.ts`, import/export). Source in `src/`, tests in `test/*.test.mts`.
-- **Runtime deps are operator-approved only** (ADR-0005): `express`, `ioredis`, `ws`, `@sentry/node`, `zod`. Node stdlib for everything else.
+- **Runtime deps are operator-approved only** (ADR-0005): `express`, `ioredis`, `ws`, `@sentry/node`, `zod`, `pino`. Node stdlib for everything else. (`pino` is the structured logger seam — import `logger` from `src/logger.ts`, never `pino()` directly; ADR-0027.)
 - **Never throw from merge/grounding/verification** — return result objects so callers decide how to report failures.
 - **Fail loud**: every `catch` either logs `console.error` with context or is annotated `/* intentional: reason */`. Silent catches caused every major 2026-04 incident.
 - **Typed errors carry a machine-readable `code`** (#756) — for exceptional `throw` sites prefer a subclass from `src/errors.ts` (e.g. `InvalidArgumentError`, `RedisSeamError`) over a bare `Error`; callers/tests discriminate on `err.code`, not `err.message`. Migration is opportunistic.
