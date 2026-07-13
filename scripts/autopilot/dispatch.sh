@@ -62,7 +62,7 @@ print(json.dumps({
     # data. Idempotent on cycleId — re-running with the same cycleId is a
     # no-op on the server, so retries don't double-count.
     #
-    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens]
+    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens] [worktree_branch]
     #
     # Issue #1136 (Slice 2 of #1119): the optional 8th positional arg
     # `reflection_sources` is the comma-separated reflection bucket tokens
@@ -97,6 +97,14 @@ print(json.dumps({
     # when no usage was parsed, which is "unknown" not "measured zero", so 0/
     # empty/absent are all omitted and recordCycle falls back to the per-cycle
     # token hash before recording a truthful null.
+    # Issue #3252: the optional 12th positional arg `worktree_branch` is the
+    # dispatch's synthesised worktree branch (`worktree-agent-<runToken>-t<N>-<slot>`).
+    # reap.py forwards it so recordCycleMetrics can mirror the grounding test
+    # counts onto the SEPARATE branch-keyed metrics record the merge-watch
+    # enrichment + dashboards read (reap's cycle-record is keyed on the bare
+    # worktree-hash task_id — an un-joinable id — so `testsAfter` recorded 0 on
+    # the sampled record every cycle). Empty/absent → the field is omitted from
+    # the POST body → recordCycleMetrics does no mirror (prior behaviour).
     cycle_id="${1:-}"
     status="${2:-}"
     skill="${3:-}"
@@ -108,8 +116,9 @@ print(json.dumps({
     files_changed="${9:-}"
     grounding_tests="${10:-}"
     tokens="${11:-}"
+    worktree_branch="${12:-}"
     if [ -z "$cycle_id" ] || [ -z "$status" ] || [ -z "$skill" ]; then
-      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens]" >&2
+      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens] [worktree_branch]" >&2
       exit 2
     fi
     # Issue #2852: defence-in-depth — fail loud at the shell BEFORE building the
@@ -174,7 +183,7 @@ print(json.dumps({
     esac
     payload=$(python3 -c "
 import json, sys
-cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed, grounding_tests, tokens = sys.argv[1:16]
+cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed, grounding_tests, tokens, worktree_branch = sys.argv[1:17]
 body = {
     'cycleId': cycle_id,
     'status': status,
@@ -238,8 +247,13 @@ if tokens != '':
             body['tokens'] = tk
     except (TypeError, ValueError):
         pass
+# Issue #3252: emit worktreeBranch when reap forwarded a non-empty one so
+# recordCycleMetrics can mirror the grounding test counts onto the branch-keyed
+# record dashboards read. Empty/absent → omitted → no mirror (prior behaviour).
+if worktree_branch:
+    body['worktreeBranch'] = worktree_branch
 print(json.dumps(body))
-" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests" "$tokens")
+" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests" "$tokens" "$worktree_branch")
     # Issue #2635: the rest of the autopilot ecosystem (reap.py, heartbeat.py,
     # term-check.py, decide.py, bootstrap.sh, the hooks) resolves the API origin
     # from HYDRA_API_BASE, but the `hydra` CLI reads HYDRA_BASE_URL and the curl

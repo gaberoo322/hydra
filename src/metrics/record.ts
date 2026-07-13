@@ -18,7 +18,7 @@
  * control loop was retired, leaving the metric write-dead (pinned at 0%).
  */
 
-import { getCycleMetrics, setCycleMetrics } from "../redis/cycle-metrics.ts";
+import { getCycleMetrics, setCycleMetrics, enrichCycleMetrics } from "../redis/cycle-metrics.ts";
 
 /** TTL for cycle metrics Redis keys: 7 days in seconds (matches redis/cycle-tracking.ts). */
 const CYCLE_KEY_TTL = 7 * 24 * 60 * 60; // 604800
@@ -47,6 +47,25 @@ const MONOTONIC_DURATION_FIELDS = [
   "verificationDurationMs",
   "planningDurationMs",
   "executionDurationMs",
+] as const;
+
+/**
+ * The grounding test-suite count fields (issue #3252). These arrive only on
+ * reap's cycle-record write, which is keyed on the bare worktree-hash `task_id`
+ * (the deposit key reap can read the counts from). But the SEPARATE
+ * `worktreeBranch`-keyed record — the one the merge-watch enrichment adds
+ * `prNumber`/`filesChanged` to and the dashboards/aggregators actually sample —
+ * is keyed on the run-token-shaped synthesised branch, an un-joinable token, so
+ * it never received these counts and `testsAfter` recorded 0 on it every cycle.
+ * When a write carries BOTH a `worktreeBranch` (that differs from its own
+ * cycleId) AND any of these fields, `recordCycleMetrics` mirrors exactly this
+ * subset onto the branch-keyed record so the sampled record carries the counts.
+ */
+const TEST_COUNT_MIRROR_FIELDS = [
+  "testsBefore",
+  "testsAfter",
+  "testsPassingBefore",
+  "testsPassingAfter",
 ] as const;
 
 /**
@@ -209,6 +228,32 @@ export async function recordCycleMetrics(
   if (!flat.source) flat.source = "claude";
 
   await setCycleMetrics(cycleId, flat, CYCLE_KEY_TTL);
+
+  // Issue #3252: cross-key test-count mirror. reap keys THIS write on the bare
+  // worktree-hash task_id, but the record aggregators read is the SEPARATE
+  // `worktreeBranch`-keyed one (holdback-merge-watch enriches it with prNumber;
+  // the two keys are un-joinable — run-token vs worktree-hash). So when this
+  // write carries a worktreeBranch that differs from its own cycleId AND any
+  // grounding test count, additively copy just those counts onto the branch
+  // record so `testsAfter` stops recording 0 on the record dashboards sample.
+  // Best-effort: a failure here logs and never blocks (observability, not
+  // correctness), matching the module convention.
+  const branch = flat.worktreeBranch;
+  if (branch && branch !== cycleId) {
+    const mirror: Record<string, string> = {};
+    for (const field of TEST_COUNT_MIRROR_FIELDS) {
+      if (field in flat) mirror[field] = flat[field];
+    }
+    if (Object.keys(mirror).length > 0) {
+      try {
+        await enrichCycleMetrics(branch, mirror);
+      } catch (err: any) {
+        console.error(
+          `[Metrics] test-count mirror to branch ${branch} failed for cycle ${cycleId}: ${err?.message || String(err)}`,
+        );
+      }
+    }
+  }
 
   console.log(`[Metrics] Recorded cycle ${cycleId}: ${metrics.tasksMerged || 0} merged, ${metrics.tasksFailed || 0} failed, regression=${metrics.regressionIntroduced || false}`);
 }
