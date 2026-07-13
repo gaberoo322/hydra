@@ -1539,7 +1539,7 @@ ESCALATION_SATURATION_SIGNAL = {
 
 
 def _rule_escalation(
-    state: dict, events: list[dict], now: int
+    state: dict, events: list[dict], now: int, *, dispatch_blocked: bool = False
 ) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
@@ -1579,10 +1579,25 @@ def _rule_escalation(
     dispatches into a reaped (still-null) slot within the same turn (issue #3274,
     QA blocker).
 
+    `dispatch_blocked` is the Subscription Usage Tracker hard-stop verdict
+    (`_rule_usage_eligibility`, step 3.5). When True the escalation re-dispatch is
+    suppressed wholesale — mirroring the identical guard in `_rule_pipeline_dispatch`
+    and `_rule_signal_classes` (issue #3274, QA blocker). Without this guard the
+    escalation rule (step 2.5, ahead of the gate) could emit a MORE expensive
+    Sonnet re-dispatch near budget exhaustion — the exact opposite of the cost
+    win. `decide()` therefore hoists the pure usage-eligibility read ahead of this
+    rule so `dispatch_blocked` is available here while the reap->escalate->auto-merge
+    ordering (INV-006) is preserved.
+
     Pure w.r.t. fs/network/Redis; reads state.slot_events + state.slots + signals.
     """
     out = _RuleOutput()
     escalated_slots: set[str] = set()
+    if dispatch_blocked:
+        # Usage tracker said allow=False — hard stop. Emit NO escalation
+        # re-dispatch this turn (mirrors the pipeline/signal dispatch rules).
+        out.debug["escalation_usage_dispatch_blocked"] = True
+        return out, escalated_slots
     slot_events_raw = state.get("slot_events") or []
     if isinstance(slot_events_raw, dict):
         slot_events_raw = slot_events_raw.get("events") or []
@@ -2331,24 +2346,33 @@ def decide(
     # 2. Completion reaps first (INV-006 — reap before dispatch).
     fold(_rule_completion_reaps(events))
 
+    # 2.4. Subscription Usage Tracker eligibility gate (PR B1). Read AHEAD of the
+    #      escalation rule (step 2.5) — `_rule_usage_eligibility` is pure over
+    #      `state` alone, so hoisting it does not disturb the
+    #      reap->escalate->auto-merge ordering (INV-006). The verdict threads into
+    #      the escalation rule AND the dispatch rules below as `dispatch_blocked`
+    #      (hard stop — no dispatch of ANY class, including the escalation
+    #      re-dispatch, issue #3274 QA blocker) + `shed_classes` (soft throttle).
+    usage_out, dispatch_blocked, shed_classes = _rule_usage_eligibility(state)
+    fold(usage_out)
+
     # 2.5. Cascade-routing escalation re-dispatch (issue #3274). Runs AFTER the
     #      completion reaps above so the just-stopped slot is freed before this
     #      rule re-dispatches into it at a stronger model tier (INV-006). A
     #      no_op / failure of a class in ESCALATION_POLICY (today: cleanup_orch
     #      at Haiku) re-dispatches once at the escalate_model HINT, gated by the
-    #      saturation guard + attempt cap in `decide_escalation`.
-    escalation_out, escalated_slots = _rule_escalation(state, events, now)
+    #      saturation guard + attempt cap in `decide_escalation`. `dispatch_blocked`
+    #      hard-suppresses the re-dispatch under the usage gate so a cheap-tier
+    #      no_op cannot trigger a MORE expensive Sonnet escalation near budget
+    #      exhaustion (issue #3274 QA blocker) — mirroring the pipeline/signal rules.
+    escalation_out, escalated_slots = _rule_escalation(
+        state, events, now, dispatch_blocked=dispatch_blocked
+    )
     fold(escalation_out)
 
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
     #    new work; emergency brake (issue #744) overrides the depth verdict.
     fold(_rule_auto_merge_sweep(state, events))
-
-    # 3.5. Subscription Usage Tracker eligibility gate (PR B1). The verdict
-    #      threads into the dispatch rules below as `dispatch_blocked`
-    #      (hard stop) + `shed_classes` (soft throttle).
-    usage_out, dispatch_blocked, shed_classes = _rule_usage_eligibility(state)
-    fold(usage_out)
 
     # 4. Pipeline dispatch (the fixed slots, in priority order).
     pipeline_out = _rule_pipeline_dispatch(

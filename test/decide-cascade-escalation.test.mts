@@ -48,6 +48,7 @@ interface StateOverrides {
   slotEvents?: any[];
   slots?: Record<string, unknown>;
   failure_log?: any[];
+  usage_eligibility?: Record<string, unknown>;
 }
 
 function baseState(o: StateOverrides = {}): any {
@@ -80,6 +81,9 @@ function baseState(o: StateOverrides = {}): any {
     signals: o.signals ?? {},
     slot_events: { events: o.slotEvents ?? [], last_id: "0-0" },
     research_force_counter: {},
+    ...(o.usage_eligibility !== undefined
+      ? { usage_eligibility: o.usage_eligibility }
+      : {}),
   };
 }
 
@@ -309,6 +313,66 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
         reapIdx < dispatchIdx,
         "reap must precede the surviving cleanup_orch dispatch (INV-006)",
       );
+    },
+  );
+
+  test(
+    "usage gate: dispatch_blocked SUPPRESSES the escalation re-dispatch (issue #3274 QA blocker)",
+    () => {
+      // Near budget exhaustion the Subscription Usage Tracker returns
+      // allow=false → dispatch_blocked. The escalation rule runs at step 2.5,
+      // AHEAD of the ordinary dispatch rules, so without a guard a cheap-tier
+      // (Haiku) cleanup_orch no_op would still trigger a MORE expensive Sonnet
+      // re-dispatch — the opposite of the cost win the cascade routing exists
+      // to deliver. decide() now hoists the usage-eligibility read ahead of the
+      // escalation rule and passes dispatch_blocked in; the guard mirrors the
+      // pipeline/signal dispatch rules and emits ZERO escalation dispatches.
+      const state = baseState({
+        slotEvents: [stopEvent("cleanup_orch", "no_op", "tBLOCK")],
+        usage_eligibility: { allow: false, reasons: { budget: "exhausted" } },
+      });
+      const plan = runDecide(state);
+      assert.equal(
+        escalationFor(plan, "cleanup_orch"),
+        undefined,
+        "dispatch_blocked must suppress the Sonnet escalation re-dispatch under the usage gate",
+      );
+      // No cleanup_orch dispatch of ANY kind should survive the hard stop.
+      const cleanupDispatches = (plan.actions ?? []).filter(
+        (a: any) => a.type === "dispatch" && a.slot === "cleanup_orch",
+      );
+      assert.equal(
+        cleanupDispatches.length,
+        0,
+        `dispatch_blocked is a hard stop — no cleanup_orch dispatch expected, got ${cleanupDispatches.length}`,
+      );
+      // The no_op slot must still be reaped — the gate blocks DISPATCH, not the
+      // completion reap (INV-006 stays intact under the budget hard stop).
+      const types = (plan.actions ?? []).map((a: any) => `${a.type}:${a.slot}`);
+      assert.ok(
+        types.includes("reap:cleanup_orch"),
+        "the no_op slot must still be reaped even when dispatch is budget-blocked",
+      );
+    },
+  );
+
+  test(
+    "usage gate allow=true leaves the escalation re-dispatch intact (guard is scoped to the hard stop)",
+    () => {
+      // Symmetry check: an explicit allow=true payload must NOT suppress the
+      // escalation — the guard fires ONLY on the budget hard stop, never on a
+      // healthy budget. Guards against an inverted-boolean regression.
+      const state = baseState({
+        slotEvents: [stopEvent("cleanup_orch", "no_op", "tALLOW")],
+        usage_eligibility: { allow: true },
+      });
+      const plan = runDecide(state);
+      const esc = escalationFor(plan, "cleanup_orch");
+      assert.ok(
+        esc,
+        "with allow=true the cascade escalation must still fire",
+      );
+      assert.equal(esc.prompt_args.escalate_model, "sonnet");
     },
   );
 });
