@@ -5,15 +5,27 @@
  * absent/empty anchorType that the metrics aggregator (src/metrics/aggregate.ts)
  * buckets as "unknown" (the data-quality failure that hid 24% of cycles).
  *
- * The skill → anchor_type map (dispatch.sh, ~line 101):
+ * The skill → anchor_type map (dispatch.sh `case "$skill"`):
  *   hydra-dev / hydra-target-build        → work-queue
- *   hydra-qa                              → qa-review
+ *   hydra-qa / hydra-target-qa            → qa-review
  *   hydra-grill                           → grill        (NEW in #2689)
  *   hydra-research / hydra-issue-research /
  *     hydra-target-research               → research
+ *   hydra-sweep / hydra-target-sweep      → sweep         (NEW in #3187)
+ *   hydra-discover / hydra-target-discover → discover     (NEW in #3187)
+ *   hydra-tool-scout                      → scout         (NEW in #3187)
+ *   hydra-architect / -architecture-scan  → architecture  (NEW in #3187)
+ *   hydra-retro / hydra-target-retro      → retro         (NEW in #3187)
+ *   hydra-cleanup / hydra-target-cleanup  → cleanup       (NEW in #3187)
+ *   hydra-wire-or-retire                  → wire-or-retire (NEW in #3187)
+ *   hydra-design-qa                       → design-qa      (NEW in #3187)
+ *   hydra-doctor                          → health         (NEW in #3187)
  *   <anything else>                       → unmapped:<skill>  (NEW in #2689 —
  *     was the bare `$skill`; now a self-describing, never-empty sentinel plus a
  *     stderr diagnostic, so an unmapped skill is traceable, never "unknown")
+ *
+ * The #3187 lanes MUST stay aligned with ANCHOR_TYPE_BY_CLASS in
+ * src/autopilot/anchor-type.ts (the class-name equivalent classifier).
  *
  * Approach (mirrors dispatch-cycle-record-api-base.test.mts): drive dispatch.sh
  * with `hydra` NOT resolvable so the curl fallback fires, point HYDRA_API at an
@@ -143,6 +155,35 @@ describe("dispatch.sh cycle-record → anchorType is always explicit (issue #268
   test("hydra-research → research", () => {
     assert.equal(recordCycle("hydra-research").anchorType, "research");
   });
+
+  // Issue #3187: the case block now covers EVERY autopilot skill, not just the
+  // three reap.py fires cycle-record for today — lanes MUST stay aligned with
+  // ANCHOR_TYPE_BY_CLASS (src/autopilot/anchor-type.ts). One case per newly
+  // mapped skill/skill-family.
+  const NEWLY_MAPPED: ReadonlyArray<readonly [string, string]> = [
+    ["hydra-target-qa", "qa-review"],
+    ["hydra-target-research", "research"],
+    ["hydra-issue-research", "research"],
+    ["hydra-sweep", "sweep"],
+    ["hydra-target-sweep", "sweep"],
+    ["hydra-discover", "discover"],
+    ["hydra-target-discover", "discover"],
+    ["hydra-tool-scout", "scout"],
+    ["hydra-architect", "architecture"],
+    ["hydra-architecture-scan", "architecture"],
+    ["hydra-retro", "retro"],
+    ["hydra-target-retro", "retro"],
+    ["hydra-cleanup", "cleanup"],
+    ["hydra-target-cleanup", "cleanup"],
+    ["hydra-wire-or-retire", "wire-or-retire"],
+    ["hydra-design-qa", "design-qa"],
+    ["hydra-doctor", "health"],
+  ];
+  for (const [skill, lane] of NEWLY_MAPPED) {
+    test(`${skill} → ${lane} (issue #3187 skill-map expansion)`, () => {
+      assert.equal(recordCycle(skill).anchorType, lane);
+    });
+  }
 
   test("an unmapped skill records 'unmapped:<skill>' — self-describing, never empty, never 'unknown'", () => {
     const body = recordCycle("hydra-some-new-skill");

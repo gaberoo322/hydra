@@ -153,11 +153,33 @@ print(json.dumps({
     # invisible to metrics). Instead the fallback emits a diagnostic on stderr AND
     # a self-describing `unmapped:<skill>` sentinel — never empty, always traceable
     # back to the exact skill that needs a first-class mapping added above.
+    #
+    # Issue #3187: the map now covers EVERY autopilot skill, not just the three
+    # in reap.py's CYCLE_RECORD_SKILLS. Reap only fires cycle-record for
+    # {hydra-dev, hydra-target-build, hydra-grill} today, so the extra cases are
+    # defensive: if CYCLE_RECORD_SKILLS expands (or a direct caller invokes
+    # `dispatch.sh cycle-record` with another skill), the anchorType is a real
+    # lane instead of an `unmapped:*` sentinel the metrics READ path rejects
+    # (isMalformedAnchorType, src/autopilot/anchor-type.ts) → `unclassified`.
+    # Lanes MUST stay aligned with ANCHOR_TYPE_BY_CLASS in
+    # src/autopilot/anchor-type.ts (the class-name equivalent) so the two
+    # classifiers never disagree — a divergence would split one lane across two
+    # buckets in the aggregator. Every orchestrator skill has a `hydra-target-*`
+    # sibling that shares the lane (dev_orch/dev_target → work-queue, etc.).
     case "$skill" in
       hydra-dev|hydra-target-build) anchor_type="work-queue" ;;
-      hydra-qa) anchor_type="qa-review" ;;
+      hydra-qa|hydra-target-qa) anchor_type="qa-review" ;;
       hydra-grill) anchor_type="grill" ;;
       hydra-research|hydra-issue-research|hydra-target-research) anchor_type="research" ;;
+      hydra-sweep|hydra-target-sweep) anchor_type="sweep" ;;
+      hydra-discover|hydra-target-discover) anchor_type="discover" ;;
+      hydra-tool-scout) anchor_type="scout" ;;
+      hydra-architect|hydra-architecture-scan) anchor_type="architecture" ;;
+      hydra-retro|hydra-target-retro) anchor_type="retro" ;;
+      hydra-cleanup|hydra-target-cleanup) anchor_type="cleanup" ;;
+      hydra-wire-or-retire) anchor_type="wire-or-retire" ;;
+      hydra-design-qa) anchor_type="design-qa" ;;
+      hydra-doctor) anchor_type="health" ;;
       *)
         # A skill with no first-class mapping. Emit a diagnostic so the gap is
         # visible (and actionable — add a case above), and record a non-empty,
