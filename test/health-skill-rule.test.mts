@@ -53,6 +53,8 @@ function healthySnapshot(): HealthSnapshot {
     blCounts: { triage: 0, backlog: 2, inProgress: 1, blocked: 0, done: 5, total: 3 },
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
+    // Issue #3270: a non-zero count keeps the attribution-ledger-dark rule silent.
+    attributionLedgerCount: 1,
     // Issue #2492: a `healthy` reflection-deposit verdict — the reflection rule
     // fires only on `served-but-bucketed-none`, so this baseline stays clean.
     reflectionHealth: {
