@@ -52,6 +52,7 @@ import {
 // `cycle-close.ts` in issue #2768 — the call site is unchanged (it passes no
 // deps arg and relies on the module default deps); only the import path moves.
 import { recordCycle } from "../autopilot/cycle-close.ts";
+import { schemaValidationError } from "./route-helpers.ts";
 
 export function createAutopilotLifecycleRouter() {
   const router = Router();
@@ -62,10 +63,7 @@ export function createAutopilotLifecycleRouter() {
   router.post("/autopilot/cycle-record", async (req, res) => {
     const parsed = CycleRecordBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      return res.status(400).json({
-        error: "Missing cycleId",
-        issues: parsed.error.issues,
-      });
+      return res.status(400).json(schemaValidationError(parsed.error));
     }
     const result = await recordCycle(parsed.data);
     if (!result.ok) {
@@ -178,10 +176,7 @@ export function createAutopilotLifecycleRouter() {
   router.post("/autopilot/run-start", async (req, res) => {
     const parsed = RunStartBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      return res.status(400).json({
-        error: "Missing run_id",
-        issues: parsed.error.issues,
-      });
+      return res.status(400).json(schemaValidationError(parsed.error));
     }
     const result = await startRun(parsed.data);
     if (!result.ok) {
