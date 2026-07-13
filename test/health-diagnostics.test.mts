@@ -1064,38 +1064,39 @@ describe("parseProbes", () => {
     assert.ok(components.includes("infrastructure"));
   });
 
-  test("assembleProbeInputs round-trip: positional settled -> ProbeInputs -> HealthSnapshot", () => {
-    // Verifies the integer-to-field mapping in assembleProbeInputs by constructing
-    // a settled array at the exact positions, assembling ProbeInputs, and checking
-    // parseProbes produces the expected snapshot field values. This is the
-    // regression guard for the index table that used to live in health-diagnostics.ts.
+  test("assembleProbeInputs round-trip: keyed settled -> ProbeInputs -> HealthSnapshot", () => {
+    // Issue #3263: assembleProbeInputs now reads a key→settled RECORD, not a
+    // positional array — the integer-subscript contract is gone. This verifies the
+    // key-to-field mapping by constructing the settled record under each ProbeInputs
+    // key, assembling ProbeInputs, and checking parseProbes produces the expected
+    // snapshot field values. Regression guard for the keyed mapping table.
     const disk = { availableGb: 50, totalGb: 500, usedPercent: 10 };
     const mem = { totalGb: 32, availableGb: 20, usedPercent: 38 };
     const fv = (v: any) => ({ status: "fulfilled" as const, value: v });
-    const rv = () => ({ status: "rejected" as const, reason: new Error("failed") });
 
-    // Build a 19-element settled array (indices 0-18)
-    const settled: Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }> = [
-      fv({ status: "ok", redis: true, cycle: "idle", uptime: 42 }), // 0 basicHealth
-      fv({ vikingdb: { status: "running" }, openviking: { status: "running" } }), // 1 serviceProbes
-      fv({ running: true, consecutiveErrors: 2 }), // 2 scheduler
-      rv(), // 3 cycle (handler-only, not in ProbeInputs)
-      fv(7),   // 4 queueDepth
-      fv({ triage: 1, backlog: 2, inProgress: 0, blocked: 0, done: 0, total: 3 }), // 5 backlogCounts
-      fv({ trend: [], stats: {} }), // 6 metrics
-      fv(disk), // 7 disk
-      fv(mem),  // 8 mem
-      fv("active"),   // 9 sysdOrchestrator
-      fv("active"),   // 10 sysdWatchdog
-      fv("inactive"), // 11 sysdTargetWeb
-      fv({ planner: 5, executor: 3, skeptic: 1 }), // 12 patterns
-      fv(12),  // 13 reflections
-      fv({ status: "running", latencyMs: 100, resultCount: 4 }), // 14 ovSearch
-      fv({ memoryHuman: "512M", connectedClients: 3, uptimeSeconds: 900 }), // 15 redisInfo
-      fv({ engaged: true, since: 1234 }), // 16 emergencyBrake
-      fv([{ hour: 0, count: 5 }]), // 17 ovSearchWindow
-      fv({ available: 0.95 }), // 18 knowledgeContext
-    ];
+    // The former retired index-3 cycle slot has no key — it is simply absent from
+    // the record (no tombstone). A key not present coalesces to null, exactly as a
+    // rejected settle would.
+    const settled = {
+      basicHealth: fv({ status: "ok", redis: true, cycle: "idle", uptime: 42 }),
+      serviceProbes: fv({ vikingdb: { status: "running" }, openviking: { status: "running" } }),
+      scheduler: fv({ running: true, consecutiveErrors: 2 }),
+      queueDepth: fv(7),
+      backlogCounts: fv({ triage: 1, backlog: 2, inProgress: 0, blocked: 0, done: 0, total: 3 }),
+      metrics: fv({ trend: [], stats: {} }),
+      disk: fv(disk),
+      mem: fv(mem),
+      sysdOrchestrator: fv("active"),
+      sysdWatchdog: fv("active"),
+      sysdTargetWeb: fv("inactive"),
+      patterns: fv({ planner: 5, executor: 3, skeptic: 1 }),
+      reflections: fv(12),
+      ovSearch: fv({ status: "running", latencyMs: 100, resultCount: 4 }),
+      redisInfo: fv({ memoryHuman: "512M", connectedClients: 3, uptimeSeconds: 900 }),
+      emergencyBrake: fv({ engaged: true, since: 1234 }),
+      ovSearchWindow: fv([{ hour: 0, count: 5 }]),
+      knowledgeContext: fv({ available: 0.95 }),
+    };
 
     const probeInputs = assembleProbeInputs(settled);
     const snap = parseProbes(probeInputs);
@@ -1207,30 +1208,31 @@ describe("derivePipelineMetrics", () => {
 //
 // The ~60-line res.json({...}) block in the GET /health/deep handler used to be
 // reachable only via Express supertest. Extracted into a pure function, the
-// HealthSnapshot → wire-envelope mapping (field names, settled[17]/[18]
-// subscripts) is now unit-testable with a stub snapshot — no Redis/OpenViking.
+// HealthSnapshot → wire-envelope mapping (field names, the ovSearchWindow/
+// knowledgeContext probe reads) is now unit-testable with a stub snapshot — no
+// Redis/OpenViking. Issue #3263: those reads are keyed by name, not by subscript.
 // ---------------------------------------------------------------------------
 
 describe("projectHealthDeepResponse", () => {
   const CHECKED_AT = "2026-06-09T00:00:00.000Z";
 
-  // Build a ProbeInputs from a Record<number, any> of settled values.
-  // Carries indices 0-18 with everything rejected by default.
-  // After issue #1771 the positional index mapping lives in assembleProbeInputs
-  // (src/api/health.ts); the tests reuse it here to keep the integer-to-field
-  // correspondence a single source of truth.
-  function makeProbes(values: Record<number, any> = {}): ProbeInputs {
-    const arr: Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }> = [];
-    for (let i = 0; i <= 18; i++) {
-      if (i in values) arr.push({ status: "fulfilled", value: values[i] });
-      else arr.push({ status: "rejected", reason: new Error("probe failed") });
+  // Build a ProbeInputs from a keyed record of settled values (issue #3263).
+  // Every ProbeInputs async-probe key that is not supplied is left ABSENT, which
+  // assembleProbeInputs coalesces to null (equivalent to a rejected settle). The
+  // key-to-field mapping lives in assembleProbeInputs (src/health/fan-out.ts); the
+  // tests reuse it here to keep the key-to-field correspondence a single source of
+  // truth — no integer subscripts anywhere.
+  function makeProbes(values: Record<string, any> = {}): ProbeInputs {
+    const settled: Record<string, { status: "fulfilled" | "rejected"; value?: any; reason?: any }> = {};
+    for (const [key, value] of Object.entries(values)) {
+      settled[key] = { status: "fulfilled", value };
     }
-    return assembleProbeInputs(arr);
+    return assembleProbeInputs(settled as any);
   }
 
   function project(
     snap: HealthSnapshot,
-    opts: { activeCycle?: unknown; settledValues?: Record<number, any> } = {},
+    opts: { activeCycle?: unknown; settledValues?: Record<string, any> } = {},
   ) {
     const { diagnostics, status, summary } = assessHealth(snap);
     return projectHealthDeepResponse(
@@ -1339,16 +1341,16 @@ describe("projectHealthDeepResponse", () => {
     assert.deepEqual(r.intelligence.darkOutcomes, verdicts);
   });
 
-  test("ovSearchTrend/knowledgeContext coalesce to null when settled[17]/[18] rejected", () => {
-    const r = project(healthySnapshot()); // settled() rejects 17 and 18 by default
+  test("ovSearchTrend/knowledgeContext coalesce to null when their keys are absent (issue #3263)", () => {
+    const r = project(healthySnapshot()); // makeProbes leaves ovSearchWindow/knowledgeContext absent by default
     assert.equal(r.intelligence.ovSearchTrend, null);
     assert.equal(r.intelligence.knowledgeContext, null);
   });
 
-  test("ovSearchTrend ← settled[17], knowledgeContext ← settled[18] (correct subscripts)", () => {
+  test("ovSearchTrend ← ovSearchWindow key, knowledgeContext ← knowledgeContext key (issue #3263)", () => {
     const trend = { window: "24h", buckets: [{ hour: 0, zeroResultRate: 0.1 }] };
     const ctx = { window: "7d", days: [{ day: "2026-06-09", availability: 0.9 }] };
-    const r = project(healthySnapshot(), { settledValues: { 17: trend, 18: ctx } });
+    const r = project(healthySnapshot(), { settledValues: { ovSearchWindow: trend, knowledgeContext: ctx } });
     assert.deepEqual(r.intelligence.ovSearchTrend, trend);
     assert.deepEqual(r.intelligence.knowledgeContext, ctx);
     // ovSearch (the live probe) still flows straight from the snapshot.

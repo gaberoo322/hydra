@@ -109,59 +109,108 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 // — the gates flow in through the injectable deps bag, defaulting to the adapter's
 // singletons (so a no-gate production caller is unchanged).
 
-// ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
+// ---- The named async-probe registry — keyed, position-free (issue #3263) ----
 //
-// Issue #1771: the I/O layer is the only place that ever sees the raw positional
-// Promise.allSettled results — that positional identity is internal to the
-// fan-out and should not cross a module boundary. assembleProbeInputs() maps the
-// array immediately after the fan-out so parseProbes() (in the pure seam
-// src/health/diagnostics.ts) receives field names, not integer subscripts. The
-// ProbeInputs type is the only thing that crosses the seam; the SettledLike shape
-// and all integer index knowledge live here, in the fan-out owner (#840/#2089).
+// Issue #1771/#2089 moved the positional-to-named assembly here, but the
+// probe-to-index mapping was still an INTEGER-SUBSCRIPT contract shared across
+// three sites that had to stay in lock-step: the positional `Promise.allSettled`
+// array literal, an inline integer-legend comment, and `assembleProbeInputs`'
+// `settled[0]…[19]` reads. Adding a probe meant four synchronised edits; removing
+// a retired probe meant renumbering every higher slot; a dead slot (the retired
+// index-3 cycle probe) had to be held alive as an idle tombstone purely to avoid
+// renumbering.
 //
-// Index legend (the ONLY place these numbers appear):
-//   0 basicHealth, 1 serviceProbes, 2 scheduler, 3 cycle (handler-only),
-//   4 queueDepth, 5 backlogCounts, 6 metrics, 7 disk, 8 mem,
-//   9 sysdOrchestrator, 10 sysdWatchdog, 11 sysdTargetWeb,
-//   12 patterns, 13 reflections, 14 ovSearch, 15 redisInfo, 16 emergencyBrake.
-//   17/18 are ovSearchWindow/ovContextAvailability — consumed only by
-//   projectHealthDeepResponse, not part of ProbeInputs.
-//   19 ollamaVlm (issue #2278) — the Tailnet VLM-host liveness probe.
-type SettledLike = Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }>;
-export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
-  // Issue #1833: `val<T>(i)` coalesces a rejected settle to null and brands the
-  // fulfilled value as the field's declared type T. The settled array is
-  // heterogeneous + untyped (Promise.allSettled over 19 unrelated probes), so the
-  // fulfilled branch is an unavoidable assertion — but naming T at each call site
-  // hands the compiler the field's expected shape, so the object literal below is
-  // type-checked against ProbeInputs by NAME (a renamed/dropped field is now a
-  // build error here, the fan-out owner, instead of a silent runtime miss in
-  // parseProbes' `|| default`).
-  const val = <T>(i: number): T | null =>
-    settled[i] && settled[i].status === "fulfilled" ? ((settled[i] as any).value as T) : null;
+// Issue #3263 replaces the positional array with a NAMED registry: each async
+// probe is a `{ key, run }` descriptor whose `key` is the `ProbeInputs` field it
+// feeds. `collectProbeInputs` builds the descriptor list from the resolved deps,
+// runs every `run()` through ONE `Promise.allSettled`, and folds the results into
+// a key→settled record. `assembleProbeInputs` reads that record BY KEY. The
+// integer subscript is gone from every site: adding a probe is one descriptor
+// entry (+ its `ProbeInputs` field); removing a probe is deleting one entry (no
+// renumbering, no tombstone). The retired index-3 cycle probe is simply absent.
+//
+// `ASYNC_PROBE_KEYS` names the async settle-array subset of `ProbeInputs`. The
+// non-async in-memory reads (skillCatalog #2386, darkOutcomes #2805,
+// reflectionOutcomesLiveness #3251) are NOT registry entries — they are direct
+// never-throw reads merged onto the record after the fan-out, exactly as before.
+
+/**
+ * The `ProbeInputs` fields fed by an async settle-array probe (issue #3263). The
+ * three non-async in-memory reads (skillCatalog / darkOutcomes /
+ * reflectionOutcomesLiveness) are deliberately excluded — they are merged by
+ * `collectProbeInputs` after the fan-out, not run as `Promise.allSettled` probes.
+ */
+type AsyncProbeKey = Exclude<
+  keyof ProbeInputs,
+  "skillCatalog" | "darkOutcomes" | "reflectionOutcomesLiveness"
+>;
+
+/**
+ * One entry in the named async-probe registry (issue #3263). `key` is the
+ * `ProbeInputs` field this probe feeds; `run` is the never-blocking closure the
+ * fan-out awaits through `Promise.allSettled` (a rejected settle coalesces the
+ * field to `null`). The registry replaces the former integer-subscript array — the
+ * probe-to-field contract now lives in ONE place, keyed by name.
+ */
+export interface AsyncProbeDescriptor {
+  key: AsyncProbeKey;
+  run: () => Promise<unknown>;
+}
+
+/** A key→settled-result record — the keyed successor to the positional array. */
+type SettledByKey = Partial<
+  Record<AsyncProbeKey, { status: "fulfilled" | "rejected"; value?: any; reason?: any }>
+>;
+
+// ---- assembleProbeInputs — maps the keyed settled record to named ProbeInputs --
+//
+// Issue #1771: the I/O layer is the only place that ever sees the raw
+// Promise.allSettled results — that identity is internal to the fan-out and must
+// not cross a module boundary. `assembleProbeInputs` maps the settled results
+// immediately after the fan-out so parseProbes() (in the pure seam
+// src/health/diagnostics.ts) receives field names. The ProbeInputs type is the
+// only thing that crosses the seam.
+//
+// Issue #3263: the input is now a key→settled RECORD, not a positional array —
+// there is no integer subscript anywhere. `val("basicHealth")` reads the settle
+// for that field by name; a missing/rejected settle coalesces to null.
+export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
+  // Issue #1833/#3263: `val<T>(key)` coalesces a rejected/absent settle to null
+  // and brands the fulfilled value as the field's declared type T. The settled
+  // record is heterogeneous + untyped (Promise.allSettled over unrelated probes),
+  // so the fulfilled branch is an unavoidable assertion — but naming T at each
+  // call site hands the compiler the field's expected shape, so the object literal
+  // below is type-checked against ProbeInputs BY NAME (a renamed/dropped field is
+  // now a build error here, the fan-out owner, instead of a silent runtime miss in
+  // parseProbes' `|| default`). The `<K extends AsyncProbeKey>` binding ties the
+  // string key to a real ProbeInputs field, so a typo is a compile error too.
+  const val = <T>(key: AsyncProbeKey): T | null => {
+    const s = settled[key];
+    return s && s.status === "fulfilled" ? (s.value as T) : null;
+  };
   return {
-    basicHealth: val<ProbeInputs["basicHealth"]>(0),
-    serviceProbes: val<ProbeInputs["serviceProbes"]>(1),
-    scheduler: val<ProbeInputs["scheduler"]>(2),
-    queueDepth: val<ProbeInputs["queueDepth"]>(4),
-    backlogCounts: val<ProbeInputs["backlogCounts"]>(5),
-    metrics: val<ProbeInputs["metrics"]>(6),
-    disk: val<ProbeInputs["disk"]>(7),
-    mem: val<ProbeInputs["mem"]>(8),
-    sysdOrchestrator: val<ProbeInputs["sysdOrchestrator"]>(9),
-    sysdWatchdog: val<ProbeInputs["sysdWatchdog"]>(10),
-    sysdTargetWeb: val<ProbeInputs["sysdTargetWeb"]>(11),
-    patterns: val<ProbeInputs["patterns"]>(12),
-    reflections: val<ProbeInputs["reflections"]>(13),
-    ovSearch: val<ProbeInputs["ovSearch"]>(14),
-    redisInfo: val<ProbeInputs["redisInfo"]>(15),
-    emergencyBrake: val<ProbeInputs["emergencyBrake"]>(16),
-    ovSearchWindow: val<ProbeInputs["ovSearchWindow"]>(17),
-    knowledgeContext: val<ProbeInputs["knowledgeContext"]>(18),
-    // Issue #2278: the Tailnet Ollama VLM-host liveness probe (index 19).
-    ollamaVlm: val<ProbeInputs["ollamaVlm"]>(19),
+    basicHealth: val<ProbeInputs["basicHealth"]>("basicHealth"),
+    serviceProbes: val<ProbeInputs["serviceProbes"]>("serviceProbes"),
+    scheduler: val<ProbeInputs["scheduler"]>("scheduler"),
+    queueDepth: val<ProbeInputs["queueDepth"]>("queueDepth"),
+    backlogCounts: val<ProbeInputs["backlogCounts"]>("backlogCounts"),
+    metrics: val<ProbeInputs["metrics"]>("metrics"),
+    disk: val<ProbeInputs["disk"]>("disk"),
+    mem: val<ProbeInputs["mem"]>("mem"),
+    sysdOrchestrator: val<ProbeInputs["sysdOrchestrator"]>("sysdOrchestrator"),
+    sysdWatchdog: val<ProbeInputs["sysdWatchdog"]>("sysdWatchdog"),
+    sysdTargetWeb: val<ProbeInputs["sysdTargetWeb"]>("sysdTargetWeb"),
+    patterns: val<ProbeInputs["patterns"]>("patterns"),
+    reflections: val<ProbeInputs["reflections"]>("reflections"),
+    ovSearch: val<ProbeInputs["ovSearch"]>("ovSearch"),
+    redisInfo: val<ProbeInputs["redisInfo"]>("redisInfo"),
+    emergencyBrake: val<ProbeInputs["emergencyBrake"]>("emergencyBrake"),
+    ovSearchWindow: val<ProbeInputs["ovSearchWindow"]>("ovSearchWindow"),
+    knowledgeContext: val<ProbeInputs["knowledgeContext"]>("knowledgeContext"),
+    // Issue #2278: the Tailnet Ollama VLM-host liveness probe.
+    ollamaVlm: val<ProbeInputs["ollamaVlm"]>("ollamaVlm"),
     // Issue #2386: the skill-catalog state is NOT an async settle-array probe (it
-    // is a synchronous in-memory read), so it has no positional index here.
+    // is a synchronous in-memory read), so it is not a registry key here.
     // assembleProbeInputs sets it null; collectProbeInputs overrides it with the
     // live read. A direct caller of assembleProbeInputs (e.g. the round-trip test)
     // therefore gets null, which parseProbes coalesces to the empty-catalog
@@ -183,11 +232,14 @@ export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
   };
 }
 
-// ---- collectProbeInputs — runs the 19-probe fan-out and assembles ProbeInputs --
+// ---- collectProbeInputs — runs the named-registry fan-out and assembles ProbeInputs --
 //
-// The single entry point. Runs every probe through one `Promise.allSettled`
-// (so a slow/failing probe never blocks the others or the response) and folds the
-// positional results to a named `ProbeInputs` record via `assembleProbeInputs`.
+// The single entry point. Builds the named async-probe registry from the resolved
+// deps, runs every descriptor's `run()` through one `Promise.allSettled` (so a
+// slow/failing probe never blocks the others or the response), zips the results
+// back to their keys, and folds that key→settled record to a named `ProbeInputs`
+// record via `assembleProbeInputs`. No integer subscript appears anywhere (issue
+// #3263) — the probe-to-field contract is keyed by name in the registry below.
 //
 // Every probe is an injectable dependency (defaulted to its real implementation)
 // so the full pipeline is testable without standing up Redis/OpenViking/the host
@@ -312,106 +364,142 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     vlmWakeGate: vlmGate = getWolGates().vlm,
   } = deps;
 
-  const settled = await Promise.allSettled([
-    /* 0: basic health */ (async () => {
-      const killed = killFileExists();
-      const redisOk = await pingRedis();
-      // In-process cycle removed in PR-3 (issue #383); status is "idle" forever.
-      return { status: killed ? "killed" : "ok", redis: redisOk, cycle: "idle", uptime: process.uptime() };
-    })(),
-    /* 1: service probes */ (async () => {
-      // Issue #1324: probe/probeOv are the shared module-level helpers
-      // probeService()/probeOv() (see /health/services) — same classification,
-      // one place, unit-tested. vikingdb stays an inline probe (not an OpenViking
-      // boundary); openviking routes through the OV Request Adapter (#954,
-      // resolves OPENVIKING_URL — no hardcoded localhost:1933). openai-proxy
-      // diagnostic removed in PR-3 (issue #383).
-      // Issue #2013: a DISTINCT embed-backend key samples OV's dense-embedding
-      // backend (ollama-embed) via the embedding-exercising search/find transport
-      // through the OV Request Adapter. The svcProbes map is keyed (post-#1869),
-      // so this is an ADDED key — vikingdb/openviking unchanged.
-      const [vikingdb, ov, embedBackend] = await Promise.all([
-        probeServiceImpl("http://localhost:5000/health"),
-        probeOvImpl(),
-        probeEmbedBackendImpl(),
-      ]);
-      // Issue #2228: if the embed-backend probe failed, FIRE a best-effort
-      // Wake-on-LAN of the gaming PC and return the current probe result
-      // immediately — never block the /health/deep fan-out waiting for the box
-      // to POST. The powered-off box self-heals (the #1794 stretch goal) by the
-      // NEXT scheduled health tick; this tick still surfaces the failure (so the
-      // #2131 alert fires correctly while it's down). NEVER throws.
-      const embedFinal = await maybeWakeEmbedBackend(embedBackend, { gate: embedGate });
-      return { vikingdb, openviking: ov, "embed-backend": embedFinal };
-    })(),
-    /* 2 */ schedulerStatus(),
-    /* 3 */ Promise.resolve({ status: "idle" }),
-    /* 4 */ workQueueLen(),
-    /* 5 */ backlogCounts(),
-    /* 6 */ (async () => ({ trend: await metricsTrend(20), stats: await aggregateStats(20) }))(),
+  // Issue #3263: the named async-probe registry — the SINGLE source of the
+  // probe-to-field contract. Each descriptor's `key` is the ProbeInputs field it
+  // feeds; `run` is its never-blocking closure. No integer subscript, no legend
+  // comment, no retired-slot tombstone: adding a probe is one entry here (+ the
+  // ProbeInputs field), removing one is deleting one entry. The former index-3
+  // cycle probe (a permanently-idle tombstone kept alive only to avoid
+  // renumbering) is simply ABSENT — the in-process cycle was removed in PR-3
+  // (issue #383) and the handler hardcodes activeCycle=null.
+  const descriptors: AsyncProbeDescriptor[] = [
+    {
+      key: "basicHealth",
+      run: async () => {
+        const killed = killFileExists();
+        const redisOk = await pingRedis();
+        // In-process cycle removed in PR-3 (issue #383); status is "idle" forever.
+        return { status: killed ? "killed" : "ok", redis: redisOk, cycle: "idle", uptime: process.uptime() };
+      },
+    },
+    {
+      key: "serviceProbes",
+      run: async () => {
+        // Issue #1324: probe/probeOv are the shared module-level helpers
+        // probeService()/probeOv() (see /health/services) — same classification,
+        // one place, unit-tested. vikingdb stays an inline probe (not an OpenViking
+        // boundary); openviking routes through the OV Request Adapter (#954,
+        // resolves OPENVIKING_URL — no hardcoded localhost:1933). openai-proxy
+        // diagnostic removed in PR-3 (issue #383).
+        // Issue #2013: a DISTINCT embed-backend key samples OV's dense-embedding
+        // backend (ollama-embed) via the embedding-exercising search/find transport
+        // through the OV Request Adapter. The svcProbes map is keyed (post-#1869),
+        // so this is an ADDED key — vikingdb/openviking unchanged.
+        const [vikingdb, ov, embedBackend] = await Promise.all([
+          probeServiceImpl("http://localhost:5000/health"),
+          probeOvImpl(),
+          probeEmbedBackendImpl(),
+        ]);
+        // Issue #2228: if the embed-backend probe failed, FIRE a best-effort
+        // Wake-on-LAN of the gaming PC and return the current probe result
+        // immediately — never block the /health/deep fan-out waiting for the box
+        // to POST. The powered-off box self-heals (the #1794 stretch goal) by the
+        // NEXT scheduled health tick; this tick still surfaces the failure (so the
+        // #2131 alert fires correctly while it's down). NEVER throws.
+        const embedFinal = await maybeWakeEmbedBackend(embedBackend, { gate: embedGate });
+        return { vikingdb, openviking: ov, "embed-backend": embedFinal };
+      },
+    },
+    { key: "scheduler", run: () => schedulerStatus() },
+    { key: "queueDepth", run: () => workQueueLen() },
+    { key: "backlogCounts", run: () => backlogCounts() },
+    { key: "metrics", run: async () => ({ trend: await metricsTrend(20), stats: await aggregateStats(20) }) },
     // Issue #939: host-info probes go through the Host-Probe Adapter, which owns
     // the argv + timeout + df/free parse and returns a typed never-throw result.
     // The fan-out coalesces a probe failure back to the same shape the old
     // `.catch()` sentinels produced (null disk/mem, "unknown" service-status) so
     // parseProbes' downstream contract is unchanged — the difference is the
     // failure mode is now a discriminated `code` we log, not a silent swallow.
-    /* 7  df    */ disk().then(r => (isProbeFailure(r) ? null : r.data)),
-    /* 8  free  */ mem().then(r => (isProbeFailure(r) ? null : r.data)),
-    /* 9  sysd  */ serviceStatus("hydra-orchestrator.service").then(r => (isProbeFailure(r) ? "unknown" : r.data)),
-    /* 10 sysd  */ serviceStatus("hydra-watchdog.timer").then(r => (isProbeFailure(r) ? "unknown" : r.data)),
-    /* 11 sysd  */ serviceStatus(targetServiceName()).then(r => (isProbeFailure(r) ? "unknown" : r.data)),
-    /* 12 */ (async () => {
-      const [p, e, s] = await Promise.all([memoryPatterns("planner"), memoryPatterns("executor"), memoryPatterns("skeptic")]);
-      const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };
-      return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
-    })(),
-    /* 13 */ reflectionKeys(),
-    /* 14 */ (async () => {
-      // Issue #954: OV search probe via the adapter (resolves OPENVIKING_URL +
-      // auth headers + timeout + JSON unwrap) — no hardcoded localhost:1933, no
-      // inline X-Api-Key. Never throws.
-      // Issue #1032: timeout raised to OV_SEARCH_PROBE_TIMEOUT_MS and the
-      // result→snapshot mapping lives in the pure, unit-tested
-      // classifyOvSearchProbe so timeout vs real-failure is testable.
-      const start = Date.now();
-      const result = await ovPostJsonImpl<any>("/api/v1/search/find", { query: "system health", limit: 3 }, { timeout: OV_SEARCH_PROBE_TIMEOUT_MS });
-      return classifyOvSearchProbe(result, Date.now() - start);
-    })(),
-    /* 15: I/O only — the raw INFO regex parse lives in the pure
-       parseRedisInfoSnapshot in diagnostics.ts (issue #1856). */
-    (async () => {
-      try {
-        const [info, clients, server] = await Promise.all([redisInfoImpl("memory"), redisInfoImpl("clients"), redisInfoImpl("server")]);
-        return parseRedisInfoSnapshot(info, clients, server);
-      } catch { return null; }
-    })(),
-    /* 16: emergency brake (issue #744) */ emergencyBrake(),
+    { key: "disk", run: () => disk().then(r => (isProbeFailure(r) ? null : r.data)) },
+    { key: "mem", run: () => mem().then(r => (isProbeFailure(r) ? null : r.data)) },
+    { key: "sysdOrchestrator", run: () => serviceStatus("hydra-orchestrator.service").then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
+    { key: "sysdWatchdog", run: () => serviceStatus("hydra-watchdog.timer").then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
+    { key: "sysdTargetWeb", run: () => serviceStatus(targetServiceName()).then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
+    {
+      key: "patterns",
+      run: async () => {
+        const [p, e, s] = await Promise.all([memoryPatterns("planner"), memoryPatterns("executor"), memoryPatterns("skeptic")]);
+        const cnt = (raw: string) => { try { return JSON.parse(raw).length; } catch { return 0; } };
+        return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
+      },
+    },
+    { key: "reflections", run: () => reflectionKeys() },
+    {
+      key: "ovSearch",
+      run: async () => {
+        // Issue #954: OV search probe via the adapter (resolves OPENVIKING_URL +
+        // auth headers + timeout + JSON unwrap) — no hardcoded localhost:1933, no
+        // inline X-Api-Key. Never throws.
+        // Issue #1032: timeout raised to OV_SEARCH_PROBE_TIMEOUT_MS and the
+        // result→snapshot mapping lives in the pure, unit-tested
+        // classifyOvSearchProbe so timeout vs real-failure is testable.
+        const start = Date.now();
+        const result = await ovPostJsonImpl<any>("/api/v1/search/find", { query: "system health", limit: 3 }, { timeout: OV_SEARCH_PROBE_TIMEOUT_MS });
+        return classifyOvSearchProbe(result, Date.now() - start);
+      },
+    },
+    {
+      // I/O only — the raw INFO regex parse lives in the pure
+      // parseRedisInfoSnapshot in diagnostics.ts (issue #1856).
+      key: "redisInfo",
+      run: async () => {
+        try {
+          const [info, clients, server] = await Promise.all([redisInfoImpl("memory"), redisInfoImpl("clients"), redisInfoImpl("server")]);
+          return parseRedisInfoSnapshot(info, clients, server);
+        } catch { return null; }
+      },
+    },
+    { key: "emergencyBrake", run: () => emergencyBrake() /* issue #744 */ },
     // Issue #1440: persisted OV search-quality trend (24h hour-buckets) and
     // per-day knowledge-context availability (7d). Both degrade to null on a
     // Redis error so the probe never blocks /health/deep — the projection
-    // coalesces a rejected settle to null.
-    /* 17 */ ovSearchWindow(24),
-    /* 18 */ knowledgeContextAvailability(7),
-    // Issue #2278: DIRECT liveness probe of the Tailnet Ollama VLM host
-    // (gabes-desktop-1:11434) — the host OpenViking uses for its vision/indexing
-    // model. Distinct from the index-1 embed-backend probe (OV-internal
-    // ollama-embed). A `down` result is surfaced as `ollamaVlm` on the wire and
-    // flips the deep-health envelope to `degraded: true` (a visibility signal,
-    // never a 5xx). The probe is contractually never-throwing.
-    // Issue #2335: if the VLM host reads `status:down`, FIRE a best-effort
-    // Wake-on-LAN of the gaming PC and return the current probe result
-    // immediately (never block the fan-out on a re-probe). This is the host that
-    // OpenViking's skill-registration handler blocks on, so waking it lets the
-    // FROZEN registration chore self-heal the empty skill catalog on the next
-    // hourly tick once the box answers. THIS tick still surfaces `down` so the
-    // #2278 degraded signal + #2131 alert stay correct. NEVER throws.
-    /* 19 */ (async () => maybeWakeVlmHost(await probeOllamaVlmImpl(), { gate: vlmGate }))(),
-  ]);
+    // coalesces a rejected settle to null. Consumed only by
+    // projectHealthDeepResponse (not parseProbes).
+    { key: "ovSearchWindow", run: () => ovSearchWindow(24) },
+    { key: "knowledgeContext", run: () => knowledgeContextAvailability(7) },
+    {
+      // Issue #2278: DIRECT liveness probe of the Tailnet Ollama VLM host
+      // (gabes-desktop-1:11434) — the host OpenViking uses for its vision/indexing
+      // model. Distinct from the serviceProbes embed-backend probe (OV-internal
+      // ollama-embed). A `down` result is surfaced as `ollamaVlm` on the wire and
+      // flips the deep-health envelope to `degraded: true` (a visibility signal,
+      // never a 5xx). The probe is contractually never-throwing.
+      // Issue #2335: if the VLM host reads `status:down`, FIRE a best-effort
+      // Wake-on-LAN of the gaming PC and return the current probe result
+      // immediately (never block the fan-out on a re-probe). This is the host that
+      // OpenViking's skill-registration handler blocks on, so waking it lets the
+      // FROZEN registration chore self-heal the empty skill catalog on the next
+      // hourly tick once the box answers. THIS tick still surfaces `down` so the
+      // #2278 degraded signal + #2131 alert stay correct. NEVER throws.
+      key: "ollamaVlm",
+      run: async () => maybeWakeVlmHost(await probeOllamaVlmImpl(), { gate: vlmGate }),
+    },
+  ];
+
+  // Run every descriptor through ONE Promise.allSettled (so a slow/failing probe
+  // never blocks the others), then zip the positional results back to their keys.
+  // The integer index is a private detail of this zip — it never escapes into the
+  // probe-to-field contract, which is now keyed by name in the registry above.
+  const results = await Promise.allSettled(descriptors.map(d => d.run()));
+  const settled: SettledByKey = {};
+  for (let i = 0; i < descriptors.length; i++) {
+    settled[descriptors[i].key] = results[i];
+  }
 
   // Issue #2386: the in-process skill-catalog state is a synchronous, never-throw
-  // in-memory copy — not an async probe — so it is read directly (not via the
-  // Promise.allSettled array, which is reserved for I/O probes mapped by integer
-  // position) and merged onto the assembled named record. parseProbes copies it
+  // in-memory copy — not an async probe — so it is read directly (not a descriptor
+  // in the named async-probe registry, which is reserved for I/O settle-array
+  // probes) and merged onto the assembled named record. parseProbes copies it
   // onto HealthSnapshot.skillCatalog; the two skill-catalog rules read it from the
   // snapshot, so this fan-out is the single place the live read happens.
   // Issue #2805: the dark leading-outcome verdicts are a direct never-throw read
