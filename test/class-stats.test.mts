@@ -52,6 +52,8 @@ function rec(over: Partial<DispatchOutcomeRecord> = {}): DispatchOutcomeRecord {
     outcome: "completed",
     tokens: 50_000,
     durationMs: 60_000,
+    escalationAttempt: null,
+    escalatedModel: null,
     recordedAt: NOW - 3600_000,
     ...over,
   };

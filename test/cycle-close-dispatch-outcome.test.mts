@@ -147,6 +147,45 @@ describe("recordCycle — per-dispatch outcome record (issue #2942)", () => {
     assert.equal(rec!.tokens, 123456);
     assert.equal(rec!.durationMs, 90_000);
     assert.equal(rec!.recordedAt, FIXED_NOW_MS);
+    // Issue #3284: a non-escalation dispatch records null provenance.
+    assert.equal(rec!.escalationAttempt, null);
+    assert.equal(rec!.escalatedModel, null);
+  });
+
+  test("threads cascade-escalation provenance onto the record (issue #3284)", async () => {
+    const store = newStore();
+    await recordCycle(
+      {
+        cycleId: "worktree-agent-277e4476-t2-cleanup_orch",
+        status: "completed",
+        tokens: 55000,
+        escalationAttempt: 2,
+        escalatedModel: "sonnet",
+      } as any,
+      makeDeps(store),
+    );
+    const rec = store.outcomes.get("worktree-agent-277e4476-t2-cleanup_orch");
+    assert.ok(rec);
+    assert.equal(rec!.escalationAttempt, 2);
+    assert.equal(rec!.escalatedModel, "sonnet");
+    assert.equal(rec!.tokens, 55000, "actual tokens carry the cost-delta (invariant 7)");
+  });
+
+  test("a malformed/absent escalation field records null, never fabricates a marker (#3284)", async () => {
+    const store = newStore();
+    await recordCycle(
+      {
+        cycleId: HARNESS_CYCLE_ID,
+        status: "completed",
+        // escalatedModel present but empty; escalationAttempt absent → both null.
+        escalatedModel: "",
+      } as any,
+      makeDeps(store),
+    );
+    const rec = store.outcomes.get(HARNESS_CYCLE_ID);
+    assert.ok(rec);
+    assert.equal(rec!.escalationAttempt, null);
+    assert.equal(rec!.escalatedModel, null);
   });
 
   test("a failed dispatch still produces a record with outcome=failed (AC1)", async () => {

@@ -9,13 +9,19 @@ import { Section } from "./Section.jsx";
  * `_rule_escalation` re-dispatched a cheap-tier class at a stronger model
  * (`cascade_routing_escalation`), how often the Subscription-Usage-Tracker hard
  * stop threw an otherwise-eligible escalation away (`cascade_routing_blocked`),
- * the per-trigger breakdown (subagent_noop vs subagent_failure), and an
- * estimated token cost delta. Answers architecture-review rec #6's open "is
- * cascading paying off, or is the gate too restrictive?".
+ * the per-trigger breakdown (subagent_noop vs subagent_failure), the REALISED
+ * token cost delta, and the post-escalation merge rate. Answers architecture-
+ * review rec #6's open "is cascading paying off, or is the gate too restrictive?".
  *
- * The cost delta is an ESTIMATE (Σ tokens(strong) − tokens(cheap) over the
- * escalations) — the exact realised cost is not known at the decision point the
- * event is emitted. The relative trend, not the absolute number, is the signal.
+ * The cost delta is the ACTUAL per-dispatch token spend recorded on the escalated
+ * dispatches' outcome records (#2942, the authoritative ADR-0016 token plane) —
+ * NOT a re-estimated per-model budget (design-concept invariant 7). The
+ * post-escalation merge rate (`postEscalationMergeRate`, invariant 8) is the
+ * fraction of terminal escalated dispatches that still merged — the measurement
+ * of the issue's ">85% escalation-triggered cycles still merge" criterion.
+ * Because these two figures derive from the outcome plane (which lags the
+ * decision-time count until the escalated attempts reap), they read 0 with an
+ * explicit "not yet measured" hint until the first escalated dispatch settles.
  * Polls every 5min to match the Outcomes page cadence.
  *
  * Low-N guard (issue #3284 success criterion c + design-concept q6): a sample of
@@ -49,12 +55,20 @@ export function CascadeRouting() {
   const blocked = typeof data?.blocked === "number" ? data.blocked : 0;
   const gateBlockRate =
     typeof data?.gateBlockRate === "number" ? data.gateBlockRate : 0;
-  const estimatedCostDelta =
-    typeof data?.estimatedCostDelta === "number" ? data.estimatedCostDelta : 0;
+  const costDeltaTokens =
+    typeof data?.costDeltaTokens === "number" ? data.costDeltaTokens : 0;
   const avgCostDeltaPerEscalation =
     typeof data?.avgCostDeltaPerEscalation === "number"
       ? data.avgCostDeltaPerEscalation
       : 0;
+  const measuredEscalations =
+    typeof data?.measuredEscalations === "number" ? data.measuredEscalations : 0;
+  const postEscalationMergeRate =
+    typeof data?.postEscalationMergeRate === "number"
+      ? data.postEscalationMergeRate
+      : 0;
+  const terminalEscalations =
+    typeof data?.terminalEscalations === "number" ? data.terminalEscalations : 0;
   const byTrigger = data?.byTrigger || {};
   const sampleSize = typeof data?.sampleSize === "number" ? data.sampleSize : 0;
 
@@ -71,8 +85,11 @@ export function CascadeRouting() {
     { label: "Gate-blocked", value: String(blocked), text: "text-amber-300" },
     { label: "Gate-block rate", value: fmtPct(gateBlockRate), text: "text-rose-300" },
     {
-      label: "Est. cost delta",
-      value: `${fmtTokens(estimatedCostDelta)} tok`,
+      label: "Cost delta (actual)",
+      // Realised token spend of the escalated dispatches (#2942). Reads "—" until
+      // the first escalated attempt reaps a token figure (the outcome plane lags
+      // the decision-time count).
+      value: measuredEscalations > 0 ? `${fmtTokens(costDeltaTokens)} tok` : "—",
       text: "text-sky-300",
     },
   ];
@@ -80,7 +97,7 @@ export function CascadeRouting() {
   return (
     <Section
       title="Cascade routing"
-      subtitle="Cheap-tier → strong-model escalations (PR #3274), how often the usage gate throttled them, and the estimated token cost delta."
+      subtitle="Cheap-tier → strong-model escalations (PR #3274), how often the usage gate throttled them, their actual token cost delta, and the post-escalation merge rate."
       right={sampleSize > 0 && `${sampleSize} decisions`}
       loading={loading}
       error={error}
@@ -116,11 +133,27 @@ export function CascadeRouting() {
             ))}
           </div>
 
-          {/* Per-escalation average cost delta */}
+          {/* Post-escalation merge rate (design-concept invariant 8): the
+              fraction of TERMINAL escalated dispatches that still merged — the
+              measurement of the issue's >85% success criterion. "—" until the
+              first escalated dispatch reaches a merged/failed outcome. */}
           <div className="flex items-center justify-between gap-3 bg-zinc-900/40 rounded-md border border-zinc-700 px-3 py-2">
-            <span className="text-sm text-zinc-100">Est. cost delta / escalation</span>
+            <span className="text-sm text-zinc-100">Post-escalation merge rate</span>
+            <span className="text-sm font-mono text-emerald-300">
+              {terminalEscalations > 0
+                ? `${fmtPct(postEscalationMergeRate)} (${terminalEscalations})`
+                : "not yet measured"}
+            </span>
+          </div>
+
+          {/* Per-escalation average ACTUAL cost delta (#2942). "—" until the
+              first escalated dispatch reaps a token figure. */}
+          <div className="flex items-center justify-between gap-3 bg-zinc-900/40 rounded-md border border-zinc-700 px-3 py-2">
+            <span className="text-sm text-zinc-100">Cost delta / escalation (actual)</span>
             <span className="text-sm font-mono text-sky-300">
-              {escalations > 0 ? `${fmtTokens(avgCostDeltaPerEscalation)} tok` : "—"}
+              {measuredEscalations > 0
+                ? `${fmtTokens(avgCostDeltaPerEscalation)} tok`
+                : "not yet measured"}
             </span>
           </div>
 

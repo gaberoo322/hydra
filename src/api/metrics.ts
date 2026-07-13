@@ -354,12 +354,17 @@ export function createMetricsRouter() {
   // cheap-tier class at a stronger model (`cascade_routing_escalation`), how
   // often the Subscription-Usage-Tracker hard stop threw an otherwise-eligible
   // escalation away (`cascade_routing_blocked`), a per-class + per-trigger
-  // breakdown, and an estimated token cost delta. Answers architecture-review
-  // rec #6's open "is cascading paying off, or is the gate too restrictive?".
+  // breakdown, the REALISED token cost delta (summed from the escalated
+  // dispatches' ACTUAL recorded tokens on the #2942 outcome plane — NOT a static
+  // per-model estimate; design-concept invariant 7), and the post-escalation
+  // merge rate (`postEscalationMergeRate`; invariant 8). Answers architecture-
+  // review rec #6's "is cascading paying off, or is the gate too restrictive?".
   //
-  // A pure read over the durable bounded ring (src/redis/cascade-telemetry.ts)
-  // the slot-events bridge feeds; `count` bounds the window (default the full
-  // ring). Read-only, additive — no new write path here.
+  // A pure read over two planes joined at read time: the durable bounded ring
+  // (src/redis/cascade-telemetry.ts) the slot-events bridge feeds for the counts,
+  // and listDispatchOutcomes (#2942) for the actual-token cost + merge rate.
+  // `count` bounds the ring window (default the full ring). Read-only, additive —
+  // no new write path here.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   router.get(

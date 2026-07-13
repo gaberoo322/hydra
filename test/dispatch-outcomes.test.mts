@@ -50,6 +50,8 @@ function record(over: Partial<DispatchOutcomeRecord> = {}): DispatchOutcomeRecor
     outcome: "completed",
     tokens: 120_000,
     durationMs: 90_000,
+    escalationAttempt: null,
+    escalatedModel: null,
     recordedAt: 1_750_000_000_000,
     ...over,
   };
@@ -112,6 +114,9 @@ describe("dispatch-outcomes Redis seam (issue #2942)", () => {
     const hash = await redis.hgetall(dispatchOutcomeKey(rec.cycleId));
     assert.equal("runIdPrefix" in hash, false);
     assert.equal("tokens" in hash, false);
+    // Issue #3284: a non-escalation dispatch omits both escalation fields.
+    assert.equal("escalationAttempt" in hash, false);
+    assert.equal("escalatedModel" in hash, false);
 
     const listed = await listDispatchOutcomes({ sinceMs: 0 });
     assert.equal(listed.ok, true);
@@ -126,6 +131,32 @@ describe("dispatch-outcomes Redis seam (issue #2942)", () => {
     assert.equal(got.tokens, null);
     assert.equal(got.durationMs, null);
     assert.equal(got.outcome, "completed");
+    assert.equal(got.escalationAttempt, null);
+    assert.equal(got.escalatedModel, null);
+  });
+
+  test("escalation provenance round-trips (issue #3284, invariant 7 marker)", async () => {
+    const rec = record({
+      cycleId: "worktree-agent-277e4476-t2-cleanup_orch",
+      className: "cleanup_orch",
+      tokens: 55_000,
+      outcome: "merged",
+      escalationAttempt: 2,
+      escalatedModel: "sonnet",
+    });
+    assert.equal((await putDispatchOutcome(rec)).ok, true);
+
+    const hash = await redis.hgetall(dispatchOutcomeKey(rec.cycleId));
+    assert.equal(hash.escalationAttempt, "2");
+    assert.equal(hash.escalatedModel, "sonnet");
+
+    const listed = await listDispatchOutcomes({ sinceMs: 0 });
+    assert.equal(listed.ok, true);
+    if (listed.ok !== true) return;
+    const got = listed.records.find((r) => r.cycleId === rec.cycleId);
+    assert.ok(got);
+    assert.equal(got!.escalationAttempt, 2);
+    assert.equal(got!.escalatedModel, "sonnet");
   });
 
   test("write-time index trim keeps only the newest indexMax members (AC2 cap)", async () => {

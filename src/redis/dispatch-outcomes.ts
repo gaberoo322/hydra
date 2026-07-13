@@ -82,6 +82,22 @@ export interface DispatchOutcomeRecord {
   tokens: number | null;
   /** Wall-clock dispatch span in ms, when known. Null = unknown. */
   durationMs: number | null;
+  /**
+   * Cascade-routing escalation provenance (issue #3284). Present ONLY when this
+   * dispatch was a cascade escalation re-dispatch (decide.py `_rule_escalation`
+   * fired it at a stronger model). Null on every ordinary dispatch — which is
+   * the overwhelming majority.
+   *
+   * - `escalationAttempt` — the escalated attempt number (>= 2). Its NON-null
+   *   presence is the marker "this record is a cascade escalation"; the cascade
+   *   metrics endpoint filters `escalationAttempt !== null` to attribute this
+   *   dispatch's ACTUAL `tokens` as the escalated-attempt cost delta (design
+   *   concept invariant 7 — the authoritative #2942 token plane, no re-estimate).
+   * - `escalatedModel` — the strong tier escalated TO (`sonnet`, ...). Null off
+   *   the escalation path.
+   */
+  escalationAttempt: number | null;
+  escalatedModel: string | null;
   /** Epoch ms the record was written. */
   recordedAt: number;
 }
@@ -91,6 +107,9 @@ export interface DispatchOutcomePatch {
   outcome?: string;
   tokens?: number;
   durationMs?: number;
+  /** Cascade-escalation provenance enrichment (issue #3284). */
+  escalationAttempt?: number;
+  escalatedModel?: string;
 }
 
 export type DispatchOutcomeWriteResult = { ok: true } | { ok: false; error: string };
@@ -136,6 +155,9 @@ function encodeRecord(record: DispatchOutcomeRecord): Record<string, string> {
   if (record.skill !== null) fields.skill = record.skill;
   if (record.tokens !== null) fields.tokens = String(record.tokens);
   if (record.durationMs !== null) fields.durationMs = String(record.durationMs);
+  if (record.escalationAttempt !== null)
+    fields.escalationAttempt = String(record.escalationAttempt);
+  if (record.escalatedModel !== null) fields.escalatedModel = record.escalatedModel;
   return fields;
 }
 
@@ -165,6 +187,8 @@ function decodeRecord(
     outcome: hash.outcome ?? "unknown",
     tokens: intOrNull(hash.tokens),
     durationMs: intOrNull(hash.durationMs),
+    escalationAttempt: intOrNull(hash.escalationAttempt),
+    escalatedModel: hash.escalatedModel ?? null,
     recordedAt: intOrNull(hash.recordedAt) ?? 0,
   };
 }
@@ -230,6 +254,9 @@ export async function upgradeDispatchOutcome(
     if (patch.outcome !== undefined) fields.outcome = patch.outcome;
     if (patch.tokens !== undefined) fields.tokens = String(patch.tokens);
     if (patch.durationMs !== undefined) fields.durationMs = String(patch.durationMs);
+    if (patch.escalationAttempt !== undefined)
+      fields.escalationAttempt = String(patch.escalationAttempt);
+    if (patch.escalatedModel !== undefined) fields.escalatedModel = patch.escalatedModel;
     if (Object.keys(fields).length === 0) return { ok: true };
     const r = getRedisConnection();
     const key = dispatchOutcomeKey(cycleId);

@@ -125,6 +125,25 @@ export const CycleRecordBodySchema = z
     // null. Accepts number|string for the same loose-script-payload tolerance
     // as the other count fields.
     tokens: z.union([z.number(), z.string()]).optional(),
+    // Issue #3284 (cascade-routing telemetry): the escalation provenance of a
+    // dispatch, forwarded by reap.py from a task-scoped deposit exactly like
+    // #2754/#3269 (schema-before-writer groove). Present ONLY on a dispatch that
+    // decide.py's `_rule_escalation` re-dispatched at a stronger model:
+    //   - `escalationAttempt`  — the escalated attempt number (>= 2; the cheap
+    //                            tier ran attempt 1). Its presence is the marker
+    //                            "this dispatch WAS a cascade escalation".
+    //   - `escalatedModel`     — the strong tier it escalated TO (e.g. `sonnet`).
+    //   - `priorAttemptStatus` — the cheap-tier stop-status that TRIGGERED the
+    //                            escalation (`subagent_noop` / `subagent_failure`).
+    // OPTIONAL + byte-for-byte backward compatible: a non-escalated dispatch (the
+    // overwhelming majority) omits all three, so recordCycle records a truthful
+    // null and the cascade aggregation counts it as a non-escalation. This lets
+    // the /metrics/cascade-routing endpoint derive cost-delta from the escalated
+    // dispatch's ACTUAL recorded tokens (#2942) — the authoritative token plane
+    // (ADR-0016), NOT a second static estimator (design-concept invariant 7).
+    escalationAttempt: z.union([z.number(), z.string()]).optional(),
+    escalatedModel: z.string().optional(),
+    priorAttemptStatus: z.string().optional(),
   })
   // Issue #2852: reject cycle-record bodies whose IDENTITY-field VALUES are
   // CLI-flag tokens (a value literally beginning with `--`, e.g. `--cycle-id`,
