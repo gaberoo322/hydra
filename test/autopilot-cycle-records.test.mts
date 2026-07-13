@@ -232,11 +232,14 @@ describe("POST /api/autopilot/cycle-record (issue #430)", () => {
   // ---------------------------------------------------------------------------
   // AC5 — Missing cycleId returns 400
   // ---------------------------------------------------------------------------
-  test("AC5: missing cycleId returns 400 with error message", async () => {
+  test("AC5: missing cycleId returns 400 with canonical schema envelope", async () => {
     const res = mockRes();
     await handler(mockReq({ status: "merged" }), res);
     assert.equal(res._status, 400);
-    assert.match(res._body.error, /cycleId/i);
+    // Issue #3261: normalized to the canonical schemaValidationError envelope
+    // (matching the sibling handlers + alerts.ts/autopilot-control.ts pattern).
+    assert.equal(res._body.code, "schema-validation-failed");
+    assert.ok(Array.isArray(res._body.issues));
 
     // No writes happened.
     assert.equal(await redis.get("hydra:scheduler:cycles-run"), null);
