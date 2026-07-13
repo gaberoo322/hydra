@@ -14,7 +14,11 @@ import assert from "node:assert/strict";
 import {
   buildDigestMessage,
   formatCriticalAlert,
+  formatBuilderHealthLines,
+  formatStagnationPanelLines,
 } from "../src/digest-format.ts";
+import type { StagnationPanel } from "../src/aggregators/builder-health-stagnation-panel.ts";
+import type { StagnationResult } from "../src/aggregators/builder-health-stagnation.ts";
 
 // ---------------------------------------------------------------------------
 // buildDigestMessage
@@ -125,5 +129,135 @@ describe("formatCriticalAlert", () => {
     const out = formatCriticalAlert({ type: "something:weird", payload: { a: 1 } });
     assert.match(out, /⚠️ \*something:weird\*/);
     assert.match(out, /"a":1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Builder-Health stagnation panel (issue #3289, epic #3285, ADR-0028)
+// ---------------------------------------------------------------------------
+
+/** Build a StagnationResult fixture with sensible defaults. */
+function res(over: Partial<StagnationResult> = {}): StagnationResult {
+  return { state: "ok", current: 1, baseline: 1, sustainedCycles: 0, ...over };
+}
+
+/**
+ * A panel fixture. `orchStates` sets each signal's orch verdict; the target
+ * realm is dark (null) by construction on this substrate (ADR-0028).
+ */
+function panel(
+  orch: Partial<Record<"cycleYield" | "reworkRate" | "mutationKillRate", StagnationResult | null>>,
+  windowCtx: Partial<StagnationPanel["windowContext"]> = {},
+): StagnationPanel {
+  return {
+    signals: {
+      cycleYield: { orch: orch.cycleYield ?? res(), target: null },
+      reworkRate: { orch: orch.reworkRate ?? res(), target: null },
+      mutationKillRate: { orch: orch.mutationKillRate ?? res(), target: null },
+    },
+    windowContext: {
+      cycles: 50,
+      mix: { cleanup: 10, feature: 30 },
+      anchorTypes: {},
+      ...windowCtx,
+    },
+  };
+}
+
+describe("formatStagnationPanelLines", () => {
+  it("renders the per-realm panel with a ⚠ flag on a breached signal", () => {
+    const p = panel({
+      cycleYield: res({ state: "breach", current: 0.3, baseline: 0.8, sustainedCycles: 4 }),
+    });
+    const out = formatStagnationPanelLines(p).join("\n");
+    // Header present.
+    assert.match(out, /Stagnation \(per-realm, vs self-baseline\):/);
+    // Breached signal carries the ⚠ flag with current-vs-baseline values.
+    assert.match(out, /Cycle-yield \[orch\]: now 0\.30 vs baseline 0\.80 ⚠/);
+    // A non-breached signal has no flag.
+    assert.match(out, /Rework-rate \[orch\]: now 1 vs baseline 1(?! ⚠)/);
+    // No ⚠ on the healthy signals.
+    assert.doesNotMatch(out, /Rework-rate \[orch\].*⚠/);
+  });
+
+  it("renders an un-instrumented realm signal as 'not instrumented', not a number", () => {
+    const out = formatStagnationPanelLines(panel({})).join("\n");
+    // The target realm is dark (null) for every signal → not instrumented.
+    assert.match(out, /Cycle-yield \[target\]: not instrumented/);
+    assert.match(out, /Rework-rate \[target\]: not instrumented/);
+    assert.match(out, /Mutation-kill \[target\]: not instrumented/);
+    // And it never prints a fabricated number for the dark realm.
+    assert.doesNotMatch(out, /\[target\]: now/);
+  });
+
+  it("renders the window-context (tier/backlog mix) line", () => {
+    const out = formatStagnationPanelLines(
+      panel({}, { cycles: 42, mix: { cleanup: 7, feature: 21 } }),
+    ).join("\n");
+    assert.match(out, /Window: 42 cycles, mix 7 cleanup:21 feature/);
+  });
+
+  it("renders a warming signal without a baseline number", () => {
+    const p = panel({
+      mutationKillRate: res({ state: "warming", current: 85, baseline: null, sustainedCycles: 0 }),
+    });
+    const out = formatStagnationPanelLines(p).join("\n");
+    assert.match(out, /Mutation-kill \[orch\]: warming \(now 85, baseline —\)/);
+    // A warming signal is never flagged as a breach.
+    assert.doesNotMatch(out, /Mutation-kill \[orch\].*⚠/);
+  });
+
+  it("returns no lines for a null or fully-dark panel", () => {
+    assert.deepEqual(formatStagnationPanelLines(null), []);
+    const dark: StagnationPanel = {
+      signals: {
+        cycleYield: { orch: null, target: null },
+        reworkRate: { orch: null, target: null },
+        mutationKillRate: { orch: null, target: null },
+      },
+      windowContext: { cycles: 0, mix: { cleanup: 0, feature: 0 }, anchorTypes: {} },
+    };
+    assert.deepEqual(formatStagnationPanelLines(dark), []);
+  });
+});
+
+describe("formatBuilderHealthLines with stagnation panel", () => {
+  it("renders the panel even when every scorecard aggregate slot is empty", () => {
+    // Only the stagnation panel carries data — the section must still render it
+    // (not the "no data yet" fallback), because the panel is the point of #3289.
+    const scorecard: any = {
+      generatedAt: "2026-07-13T00:00:00.000Z",
+      selfImprovementShare: null,
+      autonomyRate: null,
+      reworkRate: null,
+      timeToMerge: null,
+      mutationKillRateTrend: null,
+      scopeViolations: null,
+      learningThroughput: null,
+      stagnation: panel({
+        cycleYield: res({ state: "breach", current: 0.2, baseline: 0.7, sustainedCycles: 5 }),
+      }),
+    };
+    const out = formatBuilderHealthLines(scorecard).join("\n");
+    assert.match(out, /\*Builder health:\*/);
+    assert.doesNotMatch(out, /No builder-health data yet/);
+    assert.match(out, /Cycle-yield \[orch\]: now 0\.20 vs baseline 0\.70 ⚠/);
+    assert.match(out, /Window: 50 cycles/);
+  });
+
+  it("degrades to the no-data line when the panel is null and no aggregate has data", () => {
+    const scorecard: any = {
+      generatedAt: "2026-07-13T00:00:00.000Z",
+      selfImprovementShare: null,
+      autonomyRate: null,
+      reworkRate: null,
+      timeToMerge: null,
+      mutationKillRateTrend: null,
+      scopeViolations: null,
+      learningThroughput: null,
+      stagnation: null,
+    };
+    const out = formatBuilderHealthLines(scorecard).join("\n");
+    assert.match(out, /No builder-health data yet/);
   });
 });
