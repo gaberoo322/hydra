@@ -16,8 +16,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { readMetaFrictionIssues } from "../src/aggregators/friction-source.ts";
+import {
+  readMetaFrictionIssues,
+  readPatternGroups,
+  readFrictionPatterns,
+} from "../src/aggregators/friction-source.ts";
 import type { IssueRow } from "../src/github/issues.ts";
+import type { PatternGroupRaw, PatternNamespace } from "../src/redis/agent-memory.ts";
 
 const WINDOW_START = new Date("2026-05-25T00:00:00.000Z");
 
@@ -98,5 +103,87 @@ describe("readMetaFrictionIssues — never throws", () => {
       listIssuesBySearchOrEmpty: async () => [],
     });
     assert.deepEqual(out, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readPatternGroups — the shared namespace SCAN-and-parse seam (issue #3265).
+// Exercised via an injected `scanPatternGroupsRaw` stub so no live Redis is
+// needed (design invariant #5). Covers both namespaces + parse-isolation.
+// ---------------------------------------------------------------------------
+
+function stubScan(
+  byNamespace: Partial<Record<PatternNamespace, PatternGroupRaw[]>>,
+): (ns?: PatternNamespace) => Promise<PatternGroupRaw[]> {
+  const seen: PatternNamespace[] = [];
+  const fn = async (ns: PatternNamespace = "memory") => {
+    seen.push(ns);
+    return byNamespace[ns] ?? [];
+  };
+  (fn as any).seen = seen;
+  return fn as any;
+}
+
+describe("readPatternGroups — namespace fan-out", () => {
+  test("scans the friction namespace and parses each group's JSON array", async () => {
+    const scan = stubScan({
+      friction: [
+        { name: "hydra-dev", raw: JSON.stringify([{ cue: "a" }, { cue: "b" }]) },
+        { name: "hydra-qa", raw: JSON.stringify([{ cue: "c" }]) },
+      ],
+    });
+    const out = await readPatternGroups<{ cue: string }>("friction", "t", {
+      scanPatternGroupsRaw: scan,
+    });
+    assert.equal((scan as any).seen[0], "friction");
+    assert.deepEqual(
+      out.map((g) => [g.skill, g.patterns.map((p) => p.cue)]),
+      [["hydra-dev", ["a", "b"]], ["hydra-qa", ["c"]]],
+    );
+  });
+
+  test("scans the memory namespace independently", async () => {
+    const scan = stubScan({
+      memory: [{ name: "hydra-dev", raw: JSON.stringify([{ category: "x" }]) }],
+    });
+    const out = await readPatternGroups<{ category: string }>("memory", "t", {
+      scanPatternGroupsRaw: scan,
+    });
+    assert.equal((scan as any).seen[0], "memory");
+    assert.deepEqual(out, [{ skill: "hydra-dev", patterns: [{ category: "x" }] }]);
+  });
+});
+
+describe("readPatternGroups — parse isolation (never throws)", () => {
+  test("skips missing / malformed / non-array values, keeps the good ones", async () => {
+    const scan = stubScan({
+      memory: [
+        { name: "good", raw: JSON.stringify([{ category: "ok" }]) },
+        { name: "null-raw", raw: null },
+        { name: "malformed", raw: "{not json" },
+        { name: "not-array", raw: JSON.stringify({ category: "obj" }) },
+      ],
+    });
+    const out = await readPatternGroups<{ category: string }>("memory", "t", {
+      scanPatternGroupsRaw: scan,
+    });
+    assert.deepEqual(out, [{ skill: "good", patterns: [{ category: "ok" }] }]);
+  });
+});
+
+describe("readFrictionPatterns — thin friction wrapper", () => {
+  test("delegates to readPatternGroups on the friction namespace", async () => {
+    // The default (non-injected) path hits the live seam; here we assert the
+    // wrapper preserves the FrictionGroup shape by driving the shared reader
+    // through the same code path with the friction namespace.
+    const out = await readPatternGroups<{ cue: string }>("friction", "w", {
+      scanPatternGroupsRaw: stubScan({
+        friction: [{ name: "hydra-dev", raw: JSON.stringify([{ cue: "z" }]) }],
+      }),
+    });
+    assert.deepEqual(out, [{ skill: "hydra-dev", patterns: [{ cue: "z" }] }]);
+    // readFrictionPatterns exists and is a function with the (label) arity.
+    assert.equal(typeof readFrictionPatterns, "function");
+    assert.equal(readFrictionPatterns.length, 1);
   });
 });

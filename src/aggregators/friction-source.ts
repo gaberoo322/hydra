@@ -28,6 +28,20 @@
  *
  * ---
  *
+ * Namespace generalisation (issue #3265).
+ *
+ * The SCAN-and-parse loop is byte-identical for the **memory** namespace too:
+ * `lessons-explorer.ts` hand-rolled `scanPatternGroupsRaw("memory")` + per-key
+ * JSON parse + array narrow inline, crossing the `redis/agent-memory.ts`
+ * boundary directly — the exact boundary this aggregator-layer seam exists to
+ * avoid for friction. `readPatternGroups<P>(namespace, label, deps)` now owns
+ * that read for BOTH namespaces; `readFrictionPatterns` is a thin friction-only
+ * wrapper preserving its `<P> → FrictionGroup<P>` signature. `lessons-explorer`
+ * imports the shared reader through here, so `scanPatternGroupsRaw` keeps
+ * exactly one aggregator-layer caller (this module) rather than two.
+ *
+ * ---
+ *
  * Meta-friction GitHub Read seam (issue #864).
  *
  * The `gh issue list --label meta-friction` query + JSON parse + createdAt
@@ -45,7 +59,10 @@
  */
 
 import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
-import { scanPatternGroupsRaw } from "../redis/agent-memory.ts";
+import {
+  scanPatternGroupsRaw,
+  type PatternNamespace,
+} from "../redis/agent-memory.ts";
 
 /**
  * One `meta-friction` GitHub issue, as the dashboard aggregators render it.
@@ -135,37 +152,61 @@ function windowFilterMetaFriction(
 }
 
 /**
- * One `{skill, patterns}` tuple as read off Redis. `patterns` is whatever the
- * stored JSON array contained — the reader does not narrow it. Each consumer
- * supplies its own element type `P` and runs its existing lift/validate step.
+ * One `{skill, patterns}` tuple as read off Redis, for either namespace.
+ * `patterns` is whatever the stored JSON array contained — the reader does not
+ * narrow it. Each consumer supplies its own element type `P` and runs its
+ * existing lift/validate step. `skill` is the `hydra:{namespace}:` → name strip
+ * (the store keys these by skill/agent name).
  */
-export interface FrictionGroup<P> {
+export interface PatternGroup<P> {
   skill: string;
   patterns: P[];
 }
 
 /**
- * Scan every `hydra:friction:{skill}:patterns` key, parse each value as a JSON
- * array, and return one `{skill, patterns}` tuple per key. A value that is
+ * Back-compat alias for the friction consumers (issue #820). Identical shape to
+ * {@link PatternGroup}; kept so `readFrictionPatterns<P>` and its callers
+ * (`lessons-trend`, `lessons-overnight`, `friction-patterns`) reference the same
+ * `FrictionGroup<P>` name they always have.
+ */
+export type FrictionGroup<P> = PatternGroup<P>;
+
+/**
+ * Injectable Redis seam for {@link readPatternGroups}. Defaults to the typed
+ * `scanPatternGroupsRaw` accessor; tests pass a stub so the shared reader is
+ * exercised without a live Redis (design invariant #5, issue #3265).
+ */
+export interface PatternGroupsReadDeps {
+  scanPatternGroupsRaw?: typeof scanPatternGroupsRaw;
+}
+
+/**
+ * Scan every `hydra:{namespace}:{skill}:patterns` key, parse each value as a
+ * JSON array, and return one `{skill, patterns}` tuple per key. A value that is
  * missing, malformed, or not an array is skipped (logged via `console.error`
  * with `label`), never thrown — preserving each aggregator's "never throws"
  * parse-isolation contract.
  *
- * The element type `P` is the caller's responsibility: the reader casts the
- * parsed array to `P[]` without validating its members, so the caller's
- * lift/validate step remains the single place that narrows the shape.
+ * This is the single aggregator-layer home for the "SCAN a namespace → parse
+ * JSON per group → error-isolate per key" behaviour, serving BOTH the
+ * `friction` namespace (via {@link readFrictionPatterns}) and the `memory`
+ * namespace (via `lessons-explorer.ts`). The SCAN cursor walk + GET lives behind
+ * the typed `scanPatternGroupsRaw` seam; the `<P>` cast stays here at the call
+ * boundary so each consumer's validate-at-caller contract is preserved.
  *
+ * @param namespace which pattern namespace to scan (`"friction"` | `"memory"`).
  * @param label log prefix identifying the calling aggregator (e.g.
  *   `"lessons-trend"`), so a parse failure is attributable in the logs.
+ * @param deps injectable seam override for tests.
  */
-export async function readFrictionPatterns<P>(
+export async function readPatternGroups<P>(
+  namespace: PatternNamespace,
   label: string,
-): Promise<Array<FrictionGroup<P>>> {
-  // The SCAN cursor walk + GET against `hydra:friction:*:patterns` lives behind
-  // the typed seam (`scanPatternGroupsRaw`); the `<P>` cast stays here at the
-  // call boundary so each consumer's validate-at-caller contract is preserved.
-  const groups = await scanPatternGroupsRaw("friction");
-  const out: Array<FrictionGroup<P>> = [];
+  deps: PatternGroupsReadDeps = {},
+): Promise<Array<PatternGroup<P>>> {
+  const scan = deps.scanPatternGroupsRaw ?? scanPatternGroupsRaw;
+  const groups = await scan(namespace);
+  const out: Array<PatternGroup<P>> = [];
   for (const { name: skill, raw } of groups) {
     if (!raw) continue;
     try {
@@ -173,9 +214,23 @@ export async function readFrictionPatterns<P>(
       if (Array.isArray(parsed)) out.push({ skill, patterns: parsed as P[] });
     } catch (err: any) {
       console.error(
-        `[${label}] failed to parse hydra:friction:${skill}:patterns: ${err?.message || err}`,
+        `[${label}] failed to parse hydra:${namespace}:${skill}:patterns: ${err?.message || err}`,
       );
     }
   }
   return out;
+}
+
+/**
+ * Thin friction-only wrapper over {@link readPatternGroups}. Preserves the
+ * pre-#3265 `readFrictionPatterns<P>(label)` signature and `FrictionGroup<P>`
+ * return shape so the three friction consumers are untouched.
+ *
+ * @param label log prefix identifying the calling aggregator (e.g.
+ *   `"lessons-trend"`), so a parse failure is attributable in the logs.
+ */
+export async function readFrictionPatterns<P>(
+  label: string,
+): Promise<Array<FrictionGroup<P>>> {
+  return readPatternGroups<P>("friction", label);
 }

@@ -24,7 +24,7 @@
  */
 
 import { PROMOTION_THRESHOLD } from "../pattern-memory/index.ts";
-import { scanPatternGroupsRaw } from "../redis/agent-memory.ts";
+import { readPatternGroups } from "./friction-source.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -177,24 +177,16 @@ export function skillMatches(skill: string, filter: string): boolean {
 // Default Redis reader
 // ---------------------------------------------------------------------------
 
+/**
+ * Default memory-namespace reader. Delegates to the shared aggregator-layer
+ * `readPatternGroups("memory", …)` seam (issue #3265) rather than crossing the
+ * `redis/agent-memory.ts` boundary directly — the same seam `friction-source.ts`
+ * exposes for the friction namespace. The `<RawMemoryPattern>` cast happens at
+ * the shared reader's call boundary; the per-key JSON parse + array narrow +
+ * never-throws error isolation all live in `readPatternGroups`.
+ */
 async function defaultReadMemoryPatterns(): Promise<
   Array<{ skill: string; patterns: RawMemoryPattern[] }>
 > {
-  // The SCAN cursor walk + GET against `hydra:memory:*:patterns` lives behind
-  // the typed seam (`scanPatternGroupsRaw`); this reader owns only the per-key
-  // JSON parse + array narrowing into its `RawMemoryPattern` shape.
-  const groups = await scanPatternGroupsRaw("memory");
-  const out: Array<{ skill: string; patterns: RawMemoryPattern[] }> = [];
-  for (const { name: skill, raw } of groups) {
-    if (!raw) continue;
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) out.push({ skill, patterns: parsed as RawMemoryPattern[] });
-    } catch (err: any) {
-      console.error(
-        `[lessons-explorer] failed to parse hydra:memory:${skill}:patterns: ${err?.message || err}`,
-      );
-    }
-  }
-  return out;
+  return readPatternGroups<RawMemoryPattern>("memory", "lessons-explorer");
 }
