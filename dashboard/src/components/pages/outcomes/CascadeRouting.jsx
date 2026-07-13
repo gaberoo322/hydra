@@ -17,7 +17,14 @@ import { Section } from "./Section.jsx";
  * escalations) — the exact realised cost is not known at the decision point the
  * event is emitted. The relative trend, not the absolute number, is the signal.
  * Polls every 5min to match the Outcomes page cadence.
+ *
+ * Low-N guard (issue #3284 success criterion c + design-concept q6): a sample of
+ * 1–9 cascade decisions is too small to answer "what % cost savings has
+ * cascading delivered?" within 1 SD, so the card renders an explicit
+ * "measurement insufficient" notice instead of a misleadingly-precise raw-stat
+ * grid. N===0 keeps the neutral empty state; N>=10 renders the full telemetry.
  */
+const MIN_SAMPLE = 10;
 
 function fmtTokens(n) {
   if (!Number.isFinite(n)) return "0";
@@ -54,6 +61,11 @@ export function CascadeRouting() {
   const decisions = escalations + blocked;
   const triggerRows = Object.entries(byTrigger).sort((a, b) => b[1] - a[1]);
 
+  // Low-N guard: N is the aggregate cascade-decision sample the endpoint folded.
+  // 1–9 is too small to report a cost-savings answer within 1 SD (criterion c),
+  // so we surface "measurement insufficient" rather than a misleading stat grid.
+  const insufficient = sampleSize > 0 && sampleSize < MIN_SAMPLE;
+
   const STATS = [
     { label: "Escalations", value: String(escalations), text: "text-emerald-300" },
     { label: "Gate-blocked", value: String(blocked), text: "text-amber-300" },
@@ -72,10 +84,22 @@ export function CascadeRouting() {
       right={sampleSize > 0 && `${sampleSize} decisions`}
       loading={loading}
       error={error}
-      empty={!loading && !error && decisions === 0}
+      empty={!loading && !error && sampleSize === 0}
       emptyMessage="No cascade-routing escalations recorded yet."
     >
-      {decisions > 0 && (
+      {insufficient && (
+        <div className="bg-zinc-900/40 rounded-md border border-zinc-700 px-3 py-3 text-sm text-zinc-400">
+          <div className="font-semibold text-zinc-300">Measurement insufficient</div>
+          <div className="mt-1 text-xs text-zinc-500">
+            Only {sampleSize} cascade{" "}
+            {sampleSize === 1 ? "decision" : "decisions"} recorded (need{" "}
+            {MIN_SAMPLE}). Too small a sample to report escalation cost savings
+            within 1 SD — collecting more data.
+          </div>
+        </div>
+      )}
+
+      {!insufficient && sampleSize >= MIN_SAMPLE && (
         <div className="space-y-4">
           {/* Headline stat grid */}
           <div className="grid gap-2 grid-cols-2 sm:grid-cols-4">
