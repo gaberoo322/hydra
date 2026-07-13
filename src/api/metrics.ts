@@ -20,6 +20,7 @@ import {
   getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,
+  tokensForSession,
 } from "../cost/index.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { SubagentTokensBodySchema } from "../schemas/metrics.ts";
@@ -33,6 +34,17 @@ import { z } from "zod";
  */
 const CostQuerySchema = z.object({
   date: z.string().trim().min(1).optional(),
+});
+
+/**
+ * Query schema for `GET /metrics/session-tokens?session=<sessionId>` (issue
+ * #3250). `session` is the dispatch's transcript sessionId (a UUID) — the join
+ * key reap.py holds at completion time. Required + non-empty; a malformed or
+ * non-UUID id is not a validation error here (the underlying `tokensForSession`
+ * returns 0 for it — the honest "unknown" sentinel).
+ */
+const SessionTokensQuerySchema = z.object({
+  session: z.string().trim().min(1),
 });
 
 /**
@@ -385,6 +397,30 @@ export function createMetricsRouter() {
     return isolateAggregator(res, "api/metrics/tokens", async () => {
       const result = await recordSubagentTokens(skill, tokens, opts);
       return { ok: true, ...result };
+    });
+  });
+
+  // GET /metrics/session-tokens?session=<sessionId> — per-dispatch token
+  // recovery (issue #3250). Backs the autopilot's `cumulative_tokens` fix: the
+  // SubagentStop hook does not expose the subagent's token usage, so the primary
+  // reap path lands 0. reap.py calls THIS route with the completing dispatch's
+  // sessionId to recover the REAL count from that session's JSONL transcript
+  // (via the `tokensForSession` transcript-scan seam) whenever the hook floor is
+  // 0. A read-only surface: no Redis write, no ledger mutation.
+  //
+  // Response: 200 `{ session, tokens }` — `tokens` is 0 for an unresolvable /
+  // non-UUID session (the honest "unknown" sentinel; never a fabricated
+  // nonzero). Never throws: the aggregator isolation returns 500 on the
+  // structurally-impossible case, which reap.py already tolerates best-effort.
+  router.get("/metrics/session-tokens", (req, res) => {
+    const parsed = SessionTokensQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return res.status(400).json(schemaValidationError(parsed.error));
+    }
+    const { session } = parsed.data;
+    return isolateAggregator(res, "api/metrics/session-tokens", async () => {
+      const tokens = await tokensForSession(session);
+      return { session, tokens };
     });
   });
 

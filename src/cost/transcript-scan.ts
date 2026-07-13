@@ -35,8 +35,12 @@ import type { Stats } from "node:fs";
 import {
   projectsRoot,
   listTranscriptFiles,
+  resolveTranscriptPath,
+  isUuidShaped,
   sessionIdFromPath as transcriptSessionIdFromPath,
 } from "../transcript-store.ts";
+import { readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
 import { modelToFamily, parseUsageLine, parseObservedResetMs } from "./token-math.ts";
@@ -267,6 +271,127 @@ export function addBreakdown(target: TokenBreakdown, src: TokenBreakdown): void 
  * kept on this surface for existing callers (`src/cost/index.ts`, tests).
  */
 export const sessionIdFromPath = transcriptSessionIdFromPath;
+
+// ---------------------------------------------------------------------------
+// Per-session token recovery (issue #3250 — the cumulative_tokens producer)
+// ---------------------------------------------------------------------------
+//
+// The autopilot's `cumulative_tokens` run field was permanently 0 because the
+// only real token count on the primary reap path comes from the SubagentStop
+// hook, which does not expose the subagent's usage (verified in
+// on-subagent-stop.sh — it forwards event/slot/status/task_id/subagent_type/
+// summary only). The authoritative per-dispatch count already exists inside the
+// completed dispatch's JSONL transcript; this seam recovers it, keyed by the
+// dispatch's sessionId (the same UUID the hook derives into `task_id` from
+// `.session_id`). reap.py joins on it at completion time when the hook floor is
+// 0, so the value that flows into `cumulative_tokens` becomes REAL, not 0.
+//
+// A zero return is the honest "usage-not-parsed / unknown" sentinel (invariant
+// 3): a missing transcript, an empty shard, or a parse miss all sum to 0 —
+// never a fabricated estimate. All I/O is best-effort and never throws
+// (invariant 4): callers get 0 and continue.
+
+/**
+ * Sum the total tokens across every usage-bearing line of ONE session's
+ * transcript content. Pure and Redis-free — reuses `parseUsageLine` (the same
+ * authoritative parser the windowed scan uses), so the per-dispatch count is
+ * reconcilable with the per-skill/per-family cross-tabs. Non-JSON lines, lines
+ * with no usage block, and zero-usage lines all contribute nothing. Unlike the
+ * rolling-window scan this applies NO time cutoff: a completed dispatch's whole
+ * transcript is its usage, regardless of when it started. Exported for direct
+ * unit test. Total: always returns a non-negative integer.
+ */
+export function sumSessionTokens(lines: readonly string[]): number {
+  let total = 0;
+  for (const line of lines) {
+    if (!line || line[0] !== "{") continue;
+    const parsed = parseUsageLine(line);
+    if (parsed === null || parsed === "skip") continue;
+    total += parsed.tokens.total;
+  }
+  return total;
+}
+
+/**
+ * List a session's subagent transcript shards, if any. A resumed / delegating
+ * session appends a second shard one level deeper
+ * (`<projectDir>/<sessionId>/subagents/*.jsonl`, per the Transcript Store
+ * layout). We sum those shards too so a multi-shard dispatch is counted whole.
+ * Best-effort: any read error yields an empty list (no throw).
+ */
+async function listSessionSubagentShards(
+  primaryPath: string,
+  sessionId: string,
+): Promise<string[]> {
+  const shardDir = join(dirname(primaryPath), sessionId, "subagents");
+  try {
+    const entries = await readdir(shardDir, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isFile() && e.name.endsWith(".jsonl"))
+      .map((e) => join(shardDir, e.name));
+  } catch {
+    /* intentional: no subagents/ dir is the common case — not an error */
+    return [];
+  }
+}
+
+/** Injectable I/O for {@link tokensForSession} so tests need no real filesystem. */
+export interface TokensForSessionDeps {
+  /** Resolve a sessionId to its primary transcript path (default: transcript-store). */
+  resolvePath?: (sessionId: string) => Promise<string | null>;
+  /** List a session's extra subagent shards (default: on-disk walk). */
+  listShards?: (primaryPath: string, sessionId: string) => Promise<string[]>;
+  /** Read a transcript file's UTF-8 content (default: node:fs readFile). */
+  read?: (path: string) => Promise<string>;
+}
+
+/**
+ * Recover the total tokens a completed dispatch spent, by scanning its
+ * sessionId-named transcript shard(s) (issue #3250). The join key is the
+ * dispatch's `sessionId` — the same UUID the SubagentStop hook derives into the
+ * slot-events `task_id`. Returns the summed total over the primary transcript
+ * plus any `subagents/*.jsonl` shards.
+ *
+ * Best-effort and total (invariants 3 + 4): a non-UUID id, an unresolvable
+ * transcript, or any read error returns 0 — the honest "unknown" sentinel,
+ * never a fabricated nonzero. Never throws.
+ */
+export async function tokensForSession(
+  sessionId: string,
+  deps: TokensForSessionDeps = {},
+): Promise<number> {
+  const id = (sessionId ?? "").trim();
+  if (!id || !isUuidShaped(id)) return 0;
+  const resolvePath =
+    deps.resolvePath ?? ((sid: string) => resolveTranscriptPath(sid, undefined));
+  const listShards = deps.listShards ?? listSessionSubagentShards;
+  const read = deps.read ?? ((p: string) => readFile(p, "utf-8"));
+
+  let primary: string | null;
+  try {
+    primary = await resolvePath(id);
+  } catch (err) {
+    console.error(`[transcript-scan] tokensForSession resolve failed for ${id}:`, err);
+    return 0;
+  }
+  if (!primary) return 0;
+
+  const files = [primary, ...(await listShards(primary, id))];
+  let total = 0;
+  for (const file of files) {
+    let content: string;
+    try {
+      content = await read(file);
+    } catch (err) {
+      // A shard that vanished between listing and read is non-fatal — log and
+      // keep summing the rest (fail-loud-then-proceed).
+      console.error(`[transcript-scan] tokensForSession read failed for ${file}:`, err);
+      continue;
+    }
+    total += sumSessionTokens(content.split("\n"));
+  }
+  return total;
+}
 
 // ---------------------------------------------------------------------------
 // Transcript JSONL walk (issue #1971 — lifted from the former scanUsage())
