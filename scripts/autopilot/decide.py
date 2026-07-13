@@ -309,6 +309,12 @@ PIPELINE_SLOTS = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "pipeli
 
 SIGNAL_CLASSES = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "signal")
 
+# Class -> skill projection (issue #3274). The cascade-routing escalation
+# re-dispatch (`_rule_escalation`) needs the skill for the class it is
+# re-dispatching; derive it from the taxonomy alphabet so the escalation path
+# can never name a skill that drifts from the class's real dispatch skill.
+CLASS_SKILL = {r["name"]: r["skill"] for r in CLASS_TAXONOMY}
+
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
 # /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
 # cadence rationale lives in the row's `notes` field in classes.json.
@@ -570,6 +576,137 @@ MAX_FAILURE_RETRIES = 5
 # Default failure-log path consumed by self_heal.py when called from outside
 # decide.py (e.g. the Bash hook around dispatch).
 DEFAULT_FAILURE_LOG = "/tmp/hydra-autopilot-failures.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Cascade-routing escalation policy (issue #3274, design-concept issue-3274)
+# ---------------------------------------------------------------------------
+#
+# SOTA cascade routing (RouteLLM / FrugalGPT): run a cheap tier, verify, and
+# escalate to a stronger tier ONLY on a failed/no-op attempt. Hydra's cheapest
+# same-turn verifier signal is the subagent STOP STATUS (success/no_op/failure/
+# budget_exceeded) emitted by on-subagent-stop.sh — NOT CI (CI is asynchronous
+# and emits no signal back into the turn; the async CI-failure trigger is a
+# deferred Slice-B, per the design concept's rejected-alternatives + qaTrace).
+#
+# LAYERING (design-concept invariant 2): this policy is a decide.py CONSTANT,
+# NOT a classes.json field. classes.json is the class-taxonomy ALPHABET; dispatch
+# POLICY lives here + in the playbook. A class ABSENT from this dict never
+# escalates (invariant 5) — so dev_orch (already Sonnet) is untouched.
+#
+# PURITY (design-concept invariant 1, issue #1093): decide.py emits NO concrete
+# model field. `decide_escalation` returns only an `escalate_model` HINT that the
+# playbook's dispatch step maps to the Agent model kwarg, overriding the static
+# routing table for that one re-dispatch. The model lever stays in the playbook.
+#
+# Each policy row: triggers (the failure_log patterns that escalate), model (the
+# escalate-to HINT), max_attempts (the hard cap — default 2, so a Haiku attempt
+# escalates to at most ONE Sonnet retry, never a third dispatch; invariant 4).
+#
+# The two mapped stop statuses (see `_STOP_STATUS_TO_PATTERN`):
+#   no_op   -> "subagent_noop"    (agent claimed no work)
+#   failure -> "subagent_failure" (a real capability/verification failure)
+#   budget_exceeded -> "subagent_failure" (folded — a hard-cap trip is a failure)
+ESCALATION_POLICY: dict[str, dict] = {
+    # cleanup_orch runs at Haiku and empirically premature-exits (no_op in
+    # seconds). Escalate a no_op ONLY on a fresh (non-saturated) board — a
+    # SATURATION-driven no_op (board full / no knip findings) would just
+    # re-produce the same no_op at Sonnet cost (design-concept invariant 3 +
+    # qaTrace ROI answer). A real verification/emit failure is capability-driven
+    # and escalates regardless of saturation.
+    "cleanup_orch": {
+        "triggers": ("subagent_noop", "subagent_failure"),
+        "model": "sonnet",
+        "max_attempts": 2,
+    },
+}
+
+# Default attempt cap when a policy row omits `max_attempts` (invariant 4).
+ESCALATION_DEFAULT_MAX_ATTEMPTS = 2
+
+# Map an on-subagent-stop.sh stop status to the failure_log pattern the
+# escalation reducer keys on. `success` maps to None (clean completion never
+# escalates). budget_exceeded folds onto subagent_failure — a hard-cap trip is a
+# capability/runaway failure, not a saturation no_op.
+_STOP_STATUS_TO_PATTERN: dict[str, str] = {
+    "no_op": "subagent_noop",
+    "failure": "subagent_failure",
+    "budget_exceeded": "subagent_failure",
+}
+
+
+def stop_status_to_pattern(status: str | None) -> str | None:
+    """Pure: map a stop status to its escalation-trigger pattern, or None.
+
+    `success` / `unknown` / anything unmapped → None (never escalates). Kept a
+    standalone pure function so both `_rule_slot_events` (failure_log visibility)
+    and `decide_escalation` (the reducer) read the SAME mapping.
+    """
+    if not status:
+        return None
+    return _STOP_STATUS_TO_PATTERN.get(status)
+
+
+def decide_escalation(
+    *,
+    slot: str,
+    status: str | None,
+    attempt: int,
+    board_saturated: bool,
+) -> dict:
+    """Cascade-routing escalation reducer (issue #3274, prototyped 8/8 cases).
+
+    PURE. Given one subagent StopOutcome, decide whether to re-dispatch the same
+    class at a stronger model tier. Returns:
+
+        {"escalate": bool, "escalate_model": str | None, "reason": str}
+
+    `escalate_model` is a HINT the playbook maps to the Agent model kwarg — this
+    function NEVER assigns a concrete model onto a dispatch action (decide.py
+    stays pure, issue #1093 / design-concept invariant 1).
+
+    Logic (design-concept qaTrace, prototype branch=logic):
+      1. ESCALATION_POLICY[slot] absent  -> never escalate (invariant 5).
+      2. status maps to a pattern NOT in the row's triggers -> no escalate.
+      3. attempt >= max_attempts (default 2) -> no escalate (no attempt-3;
+         invariant 4). `attempt` is the attempt number of the dispatch that JUST
+         stopped (1 = the original cheap-tier run), sourced purely from the
+         completing slot's `attempt` field (default 1 when unstamped).
+      4. SATURATION GUARD (invariant 3): pattern == "subagent_noop" AND
+         board_saturated -> suppress. A saturation no_op is work-availability-
+         driven, not model-capability-driven. A "subagent_failure" is
+         capability-driven and escalates regardless of saturation.
+      5. else escalate=True, escalate_model = policy["model"].
+    """
+    no = lambda reason: {"escalate": False, "escalate_model": None, "reason": reason}
+
+    policy = ESCALATION_POLICY.get(slot)
+    if not policy:
+        return no(f"{slot} not in ESCALATION_POLICY")
+
+    pattern = stop_status_to_pattern(status)
+    if pattern is None:
+        return no(f"status {status!r} is not an escalation trigger")
+    triggers = policy.get("triggers") or ()
+    if pattern not in triggers:
+        return no(f"pattern {pattern} not in {slot} triggers")
+
+    max_attempts = int(policy.get("max_attempts", ESCALATION_DEFAULT_MAX_ATTEMPTS))
+    try:
+        attempt_i = int(attempt)
+    except (TypeError, ValueError):
+        attempt_i = 1
+    if attempt_i >= max_attempts:
+        return no(f"attempt {attempt_i} >= max_attempts {max_attempts}")
+
+    if pattern == "subagent_noop" and board_saturated:
+        return no(f"{slot} no_op on saturated board — suppress (saturation-driven)")
+
+    return {
+        "escalate": True,
+        "escalate_model": policy["model"],
+        "reason": f"{slot} {pattern} attempt {attempt_i} -> escalate to {policy['model']}",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1283,6 +1420,18 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
             # sees them. We don't dedup against existing failure_log
             # entries — the caller is expected to invoke decide once per
             # turn with a fresh batch.
+            #
+            # Issue #3274: `no_op` also lands here now (as pattern
+            # `subagent_noop`) so it is VISIBLE to self_heal.classify() and the
+            # cascade-routing escalation reducer. Previously a no_op was treated
+            # as clean completion and recorded nowhere self_heal could see it.
+            # Recording it changes VISIBILITY only — escalation is a separate,
+            # gated decision in `_rule_escalation` (design-concept invariant 6).
+            #
+            # failure/budget_exceeded keep their EXACT prior `subagent_<status>`
+            # spelling (self_heal + termination-counting semantics depend on it),
+            # so we do NOT route them through the reducer's status->pattern fold
+            # here — only ADD the net-new `no_op` case.
             if status in ("failure", "budget_exceeded"):
                 flog = state.get("failure_log")
                 if not isinstance(flog, list):
@@ -1290,6 +1439,19 @@ def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
                 flog.append({
                     "ts": ts_epoch or now,
                     "pattern": f"subagent_{status}",
+                    "slot": slot,
+                    "task_id": task_id,
+                    "action": "subagent_stop",
+                    "note": summary,
+                })
+                state["failure_log"] = flog
+            elif status == "no_op":
+                flog = state.get("failure_log")
+                if not isinstance(flog, list):
+                    flog = []
+                flog.append({
+                    "ts": ts_epoch or now,
+                    "pattern": "subagent_noop",
                     "slot": slot,
                     "task_id": task_id,
                     "action": "subagent_stop",
@@ -1363,6 +1525,96 @@ def _rule_completion_reaps(events: list[dict]) -> _RuleOutput:
         skill = ev.get("skill")
         if slot and task_id:
             out.emit(make_reap(slot, task_id, tokens, skill), reason=f"reap:{slot}")
+    return out
+
+
+# Per-class board-saturation signal name for the escalation saturation guard
+# (issue #3274). A `no_op` only suppresses escalation when THIS class's board is
+# saturated (work-availability-driven no_op). A class not listed here has no
+# saturation notion, so `board_saturated` reads False for it (a failure still
+# escalates regardless; a no_op escalates on the assumption real work existed).
+ESCALATION_SATURATION_SIGNAL = {
+    "cleanup_orch": "cleanup_board_saturated",
+}
+
+
+def _rule_escalation(state: dict, events: list[dict], now: int) -> _RuleOutput:
+    """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
+
+    Runs AFTER completion reaps (INV-006 — the just-stopped slot is reaped/freed
+    before this rule re-dispatches into it). For each `subagent_stop` event this
+    turn whose class is in `ESCALATION_POLICY`, consult the pure `decide_escalation`
+    reducer; when it says escalate, emit a re-dispatch `dispatch` action for the
+    SAME class carrying:
+
+      - `prompt_args.escalate_model` — the escalate-to model HINT (e.g. "sonnet").
+        decide.py stays pure (issue #1093 / invariant 1): it NEVER writes a
+        concrete `model` field on the action; the playbook maps this hint to the
+        Agent model kwarg, overriding the static per-class routing table for this
+        one re-dispatch.
+      - `prompt_args.attempt` — the escalated attempt number (prior_attempt + 1).
+        The playbook stamps this onto the new slot so a subsequent no_op of the
+        ESCALATION attempt reads attempt>=max_attempts and never triggers a THIRD
+        dispatch (invariant 4).
+      - `prompt_args.prior_attempt_status` — the stop status that triggered the
+        escalation, for cycle-metric visibility (issue's priorAttemptStatus field).
+
+    The attempt counter is sourced PURELY from the completing slot's `attempt`
+    field (default 1 when unstamped — the original cheap-tier dispatch). The
+    saturation flag is the precomputed per-class board-saturation signal read via
+    the signal seam (decide.py never recomputes saturation).
+
+    Pure w.r.t. fs/network/Redis; reads state.slot_events + state.slots + signals.
+    """
+    out = _RuleOutput()
+    slot_events_raw = state.get("slot_events") or []
+    if isinstance(slot_events_raw, dict):
+        slot_events_raw = slot_events_raw.get("events") or []
+    slots = state.get("slots") or {}
+    for raw_ev in slot_events_raw:
+        if not isinstance(raw_ev, dict):
+            continue
+        fields = raw_ev.get("fields") if "fields" in raw_ev else raw_ev
+        if not isinstance(fields, dict):
+            continue
+        if fields.get("event") != "subagent_stop":
+            continue
+        slot = fields.get("slot") or "unknown"
+        if slot not in ESCALATION_POLICY:
+            continue
+        status = fields.get("status") or "unknown"
+        # Attempt number of the dispatch that JUST stopped (1 = original).
+        slot_obj = slots.get(slot)
+        try:
+            prior_attempt = int(slot_obj.get("attempt")) if isinstance(slot_obj, dict) and slot_obj.get("attempt") is not None else 1
+        except (TypeError, ValueError):
+            prior_attempt = 1
+        sat_signal = ESCALATION_SATURATION_SIGNAL.get(slot)
+        board_saturated = bool(sat_signal and _signal_present(state, events, sat_signal))
+
+        decision = decide_escalation(
+            slot=slot,
+            status=status,
+            attempt=prior_attempt,
+            board_saturated=board_saturated,
+        )
+        if not decision.get("escalate"):
+            continue
+        skill = CLASS_SKILL.get(slot, "")
+        out.emit(
+            make_dispatch(
+                slot,
+                skill,
+                prompt_args={
+                    "escalate_model": decision["escalate_model"],
+                    "attempt": prior_attempt + 1,
+                    "prior_attempt_status": status,
+                },
+                reason=decision["reason"],
+            ),
+            reason=decision["reason"],
+        )
+        out.dispatched += 1
     return out
 
 
@@ -2036,6 +2288,15 @@ def decide(
     # 2. Completion reaps first (INV-006 — reap before dispatch).
     fold(_rule_completion_reaps(events))
 
+    # 2.5. Cascade-routing escalation re-dispatch (issue #3274). Runs AFTER the
+    #      completion reaps above so the just-stopped slot is freed before this
+    #      rule re-dispatches into it at a stronger model tier (INV-006). A
+    #      no_op / failure of a class in ESCALATION_POLICY (today: cleanup_orch
+    #      at Haiku) re-dispatches once at the escalate_model HINT, gated by the
+    #      saturation guard + attempt cap in `decide_escalation`.
+    escalation_out = _rule_escalation(state, events, now)
+    fold(escalation_out)
+
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
     #    new work; emergency brake (issue #744) overrides the depth verdict.
     fold(_rule_auto_merge_sweep(state, events))
@@ -2060,7 +2321,9 @@ def decide(
     )
     fold(signal_out)
 
-    dispatched_any = (pipeline_out.dispatched + signal_out.dispatched) > 0
+    dispatched_any = (
+        pipeline_out.dispatched + signal_out.dispatched + escalation_out.dispatched
+    ) > 0
     skipped_count = pipeline_out.skipped + signal_out.skipped
 
     # 5.5. Silent-wedge fallback (issue #509) — checked AFTER dispatch
