@@ -45,6 +45,9 @@ import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { redisInfo as getRedisInfo } from "../redis/utility.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { countReflectionKeys, probeReflectionOutcomesLedger } from "../redis/reflections.ts";
+// Issue #3270: the attribution ledger LLEN probe — a best-effort LLEN read that
+// surfaces ledger-dark state to the deep-health rule without fetching all rows.
+import { getLedgerLen } from "../redis/attribution-ledger.ts";
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
@@ -202,6 +205,8 @@ export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
     sysdTargetWeb: val<ProbeInputs["sysdTargetWeb"]>("sysdTargetWeb"),
     patterns: val<ProbeInputs["patterns"]>("patterns"),
     reflections: val<ProbeInputs["reflections"]>("reflections"),
+    // Issue #3270: attribution ledger LLEN.
+    attributionLedgerCount: val<ProbeInputs["attributionLedgerCount"]>("attributionLedgerCount"),
     ovSearch: val<ProbeInputs["ovSearch"]>("ovSearch"),
     redisInfo: val<ProbeInputs["redisInfo"]>("redisInfo"),
     emergencyBrake: val<ProbeInputs["emergencyBrake"]>("emergencyBrake"),
@@ -261,6 +266,8 @@ export interface CollectProbeDeps {
   serviceStatus?: typeof readServiceStatus;
   memoryPatterns?: typeof getMemoryPatterns;
   reflectionKeys?: typeof countReflectionKeys;
+  /** Issue #3270: ledger LLEN probe (default: getLedgerLen). Best-effort — returns 0 on error. */
+  attributionLedgerLen?: typeof getLedgerLen;
   emergencyBrake?: typeof getEmergencyBrake;
   ovSearchWindow?: typeof getOvSearchWindow;
   knowledgeContextAvailability?: typeof getKnowledgeContextAvailability;
@@ -338,6 +345,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     serviceStatus = readServiceStatus,
     memoryPatterns = getMemoryPatterns,
     reflectionKeys = countReflectionKeys,
+    attributionLedgerLen = getLedgerLen,
     emergencyBrake = getEmergencyBrake,
     ovSearchWindow = getOvSearchWindow,
     knowledgeContextAvailability = getKnowledgeContextAvailability,
@@ -434,6 +442,11 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       },
     },
     { key: "reflections", run: () => reflectionKeys() },
+    // Issue #3270: ledger LLEN — surfaces "ledger remains empty" to the
+    // deep-health attribution-ledger-dark rule. Best-effort: getLedgerLen already
+    // returns 0 on any Redis error (never throws), so a rejected settle here is
+    // an extra defensive layer only.
+    { key: "attributionLedgerCount", run: () => attributionLedgerLen() },
     {
       key: "ovSearch",
       run: async () => {

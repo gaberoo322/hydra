@@ -506,7 +506,28 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
       autoRecovery: true,
     };
   },
-  // Issue #1968: surface the silent empty/partial OV skill catalog through the
+  // Issue #3270: warn when the attribution ledger is empty. The attribution
+  // spine (epic #2628) was designed to populate `hydra:attribution:ledger` with
+  // per-merge observation rows as soon as PRs land and their windows close. An
+  // empty ledger after the wiring (post-#3113 ordering fix) signals the producer
+  // flow never fired — the exact symptom issue #3270 diagnoses. Advisory: surfaces
+  // as a WARNING (not error) so an operator is alerted without blocking the
+  // pipeline. Fires only when count === 0 (never on partial population); the
+  // honest-zero default on probe failure means this rule no-ops when the probe
+  // itself fails (honest-none, never a phantom alarm).
+  (s) => {
+    if (s.attributionLedgerCount > 0) return null;
+    return {
+      severity: "warning" as const,
+      component: "intelligence",
+      what: "Attribution ledger is empty — merger→ledger flow never fired",
+      why: "The outcome-attribution spine (epic #2628) wires `runAttributionRecord` as a housekeeping chore (issue #2632) to populate `hydra:attribution:ledger` with per-merge observation rows. The ledger has 0 rows, meaning the producer flow (open window on PR landing → close window after duration → append row) has not completed a single cycle. The issue #3113 ordering fix (attribution-record before holdback-merge-watch in housekeeping.ts) must be applied AND at least one PR must have landed AND its window must have elapsed.",
+      impact: "The ridge estimator (#2630) and per-class scoreboard (#2943) have no data — `estimateMarginalEffects` returns empty results and the outcome-attribution spine is dark despite the wiring existing.",
+      action: "Check `runAttributionRecord` logs (`journalctl --user -u hydra-orchestrator.service | grep '\[attribution\]'`). Verify: (1) holdback pending-enroll registry has/had entries (`HGETALL hydra:holdback:pending-enroll`); (2) attribution-record chore runs BEFORE holdback-merge-watch in housekeeping.ts (issue #3113); (3) at least one window has elapsed (`HGETALL hydra:attribution:windows`).",
+      autoRecovery: false,
+    };
+  },
+    // Issue #1968: surface the silent empty/partial OV skill catalog through the
   // deep-health Health Assessment fold so an operator watching /api/health/deep
   // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a
   // supplementary detail view, but only this rule folds the failure into the

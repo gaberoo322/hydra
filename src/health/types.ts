@@ -120,6 +120,12 @@ export interface HealthSnapshot {
   };
   patterns: { planner: number; executor: number; skeptic: number };
   reflCount: number;
+  // Issue #3270: the attribution ledger row count, probed at fan-out time so the
+  // deep-health attribution-ledger-dark rule (rules.ts) is a pure function of the
+  // snapshot. A count of 0 after the chore has been wired (post-#3113 fix) signals
+  // the ledger population never fired — the exact dark-ledger symptom the issue
+  // diagnoses. Honest-zero on a probe failure (the probe already returned 0).
+  attributionLedgerCount: number;
   // Issue #2492: the reflection-deposit-health verdict over the recent
   // cycle-metrics window — the SAME projection GET /api/learning/reflection-health
   // serves, derived in parseProbes from the metrics-probe trend already collected
@@ -262,6 +268,11 @@ export interface ProbeInputs {
   sysdTargetWeb: string | null;
   patterns: HealthSnapshot["patterns"] | null;
   reflections: number | null;
+  // Issue #3270: the attribution ledger LLEN, read at fan-out time (async probe,
+  // NOT a direct in-memory read). `| null` on a rejected settle — parseProbes
+  // coalesces to 0 (honest-none: the rule sees "empty", never a phantom populated
+  // ledger). Pairs with the deep-health attribution-ledger-dark rule in rules.ts.
+  attributionLedgerCount: number | null;
   // Issue #2386: the in-process OV skill-catalog state, read synchronously at
   // fan-out time (NOT a Promise.allSettled probe — it is a pure in-memory copy,
   // never I/O). `| null` so a fan-out that cannot resolve it degrades to the

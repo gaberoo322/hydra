@@ -216,6 +216,10 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const mData = probes.metrics || { trend: [], stats: {} };
   const patterns = probes.patterns || { planner: 0, executor: 0, skeptic: 0 };
   const reflCount = probes.reflections || 0;
+  // Issue #3270: attribution ledger LLEN — coalesces null (rejected settle or
+  // probe not yet running) to 0 so the rule sees "empty", never a phantom populated
+  // ledger. Honest-zero: the probe itself already returns 0 on Redis error.
+  const attributionLedgerCount = probes.attributionLedgerCount ?? 0;
   // Issue #2386: a null skillCatalog (the fan-out could not resolve the live
   // read) defaults to an un-run, empty catalog — `completed:false` so both
   // skill-catalog rules (assessSkillCatalog / assessRegistrationFailureRate)
@@ -290,6 +294,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     blCounts,
     patterns,
     reflCount,
+    attributionLedgerCount,
     reflectionHealth,
     skillCatalog,
     darkOutcomes,
