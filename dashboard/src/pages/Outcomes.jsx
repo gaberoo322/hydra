@@ -12,8 +12,10 @@
  *                               share, rework, scope-violations, learning.
  *   3. CacheEconomics          — point-in-time cache-hit ratio (5h / 7d)
  *   4. CostByClass             — per-class token-spend share today (issue #1439)
- *   5. LessonsTrend            — promotion rate + top friction + meta count
- *   6. SubscriptionQuotaTrend  — % burned + headroom
+ *   5. CascadeRouting          — cascade-routing escalation/block rate + cost
+ *                               delta (issue #3284)
+ *   6. LessonsTrend            — promotion rate + top friction + meta count
+ *   7. SubscriptionQuotaTrend  — % burned + headroom
  *
  * NB: the CalibrationTrend panel (tier + cost accuracy) was removed in
  * issue #2876 — its `/outcomes/calibration` endpoint always returned empty
@@ -26,6 +28,7 @@ import { OutcomeCards } from "../components/pages/outcomes/OutcomeCards.jsx";
 import { BuilderHealth } from "../components/pages/outcomes/BuilderHealth.jsx";
 import { CacheEconomics } from "../components/pages/outcomes/CacheEconomics.jsx";
 import { CostByClass } from "../components/pages/outcomes/CostByClass.jsx";
+import { CascadeRouting } from "../components/pages/outcomes/CascadeRouting.jsx";
 import { LessonsTrend } from "../components/pages/outcomes/LessonsTrend.jsx";
 import { SubscriptionQuotaTrend } from "../components/pages/outcomes/SubscriptionQuotaTrend.jsx";
 
@@ -44,6 +47,7 @@ export default function Outcomes() {
       <BuilderHealth />
       <CacheEconomics />
       <CostByClass />
+      <CascadeRouting />
       <LessonsTrend />
       <SubscriptionQuotaTrend />
     </div>

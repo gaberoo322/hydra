@@ -11,9 +11,17 @@
  * `autopilot:slot-events` so the dashboard hook can route on it.
  */
 
-import { test } from "node:test";
+import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { bridgeBroadcast } from "../src/autopilot/slot-events-bridge.ts";
+import Redis from "ioredis";
+
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/2";
+import {
+  bridgeBroadcast,
+  persistCascadeTelemetry,
+} from "../src/autopilot/slot-events-bridge.ts";
+import { getCascadeTelemetry } from "../src/redis/cascade-telemetry.ts";
+import { closeRedisConnections } from "../src/redis/connection.ts";
 
 // A recording WsBroadcastRegistry stub (issue #1965): bridgeBroadcast now
 // targets the named registry surface (`.broadcast`) instead of reaching the
@@ -257,4 +265,99 @@ test("bridgeBroadcast: dispatch_decision with outcome=dispatched + outcome=idle 
     const env = calls[0].event as { payload: Record<string, string> };
     assert.equal(env.payload.outcome, outcome, `outcome=${outcome} should round-trip verbatim`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Cascade-routing telemetry events (issue #3284)
+//
+// decide.py emits `cascade_routing_escalation` / `cascade_routing_blocked` on
+// the same slot-events stream; the field-agnostic bridge forwards them verbatim
+// (round-trip below), AND `persistCascadeTelemetry` records them into the
+// durable ring for the metrics card (Redis round-trip below).
+// ---------------------------------------------------------------------------
+
+test("bridgeBroadcast: cascade_routing_escalation round-trips verbatim (#3284)", () => {
+  const { bus, calls } = makeMockBus();
+  const raw = {
+    event: "cascade_routing_escalation",
+    turn_n: "4",
+    run_id: "abcd1234",
+    class: "cleanup_orch",
+    attempt: "2",
+    trigger_reason: "subagent_noop",
+    from_model: "haiku",
+    to_model: "sonnet",
+    ts_epoch: "1700000200",
+  };
+  const env = bridgeBroadcast(bus as any, raw);
+  assert.equal(calls[0].stream, "autopilot:slot-events");
+  assert.equal(env.payload.event, "cascade_routing_escalation");
+  assert.equal(env.payload.class, "cleanup_orch");
+  assert.equal(env.payload.trigger_reason, "subagent_noop");
+  assert.equal(env.payload.from_model, "haiku");
+  assert.equal(env.payload.to_model, "sonnet");
+  assert.equal(env.payload.attempt, "2");
+});
+
+test("bridgeBroadcast: cascade_routing_blocked round-trips verbatim (#3284)", () => {
+  const { bus, calls } = makeMockBus();
+  const raw = {
+    event: "cascade_routing_blocked",
+    turn_n: "5",
+    run_id: "abcd1234",
+    class: "cleanup_orch",
+    trigger_reason: "subagent_noop",
+    to_model: "sonnet",
+    block_reason: "usage_dispatch_blocked",
+    ts_epoch: "1700000200",
+  };
+  const env = bridgeBroadcast(bus as any, raw);
+  assert.equal(env.payload.event, "cascade_routing_blocked");
+  assert.equal(env.payload.block_reason, "usage_dispatch_blocked");
+  assert.equal(env.payload.to_model, "sonnet");
+});
+
+describe("persistCascadeTelemetry — durable ring side-effect (issue #3284, Redis)", () => {
+  const LEDGER_KEY = "hydra:autopilot:cascade-telemetry:ledger";
+  let raw: any;
+
+  async function rawRedis() {
+    if (!raw) raw = new Redis(process.env.REDIS_URL!);
+    return raw;
+  }
+
+  beforeEach(async () => {
+    const r = await rawRedis();
+    await r.del(LEDGER_KEY);
+  });
+
+  after(async () => {
+    if (raw) {
+      await raw.del(LEDGER_KEY);
+      raw.disconnect();
+    }
+    closeRedisConnections();
+  });
+
+  test("records a cascade event into the ring", async () => {
+    await persistCascadeTelemetry({
+      event: "cascade_routing_escalation",
+      class: "cleanup_orch",
+      trigger_reason: "subagent_noop",
+      from_model: "haiku",
+      to_model: "sonnet",
+      attempt: "2",
+      ts_epoch: "100",
+      run_id: "r",
+    });
+    const rollup = await getCascadeTelemetry();
+    assert.equal(rollup.escalations, 1);
+    assert.equal(rollup.byClass.cleanup_orch.escalations, 1);
+  });
+
+  test("a non-cascade event is a no-op (ring stays empty)", async () => {
+    await persistCascadeTelemetry({ event: "subagent_stop", slot: "dev_orch" });
+    const rollup = await getCascadeTelemetry();
+    assert.equal(rollup.sampleSize, 0);
+  });
 });

@@ -132,6 +132,11 @@ function escalationFor(plan: any, slot: string): any | undefined {
   );
 }
 
+/** Find the first plan event carrying a given `event` discriminator. */
+function eventOf(plan: any, event: string): any | undefined {
+  return (plan.events ?? []).find((e: any) => e && e.event === event);
+}
+
 describe("decide.py — cascade-routing escalation (issue #3274)", () => {
   test("cleanup_orch no_op on a fresh (non-saturated) board escalates to sonnet", () => {
     const state = baseState({ slotEvents: [stopEvent("cleanup_orch", "no_op")] });
@@ -375,6 +380,79 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
       assert.equal(esc.prompt_args.escalate_model, "sonnet");
     },
   );
+});
+
+describe("decide.py — cascade-routing telemetry events (issue #3284)", () => {
+  test("a realised escalation emits a cascade_routing_escalation event", () => {
+    const state = baseState({ slotEvents: [stopEvent("cleanup_orch", "no_op")] });
+    const plan = runDecide(state);
+    // The dispatch AND the telemetry event must both be present.
+    assert.ok(escalationFor(plan, "cleanup_orch"), "escalation dispatch present");
+    const ev = eventOf(plan, "cascade_routing_escalation");
+    assert.ok(ev, "a cascade_routing_escalation event must be emitted");
+    assert.equal(ev.class, "cleanup_orch");
+    assert.equal(ev.trigger_reason, "subagent_noop", "no_op maps to the subagent_noop trigger");
+    assert.equal(ev.from_model, "haiku", "cheap tier is haiku (the class default)");
+    assert.equal(ev.to_model, "sonnet", "escalate-to tier is sonnet");
+    // attempt is stringified for XADD and is the ESCALATED attempt number (2).
+    assert.equal(ev.attempt, "2");
+  });
+
+  test("a FAILURE trigger records trigger_reason=subagent_failure", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("cleanup_orch", "failure", "tF", "npm test failed")],
+    });
+    const plan = runDecide(state);
+    const ev = eventOf(plan, "cascade_routing_escalation");
+    assert.ok(ev, "a failure escalation must emit the telemetry event");
+    assert.equal(ev.trigger_reason, "subagent_failure");
+  });
+
+  test("a usage-gate-blocked would-be escalation emits cascade_routing_blocked and NO escalation event", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op", "tBLOCK")],
+      usage_eligibility: { allow: false, reasons: { budget: "exhausted" } },
+    });
+    const plan = runDecide(state);
+    // No dispatch survives the hard stop (existing invariant) …
+    assert.equal(
+      escalationFor(plan, "cleanup_orch"),
+      undefined,
+      "dispatch_blocked suppresses the re-dispatch",
+    );
+    // … but the throttled escalation is now VISIBLE via the blocked event.
+    const blocked = eventOf(plan, "cascade_routing_blocked");
+    assert.ok(blocked, "a throttled escalation must emit cascade_routing_blocked");
+    assert.equal(blocked.class, "cleanup_orch");
+    assert.equal(blocked.trigger_reason, "subagent_noop");
+    assert.equal(blocked.to_model, "sonnet", "the suppressed escalate-to tier is recorded");
+    assert.equal(blocked.block_reason, "usage_dispatch_blocked");
+    // And NO escalation event fires (the escalation did not actually happen).
+    assert.equal(
+      eventOf(plan, "cascade_routing_escalation"),
+      undefined,
+      "a blocked escalation must NOT also emit an escalation event",
+    );
+  });
+
+  test("a SUCCESS emits NEITHER cascade event (no routing decision to report)", () => {
+    const state = baseState({ slotEvents: [stopEvent("cleanup_orch", "success")] });
+    const plan = runDecide(state);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.equal(eventOf(plan, "cascade_routing_blocked"), undefined);
+  });
+
+  test("a saturated-board no_op suppression emits NEITHER cascade event (not a routing decision)", () => {
+    // Suppression here is capability-neutral (work-availability), NOT the usage
+    // gate — so it is NOT a `blocked` telemetry event; nothing is reported.
+    const state = baseState({
+      slotEvents: [stopEvent("cleanup_orch", "no_op")],
+      signals: { cleanup_board_saturated: true },
+    });
+    const plan = runDecide(state);
+    assert.equal(eventOf(plan, "cascade_routing_escalation"), undefined);
+    assert.equal(eventOf(plan, "cascade_routing_blocked"), undefined);
+  });
 });
 
 const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");

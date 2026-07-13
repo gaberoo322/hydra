@@ -11,6 +11,7 @@ import { projectAnchorDistribution } from "../metrics/stats-projection.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
+import { getCascadeTelemetry } from "../redis/cascade-telemetry.ts";
 import {
   getCostByClass,
   getRollingCostByClass,
@@ -343,6 +344,29 @@ export function createMetricsRouter() {
     aggregatorRouteNoQuery("api/metrics/cost-by-outcome", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
       return getCostByOutcome(count);
+    }),
+  );
+
+  // GET /metrics/cascade-routing — Cascade-routing escalation telemetry (issue #3284).
+  //
+  // Surfaces the cascade-routing observability the feature shipped without
+  // (PR #3274): how often decide.py's `_rule_escalation` re-dispatched a
+  // cheap-tier class at a stronger model (`cascade_routing_escalation`), how
+  // often the Subscription-Usage-Tracker hard stop threw an otherwise-eligible
+  // escalation away (`cascade_routing_blocked`), a per-class + per-trigger
+  // breakdown, and an estimated token cost delta. Answers architecture-review
+  // rec #6's open "is cascading paying off, or is the gate too restrictive?".
+  //
+  // A pure read over the durable bounded ring (src/redis/cascade-telemetry.ts)
+  // the slot-events bridge feeds; `count` bounds the window (default the full
+  // ring). Read-only, additive — no new write path here.
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/cascade-routing",
+    aggregatorRouteNoQuery("api/metrics/cascade-routing", (req) => {
+      const count = countQuerySchema(500).safeParse(req.query).data?.count ?? 500;
+      return getCascadeTelemetry(count);
     }),
   );
 

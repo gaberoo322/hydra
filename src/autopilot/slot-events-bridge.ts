@@ -31,6 +31,7 @@
 
 import type { EventBus } from "../event-bus.ts";
 import type { WsBroadcastRegistry } from "../ws-broadcast-registry.ts";
+import { cascadeRecordFromEvent, recordCascade } from "../redis/cascade-telemetry.ts";
 
 const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const CONSUMER_GROUP = "now-pixel-bridge";
@@ -85,11 +86,37 @@ export async function startSlotEventsBridge(
     consumerName,
     async (event: any) => {
       bridgeBroadcast(eventBus.wsRegistry, event);
+      // Cascade-routing telemetry (issue #3284): persist the cascade decision
+      // events into the durable bounded ring so the metrics surface can trend
+      // escalation/block rate + cost delta across restarts. Best-effort — a
+      // telemetry write must never break the animation broadcast it rides
+      // (mirrors the bridge's existing best-effort-broadcast contract).
+      await persistCascadeTelemetry(event);
     },
     // reapStale: this group is `$`-anchored (no backlog replay) and only
     // animates NEW events, so dropping a dead zombie's PEL is correct (#1221).
     { count: 32, blockMs: 5000, reapStale: true },
   );
+}
+
+/**
+ * Best-effort persist of a cascade-routing telemetry event into the durable
+ * ring (issue #3284). The bridge is `$`-anchored and lossy (it animates NEW
+ * events and may lag/skip on restart), so this is a best-effort DURABILITY
+ * layer, not an exactly-once ledger — the metrics card tolerates a dropped
+ * record the same way the sprite feed tolerates a skipped frame. A non-cascade
+ * event is a cheap no-op (`cascadeRecordFromEvent` returns null).
+ */
+export async function persistCascadeTelemetry(event: any): Promise<void> {
+  try {
+    const rec = cascadeRecordFromEvent(extractPayload(event));
+    if (rec) await recordCascade(rec);
+  } catch (err: any) {
+    // Never propagate — telemetry must not break the bridge (fail-loud log).
+    console.error(
+      `[slot-events-bridge] cascade telemetry persist failed: ${err?.message || err}`,
+    );
+  }
 }
 
 /**
