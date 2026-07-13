@@ -257,6 +257,60 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
       "the recognised no_op both records visibility and drives the gated escalation",
     );
   });
+
+  test(
+    "co-trigger: idle-board cleanup_orch no_op escalates ONCE, not double-dispatched (issue #3274 QA blocker)",
+    () => {
+      // Production-typical scenario the earlier fixtures missed: cleanup_orch
+      // runs specifically on idle-board turns, so a real no_op arrives with
+      // `orch_backfill_idle=true` present — NOT the empty `signals: {}` the
+      // fresh-board escalation cases used, which suppresses the signal-class
+      // co-trigger. Under that realistic signal state, step 2.5
+      // (_rule_escalation) re-dispatches cleanup_orch at the escalate_model
+      // tier AND step 5 (_rule_signal_classes, cleanup_orch keyed off
+      // orch_backfill_idle) would ALSO emit an ordinary `dispatch cleanup_orch`
+      // — a double-dispatch of the same class in one plan (fold() never mutates
+      // state.slots, so the signal rule reads the still-null reaped slot and
+      // fires independently). The escalation rule must claim the slot so the
+      // signal rule skips it: exactly one cleanup_orch dispatch, and it must be
+      // the ESCALATION (stronger-tier) one.
+      const state = baseState({
+        slotEvents: [stopEvent("cleanup_orch", "no_op", "tCO")],
+        signals: { orch_backfill_idle: true },
+      });
+      const plan = runDecide(state);
+
+      const cleanupDispatches = (plan.actions ?? []).filter(
+        (a: any) => a.type === "dispatch" && a.slot === "cleanup_orch",
+      );
+      assert.equal(
+        cleanupDispatches.length,
+        1,
+        `exactly one cleanup_orch dispatch expected in the plan, got ${cleanupDispatches.length}: ` +
+          JSON.stringify(cleanupDispatches.map((a: any) => a.prompt_args ?? {})),
+      );
+      // The surviving dispatch must be the escalation re-dispatch (the stronger
+      // tier), not the plain signal-class one — suppressing the wrong copy would
+      // silently downgrade the retry back to the cheap tier.
+      assert.equal(
+        (cleanupDispatches[0].prompt_args ?? {}).escalate_model,
+        "sonnet",
+        "the surviving cleanup_orch dispatch must be the escalation (sonnet) re-dispatch, not the plain signal-class copy",
+      );
+
+      // INV-006: the reap that frees the slot must still precede the dispatch.
+      const types = (plan.actions ?? []).map(
+        (a: any) => `${a.type}:${a.slot}`,
+      );
+      const reapIdx = types.indexOf("reap:cleanup_orch");
+      const dispatchIdx = types.indexOf("dispatch:cleanup_orch");
+      assert.ok(reapIdx >= 0, "the no_op slot must be reaped");
+      assert.ok(
+        reapIdx < dispatchIdx,
+        "reap must precede the surviving cleanup_orch dispatch (INV-006)",
+      );
+    },
+  );
 });
 
 const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");

@@ -1538,7 +1538,9 @@ ESCALATION_SATURATION_SIGNAL = {
 }
 
 
-def _rule_escalation(state: dict, events: list[dict], now: int) -> _RuleOutput:
+def _rule_escalation(
+    state: dict, events: list[dict], now: int
+) -> tuple[_RuleOutput, set[str]]:
     """Cascade-routing escalation re-dispatch (issue #3274, design-concept issue-3274).
 
     Runs AFTER completion reaps (INV-006 — the just-stopped slot is reaped/freed
@@ -1564,9 +1566,23 @@ def _rule_escalation(state: dict, events: list[dict], now: int) -> _RuleOutput:
     saturation flag is the precomputed per-class board-saturation signal read via
     the signal seam (decide.py never recomputes saturation).
 
+    Returns `(out, escalated_slots)` — the second element is the set of class
+    slots this rule re-dispatched into THIS turn. `decide()` threads it into
+    `_rule_signal_classes` (step 5) so a signal class that the escalation rule
+    already re-dispatched (the same reaped slot) is suppressed there — otherwise
+    a `cleanup_orch` no_op on an idle board (`orch_backfill_idle=true`) would
+    double-dispatch: once as the escalation re-dispatch here (step 2.5) and again
+    as the ordinary signal-class dispatch (step 5), since `fold()` does not
+    mutate `state["slots"]` so the signal rule reads the still-null reaped slot
+    and fires independently. This mirrors the pipeline rule's
+    `slots.get(cls) is not None` slot-busy guard for the escalation seam that
+    dispatches into a reaped (still-null) slot within the same turn (issue #3274,
+    QA blocker).
+
     Pure w.r.t. fs/network/Redis; reads state.slot_events + state.slots + signals.
     """
     out = _RuleOutput()
+    escalated_slots: set[str] = set()
     slot_events_raw = state.get("slot_events") or []
     if isinstance(slot_events_raw, dict):
         slot_events_raw = slot_events_raw.get("events") or []
@@ -1615,7 +1631,8 @@ def _rule_escalation(state: dict, events: list[dict], now: int) -> _RuleOutput:
             reason=decision["reason"],
         )
         out.dispatched += 1
-    return out
+        escalated_slots.add(slot)
+    return out, escalated_slots
 
 
 def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
@@ -1822,8 +1839,20 @@ def _rule_signal_classes(
     *,
     dispatch_blocked: bool,
     shed_classes: set[str],
+    escalated_slots: set[str],
 ) -> _RuleOutput:
     """Step 5 — signal classes (health / sweep_* / discover_* / scout / arch / retro).
+
+    `escalated_slots` is the set of class slots the escalation rule (step 2.5,
+    `_rule_escalation`) already re-dispatched THIS turn. A signal class present
+    in it is skipped here so it never double-dispatches: on an idle board a
+    `cleanup_orch` no_op both trips the escalation re-dispatch (step 2.5) and
+    would otherwise re-fire as an ordinary `orch_backfill_idle` signal-class
+    dispatch (step 5). `fold()` does not mutate `state["slots"]`, so without this
+    guard the signal rule reads the still-null reaped slot and fires a second,
+    duplicate `dispatch cleanup_orch` in the same plan (issue #3274, QA blocker).
+    This is the signal-rule analogue of `_rule_pipeline_dispatch`'s
+    `slots.get(cls) is not None` slot-busy guard.
 
     Each is independent. Signal classes also respect `burned_classes` (issue
     #432). For `scout_orch` the cost-cap gate (issue #532) fires BEFORE the
@@ -1924,6 +1953,20 @@ def _rule_signal_classes(
                 make_dispatch_decision_event(
                     state, now, cls=sig, outcome="budget",
                     reason="usage tracker shed",
+                )
+            )
+            out.skipped += 1
+            continue
+        if sig in escalated_slots:
+            # The escalation rule (step 2.5) already re-dispatched this class
+            # into the reaped slot THIS turn; suppress the ordinary signal-class
+            # dispatch so the plan carries exactly one dispatch for the slot
+            # (issue #3274 QA blocker — the idle-board cleanup_orch no_op
+            # double-dispatch). Analogue of the pipeline rule's slot-busy guard.
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="cooldown",
+                    reason="slot already re-dispatched by escalation this turn",
                 )
             )
             out.skipped += 1
@@ -2294,7 +2337,7 @@ def decide(
     #      no_op / failure of a class in ESCALATION_POLICY (today: cleanup_orch
     #      at Haiku) re-dispatches once at the escalate_model HINT, gated by the
     #      saturation guard + attempt cap in `decide_escalation`.
-    escalation_out = _rule_escalation(state, events, now)
+    escalation_out, escalated_slots = _rule_escalation(state, events, now)
     fold(escalation_out)
 
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
@@ -2318,6 +2361,7 @@ def decide(
     signal_out = _rule_signal_classes(
         state, events, scope, now,
         dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
+        escalated_slots=escalated_slots,
     )
     fold(signal_out)
 
