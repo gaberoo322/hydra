@@ -85,6 +85,18 @@ export {
 } from "./token-math.ts";
 
 // ---------------------------------------------------------------------------
+// Transcript scan — real per-session token recovery (issue #3250)
+// ---------------------------------------------------------------------------
+// `tokensForSession` recovers the REAL token count for a subagent session from
+// Claude Code's on-disk JSONL transcripts (best-effort + total: returns 0 on any
+// failure, never throws). Re-exported here so the `/api/metrics` reap-completion
+// backfill imports it through the barrel rather than the deep `transcript-scan.ts`
+// path.
+export {
+  tokensForSession,
+} from "./transcript-scan.ts";
+
+// ---------------------------------------------------------------------------
 // Subscription Usage Tracker — Anthropic-quota projection (PR A #606, B-series)
 // ---------------------------------------------------------------------------
 export {

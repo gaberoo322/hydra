@@ -20,8 +20,8 @@ import {
   getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,
+  tokensForSession,
 } from "../cost/index.ts";
-import { tokensForSession } from "../cost/transcript-scan.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { SubagentTokensBodySchema } from "../schemas/metrics.ts";
 import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
