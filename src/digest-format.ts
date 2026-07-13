@@ -25,6 +25,13 @@ import { getTargetCommitUrl } from "./target-config.ts";
 import { ORCHESTRATOR_FLOOR, type CapacitySnapshot } from "./capacity-floor-classifier.ts";
 import { type BuilderHealthScorecard } from "./aggregators/builder-health.ts";
 import {
+  type StagnationPanel,
+  type RealmStagnation,
+  type StagnationSignalName,
+  type Realm,
+} from "./aggregators/builder-health-stagnation-panel.ts";
+import { type StagnationResult } from "./aggregators/builder-health-stagnation.ts";
+import {
   NOTIFICATION_EVENT_TYPES as E,
   type NotificationEventPayload,
 } from "./event-bus-vocabulary.ts";
@@ -241,13 +248,16 @@ export function formatBuilderHealthLines(
   const scope = bh?.scopeViolations;
   const learning = bh?.learningThroughput;
 
+  const stagnation = bh?.stagnation ?? null;
+
   const hasData =
     (auto && auto.total > 0) ||
     (ttm && ttm.samples > 0) ||
     (rework && rework.window > 0) ||
     (share && share.window > 0) ||
     (scope && scope.total > 0) ||
-    (learning && (learning.metaFrictionOpened > 0 || (learning.promotionRate?.length ?? 0) > 0));
+    (learning && (learning.metaFrictionOpened > 0 || (learning.promotionRate?.length ?? 0) > 0)) ||
+    stagnationHasData(stagnation);
 
   if (!hasData) {
     lines.push("• No builder-health data yet — scorecard tracking enabled");
@@ -278,8 +288,108 @@ export function formatBuilderHealthLines(
   if (learning) {
     lines.push(`• Learning: ${learning.metaFrictionOpened} meta-friction opened, ${learning.designConceptsProducedToday} design-concepts today`);
   }
+  for (const l of formatStagnationPanelLines(stagnation)) lines.push(l);
   lines.push("");
   return lines;
+}
+
+/** True when the stagnation panel carries at least one instrumented verdict. */
+function stagnationHasData(panel: StagnationPanel | null): boolean {
+  if (!panel) return false;
+  for (const name of STAGNATION_SIGNAL_ORDER) {
+    const realms = panel.signals?.[name];
+    if (!realms) continue;
+    for (const realm of STAGNATION_REALM_ORDER) {
+      if (realms[realm]) return true;
+    }
+  }
+  return false;
+}
+
+// Deterministic render order for the per-realm stagnation panel (issue #3289,
+// epic #3285, ADR-0028). The panel is a per-signal, per-realm glance — never a
+// composite index — so each signal renders its own realm line and a ⚠ flag only
+// when the detector reports a sustained breach. An un-instrumented realm signal
+// (`null` block — the target realm is dark by construction on this substrate)
+// renders as `not instrumented`, never a fabricated number.
+const STAGNATION_SIGNAL_ORDER: readonly StagnationSignalName[] = [
+  "cycleYield",
+  "reworkRate",
+  "mutationKillRate",
+];
+const STAGNATION_REALM_ORDER: readonly Realm[] = ["orch", "target"];
+const STAGNATION_SIGNAL_LABELS: Record<StagnationSignalName, string> = {
+  cycleYield: "Cycle-yield",
+  reworkRate: "Rework-rate",
+  mutationKillRate: "Mutation-kill",
+};
+const STAGNATION_REALM_LABELS: Record<Realm, string> = {
+  orch: "orch",
+  target: "target",
+};
+
+/**
+ * Render the per-realm stagnation panel (ADR-0028) as digest lines. Pure — reads
+ * only the already-computed `StagnationPanel` off the scorecard and never throws
+ * (a null/absent panel renders nothing; a null realm block renders as
+ * `not instrumented`). Emits, in order: one `Stagnation:` header, one line per
+ * signal×realm with `current`-vs-`baseline` and a ⚠ flag on a `breach`, then a
+ * single window-context line (cycles + cleanup:feature mix as the tier/backlog
+ * proxy). A breached signal is the operator's glance-level "the builder has
+ * stopped improving here" cue.
+ */
+export function formatStagnationPanelLines(panel: StagnationPanel | null): string[] {
+  if (!stagnationHasData(panel) || !panel) return [];
+  const lines = ["• Stagnation (per-realm, vs self-baseline):"];
+  for (const name of STAGNATION_SIGNAL_ORDER) {
+    const realms: RealmStagnation | undefined = panel.signals?.[name];
+    if (!realms) continue;
+    const label = STAGNATION_SIGNAL_LABELS[name];
+    for (const realm of STAGNATION_REALM_ORDER) {
+      lines.push(`  · ${label} [${STAGNATION_REALM_LABELS[realm]}]: ${formatStagnationCell(realms[realm])}`);
+    }
+  }
+  lines.push(`  · Window: ${formatStagnationWindow(panel)}`);
+  return lines;
+}
+
+/**
+ * Render one signal×realm cell. A `null` block is an un-instrumented (dark)
+ * realm signal → `not instrumented` (never a fabricated number). A `warming`
+ * verdict has no trustworthy baseline yet. A `breach` carries the ⚠ flag.
+ */
+function formatStagnationCell(result: StagnationResult | null): string {
+  if (!result) return "not instrumented";
+  if (result.state === "warming") {
+    const cur = result.current != null ? fmtSignal(result.current) : "—";
+    return `warming (now ${cur}, baseline —)`;
+  }
+  const cur = result.current != null ? fmtSignal(result.current) : "—";
+  const base = result.baseline != null ? fmtSignal(result.baseline) : "—";
+  const flag = result.state === "breach" ? " ⚠" : "";
+  return `now ${cur} vs baseline ${base}${flag}`;
+}
+
+/** Compact fixed-precision signal value (yield/rework are 0..1, kill-rate 0..100). */
+function fmtSignal(v: number): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+/**
+ * The honest window-context line (ADR-0028 Decision 2): cycle count + the
+ * cleanup-vs-feature merged mix as the tier/backlog-composition proxy the
+ * operator reads the panel against. Degrades to `n/a` when the context block is
+ * absent — never throws.
+ */
+function formatStagnationWindow(panel: StagnationPanel): string {
+  const ctx = panel.windowContext;
+  if (!ctx) return "n/a";
+  const cycles = Number.isFinite(ctx.cycles) ? ctx.cycles : 0;
+  const cleanup = Number.isFinite(ctx.mix?.cleanup) ? ctx.mix.cleanup : 0;
+  const feature = Number.isFinite(ctx.mix?.feature) ? ctx.mix.feature : 0;
+  return `${cycles} cycles, mix ${cleanup} cleanup:${feature} feature`;
 }
 
 function formatMinutes(mins: number): string {

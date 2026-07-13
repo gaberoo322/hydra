@@ -25,6 +25,11 @@
 
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
 import {
+  type StagnationPanel,
+  type StagnationSignalName,
+  type Realm,
+} from "./aggregators/builder-health-stagnation-panel.ts";
+import {
   listRecentAutopilotRunIds as defaultListRecentAutopilotRunIds,
   getAutopilotRun as defaultGetAutopilotRun,
 } from "./redis/autopilot-runs.ts";
@@ -122,6 +127,18 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
     }
   } catch (err: any) {
     lines.push(`*Throughput:* n/a (${err?.message || err})`);
+  }
+
+  // --- Stagnation: per-realm builder-health glance (ADR-0028, epic #3285) ---
+  // Best-effort: a failing scorecard read degrades THIS line to n/a and never
+  // throws, so the heartbeat still ships. A separate read from the Throughput
+  // block above so one section's failure can't silently blank the other.
+  try {
+    const scorecardReader = deps.getBuilderHealthScorecard ?? getBuilderHealthScorecard;
+    const health = await scorecardReader();
+    lines.push(formatStagnationHeartbeatLine(health?.stagnation ?? null));
+  } catch (err: any) {
+    lines.push(`*Stagnation:* n/a (${err?.message || err})`);
   }
 
   // --- Queue: target backlog lanes ---
@@ -242,4 +259,38 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
   }
 
   return lines.filter(Boolean).join("\n");
+}
+
+/**
+ * Compact per-realm stagnation glance for the daily heartbeat (ADR-0028, epic
+ * #3285). Pure — reads only the already-computed `StagnationPanel` and never
+ * throws. Renders a single `*Stagnation:*` line: the count of breached
+ * signal×realm cells (with a ⚠ when any breached), the count still warming, and
+ * the window cycle count. A `null` panel (scorecard degraded or no instrumented
+ * realm yet) reads `no instrumented signals`. The full per-cell breakdown lives
+ * in the `formatBuilderHealthLines` panel (`digest-format.ts`); this line is the
+ * heartbeat's at-a-glance summary of it.
+ */
+export function formatStagnationHeartbeatLine(panel: StagnationPanel | null): string {
+  if (!panel || !panel.signals) return "*Stagnation:* no instrumented signals";
+  const signalOrder: readonly StagnationSignalName[] = ["cycleYield", "reworkRate", "mutationKillRate"];
+  const realmOrder: readonly Realm[] = ["orch", "target"];
+  let breached = 0;
+  let warming = 0;
+  let instrumented = 0;
+  for (const name of signalOrder) {
+    const realms = panel.signals[name];
+    if (!realms) continue;
+    for (const realm of realmOrder) {
+      const r = realms[realm];
+      if (!r) continue; // dark / un-instrumented realm signal
+      instrumented++;
+      if (r.state === "breach") breached++;
+      else if (r.state === "warming") warming++;
+    }
+  }
+  if (instrumented === 0) return "*Stagnation:* no instrumented signals";
+  const cycles = Number.isFinite(panel.windowContext?.cycles) ? panel.windowContext.cycles : 0;
+  const flag = breached > 0 ? " ⚠️" : "";
+  return `*Stagnation:* ${breached}/${instrumented} signals breached${flag}, ${warming} warming (${cycles} cycles)`;
 }
