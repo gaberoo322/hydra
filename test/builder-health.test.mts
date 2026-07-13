@@ -28,6 +28,10 @@ import {
 } from "../src/aggregators/autonomy-classifier.ts";
 import { utcDateKey } from "../src/redis/scope-violations.ts";
 import { formatBuilderHealthLines } from "../src/digest.ts";
+import {
+  computeStagnationPanel,
+  type TrendRow,
+} from "../src/aggregators/builder-health-stagnation-panel.ts";
 
 // ---------------------------------------------------------------------------
 // classifyAutonomy — pure helper
@@ -282,6 +286,50 @@ describe("getBuilderHealthScorecard — composition", () => {
     assert.equal(d?.autonomous, false);
     assert.equal(d?.reason, "pr-view-unavailable");
   });
+
+  test("exposes a per-signal per-realm stagnation panel (orch populated, target dark)", async () => {
+    // 14 cycles: enough to clear the default 10-cycle cold-start baseline.
+    // All merged with regressions absent so cycleYield is flat-high (ok).
+    const trend: TrendRow[] = Array.from({ length: 14 }, (_, i) => ({
+      completedAt: `2026-05-${String(16 + i).padStart(2, "0")}T10:00:00Z`,
+      tasksAttempted: 1,
+      tasksMerged: 1,
+      regressionIntroduced: false,
+      mutationKillRate: 80,
+      anchorType: "kanban",
+    }));
+    const card = await getBuilderHealthScorecard(
+      happyDeps({ getMetricsTrend: async () => trend as any }),
+    );
+    const s = card.stagnation;
+    assert.ok(s, "stagnation panel present");
+    // Per-realm blocks exist for each trended signal; target is dark (null),
+    // orch is populated (not blended) — ADR-0028 Decision 1/2.
+    for (const sig of ["cycleYield", "reworkRate", "mutationKillRate"] as const) {
+      assert.equal(s!.signals[sig].target, null, `${sig} target dark`);
+      assert.ok(s!.signals[sig].orch, `${sig} orch populated`);
+      assert.equal(s!.signals[sig].orch!.state, "ok", `${sig} healthy => ok`);
+    }
+    // No composite/blended index field on the panel.
+    assert.equal((s as any).index, undefined);
+    assert.equal((s as any).score, undefined);
+    // Window context is exposed, not adjusted out.
+    assert.equal(s!.windowContext.cycles, 14);
+    assert.equal(s!.windowContext.mix.feature, 14);
+  });
+
+  test("stagnation degrades to null when the trend source throws", async () => {
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getMetricsTrend: async () => {
+          throw new Error("redis down");
+        },
+      }),
+    );
+    assert.equal(card.stagnation, null);
+    // Other metrics still computed.
+    assert.equal(card.autonomyRate?.total, 2);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -305,6 +353,7 @@ describe("formatBuilderHealthLines — digest section", () => {
       mutationKillRateTrend: null,
       scopeViolations: { series: [], total: 0, windowDays: 7 },
       learningThroughput: { promotionRate: [], metaFrictionOpened: 0, designConceptsProducedToday: 0, windowDays: 7 },
+      stagnation: null,
     });
     assert.match(lines.join("\n"), /No builder-health data yet/);
   });
@@ -319,6 +368,7 @@ describe("formatBuilderHealthLines — digest section", () => {
       mutationKillRateTrend: null,
       scopeViolations: { series: [], total: 1, windowDays: 7 },
       learningThroughput: { promotionRate: [], metaFrictionOpened: 1, designConceptsProducedToday: 3, windowDays: 7 },
+      stagnation: null,
     });
     const text = lines.join("\n");
     assert.match(text, /Autonomy: 50%/);
@@ -327,5 +377,111 @@ describe("formatBuilderHealthLines — digest section", () => {
     assert.match(text, /Rework: 5% regressions/);
     assert.match(text, /Scope violations: 1 in last 7d/);
     assert.match(text, /Learning: 1 meta-friction/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeStagnationPanel — pure per-realm projection (ADR-0028, #3288)
+// ---------------------------------------------------------------------------
+
+describe("computeStagnationPanel — pure per-realm projection", () => {
+  // Helper: build a newest-first trend of N cycles with per-cycle overrides.
+  function trend(n: number, per: (i: number) => Partial<TrendRow>): TrendRow[] {
+    // Oldest-first, then reverse to newest-first (as getMetricsTrend returns).
+    const rows: TrendRow[] = [];
+    for (let i = 0; i < n; i++) {
+      rows.push({ tasksAttempted: 1, tasksMerged: 1, ...per(i) });
+    }
+    return rows.reverse();
+  }
+
+  test("cold-start: below minBaselineCycles => warming, target dark", () => {
+    const rows = trend(4, () => ({ mutationKillRate: 80 }));
+    const panel = computeStagnationPanel(rows, { minBaselineCycles: 10 });
+    assert.equal(panel.signals.mutationKillRate.orch!.state, "warming");
+    assert.equal(panel.signals.mutationKillRate.target, null);
+    assert.equal(panel.windowContext.cycles, 4);
+  });
+
+  test("cycleYield breach: a sustained collapse from a high self-baseline fires", () => {
+    // 20 cycles merged (yield 1), then 4 cycles that did NOT merge (yield 0).
+    const rows = trend(24, (i) =>
+      i < 20 ? { tasksMerged: 1 } : { tasksMerged: 0 },
+    );
+    const panel = computeStagnationPanel(rows, {
+      sustain: 3,
+      minBaselineCycles: 10,
+      band: { cycleYield: 0.15 },
+    });
+    const y = panel.signals.cycleYield.orch!;
+    assert.equal(y.state, "breach");
+    assert.ok(y.sustainedCycles >= 3);
+    assert.equal(y.current, 0);
+  });
+
+  test("reworkRate breach: a run of regression cycles above a clean baseline fires", () => {
+    // 20 clean cycles (rework 0), then 4 regression cycles (rework 1).
+    const rows = trend(24, (i) =>
+      i < 20 ? { regressionIntroduced: false } : { regressionIntroduced: true },
+    );
+    const panel = computeStagnationPanel(rows, {
+      sustain: 3,
+      minBaselineCycles: 10,
+      band: { reworkRate: 0.15 },
+    });
+    assert.equal(panel.signals.reworkRate.orch!.state, "breach");
+  });
+
+  test("healthy flat series => ok on every signal, no composite emitted", () => {
+    const rows = trend(20, () => ({
+      tasksMerged: 1,
+      regressionIntroduced: false,
+      mutationKillRate: 85,
+    }));
+    const panel = computeStagnationPanel(rows, { minBaselineCycles: 10 });
+    assert.equal(panel.signals.cycleYield.orch!.state, "ok");
+    assert.equal(panel.signals.reworkRate.orch!.state, "ok");
+    assert.equal(panel.signals.mutationKillRate.orch!.state, "ok");
+    // No blended index/score field (ADR-0028 Decision 1).
+    assert.equal((panel as any).index, undefined);
+    assert.equal((panel as any).score, undefined);
+  });
+
+  test("mutation-kill-rate: cycles with no mutation run are skipped, not zeroed", () => {
+    // 20 kills at 80, then 4 cycles with NO mutationKillRate field. The absent
+    // cycles must be skipped (not counted as a 0 that would false-breach the
+    // down-direction detector).
+    const rows = trend(24, (i) =>
+      i < 20 ? { mutationKillRate: 80 } : {},
+    );
+    const panel = computeStagnationPanel(rows, {
+      sustain: 3,
+      minBaselineCycles: 10,
+      band: { mutationKillRate: 15 },
+    });
+    // Series is effectively 20 flat readings of 80 => ok, never a fabricated
+    // 0-driven breach.
+    assert.equal(panel.signals.mutationKillRate.orch!.state, "ok");
+    assert.equal(panel.signals.mutationKillRate.orch!.current, 80);
+  });
+
+  test("window context: cleanup-vs-feature mix + anchor-type distribution", () => {
+    const rows = trend(6, (i) => ({
+      tasksMerged: 1,
+      anchorType: i < 2 ? "prior-failure" : i < 4 ? "failing-test" : "kanban",
+    }));
+    const panel = computeStagnationPanel(rows, { minBaselineCycles: 1 });
+    assert.equal(panel.windowContext.mix.cleanup, 4); // 2 prior-failure + 2 failing-test
+    assert.equal(panel.windowContext.mix.feature, 2); // 2 kanban
+    assert.equal(panel.windowContext.anchorTypes["kanban"], 2);
+  });
+
+  test("never throws on garbage rows", () => {
+    const panel = computeStagnationPanel(
+      [{ tasksMerged: "x" }, null, undefined, { mutationKillRate: "NaN" }] as any,
+      { minBaselineCycles: 1 },
+    );
+    // Degrades gracefully — no throw, target dark.
+    assert.equal(panel.signals.cycleYield.target, null);
   });
 });

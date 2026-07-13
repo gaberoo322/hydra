@@ -3,7 +3,10 @@
  *
  * The builder-side counterpart to the Outcomes surface. Three routes:
  *
- *   GET  /api/builder-health                  — the full scorecard
+ *   GET  /api/builder-health                  — the full scorecard, including
+ *                                               the per-signal per-realm
+ *                                               `stagnation` panel + window
+ *                                               context (ADR-0028, #3288)
  *   POST /api/builder-health/scope-violation  — CI scope-check gate increments
  *                                               the day-bucketed counter
  *   POST /api/builder-health/dispatch-pr      — a dispatched subagent stamps
@@ -11,9 +14,11 @@
  *
  * The GET route delegates to the pure `getBuilderHealthScorecard` aggregator
  * (overridable via the `deps` factory parameter so tests can stub without
- * Redis or `gh`). The two POSTs are the only writers of the scorecard's two
- * new persisted signals; every GET-side metric is otherwise composed
- * read-only. Query + body validation flows through `src/schemas/builder-health.ts`.
+ * Redis or `gh`) and serializes the whole scorecard — so the `stagnation`
+ * block is exposed without a per-field mapping here. The two POSTs are the
+ * only writers of the scorecard's two new persisted signals; every GET-side
+ * metric is otherwise composed read-only. Query + body validation flows
+ * through `src/schemas/builder-health.ts`.
  */
 
 import { Router } from "express";
