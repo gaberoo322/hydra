@@ -76,6 +76,33 @@ export const CycleRecordBodySchema = z
     testsAfter: z.union([z.number(), z.string()]).optional(),
     testsPassingBefore: z.union([z.number(), z.string()]).optional(),
     testsPassingAfter: z.union([z.number(), z.string()]).optional(),
+    // Issue #3269: the per-phase wall-clock spans a code-writing dispatch
+    // experienced — `groundingDurationMs` (groundProject's read-only deep-repo
+    // inspection), `verificationDurationMs` (test/typecheck/build), and the
+    // planning/execution spans of the dispatch itself. Plumbed exactly like
+    // `testsBefore`/#2754 and `filesChanged`/#2063: the dispatch deposits the
+    // spans to a task-scoped file, reap.py reads them and forwards them here, so
+    // these NUMERIC_FIELD_NAMES slots (src/metrics/record.ts) stop recording null
+    // on every cycle (the planning-performance monitoring gap flagged by the
+    // 2026-07-13 discover pass). OPTIONAL + number|string for the same
+    // loose-script-payload tolerance as the other span/count fields; absent →
+    // stripped by recordCycle → the field stays absent (truthful
+    // "unknown/never-written"), never persisted as 0 or "undefined". These four
+    // are already declared MONOTONIC in record.ts (MONOTONIC_DURATION_FIELDS), so
+    // a later 0-carrying enrichment write can never clobber a stored non-zero span
+    // and a non-zero write upgrades a stored 0/absent.
+    //
+    // NOTE (design-concept issue-3269): this is the PLUMBING half only. No
+    // dispatch measures verification/planning/execution spans yet, and
+    // groundProject's groundingDurationMs is only produced by GET
+    // /api/grounding/latest (not inside a cycle), so reap has nothing to forward
+    // today — the measurement/deposit-side wiring is a deferred follow-up. The
+    // schema+enrichment must land first (mirrors #2754's schema-before-writer
+    // sequencing).
+    groundingDurationMs: z.union([z.number(), z.string()]).optional(),
+    verificationDurationMs: z.union([z.number(), z.string()]).optional(),
+    planningDurationMs: z.union([z.number(), z.string()]).optional(),
+    executionDurationMs: z.union([z.number(), z.string()]).optional(),
     // Issue #1136 (Slice 2 of #1119): the comma-separated reflection bucket
     // tokens (`per-anchor` / `by-file` / ...) the code-writing dispatch was
     // SERVED at planning time by `GET /api/reflections`, reported back so
