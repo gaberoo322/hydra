@@ -77,6 +77,10 @@ import {
   saveDesignConceptHash,
   setDesignConceptField,
   normalizeAnchorRef,
+  appendExemptLogEntry,
+  readRecentExemptLogEntries,
+  readDailySnapshots,
+  getDesignConceptIndexSize,
 } from "./redis/design-concept.ts";
 import {
   type DesignConceptInput as DesignConceptInputType,
@@ -255,6 +259,32 @@ export function isExemptLogEntry(value: unknown): value is ExemptLogEntry {
     (v.gate_fail_reasons as unknown[]).every((r) => typeof r === "string")
   );
 }
+
+// ---------------------------------------------------------------------------
+// Adapter re-exports — exempt-log + daily-snapshot + index-size (issue #3280)
+// ---------------------------------------------------------------------------
+//
+// These four operations own no policy of their own — they are already fully-
+// formed domain persistence operations that happened to live one layer too low,
+// directly in the `redis/design-concept.ts` adapter. Re-exporting them here
+// makes THIS module the single import surface for the ENTIRE design-concept
+// domain, so a caller (the `src/api/design-concepts.ts` sub-router) no longer
+// has to import from BOTH `design-concept.ts` and `redis/design-concept.ts` to
+// get the full domain surface — the split the module header claimed did not
+// exist. `redis/design-concept.ts` remains the sole backing adapter (it still
+// owns the `getRedisConnection()` boundary, key shapes, and TTLs); these are
+// thin pass-throughs, NOT wrappers with added behavior — signatures and runtime
+// semantics are unchanged (LPUSH newest-first exempt log, ZCARD index size,
+// HASH read newest-first snapshots). Out of scope for #3280: the two other
+// direct adapter importers (`src/aggregators/builder-health.ts`,
+// `src/scheduler/chores/design-concept-snapshot.ts`), which use DI / dynamic-
+// import seams and are a distinct consolidation.
+export {
+  appendExemptLogEntry,
+  readRecentExemptLogEntries,
+  readDailySnapshots,
+  getDesignConceptIndexSize,
+};
 
 // ---------------------------------------------------------------------------
 // Persistence (Redis-backed)
