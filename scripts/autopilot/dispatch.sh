@@ -168,6 +168,12 @@ print(json.dumps({
       hydra-dev|hydra-target-build) anchor_type="work-queue" ;;
       hydra-qa) anchor_type="qa-review" ;;
       hydra-grill) anchor_type="grill" ;;
+      # Issue #3284: a cascade escalation re-dispatches a cheap signal class
+      # (today `cleanup_orch`/`hydra-cleanup`) at a stronger tier; reap now
+      # fires a cycle-record for that escalated completion so its outcome record
+      # carries the escalation provenance. Map the skill so the escalated cleanup
+      # cycle buckets to a first-class `cleanup` anchorType, not `unmapped:*`.
+      hydra-cleanup|hydra-target-cleanup) anchor_type="cleanup" ;;
       hydra-research|hydra-issue-research|hydra-target-research) anchor_type="research" ;;
       *)
         # A skill with no first-class mapping. Emit a diagnostic so the gap is

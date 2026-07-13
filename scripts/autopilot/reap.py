@@ -605,10 +605,30 @@ def _fire_cycle_record(
     letting /metrics/cascade-routing derive cost-delta from ACTUAL recorded
     tokens (invariant 7) and report postEscalationMergeRate (invariant 8). Empty
     (the non-escalation majority) → dispatch.sh omits both fields (truthful null).
+
+    Cycle-record fire gate (issue #3284): normally only CYCLE_RECORD_SKILLS
+    (code-writing classes) trip a cycle-record write. But the ONLY class that
+    cascade-escalates today is `cleanup_orch` (skill `hydra-cleanup`), a SIGNAL
+    class NOT in CYCLE_RECORD_SKILLS — so without an escalation-scoped exception,
+    an escalated cleanup dispatch would deposit its provenance, reap would read
+    it, and then `_fire_cycle_record` would early-return and DISCARD it, leaving
+    the outcome record (and thus the whole cascade rollup, which filters on a
+    non-null `escalationAttempt`) permanently empty. So when a non-empty
+    `escalation` blob is present we STILL fire the cycle-record write even for a
+    non-CYCLE_RECORD skill — the escalated attempt's durable outcome record is
+    exactly what the cascade metrics need. Non-escalated signal completions are
+    unaffected (empty escalation → the original CYCLE_RECORD_SKILLS-only gate).
     """
-    if not skill or skill not in CYCLE_RECORD_SKILLS:
-        return
     if not CYCLE_RECORD_SCRIPT.exists():
+        return
+    # Fire for code-writing classes (the #430 semantic) OR whenever a cascade
+    # escalation provenance blob rode in (issue #3284) — the escalating class
+    # (`cleanup_orch`/`hydra-cleanup`) is a signal class outside
+    # CYCLE_RECORD_SKILLS, so gating purely on the skill would silently drop the
+    # escalated attempt's outcome record and structurally zero the cascade fold.
+    if not skill:
+        return
+    if skill not in CYCLE_RECORD_SKILLS and not escalation:
         return
     try:
         subprocess.run(
