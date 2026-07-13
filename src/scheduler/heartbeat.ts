@@ -68,6 +68,13 @@ import {
 } from "../redis/scheduler.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getReconcilerHealth } from "../redis/reconciler.ts";
+import { getBuilderHealthScorecard, type BuilderHealthScorecard } from "../aggregators/builder-health.ts";
+import {
+  emitStagnationAlerts,
+  createInMemoryStagnationStore,
+  type StagnationAlertStateStore,
+} from "../notify.ts";
+import type { PublishableBus } from "../event-bus-seams.ts";
 // Status projection (issue #2935) + its types were lifted into a sibling
 // module in #2974 so the heartbeat file carries only the state machine. The
 // `SchedulerStatus` return type, `StatusProjectionDeps`, `SchedulerStateSnapshot`,
@@ -236,6 +243,22 @@ export interface HeartbeatControllerDeps {
   // --- getStatus advisory readers ---
   getAutopilotPaused?: () => Promise<{ paused: boolean; since?: number }>;
   getReconcilerHealth?: () => Promise<import("../redis/reconciler.ts").ReconcilerHealthRecord | null>;
+
+  // --- Builder-health stagnation alert (issue #3290) ---
+  /**
+   * Builder-Health Scorecard reader. Defaults to the real
+   * `getBuilderHealthScorecard` (a composed Redis + GitHub read). Each tick
+   * reads the scorecard and fires an edge-triggered `builder-health.stagnation`
+   * notification for any signal that transitioned INTO `breach`. Tests inject a
+   * deterministic stub so the tick never touches Redis / GitHub.
+   */
+  getBuilderHealthScorecard?: () => Promise<BuilderHealthScorecard>;
+  /**
+   * Process-lifetime previous-state store for the per-signal stagnation edge.
+   * Defaults to a fresh in-memory map; a bounce re-arms (cross-restart dedupe
+   * is a deliberate non-goal for the MVP proactive surface, issue #3290).
+   */
+  stagnationAlertStore?: StagnationAlertStateStore;
 }
 
 /**
@@ -263,6 +286,8 @@ export class HeartbeatController {
   private readonly clearSchedulerDeliberateStop: () => Promise<void>;
   private readonly getAutopilotPaused: () => Promise<{ paused: boolean; since?: number }>;
   private readonly getReconcilerHealth: () => Promise<import("../redis/reconciler.ts").ReconcilerHealthRecord | null>;
+  private readonly getBuilderHealthScorecard: () => Promise<BuilderHealthScorecard>;
+  private readonly stagnationAlertStore: StagnationAlertStateStore;
 
   constructor(deps: HeartbeatControllerDeps = {}) {
     this.now = deps.now ?? (() => new Date());
@@ -279,6 +304,8 @@ export class HeartbeatController {
     this.clearSchedulerDeliberateStop = deps.clearSchedulerDeliberateStop ?? clearSchedulerDeliberateStop;
     this.getAutopilotPaused = deps.getAutopilotPaused ?? getAutopilotPaused;
     this.getReconcilerHealth = deps.getReconcilerHealth ?? getReconcilerHealth;
+    this.getBuilderHealthScorecard = deps.getBuilderHealthScorecard ?? getBuilderHealthScorecard;
+    this.stagnationAlertStore = deps.stagnationAlertStore ?? createInMemoryStagnationStore();
   }
 
   // -------------------------------------------------------------------------
@@ -410,6 +437,18 @@ export class HeartbeatController {
     // the status endpoint) — the tick keeps the heartbeat advancing so the
     // watchdog can distinguish alive from wedged.
     state.lastTickAt = this.now().toISOString();
+
+    // Issue #3290: proactive builder-health stagnation alert. This is a pure
+    // observability surface — it reads the scorecard and (edge-triggered) emits
+    // a `builder-health.stagnation` notification when a signal transitions into
+    // `breach`. It makes NO policy decision, dispatches no work, and mutates no
+    // kanban/work-queue state, so it respects the heartbeat's "no second brain"
+    // identity (ADR-0012). Fire-and-forget + never-throws so a slow scorecard
+    // read (Redis + GitHub fan-out) can never wedge the liveness tick.
+    this.maybeEmitStagnationAlerts(eventBus).catch((err: any) =>
+      console.error(`[Heartbeat] Stagnation-alert emit failed: ${err?.message ?? err}`),
+    );
+
     if (state.running) {
       const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
       state.timer = setTimeout(
@@ -418,6 +457,24 @@ export class HeartbeatController {
         ),
         delay,
       );
+    }
+  }
+
+  /**
+   * Read the Builder-Health Scorecard and fire any edge-triggered
+   * `builder-health.stagnation` alerts (issue #3290). Never throws — a scorecard
+   * read failure or a bus without a `publish` method is logged and skipped.
+   */
+  private async maybeEmitStagnationAlerts(eventBus: unknown): Promise<void> {
+    const bus = eventBus as Partial<PublishableBus> | null | undefined;
+    if (!bus || typeof bus.publish !== "function") return;
+    try {
+      const scorecard = await this.getBuilderHealthScorecard();
+      await emitStagnationAlerts(scorecard, bus as PublishableBus, {
+        store: this.stagnationAlertStore,
+      });
+    } catch (err: any) {
+      console.error(`[Heartbeat] builder-health stagnation scan failed: ${err?.message ?? err}`);
     }
   }
 
