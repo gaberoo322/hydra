@@ -38,6 +38,13 @@ print(f'Merge rate: {100*merged//max(len(trend),1)}% | Empty rate: {100*empty//m
 print(f'Total cost: \${sum(costs):.2f} | Cost/merge: \${sum(costs)/max(merged,1):.2f}')
 "
 
+# Outcome-impact ranking (issue #3283, epic #2628 reverse loop) — WHAT MOVED
+# OUTCOMES, not just what was noticed. Ridge marginal effects (#2630) folded
+# across leading metrics, favorability-oriented, per tier cost proxy. Trust only
+# rows where identifiabilitySuspect AND belowNoiseFloor are both false;
+# metricCount:0 means the ledger is dark (no impact signal yet).
+hydra raw GET /attribution/impact
+
 gh issue list --repo gaberoo322/hydra --state open --json number,title,labels \
   --jq '.[] | "\(.number): [\(.labels | map(.name) | join(","))] \(.title)"'
 gh issue list --repo gaberoo322/hydra --state closed --limit 30 --json number,title,closedAt \
@@ -121,10 +128,17 @@ two findings within THIS run also dedup against each other.
 - Merge duplicates across researchers (run them through the same helper pairwise)
 
 ### 3b. Score and rank by:
-1. Merge-rate impact (heaviest weight)
-2. Cost efficiency
-3. Autonomy gain
-4. Scope size (smaller = higher)
+1. **Measured outcome-impact** (heaviest weight) — when the `/attribution/impact`
+   ranking (Phase 1) shows a non-suspect, above-noise-floor producer class with
+   high `impactPerCost`, findings that touch that area rank ABOVE equally-noticed
+   findings elsewhere. This is the empirical merge→outcome-delta signal (#2628
+   reverse loop), preferred over the notice-based proxies below. Cite the
+   `impactPerCost` + flags in the finding's evidence. If `metricCount:0` (dark
+   ledger), fall back to the proxies below and do not fabricate impact claims.
+2. Merge-rate impact
+3. Cost efficiency
+4. Autonomy gain
+5. Scope size (smaller = higher)
 
 ### 3c. Filter
 - Drop anything contradicting an ADR
