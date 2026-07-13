@@ -72,6 +72,11 @@ import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
 import { settledOrNull } from "../settled-fold.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
+import {
+  computeStagnationPanel,
+  type StagnationPanel,
+  type TrendRow,
+} from "./builder-health-stagnation-panel.ts";
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge
 // rate's native window). Used for the rework metric's "of N cycles" framing.
@@ -79,6 +84,11 @@ const MERGE_RATE_WINDOW = (() => {
   const n = Number(process.env.HYDRA_ROLLING_MERGE_RATE_WINDOW);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 50;
 })();
+
+// The stagnation panel (ADR-0028) trails a 50-cycle baseline; fetch a deeper
+// window so the newest cycle has a full trailing baseline to compare against.
+// Still inside the 7-day Redis TTL, so no backfill requirement.
+const STAGNATION_TREND_WINDOW = 100;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -125,6 +135,12 @@ export interface BuilderHealthScorecard {
   mutationKillRateTrend: MutationTrendMetric | null;
   scopeViolations: ScopeViolationMetric | null;
   learningThroughput: LearningThroughputMetric | null;
+  /**
+   * Per-signal, per-realm stagnation verdicts + window context (ADR-0028,
+   * epic #3285). A panel — never a composite index. `null` when the trend
+   * source degrades (the never-throws contract).
+   */
+  stagnation: StagnationPanel | null;
 }
 
 export interface BuilderHealthDeps {
@@ -174,6 +190,7 @@ export async function getBuilderHealthScorecard(
     mutationResult,
     scopeResult,
     learningResult,
+    stagnationResult,
   ] = await Promise.allSettled([
     computeSelfImprovementShare(deps),
     computeReworkRate(deps),
@@ -181,6 +198,7 @@ export async function getBuilderHealthScorecard(
     computeMutationTrend(deps),
     computeScopeViolations(windowDays, now, deps),
     computeLearningThroughput(windowDays, now, deps),
+    computeStagnation(deps),
   ]);
 
   return {
@@ -192,6 +210,7 @@ export async function getBuilderHealthScorecard(
     mutationKillRateTrend: settledOrNull(mutationResult, "mutation-trend"),
     scopeViolations: settledOrNull(scopeResult, "scope-violations"),
     learningThroughput: settledOrNull(learningResult, "learning-throughput"),
+    stagnation: settledOrNull(stagnationResult, "stagnation"),
   };
 }
 
@@ -253,6 +272,24 @@ async function computeMutationTrend(deps: BuilderHealthDeps): Promise<MutationTr
     series.push({ t, v });
   }
   return { series, window: trend.length };
+}
+
+// ---------------------------------------------------------------------------
+// Metric: Stagnation panel (ADR-0028, epic #3285)
+// ---------------------------------------------------------------------------
+//
+// Runs the pure `computeStagnation` detector (#3287) per signal per realm over
+// the cycle-metrics trend. Dispatched-work-only + per-realm are satisfied by
+// construction: the cycle-metrics stream is written only for autopilot
+// dispatches (no external/human PRs) and only for the orchestrator realm (the
+// target realm has no cycle stream on this substrate, so its blocks are null —
+// dark, never blended). No composite index — the panel exposes each signal's
+// verdict independently (ADR-0028 Decision 1).
+
+async function computeStagnation(deps: BuilderHealthDeps): Promise<StagnationPanel> {
+  const reader = deps.getMetricsTrend ?? getMetricsTrend;
+  const trend = (await reader(STAGNATION_TREND_WINDOW)) as TrendRow[];
+  return computeStagnationPanel(trend);
 }
 
 // ---------------------------------------------------------------------------
