@@ -11,6 +11,8 @@
 
 import * as Sentry from "@sentry/node";
 
+import { logger } from "./logger.ts";
+
 const SENTRY_DSN = process.env.SENTRY_DSN || "";
 
 if (SENTRY_DSN) {
@@ -30,9 +32,9 @@ if (SENTRY_DSN) {
     },
   });
 
-  console.log("[Sentry] Initialized for hydra-orchestrator");
+  logger.info({ component: "sentry" }, "Sentry initialized for hydra-orchestrator");
 } else {
-  console.log("[Sentry] Skipped — no SENTRY_DSN configured");
+  logger.info({ component: "sentry" }, "Sentry skipped — no SENTRY_DSN configured");
 }
 
 export { Sentry };
