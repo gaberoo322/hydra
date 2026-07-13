@@ -71,6 +71,13 @@ PATTERN_SCOPE_VIOLATION = "scope-violation"
 PATTERN_TEST_TIMEOUT = "test-timeout"
 PATTERN_CI_FLAKE = "ci-flake"
 PATTERN_RATELIMIT = "ratelimit"
+# Issue #3274: an agent that stopped claiming no work (a `no_op` stop status,
+# recorded as failure_log pattern `subagent_noop`). Visible to classify() so a
+# recurring no_op run is legible to the operator digest; the CASCADE-ROUTING
+# escalation decision itself is a SEPARATE, gated reducer in decide.py
+# (`decide_escalation`), not a self_heal HealStrategy — a no_op escalation
+# re-dispatches at a stronger model tier rather than re-queueing a GitHub issue.
+PATTERN_SUBAGENT_NOOP = "subagent-noop"
 PATTERN_UNKNOWN = "unknown"
 
 ALL_PATTERNS = (
@@ -82,6 +89,7 @@ ALL_PATTERNS = (
     PATTERN_TEST_TIMEOUT,
     PATTERN_CI_FLAKE,
     PATTERN_RATELIMIT,
+    PATTERN_SUBAGENT_NOOP,
     PATTERN_UNKNOWN,
 )
 
@@ -144,6 +152,11 @@ def classify(cue: str) -> str:
         return PATTERN_CI_FLAKE
     if "rate" in c and "limit" in c:
         return PATTERN_RATELIMIT
+    # Issue #3274: a no_op stop status (agent claimed no work). Recorded so the
+    # operator digest can see a recurring no_op run; the escalation lever is
+    # decide.py's cascade reducer, not a re-queue here.
+    if "subagent_noop" in c or "no_op" in c or "no-op" in c:
+        return PATTERN_SUBAGENT_NOOP
     return PATTERN_UNKNOWN
 
 
@@ -199,6 +212,18 @@ _STRATEGY_TABLE: dict[str, HealStrategy] = {
         action="sleep",
         seconds=600,
         note="Rate-limit — wait 10 minutes before re-dispatch.",
+    ),
+    PATTERN_SUBAGENT_NOOP: HealStrategy(
+        pattern=PATTERN_SUBAGENT_NOOP,
+        # No self_heal ACTION: a no_op is not a GitHub-issue failure to re-queue.
+        # The cascade-routing escalation decision (re-dispatch at a stronger
+        # model tier) is owned by decide.py's `decide_escalation` reducer (issue
+        # #3274). This row exists so a no_op is a KNOWN, legible pattern (visible
+        # to the operator digest) rather than falling through to the UNKNOWN
+        # re-queue path — recording changes visibility only, not behavior.
+        action="none",
+        note="no_op stop status — cascade escalation handled by decide.py "
+             "decide_escalation, not a self_heal re-queue.",
     ),
     PATTERN_UNKNOWN: HealStrategy(
         pattern=PATTERN_UNKNOWN,

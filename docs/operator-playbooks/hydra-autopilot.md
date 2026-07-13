@@ -147,6 +147,26 @@ Use the harness's model alias (`fable` / `sonnet` / `haiku` / `opus`) for the
 in the map (e.g. a legacy/unknown `slot`) → omit `model` and inherit the parent
 session, the conservative default.
 
+**Cascade-routing escalation override (issue #3274).** When a `dispatch` action
+carries `prompt_args.escalate_model` (a string model alias, e.g. `sonnet`), that
+value **overrides** the static per-class model resolved from the map above for
+that ONE dispatch — pass `model=action.prompt_args.escalate_model` to the `Agent`
+call instead of the class's default. This is the cascade-routing lever: `decide.py`
+re-dispatches a cheap-tier class (today `cleanup_orch` at Haiku) that just
+`no_op`'d / `failed` at a stronger tier, but stays PURE — it emits only the
+`escalate_model` HINT (never a concrete `model` field; the model lever stays here
+in the playbook per #1093). The escalation action also carries
+`prompt_args.attempt` (the escalated attempt number) — **stamp it onto the new
+slot (`slot["attempt"] = action.prompt_args.attempt`)** so a subsequent `no_op`
+of the escalation attempt reads `attempt >= max_attempts` in `decide_escalation`
+and never triggers a THIRD dispatch (the `ESCALATION_POLICY` max-attempts cap,
+default 2). `prompt_args.prior_attempt_status` records what triggered the
+escalation, for turn-journal visibility. A dispatch with no `escalate_model` key
+uses the static routing map unchanged (zero behavior change for non-escalated
+work). The escalation policy + reducer live in `scripts/autopilot/decide.py`
+(`ESCALATION_POLICY`, `decide_escalation`); a class absent from that dict never
+escalates.
+
 **Fallback when Fable 5 is unavailable.** The `fable` alias is not entitled in
 every environment — a background `Agent(model="fable", …)` dispatch can die in
 <1s with *"There's an issue with the selected model (claude-fable-5) … it may
