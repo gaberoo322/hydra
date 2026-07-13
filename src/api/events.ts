@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { STREAMS, streamKey } from "../event-bus-stream-keys.ts";
 import { countQuerySchema } from "../schemas/common.ts";
-import { aggregatorRouteNoQuery } from "./route-helpers.ts";
+import { PublishEventBodySchema } from "../schemas/events.ts";
+import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
 import type { EventReaderBus } from "../event-bus-seams.ts";
 
 /**
@@ -29,17 +30,24 @@ export function createEventsRouter(eventBus: EventReaderBus) {
   );
 
   // POST /events/publish — Publish events from external sources
+  //
+  // ADR-0022: validate the external publish body through the Schemas seam
+  // (issue #3259). PublishEventBodySchema requires a non-empty `type` (mirroring
+  // the prior `if (!type)` guard) and admits optional `payload` / `correlationId`;
+  // `.passthrough()` ignores unknown keys. A parse failure returns the canonical
+  // 400 `{ code: "schema-validation-failed", issues }` envelope.
   router.post("/events/publish", async (req, res) => {
+    const parsed = PublishEventBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json(schemaValidationError(parsed.error));
+    }
     try {
-      const { type, payload, correlationId } = req.body || {};
-      if (!type) {
-        return res.status(400).json({ error: "Missing type" });
-      }
+      const { type, payload, correlationId } = parsed.data;
       await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type,
         source: "claude-build",
-        correlationId: correlationId || null,
-        payload: payload || {},
+        correlationId: correlationId ?? null,
+        payload: payload ?? {},
       });
       res.json({ ok: true });
     } catch (err: any) {
