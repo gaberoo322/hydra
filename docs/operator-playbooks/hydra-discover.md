@@ -89,6 +89,47 @@ Alerts:
 - Any anchor type 0% merge over 5+ cycles → architectural finding
 - Overall empty rate >25% → performance finding
 
+### 2a-impact. Outcome-impact ranking — the reverse loop (issue #3283)
+
+The 2a breakdown above is **notice-based**: it ranks anchor types by what agents
+*observe* (empty rate, merge rate, duration). This step adds the missing
+**impact-based** signal — what actually *moved outcomes* — so discovery steers
+toward high-impact areas, not merely high-notice ones (epic #2628 finding #6:
+"discovery is self-referential").
+
+Read the outcome-attribution spine's impact ranking — the ridge estimator's
+per-metric marginal effects (#2630) folded across every leading metric, oriented
+by each metric's direction into a *favorable* effect and divided by a tier cost
+proxy:
+
+```bash
+hydra raw GET /attribution/impact          # top anchor types by impact-per-cost
+# or cap the list:  hydra raw GET /attribution/impact?topN=5
+```
+
+Each row is `{anchorType, favorableImpact, meanTier, impactPerCost,
+identifiabilitySuspect, belowNoiseFloor, contributions[]}`. **Never read
+`impactPerCost` as a bare number** — a row with `identifiabilitySuspect:true`
+means "cannot tell" (collinear/near-constant column) and a row with
+`belowNoiseFloor:true` means "measured but within exogenous drift". Trust only
+rows where BOTH flags are `false`.
+
+How to use it:
+
+- **`metricCount: 0`** → the ledger is dark (no impact signal yet); fall back to
+  the notice-based 2a signal alone and do NOT fabricate impact claims.
+- **A high-`impactPerCost`, non-suspect anchor type** is a *high-leverage area*:
+  when you file a finding that touches that anchor type's code path, cite the
+  impact delta as justification ("high outcome delta per cost", not just "noticed
+  a pattern"). This is the primary success criterion of #3283 — at least one
+  discovery candidate per 3 iterations should be impact-justified.
+- **A low/negative-`impactPerCost` anchor type that is ALSO high-notice** (high
+  cycle count / cost) is a *waste candidate*: work is flowing there but not
+  moving outcomes — a stronger finding than notice alone.
+
+Include the cited `impactPerCost` (and the flags) verbatim in any finding's
+Evidence section.
+
 ### 2b. Cost & efficiency
 From metrics: cost/merged feature, cost of empty cycles, plan cache hit rate, grounding duration trend, thread reuse rate.
 

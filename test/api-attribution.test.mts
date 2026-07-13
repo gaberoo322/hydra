@@ -218,3 +218,98 @@ describe("GET /api/attribution — read-only marginal-effect view (#2631)", () =
     assert.deepEqual(names, ["m1", "m2"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// GET /api/attribution/impact — the reverse-loop read surface (#3283)
+// ---------------------------------------------------------------------------
+// New top-level describe (its own trivial lifecycle — touches no shared Redis).
+// Drives the impact handler with INJECTED ledger-read + metric-direction fakes.
+
+/** Build a router with canned ledger + direction fakes, invoke the impact route. */
+async function callImpact(
+  loaded: LoadObservationsResult,
+  directions: Record<string, "up" | "down"> = {},
+  query: Record<string, string> = {},
+): Promise<any> {
+  const router = createAttributionRouter(
+    async () => loaded,
+    async () => directions,
+  );
+  const handler = findHandler(router, "GET", "/attribution/impact");
+  assert.ok(handler, "GET /attribution/impact handler must be registered");
+  const req = mockReq();
+  req.url = "/attribution/impact";
+  req.query = query;
+  const res = mockRes();
+  await handler!(req, res);
+  return res;
+}
+
+describe("GET /api/attribution/impact — reverse-loop impact ranking (#3283)", () => {
+  test("ranks anchor types by favorable impact per cost; every row carries posture", async () => {
+    const observations: AttributionObservation[] = [];
+    for (let i = 1; i <= 6; i++) {
+      observations.push(
+        obs({ metric: "test_count", delta: 10 * i, classCounts: { hi: i }, tier: 3 }),
+      );
+      observations.push(
+        obs({ metric: "test_count", delta: 1 * i, classCounts: { lo: i }, tier: 3 }),
+      );
+    }
+    observations.push(obs({ metric: "test_count", delta: 0, classCounts: {}, tier: null }));
+    observations.push(obs({ metric: "test_count", delta: 0, classCounts: {}, tier: null }));
+
+    const res = await callImpact({ ok: true, observations }, { test_count: "up" });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.metricCount, 1);
+    const classes = res._body.rows.map((r: any) => r.anchorType);
+    assert.deepEqual(classes, ["hi", "lo"], "hi outranks lo");
+    for (const r of res._body.rows) {
+      assert.equal(typeof r.impactPerCost, "number");
+      assert.equal(typeof r.favorableImpact, "number");
+      assert.equal(typeof r.identifiabilitySuspect, "boolean");
+      assert.equal(typeof r.belowNoiseFloor, "boolean");
+      assert.ok(Array.isArray(r.contributions));
+    }
+  });
+
+  test("?topN caps the ranking", async () => {
+    const observations: AttributionObservation[] = [];
+    for (let i = 1; i <= 6; i++) {
+      observations.push(obs({ metric: "m", delta: 10 * i, classCounts: { hi: i }, tier: 3 }));
+      observations.push(obs({ metric: "m", delta: 1 * i, classCounts: { lo: i }, tier: 3 }));
+    }
+    observations.push(obs({ metric: "m", delta: 0, classCounts: {}, tier: null }));
+    const res = await callImpact({ ok: true, observations }, { m: "up" }, { topN: "1" });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.rows.length, 1);
+    assert.equal(res._body.rows[0].anchorType, "hi");
+  });
+
+  test("an empty ledger → rows:[] , metricCount:0 at 200 (no impact signal yet)", async () => {
+    const res = await callImpact({ ok: true, observations: [] });
+    assert.equal(res._status, 200);
+    assert.deepEqual(res._body, { rows: [], metricCount: 0 });
+  });
+
+  test("a getObservations() Redis-read failure returns 500 {error}", async () => {
+    const res = await callImpact({ ok: false, error: "redis down" });
+    assert.equal(res._status, 500);
+    assert.equal(res._body.error, "redis down");
+    assert.equal(res._body.rows, undefined);
+  });
+
+  test("missing directions degrade to raw signed β (still 200, still ranked)", async () => {
+    const observations: AttributionObservation[] = [];
+    for (let i = 1; i <= 6; i++) {
+      observations.push(obs({ metric: "m", delta: 10 * i, classCounts: { c: i }, tier: 2 }));
+    }
+    observations.push(obs({ metric: "m", delta: 0, classCounts: {}, tier: null }));
+    // No direction map supplied → the lens uses raw signed β, endpoint still 200.
+    const res = await callImpact({ ok: true, observations }, {});
+    assert.equal(res._status, 200);
+    const c = res._body.rows.find((r: any) => r.anchorType === "c");
+    assert.ok(c, "class c ranked");
+    assert.equal(c.contributions[0].directed, false, "undirected contribution");
+  });
+});
