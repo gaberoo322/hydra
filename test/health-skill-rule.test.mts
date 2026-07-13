@@ -127,6 +127,10 @@ function failRateDiag(s: HealthSnapshot) {
   );
 }
 
+function attributionLedgerDiag(s: HealthSnapshot) {
+  return assessHealth(s).diagnostics.find((d) => d.what.startsWith("Attribution ledger is empty"));
+}
+
 // Issue #2386: every case reads `skillCatalog` off the snapshot, so cases are now
 // fully order-independent — no shared singleton to mutate, unlike the pre-#2386
 // registerSkills-driven version where the empty-catalog case had to run last.
@@ -263,5 +267,42 @@ describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)"
     });
     s.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
     assert.equal(failRateDiag(s), undefined, "a deferred pass must not fire the failure-rate alert");
+  });
+});
+
+// Issue #3270: the attribution-ledger-dark rule (src/health/rules.ts). It is a
+// PURE function of `HealthSnapshot.attributionLedgerCount` — fires a `warning`
+// when the count is 0 (the merger→ledger producer flow never fired, the exact
+// symptom #3270 diagnoses) and stays silent for any count > 0. The end-to-end
+// live LLEN read is covered by test/health-fan-out.test.mts; THIS suite pins the
+// rule in isolation off a controlled snapshot, exactly like the skill-catalog
+// rules above (no Redis seam, so no shared-connection teardown to piggyback on).
+describe("attribution-ledger-dark rule (#3270, snapshot-sourced)", () => {
+  test("attributionLedgerCount:0 → warning folded into status:degraded", () => {
+    const s = healthySnapshot();
+    s.attributionLedgerCount = 0;
+    const d = attributionLedgerDiag(s);
+    assert.ok(d, "an empty attribution ledger must fire a diagnostic");
+    assert.equal(d!.severity, "warning");
+    assert.equal(d!.component, "intelligence");
+    assert.equal(d!.what, "Attribution ledger is empty — merger→ledger flow never fired");
+    assert.equal(d!.autoRecovery, false);
+    // A warning is the worst severity on an otherwise-healthy snapshot → degraded.
+    assert.equal(assessHealth(s).status, "degraded");
+  });
+
+  test("attributionLedgerCount>0 → no diagnostic, status stays healthy", () => {
+    // healthySnapshot() baselines attributionLedgerCount:1 — a populated ledger.
+    const s = healthySnapshot();
+    assert.equal(s.attributionLedgerCount, 1, "baseline sanity: a populated ledger");
+    assert.equal(attributionLedgerDiag(s), undefined, "a populated ledger must not fire");
+    assert.equal(assessHealth(s).status, "healthy", "a populated ledger must not degrade deep-health");
+  });
+
+  test("a larger populated count (>1) also stays silent", () => {
+    const s = healthySnapshot();
+    s.attributionLedgerCount = 42;
+    assert.equal(attributionLedgerDiag(s), undefined, "count 42 must not fire");
+    assert.equal(assessHealth(s).status, "healthy");
   });
 });
