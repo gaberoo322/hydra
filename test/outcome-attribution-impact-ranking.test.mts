@@ -8,7 +8,7 @@
  * ranking, with no Redis and no HTTP.
  *
  * What this guards (from issue #3283 success criteria):
- *   - `getTopImpactAnchorTypes()` is exported as the public reverse-loop lens.
+ *   - `getTopImpactProducerClasses()` is exported as the public reverse-loop lens.
  *   - Producer classes are ranked by FAVORABLE outcome-impact PER unit of build
  *     cost (mean-tier proxy), descending.
  *   - A metric's `direction` orients raw signed β into a favorable effect
@@ -24,7 +24,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import type { AttributionObservation } from "../src/redis/attribution-ledger.ts";
-import { getTopImpactAnchorTypes } from "../src/outcome-attribution/impact-ranking.ts";
+import { getTopImpactProducerClasses } from "../src/outcome-attribution/impact-ranking.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -68,13 +68,13 @@ const PIN = { lambda: 0.001, noiseFloorK: 2 } as const;
 describe("outcome-attribution impact-ranking lens (#3283)", () => {
   test("ranks producer classes by favorable impact per cost, descending", () => {
     const rows = twoClassRows("test_count", 1);
-    const ranking = getTopImpactAnchorTypes(rows, {
+    const ranking = getTopImpactProducerClasses(rows, {
       metricDirections: { test_count: "up" },
       estimatorOpts: PIN,
     });
 
     assert.equal(ranking.metricCount, 1, "one metric folded");
-    const classes = ranking.rows.map((r) => r.anchorType);
+    const classes = ranking.rows.map((r) => r.producerClass);
     assert.deepEqual(
       classes,
       ["hi", "lo"],
@@ -89,7 +89,7 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
       assert.ok(r.contributions.length >= 1, "carries per-metric breakdown");
     }
     // The favorable impact for an "up" metric preserves the positive sign.
-    const hi = ranking.rows.find((r) => r.anchorType === "hi")!;
+    const hi = ranking.rows.find((r) => r.producerClass === "hi")!;
     assert.ok(hi.favorableImpact > 0, "hi favorable impact is positive");
     assert.equal(hi.meanTier, 3, "hi contributed only at tier 3");
   });
@@ -99,11 +99,11 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
     // NEGATIVE (the metric dropped, which is GOOD). With direction "down" the
     // favorable effect must come out POSITIVE.
     const rows = twoClassRows("brier", -1);
-    const ranking = getTopImpactAnchorTypes(rows, {
+    const ranking = getTopImpactProducerClasses(rows, {
       metricDirections: { brier: "down" },
       estimatorOpts: PIN,
     });
-    const hi = ranking.rows.find((r) => r.anchorType === "hi")!;
+    const hi = ranking.rows.find((r) => r.producerClass === "hi")!;
     assert.ok(
       hi.favorableImpact > 0,
       "a lower-is-better metric that dropped yields positive favorable impact",
@@ -123,12 +123,12 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
     }
     for (let i = 0; i < 4; i++) rows.push(obs("m", 0, {}, null));
 
-    const ranking = getTopImpactAnchorTypes(rows, {
+    const ranking = getTopImpactProducerClasses(rows, {
       metricDirections: { m: "up" },
       estimatorOpts: PIN,
     });
-    const shallow = ranking.rows.find((r) => r.anchorType === "shallow")!;
-    const deep = ranking.rows.find((r) => r.anchorType === "deep")!;
+    const shallow = ranking.rows.find((r) => r.producerClass === "shallow")!;
+    const deep = ranking.rows.find((r) => r.producerClass === "deep")!;
     assert.equal(shallow.meanTier, 1);
     assert.equal(deep.meanTier, 4);
     assert.ok(
@@ -136,7 +136,7 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
       "cheaper (shallow-tier) class ranks higher per cost at equal impact",
     );
     assert.equal(
-      ranking.rows[0].anchorType,
+      ranking.rows[0].producerClass,
       "shallow",
       "shallow leads the ranking",
     );
@@ -151,14 +151,14 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
     }
     for (let i = 0; i < 4; i++) rows.push(obs("m", 0, {}, null));
 
-    const withFlags = getTopImpactAnchorTypes(rows, {
+    const withFlags = getTopImpactProducerClasses(rows, {
       metricDirections: { m: "up" },
       estimatorOpts: PIN,
     });
     const anySuspect = withFlags.rows.some((r) => r.identifiabilitySuspect);
     assert.ok(anySuspect, "collinear pair surfaced as identifiability-suspect");
 
-    const confident = getTopImpactAnchorTypes(rows, {
+    const confident = getTopImpactProducerClasses(rows, {
       metricDirections: { m: "up" },
       estimatorOpts: PIN,
       onlyConfident: true,
@@ -173,22 +173,22 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
 
   test("topN caps the ranking after sorting", () => {
     const rows = twoClassRows("m", 1);
-    const capped = getTopImpactAnchorTypes(rows, {
+    const capped = getTopImpactProducerClasses(rows, {
       metricDirections: { m: "up" },
       estimatorOpts: PIN,
       topN: 1,
     });
     assert.equal(capped.rows.length, 1, "topN=1 returns one row");
-    assert.equal(capped.rows[0].anchorType, "hi", "the single row is the top one");
+    assert.equal(capped.rows[0].producerClass, "hi", "the single row is the top one");
   });
 
   test("dark/empty ledger → rows:[] , metricCount:0", () => {
-    const empty = getTopImpactAnchorTypes([], {});
+    const empty = getTopImpactProducerClasses([], {});
     assert.deepEqual(empty.rows, []);
     assert.equal(empty.metricCount, 0);
 
     // Only empty windows (no non-zero class columns) → no ranked classes.
-    const onlyEmpty = getTopImpactAnchorTypes(
+    const onlyEmpty = getTopImpactProducerClasses(
       [obs("m", 0, {}, null), obs("m", 0, {}, null)],
       { estimatorOpts: PIN },
     );
@@ -198,8 +198,8 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
 
   test("no direction supplied → raw signed β, contribution marked not-directed", () => {
     const rows = twoClassRows("m", 1);
-    const ranking = getTopImpactAnchorTypes(rows, { estimatorOpts: PIN });
-    const hi = ranking.rows.find((r) => r.anchorType === "hi")!;
+    const ranking = getTopImpactProducerClasses(rows, { estimatorOpts: PIN });
+    const hi = ranking.rows.find((r) => r.producerClass === "hi")!;
     const c = hi.contributions[0];
     assert.equal(c.directed, false, "no direction ⇒ not directed");
     assert.equal(c.favorable, c.beta, "favorable == raw signed beta");
@@ -208,11 +208,11 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
   test("PURE — same input → same output, no argument mutation", () => {
     const rows = twoClassRows("m", 1);
     const snapshot = JSON.stringify(rows);
-    const a = getTopImpactAnchorTypes(rows, {
+    const a = getTopImpactProducerClasses(rows, {
       metricDirections: { m: "up" },
       estimatorOpts: PIN,
     });
-    const b = getTopImpactAnchorTypes(rows, {
+    const b = getTopImpactProducerClasses(rows, {
       metricDirections: { m: "up" },
       estimatorOpts: PIN,
     });
@@ -231,12 +231,12 @@ describe("outcome-attribution impact-ranking lens (#3283)", () => {
       rows.push(obs("m1", 0, {}, null));
       rows.push(obs("m2", 0, {}, null));
     }
-    const ranking = getTopImpactAnchorTypes(rows, {
+    const ranking = getTopImpactProducerClasses(rows, {
       metricDirections: { m1: "up", m2: "up" },
       estimatorOpts: PIN,
     });
     assert.equal(ranking.metricCount, 2, "two metrics folded");
-    const multi = ranking.rows.find((r) => r.anchorType === "multi")!;
+    const multi = ranking.rows.find((r) => r.producerClass === "multi")!;
     assert.equal(
       multi.contributions.length,
       2,

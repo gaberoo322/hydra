@@ -5,8 +5,8 @@
  * The attribution spine measures, per leading metric, each producer class's
  * ridge marginal effect β_c (`estimator.ts`). That answers "which class moves
  * THIS metric most?" — but a discovery agent asks a different, cross-metric
- * question: **"which anchor types have the highest FAVORABLE outcome impact per
- * unit of build cost?"** — so the reverse loop can steer discovery toward
+ * question: **"which producer classes have the highest FAVORABLE outcome impact
+ * per unit of build cost?"** — so the reverse loop can steer discovery toward
  * high-impact areas rather than merely high-*notice* ones (the frontier gap in
  * the architecture review, finding #6: "discovery is self-referential").
  *
@@ -80,12 +80,12 @@ export interface MetricContribution {
 }
 
 /**
- * One anchor type's (producer class's) cross-metric impact ranking row. The
- * discovery reverse-loop consumes these ordered by descending `impactPerCost`.
+ * One producer class's cross-metric impact ranking row. The discovery
+ * reverse-loop consumes these ordered by descending `impactPerCost`.
  */
 export interface ImpactRankRow {
-  /** Producer class / anchor type (e.g. `discover`, `dev`, `arch`). */
-  anchorType: string;
+  /** Producer class (e.g. `discover`, `dev`, `arch`). */
+  producerClass: string;
   /**
    * Sum of the favorable effects across every metric this class contributed to
    * — the total measured outcome improvement attributed to the class.
@@ -149,7 +149,7 @@ export interface ImpactRankingOptions {
   onlyConfident?: boolean;
   /**
    * Optional cap on the number of ranked rows returned (the "top-N" of
-   * {@link getTopImpactAnchorTypes}). Applied AFTER ranking and any
+   * {@link getTopImpactProducerClasses}). Applied AFTER ranking and any
    * `onlyConfident` filter. `undefined` ⇒ return all.
    */
   topN?: number;
@@ -161,19 +161,19 @@ export interface ImpactRankingOptions {
 }
 
 /**
- * Rank producer classes (anchor types) by **favorable outcome impact per unit of
- * build cost**, folding the ridge estimator's per-metric marginal effects across
- * every leading metric. PURE — no I/O, never throws.
+ * Rank producer classes by **favorable outcome impact per unit of build cost**,
+ * folding the ridge estimator's per-metric marginal effects across every leading
+ * metric. PURE — no I/O, never throws.
  *
  * This is the reverse-loop's public read surface: discovery classes consume the
- * ranked `anchorType`s to steer toward high-impact areas rather than merely
+ * ranked `producerClass`es to steer toward high-impact areas rather than merely
  * high-notice ones.
  *
  * @param observations Raw ledger rows (the same `getObservations()` feeds the
  *   `/api/attribution` view). Consumed read-only.
  * @param opts Direction map, confidence filter, top-N cap, estimator tunables.
  */
-export function getTopImpactAnchorTypes(
+export function getTopImpactProducerClasses(
   observations: AttributionObservation[],
   opts: ImpactRankingOptions = {},
 ): ImpactRanking {
@@ -228,9 +228,9 @@ export function getTopImpactAnchorTypes(
   }
 
   const rows: ImpactRankRow[] = [];
-  for (const [anchorType, entry] of acc) {
-    const sum = tierSum.get(anchorType);
-    const cnt = tierCount.get(anchorType);
+  for (const [producerClass, entry] of acc) {
+    const sum = tierSum.get(producerClass);
+    const cnt = tierCount.get(producerClass);
     const meanTier = cnt && cnt > 0 ? sum! / cnt : null;
     // Cost proxy: mean tier, floored at 1 so a T1 class isn't divided by <1 and
     // a null-tier class ranks on its raw favorable impact.
@@ -244,7 +244,7 @@ export function getTopImpactAnchorTypes(
     const belowNoiseFloor = entry.contributions.every((c) => c.belowNoiseFloor);
 
     rows.push({
-      anchorType,
+      producerClass,
       favorableImpact: entry.favorable,
       meanTier,
       impactPerCost,
@@ -255,12 +255,12 @@ export function getTopImpactAnchorTypes(
   }
 
   // Rank by descending impact-per-cost. Ties broken by descending raw favorable
-  // impact then anchorType (stable, deterministic ordering).
+  // impact then producerClass (stable, deterministic ordering).
   rows.sort(
     (a, b) =>
       b.impactPerCost - a.impactPerCost ||
       b.favorableImpact - a.favorableImpact ||
-      a.anchorType.localeCompare(b.anchorType),
+      a.producerClass.localeCompare(b.producerClass),
   );
 
   let out = rows;

@@ -103,27 +103,30 @@ by each metric's direction into a *favorable* effect and divided by a tier cost
 proxy:
 
 ```bash
-hydra raw GET /attribution/impact          # top anchor types by impact-per-cost
+hydra raw GET /attribution/impact          # top producer classes by impact-per-cost
 # or cap the list:  hydra raw GET /attribution/impact?topN=5
 ```
 
-Each row is `{anchorType, favorableImpact, meanTier, impactPerCost,
-identifiabilitySuspect, belowNoiseFloor, contributions[]}`. **Never read
-`impactPerCost` as a bare number** — a row with `identifiabilitySuspect:true`
-means "cannot tell" (collinear/near-constant column) and a row with
-`belowNoiseFloor:true` means "measured but within exogenous drift". Trust only
-rows where BOTH flags are `false`.
+The ledger grain is **producer CLASS** (e.g. `dev_orch`, `discover`, `arch`), not
+anchor type — the spine attributes outcome deltas to the class that produced the
+merge, so this ranking is class-grained. Each row is `{producerClass,
+favorableImpact, meanTier, impactPerCost, identifiabilitySuspect,
+belowNoiseFloor, contributions[]}`. **Never read `impactPerCost` as a bare
+number** — a row with `identifiabilitySuspect:true` means "cannot tell"
+(collinear/near-constant column) and a row with `belowNoiseFloor:true` means
+"measured but within exogenous drift". Trust only rows where BOTH flags are
+`false`.
 
 How to use it:
 
 - **`metricCount: 0`** → the ledger is dark (no impact signal yet); fall back to
   the notice-based 2a signal alone and do NOT fabricate impact claims.
-- **A high-`impactPerCost`, non-suspect anchor type** is a *high-leverage area*:
-  when you file a finding that touches that anchor type's code path, cite the
+- **A high-`impactPerCost`, non-suspect producer class** is a *high-leverage
+  area*: when you file a finding that touches that class's code path, cite the
   impact delta as justification ("high outcome delta per cost", not just "noticed
   a pattern"). This is the primary success criterion of #3283 — at least one
   discovery candidate per 3 iterations should be impact-justified.
-- **A low/negative-`impactPerCost` anchor type that is ALSO high-notice** (high
+- **A low/negative-`impactPerCost` producer class that is ALSO high-notice** (high
   cycle count / cost) is a *waste candidate*: work is flowing there but not
   moving outcomes — a stronger finding than notice alone.
 

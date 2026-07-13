@@ -11,8 +11,8 @@
  * `GET /api/attribution/impact` is the **reverse-loop read surface** (issue
  * #3283, completing epic #2628): it folds those per-metric β_c ACROSS every
  * leading metric — orienting each with the metric's `direction` into a favorable
- * effect and dividing by a tier cost proxy — to rank producer classes (anchor
- * types) by outcome-impact-per-cost. Discovery classes consume it to steer
+ * effect and dividing by a tier cost proxy — to rank producer classes by
+ * outcome-impact-per-cost. Discovery classes consume it to steer
  * toward high-IMPACT areas rather than merely high-NOTICE ones. Same read-only /
  * never-a-bare-estimate discipline as the base view.
  *
@@ -54,11 +54,12 @@ import {
 } from "../redis/attribution-ledger.ts";
 import {
   estimateMarginalEffects,
-  getTopImpactAnchorTypes,
+  getTopImpactProducerClasses,
   type MetricEstimate,
   type MetricDirection,
 } from "../outcome-attribution/index.ts";
 import { loadOutcomes } from "../outcomes.ts";
+import { AttributionImpactQuerySchema } from "../schemas/attribution.ts";
 
 /**
  * The one dependency the handler needs: the append-only ledger read. Defaults to
@@ -105,16 +106,6 @@ function rankByMagnitude(estimate: MetricEstimate): MetricEstimate {
 }
 
 /**
- * Parse the optional `topN` query param into a non-negative integer, or
- * `undefined` when absent/malformed (⇒ return all ranked rows).
- */
-function parseTopN(raw: unknown): number | undefined {
-  if (typeof raw !== "string" || raw === "") return undefined;
-  const n = Number(raw);
-  return Number.isInteger(n) && n >= 0 ? n : undefined;
-}
-
-/**
  * @param loadObservations Optional ledger-read override (tests inject a fake).
  *   Defaults to the live `getObservations()` Redis seam.
  * @param loadMetricDirections Optional metric-direction override (tests inject a
@@ -151,7 +142,7 @@ export function createAttributionRouter(
   });
 
   // GET /attribution/impact — the reverse-loop read surface (issue #3283, epic
-  // #2628). Ranks producer classes (anchor types) by FAVORABLE outcome impact
+  // #2628). Ranks producer classes by FAVORABLE outcome impact
   // PER unit of build cost, folding the ridge estimator across every leading
   // metric and orienting each raw β with the metric's direction. Discovery
   // classes consume this to steer toward high-IMPACT areas over high-NOTICE
@@ -159,6 +150,17 @@ export function createAttributionRouter(
   // yet); Redis-read fail → 500. Optional `?topN=N` caps the ranking.
   router.get("/attribution/impact", async (req, res) => {
     try {
+      // ADR-0022: route the WHOLE query through the schema before reading any
+      // named field. A malformed `topN` (non-numeric / fractional / negative)
+      // is a 400; absent ⇒ `undefined` ⇒ return all ranked rows.
+      const parsed = AttributionImpactQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return res
+          .status(400)
+          .json({ code: "schema-validation-failed", issues: parsed.error.issues });
+      }
+      const { topN } = parsed.data;
+
       const loaded = await loadObservations();
       if (loaded.ok === false) {
         // The only 500: the append-only ledger could not be read.
@@ -169,9 +171,8 @@ export function createAttributionRouter(
       // it does NOT fail the request (an impact ranking without favorability
       // orientation is still a usable notice-vs-impact signal).
       const metricDirections = await loadMetricDirections();
-      const topN = parseTopN(req.query.topN);
 
-      const ranking = getTopImpactAnchorTypes(loaded.observations, {
+      const ranking = getTopImpactProducerClasses(loaded.observations, {
         metricDirections,
         topN,
       });

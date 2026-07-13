@@ -129,8 +129,8 @@ two findings within THIS run also dedup against each other.
 
 ### 3b. Score and rank by:
 1. **Measured outcome-impact** (heaviest weight) — when the `/attribution/impact`
-   ranking (Phase 1) shows a non-suspect, above-noise-floor anchor type with high
-   `impactPerCost`, findings that touch that area rank ABOVE equally-noticed
+   ranking (Phase 1) shows a non-suspect, above-noise-floor producer class with
+   high `impactPerCost`, findings that touch that area rank ABOVE equally-noticed
    findings elsewhere. This is the empirical merge→outcome-delta signal (#2628
    reverse loop), preferred over the notice-based proxies below. Cite the
    `impactPerCost` + flags in the finding's evidence. If `metricCount:0` (dark

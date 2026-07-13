@@ -246,7 +246,7 @@ async function callImpact(
 }
 
 describe("GET /api/attribution/impact — reverse-loop impact ranking (#3283)", () => {
-  test("ranks anchor types by favorable impact per cost; every row carries posture", async () => {
+  test("ranks producer classes by favorable impact per cost; every row carries posture", async () => {
     const observations: AttributionObservation[] = [];
     for (let i = 1; i <= 6; i++) {
       observations.push(
@@ -262,7 +262,7 @@ describe("GET /api/attribution/impact — reverse-loop impact ranking (#3283)", 
     const res = await callImpact({ ok: true, observations }, { test_count: "up" });
     assert.equal(res._status, 200);
     assert.equal(res._body.metricCount, 1);
-    const classes = res._body.rows.map((r: any) => r.anchorType);
+    const classes = res._body.rows.map((r: any) => r.producerClass);
     assert.deepEqual(classes, ["hi", "lo"], "hi outranks lo");
     for (const r of res._body.rows) {
       assert.equal(typeof r.impactPerCost, "number");
@@ -283,7 +283,7 @@ describe("GET /api/attribution/impact — reverse-loop impact ranking (#3283)", 
     const res = await callImpact({ ok: true, observations }, { m: "up" }, { topN: "1" });
     assert.equal(res._status, 200);
     assert.equal(res._body.rows.length, 1);
-    assert.equal(res._body.rows[0].anchorType, "hi");
+    assert.equal(res._body.rows[0].producerClass, "hi");
   });
 
   test("an empty ledger → rows:[] , metricCount:0 at 200 (no impact signal yet)", async () => {
@@ -299,6 +299,36 @@ describe("GET /api/attribution/impact — reverse-loop impact ranking (#3283)", 
     assert.equal(res._body.rows, undefined);
   });
 
+  test("a malformed ?topN is a 400 schema-validation-failed (ADR-0022 query seam)", async () => {
+    // The whole query routes through AttributionImpactQuerySchema.safeParse
+    // before any named field is read; a non-numeric / negative / fractional
+    // topN fails the parse and returns 400, not a silent return-all.
+    for (const bad of ["abc", "-1", "1.5"]) {
+      const res = await callImpact(
+        { ok: true, observations: [] },
+        {},
+        { topN: bad },
+      );
+      assert.equal(res._status, 400, `topN=${bad} must 400`);
+      assert.equal(res._body.code, "schema-validation-failed");
+      assert.ok(Array.isArray(res._body.issues), "issues array present");
+      // The ledger read never happened — a schema failure short-circuits.
+      assert.equal(res._body.rows, undefined);
+    }
+  });
+
+  test("an absent ?topN parses to undefined → returns all ranked rows (200)", async () => {
+    const observations: AttributionObservation[] = [];
+    for (let i = 1; i <= 6; i++) {
+      observations.push(obs({ metric: "m", delta: 10 * i, classCounts: { hi: i }, tier: 3 }));
+      observations.push(obs({ metric: "m", delta: 1 * i, classCounts: { lo: i }, tier: 3 }));
+    }
+    observations.push(obs({ metric: "m", delta: 0, classCounts: {}, tier: null }));
+    const res = await callImpact({ ok: true, observations }, { m: "up" }, {});
+    assert.equal(res._status, 200);
+    assert.equal(res._body.rows.length, 2, "no cap → all ranked rows");
+  });
+
   test("missing directions degrade to raw signed β (still 200, still ranked)", async () => {
     const observations: AttributionObservation[] = [];
     for (let i = 1; i <= 6; i++) {
@@ -308,7 +338,7 @@ describe("GET /api/attribution/impact — reverse-loop impact ranking (#3283)", 
     // No direction map supplied → the lens uses raw signed β, endpoint still 200.
     const res = await callImpact({ ok: true, observations }, {});
     assert.equal(res._status, 200);
-    const c = res._body.rows.find((r: any) => r.anchorType === "c");
+    const c = res._body.rows.find((r: any) => r.producerClass === "c");
     assert.ok(c, "class c ranked");
     assert.equal(c.contributions[0].directed, false, "undirected contribution");
   });

@@ -32,13 +32,12 @@ export type { MetricEstimate, AttributionEstimate } from "./estimator.ts";
 // Impact-ranking lens — the reverse-loop read surface (issue #3283)
 // ---------------------------------------------------------------------------
 // A pure fold over the estimator's per-metric marginal effects that ranks
-// producer classes (anchor types) by FAVORABLE outcome impact PER unit of build
-// cost, across every leading metric. This is what the discovery reverse-loop
-// consumes (via `GET /api/attribution/impact`) to steer toward high-IMPACT
-// areas rather than merely high-NOTICE ones (epic #2628 finding #6). Read-only,
-// zero-I/O, never a bare estimate — every row carries its identifiability +
-// noise-floor posture.
-export { getTopImpactAnchorTypes } from "./impact-ranking.ts";
+// producer classes by FAVORABLE outcome impact PER unit of build cost, across
+// every leading metric. This is what the discovery reverse-loop consumes (via
+// `GET /api/attribution/impact`) to steer toward high-IMPACT areas rather than
+// merely high-NOTICE ones (epic #2628 finding #6). Read-only, zero-I/O, never a
+// bare estimate — every row carries its identifiability + noise-floor posture.
+export { getTopImpactProducerClasses } from "./impact-ranking.ts";
 export type {
   ImpactRanking,
   ImpactRankRow,
