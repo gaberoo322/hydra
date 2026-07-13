@@ -481,6 +481,21 @@ export async function recordCycle(
       testsAfter: filesChangedCount(body.testsAfter),
       testsPassingBefore: filesChangedCount(body.testsPassingBefore),
       testsPassingAfter: filesChangedCount(body.testsPassingAfter),
+      // Issue #3269: the per-phase wall-clock spans reap.py forwards from the
+      // dispatch's deposit (groundingDurationMs from groundProject, plus the
+      // verification/planning/execution spans). `filesChangedCount` is reused as
+      // the non-negative-integer-or-undefined coercion (matching testsBefore/
+      // filesChanged): an absent field is stripped by the loop below and stays
+      // absent (truthful "unknown/never-written"), an explicit 0 records a
+      // measured zero-span cycle. These four are MONOTONIC in record.ts
+      // (MONOTONIC_DURATION_FIELDS), so recordCycleMetrics enforces that a later
+      // 0-carrying write never clobbers a stored non-zero span. This is the
+      // plumbing that lets `groundingDurationMs` et al. stop recording null on
+      // every cycle once the deferred measurement/deposit follow-up lands.
+      groundingDurationMs: filesChangedCount(body.groundingDurationMs),
+      verificationDurationMs: filesChangedCount(body.verificationDurationMs),
+      planningDurationMs: filesChangedCount(body.planningDurationMs),
+      executionDurationMs: filesChangedCount(body.executionDurationMs),
       abandonReason: body.abandonReason,
       regressionIntroduced: body.regressionIntroduced === true ? true : undefined,
       autopilotTurnId: body.autopilotTurnId,

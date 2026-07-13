@@ -486,4 +486,82 @@ describe("POST /api/autopilot/cycle-record (issue #430)", () => {
     const metricBad = await redis.hgetall("hydra:metrics:autopilot-turn-2063-bad");
     assert.equal(metricBad.filesChanged, undefined); // negative clamps to unknown
   });
+
+  // ---------------------------------------------------------------------------
+  // AC-3269 (issue #3269) — the four grounding/verification/planning/execution
+  // span fields, when carried on a fresh record, land as non-zero integers on
+  // the metrics hash (the plumbing that lets them stop recording null on every
+  // cycle). Mirrors the filesChanged/#2063 + testsBefore/#2754 precedents.
+  // ---------------------------------------------------------------------------
+  test("issue #3269: grounding/verification/planning/execution spans on a fresh record write integers to the metrics hash", async () => {
+    const req = mockReq({
+      cycleId: "autopilot-turn-3269",
+      status: "merged",
+      groundingDurationMs: 1500,
+      verificationDurationMs: 42000,
+      planningDurationMs: 3000,
+      executionDurationMs: 88000,
+    });
+    const res = mockRes();
+    await handler(req, res);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ok, true);
+    const metric = await redis.hgetall("hydra:metrics:autopilot-turn-3269");
+    assert.equal(metric.groundingDurationMs, "1500");
+    assert.equal(metric.verificationDurationMs, "42000");
+    assert.equal(metric.planningDurationMs, "3000");
+    assert.equal(metric.executionDurationMs, "88000");
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC-3269b (issue #3269) — invariant 1: an absent span field stays absent
+  // (truthful "unknown/never-written"), never persisted as 0 or "undefined";
+  // an explicit 0 records a measured zero-span cycle. Same truthful-null
+  // contract as filesChanged AC13.
+  // ---------------------------------------------------------------------------
+  test("issue #3269: an absent span records nothing; an explicit 0 records a measured zero", async () => {
+    const resAbsent = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-3269-absent", status: "merged" }),
+      resAbsent,
+    );
+    const metricAbsent = await redis.hgetall("hydra:metrics:autopilot-turn-3269-absent");
+    assert.equal(metricAbsent.groundingDurationMs, undefined);
+    assert.equal(metricAbsent.verificationDurationMs, undefined);
+    assert.equal(metricAbsent.planningDurationMs, undefined);
+    assert.equal(metricAbsent.executionDurationMs, undefined);
+
+    const resZero = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-3269-zero", status: "merged", groundingDurationMs: 0 }),
+      resZero,
+    );
+    const metricZero = await redis.hgetall("hydra:metrics:autopilot-turn-3269-zero");
+    assert.equal(metricZero.groundingDurationMs, "0"); // measured zero is persisted
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC-3269c (issue #3269) — invariant 2: a numeric-string span (the shell path
+  // forwards string positionals) coerces via the SAME filesChangedCount helper
+  // as testsBefore, and a negative/garbage value clamps to unknown (written as
+  // nothing). Mirrors filesChanged AC14.
+  // ---------------------------------------------------------------------------
+  test("issue #3269: a numeric-string span coerces; negative/garbage records nothing", async () => {
+    const resStr = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-3269-str", status: "merged", groundingDurationMs: "2200" }),
+      resStr,
+    );
+    const metricStr = await redis.hgetall("hydra:metrics:autopilot-turn-3269-str");
+    assert.equal(metricStr.groundingDurationMs, "2200");
+
+    const resBad = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-3269-bad", status: "merged", verificationDurationMs: -7 }),
+      resBad,
+    );
+    const metricBad = await redis.hgetall("hydra:metrics:autopilot-turn-3269-bad");
+    assert.equal(metricBad.verificationDurationMs, undefined); // negative clamps to unknown
+  });
 });
