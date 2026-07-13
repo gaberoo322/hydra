@@ -246,6 +246,18 @@ async function writeDispatchOutcomeRecord(
     const classRow = parsed ? classByName(parsed.className) : undefined;
     const tokens = await resolveDispatchTokens(body, cycleId, deps);
     const durationMs = numberOrDefault(body.totalDurationMs, 0);
+    // Cascade-routing escalation provenance (issue #3284): pass-through of the
+    // three optional fields reap forwards ONLY on a cascade escalation
+    // re-dispatch. Non-escalated dispatches omit them → truthful null (never a
+    // fabricated 0/""). The escalationAttempt marker lets the cascade metrics
+    // endpoint attribute THIS dispatch's actual tokens as the escalated-attempt
+    // cost delta (design-concept invariant 7 — authoritative token plane, no
+    // second estimator).
+    const escalationAttempt = filesChangedCount(body.escalationAttempt) ?? null;
+    const escalatedModel =
+      typeof body.escalatedModel === "string" && body.escalatedModel.length > 0
+        ? body.escalatedModel
+        : null;
     const result = await deps.dispatchOutcomes.put({
       cycleId,
       runIdPrefix: parsed?.runIdPrefix ?? null,
@@ -255,6 +267,8 @@ async function writeDispatchOutcomeRecord(
       outcome: status,
       tokens,
       durationMs: durationMs > 0 ? durationMs : null,
+      escalationAttempt,
+      escalatedModel,
       recordedAt: deps.now(),
     });
     if (result.ok === false) {
@@ -397,6 +411,15 @@ export async function recordCycle(
           const upgradeTokens = filesChangedCount(body.tokens);
           if (upgradeTokens !== undefined) patch.tokens = upgradeTokens;
           if (enrichDuration > 0) patch.durationMs = enrichDuration;
+          // Issue #3284: carry a cascade-escalation marker onto the record if
+          // the enriching (PR-aware) write is the first to know it. The first
+          // write below already persists these when reap forwarded them; this
+          // additive HSET only fills a gap, never clobbers (a non-escalation
+          // enrichment omits both and leaves the stored provenance untouched).
+          const upgradeAttempt = filesChangedCount(body.escalationAttempt);
+          if (upgradeAttempt !== undefined) patch.escalationAttempt = upgradeAttempt;
+          if (typeof body.escalatedModel === "string" && body.escalatedModel.length > 0)
+            patch.escalatedModel = body.escalatedModel;
           const upgradeResult = await deps.dispatchOutcomes.upgrade(cycleId, patch);
           if (upgradeResult.ok === false) {
             console.error(

@@ -18,16 +18,30 @@
 #       ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>
 #     the anchor deposit at
 #       ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-<task_id>
-#     and the grounding test-count deposit at
+#     the grounding test-count deposit at
 #       ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-grounding-tests-<task_id>
-#   - <task_id> is the HARNESS task id. PRIMARY source: the `agent-<HASH>`
-#     worktree-dir basename (12+ hex chars), which is the branch suffix
-#     `worktree-agent-<HASH>` and the slot `task_id` reap reads (#1945 — env
-#     vars alone are the WRONG key inside a worktree subagent). Fallback:
-#     HYDRA_AUTOPILOT_TASK_ID then CLAUDE_CODE_SESSION_ID, only when cwd is not
-#     an agent-<HASH> worktree.
+#     and the cascade-routing escalation-provenance deposit at
+#       ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-escalation-<task_id>   (issue #3284)
+#   - <task_id> is the HARNESS task id. For the reflect/grounding modes the
+#     PRIMARY source is the `agent-<HASH>` worktree-dir basename (12+ hex chars),
+#     which is the branch suffix `worktree-agent-<HASH>` and the slot `task_id`
+#     reap reads (#1945 — env vars alone are the WRONG key inside a worktree
+#     subagent). Fallback: HYDRA_AUTOPILOT_TASK_ID then CLAUDE_CODE_SESSION_ID,
+#     only when cwd is not an agent-<HASH> worktree.
+#   - The `escalation` mode is DIFFERENT (issue #3284): it is invoked by the
+#     autopilot HARNESS at escalation-dispatch time, NOT by a worktree subagent,
+#     so the harness is not inside the escalated worktree and cwd carries no
+#     agent-<HASH> hash. The escalated dispatch's task_id is therefore passed as
+#     an EXPLICIT argument (the harness knows it — it is the slot task_id it just
+#     allocated / the branch suffix it synthesised) rather than derived from cwd.
 #   - The anchor deposit is written UNCONDITIONALLY (even when zero reflections
 #     were served) so a first-failure anchor is recoverable (#2112).
+#   - The escalation deposit carries ONLY the cascade-routing provenance JSON
+#     ({"escalationAttempt":N,"escalatedModel":"sonnet","priorAttemptStatus":"no_op"})
+#     that reap.py's `_read_escalation_deposit` reads back verbatim and forwards
+#     on the single cycle-record write, so the durable per-dispatch outcome
+#     record (#2942) tags the escalated attempt and /metrics/cascade-routing can
+#     measure cost-delta + postEscalationMergeRate off ACTUAL tokens (#3284).
 #   - Graceful no-op: this script MUST NOT run under `set -e` and MUST NEVER
 #     abort its caller on an I/O error, a missing footer, or an unreachable
 #     reflection API — best-effort with a FAIL-LOUD stderr WARN, exactly as the
@@ -35,14 +49,23 @@
 #
 # USAGE (invoked by the fragments; args, not caller shell vars, since a script
 # is a separate process):
-#   reflection-deposit.sh reflect  <skill_name> <anchor_ref> <refl_json>
-#   reflection-deposit.sh grounding <skill_name>
+#   reflection-deposit.sh reflect    <skill_name> <anchor_ref> <refl_json>
+#   reflection-deposit.sh grounding  <skill_name>
+#   reflection-deposit.sh escalation <skill_name> <task_id> <escalated_model> <attempt> [prior_attempt_status]
 #
-#   reflect   — deposits refl-sources (mapped from <refl_json>.blocks) + the
-#               unconditional anchor deposit. <refl_json> is the raw body from
-#               GET /api/reflections (may be empty on an unreachable API).
-#   grounding — runs `npm test`, parses the node:test footer, deposits the
-#               post-implementation test counts.
+#   reflect    — deposits refl-sources (mapped from <refl_json>.blocks) + the
+#                unconditional anchor deposit. <refl_json> is the raw body from
+#                GET /api/reflections (may be empty on an unreachable API).
+#   grounding  — runs `npm test`, parses the node:test footer, deposits the
+#                post-implementation test counts.
+#   escalation — deposits the cascade-routing escalation provenance for the
+#                EXPLICITLY-passed <task_id> (issue #3284). Invoked by the
+#                autopilot harness the moment a `dispatch` action carrying
+#                `prompt_args.escalate_model` is executed — writes
+#                {"escalationAttempt":<attempt>,"escalatedModel":<model>,
+#                 "priorAttemptStatus":<status>} so reap.py reads it back.
+#                Non-escalated dispatches never invoke this mode → no deposit →
+#                reap omits the fields (truthful null, the vast majority).
 #
 # Deliberately NOT `set -euo pipefail`: this is best-effort telemetry that must
 # never take down the build. Every branch handles its own failure loud-on-stderr.
@@ -173,6 +196,70 @@ print(json.dumps(body))
   fi
 }
 
+# --- mode: escalation ---------------------------------------------------------
+# escalation <skill_name> <task_id> <escalated_model> <attempt> [prior_attempt_status]
+# Deposits the cascade-routing escalation provenance (issue #3284) for the
+# EXPLICITLY-passed task_id. Invoked by the autopilot HARNESS at
+# escalation-dispatch time (not a worktree subagent), so task_id is an argument,
+# NOT derived from cwd. Best-effort: a missing task_id / non-positive attempt /
+# empty model / underivable JSON yields no deposit → reap omits the fields
+# (truthful null). Writes ONLY when the provenance is well-formed so a malformed
+# invocation can never fabricate a bogus escalation marker.
+do_escalation() {
+  local skill="$1" task_id="$2" model="$3" attempt="$4" prior_status="$5"
+  local dir
+  dir="$(deposit_dir)"
+
+  if [ -z "$task_id" ]; then
+    printf '[%s] WARN escalation-deposit-no-task-id: harness passed no task_id — escalationAttempt will stay null (cue: escalation-deposit-no-task-id)\n' \
+      "$skill" >&2
+    return
+  fi
+
+  # Build the provenance JSON with python3 (validates attempt is a positive int
+  # and model is non-empty; the reader — dispatch.sh — enforces the SAME shape,
+  # so keep them consistent). A malformed/insufficient invocation yields "" and
+  # deposits nothing (no fabricated marker).
+  local json
+  json="$(python3 -c '
+import json, sys
+model = sys.argv[1].strip()
+attempt_raw = sys.argv[2].strip()
+prior = sys.argv[3].strip()
+body = {}
+# escalationAttempt: a POSITIVE integer (>= 2 in practice — the cheap tier ran
+# attempt 1). Anything non-positive/unparseable → omit (truthful null).
+try:
+    n = int(attempt_raw)
+    if n > 0:
+        body["escalationAttempt"] = n
+except (TypeError, ValueError):
+    pass
+if model:
+    body["escalatedModel"] = model
+if prior:
+    body["priorAttemptStatus"] = prior
+# Only a deposit that carries the load-bearing escalationAttempt is worth
+# writing — reap keys the whole cascade fold on its NON-null presence.
+if "escalationAttempt" not in body:
+    sys.exit(0)
+print(json.dumps(body))
+' "$model" "$attempt" "$prior_status" 2>/dev/null || printf '')"
+
+  if [ -n "$json" ]; then
+    local path="${dir}/hydra-escalation-${task_id}"
+    if printf '%s' "$json" > "$path" 2>/dev/null; then
+      printf '[%s] escalation-deposit ok: %s -> %s\n' "$skill" "$json" "$path" >&2
+    else
+      printf '[%s] WARN escalation-deposit-write-failed: could not write %s (cue: escalation-deposit-write-failed)\n' \
+        "$skill" "$path" >&2
+    fi
+  else
+    printf '[%s] WARN escalation-deposit-malformed: model=%s attempt=%s — no positive escalationAttempt, nothing deposited (cue: escalation-deposit-malformed)\n' \
+      "$skill" "$model" "$attempt" >&2
+  fi
+}
+
 # --- dispatch -----------------------------------------------------------------
 mode="${1:-}"
 case "$mode" in
@@ -184,8 +271,12 @@ case "$mode" in
     # grounding <skill_name>
     do_grounding "${2:-reflection-deposit}"
     ;;
+  escalation)
+    # escalation <skill_name> <task_id> <escalated_model> <attempt> [prior_attempt_status]
+    do_escalation "${2:-reflection-deposit}" "${3:-}" "${4:-}" "${5:-}" "${6:-}"
+    ;;
   *)
-    printf '[reflection-deposit] WARN unknown-mode: %s (expected reflect|grounding) — no-op\n' "$mode" >&2
+    printf '[reflection-deposit] WARN unknown-mode: %s (expected reflect|grounding|escalation) — no-op\n' "$mode" >&2
     ;;
 esac
 

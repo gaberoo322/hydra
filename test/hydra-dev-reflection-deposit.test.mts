@@ -269,4 +269,73 @@ describe("scripts/reflection-deposit.sh — deposit mechanics preserved (issue #
       "helper must always exit 0 (best-effort telemetry never fails the caller)",
     );
   });
+
+  // Issue #3284 — the cascade-routing escalation-provenance WRITER. reap.py's
+  // `_read_escalation_deposit` reads `hydra-escalation-<task_id>`, but before
+  // this nothing WROTE it, so escalationAttempt/escalatedModel were permanently
+  // null. The helper gained an `escalation` mode (harness-invoked at dispatch
+  // time, task_id passed EXPLICITLY since the harness is not inside the escalated
+  // worktree). Pin the write key + the well-formedness guard so the writer can't
+  // silently regress back out (re-opening the 2nd-QA-bounce gap).
+  test("writes the hydra-escalation-<task_id> deposit reap.py reads (issue #3284)", () => {
+    assert.ok(
+      depositScript.includes("hydra-escalation-"),
+      "helper must write the hydra-escalation-<task_id> deposit reap.py's _read_escalation_deposit reads",
+    );
+    assert.match(
+      depositScript,
+      /escalation\)/,
+      "helper must dispatch an `escalation` mode (the WRITE half of the reap read path)",
+    );
+  });
+
+  test("escalation deposit only fires on well-formed provenance and fails loud (issue #3284)", () => {
+    // The blob must carry escalationAttempt (the load-bearing marker the cascade
+    // rollup filters on) + escalatedModel — matching what dispatch.sh parses.
+    for (const field of ["escalationAttempt", "escalatedModel", "priorAttemptStatus"]) {
+      assert.ok(
+        depositScript.includes(field),
+        `escalation deposit must emit ${field} (kept consistent with dispatch.sh's reader)`,
+      );
+    }
+    for (const cue of [
+      "escalation-deposit-no-task-id",
+      "escalation-deposit-write-failed",
+      "escalation-deposit-malformed",
+    ]) {
+      assert.ok(
+        depositScript.includes(cue),
+        `helper must FAIL-LOUD (cue ${cue}) rather than fabricate or silently drop an escalation marker`,
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #3284 — the autopilot playbook must instruct the harness to DEPOSIT the
+// escalation provenance the moment it executes an escalate_model dispatch. This
+// is the WRITE half reap.py already reads; without it the cascade cost-delta +
+// postEscalationMergeRate are structurally 0. Lint the playbook so the
+// obligation can't erode back into optional prose (the 2nd-QA-bounce root cause).
+// ---------------------------------------------------------------------------
+describe("hydra-autopilot playbook — escalation-provenance deposit obligation (issue #3284)", () => {
+  const playbook = readFileSync(
+    resolve(PLAYBOOK_DIR, "hydra-autopilot.md"),
+    "utf8",
+  );
+
+  test("instructs the harness to invoke reflection-deposit.sh escalation on an escalate_model dispatch", () => {
+    assert.ok(
+      /reflection-deposit\.sh"?\s+escalation/.test(playbook),
+      "the Cascade-routing escalation override section must invoke `reflection-deposit.sh escalation` so the provenance is deposited for reap.py to read back",
+    );
+    assert.ok(
+      /#3284/.test(playbook),
+      "the deposit instruction must cite issue #3284 for future archaeology",
+    );
+    assert.ok(
+      /escalate_model/.test(playbook) && /task_id/.test(playbook),
+      "the instruction must key the deposit on the escalated dispatch's task_id (passed explicitly by the harness)",
+    );
+  });
 });

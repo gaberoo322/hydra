@@ -321,6 +321,7 @@ broad consumers are:
 | GET | `/api/metrics` | stable |
 | GET | `/api/metrics/abandonment` | stable |
 | GET | `/api/metrics/anchor-distribution` | stable |
+| GET | `/api/metrics/cascade-routing` | stable |
 | GET | `/api/metrics/cost` | stable |
 | GET | `/api/metrics/cost-by-class` | stable |
 | GET | `/api/metrics/grounding-duration` | stable |

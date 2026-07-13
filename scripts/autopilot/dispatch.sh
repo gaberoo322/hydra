@@ -62,7 +62,7 @@ print(json.dumps({
     # data. Idempotent on cycleId — re-running with the same cycleId is a
     # no-op on the server, so retries don't double-count.
     #
-    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens] [worktree_branch]
+    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens] [worktree_branch] [escalation_json]
     #
     # Issue #1136 (Slice 2 of #1119): the optional 8th positional arg
     # `reflection_sources` is the comma-separated reflection bucket tokens
@@ -105,6 +105,16 @@ print(json.dumps({
     # worktree-hash task_id — an un-joinable id — so `testsAfter` recorded 0 on
     # the sampled record every cycle). Empty/absent → the field is omitted from
     # the POST body → recordCycleMetrics does no mirror (prior behaviour).
+    # Issue #3284: the optional 13th positional arg `escalation` is a compact JSON
+    # object of the dispatch's cascade-routing escalation provenance
+    # ({"escalationAttempt":N,"escalatedModel":"sonnet"}), present ONLY when
+    # decide.py's `_rule_escalation` re-dispatched this cheap-tier class at a
+    # stronger model. reap.py reads it from a task-scoped deposit and forwards it
+    # here so the durable per-dispatch outcome record (#2942) tags the escalated
+    # attempt — letting /metrics/cascade-routing derive cost-delta from this
+    # dispatch's ACTUAL recorded tokens (design-concept invariant 7) and report
+    # postEscalationMergeRate (invariant 8). Empty/absent → both fields omitted
+    # from the POST body (truthful "not an escalation").
     cycle_id="${1:-}"
     status="${2:-}"
     skill="${3:-}"
@@ -117,8 +127,9 @@ print(json.dumps({
     grounding_tests="${10:-}"
     tokens="${11:-}"
     worktree_branch="${12:-}"
+    escalation="${13:-}"
     if [ -z "$cycle_id" ] || [ -z "$status" ] || [ -z "$skill" ]; then
-      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens] [worktree_branch]" >&2
+      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens] [worktree_branch] [escalation_json]" >&2
       exit 2
     fi
     # Issue #2852: defence-in-depth — fail loud at the shell BEFORE building the
@@ -157,6 +168,12 @@ print(json.dumps({
       hydra-dev|hydra-target-build) anchor_type="work-queue" ;;
       hydra-qa) anchor_type="qa-review" ;;
       hydra-grill) anchor_type="grill" ;;
+      # Issue #3284: a cascade escalation re-dispatches a cheap signal class
+      # (today `cleanup_orch`/`hydra-cleanup`) at a stronger tier; reap now
+      # fires a cycle-record for that escalated completion so its outcome record
+      # carries the escalation provenance. Map the skill so the escalated cleanup
+      # cycle buckets to a first-class `cleanup` anchorType, not `unmapped:*`.
+      hydra-cleanup|hydra-target-cleanup) anchor_type="cleanup" ;;
       hydra-research|hydra-issue-research|hydra-target-research) anchor_type="research" ;;
       *)
         # A skill with no first-class mapping. Emit a diagnostic so the gap is
@@ -183,7 +200,7 @@ print(json.dumps({
     esac
     payload=$(python3 -c "
 import json, sys
-cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed, grounding_tests, tokens, worktree_branch = sys.argv[1:17]
+cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed, grounding_tests, tokens, worktree_branch, escalation = sys.argv[1:18]
 body = {
     'cycleId': cycle_id,
     'status': status,
@@ -252,8 +269,31 @@ if tokens != '':
 # record dashboards read. Empty/absent → omitted → no mirror (prior behaviour).
 if worktree_branch:
     body['worktreeBranch'] = worktree_branch
+# Issue #3284: merge the cascade-routing escalation provenance. Present ONLY on
+# an escalated re-dispatch. escalationAttempt must be a POSITIVE integer (>= 2 in
+# practice — the cheap tier ran attempt 1); escalatedModel a non-empty string.
+# Empty/absent/malformed → both fields omitted (truthful 'not an escalation'),
+# so recordCycle records null provenance for the overwhelming non-escalation
+# majority and never fabricates a marker.
+if escalation != '':
+    try:
+        esc = json.loads(escalation)
+        if isinstance(esc, dict):
+            attempt = esc.get('escalationAttempt')
+            if not isinstance(attempt, bool):
+                try:
+                    n = int(attempt)
+                    if n > 0:
+                        body['escalationAttempt'] = n
+                except (TypeError, ValueError):
+                    pass
+            model = esc.get('escalatedModel')
+            if isinstance(model, str) and model:
+                body['escalatedModel'] = model
+    except (TypeError, ValueError):
+        pass
 print(json.dumps(body))
-" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests" "$tokens" "$worktree_branch")
+" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed" "$grounding_tests" "$tokens" "$worktree_branch" "$escalation")
     # Issue #2635: the rest of the autopilot ecosystem (reap.py, heartbeat.py,
     # term-check.py, decide.py, bootstrap.sh, the hooks) resolves the API origin
     # from HYDRA_API_BASE, but the `hydra` CLI reads HYDRA_BASE_URL and the curl

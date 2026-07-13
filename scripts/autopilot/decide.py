@@ -920,6 +920,80 @@ def make_dispatch_decision_event(
     }
 
 
+def make_cascade_escalation_event(
+    state: dict,
+    now: int,
+    *,
+    cls: str,
+    attempt: int,
+    trigger_reason: str,
+    from_model: str,
+    to_model: str,
+) -> dict:
+    """Construct one `cascade_routing_escalation` telemetry event (issue #3284).
+
+    Emitted by `_rule_escalation` the moment the cascade reducer decides to
+    re-dispatch a cheap-tier class at a stronger model. It records WHICH class
+    escalated, the attempt number of the escalated re-dispatch, the trigger
+    (the stop-status→pattern that fired the escalation, e.g. `subagent_noop` /
+    `subagent_failure`), and the cheap→strong model tiers.
+
+    The event carries the model TIERS (not a token cost) because the cost delta
+    is not known at decision time — the escalated dispatch has not run yet. The
+    aggregation lens (src/autopilot/cascade-telemetry.ts) joins these records to
+    the per-class token surrogate to derive the realised cost delta.
+
+    Rides `hydra:autopilot:slot-events` alongside the other decide.py
+    observability events; the field-agnostic bridge forwards it verbatim.
+    Every value is string-serialisable for XADD.
+    """
+    return {
+        "event": "cascade_routing_escalation",
+        "turn_n": str(int(state.get("turn", 0) or 0)),
+        "run_id": str(state.get("run_id") or ""),
+        "class": str(cls),
+        "attempt": str(int(attempt)),
+        "trigger_reason": str(trigger_reason),
+        "from_model": str(from_model),
+        "to_model": str(to_model),
+        "ts_epoch": str(now),
+    }
+
+
+def make_cascade_blocked_event(
+    state: dict,
+    now: int,
+    *,
+    cls: str,
+    trigger_reason: str,
+    to_model: str,
+    block_reason: str,
+) -> dict:
+    """Construct one `cascade_routing_blocked` telemetry event (issue #3284).
+
+    Emitted by `_rule_escalation` when the Subscription Usage Tracker hard-stop
+    (`dispatch_blocked`) suppresses an escalation the cascade reducer would
+    OTHERWISE have fired. It answers the "is the gate too restrictive?" question
+    the issue flags: without this event a throttled escalation is invisible and
+    cannot be told apart from "cascading never triggered".
+
+    `block_reason` is the gate verdict (today always the usage hard-stop);
+    `to_model` is the escalate-to tier the gate suppressed. `trigger_reason` is
+    the stop-status→pattern that WOULD have escalated. Every value is
+    string-serialisable for XADD.
+    """
+    return {
+        "event": "cascade_routing_blocked",
+        "turn_n": str(int(state.get("turn", 0) or 0)),
+        "run_id": str(state.get("run_id") or ""),
+        "class": str(cls),
+        "trigger_reason": str(trigger_reason),
+        "to_model": str(to_model),
+        "block_reason": str(block_reason),
+        "ts_epoch": str(now),
+    }
+
+
 def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "") -> dict:
     """Silent-wedge fallback (issue #509). Hooks are the primary slot
     accounting path; this action fires when an active slot has aged past
@@ -1594,10 +1668,7 @@ def _rule_escalation(
     out = _RuleOutput()
     escalated_slots: set[str] = set()
     if dispatch_blocked:
-        # Usage tracker said allow=False — hard stop. Emit NO escalation
-        # re-dispatch this turn (mirrors the pipeline/signal dispatch rules).
         out.debug["escalation_usage_dispatch_blocked"] = True
-        return out, escalated_slots
     slot_events_raw = state.get("slot_events") or []
     if isinstance(slot_events_raw, dict):
         slot_events_raw = slot_events_raw.get("events") or []
@@ -1631,6 +1702,25 @@ def _rule_escalation(
         )
         if not decision.get("escalate"):
             continue
+        trigger_reason = stop_status_to_pattern(status) or status
+        # Cascade telemetry (issue #3284): the escalation reducer says escalate.
+        # Under the usage hard stop, we STILL walk here (unlike the previous
+        # blanket early-return) so we can distinguish "cascading never triggered"
+        # from "the gate throttled a would-be escalation" — the latter emits a
+        # `cascade_routing_blocked` observability event and dispatches nothing,
+        # exactly mirroring the suppress-but-record contract.
+        if dispatch_blocked:
+            out.events.append(
+                make_cascade_blocked_event(
+                    state,
+                    now,
+                    cls=slot,
+                    trigger_reason=trigger_reason,
+                    to_model=decision["escalate_model"],
+                    block_reason="usage_dispatch_blocked",
+                )
+            )
+            continue
         skill = CLASS_SKILL.get(slot, "")
         out.emit(
             make_dispatch(
@@ -1644,6 +1734,23 @@ def _rule_escalation(
                 reason=decision["reason"],
             ),
             reason=decision["reason"],
+        )
+        # Cascade telemetry (issue #3284): record the realised escalation. The
+        # event rides the slot-events stream alongside the dispatch; the
+        # aggregation lens joins it to the per-class token surrogate for the
+        # realised cost delta.
+        out.events.append(
+            make_cascade_escalation_event(
+                state,
+                now,
+                cls=slot,
+                attempt=prior_attempt + 1,
+                trigger_reason=trigger_reason,
+                # cheap tier is whatever the class ran at (Haiku, per classes.json);
+                # the reducer's `escalate_model` is the strong tier it escalates to.
+                from_model=str((slot_obj or {}).get("model") or "haiku") if isinstance(slot_obj, dict) else "haiku",
+                to_model=decision["escalate_model"],
+            )
         )
         out.dispatched += 1
         escalated_slots.add(slot)

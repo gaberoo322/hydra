@@ -424,6 +424,41 @@ def _read_grounding_tests(task_id: str) -> dict[str, int]:
         return {}
 
 
+def _read_escalation_deposit(task_id: str) -> str:
+    """Read the cascade-routing escalation deposit for `task_id` (issue #3284).
+
+    A dispatch that decide.py's `_rule_escalation` re-dispatched at a stronger
+    model is the only actor that knows its own escalation provenance (decide.py
+    surfaced `escalate_model` / `attempt` as prompt_args; the harness stamps a
+    task-scoped deposit at dispatch time). Exactly like the grounding-tests
+    deposit (`_read_grounding_tests`), the escalated dispatch deposits a compact
+    JSON blob and reap reads it here to forward on the single cycle-record write
+    so the durable per-dispatch outcome record (#2942) tags the escalated
+    attempt. That marker lets /metrics/cascade-routing derive cost-delta from the
+    dispatch's ACTUAL recorded tokens (design-concept invariant 7) and report
+    postEscalationMergeRate (invariant 8) — no static token estimator.
+
+    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-escalation-<task_id>
+    (same dir + task_id keying as the other deposits, so they travel together).
+    Expected JSON shape (any subset): {"escalationAttempt": N, "escalatedModel": "sonnet"}.
+
+    Returns the RAW deposit string verbatim (dispatch.sh does the JSON parse +
+    field validation), or "" when the file is absent/empty/unreadable — the
+    overwhelming non-escalation majority. Best-effort and fully non-fatal: never
+    blocks the reap.
+    """
+    if not task_id:
+        return ""
+    try:
+        path = REFL_SOURCES_DIR / f"hydra-escalation-{task_id}"
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        _append_log(f"escalation_read_skipped task_id={task_id} err={exc}")
+        return ""
+
+
 def _slot_started_epoch(slot: dict | None) -> int | None:
     """Best-effort dispatch-start epoch (seconds) for an occupied pipeline slot.
 
@@ -499,6 +534,7 @@ def _fire_cycle_record(
     anchor_ref: str = "",
     grounding_tests: dict[str, int] | None = None,
     worktree_branch: str = "",
+    escalation: str = "",
 ) -> None:
     """Best-effort POST to /api/autopilot/cycle-record (issue #430).
 
@@ -560,10 +596,39 @@ def _fire_cycle_record(
     read — the two keys are otherwise un-joinable, so `testsAfter` recorded 0 on
     the sampled record every cycle. Empty (signal class / cleared slot) →
     dispatch.sh omits the field → no mirror (the prior behaviour).
+
+    `escalation` (issue #3284): the raw cascade-routing escalation-provenance
+    deposit blob ({"escalationAttempt":N,"escalatedModel":"sonnet"}) read by
+    `_read_escalation_deposit`, present ONLY on a dispatch decide.py escalated to
+    a stronger model. Forwarded as the 13th positional `cycle-record` arg so the
+    durable per-dispatch outcome record (#2942) tags the escalated attempt —
+    letting /metrics/cascade-routing derive cost-delta from ACTUAL recorded
+    tokens (invariant 7) and report postEscalationMergeRate (invariant 8). Empty
+    (the non-escalation majority) → dispatch.sh omits both fields (truthful null).
+
+    Cycle-record fire gate (issue #3284): normally only CYCLE_RECORD_SKILLS
+    (code-writing classes) trip a cycle-record write. But the ONLY class that
+    cascade-escalates today is `cleanup_orch` (skill `hydra-cleanup`), a SIGNAL
+    class NOT in CYCLE_RECORD_SKILLS — so without an escalation-scoped exception,
+    an escalated cleanup dispatch would deposit its provenance, reap would read
+    it, and then `_fire_cycle_record` would early-return and DISCARD it, leaving
+    the outcome record (and thus the whole cascade rollup, which filters on a
+    non-null `escalationAttempt`) permanently empty. So when a non-empty
+    `escalation` blob is present we STILL fire the cycle-record write even for a
+    non-CYCLE_RECORD skill — the escalated attempt's durable outcome record is
+    exactly what the cascade metrics need. Non-escalated signal completions are
+    unaffected (empty escalation → the original CYCLE_RECORD_SKILLS-only gate).
     """
-    if not skill or skill not in CYCLE_RECORD_SKILLS:
-        return
     if not CYCLE_RECORD_SCRIPT.exists():
+        return
+    # Fire for code-writing classes (the #430 semantic) OR whenever a cascade
+    # escalation provenance blob rode in (issue #3284) — the escalating class
+    # (`cleanup_orch`/`hydra-cleanup`) is a signal class outside
+    # CYCLE_RECORD_SKILLS, so gating purely on the skill would silently drop the
+    # escalated attempt's outcome record and structurally zero the cascade fold.
+    if not skill:
+        return
+    if skill not in CYCLE_RECORD_SKILLS and not escalation:
         return
     try:
         subprocess.run(
@@ -593,6 +658,11 @@ def _fire_cycle_record(
                 # counts onto the branch-keyed record dashboards read. Empty →
                 # dispatch.sh omits it → no mirror.
                 worktree_branch or "",
+                # Issue #3284: the cascade-routing escalation provenance blob as
+                # the 13th positional so the durable outcome record tags the
+                # escalated attempt. Empty (non-escalation majority) →
+                # dispatch.sh omits both fields (truthful null).
+                escalation or "",
             ],
             check=False,
             capture_output=True,
@@ -1191,6 +1261,12 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # tests fields are omitted from the POST body (truthful "unknown").
     grounding_tests = _read_grounding_tests(task_id)
 
+    # Issue #3284: read the cascade-routing escalation-provenance deposit so a
+    # dispatch decide.py escalated to a stronger model tags its outcome record
+    # (#2942) with escalationAttempt/escalatedModel. Absent deposit (the
+    # non-escalation majority) → "" → both fields omitted from the POST body.
+    escalation = _read_escalation_deposit(task_id)
+
     # Issue #2450: warn when a code-writing class completes with no deposit file
     # at all — deposit-absent on a REFLECTION_DEPOSIT_SKILLS slot means the
     # deposit recipe either did not run or deposited under a miskeyed path. This
@@ -1246,6 +1322,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         anchor_ref=anchor_ref or "",
         grounding_tests=grounding_tests,
         worktree_branch=worktree_branch or "",
+        escalation=escalation or "",
     )
 
     # Issue #2952: fire the per-CYCLE token record so the near-empty

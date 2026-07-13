@@ -83,6 +83,8 @@ function underperformingBoard(): ClassScoreboard {
       outcome: i < 1 ? "merged" : "failed",
       tokens: 40_000,
       durationMs: 60_000,
+      escalationAttempt: null,
+      escalatedModel: null,
       recordedAt: NOW - (i + 1) * 60_000,
     });
   }

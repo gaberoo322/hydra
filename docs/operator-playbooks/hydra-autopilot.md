@@ -167,6 +167,39 @@ work). The escalation policy + reducer live in `scripts/autopilot/decide.py`
 (`ESCALATION_POLICY`, `decide_escalation`); a class absent from that dict never
 escalates.
 
+**MANDATORY — deposit the escalation provenance (issue #3284).** The moment you
+execute a `dispatch` action carrying `prompt_args.escalate_model`, deposit the
+cascade-routing provenance so `scripts/autopilot/reap.py`'s
+`_read_escalation_deposit` can read it back and forward it on the single
+cycle-record write — otherwise `escalationAttempt` / `escalatedModel` land
+permanently null on the durable per-dispatch outcome record and
+`/metrics/cascade-routing` reports a structural 0 cost-delta + 0
+postEscalationMergeRate forever. This is the WRITE half of the read path reap.py
+already implements. Unlike the reflection/grounding deposits (written by the
+worktree subagent from its own `agent-<HASH>` cwd), the escalation provenance is
+known ONLY to you (the harness) at dispatch time, so pass the escalated
+dispatch's **task_id explicitly** — the slot `task_id` you just allocated (the
+`worktree-agent-<HASH>` suffix `reap.py` keys the completion on). Run this
+BEFORE (or right alongside) the `Agent(...)` dispatch:
+
+```bash
+# scripts/reflection-deposit.sh is a worktree-relative helper; resolve it from
+# the repo root so a mid-turn `cd` can't lose it. Substitute the values from the
+# dispatch action's prompt_args (escalate_model / attempt / prior_attempt_status)
+# and the escalated slot's task_id.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
+bash "$REPO_ROOT/scripts/reflection-deposit.sh" escalation \
+  "<skill_of_escalated_class>" "<escalated_task_id>" \
+  "<prompt_args.escalate_model>" "<prompt_args.attempt>" \
+  "<prompt_args.prior_attempt_status>"
+```
+
+The helper writes `hydra-escalation-<task_id>` only when the provenance is
+well-formed (a positive `attempt` and non-empty model), so a malformed
+invocation can never fabricate a bogus escalation marker. A non-escalated
+dispatch never runs this — no deposit → reap omits the fields (truthful null,
+the overwhelming majority).
+
 **Fallback when Fable 5 is unavailable.** The `fable` alias is not entitled in
 every environment — a background `Agent(model="fable", …)` dispatch can die in
 <1s with *"There's an issue with the selected model (claude-fable-5) … it may
