@@ -40,7 +40,7 @@ function isDeterministic(): boolean {
 /**
  * Build the pino options honoring the encapsulated policy. Exported for tests
  * that construct a logger against a `sync` destination — never call `pino()`
- * directly from a call site; import `logger` (or `childLogger`) instead.
+ * directly from a call site; import `logger` instead.
  */
 export function loggerOptions(): LoggerOptions {
   const options: LoggerOptions = {
@@ -74,14 +74,3 @@ export function createLogger(destination?: DestinationStream): Logger {
  * `process.stderr`.
  */
 export const logger: Logger = createLogger();
-
-/**
- * Derive a child logger that inherits the parent policy and always emits the
- * supplied `bindings` (e.g. `{ cycleId, class }`) on every line. Prefer this
- * over threading the same fields through every call.
- */
-export function childLogger(bindings: Record<string, unknown>): Logger {
-  return logger.child(bindings);
-}
-
-export default logger;
