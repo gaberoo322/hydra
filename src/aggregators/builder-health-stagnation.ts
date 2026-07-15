@@ -44,7 +44,7 @@
  */
 export type StagnationDirection = "down" | "up";
 
-export type StagnationState = "ok" | "warming" | "breach";
+type StagnationState = "ok" | "warming" | "breach";
 
 export interface StagnationOptions {
   /**

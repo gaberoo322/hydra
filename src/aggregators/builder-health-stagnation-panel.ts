@@ -79,7 +79,7 @@ export interface RealmStagnation {
 }
 
 /** Window context exposed alongside the panel (ADR-0028 Decision 2). */
-export interface StagnationWindowContext {
+interface StagnationWindowContext {
   /** Number of cycles the panel was computed over (orch realm). */
   cycles: number;
   /** Cleanup-vs-feature merged-cycle split (fix:feature framing, #732). */
