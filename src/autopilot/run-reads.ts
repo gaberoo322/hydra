@@ -4,7 +4,7 @@
  * / behavior-gallery aggregators.
  *
  * Extracted from `runs.ts` (this issue) so the lifecycle WRITE path
- * (`startRun`/`endRun`/`recordTurn`/`recordReflectionOutcome`) and the composite
+ * (`startRun`/`endRun`/`recordTurn`) and the composite
  * READ path each have a single named home, completing the
  * write/read separation that #1183 (`run-projections.ts`, the pure projections)
  * began and #2568 (`sweep-reader.ts`, the dead-pid sweep idiom) extended. The

@@ -12,7 +12,9 @@
  * Fix (Slice 1): a reap-side reflection PRODUCER —
  *   - `ReflectionRecordBodySchema` (src/autopilot/schemas.ts),
  *   - `POST /autopilot/reflection-record` (src/api/autopilot-lifecycle.ts),
- *   - `recordReflectionOutcome()` never-throws wrapper (src/autopilot/runs.ts),
+ *   - `recordReflectionOutcome()` never-throws wrapper
+ *     (src/reflections/outcome-record.ts; extracted from src/autopilot/runs.ts
+ *     in issue #3321),
  *   - `scripts/autopilot/reap.py::_fire_reflection_record` best-effort POST,
  *     fired from `self_heal.append_failure` on a NON-MERGED outcome.
  *
@@ -246,7 +248,7 @@ describe("POST /api/autopilot/reflection-record (issue #1119)", () => {
 
 describe("recordReflectionOutcome wrapper (issue #1119)", () => {
   test("returns an Err (never throws) on an invalid anchorRef", async () => {
-    const { recordReflectionOutcome } = await import("../src/autopilot/runs.ts");
+    const { recordReflectionOutcome } = await import("../src/reflections/outcome-record.ts");
     // The schema normally blocks this, but the wrapper is the never-throw
     // backstop: a whitespace-only anchorRef must yield an Err result object,
     // not a thrown exception.

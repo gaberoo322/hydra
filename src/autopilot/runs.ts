@@ -45,6 +45,19 @@
  * `recordDispatchPr` from `dispatch-pr-link.ts` directly (no re-export here,
  * the #2125 precedent).
  *
+ * The **reflection-outcome** writer `recordReflectionOutcome` (plus its
+ * `RecordReflectionOutcomeResult` type) was extracted into the reflections
+ * write domain leaf `src/reflections/outcome-record.ts` (issue #3321). That
+ * write is NOT part of the run/turn lifecycle — it is a thin validated wrapper
+ * around `recordAnchorReflection` (a reflections-domain write) and its only live
+ * caller is `src/api/autopilot-lifecycle.ts` — so it now lives next to its
+ * delegate in `src/reflections/`. This removed the cross-domain
+ * `import { recordAnchorReflection } from ../reflections/per-anchor.ts` edge
+ * this write Module used to carry; the caller imports `recordReflectionOutcome`
+ * from `reflections/outcome-record.ts` directly (no re-export here, the #2125
+ * precedent). This Module's stated scope is now exactly
+ * `startRun` / `endRun` / `recordTurn`.
+ *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
  *     bookended by run-start / run-end, persisted as
@@ -85,13 +98,11 @@ import {
   addAutopilotRunTurn,
   hasAutopilotRunTurnAt,
 } from "../redis/autopilot-runs.ts";
-import { recordAnchorReflection } from "../reflections/per-anchor.ts";
 import type {
   CrashDetail,
   RunStartBody,
   RunEndBody,
   TurnBody,
-  ReflectionRecordBody,
 } from "./schemas.ts";
 // `isPidAlive` (the liveness probe the injectable deps bag defaults to) is
 // imported from `run-projections.ts` (issue #1183); the composite READ
@@ -168,7 +179,7 @@ const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 // Shared result-type primitives + the `errRedis` helper now live in the zero-I/O
 // leaf `run-result.ts` (issue #3087). This write Module imports the value helpers
 // (`errRedis` / `numberOrDefault`) and the `Ok` / `Err` types it uses internally
-// (see `RecordReflectionOutcomeResult` / `RunStartResult` below). The read module
+// (see `RunStartResult` below). The read module
 // (`run-reads.ts`) and the sibling write module (`cycle-close.ts`) import DOWN from
 // the leaf directly rather than sideways from this write module. Both back-compat
 // re-exports through this module were dropped once no caller imported them from
@@ -325,67 +336,6 @@ function sanitizeCrashDetail(detail: CrashDetail | undefined): Record<string, un
         : tail;
   }
   return Object.keys(out).length > 0 ? out : null;
-}
-
-// ---------------------------------------------------------------------------
-// Lifecycle: reflection-record (issue #1119)
-// ---------------------------------------------------------------------------
-
-export type RecordReflectionOutcomeResult = Ok<{
-  anchorRef: string;
-  outcome: string;
-}> | Err;
-
-/**
- * Re-wire a reflection PRODUCER onto the live path (issue #1119, Slice 1).
- *
- * `recordAnchorReflection` lost its only live caller when #710 deleted the
- * in-process planner, so the per-anchor reflection store went structurally
- * empty (`GET /api/reflections?anchor=` → `count:0`), and a retry of a
- * prior-failure anchor silently lost its own failure context (the #193
- * retry-correctness invariant). This wrapper is the orchestrator-side entry
- * point the reap path calls (via `POST /api/autopilot/reflection-record`) when
- * a dispatch terminalises NON-MERGED, so the next attempt's pull is non-empty.
- *
- * Never throws — returns an Ok/Err result (the merge/grounding/verification
- * convention); a reflection-write failure is learning, not correctness, and the
- * reap path swallows a non-2xx. A thin pass-through onto the producer's opts;
- * idempotency is the producer's capped per-anchor ring plus reap's
- * `reaped_task_ids` ledger keyed on `cycleId`.
- */
-export async function recordReflectionOutcome(
-  body: ReflectionRecordBody,
-): Promise<RecordReflectionOutcomeResult> {
-  try {
-    const anchorRef = body.anchorRef.trim();
-    const outcome = body.outcome.trim();
-    if (!anchorRef) {
-      return { ok: false, code: "invalid", detail: "anchorRef must be a non-empty string" };
-    }
-    if (!outcome) {
-      return { ok: false, code: "invalid", detail: "outcome must be a non-empty string" };
-    }
-    const cycleId =
-      typeof body.cycleId === "string" && body.cycleId.trim().length > 0
-        ? body.cycleId.trim()
-        : `reflection-${anchorRef}-${Date.now()}`;
-
-    await recordAnchorReflection({
-      cycleId,
-      anchorRef,
-      taskTitle: body.taskTitle ?? anchorRef,
-      outcome,
-      reason: body.reason,
-      scopeFiles: body.scopeFiles,
-    });
-
-    return { ok: true, anchorRef, outcome };
-  } catch (err: any) {
-    // Never throw out of this path — reflection writes are best-effort
-    // learning, not correctness. Surface the failure as an Err so the route
-    // can answer 500 without crashing the reap-side POST.
-    return errRedis(err);
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -43,11 +43,15 @@ import {
   ReflectionRecordBodySchema,
 } from "../autopilot/schemas.ts";
 import {
-  recordReflectionOutcome,
   startRun,
   endRun,
   recordTurn,
 } from "../autopilot/runs.ts";
+// `recordReflectionOutcome` (the reap-side reflection WRITE wrapper) moved to the
+// reflections write domain leaf `reflections/outcome-record.ts` in issue #3321 —
+// the call site is unchanged (it passes the parsed body and translates the same
+// Ok/Err result to HTTP); only the import path moves.
+import { recordReflectionOutcome } from "../reflections/outcome-record.ts";
 // `recordCycle` (the cross-domain cycle-close coordinator) moved to the sibling
 // `cycle-close.ts` in issue #2768 — the call site is unchanged (it passes no
 // deps arg and relies on the module default deps); only the import path moves.

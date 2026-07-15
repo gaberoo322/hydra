@@ -4,8 +4,8 @@
  * the runs (cycle-hash), metrics, and scheduler-counter domains."
  *
  * This Module was split out of `runs.ts` (issue #2768). `runs.ts` retains the
- * narrow **run/turn-lifecycle write** path (`startRun`/`endRun`/`recordTurn`/
- * `recordReflectionOutcome`); this sibling owns the wider
+ * narrow **run/turn-lifecycle write** path (`startRun`/`endRun`/`recordTurn`);
+ * this sibling owns the wider
  * `recordCycle` coordination, which pulls from three domains at once. It follows
  * the same per-concern sibling-extraction precedent as `run-projections.ts`
  * (read projections, #1183) and `sweep-reader.ts` (dead-pid sweep, #2568): one
