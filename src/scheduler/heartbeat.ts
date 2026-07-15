@@ -73,7 +73,7 @@ import {
   emitStagnationAlerts,
   createInMemoryStagnationStore,
   type StagnationAlertStateStore,
-} from "../notify.ts";
+} from "../notification/stagnation-alerts.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
 // Status projection (issue #2935) + its types were lifted into a sibling
 // module in #2974 so the heartbeat file carries only the state machine. The
