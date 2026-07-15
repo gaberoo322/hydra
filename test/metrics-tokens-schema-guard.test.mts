@@ -33,7 +33,10 @@ import Redis from "ioredis";
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
 
-const { createMetricsRouter } = await import("../src/api/metrics.ts");
+// Issue #3322: POST /metrics/tokens was split out of the metrics read router
+// into the dedicated token-write seam (createMetricsTokensRouter). These
+// mount-and-drive tests exercise that router; the route path is unchanged.
+const { createMetricsTokensRouter } = await import("../src/api/metrics-tokens.ts");
 const { SubagentTokensBodySchema } = await import("../src/schemas/metrics.ts");
 
 let redis: any;
@@ -103,14 +106,23 @@ describe("POST /metrics/tokens zod schema guard (issue #3074)", () => {
     }
   });
 
-  test("handler is mounted on the metrics router", () => {
-    const router = createMetricsRouter();
+  test("handler is mounted on the metrics-tokens write router", () => {
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     assert.ok(post, "POST /metrics/tokens handler should exist");
   });
 
+  // Issue #3322 invariant 4: after the split the metrics READ router is a pure
+  // read surface — POST /metrics/tokens no longer lives on createMetricsRouter.
+  test("POST /metrics/tokens is NOT on the metrics read router after the #3322 split", async () => {
+    const { createMetricsRouter } = await import("../src/api/metrics.ts");
+    const readRouter = createMetricsRouter();
+    const postOnReadRouter = findHandler(readRouter, "POST", "/metrics/tokens");
+    assert.equal(postOnReadRouter, null, "the write route moved off the read router");
+  });
+
   test("happy path: valid {skill, tokens} returns 200 {ok:true} and persists", async () => {
-    const router = createMetricsRouter();
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     const date = `2099-01-01`;
     const res = mockRes();
@@ -129,7 +141,7 @@ describe("POST /metrics/tokens zod schema guard (issue #3074)", () => {
   });
 
   test("string tokens are coerced through the schema (was inline parseInt)", async () => {
-    const router = createMetricsRouter();
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     const date = `2099-01-02`;
     const res = mockRes();
@@ -145,7 +157,7 @@ describe("POST /metrics/tokens zod schema guard (issue #3074)", () => {
   });
 
   test("validation failure: missing skill returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     const res = mockRes();
     await post!(mockReq({ tokens: 100 }), res);
@@ -158,7 +170,7 @@ describe("POST /metrics/tokens zod schema guard (issue #3074)", () => {
   });
 
   test("validation failure: blank skill returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     const res = mockRes();
     await post!(mockReq({ skill: "   ", tokens: 100 }), res);
@@ -168,7 +180,7 @@ describe("POST /metrics/tokens zod schema guard (issue #3074)", () => {
   });
 
   test("validation failure: missing tokens returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     const res = mockRes();
     await post!(mockReq({ skill: "hydra-dev" }), res);
@@ -178,7 +190,7 @@ describe("POST /metrics/tokens zod schema guard (issue #3074)", () => {
   });
 
   test("validation failure: negative tokens returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     const res = mockRes();
     await post!(mockReq({ skill: "hydra-dev", tokens: -5 }), res);
@@ -188,7 +200,7 @@ describe("POST /metrics/tokens zod schema guard (issue #3074)", () => {
   });
 
   test("validation failure: non-numeric tokens string returns 400 schema-validation-failed", async () => {
-    const router = createMetricsRouter();
+    const router = createMetricsTokensRouter();
     const post = findHandler(router, "POST", "/metrics/tokens");
     const res = mockRes();
     await post!(mockReq({ skill: "hydra-dev", tokens: "not-a-number" }), res);
