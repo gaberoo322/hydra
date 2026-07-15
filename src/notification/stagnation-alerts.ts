@@ -46,7 +46,7 @@ export const BUILDER_HEALTH_STAGNATION_EVENT = "builder-health.stagnation";
  * The per-(signal, realm) previous verdict the edge-trigger compares against.
  * Only the coarse state matters for the edge — `null` means "never sampled".
  */
-export type StagnationAlertPrevState = "ok" | "warming" | "breach" | null;
+type StagnationAlertPrevState = "ok" | "warming" | "breach" | null;
 
 /**
  * Injectable previous-state store for the edge-trigger. Keyed by
