@@ -1,7 +1,8 @@
 /**
  * Regression tests for the proactive builder-health stagnation alert
  * (issue #3290, epic #3285, ADR-0028) — the edge-trigger logic in
- * `emitStagnationAlerts` (`src/notify.ts`).
+ * `emitStagnationAlerts` (`src/notification/stagnation-alerts.ts`, extracted
+ * out of the Telegram transport by issue #3303).
  *
  * Invariants under test (the issue's acceptance criteria):
  *   - a `builder-health.stagnation` notification is emitted ONCE on the
@@ -25,7 +26,7 @@ import {
   createInMemoryStagnationStore,
   BUILDER_HEALTH_STAGNATION_EVENT,
   type StagnationAlertStateStore,
-} from "../src/notify.ts";
+} from "../src/notification/stagnation-alerts.ts";
 import type { StagnationResult } from "../src/aggregators/builder-health-stagnation.ts";
 import type { BuilderHealthScorecard } from "../src/aggregators/builder-health.ts";
 
