@@ -89,7 +89,7 @@ Tier names verification *depth*, not merge authority (ADR-0015, #742). Every PR 
 
 ## Agent skills
 
-- **Issue tracker** — GitHub Issues on `gaberoo322/hydra` via the `gh` CLI. See [`docs/agents/issue-tracker.md`](./docs/agents/issue-tracker.md).
+- **Issue tracker** — GitHub Issues on `gaberoo322/hydra` via the `gh` CLI; wayfinder maps use native sub-issues + blocked-by. See [`docs/agents/issue-tracker.md`](./docs/agents/issue-tracker.md).
 - **Triage labels** — `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`, `target-backlog`. See [`docs/agents/triage-labels.md`](./docs/agents/triage-labels.md).
 - **Domain docs** — multi-context via [`CONTEXT-MAP.md`](./CONTEXT-MAP.md). See [`docs/agents/domain.md`](./docs/agents/domain.md).
 
