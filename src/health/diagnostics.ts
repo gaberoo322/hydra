@@ -39,7 +39,6 @@ import { projectReflectionHealth } from "../metrics/reflection-health.ts";
 // logic. The leaf carries no logic, so importing it adds no runtime edge and
 // cannot form a cycle. Re-exported below for zero-diff callers.
 import type {
-  ServiceProbe,
   ServiceProbeMap,
   HealthSnapshot,
   HealthSeverity,
@@ -48,16 +47,15 @@ import type {
   ProbeMetricsInput,
   ProbeInputs,
 } from "./types.ts";
-// Re-export the vocabulary so existing importers of ./diagnostics.ts (wire.ts,
-// rules.ts, fan-out.ts, skill-catalog.ts, api/health.ts, and the tests) keep
-// resolving the same names from here with a zero-diff import surface. New code
+// Re-export the vocabulary still consumed through ./diagnostics.ts (the parse
+// seam's own tests import HealthSnapshot/ProbeInputs from here; wire.ts and the
+// barrel keep resolving HealthAssessment/ProbeMetricsInput from here). The
+// ServiceProbe/ServiceProbeMap/HealthSeverity/HealthDiagnostic re-exports were
+// dropped (issue #3314): every remaining consumer imports those four names from
+// ./types.ts directly, so re-exporting them here was dead surface. New code
 // SHOULD import the type vocabulary from ./types.ts directly.
 export type {
-  ServiceProbe,
-  ServiceProbeMap,
   HealthSnapshot,
-  HealthSeverity,
-  HealthDiagnostic,
   HealthAssessment,
   ProbeMetricsInput,
   ProbeInputs,
