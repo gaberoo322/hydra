@@ -44,22 +44,35 @@ import { recordCycleMetrics, type CycleMetricsInput } from "../metrics/record.ts
 import {
   putDispatchOutcome,
   upgradeDispatchOutcome,
-  type DispatchOutcomeRecord,
-  type DispatchOutcomePatch,
-  type DispatchOutcomeWriteResult,
 } from "../redis/dispatch-outcomes.ts";
 import { getCycleTokensRaw } from "../redis/cost.ts";
 import type { CycleRecordBody } from "./schemas.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
-// cycleId → {runIdPrefix, turn, className} parse + class-row join for the
-// per-dispatch outcome record (issue #2942). Both PURE lookups live in the
-// Taxonomy Module (issue #2920 precedent).
-import { parseDispatchCycleId, classByName } from "../taxonomy/classes.ts";
+// The dispatch-outcome record concern (issue #2942) — attribution
+// instrumentation, extracted into its own focused leaf in issue #3323 so it is
+// no longer entangled with the three lifecycle-accounting writes here. This
+// coordinator calls `writeDispatchOutcomeRecord` on the first-write path and
+// `upgradeDispatchOutcomeRecord` on the completed→merged dedup arm; the leaf
+// owns the token resolution, record construction, and dark-tolerance contract,
+// and it — not this coordinator — imports `redis/dispatch-outcomes.ts`.
+import {
+  writeDispatchOutcomeRecord,
+  upgradeDispatchOutcomeRecord,
+  type AutopilotDispatchOutcomesFacade,
+} from "./outcome-record.ts";
 // Shared result-type primitives + coercion helpers. They live in the zero-I/O
 // leaf `run-result.ts` (issue #3087), imported DOWN from here — the same leaf
 // the run/turn writers (`runs.ts`) import — so this write module no longer
 // reaches sideways into the write-lifecycle module for its result types.
-import { type Ok, type Err, errRedis, numberOrDefault } from "./run-result.ts";
+// `filesChangedCount` moved down there in issue #3323 (a second importer, the
+// dispatch-outcome leaf, made the private helper a shared primitive).
+import {
+  type Ok,
+  type Err,
+  errRedis,
+  numberOrDefault,
+  filesChangedCount,
+} from "./run-result.ts";
 // Anchor-type classification POLICY — the pure, zero-I/O leaf extracted in
 // issue #2858. `recordCycle` uses `classifyAnchorType` (and, transitively,
 // `UNCLASSIFIED_ANCHOR_TYPE`) to classify a cycle-record's anchorType. The
@@ -122,24 +135,6 @@ interface AutopilotRunsMetricsFacade {
   recordCycleMetrics(cycleId: string, metrics: CycleMetricsInput): Promise<void>;
 }
 
-/**
- * The durable per-dispatch outcome-record seam (issue #2942). `put` fires on
- * the FIRST cycle-record write, `upgrade` on the issue-2860 completed→merged
- * dedup/enrichment path — so exactly one record exists per cycleId and its
- * `outcome` stays in lockstep with the cycle-hash `status`. `readCycleTokens`
- * is the write-time token fallback (the per-cycle token hash in
- * `src/redis/cost.ts`) when the POST body carried no `tokens` figure.
- *
- * The record write is ADDITIVE and BEST-EFFORT: a failure logs
- * `console.error` and never alters `CycleRecordResult` or blocks the reap
- * path (observability, not correctness).
- */
-interface AutopilotDispatchOutcomesFacade {
-  put(record: DispatchOutcomeRecord): Promise<DispatchOutcomeWriteResult>;
-  upgrade(cycleId: string, patch: DispatchOutcomePatch): Promise<DispatchOutcomeWriteResult>;
-  readCycleTokens(cycleId: string): Promise<string | null>;
-}
-
 export interface CycleCloseDeps {
   cycle: AutopilotRunsCycleFacade;
   scheduler: AutopilotRunsSchedulerFacade;
@@ -179,109 +174,14 @@ const defaultCycleCloseDeps: CycleCloseDeps = {
 
 // ---------------------------------------------------------------------------
 // Helpers (cycle-close-only — sole caller is recordCycle)
+//
+// The dispatch-outcome record helpers (`resolveDispatchTokens`,
+// `writeDispatchOutcomeRecord`) and the `filesChangedCount` coercion they used
+// moved to focused leaves in issue #3323: the first two to `outcome-record.ts`
+// (attribution instrumentation), `filesChangedCount` DOWN to `run-result.ts`
+// (a shared zero-I/O coercion primitive with a second importer). The metrics
+// path below still uses `filesChangedCount` (imported from `run-result.ts`).
 // ---------------------------------------------------------------------------
-
-/**
- * Coerce a `filesChanged` body value (number | numeric-string | absent) into a
- * non-negative integer COUNT, or `undefined` when the field is absent/garbage
- * (issue #2063). Returning `undefined` — never 0 — for an absent field is what
- * preserves the "unknown / never-written" vs "measured zero" distinction the
- * 95.6%-empty-rate alert needs: an absent field is stripped from the metrics
- * object and never written, while an explicit 0 records a truthful zero-file
- * cycle. Negative / non-finite inputs clamp to `undefined` (treated as unknown)
- * so a malformed positional can never write a nonsense count.
- */
-function filesChangedCount(v: unknown): number | undefined {
-  if (v === undefined || v === null) return undefined;
-  if (typeof v === "number") {
-    if (!Number.isFinite(v) || v < 0) return undefined;
-    return Math.floor(v);
-  }
-  if (typeof v === "string") {
-    if (v.length === 0) return undefined;
-    const n = Number(v);
-    if (!Number.isFinite(n) || n < 0) return undefined;
-    return Math.floor(n);
-  }
-  return undefined;
-}
-
-/**
- * Resolve the per-dispatch token figure for the outcome record (issue #2942):
- * the POST body's `tokens` (reap's authoritative total) when present, else the
- * per-cycle token hash (`hydra:metrics:tokens:by-cycle:<id>`, the write-time
- * fallback), else a truthful `null` — never a fabricated 0. Reuses
- * `filesChangedCount` as the non-negative-integer-or-undefined coercion.
- */
-async function resolveDispatchTokens(
-  body: CycleRecordBody,
-  cycleId: string,
-  deps: CycleCloseDeps,
-): Promise<number | null> {
-  const fromBody = filesChangedCount(body.tokens);
-  if (fromBody !== undefined) return fromBody;
-  const raw = await deps.dispatchOutcomes.readCycleTokens(cycleId);
-  const fromHash = filesChangedCount(raw ?? undefined);
-  return fromHash !== undefined ? fromHash : null;
-}
-
-/**
- * First-write per-dispatch outcome record (issue #2942). Fires exactly once
- * per cycleId (the caller's first-write path — duplicate posts route through
- * the upgrade arm instead). Additive + best-effort: any failure logs and
- * returns; it never alters the caller's `CycleRecordResult`.
- *
- * Dark-tolerant: an unparseable cycleId (bare-UUID qa relay ids) records null
- * run/turn/class attribution; an unknown class records a null skill; absent
- * tokens record null. A record is never dropped and never fabricated.
- */
-async function writeDispatchOutcomeRecord(
-  body: CycleRecordBody,
-  cycleId: string,
-  status: string,
-  deps: CycleCloseDeps,
-): Promise<void> {
-  try {
-    const parsed = parseDispatchCycleId(cycleId);
-    const classRow = parsed ? classByName(parsed.className) : undefined;
-    const tokens = await resolveDispatchTokens(body, cycleId, deps);
-    const durationMs = numberOrDefault(body.totalDurationMs, 0);
-    // Cascade-routing escalation provenance (issue #3284): pass-through of the
-    // three optional fields reap forwards ONLY on a cascade escalation
-    // re-dispatch. Non-escalated dispatches omit them → truthful null (never a
-    // fabricated 0/""). The escalationAttempt marker lets the cascade metrics
-    // endpoint attribute THIS dispatch's actual tokens as the escalated-attempt
-    // cost delta (design-concept invariant 7 — authoritative token plane, no
-    // second estimator).
-    const escalationAttempt = filesChangedCount(body.escalationAttempt) ?? null;
-    const escalatedModel =
-      typeof body.escalatedModel === "string" && body.escalatedModel.length > 0
-        ? body.escalatedModel
-        : null;
-    const result = await deps.dispatchOutcomes.put({
-      cycleId,
-      runIdPrefix: parsed?.runIdPrefix ?? null,
-      turn: parsed?.turn ?? null,
-      className: parsed?.className ?? null,
-      skill: classRow?.skill ?? null,
-      outcome: status,
-      tokens,
-      durationMs: durationMs > 0 ? durationMs : null,
-      escalationAttempt,
-      escalatedModel,
-      recordedAt: deps.now(),
-    });
-    if (result.ok === false) {
-      console.error(
-        `[cycle-close] dispatch-outcome record write failed for cycle=${cycleId}: ${result.error}`,
-      );
-    }
-  } catch (err: any) {
-    console.error(
-      `[cycle-close] dispatch-outcome record write threw for cycle=${cycleId}: ${err?.message || String(err)}`,
-    );
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Lifecycle: cycle-record
@@ -404,33 +304,10 @@ export async function recordCycle(
       // the completed→merged transition (a plain dedup/enrichment post leaves
       // the record untouched — exactly one record per cycleId, put on the
       // first write below, upgraded in place here). Additive + best-effort:
-      // a failure logs and never alters the returned CycleRecordResult.
+      // a failure logs and never alters the returned CycleRecordResult. The
+      // record-write logic lives in the `outcome-record.ts` leaf (issue #3323).
       if (statusUpgraded) {
-        try {
-          const patch: DispatchOutcomePatch = { outcome: "merged" };
-          const upgradeTokens = filesChangedCount(body.tokens);
-          if (upgradeTokens !== undefined) patch.tokens = upgradeTokens;
-          if (enrichDuration > 0) patch.durationMs = enrichDuration;
-          // Issue #3284: carry a cascade-escalation marker onto the record if
-          // the enriching (PR-aware) write is the first to know it. The first
-          // write below already persists these when reap forwarded them; this
-          // additive HSET only fills a gap, never clobbers (a non-escalation
-          // enrichment omits both and leaves the stored provenance untouched).
-          const upgradeAttempt = filesChangedCount(body.escalationAttempt);
-          if (upgradeAttempt !== undefined) patch.escalationAttempt = upgradeAttempt;
-          if (typeof body.escalatedModel === "string" && body.escalatedModel.length > 0)
-            patch.escalatedModel = body.escalatedModel;
-          const upgradeResult = await deps.dispatchOutcomes.upgrade(cycleId, patch);
-          if (upgradeResult.ok === false) {
-            console.error(
-              `[cycle-close] dispatch-outcome record upgrade failed for cycle=${cycleId}: ${upgradeResult.error}`,
-            );
-          }
-        } catch (err: any) {
-          console.error(
-            `[cycle-close] dispatch-outcome record upgrade threw for cycle=${cycleId}: ${err?.message || String(err)}`,
-          );
-        }
+        await upgradeDispatchOutcomeRecord(body, cycleId, enrichDuration, deps);
       }
       return {
         ok: true,

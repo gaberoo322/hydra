@@ -3,8 +3,11 @@
  * "what does a lifecycle operation's result look like?" at the lowest
  * abstraction level in the autopilot domain (issue #3087).
  *
- * These four symbols (`Ok<T>` / `Err` / `errRedis` / `numberOrDefault`) were the
- * single source of truth on the WRITE-lifecycle Module `runs.ts`. That kept them
+ * These five symbols (`Ok<T>` / `Err` / `errRedis` / `numberOrDefault` /
+ * `filesChangedCount`) were the single source of truth on the WRITE-lifecycle
+ * Module `runs.ts` (the first four; `filesChangedCount` was a private helper on
+ * the `cycle-close.ts` write coordinator and moved DOWN here in issue #3323 when
+ * the dispatch-outcome extraction gave it a second importer). That kept them
  * out of an import cycle, but produced an import-direction inversion: the
  * pure-read `run-reads.ts` and the sibling write module `cycle-close.ts` had a
  * production import edge INTO the write module `runs.ts` purely to reach the
@@ -69,4 +72,32 @@ export function numberOrDefault(v: unknown, fallback: number): number {
     if (Number.isFinite(n)) return n;
   }
   return fallback;
+}
+
+/**
+ * Coerce a body value (number | numeric-string | absent) into a non-negative
+ * integer COUNT, or `undefined` when the field is absent/garbage (issue #2063).
+ * Zero-I/O, shared by the `cycle-close.ts` metrics path AND the extracted
+ * `outcome-record.ts` dispatch-outcome leaf (issue #3323).
+ *
+ * Returning `undefined` — never 0 — for an absent field is what preserves the
+ * "unknown / never-written" vs "measured zero" distinction the metrics
+ * observability alerts need: an absent field is stripped from the metrics object
+ * and never written, while an explicit 0 records a truthful zero. Negative /
+ * non-finite inputs clamp to `undefined` (treated as unknown) so a malformed
+ * positional can never write a nonsense count.
+ */
+export function filesChangedCount(v: unknown): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v) || v < 0) return undefined;
+    return Math.floor(v);
+  }
+  if (typeof v === "string") {
+    if (v.length === 0) return undefined;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return Math.floor(n);
+  }
+  return undefined;
 }
