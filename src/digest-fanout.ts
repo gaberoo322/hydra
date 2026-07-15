@@ -271,7 +271,7 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
  * in the `formatBuilderHealthLines` panel (`digest-format.ts`); this line is the
  * heartbeat's at-a-glance summary of it.
  */
-export function formatStagnationHeartbeatLine(panel: StagnationPanel | null): string {
+function formatStagnationHeartbeatLine(panel: StagnationPanel | null): string {
   if (!panel || !panel.signals) return "*Stagnation:* no instrumented signals";
   const signalOrder: readonly StagnationSignalName[] = ["cycleYield", "reworkRate", "mutationKillRate"];
   const realmOrder: readonly Realm[] = ["orch", "target"];
