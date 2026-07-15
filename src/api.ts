@@ -13,6 +13,7 @@ import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createMaintenanceRouter } from "./api/maintenance.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
+import { createMetricsTokensRouter } from "./api/metrics-tokens.ts";
 import { createTierRouter } from "./api/tier.ts";
 import { createDigestRouter } from "./api/digest.ts";
 import { createOperationalRouter } from "./api/operational.ts";
@@ -98,6 +99,10 @@ function createApi(eventBus: EventBus) {
   // Maintenance — hourly housekeeping endpoint (issue #723, scheduler fold PR-3/4).
   api.use(createMaintenanceRouter(eventBus));
   api.use(createMetricsRouter());
+  // Token-recording write seam (issue #3322) — split out of the metrics read
+  // router; mounts prefix-less at the same /api base so POST /metrics/tokens
+  // resolves byte-identically.
+  api.use(createMetricsTokensRouter());
   api.use(createArchitectureRouter(eventBus));
   // Routes split out of misc.ts per issue #268 — each owns one domain.
   api.use(createOpenVikingRouter());
