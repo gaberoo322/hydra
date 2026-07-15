@@ -58,7 +58,7 @@ import { bucketCycleStatus } from "../autopilot/cycle-status.ts";
  * 50-cycle window the metrics card renders, with headroom. Env-overridable via
  * `HYDRA_CASCADE_TELEMETRY_MAX` for a longer dwell.
  */
-export const CASCADE_TELEMETRY_MAX = (() => {
+const CASCADE_TELEMETRY_MAX = (() => {
   const raw = Number(process.env.HYDRA_CASCADE_TELEMETRY_MAX);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 500;
 })();
@@ -70,7 +70,7 @@ export const CASCADE_TELEMETRY_MAX = (() => {
  * never asks for records the plane has already reaped. Env-overridable via
  * `HYDRA_CASCADE_OUTCOME_WINDOW_MS`.
  */
-export const CASCADE_OUTCOME_WINDOW_MS = (() => {
+const CASCADE_OUTCOME_WINDOW_MS = (() => {
   const raw = Number(process.env.HYDRA_CASCADE_OUTCOME_WINDOW_MS);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 14 * 24 * 3600 * 1000;
 })();
@@ -180,7 +180,7 @@ export interface EscalationOutcomeFold {
 }
 
 /** A zero fold — the honest "no escalated dispatch has reaped yet" default. */
-export const EMPTY_ESCALATION_OUTCOME_FOLD: EscalationOutcomeFold = {
+const EMPTY_ESCALATION_OUTCOME_FOLD: EscalationOutcomeFold = {
   costDeltaTokens: 0,
   measuredEscalations: 0,
   avgCostDeltaPerEscalation: 0,
