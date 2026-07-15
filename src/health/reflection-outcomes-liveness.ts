@@ -41,7 +41,9 @@ import type { ReflectionOutcomesLedgerState } from "../redis/reflections.ts";
  */
 export const REFLECTION_OUTCOMES_FRESH_MS = 24 * 60 * 60 * 1000;
 
-export type ReflectionOutcomesLivenessVerdict =
+// Module-private (issue #3314): consumed only by ReflectionOutcomesLivenessReport
+// below; no external importer references it, so it carries no `export`.
+type ReflectionOutcomesLivenessVerdict =
   | "retired-empty"
   | "retired-frozen-tail"
   | "unexpected-live-tail";

@@ -154,8 +154,12 @@ type AsyncProbeKey = Exclude<
  * fan-out awaits through `Promise.allSettled` (a rejected settle coalesces the
  * field to `null`). The registry replaces the former integer-subscript array — the
  * probe-to-field contract now lives in ONE place, keyed by name.
+ *
+ * Module-private (issue #3314): only `collectProbeInputs` below builds the
+ * descriptor list — no external consumer references this shape, so it carries no
+ * `export`.
  */
-export interface AsyncProbeDescriptor {
+interface AsyncProbeDescriptor {
   key: AsyncProbeKey;
   run: () => Promise<unknown>;
 }
