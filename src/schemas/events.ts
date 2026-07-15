@@ -32,5 +32,3 @@ export const PublishEventBodySchema = z
     correlationId: z.string().nullish(),
   })
   .passthrough();
-
-export type PublishEventBody = z.infer<typeof PublishEventBodySchema>;
