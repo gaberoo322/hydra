@@ -35,5 +35,3 @@ export const AttributionImpactQuerySchema = z.object({
     .min(0)
     .optional(),
 });
-
-export type AttributionImpactQuery = z.infer<typeof AttributionImpactQuerySchema>;
