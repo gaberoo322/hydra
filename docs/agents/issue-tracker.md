@@ -83,6 +83,49 @@ gh issue edit <N> --repo gaberoo322/hydra --remove-label in-progress --add-label
 gh issue close <N> --repo gaberoo322/hydra --comment "Resolved by #<PR>" --reason completed
 ```
 
+## Wayfinding operations
+
+How `/wayfinder` (and `/hydra-wayfinder`) expresses its shared map on this tracker.
+
+| Concept | Expression |
+|---|---|
+| Map | Issue labelled `wayfinder:map` |
+| Ticket | **Native sub-issue** of the map, labelled `wayfinder:<type>` — one of `research`, `prototype`, `grilling`, `task` |
+| Claim | Native assignee (`gh issue edit <N> --add-assignee @me`); open + unassigned = unclaimed |
+| Blocking | Native blocked-by relationship (renders visually in GitHub's issue UI) |
+| Frontier | Open, unassigned sub-issues of the map whose blockers are all closed |
+
+Wayfinder tickets are operator-driven: never apply the `needs-triage`/`ready-for-agent` lifecycle labels to them — the `wayfinder:*` labels keep them off autopilot's and the sweeps' radar.
+
+### Commands
+
+Sub-issue and blocked-by mutations are GraphQL-only; fetch node IDs via REST to spare the GraphQL rate budget:
+
+```bash
+MAP_ID=$(gh api repos/gaberoo322/hydra/issues/<MAP_N> --jq .node_id)
+
+# Link a ticket as a sub-issue of the map (create-then-wire second pass)
+gh api graphql -f query='mutation($map:ID!,$ticket:ID!){
+  addSubIssue(input:{issueId:$map, subIssueId:$ticket}){ issue { number } } }' \
+  -f map="$MAP_ID" -f ticket="$TICKET_ID"
+
+# Mark ticket B blocked by ticket A
+gh api graphql -f query='mutation($blocked:ID!,$blocker:ID!){
+  addBlockedBy(input:{issueId:$blocked, blockingIssueId:$blocker}){ issue { number } } }' \
+  -f blocked="$B_ID" -f blocker="$A_ID"
+
+# Frontier: open, unblocked, unclaimed children of map <MAP_N>
+gh api graphql -F n=<MAP_N> -f query='query($n:Int!){
+  repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
+    subIssues(first:100){ nodes { number title state
+      assignees(first:1){totalCount}
+      blockedBy(first:20){nodes{ number state }} } } } } }' \
+  --jq '.data.repository.issue.subIssues.nodes
+        | map(select(.state=="OPEN" and .assignees.totalCount==0
+          and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
+        | .[] | "#\(.number) \(.title)"'
+```
+
 ## See also
 
 - `docs/agents/triage-labels.md` — full label vocabulary + transitions
