@@ -50,7 +50,7 @@ import { isMergedWork } from "./merged-refs.ts";
  * non-suppressing outcome (the candidate survives to scoring). Each other value
  * names the eligibility gate that fired, in the order the cascade evaluates them.
  */
-export type SuppressReason =
+type SuppressReason =
   | "eligible"
   | "in-flight-pr"
   | "spawn-capable"
@@ -64,7 +64,7 @@ export type SuppressReason =
  * them onto the public `*_suppressed` wire fields. `null` (from an `"eligible"`
  * decision) means "bump nothing".
  */
-export type SuppressCounter =
+type SuppressCounter =
   | "inFlightSuppressed"
   | "spawnSuppressed"
   | "nonPrDeliverableSuppressed"
