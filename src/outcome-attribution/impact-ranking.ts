@@ -60,7 +60,7 @@ import { estimateMarginalEffects } from "./estimator.ts";
 export type MetricDirection = "up" | "down";
 
 /** One producer class's contribution from ONE metric, kept for auditability. */
-export interface MetricContribution {
+interface MetricContribution {
   /** Leading-metric name. */
   metric: string;
   /** Raw signed marginal effect β_c the estimator assigned for this metric. */
@@ -83,7 +83,7 @@ export interface MetricContribution {
  * One producer class's cross-metric impact ranking row. The discovery
  * reverse-loop consumes these ordered by descending `impactPerCost`.
  */
-export interface ImpactRankRow {
+interface ImpactRankRow {
   /** Producer class (e.g. `discover`, `dev`, `arch`). */
   producerClass: string;
   /**
@@ -122,7 +122,7 @@ export interface ImpactRankRow {
 }
 
 /** The full impact ranking: producer classes ordered by descending impact/cost. */
-export interface ImpactRanking {
+interface ImpactRanking {
   /** Producer classes, highest `impactPerCost` first. */
   rows: ImpactRankRow[];
   /**
@@ -133,7 +133,7 @@ export interface ImpactRanking {
   metricCount: number;
 }
 
-export interface ImpactRankingOptions {
+interface ImpactRankingOptions {
   /**
    * Per-metric "which way is better" map. A metric present here has its β
    * oriented to a favorable effect; a metric absent contributes its raw signed

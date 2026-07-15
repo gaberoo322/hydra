@@ -38,13 +38,7 @@ export type { MetricEstimate, AttributionEstimate } from "./estimator.ts";
 // merely high-NOTICE ones (epic #2628 finding #6). Read-only, zero-I/O, never a
 // bare estimate — every row carries its identifiability + noise-floor posture.
 export { getTopImpactProducerClasses } from "./impact-ranking.ts";
-export type {
-  ImpactRanking,
-  ImpactRankRow,
-  MetricContribution,
-  MetricDirection,
-  ImpactRankingOptions,
-} from "./impact-ranking.ts";
+export type { MetricDirection } from "./impact-ranking.ts";
 
 // ---------------------------------------------------------------------------
 // Recorder subscription — live merge-landing -> ledger writer (issue #2632)
