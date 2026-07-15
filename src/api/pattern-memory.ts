@@ -16,6 +16,7 @@ import {
   SubagentFrictionBodySchema,
 } from "../schemas/pattern-memory.ts";
 import { RuleActionLogQuerySchema } from "../schemas/learning.ts";
+import { getLastDemotionCount } from "../redis/agent-memory.ts";
 
 // The friction-patterns diagnostic aggregates over the same skills the
 // subagent-capture write routes above accept (issue #3006, relocated with the
@@ -254,7 +255,12 @@ export function createPatternMemoryRouter() {
         out[skill] = patterns;
         total += patterns.length;
       }
-      res.json({ ...out, totalPatterns: total });
+      // Issue #3340 — surface the demotion count from the most recent
+      // pattern-cue-demotion chore run alongside the friction patterns. This
+      // is the observability half of the escalation-inverse feedback loop:
+      // how many closed meta-friction issues drove a cue demotion last run.
+      const lastDemotionCount = await getLastDemotionCount();
+      res.json({ ...out, totalPatterns: total, lastDemotionCount });
     } catch (err: any) {
       console.error(`[pattern-memory-api] friction-patterns failed: ${err?.message || String(err)}`);
       res.status(500).json({

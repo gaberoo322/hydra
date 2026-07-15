@@ -130,3 +130,49 @@ export async function readRecentRuleActions(limit: number): Promise<string[]> {
   const r = getRedisConnection();
   return r.lrange(RULE_ACTION_LOG_KEY, 0, limit - 1);
 }
+
+// ---------------------------------------------------------------------------
+// Cue-demotion on issue resolution (issue #3340)
+// ---------------------------------------------------------------------------
+//
+// The inverse of the escalation path: when a `meta-friction` GitHub issue is
+// CLOSED, the demotion chore reduces the matched cue's hit count so it must
+// re-accumulate before it can re-escalate. These accessors back that chore's
+// idempotency (a per-issue processed marker) and its observability (the count
+// of demotions from the most recent run, surfaced on the friction-patterns
+// diagnostic).
+
+/**
+ * Read the per-issue demotion marker (the processed-at epoch string), or null
+ * when the closed issue has not yet driven a demotion. The chore skips any
+ * issue whose marker is present so an hourly re-run is idempotent.
+ */
+export async function getDemotedIssueMarker(issueNumber: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.hget(redisKeys.demotedIssues(), issueNumber);
+}
+
+/** Record that a closed issue has been processed by the demotion chore. */
+export async function setDemotedIssueMarker(issueNumber: string, value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(redisKeys.demotedIssues(), issueNumber, value);
+}
+
+/**
+ * Persist the demotion count from the most recent chore run so the
+ * friction-patterns diagnostic can surface it (issue #3340 AC: "surface count
+ * in the patterns response").
+ */
+export async function setLastDemotionCount(count: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.learningLastDemotionCount(), String(count));
+}
+
+/** Read the demotion count from the most recent chore run (0 when unset). */
+export async function getLastDemotionCount(): Promise<number> {
+  const r = getRedisConnection();
+  const raw = await r.get(redisKeys.learningLastDemotionCount());
+  if (!raw) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : 0;
+}
