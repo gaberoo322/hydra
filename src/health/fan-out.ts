@@ -73,7 +73,20 @@ import { projectReflectionOutcomesLiveness } from "./reflection-outcomes-livenes
 import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult, type ProbeOutcome } from "./probe.ts";
 import { parseRedisInfoSnapshot } from "./diagnostics.ts";
 // Issue #3230: the ProbeInputs named-record type comes from the zero-logic leaf.
-import type { ProbeInputs } from "./types.ts";
+// Issue #3393: the pure settled-record → ProbeInputs mapping (assembleProbeInputs)
+// and its structural-vocabulary types (AsyncProbeKey / InlineProbeKey /
+// SettledByKey) + the inline honest-none registry (INLINE_FALLBACKS) now live in
+// that same leaf, co-located with the ProbeInputs type they populate. This
+// fan-out is a pure I/O coordinator that IMPORTS the assembly and calls it after
+// the async fan-out — it no longer owns the structural mapping.
+import {
+  assembleProbeInputs,
+  INLINE_FALLBACKS,
+  type ProbeInputs,
+  type AsyncProbeKey,
+  type InlineProbeKey,
+  type SettledByKey,
+} from "./types.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
 import {
   getWolGates,
@@ -155,24 +168,13 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 // (+ its `ProbeInputs` field) — no `Exclude` list, no null placeholder, no bespoke
 // post-fan-out block to keep in sync. The retired index-3 cycle probe stays absent.
 
-/**
- * The `ProbeInputs` fields fed by an async settle-array probe (issue #3263). A
- * rejected/absent settle for one of these coalesces to `null` (parseProbes then
- * applies its own default). The three inline in-process reads are excluded — they
- * live in the inline descriptor variant with a semantic honest-none `fallback`.
- */
-type AsyncProbeKey = Exclude<keyof ProbeInputs, InlineProbeKey>;
-
-/**
- * The `ProbeInputs` fields fed by a direct in-process read (issue #3372):
- * skillCatalog (#2386, sync in-memory copy), darkOutcomes (#2805, async chore read
- * that plucks `.outcomeVerdicts`), reflectionOutcomesLiveness (#3251, async ledger
- * probe + clock projection). Each carries a SEMANTIC honest-none `fallback` (empty
- * catalog / [] / retired-empty report) — which is why they are inline descriptors
- * rather than async settle-array probes: a rejected async settle coalesces to
- * `null`, losing the meaningful default these reads must preserve.
- */
-type InlineProbeKey = "skillCatalog" | "darkOutcomes" | "reflectionOutcomesLiveness";
+// Issue #3393: `AsyncProbeKey` / `InlineProbeKey` (the structural key partition of
+// `ProbeInputs`) now live in the type-vocabulary leaf (src/health/types.ts),
+// alongside the `ProbeInputs` type they partition and the `assembleProbeInputs`
+// mapping that consumes them — imported at the top of this file. The
+// `ProbeDescriptor` union below is the fan-out's OWN I/O concern (it names the two
+// execution paths this coordinator runs), so it stays here and references the
+// imported key types.
 
 /**
  * One entry in the unified probe registry (issue #3263/#3372) — a discriminated
@@ -208,117 +210,14 @@ type ProbeDescriptor =
       };
     }[InlineProbeKey];
 
-/** A key→settled-result record — the keyed successor to the positional array. */
-type SettledByKey = Partial<
-  Record<AsyncProbeKey, { status: "fulfilled" | "rejected"; value?: any; reason?: any }>
->;
-
-// ---- The inline honest-none fallbacks (issue #3372) ------------------------
+// ---- The keyed settled record + inline fallbacks + assembleProbeInputs ------
 //
-// The SEMANTIC honest-none value each inline in-process read degrades to when it
-// throws (empty catalog / [] / retired-empty report). This is the ONE source of
-// those defaults inside the fan-out: the inline descriptors below carry each as
-// their `fallback`, and `assembleProbeInputs` seeds the inline keys from the same
-// registry (so it is a pure structural map with NO per-field `null` placeholder —
-// the misleading-null artifact issue #3372 removes). `collectProbeInputs` then
-// overrides these seeds with the live read (or the fallback on a read error).
-//
-// These are deliberately the SAME honest-none values `parseProbes` (the pure seam,
-// src/health/diagnostics.ts) coalesces a `null` inline field to, so a direct
-// caller of `assembleProbeInputs` (e.g. the round-trip test) reaches byte-identical
-// downstream behaviour whether the inline key arrives as this fallback or as the
-// former `null`: both drive the two skill-catalog rules / the dark-outcome rule /
-// the reflection-outcomes rule to their honest-none no-op.
-const INLINE_FALLBACKS: { [K in InlineProbeKey]: ProbeInputs[K] } = {
-  // Un-run, empty catalog — `completed:false` so both skill-catalog rules no-op.
-  skillCatalog: {
-    skills: [],
-    registered: 0,
-    total: 0,
-    completed: false,
-    lastAttemptAt: null,
-    vlmDeferred: false,
-  },
-  // Empty verdict list — the dark-outcome rule no-ops.
-  darkOutcomes: [],
-  // The `retired-empty` report — the reflection-outcomes rule fires the plain
-  // retirement INFO, never a phantom alarm.
-  reflectionOutcomesLiveness: {
-    verdict: "retired-empty",
-    count: 0,
-    latestEntryMs: null,
-    ageMs: null,
-    note: "Retired reflection-outcomes ledger is empty/absent (writer removed #1006, reader swept #1655) — expected.",
-  },
-};
-
-// ---- assembleProbeInputs — maps the keyed settled record to named ProbeInputs --
-//
-// Issue #1771: the I/O layer is the only place that ever sees the raw
-// Promise.allSettled results — that identity is internal to the fan-out and must
-// not cross a module boundary. `assembleProbeInputs` maps the settled results
-// immediately after the fan-out so parseProbes() (in the pure seam
-// src/health/diagnostics.ts) receives field names. The ProbeInputs type is the
-// only thing that crosses the seam.
-//
-// Issue #3263: the input is now a key→settled RECORD, not a positional array —
-// there is no integer subscript anywhere. `val("basicHealth")` reads the settle
-// for that field by name; a missing/rejected settle coalesces to null.
-//
-// Issue #3372: this is now a PURE structural map over the async settled record.
-// The three inline in-process reads are NOT special-cased here with `null`
-// placeholders any more — they are seeded from the shared {@link INLINE_FALLBACKS}
-// registry (their honest-none defaults) and then OVERRIDDEN by `collectProbeInputs`
-// with the live read. So this function owns zero field-level inline logic: it maps
-// the async keys and spreads the inline honest-none seeds, nothing else.
-export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
-  // Issue #1833/#3263: `val<T>(key)` coalesces a rejected/absent settle to null
-  // and brands the fulfilled value as the field's declared type T. The settled
-  // record is heterogeneous + untyped (Promise.allSettled over unrelated probes),
-  // so the fulfilled branch is an unavoidable assertion — but naming T at each
-  // call site hands the compiler the field's expected shape, so the object literal
-  // below is type-checked against ProbeInputs BY NAME (a renamed/dropped field is
-  // now a build error here, the fan-out owner, instead of a silent runtime miss in
-  // parseProbes' `|| default`). The `<K extends AsyncProbeKey>` binding ties the
-  // string key to a real ProbeInputs field, so a typo is a compile error too.
-  const val = <T>(key: AsyncProbeKey): T | null => {
-    const s = settled[key];
-    return s && s.status === "fulfilled" ? (s.value as T) : null;
-  };
-  return {
-    basicHealth: val<ProbeInputs["basicHealth"]>("basicHealth"),
-    serviceProbes: val<ProbeInputs["serviceProbes"]>("serviceProbes"),
-    scheduler: val<ProbeInputs["scheduler"]>("scheduler"),
-    queueDepth: val<ProbeInputs["queueDepth"]>("queueDepth"),
-    backlogCounts: val<ProbeInputs["backlogCounts"]>("backlogCounts"),
-    metrics: val<ProbeInputs["metrics"]>("metrics"),
-    disk: val<ProbeInputs["disk"]>("disk"),
-    mem: val<ProbeInputs["mem"]>("mem"),
-    sysdOrchestrator: val<ProbeInputs["sysdOrchestrator"]>("sysdOrchestrator"),
-    sysdWatchdog: val<ProbeInputs["sysdWatchdog"]>("sysdWatchdog"),
-    sysdTargetWeb: val<ProbeInputs["sysdTargetWeb"]>("sysdTargetWeb"),
-    patterns: val<ProbeInputs["patterns"]>("patterns"),
-    reflections: val<ProbeInputs["reflections"]>("reflections"),
-    // Issue #3270: attribution ledger LLEN.
-    attributionLedgerCount: val<ProbeInputs["attributionLedgerCount"]>("attributionLedgerCount"),
-    ovSearch: val<ProbeInputs["ovSearch"]>("ovSearch"),
-    redisInfo: val<ProbeInputs["redisInfo"]>("redisInfo"),
-    emergencyBrake: val<ProbeInputs["emergencyBrake"]>("emergencyBrake"),
-    ovSearchWindow: val<ProbeInputs["ovSearchWindow"]>("ovSearchWindow"),
-    knowledgeContext: val<ProbeInputs["knowledgeContext"]>("knowledgeContext"),
-    // Issue #2278: the Tailnet Ollama VLM-host liveness probe.
-    ollamaVlm: val<ProbeInputs["ollamaVlm"]>("ollamaVlm"),
-    // Issue #3372: the three inline in-process reads (skillCatalog #2386,
-    // darkOutcomes #2805, reflectionOutcomesLiveness #3251) are seeded from their
-    // shared honest-none fallbacks — NOT hardcoded `null` placeholders — and are
-    // OVERRIDDEN by collectProbeInputs with the live read. A direct caller of
-    // assembleProbeInputs (e.g. the round-trip test) therefore gets the honest-none
-    // default directly, driving the same downstream rule no-ops the former
-    // `null → parseProbes default` path did. This keeps assembleProbeInputs a pure
-    // structural map with no inline-field special casing.
-    ...INLINE_FALLBACKS,
-  };
-}
+// Issue #3393: the `SettledByKey` record type, the `INLINE_FALLBACKS` honest-none
+// registry, and the pure `assembleProbeInputs` mapping all moved to the
+// type-vocabulary leaf (src/health/types.ts), co-located with the `ProbeInputs`
+// type they populate. They are imported at the top of this file; `collectProbeInputs`
+// below zips the async settles into a `SettledByKey`, hands it to
+// `assembleProbeInputs`, and overrides the inline seeds with the live reads.
 
 // ---- collectProbeInputs — runs the named-registry fan-out and assembles ProbeInputs --
 //
