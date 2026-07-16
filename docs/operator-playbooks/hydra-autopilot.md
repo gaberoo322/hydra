@@ -57,7 +57,7 @@ Each tick:
 > surfaces loudly as a `plan-stale-skipped: ... exact off-by-one ...` reason
 > in the turn record.
 
-## Class taxonomy (7 pipeline slots + 12 signal classes)
+## Class taxonomy (7 pipeline slots + 14 signal classes)
 
 | Kind | Class | Skill |
 |---|---|---|
@@ -81,6 +81,7 @@ Each tick:
 | signal | `wire_or_retire_target` | hydra-wire-or-retire (#2722, epic #2720; judgment counterpart to cleanup_target — resolves triage `wire-or-retire` items into WIRE/RETIRE/UNCLEAR verdicts; 24h cooldown, ≤2 items/run, model param omitted) |
 | signal | `design_qa_target` | hydra-design-qa (#2739, parent #2732; periodic VISUAL QA — screenshots every nav-registry route + judges vs the Target design ADR's [judgment] rules, files ≤3 deduped `needs-triage` design-qa items/run; 7d calendar cooldown, >5-open saturation backstop, model param omitted) |
 | signal | `skill_prune` | hydra-skill-prune (#2949, epic #2944; eval-gated PROMPT counterpart to cleanup_orch — prunes ONE playbook-generated skill/run along the Pocock taxonomy [duplication/sediment/no-op], gated on promptfoo golden-task parity, ≤1 T1/T2 PR/run editing only that playbook + its regenerated skill + tightened ratchet baseline, else files a `needs-triage` candidate list; 7d calendar cooldown, saturation backstop, `apply:true`, model param omitted) |
+| signal | `wayfinder_orch` | **ticket-type routed** (#3351, epic #3350, ADR-0029; the single AFK working class for wayfinder maps — works the next unblocked, unclaimed AFK-typed frontier ticket on an open approved `wayfinder:map`. The `skill` is resolved at dispatch time from `prompt_args.ticket_type`: `research` → hydra-issue-research, `task` → hydra-dev. 1h cooldown, one ticket/fire, model param omitted; collect-state.sh owns the native GraphQL frontier enumeration, decide.py stays pure) |
 
 > **CONTEXT POINTER:** per-class wiring details (cooldowns, saturation guards, scope, cadence) for `scout_orch`, `dev_target` cost-cap backstop, `architecture_orch`, `retro_orch`, `cleanup_orch`, and `design_concept_orch` live in `hydra-autopilot-class-wiring.md` (sibling of this SKILL.md). The authoritative source for dispatch policy is `decide.py`.
 
@@ -141,6 +142,7 @@ on Fable 5 (the frontier model, replacing Opus as of 2026-06-10).
 | `wire_or_retire_target` | inherit parent (omit `model`) | Judgment work — recover a module's intent (git archaeology + vision/priorities/backlog cross-ref) and decide WIRE/RETIRE/UNCLEAR. NOT deterministic like `cleanup_target`; a low tier hits the documented Haiku-premature-exit failure mode (narrates "standing by", files nothing). Omit `model` so it inherits the parent (Fable 5), per #1093. |
 | `design_qa_target` | inherit parent (omit `model`) | Visual judgment work — grade every route's screenshot against the Target design ADR's [judgment] rules (consistency / density / empty-state honesty). Like `wire_or_retire_target` it is an opinion, not a deterministic check; omit `model` so it inherits the parent (Fable 5), per #1093, to avoid the Haiku-premature-exit failure mode. |
 | `discover_orch` / `discover_target` | Haiku | Patrol/diagnostics, designed small/fast/cheap |
+| `wayfinder_orch` | inherit parent (omit `model`) | Works a wayfinder-map frontier ticket (research enrichment or a `wayfinder:task` build) — real authoring/judgment on a foggy initiative, not a deterministic check. Omit `model` so it inherits the parent (Fable 5), per #1093, avoiding the Haiku-premature-exit failure mode. |
 
 Use the harness's model alias (`fable` / `sonnet` / `haiku` / `opus`) for the
 `model` kwarg so the operator's plan resolves the concrete version. A class not
@@ -199,6 +201,46 @@ well-formed (a positive `attempt` and non-empty model), so a malformed
 invocation can never fabricate a bogus escalation marker. A non-escalated
 dispatch never runs this — no deposit → reap omits the fields (truthful null,
 the overwhelming majority).
+
+### `wayfinder_orch` dispatch — ticket-type → skill (issue #3351, epic #3350, ADR-0029)
+
+`wayfinder_orch` is the single AFK working class for **wayfinder maps** (open
+issues labelled `wayfinder:map`). `decide.py` fires it on the pre-resolved
+`wayfinder_orch_frontier` signal (`collect-state.sh` owns the native GraphQL
+frontier enumeration — `decide.py` stays pure), emitting a `dispatch` action
+whose `prompt_args` carry the pre-resolved **`ticket`** (`issue-<N>`) and its
+**`ticket_type`** (`research` | `task`). `decide.py` emits `skill:
+"hydra-issue-research"` as the taxonomy default; **you MUST override it from
+`ticket_type` at dispatch time**:
+
+- `ticket_type == "research"` → **hydra-issue-research** on the frontier ticket
+  (`prompt_args.ticket`). Enrich the ticket's body with codebase + web findings.
+- `ticket_type == "task"` → **hydra-dev** on the frontier ticket. Implement it in
+  a worktree and open a PR whose body ends `Closes #<N>`.
+
+Only these two AFK-typed tickets ever reach here — the HITL types
+(`wayfinder:grilling`, `wayfinder:prototype`) route to the interactive
+`/wayfinder`, never to autopilot (the off-radar rule: `wayfinder:*` tickets carry
+no standard lifecycle labels, so the ordinary sweeps stay blind; this frontier
+signal is their ONLY AFK dispatch path). The dispatch OMITS `model` (inherit the
+parent per #1093 — real authoring/judgment).
+
+**Resolution protocol (AC #1) — the worker records the outcome on the map.** When
+the dispatched worker finishes the frontier ticket, it MUST, before the ticket is
+considered resolved:
+
+1. Post a **resolution comment** on the frontier ticket summarising the verdict /
+   PR / findings (`gh issue comment <N> --body '…'`).
+2. **Close** the ticket (`gh issue close <N>`) — a `task` ticket closes when its
+   PR merges; a `research` ticket closes once its enrichment lands.
+3. **Append to the map's `## Decisions so far`** section (edit the map issue body)
+   so the map's running ledger reflects the newly-cleared frontier — the next
+   `collect-state.sh` tick then surfaces the NEXT unblocked frontier ticket.
+
+The 1h `wayfinder_orch` cooldown means one frontier ticket per fire; the map is
+worked one cleared ticket at a time across ticks until its frontier is empty (all
+AFK tickets closed), at which point `wayfinder_orch_frontier` reads `none` and the
+class idles until a new map or a newly-unblocked ticket appears.
 
 **Fallback when Fable 5 is unavailable.** The `fable` alias is not entitled in
 every environment — a background `Agent(model="fable", …)` dispatch can die in
@@ -481,6 +523,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1). `shed` is the UNION of the weekly-projection pacing shed (`pacingState==="over"`) and the graduated 5h-utilization throttle (issue #1087, keyed off `percentLast5h` against `HYDRA_USAGE_5H_THROTTLE_T1/T2`); `reasons.fiveHourThrottleShed` flags the latter |
 | `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor; `dev_orch` yields the same turn (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. |
+| `wayfinder_orch_frontier=issue-N` (or `none`) | `state.signals.wayfinder_orch_frontier` (string, or omit — verbatim, no rename) | `wayfinder_orch` (issue #3351, epic #3350, ADR-0029) — the pre-resolved next AFK-typed, unblocked, unclaimed frontier ticket across all open **approved** (`wayfinder:map` minus `wayfinder:destination-pending`) maps. collect-state.sh owns the native GraphQL sub-issue/blocked-by enumeration so decide.py stays pure; gh/GraphQL-down degrades to `none` (fail closed). |
+| `wayfinder_orch_ticket_type=research\|task` | `state.signals.wayfinder_orch_ticket_type` (string) | the frontier ticket's type, threaded into the dispatch `prompt_args.ticket_type` so the dispatch step below resolves ticket-type → skill (`research` → hydra-issue-research, `task` → hydra-dev). |
 
 Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
 received target-product anchors (item-26x). Post-#458, candidates are

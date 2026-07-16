@@ -117,6 +117,8 @@ export const ANCHOR_TYPE_BY_CLASS: Readonly<Record<string, string>> = {
   wire_or_retire_target: "wire-or-retire",
   design_qa_target: "design-qa",
   skill_prune: "skill-prune",
+  // issue #3351, epic #3350, ADR-0029 — the wayfinder-map AFK working class.
+  wayfinder_orch: "wayfinder",
 };
 
 /**

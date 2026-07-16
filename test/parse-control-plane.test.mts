@@ -99,6 +99,7 @@ test("class census matches decide.py's derived taxonomy names + order", () => {
     "wire_or_retire_target",
     "design_qa_target",
     "skill_prune",
+    "wayfinder_orch",
   ];
   assert.deepEqual(
     census.classes.map((c) => c.name),
