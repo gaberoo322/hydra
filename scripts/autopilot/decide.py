@@ -3241,6 +3241,33 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             # No open approved map has an eligible (AFK-typed, unblocked,
             # unclaimed) frontier ticket — nothing to work.
             return None
+        # Saturation guard — global cap <=2 concurrent workers (issue #3354,
+        # ADR-0029 Decision 2). collect-state.sh pre-resolves the count of live
+        # `wayfinder_orch` workers (OPEN, self-assigned, AFK-typed sub-issues
+        # across all approved maps) into the `wayfinder_orch_inflight_global`
+        # signal; we read it VERBATIM (PURITY: no gh/curl/GraphQL here — the
+        # enumeration lives only in collect-state.sh). Suppress a new dispatch
+        # once two workers are already in flight, so the class never exceeds the
+        # global cap. Guard order is FRONTIER-FIRST, then cap: the frontier is
+        # resolved above, then the cap is applied only when there IS work to do.
+        #
+        # Per-map single-flight (<=1 in-flight per map) is enforced STRUCTURALLY
+        # in collect-state.sh (a map with an in-flight worker yields no frontier
+        # pick), so decide.py needs only the global-cap ceiling here.
+        #
+        # Fail-open on an ABSENT / malformed counter (default 0): a missing signal
+        # means the guard has no evidence of saturation, so it must not block the
+        # frontier — it blocks ONLY on a positive count that reaches the cap. This
+        # is the safe direction; the structural per-map guard + the assignee-based
+        # frontier exclusion already prevent double-dispatch of a single ticket.
+        inflight = signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else None
+        try:
+            inflight_n = int(inflight)
+        except (TypeError, ValueError):
+            inflight_n = 0
+        if inflight_n >= 2:
+            # Global cap reached — two workers already in flight; hold this fire.
+            return None
         ticket_type = (
             signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
         )

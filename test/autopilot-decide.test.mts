@@ -3280,3 +3280,226 @@ describe("collect-state.sh — wayfinder destination-gate approved-map guard (is
     assert.deepEqual(admitted, [901, 903, 905], "admitted map numbers must be sorted ascending");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Saturation guards — global cap <=2 (issue #3354, epic #3350, ADR-0029 Dec. 2)
+// ---------------------------------------------------------------------------
+//
+// A live `wayfinder_orch` worker CLAIMS its ticket by self-assigning it (dispatch
+// protocol, hydra-autopilot.md). collect-state.sh counts open, assigned, AFK-typed
+// tickets across all approved maps into `wayfinder_orch_inflight_global`; decide.py
+// reads that counter VERBATIM (staying PURE — no gh/GraphQL) and suppresses a new
+// dispatch once two workers are in flight. These golden fixtures pin the decide.py
+// half of the guard: dispatch at 0/1 in flight, suppress at >=2, and fail-open on
+// an absent/garbage counter (the structural per-map single-flight guard in
+// collect-state.sh still holds; the cap must not block on missing evidence).
+//
+// New TOP-LEVEL describe with its own lifecycle (per the CLAUDE.md authoring rule)
+// — decide.py runs are pure over temp state files, nothing shared to tear down.
+// ---------------------------------------------------------------------------
+describe("decide.py — wayfinder_orch global-cap saturation guard (issue #3354)", () => {
+  function wfStateCap(inflight: unknown, over: Record<string, unknown> = {}): any {
+    const signals: Record<string, unknown> = {
+      wayfinder_orch_frontier: "issue-5000",
+      wayfinder_orch_ticket_type: "research",
+    };
+    // Only stamp the counter when a value is supplied — omit it entirely for the
+    // absent-signal arm (mirrors collect-state.sh emitting nothing).
+    if (inflight !== undefined) signals.wayfinder_orch_inflight_global = inflight;
+    return baseState({
+      signals,
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wayfinder_orch: 0,
+      },
+      ...over,
+    });
+  }
+
+  function wfDispatch(plan: any): any {
+    return findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch");
+  }
+
+  test("dispatches at 0 in-flight (global cap not reached)", () => {
+    const plan = runDecide(wfStateCap("0"), null);
+    assert.ok(wfDispatch(plan), "0 in-flight workers must not suppress a wayfinder_orch dispatch");
+  });
+
+  test("dispatches at 1 in-flight (one slot still free under the cap)", () => {
+    const plan = runDecide(wfStateCap("1"), null);
+    assert.ok(wfDispatch(plan), "1 in-flight worker leaves one slot free — dispatch must proceed");
+  });
+
+  test("SUPPRESSES at 2 in-flight (global cap of <=2 reached)", () => {
+    const plan = runDecide(wfStateCap("2"), null);
+    assert.equal(
+      wfDispatch(plan), undefined,
+      "two workers already in flight — the global cap must suppress a third wayfinder_orch dispatch",
+    );
+  });
+
+  test("SUPPRESSES above the cap (>=2 is a ceiling, not an equality)", () => {
+    const plan = runDecide(wfStateCap("5"), null);
+    assert.equal(
+      wfDispatch(plan), undefined,
+      "an over-cap counter (defensive) must also suppress — the guard is >= 2, not == 2",
+    );
+  });
+
+  test("fail-open on an ABSENT counter (default 0 — never block on missing evidence)", () => {
+    // collect-state.sh emitted no counter (older state / gh hiccup). The cap must
+    // NOT block: absence is treated as 0, and the structural per-map single-flight
+    // guard still prevents double-dispatch of a single ticket.
+    const plan = runDecide(wfStateCap(undefined), null);
+    assert.ok(
+      wfDispatch(plan),
+      "an absent in-flight counter must default to 0 (fail-open), not suppress the frontier",
+    );
+  });
+
+  test("fail-open on a GARBAGE counter (non-numeric → 0)", () => {
+    const plan = runDecide(wfStateCap("not-a-number"), null);
+    assert.ok(
+      wfDispatch(plan),
+      "a malformed counter must default to 0 (fail-open on the parse), not suppress the frontier",
+    );
+  });
+
+  test("guard order is FRONTIER-FIRST: no frontier ticket → no dispatch regardless of the counter", () => {
+    // Even at 0 in-flight, a `none` frontier means there is nothing to work — the
+    // cap check never runs because the frontier guard returns first.
+    const state = wfStateCap("0", { signals: { wayfinder_orch_frontier: "none", wayfinder_orch_inflight_global: "0" } });
+    const plan = runDecide(state, null);
+    assert.equal(
+      wfDispatch(plan), undefined,
+      "a `none` frontier must not dispatch even under the cap — the frontier guard is checked first",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Saturation guards — collect-state.sh in-flight count + per-map single-flight
+// (issue #3354, epic #3350, ADR-0029 Decision 2)
+// ---------------------------------------------------------------------------
+//
+// The COUNTING half lives in collect-state.sh: one native GraphQL query per
+// approved map derives (a) the map's in-flight count = OPEN, assigned, AFK-typed
+// sub-issues, and (b) the frontier pick, which it withholds when the map already
+// has an in-flight worker (per-map single-flight). collect-state.sh is
+// network-dependent (live gh/GraphQL), so we cannot run the whole collector
+// offline — but the per-map derivation is a PURE jq program embedded in the
+// source. We golden-fixture it by EXTRACTING that exact program from
+// collect-state.sh (no copy — it stays coupled to production; fails loud if the
+// guard ever disappears) and running it under the real `jq` binary against
+// `subIssues`-shaped GraphQL fixtures. This pins:
+//   - HITL types (grilling/prototype) are NEVER counted and NEVER picked (AC #1).
+//   - per-map single-flight: a map with an in-flight (assigned) worker yields NO
+//     new frontier pick (AC #2, the <=1-per-map bound).
+//   - the emitted in-flight count reflects assigned AFK tickets (feeds the global
+//     cap the decide.py suite above pins).
+//
+// New TOP-LEVEL describe, own lifecycle (pure CLI over stdin — nothing to tear
+// down), per the CLAUDE.md authoring rule.
+// ---------------------------------------------------------------------------
+describe("collect-state.sh — wayfinder saturation guards: in-flight count + per-map single-flight (issue #3354)", () => {
+  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
+
+  // Extract the EXACT per-map derivation jq program from collect-state.sh so the
+  // golden fixture exercises the production filter, not a drifting copy. The
+  // program is the `--jq '...'` argument on the per-map GraphQL query — anchored
+  // on the `subIssues` GraphQL field so it can't grab the (separate) map-selection
+  // filter. Fails loud if the anchor moves (the guard must stay findable).
+  function extractPerMapJq(): string {
+    const src = readFileSync(COLLECT_STATE, "utf-8");
+    // Anchor on the GraphQL query body's data path (unique to the per-map query).
+    const ANCHOR = ".data.repository.issue.subIssues.nodes";
+    const anchor = src.indexOf(ANCHOR);
+    assert.ok(anchor >= 0, "per-map subIssues GraphQL --jq program missing from collect-state.sh");
+    // The program starts at the opening `--jq '` before the anchor.
+    const JQ_FLAG = "--jq '";
+    const jqStart = src.lastIndexOf(JQ_FLAG, anchor);
+    assert.ok(jqStart >= 0 && jqStart < anchor, "per-map --jq flag missing before the subIssues query body");
+    const progStart = jqStart + JQ_FLAG.length;
+    const progEnd = src.indexOf("'", progStart);
+    assert.ok(progEnd > progStart, "unterminated per-map jq program in collect-state.sh");
+    const prog = src.slice(progStart, progEnd);
+    // Sanity: the extracted program MUST carry both guard mechanisms.
+    assert.ok(
+      prog.includes("assignees.totalCount>0"),
+      "extracted per-map filter lost the in-flight (assigned) count — the global-cap input",
+    );
+    assert.ok(
+      prog.includes("assignees.totalCount==0"),
+      "extracted per-map filter lost the unassigned-only frontier pick (single-flight relies on it)",
+    );
+    return prog;
+  }
+
+  // Run the extracted jq over a `subIssues`-shaped GraphQL fixture; returns the
+  // program's single-line output (`<inflight>` or `<inflight> <num> <type>`).
+  function runPerMap(nodes: any[]): string {
+    const prog = extractPerMapJq();
+    const payload = { data: { repository: { issue: { subIssues: { nodes } } } } };
+    const r = spawnSync("jq", ["-r", prog], { input: JSON.stringify(payload), encoding: "utf-8" });
+    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
+    return r.stdout.trim();
+  }
+
+  // A GraphQL sub-issue node in the exact shape collect-state.sh queries.
+  function node(num: number, type: string, opts: { assigned?: boolean; blockedByOpen?: number } = {}): any {
+    return {
+      number: num,
+      state: "OPEN",
+      labels: { nodes: [{ name: type }] },
+      assignees: { totalCount: opts.assigned ? 1 : 0 },
+      blockedBy: { nodes: opts.blockedByOpen != null ? [{ number: opts.blockedByOpen, state: "OPEN" }] : [] },
+    };
+  }
+
+  test("AC #1: HITL-typed tickets (grilling/prototype) are NEVER counted or picked", () => {
+    // A map whose only open tickets are HITL types: in-flight 0 (an assigned HITL
+    // ticket is NOT a wayfinder_orch worker) and NO frontier pick.
+    const out = runPerMap([
+      node(30, "wayfinder:grilling", { assigned: true }),
+      node(31, "wayfinder:prototype"),
+    ]);
+    assert.equal(out, "0", "HITL tickets must not be counted in-flight nor picked into the AFK frontier");
+  });
+
+  test("picks an unblocked, unassigned AFK ticket when the map has zero in-flight", () => {
+    const out = runPerMap([node(40, "wayfinder:research")]);
+    assert.equal(out, "0 40 research", "a fresh unblocked AFK ticket is picked; in-flight count is 0");
+  });
+
+  test("per-map single-flight (AC #2): an in-flight worker WITHHOLDS a second pick on the same map", () => {
+    // #41 is claimed (assigned) → in-flight 1. #42 is unblocked+unassigned but the
+    // map already has a worker, so NO new pick is emitted (only the count).
+    const out = runPerMap([
+      node(41, "wayfinder:task", { assigned: true }),
+      node(42, "wayfinder:research"),
+    ]);
+    assert.equal(
+      out, "1",
+      "a map with one in-flight worker must yield in-flight=1 and NO new frontier pick (single-flight)",
+    );
+  });
+
+  test("in-flight count reflects assigned AFK tickets (feeds the global cap)", () => {
+    // Two claimed AFK tickets on one map → in-flight 2, no new pick.
+    const out = runPerMap([
+      node(50, "wayfinder:task", { assigned: true }),
+      node(51, "wayfinder:research", { assigned: true }),
+    ]);
+    assert.equal(out, "2", "two claimed AFK tickets on a map count as 2 in-flight (global-cap input)");
+  });
+
+  test("a blocked AFK ticket is not picked (in-flight 0, no pick)", () => {
+    const out = runPerMap([node(60, "wayfinder:research", { blockedByOpen: 999 })]);
+    assert.equal(out, "0", "a ticket whose blocker is still OPEN is neither in-flight nor pickable");
+  });
+
+  test("an empty frontier yields in-flight 0 and no pick", () => {
+    assert.equal(runPerMap([]), "0", "a map with no AFK tickets contributes 0 in-flight and no pick");
+  });
+});

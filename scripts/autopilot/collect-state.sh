@@ -693,6 +693,30 @@ except Exception:
 # `none` — the suppressing direction (never dispatch a worker with no resolved
 # target). Maps are walked oldest-first (stable ordering) so the frontier pick
 # is deterministic across ticks.
+# Saturation guards (issue #3354, epic #3350, ADR-0029 Decision 2): the frontier
+# collector emits an in-flight COUNTER and enforces per-map single-flight, so the
+# `wayfinder_orch` class can never run more than one worker per map or two workers
+# globally. Both bounds hinge on ONE mechanism — a live worker CLAIMS its ticket by
+# self-assigning it (`gh issue edit <N> --add-assignee @me`, the first step of the
+# dispatch protocol in hydra-autopilot.md). An OPEN AFK-typed sub-issue that IS
+# assigned is therefore an in-flight worker; the frontier pick already skips
+# assigned tickets (`assignees.totalCount==0`), so a claimed ticket is never
+# re-picked. That gives us both:
+#   - `wayfinder_orch_inflight_global` — the count of OPEN, assigned, AFK-typed
+#     (`wayfinder:research` | `wayfinder:task`) sub-issues across ALL open approved
+#     maps = the number of live `wayfinder_orch` workers. decide.py reads it
+#     verbatim and suppresses a new dispatch at >= 2 (the global cap; decide.py
+#     stays PURE — no gh/GraphQL there).
+#   - per-map single-flight — a map with >= 1 in-flight (assigned AFK) ticket
+#     yields NO new frontier pick this tick, so at most one worker is ever in
+#     flight for a given map even if two of its tickets are simultaneously
+#     unblocked+unassigned. (The blocking graph serializes most frontiers already;
+#     this guard covers the parallel-eligible case.)
+#
+# We must count in-flight across EVERY approved map (not stop at the first frontier
+# pick), so the loop below always folds the per-map in-flight count into the global
+# total before it decides on the frontier. HITL types (grilling/prototype) are
+# never counted and never picked — they route to /wayfinder only.
 echo -n "wayfinder_orch_frontier="
 WF_MAPS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
   --json number,labels --jq '
@@ -702,6 +726,7 @@ WF_MAPS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfi
     | sort' 2>/dev/null || true)
 WF_FRONTIER="none"
 WF_TICKET_TYPE=""
+WF_INFLIGHT_GLOBAL=0
 if [ -n "$WF_MAPS_JSON" ]; then
   WF_MAP_NUMS=$(printf '%s' "$WF_MAPS_JSON" | python3 -c "
 import json, sys
@@ -712,33 +737,49 @@ except Exception:
   pass
 " 2>/dev/null || true)
   for map_n in $WF_MAP_NUMS; do
-    # Native GraphQL frontier query (docs/agents/issue-tracker.md): open,
-    # unassigned sub-issues whose blockers are all closed, restricted to the two
-    # AFK-typed labels (research | task); grilling/prototype are HITL and route
-    # to /wayfinder, never here. Emit the first eligible ticket's number+type.
-    WF_PICK=$(gh api graphql -F n="$map_n" -f query='query($n:Int!){
+    # ONE native GraphQL query per map (docs/agents/issue-tracker.md) derives BOTH
+    # this map's in-flight count and its frontier pick. Emits a single line:
+    #   `<inflight> [<pick-number> <pick-type>]`
+    # where <inflight> is the count of OPEN, assigned, AFK-typed sub-issues (live
+    # workers on this map) and the optional pick is the FIRST OPEN, UNASSIGNED,
+    # UNBLOCKED AFK-typed ticket ONLY when this map has zero in-flight (per-map
+    # single-flight). grilling/prototype are HITL — never counted, never picked.
+    WF_MAP_LINE=$(gh api graphql -F n="$map_n" -f query='query($n:Int!){
       repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
         subIssues(first:100){ nodes { number state
           labels(first:20){nodes{ name }}
           assignees(first:1){totalCount}
           blockedBy(first:20){nodes{ number state }} } } } } }' \
-      --jq '.data.repository.issue.subIssues.nodes
-            | map(select(.state=="OPEN" and .assignees.totalCount==0
-                and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
-            | map({number, type: ([.labels.nodes[].name
-                | select(. == "wayfinder:research" or . == "wayfinder:task")] | .[0])})
-            | map(select(.type != null))
-            | .[0] | if . == null then "" else "\(.number) \(.type | sub("wayfinder:"; ""))" end' \
+      --jq '(.data.repository.issue.subIssues.nodes
+              | map(. + {type: ([.labels.nodes[].name
+                  | select(. == "wayfinder:research" or . == "wayfinder:task")] | .[0])})
+              | map(select(.type != null))) as $afk
+            | ($afk | map(select(.state=="OPEN" and .assignees.totalCount>0)) | length) as $inflight
+            | ($afk
+                | map(select(.state=="OPEN" and .assignees.totalCount==0
+                    and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
+                | .[0]) as $pick
+            | if $inflight > 0 then "\($inflight)"
+              elif $pick == null then "\($inflight)"
+              else "\($inflight) \($pick.number) \($pick.type | sub("wayfinder:"; ""))" end' \
       2>/dev/null || true)
-    if [ -n "$WF_PICK" ]; then
-      WF_FRONTIER="issue-$(printf '%s' "$WF_PICK" | cut -d' ' -f1)"
-      WF_TICKET_TYPE=$(printf '%s' "$WF_PICK" | cut -d' ' -f2)
-      break
+    # Fold this map's in-flight count into the global total (default 0 on any gap).
+    WF_MAP_INFLIGHT=$(printf '%s' "$WF_MAP_LINE" | cut -d' ' -f1)
+    case "$WF_MAP_INFLIGHT" in
+      ''|*[!0-9]*) WF_MAP_INFLIGHT=0 ;;
+    esac
+    WF_INFLIGHT_GLOBAL=$((WF_INFLIGHT_GLOBAL + WF_MAP_INFLIGHT))
+    # Take the FIRST map that yielded a frontier pick (fields 2 & 3 present).
+    WF_PICK_NUM=$(printf '%s' "$WF_MAP_LINE" | cut -d' ' -f2)
+    if [ "$WF_FRONTIER" = "none" ] && [ -n "$WF_PICK_NUM" ]; then
+      WF_FRONTIER="issue-$WF_PICK_NUM"
+      WF_TICKET_TYPE=$(printf '%s' "$WF_MAP_LINE" | cut -d' ' -f3)
     fi
   done
 fi
 echo "$WF_FRONTIER"
 echo "wayfinder_orch_ticket_type=${WF_TICKET_TYPE}"
+echo "wayfinder_orch_inflight_global=${WF_INFLIGHT_GLOBAL}"
 
 # Tool Scout — Phase C alert-driven trigger (issue #486).
 #
