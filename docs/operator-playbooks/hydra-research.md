@@ -146,7 +146,56 @@ two findings within THIS run also dedup against each other.
 
 ## Phase 4: Create Issues
 
-For each surviving opportunity (top N where N = issue gap, max 5), decide whether it ships as a **flat** GitHub issue or routes through **`hydra-prd`** to emit a parent epic + tracer-bullet children. The rule below is the contract `hydra-research` honours; the unit-testable helper lives in `scripts/ci/epic-shape-classifier.ts`.
+For each surviving opportunity (top N where N = issue gap, max 5), route it through the decision tree below. The **fog-gate branch (4.0)** runs FIRST — a pure additive prefix UPSTREAM of the epic-vs-flat routing: a finding that is genuinely *undecided* (carries open decisions, not just slices) and big is charted as a **wayfinder destination-pending map**, not filed as an epic. Only when the fog-gate does **not** fire does the finding flow UNCHANGED into the existing epic-vs-flat routing (4a–4c). The rule below is the contract `hydra-research` honours; the unit-testable helper lives in `scripts/ci/epic-shape-classifier.ts`.
+
+### 4.0 Fog-gate branch — chart a destination-pending map (ADR-0029)
+
+**Run this branch before the epic-vs-flat classifier.** Per [ADR-0029](../adr/0029-autopilot-charts-and-works-wayfinder-maps.md) Decision 1 + Decision 4's routing decision-tree, a *foggy + big* finding is neither a flat issue nor an epic — it is a **map**: an epic is *decided-and-needs-slicing*, a map is *undecided-and-needs-charting*. `hydra-research` and `hydra-architecture-scan` are the only two fog-native producers that get this branch (`discover` / `retro` / `cleanup` keep filing normal issues — ADR-0029 Decision 1).
+
+**Fog-gate predicate — a boolean AND (both must hold; size alone never charts a map):**
+
+1. **Fog** — the finding self-asserts **≥2 unresolved *decisions*** (open questions the operator has not made — *not* implementation slices). A finding with 6 slices but no open decisions is decided-and-needs-slicing → it is an epic, NOT a map.
+2. **Size floor** — the finding clears the floor: **~≥4 slices OR it spans ≥2 subsystems** (the exact number is a tuning knob).
+
+The `slices: [...]` array and an explicit decision count on the opportunity object (surface open decisions as e.g. `openDecisions: ["…", "…"]` during synthesis) make this self-assertion concrete. When the AND holds, chart a map; otherwise fall through to 4a.
+
+**Dedup BEFORE charting (acceptance criterion 3).** Use the SAME shared backfill dedup baseline built in Phase 3a — which already includes open `wayfinder:map` issues (open across every label set) — so an overlapping finding that is already charted produces no second map:
+
+```bash
+# BASELINE_TITLES was built in Phase 3a (open across every label set, incl. open
+# wayfinder:map issues, + recently-closed). $CANDIDATE = the finding's map title.
+node --experimental-strip-types scripts/ci/issue-dedup.ts \
+  "$CANDIDATE" "${BASELINE_TITLES[@]}"
+# → {"duplicate":true,...}  → an overlapping map/epic already exists; DO NOT chart
+# → {"duplicate":false,...} → proceed to chart the map
+```
+
+If the finding is a duplicate, skip charting (note it in the report). Otherwise chart the destination-pending map:
+
+```bash
+gh issue create --repo gaberoo322/hydra \
+  --title "<destination the effort finds its way to>" \
+  --label "wayfinder:map" --label "wayfinder:destination-pending" \
+  --body "$(cat <<'EOF'
+## Destination
+
+<1-2 lines naming the spec / locked decision / in-place change this effort finds
+its way to — the thing that is TRUE when the map is done.>
+
+## Not yet specified
+
+<the fog sketch: the ≥2 open decisions the operator has not made yet, as prose.
+This is the frontier that ticket-charting will later resolve — NOT tickets.>
+EOF
+)"
+```
+
+Then append the map's title to `BASELINE_TITLES` so later findings in THIS run dedup against it (in-run dedup, mirroring 3a).
+
+**Invariants (ADR-0029 Decision 1 + 3 + 5):**
+- The map carries BOTH labels `wayfinder:map` AND `wayfinder:destination-pending`, and its body is `## Destination` + `## Not yet specified` **ONLY** — **zero tickets**, no `## Sub-issues` block, no `## Decisions so far` content. Draft scope is destination-only: the gate sits between wayfinder's name-destination and map-the-frontier steps, so ticket-charting is the first working action AFTER the operator approves the destination (an amendment strands no tickets).
+- The `wayfinder:map` + `wayfinder:destination-pending` label pair is the exact contract the already-merged frontier collector (`scripts/autopilot/collect-state.sh`) reads: it counts a map's AFK tickets as dispatchable ONLY when the map LACKS `wayfinder:destination-pending`. *Approve* = the operator removes the label; the producer emits exactly what the collector recognizes.
+- **Off-radar rule (ADR-0029 Decision 3):** the map carries NO lifecycle label (no `ready-for-agent` / `needs-triage` / `enhancement`) — `wayfinder:*` tickets stay invisible to `hydra-sweep` and the orphan-backstop. Dispatchability comes from the dedicated map-frontier signal, not from relabeling. The operator drains destination-pending maps via the `hydra-review` bucket.
 
 ### Epic vs. flat decision rule
 
