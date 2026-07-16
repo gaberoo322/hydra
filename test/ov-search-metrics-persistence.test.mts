@@ -26,7 +26,7 @@ import {
 import {
   computeFlushDelta,
   type OvSearchMetrics,
-} from "../src/knowledge-base/ov-search.ts";
+} from "../src/knowledge-base/ov-search-counter.ts";
 
 describe("utcHourKey / utcDayKey — pure helpers", () => {
   test("utcHourKey formats UTC YYYY-MM-DDTHH", () => {

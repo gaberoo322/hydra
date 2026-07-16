@@ -31,8 +31,10 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { trackedOvSearch, loadKnowledgeBaseForPrompt, OvSearchMetricsCounter } =
+const { trackedOvSearch, loadKnowledgeBaseForPrompt } =
   await import("../src/knowledge-base/ov-search.ts");
+const { OvSearchMetricsCounter } =
+  await import("../src/knowledge-base/ov-search-counter.ts");
 const { ovBaseUrl } = await import("../src/knowledge-base/ov-request.ts");
 
 /** The one contract this suite defends — the exact route the live OV serves 200. */
