@@ -31,6 +31,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   scoreCandidate,
+  scoreCandidateWithReflection,
   PRIORITY_TIER_BASE_SCORE,
   type ScoreSignals,
 } from "../src/backlog/candidate-scoring.ts";
@@ -95,6 +96,55 @@ describe("candidate-scoring — blocker-cleared absence branch (#2973)", () => {
   test("no bonus reason when blockerJustCleared is absent", () => {
     const { reasons } = scoreCandidate(signals({}));
     assert.ok(!reasons.some((r) => r.startsWith("blocker-cleared")));
+  });
+});
+
+describe("candidate-scoring — reflection-aware contract (#3392)", () => {
+  const base = { priorityTier: "kanban-queued" as const, now: NOW };
+
+  test("a recent (<24h) reflection is fetched via the reader and applies the -0.20 penalty", async () => {
+    let seen: string | undefined;
+    const reader = async (ref: string) => {
+      seen = ref;
+      return new Date(NOW - 2 * HOUR_MS).toISOString();
+    };
+    const { score, reasons } = await scoreCandidateWithReflection("issue-3392", base, reader);
+    assert.equal(seen, "issue-3392", "the anchorRef is forwarded to the reader");
+    // scoreCandidate returns the un-rounded arithmetic (0.85 - 0.20); the
+    // coordinator rounds. Compare within float tolerance.
+    assert.ok(Math.abs(score - 0.65) < 1e-9, `expected ~0.65, got ${score}`);
+    assert.ok(reasons.some((r) => r.includes("recent-failure")));
+  });
+
+  test("a null reflection read applies no penalty (fetch is co-located, not the coordinator's job)", async () => {
+    const { score, reasons } = await scoreCandidateWithReflection(
+      "issue-3392",
+      base,
+      async () => null,
+    );
+    assert.equal(score, 0.85);
+    assert.ok(!reasons.some((r) => r.includes("recent-failure")));
+  });
+
+  test("a throwing reader fails open — no penalty, resolves rather than rejecting", async () => {
+    await assert.doesNotReject(async () => {
+      const { score, reasons } = await scoreCandidateWithReflection(
+        "issue-3392",
+        base,
+        async () => {
+          throw new Error("reflection read failed");
+        },
+      );
+      assert.equal(score, 0.85, "fail-open: scored as if no reflection existed");
+      assert.ok(!reasons.some((r) => r.includes("recent-failure")));
+    });
+  });
+
+  test("delegates to the pure scoreCandidate — same result as passing the timestamp directly", async () => {
+    const ts = new Date(NOW - 5 * HOUR_MS).toISOString();
+    const viaContract = await scoreCandidateWithReflection("issue-3392", base, async () => ts);
+    const viaPure = scoreCandidate({ ...base, lastReflectionAt: ts });
+    assert.deepEqual(viaContract, viaPure);
   });
 });
 
