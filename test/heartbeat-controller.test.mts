@@ -289,3 +289,46 @@ describe("HeartbeatController — getStatus composition (issues #232 / #208)", (
     assert.equal(status.running, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tick fires the injected builder-health stagnation emit (issue #3371).
+//
+// After #3371 the heartbeat no longer owns the scorecard read / edge-state
+// store — it only fires an injected `emitTickStagnationAlerts(eventBus)` on each
+// tick, fire-and-forget. These cases assert the controller-side wiring: the tick
+// calls the injected emit, and a rejected emit promise never propagates out of
+// the tick (the liveness state machine keeps ticking).
+// ---------------------------------------------------------------------------
+describe("HeartbeatController — tick stagnation emit wiring (issue #3371)", () => {
+  it("fires the injected emit on the first tick with the event bus", async () => {
+    const calls: unknown[] = [];
+    const controller = makeController({
+      emitTickStagnationAlerts: async (eventBus: unknown) => {
+        calls.push(eventBus);
+      },
+    });
+    // start() runs the first cycle immediately (fire-and-forget). Give the
+    // microtask queue a turn so the emit call is observed.
+    await controller.start(noopBus, { intervalMs: 60_000 });
+    await Promise.resolve();
+    assert.equal(calls.length, 1, "the tick fired the injected emit once");
+    assert.equal(calls[0], noopBus, "the tick passed the event bus through to the emit");
+    await controller.stop({ reason: "shutdown" });
+  });
+
+  it("a rejected emit promise never throws out of the tick", async () => {
+    const controller = makeController({
+      emitTickStagnationAlerts: async () => {
+        throw new Error("scorecard fan-out wedged");
+      },
+    });
+    // If the rejection escaped runScheduledCycle, start()'s immediate tick would
+    // surface it; assert start() resolves cleanly and the scheduler is running.
+    const result = await controller.start(noopBus, { intervalMs: 60_000 });
+    await Promise.resolve();
+    assert.equal(result.started, true, "start() completed despite the emit rejecting");
+    const status = await controller.getStatus();
+    assert.equal(status.running, true, "the liveness state machine keeps ticking");
+    await controller.stop({ reason: "shutdown" });
+  });
+});
