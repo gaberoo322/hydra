@@ -3282,6 +3282,209 @@ describe("collect-state.sh — wayfinder destination-gate approved-map guard (is
 });
 
 // ---------------------------------------------------------------------------
+// Stalled-map staleness sweep — housekeeping backstop (issue #3355, epic #3350,
+// ADR-0029)
+// ---------------------------------------------------------------------------
+//
+// Two stall classes strand a wayfinder map on the OPERATOR's side with no
+// autopilot working path (both need the human — ADR-0029 Decision 3):
+//   1. A `wayfinder:destination-pending` map the operator never approves (a draft
+//      forever; its whole AFK frontier is un-dispatchable per the #3353 gate).
+//   2. An OPEN, unblocked, unclaimed HITL frontier ticket (`wayfinder:grilling` |
+//      `wayfinder:prototype`) on an APPROVED map the operator never picks up —
+//      `wayfinder_orch` never dispatches HITL tickets, so it stalls its map's AFK
+//      frontier.
+//
+// collect-state.sh's staleness sweep emits two counts — `wayfinder_stale_maps`
+// and `wayfinder_stale_hitl` — of the ones aged PAST the threshold
+// (WAYFINDER_STALENESS_THRESHOLD_SEC, default 48h) so /hydra-review and the digest
+// can flag the genuinely stalled ones distinctly from the fresh backlog. Fresh
+// (within-threshold) maps/tickets are NOT flagged.
+//
+// The sweep is network-dependent (live gh list + per-map GraphQL), so we cannot
+// run the whole collector offline. Its two age filters, however, are PURE jq
+// programs embedded in the source — we golden-fixture them by EXTRACTING the exact
+// programs from collect-state.sh (no copy — they stay coupled to production) and
+// running them under the real `jq` binary against timestamp fixtures. This pins
+// the two acceptance criteria: a past-threshold map/ticket IS counted; a
+// within-threshold one is NOT.
+//
+// New TOP-LEVEL describe with its own lifecycle (pure CLI over stdin — nothing to
+// tear down — but kept top-level per the CLAUDE.md authoring rule).
+// ---------------------------------------------------------------------------
+describe("collect-state.sh — stalled-map staleness sweep (issue #3355)", () => {
+  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
+  const THRESHOLD_SEC = 172800; // 48h — the documented default in collect-state.sh
+  const src = readFileSync(COLLECT_STATE, "utf-8");
+
+  // ISO-8601 UTC timestamp `sec` seconds in the past — the `createdAt` shape gh /
+  // GraphQL emit and the jq `fromdateiso8601` parses.
+  function agoIso(sec: number): string {
+    return new Date(Date.now() - sec * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  }
+  const STALE_ISO = agoIso(THRESHOLD_SEC + 6 * 3600); // 6h past the threshold
+  const FRESH_ISO = agoIso(3600); // 1h old — well within the threshold
+
+  // Generic `--jq '...'` extractor anchored on a preceding literal so it grabs the
+  // exact production program, not a copy that could drift. Fails loud if the
+  // anchor moves (the sweep must stay findable) and substitutes the literal
+  // threshold for the `${WAYFINDER_STALENESS_THRESHOLD_SEC}` shell interpolation so
+  // the extracted program runs standalone under jq.
+  function extractJqAfter(anchorLiteral: string, mustInclude: string): string {
+    const anchor = src.indexOf(anchorLiteral);
+    assert.ok(anchor >= 0, `staleness-sweep anchor ${JSON.stringify(anchorLiteral)} missing from collect-state.sh`);
+    const JQ_FLAG = "--jq \"";
+    const jqStart = src.indexOf(JQ_FLAG, anchor);
+    assert.ok(jqStart >= 0, `--jq program missing after ${JSON.stringify(anchorLiteral)}`);
+    const progStart = jqStart + JQ_FLAG.length;
+    // Scan for the UNESCAPED closing double-quote — the HITL program embeds `\"`
+    // (backslash-quote) inside for its label literals, so a naive indexOf('"')
+    // would truncate at the first embedded quote.
+    let progEnd = progStart;
+    while (progEnd < src.length && !(src[progEnd] === '"' && src[progEnd - 1] !== "\\")) {
+      progEnd += 1;
+    }
+    assert.ok(progEnd > progStart && progEnd < src.length, "unterminated staleness-sweep jq program in collect-state.sh");
+    // Unescape the shell `\"` -> `"` so the extracted program is valid jq.
+    let prog = src.slice(progStart, progEnd).replace(/\\"/g, '"');
+    assert.ok(
+      prog.includes(mustInclude),
+      `extracted staleness filter lost its guard token ${JSON.stringify(mustInclude)}`,
+    );
+    // The production program references the threshold via shell interpolation;
+    // substitute the literal so the standalone jq run has a concrete bound.
+    prog = prog.replace("${WAYFINDER_STALENESS_THRESHOLD_SEC}", String(THRESHOLD_SEC));
+    assert.ok(
+      prog.includes(String(THRESHOLD_SEC)),
+      "threshold interpolation was not present in the extracted program",
+    );
+    return prog;
+  }
+
+  function runJq(prog: string, input: unknown): number {
+    const r = spawnSync("jq", [prog], { input: JSON.stringify(input), encoding: "utf-8" });
+    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
+    return JSON.parse(r.stdout);
+  }
+
+  // ---- 1. Stale destination-pending maps -----------------------------------
+  // The map-count filter is the --jq after the second `--label 'wayfinder:map'`
+  // gh call (the one that ALSO carries `--label 'wayfinder:destination-pending'`).
+  function mapStaleJq(): string {
+    return extractJqAfter("--label 'wayfinder:destination-pending' \\", "createdAt");
+  }
+
+  test("AC: a destination-pending map older than the threshold IS flagged", () => {
+    const n = runJq(mapStaleJq(), [{ number: 900, createdAt: STALE_ISO }]);
+    assert.equal(n, 1, "a past-threshold destination-pending map must be counted as stale");
+  });
+
+  test("AC: a fresh (within-threshold) destination-pending map is NOT flagged", () => {
+    const n = runJq(mapStaleJq(), [{ number: 901, createdAt: FRESH_ISO }]);
+    assert.equal(n, 0, "a within-threshold map is still in the normal review cadence, not stale");
+  });
+
+  test("mixed board: only the past-threshold maps are counted", () => {
+    const n = runJq(mapStaleJq(), [
+      { number: 900, createdAt: STALE_ISO },
+      { number: 901, createdAt: FRESH_ISO },
+      { number: 902, createdAt: STALE_ISO },
+    ]);
+    assert.equal(n, 2, "exactly the two past-threshold maps count; the fresh one does not");
+  });
+
+  // ---- 2. Stale un-picked-up HITL frontier tickets -------------------------
+  // The HITL filter is the --jq after the `wayfinder:grilling` GraphQL walk; it
+  // consumes the GraphQL response shape (.data.repository.issue.subIssues.nodes).
+  function hitlStaleJq(): string {
+    return extractJqAfter("subIssues(first:100){ nodes { number state createdAt", "assignees.totalCount==0");
+  }
+
+  // GraphQL-response-shaped sub-issue node.
+  function node(
+    number: number,
+    label: string,
+    opts: { createdAt?: string; state?: string; assigned?: number; blockedOpen?: boolean } = {},
+  ): any {
+    return {
+      number,
+      state: opts.state ?? "OPEN",
+      createdAt: opts.createdAt ?? STALE_ISO,
+      labels: { nodes: [{ name: label }] },
+      assignees: { totalCount: opts.assigned ?? 0 },
+      blockedBy: { nodes: opts.blockedOpen ? [{ number: 99, state: "OPEN" }] : [] },
+    };
+  }
+  function graphqlResponse(nodes: any[]): any {
+    return { data: { repository: { issue: { subIssues: { nodes } } } } };
+  }
+
+  test("AC: a stale, unblocked, unclaimed HITL ticket IS flagged", () => {
+    const n = runJq(
+      hitlStaleJq(),
+      graphqlResponse([node(10, "wayfinder:grilling"), node(11, "wayfinder:prototype")]),
+    );
+    assert.equal(n, 2, "both past-threshold, unblocked, unclaimed HITL tickets must count");
+  });
+
+  test("AC: a fresh (within-threshold) HITL ticket is NOT flagged", () => {
+    const n = runJq(hitlStaleJq(), graphqlResponse([node(12, "wayfinder:grilling", { createdAt: FRESH_ISO })]));
+    assert.equal(n, 0, "a within-threshold HITL ticket is not yet stalled");
+  });
+
+  test("a stale but CLAIMED (assigned) HITL ticket is NOT flagged — it has a live worker/owner", () => {
+    const n = runJq(hitlStaleJq(), graphqlResponse([node(13, "wayfinder:grilling", { assigned: 1 })]));
+    assert.equal(n, 0, "an assigned HITL ticket has been picked up — not an un-picked-up stall");
+  });
+
+  test("a stale but BLOCKED HITL ticket is NOT flagged — it is not on the frontier yet", () => {
+    const n = runJq(hitlStaleJq(), graphqlResponse([node(14, "wayfinder:prototype", { blockedOpen: true })]));
+    assert.equal(n, 0, "a ticket with an open blocker is not un-picked-up frontier work");
+  });
+
+  test("a stale AFK-typed ticket is NOT counted as HITL — only grilling/prototype are HITL", () => {
+    const n = runJq(
+      hitlStaleJq(),
+      graphqlResponse([node(15, "wayfinder:research"), node(16, "wayfinder:task")]),
+    );
+    assert.equal(n, 0, "AFK types (research/task) have an autopilot path; they are not HITL stalls");
+  });
+
+  test("mixed frontier: only the stale, unblocked, unclaimed HITL ticket survives every gate", () => {
+    const n = runJq(
+      hitlStaleJq(),
+      graphqlResponse([
+        node(20, "wayfinder:grilling"), // stale, unblocked, unclaimed → count
+        node(21, "wayfinder:prototype", { createdAt: FRESH_ISO }), // fresh → skip
+        node(22, "wayfinder:grilling", { assigned: 1 }), // claimed → skip
+        node(23, "wayfinder:prototype", { blockedOpen: true }), // blocked → skip
+        node(24, "wayfinder:research"), // AFK-typed → skip
+        node(25, "wayfinder:grilling", { state: "CLOSED" }), // closed → skip
+      ]),
+    );
+    assert.equal(n, 1, "exactly one node clears every eligibility+staleness gate");
+  });
+
+  // ---- 3. The signals are emitted with the documented names/threshold --------
+  test("collect-state.sh emits the sweep signals with the documented names and default threshold", () => {
+    assert.ok(src.includes('echo -n "wayfinder_stale_maps="'), "wayfinder_stale_maps signal must be emitted");
+    assert.ok(src.includes('echo "$WF_STALE_HITL"'), "wayfinder_stale_hitl count must be emitted");
+    assert.ok(
+      src.includes('echo -n "wayfinder_stale_hitl="'),
+      "wayfinder_stale_hitl signal label must be emitted",
+    );
+    assert.ok(
+      src.includes("HYDRA_WAYFINDER_STALENESS_SEC:-172800"),
+      "the 48h default threshold (env-overridable) must be present",
+    );
+    assert.ok(
+      src.includes('echo "wayfinder_staleness_threshold_sec=${WAYFINDER_STALENESS_THRESHOLD_SEC}"'),
+      "the resolved threshold must be surfaced so downstream readers can label the age bound",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Saturation guards — global cap <=2 (issue #3354, epic #3350, ADR-0029 Dec. 2)
 // ---------------------------------------------------------------------------
 //
