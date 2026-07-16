@@ -113,10 +113,20 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
     lines.push(`*Usage:* n/a (${err?.message || err})`);
   }
 
+  // --- Builder-health scorecard: ONE shared read for both sections below ---
+  // The Throughput and Stagnation sections both derive from the same scorecard,
+  // whose read itself fans out across Redis, `gh pr list`, and metrics. Reading
+  // it once (via `allSettled`, so a rejection never propagates) removes the
+  // duplicate I/O AND the subtle correctness hazard of the two sections
+  // observing different snapshots — while preserving the per-section
+  // independent-degradation invariant: on a failed read each section still
+  // emits its OWN `n/a` line, byte-identical to the pre-share behaviour.
+  const scorecardReader = deps.getBuilderHealthScorecard ?? getBuilderHealthScorecard;
+  const [scorecardResult] = await Promise.allSettled([scorecardReader()]);
+
   // --- Throughput: autonomous merge rate over the builder-health window ---
-  try {
-    const scorecardReader = deps.getBuilderHealthScorecard ?? getBuilderHealthScorecard;
-    const health = await scorecardReader();
+  if (scorecardResult.status === "fulfilled") {
+    const health = scorecardResult.value;
     const autonomy = health?.autonomyRate;
     if (autonomy && autonomy.total > 0) {
       lines.push(
@@ -125,19 +135,21 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
     } else {
       lines.push(`*Throughput:* no merges in window`);
     }
-  } catch (err: any) {
+  } else {
+    const err: any = scorecardResult.reason;
     lines.push(`*Throughput:* n/a (${err?.message || err})`);
   }
 
   // --- Stagnation: per-realm builder-health glance (ADR-0028, epic #3285) ---
   // Best-effort: a failing scorecard read degrades THIS line to n/a and never
-  // throws, so the heartbeat still ships. A separate read from the Throughput
-  // block above so one section's failure can't silently blank the other.
-  try {
-    const scorecardReader = deps.getBuilderHealthScorecard ?? getBuilderHealthScorecard;
-    const health = await scorecardReader();
+  // throws, so the heartbeat still ships. Shares the single scorecard read
+  // above with Throughput; each section still degrades independently so one
+  // section's failure can't silently blank the other.
+  if (scorecardResult.status === "fulfilled") {
+    const health = scorecardResult.value;
     lines.push(formatStagnationHeartbeatLine(health?.stagnation ?? null));
-  } catch (err: any) {
+  } else {
+    const err: any = scorecardResult.reason;
     lines.push(`*Stagnation:* n/a (${err?.message || err})`);
   }
 
