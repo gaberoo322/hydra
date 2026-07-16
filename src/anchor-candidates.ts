@@ -110,7 +110,7 @@ import {
 // scoring symbols directly from the canonical home (the back-compat re-exports
 // were retired in issue #2077).
 import {
-  scoreCandidate,
+  scoreCandidateWithReflection,
   type PriorityTier,
 } from "./backlog/candidate-scoring.ts";
 // Eligibility predicates now live in their own sibling Module
@@ -548,15 +548,11 @@ async function getCandidateFeedImpl(
   const priorityOf = new WeakMap<ScoredCandidate, number>();
   for (const c of candidates) {
     // A failing annotation degrades that one field — it must NEVER drop a
-    // candidate (ADR-0016 invariant). The production readers already catch
-    // internally; wrapping here also shields against an injected dep that
-    // throws, so the feed seam keeps the invariant regardless of the dep.
-    let lastReflectionAt: string | null = null;
-    try {
-      lastReflectionAt = await d.loadLastReflectionAt(c.anchorRef);
-    } catch (err: any) {
-      console.error(`[CandidateFeed] reflection annotation failed for "${c.anchorRef.slice(0, 60)}": ${err.message}`);
-    }
+    // candidate (ADR-0016 invariant). The reflection read + its fail-open wrap
+    // now live in `scoreCandidateWithReflection` (issue #3392), co-located with
+    // the penalty math: the coordinator forwards the reader, the scoring
+    // contract owns the fetch. The design-concept annotation stays inline here
+    // (a distinct concern, not part of the scoring contract).
     let designConcept: CandidateDesignConcept = ABSENT_DESIGN_CONCEPT;
     try {
       designConcept = await d.loadDesignConcept(c.anchorRef, now);
@@ -564,13 +560,16 @@ async function getCandidateFeedImpl(
       console.error(`[CandidateFeed] design-concept annotation failed for "${c.anchorRef.slice(0, 60)}": ${err.message}`);
     }
 
-    const { score, reasons } = scoreCandidate({
-      priorityTier: c.priority_tier,
-      lastUpdated: c.last_updated,
-      lastReflectionAt,
-      blockerJustCleared: c.blockerJustCleared,
-      now,
-    });
+    const { score, reasons } = await scoreCandidateWithReflection(
+      c.anchorRef,
+      {
+        priorityTier: c.priority_tier,
+        lastUpdated: c.last_updated,
+        blockerJustCleared: c.blockerJustCleared,
+        now,
+      },
+      d.loadLastReflectionAt,
+    );
 
     // Surface extras alongside structured reasons for operator visibility.
     if (c.extras) {

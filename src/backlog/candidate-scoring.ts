@@ -78,6 +78,51 @@ export interface ScoreResult {
 }
 
 /**
+ * Reads the most recent reflection timestamp (ISO) for an anchor reference, or
+ * null when the anchor has no reflection. This is the I/O half of the
+ * reflection-freshness signal — the WHAT (which timestamp to read, how a miss
+ * maps to null). It is co-located here, next to the penalty math in
+ * `scoreCandidate`, so "how fresh is this anchor's last reflection, and how much
+ * does it penalize the score?" is answerable from THIS file alone (issue #3392).
+ *
+ * Must never reject — a failing read degrades to `null` (score as if no
+ * reflection existed), never drops the candidate (ADR-0016 invariant). The
+ * production reader (`loadLastReflectionAtImpl` in `src/anchor-candidates.ts`)
+ * already catches internally; the fail-open wrap in `scoreCandidateWithReflection`
+ * shields the scoring contract against an injected reader that throws.
+ */
+export type ReflectionReader = (anchorRef: string) => Promise<string | null>;
+
+/**
+ * The reflection-aware scoring contract: fetch the anchor's last-reflection
+ * timestamp via the injected `readReflectionAt`, fold it into `signals`, and
+ * delegate to the pure `scoreCandidate`. This is the single surface a caller
+ * uses to score a candidate INCLUDING the reflection-freshness penalty — the
+ * fetch is part of the scoring contract, not the coordinator's loop (issue
+ * #3392). `scoreCandidate` stays pure; this async wrapper owns the one I/O read.
+ *
+ * Fail-open: a `readReflectionAt` that throws is caught here (logged, then
+ * treated as null) so the reflection penalty is simply not applied — the
+ * candidate is never dropped. Any `signals.lastReflectionAt` already present is
+ * overridden by the fetched value; pass `signals` WITHOUT `lastReflectionAt`.
+ */
+export async function scoreCandidateWithReflection(
+  anchorRef: string,
+  signals: Omit<ScoreSignals, "lastReflectionAt">,
+  readReflectionAt: ReflectionReader,
+): Promise<ScoreResult> {
+  let lastReflectionAt: string | null = null;
+  try {
+    lastReflectionAt = await readReflectionAt(anchorRef);
+  } catch (err: any) {
+    console.error(
+      `[CandidateFeed] reflection annotation failed for "${anchorRef.slice(0, 60)}": ${err?.message ?? err}`,
+    );
+  }
+  return scoreCandidate({ ...signals, lastReflectionAt });
+}
+
+/**
  * Score a candidate anchor on a 0-1 scale. Pure — pass the tier and observable
  * signals; returns the score plus human-readable reasons.
  *
