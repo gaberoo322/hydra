@@ -47,6 +47,20 @@ const MONOTONIC_DURATION_FIELDS = [
   "verificationDurationMs",
   "planningDurationMs",
   "executionDurationMs",
+  // Issue #3338: the three cycle-COORDINATION spans (distinct altitude from the
+  // per-dispatch phase spans above). They partition a cycle's wall-clock into
+  // the autopilot orchestration phases so a slow cycle can be attributed to
+  // dispatch decision-making vs executor work vs merge-wait:
+  //   - decisionLatencyMs   — cycle-start → anchor-select (planning → seed)
+  //   - executionLatencyMs  — anchor-select → merge-ready (dispatch → result)
+  //   - mergeLatencyMs      — merge-ready → cycle-complete (poll → final commit)
+  // Declared MONOTONIC for the SAME reason as the phase spans: a cycleId's
+  // double-write (reap `completed` + post-merge follow-up) is order-independent,
+  // so a later 0-carrying enrichment write can neither clobber a stored non-zero
+  // span nor block a real span from upgrading a stored 0/absent.
+  "decisionLatencyMs",
+  "executionLatencyMs",
+  "mergeLatencyMs",
 ] as const;
 
 /**
@@ -97,6 +111,12 @@ export const NUMERIC_FIELD_NAMES = [
   "verificationDurationMs",
   "planningDurationMs",
   "executionDurationMs",
+  // Issue #3338: cycle-coordination spans (see MONOTONIC_DURATION_FIELDS). NUMERIC
+  // so trend.ts (which derives its parse list from THIS tuple) reads them back as
+  // numbers and the record aggregators surface per-span bottleneck attribution.
+  "decisionLatencyMs",
+  "executionLatencyMs",
+  "mergeLatencyMs",
   "tokenCost",
   "jitTestsGenerated",
   "jitTestsKept",

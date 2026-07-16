@@ -103,6 +103,24 @@ export const CycleRecordBodySchema = z
     verificationDurationMs: z.union([z.number(), z.string()]).optional(),
     planningDurationMs: z.union([z.number(), z.string()]).optional(),
     executionDurationMs: z.union([z.number(), z.string()]).optional(),
+    // Issue #3338: the three cycle-COORDINATION spans that partition a cycle's
+    // wall-clock into the autopilot orchestration phases — decisionLatencyMs
+    // (cycle-start → anchor-select), executionLatencyMs (anchor-select →
+    // merge-ready), mergeLatencyMs (merge-ready → cycle-complete). A distinct
+    // ALTITUDE from the #3269 per-dispatch phase spans above: these attribute a
+    // slow cycle to dispatch decision-making vs executor work vs merge-wait, so
+    // a stalled merge-poll loop (#2110) surfaces inline instead of only post-hoc.
+    // Plumbed exactly like #3269/#2754: the writer deposits the spans, reap.py
+    // forwards them here, recordCycle passes them through. OPTIONAL + number|string
+    // for the same loose-script-payload tolerance; absent → stripped by recordCycle
+    // → the field stays absent (truthful "unknown/never-written"), never persisted
+    // as 0 or "undefined". Declared MONOTONIC in record.ts (MONOTONIC_DURATION_FIELDS),
+    // so a later 0-carrying enrichment write can never clobber a stored non-zero span.
+    // NOTE (mirrors #3269): this is the PLUMBING half — the schema+enrichment lands
+    // first; the measurement/deposit-side wiring is a follow-up (schema-before-writer).
+    decisionLatencyMs: z.union([z.number(), z.string()]).optional(),
+    executionLatencyMs: z.union([z.number(), z.string()]).optional(),
+    mergeLatencyMs: z.union([z.number(), z.string()]).optional(),
     // Issue #1136 (Slice 2 of #1119): the comma-separated reflection bucket
     // tokens (`per-anchor` / `by-file` / ...) the code-writing dispatch was
     // SERVED at planning time by `GET /api/reflections`, reported back so

@@ -396,6 +396,18 @@ export async function recordCycle(
       verificationDurationMs: filesChangedCount(body.verificationDurationMs),
       planningDurationMs: filesChangedCount(body.planningDurationMs),
       executionDurationMs: filesChangedCount(body.executionDurationMs),
+      // Issue #3338: the three cycle-COORDINATION spans (dispatch decision /
+      // executor work / merge-wait latency). `filesChangedCount` is reused as the
+      // non-negative-integer-or-undefined coercion (matching the #3269 phase spans
+      // above): an absent field is stripped by the loop below and stays absent
+      // (truthful "unknown/never-written"), an explicit 0 records a measured
+      // zero-span. These three are MONOTONIC in record.ts, so recordCycleMetrics
+      // enforces that a later 0-carrying write never clobbers a stored non-zero
+      // span. This is the plumbing that lets the coordination spans ride the
+      // metrics event-stream alongside the existing token/test-time observations.
+      decisionLatencyMs: filesChangedCount(body.decisionLatencyMs),
+      executionLatencyMs: filesChangedCount(body.executionLatencyMs),
+      mergeLatencyMs: filesChangedCount(body.mergeLatencyMs),
       abandonReason: body.abandonReason,
       regressionIntroduced: body.regressionIntroduced === true ? true : undefined,
       autopilotTurnId: body.autopilotTurnId,

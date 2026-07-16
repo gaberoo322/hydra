@@ -34,6 +34,7 @@ const { projectTokensPerMergedPR, projectAggregateStats } = await import(
   "../src/metrics/stats-projection.ts"
 );
 const { tokensByCycleKey } = await import("../src/redis/cost.ts");
+const { CycleRecordBodySchema } = await import("../src/autopilot/schemas.ts");
 
 describe("per-cycle token join into the trend (issue #2930)", () => {
   let redis: any;
@@ -285,5 +286,150 @@ describe("default dispatch source is 'claude', never 'codex' (issue #3070)", () 
     await recordCycleMetrics(cycleId, { tasksMerged: 1, source: "work-queue" });
     const stored = await getCycleMetrics(cycleId);
     assert.strictEqual(stored.source, "work-queue");
+  });
+});
+
+/**
+ * Cycle-coordination span instrumentation (issue #3338).
+ *
+ * Three cycle-COORDINATION spans — decisionLatencyMs (cycle-start → anchor-select),
+ * executionLatencyMs (anchor-select → merge-ready), mergeLatencyMs (merge-ready →
+ * cycle-complete) — partition a cycle's wall-clock into the autopilot orchestration
+ * phases, so a slow cycle can be attributed to dispatch decision-making vs executor
+ * work vs merge-wait. They are plumbed through the same schema-before-writer groove
+ * as the #3269 per-dispatch phase spans: recorded as NUMERIC + MONOTONIC fields on
+ * the cycle-metrics hash, parsed back by getMetricsTrend, and forwarded through
+ * CycleRecordBodySchema → recordCycle.
+ *
+ * These tests pin: (1) the spans round-trip through the metrics hash and surface as
+ * numbers in the trend; (2) they are MONOTONIC — a later 0-carrying write can neither
+ * clobber a stored non-zero span nor block a real span from upgrading a stored 0;
+ * (3) an absent span stays absent (never a fabricated 0 on the hash); (4) the schema
+ * accepts both number and string forms and strips absent fields.
+ *
+ * Own top-level describe with its own before/after lifecycle so it never piggybacks
+ * on a sibling suite's shared-Redis teardown (CLAUDE.md authoring rule).
+ */
+describe("cycle-coordination span instrumentation (issue #3338)", () => {
+  let redis: any;
+  let getCycleMetrics: (cycleId: string) => Promise<Record<string, string>>;
+
+  async function cleanKeys() {
+    const keys = await redis.keys("hydra:metrics:*");
+    if (keys.length > 0) await redis.del(...keys);
+    await redis.del("hydra:metrics:index");
+  }
+
+  beforeEach(async () => {
+    if (!redis) redis = new Redis(process.env.REDIS_URL);
+    if (!getCycleMetrics) {
+      ({ getCycleMetrics } = await import("../src/redis/cycle-metrics.ts"));
+    }
+    await cleanKeys();
+  });
+
+  after(async () => {
+    await cleanKeys();
+    if (redis) redis.disconnect();
+  });
+
+  test("the three coordination spans round-trip through the metrics hash", async () => {
+    const cycleId = "cycle-3338-round-trip";
+    await recordCycleMetrics(cycleId, {
+      tasksMerged: 1,
+      decisionLatencyMs: 1200,
+      executionLatencyMs: 45000,
+      mergeLatencyMs: 8000,
+    });
+    const stored = await getCycleMetrics(cycleId);
+    assert.strictEqual(stored.decisionLatencyMs, "1200");
+    assert.strictEqual(stored.executionLatencyMs, "45000");
+    assert.strictEqual(stored.mergeLatencyMs, "8000");
+  });
+
+  test("the coordination spans surface as NUMBERS in the metrics trend", async () => {
+    const cycleId = "cycle-3338-trend-numeric";
+    await recordCycleMetrics(cycleId, {
+      tasksMerged: 1,
+      decisionLatencyMs: 1200,
+      executionLatencyMs: 45000,
+      mergeLatencyMs: 8000,
+    });
+    const trend = await getMetricsTrend(1);
+    assert.equal(trend.length, 1, "expected the one recorded cycle");
+    assert.strictEqual(trend[0].decisionLatencyMs, 1200);
+    assert.strictEqual(trend[0].executionLatencyMs, 45000);
+    assert.strictEqual(trend[0].mergeLatencyMs, 8000);
+  });
+
+  test("a coordination span is MONOTONIC-max: a 0-carrying follow-up never clobbers a stored non-zero span", async () => {
+    const cycleId = "cycle-3338-monotonic-no-clobber";
+    // First write records a real merge-wait span (the reap `completed` write).
+    await recordCycleMetrics(cycleId, { mergeLatencyMs: 8000 });
+    // The post-merge follow-up write carries 0 (no start stamp available) — it
+    // must NOT clobber the real span, mirroring the #2364/#3269 monotonic guard.
+    await recordCycleMetrics(cycleId, { mergeLatencyMs: 0, tasksMerged: 1 });
+    const stored = await getCycleMetrics(cycleId);
+    assert.strictEqual(
+      stored.mergeLatencyMs,
+      "8000",
+      "a 0 follow-up must never clobber a stored non-zero coordination span",
+    );
+  });
+
+  test("a coordination span is MONOTONIC-max: a real span UPGRADES a stored 0/absent", async () => {
+    const cycleId = "cycle-3338-monotonic-upgrade";
+    // First write lands 0 (the truthful "unknown" sentinel for this write).
+    await recordCycleMetrics(cycleId, { decisionLatencyMs: 0 });
+    // A later write carries the real span — it must upgrade the stored 0.
+    await recordCycleMetrics(cycleId, { decisionLatencyMs: 1500, tasksMerged: 1 });
+    const stored = await getCycleMetrics(cycleId);
+    assert.strictEqual(
+      stored.decisionLatencyMs,
+      "1500",
+      "a real coordination span must upgrade a stored 0/absent",
+    );
+  });
+
+  test("an absent coordination span stays absent on the hash (never a fabricated 0)", async () => {
+    const cycleId = "cycle-3338-absent";
+    await recordCycleMetrics(cycleId, { tasksMerged: 1 });
+    const stored = await getCycleMetrics(cycleId);
+    assert.ok(
+      !("decisionLatencyMs" in stored),
+      "an unmeasured coordination span must stay absent, not persist as 0",
+    );
+    assert.ok(!("executionLatencyMs" in stored));
+    assert.ok(!("mergeLatencyMs" in stored));
+  });
+
+  test("CycleRecordBodySchema accepts the coordination spans in number AND string form", () => {
+    const numeric = CycleRecordBodySchema.safeParse({
+      cycleId: "cycle-3338-schema-num",
+      decisionLatencyMs: 1200,
+      executionLatencyMs: 45000,
+      mergeLatencyMs: 8000,
+    });
+    assert.ok(numeric.success, "numeric spans must pass the schema");
+
+    const stringForm = CycleRecordBodySchema.safeParse({
+      cycleId: "cycle-3338-schema-str",
+      decisionLatencyMs: "1200",
+      executionLatencyMs: "45000",
+      mergeLatencyMs: "8000",
+    });
+    assert.ok(stringForm.success, "string-form spans (loose-payload) must pass the schema");
+  });
+
+  test("a genuinely-measured 0-span cycle records 0 (distinct from absent)", async () => {
+    const cycleId = "cycle-3338-real-zero";
+    // A cycle whose merge landed instantly records a truthful 0 merge-wait.
+    await recordCycleMetrics(cycleId, { mergeLatencyMs: 0, tasksMerged: 1 });
+    const stored = await getCycleMetrics(cycleId);
+    assert.strictEqual(
+      stored.mergeLatencyMs,
+      "0",
+      "a genuinely-measured 0-span records 0 — distinct from the absent sentinel",
+    );
   });
 });
