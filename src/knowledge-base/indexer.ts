@@ -130,6 +130,18 @@ export function resetCoverageStats(): void {
   defaultHashAdapter.resetCoverageStats();
 }
 
+/**
+ * @see HashDedupAdapter.getIndexedPaths (issue #3341 — the lexical
+ * fallback-ranking corpus). NOTE: `trackedOvSearch` reads the corpus from the
+ * hash-dedup leaf directly (this module imports ov-search.ts, so importing
+ * back from here would recreate the #3229 cycle); this delegator keeps the
+ * module-level facade complete for external callers, matching
+ * getCoverageStats above.
+ */
+export function getIndexedPaths(): string[] {
+  return defaultHashAdapter.getIndexedPaths();
+}
+
 /** @see HashDedupAdapter.runSourceInitialPass */
 export function runSourceInitialPass(opts: {
   paths?: SourcePath[];

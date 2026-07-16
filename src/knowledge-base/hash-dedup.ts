@@ -230,6 +230,22 @@ export class HashDedupAdapter {
     return persisted.size;
   }
 
+  /**
+   * Narrow, read-only fallback-corpus getter (issue #3341): the merged set of
+   * file paths this adapter currently knows as indexed — the source-file dedup
+   * map (hydrated from the durable Redis `hydra:knowledge:source-hashes` copy
+   * on startup, #1123) plus the config-tree hash map. Returns a defensive
+   * snapshot; NO Redis read, no mutation surface — the private maps stay
+   * private. Consumed by `trackedOvSearch`'s lexical-distance fallback ranking
+   * (ov-search.ts) when OpenViking is unavailable; an unhydrated/empty adapter
+   * returns `[]` and the search degrades to the pre-#3341 empty result.
+   */
+  getIndexedPaths(): string[] {
+    const merged = new Set<string>(this.indexedSourceHashes.keys());
+    for (const path of this.indexedConfigHashes.keys()) merged.add(path);
+    return [...merged];
+  }
+
   /** Snapshot of the coverage stats (defensive copy of watchedPaths). */
   getCoverageStats(): CoverageStats {
     return {

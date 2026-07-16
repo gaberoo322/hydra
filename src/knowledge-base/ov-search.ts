@@ -37,6 +37,14 @@ import { ovPostJson, isOvFailure } from "./ov-request.ts";
 // singleton; the counter class appears only as `trackedOvSearch`'s injectable
 // param type (issue #1926).
 import { defaultMetrics, OvSearchMetricsCounter } from "./ov-search-counter.ts";
+// Issue #3341: lexical-distance fallback ranking when OpenViking is
+// unavailable. The scorer is a pure leaf (no IO); the fallback corpus is the
+// in-memory HashDedupAdapter path cache, read through its narrow
+// getIndexedPaths() getter. Imported from the hash-dedup LEAF directly —
+// indexer.ts imports trackedOvSearch from this module, so routing through the
+// indexer.ts facade delegator would recreate the #3229 import cycle.
+import { rankLexicalFallback } from "./fallback-scorer.ts";
+import { defaultHashAdapter } from "./hash-dedup.ts";
 
 export const OV_URL = OPENVIKING_URL;
 export const OV_KEY = OPENVIKING_API_KEY;
@@ -80,23 +88,58 @@ export function buildFallbackQuery(originalQuery: string): string {
 // ===========================================================================
 
 /**
+ * How the entries in a {@link trackedOvSearch} result were ranked
+ * (issue #3341): `"semantic"` — OpenViking answered and ranked; `"lexical"` —
+ * OV was unavailable and the result was ranked in-process by
+ * per-token-Levenshtein distance over the indexed-path corpus. Deliberately
+ * NOT a numeric `tier` field — "Tier" is reserved Hydra vocabulary for
+ * self-modification verification depth (ADR-0004/0015).
+ */
+export type OvRankingMode = "semantic" | "lexical";
+
+/**
+ * The default #3341 fallback corpus: the in-memory indexed-path cache on the
+ * production-shared HashDedupAdapter. In-process snapshot — NO Redis or HTTP
+ * round-trip on the search hot path; an unhydrated cache yields `[]` and the
+ * degraded search returns the pre-#3341 empty result.
+ */
+function defaultFallbackCorpus(): string[] {
+  return defaultHashAdapter.getIndexedPaths();
+}
+
+/**
  * Tracked OV search -- wraps a fetch to /api/v1/search/find with metrics + logging + fallback.
- * Returns { resources, memories } arrays.
+ * Returns { resources, memories } arrays, plus an additive optional
+ * `rankingMode` field (issue #3341): `"semantic"` when OV served the result,
+ * `"lexical"` when OV was unavailable (any `isOvFailure` code — ov-timeout,
+ * ov-service-down, ov-non-2xx, ov-malformed-json) and the result was ranked
+ * in-process over the indexed-path corpus instead. Lexical entries populate
+ * `resources` ONLY (uri = local file path, entry-level score); `memories`
+ * stays empty under degradation so loadKnowledgeBaseForPrompt never renders
+ * file paths as learned lessons. Absent `rankingMode` means nothing was
+ * ranked (empty degraded result) — the pre-#3341 shape.
  *
  * `counter` is the injectable metrics sink (issue #1926); it defaults to the
  * process-wide {@link defaultMetrics} singleton so production callers and
  * `api/openviking.ts` are unchanged. A test passes a fresh
  * `new OvSearchMetricsCounter()` to isolate counts per case.
+ *
+ * `corpusPaths` is the injectable #3341 fallback-corpus read (same pattern as
+ * `counter`); it defaults to {@link defaultFallbackCorpus} so production
+ * callers are unchanged. A test passes a fake to drive the fallback branches
+ * without touching the shared adapter.
  */
 export async function trackedOvSearch(
   query: string,
   limit = 5,
   sessionId?: string | null,
   counter: OvSearchMetricsCounter = defaultMetrics,
-): Promise<{ resources: any[]; memories: any[] }> {
+  corpusPaths: () => string[] = defaultFallbackCorpus,
+): Promise<{ resources: any[]; memories: any[]; rankingMode?: OvRankingMode }> {
   const startMs = Date.now();
   let resources: any[] = [];
   let memories: any[] = [];
+  let rankingMode: OvRankingMode | undefined;
 
   try {
     const body: Record<string, any> = { query, limit };
@@ -114,6 +157,29 @@ export async function trackedOvSearch(
     if (isOvFailure(result)) {
       counter.recordError(latencyMs);
       console.log(`[OV Search] query="${query.slice(0, 80)}" status=${result.code} latency=${latencyMs}ms ERROR`);
+      // Issue #3341: OV is unavailable (any ov-* failure code) — degrade to an
+      // in-process lexical-distance ranking over the indexed-path corpus
+      // instead of forcing callers into zero-context. Resources only (uri =
+      // local file path, which can never match the viking://resources/ prefix,
+      // so probeOvSourceResourcesPresent semantics are unchanged); memories
+      // stay empty. Wrapped so a corpus/scorer error degrades to the
+      // pre-change empty result — trackedOvSearch still never throws. A
+      // zero-result response with OV UP is a semantic answer, not degradation,
+      // and never reaches this branch.
+      try {
+        const ranked = rankLexicalFallback(query, corpusPaths(), limit);
+        if (ranked.length > 0) {
+          const served = ranked.map(({ path, score }) => ({ uri: path, score }));
+          console.log(
+            `[OV Search] lexical fallback query="${query.slice(0, 80)}" code=${result.code} rankingMode=lexical served=${served.length} latency=${Date.now() - startMs}ms`,
+          );
+          return { resources: served, memories: [], rankingMode: "lexical" };
+        }
+      } catch (fbErr: any) {
+        console.error(
+          `[OV Search] lexical fallback error: ${fbErr?.message ?? fbErr} — degrading to empty result`,
+        );
+      }
       return { resources: [], memories: [] };
     }
 
@@ -123,6 +189,7 @@ export async function trackedOvSearch(
     const resultCount = resources.length + memories.length;
 
     counter.recordSearch(latencyMs, resultCount);
+    rankingMode = "semantic";
 
     if (resultCount === 0) {
       console.log(`[OV Search] query="${query.slice(0, 80)}" results=0 latency=${latencyMs}ms -- attempting fallback`);
@@ -173,7 +240,12 @@ export async function trackedOvSearch(
   // hiccup degrades to a logged warning, not a failed search.
   await counter.flush(false);
 
-  return { resources, memories };
+  // Issue #3341: `rankingMode` is additive-optional — set to "semantic" only
+  // when OV actually served/ranked the result; a thrown-error empty result
+  // keeps the exact pre-#3341 `{resources, memories}` shape (no key).
+  return rankingMode
+    ? { resources, memories, rankingMode }
+    : { resources, memories };
 }
 
 // ===========================================================================
