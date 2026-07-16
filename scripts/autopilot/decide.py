@@ -3241,6 +3241,28 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             # No open approved map has an eligible (AFK-typed, unblocked,
             # unclaimed) frontier ticket — nothing to work.
             return None
+        # Saturation guard (issue #3354, ADR-0029 Decision 2/6). Global cap:
+        # at most 2 wayfinder_orch workers may be in flight across ALL maps
+        # simultaneously. The in-flight count is PRE-COMPUTED in collect-state.sh
+        # (WF_INFLIGHT_GLOBAL — open + claimed AFK tickets); decide.py reads it
+        # verbatim and calls no network (signal-seam discipline, AC #3). Per-map
+        # single-flight is already enforced upstream: collect-state.sh yields no
+        # frontier pick for a map that has an in-flight worker, so a non-`none`
+        # frontier here implies the picked map is free — only the GLOBAL ceiling
+        # remains to check.
+        try:
+            inflight_global = int(
+                (signals.get("wayfinder_orch_inflight_global") if isinstance(signals, dict) else 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            inflight_global = 0
+        if inflight_global >= 2:
+            # Global concurrency ceiling hit — do not open a 3rd worker. The 1h
+            # cooldown + this cap intentionally bound wayfinder throughput
+            # (ADR-0029 Decision 2); the frontier ticket is worked on a later
+            # tick once a worker clears.
+            return None
         ticket_type = (
             signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
         )

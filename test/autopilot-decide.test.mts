@@ -3160,3 +3160,127 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// wayfinder_orch saturation guards (issue #3354, epic #3350, ADR-0029 D2/D6)
+// ---------------------------------------------------------------------------
+//
+// HITL routing + saturation guards. Two concurrency invariants bound the AFK
+// working class:
+//   - Global cap: at most 2 wayfinder_orch workers in flight across ALL maps.
+//   - Per-map single-flight: at most 1 in-flight worker per map.
+//
+// SIGNAL-SEAM SPLIT (ADR-0029 Decision 6 / AC #3): the in-flight COUNT is
+// enumerated ONLY in collect-state.sh (`wayfinder_orch_inflight_global` — open,
+// claimed AFK tickets across approved maps) and per-map single-flight is
+// enforced STRUCTURALLY there (a map with an in-flight worker yields no frontier
+// pick, so a non-`none` frontier already implies the picked map is free).
+// decide.py stays PURE: it reads the pre-computed global counter verbatim and
+// suppresses a new dispatch when it is >= 2. This suite is the decide.py-golden
+// half of AC #2 (the global-cap arm); the per-map single-flight arm is a
+// collect-state.sh property (its frontier query drops in-flight maps), out of
+// decide.py's reach.
+//
+// New TOP-LEVEL describe with its own lifecycle (decide.py is a pure CLI over
+// temp files — nothing to tear down — per the CLAUDE.md authoring rule).
+// ---------------------------------------------------------------------------
+describe("decide.py — wayfinder_orch saturation guards (issue #3354)", () => {
+  // Cooled + a live frontier pick by default, so only the saturation counter
+  // under test decides whether the dispatch fires.
+  function wfSatState(over: Record<string, unknown> = {}): any {
+    const signals = {
+      wayfinder_orch_frontier: "issue-4242",
+      wayfinder_orch_ticket_type: "research",
+      ...((over.signals as Record<string, unknown>) ?? {}),
+    };
+    const rest = { ...over };
+    delete (rest as Record<string, unknown>).signals;
+    return baseState({
+      signals,
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wayfinder_orch: 0,
+      },
+      ...rest,
+    });
+  }
+
+  test("dispatches when the global in-flight count is below the cap (0 workers)", () => {
+    const state = wfSatState({
+      signals: { wayfinder_orch_inflight_global: "0" },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "0 in-flight workers is below the cap of 2 → dispatch");
+    assert.equal(a.prompt_args.ticket, "issue-4242");
+  });
+
+  test("dispatches at exactly 1 in-flight worker (below the cap of 2)", () => {
+    const state = wfSatState({
+      signals: { wayfinder_orch_inflight_global: "1" },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "1 in-flight worker still leaves room for a 2nd → dispatch");
+  });
+
+  test("SUPPRESSES the dispatch at the global cap (2 in-flight workers)", () => {
+    const state = wfSatState({
+      signals: { wayfinder_orch_inflight_global: "2" },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      "at 2 concurrent workers the global cap must block a 3rd dispatch",
+    );
+  });
+
+  test("SUPPRESSES above the cap (defensive — counter drifted past 2)", () => {
+    const state = wfSatState({
+      signals: { wayfinder_orch_inflight_global: "3" },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      ">=2 (not ==2) is the ceiling test so a drifted counter still suppresses",
+    );
+  });
+
+  test("a missing in-flight counter defaults to 0 → dispatches (fail-open on absence, not on saturation)", () => {
+    // wfSatState with no inflight_global signal → absent → parsed as 0.
+    const state = wfSatState();
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "an absent counter must not block the very first worker (0 default)");
+  });
+
+  test("a non-numeric in-flight counter is treated as 0 (never silently blocks)", () => {
+    const state = wfSatState({
+      signals: { wayfinder_orch_inflight_global: "none" },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "a garbage counter value degrades to 0, not to a permanent block");
+  });
+
+  test("the cap does NOT fire when there is no frontier ticket (guard order: frontier first, then cap)", () => {
+    // Even a saturated counter is moot when there's nothing to work; the
+    // frontier `none` check short-circuits before the cap, so no dispatch and
+    // no spurious cap evaluation.
+    const state = wfSatState({
+      signals: {
+        wayfinder_orch_frontier: "none",
+        wayfinder_orch_inflight_global: "2",
+      },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      "no frontier ticket → no dispatch regardless of the in-flight counter",
+    );
+  });
+});

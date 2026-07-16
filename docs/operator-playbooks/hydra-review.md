@@ -8,11 +8,12 @@ claude_only: true
 
 # Operator Review
 
-Interactive session to resolve issues needing human judgment. Drains three buckets in order:
+Interactive session to resolve issues needing human judgment. Drains four buckets in order:
 
 1. **Overnight operator-decision queue** — today's `Operator decision queue YYYY-MM-DD` issue, written by `/hydra-autopilot` running in unattended mode (issue #413). One row per Tier-0 / non-mechanical PR that would have called `AskUserQuestion` if the operator had been awake.
 2. **`ready-for-human`** — issues requiring operator decisions
 3. **Stale-blocked** — `blocked` issues where no linked open issue justifies the block
+4. **Wayfinder HITL tickets** — unblocked, unclaimed `wayfinder:grilling` / `wayfinder:prototype` frontier tickets on open approved maps (issue #3354, ADR-0029 Decision 3). These require operator judgment and are **never machine-dispatched** — `wayfinder_orch` only works AFK-typed (`wayfinder:research`/`wayfinder:task`) tickets, so an HITL ticket only advances when the operator runs `/wayfinder`. This bucket surfaces them; it never auto-resolves one.
 
 The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there.
 
@@ -54,6 +55,42 @@ gh issue list --repo gaberoo322/hydra --label "blocked" --state open --json numb
 
 For each blocked issue, check body/comments for "blocked by #N", "depends on #N", or links. Referenced issue closed or no blocker referenced → stale-blocked.
 
+**Wayfinder HITL tickets (issue #3354, ADR-0029 Decision 3).** Enumerate unblocked,
+unclaimed HITL-typed (`wayfinder:grilling` / `wayfinder:prototype`) frontier tickets
+across open **approved** maps (a map carries `wayfinder:map` but NOT the draft gate
+label `wayfinder:destination-pending`). Mirror the AFK frontier query in
+`scripts/autopilot/collect-state.sh`, but select the HITL types instead of the AFK
+ones — this is the ONLY surface (besides `/wayfinder` itself) that sees these
+off-radar tickets:
+
+```bash
+# 1. Pick open, APPROVED maps (cheap REST list; no GraphQL).
+MAPS=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
+  --json number,labels --jq '
+    [ .[] | select((.labels | map(.name) | index("wayfinder:destination-pending")) | not)
+      | .number ] | sort | .[]')
+# 2. Per map, walk sub-issues → open, UNASSIGNED, all-blockers-closed, HITL-typed.
+for m in $MAPS; do
+  gh api graphql -F n="$m" -f query='query($n:Int!){
+    repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
+      subIssues(first:100){ nodes { number title state
+        labels(first:20){nodes{ name }}
+        assignees(first:1){totalCount}
+        blockedBy(first:20){nodes{ state }} } } } } }' \
+    --jq --arg map "$m" '.data.repository.issue.subIssues.nodes
+      | map(select(.state=="OPEN" and .assignees.totalCount==0
+          and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
+      | map({map: $map, number, title,
+             type: ([.labels.nodes[].name
+               | select(. == "wayfinder:grilling" or . == "wayfinder:prototype")] | .[0])})
+      | map(select(.type != null))
+      | .[] | "map #\(.map) · #\(.number) \(.title) (\(.type | sub("wayfinder:"; "")))"'
+done
+```
+
+These are LISTED for the operator, never resolved by this session — the only way to
+advance one is to run `/wayfinder` on its map.
+
 ### 2. Present
 
 ```
@@ -70,6 +107,10 @@ For each blocked issue, check body/comments for "blocked by #N", "depends on #N"
 ### Stale-blocked (K)
 | # | Title | Age | Blocker status |
 |---|-------|-----|----------------|
+
+### Wayfinder HITL tickets (W) — run /wayfinder to advance
+| Map | # | Title | Type |
+|-----|---|-------|------|
 ```
 
 Then: "I'll walk through these one at a time, starting with the overnight queue. Ready?"
@@ -134,6 +175,11 @@ Explore the codebase before asking obvious questions.
 - **Still blocked (update reference)** — link the actual open blocker
 - **No longer relevant** — close `wontfix`
 
+#### Wayfinder HITL ticket (operator judgment required — ADR-0029 Decision 3)
+- **Run /wayfinder now** — open the map's interactive session to resolve this decision ticket (the ONLY path that advances it)
+- **Defer** — leave it on the map for a later `/wayfinder` session
+- Do NOT relabel it `ready-for-agent`, assign it, or synthesize an answer — an agent must never machine-dispatch or auto-resolve an HITL ticket; that re-exposes off-radar map tickets to the sweeps and breaches the HITL contract.
+
 ### 5. Wrap-up
 
 ```
@@ -149,6 +195,7 @@ Overnight queue: applied=A, overridden=O, deferred=D, dropped=R
 ## Rules
 
 - **Drain the overnight queue first.** It's the most time-sensitive bucket; the operator already paid for the autopilot's reasoning. Don't reorder.
+- **Wayfinder HITL tickets are listed, never resolved here.** They are `wayfinder:grilling` / `wayfinder:prototype` decision tickets that require operator judgment (ADR-0029 Decision 3); the only way to advance one is `/wayfinder` on its map. Never assign, relabel `ready-for-agent`, or answer one on the ticket's behalf — that breaches the HITL contract and re-exposes off-radar map tickets to the sweeps. `wayfinder_orch` structurally cannot dispatch them (it works only AFK-typed tickets).
 - One issue at a time. No batching.
 - Every comment posted to GitHub starts with: `> *This was generated by AI during operator review.*`
 - Agent briefs (when relabeling to `ready-for-agent`) include: category, summary, current/desired behavior, acceptance criteria, out-of-scope, key interfaces.
