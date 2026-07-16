@@ -247,6 +247,48 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.ovSearch as any)?.status, "backend-unreachable");
     assert.equal((probes.ovSearch as any)?.latencyMs, null);
   });
+
+  // Issue #3372: the unified registry's `inline` descriptor variant. Each of the
+  // three in-process reads (skillCatalog sync #2386, darkOutcomes async #2805,
+  // reflectionOutcomesLiveness async #3251) runs inside a per-descriptor try/catch
+  // that yields its SEMANTIC honest-none `fallback` on error — NOT raw null, never
+  // propagating, and never blocking the async settle-array fan-out. This is the
+  // new invariant the descriptor-union refactor introduces (formerly three bespoke
+  // post-fan-out try/catch blocks); the three reads previously had no error-path
+  // coverage in this suite.
+  test("a throwing inline read folds to its semantic honest-none fallback without blocking the async fan-out (issue #3372)", async () => {
+    const probes = await collectProbeInputs(happyDeps({
+      // The genuinely-synchronous read throws.
+      skillCatalogState: (() => { throw new Error("registry not built"); }) as any,
+      // The two async inline reads reject.
+      darkOutcomesEval: (async () => { throw new Error("outcomes.yaml unreadable"); }) as any,
+      reflectionOutcomesLedgerProbe: (async () => { throw new Error("redis down"); }) as any,
+    }));
+
+    // skillCatalog folds to the un-run empty catalog (completed:false → both
+    // skill-catalog rules no-op), NOT null.
+    assert.deepEqual(probes.skillCatalog, {
+      skills: [],
+      registered: 0,
+      total: 0,
+      completed: false,
+      lastAttemptAt: null,
+      vlmDeferred: false,
+    });
+    // darkOutcomes folds to [] (the dark-outcome rule no-ops), NOT null.
+    assert.deepEqual(probes.darkOutcomes, []);
+    // reflectionOutcomesLiveness folds to the `retired-empty` report (the rule
+    // fires the plain retirement INFO), NOT null.
+    assert.equal((probes.reflectionOutcomesLiveness as any)?.verdict, "retired-empty");
+    assert.equal((probes.reflectionOutcomesLiveness as any)?.count, 0);
+
+    // ...and every async settle-array probe still resolved (no inline failure
+    // blocked the fan-out — the Promise.allSettled guarantee is intact).
+    assert.equal(probes.basicHealth?.status, "ok");
+    assert.equal(probes.queueDepth, 7);
+    assert.equal((probes.backlogCounts as any)?.total, 3);
+    assert.equal((probes.emergencyBrake as any)?.engaged, true);
+  });
 });
 
 // Issue #2498: the WakeGate injection seam. `maybeWakeEmbedBackend` /

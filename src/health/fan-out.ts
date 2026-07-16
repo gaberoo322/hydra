@@ -112,7 +112,7 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 // — the gates flow in through the injectable deps bag, defaulting to the adapter's
 // singletons (so a no-gate production caller is unchanged).
 
-// ---- The named async-probe registry — keyed, position-free (issue #3263) ----
+// ---- The unified probe registry — keyed, position-free (issue #3263/#3372) ----
 //
 // Issue #1771/#2089 moved the positional-to-named assembly here, but the
 // probe-to-index mapping was still an INTEGER-SUBSCRIPT contract shared across
@@ -123,51 +123,134 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 // index-3 cycle probe) had to be held alive as an idle tombstone purely to avoid
 // renumbering.
 //
-// Issue #3263 replaces the positional array with a NAMED registry: each async
-// probe is a `{ key, run }` descriptor whose `key` is the `ProbeInputs` field it
-// feeds. `collectProbeInputs` builds the descriptor list from the resolved deps,
-// runs every `run()` through ONE `Promise.allSettled`, and folds the results into
-// a key→settled record. `assembleProbeInputs` reads that record BY KEY. The
-// integer subscript is gone from every site: adding a probe is one descriptor
-// entry (+ its `ProbeInputs` field); removing a probe is deleting one entry (no
-// renumbering, no tombstone). The retired index-3 cycle probe is simply absent.
+// Issue #3263 replaced the positional array with a NAMED registry: each async
+// probe became a `{ key, run }` descriptor whose `key` is the `ProbeInputs` field
+// it feeds. The integer subscript vanished — but the three in-process reads
+// (skillCatalog #2386, darkOutcomes #2805, reflectionOutcomesLiveness #3251) were
+// left OUTSIDE that registry: an `Exclude<...>` type carved them out of the async
+// key set, `assembleProbeInputs` hardcoded them to `null` placeholders, and
+// `collectProbeInputs` ran three bespoke try/catch blocks after the fan-out to
+// merge their live values. So TWO mental models co-existed, and adding one of
+// those reads still meant three synchronised edits (the Exclude carve-out, the
+// null placeholder, the bespoke post-fan-out block).
 //
-// `ASYNC_PROBE_KEYS` names the async settle-array subset of `ProbeInputs`. The
-// non-async in-memory reads (skillCatalog #2386, darkOutcomes #2805,
-// reflectionOutcomesLiveness #3251) are NOT registry entries — they are direct
-// never-throw reads merged onto the record after the fan-out, exactly as before.
+// Issue #3372 UNIFIES both kinds behind ONE discriminated `ProbeDescriptor` union:
+//   - `{ kind: "async", key, run }` — the settle-array probe (unchanged): its
+//     `run` is fanned out through ONE `Promise.allSettled`; a rejected settle
+//     coalesces the field to `null` (parseProbes then applies its own default).
+//   - `{ kind: "inline", key, run, fallback }` — the direct in-process read: its
+//     `run` (sync OR async — awaited uniformly via `Promise.resolve`) runs inside
+//     a per-descriptor try/catch that yields `fallback` on error. `fallback` is
+//     the SEMANTIC honest-none value (empty catalog / [] / retired-empty report),
+//     NOT raw `null` — which is exactly why these reads could never be ordinary
+//     async probes (a rejected async settle coalesces to `null`, losing the
+//     meaningful default). The true common property of the three reads is this
+//     honest-none fallback, NOT "runs synchronously": only skillCatalog is truly
+//     sync; darkOutcomes and reflectionOutcomesLiveness are awaited.
+//
+// `collectProbeInputs` builds ONE descriptor list, partitions by `kind`, fans out
+// the async subset through `Promise.allSettled`, runs the inline subset with a
+// per-descriptor try/catch, and folds both into the named `ProbeInputs` record via
+// `assembleProbeInputs`. Adding a probe of EITHER kind is now one descriptor entry
+// (+ its `ProbeInputs` field) — no `Exclude` list, no null placeholder, no bespoke
+// post-fan-out block to keep in sync. The retired index-3 cycle probe stays absent.
 
 /**
- * The `ProbeInputs` fields fed by an async settle-array probe (issue #3263). The
- * three non-async in-memory reads (skillCatalog / darkOutcomes /
- * reflectionOutcomesLiveness) are deliberately excluded — they are merged by
- * `collectProbeInputs` after the fan-out, not run as `Promise.allSettled` probes.
+ * The `ProbeInputs` fields fed by an async settle-array probe (issue #3263). A
+ * rejected/absent settle for one of these coalesces to `null` (parseProbes then
+ * applies its own default). The three inline in-process reads are excluded — they
+ * live in the inline descriptor variant with a semantic honest-none `fallback`.
  */
-type AsyncProbeKey = Exclude<
-  keyof ProbeInputs,
-  "skillCatalog" | "darkOutcomes" | "reflectionOutcomesLiveness"
->;
+type AsyncProbeKey = Exclude<keyof ProbeInputs, InlineProbeKey>;
 
 /**
- * One entry in the named async-probe registry (issue #3263). `key` is the
- * `ProbeInputs` field this probe feeds; `run` is the never-blocking closure the
- * fan-out awaits through `Promise.allSettled` (a rejected settle coalesces the
- * field to `null`). The registry replaces the former integer-subscript array — the
- * probe-to-field contract now lives in ONE place, keyed by name.
+ * The `ProbeInputs` fields fed by a direct in-process read (issue #3372):
+ * skillCatalog (#2386, sync in-memory copy), darkOutcomes (#2805, async chore read
+ * that plucks `.outcomeVerdicts`), reflectionOutcomesLiveness (#3251, async ledger
+ * probe + clock projection). Each carries a SEMANTIC honest-none `fallback` (empty
+ * catalog / [] / retired-empty report) — which is why they are inline descriptors
+ * rather than async settle-array probes: a rejected async settle coalesces to
+ * `null`, losing the meaningful default these reads must preserve.
+ */
+type InlineProbeKey = "skillCatalog" | "darkOutcomes" | "reflectionOutcomesLiveness";
+
+/**
+ * One entry in the unified probe registry (issue #3263/#3372) — a discriminated
+ * union over the two execution paths. The `kind` discriminant lets
+ * `collectProbeInputs` partition ONE descriptor array into the settle-array
+ * fan-out (`async`) and the per-descriptor inline reads (`inline`), with the
+ * compiler enforcing which path each descriptor takes:
+ *
+ *  - `async`  — `run` is fanned out through `Promise.allSettled`; a rejected
+ *               settle coalesces the field to `null`.
+ *  - `inline` — `run` (sync or async, awaited uniformly) runs inside a
+ *               per-descriptor try/catch that yields `fallback` (the honest-none
+ *               semantic default) on error — never `null`, never propagating, and
+ *               never blocking the async fan-out.
+ *
+ * The inline arm is a mapped-type distribution over {@link InlineProbeKey} so
+ * `run`/`fallback` are pinned to the SAME `ProbeInputs[K]` field type at each key —
+ * the compiler enforces the field contract exactly as the async arm's assembly
+ * does, so a renamed/dropped field is a build error here (the fan-out owner).
  *
  * Module-private (issue #3314): only `collectProbeInputs` below builds the
  * descriptor list — no external consumer references this shape, so it carries no
  * `export`.
  */
-interface AsyncProbeDescriptor {
-  key: AsyncProbeKey;
-  run: () => Promise<unknown>;
-}
+type ProbeDescriptor =
+  | { kind: "async"; key: AsyncProbeKey; run: () => Promise<unknown> }
+  | {
+      [K in InlineProbeKey]: {
+        kind: "inline";
+        key: K;
+        run: () => Promise<ProbeInputs[K]> | ProbeInputs[K];
+        fallback: ProbeInputs[K];
+      };
+    }[InlineProbeKey];
 
 /** A key→settled-result record — the keyed successor to the positional array. */
 type SettledByKey = Partial<
   Record<AsyncProbeKey, { status: "fulfilled" | "rejected"; value?: any; reason?: any }>
 >;
+
+// ---- The inline honest-none fallbacks (issue #3372) ------------------------
+//
+// The SEMANTIC honest-none value each inline in-process read degrades to when it
+// throws (empty catalog / [] / retired-empty report). This is the ONE source of
+// those defaults inside the fan-out: the inline descriptors below carry each as
+// their `fallback`, and `assembleProbeInputs` seeds the inline keys from the same
+// registry (so it is a pure structural map with NO per-field `null` placeholder —
+// the misleading-null artifact issue #3372 removes). `collectProbeInputs` then
+// overrides these seeds with the live read (or the fallback on a read error).
+//
+// These are deliberately the SAME honest-none values `parseProbes` (the pure seam,
+// src/health/diagnostics.ts) coalesces a `null` inline field to, so a direct
+// caller of `assembleProbeInputs` (e.g. the round-trip test) reaches byte-identical
+// downstream behaviour whether the inline key arrives as this fallback or as the
+// former `null`: both drive the two skill-catalog rules / the dark-outcome rule /
+// the reflection-outcomes rule to their honest-none no-op.
+const INLINE_FALLBACKS: { [K in InlineProbeKey]: ProbeInputs[K] } = {
+  // Un-run, empty catalog — `completed:false` so both skill-catalog rules no-op.
+  skillCatalog: {
+    skills: [],
+    registered: 0,
+    total: 0,
+    completed: false,
+    lastAttemptAt: null,
+    vlmDeferred: false,
+  },
+  // Empty verdict list — the dark-outcome rule no-ops.
+  darkOutcomes: [],
+  // The `retired-empty` report — the reflection-outcomes rule fires the plain
+  // retirement INFO, never a phantom alarm.
+  reflectionOutcomesLiveness: {
+    verdict: "retired-empty",
+    count: 0,
+    latestEntryMs: null,
+    ageMs: null,
+    note: "Retired reflection-outcomes ledger is empty/absent (writer removed #1006, reader swept #1655) — expected.",
+  },
+};
 
 // ---- assembleProbeInputs — maps the keyed settled record to named ProbeInputs --
 //
@@ -181,6 +264,13 @@ type SettledByKey = Partial<
 // Issue #3263: the input is now a key→settled RECORD, not a positional array —
 // there is no integer subscript anywhere. `val("basicHealth")` reads the settle
 // for that field by name; a missing/rejected settle coalesces to null.
+//
+// Issue #3372: this is now a PURE structural map over the async settled record.
+// The three inline in-process reads are NOT special-cased here with `null`
+// placeholders any more — they are seeded from the shared {@link INLINE_FALLBACKS}
+// registry (their honest-none defaults) and then OVERRIDDEN by `collectProbeInputs`
+// with the live read. So this function owns zero field-level inline logic: it maps
+// the async keys and spreads the inline honest-none seeds, nothing else.
 export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
   // Issue #1833/#3263: `val<T>(key)` coalesces a rejected/absent settle to null
   // and brands the fulfilled value as the field's declared type T. The settled
@@ -218,26 +308,15 @@ export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
     knowledgeContext: val<ProbeInputs["knowledgeContext"]>("knowledgeContext"),
     // Issue #2278: the Tailnet Ollama VLM-host liveness probe.
     ollamaVlm: val<ProbeInputs["ollamaVlm"]>("ollamaVlm"),
-    // Issue #2386: the skill-catalog state is NOT an async settle-array probe (it
-    // is a synchronous in-memory read), so it is not a registry key here.
-    // assembleProbeInputs sets it null; collectProbeInputs overrides it with the
-    // live read. A direct caller of assembleProbeInputs (e.g. the round-trip test)
-    // therefore gets null, which parseProbes coalesces to the empty-catalog
-    // default — the two skill-catalog rules no-op, matching the prior behaviour
-    // where assembleProbeInputs carried no catalog at all.
-    skillCatalog: null,
-    // Issue #2805: like skillCatalog, the dark-outcome verdicts are a direct
-    // never-throw read (not an async settle-array probe), so assembleProbeInputs
-    // sets null and collectProbeInputs overrides it with the live read. A direct
-    // caller gets null → parseProbes coalesces to [] → the dark-outcome rule
-    // no-ops (honest-none).
-    darkOutcomes: null,
-    // Issue #3251: like darkOutcomes, the reflection-outcomes ledger liveness is
-    // a direct never-throw read+projection (not an async settle-array probe), so
-    // assembleProbeInputs sets null and collectProbeInputs overrides it with the
-    // live projection. A direct caller gets null → parseProbes coalesces to the
-    // `retired-empty` honest-none default → the rule fires the plain retirement INFO.
-    reflectionOutcomesLiveness: null,
+    // Issue #3372: the three inline in-process reads (skillCatalog #2386,
+    // darkOutcomes #2805, reflectionOutcomesLiveness #3251) are seeded from their
+    // shared honest-none fallbacks — NOT hardcoded `null` placeholders — and are
+    // OVERRIDDEN by collectProbeInputs with the live read. A direct caller of
+    // assembleProbeInputs (e.g. the round-trip test) therefore gets the honest-none
+    // default directly, driving the same downstream rule no-ops the former
+    // `null → parseProbes default` path did. This keeps assembleProbeInputs a pure
+    // structural map with no inline-field special casing.
+    ...INLINE_FALLBACKS,
   };
 }
 
@@ -376,16 +455,22 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     vlmWakeGate: vlmGate = getWolGates().vlm,
   } = deps;
 
-  // Issue #3263: the named async-probe registry — the SINGLE source of the
+  // Issue #3263/#3372: the unified probe registry — the SINGLE source of the
   // probe-to-field contract. Each descriptor's `key` is the ProbeInputs field it
   // feeds; `run` is its never-blocking closure. No integer subscript, no legend
-  // comment, no retired-slot tombstone: adding a probe is one entry here (+ the
-  // ProbeInputs field), removing one is deleting one entry. The former index-3
-  // cycle probe (a permanently-idle tombstone kept alive only to avoid
-  // renumbering) is simply ABSENT — the in-process cycle was removed in PR-3
+  // comment, no retired-slot tombstone: adding a probe (of EITHER kind) is one
+  // entry here (+ the ProbeInputs field), removing one is deleting one entry. The
+  // former index-3 cycle probe (a permanently-idle tombstone kept alive only to
+  // avoid renumbering) is simply ABSENT — the in-process cycle was removed in PR-3
   // (issue #383) and the handler hardcodes activeCycle=null.
-  const descriptors: AsyncProbeDescriptor[] = [
+  //
+  // The `async` descriptors fan out through Promise.allSettled (a rejected settle
+  // coalesces to null); the three `inline` descriptors are direct in-process reads
+  // run through a per-descriptor try/catch that yields their honest-none `fallback`
+  // on error (issue #3372 — see the ProbeDescriptor union above).
+  const descriptors: ProbeDescriptor[] = [
     {
+      kind: "async",
       key: "basicHealth",
       run: async () => {
         const killed = killFileExists();
@@ -395,6 +480,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       },
     },
     {
+      kind: "async",
       key: "serviceProbes",
       run: async () => {
         // Issue #1324: probe/probeOv are the shared module-level helpers
@@ -422,22 +508,23 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
         return { vikingdb, openviking: ov, "embed-backend": embedFinal };
       },
     },
-    { key: "scheduler", run: () => schedulerStatus() },
-    { key: "queueDepth", run: () => workQueueLen() },
-    { key: "backlogCounts", run: () => backlogCounts() },
-    { key: "metrics", run: async () => ({ trend: await metricsTrend(20), stats: await aggregateStats(20) }) },
+    { kind: "async", key: "scheduler", run: () => schedulerStatus() },
+    { kind: "async", key: "queueDepth", run: () => workQueueLen() },
+    { kind: "async", key: "backlogCounts", run: () => backlogCounts() },
+    { kind: "async", key: "metrics", run: async () => ({ trend: await metricsTrend(20), stats: await aggregateStats(20) }) },
     // Issue #939: host-info probes go through the Host-Probe Adapter, which owns
     // the argv + timeout + df/free parse and returns a typed never-throw result.
     // The fan-out coalesces a probe failure back to the same shape the old
     // `.catch()` sentinels produced (null disk/mem, "unknown" service-status) so
     // parseProbes' downstream contract is unchanged — the difference is the
     // failure mode is now a discriminated `code` we log, not a silent swallow.
-    { key: "disk", run: () => disk().then(r => (isProbeFailure(r) ? null : r.data)) },
-    { key: "mem", run: () => mem().then(r => (isProbeFailure(r) ? null : r.data)) },
-    { key: "sysdOrchestrator", run: () => serviceStatus("hydra-orchestrator.service").then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
-    { key: "sysdWatchdog", run: () => serviceStatus("hydra-watchdog.timer").then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
-    { key: "sysdTargetWeb", run: () => serviceStatus(targetServiceName()).then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
+    { kind: "async", key: "disk", run: () => disk().then(r => (isProbeFailure(r) ? null : r.data)) },
+    { kind: "async", key: "mem", run: () => mem().then(r => (isProbeFailure(r) ? null : r.data)) },
+    { kind: "async", key: "sysdOrchestrator", run: () => serviceStatus("hydra-orchestrator.service").then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
+    { kind: "async", key: "sysdWatchdog", run: () => serviceStatus("hydra-watchdog.timer").then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
+    { kind: "async", key: "sysdTargetWeb", run: () => serviceStatus(targetServiceName()).then(r => (isProbeFailure(r) ? "unknown" : r.data)) },
     {
+      kind: "async",
       key: "patterns",
       run: async () => {
         const [p, e, s] = await Promise.all([memoryPatterns("planner"), memoryPatterns("executor"), memoryPatterns("skeptic")]);
@@ -445,13 +532,14 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
         return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
       },
     },
-    { key: "reflections", run: () => reflectionKeys() },
+    { kind: "async", key: "reflections", run: () => reflectionKeys() },
     // Issue #3270: ledger LLEN — surfaces "ledger remains empty" to the
     // deep-health attribution-ledger-dark rule. Best-effort: getLedgerLen already
     // returns 0 on any Redis error (never throws), so a rejected settle here is
     // an extra defensive layer only.
-    { key: "attributionLedgerCount", run: () => attributionLedgerLen() },
+    { kind: "async", key: "attributionLedgerCount", run: () => attributionLedgerLen() },
     {
+      kind: "async",
       key: "ovSearch",
       run: async () => {
         // Issue #954: OV search probe via the adapter (resolves OPENVIKING_URL +
@@ -466,6 +554,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       },
     },
     {
+      kind: "async",
       // I/O only — the raw INFO regex parse lives in the pure
       // parseRedisInfoSnapshot in diagnostics.ts (issue #1856).
       key: "redisInfo",
@@ -476,15 +565,16 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
         } catch { return null; }
       },
     },
-    { key: "emergencyBrake", run: () => emergencyBrake() /* issue #744 */ },
+    { kind: "async", key: "emergencyBrake", run: () => emergencyBrake() /* issue #744 */ },
     // Issue #1440: persisted OV search-quality trend (24h hour-buckets) and
     // per-day knowledge-context availability (7d). Both degrade to null on a
     // Redis error so the probe never blocks /health/deep — the projection
     // coalesces a rejected settle to null. Consumed only by
     // projectHealthDeepResponse (not parseProbes).
-    { key: "ovSearchWindow", run: () => ovSearchWindow(24) },
-    { key: "knowledgeContext", run: () => knowledgeContextAvailability(7) },
+    { kind: "async", key: "ovSearchWindow", run: () => ovSearchWindow(24) },
+    { kind: "async", key: "knowledgeContext", run: () => knowledgeContextAvailability(7) },
     {
+      kind: "async",
       // Issue #2278: DIRECT liveness probe of the Tailnet Ollama VLM host
       // (gabes-desktop-1:11434) — the host OpenViking uses for its vision/indexing
       // model. Distinct from the serviceProbes embed-backend probe (OV-internal
@@ -501,61 +591,98 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       key: "ollamaVlm",
       run: async () => maybeWakeVlmHost(await probeOllamaVlmImpl(), { gate: vlmGate }),
     },
+    // ---- The three inline in-process reads (issue #3372) --------------------
+    //
+    // Not async settle-array probes — direct in-process reads whose failure mode
+    // is a SEMANTIC honest-none `fallback` (empty catalog / [] / retired-empty),
+    // not raw null. Each `run` runs inside a per-descriptor try/catch below that
+    // yields `fallback` on error, never propagating and never blocking the async
+    // fan-out. Before #3372 these lived OUTSIDE the registry (an Exclude carve-out
+    // + null placeholders in assembleProbeInputs + three bespoke post-fan-out
+    // try/catch blocks); now they are ordinary registry entries of `kind:"inline"`.
+    {
+      // Issue #2386: the in-process OV skill-catalog state — a synchronous,
+      // never-throw in-memory copy (the ONLY genuinely-sync read of the three).
+      // parseProbes copies it onto HealthSnapshot.skillCatalog; the two
+      // skill-catalog rules read it from the snapshot, so this fan-out is the
+      // single place the live read happens. `fallback` is the un-run empty catalog.
+      kind: "inline",
+      key: "skillCatalog",
+      run: () => skillCatalogState(),
+      fallback: INLINE_FALLBACKS.skillCatalog,
+    },
+    {
+      // Issue #2805: the dark leading-outcome verdicts — a never-throwing chore
+      // read (async) that plucks `.outcomeVerdicts` (the dark verdicts with
+      // producerHint + query the rule surfaces). `fallback` is [] → the
+      // dark-outcome rule no-ops (honest-none), so a check hiccup never breaks
+      // /health/deep.
+      kind: "inline",
+      key: "darkOutcomes",
+      run: async () => (await darkOutcomesEval({})).outcomeVerdicts,
+      fallback: INLINE_FALLBACKS.darkOutcomes,
+    },
+    {
+      // Issue #3251: probe the retired reflection-outcomes ledger (async, never
+      // throws — folds a Redis error to the absent state) and project its residual
+      // state into a liveness report with the injected clock. `fallback` is the
+      // `retired-empty` report → the reflection-outcomes rule fires the plain
+      // retirement INFO, never a phantom alarm.
+      kind: "inline",
+      key: "reflectionOutcomesLiveness",
+      run: async () =>
+        projectReflectionOutcomesLiveness(
+          await reflectionOutcomesLedgerProbe(),
+          reflectionOutcomesNow ? { now: reflectionOutcomesNow } : {},
+        ),
+      fallback: INLINE_FALLBACKS.reflectionOutcomesLiveness,
+    },
   ];
 
-  // Run every descriptor through ONE Promise.allSettled (so a slow/failing probe
-  // never blocks the others), then zip the positional results back to their keys.
-  // The integer index is a private detail of this zip — it never escapes into the
-  // probe-to-field contract, which is now keyed by name in the registry above.
-  const results = await Promise.allSettled(descriptors.map(d => d.run()));
+  // Partition the unified registry by `kind` (issue #3372). The `async` subset
+  // fans out through ONE Promise.allSettled (so a slow/failing probe never blocks
+  // the others); the `inline` subset runs directly through a per-descriptor
+  // try/catch that yields the honest-none `fallback` on error. Both merge into the
+  // named ProbeInputs record — assembleProbeInputs maps the async keys, the inline
+  // results override their honest-none seeds.
+  const asyncDescriptors = descriptors.filter(
+    (d): d is Extract<ProbeDescriptor, { kind: "async" }> => d.kind === "async",
+  );
+  const inlineDescriptors = descriptors.filter(
+    (d): d is Extract<ProbeDescriptor, { kind: "inline" }> => d.kind === "inline",
+  );
+
+  // Run the async subset through ONE Promise.allSettled, then zip the positional
+  // results back to their keys. The integer index is a private detail of this zip
+  // — it never escapes into the probe-to-field contract, which is keyed by name.
+  const results = await Promise.allSettled(asyncDescriptors.map(d => d.run()));
   const settled: SettledByKey = {};
-  for (let i = 0; i < descriptors.length; i++) {
-    settled[descriptors[i].key] = results[i];
+  for (let i = 0; i < asyncDescriptors.length; i++) {
+    settled[asyncDescriptors[i].key] = results[i];
   }
 
-  // Issue #2386: the in-process skill-catalog state is a synchronous, never-throw
-  // in-memory copy — not an async probe — so it is read directly (not a descriptor
-  // in the named async-probe registry, which is reserved for I/O settle-array
-  // probes) and merged onto the assembled named record. parseProbes copies it
-  // onto HealthSnapshot.skillCatalog; the two skill-catalog rules read it from the
-  // snapshot, so this fan-out is the single place the live read happens.
-  // Issue #2805: the dark leading-outcome verdicts are a direct never-throw read
-  // (like the skill-catalog state), merged onto the assembled record. A defensive
-  // catch folds any unexpected error to null → parseProbes coalesces to [] → the
-  // dark-outcome rule no-ops (honest-none), so a dark-outcome-check hiccup never
-  // breaks /health/deep. Only `outcomeVerdicts` is carried (it holds the dark
-  // verdicts with producerHint + query the rule surfaces).
-  let darkOutcomes: ProbeInputs["darkOutcomes"] = null;
-  try {
-    const evaluated = await darkOutcomesEval({});
-    darkOutcomes = evaluated.outcomeVerdicts;
-  } catch (err: any) {
-    console.error(
-      `[health/fan-out] dark-outcome check failed (folding to honest-none): ${err?.message || err}`,
-    );
+  // Run each inline read directly. `Promise.resolve(run())` awaits a sync OR async
+  // `run` uniformly; a throw/rejection folds to the descriptor's honest-none
+  // `fallback` (never null, never propagating). This replaces the former three
+  // bespoke post-fan-out try/catch blocks with one uniform loop.
+  const inline: Partial<{ [K in InlineProbeKey]: ProbeInputs[K] }> = {};
+  for (const d of inlineDescriptors) {
+    try {
+      // The union-distributed run/fallback are `ProbeInputs[K]` for this key, but
+      // the loop erases K to the InlineProbeKey union — the assignment through the
+      // Partial record is sound because the descriptor's own key binds run→fallback.
+      (inline as any)[d.key] = await Promise.resolve(d.run());
+    } catch (err: any) {
+      (inline as any)[d.key] = d.fallback;
+      console.error(
+        `[health/fan-out] inline probe '${d.key}' failed (folding to honest-none fallback): ${err?.message || err}`,
+      );
+    }
   }
-  // Issue #3251: probe the retired reflection-outcomes ledger and project its
-  // residual state into a liveness report. The probe itself never throws (folds a
-  // Redis error to the absent state); a defensive catch here folds any unexpected
-  // error to null → parseProbes coalesces to `retired-empty` → the rule fires the
-  // plain retirement INFO. So a ledger-probe hiccup never breaks /health/deep.
-  let reflectionOutcomesLiveness: ProbeInputs["reflectionOutcomesLiveness"] = null;
-  try {
-    const ledger = await reflectionOutcomesLedgerProbe();
-    reflectionOutcomesLiveness = projectReflectionOutcomesLiveness(
-      ledger,
-      reflectionOutcomesNow ? { now: reflectionOutcomesNow } : {},
-    );
-  } catch (err: any) {
-    console.error(
-      `[health/fan-out] reflection-outcomes ledger probe failed (folding to retired-empty): ${err?.message || err}`,
-    );
-  }
+
   return {
     ...assembleProbeInputs(settled),
-    skillCatalog: skillCatalogState(),
-    darkOutcomes,
-    reflectionOutcomesLiveness,
+    ...inline,
   };
 }
 
