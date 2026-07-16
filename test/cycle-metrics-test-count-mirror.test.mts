@@ -44,7 +44,7 @@ function cycleKeyCount(keys: string[]): number {
 
 describe("recordCycleMetrics no longer mirrors test counts cross-key (issue #3391)", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL!);
     await cleanTestKeys();
   });
 
