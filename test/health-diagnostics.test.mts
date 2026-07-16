@@ -23,11 +23,12 @@ import {
 // data-OUT leg). The parse-pipeline tests above import only from the parse seam;
 // this projection-specific suite imports the projection from its new home.
 import { projectHealthDeepResponse } from "../src/health/wire.ts";
-// assembleProbeInputs moved to the Health Probe Fan-out Module
-// (src/health/fan-out.ts, issue #2089) — the new home of the probe enumeration
-// and its positional-to-named mapping. Still exported for unit testing the
-// positional index mapping in isolation.
-import { assembleProbeInputs } from "../src/health/fan-out.ts";
+// Issue #3393: assembleProbeInputs (the pure settled-record → ProbeInputs mapping)
+// now lives in the type-vocabulary leaf (src/health/types.ts), co-located with the
+// ProbeInputs type it populates — it moved out of the fan-out I/O coordinator
+// (src/health/fan-out.ts, its #2089 home) so the pure mapping is unit-testable from
+// a SettledByKey fixture without touching the async fan-out.
+import { assembleProbeInputs } from "../src/health/types.ts";
 // Issue #2131: the ServiceProbe Adapter Seam — drive the embed-backend probe
 // end-to-end (probe → rule fold) via its injected `ovPostJsonImpl` seam, no network.
 import { probeEmbedBackend } from "../src/health/probe.ts";
