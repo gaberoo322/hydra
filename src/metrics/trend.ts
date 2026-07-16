@@ -17,6 +17,7 @@ import { NUMERIC_FIELD_NAMES } from "./record.ts";
 import {
   isMalformedAnchorType,
   UNCLASSIFIED_ANCHOR_TYPE,
+  inferAnchorTypeFromCycleId,
 } from "../autopilot/anchor-type.ts";
 
 /**
@@ -196,6 +197,26 @@ export async function getMetricsTrend(count = 20) {
     // form (absent, empty, the "null"/"undefined" sentinels) to "unknown" so
     // the trend output matches the aggregator's honest bucket.
     parsed.anchorType = normalizeAnchorType(parsed.anchorType);
+
+    // Issue #3390: recover a decodable cycleId whose STORED anchorType is a
+    // data-quality sentinel. A follow-up write (the phase-6 merged-cycle
+    // enrichment, cycle-merge-reconcile) frequently lands the FIRST record for
+    // a cycleId while omitting anchorType, and at write time `classifyAnchorType`
+    // could not decode the cycleId (the pre-#3390 inference regex rejected the
+    // `skill_prune`/`health` slots and any trailing `-<suffix>` after the slot),
+    // so the record persisted as `unclassified`/`unknown`. The cycleId still
+    // embeds the dispatch slot, so re-infer here at read time — turning those
+    // rows back into their real lane WITHOUT a Redis backfill migration. Only
+    // fires for the two sentinel buckets; a genuine anchorType is never
+    // overwritten. Mirrors the read-time recovery precedent for
+    // reflectionMatchSource above.
+    if (
+      parsed.anchorType === UNCLASSIFIED_ANCHOR_TYPE ||
+      parsed.anchorType === "unknown"
+    ) {
+      const inferred = inferAnchorTypeFromCycleId(cycleId);
+      if (inferred !== undefined) parsed.anchorType = inferred;
+    }
 
     // Issue #2930: join the per-cycle token total from the separate
     // `hydra:metrics:tokens:cycle:<id>` key (read ONLY through the src/redis/cost.ts

@@ -185,22 +185,47 @@ export const SLOT_ANCHOR_TYPE: Readonly<Record<string, string>> = Object.freeze(
  * `local` when `state.run_id` is absent (legacy/test callers). So the run-token
  * class is `[0-9a-z]+` (hex OR the `local` fallback), not hex-only.
  *
- * The regex is deliberately fenced so it can NEVER swallow a non-dispatch id
- * (#2822 invariants): the mandatory `-t{N}-` middle plus a slot tail anchored on
- * `_(orch|target)` are what exclude (a) bare-UUID / short-hex / `autopilot-…`
- * cycleIds — none of which carry that middle+tail — and (b) the harness's own
- * `worktree-agent-<longhash>` branch names, which carry no turn/slot suffix. The
- * slot vocabulary `[a-z][a-z0-9_]*_(orch|target)` mirrors `DISPATCH_CYCLE_ID`'s
- * class token in `src/taxonomy/classes.ts`, so the two cycleId parsers never
- * disagree on what a slot is.
+ * The parse is deliberately fenced so it can NEVER swallow a non-dispatch id
+ * (#2822 invariants): the mandatory `-t{N}-` middle is what excludes (a)
+ * bare-UUID / short-hex / `autopilot-…` cycleIds — none of which carry that
+ * middle — and (b) the harness's own `worktree-agent-<longhash>` branch names,
+ * which carry no turn/slot suffix.
+ *
+ * Issue #3390: the slot token is now validated against the taxonomy class
+ * alphabet ({@link SLOT_ANCHOR_TYPE}, derived from `DISPATCH_CLASSES`) rather
+ * than a structural `_(orch|target)$` suffix anchor. This closes two
+ * un-inferrable-but-decodable gaps the live 50-cycle sample carried as
+ * `unclassified`:
+ *   - slot classes with NO `_orch`/`_target` suffix — `skill_prune`, `health`
+ *     (e.g. `…-t2-skill_prune`) — which the old suffix-anchored regex rejected
+ *     even though they are first-class taxonomy classes with a real lane; and
+ *   - a trailing `-<suffix>` AFTER the slot (e.g. `…-t5-dev_orch-3170`,
+ *     `a664419f-t1-dev_orch-3104`), which the old end-anchored `$` rejected.
+ * The middle `-t{N}-` fence is unchanged, so the exclusion of non-dispatch ids
+ * and the harness `worktree-agent-<longhash>` branch names is preserved.
  */
 export function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
-  // Pattern: [worktree-agent-]<runToken>-t<N>-<slot>, slot ending in _orch|_target.
-  const m = /^(?:worktree-agent-)?[0-9a-z]+-t\d+-([a-z][a-z0-9_]*_(?:orch|target))$/.exec(
+  // Fence: [worktree-agent-]<runToken>-t<N>-<tail>. The mandatory `-t{N}-`
+  // middle is the safety anchor; the <tail> is resolved to a known class below
+  // rather than pattern-anchored, so a real class without an _orch/_target
+  // suffix (skill_prune, health) or a trailing -<suffix> after the slot still
+  // decodes (#3390).
+  const m = /^(?:worktree-agent-)?[0-9a-z][0-9a-z-]*-t\d+-([a-z][a-z0-9_-]*)$/.exec(
     cycleId,
   );
   if (!m) return undefined;
-  return SLOT_ANCHOR_TYPE[m[1]];
+  const tail = m[1];
+  // Exact-match fast path: the tail IS a known class (e.g. `dev_orch`,
+  // `skill_prune`). This is the common shape and avoids the prefix scan.
+  if (tail in SLOT_ANCHOR_TYPE) return SLOT_ANCHOR_TYPE[tail];
+  // Trailing-suffix path: the tail is `<class>-<suffix>` (e.g. `dev_orch-3170`).
+  // Class names use underscores, never hyphens, so the class token is exactly
+  // the segment before the first `-`; a trailing `-<issue>`/`-<pr>` suffix is
+  // sliced off. Resolve that segment against the class alphabet.
+  const hyphen = tail.indexOf("-");
+  if (hyphen === -1) return undefined;
+  const candidate = tail.slice(0, hyphen);
+  return candidate in SLOT_ANCHOR_TYPE ? SLOT_ANCHOR_TYPE[candidate] : undefined;
 }
 
 /**
