@@ -142,6 +142,13 @@ export const redisKeys = {
   // distinct namespace so soft-friction items captured from subagents don't
   // pollute the planner/executor learning sets that drive prompt promotion.
   frictionPatterns: (skill: string) => `hydra:friction:${skill}:patterns`,
+  // Issue #3340 — cue-demotion idempotency + observability. `demotedIssues` is a
+  // hash keyed by CLOSED meta-friction issue number → processed-at epoch, so the
+  // hourly demotion chore never re-demotes an already-handled close.
+  // `learningLastDemotionCount` holds the demotion count from the most recent
+  // chore run, surfaced on the friction-patterns diagnostic response.
+  demotedIssues: () => "hydra:learning:demoted-issues",
+  learningLastDemotionCount: () => "hydra:learning:last-demotion-count",
 
   // ---------------------------------------------------------------------------
   // Reflections

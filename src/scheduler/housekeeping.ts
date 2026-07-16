@@ -69,6 +69,7 @@ import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
 import { runCycleMergeReconcile } from "./chores/cycle-merge-reconcile.ts";
+import { runPatternCueDemotion } from "./chores/pattern-cue-demotion.ts";
 import { runAttributionRecord } from "../outcome-attribution/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -479,6 +480,23 @@ async function runHousekeeping(
       name: "cycle-merge-reconcile",
       work: async () => {
         await runCycleMergeReconcile();
+      },
+    },
+
+    {
+      // Issue #3340: pattern-cue demotion on issue RESOLUTION — the inverse of
+      // the escalation path (#512). Polls recently-closed meta-friction issues,
+      // reverse-maps each to its cue, and demotes the matched friction pattern's
+      // hit count so a solved-and-closed issue is not re-filed by the next hit.
+      // No Redis time-guard — intrinsically idempotent via a per-issue processed
+      // marker, so an hourly tick against an all-processed set is a no-op. Placed
+      // LAST so any same-hour escalation write (driven by recordPattern via the
+      // subagent-friction POST path) has committed before the demotion reads the
+      // closed-issue set. Never throws — the underlying pass returns a result
+      // object and this chore folds any fault to a logged 0.
+      name: "pattern-cue-demotion",
+      work: async () => {
+        await runPatternCueDemotion();
       },
     },
   ];
