@@ -588,14 +588,22 @@ def _fire_cycle_record(
     Both default to "" — dispatch.sh omits an empty field, so a genuinely
     task-less dispatch stays null (the correct truthful behaviour).
 
-    `worktree_branch` (issue #3252): the slot's synthesised worktree branch
-    (`worktree-agent-<runToken>-t<N>-<slot>`). Forwarded as the 12th positional
-    `cycle-record` arg so `recordCycleMetrics` can mirror the grounding test
-    counts (which arrive keyed on THIS write's bare worktree-hash cycleId) onto
-    the SEPARATE branch-keyed record the merge-watch enrichment + dashboards
-    read — the two keys are otherwise un-joinable, so `testsAfter` recorded 0 on
-    the sampled record every cycle. Empty (signal class / cleared slot) →
-    dispatch.sh omits the field → no mirror (the prior behaviour).
+    `worktree_branch` (issue #3391, superseding #3252): the slot's synthesised
+    worktree branch (`worktree-agent-<runToken>-t<N>-<slot>`). When present, it
+    becomes THE `cycleId` this cycle-record is POSTed under — NOT the bare
+    worktree-hash `task_id` — so the test-count-bearing write lands on the SAME
+    indexed record the merge-watch enrichment (holdback-merge-watch.ts) later
+    adds `prNumber`/`filesChanged` to. Before #3391 reap keyed this write on
+    `task_id` and forwarded the branch only so a cross-key TS mirror in
+    `src/metrics/record.ts` could copy the four test-count fields onto the
+    branch record; that mirror is retired here because unifying the cycleId at
+    the write means one indexed record per dispatch carries BOTH `testsAfter`
+    and the merge fields — no un-joinable twin, no phantom-index hazard, and
+    the `!raw.cycleId` trend-read guard is satisfied because the record IS
+    indexed under a cycleId. Empty (signal class / cleared slot) → the
+    cycle-record keys on `task_id` as before (the signal-class cycleId IS the
+    task_id). It is still forwarded as the 12th positional so dispatch.sh stamps
+    `worktreeBranch` as record metadata (== cycleId in the pipeline case).
 
     `escalation` (issue #3284): the raw cascade-routing escalation-provenance
     deposit blob ({"escalationAttempt":N,"escalatedModel":"sonnet"}) read by
@@ -630,13 +638,27 @@ def _fire_cycle_record(
         return
     if skill not in CYCLE_RECORD_SKILLS and not escalation:
         return
+    # Issue #3391: key the cycle-record on the synthesised worktree branch when
+    # one is known, so the test-count-bearing write lands on the SAME indexed
+    # record the merge-watch enrichment adds prNumber/filesChanged to (they were
+    # previously un-joinable twins — the bare worktree-hash task_id here vs the
+    # run-token-shaped branch there — so `testsAfter` recorded 0 on the sampled
+    # record every cycle). A signal-class / cleared-slot completion has no branch,
+    # so it keeps keying on task_id (its cycleId IS the task_id). Logged so the
+    # chosen key is observable in the run log (asserted by the reap harness — the
+    # POST itself goes to dispatch.sh and cannot be inspected from a test).
+    effective_cycle_id = worktree_branch or task_id
+    _append_log(
+        f"cycle_record_fired cycleId={effective_cycle_id} task_id={task_id} "
+        f"skill={skill} status={status}"
+    )
     try:
         subprocess.run(
             [
                 "bash",
                 str(CYCLE_RECORD_SCRIPT),
                 "cycle-record",
-                task_id,
+                effective_cycle_id,
                 status,
                 skill,
                 "",  # pr_number — not known at reap time; capacity-writeback
@@ -653,10 +675,11 @@ def _fire_cycle_record(
                 # integer (0 = "no usage parsed" = unknown, omitted so
                 # recordCycle's per-cycle-token-hash fallback gets its chance).
                 str(total_tokens or 0),
-                # Issue #3252: the synthesised worktree branch as the 12th
-                # positional so recordCycleMetrics mirrors the grounding test
-                # counts onto the branch-keyed record dashboards read. Empty →
-                # dispatch.sh omits it → no mirror.
+                # Issue #3391 (superseding #3252): the synthesised worktree branch
+                # as the 12th positional. It is now ALSO the cycleId above, so
+                # dispatch.sh stamps `worktreeBranch` as record metadata that
+                # equals the cycleId (the retired cross-key mirror is gone). Empty
+                # → dispatch.sh omits the metadata field (signal-class case).
                 worktree_branch or "",
                 # Issue #3284: the cascade-routing escalation provenance blob as
                 # the 13th positional so the durable outcome record tags the
@@ -669,7 +692,10 @@ def _fire_cycle_record(
             timeout=10,
         )
     except (subprocess.SubprocessError, OSError) as exc:
-        _append_log(f"cycle_record_skipped task_id={task_id} err={exc}")
+        _append_log(
+            f"cycle_record_skipped cycleId={effective_cycle_id} "
+            f"task_id={task_id} err={exc}"
+        )
 
 
 def _fire_worktree_gc(skill: str | None) -> None:
@@ -1256,13 +1282,13 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     anchor_ref = slot.get("anchor") if isinstance(slot, dict) else None
     if not anchor_ref:
         anchor_ref = _read_anchor_deposit(task_id)
-    # Issue #3252: capture the slot's synthesised worktree branch BEFORE the slot
-    # is nulled below. reap's cycle-record is keyed on the bare worktree-hash
-    # task_id (the deposit key it reads the grounding test counts from), but the
-    # record the merge-watch enrichment + dashboards read is keyed on THIS branch
-    # (an un-joinable run-token-shaped id). Forwarding it lets recordCycleMetrics
-    # mirror the test counts onto the branch record so `testsAfter` stops
-    # recording 0 there. None when the slot is absent (signal class / cleared).
+    # Issue #3391 (superseding #3252): capture the slot's synthesised worktree
+    # branch BEFORE the slot is nulled below. It is now THE cycleId reap's
+    # cycle-record write is keyed on (see `_fire_cycle_record`), so the
+    # test-count-bearing write and the merge-watch enrichment land on ONE indexed
+    # record instead of un-joinable twins — `testsAfter` therefore stops recording
+    # 0 on the sampled record. None when the slot is absent (signal class /
+    # cleared): those keep keying on task_id (their cycleId IS the task_id).
     worktree_branch = slot.get("branch") if isinstance(slot, dict) else None
     if slot is not None:
         slot["tokens"] = total_tokens
