@@ -1,23 +1,25 @@
 /**
- * Digest async fan-out assemblers (issue #2215).
+ * Daily-heartbeat async fan-out assembler (issue #2215; weekly summary split
+ * out into `src/digest-weekly.ts` in #3394).
  *
- * These are the two side-effecting siblings of the pure grammar in
- * `src/digest-format.ts`. Each is a mini fan-out orchestrator: it reads from
+ * `buildDailyHeartbeat` is the side-effecting sibling of the pure grammar in
+ * `src/digest-format.ts`. It is a mini fan-out orchestrator: it reads from
  * five-to-six independent sub-sources (Redis run index, the usage tracker, the
- * builder-health scorecard, the target backlog, the alert ring, metrics trends,
- * roadmap progress …), assembles the on-wire Telegram string, and degrades each
- * section best-effort (a failing reader → an `n/a` line, never a thrown error)
- * so the heartbeat / weekly summary ALWAYS ships.
+ * builder-health scorecard, the target backlog, the alert ring …), assembles
+ * the on-wire Telegram string, and degrades each section best-effort (a failing
+ * reader → an `n/a` line, never a thrown error) so the heartbeat ALWAYS ships.
  *
- * They were lifted out of `digest-format.ts` so that file's documented contract
- * — pure assembly grammar, no timers, no Telegram calls, no dynamic imports,
- * no Redis / usage-tracker / GitHub I/O — becomes literally true. This module is
+ * It was lifted out of `digest-format.ts` so that file's documented contract —
+ * pure assembly grammar, no timers, no Telegram calls, no dynamic imports, no
+ * Redis / usage-tracker / GitHub I/O — becomes literally true. This module is
  * named after its body (the async fan-out), mirroring the `notify.ts` /
  * `notify-format.ts` split (issue #1512) and the health `fan-out.ts` precedent
- * (issues #2039 / #2089).
+ * (issues #2039 / #2089). The once-a-week weekly summary — which shared no
+ * helpers, types, or callers with the daily heartbeat — now lives in the
+ * sibling `src/digest-weekly.ts` leaf (issue #3394).
  *
  * Each reader is injectable via `deps` (defaulting to the real import), the same
- * pattern as `src/aggregators/builder-health.ts`, so both assemblers stay
+ * pattern as `src/aggregators/builder-health.ts`, so the assembler stays
  * unit-testable without Redis, the usage tracker, or GitHub. The on-wire output
  * is byte-identical to the pre-extraction `digest-format.ts` — this is a
  * boundary realignment, not a format change.
@@ -36,9 +38,6 @@ import {
 import { getUsage as defaultGetUsage } from "./cost/index.ts";
 import { getBacklogCounts as defaultGetBacklogCounts } from "./backlog/reads.ts";
 import { readRecentAlerts as defaultReadRecentAlerts } from "./redis/alerts.ts";
-import { getMetricsTrend as defaultGetMetricsTrend } from "./metrics/trend.ts";
-import { getFixFeatureRatio as defaultGetFixFeatureRatio } from "./metrics/aggregate.ts";
-import { getCurrentMilestoneProgress as defaultGetCurrentMilestoneProgress } from "./config/roadmap.ts";
 
 /**
  * Injectable readers for `buildDailyHeartbeat`. Each defaults to the real
@@ -193,92 +192,6 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
     lines.push(`*Alerts (24h):* ${count}${count > 0 ? " — see the 4h alert digest" : ""}`);
   } catch (err: any) {
     lines.push(`*Alerts (24h):* n/a (${err?.message || err})`);
-  }
-
-  return lines.filter(Boolean).join("\n");
-}
-
-/**
- * Injectable readers for `buildWeeklySummary`. Each defaults to the real
- * module import, so the production wrapper calls `buildWeeklySummary()` with
- * no args; tests pass stubs to exercise the grammar without Redis or GitHub.
- * Mirrors the `DailyHeartbeatDeps` pattern above (and
- * `src/aggregators/builder-health.ts`).
- */
-export interface WeeklySummaryDeps {
-  getMetricsTrend?: (n: number) => Promise<any[]>;
-  getFixFeatureRatio?: (n: number) => Promise<any>;
-  getCurrentMilestoneProgress?: () => Promise<any>;
-  getBacklogCounts?: () => Promise<any>;
-  now?: () => number;
-}
-
-/**
- * Build a weekly progress summary for the operator (issue #1412 — moved out of
- * `src/digest.ts` into the pure-core seam, then into this async fan-out module
- * in #2215).
- *
- * Returns the assembled Telegram string, or `null` when no metrics were
- * recorded in the last 7 days. Readers are injectable via `deps` (defaulting
- * to the real imports) so the assembly grammar is testable without Redis or
- * GitHub — the production wrapper in `src/digest.ts` calls it with no args.
- *
- * The on-wire output is unchanged from the pre-extraction `digest.ts`.
- */
-export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<string | null> {
-  const now = deps.now ?? (() => Date.now());
-  const getMetricsTrend = deps.getMetricsTrend ?? defaultGetMetricsTrend;
-  const getFixFeatureRatio = deps.getFixFeatureRatio ?? defaultGetFixFeatureRatio;
-  const getCurrentMilestoneProgress =
-    deps.getCurrentMilestoneProgress ?? defaultGetCurrentMilestoneProgress;
-  const getBacklogCounts = deps.getBacklogCounts ?? defaultGetBacklogCounts;
-
-  const trend = await getMetricsTrend(50);
-  const weekAgo = now() - 7 * 24 * 60 * 60 * 1000;
-  const thisWeek = trend.filter(m => {
-    const t = m.recordedAt ? new Date(m.recordedAt).getTime() : 0;
-    return t > weekAgo;
-  });
-
-  if (thisWeek.length === 0) return null;
-
-  const merged = thisWeek.filter(m => parseInt(m.tasksMerged) > 0).length;
-  const failed = thisWeek.filter(m => parseInt(m.tasksFailed) > 0).length;
-  const rolledBack = thisWeek.filter(m => m.rolledBack === true || m.rolledBack === "true").length;
-  const abandoned = thisWeek.filter(m => parseInt(m.tasksAbandoned) > 0).length;
-  const ratio = await getFixFeatureRatio(thisWeek.length);
-  const milestone = await getCurrentMilestoneProgress();
-  const counts = await getBacklogCounts();
-
-  const lines = [
-    `📈 *Hydra Weekly Summary*`,
-    ``,
-    `*Cycles:* ${thisWeek.length} run — ${merged} merged, ${failed} failed, ${rolledBack} rolled back, ${abandoned} abandoned`,
-    `*Fix:Feature ratio:* ${ratio.fixes}:${ratio.features} (${ratio.ratio}:1)`,
-  ];
-
-  if (milestone) {
-    lines.push(`*Milestone:* ${milestone.name} — ${milestone.pctComplete}% (${milestone.done}/${milestone.total} epics)`);
-    if (milestone.remainingTitles.length > 0) {
-      lines.push(`*Remaining:* ${milestone.remainingTitles.slice(0, 3).join(", ")}${milestone.remainingTitles.length > 3 ? ` +${milestone.remainingTitles.length - 3} more` : ""}`);
-    }
-  }
-
-  lines.push(`*Backlog:* ${counts.queued || 0} queued, ${counts.blocked || 0} blocked, ${counts.triage || 0} triage`);
-  lines.push("");
-
-  // Warnings
-  if (ratio.ratio > 2) {
-    lines.push(`⚠️ Fix ratio is ${ratio.ratio}:1 — most cycles are fixing previous work`);
-  }
-  if (rolledBack >= 3) {
-    lines.push(`⚠️ ${rolledBack} rollbacks this week — executor quality needs attention`);
-  }
-  if ((counts.blocked || 0) > 0) {
-    lines.push(`⚠️ ${counts.blocked} items blocked — check Telegram for unblock commands`);
-  }
-  if (milestone && milestone.pctComplete === 100) {
-    lines.push(`🎉 Milestone "${milestone.name}" is 100% complete — ready for operator review`);
   }
 
   return lines.filter(Boolean).join("\n");
