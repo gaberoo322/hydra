@@ -20,12 +20,15 @@
  *   1. **The repo handle** — {@link resolveGithubRepo} (env-overridable via
  *      `HYDRA_GITHUB_REPO`, default `gaberoo322/hydra`). Moving repos is now a
  *      one-env-var change, not a 10-file sweep.
- *   2. **The canonical field set + typed return shapes** — {@link IssueRow} /
- *      {@link PrRow}, parsed once by {@link parseIssueRows} / {@link parsePrRows}.
+ *   2. **The canonical issue field set + typed return shape** — {@link IssueRow},
+ *      parsed once by {@link parseIssueRows}. (The PR-list shapes `PrRow` /
+ *      `parsePrRows` were extracted to the focused `./prs.ts` Module, issue
+ *      #3370, and are re-exported from here for back-compat.)
  *   3. **The label-filtered / search-windowed list queries** the aggregators
  *      actually need ({@link listIssuesByLabel}, {@link listIssuesBySearch},
- *      {@link listOpenPrs}, {@link viewPr}), reading through the Adapter's
- *      `ghJson`.
+ *      {@link listOpenIssues}, {@link viewPr}), reading through the Adapter's
+ *      `ghJson`. (The PR-list query `listOpenPrs` lives in `./prs.ts` and is
+ *      re-exported here.)
  *
  * Label *classification* does NOT live here: the provenance-label vocabulary
  * and classifier (`provenanceFromLabels`) belong to the Dispatch-Class
@@ -96,19 +99,6 @@ export function resolveGithubRepo(override?: string): string {
 export const ISSUE_JSON_FIELDS = "number,title,url,createdAt,labels,body,state";
 
 /**
- * The canonical open-PR list `--json` field set. Covers BOTH consumer shapes:
- *   - the CI-rollup view (`updatedAt`, `statusCheckRollup`) the merge-queue
- *     readers need, and
- *   - the lifecycle view (`state`, `headRefName`, `createdAt`) the PR Lifecycle
- *     Bridge (`src/autopilot/pr-lifecycle-bridge.ts`, issue #673) needs to diff
- *     OPEN→MERGED/CLOSED transitions and attribute an event to a head branch.
- * Over-fetching a handful of small fields is cheaper than maintaining two
- * divergent field lists — the same posture {@link ISSUE_JSON_FIELDS} takes.
- */
-const PR_LIST_JSON_FIELDS =
-  "number,state,title,url,headRefName,createdAt,updatedAt,statusCheckRollup";
-
-/**
  * One GitHub issue as the read seam returns it. A defensively-parsed superset
  * of the fields the aggregators consume; absent fields are normalized
  * (`title`/`url` synthesized from `number`, `labels` flattened to `string[]`).
@@ -131,37 +121,6 @@ export interface IssueRow {
    * (issue #934).
    */
   updatedAt?: string;
-}
-
-/** One open PR as the read seam returns it, including its CI status rollup. */
-export interface PrRow {
-  number: number;
-  title: string;
-  url: string;
-  updatedAt: string;
-  /**
-   * Upper-cased PR state (`OPEN` / `MERGED` / `CLOSED`), populated when the
-   * caller requested `state` in its `--json` field set. Defaults to `OPEN` when
-   * the field is present-but-unrecognized, and `""` when not requested at all.
-   * Consumed by the PR Lifecycle Bridge (issue #673) to diff state transitions.
-   */
-  state: string;
-  /**
-   * Head-branch name, populated only when the caller requested `headRefName`.
-   * The lifecycle bridge extracts the dispatch task_id from it; `""` otherwise.
-   */
-  headRefName: string;
-  /**
-   * ISO-8601 created timestamp, populated only when the caller requested
-   * `createdAt`; `""` otherwise.
-   */
-  createdAt: string;
-  /** Raw status-check rollup entries; the caller decides which conclusions count as failing. */
-  statusCheckRollup: Array<{
-    conclusion?: string;
-    name?: string;
-    context?: string;
-  }>;
 }
 
 /**
@@ -233,55 +192,6 @@ export function parseIssueRows(parsed: unknown, repo: string): IssueRow[] {
   return out;
 }
 
-/**
- * Parse a `gh pr list --json` payload into {@link PrRow}s. Rows without a
- * positive integer `number` are dropped; `statusCheckRollup` is normalized to
- * an array of `{conclusion,name,context}`. Never throws.
- */
-export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
-  if (!Array.isArray(parsed)) return [];
-  const out: PrRow[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      state?: unknown;
-      title?: unknown;
-      url?: unknown;
-      headRefName?: unknown;
-      createdAt?: unknown;
-      updatedAt?: unknown;
-      statusCheckRollup?: unknown;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const rollupRaw = Array.isArray(c.statusCheckRollup) ? c.statusCheckRollup : [];
-    const statusCheckRollup = rollupRaw
-      .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
-      .map((r) => ({
-        conclusion: typeof r.conclusion === "string" ? r.conclusion : undefined,
-        name: typeof r.name === "string" ? r.name : undefined,
-        context: typeof r.context === "string" ? r.context : undefined,
-      }));
-    out.push({
-      number,
-      // State requested → upper-cased; absent → "" (the lifecycle bridge maps
-      // an unrecognized-but-present value to OPEN at its own layer).
-      state: typeof c.state === "string" ? c.state.toUpperCase() : "",
-      title: typeof c.title === "string" ? c.title : `PR #${number}`,
-      url:
-        typeof c.url === "string"
-          ? c.url
-          : `https://github.com/${repo}/pull/${number}`,
-      headRefName: typeof c.headRefName === "string" ? c.headRefName : "",
-      createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
-      updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : "",
-      statusCheckRollup,
-    });
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // 3. The list / view queries — read through the Adapter's ghJson
 // ---------------------------------------------------------------------------
@@ -302,9 +212,15 @@ export interface IssueQueryOptions {
   maxBuffer?: number;
 }
 
-const DEFAULT_LIMIT = 100;
-const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
+/**
+ * Default `--limit` for list queries. Exported so the extracted PR-list surface
+ * (`./prs.ts`, issue #3370) shares the seam's one spelling.
+ */
+export const DEFAULT_LIMIT = 100;
+/** Default per-call timeout (ms). Exported for `./prs.ts` — see {@link DEFAULT_LIMIT}. */
+export const DEFAULT_TIMEOUT_MS = 10_000;
+/** Default per-call stdout cap (bytes). Exported for `./prs.ts` — see {@link DEFAULT_LIMIT}. */
+export const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
 
 function issueListArgs(
   repo: string,
@@ -388,34 +304,27 @@ export async function listOpenIssues(
   return { ok: true, rows: parseIssueRows(res.data, repo) };
 }
 
+// ---------------------------------------------------------------------------
+// 3a. The PR-list surface — re-exported from the focused prs Module (#3370)
+// ---------------------------------------------------------------------------
+
 /**
- * List open PRs with their CI status rollup. Never throws — returns the
- * discriminated {@link IssueReadResult} of {@link PrRow}.
+ * The PR-list read surface (`PrRow`, `parsePrRows`, `PR_LIST_JSON_FIELDS`,
+ * `listOpenPrs`, `listOpenPrsOrEmpty`) lives in its own Module (`./prs.ts`,
+ * issue #3370) — it serves the PR Lifecycle Bridge, the lifecycle snapshot, and
+ * the stuck-items aggregator, and evolves on a distinct change axis (CI-rollup +
+ * head-branch fields for OPEN PRs) from the issue-list surface. It is re-exported
+ * here so the public read-seam surface (`from "../github/issues.ts"`) is
+ * unchanged for the existing consumers and the test surface. `prs.ts` imports
+ * {@link resolveGithubRepo} and the shared {@link IssueReadResult} /
+ * {@link isIssueReadFailure} back from this module (a benign call-time ESM cycle
+ * — see `./prs.ts` for the contract).
  */
-export async function listOpenPrs(
-  opts: IssueQueryOptions = {},
-): Promise<IssueReadResult<PrRow>> {
-  const repo = resolveGithubRepo(opts.repo);
-  if (!repo) return { ok: true, rows: [] };
-  const args = [
-    "pr",
-    "list",
-    "--repo",
-    repo,
-    "--state",
-    opts.state ?? "open",
-    "--limit",
-    String(opts.limit ?? DEFAULT_LIMIT),
-    "--json",
-    opts.fields ?? PR_LIST_JSON_FIELDS,
-  ];
-  const res = await ghJson<unknown>(args, execOpts(opts));
-  if (isGhFailure(res)) return { ok: false, code: res.code };
-  return { ok: true, rows: parsePrRows(res.data, repo) };
-}
+export { PR_LIST_JSON_FIELDS, parsePrRows, listOpenPrs, listOpenPrsOrEmpty } from "./prs.ts";
+export type { PrRow } from "./prs.ts";
 
 // ---------------------------------------------------------------------------
-// 3a. Per-PR view — re-exported from the focused view-pr Module (#2224)
+// 3b. Per-PR view — re-exported from the focused view-pr Module (#2224)
 // ---------------------------------------------------------------------------
 
 /**
@@ -485,19 +394,6 @@ export async function listIssuesBySearchOrEmpty(
   const res = await listIssuesBySearch(search, opts);
   if (isIssueReadFailure(res)) {
     console.error(`[${logPrefix}] gh issue list --search "${search}" failed (${res.code})`);
-    return [];
-  }
-  return res.rows;
-}
-
-/** Like {@link listOpenPrs} but degrades to `[]` after logging. */
-export async function listOpenPrsOrEmpty(
-  logPrefix: string,
-  opts: IssueQueryOptions = {},
-): Promise<PrRow[]> {
-  const res = await listOpenPrs(opts);
-  if (isIssueReadFailure(res)) {
-    console.error(`[${logPrefix}] gh pr list failed (${res.code})`);
     return [];
   }
   return res.rows;
