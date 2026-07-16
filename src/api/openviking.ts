@@ -6,10 +6,11 @@ import { Router } from "express";
 // OpenViking Request Adapter's transport discipline plus this reader's metrics
 // and zero-result fallback.
 import {
-  getOvSearchMetrics,
   trackedOvSearch,
   loadKnowledgeBaseForPrompt,
 } from "../knowledge-base/ov-search.ts";
+// Issue #3344: the metrics read surface lives in the focused counter leaf.
+import { getOvSearchMetrics } from "../knowledge-base/ov-search-counter.ts";
 import { getCoverageStats } from "../knowledge-base/indexer.ts";
 import { OpenVikingSearchQuerySchema } from "../schemas/openviking.ts";
 import { KnowledgeQuerySchema } from "../schemas/learning.ts";

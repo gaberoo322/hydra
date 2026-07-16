@@ -12,11 +12,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
+import { buildFallbackQuery } from "../src/knowledge-base/ov-search.ts";
 import {
-  buildFallbackQuery,
   getOvSearchMetrics,
   resetOvSearchMetrics,
-} from "../src/knowledge-base/ov-search.ts";
+} from "../src/knowledge-base/ov-search-counter.ts";
 
 describe("OV search metrics", () => {
   test("getOvSearchMetrics returns zeroes when no searches have occurred", () => {
