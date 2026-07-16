@@ -129,7 +129,62 @@ Drop a candidate before it becomes an issue when ANY of:
 
 ### 4. Emit issues (via hydra-prd or to-tickets — labelled `needs-triage`)
 
-Turn the surviving candidates into GitHub issues. Two emission paths, pick by candidate count:
+Turn the surviving candidates into GitHub issues. The **fog-gate branch (4.0) runs FIRST** — a pure additive prefix UPSTREAM of the `≥3 → hydra-prd` / `1–2 → to-tickets` routing: a *foggy + big* candidate is charted as a **wayfinder destination-pending map**, not filed as an epic. Only when the fog-gate does **not** fire does the candidate flow UNCHANGED into the two emission paths below.
+
+#### 4.0 Fog-gate branch — chart a destination-pending map (ADR-0029)
+
+**Run this branch before choosing an emission path.** Per [ADR-0029](../adr/0029-autopilot-charts-and-works-wayfinder-maps.md) Decision 1 + Decision 4's routing decision-tree, a *foggy + big* candidate is neither a `needs-triage` issue nor an epic — it is a **map**: an epic is *decided-and-needs-slicing*, a map is *undecided-and-needs-charting*. `hydra-architecture-scan` and `hydra-research` are the only two fog-native producers that get this branch (`discover` / `retro` / `cleanup` keep filing normal issues — ADR-0029 Decision 1).
+
+**Fog-gate predicate — a boolean AND (both must hold; size alone never charts a map):**
+
+1. **Fog** — the candidate self-asserts **≥2 unresolved *decisions*** (open questions the operator has not made — *not* implementation slices). A deepening candidate with a clear, single solution is decided; even if it is large it is an epic (or `needs-triage` issue), NOT a map. A candidate whose *Solution* section still names open design forks (which seam, which owning module, whether to split) is foggy.
+2. **Size floor** — the candidate clears the floor: **~≥4 slices OR it spans ≥2 subsystems** (the exact number is a tuning knob).
+
+When the AND holds, chart a map; otherwise fall through to the `≥3 → hydra-prd` / `1–2 → to-tickets` routing below (untouched).
+
+**Dedup BEFORE charting (acceptance criterion 3).** Reuse the SAME shared backfill dedup baseline `BASELINE_TITLES` built in step 3's filter — which is open across every backfill label set (INCLUDING open `wayfinder:map` issues) plus recently-closed — so an overlapping candidate that is already charted produces no second map:
+
+```bash
+# BASELINE_TITLES was built in step 3 (open across every backfill label set,
+# incl. open wayfinder:map issues, + closed within 7 days). $CANDIDATE = the
+# candidate's destination/map title.
+node --experimental-strip-types scripts/ci/issue-dedup.ts \
+  "$CANDIDATE" "${BASELINE_TITLES[@]}"
+# → {"duplicate":true,...}  → an overlapping map/epic already exists; DO NOT chart
+# → {"duplicate":false,...} → proceed to chart the map
+```
+
+If the candidate is a duplicate, skip charting (note the friction in the report). Otherwise chart the destination-pending map:
+
+```bash
+gh issue create --repo gaberoo322/hydra \
+  --title "<destination the effort finds its way to>" \
+  --label "wayfinder:map" --label "wayfinder:destination-pending" \
+  --body "$(cat <<'EOF'
+## Destination
+
+<1-2 lines naming the spec / locked decision / in-place change this deepening
+effort finds its way to — the thing that is TRUE when the map is done.>
+
+## Not yet specified
+
+<the fog sketch: the ≥2 open design decisions the operator has not made yet, as
+prose. This is the frontier that ticket-charting will later resolve — NOT tickets.>
+EOF
+)"
+```
+
+Then append the map's title to `BASELINE_TITLES` so later candidates in THIS run dedup against it too (mirroring step 3's in-run append).
+
+**Invariants (ADR-0029 Decision 1 + 3 + 5):**
+- The map carries BOTH labels `wayfinder:map` AND `wayfinder:destination-pending`, and its body is `## Destination` + `## Not yet specified` **ONLY** — **zero tickets**, no `## Sub-issues` block, no `## Decisions so far` content. Draft scope is destination-only: the gate sits between wayfinder's name-destination and map-the-frontier steps, so ticket-charting is the first working action AFTER the operator approves the destination (an amendment strands no tickets).
+- The `wayfinder:map` + `wayfinder:destination-pending` label pair is the exact contract the already-merged frontier collector (`scripts/autopilot/collect-state.sh`) reads: it counts a map's AFK tickets as dispatchable ONLY when the map LACKS `wayfinder:destination-pending`. *Approve* = the operator removes the label; the producer emits exactly what the collector recognizes.
+- **Off-radar rule (ADR-0029 Decision 3):** the map carries NONE of this skill's usual `enhancement` / `needs-triage` / `architecture-scan` labels — `wayfinder:*` tickets stay invisible to `hydra-sweep` and the orphan-backstop. This is the ONE architecture-scan emission that is NOT labelled `needs-triage` + `architecture-scan`; dispatchability comes from the dedicated map-frontier signal, not from a lifecycle label. The operator drains destination-pending maps via the `hydra-review` bucket.
+- The board-saturation back-stop still applies before charting: if the board is already saturated with `architecture-scan` issues, emit nothing (a map is still emission).
+
+#### 4.1 Emission paths (non-fog candidates)
+
+For every candidate the fog-gate did NOT chart, pick by candidate count:
 
 - **≥ 3 related candidates → `hydra-prd`.** Build a `PrdInput` JSON (see `docs/operator-playbooks/hydra-prd.md`) where each candidate is one slice: `whatToBuild` = the **Solution**, `acceptanceCriteria` from the **Benefits** (e.g. "the X module is testable through its interface", "npm test passes"), `filesInScope` = the candidate's **Files**, and `filesOutOfScope` listing the Untouchable Core. Invoke `hydra-prd --apply --input=/tmp/arch-scan-prd.json`. It produces one parent epic + N children, each stamped `Expected tier: N` from `/api/tier`, and parseable by `hydra-epic-close`. **Override the child label**: `hydra-prd` defaults children to `ready-for-agent` — for architecture-scan output the children MUST be `needs-triage` instead (see the labelling rule below). If `hydra-prd` cannot override the child label in your invocation, fall back to the `to-tickets` path so nothing is auto-routed to `ready-for-agent`, then re-label any children with `gh issue edit --add-label needs-triage --remove-label ready-for-agent`.
 - **1–2 standalone candidates → `to-tickets`** (or a direct `gh issue create`). Each candidate becomes one issue using the body schema below.
