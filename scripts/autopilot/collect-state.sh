@@ -661,6 +661,85 @@ try:
 except Exception:
   print('false')" || echo "false"
 
+# Wayfinder map frontier — AFK working path (issue #3351, epic #3350, ADR-0029).
+#
+# The single AFK working class for wayfinder maps (`wayfinder_orch`) needs the
+# NEXT unblocked frontier ticket pre-resolved into state, because decide.py stays
+# PURE (AC #3: no gh/curl/GraphQL inside decide.py — the enumeration lives ONLY
+# here). This block does exactly that pre-resolution and emits two signals:
+#
+#   - `wayfinder_orch_frontier`     — an `issue-<N>` ref for the first AFK-typed
+#     (`wayfinder:research` | `wayfinder:task`), unblocked (all blocked-by
+#     closed), unclaimed (open + unassigned) frontier sub-issue across all open
+#     APPROVED wayfinder maps — or `none` when there is nothing to work.
+#   - `wayfinder_orch_ticket_type`  — `research` | `task` for that ticket, so the
+#     playbook can resolve ticket-type -> skill at dispatch time
+#     (research -> /hydra-issue-research, task -> /hydra-dev).
+#
+# A map is APPROVED when it carries `wayfinder:map` but NOT the draft gate label
+# `wayfinder:destination-pending` (ADR-0029: a destination-pending map is an
+# unapproved draft with no worked tickets yet). The `wayfinder:*` off-radar rule
+# is preserved — tickets carry zero standard lifecycle labels, so this dedicated
+# frontier signal is their ONLY AFK dispatch path.
+#
+# Two-step, mirroring the doc's rate-budget guidance (REST list to pick maps,
+# GraphQL only for the sub-issue/blocked-by walk):
+#   1. REST `gh issue list` for open `wayfinder:map` issues (cheap, no GraphQL).
+#   2. Per approved map, the native GraphQL frontier query (subIssues + blockedBy
+#      + assignees) — the exact query in docs/agents/issue-tracker.md. We stop at
+#      the FIRST eligible ticket (one-per-fire; the 1h cooldown paces the rest).
+#
+# Best-effort: any failure (gh down, GraphQL error, no maps) degrades to
+# `none` — the suppressing direction (never dispatch a worker with no resolved
+# target). Maps are walked oldest-first (stable ordering) so the frontier pick
+# is deterministic across ticks.
+echo -n "wayfinder_orch_frontier="
+WF_MAPS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
+  --json number,labels --jq '
+    [ .[]
+      | select((.labels | map(.name) | index("wayfinder:destination-pending")) | not)
+      | .number ]
+    | sort' 2>/dev/null || true)
+WF_FRONTIER="none"
+WF_TICKET_TYPE=""
+if [ -n "$WF_MAPS_JSON" ]; then
+  WF_MAP_NUMS=$(printf '%s' "$WF_MAPS_JSON" | python3 -c "
+import json, sys
+try:
+  for n in json.load(sys.stdin):
+    print(int(n))
+except Exception:
+  pass
+" 2>/dev/null || true)
+  for map_n in $WF_MAP_NUMS; do
+    # Native GraphQL frontier query (docs/agents/issue-tracker.md): open,
+    # unassigned sub-issues whose blockers are all closed, restricted to the two
+    # AFK-typed labels (research | task); grilling/prototype are HITL and route
+    # to /wayfinder, never here. Emit the first eligible ticket's number+type.
+    WF_PICK=$(gh api graphql -F n="$map_n" -f query='query($n:Int!){
+      repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
+        subIssues(first:100){ nodes { number state
+          labels(first:20){nodes{ name }}
+          assignees(first:1){totalCount}
+          blockedBy(first:20){nodes{ number state }} } } } } }' \
+      --jq '.data.repository.issue.subIssues.nodes
+            | map(select(.state=="OPEN" and .assignees.totalCount==0
+                and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
+            | map({number, type: ([.labels.nodes[].name
+                | select(. == "wayfinder:research" or . == "wayfinder:task")] | .[0])})
+            | map(select(.type != null))
+            | .[0] | if . == null then "" else "\(.number) \(.type | sub("wayfinder:"; ""))" end' \
+      2>/dev/null || true)
+    if [ -n "$WF_PICK" ]; then
+      WF_FRONTIER="issue-$(printf '%s' "$WF_PICK" | cut -d' ' -f1)"
+      WF_TICKET_TYPE=$(printf '%s' "$WF_PICK" | cut -d' ' -f2)
+      break
+    fi
+  done
+fi
+echo "$WF_FRONTIER"
+echo "wayfinder_orch_ticket_type=${WF_TICKET_TYPE}"
+
 # Tool Scout — Phase C alert-driven trigger (issue #486).
 #
 # `scout_alert_eligible_count` is the number of recent `hydra:alerts`

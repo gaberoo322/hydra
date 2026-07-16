@@ -2982,3 +2982,181 @@ describe("decide.py — wire_or_retire_target signal class (issue #2722)", () =>
     assert.equal(a.skill, "hydra-wire-or-retire");
   });
 });
+
+// ---------------------------------------------------------------------------
+// wayfinder_orch signal class (issue #3351, epic #3350, ADR-0029)
+// ---------------------------------------------------------------------------
+//
+// The single AFK working class for wayfinder maps. collect-state.sh owns the
+// native GraphQL frontier enumeration and pre-resolves the next AFK-typed,
+// unblocked, unclaimed frontier ticket into two signals — `wayfinder_orch_frontier`
+// (an `issue-<N>` ref, or `none`) and `wayfinder_orch_ticket_type` (research|task).
+// decide.py stays PURE: it reads those precomputed signals verbatim (AC #3 — no
+// gh/curl/GraphQL inside decide.py) and emits a pure `dispatch` action referencing
+// the pre-resolved ticket, threading the ticket ref + type into prompt_args so the
+// playbook can resolve ticket-type -> skill at dispatch time.
+//
+// This suite is the decide.py-golden-fixture half of AC #2: frontier-available
+// signal present + cooldown satisfied -> wayfinder_orch dispatch action; absent
+// signal -> no dispatch.
+//
+// Contract points this suite pins:
+//  - fires on wayfinder_orch_frontier (an issue-<N> ref), dispatching with the
+//    ticket + ticket_type threaded into prompt_args
+//  - is a NO-OP without the signal, and when the signal is the literal `none`
+//  - respects the 1h cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"])
+//  - is orch-scope: EXCLUDED under target-only, ALLOWED under orch-only + all
+//  - OMITS the model param (inherit parent per #1093 — authoring/judgment work)
+//  - defaults ticket_type to "research" when collect-state.sh didn't stamp one
+//
+// New TOP-LEVEL describe with its own lifecycle (decide.py is a pure CLI over
+// temp files — nothing to tear down — but kept top-level per the CLAUDE.md
+// authoring rule).
+// ---------------------------------------------------------------------------
+describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
+  const HOUR = 60 * 60;
+  const now = Math.floor(Date.now() / 1000);
+
+  function wfState(over: Record<string, unknown> = {}): any {
+    // signal_last_fired must include the class key at 0 (cooled) by default so
+    // the 1h cooldown gate does not spuriously suppress the dispatch.
+    return baseState({
+      signals: {
+        wayfinder_orch_frontier: "issue-4242",
+        wayfinder_orch_ticket_type: "research",
+      },
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wayfinder_orch: 0,
+      },
+      ...over,
+    });
+  }
+
+  test("fires on wayfinder_orch_frontier (research) — threads ticket + type into prompt_args", () => {
+    const plan = runDecide(wfState(), null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "wayfinder_orch must dispatch when a frontier ticket is pre-resolved and cooled");
+    // decide.py emits the taxonomy default skill; the playbook overrides per type.
+    assert.equal(a.skill, "hydra-issue-research");
+    assert.ok(a.prompt_args, "dispatch must carry prompt_args referencing the pre-resolved ticket");
+    assert.equal(a.prompt_args.ticket, "issue-4242", "prompt_args.ticket must be the pre-resolved frontier ref");
+    assert.equal(a.prompt_args.ticket_type, "research", "prompt_args.ticket_type must carry the frontier type");
+  });
+
+  test("carries the task ticket_type verbatim for task frontier tickets", () => {
+    const state = wfState({
+      signals: {
+        wayfinder_orch_frontier: "issue-4243",
+        wayfinder_orch_ticket_type: "task",
+      },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "wayfinder_orch must dispatch on a task-typed frontier ticket");
+    assert.equal(a.prompt_args.ticket, "issue-4243");
+    assert.equal(a.prompt_args.ticket_type, "task", "task type must pass through so the playbook routes to hydra-dev");
+  });
+
+  test("does NOT fire without the wayfinder_orch_frontier signal (AC #2 absent-signal arm)", () => {
+    const state = wfState({ signals: {} });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      "no pre-resolved frontier ticket → no wayfinder dispatch",
+    );
+  });
+
+  test("does NOT fire when the frontier signal is the literal `none`", () => {
+    const state = wfState({
+      signals: { wayfinder_orch_frontier: "none" },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      "a `none` frontier (no eligible ticket on any approved map) must not dispatch",
+    );
+  });
+
+  test("defaults ticket_type to research when collect-state.sh did not stamp one", () => {
+    const state = wfState({
+      signals: { wayfinder_orch_frontier: "issue-4244" },  // no ticket_type
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "an unstamped ticket_type must still dispatch (default research)");
+    assert.equal(a.prompt_args.ticket_type, "research", "missing ticket_type defaults to research (matches the taxonomy default skill)");
+  });
+
+  test("OMITS the model param — inherit parent per #1093 (authoring/judgment work)", () => {
+    const plan = runDecide(wfState(), null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "expected a wayfinder_orch dispatch");
+    assert.equal("model" in a, false, "wayfinder_orch dispatch must not pin a model (#1093)");
+    assert.equal(a.prompt_args?.model, undefined, "no model in prompt_args either");
+  });
+
+  test("respects the 1h cooldown (SIGNAL_COOLDOWNS)", () => {
+    // Fired 30m ago → still inside the 1h window → suppressed.
+    const state = wfState({
+      started_epoch: now,
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wayfinder_orch: now - 30 * 60,
+      },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      "within the 1h cooldown window wayfinder_orch must not re-dispatch",
+    );
+  });
+
+  test("fires again once the 1h cooldown has elapsed", () => {
+    const state = wfState({
+      started_epoch: now,
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        wayfinder_orch: now - (HOUR + 60),
+      },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "past the 1h cooldown wayfinder_orch dispatches again");
+    assert.equal(a.skill, "hydra-issue-research");
+  });
+
+  test("is EXCLUDED under target-only scope (orch-scope class)", () => {
+    const state = wfState({ scope: "target-only" });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      "target-only scope must exclude the orch-scope wayfinder_orch class",
+    );
+  });
+
+  test("is ALLOWED under orch-only scope", () => {
+    const state = wfState({ scope: "orch-only" });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "wayfinder_orch");
+    assert.ok(a, "orch-only scope must allow the orch-scope wayfinder_orch class");
+    assert.equal(a.skill, "hydra-issue-research");
+  });
+
+  test("wayfinder_orch in burned_classes is NOT re-dispatched (mirrors #432)", () => {
+    const state = wfState({ burned_classes: ["wayfinder_orch"] });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "wayfinder_orch"),
+      undefined,
+      "burned signal class wayfinder_orch must not be re-dispatched",
+    );
+  });
+});

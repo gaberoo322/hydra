@@ -185,6 +185,15 @@
       "cooldownSeconds": 604800,
       "model": null,
       "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "name": "wayfinder_orch",
+      "kind": "signal",
+      "skill": "hydra-issue-research",
+      "scope": "orch",
+      "cooldownSeconds": 3600,
+      "model": null,
+      "sourcePath": "scripts/autopilot/classes.json"
     }
   ],
   "labels": [
@@ -403,6 +412,11 @@
     {
       "class": "skill_prune",
       "skill": "hydra-skill-prune",
+      "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "class": "wayfinder_orch",
+      "skill": "hydra-issue-research",
       "sourcePath": "scripts/autopilot/classes.json"
     }
   ]

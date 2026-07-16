@@ -679,7 +679,12 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // `design_qa_target` (7d — same bug class), bumping the total to 18
   // (7 pipeline + 11 signal). #2949 added the 7th long-cooldown signal class
   // `skill_prune` (7d — same bug class), bumping the total to 19
-  // (7 pipeline + 12 signal).
+  // (7 pipeline + 12 signal). NOTE (issue #3351): `wayfinder_orch` is a NEW
+  // signal class in classes.json but is DELIBERATELY NOT in this bootstrap seed —
+  // it is a 1h class (like cleanup_orch's cadence but map-anchored, not
+  // carry-forward-sensitive), so a missing signal_last_fired entry is treated as
+  // never-fired (immediately eligible) with no #2575 re-run hazard. The bootstrap
+  // seed set is intentionally the 12 carry-forward-sensitive classes only.
   test("emits exactly 7 pipeline slot names + 12 signal_last_fired names (19 keys total)", () => {
     const tmp = makeTempState();
     try {

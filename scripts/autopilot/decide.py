@@ -568,6 +568,13 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # skill_prune is excluded, mirroring scout_orch / architecture_orch /
     # retro_orch / cleanup_orch above.
     "skill_prune",
+    # wayfinder_orch (issue #3351, epic #3350, ADR-0029) works the next unblocked
+    # frontier ticket on an open approved orchestrator `wayfinder:map` — orch-scope
+    # by definition (the maps live on the orchestrator GH board). Under
+    # `target-only` the autopilot stays out of orch work, so wayfinder_orch is
+    # excluded, mirroring scout_orch / architecture_orch / retro_orch / cleanup_orch
+    # / skill_prune above.
+    "wayfinder_orch",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -2060,6 +2067,15 @@ def _rule_signal_classes(
         # cooldown, not the one-per-turn stagger — like cleanup_orch). Registered
         # last as a lowest-priority signal class — spare capacity only.
         "skill_prune",
+        # wayfinder_orch (issue #3351, epic #3350, ADR-0029) — the single AFK
+        # working class for wayfinder maps. Fires on the pre-resolved
+        # `wayfinder_orch_frontier` signal (collect-state.sh owns the native
+        # GraphQL frontier enumeration; decide.py reads the resolved ticket ref
+        # verbatim — the signal-seam discipline). 1h class cooldown, one frontier
+        # ticket per fire. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not
+        # idle-backfill). Registered last as a lowest-priority signal class —
+        # spare capacity only, never preempting a pipeline dispatch.
+        "wayfinder_orch",
     ):
         if dispatch_blocked:
             out.events.append(
@@ -3182,6 +3198,66 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 reason="orch board idle — eval-gated skill prune backfill",
             )
         return None
+    if sig == "wayfinder_orch":
+        # Issue #3351 (epic #3350, ADR-0029 — autopilot charts & works wayfinder
+        # maps). The single AFK working class for wayfinder maps: work the next
+        # unblocked frontier ticket on an open approved orchestrator
+        # `wayfinder:map`. This is the tracer-bullet slice #3351 exercising the
+        # full working path end-to-end on a scratch map.
+        #
+        # SIGNAL-SEAM DISCIPLINE (AC #3): decide.py stays PURE — no gh / curl /
+        # GraphQL here. The native GraphQL frontier enumeration (per open
+        # approved wayfinder:map, walk sub-issues -> first AFK-typed
+        # [wayfinder:research | wayfinder:task], unblocked [all blocked-by
+        # closed], unclaimed ticket) lives ONLY in collect-state.sh, which
+        # pre-resolves the pick into two precomputed signals this selector reads
+        # verbatim:
+        #   - `wayfinder_orch_frontier`     — the resolved `issue-<N>` ticket ref
+        #     (or `none` / absent when no map has an eligible frontier ticket).
+        #   - `wayfinder_orch_ticket_type`  — `research` | `task`, so the playbook
+        #     can resolve ticket-type -> skill at dispatch time
+        #     (research -> /hydra-issue-research, task -> /hydra-dev).
+        #
+        # The 1h class cooldown (SIGNAL_COOLDOWNS["wayfinder_orch"], honored by
+        # the shared signal_is_cooled guard at the top of this function) enforces
+        # one frontier ticket per fire — mirroring the discover/cleanup 1h
+        # backfill cadence. Like cleanup_orch (also 1h) the bootstrap seed is a
+        # benign hardening, not a correctness requirement (a stray extra fire
+        # after a pace-gate relaunch merely works one more frontier step); the
+        # #2575 cooldown-bootstrap bug class bites the LONG-cooldown classes, not
+        # a 1h step. NOT in BACKFILL_SIGNAL_CLASSES (map-anchored, not idle-backfill).
+        #
+        # decide.py emits a PURE dispatch action referencing the pre-resolved
+        # ticket: `skill` defaults to hydra-issue-research (the common frontier
+        # type) and the ticket ref + type are threaded into prompt_args so the
+        # playbook's ticket-type router can override the skill per dispatch and
+        # the worker knows exactly which ticket to resolve. The model param is
+        # OMITTED (inherit the parent per #1093).
+        signals = state.get("signals") if isinstance(state, dict) else None
+        frontier = (
+            signals.get("wayfinder_orch_frontier") if isinstance(signals, dict) else None
+        )
+        if not (isinstance(frontier, str) and frontier and frontier != "none"):
+            # No open approved map has an eligible (AFK-typed, unblocked,
+            # unclaimed) frontier ticket — nothing to work.
+            return None
+        ticket_type = (
+            signals.get("wayfinder_orch_ticket_type") if isinstance(signals, dict) else None
+        )
+        # Default to `research` when collect-state.sh didn't stamp a type — the
+        # taxonomy default skill (hydra-issue-research) matches, so an unstamped
+        # frontier ticket still dispatches safely rather than blocking the path.
+        if ticket_type not in ("research", "task"):
+            ticket_type = "research"
+        return make_dispatch(
+            sig,
+            "hydra-issue-research",
+            prompt_args={"ticket": frontier, "ticket_type": ticket_type},
+            reason=(
+                f"wayfinder map frontier ticket {frontier} ({ticket_type}) "
+                "unblocked and unclaimed — work it"
+            ),
+        )
     return None
 
 
