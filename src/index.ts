@@ -206,7 +206,18 @@ async function main() {
   const wss = new WebSocketServer({ server });
   wss.on("connection", (ws) => {
     eventBus.addWsClient(ws);
-    ws.send(JSON.stringify({ type: "connected", timestamp: new Date().toISOString() }));
+    // `ws.send()` can throw synchronously when the socket is still CONNECTING
+    // (readyState 0) or the write buffer is exhausted (issue #3368). This
+    // acknowledgement is best-effort: a client that misses it re-establishes
+    // via the normal reconnect flow, so isolate the failure here rather than
+    // letting a TypeError crash the connection handler / event loop.
+    try {
+      ws.send(JSON.stringify({ type: "connected", timestamp: new Date().toISOString() }));
+    } catch (err: any) {
+      console.error(
+        `[Hydra] WS connection ack send failed (readyState=${ws.readyState}) — client will reconnect: ${err?.message || err}`,
+      );
+    }
   });
 
   // Heartbeat — detect dead connections
