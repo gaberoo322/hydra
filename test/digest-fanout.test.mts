@@ -74,6 +74,35 @@ describe("buildDailyHeartbeat", () => {
     assert.match(out, /\*Alerts \(24h\):\* n\/a \(redis down\)/);
   });
 
+  it("degrades Throughput+Stagnation to n/a when the FULFILLED scorecard throws during processing — never throws itself (regression #3377/#3379)", async () => {
+    // The scorecard READ resolves (fulfilled), but reading its fields throws.
+    // With the single shared `allSettled` read, only a *rejection* is caught by
+    // the settled-status branch; a throw while processing a fulfilled value must
+    // still be guarded per-section so the heartbeat never throws. A bare
+    // `if (fulfilled) { …access… }` without an inner try/catch would let this
+    // propagate and blank the whole digest.
+    const throwingScorecard: any = {
+      get autonomyRate() {
+        throw new Error("scorecard field boom");
+      },
+      get stagnation() {
+        throw new Error("scorecard field boom");
+      },
+    };
+    const out = await buildDailyHeartbeat({
+      listRecentAutopilotRunIds: async () => [],
+      getUsage: async () => ({ calibrated: false }),
+      getBuilderHealthScorecard: async () => throwingScorecard,
+      getBacklogCounts: async () => ({}),
+      readRecentAlerts: async () => [],
+    });
+    assert.match(out, /💓 \*Hydra Daily Heartbeat\*/);
+    assert.match(out, /\*Throughput:\* n\/a \(scorecard field boom\)/);
+    assert.match(out, /\*Stagnation:\* n\/a \(scorecard field boom\)/);
+    // The rest of the digest still ships around the degraded sections.
+    assert.match(out, /\*Target backlog:\* 0 queued, 0 blocked, 0 triage/);
+  });
+
   it("marks usage uncalibrated when quota env vars are unset", async () => {
     const out = await buildDailyHeartbeat({
       listRecentAutopilotRunIds: async () => [],

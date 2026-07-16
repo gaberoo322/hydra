@@ -125,15 +125,22 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
   const [scorecardResult] = await Promise.allSettled([scorecardReader()]);
 
   // --- Throughput: autonomous merge rate over the builder-health window ---
+  // The `try/catch` guards the FULFILLED-branch processing (not just the shared
+  // read above): a throw while reading scorecard fields still degrades THIS line
+  // to n/a rather than propagating, preserving the never-throws invariant.
   if (scorecardResult.status === "fulfilled") {
-    const health = scorecardResult.value;
-    const autonomy = health?.autonomyRate;
-    if (autonomy && autonomy.total > 0) {
-      lines.push(
-        `*Throughput:* ${autonomy.autonomous}/${autonomy.total} PRs auto-merged (last ${autonomy.window})`,
-      );
-    } else {
-      lines.push(`*Throughput:* no merges in window`);
+    try {
+      const health = scorecardResult.value;
+      const autonomy = health?.autonomyRate;
+      if (autonomy && autonomy.total > 0) {
+        lines.push(
+          `*Throughput:* ${autonomy.autonomous}/${autonomy.total} PRs auto-merged (last ${autonomy.window})`,
+        );
+      } else {
+        lines.push(`*Throughput:* no merges in window`);
+      }
+    } catch (err: any) {
+      lines.push(`*Throughput:* n/a (${err?.message || err})`);
     }
   } else {
     const err: any = scorecardResult.reason;
@@ -146,8 +153,12 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
   // above with Throughput; each section still degrades independently so one
   // section's failure can't silently blank the other.
   if (scorecardResult.status === "fulfilled") {
-    const health = scorecardResult.value;
-    lines.push(formatStagnationHeartbeatLine(health?.stagnation ?? null));
+    try {
+      const health = scorecardResult.value;
+      lines.push(formatStagnationHeartbeatLine(health?.stagnation ?? null));
+    } catch (err: any) {
+      lines.push(`*Stagnation:* n/a (${err?.message || err})`);
+    }
   } else {
     const err: any = scorecardResult.reason;
     lines.push(`*Stagnation:* n/a (${err?.message || err})`);
