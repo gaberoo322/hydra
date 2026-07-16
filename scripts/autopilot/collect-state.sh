@@ -781,6 +781,99 @@ echo "$WF_FRONTIER"
 echo "wayfinder_orch_ticket_type=${WF_TICKET_TYPE}"
 echo "wayfinder_orch_inflight_global=${WF_INFLIGHT_GLOBAL}"
 
+# Stalled-map staleness sweep — housekeeping backstop (issue #3355, epic #3350,
+# ADR-0029).
+#
+# Two stall classes silently strand a wayfinder map on the operator's side, and
+# NEITHER has an autopilot working path (both need the human — the machine must
+# not synthesize the operator's side of a decision, ADR-0029 Decision 3):
+#
+#   1. A `wayfinder:destination-pending` map the operator never approves. It sits
+#      a draft forever — its whole AFK frontier is un-dispatchable (the #3353
+#      approved-map gate excludes it), so the map is dead weight until someone
+#      approves or rejects it in /hydra-review §0.5.
+#   2. An OPEN, unblocked, unclaimed HITL frontier ticket
+#      (`wayfinder:grilling` | `wayfinder:prototype`) on an APPROVED map that the
+#      operator never picks up. `wayfinder_orch` NEVER dispatches HITL tickets
+#      (ADR-0029 Decision 3), so an un-picked-up one stalls its whole map's AFK
+#      frontier — the autopilot cannot advance past a blocking decision — with no
+#      autonomous escape.
+#
+# Both re-surface every day in /hydra-review, but a map/ticket the operator keeps
+# deferring never crosses a threshold that says "this has been stuck too long".
+# This collector emits that threshold-crossing signal so the review session (and
+# the digest) can flag the genuinely STALE ones — the ones aged past
+# WAYFINDER_STALENESS_THRESHOLD_SEC — distinctly from the fresh backlog. A map/
+# ticket WITHIN the threshold is NOT flagged (it is still in the normal review
+# cadence); only past-threshold ones surface here.
+#
+# Age is measured from `createdAt` (not `updatedAt`): a destination-pending map's
+# createdAt is when it was charted, and its whole lifetime IS the un-approved
+# window (nothing touches it until the operator acts, so updatedAt would be the
+# same). An HITL ticket's createdAt is when the frontier surfaced the decision;
+# it stays inert until the operator resolves it via /wayfinder, so createdAt is
+# the true "how long stuck" clock. This mirrors the stale_blocked precedent above
+# (an age threshold on a timestamp field) but keys on createdAt, not updatedAt.
+#
+# Threshold: 48h (172800s) — two full daily /hydra-review cadences. A map/ticket
+# still stuck after the operator has seen it twice is genuinely stalled, not just
+# in-flight. Overridable via HYDRA_WAYFINDER_STALENESS_SEC for tuning without a
+# code change (mirrors the env-tunable thresholds elsewhere in this collector).
+#
+# Read-only + best-effort (the header contract): any failure (gh down, GraphQL
+# error, no maps) degrades to `0` on both counts — the suppressing direction, so
+# a transient outage never spuriously flags a stall the operator would then chase.
+WAYFINDER_STALENESS_THRESHOLD_SEC="${HYDRA_WAYFINDER_STALENESS_SEC:-172800}"
+echo "wayfinder_staleness_threshold_sec=${WAYFINDER_STALENESS_THRESHOLD_SEC}"
+
+# 1. Stale destination-pending maps: open wayfinder:map issues carrying the
+#    destination-pending gate whose createdAt is older than the threshold. The jq
+#    age filter is PURE (no network) so it is golden-fixtured in
+#    test/autopilot-decide.test.mts; the gh list feeds it live.
+echo -n "wayfinder_stale_maps="
+gh issue list --repo gaberoo322/hydra --state open \
+  --label 'wayfinder:map' --label 'wayfinder:destination-pending' \
+  --json number,createdAt --jq "
+    [ .[]
+      | select((now - (.createdAt | fromdateiso8601)) > ${WAYFINDER_STALENESS_THRESHOLD_SEC}) ]
+    | length" 2>/dev/null || echo 0
+
+# 2. Stale un-picked-up HITL frontier tickets: across every APPROVED map (a
+#    wayfinder:map WITHOUT the destination-pending gate — a pending map holds no
+#    tickets), count OPEN, unblocked (all blocked-by closed), unclaimed
+#    (unassigned), HITL-typed (wayfinder:grilling | wayfinder:prototype) sub-issues
+#    whose createdAt is older than the threshold. The eligibility+age jq is PURE
+#    and golden-fixtured; the per-map GraphQL walk feeds it live. Maps are the
+#    same approved set the frontier collector above walks.
+echo -n "wayfinder_stale_hitl="
+WF_STALE_HITL=0
+if [ -n "${WF_MAPS_JSON:-}" ]; then
+  # Reuse the approved-map numbers the frontier collector already resolved
+  # ($WF_MAP_NUMS is set inside the frontier block above when maps exist).
+  for map_n in ${WF_MAP_NUMS:-}; do
+    WF_MAP_STALE=$(gh api graphql -F n="$map_n" -f query='query($n:Int!){
+      repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
+        subIssues(first:100){ nodes { number state createdAt
+          labels(first:20){nodes{ name }}
+          assignees(first:1){totalCount}
+          blockedBy(first:20){nodes{ number state }} } } } } }' \
+      --jq "(.data.repository.issue.subIssues.nodes
+              | map(. + {hitl: ([.labels.nodes[].name
+                  | select(. == \"wayfinder:grilling\" or . == \"wayfinder:prototype\")] | .[0])})
+              | map(select(.hitl != null))
+              | map(select(.state==\"OPEN\" and .assignees.totalCount==0
+                  and ([.blockedBy.nodes[]? | select(.state==\"OPEN\")] | length)==0
+                  and ((now - (.createdAt | fromdateiso8601)) > ${WAYFINDER_STALENESS_THRESHOLD_SEC})))
+              | length)" \
+      2>/dev/null || echo 0)
+    case "$WF_MAP_STALE" in
+      ''|*[!0-9]*) WF_MAP_STALE=0 ;;
+    esac
+    WF_STALE_HITL=$((WF_STALE_HITL + WF_MAP_STALE))
+  done
+fi
+echo "$WF_STALE_HITL"
+
 # Tool Scout — Phase C alert-driven trigger (issue #486).
 #
 # `scout_alert_eligible_count` is the number of recent `hydra:alerts`
