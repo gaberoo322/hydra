@@ -1,6 +1,6 @@
 ---
 name: hydra-wayfinder
-description: Plan a chunk of Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into blocking decision tickets, resolve them one at a time, then hand the cleared map to /to-spec. Adapts Matt Pocock's `wayfinder` skill to Hydra.
+description: Plan a chunk of Hydra work too big for one agent session as a shared map of investigation tickets on gaberoo322/hydra — chart the fog into native blocking decision tickets, resolve them one at a time, then hand the cleared map to hydra-prd (epic route) or /to-spec (spec route). Adapts Matt Pocock's `wayfinder` skill to Hydra.
 when_to_use: "When the operator has a large, foggy Hydra initiative to plan (bigger than one session), says 'wayfind', 'chart a map', 'plan this big change', or wants to break a vague initiative into decision tickets before writing a spec. Interactive / operator-driven — not an autopilot dispatch class."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebSearch(*) WebFetch(*) Agent(*)
 claude_only: true
@@ -13,28 +13,33 @@ Plan a chunk of Hydra work **too big for one agent session** as a shared **map**
 of investigation tickets on `gaberoo322/hydra`. A loose idea has arrived, wrapped
 in fog: the way from here to the **destination** isn't visible yet. This skill
 charts that way as issues on the tracker, then resolves the tickets one at a time
-until the route is clear and the map can be handed to `/to-spec`.
+until the route is clear and the map can be handed off — to `hydra-prd` for an
+implementation epic, or `/to-spec` for a spec.
 
 This is the Hydra-native adaptation of Matt Pocock's upstream `wayfinder`
 (`~/.claude/skills/wayfinder/SKILL.md`) — same charting discipline, wired to
-Hydra's tracker (`gaberoo322/hydra`), label vocabulary, `Blocked by #N`
-convention, and epic format so `hydra-epic-close` can GC a completed map. Read
-the upstream skill for the underlying philosophy; this playbook is the wiring.
+Hydra's tracker (`gaberoo322/hydra`), label vocabulary, **native** sub-issue +
+blocked-by convention (map internals), the body-text `## Sub-issues` epic format
+so `hydra-epic-close` can GC a completed map, and the two-conventions boundary of
+ADR-0029 Decision 5. Read the upstream skill for the underlying philosophy; this
+playbook is the wiring.
 
-**Who runs this:** the **operator**, interactively, to plan a big Hydra (or
-Target) change before it becomes tracked work — NOT `hydra-autopilot`. Wayfinder
-tickets are mostly HITL (human-in-the-loop). It deliberately is **not** an
-autopilot class: making the loop *sequence* work off a wayfinder map (respect
-`Blocked by`) is a separate, deferred `decide.py` (T3) change.
+**Who runs this:** the **operator**, interactively, drives **charting** and the
+**HITL** (grilling/prototype) tickets. The **AFK share** (research/task tickets)
+is worked by `hydra-autopilot` via the `wayfinder_orch` signal class per ADR-0029
+— the loop *sequences* work off the map's **native** blocked-by frontier
+(`collect-state.sh` → `decide.py`) without touching the off-radar rule. Wayfinder
+tickets are mostly HITL (human-in-the-loop).
 
 ## Plan, don't do
 
 Wayfinder is **planning** by default: each ticket resolves a *decision*, and the
 map is done when the way is clear — nothing left to decide before someone goes
 and builds the thing. The pull to just start coding is usually the signal you've
-reached the edge of the map and it's time to hand off to `/to-spec` →
-`/to-tickets` → `hydra-dev`. Produce decisions, not deliverables, unless the
-map's `## Notes` explicitly carries execution into the map.
+reached the edge of the map and it's time to hand off — to `hydra-prd` (for an
+implementation epic) or `/to-spec` → `/to-tickets` → `hydra-dev` (for a spec).
+Produce decisions, not deliverables, unless the map's `## Notes` explicitly
+carries execution into the map.
 
 ## Refer by name
 
@@ -105,16 +110,20 @@ agent session:
 <the decision or investigation this ticket resolves>
 
 Part of wayfinder map #<map-number>.
-Blocked by #<a> #<b>      <!-- omit the line entirely if nothing blocks it -->
 ```
 
 - **Label** each ticket `wayfinder:<type>` — one of `research`, `prototype`,
   `grilling`, `task` (see [Ticket types](#ticket-types)).
-- **Blocking** uses Hydra's existing **`Blocked by #N`** body convention (the same
-  string `hydra-dev`'s parent-flow unblock logic and `hydra-sweep` already parse)
-  — GitHub-native "blocked-by" relationships aren't reliably settable via `gh`, so
-  the text convention is the Hydra lane. A ticket is **unblocked** when every
-  ticket it names as a blocker is CLOSED.
+- **Blocking** (map internals) uses **native** GitHub blocked-by relationships,
+  set via `gh api graphql` (see `docs/agents/issue-tracker.md § Wayfinding
+  operations` for the mutation) — the newer authoritative contract (ADR-0029
+  Decision 5), proven native across map #3305's six sessions. Native renders the
+  frontier **visually** in GitHub and drives the `collect-state.sh` frontier query
+  that the autopilot integration reads. A ticket is **unblocked** when every ticket
+  it is blocked-by is CLOSED. (This is a different surface from the map's
+  `## Sub-issues` body-text checklist below, which stays **body-text** because
+  `hydra-epic-close` parses it — see the two-conventions boundary in
+  [Reuse & compatibility](#reuse--compatibility-do-not-reinvent).)
 - The **frontier** = open, unblocked, unassigned tickets — the edge of the known.
 - A session **claims** a ticket by assigning it to the driver (`gh issue edit N
   --add-assignee @me`) **before** any work, so concurrent sessions skip it.
@@ -155,7 +164,10 @@ EOF
 ```
 
 **Create a ticket, then a second pass wires blocking** (issues need numbers before
-they can reference each other):
+they can reference each other). Blocking is **native** — link the ticket as a
+sub-issue of the map and add `blocked-by` edges via `gh api graphql`; the exact
+mutations (`addSubIssue`, `addBlockedBy`) live in `docs/agents/issue-tracker.md
+§ Wayfinding operations`:
 ```bash
 T=$(gh issue create --repo gaberoo322/hydra --label "wayfinder:grilling" \
   --title "$TICKET_TITLE" --body-file /dev/stdin <<'EOF' | grep -oP 'issues/\K[0-9]+'
@@ -164,22 +176,31 @@ T=$(gh issue create --repo gaberoo322/hydra --label "wayfinder:grilling" \
 Part of wayfinder map #<inline the map number literally>.
 EOF
 )
-# second pass: append the Blocked-by line and add `blocked` label if it has blockers
+# second pass: fetch node IDs (REST), wire the ticket as a native sub-issue of the
+# map (addSubIssue) and add native blocked-by edges (addBlockedBy) for its blockers
 ```
 
-**Query the frontier** (open wayfinder tickets whose blockers are all closed):
+**Query the frontier** (open wayfinder tickets whose native blockers are all
+closed) — the native sub-issue/blocked-by frontier query, per
+`docs/agents/issue-tracker.md § Wayfinding operations`:
 ```bash
-gh issue list --repo gaberoo322/hydra --state open \
-  --search 'label:wayfinder:research,wayfinder:prototype,wayfinder:grilling,wayfinder:task no:assignee' \
-  --json number,title,body,labels
-# then drop any whose `Blocked by #N` names an OPEN issue (parse the body, resolve each N's state)
+gh api graphql -F n=<MAP_N> -f query='query($n:Int!){
+  repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
+    subIssues(first:100){ nodes { number title state
+      assignees(first:1){totalCount}
+      blockedBy(first:20){nodes{ number state }} } } } } }' \
+  --jq '.data.repository.issue.subIssues.nodes
+        | map(select(.state=="OPEN" and .assignees.totalCount==0
+          and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
+        | .[] | "#\(.number) \(.title)"'
 ```
 
 **Record a resolution** (on close): post the answer as a comment, close the
 issue, tick its box in the map's `## Sub-issues` checklist, and append one line to
-`## Decisions so far`. Then unblock dependents whose last blocker just closed
-(remove their `blocked` label) — the same unblock shape as `hydra-dev`
-parent-flow.
+`## Decisions so far`. Closing the ticket **automatically advances the native
+frontier** — its `blocked-by` edges now point at a CLOSED issue, so the frontier
+query re-includes any dependent whose last blocker just closed; no manual
+`blocked`-label removal is needed.
 
 ## Ticket types
 
@@ -246,9 +267,9 @@ context stays inside the smart zone, and the map stays collaboratively editable.
    straight to `/to-spec` (or `hydra-prd` for an epic).
 3. **Create the map** (`wayfinder:map`): Destination + Notes filled, Decisions-so-
    far empty, fog sketched into Not-yet-specified, empty `## Sub-issues`.
-4. **Create the specifiable tickets** as issues; **second pass** wires `Blocked by
-   #N` and adds each to the map's `## Sub-issues` checklist. Everything you can't
-   yet specify stays in the fog.
+4. **Create the specifiable tickets** as issues; **second pass** wires the native
+   sub-issue + `blocked-by` edges (`gh api graphql`) and adds each to the map's
+   `## Sub-issues` checklist. Everything you can't yet specify stays in the fog.
 5. **Stop.** Charting is one session's work; do not also resolve tickets.
 
 ### Work through the map  (`arguments: [map]`, optional `[ticket]`)
@@ -260,8 +281,9 @@ context stays inside the smart zone, and the map stays collaboratively editable.
    invoke the skill the type names (`/research`, `/prototype`, `/grill-with-docs`).
    If in doubt, grill.
 4. **Record the resolution:** post the answer as a comment, close the ticket, tick
-   its `## Sub-issues` box, append a one-line gist to Decisions-so-far, and unblock
-   dependents whose last blocker just closed.
+   its `## Sub-issues` box, and append a one-line gist to Decisions-so-far. Closing
+   the ticket advances the native frontier automatically — dependents whose last
+   blocker just closed re-enter the frontier query with no manual label change.
 5. **Graduate fog:** add newly-specifiable tickets (create-then-wire), clearing
    each graduated patch out of Not-yet-specified. If the answer reveals a ticket
    sits beyond the destination, rule it Out of scope rather than resolving it. If a
@@ -275,11 +297,16 @@ the tracker.
 When the frontier is empty (no open tickets, no ticketable fog left toward the
 destination), the way is clear. Hand off:
 
+- **Destination = an implementation epic** → lead with **`hydra-prd`**, the
+  Hydra-native producer: a capstone task synthesises the map's Decisions-so-far
+  (each closed ticket is a primary source) into an ADR + structured PRD JSON, then
+  `hydra-prd --apply` emits the parent epic + dependency-ordered tracer-bullet
+  children stamped `Expected tier: N` (the #3125 → ADR-0028 → epic #3285 pattern;
+  ADR-0029 Decision 4 / survey F7). `/to-spec` → `/to-tickets` is **not** the epic
+  route — reserve it for the spec-destination route below.
 - **Destination = a spec** → run **`/to-spec`**, synthesising the map's
-  Decisions-so-far (each closed ticket is a primary source) into the spec, then
-  **`/to-tickets`** to slice it into tracer-bullet build issues for `hydra-dev`.
-  For a multi-issue epic, `hydra-prd` is the Hydra-native producer (parent epic +
-  dependency-ordered children stamped `Expected tier: N`).
+  Decisions-so-far into the spec, then **`/to-tickets`** to slice it into
+  tracer-bullet build issues for `hydra-dev`.
 - **Destination = a locked decision** → the decision lives in the map + its
   tickets; record it as an ADR if it governs future work (`docs/adr/NNNN-*.md`).
 - **Destination = an in-place change** → proceed to build; the map's tickets are
@@ -293,18 +320,31 @@ Once handed off, `hydra-epic-close` GCs the map when its last ticket closes
 - **Epic format** — the `## Sub-issues` `- [ ] #N` checklist is exactly what
   `parseEpicReferences()` / `hydra-epic-close` reads. A wayfinder map IS an epic to
   that sweeper. Verified against `docs/operator-playbooks/hydra-epic-close.md`.
-- **Blocking** — `Blocked by #N` body text, the same convention
-  `hydra-dev`-parent-flow's unblock loop and `hydra-sweep` parse. No new
-  mechanism.
-- **Producers** — handoff routes through the existing `/to-spec` → `/to-tickets` /
-  `hydra-prd` path, not a bespoke issue writer.
+- **Blocking — two conventions by design, no bridge** (ADR-0029 Decision 5). The
+  boundary must read as exactly one on each surface:
+  - **Map internals** (ticket blocking, the frontier, AFK gating) use **native**
+    GitHub sub-issues + blocked-by (`gh api graphql`). This is the newer
+    authoritative contract — it renders the frontier visually and drives the
+    `collect-state.sh` frontier query. See `docs/agents/issue-tracker.md
+    § Wayfinding operations`.
+  - **The handoff epic** `hydra-prd` produces uses **body-text** `## Sub-issues` +
+    `Blocked by #N` — the convention `hydra-epic-close`, `hydra-dev`-parent-flow,
+    and #3059's `deriveBoardState` filter parse. `hydra-prd`'s capstone translation
+    *is* the bridge; do not collapse the two conventions into one.
+- **Producers** — the epic handoff routes through **`hydra-prd`** (the Hydra-native
+  epic producer); the spec route uses `/to-spec` → `/to-tickets`. Not a bespoke
+  issue writer.
 
 ## Out of scope (this skill)
 
-- **Autopilot integration.** Wayfinder is operator-interactive. Teaching
-  `decide.py` anchor-selection to *sequence* work off a map's `Blocked by` edges is
-  a separate, deferred **T3** change (the known "autopilot is dependency-blind"
-  gap) — not part of this skill.
+- **Autopilot integration.** *Charting* and *HITL resolution* stay
+  operator-interactive — this skill drives them. The **AFK share** of a map,
+  however, is worked by `hydra-autopilot` per ADR-0029: a dedicated map-frontier
+  signal in `collect-state.sh` feeds the `wayfinder_orch` signal class, which
+  dispatches AFK-typed (`research` / `task`) frontier tickets without unwinding the
+  off-radar rule. That machinery lives in `collect-state.sh` / `decide.py` /
+  `hydra-review`, not in this skill — see `docs/agents/issue-tracker.md
+  § Wayfinding operations → Autopilot integration`.
 - **Target tracker.** This playbook targets `gaberoo322/hydra` (orchestrator
   planning). A Target (`~/hydra-betting`) variant is a future adaptation.
 

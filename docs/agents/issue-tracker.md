@@ -95,7 +95,15 @@ How `/wayfinder` (and `/hydra-wayfinder`) expresses its shared map on this track
 | Blocking | Native blocked-by relationship (renders visually in GitHub's issue UI) |
 | Frontier | Open, unassigned sub-issues of the map whose blockers are all closed |
 
-Wayfinder tickets are operator-driven: never apply the `needs-triage`/`ready-for-agent` lifecycle labels to them — the `wayfinder:*` labels keep them off autopilot's and the sweeps' radar.
+Wayfinder tickets stay **off-radar**: never apply the `needs-triage`/`ready-for-agent` lifecycle labels to them, so `hydra-sweep` and the orphan-backstop stay blind (the `wayfinder:*` labels carry zero lifecycle meaning). This rule is **refined, not removed**, by the autopilot integration below: the AFK share of a map becomes dispatchable through a **dedicated map-frontier signal**, never by relabeling to `ready-for-agent` (ADR-0029 Decision 3).
+
+### Autopilot integration (AFK dispatch)
+
+`hydra-autopilot` charts and works the AFK share of a map without unwinding the off-radar rule (ADR-0029):
+
+- **Frontier dispatch path.** `collect-state.sh` runs the native GraphQL frontier query per open, approved (no `wayfinder:destination-pending`) map and pre-resolves the next AFK-typed (`wayfinder:research` / `wayfinder:task`), unblocked, unclaimed frontier ticket into `state.json` as a signal. `decide.py` (pure — enumerates nothing, calls no network) reads that signal and emits a `dispatch` action for the **`wayfinder_orch`** signal class, which routes by ticket type (`wayfinder:research` → `/hydra-issue-research`; `wayfinder:task` → a scoped task worker). HITL-typed tickets (`wayfinder:grilling` / `wayfinder:prototype`) are never dispatched — `wayfinder_orch` skips them and works the AFK ones not blocked by them.
+- **Two `hydra-review` buckets** are the single operator morning drain: (1) **destination-pending maps** — machine-charted maps awaiting a Destination approve/amend/reject (approve = remove the `wayfinder:destination-pending` label); and (2) **wayfinder HITL tickets** — open maps' unblocked, unclaimed `grilling` / `prototype` tickets awaiting a live `/wayfinder <map> <ticket>` session. There is no autopilot-side answer ingestion; the interactive session records the resolution, closes the ticket, and appends to the map, and the next tick resumes AFK dispatch.
+- **Native-map / body-text-epic boundary.** Map internals (charting wiring, the `collect-state.sh` frontier collector, AFK gating) use **native** sub-issues + blocked-by — the frontier query above reads them. The `hydra-prd` **handoff epic** the map produces uses **body-text** `## Sub-issues` + `Blocked by #N`, which `hydra-dev`, `hydra-epic-close`, and #3059's `deriveBoardState` filter parse. The two conventions never collide and must not be collapsed into one (ADR-0029 Decision 5).
 
 ### Commands
 
