@@ -97,14 +97,16 @@ print(json.dumps({
     # when no usage was parsed, which is "unknown" not "measured zero", so 0/
     # empty/absent are all omitted and recordCycle falls back to the per-cycle
     # token hash before recording a truthful null.
-    # Issue #3252: the optional 12th positional arg `worktree_branch` is the
-    # dispatch's synthesised worktree branch (`worktree-agent-<runToken>-t<N>-<slot>`).
-    # reap.py forwards it so recordCycleMetrics can mirror the grounding test
-    # counts onto the SEPARATE branch-keyed metrics record the merge-watch
-    # enrichment + dashboards read (reap's cycle-record is keyed on the bare
-    # worktree-hash task_id — an un-joinable id — so `testsAfter` recorded 0 on
-    # the sampled record every cycle). Empty/absent → the field is omitted from
-    # the POST body → recordCycleMetrics does no mirror (prior behaviour).
+    # Issue #3391 (superseding #3252): the optional 12th positional arg
+    # `worktree_branch` is the dispatch's synthesised worktree branch
+    # (`worktree-agent-<runToken>-t<N>-<slot>`). reap.py now passes it as the
+    # cycle_id (1st positional) too, so the test-count-bearing write and the
+    # merge-watch enrichment land on ONE indexed record (no more un-joinable
+    # twins, so `testsAfter` stops recording 0 on the sampled record). This
+    # positional survives as `worktreeBranch` record METADATA — equal to the
+    # cycleId in the pipeline case; the cross-key mirror recordCycleMetrics used
+    # to run off this field is retired (#3391). Empty/absent → the field is
+    # omitted from the POST body (signal-class case).
     # Issue #3284: the optional 13th positional arg `escalation` is a compact JSON
     # object of the dispatch's cascade-routing escalation provenance
     # ({"escalationAttempt":N,"escalatedModel":"sonnet"}), present ONLY when
@@ -286,9 +288,11 @@ if tokens != '':
             body['tokens'] = tk
     except (TypeError, ValueError):
         pass
-# Issue #3252: emit worktreeBranch when reap forwarded a non-empty one so
-# recordCycleMetrics can mirror the grounding test counts onto the branch-keyed
-# record dashboards read. Empty/absent → omitted → no mirror (prior behaviour).
+# Issue #3391 (superseding #3252): emit worktreeBranch as record metadata when
+# reap forwarded a non-empty one. It equals the cycleId in the pipeline case
+# (reap now keys the cycle-record on the branch, #3391), so the retired cross-key
+# mirror is a no-op — this field survives only as the agents-stream correlation
+# token. Empty/absent → omitted (signal-class case).
 if worktree_branch:
     body['worktreeBranch'] = worktree_branch
 # Issue #3284: merge the cascade-routing escalation provenance. Present ONLY on

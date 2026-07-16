@@ -1,22 +1,24 @@
 /**
- * Cross-key test-count mirror contract for recordCycleMetrics (issue #3252).
+ * `recordCycleMetrics` no longer runs a cross-key test-count mirror (issue #3391,
+ * retiring the #3252 mirror).
  *
- * `testsAfter` recorded 0 on every sampled cycle because the grounding test
- * counts and the record dashboards read live under DIFFERENT, un-joinable
- * cycleIds:
- *   - reap keys its cycle-record on the bare worktree-hash `task_id` — the
- *     deposit key it can read the grounding test counts from. So testsAfter
- *     lands on THAT record.
- *   - the merge-watch enrichment (holdback-merge-watch.ts) + the dashboards read
- *     the SEPARATE record keyed on the synthesised `worktreeBranch`
- *     (`worktree-agent-<runToken>-t<N>-<slot>`, a run-token-shaped id) — which
- *     never received the counts.
- * The two tokens (worktree-hash vs run-token) cannot be derived from each other,
- * so no read-side join recovers testsAfter. reap now forwards `worktreeBranch`
- * and `recordCycleMetrics` mirrors just the four test-count fields onto the
- * branch-keyed record, so the sampled record finally carries them.
+ * The #3252 mirror existed because reap keyed its test-count-bearing cycle-record
+ * on the bare worktree-hash `task_id` while the merge-watch enrichment + the
+ * dashboards read the SEPARATE `worktreeBranch`-keyed record — two un-joinable
+ * ids — so `testsAfter` recorded 0 on the sampled record every cycle. The mirror
+ * copied the four test fields across, but it surfaced a 2-field, cycleId-less
+ * twin the trend read (`if (!raw.cycleId) continue`) discarded anyway, and it
+ * risked minting a phantom partial index entry.
  *
- * These tests pin that mirror against real Redis.
+ * #3391 removes the root cause instead: reap now POSTs its cycle-record under the
+ * synthesised `worktreeBranch` itself, so the test counts and the merge fields
+ * land on ONE indexed record per dispatch. There is no branch twin to mirror
+ * onto, so `recordCycleMetrics` performs a single `setCycleMetrics` write and
+ * NEVER fans out a second cross-key write.
+ *
+ * These tests pin the NEW invariant against real Redis: a write carrying a
+ * `worktreeBranch` field records exactly one metrics key (its own cycleId) — no
+ * separate branch record is ever created by the write path.
  */
 
 import { test, describe, beforeEach, after } from "node:test";
@@ -36,9 +38,13 @@ async function cleanTestKeys() {
   await testRedis.del("hydra:metrics:index");
 }
 
-describe("recordCycleMetrics test-count mirror (issue #3252)", () => {
+function cycleKeyCount(keys: string[]): number {
+  return keys.filter((k: string) => k !== "hydra:metrics:index").length;
+}
+
+describe("recordCycleMetrics no longer mirrors test counts cross-key (issue #3391)", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL!);
     await cleanTestKeys();
   });
 
@@ -47,10 +53,12 @@ describe("recordCycleMetrics test-count mirror (issue #3252)", () => {
     if (testRedis) testRedis.disconnect();
   });
 
-  test("reap's bare-hash write mirrors testsAfter onto the branch-keyed record", async () => {
-    const cycleId = "a8d148355c9c2211f"; // bare worktree-hash task_id (reap's key)
-    const branch = "worktree-agent-15dc1488-t3-dev_orch"; // the sampled record's key
-    await recordCycleMetrics(cycleId, {
+  test("reap's write is now keyed on the branch itself — the counts live on that one record", async () => {
+    // Post-#3391 reap keys its cycle-record ON the branch, so `cycleId` here IS
+    // the synthesised branch and it also (harmlessly) carries the same value in
+    // the worktreeBranch metadata field.
+    const branch = "worktree-agent-15dc1488-t3-dev_orch";
+    await recordCycleMetrics(branch, {
       testsBefore: 6100,
       testsAfter: 6120,
       testsPassingBefore: 6098,
@@ -59,102 +67,89 @@ describe("recordCycleMetrics test-count mirror (issue #3252)", () => {
       tasksMerged: 1,
     });
 
-    // The bare-hash record still carries the counts (reap's own write).
-    const bare = await getCycleMetrics(cycleId);
-    assert.equal(bare.testsAfter, "6120", "reap's own record keeps testsAfter");
-
-    // The branch record — the one dashboards read — now carries them too.
+    // The record the merge-watch enrichment + dashboards read carries the counts
+    // directly — no mirror needed.
     const b = await getCycleMetrics(branch);
-    assert.equal(b.testsAfter, "6120", "testsAfter mirrored onto the branch record");
+    assert.equal(b.testsAfter, "6120", "the branch record carries testsAfter");
     assert.equal(b.testsBefore, "6100");
     assert.equal(b.testsPassingBefore, "6098");
     assert.equal(b.testsPassingAfter, "6117");
+
+    // Exactly one metrics key exists — the write never fans out a second record.
+    const keys = await testRedis.keys("hydra:metrics:*");
+    assert.equal(cycleKeyCount(keys), 1, "no phantom second record from the write path");
   });
 
-  test("the mirror enriches a branch record already written by merge-watch", async () => {
-    const cycleId = "a5aa4787b38567ce5";
+  test("a bare-hash write carrying a DIFFERENT worktreeBranch does NOT create a branch record", async () => {
+    // Even if a legacy caller still passes a worktreeBranch that differs from the
+    // cycleId, the retired mirror must not resurrect: only the write's own key is
+    // ever written.
+    const cycleId = "a5aa4787b38567ce5"; // a bare worktree-hash (legacy shape)
     const branch = "worktree-agent-35fea1b1-t10-dev_orch";
-    // merge-watch enriched the branch record FIRST (prNumber, no testsAfter).
-    await recordCycleMetrics(branch, {
-      prNumber: "3136",
-      filesChanged: 2,
-      anchorReference: "issue-3136",
-      status: "merged",
-      tasksMerged: 1,
-    });
-    // reap's later write (bare-hash key) carries the counts + the branch pointer.
     await recordCycleMetrics(cycleId, {
       testsAfter: 5955,
       testsPassingAfter: 5950,
+      worktreeBranch: branch, // differs from cycleId
+    });
+
+    // The write's own record carries the counts...
+    const own = await getCycleMetrics(cycleId);
+    assert.equal(own.testsAfter, "5955", "the write's own record carries testsAfter");
+
+    // ...and the branch key was NEVER written (no mirror).
+    const b = await getCycleMetrics(branch);
+    assert.deepEqual(b, {}, "no cross-key mirror onto the differing branch id");
+
+    const keys = await testRedis.keys("hydra:metrics:*");
+    assert.equal(cycleKeyCount(keys), 1, "exactly one record — the write's own key");
+  });
+
+  test("the merge-watch enrichment and reap's write now converge on the same branch record", async () => {
+    // This is the join #3391 restores end-to-end: merge-watch enriches the branch
+    // record with prNumber/filesChanged, reap's test-count write lands on the
+    // SAME branch key, and both sets of fields coexist on one indexed record.
+    const branch = "worktree-agent-6fd1300b-t1-dev_orch";
+    // merge-watch enrichment (prNumber, no test counts).
+    await recordCycleMetrics(branch, {
+      prNumber: "3391",
+      filesChanged: 4,
+      anchorReference: "issue-3391",
+      status: "merged",
+      tasksMerged: 1,
+    });
+    // reap's test-count write, keyed on the SAME branch (#3391).
+    await recordCycleMetrics(branch, {
+      testsAfter: 6001,
+      testsPassingAfter: 5998,
       worktreeBranch: branch,
     });
 
     const b = await getCycleMetrics(branch);
-    // The merge-watch metadata survives (additive HSET, disjoint fields)...
-    assert.equal(b.prNumber, "3136", "merge-watch prNumber untouched");
-    assert.equal(b.anchorReference, "issue-3136");
-    assert.equal(b.filesChanged, "2");
-    // ...and the mirror added the counts the branch record was missing.
-    assert.equal(b.testsAfter, "5955", "testsAfter mirrored onto the enriched record");
-    assert.equal(b.testsPassingAfter, "5950");
-  });
+    // Merge fields survive (additive HSET)...
+    assert.equal(b.prNumber, "3391", "merge-watch prNumber untouched");
+    assert.equal(b.filesChanged, "4");
+    assert.equal(b.anchorReference, "issue-3391");
+    // ...alongside the test counts on the SAME record.
+    assert.equal(b.testsAfter, "6001", "testsAfter on the same indexed record");
+    assert.equal(b.testsPassingAfter, "5998");
 
-  test("mirror is skipped when worktreeBranch equals the cycleId (no self-mirror)", async () => {
-    // holdback-merge-watch writes cycleId == the branch and carries no
-    // worktreeBranch field — but even if it did, a branch == cycleId write must
-    // not fan out a redundant self-write.
-    const branch = "worktree-agent-c314c734-t3-dev_orch";
-    await recordCycleMetrics(branch, {
-      testsAfter: 6000,
-      worktreeBranch: branch, // same key
-      prNumber: "9999",
-    });
-    const b = await getCycleMetrics(branch);
-    assert.equal(b.testsAfter, "6000", "the write itself still records testsAfter");
-    // Only one metrics key exists — no phantom second record was minted.
+    // The record IS indexed (setCycleMetrics zadds it) and carries a cycleId, so
+    // the trend read (`if (!raw.cycleId) continue`) will surface it.
+    assert.equal(b.cycleId, branch, "the record carries a cycleId the trend read requires");
+    const indexed = await testRedis.zrange("hydra:metrics:index", 0, -1);
+    assert.ok(indexed.includes(branch), "the branch record is indexed");
+
+    // Only the one branch record exists.
     const keys = await testRedis.keys("hydra:metrics:*");
-    const cycleKeys = keys.filter((k: string) => k !== "hydra:metrics:index");
-    assert.equal(cycleKeys.length, 1, "no extra record created by a self-referential branch");
+    assert.equal(cycleKeyCount(keys), 1, "one converged record, no twin");
   });
 
-  test("no worktreeBranch → no mirror (unchanged prior behaviour)", async () => {
+  test("no worktreeBranch → a single record, unchanged (signal-class case)", async () => {
     const cycleId = "a0d65a4c6a614ae6f";
     await recordCycleMetrics(cycleId, { testsAfter: 6040, tasksMerged: 1 });
     const m = await getCycleMetrics(cycleId);
     assert.equal(m.testsAfter, "6040");
-    // Exactly one cycle record — the mirror never fired.
     const keys = await testRedis.keys("hydra:metrics:*");
-    const cycleKeys = keys.filter((k: string) => k !== "hydra:metrics:index");
-    assert.equal(cycleKeys.length, 1, "no branch mirror without a worktreeBranch");
-  });
-
-  test("a write with a branch but NO test counts mirrors nothing", async () => {
-    const cycleId = "aba8bd9aaef722217";
-    const branch = "worktree-agent-deadbeef-t1-dev_orch";
-    // A duration/token-only enrichment carrying a branch pointer but no test
-    // counts must not create a partial branch record.
-    await recordCycleMetrics(cycleId, {
-      totalDurationMs: 12345,
-      worktreeBranch: branch,
-    });
-    const b = await getCycleMetrics(branch);
-    assert.deepEqual(b, {}, "no mirror write when there are no test counts to copy");
-  });
-
-  test("the mirror does NOT add the branch cycleId to the metrics index", async () => {
-    const cycleId = "a753548ad9c3885b3";
-    const branch = "worktree-agent-6fd1300b-t1-dev_orch";
-    await recordCycleMetrics(cycleId, {
-      testsAfter: 6001,
-      worktreeBranch: branch,
-    });
-    // reap's own key is indexed (setCycleMetrics zadds it); the mirrored branch
-    // key must NOT be — the mirror is an enrich, never a fresh index entry.
-    const indexed = await testRedis.zrange("hydra:metrics:index", 0, -1);
-    assert.ok(indexed.includes(cycleId), "reap's own record is indexed");
-    assert.ok(
-      !indexed.includes(branch),
-      "the mirror never mints a phantom index entry for the branch key",
-    );
+    assert.equal(cycleKeyCount(keys), 1, "one record for a branch-less write");
   });
 });
