@@ -86,8 +86,10 @@ describe("cue demotion: pure helpers (issue #3340)", () => {
     assert.equal(parseCueFromMetaTitle("some unrelated issue title"), null);
     assert.equal(parseCueFromMetaTitle("meta(friction): no hit count here"), null);
     assert.equal(parseCueFromMetaTitle(""), null);
-    // @ts-expect-error deliberate wrong type
-    assert.equal(parseCueFromMetaTitle(null), null);
+    // Deliberate wrong type: exercises the runtime `typeof title !== "string"`
+    // guard. Cast (not @ts-expect-error) because strictNullChecks is off, so
+    // a bare `null` argument raises no type error for the directive to consume.
+    assert.equal(parseCueFromMetaTitle(null as unknown as string), null);
   });
 
   test("demotePattern reduces hitCount modulo the promotion threshold", () => {
