@@ -11,11 +11,13 @@
  * the accumulator state (`pendingEvents`, `lastDigestAt`, timer handles) remain
  * in `src/digest.ts` as thin orchestrators over this core.
  *
- * The two async fan-out assemblers `buildDailyHeartbeat` and `buildWeeklySummary`
- * — which fetch their own data from five-to-six sub-sources — now live in the
- * sibling `src/digest-fanout.ts` (issue #2215, named after its body, mirroring
- * the `notify.ts` / `notify-format.ts` split). `src/digest.ts` imports them from
- * there and re-exports `buildWeeklySummary` so downstream callers are unchanged.
+ * The two async fan-out assemblers — which fetch their own data from
+ * five-to-six sub-sources — now live in their own named leaves:
+ * `buildDailyHeartbeat` in `src/digest-fanout.ts` (issue #2215) and
+ * `buildWeeklySummary` in `src/digest-weekly.ts` (issue #3394), each named after
+ * its body, mirroring the `notify.ts` / `notify-format.ts` split. `src/digest.ts`
+ * imports each from its leaf and re-exports `buildWeeklySummary` so downstream
+ * callers are unchanged.
  *
  * The on-wire output is unchanged from the pre-extraction `digest.ts` — this
  * concentrates where the grammar lives, not the format itself.
