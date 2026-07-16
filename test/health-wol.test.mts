@@ -17,11 +17,18 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
+// Mechanism symbols (packet build + UDP send) live in the wol-send.ts leaf
+// (issue #3345); policy symbols (gate, config, wake triggers) stay in wol.ts.
 import {
   buildMagicPacket,
   parseMac,
-  WakeGate,
   sendMagicPacket,
+  WOL_DEFAULT_MAC,
+  WOL_DEFAULT_BROADCAST,
+  WOL_PORTS,
+} from "../src/health/wol-send.ts";
+import {
+  WakeGate,
   readWolConfig,
   attemptEmbedBackendWake,
   attemptVlmHostWake,
@@ -29,9 +36,6 @@ import {
   maybeWakeVlmHost,
   getWolGates,
   resetWolGates,
-  WOL_DEFAULT_MAC,
-  WOL_DEFAULT_BROADCAST,
-  WOL_PORTS,
   type WolConfig,
 } from "../src/health/wol.ts";
 
