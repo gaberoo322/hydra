@@ -158,7 +158,7 @@ export interface CueDemotionDeps {
 }
 
 /** One demotion that actually fired, for the run summary. */
-export interface DemotionRecord {
+interface DemotionRecord {
   issueNumber: number;
   cue: string;
   skill: string;
