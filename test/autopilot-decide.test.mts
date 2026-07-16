@@ -3160,3 +3160,123 @@ describe("decide.py — wayfinder_orch signal class (issue #3351)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Destination gate — approved-map guard (issue #3353, epic #3350, ADR-0029)
+// ---------------------------------------------------------------------------
+//
+// ADR-0029 Decision 1: a `wayfinder:map` issue is a dispatchable APPROVED map
+// only when it does NOT carry the draft gate label `wayfinder:destination-pending`.
+// The frontier collector in collect-state.sh enforces this at the MAP-SELECTION
+// step: its jq program filters the open `wayfinder:map` list down to the maps
+// that lack the gate label BEFORE it walks any map's sub-issue frontier. A
+// destination-pending map's number therefore never enters `WF_MAP_NUMS`, so the
+// GraphQL frontier walk that resolves an AFK ticket into `wayfinder_orch_frontier`
+// never runs for it — its AFK tickets are structurally un-dispatchable.
+//
+// collect-state.sh is network-dependent (live `gh issue list` + GraphQL), so we
+// cannot run the whole collector offline. The gate itself, however, is a PURE jq
+// program embedded in the source — we golden-fixture it by EXTRACTING that exact
+// program from collect-state.sh (no copy — it stays coupled to production) and
+// running it under the real `jq` binary against label fixtures. This pins:
+//
+//   - AC #1: an AFK ticket under a destination-pending map is NOT dispatched —
+//     i.e. the pending map is excluded from the map list the frontier walk runs
+//     over, so no ticket under it can ever surface into the frontier signal.
+//   - AC #2: after `wayfinder:destination-pending` is removed, that map becomes
+//     dispatchable on the next tick — i.e. it re-enters the map list and its
+//     tickets become walk-eligible.
+//
+// New TOP-LEVEL describe with its own lifecycle (pure CLI over stdin — nothing
+// to tear down — but kept top-level per the CLAUDE.md authoring rule).
+// ---------------------------------------------------------------------------
+describe("collect-state.sh — wayfinder destination-gate approved-map guard (issue #3353)", () => {
+  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
+
+  // Extract the EXACT map-selection jq program from collect-state.sh so the
+  // golden fixture exercises the production filter, not a copy that could drift.
+  // The program is the `--jq '...'` argument to the `gh issue list --label
+  // 'wayfinder:map'` call — anchored on that label so it can't grab an unrelated
+  // jq block. Fails loud if the anchor moves (the guard must stay findable).
+  function extractMapSelectionJq(): string {
+    const src = readFileSync(COLLECT_STATE, "utf-8");
+    const MAP_LABEL = "--label 'wayfinder:map'";
+    const anchor = src.indexOf(MAP_LABEL);
+    assert.ok(anchor >= 0, "wayfinder:map frontier gh call missing from collect-state.sh");
+    const JQ_FLAG = "--jq '";
+    const jqStart = src.indexOf(JQ_FLAG, anchor);
+    assert.ok(jqStart >= 0, "map-selection --jq program missing after the wayfinder:map call");
+    const progStart = jqStart + JQ_FLAG.length;
+    const progEnd = src.indexOf("'", progStart);
+    assert.ok(progEnd > progStart, "unterminated map-selection jq program in collect-state.sh");
+    const prog = src.slice(progStart, progEnd);
+    // Sanity: the guard label MUST appear inside the extracted program — this is
+    // the whole point of the gate. If it ever disappears, the approved-map guard
+    // is gone and the test must fail rather than silently pass.
+    assert.ok(
+      prog.includes("wayfinder:destination-pending"),
+      "extracted map-selection filter lost the wayfinder:destination-pending guard",
+    );
+    return prog;
+  }
+
+  // Run the extracted jq program over a `gh issue list --json number,labels`-shaped
+  // fixture; returns the sorted array of admitted (approved) map numbers.
+  function selectApprovedMaps(maps: unknown[]): number[] {
+    const prog = extractMapSelectionJq();
+    const r = spawnSync("jq", ["-c", prog], {
+      input: JSON.stringify(maps),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
+    return JSON.parse(r.stdout);
+  }
+
+  // gh-shaped map row: `{number, labels:[{name}]}` — the exact shape
+  // collect-state.sh requests via `--json number,labels`.
+  function mapRow(num: number, extraLabels: string[] = []): any {
+    return { number: num, labels: [{ name: "wayfinder:map" }, ...extraLabels.map((name) => ({ name }))] };
+  }
+
+  test("AC #1: a destination-pending map is EXCLUDED from the frontier walk (its AFK ticket is not dispatched)", () => {
+    const pendingMap = mapRow(900, ["wayfinder:destination-pending"]);
+    const approvedMap = mapRow(901);
+    const admitted = selectApprovedMaps([pendingMap, approvedMap]);
+    assert.ok(
+      !admitted.includes(900),
+      "a wayfinder:destination-pending map must NOT enter the map list the frontier walk runs over — " +
+        "so no AFK ticket under it can surface into wayfinder_orch_frontier",
+    );
+    assert.ok(
+      admitted.includes(901),
+      "an approved map (no gate label) must remain dispatchable alongside the excluded pending one",
+    );
+  });
+
+  test("AC #2: removing wayfinder:destination-pending makes the map dispatchable on the next tick", () => {
+    // Same map #900, but the operator has removed the gate label (= approve).
+    const beforeApproval = selectApprovedMaps([mapRow(900, ["wayfinder:destination-pending"]), mapRow(901)]);
+    assert.deepEqual(beforeApproval, [901], "before approval only the un-gated map #901 is admitted");
+
+    const afterApproval = selectApprovedMaps([mapRow(900), mapRow(901)]);
+    assert.deepEqual(
+      afterApproval,
+      [900, 901],
+      "after the gate label is removed, map #900 re-enters the frontier walk (dispatchable next tick)",
+    );
+  });
+
+  test("guard is label-specific — an unrelated wayfinder label does NOT gate a map", () => {
+    // Only wayfinder:destination-pending gates. A map carrying some other
+    // wayfinder:* label but not the gate label stays approved.
+    const admitted = selectApprovedMaps([mapRow(902, ["wayfinder:charting"])]);
+    assert.deepEqual(admitted, [902], "a non-gate wayfinder label must not exclude the map");
+  });
+
+  test("output is deterministically sorted (stable frontier pick across ticks)", () => {
+    // ADR-0029: maps are walked oldest-first / stable ordering so the frontier
+    // pick is deterministic. The map-selection jq ends in `| sort`.
+    const admitted = selectApprovedMaps([mapRow(905), mapRow(901), mapRow(903)]);
+    assert.deepEqual(admitted, [901, 903, 905], "admitted map numbers must be sorted ascending");
+  });
+});
