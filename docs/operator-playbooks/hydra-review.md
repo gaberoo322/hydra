@@ -8,14 +8,15 @@ claude_only: true
 
 # Operator Review
 
-Interactive session to resolve issues needing human judgment. Drains four buckets in order:
+Interactive session to resolve issues needing human judgment. Drains these buckets in order:
 
 1. **Overnight operator-decision queue** — today's `Operator decision queue YYYY-MM-DD` issue, written by `/hydra-autopilot` running in unattended mode (issue #413). One row per Tier-0 / non-mechanical PR that would have called `AskUserQuestion` if the operator had been awake.
-2. **Destination-pending wayfinder maps** — open `wayfinder:map` issues carrying the `wayfinder:destination-pending` draft-gate label (ADR-0029). Each is a machine-charted map awaiting operator sign-off on its proposed Destination before its AFK frontier becomes dispatchable.
-3. **`ready-for-human`** — issues requiring operator decisions
-4. **Stale-blocked** — `blocked` issues where no linked open issue justifies the block
+2. **Destination-pending wayfinder maps** — open `wayfinder:map` issues carrying the `wayfinder:destination-pending` draft-gate label (ADR-0029 Decision 1). Each is a machine-charted map awaiting operator sign-off on its proposed Destination before its AFK frontier becomes dispatchable.
+3. **Wayfinder HITL frontier tickets** — open, unblocked, unclaimed `wayfinder:grilling` / `wayfinder:prototype` sub-issues on approved maps (ADR-0029 Decision 3). The `wayfinder_orch` autopilot class never dispatches these; they need operator judgment and resolve via `/wayfinder`.
+4. **`ready-for-human`** — issues requiring operator decisions
+5. **Stale-blocked** — `blocked` issues where no linked open issue justifies the block
 
-The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board.
+The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board. Wayfinder HITL tickets drain after that: an unresolved HITL ticket stalls its whole map's AFK frontier (the autopilot cannot advance past a blocking decision), so clearing one is high-leverage too.
 
 ## Procedure
 
@@ -76,7 +77,64 @@ Walk the maps **oldest-first**, one at a time. For each, read the body's `## Des
 
 Do not yield to the later steps until every destination-pending map is decided or explicitly skipped.
 
-> HITL frontier tickets (`wayfinder:grilling` / `wayfinder:prototype`) are a **separate** bucket, added by issue #3354; they are resolved via `/wayfinder <map> <ticket>`, not here.
+> HITL frontier tickets (`wayfinder:grilling` / `wayfinder:prototype`) are a **separate** bucket — the next step (§0.6); they are resolved via `/wayfinder <map> <ticket>`, not here.
+
+### 0.6. Drain wayfinder HITL frontier tickets
+
+ADR-0029 Decision 3: a `wayfinder:map`'s frontier holds two kinds of ticket.
+**AFK** tickets (`wayfinder:research` / `wayfinder:task`) are worked autonomously by
+the `wayfinder_orch` autopilot class. **HITL** tickets (`wayfinder:grilling` /
+`wayfinder:prototype`) need the operator's judgment — `wayfinder_orch` NEVER
+dispatches them (the machine must not synthesize the human's side of a decision).
+They sit inert on the frontier until the operator resolves them here. This is the
+single surface where the operator sees them.
+
+List the open, **unblocked** (all blocked-by closed), **unclaimed** (unassigned),
+HITL-typed frontier tickets across every open **approved** map (a `wayfinder:map`
+that does NOT carry the `wayfinder:destination-pending` gate label — a
+destination-pending map holds no tickets yet, ADR-0029 Decision 1):
+
+```bash
+# 1. Approved maps: open wayfinder:map issues WITHOUT the destination-pending gate.
+APPROVED_MAPS=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
+  --json number,labels --jq '
+    [ .[] | select((.labels | map(.name) | index("wayfinder:destination-pending")) | not) | .number ]
+    | sort | .[]')
+
+# 2. Per approved map, walk its frontier for HITL-typed, unblocked, unclaimed tickets.
+for m in $APPROVED_MAPS; do
+  gh api graphql -F n="$m" -f query='query($n:Int!){
+    repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
+      subIssues(first:100){ nodes { number title state
+        labels(first:20){nodes{ name }}
+        assignees(first:1){totalCount}
+        blockedBy(first:20){nodes{ number state }} } } } } }' \
+    --jq --arg map "$m" '.data.repository.issue.subIssues.nodes
+          | map(select(.state=="OPEN" and .assignees.totalCount==0
+              and ([.blockedBy.nodes[]? | select(.state=="OPEN")] | length)==0))
+          | map(. + {type: ([.labels.nodes[].name
+              | select(. == "wayfinder:grilling" or . == "wayfinder:prototype")] | .[0])})
+          | map(select(.type != null))
+          | .[] | "\($map)\t\(.number)\t\(.type)\t\(.title)"'
+done
+```
+
+Walk them one at a time. For each HITL ticket, present the parent map, the ticket
+title, and its type (`grilling` = a decision to stress-test; `prototype` = a
+state/logic/UI shape to sanity-check), then offer:
+
+- **Resolve now** — run the interactive resolver on it: `/wayfinder <map> <ticket>`.
+  That session grills / prototypes the question, records the resolution comment,
+  closes the ticket, and appends to the map's `## Decisions so far`. Autopilot's
+  next tick then sees the advanced frontier and resumes AFK dispatch.
+- **Defer** — leave it on the frontier; it re-surfaces in tomorrow's review (the
+  staleness sweep, issue #3355, eventually flags a never-picked HITL ticket).
+- **Reframe** — the ticket is mis-typed or no longer a real decision. Fix its type
+  label (or close it with a comment) so the frontier advances.
+
+Never `--add-assignee`, never relabel `ready-for-agent`, never auto-answer an HITL
+ticket — the off-radar rule keeps these off the ordinary board, and the HITL
+contract keeps the machine out of the human's decision.
 
 ### 1. Gather
 
@@ -99,6 +157,10 @@ For each blocked issue, check body/comments for "blocked by #N", "depends on #N"
 ### Destination-pending wayfinder maps (P)
 | # | Map title | Age | Proposed Destination |
 |---|-----------|-----|----------------------|
+
+### Wayfinder HITL frontier tickets (H)
+| # | Map | Type | Title |
+|---|-----|------|-------|
 
 ### Ready-for-human (M)
 | # | Title | Age | Why here |
@@ -148,6 +210,12 @@ Explore the codebase before asking obvious questions.
 - **Defer** — keep the row for tomorrow's review (rare; only when more context is needed)
 - **Drop** — discard without action
 
+#### Wayfinder HITL frontier ticket (grilling / prototype)
+- **Resolve now** — run `/wayfinder <map> <ticket>`; it records the resolution comment, closes the ticket, and appends to the map's `## Decisions so far`
+- **Defer** — leave it on the frontier for tomorrow (the #3355 staleness sweep backstops a never-picked ticket)
+- **Reframe** — fix a mis-typed ticket's `wayfinder:*` label, or close it if it is no longer a real decision, so the frontier advances
+- Never assign, never relabel `ready-for-agent`, never auto-answer — the HITL contract keeps the machine out of the human's decision (ADR-0029 Decision 3)
+
 #### Triage origin (judgment/design needed)
 - **Make it agent-ready** — write agent brief, relabel `ready-for-agent`
 - **Break it down** — create child issues, convert to tracking parent or close
@@ -185,8 +253,9 @@ Overnight queue: applied=A, overridden=O, deferred=D, dropped=R
 
 ## Rules
 
-- **Drain the overnight queue first, then destination-pending maps.** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029). Don't reorder either ahead of `ready-for-human` / stale-blocked.
+- **Drain the overnight queue first, then destination-pending maps, then the wayfinder HITL frontier tickets.** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029); an unresolved HITL ticket then stalls its own map's AFK frontier. Don't reorder any of the three ahead of `ready-for-human` / stale-blocked.
 - **A destination-pending map amendment edits the Destination, THEN removes the gate label.** Never remove the label without first landing the operator's edit — the gate is the only thing holding an unwanted destination out of autopilot's frontier. A rejection **closes** the map; it does not just leave the label on (that would strand it for the staleness sweep).
+- **Never resolve a wayfinder HITL ticket for the machine.** `wayfinder_orch` structurally never dispatches `wayfinder:grilling` / `wayfinder:prototype` tickets (ADR-0029 Decision 3 — no autopilot answer-ingestion path); the operator resolves them via `/wayfinder`. Never `--add-assignee` (assignment is the AFK-worker claim signal), never relabel `ready-for-agent` (the off-radar rule keeps `wayfinder:*` off the ordinary board).
 - One issue at a time. No batching.
 - Every comment posted to GitHub starts with: `> *This was generated by AI during operator review.*`
 - Agent briefs (when relabeling to `ready-for-agent`) include: category, summary, current/desired behavior, acceptance criteria, out-of-scope, key interfaces.

@@ -225,6 +225,39 @@ no standard lifecycle labels, so the ordinary sweeps stay blind; this frontier
 signal is their ONLY AFK dispatch path). The dispatch OMITS `model` (inherit the
 parent per #1093 — real authoring/judgment).
 
+**Claim protocol (issue #3354, ADR-0029 Decision 2) — the worker MUST claim the
+ticket FIRST.** Before it does any work, the dispatched worker self-assigns the
+frontier ticket:
+
+```bash
+gh issue edit <N> --repo gaberoo322/hydra --add-assignee @me
+```
+
+This claim is the load-bearing mechanism for BOTH saturation guards. An open,
+AFK-typed ticket that is *assigned* is an in-flight worker: `collect-state.sh`
+counts assigned tickets into `wayfinder_orch_inflight_global` (the global-cap
+input `decide.py` reads) and its frontier query already skips assigned tickets
+(`assignees.totalCount==0`), so a claimed ticket is never re-picked. **Skipping
+this claim makes both guards inert** — the in-flight counter would read 0 forever
+and the same frontier ticket could be dispatched twice. The claim is therefore
+step 0 of every `wayfinder_orch` dispatch, not an afterthought.
+
+**Saturation guards (issue #3354, ADR-0029 Decision 2).** Two bounds cap
+concurrency, both anchored on the claim above:
+- **Global cap — ≤2 concurrent `wayfinder_orch` workers** across all maps.
+  `collect-state.sh` counts open, assigned, AFK-typed tickets across every
+  approved map into `wayfinder_orch_inflight_global`; `decide.py` suppresses a new
+  `wayfinder_orch` dispatch when that counter is ≥2 (frontier-first, then cap —
+  purely reading the pre-resolved counter, no network in `decide.py`).
+- **Per-map single-flight — ≤1 in-flight worker per map.** Enforced structurally
+  in `collect-state.sh`: a map that already has an in-flight (assigned) AFK ticket
+  yields NO new frontier pick that tick, so a second worker never starts on the
+  same map even if two of its tickets are simultaneously unblocked+unassigned.
+
+HITL-typed tickets (`wayfinder:grilling`, `wayfinder:prototype`) are never
+counted and never dispatched here — they surface only in the hydra-review HITL
+bucket and resolve via `/wayfinder`.
+
 **Resolution protocol (AC #1) — the worker records the outcome on the map.** When
 the dispatched worker finishes the frontier ticket, it MUST, before the ticket is
 considered resolved:
@@ -525,6 +558,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor; `dev_orch` yields the same turn (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. |
 | `wayfinder_orch_frontier=issue-N` (or `none`) | `state.signals.wayfinder_orch_frontier` (string, or omit — verbatim, no rename) | `wayfinder_orch` (issue #3351, epic #3350, ADR-0029) — the pre-resolved next AFK-typed, unblocked, unclaimed frontier ticket across all open **approved** (`wayfinder:map` minus `wayfinder:destination-pending`) maps. collect-state.sh owns the native GraphQL sub-issue/blocked-by enumeration so decide.py stays pure; gh/GraphQL-down degrades to `none` (fail closed). |
 | `wayfinder_orch_ticket_type=research\|task` | `state.signals.wayfinder_orch_ticket_type` (string) | the frontier ticket's type, threaded into the dispatch `prompt_args.ticket_type` so the dispatch step below resolves ticket-type → skill (`research` → hydra-issue-research, `task` → hydra-dev). |
+| `wayfinder_orch_inflight_global=N` | `state.signals.wayfinder_orch_inflight_global` (string integer) | the count of live `wayfinder_orch` workers — open, self-assigned, AFK-typed (`wayfinder:research`\|`wayfinder:task`) sub-issues across all open **approved** maps (issue #3354, ADR-0029 Decision 2). `decide.py` reads it verbatim and suppresses a new dispatch at ≥2 (global cap of ≤2 concurrent workers). collect-state.sh owns the count so decide.py stays pure; absent/malformed → treated as 0 (fail-open on absence — the structural per-map single-flight guard still holds). |
 
 Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
 received target-product anchors (item-26x). Post-#458, candidates are
