@@ -22,12 +22,6 @@ export interface GroundingOpts {
   testCmd?: string;
   /** Arguments passed to {@link GroundingOpts.testCmd}. Default: `[]`. */
   testArgs?: string[];
-  /**
-   * Paths to focus the inspection on. Currently documented but UNREAD by the
-   * implementation — declared so a future caller is not misled into thinking
-   * it already does something.
-   */
-  focusPaths?: string[];
 }
 
 /**
