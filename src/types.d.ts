@@ -6,6 +6,7 @@ declare module "ioredis" {
     get(key: string): Promise<string | null>;
     set(...args: any[]): Promise<any>;
     del(...args: any[]): Promise<number>;
+    ttl(key: string): Promise<number>;
     hget(key: string, field: string): Promise<string | null>;
     hset(key: string, ...args: any[]): Promise<number>;
     hgetall(key: string): Promise<Record<string, string>>;
