@@ -57,6 +57,7 @@
  * Controlled via API: POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
  */
 
+import { logger } from "../logger.ts";
 import {
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
@@ -337,7 +338,7 @@ export class HeartbeatController {
     try {
       const raw = await this.getSchedulerStateRaw();
       if (!raw) {
-        console.log("[Heartbeat] No persisted state in Redis — starting fresh");
+        logger.info({}, "no persisted state in Redis — starting fresh");
       }
 
       // Load atomic counter for cyclesRun (issue #140 — AC1)
@@ -366,12 +367,15 @@ export class HeartbeatController {
       const accountedGap =
         state.cyclesRun - (state.cyclesMerged + state.cyclesFailed + state.cyclesUnaccounted);
       if (accountedGap !== 0) {
-        console.warn(
-          `[Heartbeat] Cycle-accounting gap on startup: cyclesRun=${state.cyclesRun} ` +
-            `!= merged(${state.cyclesMerged}) + failed(${state.cyclesFailed}) + ` +
-            `unaccounted(${state.cyclesUnaccounted}); residual gap=${accountedGap}. ` +
-            `Go-forward cycles are bucketed (issue #1919); a non-zero residual is a ` +
-            `frozen historical artifact predating the unaccounted counter, not a live leak.`,
+        logger.warn(
+          {
+            cyclesRun: state.cyclesRun,
+            cyclesMerged: state.cyclesMerged,
+            cyclesFailed: state.cyclesFailed,
+            cyclesUnaccounted: state.cyclesUnaccounted,
+            residualGap: accountedGap,
+          },
+          "cycle-accounting gap on startup; non-zero residual is a frozen historical artifact predating the unaccounted counter, not a live leak",
         );
       }
 
@@ -394,12 +398,12 @@ export class HeartbeatController {
           }
         }
       } catch (err: any) {
-        console.error(`[Heartbeat] Failed to load deliberate-stop marker: ${err.message}`);
+        logger.error({ err }, "failed to load deliberate-stop marker");
       }
 
-      console.log(`[Heartbeat] Loaded persisted state — cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}, stopReason=${state.stopReason ?? "none"}`);
+      logger.info({ cyclesRun: state.cyclesRun, cyclesMerged: state.cyclesMerged, cyclesFailed: state.cyclesFailed, stateVersion: state._stateVersion, stopReason: state.stopReason ?? "none" }, "persisted state loaded");
     } catch (err: any) {
-      console.error(`[Heartbeat] Failed to load persisted state: ${err.message}`);
+      logger.error({ err }, "failed to load persisted state");
     }
   }
 
@@ -445,14 +449,14 @@ export class HeartbeatController {
     // scorecard read, edge-state store, and never-throws guard now live in
     // `./tick-stagnation-alert.ts`; the heartbeat only fires the injected emit.
     this.emitTickStagnationAlerts(eventBus).catch((err: any) =>
-      console.error(`[Heartbeat] Stagnation-alert emit failed: ${err?.message ?? err}`),
+      logger.error({ err }, "stagnation-alert emit failed"),
     );
 
     if (state.running) {
       const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
       state.timer = setTimeout(
         () => this.runScheduledCycle(eventBus).catch((err: any) =>
-          console.error(`[Heartbeat] Scheduled cycle failed: ${err.message}`),
+          logger.error({ err }, "scheduled cycle failed"),
         ),
         delay,
       );
@@ -487,13 +491,13 @@ export class HeartbeatController {
     try {
       await this.clearSchedulerDeliberateStop();
     } catch (err: any) {
-      console.error(`[Heartbeat] Failed to clear deliberate-stop marker: ${err.message}`);
+      logger.error({ err }, "failed to clear deliberate-stop marker");
     }
 
-    console.log(`[Heartbeat] Started — housekeeping cycles every ${intervalMs / 1000}s`);
+    logger.info({ intervalMs, intervalSecs: intervalMs / 1000 }, "heartbeat started");
 
     // Run first cycle immediately (fire-and-forget — errors handled inside runScheduledCycle)
-    this.runScheduledCycle(eventBus).catch((err: any) => console.error(`[Heartbeat] First cycle failed: ${err.message}`));
+    this.runScheduledCycle(eventBus).catch((err: any) => logger.error({ err }, "first cycle failed"));
 
     return {
       started: true,
@@ -552,7 +556,7 @@ export class HeartbeatController {
           DELIBERATE_STOP_TTL_SECONDS,
         );
       } catch (err: any) {
-        console.error(`[Heartbeat] Failed to persist deliberate-stop marker: ${err.message}`);
+        logger.error({ err }, "failed to persist deliberate-stop marker");
       }
     } else if (reason === "circuit-breaker" || reason === "error-cap") {
       // Track the reason in-memory so /status surfaces it, but DO NOT write
@@ -564,7 +568,7 @@ export class HeartbeatController {
       // stop survives a clean shutdown/restart cycle via the Redis marker.
     }
 
-    console.log(`[Heartbeat] Stopped after ${state.cyclesRun} cycles (reason=${reason})`);
+    logger.info({ cyclesRun: state.cyclesRun, reason }, "heartbeat stopped");
 
     return {
       stopped: true,
@@ -608,7 +612,7 @@ export class HeartbeatController {
   async autoStart(eventBus): Promise<Record<string, any> | null> {
     const interval = parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS);
     if (interval && interval >= MIN_INTERVAL_MS) {
-      console.log(`[Heartbeat] Auto-starting from HYDRA_AUTO_CYCLE_INTERVAL_MS=${interval}`);
+      logger.info({ intervalMs: interval }, "auto-starting from HYDRA_AUTO_CYCLE_INTERVAL_MS");
       return await this.start(eventBus, { intervalMs: interval });
     }
     return null;
