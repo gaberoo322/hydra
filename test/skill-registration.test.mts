@@ -89,8 +89,10 @@ describe("registerSkills: transient-failure retry (#1828)", () => {
 
     await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
-    // 4 skills × 3 attempts each (1 initial + 2 retries) = 12 calls, all failing.
-    assert.equal(calls, 12, "each skill must be attempted exactly 3 times");
+    // #3402: 4 skills × 5 attempts each (1 initial + 4 retries) = 20 calls, all
+    // failing. The startup budget widened 3 → 5 so a sustained OV load window is
+    // ridden out in-band instead of abandoning the catalog until the hourly chore.
+    assert.equal(calls, 20, "each skill must be attempted exactly 5 times (#3402 widened budget)");
   });
 });
 
@@ -166,8 +168,9 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
     // First skill times out on every attempt; the rest succeed first try.
     let firstSkillCalls = 0;
     globalThis.fetch = (async () => {
-      // The first skill burns its 3 attempts before any other skill is reached.
-      if (firstSkillCalls < 3) {
+      // The first skill burns its 5 attempts (#3402 widened budget) before any
+      // other skill is reached.
+      if (firstSkillCalls < 5) {
         firstSkillCalls++;
         timeoutThrow();
       }
@@ -237,10 +240,10 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
 
   test("re-registers ONLY the missing skills, never clobbering a succeeded one", async () => {
     muteConsole();
-    // Partial startup: first skill times out all attempts, rest succeed.
+    // Partial startup: first skill times out all attempts (5, #3402), rest succeed.
     let firstSkillCalls = 0;
     globalThis.fetch = (async () => {
-      if (firstSkillCalls < 3) {
+      if (firstSkillCalls < 5) {
         firstSkillCalls++;
         timeoutThrow();
       }
@@ -361,7 +364,8 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
     muteConsole();
     // The dominant failure mode: every POST returns OV's INTERNAL/"Request timed
     // out." 500. Pre-#2250 this abandoned on the FIRST attempt (4 calls total).
-    // Now it must burn the full 3-attempt budget per skill = 12 calls.
+    // Now it must burn the full retry budget per skill. #3402 widened that budget
+    // 3 → 5, so it is 4 skills × 5 attempts = 20 calls.
     let calls = 0;
     globalThis.fetch = (async () => {
       calls++;
@@ -370,7 +374,7 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
 
     await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
-    assert.equal(calls, 12, "4 skills × 3 attempts — the server-timeout body must be retried");
+    assert.equal(calls, 20, "4 skills × 5 attempts — the server-timeout body must be retried (#3402)");
     assert.equal(getSkillCatalogState().registered, 0, "all four still fail when OV never clears");
   });
 
@@ -425,6 +429,88 @@ describe("getSkillCatalogState: defensive copy", () => {
     const b = getSkillCatalogState();
     assert.equal(b.registered, 4, "the returned object must be a copy, not the live state");
     assert.equal(b.skills[0].registered, true, "skill entries must be copied too");
+  });
+});
+
+describe("registerSkills: widened budget + jittered backoff (#3402)", () => {
+  test("a burst that clears on the 5th attempt is ridden out in-band (would have been abandoned at 3)", async () => {
+    muteConsole();
+    // A single skill's first FOUR POSTs are OV server-timeout 500s; the fifth
+    // succeeds. Under the old 3-attempt budget this skill would have been
+    // abandoned (empty catalog until the hourly chore). The widened 5-attempt
+    // budget rides the burst out at startup.
+    let firstSkillCalls = 0;
+    globalThis.fetch = (async () => {
+      // The first skill exhausts its early attempts before any sibling is reached.
+      if (firstSkillCalls < 4) {
+        firstSkillCalls++;
+        return ovServerTimeoutResponse();
+      }
+      return okResponse();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+
+    const state = getSkillCatalogState();
+    assert.equal(
+      state.registered,
+      4,
+      "all four register — the first recovers on its 5th attempt instead of being abandoned",
+    );
+    assert.ok(
+      state.skills.every((s) => s.registered && s.lastError === null),
+      "no skill is left with a lingering timeout error after the in-band recovery",
+    );
+  });
+
+  test("the retry backoff is equal-jittered into [base/2, base] and de-synchronizes retries", async () => {
+    muteConsole();
+    // Capture the delays the retry loop sleeps for by intercepting setTimeout.
+    const realSetTimeout = globalThis.setTimeout;
+    const delays: number[] = [];
+    globalThis.setTimeout = ((fn: (...a: any[]) => void, ms?: number, ...rest: any[]) => {
+      if (typeof ms === "number") delays.push(ms);
+      // Fire immediately so the test doesn't wait on the real clock.
+      return realSetTimeout(fn as any, 0, ...rest);
+    }) as any;
+
+    try {
+      // Every POST times out so the full retry ladder runs; use a real base so
+      // the exponential steps are distinguishable. rng:() => 1 selects the TOP of
+      // each jitter band → delay === base*2^(attempt-1). Only one skill matters
+      // for the delay shape, so read the first skill's four inter-attempt sleeps.
+      globalThis.fetch = (async () => ovServerTimeoutResponse()) as any;
+      await registerSkills({ backoffBaseMs: 100, rng: () => 1, probeVlm: vlmUp });
+
+      // First skill's 4 backoffs at rng=1: 100, 200, 400, 800 (base*2^(n-1)).
+      assert.deepEqual(
+        delays.slice(0, 4),
+        [100, 200, 400, 800],
+        "rng=1 must yield the full exponential band top (no jitter reduction)",
+      );
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    // rng:() => 0 collapses each backoff to the fixed floor base/2 — proving the
+    // jitter is EQUAL-jitter (half fixed, half random), not pure exponential.
+    const realSetTimeout2 = globalThis.setTimeout;
+    const floorDelays: number[] = [];
+    globalThis.setTimeout = ((fn: (...a: any[]) => void, ms?: number, ...rest: any[]) => {
+      if (typeof ms === "number") floorDelays.push(ms);
+      return realSetTimeout2(fn as any, 0, ...rest);
+    }) as any;
+    try {
+      globalThis.fetch = (async () => ovServerTimeoutResponse()) as any;
+      await registerSkills({ backoffBaseMs: 100, rng: () => 0, probeVlm: vlmUp });
+      assert.deepEqual(
+        floorDelays.slice(0, 4),
+        [50, 100, 200, 400],
+        "rng=0 must yield the fixed floor base/2·2^(n-1) — half the delay is jittered away",
+      );
+    } finally {
+      globalThis.setTimeout = realSetTimeout2;
+    }
   });
 });
 
