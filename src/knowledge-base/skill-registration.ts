@@ -12,7 +12,11 @@
 import { ovPostJson, isOvFailure, isOvServerTimeout } from "./ov-request.ts";
 import type { OvErrorCode } from "./ov-request.ts";
 // Issue #2277: the VLM-liveness probe gates the graceful-degradation path below.
-import { probeOllamaVlm } from "../health/probe.ts";
+// Issue #3402: the skills-endpoint liveness probe gates a SECOND degradation path
+// — the VLM can be UP while OV's `/api/v1/skills` POST handler is itself
+// load-gated (indexing-bound). The startup pass now pre-flights it too, mirroring
+// what the hourly recovery chore already does (#2163).
+import { probeOllamaVlm, probeSkillsEndpoint } from "../health/probe.ts";
 
 // Issue #1828: skill registration timed out systematically (~8-12x/hour) under
 // OpenViking indexing load — a fire-and-forget single attempt with a 60s budget
@@ -82,8 +86,30 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  */
 export const VLM_DEFERRED_MARKER = "vlm-deferred" as const;
 
-/** A skill's last-failure marker: an OV failure code, the VLM-deferred marker, or null (never failed). */
-type SkillLastError = OvErrorCode | typeof VLM_DEFERRED_MARKER | null;
+/**
+ * The deferred marker recorded as a skill's `lastError` when the STARTUP
+ * registration pass was SKIPPED (not attempted) because the OV `/api/v1/skills`
+ * POST handler was probed load-gated/failed while the VLM was UP (issue #3402).
+ *
+ * Distinct from {@link VLM_DEFERRED_MARKER}: that means the Tailnet VLM backend
+ * was offline; this means the VLM is reachable but OV's own skills handler is
+ * indexing-bound and cannot answer even a cheap 3s liveness probe — so a full
+ * 4×3×120s registration pass is guaranteed to burn ~24min of blocked I/O and
+ * STILL land the catalog at 0/4. We defer instead, POSTing nothing, and let the
+ * hourly Housekeeping chore (`reRegisterMissingSkills`, gated on this same probe)
+ * re-register once the handler is responsive — no restart needed.
+ */
+export const SKILLS_DEFERRED_MARKER = "skills-deferred" as const;
+
+/**
+ * A skill's last-failure marker: an OV failure code, the VLM-deferred marker, the
+ * skills-handler-deferred marker (#3402), or null (never failed).
+ */
+type SkillLastError =
+  | OvErrorCode
+  | typeof VLM_DEFERRED_MARKER
+  | typeof SKILLS_DEFERRED_MARKER
+  | null;
 
 /** Per-skill registration outcome in the in-process catalog state. */
 interface SkillRegistrationEntry {
@@ -119,6 +145,17 @@ export interface SkillCatalogState {
    * pass that actually attempts registration (VLM up).
    */
   vlmDeferred: boolean;
+  /**
+   * true when the last pass was DEFERRED because OV's `/api/v1/skills` POST
+   * handler was probed load-gated/failed while the VLM was UP (issue #3402) — the
+   * skills were NOT POSTed (a full 4×3×120s pass against a handler that cannot
+   * answer a 3s liveness probe is guaranteed to burn ~24min and still land 0/4).
+   * Sibling to {@link vlmDeferred}: that flags "VLM host offline"; this flags "VLM
+   * up but the skills handler itself is indexing-bound". Lets the health surface
+   * tell the two degraded modes apart. Reset to false on any pass that actually
+   * attempts registration (VLM up AND the skills handler responsive).
+   */
+  skillsDeferred: boolean;
 }
 
 // Seeded so a query before the first pass reports the expected total with every
@@ -131,6 +168,7 @@ const skillCatalogState: SkillCatalogState = {
   completed: false,
   lastAttemptAt: null,
   vlmDeferred: false,
+  skillsDeferred: false,
 };
 
 /**
@@ -147,6 +185,7 @@ export function getSkillCatalogState(): SkillCatalogState {
     completed: skillCatalogState.completed,
     lastAttemptAt: skillCatalogState.lastAttemptAt,
     vlmDeferred: skillCatalogState.vlmDeferred,
+    skillsDeferred: skillCatalogState.skillsDeferred,
   };
 }
 
@@ -201,6 +240,16 @@ export interface RegisterSkillsOptions {
    * while the VLM is offline.
    */
   probeVlm?: typeof probeOllamaVlm;
+  /**
+   * Probe the OV `/api/v1/skills` POST handler liveness (issue #3402). Defaults to
+   * the real `probeSkillsEndpoint` — the SAME probe the hourly recovery chore gates
+   * on (#2163). Injected by tests to drive the responsive/load-gated branches
+   * deterministically. When it returns `status:"failed"` (the handler cannot answer
+   * a cheap 3s liveness probe while the VLM is UP), the startup pass short-circuits
+   * into a skills-deferred degraded path instead of burning the full 4×3×120s
+   * timeout budget against a load-gated handler.
+   */
+  probeSkills?: typeof probeSkillsEndpoint;
 }
 
 /** Outcome of one skill's registration: success, or the last failure code. */
@@ -254,6 +303,7 @@ async function registerOneSkill(
 export async function registerSkills(opts: RegisterSkillsOptions = {}) {
   const backoffBaseMs = opts.backoffBaseMs ?? SKILL_REGISTER_BACKOFF_BASE_MS;
   const probeVlm = opts.probeVlm ?? probeOllamaVlm;
+  const probeSkills = opts.probeSkills ?? probeSkillsEndpoint;
 
   // Issue #2277 — graceful degradation when the VLM backend is offline.
   //
@@ -312,9 +362,71 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
     return;
   }
 
+  // Issue #3402 — graceful degradation when the VLM is UP but OV's own
+  // `/api/v1/skills` POST handler is load-gated.
+  //
+  // The #2277 VLM gate above covers "the Tailnet VLM host is offline". But the
+  // recurring #3402 cascade is a DIFFERENT mode: the VLM is reachable, yet OV's
+  // skills handler blocks synchronously on VLM-dependent semantic enrichment under
+  // OV's OWN indexing load and cannot answer. The VLM gate passes, the startup
+  // pass falls through, and every POST hits "Request timed out." — all 3 retries
+  // exhaust per skill, burning up to ~24min of blocked I/O and STILL landing the
+  // catalog at 0/4. The hourly recovery chore already pre-flights this exact case
+  // (`probeSkillsEndpoint`, #2163); the STARTUP pass did not — that asymmetry IS
+  // issue-3402.
+  //
+  // Pre-flight the SAME skills-endpoint liveness probe here. When it folds to
+  // `failed` (the handler cannot answer a cheap 3s probe), DEFER: record every
+  // skill un-registered with SKILLS_DEFERRED_MARKER, flag `skillsDeferred:true`,
+  // emit EXACTLY ONE operator alert, and return WITHOUT POSTing anything — the
+  // hourly chore re-registers once the handler is responsive (no restart needed).
+  // The probe NEVER throws (its adapter folds all I/O to a result); we still guard
+  // defensively so a probe bug can never block startup — on a throw we degrade to
+  // "attempt anyway" (the pre-#3402 behaviour), NOT to a false deferral.
+  let skillsStatus: "running" | "failed" = "running";
+  try {
+    skillsStatus = (await probeSkills()).status === "running" ? "running" : "failed";
+  } catch (err: any) {
+    /* intentional: probeSkillsEndpoint folds its own I/O to a ServiceProbeResult
+       and never throws, but guard so a probe bug degrades to attempt-anyway rather
+       than a spurious deferral — do NOT mask a healthy handler behind a probe crash. */
+    console.error(`[Learning] Skills-endpoint liveness pre-check threw, attempting registration anyway: ${err?.message || String(err)}`);
+    skillsStatus = "running";
+  }
+
+  if (skillsStatus === "failed") {
+    const deferredEntries: SkillRegistrationEntry[] = OV_SKILLS.map((s) => ({
+      name: s.name,
+      registered: false,
+      lastError: SKILLS_DEFERRED_MARKER,
+      lastSuccessAt: null,
+    }));
+    skillCatalogState.skills = deferredEntries;
+    skillCatalogState.registered = 0;
+    skillCatalogState.total = OV_SKILLS.length;
+    skillCatalogState.completed = true;
+    skillCatalogState.lastAttemptAt = Date.now();
+    skillCatalogState.skillsDeferred = true;
+    // VLM was reachable this pass — the deferral is the skills-handler mode, not
+    // the VLM-offline mode, so clear any prior VLM-deferred flag.
+    skillCatalogState.vlmDeferred = false;
+
+    // Exactly ONE operator-visible alert (mirrors the #2277 VLM-deferred contract:
+    // one alert, no second cascade of per-attempt timeout logs). Fail-loud: error
+    // level, names the load-gated skills handler + the no-restart recovery path.
+    console.error(
+      `[Learning] OV skill catalog DEFERRED — /api/v1/skills POST handler is load-gated ` +
+        `(VLM reachable, but the handler did not answer the 3s liveness probe under OV indexing load), ` +
+        `so all ${OV_SKILLS.length} skill registrations were skipped to avoid the 4×3×120s timeout cascade (#3402). ` +
+        `Planners run without skill context until OV load clears; the hourly Housekeeping chore re-registers ` +
+        `automatically once the handler is responsive (no restart needed) — see issue #3402.`,
+    );
+    return;
+  }
+
   // Reset the in-process catalog state for this pass: every skill starts
   // un-registered and is updated as the loop resolves each one (issue #1968).
-  // VLM was reachable, so clear any deferred flag a prior pass set (#2277).
+  // VLM was reachable, so clear any deferred flag a prior pass set (#2277/#3402).
   const entries: SkillRegistrationEntry[] = OV_SKILLS.map((s) => ({
     name: s.name,
     registered: false,
@@ -343,8 +455,11 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
   skillCatalogState.total = OV_SKILLS.length;
   skillCatalogState.completed = true;
   skillCatalogState.lastAttemptAt = Date.now();
-  // VLM was reachable this pass — clear any deferred flag a prior pass set (#2277).
+  // VLM was reachable AND the skills handler was responsive this pass — the loop
+  // actually ran, so clear both deferred flags a prior pass may have set
+  // (#2277 vlmDeferred, #3402 skillsDeferred).
   skillCatalogState.vlmDeferred = false;
+  skillCatalogState.skillsDeferred = false;
 
   if (registered > 0) {
     console.log(`[Learning] Registered ${registered}/${OV_SKILLS.length} OV skills`);
@@ -443,7 +558,12 @@ export async function reRegisterMissingSkills(
   // least one skill recovers; a 0-recovery pass leaves it as-is (still deferred
   // if it was — the chore gated on the skills endpoint, but the registrations
   // could still have failed for another reason this pass).
-  if (recovered > 0) skillCatalogState.vlmDeferred = false;
+  // A recovery means OV answered and the skills registrations went through, so
+  // neither degraded mode holds any longer (#2277 vlmDeferred, #3402 skillsDeferred).
+  if (recovered > 0) {
+    skillCatalogState.vlmDeferred = false;
+    skillCatalogState.skillsDeferred = false;
+  }
 
   const stillMissing = skillCatalogState.total - skillCatalogState.registered;
   // Issue #2163: ALWAYS log an executed recovery pass (attempted=true), not only

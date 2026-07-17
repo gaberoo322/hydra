@@ -15,12 +15,26 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { registerSkills, getSkillCatalogState, reRegisterMissingSkills, VLM_DEFERRED_MARKER } =
-  await import("../src/knowledge-base/skill-registration.ts");
+const {
+  registerSkills,
+  getSkillCatalogState,
+  reRegisterMissingSkills,
+  VLM_DEFERRED_MARKER,
+  SKILLS_DEFERRED_MARKER,
+} = await import("../src/knowledge-base/skill-registration.ts");
 
 /** Injectable VLM probe stubs (issue #2277). Default real probe is bypassed in tests. */
 const vlmUp = async () => ({ status: "ok" as const, latencyMs: 5 });
 const vlmDown = async () => ({ status: "down" as const, latencyMs: 5000, error: "timeout" });
+
+/**
+ * Injectable skills-endpoint probe stubs (issue #3402). The startup pass now
+ * pre-flights `probeSkillsEndpoint` between the VLM gate and the POST loop; the
+ * registration-loop tests below pin `probeSkills: skillsUp` so the loop runs and
+ * they exercise ONLY the retry/state behaviour they mean to (not the new gate).
+ */
+const skillsUp = async () => ({ status: "running" as const, latencyMs: 5 });
+const skillsDownProbe = async () => ({ status: "failed" as const, latencyMs: null });
 
 const realFetch = globalThis.fetch;
 const realErr = console.error;
@@ -73,7 +87,7 @@ describe("registerSkills: transient-failure retry (#1828)", () => {
     }) as any;
 
     // backoffBaseMs:0 keeps the retry sleep off the wall clock.
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     // 4 skills, one extra call for the retried first skill = 5 total.
     assert.equal(calls, 5, "the timed-out first skill must be retried exactly once");
@@ -87,7 +101,7 @@ describe("registerSkills: transient-failure retry (#1828)", () => {
       timeoutThrow();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     // 4 skills × 3 attempts each (1 initial + 2 retries) = 12 calls, all failing.
     assert.equal(calls, 12, "each skill must be attempted exactly 3 times");
@@ -103,7 +117,7 @@ describe("registerSkills: non-retryable failures short-circuit (#1828)", () => {
       return { ok: false, status: 400, json: async () => ({}), text: async () => "bad payload" };
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     // 4 skills, one attempt each — ov-non-2xx is not in the retryable set.
     assert.equal(calls, 4, "a non-retryable code must not trigger retries");
@@ -122,7 +136,7 @@ describe("registerSkills: raised per-attempt timeout (#1828)", () => {
       return okResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
     assert.equal(sawSignal, true, "fetch must receive an AbortSignal with a live timeout budget");
   });
 });
@@ -132,7 +146,7 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
     muteConsole();
     globalThis.fetch = (async () => okResponse()) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     const state = getSkillCatalogState();
     assert.equal(state.completed, true, "a finished pass must mark completed");
@@ -149,7 +163,7 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
       timeoutThrow();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     const state = getSkillCatalogState();
     assert.equal(state.completed, true);
@@ -174,7 +188,7 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
       return okResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     const state = getSkillCatalogState();
     assert.equal(state.registered, 3, "3 of 4 skills register; the first fails out");
@@ -192,7 +206,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
     // so instead assert the already-full branch is a no-op: register all 4 then
     // re-register — nothing is attempted.
     globalThis.fetch = (async () => okResponse()) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     let calls = 0;
     globalThis.fetch = (async () => {
@@ -213,7 +227,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
     assert.equal(getSkillCatalogState().registered, 0, "precondition: catalog empty after startup");
 
     // OV recovers — re-register all four missing skills now succeed.
@@ -246,7 +260,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
       }
       return okResponse();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
     const before = getSkillCatalogState();
     assert.equal(before.registered, 3, "precondition: 3/4 after a partial startup");
     const succeededAt = before.skills[1].lastSuccessAt;
@@ -279,7 +293,7 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     // OV still timing out during the recovery pass.
     const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
@@ -301,7 +315,7 @@ describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", 
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     // Capture only the recovery-pass output: count [Learning] recovery lines
     // across BOTH console.error and console.log. The per-skill [Learning] logs
@@ -334,7 +348,7 @@ describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", 
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     const lines: string[] = [];
     console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
@@ -368,7 +382,7 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
       return ovServerTimeoutResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     assert.equal(calls, 12, "4 skills × 3 attempts — the server-timeout body must be retried");
     assert.equal(getSkillCatalogState().registered, 0, "all four still fail when OV never clears");
@@ -385,7 +399,7 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
       return okResponse();
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     assert.equal(calls, 5, "the timed-out first skill is retried exactly once, then all succeed");
     assert.equal(getSkillCatalogState().registered, 4, "all four skills register after the retry");
@@ -406,7 +420,7 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
       };
     }) as any;
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     assert.equal(calls, 4, "4 skills, one attempt each — a genuine 4xx is not retried");
   });
@@ -416,7 +430,7 @@ describe("getSkillCatalogState: defensive copy", () => {
   test("mutating the returned object does not corrupt the live state", async () => {
     muteConsole();
     globalThis.fetch = (async () => okResponse()) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     const a = getSkillCatalogState();
     a.registered = -999;
@@ -493,11 +507,133 @@ describe("registerSkills: VLM-down graceful degradation (#2277)", () => {
       calls++;
       return okResponse();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
     assert.equal(calls, 4, "a reachable VLM runs the normal 4-skill registration loop");
     const state = getSkillCatalogState();
     assert.equal(state.registered, 4, "all four register once the VLM is reachable");
     assert.equal(state.vlmDeferred, false, "a successful up-pass clears the deferred flag");
+  });
+});
+
+describe("registerSkills: skills-endpoint load-gated deferral (#3402)", () => {
+  test("a load-gated skills handler (VLM up) DEFERS — zero POSTs, no timeout cascade", async () => {
+    muteConsole();
+    // The #3402 mode: VLM reachable, but OV's /api/v1/skills POST handler is
+    // indexing-bound and fails its 3s liveness probe. The startup pass MUST NOT
+    // fall through to the 4×3×120s registration loop — if even one POST fires,
+    // this counter trips.
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return okResponse();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsDownProbe });
+
+    assert.equal(fetchCalls, 0, "a load-gated skills handler must POST nothing — the cascade is short-circuited");
+
+    const state = getSkillCatalogState();
+    assert.equal(state.completed, true, "the deferred pass still marks completed");
+    assert.equal(state.registered, 0, "nothing registers while the skills handler is load-gated");
+    assert.equal(state.total, 4);
+    assert.equal(state.skillsDeferred, true, "the state flags the deliberate skills-handler deferral");
+    assert.equal(state.vlmDeferred, false, "a skills-handler deferral is NOT a VLM deferral");
+    assert.ok(
+      state.skills.every((s) => !s.registered && s.lastError === SKILLS_DEFERRED_MARKER),
+      "each skill records the skills-deferred marker, distinct from vlm-deferred and any ov-* code",
+    );
+  });
+
+  test("emits EXACTLY ONE operator-visible alert on a skills-handler deferral", async () => {
+    // The deferral path must emit exactly one [Learning] DEFERRED alert and
+    // nothing else — no per-skill timeout spam, no #1968 EMPTY line (the whole
+    // point of mirroring the #2277 one-alert contract).
+    console.error = () => {};
+    console.log = () => {};
+    globalThis.fetch = (async () => okResponse()) as any;
+
+    const lines: string[] = [];
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsDownProbe });
+
+    const deferredLines = lines.filter((l) => l.includes("DEFERRED"));
+    assert.equal(deferredLines.length, 1, "exactly one operator-visible deferral alert");
+    assert.match(deferredLines[0], /\/api\/v1\/skills/, "the alert names the load-gated skills handler");
+    assert.match(deferredLines[0], /no restart needed/, "the alert states the no-restart recovery path");
+    assert.equal(
+      lines.filter((l) => l.includes("EMPTY")).length,
+      0,
+      "a deferral must NOT also emit the #1968 EMPTY alert (would be a double alert)",
+    );
+  });
+
+  test("a genuine 4xx is NOT masked — the deferral only fires on a failed probe (do-not-mask #1828)", async () => {
+    muteConsole();
+    // INVARIANT 4: when the skills probe reports the handler is RESPONSIVE
+    // (running), a real payload rejection (4xx) must still surface immediately —
+    // the #3402 short-circuit must not swallow a genuine non-transient OV failure.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return { ok: false, status: 400, json: async () => ({}), text: async () => "bad payload" };
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
+
+    // Probe said running → the loop runs; a 400 is non-retryable → one POST/skill.
+    assert.equal(calls, 4, "a responsive-handler pass must attempt each skill (the 4xx is NOT deferred/masked)");
+    const state = getSkillCatalogState();
+    assert.equal(state.skillsDeferred, false, "a real 4xx is a registration failure, NOT a deferral");
+    assert.equal(state.registered, 0, "all four fail on the 4xx");
+    assert.ok(
+      state.skills.every((s) => !s.registered && s.lastError === "ov-non-2xx"),
+      "the genuine 4xx surfaces as ov-non-2xx per skill, not the skills-deferred marker",
+    );
+  });
+
+  test("a throwing probe degrades to attempt-anyway (never a spurious deferral)", async () => {
+    muteConsole();
+    // The probe is contractually never-throwing, but a probe BUG must not block or
+    // falsely defer startup registration — it degrades to the pre-#3402 behaviour
+    // (run the loop) rather than deferring on a phantom failure.
+    const throwingProbe = (async () => {
+      throw new Error("probe blew up");
+    }) as any;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return okResponse();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: throwingProbe });
+
+    assert.equal(calls, 4, "a probe throw degrades to attempt-anyway — the loop still runs");
+    const state = getSkillCatalogState();
+    assert.equal(state.skillsDeferred, false, "a probe crash must NOT trigger a spurious deferral");
+    assert.equal(state.registered, 4, "registration succeeds when the handler is actually up");
+  });
+
+  test("a responsive skills handler clears a prior skills-deferral", async () => {
+    muteConsole();
+    // First pass: skills handler load-gated → skillsDeferred set.
+    globalThis.fetch = (async () => okResponse()) as any;
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsDownProbe });
+    assert.equal(getSkillCatalogState().skillsDeferred, true, "precondition: deferred after a load-gated pass");
+
+    // Second pass: handler responsive → the loop runs and clears the flag.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return okResponse();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
+
+    assert.equal(calls, 4, "a responsive handler runs the normal 4-skill registration loop");
+    const state = getSkillCatalogState();
+    assert.equal(state.registered, 4, "all four register once the handler is responsive");
+    assert.equal(state.skillsDeferred, false, "a successful pass clears the skills-deferred flag");
   });
 });

@@ -381,6 +381,7 @@ export const INLINE_FALLBACKS: { [K in InlineProbeKey]: ProbeInputs[K] } = {
     completed: false,
     lastAttemptAt: null,
     vlmDeferred: false,
+    skillsDeferred: false,
   },
   // Empty verdict list — the dark-outcome rule no-ops.
   darkOutcomes: [],

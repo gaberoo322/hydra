@@ -231,6 +231,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     completed: false,
     lastAttemptAt: null,
     vlmDeferred: false,
+    skillsDeferred: false,
   };
   // Issue #2805: a null darkOutcomes (the fan-out could not run the dark-outcome
   // check) defaults to an empty array — honest-none, the dark-outcome rule
