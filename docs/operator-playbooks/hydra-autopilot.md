@@ -537,7 +537,10 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | collect-state output | state.signals key | Drives |
 |---|---|---|
 | `ready_for_agent > 0` (orch GH board) | `orch_work_available` | `dev_orch` (issue #458) |
-| `work_queue > 0` (target Redis queue) | `target_work_available` | `dev_target` |
+| `work_queue > 0` (target Redis queue) | `target_work_available` | `dev_target` (legacy Redis substrate; runs in parallel with the GitHub board during the ADR-0031 expand phase) |
+| `target_ready_for_agent > 0` (**target GH board**, scope=target board-state — open-blocker-excluded via the inherited #3059 filter) | `target_board_work_available` | `dev_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: ready-for-agent present → build. Fires alongside `target_work_available`; either triggers dev_target during cutover) |
+| `target_ready_for_agent == 0` (**target GH board** empty of ready-for-agent work) | `target_board_research_due` | `research_target` (issue #3435, ADR-0031 — orch-style GitHub-board Target dispatch: board empty → research. Not subject to the daily force cap — a plain board-empty signal, cadence-paced) |
+| `target_needs_qa > 0` (**target GH board**, scope=target) | `needs_qa_target` | `qa_target` (issue #3435, ADR-0031 — Target QA now GitHub-board-derived, same source that drives `dev_target`/`research_target`) |
 | `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` |
 | `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |
 | `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch` |

@@ -134,6 +134,72 @@ else
   }'
 fi
 
+# Target-side issue board — GitHub-derived Target dispatch signals (issue #3435,
+# spec #3432, ADR-0031).
+#
+# ADR-0031 migrates Target task tracking from Redis to GitHub Issues on the
+# Target repo (gaberoo322/hydra-betting). This block is the exact parity of the
+# orch board-state collection above: it reads the SAME scope-parameterized
+# reader — `GET /api/autopilot/board-state?scope=target` (issue #3434) — which
+# reuses the pure `deriveBoardState` BYTE-FOR-BYTE against the Target repo. The
+# `ready_for_agent` count it returns already excludes dependency-blocked
+# (open-blocker) issues via the inherited #3059 strict blocked-by/depends-on
+# filter (ADR-0031 Decision 5), so a Target issue "blocked by #N" for an OPEN
+# #N never inflates the dispatchable count — the blocked-exclusion is free.
+#
+# We emit the three counts decide.py's Target branch consumes as its dispatch
+# signals, prefixed `target_` so they never collide with the orch board counts
+# above:
+#   - `target_ready_for_agent` — >0 → the autopilot sets
+#     `target_board_work_available`, which decide.py's `dev_target` selector
+#     reads (ready-for-agent present → dispatch hydra-target-build).
+#   - `target_needs_qa`        — >0 → `needs_qa_target` → `qa_target`.
+#   - `target_needs_research`  — surfaced for completeness / symmetry.
+# `dev_target` empty (target_ready_for_agent==0) → the autopilot sets
+# `target_board_research_due`, which decide.py's `research_target` selector
+# reads (board empty → dispatch hydra-target-research).
+#
+# EXPAND PHASE (ADR-0030 expand-contract, ADR-0031 Decision 6 drain-and-fresh):
+# nothing is deleted yet. The Redis Target reads (work_queue / reframe_queue /
+# prior_failures / the /api/backlog lane reads below) stay in place in parallel;
+# decide.py's Target selectors fire on EITHER the Redis signal OR the new
+# GitHub-board signal during the cutover. FALLBACK mirrors the orch block: on a
+# degraded/unreachable orchestrator we drop back to a direct REST `gh` read
+# against the Target repo (ADR-0031 Decision 6 — REST, never GraphQL, on the
+# money-critical Target hot path), so a transient outage never wedges the turn.
+TARGET_GH_REPO="${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}"
+TARGET_BOARD_STATE_JSON=$(hydra raw GET "/autopilot/board-state?scope=target" 2>/dev/null || true)
+TARGET_BOARD_STATE_DEGRADED=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "
+import json,sys
+try:
+  d=json.load(sys.stdin)
+  ok = isinstance(d,dict) and not d.get('degraded', False) and 'ready_for_agent' in d
+  print('0' if ok else '1')
+except Exception:
+  print('1')" 2>/dev/null || echo 1)
+if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
+  printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+# Emit only the counts decide.py's Target branch consumes, prefixed target_ so
+# they never collide with the orch board counts above.
+print('target_ready_for_agent=' + str(d.get('ready_for_agent', 0)))
+print('target_needs_qa=' + str(d.get('needs_qa', 0)))
+print('target_needs_research=' + str(d.get('needs_research', 0)))"
+else
+  # Fallback: orchestrator down or its gh read degraded — read the Target repo
+  # directly over REST (never GraphQL — ADR-0031 Decision 6). Note this fallback
+  # does NOT apply the #3059 open-blocker filter (which needs the async blocker
+  # resolve the endpoint owns); the healthy endpoint path above is the
+  # blocked-excluding source of truth. Best-effort: any failure emits zeros.
+  gh issue list --repo "$TARGET_GH_REPO" --state open --json number,labels --jq '{
+    target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
+    target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
+    target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
+  } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null \
+    || { echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_research=0"; }
+fi
+
 # untriaged-orphans triage backstop (issue #2426).
 #
 # The dev_orch dispatch path keys ONLY on `ready-for-agent` and the triage

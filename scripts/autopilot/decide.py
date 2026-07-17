@@ -2634,6 +2634,13 @@ def _select_for_slot(
             return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
         return None
     if cls == "qa_target":
+        # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
+        # ADR-0031 the autopilot sets it from the scope=target GitHub board's
+        # `target_needs_qa > 0` count (collect-state.sh) — the same board read
+        # that drives `dev_target` / `research_target` — so Target QA dispatch is
+        # now GitHub-board-derived like the rest of the Target branch. The
+        # selector is substrate-agnostic: it reads one boolean signal regardless
+        # of whether it was sourced from the board or (legacy) Redis.
         if _signal_present(state, events, "needs_qa_target"):
             return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
         return None
@@ -2678,7 +2685,22 @@ def _select_for_slot(
         # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
         # best /api/anchor/candidates entry as an anchor hint, because the
         # unified candidates feed IS target-product work in this deployment.
-        if _signal_present(state, events, "target_work_available"):
+        #
+        # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). The Target's
+        # tracking substrate is migrating from Redis to GitHub Issues on the
+        # Target repo. `target_board_work_available` is the collect-state signal
+        # for "the scope=target board has ≥1 ready-for-agent, unblocked issue"
+        # (collect-state.sh sets it from `target_ready_for_agent > 0`, which is
+        # already open-blocker-excluded via the inherited #3059 filter — ADR-0031
+        # Decision 5). This is the orch-style Target dispatch decision:
+        # ready-for-agent present → dev_target. EXPAND PHASE (ADR-0030): fire on
+        # EITHER the legacy Redis `target_work_available` OR the new GitHub-board
+        # `target_board_work_available` — both live in parallel during cutover;
+        # nothing Redis-side is deleted here.
+        if (
+            _signal_present(state, events, "target_work_available")
+            or _signal_present(state, events, "target_board_work_available")
+        ):
             prompt_args: dict = {}
             # ISSUE #1129 (finished): the dev-steer half of the single target
             # candidate boundary now reads the SAME feed-owned flag the
@@ -2722,6 +2744,25 @@ def _select_for_slot(
         # (issue #1129 finished — the private dev-side threshold was deleted).
         if _signal_present(state, events, "target_research_due"):
             return make_dispatch(cls, "hydra-target-research", reason="target research due")
+        # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
+        # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
+        # unblocked issues) means the Target product needs more research
+        # direction — the GitHub-board mirror of the candidate-feed
+        # `research_recommended` trigger below. collect-state.sh sets
+        # `target_board_research_due` when `target_ready_for_agent == 0`. Placed
+        # AFTER the explicit `target_research_due` and BEFORE the Redis
+        # candidate-feed trigger so the two substrates coexist during the expand
+        # phase (ADR-0030). Unlike the forced candidate-feed path below this is a
+        # plain board-empty signal, so it is NOT subject to the daily force cap —
+        # it fires no more often than the pace-gated turn cadence and its class
+        # cooldown allow, mirroring how `dev_target`/`qa_target` read their board
+        # signals directly.
+        if _signal_present(state, events, "target_board_research_due"):
+            return make_dispatch(
+                cls,
+                "hydra-target-research",
+                reason="target GitHub board empty of ready-for-agent work",
+            )
         if candidates is not None and research_recommended(candidates):
             if _research_force_allowed(state, "research_target", now):
                 # Issue #1666: stamp the daily force counter at the commit
