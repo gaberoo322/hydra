@@ -6,6 +6,7 @@ import {
   getAggregateStats,
   getCumulativeAccomplishments,
   getCostByOutcome,
+  getUnclassifiedAnchors,
 } from "../metrics/aggregate.ts";
 import { projectAnchorDistribution } from "../metrics/stats-projection.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
@@ -177,6 +178,33 @@ export function createMetricsRouter() {
       // Aggregation lives in src/metrics/aggregate.ts; this route is a thin
       // delegate (issue #2126).
       return projectAnchorDistribution(trend);
+    }),
+  );
+
+  // GET /metrics/unclassified — Attribution metadata for cycles still stuck in
+  // the `unclassified` anchorType bucket (issue #3443).
+  //
+  // Issue #3403 (PR #3406) shipped the instrumentation that captures each
+  // unclassified cycle's metadata (cycleId, prNumber, anchorReference,
+  // taskTitle) so the residue that survives the classifier
+  // (src/autopilot/anchor-type.ts, after skill-name / slot / unambiguous-prefix
+  // inference) is ATTRIBUTABLE rather than an opaque count. `getUnclassifiedAnchors`
+  // was exported but never wired to a consumer — the discovery playbook's
+  // >10%-unclassified architectural-review trigger needs the offending cycleIds
+  // to root-cause the gap, so this endpoint exposes them.
+  //
+  // A thin delegate to the src/metrics/aggregate.ts aggregator (ADR-0016
+  // Locality) — the anchorType-filter + rate math is NOT re-implemented here,
+  // mirroring the /metrics/anchor-distribution → projectAnchorDistribution split.
+  // Payload is the aggregator's body RAW: `{ windowCycles, unclassified:
+  // [{cycleId, prNumber?, anchorReference?, taskTitle?}], rate }` — no envelope.
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/unclassified",
+    aggregatorRouteNoQuery("api/metrics/unclassified", (req) => {
+      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
+      return getUnclassifiedAnchors(count);
     }),
   );
 
