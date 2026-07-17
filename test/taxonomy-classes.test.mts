@@ -85,6 +85,10 @@ const EXPECTED_SIGNAL = [
   // issue #3351, epic #3350, ADR-0029 — the wayfinder-map AFK working class
   // (orch, 1h; works the next unblocked frontier ticket).
   "wayfinder_orch",
+  // issue #3421, epic #3419, ADR-0030 Decision 2 — the tickets-stage producer
+  // class (orch, 1h; dispatches the upstream to-tickets skill + Hydra overlay;
+  // hydra-prd is demoted to the called renderer library).
+  "tickets_orch",
 ];
 const EXPECTED_COOLDOWNS: Record<string, number> = {
   health: 0,
@@ -101,6 +105,7 @@ const EXPECTED_COOLDOWNS: Record<string, number> = {
   design_qa_target: 7 * 24 * 60 * 60,
   skill_prune: 7 * 24 * 60 * 60,
   wayfinder_orch: 3600,
+  tickets_orch: 3600,
 };
 
 const REQUIRED_COLUMNS = [
@@ -144,10 +149,34 @@ describe("taxonomy: TS view agrees with classes.json", () => {
     }
   });
 
-  test("exactly the 21 known classes, in dispatch order", () => {
+  test("exactly the 22 known classes, in dispatch order", () => {
     assert.deepEqual(PIPELINE_SLOT_NAMES, EXPECTED_PIPELINE);
     assert.deepEqual(SIGNAL_CLASS_NAMES, EXPECTED_SIGNAL);
-    assert.equal(DISPATCH_CLASSES.length, 21);
+    assert.equal(DISPATCH_CLASSES.length, 22);
+  });
+
+  // Regression for issue #3421 (epic #3419, ADR-0030 Decision 2): the
+  // tickets-stage class row. The row binds the Pocock `tickets` stage to the
+  // vendored upstream `to-tickets` skill (+ Hydra AFK overlay); hydra-prd is
+  // demoted to the called PrdInput→issue renderer library and deliberately
+  // has NO class row of its own. Expand step only — decide.py's hardcoded
+  // pipeline_priority / signal iteration tuples do not dispatch this class
+  // yet (that wiring is delta #3423's contract phase).
+  test("tickets_orch row: the ADR-0030 tickets-stage class shape (#3421)", () => {
+    const row = classByName("tickets_orch");
+    assert.ok(row, "tickets_orch row must exist");
+    assert.equal(row.kind, "signal");
+    assert.equal(row.skill, "to-tickets");
+    assert.equal(row.costClass, "other");
+    assert.equal(row.learningAgent, null);
+    assert.equal(row.cooldownSeconds, 3600);
+    assert.equal(row.scope, "orch");
+    assert.equal(row.provenanceLabel, null);
+    // classBySkill resolves the upstream skill name to the same row.
+    assert.equal(classBySkill("to-tickets")?.name, "tickets_orch");
+    // hydra-prd itself must NOT (re)gain a dispatch-class row — it is the
+    // callee renderer library, not a dispatch identity.
+    assert.equal(classBySkill("hydra-prd"), undefined);
   });
 
   test("cooldown values match the pre-#1670 embedded SIGNAL_COOLDOWNS", () => {
@@ -301,7 +330,7 @@ describe("taxonomy: TS parser hard-fails with InvariantViolationError", () => {
   }
 
   test("valid file parses clean", () => {
-    assert.equal(parseClassTaxonomy(validText).length, 21);
+    assert.equal(parseClassTaxonomy(validText).length, 22);
   });
 
   test("malformed JSON throws", () => {

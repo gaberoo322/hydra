@@ -18,6 +18,18 @@
  *
  * This module is pure — no fs / network / process — so it can be unit
  * tested directly. See test/hydra-prd-template.test.mts.
+ *
+ * ## Demoted to a called renderer library (ADR-0030 Decision 2, issue #3421)
+ *
+ * Under the one-lineage refit (ADR-0030), the Pocock `tickets` stage is owned
+ * by the `tickets_orch` dispatch class (`scripts/autopilot/classes.json`),
+ * which dispatches the vendored upstream `to-tickets` skill + the thin Hydra
+ * AFK overlay (the Option C compose mechanism, issue #3420). This module is
+ * that overlay's CALLEE: the `PrdInput`→issue-body renderer library. It is
+ * NOT a standalone dispatch identity — `hydra-prd` has no class row in the
+ * taxonomy and must not gain one (pinned by test/taxonomy-classes.test.mts).
+ * Expand step: the existing hydra-prd playbook path stays alive beside the
+ * new class until the delta #3423 / epsilon #3424 contract phases retire it.
  */
 
 /**

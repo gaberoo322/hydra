@@ -119,6 +119,10 @@ export const ANCHOR_TYPE_BY_CLASS: Readonly<Record<string, string>> = {
   skill_prune: "skill-prune",
   // issue #3351, epic #3350, ADR-0029 — the wayfinder-map AFK working class.
   wayfinder_orch: "wayfinder",
+  // issue #3421, epic #3419, ADR-0030 Decision 2 — the tickets-stage producer
+  // class (dispatches the vendored upstream `to-tickets` skill + Hydra
+  // overlay; hydra-prd demoted to the called renderer library).
+  tickets_orch: "tickets",
 };
 
 /**

@@ -194,6 +194,15 @@
       "cooldownSeconds": 3600,
       "model": null,
       "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "name": "tickets_orch",
+      "kind": "signal",
+      "skill": "to-tickets",
+      "scope": "orch",
+      "cooldownSeconds": 3600,
+      "model": null,
+      "sourcePath": "scripts/autopilot/classes.json"
     }
   ],
   "labels": [
@@ -417,6 +426,11 @@
     {
       "class": "wayfinder_orch",
       "skill": "hydra-issue-research",
+      "sourcePath": "scripts/autopilot/classes.json"
+    },
+    {
+      "class": "tickets_orch",
+      "skill": "to-tickets",
       "sourcePath": "scripts/autopilot/classes.json"
     }
   ]
