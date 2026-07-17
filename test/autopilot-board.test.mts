@@ -593,7 +593,9 @@ describe("Target board-label leaf — single definition (issue #3434)", () => {
     // target-backlog is an ORCH-side routing label (#2704); no Target-repo
     // issue carries it, so it is not part of the Target board vocabulary.
     assert.equal(
-      Object.values(TARGET_BOARD_LABELS).includes("target-backlog"),
+      (Object.values(TARGET_BOARD_LABELS) as string[]).includes(
+        "target-backlog",
+      ),
       false,
     );
   });
