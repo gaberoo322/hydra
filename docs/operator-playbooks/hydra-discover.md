@@ -88,6 +88,29 @@ Alerts:
 - Any anchor type >50% empty over 5+ cycles → performance finding
 - Any anchor type 0% merge over 5+ cycles → architectural finding
 - Overall empty rate >25% → performance finding
+- Unclassified-anchor rate >10% → architectural finding (the classifier can't
+  attribute those cycles to a lane; drill into the offending cycleIds below)
+
+**Unclassified-residue drill-down (issue #3403 instrumentation, exposed #3443).**
+When the anchor-type breakdown shows an `unclassified` bucket over the >10%
+threshold, root-cause it by pulling the offending cycles' attribution metadata —
+each carries the `cycleId` and, where the writer forwarded one, the `prNumber`
+you can trace back to a specific PR:
+
+```bash
+hydra raw GET /metrics/unclassified            # default 50-cycle window
+# or widen/narrow the window:  hydra raw GET /metrics/unclassified?count=200
+```
+
+Payload: `{ windowCycles, unclassified: [{ cycleId, prNumber?, anchorReference?,
+taskTitle? }], rate }` — `rate` is the unclassified percentage over
+`windowCycles`, and each `unclassified` entry maps a residual cycle back to a
+named PR / anchor (a *documented exception*) rather than an opaque count. Most
+residual rows are the holdback-merge-watch merged-status enrichment write (they
+carry a `prNumber` but no forwarded `anchorType`, and their bare-UUID / harness
+branch cycleId has no decodable dispatch slot — the known #2800 upstream forward
+gap); file an architectural finding only when the residue reflects a NEW
+undecodable id shape.
 
 ### 2a-impact. Outcome-impact ranking — the reverse loop (issue #3283)
 
