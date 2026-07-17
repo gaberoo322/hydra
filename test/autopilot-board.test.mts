@@ -26,7 +26,15 @@ import {
   STALE_BLOCKED_SECONDS,
   type AutopilotBoardRouterDeps,
 } from "../src/api/autopilot-board.ts";
-import { AutopilotBoardStateResponseSchema } from "../src/schemas/autopilot-board.ts";
+import {
+  AutopilotBoardStateResponseSchema,
+  AutopilotBoardStateQuerySchema,
+  BOARD_STATE_SCOPES,
+} from "../src/schemas/autopilot-board.ts";
+import {
+  TARGET_BOARD_LABELS,
+  TARGET_SPECIFIC_LABELS,
+} from "../src/target-board-labels.ts";
 import type { IssueRow, IssueReadResult } from "../src/github/issues.ts";
 
 // ---------------------------------------------------------------------------
@@ -430,5 +438,165 @@ describe("GET /autopilot/board-state — route (issue #934)", () => {
     );
     assert.equal(res._status, 400);
     assert.equal(res._body.code, "schema-validation-failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scope-parameterized board-state read + Target board-label leaf (issue #3434)
+// ---------------------------------------------------------------------------
+
+describe("board-state query scope param (issue #3434)", () => {
+  test("scope defaults to 'orch' when omitted — every existing caller unchanged", () => {
+    const parsed = AutopilotBoardStateQuerySchema.safeParse({});
+    assert.equal(parsed.success, true);
+    if (parsed.success) assert.equal(parsed.data.scope, "orch");
+  });
+
+  test("scope=target is accepted", () => {
+    const parsed = AutopilotBoardStateQuerySchema.safeParse({ scope: "target" });
+    assert.equal(parsed.success, true);
+    if (parsed.success) assert.equal(parsed.data.scope, "target");
+  });
+
+  test("an unknown scope value is rejected (enum-guarded)", () => {
+    const parsed = AutopilotBoardStateQuerySchema.safeParse({ scope: "betting" });
+    assert.equal(parsed.success, false);
+  });
+
+  test("the only scopes are orch + target", () => {
+    assert.deepEqual([...BOARD_STATE_SCOPES], ["orch", "target"]);
+  });
+});
+
+describe("deriveBoardState reused BYTE-FOR-BYTE for the Target board (issue #3434)", () => {
+  // ADR-0031 Decision 3: no parallel Target board module — the SAME pure
+  // bucketing function projects the Target's board. These fixtures pin that the
+  // orch six-count + two-stale-list projection is correct over Target-label
+  // rows (which is exactly the orch board-state set — the Target-specific
+  // labels are write-side vocabulary, NOT read count fields).
+  test("Target-scope rows bucket through the unchanged deriveBoardState", () => {
+    const out = deriveBoardState(
+      [
+        row({ number: 1, labels: [TARGET_BOARD_LABELS.ready_for_agent] }),
+        row({ number: 2, labels: [TARGET_BOARD_LABELS.needs_qa] }),
+        row({ number: 3, labels: [TARGET_BOARD_LABELS.needs_triage] }),
+        row({ number: 4, labels: [TARGET_BOARD_LABELS.needs_research] }),
+        row({
+          number: 5,
+          labels: [TARGET_BOARD_LABELS.in_progress],
+          updatedAt: isoSecondsAgo(STALE_IN_PROGRESS_SECONDS + 60),
+        }),
+        row({
+          number: 6,
+          labels: [TARGET_BOARD_LABELS.blocked],
+          updatedAt: isoSecondsAgo(STALE_BLOCKED_SECONDS + 60),
+        }),
+      ],
+      NOW_MS,
+    );
+    assert.equal(out.ready_for_agent, 1);
+    assert.equal(out.needs_qa, 1);
+    assert.equal(out.needs_triage, 1);
+    assert.equal(out.needs_research, 1);
+    assert.equal(out.in_progress, 1);
+    assert.equal(out.blocked, 1);
+    assert.deepEqual(out.stale_in_progress, [5]);
+    assert.deepEqual(out.stale_blocked, [6]);
+  });
+
+  test("Target-specific labels are NOT surfaced as read count fields (deferred)", () => {
+    // A row carrying only Target-specific qualifier labels contributes to no
+    // board-state count — those labels are write-side vocabulary, not buckets.
+    const out = deriveBoardState(
+      [
+        row({
+          number: 1,
+          labels: [
+            TARGET_SPECIFIC_LABELS.money_critical,
+            TARGET_SPECIFIC_LABELS.reframe,
+            TARGET_SPECIFIC_LABELS.wire_or_retire,
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    assert.equal(out.needs_qa, 0);
+    assert.equal(out.ready_for_agent, 0);
+    assert.equal(out.needs_triage, 0);
+    assert.equal(out.needs_research, 0);
+    assert.equal(out.in_progress, 0);
+    assert.equal(out.blocked, 0);
+    // The response Omit shape has no money_critical / reframe / wire_or_retire keys.
+    assert.equal("money_critical" in out, false);
+    assert.equal("reframe" in out, false);
+    assert.equal("wire_or_retire" in out, false);
+  });
+});
+
+describe("GET /autopilot/board-state?scope=target — route (issue #3434)", () => {
+  test("scope=target buckets Target-label rows and stays never-throw", async () => {
+    const res = await callRoute(
+      {
+        readOpenIssues: async () =>
+          okResult([
+            row({ number: 1, labels: [TARGET_BOARD_LABELS.ready_for_agent] }),
+            row({ number: 2, labels: [TARGET_BOARD_LABELS.needs_qa] }),
+          ]),
+      },
+      { scope: "target" },
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ready_for_agent, 1);
+    assert.equal(res._body.needs_qa, 1);
+    assert.equal(res._body.degraded, false);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("scope=target degrades to the all-zero board on a seam failure (never 500)", async () => {
+    const res = await callRoute(
+      {
+        readOpenIssues: async () =>
+          ({ ok: false, code: "gh-failed" } as IssueReadResult<IssueRow>),
+      },
+      { scope: "target" },
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.degraded, true);
+    assert.equal(res._body.ready_for_agent, 0);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+});
+
+describe("Target board-label leaf — single definition (issue #3434)", () => {
+  test("mirrors the orch board-state set (reused, not re-spelled)", () => {
+    assert.equal(TARGET_BOARD_LABELS.needs_qa, ORCH_BOARD_LABELS.needs_qa);
+    assert.equal(
+      TARGET_BOARD_LABELS.ready_for_agent,
+      ORCH_BOARD_LABELS.ready_for_agent,
+    );
+    assert.equal(TARGET_BOARD_LABELS.needs_triage, ORCH_BOARD_LABELS.needs_triage);
+    assert.equal(
+      TARGET_BOARD_LABELS.needs_research,
+      ORCH_BOARD_LABELS.needs_research,
+    );
+    assert.equal(TARGET_BOARD_LABELS.in_progress, ORCH_BOARD_LABELS.in_progress);
+    assert.equal(TARGET_BOARD_LABELS.blocked, ORCH_BOARD_LABELS.blocked);
+  });
+
+  test("adds the three surviving Target-specific labels", () => {
+    assert.equal(TARGET_BOARD_LABELS.money_critical, "money-critical");
+    assert.equal(TARGET_BOARD_LABELS.reframe, "reframe");
+    assert.equal(TARGET_BOARD_LABELS.wire_or_retire, "wire-or-retire");
+  });
+
+  test("excludes the orch-only target-backlog routing label", () => {
+    // target-backlog is an ORCH-side routing label (#2704); no Target-repo
+    // issue carries it, so it is not part of the Target board vocabulary.
+    assert.equal(
+      (Object.values(TARGET_BOARD_LABELS) as string[]).includes(
+        "target-backlog",
+      ),
+      false,
+    );
   });
 });
