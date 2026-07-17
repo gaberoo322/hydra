@@ -33,7 +33,7 @@
 
 import type { LeadingOutcomeSample } from "../outcome-regression.ts";
 import type { AttributionWindow } from "../redis/attribution-windows.ts";
-import type { PendingEnrollEntry } from "../redis/holdback.ts";
+import type { PendingEnrollEntry } from "../redis/holdback-merge-watch.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables (ADR-0005 — named, env-overridable, not magic literals).
