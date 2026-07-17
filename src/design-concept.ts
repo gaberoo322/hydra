@@ -23,20 +23,21 @@
  *
  * The pure, zero-Redis half of the domain — the domain value types
  * (`DesignConcept`, `DesignConceptScope`), the artifact-identity hash
- * (`computeArtifactHash`), and the gate predicates (`isFresh`, `gateCheck`,
- * `DESIGN_CONCEPT_MAX_AGE_MS`) — was extracted to `src/design-concept-gate.ts`
- * (issue #3039). That leaf imports only the tier-classifier, so gate/identity
- * tests need zero Redis setup. This module imports the leaf and **re-exports**
- * its public symbols, so a caller can still `import { gateCheck,
+ * (`computeArtifactHash`), the gate predicates (`isFresh`, `gateCheck`,
+ * `DESIGN_CONCEPT_MAX_AGE_MS`), and the green-light criterion
+ * (`computeGreenLight` + `GREEN_LIGHT_WINDOW_DAYS` /
+ * `GREEN_LIGHT_REQUIRED_DAYS` / `GreenLightMetrics`) — all live in
+ * `src/design-concept-gate.ts` (issues #3039, #3414). That leaf imports only
+ * the tier-classifier, so gate/identity/green-light tests need zero Redis
+ * setup. This module imports the leaf and **re-exports** its public symbols,
+ * so a caller can still `import { gateCheck, computeGreenLight,
  * getDesignConcept } from "./design-concept.ts"` on one line — preserving the
  * single-source import surface that motivated the #2316 consolidation.
  *
  * This module retains:
  *
- * 1. **Artifact identity (Redis-adjacent)** — `designConceptHandle` and the
- *    green-light criterion (`computeGreenLight` + `GREEN_LIGHT_WINDOW_DAYS` /
- *    `GREEN_LIGHT_REQUIRED_DAYS`). Pure — no Redis IO, but domain-local to
- *    persistence.
+ * 1. **Artifact identity (Redis-adjacent)** — `designConceptHandle`, the
+ *    stable retrieval handle derived from the canonical `anchorRef`.
  *
  * 2. **Persistence** — `saveDesignConcept`, `getDesignConcept`,
  *    `listDesignConcepts`, `approveDesignConcept`, `resolveDesignConceptForQa`,
@@ -99,7 +100,11 @@ export {
   computeArtifactHash,
   isFresh,
   gateCheck,
+  computeGreenLight,
+  GREEN_LIGHT_WINDOW_DAYS,
+  GREEN_LIGHT_REQUIRED_DAYS,
   type DesignConcept,
+  type GreenLightMetrics,
 } from "./design-concept-gate.ts";
 
 // File-private status alias — used by `saveDesignConcept` / `hydrate`. Kept
@@ -146,73 +151,6 @@ export function designConceptHandle(anchorRef: string): DesignConceptHandle {
     anchorRef: canonical,
     redisKey: `hydra:design-concept:${canonical}`,
     apiPath: `/api/design-concepts/${canonical}`,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Green-light criterion (issue #736)
-// ---------------------------------------------------------------------------
-
-/**
- * The promotion clock is idle-tolerant (issue #736): Phase C of #437 may
- * flip when at least `GREEN_LIGHT_REQUIRED_DAYS` of the most-recent
- * `GREEN_LIGHT_WINDOW_DAYS` snapshot days produced ≥1 design concept.
- *
- * Chosen form: "N of last M days" rather than a pure consecutive run.
- * Rationale (the open design choice the design-concept artifact deferred
- * to implementation): a strict `consecutiveGreenDays >= 7` punishes
- * legitimately-quiet orch days (no `ready-for-agent` issue lacking a fresh
- * artifact ⇒ nothing to grill), which is exactly the failure the issue
- * reports. "7 of last 10" tolerates up to 3 quiet days inside the window
- * while still demanding sustained production. Both the threshold and the
- * window stay well inside MAX_SNAPSHOT_DAYS (14) so the HASH always holds
- * enough history to evaluate.
- *
- * (Extracted from `src/api/design-concepts.ts` to its domain home so the
- * pure function is directly unit-testable and the policy constants are
- * importable without HTTP overhead — issue #1875.)
- */
-export const GREEN_LIGHT_WINDOW_DAYS = 10;
-export const GREEN_LIGHT_REQUIRED_DAYS = 7;
-
-export type GreenLightMetrics = {
-  /** Legacy field: green days counted consecutively from the newest. */
-  consecutiveGreenDays: number;
-  /** Green (production > 0) days within the trailing window. */
-  greenDaysInWindow: number;
-  windowDays: number;
-  requiredGreenDays: number;
-  greenLightReady: boolean;
-};
-
-/**
- * Compute the green-light metrics from a newest-first snapshot list. Pure
- * — no Redis IO — so it is unit-testable. A "green" day is one whose
- * production count is > 0.
- */
-export function computeGreenLight(
-  snapshots: Array<{ date: string; count: number }>,
-  windowDays: number = GREEN_LIGHT_WINDOW_DAYS,
-  requiredGreenDays: number = GREEN_LIGHT_REQUIRED_DAYS,
-): GreenLightMetrics {
-  // `consecutiveGreenDays`: walk from newest until the first zero day.
-  let consecutiveGreenDays = 0;
-  for (const s of snapshots) {
-    if (s.count > 0) consecutiveGreenDays += 1;
-    else break;
-  }
-  // `greenDaysInWindow`: count green days among the newest `windowDays`.
-  const window = snapshots.slice(0, windowDays);
-  const greenDaysInWindow = window.reduce(
-    (n, s) => (s.count > 0 ? n + 1 : n),
-    0,
-  );
-  return {
-    consecutiveGreenDays,
-    greenDaysInWindow,
-    windowDays,
-    requiredGreenDays,
-    greenLightReady: greenDaysInWindow >= requiredGreenDays,
   };
 }
 

@@ -1,9 +1,11 @@
 /**
  * Direct unit tests for `computeGreenLight` (issue #1875).
  *
- * `computeGreenLight` + its policy constants live in the design-concept module
- * (`src/design-concept.ts`) so the pure function can be exercised WITHOUT
- * Redis or an Express server. These tests assert the green-light criterion
+ * `computeGreenLight` + its policy constants live in the pure gate leaf
+ * (`src/design-concept-gate.ts`, relocated there in issue #3414) and are
+ * re-exported by `src/design-concept.ts`, so the pure function can be
+ * exercised WITHOUT Redis or an Express server. These tests assert the
+ * green-light criterion
  * (issue #736: ≥7 of the trailing 10 snapshot days produced a concept) at
  * the function boundary — the edge cases the HTTP-only test
  * (`test/design-concept-snapshots-api.test.mts`) could only reach through a
@@ -23,9 +25,10 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-// `computeGreenLight` + its policy constants are part of the design-concept
-// module (issue #2316 consolidated all domain symbols into the single deep
-// module from the prior three-module split).
+// `computeGreenLight` + its policy constants now live in the pure gate leaf
+// (`design-concept-gate.ts`, relocated in issue #3414) but are re-exported by
+// `design-concept.ts`, so this import path resolves unchanged — the public
+// import surface is stable across the move (design-concept #3414 invariant).
 import {
   computeGreenLight,
   GREEN_LIGHT_WINDOW_DAYS,
