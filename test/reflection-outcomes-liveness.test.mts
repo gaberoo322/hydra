@@ -59,6 +59,7 @@ function baseSnapshot(): HealthSnapshot {
       completed: true,
       lastAttemptAt: Date.now(),
       vlmDeferred: false,
+      skillsDeferred: false,
     },
     darkOutcomes: [],
     reflectionOutcomesLiveness: {

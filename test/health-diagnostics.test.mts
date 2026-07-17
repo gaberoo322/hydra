@@ -83,6 +83,7 @@ function healthySnapshot(): HealthSnapshot {
       completed: true,
       lastAttemptAt: Date.now(),
       vlmDeferred: false,
+      skillsDeferred: false,
     },
     // Issue #2805: no dark leading outcomes by default — the dark-outcome rule
     // fires ONLY when at least one verdict has status "dark", so an empty array
@@ -1056,6 +1057,7 @@ describe("parseProbes", () => {
         completed: true,
         lastAttemptAt: Date.now(),
         vlmDeferred: false,
+        skillsDeferred: false,
       },
       // Issue #2805: no dark outcomes in this fan-out — the dark-outcome rule
       // must not add a diagnostic to the degraded-fan-out assertion below.

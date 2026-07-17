@@ -274,6 +274,7 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
       completed: false,
       lastAttemptAt: null,
       vlmDeferred: false,
+      skillsDeferred: false,
     });
     // darkOutcomes folds to [] (the dark-outcome rule no-ops), NOT null.
     assert.deepEqual(probes.darkOutcomes, []);

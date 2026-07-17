@@ -44,6 +44,17 @@ export interface SkillCatalogSnapshot {
    * the field default to the non-deferred (#1968) framing.
    */
   vlmDeferred?: boolean;
+  /**
+   * true when the last pass was DEFERRED because the OpenViking /api/v1/skills
+   * endpoint was load-gated at startup (issue #3402) — the skills handler could
+   * not answer yet, so registration was SKIPPED (rather than burning the timeout
+   * budget against a handler that cannot respond). Like {@link vlmDeferred} this
+   * is a deliberate, self-healing graceful degradation — the hourly Housekeeping
+   * chore re-registers once the endpoint answers — NOT the #1968 "every POST
+   * failed under load" empty. Optional so callers that pre-date the field default
+   * to the non-deferred framing.
+   */
+  skillsDeferred?: boolean;
 }
 
 /** Folded verdict on the skill catalog: a status plus an optional diagnostic. */
@@ -100,6 +111,31 @@ export function assessSkillCatalog(snap: SkillCatalogSnapshot): SkillCatalogAsse
         why: "The Tailnet Ollama VLM backend (gabes-desktop-1:11434) was down at registration time, so all skill registrations were SKIPPED to avoid the timeout cascade (#2277/#2269/#1831) — the catalog is empty by deliberate graceful degradation, not failed POSTs.",
         impact: "Planners run without skill context until the VLM recovers — degraded forecast quality; contributes to the no-task rate (#1832).",
         action: "Recover the Ollama VLM host (Wake-on-LAN: #1794) — see docs/operator-playbooks/ollama-recovery.md. Once it answers, the hourly Housekeeping chore re-registers the skills automatically (no restart needed).",
+        autoRecovery: true,
+      },
+    };
+  }
+
+  // Issue #3402 — sibling graceful-degradation path to `vlmDeferred` above. The
+  // last pass was DEFERRED because the OpenViking /api/v1/skills endpoint was
+  // load-gated at startup: the orchestrator deliberately SKIPPED the
+  // registrations (rather than burning the timeout budget against a handler that
+  // cannot answer yet). Report this as `degraded` (warning, auto-recovering) —
+  // NOT the #1968 `empty` (error). Like the VLM-deferred case it is a known,
+  // self-healing condition: the hourly Housekeeping chore re-registers once the
+  // /skills endpoint answers, no restart needed. Surfacing it as `empty` would
+  // mis-frame a deliberate degradation as a hard registration failure and
+  // mis-route the operator to "check OpenViking load and restart".
+  if (snap.skillsDeferred) {
+    return {
+      status: "degraded",
+      diagnostic: {
+        severity: "warning",
+        component: "intelligence",
+        what: "OV skill catalog deferred (skills endpoint load-gated)",
+        why: "The OpenViking /api/v1/skills endpoint was load-gated at startup, so all skill registrations were SKIPPED (#3402) — the catalog is empty by deliberate graceful degradation, not failed POSTs.",
+        impact: "Planners run without skill context until the endpoint answers — degraded forecast quality; contributes to the no-task rate (#1832).",
+        action: "No action needed — the hourly Housekeeping chore re-registers the skills automatically once the /api/v1/skills endpoint answers (no restart needed). If it persists, check OpenViking startup load.",
         autoRecovery: true,
       },
     };
@@ -212,6 +248,16 @@ export function assessRegistrationFailureRate(
   // for one deliberate degradation — there was no failed *registration* to rate
   // (nothing was POSTed), so a "100% failure rate" framing would be misleading.
   if (snap.vlmDeferred) return null;
+
+  // Issue #3402 — the same suppression for the skills-endpoint deferral. When the
+  // OpenViking /api/v1/skills handler is load-gated at startup, registration is
+  // DEFERRED (skipped), not failed — nothing was POSTed, so an empty catalog
+  // (rate 100%) here is a deliberate graceful degradation, not a registration
+  // failure. Fire no failure-rate alert: the population gate (assessSkillCatalog)
+  // already owns the single degraded/deferred diagnostic for this state, so
+  // alerting here too would double-report one deliberate degradation with a
+  // misleading "100% failure rate" framing.
+  if (snap.skillsDeferred) return null;
 
   const failed = snap.total - snap.registered;
   const rate = failed / snap.total;

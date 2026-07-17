@@ -177,6 +177,10 @@ export function createHealthRouter(eventBus: PingableBus) {
       // Issue #2277: surface the deferred (VLM-down) state so the operator can
       // tell a deliberate graceful degradation from the #1968 under-load empty.
       vlmDeferred: state.vlmDeferred,
+      // Issue #3402: surface the second deferred mode — VLM up but OV's skills
+      // handler load-gated — as a sibling flag so the operator can distinguish the
+      // two deliberate degradations from each other and from the under-load empty.
+      skillsDeferred: state.skillsDeferred,
       skills: state.skills,
       diagnostic: assessment.diagnostic,
     });
