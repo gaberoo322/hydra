@@ -61,13 +61,15 @@ Each tick:
 
 | Kind | Class | Skill |
 |---|---|---|
-| pipeline | `dev_orch` | hydra-dev |
-| pipeline | `qa_orch` | hydra-qa |
+| pipeline | `dev_orch` | hydra-dev (**implement** stage — composed on the vendored upstream `implement` base, ADR-0030 Decision 2 / #3422) |
+| pipeline | `qa_orch` | hydra-qa (**review** stage — composed on the vendored upstream `code-review` base, ADR-0030 Decision 2 / #3420) |
 | pipeline | `research_orch` | hydra-research / hydra-issue-research |
 | pipeline | `dev_target` | hydra-target-build |
 | pipeline | `qa_target` | hydra-qa (target scope) |
 | pipeline | `research_target` | hydra-target-research |
-| pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only) |
+| pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only — the **spec** stage of the one-lineage refit; ADR-0030 Decision 2 folds grill-before-build in as this stage's interactive mode over the vendored upstream `to-spec` base, #3422) |
+
+> **One-lineage stage bindings (ADR-0030 Decision 2, expand step — #3422).** The three code-writing pipeline stages now compose against the *same* vendored upstream Pocock skills the operator runs interactively (the lineage home is `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) folds the design-concept gate in as `_vendor/to-spec.md`'s interactive mode. This is the **expand** phase of the expand-contract sequence (ADR-0030 Decision 5): the composed bindings are added while the old fork identities stay live and dispatchable, and the `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) are **unchanged** — delta (#3423) migrates those seams and epsilon (#3424) contracts the forks. The grill-before-build sequencing (`dev_orch` yields when `orch_pending_grill_anchor` is set, #628) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
 | signal | `health` | hydra-doctor (scope-agnostic) |
 | signal | `sweep_orch` | hydra-sweep |
 | signal | `sweep_target` | hydra-target-sweep |

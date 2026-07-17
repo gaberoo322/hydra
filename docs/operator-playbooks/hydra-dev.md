@@ -5,10 +5,13 @@ when_to_use: "When the user wants to work on a Hydra orchestrator issue, says 'p
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [issue_number]
 claude_only: true
+compose_base: _vendor/implement.md
 reference_files: [_fragments/hydra-dev-parent-flow.md, _fragments/hydra-dev-child-flow.md]
 ---
 
 # Hydra Dev
+
+> **Composed skill (ADR-0030 Decision 2 / Option C, issue #3422).** This playbook is the thin Hydra **AFK overlay** on top of the vendored upstream `implement` base (`docs/operator-playbooks/_vendor/implement.md`). `scripts/sync-skills.sh` emits `~/.claude/skills/hydra-dev/SKILL.md` as **[upstream implement base] + [this overlay]**, with the vendored base's `disable-model-invocation: true` **stripped** (it hard-errors under Skill-tool dispatch). The **implement** stage of the one-lineage refit now dispatches the *same* upstream skill the operator runs, in AFK mode: the upstream base sets the spirit (implement against the spec/tickets, use `/tdd` at pre-agreed seams, typecheck + single-file tests as you go, the full suite once at the end, then `/code-review`), and the worktree-isolation, verification-depth, and PR contract below are the Hydra-specific overlay that rides on it. **Expand-contract (ADR-0030 Decision 5):** the old `hydra-dev` fork identity stays live and dispatchable — nothing retires here (delta #3423 migrates the `decide.py` seams; epsilon #3424 contracts).
 
 Autonomous implementation of GitHub issues against the Hydra orchestrator
 (`~/hydra`). Delegates to a worktree subagent for isolation.
