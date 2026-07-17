@@ -412,6 +412,87 @@ describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
   });
 });
 
+describe("registerSkills: backoff jitter decorrelates the retry herd (#3402)", () => {
+  test("the retry sleep is scaled by the injected jitter (equal-jitter form)", async () => {
+    // Issue #3402: the four skills retried in lockstep against the same
+    // overloaded OV /api/v1/skills handler (fixed 1000ms/2000ms backoff),
+    // re-hitting the endpoint in synchronized windows and exhausting together.
+    // The fix scales each backoff by `0.5 + jitter()*0.5`, so a jitter source of
+    // 0 halves the base and 1 leaves it whole — proving the multiplier is live.
+    // We measure the actual sleep by stubbing setTimeout's delay argument.
+    console.error = () => {};
+    console.log = () => {};
+
+    const realSetTimeout = globalThis.setTimeout;
+    const sleeps: number[] = [];
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number) => {
+      sleeps.push(ms ?? 0);
+      // Fire the callback immediately so the retry loop does not actually wait.
+      return realSetTimeout(fn as any, 0);
+    }) as any;
+
+    // First skill: fail twice (engaging two backoffs), then succeed; the rest
+    // succeed first try. A non-zero base + jitter()=0 must yield base/2.
+    let firstSkillCalls = 0;
+    globalThis.fetch = (async () => {
+      if (firstSkillCalls < 2) {
+        firstSkillCalls++;
+        timeoutThrow();
+      }
+      return okResponse();
+    }) as any;
+
+    try {
+      // base=1000, jitter()=0 → equal-jitter floor: attempt1 backoff = round(1000*0.5)=500,
+      // attempt2 backoff = round(2000*0.5)=1000. Without the jitter multiplier the
+      // values would be the un-scaled 1000/2000 — so these assert the multiplier fired.
+      await registerSkills({ backoffBaseMs: 1000, jitter: () => 0, probeVlm: vlmUp });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    assert.deepEqual(
+      sleeps,
+      [500, 1000],
+      "jitter()=0 must halve each exponential backoff step (equal-jitter floor)",
+    );
+  });
+
+  test("jitter()=1 leaves the full exponential backoff (equal-jitter ceiling)", async () => {
+    console.error = () => {};
+    console.log = () => {};
+
+    const realSetTimeout = globalThis.setTimeout;
+    const sleeps: number[] = [];
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number) => {
+      sleeps.push(ms ?? 0);
+      return realSetTimeout(fn as any, 0);
+    }) as any;
+
+    let firstSkillCalls = 0;
+    globalThis.fetch = (async () => {
+      if (firstSkillCalls < 2) {
+        firstSkillCalls++;
+        timeoutThrow();
+      }
+      return okResponse();
+    }) as any;
+
+    try {
+      // base=1000, jitter()=1 → 0.5 + 0.5 = 1.0 multiplier: full 1000/2000 steps.
+      await registerSkills({ backoffBaseMs: 1000, jitter: () => 1, probeVlm: vlmUp });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    assert.deepEqual(
+      sleeps,
+      [1000, 2000],
+      "jitter()=1 must leave the full exponential backoff (equal-jitter ceiling)",
+    );
+  });
+});
+
 describe("getSkillCatalogState: defensive copy", () => {
   test("mutating the returned object does not corrupt the live state", async () => {
     muteConsole();

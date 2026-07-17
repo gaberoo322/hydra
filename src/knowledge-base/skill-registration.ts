@@ -193,6 +193,17 @@ export interface RegisterSkillsOptions {
   /** Base backoff in ms (doubles each retry). Defaults to {@link SKILL_REGISTER_BACKOFF_BASE_MS}. */
   backoffBaseMs?: number;
   /**
+   * Jitter source in [0,1). Defaults to `Math.random`. Injected by tests to make
+   * the backoff deterministic. Multiplied into the computed backoff (equal-jitter
+   * form) so the four skills — which retry in lockstep against the SAME overloaded
+   * OV `/api/v1/skills` handler — decorrelate their retries instead of re-hitting
+   * the endpoint in the same synchronized windows (thundering herd). This is the
+   * issue #3402 evidence: 6 registrations retried in fixed 1000ms/2000ms steps and
+   * all exhausted against a transient load spike. Mirrors the sibling
+   * `indexer.ts` (#2658) idiom for the same OV-contention class.
+   */
+  jitter?: () => number;
+  /**
    * Probe the Tailnet Ollama VLM backend liveness (issue #2277). Defaults to the
    * real `probeOllamaVlm`. Injected by tests to drive the up/down branches
    * deterministically without a live network. When it returns `status:"down"`,
@@ -209,6 +220,7 @@ type RegisterOutcome = { ok: true } | { ok: false; code: OvErrorCode };
 async function registerOneSkill(
   skill: (typeof OV_SKILLS)[number],
   backoffBaseMs: number,
+  jitter: () => number,
 ): Promise<RegisterOutcome> {
   let lastCode: OvErrorCode = "ov-service-down";
   for (let attempt = 1; attempt <= SKILL_REGISTER_MAX_ATTEMPTS; attempt++) {
@@ -240,8 +252,15 @@ async function registerOneSkill(
       return { ok: false, code: result.code };
     }
 
-    // Exponential backoff: base, 2×base, 4×base, … before the next attempt.
-    const backoff = backoffBaseMs * 2 ** (attempt - 1);
+    // Exponential backoff WITH equal jitter (issue #3402): base, 2×base, 4×base,
+    // … each scaled by `0.5 + jitter()*0.5` so the value lands in [base/2, base).
+    // The four skills retry in lockstep against the SAME overloaded OV
+    // `/api/v1/skills` handler; without jitter their retries synchronize on the
+    // same windows (1000ms, 2000ms — the issue evidence) and re-trigger the same
+    // load timeout together. Jitter decorrelates the herd so retries spread across
+    // the load window. Same equal-jitter form as the sibling `indexer.ts` (#2658).
+    const base = backoffBaseMs * 2 ** (attempt - 1);
+    const backoff = Math.round(base * (0.5 + jitter() * 0.5));
     console.error(
       `[Learning] Transient OV failure registering skill ${skill.name}: ${result.code} — ` +
         `retrying in ${backoff}ms (attempt ${attempt}/${SKILL_REGISTER_MAX_ATTEMPTS})`,
@@ -253,6 +272,7 @@ async function registerOneSkill(
 
 export async function registerSkills(opts: RegisterSkillsOptions = {}) {
   const backoffBaseMs = opts.backoffBaseMs ?? SKILL_REGISTER_BACKOFF_BASE_MS;
+  const jitter = opts.jitter ?? Math.random;
   const probeVlm = opts.probeVlm ?? probeOllamaVlm;
 
   // Issue #2277 — graceful degradation when the VLM backend is offline.
@@ -323,7 +343,7 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
   }));
   let registered = 0;
   for (let i = 0; i < OV_SKILLS.length; i++) {
-    const outcome = await registerOneSkill(OV_SKILLS[i], backoffBaseMs);
+    const outcome = await registerOneSkill(OV_SKILLS[i], backoffBaseMs, jitter);
     if (outcome.ok === true) {
       entries[i].registered = true;
       entries[i].lastError = null;
@@ -406,6 +426,7 @@ export async function reRegisterMissingSkills(
   opts: RegisterSkillsOptions = {},
 ): Promise<ReRegisterResult> {
   const backoffBaseMs = opts.backoffBaseMs ?? SKILL_REGISTER_BACKOFF_BASE_MS;
+  const jitter = opts.jitter ?? Math.random;
 
   // Guard: nothing to do before the startup pass finishes, or once the catalog
   // is already full. Matches the {ran, skipped} chore contract — a guard miss
@@ -423,7 +444,7 @@ export async function reRegisterMissingSkills(
     if (entry.registered) continue;
     const def = OV_SKILLS.find((s) => s.name === entry.name);
     if (!def) continue; // defensive: state is seeded from OV_SKILLS, so always found
-    const outcome = await registerOneSkill(def, backoffBaseMs);
+    const outcome = await registerOneSkill(def, backoffBaseMs, jitter);
     if (outcome.ok === true) {
       entry.registered = true;
       entry.lastError = null;
