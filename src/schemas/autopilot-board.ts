@@ -41,12 +41,30 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 
 /**
- * Query schema for `GET /api/autopilot/board-state`. The endpoint takes no
- * meaningful parameters today; `.strict()` rejects unexpected query keys so a
- * typo surfaces as a 400 rather than being silently ignored, mirroring the
- * request-validation contract of the idle-diagnostics endpoint.
+ * The repo the board-state read projects: `orch` = the Orchestrator's own repo
+ * (`gaberoo322/hydra`), `target` = the Target repo (`gaberoo322/hydra-betting`)
+ * per ADR-0031. Exported so the endpoint and its tests share one spelling.
  */
-export const AutopilotBoardStateQuerySchema = z.object({}).strict();
+export const BOARD_STATE_SCOPES = ["orch", "target"] as const;
+export type BoardStateScope = (typeof BOARD_STATE_SCOPES)[number];
+
+/**
+ * Query schema for `GET /api/autopilot/board-state`. `.strict()` rejects
+ * unexpected query keys so a typo surfaces as a 400 rather than being silently
+ * ignored, mirroring the request-validation contract of the idle-diagnostics
+ * endpoint.
+ *
+ * The single meaningful parameter is an OPTIONAL `scope` (`orch` | `target`,
+ * ADR-0031 Decision 3). It defaults to `orch` so every existing scope-less
+ * caller (`collect-state.sh`, current tests) keeps today's exact behavior; the
+ * endpoint injects the Target repo handle into the read seam only when
+ * `scope=target`, reusing the pure `deriveBoardState` byte-for-byte unchanged.
+ */
+export const AutopilotBoardStateQuerySchema = z
+  .object({
+    scope: z.enum(BOARD_STATE_SCOPES).default("orch"),
+  })
+  .strict();
 
 // ---------------------------------------------------------------------------
 // Response

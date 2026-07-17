@@ -28,6 +28,17 @@
  * The only non-200 is a 400 `schema-validation-failed` for a malformed query.
  * The `degraded` flag lets `collect-state.sh` fall back to its inline `gh`
  * call so a transient outage never wedges the autopilot turn.
+ *
+ * Scope (ADR-0031 Decision 3, issue #3434): an OPTIONAL `?scope=orch|target`
+ * query param (default `orch`) selects which repo the same `deriveBoardState`
+ * projects. `scope=target` injects the Target repo handle
+ * (`getTargetGithubRepo()`) into BOTH `listOpenIssues` and the blocker
+ * resolver; `deriveBoardState` and the degrade/never-throw contract are
+ * identical for both scopes — no parallel Target board module is built (the
+ * ideal seam count is one). The Target board-label VOCABULARY lives in one leaf
+ * (`src/target-board-labels.ts`); this read keeps the orch six-count +
+ * two-stale-list projection for both scopes (no Target-only count fields — a
+ * deliberately deferred follow-on, since adding them would fork this function).
  */
 
 import { Router } from "express";
@@ -35,6 +46,7 @@ import { Router } from "express";
 import {
   AutopilotBoardStateQuerySchema,
   type AutopilotBoardStateResponse,
+  type BoardStateScope,
 } from "../schemas/autopilot-board.ts";
 import {
   listOpenIssues,
@@ -46,6 +58,7 @@ import {
   extractStrictBlockerRefs,
   fetchOpenBlockerNumbers,
 } from "../github/blockers.ts";
+import { getTargetGithubRepo } from "../target-config.ts";
 
 // ---------------------------------------------------------------------------
 // The orchestrator board label vocabulary — one authoritative copy
@@ -287,10 +300,7 @@ export interface AutopilotBoardRouterDeps {
 
 export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) {
   const router = Router();
-  const readOpenIssues = deps.readOpenIssues ?? defaultReadOpenIssues;
   const clock = deps.now ?? (() => Date.now());
-  const resolveBlockers =
-    deps.resolveOpenBlockers ?? ((rows) => resolveOpenBlockers(rows));
 
   router.get("/autopilot/board-state", async (req, res) => {
     const parsed = AutopilotBoardStateQuerySchema.safeParse(req.query ?? {});
@@ -300,6 +310,20 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
         issues: parsed.error.issues,
       });
     }
+
+    // ADR-0031 Decision 3: `scope=target` injects the Target repo handle into
+    // BOTH the open-issue read and the blocker resolver; `scope=orch` (the
+    // default) preserves today's behavior by injecting no override (the read
+    // seam resolves the Orchestrator's own repo). `deriveBoardState` is reused
+    // byte-for-byte unchanged for both scopes. Injected deps (test stubs) win
+    // over the scope-selected defaults so the pure filter stays testable.
+    const scope: BoardStateScope = parsed.data.scope;
+    const repoOverride = scope === "target" ? getTargetGithubRepo() : undefined;
+    const readOpenIssues =
+      deps.readOpenIssues ?? (() => defaultReadOpenIssues(repoOverride));
+    const resolveBlockers =
+      deps.resolveOpenBlockers ??
+      ((rows: readonly IssueRow[]) => resolveOpenBlockers(rows, repoOverride));
 
     const nowMs = clock();
     let counts = emptyCounts();
@@ -343,6 +367,16 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 // Default wiring
 // ---------------------------------------------------------------------------
 
-function defaultReadOpenIssues(): Promise<IssueReadResult<IssueRow>> {
-  return listOpenIssues({ fields: BOARD_ISSUE_FIELDS });
+/**
+ * Default open-issue reader through the GitHub-Read seam. `repo` is the
+ * scope-selected handle: `undefined` for `scope=orch` (the seam resolves the
+ * Orchestrator's own repo, preserving today's behavior) or the Target repo for
+ * `scope=target` (ADR-0031 Decision 3). Uses the REST-backed `gh issue list`
+ * path (ADR-0031 Decision 6 — never GraphQL for the money-critical Target
+ * hot path).
+ */
+function defaultReadOpenIssues(
+  repo?: string,
+): Promise<IssueReadResult<IssueRow>> {
+  return listOpenIssues({ fields: BOARD_ISSUE_FIELDS, repo });
 }
