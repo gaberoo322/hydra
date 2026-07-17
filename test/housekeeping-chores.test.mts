@@ -424,6 +424,7 @@ describe("runSkillCatalogReregister — isolated (issue #2148)", () => {
     completed: true,
     lastAttemptAt: 1,
     vlmDeferred: false,
+    skillsDeferred: false,
   });
   const emptyCompletedState = () => ({
     skills: [
@@ -435,6 +436,7 @@ describe("runSkillCatalogReregister — isolated (issue #2148)", () => {
     completed: true,
     lastAttemptAt: 1,
     vlmDeferred: false,
+    skillsDeferred: false,
   });
   // Issue #2163: the chore now gates on the SKILLS-endpoint probe
   // (`probeSkillsImpl`), not the shallow `probeOv` GET /health. `skillsUp`/
