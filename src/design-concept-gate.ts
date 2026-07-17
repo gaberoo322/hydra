@@ -31,6 +31,14 @@
  *    tier-classifier (`classifyChange`, `permitsBreakingChange`) for the
  *    breaking-impact rule.
  *
+ * 3. **Green-light criterion** — `computeGreenLight`
+ *    (+ `GREEN_LIGHT_WINDOW_DAYS` / `GREEN_LIGHT_REQUIRED_DAYS` /
+ *    `GreenLightMetrics`). Pure — no Redis IO. Relocated here from
+ *    `design-concept.ts` (issue #3414) because it satisfies this leaf's stated
+ *    "zero-Redis, pure predicate" invariant; it sat in the persistence module
+ *    only for historical reasons. `design-concept.ts` re-exports it so its
+ *    callers keep their single-source import surface.
+ *
  * Persistence (`saveDesignConcept`, `getDesignConcept`, …) lives in
  * `design-concept.ts`, which imports this leaf (a correct downward dependency:
  * persistence is the implementation, the gate is the domain rule that guards
@@ -251,4 +259,75 @@ export function gateCheck(
   }
 
   return { ok: reasons.length === 0, reasons };
+}
+
+// ---------------------------------------------------------------------------
+// 4. Green-light criterion (pure — no Redis IO)
+// ---------------------------------------------------------------------------
+//
+// Relocated from `design-concept.ts` (the persistence module) into this pure
+// gate leaf (issue #3414): `computeGreenLight` reads a plain snapshot list and
+// returns a struct with zero Redis IO, satisfying this leaf's "zero-Redis, pure
+// predicate" invariant. It previously lived in the persistence module only for
+// historical reasons (extracted there from the route layer in #1875).
+// `design-concept.ts` re-exports these symbols so its callers
+// (`src/api/design-concepts.ts`) keep their single-source import surface.
+
+/**
+ * The promotion clock is idle-tolerant (issue #736): Phase C of #437 may
+ * flip when at least `GREEN_LIGHT_REQUIRED_DAYS` of the most-recent
+ * `GREEN_LIGHT_WINDOW_DAYS` snapshot days produced ≥1 design concept.
+ *
+ * Chosen form: "N of last M days" rather than a pure consecutive run.
+ * Rationale (the open design choice the design-concept artifact deferred
+ * to implementation): a strict `consecutiveGreenDays >= 7` punishes
+ * legitimately-quiet orch days (no `ready-for-agent` issue lacking a fresh
+ * artifact ⇒ nothing to grill), which is exactly the failure the issue
+ * reports. "7 of last 10" tolerates up to 3 quiet days inside the window
+ * while still demanding sustained production. Both the threshold and the
+ * window stay well inside MAX_SNAPSHOT_DAYS (14) so the HASH always holds
+ * enough history to evaluate.
+ */
+export const GREEN_LIGHT_WINDOW_DAYS = 10;
+export const GREEN_LIGHT_REQUIRED_DAYS = 7;
+
+export type GreenLightMetrics = {
+  /** Legacy field: green days counted consecutively from the newest. */
+  consecutiveGreenDays: number;
+  /** Green (production > 0) days within the trailing window. */
+  greenDaysInWindow: number;
+  windowDays: number;
+  requiredGreenDays: number;
+  greenLightReady: boolean;
+};
+
+/**
+ * Compute the green-light metrics from a newest-first snapshot list. Pure
+ * — no Redis IO — so it is unit-testable. A "green" day is one whose
+ * production count is > 0.
+ */
+export function computeGreenLight(
+  snapshots: Array<{ date: string; count: number }>,
+  windowDays: number = GREEN_LIGHT_WINDOW_DAYS,
+  requiredGreenDays: number = GREEN_LIGHT_REQUIRED_DAYS,
+): GreenLightMetrics {
+  // `consecutiveGreenDays`: walk from newest until the first zero day.
+  let consecutiveGreenDays = 0;
+  for (const s of snapshots) {
+    if (s.count > 0) consecutiveGreenDays += 1;
+    else break;
+  }
+  // `greenDaysInWindow`: count green days among the newest `windowDays`.
+  const window = snapshots.slice(0, windowDays);
+  const greenDaysInWindow = window.reduce(
+    (n, s) => (s.count > 0 ? n + 1 : n),
+    0,
+  );
+  return {
+    consecutiveGreenDays,
+    greenDaysInWindow,
+    windowDays,
+    requiredGreenDays,
+    greenLightReady: greenDaysInWindow >= requiredGreenDays,
+  };
 }
