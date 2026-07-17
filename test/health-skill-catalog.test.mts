@@ -123,3 +123,70 @@ describe("assessSkillCatalog: VLM-deferred graceful degradation (#2277)", () => 
     assert.equal(deferred.diagnostic?.severity, "warning");
   });
 });
+
+describe("assessSkillCatalog: skills-endpoint-deferred graceful degradation (#3402)", () => {
+  // Sibling of the #2277 VLM-deferred block above: the /api/v1/skills handler was
+  // load-gated at startup, so registration was DEFERRED (skipped), not failed. The
+  // population gate must emit the SAME self-healing verdict shape the vlmDeferred
+  // path does — degraded/warning/autoRecovery:true — NOT the #1968 empty/error.
+  const deferredSnap = (): SkillCatalogSnapshot => ({
+    registered: 0,
+    total: 4,
+    completed: true,
+    skillsDeferred: true,
+    skills: ["planner", "executor", "skeptic", "director"].map((n) => ({
+      name: n,
+      registered: false,
+      lastError: "skills-deferred",
+    })),
+  });
+
+  test("a skills-deferred empty catalog is DEGRADED (warning, auto-recovering), NOT empty/error", () => {
+    const a = assessSkillCatalog(deferredSnap());
+    // The key #3402 acceptance: zero-registered but skills-deferred must NOT fold
+    // to the #1968 `empty`/`error` framing — it is a deliberate, self-healing
+    // degradation, so it is a `degraded` warning that advertises auto-recovery
+    // (the hourly chore re-registers once the /skills endpoint answers). This is
+    // the SAME verdict shape the vlmDeferred sibling produces.
+    assert.equal(a.status, "degraded");
+    assert.equal(a.diagnostic?.severity, "warning");
+    assert.equal(a.diagnostic?.component, "intelligence");
+    assert.match(a.diagnostic!.what, /defer/i);
+    assert.match(a.diagnostic!.why, /skills/i);
+    assert.equal(a.diagnostic?.autoRecovery, true);
+    // Must NOT mis-route the operator to the #1968 "restart the orchestrator" path.
+    assert.doesNotMatch(a.diagnostic!.action, /restart the orchestrator/i);
+  });
+
+  test("skillsDeferred takes precedence over the empty rule at registered:0", () => {
+    // Same zero-registered shape, but without the deferred flag it would be the
+    // hard `empty`/error verdict — proving the flag is what flips the framing.
+    const notDeferred = deferredSnap();
+    notDeferred.skillsDeferred = false;
+    const empty = assessSkillCatalog(notDeferred);
+    assert.equal(empty.status, "empty");
+    assert.equal(empty.diagnostic?.severity, "error");
+
+    const deferred = assessSkillCatalog(deferredSnap());
+    assert.equal(deferred.status, "degraded");
+    assert.equal(deferred.diagnostic?.severity, "warning");
+  });
+
+  test("skills-deferred and vlm-deferred produce the same self-healing verdict shape", () => {
+    // Symmetry assertion (#3402): both deferral modes must yield an identical
+    // verdict *shape* — degraded status, warning severity, intelligence component,
+    // autoRecovery:true — so a consumer treats them the same self-healing way.
+    const vlm = assessSkillCatalog({
+      registered: 0,
+      total: 4,
+      completed: true,
+      vlmDeferred: true,
+      skills: [{ name: "planner", registered: false, lastError: "vlm-deferred" }],
+    });
+    const skills = assessSkillCatalog(deferredSnap());
+    assert.equal(vlm.status, skills.status);
+    assert.equal(vlm.diagnostic?.severity, skills.diagnostic?.severity);
+    assert.equal(vlm.diagnostic?.component, skills.diagnostic?.component);
+    assert.equal(vlm.diagnostic?.autoRecovery, skills.diagnostic?.autoRecovery);
+  });
+});

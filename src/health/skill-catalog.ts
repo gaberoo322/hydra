@@ -116,6 +116,31 @@ export function assessSkillCatalog(snap: SkillCatalogSnapshot): SkillCatalogAsse
     };
   }
 
+  // Issue #3402 — sibling graceful-degradation path to `vlmDeferred` above. The
+  // last pass was DEFERRED because the OpenViking /api/v1/skills endpoint was
+  // load-gated at startup: the orchestrator deliberately SKIPPED the
+  // registrations (rather than burning the timeout budget against a handler that
+  // cannot answer yet). Report this as `degraded` (warning, auto-recovering) —
+  // NOT the #1968 `empty` (error). Like the VLM-deferred case it is a known,
+  // self-healing condition: the hourly Housekeeping chore re-registers once the
+  // /skills endpoint answers, no restart needed. Surfacing it as `empty` would
+  // mis-frame a deliberate degradation as a hard registration failure and
+  // mis-route the operator to "check OpenViking load and restart".
+  if (snap.skillsDeferred) {
+    return {
+      status: "degraded",
+      diagnostic: {
+        severity: "warning",
+        component: "intelligence",
+        what: "OV skill catalog deferred (skills endpoint load-gated)",
+        why: "The OpenViking /api/v1/skills endpoint was load-gated at startup, so all skill registrations were SKIPPED (#3402) — the catalog is empty by deliberate graceful degradation, not failed POSTs.",
+        impact: "Planners run without skill context until the endpoint answers — degraded forecast quality; contributes to the no-task rate (#1832).",
+        action: "No action needed — the hourly Housekeeping chore re-registers the skills automatically once the /api/v1/skills endpoint answers (no restart needed). If it persists, check OpenViking startup load.",
+        autoRecovery: true,
+      },
+    };
+  }
+
   if (snap.registered === 0) {
     return {
       status: "empty",
