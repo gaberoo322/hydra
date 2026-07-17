@@ -770,10 +770,15 @@ except Exception:
     esac
     WF_INFLIGHT_GLOBAL=$((WF_INFLIGHT_GLOBAL + WF_MAP_INFLIGHT))
     # Take the FIRST map that yielded a frontier pick (fields 2 & 3 present).
-    WF_PICK_NUM=$(printf '%s' "$WF_MAP_LINE" | cut -d' ' -f2)
+    # `-s` suppresses no-delimiter lines: the no-pick sentinel `WF_MAP_LINE="0"`
+    # (in-flight count only, no space) has no delimiter, so `cut -s` prints
+    # nothing and WF_PICK_NUM stays empty — keeping the frontier at `none`.
+    # Without `-s`, GNU cut echoes the whole line ("0"), spuriously yielding
+    # `wayfinder_orch_frontier=issue-0` (#3400).
+    WF_PICK_NUM=$(printf '%s' "$WF_MAP_LINE" | cut -s -d' ' -f2)
     if [ "$WF_FRONTIER" = "none" ] && [ -n "$WF_PICK_NUM" ]; then
       WF_FRONTIER="issue-$WF_PICK_NUM"
-      WF_TICKET_TYPE=$(printf '%s' "$WF_MAP_LINE" | cut -d' ' -f3)
+      WF_TICKET_TYPE=$(printf '%s' "$WF_MAP_LINE" | cut -s -d' ' -f3)
     fi
   done
 fi
