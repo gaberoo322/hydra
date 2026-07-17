@@ -286,7 +286,8 @@ export function renderParentBody(
  *   must be created first).
  * - `sliceIndex` is the 1-based index of this slice in `input.slices`.
  * - `siblingIssueNumbers` maps 1-based sibling indices to their issue numbers
- *   (so a child whose `dependsOn: [1]` can render `## Blocked by` → `#42`).
+ *   (so a child whose `dependsOn: [1]` renders `## Blocked by` → `- Blocked by #42`,
+ *   the parser-clean form `extractStrictBlockerRefs` recovers — see issue #3425).
  *   Entries for not-yet-created siblings are omitted from the Blocked by list
  *   — the skill creates children in dependency order so earlier siblings
  *   always have numbers by the time later siblings render.
@@ -384,8 +385,15 @@ export function renderChildBody(
     }
   }
   if (resolvedDeps.length > 0) {
+    // Issue #3425: each bullet self-anchors the `Blocked by #N` phrase so
+    // `extractStrictBlockerRefs` (src/github/blockers.ts, STRICT_BLOCKER_PATTERNS)
+    // recovers the number. The `## Blocked by` heading alone does NOT prime the
+    // contiguous `blocked by … #N` pattern across the blank line, so the old
+    // bare `- #N` bullet parsed to [] — silently no-opping #3059's dep-aware
+    // dispatch gate (ADR-0029 Decision 5). The heading + one-bullet-per-blocker
+    // structure is preserved; only the bullet text changes.
     for (const ref of resolvedDeps) {
-      lines.push(`- ${ref}`);
+      lines.push(`- Blocked by ${ref}`);
     }
   } else {
     lines.push("- _(none)_");

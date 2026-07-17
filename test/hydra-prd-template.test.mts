@@ -49,6 +49,7 @@ import {
   type PrdSlice,
 } from "../scripts/ci/hydra-prd-render.ts";
 import { parseEpicReferences } from "../scripts/ci/epic-close.ts";
+import { extractStrictBlockerRefs } from "../src/github/blockers.ts";
 
 function slice(
   title: string,
@@ -275,7 +276,11 @@ describe("renderChildBody", () => {
       [2, 202],
     ]);
     const childC = renderChildBody(input, 3, 100, siblings, 2);
-    assert.match(childC, /## Blocked by\n\n- #201\n- #202/);
+    // Issue #3425: each blocker bullet self-anchors the `Blocked by` phrase so
+    // extractStrictBlockerRefs (STRICT_BLOCKER_PATTERNS) recovers the number —
+    // the heading alone does not prime the contiguous parser pattern, and the
+    // old bare `- #N` bullet parsed to [] (the #3059 dispatch-gate no-op bug).
+    assert.match(childC, /## Blocked by\n\n- Blocked by #201\n- Blocked by #202/);
   });
 
   test("renders explicit Files out of scope when provided", () => {
@@ -297,6 +302,52 @@ describe("renderChildBody", () => {
 
   test("throws on out-of-range sliceIndex", () => {
     assert.throws(() => renderChildBody(validInput(), 99, 42));
+  });
+});
+
+// Issue #3425: the durable artifact renderChildBody produces must round-trip
+// through extractStrictBlockerRefs (src/github/blockers.ts) — the exact parser
+// #3059's deriveBoardState dispatch gate uses to exclude dependency-blocked
+// issues from the ready-for-agent pool (ADR-0029 Decision 5). Before the fix,
+// renderChildBody emitted a bare `- #N` bullet under `## Blocked by`, which the
+// STRICT_BLOCKER_PATTERNS contiguous `blocked by … #N` regex could not match
+// across the heading/blank-line gap — so every hydra-prd epic since #3059
+// merged had silently non-functioning Blocked-by gating. This cross-seam guard
+// bridges producer (renderer) and consumer (parser) so the seam can never
+// desync again.
+describe("renderChildBody → extractStrictBlockerRefs round-trip (#3425)", () => {
+  test("a child with dependsOn round-trips to the resolved sibling numbers", () => {
+    const input = validInput({
+      slices: [
+        slice("a"),
+        { ...slice("b"), dependsOn: [1] },
+        { ...slice("c"), dependsOn: [1, 2] },
+      ],
+    });
+    const siblings = new Map<number, number>([
+      [1, 201],
+      [2, 202],
+    ]);
+    const childC = renderChildBody(input, 3, 100, siblings, 3);
+    // The exact parser #3059's dispatch gate calls on the issue body must
+    // recover the declared blocker numbers, in first-appearance order.
+    assert.deepEqual(extractStrictBlockerRefs(childC), [201, 202]);
+  });
+
+  test("a child with a single blocker round-trips to that one number", () => {
+    const input = validInput({
+      slices: [slice("a"), { ...slice("b"), dependsOn: [1] }, slice("c")],
+    });
+    const childB = renderChildBody(input, 2, 100, new Map([[1, 55]]), 3);
+    assert.deepEqual(extractStrictBlockerRefs(childB), [55]);
+  });
+
+  test("a child with no dependencies parses to no blockers", () => {
+    // The `## Blocked by\n\n- _(none)_` empty form must NOT surface a spurious
+    // blocker — an unblocked child stays dispatchable.
+    const body = renderChildBody(validInput(), 1, 42, new Map(), 3);
+    assert.match(body, /## Blocked by\n\n- _\(none\)_/);
+    assert.deepEqual(extractStrictBlockerRefs(body), []);
   });
 });
 
