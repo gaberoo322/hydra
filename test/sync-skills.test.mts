@@ -585,6 +585,235 @@ describe("scripts/sync-skills.sh — disable-model-invocation propagation + byte
   });
 });
 
+describe("scripts/sync-skills.sh — compose_base vendored-base composition (issue #3420, ADR-0030 Option C)", () => {
+  /**
+   * ADR-0030 Decision 4 (Option C) lineage-home mechanism: a playbook that
+   * declares `compose_base: _vendor/<name>.md` generates its Claude SKILL.md as
+   * [vendored upstream Pocock base body] + [overlay body], with the vendored
+   * base's `disable-model-invocation: true` STRIPPED (it hard-errors under
+   * Skill-tool dispatch — the tracer's whole point is that the composed review
+   * skill dispatches WITHOUT that key).
+   *
+   * Hermetic throwaway-repo idiom (mirrors the @include / #2945 suites above):
+   * REPO_ROOT = script dir's parent, playbooks at docs/operator-playbooks/,
+   * vendored bases at docs/operator-playbooks/_vendor/, real sync-skills.sh
+   * copied in so the resolver under test is production.
+   */
+  function makeComposeRepo(): {
+    dir: string;
+    script: string;
+    playbooks: string;
+    vendor: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-compose-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    const vendor = join(playbooks, "_vendor");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(vendor, { recursive: true });
+    const script = join(scripts, "sync-skills.sh");
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    return { dir, script, playbooks, vendor };
+  }
+
+  function runCompose(repo: {
+    dir: string;
+    script: string;
+  }): { status: number | null; stdout: string; stderr: string; claudeDir: string } {
+    const claudeDir = join(repo.dir, "out-claude");
+    const codexDir = join(repo.dir, "out-codex");
+    const r = spawnSync("bash", [repo.script], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: codexDir,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, claudeDir };
+  }
+
+  test("composes [vendored base] + [overlay] and STRIPS disable-model-invocation from the frontmatter", () => {
+    const repo = makeComposeRepo();
+    try {
+      // A vendored upstream base that ships the hard-erroring flag (as every
+      // dispatched Pocock skill does upstream).
+      writeFileSync(
+        join(repo.vendor, "code-review.md"),
+        "---\nname: code-review\ndescription: upstream two-axis review\ndisable-model-invocation: true\n---\n\nUPSTREAM-BASE-BODY two-axis review of the diff\n",
+      );
+      // The thin Hydra AFK overlay that composes against it.
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: Hydra QA overlay\nclaude_only: true\ncompose_base: _vendor/code-review.md\n---\n\n# Hydra QA\n\nOVERLAY-BODY tier-aware verification depth\n",
+      );
+      const r = runCompose(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(join(r.claudeDir, "hydra-qa", "SKILL.md"), "utf-8");
+
+      // Both bodies present, base BEFORE overlay.
+      const baseIdx = out.indexOf("UPSTREAM-BASE-BODY");
+      const overlayIdx = out.indexOf("OVERLAY-BODY");
+      assert.ok(baseIdx >= 0, "composed skill must carry the vendored upstream base body");
+      assert.ok(overlayIdx >= 0, "composed skill must carry the Hydra AFK overlay body");
+      assert.ok(baseIdx < overlayIdx, "the vendored base body must precede the overlay body");
+
+      // The strip: no disable-model-invocation in the generated frontmatter.
+      const fmMatch = out.match(/^---\n([\s\S]*?)\n---\n/);
+      assert.ok(fmMatch, "generated skill must have a frontmatter block");
+      assert.doesNotMatch(
+        fmMatch![1],
+        /disable-model-invocation/,
+        "the composed frontmatter must STRIP disable-model-invocation — it hard-errors under Skill-tool dispatch (ADR-0030 Decision 4)",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the strip wins even if the OVERLAY playbook itself declares disable-model-invocation", () => {
+    const repo = makeComposeRepo();
+    try {
+      writeFileSync(
+        join(repo.vendor, "code-review.md"),
+        "---\nname: code-review\ndescription: upstream review\n---\n\nUPSTREAM base body\n",
+      );
+      // Overlay maliciously/accidentally re-declares the flag — compose must
+      // still strip it (the compose guard beats the overlay's own frontmatter).
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\ndisable-model-invocation: true\n---\n\noverlay body\n",
+      );
+      const r = runCompose(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(join(r.claudeDir, "hydra-qa", "SKILL.md"), "utf-8");
+      const fmMatch = out.match(/^---\n([\s\S]*?)\n---\n/);
+      assert.ok(fmMatch);
+      assert.doesNotMatch(
+        fmMatch![1],
+        /disable-model-invocation/,
+        "compose must strip the flag even when the overlay declares it — the composed AFK skill is Skill-tool-dispatched",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a vendored base is NOT emitted as a standalone skill (the non-recursive glob skips _vendor/)", () => {
+    const repo = makeComposeRepo();
+    try {
+      writeFileSync(
+        join(repo.vendor, "code-review.md"),
+        "---\nname: code-review\ndescription: upstream\ndisable-model-invocation: true\n---\n\nbase body\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\n---\n\noverlay body\n",
+      );
+      const r = runCompose(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      assert.ok(
+        existsSync(join(r.claudeDir, "hydra-qa", "SKILL.md")),
+        "the composing overlay skill must be emitted",
+      );
+      assert.ok(
+        !existsSync(join(r.claudeDir, "code-review", "SKILL.md")),
+        "the vendored base must NOT be emitted as its own ~/.claude/skills entry — it is a compose input only (like _fragments/)",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing compose_base FAILS LOUD (non-zero exit, names the unresolved base)", () => {
+    const repo = makeComposeRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/does-not-exist.md\n---\n\noverlay body\n",
+      );
+      const r = runCompose(repo);
+      assert.notEqual(
+        r.status,
+        0,
+        "a missing vendored base must abort the sync (fail loud, like @include / reference_files)",
+      );
+      assert.match(
+        r.stderr + r.stdout,
+        /unresolved compose_base/i,
+        "the failure must name the unresolved compose_base",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a playbook WITHOUT compose_base regenerates byte-identically (composition is opt-in, no perturbation)", () => {
+    const repo = makeComposeRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "plain.md"),
+        "---\nname: plain\ndescription: a plain uncomposed skill\n---\n\n# Plain\n\nstable body\n",
+      );
+      const first = runCompose(repo);
+      assert.equal(first.status, 0, `first sync failed: ${first.stderr}`);
+      const target = join(first.claudeDir, "plain", "SKILL.md");
+      const a = readFileSync(target, "utf-8");
+      const second = runCompose(repo);
+      assert.equal(second.status, 0, `second sync failed: ${second.stderr}`);
+      const b = readFileSync(target, "utf-8");
+      assert.equal(b, a, "an uncomposed playbook must regenerate byte-identically");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the LIVE hydra-qa playbook composes the vendored code-review base and ships NO disable-model-invocation", () => {
+    // Golden check against the REAL repo: sync the real playbooks, then assert
+    // the live hydra-qa tracer (a) carries the upstream code-review base body,
+    // (b) carries its own overlay body, and (c) has NO disable-model-invocation
+    // in its generated frontmatter — the acceptance criterion that the composed
+    // review skill dispatches under the Skill tool without a hard-error.
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-compose-live-"));
+    try {
+      const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+        env: {
+          ...process.env,
+          CLAUDE_SKILLS_DIR: join(dir, "claude"),
+          CODEX_SKILLS_DIR: join(dir, "codex"),
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+      const out = readFileSync(join(dir, "claude", "hydra-qa", "SKILL.md"), "utf-8");
+      // Upstream code-review base body marker.
+      assert.match(
+        out,
+        /Two-axis review of the diff/,
+        "live hydra-qa must carry the vendored upstream code-review base body",
+      );
+      // Hydra overlay marker.
+      assert.match(
+        out,
+        /Tier-aware verification depth/,
+        "live hydra-qa must carry its own Hydra AFK overlay body",
+      );
+      // Frontmatter strip.
+      const fmMatch = out.match(/^---\n([\s\S]*?)\n---\n/);
+      assert.ok(fmMatch, "live hydra-qa must have a frontmatter block");
+      assert.doesNotMatch(
+        fmMatch![1],
+        /disable-model-invocation/,
+        "the live composed hydra-qa frontmatter must NOT carry disable-model-invocation — it would hard-error under Skill-tool dispatch",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/setup-git-hooks.sh (issue #433)", () => {
   /**
    * Create a throwaway git repo with a `scripts/sync-skills.sh` stub and a
