@@ -7,6 +7,16 @@
 # - Existing skills outside the managed set are left alone.
 # - Skills matching `claude_only: true` are NOT generated for Codex.
 #
+# compose_base composition (issue #3420, ADR-0030 Decision 4 / Option C):
+#   A playbook may declare `compose_base: _vendor/<name>.md`. When it does, the
+#   generated Claude SKILL.md body becomes [vendored upstream Pocock base body]
+#   + [this playbook's body as a thin Hydra AFK overlay], and the composed
+#   frontmatter STRIPS `disable-model-invocation` unconditionally (the vendored
+#   upstream base ships it; it hard-errors under Skill-tool dispatch). Vendored
+#   bases live under docs/operator-playbooks/_vendor/ — git-tracked, gate-
+#   eligible, never emitted standalone (the non-recursive *.md glob skips the
+#   subdirectory, exactly like _fragments/). A missing base FAILS LOUD.
+#
 # disable-model-invocation forwarding (issue #2945):
 #   The optional `disable-model-invocation: true` playbook-frontmatter key is
 #   forwarded verbatim (kebab-case, same spelling) into the generated Claude
@@ -143,7 +153,61 @@ def resolve_line(line):
     return frag
 
 resolved = "\n".join(resolve_line(l) for l in body.split("\n"))
-print(json.dumps({"fm": fm, "body": resolved}))
+
+# Resolve a `compose_base:` directive (issue #3420, ADR-0030 Decision 4 /
+# Option C — the lineage-home compose step). When a playbook declares
+#   compose_base: _vendor/<name>.md
+# the generated Claude SKILL.md body is the VENDORED upstream Pocock base body
+# followed by this playbook's own body as a thin Hydra AFK overlay. The vendored
+# base lives under docs/operator-playbooks/_vendor/ — git-tracked (no #666
+# off-repo clobber), gate-eligible, never itself emitted (the non-recursive
+# *.md glob skips the subdirectory, exactly like _fragments/).
+#
+# HARD INVARIANT (from #3386, carried into the epic): every dispatched upstream
+# Pocock skill ships `disable-model-invocation: true`, which HARD-ERRORS under
+# Skill-tool dispatch. The compose step MUST strip that key so the composed AFK
+# output never carries it — we surface `compose: true` so the shell forces the
+# strip regardless of what the OVERLAY playbook's own frontmatter declares.
+compose_base = fm.get("compose_base")
+compose = False
+if compose_base:
+    compose = True
+    base_path = os.path.normpath(os.path.join(playbooks_dir, compose_base))
+    # Contain the base within the playbooks dir — refuse path-escapes.
+    if not base_path.startswith(os.path.normpath(playbooks_dir) + os.sep):
+        raise SystemExit(
+            "sync-skills: compose_base path escapes operator-playbooks/: "
+            + compose_base + " (in " + os.path.basename(path) + ")"
+        )
+    if not os.path.isfile(base_path):
+        # FAIL LOUD (mirrors the @include / reference_files contract): a missing
+        # vendored base must abort the sync, never silently emit the overlay
+        # alone (which would drop the whole upstream skill body).
+        raise SystemExit(
+            "sync-skills: unresolved compose_base " + compose_base
+            + " (in " + os.path.basename(path) + "): no such vendored base at "
+            + base_path
+        )
+    with open(base_path, "r", encoding="utf-8") as bf:
+        base_text = bf.read()
+    bm = re.match(r"^---\n(.*?)\n---\n(.*)$", base_text, re.DOTALL)
+    if not bm:
+        raise SystemExit(
+            "sync-skills: compose_base " + compose_base + " has no frontmatter "
+            + "(in " + os.path.basename(path) + "): a vendored base must be a "
+            + "well-formed upstream SKILL.md"
+        )
+    base_body = bm.group(2)
+    # Compose: vendored upstream base body, then a separator, then the overlay.
+    resolved = (
+        base_body.rstrip("\n")
+        + "\n\n---\n\n## Hydra AFK overlay ("
+        + skill_name
+        + ")\n\n"
+        + resolved.lstrip("\n")
+    )
+
+print(json.dumps({"fm": fm, "body": resolved, "compose": compose}))
 PY
 )
 
@@ -170,6 +234,12 @@ else: print("")')
   # kebab-case key's true/false value to a Python bool, so print "1" only when it
   # is truthy — never the literal Python "True". "1" here means "emit the key".
   disable_model_invocation=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d["fm"].get("disable-model-invocation") else "0")')
+  # compose (issue #3420, ADR-0030 Decision 4 / Option C): "1" when this playbook
+  # declared a compose_base and the body is now [vendored upstream base] +
+  # [overlay]. It forces the disable-model-invocation STRIP below regardless of
+  # any key the overlay's own frontmatter carries — a composed AFK skill is
+  # dispatched through the Skill tool, where the flag hard-errors.
+  compose=$(echo "$parsed" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("1" if d.get("compose") else "0")')
   # reference_files (issue #2947): an optional list of _fragments/<name>.md files
   # COPIED VERBATIM into the generated skill folder as siblings of SKILL.md — the
   # progressive-disclosure escape valve that keeps the SKILL.md body small
@@ -206,8 +276,12 @@ elif r:
     echo "allowed-tools: $allowed_claude"
     # Emit disable-model-invocation only when the playbook opted in; lowercase
     # `true` (never Python's "True"). Omitted entirely otherwise so untouched
-    # playbooks regenerate byte-identical (issue #2945).
-    [ "$disable_model_invocation" = "1" ] && echo "disable-model-invocation: true"
+    # playbooks regenerate byte-identical (issue #2945). A COMPOSED skill (#3420)
+    # ALWAYS strips the key — the vendored upstream base ships it, but the
+    # composed AFK output is dispatched through the Skill tool where it
+    # hard-errors (ADR-0030 Decision 4 hard invariant); the `compose` guard wins
+    # over the overlay's own frontmatter.
+    [ "$disable_model_invocation" = "1" ] && [ "$compose" != "1" ] && echo "disable-model-invocation: true"
     [ -n "$args_yaml" ] && echo "arguments: $args_yaml"
     echo "---"
     echo
