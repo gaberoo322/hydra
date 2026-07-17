@@ -51,7 +51,7 @@ import {
   setMergeWatchHealth,
   type PendingEnrollEntry,
   type MergeWatchHealthRecord,
-} from "../../redis/holdback.ts";
+} from "../../redis/holdback-merge-watch.ts";
 import { enrollHoldback, type EnrollResult } from "../../holdback.ts";
 // `recordCycle` + its `CycleRecordResult` type moved to the sibling
 // `cycle-close.ts` in issue #2768 — the call site is unchanged (it passes no

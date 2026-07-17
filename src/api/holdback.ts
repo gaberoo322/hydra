@@ -32,7 +32,7 @@ import {
   HoldbackPendingBodySchema,
 } from "../schemas/holdback.ts";
 import { enrollHoldback, checkHoldback, reportRevertFailed, type HoldbackEventBus } from "../holdback.ts";
-import { pendingEnrollAdd, type PendingEnrollEntry } from "../redis/holdback.ts";
+import { pendingEnrollAdd, type PendingEnrollEntry } from "../redis/holdback-merge-watch.ts";
 
 export function createHoldbackRouter(eventBus: HoldbackEventBus) {
   const router = Router();

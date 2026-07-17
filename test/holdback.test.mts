@@ -59,6 +59,8 @@ import {
   _resetRevertCount,
   holdbackBaselineKey,
   utcDateKey,
+} from "../src/redis/holdback.ts";
+import {
   pendingEnrollAdd,
   pendingEnrollList,
   pendingEnrollRemove,
@@ -68,7 +70,7 @@ import {
   _resetEnrolledMarker,
   setMergeWatchHealth,
   getMergeWatchHealth,
-} from "../src/redis/holdback.ts";
+} from "../src/redis/holdback-merge-watch.ts";
 import {
   runHoldbackMergeWatch,
   type MergeStatus,

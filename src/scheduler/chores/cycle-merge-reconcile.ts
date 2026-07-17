@@ -71,7 +71,7 @@ import {
   wasEnrolledMarked,
   type PendingEnrollEntry,
   type PendingEnrollAddResult,
-} from "../../redis/holdback.ts";
+} from "../../redis/holdback-merge-watch.ts";
 
 /** How many recent cycle records to scan per tick (newest first). */
 const DEFAULT_SCAN_LIMIT = 50;
