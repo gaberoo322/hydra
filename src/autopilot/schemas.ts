@@ -298,47 +298,13 @@ export const TurnBodySchema = z
 export type TurnBody = z.infer<typeof TurnBodySchema>;
 
 // ---------------------------------------------------------------------------
-// Emergency brake — POST /api/autopilot/emergency-brake (issue #744)
+// Operator-control-flag schemas (emergency-brake + autopilot-pause) were
+// extracted to the focused `src/autopilot/control-schemas.ts` leaf (issue
+// #3410): they are strict-object, stable, operator-only toggle surfaces whose
+// sole consumer is `src/api/autopilot-control.ts` — a different volatility axis
+// from the loose lifecycle schemas that remain here. Import
+// EmergencyBrakeBodySchema / AutopilotPauseBodySchema from there, not here.
 // ---------------------------------------------------------------------------
-
-/**
- * Operator-only emergency-brake toggle body. NEW endpoint, so strict
- * (per the "For NEW endpoints, follow queue.ts's strict pattern" note above):
- * an unknown field is a caller bug we want surfaced, not silently ignored.
- *
- *   engaged: true  => pull the brake (pause all auto-merge, route open PRs to
- *                     /hydra-review).
- *   engaged: false => release the brake (resume ADR-0015 depth-gated merge).
- *
- * `engagedBy` is an optional operator-attribution string recorded for the
- * incident audit trail (defaults server-side to "operator").
- */
-export const EmergencyBrakeBodySchema = z
-  .strictObject({
-    engaged: z.boolean({ message: "engaged must be a boolean" }),
-    engagedBy: z.string().trim().min(1).optional(),
-  });
-
-// ---------------------------------------------------------------------------
-// Autopilot pause — POST /api/autopilot/paused (issue #988)
-// ---------------------------------------------------------------------------
-
-/**
- * Operator-only autopilot-pause toggle body. NEW endpoint, so strict (per the
- * "For NEW endpoints, follow queue.ts's strict pattern" note above): an
- * unknown field is a caller bug we want surfaced, not silently ignored.
- *
- *   paused: true  => pause autopilot (launcher skips, brain drains — no new
- *                    dispatches; in-flight subagents are untouched).
- *   paused: false => resume autopilot.
- *
- * No attribution field (unlike the emergency-brake's `engagedBy`): the pause
- * blob is `{paused, since}` only, by design (issue #988).
- */
-export const AutopilotPauseBodySchema = z
-  .strictObject({
-    paused: z.boolean({ message: "paused must be a boolean" }),
-  });
 
 // ---------------------------------------------------------------------------
 // Reflection record — POST /api/autopilot/reflection-record (issue #1119)

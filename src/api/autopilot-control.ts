@@ -21,7 +21,7 @@ import { STREAMS } from "../event-bus-stream-keys.ts";
 import {
   EmergencyBrakeBodySchema,
   AutopilotPauseBodySchema,
-} from "../autopilot/schemas.ts";
+} from "../autopilot/control-schemas.ts";
 import {
   getEmergencyBrake,
   setEmergencyBrake,
