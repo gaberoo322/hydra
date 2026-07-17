@@ -60,11 +60,15 @@ once per session at low resolution.
 
 **Epic-compatibility (reuse, don't reinvent).** The map body carries a
 `## Sub-issues` checklist of its tickets in the **exact** format
-`hydra-epic-close` parses (`- [ ] #N` / `- [x] #N`) so a completed map is
-garbage-collected by the existing epic sweeper — do **not** invent a second epic
-format. `hydra-epic-close` closes the map only once **every** referenced ticket is
-CLOSED (i.e. the way is clear). If you want the map to persist as a reference
-after the `/to-spec` handoff, add the `keep-open` label (epic-close's opt-out).
+`hydra-epic-close` parses (`- [ ] #N` / `- [x] #N`) — do **not** invent a second
+epic format. But a `wayfinder:map` is **not** GC'd by `hydra-epic-close`: the
+sweeper drops every `wayfinder:map` from its candidate scan, because a map that
+reaches "all tickets CLOSED" has reached its **handoff** rung, not its grave. The
+map's death is owned by the `hydra-review` handoff flow (§0.7), which closes it as
+the final handoff step (or keeps it with `keep-open` as a reference). The
+`## Sub-issues` shape still matters — `hydra-review` and human readers use it to
+see the frontier — but closing is deferred to handoff so a cleared map is never
+GC'd before it can be handed off.
 
 ### The map body
 
@@ -295,7 +299,11 @@ the tracker.
 ## Handing off — the map is done
 
 When the frontier is empty (no open tickets, no ticketable fog left toward the
-destination), the way is clear. Hand off:
+destination), the way is clear. **The handoff itself is an operator-interactive
+step and runs from `hydra-review` §0.7** — a cleared map surfaces there as
+*handoff-ready* (marked `wayfinder:handoff-pending`), and the operator drives one
+of the routes below, then `hydra-review` closes the map. You can also hand off
+directly from here in the same session that clears the last ticket. Either way:
 
 - **Destination = an implementation epic** → lead with **`hydra-prd`**, the
   Hydra-native producer: a capstone task synthesises the map's Decisions-so-far
@@ -312,8 +320,10 @@ destination), the way is clear. Hand off:
 - **Destination = an in-place change** → proceed to build; the map's tickets are
   the plan.
 
-Once handed off, `hydra-epic-close` GCs the map when its last ticket closes
-(unless `keep-open` is set).
+The map is **closed by the handoff step** (`hydra-review` §0.7, or here if you hand
+off inline) once its Destination is reached — not by `hydra-epic-close`, which
+excludes `wayfinder:map` from auto-GC so a cleared map is never closed before
+handoff. Add `keep-open` if the map should persist as a reference after handoff.
 
 ## Reuse & compatibility (do not reinvent)
 

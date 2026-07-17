@@ -76,7 +76,7 @@
       "description": 15
     },
     "docs/operator-playbooks/hydra-epic-close.md": {
-      "body": 1030,
+      "body": 1140,
       "description": 12
     },
     "docs/operator-playbooks/hydra-grill.md": {
@@ -112,7 +112,7 @@
       "description": 41
     },
     "docs/operator-playbooks/hydra-review.md": {
-      "body": 2595,
+      "body": 4296,
       "description": 30
     },
     "docs/operator-playbooks/hydra-skill-prune.md": {
@@ -164,7 +164,7 @@
       "description": 36
     },
     "docs/operator-playbooks/hydra-wayfinder.md": {
-      "body": 2668,
+      "body": 2807,
       "description": 48
     },
     "docs/operator-playbooks/hydra-wire-or-retire.md": {
