@@ -275,6 +275,31 @@ describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)"
     s.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
     assert.equal(failRateDiag(s), undefined, "a deferred pass must not fire the failure-rate alert");
   });
+
+  test("skills-deferred pass → no failure-rate alert (deliberate degradation, not failed registration)", () => {
+    // Issue #3402: skillsDeferred:true means the OpenViking /api/v1/skills handler
+    // was load-gated at startup and registration was SKIPPED, not failed — nothing
+    // was POSTed, so a "100% failure rate" framing would be misleading. The alert
+    // must suppress (assessRegistrationFailureRate's #3402 short-circuit), exactly
+    // like the vlmDeferred path above. Note vlmDeferred:false here so this asserts
+    // the NEW skillsDeferred guard, not the pre-existing vlmDeferred one.
+    const s = withCatalog({
+      skills: [],
+      registered: 0,
+      total: 4,
+      completed: true,
+      lastAttemptAt: Date.now(),
+      vlmDeferred: false,
+      skillsDeferred: true,
+    });
+    // VLM reachable — so absent the skillsDeferred guard the 100%-failed catalog
+    // would fire the OpenViking-load failure-rate alert; the guard suppresses it.
+    assert.equal(
+      failRateDiag(s),
+      undefined,
+      "a skills-deferred pass must not fire the failure-rate alert",
+    );
+  });
 });
 
 // Issue #3270: the attribution-ledger-dark rule (src/health/rules.ts). It is a
