@@ -77,8 +77,10 @@ describe("inferAnchorTypeFromCycleId — decodes suffix-less + trailing-suffix s
   const SENTINEL_IDS = [
     "worktree-agent-ab501d7d0f2c6aab8", // harness branch, no -t{N}- middle
     "worktree-agent-a4f8a3811688505c3",
-    "hydra-dev", // skill-name cycleId
-    "dev_orch", // bare class name, no -t{N}- fence
+    // NB (#3403): `hydra-dev` is no longer a sentinel — the skill-name leg now
+    // decodes it to `work-queue` (see the #3403 skill-name suite below). It was
+    // moved out of this list when that behaviour changed.
+    "dev_orch", // bare class name, no -t{N}- fence AND not a skill token
     "b8a3071f-a783-4812-bec5-8fa0f5079a08", // bare UUID
     "b17ee362-3c54-4b5c-8707-8565b0cc9498-t3", // -t3 with no slot tail
     "c6db11dc-t3-pr3326", // `pr3326` is not a class

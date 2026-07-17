@@ -162,6 +162,79 @@ export const SLOT_ANCHOR_TYPE: Readonly<Record<string, string>> = Object.freeze(
 );
 
 /**
+ * The canonical anchorType keyed by the Claude Code SKILL a class dispatches
+ * (`hydra-dev` → `work-queue`, `hydra-qa` → `qa-review`, …) — a second DERIVED
+ * view over {@link ANCHOR_TYPE_BY_CLASS}, indexed on `DispatchClassRow.skill`
+ * instead of `.name` (issue #3403).
+ *
+ * # Why this exists — the skill-name cycleId gap it closes
+ *
+ * The live 50-cycle telemetry sample (issue #3403) carried a cycleId that is the
+ * bare SKILL name — literally `hydra-dev` (the merged-status enrichment write for
+ * a `hydra-dev` dispatch that reap keyed on the skill token rather than a
+ * slot-suffixed branch). The slot-suffix parser
+ * ({@link inferAnchorTypeFromCycleId}) rejected it — `hydra-dev` carries no
+ * `-t{N}-` fence and is not a class NAME (`dev_orch`/`dev_target` are) — so it
+ * fell through to the `unclassified` sentinel even though the skill unambiguously
+ * identifies the dispatch class. Deriving a skill→lane view from the same single
+ * alphabet lets that shape decode without a hand-maintained second map. Every
+ * skill in `classes.json` is unique (`src/taxonomy/classes.ts` fails loud on a
+ * duplicate skill), so this map is total and unambiguous by construction.
+ */
+export const SKILL_ANCHOR_TYPE: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(
+    DISPATCH_CLASSES.map((row) => [row.skill, ANCHOR_TYPE_BY_CLASS[row.name]]),
+  ),
+);
+
+/**
+ * The canonical anchorType keyed by a class-name PREFIX (the segment before the
+ * first `_`, e.g. `dev` for `dev_orch`/`dev_target`) — but ONLY for prefixes
+ * that resolve to a single lane across every class sharing them (issue #3403).
+ *
+ * # Why this exists — the class-prefix cycleId gap it closes
+ *
+ * The #3403 sample carried a cycleId like `dev-3291` — a `<class-prefix>-<issue>`
+ * shape (reap keyed the enrichment on `dev-<issueNumber>` rather than the full
+ * `dev_orch` slot). The tail token `dev` is not a class NAME, so
+ * {@link inferAnchorTypeFromCycleId}'s exact-match and trailing-suffix legs both
+ * missed it. But `dev` maps unambiguously to `work-queue` (both `dev_orch` and
+ * `dev_target` share that lane), so the prefix alone is enough to decode.
+ *
+ * # Why UNAMBIGUOUS-only — the design fence
+ *
+ * A prefix is included ONLY when EVERY class sharing it maps to the SAME lane.
+ * `design` is deliberately EXCLUDED because `design_concept_orch` (`grill`) and
+ * `design_qa_target` (`design-qa`) disagree — decoding a bare `design-…` cycleId
+ * would be a guess between two lanes, exactly the "never guess" invariant #2822
+ * pinned for bare-UUID cycleIds. An ambiguous prefix therefore stays
+ * unclassified (the honest sentinel) rather than picking a lane arbitrarily.
+ */
+export const PREFIX_ANCHOR_TYPE: Readonly<Record<string, string>> = (() => {
+  // Group every class's lane by its name-prefix (segment before the first `_`).
+  const lanesByPrefix = new Map<string, Set<string>>();
+  for (const row of DISPATCH_CLASSES) {
+    const underscore = row.name.indexOf("_");
+    // A prefix-less class name (`health`, …) uses the whole name as its prefix;
+    // that is fine — it is still a unique token that resolves to one lane.
+    const prefix = underscore === -1 ? row.name : row.name.slice(0, underscore);
+    const lane = ANCHOR_TYPE_BY_CLASS[row.name];
+    let lanes = lanesByPrefix.get(prefix);
+    if (!lanes) {
+      lanes = new Set<string>();
+      lanesByPrefix.set(prefix, lanes);
+    }
+    lanes.add(lane);
+  }
+  // Keep only prefixes that resolve to a single lane (unambiguous).
+  const out: Record<string, string> = {};
+  for (const [prefix, lanes] of lanesByPrefix) {
+    if (lanes.size === 1) out[prefix] = [...lanes][0];
+  }
+  return Object.freeze(out);
+})();
+
+/**
  * Attempt to infer an anchorType from a dispatch-relay cycleId. Returns the
  * mapped anchorType when the trailing slot is a known dispatch slot; returns
  * `undefined` when the cycleId does not match the pattern or the slot has no
@@ -203,8 +276,28 @@ export const SLOT_ANCHOR_TYPE: Readonly<Record<string, string>> = Object.freeze(
  *     `a664419f-t1-dev_orch-3104`), which the old end-anchored `$` rejected.
  * The middle `-t{N}-` fence is unchanged, so the exclusion of non-dispatch ids
  * and the harness `worktree-agent-<longhash>` branch names is preserved.
+ *
+ * Issue #3403: two further fence-LESS shapes the live 50-cycle sample carried as
+ * `unclassified` — even though each unambiguously names a dispatch class — now
+ * decode via taxonomy-derived lookups that run BEFORE the `-t{N}-` fence:
+ *   - the bare SKILL name as the whole cycleId (`hydra-dev`): matched against
+ *     {@link SKILL_ANCHOR_TYPE}; and
+ *   - a `<class-prefix>-<suffix>` id with no turn segment (`dev-3291`): the
+ *     leading segment is matched against {@link PREFIX_ANCHOR_TYPE}, which only
+ *     holds prefixes that resolve to ONE lane, so an ambiguous prefix (`design`)
+ *     never guesses. The same {@link PREFIX_ANCHOR_TYPE} lookup is also the final
+ *     leg of the fenced-tail resolution, so a fenced tail whose class token is a
+ *     bare prefix (`…-t3-dev`) decodes too.
+ * Neither leg can swallow a bare-UUID / short-hex / harness-branch cycleId
+ * (#2822 invariant): each requires the token to be a REAL taxonomy skill or an
+ * unambiguous class prefix, which a random hex/UUID segment is not.
  */
 export function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
+  // Issue #3403 skill-name leg: the whole cycleId is the bare skill name the
+  // dispatch runs (`hydra-dev`, `hydra-qa`, …). Runs before the fence because a
+  // skill name carries no `-t{N}-` middle. Only a REAL taxonomy skill matches,
+  // so this cannot swallow a non-dispatch id.
+  if (cycleId in SKILL_ANCHOR_TYPE) return SKILL_ANCHOR_TYPE[cycleId];
   // Fence: [worktree-agent-]<runToken>-t<N>-<tail>. The mandatory `-t{N}-`
   // middle is the safety anchor; the <tail> is resolved to a known class below
   // rather than pattern-anchored, so a real class without an _orch/_target
@@ -213,19 +306,46 @@ export function inferAnchorTypeFromCycleId(cycleId: string): string | undefined 
   const m = /^(?:worktree-agent-)?[0-9a-z][0-9a-z-]*-t\d+-([a-z][a-z0-9_-]*)$/.exec(
     cycleId,
   );
-  if (!m) return undefined;
-  const tail = m[1];
-  // Exact-match fast path: the tail IS a known class (e.g. `dev_orch`,
-  // `skill_prune`). This is the common shape and avoids the prefix scan.
-  if (tail in SLOT_ANCHOR_TYPE) return SLOT_ANCHOR_TYPE[tail];
-  // Trailing-suffix path: the tail is `<class>-<suffix>` (e.g. `dev_orch-3170`).
-  // Class names use underscores, never hyphens, so the class token is exactly
-  // the segment before the first `-`; a trailing `-<issue>`/`-<pr>` suffix is
-  // sliced off. Resolve that segment against the class alphabet.
-  const hyphen = tail.indexOf("-");
+  if (m) {
+    const tail = m[1];
+    // Exact-match fast path: the tail IS a known class (e.g. `dev_orch`,
+    // `skill_prune`). This is the common shape and avoids the prefix scan.
+    if (tail in SLOT_ANCHOR_TYPE) return SLOT_ANCHOR_TYPE[tail];
+    // Trailing-suffix path: the tail is `<class>-<suffix>` (e.g. `dev_orch-3170`).
+    // Class names use underscores, never hyphens, so the class token is exactly
+    // the segment before the first `-`; a trailing `-<issue>`/`-<pr>` suffix is
+    // sliced off. Resolve that segment against the class alphabet, then fall to
+    // the unambiguous-prefix map (#3403) so a fenced bare prefix (`…-t3-dev`)
+    // still decodes.
+    return resolveClassToken(tail);
+  }
+  // Issue #3403 prefix leg: a fence-LESS `<class-prefix>-<suffix>` id (`dev-3291`).
+  // The first `-`-delimited segment is the candidate class prefix; a trailing
+  // `-<issue>`/`-<pr>` suffix is sliced off. Only an UNAMBIGUOUS prefix in
+  // PREFIX_ANCHOR_TYPE resolves — so a bare UUID (`b8a3071f-a783-…`, whose first
+  // segment `b8a3071f` is no class prefix) still returns undefined.
+  const hyphen = cycleId.indexOf("-");
   if (hyphen === -1) return undefined;
-  const candidate = tail.slice(0, hyphen);
-  return candidate in SLOT_ANCHOR_TYPE ? SLOT_ANCHOR_TYPE[candidate] : undefined;
+  const head = cycleId.slice(0, hyphen);
+  return head in PREFIX_ANCHOR_TYPE ? PREFIX_ANCHOR_TYPE[head] : undefined;
+}
+
+/**
+ * Resolve a fenced cycleId TAIL token (the `<tail>` in `…-t{N}-<tail>`) to its
+ * anchorType lane (issue #3403). Tries, in order: exact class name
+ * ({@link SLOT_ANCHOR_TYPE}), the `<class>-<suffix>` trailing-suffix form, and
+ * finally the unambiguous class PREFIX ({@link PREFIX_ANCHOR_TYPE}) so a fenced
+ * bare prefix (`…-t3-dev`) decodes. Returns `undefined` when no leg matches.
+ */
+function resolveClassToken(tail: string): string | undefined {
+  if (tail in SLOT_ANCHOR_TYPE) return SLOT_ANCHOR_TYPE[tail];
+  const hyphen = tail.indexOf("-");
+  const candidate = hyphen === -1 ? tail : tail.slice(0, hyphen);
+  if (candidate in SLOT_ANCHOR_TYPE) return SLOT_ANCHOR_TYPE[candidate];
+  // Final leg: the token is a bare unambiguous class prefix (`dev`) rather than
+  // a full class name. PREFIX_ANCHOR_TYPE holds single-lane prefixes only, so
+  // this never guesses across an ambiguous prefix (`design`).
+  return candidate in PREFIX_ANCHOR_TYPE ? PREFIX_ANCHOR_TYPE[candidate] : undefined;
 }
 
 /**

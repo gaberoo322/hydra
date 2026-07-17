@@ -67,6 +67,65 @@ export async function getCumulativeAccomplishments(count = 15) {
 }
 
 /**
+ * A single still-unclassified cycle's attribution metadata (issue #3403).
+ *
+ * Exposed by {@link getUnclassifiedAnchors} so the residue that survives the
+ * classifier (`src/autopilot/anchor-type.ts` — after skill-name, slot, and
+ * unambiguous-prefix inference) is ATTRIBUTABLE rather than an opaque bucket
+ * count. The discovery playbook's >10%-unclassified architectural-review trigger
+ * needs the offending cycleIds to root-cause the gap; before this the /metrics
+ * distribution only reported HOW MANY were unclassified, never WHICH.
+ */
+export interface UnclassifiedAnchorRecord {
+  /** The cycleId that could not be decoded to a lane. */
+  cycleId: string;
+  /** The merged-PR number, when the record was a merge-status enrichment. */
+  prNumber?: string;
+  /** The anchor reference (issue ref), when the writer forwarded one. */
+  anchorReference?: string;
+  /** The human task title, when the writer forwarded one. */
+  taskTitle?: string;
+}
+
+/**
+ * The unclassified-anchor instrumentation projection (issue #3403).
+ *
+ * Surfaces the metadata of every cycle in the recent window whose anchorType is
+ * the `unclassified` sentinel — the root-cause capture the #3403 proposed
+ * solution (#3) calls for. Most residual unclassified cycles are the
+ * holdback-merge-watch merged-status enrichment write (they carry a `prNumber`
+ * but no forwarded anchorType, and their cycleId is a bare UUID / harness branch
+ * name with no decodable dispatch slot — the known #2800 upstream forward gap).
+ * Emitting the cycleId + prNumber makes each a "documented exception" the
+ * operator can map back to its PR, satisfying the issue's success criterion that
+ * every unclassified cycle map to a named type OR a documented exception.
+ *
+ * Thin wrapper: fetch the trend (the `count` knob), then filter/shape the
+ * sentinel rows — mirrors the other `getX` aggregators in this module.
+ */
+export async function getUnclassifiedAnchors(
+  count = 50,
+): Promise<{ windowCycles: number; unclassified: UnclassifiedAnchorRecord[]; rate: number }> {
+  const trend = await getMetricsTrend(count);
+  const unclassified: UnclassifiedAnchorRecord[] = [];
+  for (const m of trend) {
+    if ((m.anchorType && String(m.anchorType).trim()) !== "unclassified") continue;
+    const record: UnclassifiedAnchorRecord = { cycleId: String(m.cycleId) };
+    if (m.prNumber !== undefined && m.prNumber !== null && String(m.prNumber).length > 0) {
+      record.prNumber = String(m.prNumber);
+    }
+    if (m.anchorReference) record.anchorReference = String(m.anchorReference);
+    if (m.taskTitle) record.taskTitle = String(m.taskTitle);
+    unclassified.push(record);
+  }
+  const windowCycles = trend.length;
+  const rate = windowCycles > 0
+    ? +((unclassified.length / windowCycles) * 100).toFixed(1)
+    : 0;
+  return { windowCycles, unclassified, rate };
+}
+
+/**
  * Compute fix:feature ratio from recent cycles.
  * Fixes = prior-failure or failing-test anchors. Features = everything else that merged.
  */
