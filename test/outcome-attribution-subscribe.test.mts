@@ -160,6 +160,32 @@ describe("windows.ts — pure window policy (#2632)", () => {
     assert.equal(windowDurationMs(Number.NaN), ATTRIBUTION_DEFAULT_WINDOW_MS);
   });
 
+  test("ATTRIBUTION_DEFAULT_WINDOW_MS is a daily (not weekly) cadence (#3404)", () => {
+    // Regression guard for #3404: the default window governs every UNCONFIGURED
+    // leading metric, so a week-long default kept the impact ledger structurally
+    // DARK (`metricCount: 0`) for a full week after the spine began opening
+    // windows — no window closed → no observation row → the discovery
+    // reverse-loop fell back to the notice-based signals it was built to
+    // replace. The default MUST stay on a daily cadence so an unconfigured
+    // metric produces a ledger row within a day. A genuinely slow metric opts
+    // into a LONGER window per-metric via `attribution_window_ms`; this bound
+    // does not constrain that escape hatch.
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    assert.equal(
+      ATTRIBUTION_DEFAULT_WINDOW_MS,
+      ONE_DAY_MS,
+      "default window must be exactly one day so the impact ledger is not dark for a week (#3404)",
+    );
+    // Explicit upper bound: never regress back to a multi-day default that
+    // re-darkens the ledger for the continuous discovery loop.
+    assert.ok(
+      ATTRIBUTION_DEFAULT_WINDOW_MS <= 2 * ONE_DAY_MS,
+      "default window must be <= 2 days so discovery gets impact signal on a daily cadence (#3404)",
+    );
+    // An unconfigured metric (windowDurationMs(undefined)) closes within a day.
+    assert.ok(windowDurationMs(undefined) <= ONE_DAY_MS);
+  });
+
   test("windowId: stable, SHA-preferred, PR fallback", () => {
     assert.equal(windowId("m", "abc123", 42), "m@abc123");
     assert.equal(windowId("m", null, 42), "m@pr-42");

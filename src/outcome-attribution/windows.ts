@@ -40,15 +40,34 @@ import type { PendingEnrollEntry } from "../redis/holdback.ts";
 // ---------------------------------------------------------------------------
 
 /**
- * Conservative DEFAULT window duration for a leading metric with no explicit
- * `attribution_window_ms` in outcomes.yaml. 7 days is long enough that even a
- * slow-moving calibration metric (Brier) has settled, so an unconfigured metric
- * still closes eventually rather than never — the invariant the design concept
- * requires. Env-overridable.
+ * DEFAULT window duration for a leading metric with no explicit
+ * `attribution_window_ms` in outcomes.yaml.
+ *
+ * This default trades OFF two forces:
+ *   - long enough that the metric has moved enough to attribute (a slow-moving
+ *     calibration metric like Brier keeps drifting for a while after a merge),
+ *   - short enough that the ledger the reverse-loop consumes (`GET
+ *     /api/attribution/impact`, the discovery impact-steering signal) does not
+ *     stay structurally DARK for a week.
+ *
+ * The original 7-day default optimized only the first force, and the effect was
+ * that the ledger read `metricCount: 0` for a full week after the spine started
+ * opening windows (issue #3404): NO window closed → NO observation row →
+ * discovery fell back to the notice-based (cycle-count / merge-rate) signals the
+ * spine was built to replace. A 7-day dark period defeats the reverse loop,
+ * because discovery runs continuously and needs impact signal on a daily
+ * cadence, not a weekly one.
+ *
+ * 24 hours is the balance: a day is long enough for a metric to settle to a
+ * meaningfully attributable delta yet keeps the impact ledger fresh for the
+ * continuous discovery loop. A genuinely slower metric can still opt into a
+ * LONGER window per-metric via `attribution_window_ms` in outcomes.yaml (that
+ * escape hatch is unchanged); this default only governs an UNCONFIGURED metric.
+ * Env-overridable via `HYDRA_ATTRIBUTION_DEFAULT_WINDOW_MS`.
  */
 export const ATTRIBUTION_DEFAULT_WINDOW_MS = numFromEnv(
   "HYDRA_ATTRIBUTION_DEFAULT_WINDOW_MS",
-  7 * 24 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
 );
 
 function numFromEnv(name: string, fallback: number): number {
