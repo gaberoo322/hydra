@@ -6,18 +6,9 @@ intersection, 3.2 — doc banner check). All three run before code is written.
 
 Cross-reference drift check. Skip if recently merged.
 
-#### 2.1. Shipped-anchor preflight (issue #2771) — reject a work-queue head already merged to origin/main
+#### 2.1. Shipped-anchor preflight (issue #2771) — reject a board anchor already merged to origin/main
 
-The `work-queue-hygiene` reconciler (`src/backlog/work-queue-hygiene.ts`, cause
-`shipped-subject`, issue #2482) already evicts a queue entry whose subject is
-covered by a recently-merged PR/commit — but it runs **hourly / on
-`POST /api/queue/reconcile`**. A build that picks the work-queue head **between
-reconciles** still lands on a stale, already-shipped anchor (the exact
-`target-build-anchor-already-shipped-on-main` hits: item-666 / item-704 /
-item-718). This preflight closes that between-reconcile window at anchor-select
-time. Run it ONLY when the anchor came from the work queue (priority 1); a
-failing-test / typecheck / backlog / priorities anchor is not a work-queue entry
-and skips this check.
+Under ADR-0031 the Target board is GitHub Issues on `gaberoo322/hydra-betting`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. But an issue whose work landed on `origin/main` via a PR that did NOT cite `Closes #N` (or a hand-filed dup of already-shipped work) can still sit open on the board and be picked. This preflight closes that window at anchor-select time. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
 
 **Invariants (do NOT weaken these):**
 - **Positive-evidence-only removal.** The *absence* of a matching `#NNN` /
@@ -29,10 +20,10 @@ and skips this check.
   polarity as `subjectCoveredBy` in `src/backlog/token-algebra.ts`).
 - **Fail-open on uncertainty.** Any unreachable `git` / empty log / short-title
   anchor (< 4 significant words) KEEPS the anchor — the preflight degrades to a
-  no-op, mirroring `reconcileWorkQueue` and `subjectCoveredBy`.
-- **Friction cue still emitted post-eviction.** On a positive shipped-on-main
+  no-op, mirroring the retired `reconcileWorkQueue` polarity and `subjectCoveredBy`.
+- **Friction cue still emitted post-close.** On a positive shipped-on-main
   hit, still record the `target-build-anchor-already-shipped-on-main` friction
-  cue (pattern-memory bookkeeping) even though the entry is LREM-evicted — this
+  cue (pattern-memory bookkeeping) even though the issue is closed — this
   is how the learning system keeps the recurrence signal alive.
 - **Worktree isolation preserved.** Read `origin/main` from **inside
   `$TARGET_WT/web`** (the worktree is already branched off `origin/main` in Step
@@ -40,11 +31,11 @@ and skips this check.
   main tree.
 
 ```bash
-# Only meaningful for a WORK-QUEUE anchor. Set ANCHOR_FROM_WORK_QUEUE=1 when the
-# task came from priority 1, and ANCHOR_SUBJECT to the raw work-queue entry's
-# `reference` text (the descriptive title). WQ_RAW is the exact JSON element you
-# LRANGE'd at priority 1 (needed for a byte-exact LREM).
-if [ "${ANCHOR_FROM_WORK_QUEUE:-0}" = "1" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
+# Only meaningful for a BOARD anchor (Step 2 priority 3). ANCHOR_NUM is the
+# hydra-betting issue number claimed in Step 2; ANCHOR_SUBJECT is that issue's
+# title (the descriptive subject). A failing-test / priorities anchor has no
+# ANCHOR_NUM and skips this preflight entirely.
+if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
   # Significant-word guard: < 4 words of length > 3 → never subject-match
   # (short/generic titles like "fix tests" would spuriously hit — the #2482
   # SUBJECT_MATCH_MIN_WORDS guard, mirrored here).
@@ -73,29 +64,35 @@ if [ "${ANCHOR_FROM_WORK_QUEUE:-0}" = "1" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; the
   fi
 
   if [ "$SHIPPED_ON_MAIN" = "1" ]; then
-    echo "shipped-on-main: anchor subject covered by recent origin/main — evicting + skipping"
-    # 1. LREM the stale entry (byte-exact — the raw JSON from the LRANGE above).
-    docker exec hydra-redis-1 redis-cli LREM hydra:anchors:work-queue 1 "$WQ_RAW"
+    echo "shipped-on-main: anchor subject covered by recent origin/main — closing dup + re-selecting"
+    # 1. Close the already-shipped board issue as a dup and clear the claim label.
+    #    REST-only (`gh issue close` / `gh issue edit`); never GraphQL (ADR-0031 Decision 6).
+    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting --remove-label in-progress 2>/dev/null || true
+    gh issue close "$ANCHOR_NUM" --repo gaberoo322/hydra-betting --reason completed \
+      --comment "Already shipped on origin/main (subject-coverage ≥70% at anchor-select preflight) — closing as duplicate of merged work."
     # 2. Emit the friction cue (pattern-memory bookkeeping — MUST still fire).
     hydra raw POST /memory/subagent-friction "{
       \"skill\":\"hydra-target-build\",
       \"cue\":\"target-build-anchor-already-shipped-on-main\",
-      \"workaround\":\"LREM stale work-queue head; selected next candidate\",
+      \"workaround\":\"closed shipped board issue as dup; selected next candidate\",
       \"context\":\"origin/main subject-coverage hit at anchor-select preflight\",
       \"cycleId\":\"$CYCLE_ID\"
     }"
     # 3. Fall through to the next candidate (re-run the priority order from the
-    #    top; the evicted entry is gone from the queue, so the next LRANGE head
-    #    is a fresh candidate).
+    #    top; the closed issue is off the open board, so the next board pick is a
+    #    fresh candidate).
     echo "re-select the next candidate before proceeding to Step 3"
   fi
 fi
 ```
 
-Positive coverage evicts + re-selects; anything short of it (short title,
-unreachable `git`, empty log, < 70% coverage) keeps the anchor and proceeds. The
-reconciler still owns the durable hourly sweep — this is only the
-between-reconcile guard.
+Positive coverage closes the dup + re-selects; anything short of it (short title,
+unreachable `git`, empty log, < 70% coverage) keeps the anchor and proceeds.
+Enforced `Closes #N` close-discipline (ADR-0031 Decision 5) is the durable
+suppression — this preflight is only the residual guard for a board issue whose
+work shipped without a `Closes` linkage. ADR-0031 Decision 5 retains the
+positive-evidence `merged-refs` / `token-algebra` matchers as an OPTIONAL
+reconciler sweep, not a hot-path gate.
 
 ### 3.1. Grounding preflight — ledger intersection (issue #2727)
 
@@ -200,11 +197,17 @@ if [ -n "$HIT_WOR" ]; then
   echo "GROUNDING PREFLIGHT STOP: wire-or-retire ledger hit(s):"
   printf '%b\n' "$HIT_WOR"
   echo "Action: STOP-AND-REFRAME — a wire-or-retire decision is pending for these modules."
-  echo "Do NOT build. Write the reframe verdict, move the backlog lane, emit the event."
+  echo "Do NOT build. Write the reframe verdict, label the issue reframe, emit the event."
 
-  # Move the item lane to match the verdict (lane-desync lesson):
-  # requeue into backlog with a reframe note so the next pick reads the context.
-  [ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" backlog 2>/dev/null || true
+  # Mark the anchor issue for reframe (ADR-0031 Decision 4/5 — the `reframe`
+  # label replaces the retired Redis reframe-queue). REST-only relabel: clear the
+  # in-progress claim and stamp reframe so the item leaves the build lane and the
+  # next pick reads the context. `TARGET_SPECIFIC_LABELS.reframe` = "reframe"
+  # (src/target-board-labels.ts). No `hydra backlog` write.
+  if [ -n "${ANCHOR_NUM:-}" ]; then
+    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+      --remove-label in-progress --remove-label ready-for-agent --add-label reframe 2>/dev/null || true
+  fi
 
   # Emit reframe-save event — this is the token-value receipt for the epic.
   REFRAME_PAYLOAD=$(jq -n \
@@ -226,7 +229,12 @@ elif [ -n "$HIT_AW" ]; then
   echo "The correct move is to wire the existing module, NOT rebuild it."
   echo "Reframe the plan toward a wiring task (add the runtime import / route / API call)."
 
-  [ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" backlog 2>/dev/null || true
+  # Mark the anchor issue for reframe (ADR-0031 Decision 4/5 — `reframe` label,
+  # not the retired Redis reframe-queue). REST-only relabel; no `hydra backlog`.
+  if [ -n "${ANCHOR_NUM:-}" ]; then
+    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+      --remove-label in-progress --remove-label ready-for-agent --add-label reframe 2>/dev/null || true
+  fi
 
   REFRAME_PAYLOAD=$(jq -n \
     --arg anchorRef "${ANCHOR_REF:-unknown}" \
@@ -258,8 +266,9 @@ intersection loops (an unset `SCOPE_IN` makes the preflight a silent no-op).
   operator knows the file needs to exist. **Never fail the build on a missing
   ledger — it is a read-only advisory check.**
 - `jq` unavailable → the event publish fails; log and continue (non-fatal).
-- `hydra backlog move` fails → log and continue (non-fatal; the lane remains
-  wherever it was — a manual fix is preferred over a blocked build).
+- `gh issue edit … --add-label reframe` fails → log and continue (non-fatal; the
+  issue keeps its current labels — a manual reframe-label is preferred over a
+  blocked build).
 
 The ledger-missing guard for the first case is woven into the snippet above
 (step 1, right after `WIRING_STATUS_PATH` is set and before the `WOR_ROWS`
@@ -322,7 +331,12 @@ if [ -n "$HIT_DOCS" ]; then
   echo "Action: STOP-AND-REFRAME — these docs are superseded (dead premise)."
   echo "Follow each banner's 'superseded by' pointer and re-plan against the current doc."
 
-  [ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" backlog 2>/dev/null || true
+  # Mark the anchor issue for reframe (ADR-0031 Decision 4/5 — `reframe` label,
+  # not the retired Redis reframe-queue). REST-only relabel; no `hydra backlog`.
+  if [ -n "${ANCHOR_NUM:-}" ]; then
+    gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+      --remove-label in-progress --remove-label ready-for-agent --add-label reframe 2>/dev/null || true
+  fi
 
   # Emit reframe-save event — same token-value receipt as the ledger gate.
   REFRAME_PAYLOAD=$(jq -n \

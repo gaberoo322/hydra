@@ -29,17 +29,18 @@ CLAUDE_LOCK=$(docker exec hydra-redis-1 redis-cli GET hydra:cycle:active:claude 
 if [ -n "$CLAUDE_LOCK" ]; then echo "BLOCKED: another Claude cycle running ($CLAUDE_LOCK)"; fi
 ```
 
-**WIP limit check:**
+**WIP limit check (GitHub-Issues board — ADR-0031 Decision 4):** Target tracking now lives as GitHub Issues on `gaberoo322/hydra-betting`, not the Redis backlog. Count the currently-claimed items by their `in-progress` label. Read via **REST** (`gh api`), never `gh --json` / GraphQL — the money-critical Target loop must draw from the underused REST pool (ADR-0031 Decision 6, #3427).
 ```bash
-hydra backlog ls | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-ip=d.get('inProgress',[])
-if len(ip) >= 3:
-    print(f'BLOCKED: WIP limit reached ({len(ip)}/3 in-progress)')
-    for i in ip: print(f'  {i[\"id\"]} — {i[\"title\"][:60]}')
-    sys.exit(1)
-"
+# Count open `in-progress` Target issues via the REST search pool (never GraphQL).
+IN_PROGRESS=$(gh api -X GET search/issues \
+  -f q='repo:gaberoo322/hydra-betting is:issue is:open label:in-progress' \
+  --jq '.total_count')
+if [ "${IN_PROGRESS:-0}" -ge 3 ]; then
+  echo "BLOCKED: WIP limit reached (${IN_PROGRESS}/3 in-progress)"
+  gh api -X GET search/issues \
+    -f q='repo:gaberoo322/hydra-betting is:issue is:open label:in-progress' \
+    --jq '.items[] | "  #\(.number) — \(.title[0:60])"'
+fi
 ```
 
 If either fails, stop. Do not delegate.
@@ -160,8 +161,7 @@ Load context (parallel):
 - `~/hydra/config/direction/vision.md`
 - `~/hydra/config/feedback/to-planner.md`
 - `~/hydra/config/feedback/to-executor.md`
-- `hydra backlog ls`
-- `docker exec hydra-redis-1 redis-cli LRANGE "hydra:anchors:work-queue" 0 4`
+- The Target board (open issues), via **REST** — never `gh --json` / GraphQL (ADR-0031 Decision 6): `gh api -X GET search/issues -f q='repo:gaberoo322/hydra-betting is:issue is:open' --jq '.items[] | "#\(.number) [\(.labels | map(.name) | join(","))] \(.title)"'`. (Replaces the retired `hydra backlog ls` + `LRANGE hydra:anchors:work-queue` Redis reads.)
 - `hydra memory planner` && `hydra memory executor`
 
 > **Direction docs are a mirror — refresh if stale (issue #1791).** The
@@ -193,22 +193,37 @@ Load context (parallel):
 >
 > (e.g. the Target's `north-star.md`, documented stale-not-deprecated, and any M12 / cross-venue-arb framing docs post hydra-betting ADR-0002.) A banner'd doc is a dead premise: **do NOT plan from it** — exactly as the Step 3.1 grounding preflight refuses to build on a wire-or-retire ledger row. Read the banner's pointer and ground on the doc it names instead. This is a thin banner slice, NOT a doc-lifecycle system — there is no freshness scoring and no staleness detector. A banner is applied only when an explicit supersession decision happens, under the same **ADR acceptance-checklist rule** that governs code ledger annotations: *when an ADR (or an equivalent operator supersession decision) retires a doc's premise, the acceptance checklist requires stamping the retired doc with the STATUS-superseded banner in that same change — code annotations and doc banners are the two arms of one rule.*
 
-### 2. Anchor (select task)
+### 2. Anchor (select task) — GitHub-Issues board (ADR-0031)
+
+Target work is now tracked as **GitHub Issues on `gaberoo322/hydra-betting`**, orch-style label-driven (ADR-0031 Decision 2/4) — NOT the Redis work-queue / `/backlog` API. Dispatch simplifies to the Orchestrator's own model: pick a `ready-for-agent`, **unblocked** issue, ordered by priority. There is no scored ranking, no OpenViking semantic dedup, and no Redis atomic claim — those Redis mechanisms are retired.
 
 If operator gave a task, use it. Otherwise priority order:
-1. Work queue: `docker exec hydra-redis-1 redis-cli LRANGE hydra:anchors:work-queue 0 0`
-2. Failing tests
-3. Typecheck errors
-4. Queued backlog (atomic claim — prevents Codex collision):
+1. Failing tests
+2. Typecheck errors
+3. **`ready-for-agent` board pick** — read the board via **REST** (`gh api`, never `gh --json` / GraphQL — ADR-0031 Decision 6, the money-critical Target loop stays off the Orchestrator's saturated GraphQL pool), then claim by relabeling `in-progress` (mirrors the Orchestrator `hydra-dev` claim). This is the label-driven replacement for the retired atomic Redis `/backlog/claim`:
    ```bash
-   CLAIMED=$(hydra raw POST /backlog/claim '{"claimedBy":"claude"}')
+   # Pick the highest-priority open `ready-for-agent` Target issue via the REST
+   # search pool. Priority label ordering (priority/high > priority/medium > …)
+   # is the intra-lane tiebreak; without one, oldest-open wins.
+   ANCHOR_NUM=$(gh api -X GET search/issues \
+     -f q='repo:gaberoo322/hydra-betting is:issue is:open label:ready-for-agent' \
+     -f sort=created -f order=asc \
+     --jq '.items[0].number // empty')
+   if [ -n "$ANCHOR_NUM" ]; then
+     ANCHOR_REF="issue-${ANCHOR_NUM}"
+     # Claim it: relabel ready-for-agent -> in-progress (the label-driven claim).
+     # `gh issue edit` is a REST call under the hood — no GraphQL on the hot path.
+     gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+       --remove-label ready-for-agent --add-label in-progress
+   fi
+   # No open `ready-for-agent` issue -> fall through to the priorities doc.
    ```
-   `claimed: false` → fall through to step 5.
-5. Priorities doc (skip "What's been completed").
+   Empty `ANCHOR_NUM` → fall through to step 4.
+4. Priorities doc (skip "What's been completed").
 
 Cross-reference drift check. Skip if recently merged.
 
-> **CONTEXT POINTER:** for work-queue anchors run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: work-queue head — LREM if ≥70% subject-word overlap with origin/main commits; wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
+> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as already-shipped if ≥70% subject-word overlap with origin/main commits (close the issue as a dup, re-select); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
 
 ### 3. Plan (planner role)
 
@@ -222,7 +237,7 @@ Complexity:
 
 ### 3.5. Self-declare scope (issue #396)
 
-Because hydra-target-build picks its own task — there is no GitHub issue with a pre-existing scope contract — the child MUST write its own scope contract before opening the PR. This is the subagent-side replacement for the deleted `reconcilePlanVsActual()` step (control-loop step 6.5, removed in PR #400).
+When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR (the subagent-side replacement for the deleted `reconcilePlanVsActual()` step — control-loop step 6.5, removed in PR #400). A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `gaberoo322/hydra-betting` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below.
 
 Compute the in-scope list from the plan's `scopeBoundary.in`. Record it locally so it can be embedded in the PR body in Step 7:
 
