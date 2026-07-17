@@ -1577,3 +1577,37 @@ describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () =
     }
   });
 });
+
+describe("collect-state.sh wayfinder frontier no-pick sentinel (#3400)", () => {
+  // collect-state.sh is network-dependent (live gh), so this pins the SOURCE:
+  // the wayfinder frontier/ticket-type extraction MUST use `cut -s` so the
+  // no-pick sentinel line (`WF_MAP_LINE="0"`, no space) yields empty output and
+  // the frontier stays `none`. Without `-s`, GNU cut echoes the whole line
+  // ("0") when there is no delimiter, spuriously emitting
+  // `wayfinder_orch_frontier=issue-0` — which decide.py's truthy-and-!=none
+  // wayfinder gate accepts, dispatching wayfinder_orch against issue 0 (#3400).
+  test("WF_PICK_NUM + WF_TICKET_TYPE cut both use -s (suppress no-delimiter)", () => {
+    const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+    // Isolate the frontier-extraction block so a `cut` elsewhere can't satisfy
+    // the assertion; anchor on the two assignments this fix targets.
+    const pickStart = src.indexOf("WF_PICK_NUM=");
+    assert.ok(pickStart >= 0, "WF_PICK_NUM assignment missing from collect-state.sh");
+    const block = src.slice(pickStart, src.indexOf("echo \"$WF_FRONTIER\"", pickStart));
+    assert.match(
+      block,
+      /WF_PICK_NUM=\$\(printf '%s' "\$WF_MAP_LINE" \| cut -s -d' ' -f2\)/,
+      "WF_PICK_NUM must use `cut -s` so the no-pick sentinel resolves to empty",
+    );
+    assert.match(
+      block,
+      /WF_TICKET_TYPE=\$\(printf '%s' "\$WF_MAP_LINE" \| cut -s -d' ' -f3\)/,
+      "WF_TICKET_TYPE must use `cut -s` so the no-pick sentinel resolves to empty",
+    );
+    // Belt-and-suspenders: neither extraction may fall back to a bare `cut -d`
+    // without `-s` (the exact #3400 regression).
+    assert.ok(
+      !/WF_PICK_NUM=\$\(printf '%s' "\$WF_MAP_LINE" \| cut -d' ' -f2\)/.test(block),
+      "WF_PICK_NUM must NOT use bare `cut -d` without `-s` (#3400 regression)",
+    );
+  });
+});
