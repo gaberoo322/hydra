@@ -1,9 +1,9 @@
 /**
  * Housekeeping Redis ops: per-chore idempotency time-guards.
  *
- * Extracted from redis/scheduler.ts (issue #1956). These 8 accessors carry
- * non-scheduler key namespaces (hydra:blocked:*, hydra:digest:*,
- * hydra:memory:*, hydra:cleanup:*) and are consumed ONLY by
+ * Extracted from redis/scheduler.ts (issue #1956). These accessors carry
+ * non-scheduler key namespaces (hydra:digest:*, hydra:memory:*,
+ * hydra:cleanup:*) and are consumed ONLY by
  * src/scheduler/housekeeping.ts. Moving them here:
  *
  *   1. Concentrates the Housekeeping Redis contract at a natural boundary
@@ -23,22 +23,6 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
-
-// ---------------------------------------------------------------------------
-// Blocked-issue escalation cooldown (per-item timestamp hash)
-// ---------------------------------------------------------------------------
-
-/** Read the last-escalation timestamp for a blocked item, or null when absent. */
-export async function getBlockedLastEscalation(itemId: string): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.hget(redisKeys.blockedLastEscalation(), itemId);
-}
-
-/** Record the last-escalation timestamp for a blocked item. */
-export async function setBlockedLastEscalation(itemId: string, value: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.hset(redisKeys.blockedLastEscalation(), itemId, value);
-}
 
 // ---------------------------------------------------------------------------
 // Weekly digest + memory consolidation timestamps
