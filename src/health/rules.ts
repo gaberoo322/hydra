@@ -75,6 +75,9 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: false,
         }
       : null,
+  // Issue #3459: the "Stopped but work exists" else-if branch removed — it
+  // gated on s.queueDepth > 0 || s.blCounts.total > 0, which were always 0
+  // after ADR-0031 retired the Redis backlog subsystem (honest-zero stubs).
   (s) =>
     s.sched.consecutiveErrors >= 5
       ? {
@@ -86,17 +89,7 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           action: "Check logs, then POST /api/scheduler/start",
           autoRecovery: false,
         }
-      : !s.sched.running && (s.queueDepth > 0 || s.blCounts.total > 0)
-        ? {
-            severity: "error",
-            component: "scheduler",
-            what: "Stopped but work exists",
-            why: `${s.queueDepth} queue + ${s.blCounts.total} backlog items waiting.`,
-            impact: "Queue growing stale.",
-            action: "POST /api/scheduler/start",
-            autoRecovery: false,
-          }
-        : null,
+      : null,
   (s) =>
     s.disk.availableGb > 0 && s.disk.availableGb < 5
       ? {
@@ -250,18 +243,11 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
     }
     return null;
   },
-  (s) =>
-    s.queueDepth === 0 && s.blCounts.total === 0 && s.health.cycle !== "running"
-      ? {
-          severity: "warning",
-          component: "pipeline",
-          what: "Pipeline empty",
-          why: "No queue or backlog. Falls back to priorities.md or research.",
-          impact: "May idle.",
-          action: "Add items or trigger research",
-          autoRecovery: true,
-        }
-      : null,
+  // Issue #3459: "Pipeline empty" rule removed — it gated on queueDepth === 0
+  // && blCounts.total === 0, which were always 0 after ADR-0031 (the rule
+  // fired on every tick once the honest-zero stubs replaced the real readers,
+  // making it pure noise). A future GitHub-board-aware rule can replace it.
+
   (s) =>
     s.recent.noTaskRate > 40 && s.recent.cycleCount >= 5
       ? {
@@ -274,18 +260,8 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: false,
         }
       : null,
-  (s) =>
-    s.blCounts.blocked > 0
-      ? {
-          severity: "warning",
-          component: "pipeline",
-          what: `${s.blCounts.blocked} blocked item(s)`,
-          why: "Need operator action.",
-          impact: "Work stalled.",
-          action: "Review on Backlog page",
-          autoRecovery: false,
-        }
-      : null,
+  // Issue #3459: "Blocked items" rule removed — it gated on blCounts.blocked > 0,
+  // which was always 0 after ADR-0031 retired the Redis backlog subsystem.
   // The dollar-based daily-spend cap diagnostic was retired with the
   // Subscription Usage Tracker. The new gate fires through the autopilot
   // (see /api/usage and /api/usage/eligibility), not the scheduler.

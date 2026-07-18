@@ -202,15 +202,9 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     mergeRate: 0,
     consecutiveErrors: 0,
   };
-  const queueDepth = probes.queueDepth || 0;
-  const blCounts = probes.backlogCounts || {
-    triage: 0,
-    backlog: 0,
-    inProgress: 0,
-    blocked: 0,
-    done: 0,
-    total: 0,
-  };
+  // Issue #3459: queueDepth + blCounts removed — their probe stubs always
+  // returned 0/empty after ADR-0031 retired the Redis backlog subsystem, and
+  // the four rules gating on them could never fire. Removed from HealthSnapshot.
   const mData = probes.metrics || { trend: [], stats: {} };
   const patterns = probes.patterns || { planner: 0, executor: 0, skeptic: 0 };
   const reflCount = probes.reflections || 0;
@@ -289,8 +283,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     health,
     sched,
     svcProbes,
-    queueDepth,
-    blCounts,
+    // Issue #3459: queueDepth + blCounts removed (see above).
     patterns,
     reflCount,
     attributionLedgerCount,
@@ -329,7 +322,8 @@ export function assessHealth(snapshot: HealthSnapshot): HealthAssessment {
 
   let summary: string;
   if (status === "healthy") {
-    summary = `All systems operational. Scheduler ${snapshot.sched.running ? "running" : "idle"}, uptime ${fmtUp(snapshot.health.uptime)}, ${snapshot.queueDepth} queued.`;
+    // Issue #3459: queueDepth removed from healthy summary (always 0 after ADR-0031).
+    summary = `All systems operational. Scheduler ${snapshot.sched.running ? "running" : "idle"}, uptime ${fmtUp(snapshot.health.uptime)}.`;
   } else {
     const c: Record<HealthSeverity, number> = { critical: 0, error: 0, warning: 0, info: 0 };
     for (const d of diagnostics) c[d.severity]++;

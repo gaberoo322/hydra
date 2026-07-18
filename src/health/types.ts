@@ -109,15 +109,10 @@ export interface HealthSnapshot {
   // struct — a new monitored service is a one-entry edit to the api/health.ts
   // fan-out, not a four-file struct-field change.
   svcProbes: ServiceProbeMap;
-  queueDepth: number;
-  blCounts: {
-    triage: number;
-    backlog: number;
-    inProgress: number;
-    blocked: number;
-    done: number;
-    total: number;
-  };
+  // Issue #3459: queueDepth and blCounts were Redis backlog fields retired with
+  // ADR-0031. Their honest-zero stubs always returned 0/empty, and the four rules
+  // that gated on them could never fire. Removed from the snapshot type so the
+  // health wire and rules no longer carry silent-zero fields.
   patterns: { planner: number; executor: number; skeptic: number };
   reflCount: number;
   // Issue #3270: the attribution ledger row count, probed at fan-out time so the
@@ -262,8 +257,8 @@ export interface ProbeInputs {
   basicHealth: HealthSnapshot["health"] | null;
   serviceProbes: HealthSnapshot["svcProbes"] | null;
   scheduler: HealthSnapshot["sched"] | null;
-  queueDepth: number | null;
-  backlogCounts: HealthSnapshot["blCounts"] | null;
+  // Issue #3459: queueDepth and backlogCounts removed — their stubs always
+  // returned 0/empty after ADR-0031 retired the Redis backlog subsystem.
   metrics: ProbeMetricsInput | null;
   disk: HealthSnapshot["disk"] | null;
   mem: HealthSnapshot["mem"] | null;
@@ -437,8 +432,7 @@ export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
     basicHealth: val<ProbeInputs["basicHealth"]>("basicHealth"),
     serviceProbes: val<ProbeInputs["serviceProbes"]>("serviceProbes"),
     scheduler: val<ProbeInputs["scheduler"]>("scheduler"),
-    queueDepth: val<ProbeInputs["queueDepth"]>("queueDepth"),
-    backlogCounts: val<ProbeInputs["backlogCounts"]>("backlogCounts"),
+    // Issue #3459: queueDepth + backlogCounts removed (see ProbeInputs).
     metrics: val<ProbeInputs["metrics"]>("metrics"),
     disk: val<ProbeInputs["disk"]>("disk"),
     mem: val<ProbeInputs["mem"]>("mem"),

@@ -55,8 +55,7 @@ function healthySnapshot(): HealthSnapshot {
       vikingdb: { status: "running" },
       openviking: { status: "running" },
     },
-    queueDepth: 3,
-    blCounts: { triage: 0, backlog: 2, inProgress: 1, blocked: 0, done: 5, total: 3 },
+    // Issue #3459: queueDepth + blCounts removed from HealthSnapshot.
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
     // Issue #3270: a non-zero ledger count — the attribution-ledger-dark rule
@@ -145,9 +144,10 @@ describe("assessHealth — baseline", () => {
     const a = assessHealth(healthySnapshot());
     assert.equal(a.diagnostics.length, 0);
     assert.equal(a.status, "healthy");
+    // Issue #3459: queueDepth removed from healthy summary (always 0 after ADR-0031).
     assert.equal(
       a.summary,
-      "All systems operational. Scheduler running, uptime 1h 0m, 3 queued.",
+      "All systems operational. Scheduler running, uptime 1h 0m.",
     );
   });
 });
@@ -195,28 +195,27 @@ describe("assessHealth — per-rule firing", () => {
     assert.match(d!.why, /boom/);
   });
 
-  test("scheduler stopped with work → error scheduler (stopped but work exists)", () => {
+  // Issue #3459: "Stopped but work exists" rule removed — gated on queueDepth/blCounts
+  // which were always 0 after ADR-0031. Flipped to assert the rule does NOT fire.
+  test("scheduler stopped with consecutiveErrors<5 and no errors → no scheduler error (issue #3459)", () => {
     const d = find(
       clone((s) => {
         s.sched.running = false;
-        s.queueDepth = 2;
-        s.blCounts.total = 3;
+        s.sched.consecutiveErrors = 0;
       }),
       "scheduler",
       "error",
     );
-    assert.ok(d);
-    assert.equal(d!.what, "Stopped but work exists");
+    // The old "Stopped but work exists" rule is gone; a stopped-but-no-errors
+    // scheduler with no consecutive error count fires no scheduler error.
+    assert.equal(d, undefined);
   });
 
-  test("consecutiveErrors>=5 takes precedence over stopped-but-work (mutual exclusion)", () => {
-    // Both conditions true; the original if/else-if fired only the first.
+  test("consecutiveErrors>=5 still fires auto-stopped (the queueDepth branch is removed, not the error-count branch)", () => {
     const diags = assessHealth(
       clone((s) => {
         s.sched.consecutiveErrors = 6;
         s.sched.running = false;
-        s.queueDepth = 5;
-        s.blCounts.total = 5;
       }),
     ).diagnostics.filter((d) => d.component === "scheduler" && d.severity === "error");
     assert.equal(diags.length, 1);
@@ -435,16 +434,15 @@ describe("assessHealth — per-rule firing", () => {
     assert.equal(diags[0].what, "OpenViking unreachable");
   });
 
-  test("empty pipeline → warning pipeline", () => {
+  // Issue #3459: "Pipeline empty" rule removed — gated on queueDepth/blCounts,
+  // always 0 after ADR-0031. Flipped to assert the rule no longer fires.
+  test("pipeline empty no longer fires a diagnostic (issue #3459)", () => {
     const d = assessHealth(
       clone((s) => {
-        s.queueDepth = 0;
-        s.blCounts.total = 0;
         s.health.cycle = "idle";
       }),
     ).diagnostics.find((x) => x.what === "Pipeline empty");
-    assert.ok(d);
-    assert.equal(d!.severity, "warning");
+    assert.equal(d, undefined);
   });
 
   test("no-task rate guard: fires only when cycleCount (trend.length) >= 5", () => {
@@ -467,12 +465,14 @@ describe("assessHealth — per-rule firing", () => {
     assert.match(d!.why, /3\/6 cycles/);
   });
 
-  test("blocked items → warning pipeline", () => {
-    const d = assessHealth(clone((s) => (s.blCounts.blocked = 2))).diagnostics.find((x) =>
+  // Issue #3459: "Blocked items" rule removed — gated on blCounts.blocked,
+  // always 0 after ADR-0031. Flipped to assert the rule no longer fires.
+  test("blCounts.blocked no longer fires a blocked-items diagnostic (issue #3459)", () => {
+    // HealthSnapshot no longer carries blCounts, so the diagnostic cannot fire.
+    const d = assessHealth(healthySnapshot()).diagnostics.find((x) =>
       x.what?.includes("blocked item"),
     );
-    assert.ok(d);
-    assert.equal(d!.what, "2 blocked item(s)");
+    assert.equal(d, undefined);
   });
 
   test("merge rate guard: fires only when cycleCount (trend.length) >= 5", () => {
@@ -882,19 +882,16 @@ describe("assessHealth — status fold", () => {
 // ---------------------------------------------------------------------------
 
 describe("assessHealth — summary", () => {
-  test("healthy banner reflects scheduler/uptime/queue", () => {
-    // Healthy requires a running scheduler: a stopped scheduler with waiting
-    // work trips "Stopped but work exists", and with no work trips "Pipeline
-    // empty" — both demote from healthy. So the healthy banner always reads
-    // "running".
+  // Issue #3459: queueDepth removed from the healthy summary banner.
+  test("healthy banner reflects scheduler/uptime (no queue count — issue #3459)", () => {
+    // Healthy requires a running scheduler. queueDepth is no longer on the snapshot.
     const a = assessHealth(
       clone((s) => {
         s.health.uptime = 90; // 1m
-        s.queueDepth = 7;
       }),
     );
     assert.equal(a.status, "healthy");
-    assert.equal(a.summary, "All systems operational. Scheduler running, uptime 1m, 7 queued.");
+    assert.equal(a.summary, "All systems operational. Scheduler running, uptime 1m.");
   });
 
   test("non-healthy summary counts severities and quotes first diagnostic", () => {
@@ -930,10 +927,11 @@ describe("parseProbes", () => {
   // Issue #1771: tests now build ProbeInputs named records directly —
   // no integer subscripts, no count-to-the-right-index to understand the fixture.
   // emptyProbes() is the "all probes failed" baseline; spread to override one field.
+  // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
   function emptyProbes(): ProbeInputs {
     return {
       basicHealth: null, serviceProbes: null, scheduler: null,
-      queueDepth: null, backlogCounts: null, metrics: null,
+      metrics: null,
       disk: null, mem: null,
       sysdOrchestrator: null, sysdWatchdog: null, sysdTargetWeb: null,
       patterns: null, reflections: null, ovSearch: null,
@@ -1017,8 +1015,7 @@ describe("parseProbes", () => {
     assert.equal(snap.health.redis, false);
     assert.equal(snap.sched.running, false);
     assert.equal(snap.sched.consecutiveErrors, 0);
-    assert.equal(snap.queueDepth, 0);
-    assert.equal(snap.blCounts.total, 0);
+    // Issue #3459: queueDepth + blCounts removed from HealthSnapshot.
     assert.deepEqual(snap.patterns, { planner: 0, executor: 0, skeptic: 0 });
     assert.equal(snap.reflCount, 0);
     assert.equal(snap.emergencyBrake.engaged, false); // fail-safe to disengaged
@@ -1028,12 +1025,11 @@ describe("parseProbes", () => {
 
   test("end-to-end: parseProbes -> assessHealth on a degraded fan-out", () => {
     // A realistic partial-failure: OV down, watchdog inactive, disk low.
+    // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
     const snap = parseProbes({
       basicHealth: { status: "ok", redis: true, cycle: "idle", uptime: 1000 },
       serviceProbes: { vikingdb: { status: "running" }, openviking: { status: "failed" } },
       scheduler: { running: true, consecutiveErrors: 0, lastCycleAt: new Date().toISOString() },
-      queueDepth: 2,
-      backlogCounts: { triage: 0, backlog: 1, inProgress: 0, blocked: 0, done: 0, total: 1 },
       metrics: { trend: [], stats: {} },
       disk: { availableGb: 12, totalGb: 500, usedPercent: 90 }, // low (issue #939: already-parsed)
       mem: null,
@@ -1091,12 +1087,11 @@ describe("parseProbes", () => {
     // The former retired index-3 cycle slot has no key — it is simply absent from
     // the record (no tombstone). A key not present coalesces to null, exactly as a
     // rejected settle would.
+    // Issue #3459: queueDepth + backlogCounts removed from SettledByKey.
     const settled = {
       basicHealth: fv({ status: "ok", redis: true, cycle: "idle", uptime: 42 }),
       serviceProbes: fv({ vikingdb: { status: "running" }, openviking: { status: "running" } }),
       scheduler: fv({ running: true, consecutiveErrors: 2 }),
-      queueDepth: fv(7),
-      backlogCounts: fv({ triage: 1, backlog: 2, inProgress: 0, blocked: 0, done: 0, total: 3 }),
       metrics: fv({ trend: [], stats: {} }),
       disk: fv(disk),
       mem: fv(mem),
@@ -1115,11 +1110,10 @@ describe("parseProbes", () => {
     const probeInputs = assembleProbeInputs(settled);
     const snap = parseProbes(probeInputs);
 
+    // Issue #3459: queueDepth + blCounts assertions removed from this round-trip test.
     assert.equal(snap.health.uptime, 42);
     assert.equal(snap.health.redis, true);
     assert.equal(snap.sched.consecutiveErrors, 2);
-    assert.equal(snap.queueDepth, 7);
-    assert.equal(snap.blCounts.total, 3);
     assert.deepEqual(snap.disk, disk);
     assert.deepEqual(snap.mem, mem);
     assert.equal(snap.sysd.orchestrator, "active");
@@ -1426,9 +1420,12 @@ describe("projectHealthDeepResponse", () => {
     assert.equal(idle.services.scheduler.status, "idle");
   });
 
-  test("pipeline projects rate fields only — NOT the raw rule-guard counts", () => {
+  // Issue #3459: pipeline.queueDepth + backlogCounts removed from the wire shape.
+  test("pipeline projects rate fields only — NOT the raw rule-guard counts (issue #3459: no queueDepth/backlogCounts)", () => {
     const r = project(healthySnapshot());
-    assert.equal(r.pipeline.queueDepth, 3);
+    // queueDepth and backlogCounts are no longer on the pipeline wire shape.
+    assert.ok(!("queueDepth" in r.pipeline));
+    assert.ok(!("backlogCounts" in r.pipeline));
     assert.deepEqual(Object.keys(r.pipeline.recentMetrics).sort(), [
       "avgDurationHuman",
       "avgDurationMs",
