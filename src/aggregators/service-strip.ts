@@ -53,14 +53,17 @@ import {
   probeOllamaVlm,
   type ProbeStatus,
 } from "../health/probe.ts";
-// Issue #2597: the ordered, shared enumeration of which external-service
-// liveness probes the strip renders (and in what order) lives in the fan-out —
-// the single owner of the orchestrator's probe set. The strip maps each
-// descriptor to a ServiceRow via the shared classifiers above.
+// Issue #2597/#3482: the ordered, shared enumeration of which external-service
+// liveness probes the strip renders (and in what order) lives in the focused
+// strip-probes leaf — the single owner of the strip's probe set. Issue #3482
+// extracted it from the deep-health fan-out so importing it no longer pulls the
+// fan-out's heavy closure (Redis adapters, WoL gates, reflection/ledger readers)
+// into this module's load path. The strip maps each descriptor to a ServiceRow
+// via the shared classifiers above.
 import {
   STRIP_PROBE_DESCRIPTORS,
   type StripProbeDeps,
-} from "../health/fan-out.ts";
+} from "../health/strip-probes.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -121,7 +124,7 @@ export async function getServiceStrip(deps: ServiceStripDeps = {}): Promise<Serv
 
   // Resolve every dep to a concrete implementation once, then hand the bag to
   // each descriptor's `run` closure. The descriptor enumeration
-  // (STRIP_PROBE_DESCRIPTORS, owned by the fan-out) decides WHICH probes appear
+  // (STRIP_PROBE_DESCRIPTORS, owned by the strip-probes leaf) decides WHICH probes appear
   // and in WHAT order — this function no longer hard-codes that (issue #2597).
   const resolved: StripProbeDeps = {
     probe: deps.probe ?? defaultProbe,
