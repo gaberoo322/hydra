@@ -80,7 +80,7 @@ import {
 } from "../redis/attribution-reverted.ts";
 import {
   pendingEnrollList,
-} from "../redis/holdback.ts";
+} from "../redis/holdback-merge-watch.ts";
 import { type MergeStatus } from "./windows.ts";
 import { openWindowsForLandedMerges, fetchMergeStatusViaGh } from "./phase-open.ts";
 import { closeDueWindows } from "./phase-close.ts";

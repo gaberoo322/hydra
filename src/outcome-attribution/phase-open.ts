@@ -31,7 +31,7 @@ import {
 import {
   pendingEnrollList,
   type PendingEnrollEntry,
-} from "../redis/holdback.ts";
+} from "../redis/holdback-merge-watch.ts";
 import { viewPr } from "../github/issues.ts";
 import {
   buildWindowsForMerge,
