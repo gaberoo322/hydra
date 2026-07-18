@@ -43,22 +43,10 @@ import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { redisInfo as getRedisInfo } from "../redis/utility.ts";
 
-// The Redis backlog subsystem was retired in the ADR-0031 contract phase (issue
-// #3439) — the Target now tracks work as GitHub Issues, so the old
-// `getWorkQueueLen` / `getBacklogCounts` Redis readers no longer exist. The two
-// health-snapshot fields they fed (`queueDepth`, `blCounts`) are kept in the
-// snapshot shape for wire/rule stability, backed by these honest-zero stubs (the
-// Redis backlog is gone, so both are always 0/empty now). A future GitHub-board
-// health probe can replace these.
-const getWorkQueueLen = async (): Promise<number> => 0;
-const getBacklogCounts = async (): Promise<{
-  triage: number;
-  backlog: number;
-  inProgress: number;
-  blocked: number;
-  done: number;
-  total: number;
-}> => ({ triage: 0, backlog: 0, inProgress: 0, blocked: 0, done: 0, total: 0 });
+// Issue #3459: getWorkQueueLen / getBacklogCounts stubs removed. These always
+// returned 0/empty after ADR-0031 retired the Redis backlog subsystem; the four
+// rules that gated on queueDepth/blCounts could never fire. The fields have been
+// removed from HealthSnapshot and ProbeInputs.
 import { countReflectionKeys, probeReflectionOutcomesLedger } from "../redis/reflections.ts";
 // Issue #3270: the attribution ledger LLEN probe — a best-effort LLEN read that
 // surfaces ledger-dark state to the deep-health rule without fetching all rows.
@@ -254,8 +242,8 @@ export interface CollectProbeDeps {
   /** Whether the `.kill` file exists (default: real fs check on $HYDRA_ROOT/.kill). */
   killFileExists?: () => boolean;
   schedulerStatus?: typeof getSchedulerStatus;
-  workQueueLen?: typeof getWorkQueueLen;
-  backlogCounts?: typeof getBacklogCounts;
+  // Issue #3459: workQueueLen + backlogCounts removed (stubs always returned 0
+  // after ADR-0031 retired the Redis backlog subsystem).
   metricsTrend?: typeof getMetricsTrend;
   aggregateStats?: typeof getAggregateStats;
   disk?: typeof readDisk;
@@ -333,8 +321,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     pingRedis,
     killFileExists = () => existsSync(KILL_FILE),
     schedulerStatus = getSchedulerStatus,
-    workQueueLen = getWorkQueueLen,
-    backlogCounts = getBacklogCounts,
+    // Issue #3459: workQueueLen + backlogCounts removed.
     metricsTrend = getMetricsTrend,
     aggregateStats = getAggregateStats,
     disk = readDisk,
@@ -423,8 +410,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       },
     },
     { kind: "async", key: "scheduler", run: () => schedulerStatus() },
-    { kind: "async", key: "queueDepth", run: () => workQueueLen() },
-    { kind: "async", key: "backlogCounts", run: () => backlogCounts() },
+    // Issue #3459: queueDepth + backlogCounts descriptors removed.
     { kind: "async", key: "metrics", run: async () => ({ trend: await metricsTrend(20), stats: await aggregateStats(20) }) },
     // Issue #939: host-info probes go through the Host-Probe Adapter, which owns
     // the argv + timeout + df/free parse and returns a typed never-throw result.

@@ -108,9 +108,10 @@ export interface HealthDeepResponse {
     "embed-backend": ServiceProbe;
   };
   activeCycle: unknown;
+  // Issue #3459: pipeline.queueDepth + pipeline.backlogCounts removed — they were
+  // always 0/empty after ADR-0031 retired the Redis backlog subsystem. A future
+  // GitHub-board probe can add githubBoardCounts when that substrate is stable.
   pipeline: {
-    queueDepth: number;
-    backlogCounts: HealthSnapshot["blCounts"];
     recentMetrics: {
       cycleCount: number;
       mergeRate: number;
@@ -173,7 +174,8 @@ export function projectHealthDeepResponse(
   checkedAt: string,
   probes: ProbeInputs,
 ): HealthDeepResponse {
-  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, reflectionHealth, darkOutcomes, reflectionOutcomesLiveness, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  // Issue #3459: queueDepth + blCounts removed from destructure (no longer on snapshot).
+  const { health, svcProbes, sched, patterns, reflCount, reflectionHealth, darkOutcomes, reflectionOutcomesLiveness, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
 
   // Issue #1440: coalesce the two persisted OV-quality reads.
@@ -202,12 +204,12 @@ export function projectHealthDeepResponse(
       "embed-backend": svcProbes["embed-backend"] ?? { status: "failed" },
     },
     activeCycle,
-    // Issue #744: emergency-brake state alongside the kill switch — both are
-    // operator-controlled merge/cycle gates the dashboard surfaces.
+    // Issue #744: emergency-brake state alongside the kill switch.
+    // Issue #3459: queueDepth + backlogCounts removed from pipeline wire shape.
     // recentMetrics projects only the rate fields the wire contract has
     // always carried — the new raw counts (mergedN/noTaskN/revertN) on the
     // snapshot's `recent` are for rule guards, not the HTTP envelope.
-    pipeline: { queueDepth, backlogCounts: blCounts, recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, killSwitch: health.status === "killed", emergencyBrake },
+    pipeline: { recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, killSwitch: health.status === "killed", emergencyBrake },
     infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
     // Issue #1440: `ovSearch` is the live in-memory snapshot + liveness probe
     // (resets on restart). `ovSearchTrend` is the restart-surviving 24h

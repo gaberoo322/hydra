@@ -115,8 +115,9 @@ describe("health router — ADR-0016 vacuous-read removal", () => {
       false,
       "priorFailures must be dropped from the health pipeline block",
     );
-    // The live signals stay.
-    assert.ok("queueDepth" in res._body.pipeline);
-    assert.ok("backlogCounts" in res._body.pipeline);
+    // Issue #3459: queueDepth + backlogCounts removed from pipeline wire shape
+    // (always 0/empty after ADR-0031 retired the Redis backlog subsystem).
+    assert.ok(!("queueDepth" in res._body.pipeline), "queueDepth must be removed from pipeline (issue #3459)");
+    assert.ok(!("backlogCounts" in res._body.pipeline), "backlogCounts must be removed from pipeline (issue #3459)");
   });
 });

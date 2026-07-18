@@ -25,8 +25,7 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
     pingRedis: async () => true,
     killFileExists: () => false,
     schedulerStatus: (async () => ({ running: true, consecutiveErrors: 2 })) as any,
-    workQueueLen: (async () => 7) as any,
-    backlogCounts: (async () => ({ triage: 1, backlog: 2, inProgress: 0, blocked: 0, done: 0, total: 3 })) as any,
+    // Issue #3459: workQueueLen + backlogCounts removed (stubs retired with ADR-0031).
     metricsTrend: (async () => []) as any,
     aggregateStats: (async () => ({})) as any,
     disk: (async () => ({ ok: true, data: { availableGb: 50, totalGb: 500, usedPercent: 10 } })) as any,
@@ -109,10 +108,9 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.serviceProbes as any)?.openviking?.status, "running");
     assert.equal((probes.serviceProbes as any)?.["embed-backend"]?.status, "running");
 
-    // indices 2,4,5,12,13,16,17,18 — direct probe values.
+    // indices 2,5,12,13,16,17,18 — direct probe values.
+    // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
     assert.equal((probes.scheduler as any)?.consecutiveErrors, 2);
-    assert.equal(probes.queueDepth, 7);
-    assert.equal((probes.backlogCounts as any)?.total, 3);
     assert.deepEqual(probes.patterns, { planner: 5, executor: 3, skeptic: 1 });
     assert.equal(probes.reflections, 12);
     assert.equal((probes.emergencyBrake as any)?.engaged, true);
@@ -225,18 +223,17 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal(probes.sysdTargetWeb, "unknown");
   });
 
+  // Issue #3459: workQueueLen + backlogCounts probes removed. Coalesce-to-null
+  // test now uses reflections (another async probe) to verify the guarantee.
   test("a throwing probe rejects its settle and coalesces that field to null without blocking others", async () => {
     const probes = await collectProbeInputs(happyDeps({
-      workQueueLen: (async () => { throw new Error("redis down"); }) as any,
       reflectionKeys: (async () => { throw new Error("redis down"); }) as any,
     }));
-    // The two throwing probes coalesce to null...
-    assert.equal(probes.queueDepth, null);
+    // The throwing probe coalesces to null...
     assert.equal(probes.reflections, null);
     // ...while every other probe still resolves (no one slow/failing probe
     // blocks the fan-out — the Promise.allSettled guarantee).
     assert.equal(probes.basicHealth?.status, "ok");
-    assert.equal((probes.backlogCounts as any)?.total, 3);
     assert.equal((probes.emergencyBrake as any)?.engaged, true);
   });
 
@@ -285,9 +282,8 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
 
     // ...and every async settle-array probe still resolved (no inline failure
     // blocked the fan-out — the Promise.allSettled guarantee is intact).
+    // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
     assert.equal(probes.basicHealth?.status, "ok");
-    assert.equal(probes.queueDepth, 7);
-    assert.equal((probes.backlogCounts as any)?.total, 3);
     assert.equal((probes.emergencyBrake as any)?.engaged, true);
   });
 });

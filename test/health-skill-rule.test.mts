@@ -49,8 +49,7 @@ function healthySnapshot(): HealthSnapshot {
       vikingdb: { status: "running" },
       openviking: { status: "running" },
     },
-    queueDepth: 3,
-    blCounts: { triage: 0, backlog: 2, inProgress: 1, blocked: 0, done: 5, total: 3 },
+    // Issue #3459: queueDepth + blCounts removed from HealthSnapshot.
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
     // Issue #3270: a non-zero count keeps the attribution-ledger-dark rule silent.
