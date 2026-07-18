@@ -432,9 +432,23 @@ gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName --j
 ] | length' 2>/dev/null || echo 0
 
 # backlog + queues
-hydra raw GET /backlog/counts 2>/dev/null || hydra backlog ls | python3 -c "
-import json,sys; d=json.load(sys.stdin)
-print(json.dumps({l: len(d.get(l,[])) for l in ['queued','inProgress','blocked','triage']}))"
+#
+# The Redis backlog subsystem (lanes: queued/inProgress/blocked/triage) was
+# retired by the ADR-0031 Target-tracking migration (#3439, PR #3455): the
+# Target now tracks work as GitHub Issues on gaberoo322/hydra-betting, so the
+# `/api/backlog` + `/api/backlog/counts` HTTP surface is gone (returns 404).
+# The old call (`hydra raw GET /backlog/counts || hydra backlog ls | json.load`)
+# lacked a fail-closed guard: on a 404 the `hydra` CLI prints the HTML error
+# BODY to stdout (not stderr, so `2>/dev/null` never suppressed it) and exits
+# nonzero, so the `||` fallback piped that HTML into `json.load`, which erupted
+# with a JSONDecodeError traceback at the top of the state emit and corrupted
+# the whole board-signal collection (run b07ad8e4, 2026-07-18, issue #3478).
+# The queued/inProgress/blocked/triage counts it emitted are consumed by NO
+# decide.py / assert_invariants.py signal, so we drop them and instead emit a
+# single OBSERVABLE marker: a degraded/retired read is now a visible signal line
+# rather than a silent traceback. Fail closed — no CLI call that can 404 onto
+# stdout.
+echo "backlog_subsystem=retired-adr0031"
 echo -n "work_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0
 echo -n "reframe_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue 2>/dev/null || echo 0
 echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures 2>/dev/null || echo 0
@@ -628,9 +642,27 @@ TARGET_CLEANUP_BOARD_SATURATION_CAP=10
 TARGET_WIRE_OR_RETIRE_LABEL="wire-or-retire"
 TARGET_DESIGN_QA_LABEL="design-qa"
 TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
-TARGET_BACKLOG_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/backlog" 2>/dev/null || echo '')
-if [ -n "$TARGET_BACKLOG_JSON" ]; then
-  printf '%s' "$TARGET_BACKLOG_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
+# ADR-0031 lane: read these Target board-derivation signals directly from the
+# GitHub board (gaberoo322/hydra-betting), NOT the retired `/api/backlog` HTTP
+# surface (deleted by #3439 / PR #3455 — it now returns 404). The old
+# `curl -sf .../api/backlog || echo ''` guard degraded SILENTLY to empty on the
+# 404, so the `[ -n ... ]` gate fell to the all-suppressing `else` defaults
+# below with no visible signal — flipping wire_or_retire/design_qa off and
+# leaving `target_backfill_idle=false`, i.e. exactly the degraded-signal set
+# that mis-drove the run (b07ad8e4, 2026-07-18, issue #3478).
+#
+# The lane->label mapping mirrors the direct-`gh` Target reads already above
+# (lines ~195, ~546): the retired Redis backlog's `triage` lane == the
+# `needs-triage` label, its `queued` lane == the `ready-for-agent` label. REST
+# `gh issue list` (never GraphQL — ADR-0031 Decision 6, money-critical Target
+# hot path). On an UNREACHABLE read we still fall to the suppressing defaults
+# (fail closed) BUT now emit an OBSERVABLE `target_board_signals_degraded=true`
+# line so a degraded read is a visible signal rather than an invisible zero-set.
+TARGET_BOARD_ISSUES_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open \
+  --json number,labels --jq '[ .[] | { labels: (.labels | map(.name)) } ]' 2>/dev/null || echo '')
+if [ -n "$TARGET_BOARD_ISSUES_JSON" ]; then
+  echo "target_board_signals_degraded=false"
+  printf '%s' "$TARGET_BOARD_ISSUES_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
     TARGET_CLEANUP_SCAN_LABEL="$TARGET_CLEANUP_SCAN_LABEL" \
     TARGET_WIRE_OR_RETIRE_LABEL="$TARGET_WIRE_OR_RETIRE_LABEL" \
     TARGET_DESIGN_QA_LABEL="$TARGET_DESIGN_QA_LABEL" \
@@ -638,34 +670,38 @@ if [ -n "$TARGET_BACKLOG_JSON" ]; then
     TARGET_CLEANUP_BOARD_SATURATION_CAP="$TARGET_CLEANUP_BOARD_SATURATION_CAP" python3 -c "
 import json, os, sys
 try:
-  lanes = json.load(sys.stdin)
-  triage = lanes.get('triage') or []
-  queued = lanes.get('queued') or []
-  label = os.environ.get('TARGET_CLEANUP_SCAN_LABEL', 'cleanup-scan')
+  rows = json.load(sys.stdin)
+  if not isinstance(rows, list):
+    rows = []
+  scan_label = os.environ.get('TARGET_CLEANUP_SCAN_LABEL', 'cleanup-scan')
   wor_label = os.environ.get('TARGET_WIRE_OR_RETIRE_LABEL', 'wire-or-retire')
   dqa_label = os.environ.get('TARGET_DESIGN_QA_LABEL', 'design-qa')
   cap = int(os.environ.get('TARGET_CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
   dqa_cap = int(os.environ.get('TARGET_DESIGN_QA_BOARD_SATURATION_CAP', '5') or 5)
   wq = int(os.environ.get('TARGET_WORK_QUEUE', '0') or 0)
+  # Lane->label mapping (ADR-0031): triage lane == needs-triage,
+  # queued lane == ready-for-agent (all rows here are already open == not-done).
+  triage_count = 0
+  queued_count = 0
   open_scan = 0
   open_design_qa = 0
-  for lane, rows in lanes.items():
-    if lane in ('done', 'counts') or not isinstance(rows, list):
-      continue
-    for row in rows:
-      labels = row.get('labels') if isinstance(row, dict) else None
-      if not isinstance(labels, list):
-        continue
-      if label in labels:
-        open_scan += 1
-      if dqa_label in labels:
-        open_design_qa += 1
   wor_triage = 0
-  for row in triage:
+  for row in rows:
     labels = row.get('labels') if isinstance(row, dict) else None
-    if isinstance(labels, list) and wor_label in labels:
+    if not isinstance(labels, list):
+      continue
+    in_triage = 'needs-triage' in labels
+    if in_triage:
+      triage_count += 1
+    if 'ready-for-agent' in labels:
+      queued_count += 1
+    if scan_label in labels:
+      open_scan += 1
+    if dqa_label in labels:
+      open_design_qa += 1
+    if wor_label in labels and in_triage:
       wor_triage += 1
-  idle = (len(triage) == 0 and len(queued) == 0 and wq == 0)
+  idle = (triage_count == 0 and queued_count == 0 and wq == 0)
   dqa_saturated = (open_design_qa > dqa_cap)
   print('target_backfill_idle=' + ('true' if idle else 'false'))
   print('target_cleanup_board_open_scan=' + str(open_scan))
@@ -686,6 +722,10 @@ except Exception:
   print('design_qa_target_due=false')
 " 2>/dev/null || { echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
 else
+  # Fail closed AND observable: the board read was unreachable/empty, so emit
+  # the suppressing defaults (never dispatch a scan/resolver that cannot read
+  # its own board) but flag the degradation so it is not an invisible zero-set.
+  echo "target_board_signals_degraded=true"
   echo "target_backfill_idle=false"
   echo "target_cleanup_board_open_scan=0"
   echo "target_cleanup_board_saturated=true"
