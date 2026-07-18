@@ -19,103 +19,20 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  runBlockedItemEscalation,
-  runDoneLanePrune,
   runWeeklyDigest,
   runMemoryConsolidation,
   runDesignConceptSnapshot,
   runForecastCalibrationBrier,
-  returnStaleInProgressItems,
   pruneStaleRedisKeys,
-  runMergedItemReconciler,
   runSkillCatalogReregister,
   runHousekeeping,
   choreGuard,
 } from "../src/scheduler/housekeeping.ts";
 
-interface PublishedEvent {
-  stream: string;
-  type: string;
-  payload: any;
-}
-
-function makeFakeBus(captured: PublishedEvent[]) {
-  return {
-    async publish(stream: string, event: any) {
-      captured.push({ stream, type: event.type, payload: event.payload });
-      return "fake-id";
-    },
-  };
-}
-
-describe("runBlockedItemEscalation — isolated (issue #2067)", () => {
-  test("re-escalates a >12h-blocked item with no prior escalation stamp", async () => {
-    const captured: PublishedEvent[] = [];
-    const bus = makeFakeBus(captured);
-    const stamps = new Map<string, string>();
-    const now = 1_000_000_000_000;
-    const blockedAt = new Date(now - 13 * 60 * 60 * 1000).toISOString(); // 13h ago
-
-    await runBlockedItemEscalation(bus as any, {
-      loadBacklog: async () =>
-        ({
-          blocked: [
-            { id: "item-1", title: "stuck", meta: { blockedAt, blockedReason: "missing API_KEY" } },
-          ],
-        }) as any,
-      getLastEscalation: async (id) => stamps.get(id) ?? null,
-      setLastEscalation: async (id, v) => {
-        stamps.set(id, v);
-      },
-      now: () => now,
-    });
-
-    assert.equal(captured.length, 1, "one re-escalation should fire");
-    assert.equal(captured[0].type, "cycle:operator_blocked");
-    assert.equal(captured[0].payload.taskId, "item-1");
-    assert.equal(captured[0].payload.reescalation, true);
-    assert.equal(stamps.get("item-1"), String(now), "the per-item stamp is written");
-  });
-
-  test("suppresses an item re-escalated within the last 12h", async () => {
-    const captured: PublishedEvent[] = [];
-    const bus = makeFakeBus(captured);
-    const now = 1_000_000_000_000;
-    const blockedAt = new Date(now - 48 * 60 * 60 * 1000).toISOString(); // 2 days
-    const recentStamp = String(now - 1 * 60 * 60 * 1000); // escalated 1h ago
-
-    await runBlockedItemEscalation(bus as any, {
-      loadBacklog: async () =>
-        ({ blocked: [{ id: "item-2", title: "stuck", meta: { blockedAt } }] }) as any,
-      getLastEscalation: async () => recentStamp,
-      setLastEscalation: async () => {},
-      now: () => now,
-    });
-
-    assert.equal(captured.length, 0, "a recently-escalated item is suppressed");
-  });
-
-  test("never throws — a failing loadBacklog is caught and logged", async () => {
-    const captured: PublishedEvent[] = [];
-    const bus = makeFakeBus(captured);
-    const originalError = console.error;
-    let logged = "";
-    console.error = (msg: any) => {
-      logged = String(msg);
-    };
-    try {
-      await runBlockedItemEscalation(bus as any, {
-        loadBacklog: async () => {
-          throw new Error("redis down");
-        },
-      });
-    } finally {
-      console.error = originalError;
-    }
-    assert.equal(captured.length, 0);
-    assert.match(logged, /Blocked escalation check failed: redis down/);
-  });
-});
+// The runBlockedItemEscalation chore (and its isolated tests) was retired with
+// the Redis backlog subsystem — ADR-0031 contract phase, issue #3439. It read
+// the Redis `blocked` lane, which no longer exists (the Target tracks work as
+// GitHub Issues, and the #3059 blocked-by filter handles dependency-blocking).
 
 describe("runDesignConceptSnapshot — isolated (issue #2067)", () => {
   test("writes when no snapshot exists for today (returns true → ran)", async () => {
@@ -180,17 +97,9 @@ describe("runForecastCalibrationBrier — isolated (issue #2067)", () => {
   });
 });
 
-describe("runDoneLanePrune — isolated (issue #2067)", () => {
-  test("delegates to the injected prune function", async () => {
-    let called = false;
-    await runDoneLanePrune({
-      pruneOldDoneItems: async () => {
-        called = true;
-      },
-    });
-    assert.equal(called, true);
-  });
-});
+// The runDoneLanePrune chore (and its isolated test) was retired with the Redis
+// backlog subsystem — ADR-0031 contract phase, issue #3439 (it pruned the Redis
+// `done` lane, which no longer exists).
 
 describe("runWeeklyDigest — isolated (issue #2067)", () => {
   test("sends + stamps when a summary is produced", async () => {
@@ -241,43 +150,10 @@ describe("runMemoryConsolidation — isolated (issue #2067)", () => {
   });
 });
 
-describe("returnStaleInProgressItems — isolated (issue #2067)", () => {
-  test("returns a >24h inProgress item to queued via the atomic backlog seam", async () => {
-    const now = 1_000_000_000_000;
-    const staleScore = now - 25 * 60 * 60 * 1000; // 25h old
-    const calls: Array<{ id: string; meta: Record<string, unknown> }> = [];
-    await returnStaleInProgressItems({
-      getBacklogLaneWithScores: async () => ["item-stale", String(staleScore)],
-      // Issue #2582: the chore now delegates the mutation to the backlog
-      // module's atomic + claim-clearing helper instead of the pre-#1990
-      // non-atomic moveBacklogItem. Assert on the id + returnedReason it hands
-      // in; the helper (unit-tested separately) owns the actual write.
-      returnInProgressItemToQueued: async (id, meta) => {
-        calls.push({ id, meta });
-        return { id, title: "stale build", lane: "queued", meta };
-      },
-      now: () => now,
-    });
-    assert.equal(calls.length, 1, "the stale item is returned exactly once");
-    assert.equal(calls[0].id, "item-stale");
-    assert.equal(calls[0].meta.returnedReason, "stale_in_progress");
-    assert.equal(typeof calls[0].meta.returnedAt, "string");
-  });
-
-  test("leaves a fresh inProgress item alone", async () => {
-    const now = 1_000_000_000_000;
-    let moved = false;
-    await returnStaleInProgressItems({
-      getBacklogLaneWithScores: async () => ["item-fresh", String(now)],
-      returnInProgressItemToQueued: async () => {
-        moved = true;
-        return null;
-      },
-      now: () => now,
-    });
-    assert.equal(moved, false, "a fresh item is not moved");
-  });
-});
+// The returnStaleInProgressItems chore (and its isolated tests) was retired with
+// the Redis backlog subsystem — ADR-0031 contract phase, issue #3439 (it moved
+// items between the Redis `inProgress` and `queued` lanes, which no longer
+// exist).
 
 describe("pruneStaleRedisKeys — isolated (issue #2067)", () => {
   test("deletes a >7d no-TTL dated key and keeps a fresh one, via injected deps", async () => {
@@ -345,73 +221,12 @@ describe("pruneStaleRedisKeys — isolated (issue #2067)", () => {
   });
 });
 
-describe("runMergedItemReconciler — health snapshot persistence (issue #2057)", () => {
-  test("persists feed liveness + batch metrics from a clean run", async () => {
-    let saved: any = null;
-    await runMergedItemReconciler({
-      reconcileMergedItems: async () => ({
-        reconciled: [{ id: "item-1", ref: "pr-9" }],
-        escalated: [],
-        scanned: 4,
-        feed: { prs: { examined: 3 }, commits: { examined: 2 } },
-        metrics: { referencesFound: 1, movesFailed: 0, durationMs: 42 },
-      }),
-      setReconcilerHealth: async (record) => { saved = record; },
-    });
-
-    assert.ok(saved, "a health snapshot must be persisted every run");
-    assert.ok(saved.ranAt, "ranAt timestamp stamped");
-    assert.equal(saved.feed.prs.examined, 3);
-    assert.equal(saved.feed.commits.examined, 2);
-    assert.equal(saved.metrics.referencesFound, 1);
-    assert.equal(saved.metrics.movesFailed, 0);
-    assert.equal(saved.metrics.itemsReconciled, 1);
-    assert.equal(saved.metrics.itemsEscalated, 0);
-    assert.equal(saved.metrics.scanned, 4);
-    assert.equal(saved.metrics.durationMs, 42);
-    assert.equal(saved.alert, undefined, "no alert on a clean run");
-  });
-
-  test("persists the both-feeds-down alert into the health snapshot", async () => {
-    let saved: any = null;
-    await runMergedItemReconciler({
-      reconcileMergedItems: async () => ({
-        reconciled: [],
-        escalated: [],
-        scanned: 0,
-        feed: {
-          prs: { examined: 0, failed: "merged-PR feed unavailable" },
-          commits: { examined: 0, failed: "merge-commit feed unavailable" },
-        },
-        metrics: { referencesFound: 0, movesFailed: 0, durationMs: 5 },
-        alert: { code: "reconciler:both-feeds-down", message: "both feeds blind" },
-      }),
-      setReconcilerHealth: async (record) => { saved = record; },
-    });
-
-    assert.ok(saved.alert, "the critical alert must reach the health snapshot");
-    assert.equal(saved.alert.code, "reconciler:both-feeds-down");
-    assert.ok(saved.feed.prs.failed, "down feed reason persisted");
-    assert.ok(saved.feed.commits.failed, "down feed reason persisted");
-  });
-
-  test("a health-persist failure does not abort the chore (fail-soft)", async () => {
-    // The reconciler already ran (and fired any alert) — a Redis write failure
-    // for the observability snapshot must never throw out of the chore.
-    await runMergedItemReconciler({
-      reconcileMergedItems: async () => ({
-        reconciled: [],
-        escalated: [],
-        scanned: 0,
-        feed: { prs: { examined: 1 }, commits: { examined: 1 } },
-        metrics: { referencesFound: 0, movesFailed: 0, durationMs: 1 },
-      }),
-      setReconcilerHealth: async () => { throw new Error("redis down"); },
-    });
-    // Reaching here without throwing is the assertion.
-    assert.ok(true);
-  });
-});
+// The runMergedItemReconciler chore (and its isolated tests) was retired with
+// the Redis backlog subsystem — ADR-0031 contract phase, issue #3439. It moved
+// merged Redis backlog items to the `done` lane; merged/shipped suppression is
+// now enforced by `Closes #N` close-discipline on the GitHub board (ADR-0031
+// Decision 5). The positive-evidence merged-blob matchers it used
+// (`merged-refs` / `token-algebra`) are retained as leaf modules.
 
 describe("runSkillCatalogReregister — isolated (issue #2148)", () => {
   const fullState = () => ({

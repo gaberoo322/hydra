@@ -3,12 +3,10 @@ import * as Sentry from "@sentry/node";
 import { resolve } from "node:path";
 
 import { createCyclesRouter } from "./api/cycles.ts";
-import { createQueueRouter } from "./api/queue.ts";
 import { createGroundingRouter } from "./api/grounding.ts";
 import { createHealthRouter } from "./api/health.ts";
 import { createRecommendationsRouter } from "./api/recommendations.ts";
 import { createResearchRouter } from "./api/research.ts";
-import { createBacklogRouter } from "./api/backlog.ts";
 import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createMaintenanceRouter } from "./api/maintenance.ts";
@@ -32,7 +30,6 @@ import { createCapacityRouter } from "./api/capacity.ts";
 import { createObservabilityRouter } from "./api/observability.ts";
 import { createLearningRouter } from "./api/learning.ts";
 import { createPatternMemoryRouter } from "./api/pattern-memory.ts";
-import { createAnchorRouter } from "./api/anchor.ts";
 import { createAutopilotLifecycleRouter } from "./api/autopilot-lifecycle.ts";
 import { createAutopilotRunsRouter } from "./api/autopilot-runs.ts";
 import { createAutopilotLogRouter } from "./api/autopilot-log.ts";
@@ -81,7 +78,6 @@ function createApi(eventBus: EventBus) {
 
   // Mount domain sub-routers
   api.use(createCyclesRouter());
-  api.use(createQueueRouter());
   // Grounding read surface (issue #3190) — re-homed from the retired
   // `api/tasks.ts` router; mounts prefix-less so /api/grounding/latest stays
   // byte-identical. The old router's always-dead /agents/status +
@@ -93,7 +89,6 @@ function createApi(eventBus: EventBus) {
   // router; mounts prefix-less so /api/recommendations stays byte-identical.
   api.use(createRecommendationsRouter());
   api.use(createResearchRouter());
-  api.use(createBacklogRouter());
   api.use(createDesignConceptsRouter());
   api.use(createSchedulerRouter(eventBus));
   // Maintenance — hourly housekeeping endpoint (issue #723, scheduler fold PR-3/4).
@@ -121,7 +116,6 @@ function createApi(eventBus: EventBus) {
   // into createPatternMemoryRouter. Route paths unchanged; src/api.ts stays a
   // thin mount point with the same three zero-arg factory calls.
   api.use(createPatternMemoryRouter());
-  api.use(createAnchorRouter());
   // Autopilot HTTP surface — split by domain concern (#2034) into four focused
   // sub-routers, each a thin adapter over its own domain Module: lifecycle
   // WRITES (run/turn/cycle), run-projection READS, log/journal serving, and

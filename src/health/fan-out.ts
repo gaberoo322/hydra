@@ -40,10 +40,25 @@ import { resolve } from "node:path";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
-import { getBacklogCounts } from "../backlog/reads.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { redisInfo as getRedisInfo } from "../redis/utility.ts";
-import { getWorkQueueLen } from "../redis/work-queue.ts";
+
+// The Redis backlog subsystem was retired in the ADR-0031 contract phase (issue
+// #3439) — the Target now tracks work as GitHub Issues, so the old
+// `getWorkQueueLen` / `getBacklogCounts` Redis readers no longer exist. The two
+// health-snapshot fields they fed (`queueDepth`, `blCounts`) are kept in the
+// snapshot shape for wire/rule stability, backed by these honest-zero stubs (the
+// Redis backlog is gone, so both are always 0/empty now). A future GitHub-board
+// health probe can replace these.
+const getWorkQueueLen = async (): Promise<number> => 0;
+const getBacklogCounts = async (): Promise<{
+  triage: number;
+  backlog: number;
+  inProgress: number;
+  blocked: number;
+  done: number;
+  total: number;
+}> => ({ triage: 0, backlog: 0, inProgress: 0, blocked: 0, done: 0, total: 0 });
 import { countReflectionKeys, probeReflectionOutcomesLedger } from "../redis/reflections.ts";
 // Issue #3270: the attribution ledger LLEN probe — a best-effort LLEN read that
 // surfaces ledger-dark state to the deep-health rule without fetching all rows.

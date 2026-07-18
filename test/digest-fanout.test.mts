@@ -42,7 +42,6 @@ describe("buildDailyHeartbeat", () => {
       getBuilderHealthScorecard: async () => ({
         autonomyRate: { autonomous: 4, total: 5, window: 50 },
       }),
-      getBacklogCounts: async () => ({ queued: 3, blocked: 1, triage: 2 }),
       readRecentAlerts: async () => [JSON.stringify({ timestamp: new Date(fixedNow).toISOString() })],
     });
 
@@ -51,7 +50,6 @@ describe("buildDailyHeartbeat", () => {
     assert.match(out, /\*Autopilot:\* last run ended — started 30m ago/);
     assert.match(out, /\*Usage:\* 5h 12% · weekly 40% \(caps at 90%\)/);
     assert.match(out, /\*Throughput:\* 4\/5 PRs auto-merged \(last 50\)/);
-    assert.match(out, /\*Target backlog:\* 3 queued, 1 blocked, 2 triage/);
     assert.match(out, /\*Alerts \(24h\):\* 1/);
   });
 
@@ -63,14 +61,12 @@ describe("buildDailyHeartbeat", () => {
       listRecentAutopilotRunIds: boom,
       getUsage: boom,
       getBuilderHealthScorecard: boom,
-      getBacklogCounts: boom,
       readRecentAlerts: boom,
     });
     assert.match(out, /💓 \*Hydra Daily Heartbeat\*/);
     assert.match(out, /\*Autopilot:\* n\/a \(redis down\)/);
     assert.match(out, /\*Usage:\* n\/a \(redis down\)/);
     assert.match(out, /\*Throughput:\* n\/a \(redis down\)/);
-    assert.match(out, /\*Target backlog:\* n\/a \(redis down\)/);
     assert.match(out, /\*Alerts \(24h\):\* n\/a \(redis down\)/);
   });
 
@@ -93,14 +89,11 @@ describe("buildDailyHeartbeat", () => {
       listRecentAutopilotRunIds: async () => [],
       getUsage: async () => ({ calibrated: false }),
       getBuilderHealthScorecard: async () => throwingScorecard,
-      getBacklogCounts: async () => ({}),
       readRecentAlerts: async () => [],
     });
     assert.match(out, /💓 \*Hydra Daily Heartbeat\*/);
     assert.match(out, /\*Throughput:\* n\/a \(scorecard field boom\)/);
     assert.match(out, /\*Stagnation:\* n\/a \(scorecard field boom\)/);
-    // The rest of the digest still ships around the degraded sections.
-    assert.match(out, /\*Target backlog:\* 0 queued, 0 blocked, 0 triage/);
   });
 
   it("marks usage uncalibrated when quota env vars are unset", async () => {
@@ -108,13 +101,11 @@ describe("buildDailyHeartbeat", () => {
       listRecentAutopilotRunIds: async () => [],
       getUsage: async () => ({ calibrated: false }),
       getBuilderHealthScorecard: async () => ({}),
-      getBacklogCounts: async () => ({}),
       readRecentAlerts: async () => [],
     });
     assert.match(out, /\*Autopilot:\* ⚠️ no recent run indexed/);
     assert.match(out, /\*Usage:\* uncalibrated \(quota env vars unset\)/);
     assert.match(out, /\*Throughput:\* no merges in window/);
-    assert.match(out, /\*Target backlog:\* 0 queued, 0 blocked, 0 triage/);
     assert.match(out, /\*Alerts \(24h\):\* 0/);
   });
 });

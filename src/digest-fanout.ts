@@ -4,8 +4,8 @@
  *
  * `buildDailyHeartbeat` is the side-effecting sibling of the pure grammar in
  * `src/digest-format.ts`. It is a mini fan-out orchestrator: it reads from
- * five-to-six independent sub-sources (Redis run index, the usage tracker, the
- * builder-health scorecard, the target backlog, the alert ring …), assembles
+ * several independent sub-sources (Redis run index, the usage tracker, the
+ * builder-health scorecard, the alert ring …), assembles
  * the on-wire Telegram string, and degrades each section best-effort (a failing
  * reader → an `n/a` line, never a thrown error) so the heartbeat ALWAYS ships.
  *
@@ -36,7 +36,6 @@ import {
   getAutopilotRun as defaultGetAutopilotRun,
 } from "./redis/autopilot-runs.ts";
 import { getUsage as defaultGetUsage } from "./cost/index.ts";
-import { getBacklogCounts as defaultGetBacklogCounts } from "./backlog/reads.ts";
 import { readRecentAlerts as defaultReadRecentAlerts } from "./redis/alerts.ts";
 
 /**
@@ -51,7 +50,6 @@ export interface DailyHeartbeatDeps {
   getAutopilotRun?: (id: string) => Promise<any>;
   getUsage?: () => Promise<any>;
   getBuilderHealthScorecard?: () => Promise<any>;
-  getBacklogCounts?: () => Promise<any>;
   readRecentAlerts?: (n: number) => Promise<string[]>;
   now?: () => number;
 }
@@ -65,7 +63,6 @@ export interface DailyHeartbeatDeps {
  *   - Liveness   — most recent autopilot run + its age (a wedged loop shows up)
  *   - Usage      — 5h % and weekly since-reset %, against the 90% hard-stops
  *   - Throughput — autonomous merge rate over the builder-health window
- *   - Queue      — target backlog lanes (queued / blocked / triage)
  *   - Alerts     — count of alert events recorded in the last 24h
  *
  * Readers are injectable via `deps` (defaulting to the real imports) so the
@@ -163,16 +160,9 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
     lines.push(`*Stagnation:* n/a (${err?.message || err})`);
   }
 
-  // --- Queue: target backlog lanes ---
-  try {
-    const getBacklogCounts = deps.getBacklogCounts ?? defaultGetBacklogCounts;
-    const counts = await getBacklogCounts();
-    lines.push(
-      `*Target backlog:* ${counts.queued || 0} queued, ${counts.blocked || 0} blocked, ${counts.triage || 0} triage`,
-    );
-  } catch (err: any) {
-    lines.push(`*Target backlog:* n/a (${err?.message || err})`);
-  }
+  // (The Redis "Target backlog" lane-depth line was retired with the Redis
+  // backlog subsystem — ADR-0031 contract phase, issue #3439. The Target now
+  // tracks work as GitHub Issues; a GitHub-board digest line is a follow-on.)
 
   // --- Alerts: count recorded in the last 24h ---
   try {

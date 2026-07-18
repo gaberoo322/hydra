@@ -6,7 +6,6 @@ import {
   readRecentAlerts,
   setAlertAt,
 } from "../redis/alerts.ts";
-import { pushToWorkQueue } from "../redis/work-queue.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { SentryWebhookPayloadSchema } from "../schemas/webhooks.ts";
 import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
@@ -15,8 +14,9 @@ import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.t
  * Alerts + Sentry webhook routes.
  *
  * Extracted from api/misc.ts as part of issue #268. Alerts live in a Redis
- * list (`hydra:alerts`); Sentry webhook posts both queue an alert and enqueue
- * a work item.
+ * list (`hydra:alerts`); a Sentry webhook post records an alert. (The prior
+ * Redis work-queue enqueue was retired with the Redis backlog subsystem —
+ * ADR-0031 contract phase, issue #3439.)
  */
 export function createAlertsRouter() {
   const router = Router();
@@ -102,23 +102,6 @@ export function createAlertsRouter() {
         return res.json({ skipped: true, reason: `level ${level}` });
       }
 
-      await pushToWorkQueue(JSON.stringify({
-        reference: `Fix Sentry ${level}: ${title}`,
-        reason: `Sentry issue in ${project}${culprit ? ` at ${culprit}` : ""}${url ? ` — ${url}` : ""}`,
-        context: JSON.stringify({
-          source: "sentry-webhook",
-          project,
-          title,
-          culprit,
-          level,
-          url,
-          firstSeen: issue.first_seen || issue.firstSeen,
-          count: issue.count,
-        }),
-        queuedAt: new Date().toISOString(),
-        source: "sentry",
-      }));
-
       await pushAlert(JSON.stringify({
         id: `sentry-${Date.now()}`,
         type: "sentry:issue",
@@ -129,7 +112,7 @@ export function createAlertsRouter() {
         payload: { project, title, culprit, url },
       }), ALERTS_MAX);
 
-      console.log(`[Sentry Webhook] Queued: "${title}" from ${project}`);
+      console.log(`[Sentry Webhook] Alerted: "${title}" from ${project}`);
       res.json({ queued: true, title });
     } catch (err: any) {
       console.error(`[Sentry Webhook] Failed: ${err.message}`);
