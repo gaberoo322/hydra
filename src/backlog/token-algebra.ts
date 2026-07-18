@@ -15,7 +15,7 @@
 // Everything in this module is PURE: it takes strings or plain objects and
 // returns strings, numbers, or booleans. Zero I/O, zero clock, zero network,
 // zero imports of side-effecting modules. The gh-scan I/O factory
-// (`makeMergedAnchorRefsLoader`, `loadMergedAnchorRefsImpl`) lives in
+// (`makeMergedAnchorRefsLoader`) lives in
 // `src/backlog/merged-refs.ts` and imports the algebra it needs from here; that
 // module also re-exports these symbols for back-compat so existing import sites
 // (`./merged-refs.ts`) keep resolving unchanged.

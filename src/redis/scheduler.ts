@@ -211,14 +211,13 @@ export async function clearSchedulerDeliberateStop(): Promise<void> {
 // Housekeeping Redis ops moved to src/redis/housekeeping.ts (issue #1956)
 // ---------------------------------------------------------------------------
 //
-// The 8 Housekeeping-domain time-guard accessors (getBlockedLastEscalation,
-// setBlockedLastEscalation, getDigestLastWeekly, setDigestLastWeekly,
-// getMemoryLastConsolidation, setMemoryLastConsolidation, getCleanupLastDaily,
-// setCleanupLastDaily) that previously lived here have been relocated to
-// src/redis/housekeeping.ts. They carried non-scheduler key namespaces
-// (hydra:blocked:*, hydra:digest:*, hydra:memory:*, hydra:cleanup:*) and
-// were consumed only by src/scheduler/housekeeping.ts. The key strings on
-// disk are UNCHANGED — this was a source-location move, not a key migration.
+// The Housekeeping-domain time-guard accessors (getDigestLastWeekly,
+// setDigestLastWeekly, getMemoryLastConsolidation, setMemoryLastConsolidation,
+// getCleanupLastDaily, setCleanupLastDaily) that previously lived here have been
+// relocated to src/redis/housekeeping.ts. They carried non-scheduler key
+// namespaces (hydra:digest:*, hydra:memory:*, hydra:cleanup:*) and were consumed
+// only by src/scheduler/housekeeping.ts. The key strings on disk are UNCHANGED —
+// this was a source-location move, not a key migration.
 
 // ---------------------------------------------------------------------------
 // Research floor (issue #84/#327) accessors removed in #706 (scheduler fold

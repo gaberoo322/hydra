@@ -13,9 +13,9 @@
 //
 // Because the MergedRefs concern is owned by neither consumer exclusively, its
 // neutral home is here, a sibling to `src/backlog/reconciler.ts`. Both consumers
-// import the loader type (`MergedAnchorRefsLoader`) and the production loader
-// (`loadMergedAnchorRefsImpl`) from this one location; neither needs to know the
-// other shares the scan.
+// import the loader type (`MergedAnchorRefsLoader`) and build a loader via the
+// factory (`makeMergedAnchorRefsLoader`) from this one location; neither needs to
+// know the other shares the scan.
 //
 // The Seam owns: the `gh pr list --state merged` scan on both repos and the TTL
 // cache. The pure normalized identity-token algebra (`mergedTokensFromPr`,
@@ -130,10 +130,9 @@ export type MergedAnchorRefsLoader = (nowMs?: number) => Promise<Set<string>>;
  * The TTL cache lives in THIS closure, not in module scope (#1834). A fresh
  * cache entry (younger than `MERGED_SCAN_CACHE_TTL_MS`) short-circuits the `gh`
  * shell-out so the hot `/api/anchor/candidates` path doesn't fork `gh` on every
- * request. Production wires one long-lived instance (`loadMergedAnchorRefsImpl`)
- * as the default `loadMergedAnchorRefs` dep; each call to this factory yields a
- * loader with its OWN cold cache, so tests get isolation by constructing a
- * fresh loader instead of resetting shared module state.
+ * request. Each call to this factory yields a loader with its OWN cold cache, so
+ * tests get isolation by constructing a fresh loader instead of resetting shared
+ * module state.
  *
  * The `exec` parameter is the injectable seam so the TTL-cache behaviour is
  * unit-testable without forking a real `gh`.
@@ -192,11 +191,3 @@ export function makeMergedAnchorRefsLoader(
   };
 }
 
-/**
- * Production merged-refs reader — the single long-lived default loader wired
- * into `CandidateFeedDeps.loadMergedAnchorRefs` and `reconcileWorkQueue`. Its
- * TTL cache is the module's only merged-scan cache, contained inside the
- * factory closure above (no module-level mutable state, no test-reset hook).
- */
-export const loadMergedAnchorRefsImpl: MergedAnchorRefsLoader =
-  makeMergedAnchorRefsLoader();
