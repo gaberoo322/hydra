@@ -17,7 +17,9 @@ Under ADR-0031 the Target board is GitHub Issues on `gaberoo322/hydra-betting`, 
   Removal requires a POSITIVE subject-coverage hit: the anchor subject's
   significant words (length > 3, ≥ 4 of them) must be ≥ 70% contained in a
   concrete recent `origin/main` commit blob (the same asymmetric-containment
-  polarity as `subjectCoveredBy` in `src/backlog/token-algebra.ts`).
+  subject-coverage polarity the retired `subjectCoveredBy` matcher used —
+  score = |anchorWords ∩ commitWords| / |anchorWords| ≥ 0.70; the shell
+  reimplements it inline below, see issue #3461).
 - **Fail-open on uncertainty.** Any unreachable `git` / empty log / short-title
   anchor (< 4 significant words) KEEPS the anchor — the preflight degrades to a
   no-op, mirroring the retired `reconcileWorkQueue` polarity and `subjectCoveredBy`.
@@ -90,9 +92,10 @@ Positive coverage closes the dup + re-selects; anything short of it (short title
 unreachable `git`, empty log, < 70% coverage) keeps the anchor and proceeds.
 Enforced `Closes #N` close-discipline (ADR-0031 Decision 5) is the durable
 suppression — this preflight is only the residual guard for a board issue whose
-work shipped without a `Closes` linkage. ADR-0031 Decision 5 retains the
-positive-evidence `merged-refs` / `token-algebra` matchers as an OPTIONAL
-reconciler sweep, not a hot-path gate.
+work shipped without a `Closes` linkage. The positive-evidence subject-coverage
+matcher this preflight reimplements inline (formerly the `merged-refs` /
+`token-algebra` leaf modules, deleted in issue #3461 as they had no production
+callers post-ADR-0031) is an OPTIONAL reconciler polarity, not a hot-path gate.
 
 ### 3.1. Grounding preflight — ledger intersection (issue #2727)
 

@@ -225,8 +225,10 @@ describe("pruneStaleRedisKeys — isolated (issue #2067)", () => {
 // the Redis backlog subsystem — ADR-0031 contract phase, issue #3439. It moved
 // merged Redis backlog items to the `done` lane; merged/shipped suppression is
 // now enforced by `Closes #N` close-discipline on the GitHub board (ADR-0031
-// Decision 5). The positive-evidence merged-blob matchers it used
-// (`merged-refs` / `token-algebra`) are retained as leaf modules.
+// Decision 5). The positive-evidence merged-blob matcher leaf modules it used
+// (`src/backlog/merged-refs.ts` / `token-algebra.ts`) had no remaining
+// production callers after the subsystem retirement and were deleted in
+// issue #3461, leaving `src/backlog/` empty.
 
 describe("runSkillCatalogReregister — isolated (issue #2148)", () => {
   const fullState = () => ({
