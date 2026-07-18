@@ -575,6 +575,15 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # excluded, mirroring scout_orch / architecture_orch / retro_orch / cleanup_orch
     # / skill_prune above.
     "wayfinder_orch",
+    # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5) turns a
+    # resolved orchestrator plan/finding into one parent epic + N tracer-bullet
+    # child issues on the ORCHESTRATOR GH board (via the vendored upstream
+    # to-tickets skill + Hydra AFK overlay) — orch-scope by definition (ADR-0030
+    # charted the orchestrator taxonomy only; Target mirrors were ruled out at
+    # charting). Under `target-only` the autopilot stays out of orch work, so
+    # tickets_orch is excluded, mirroring wayfinder_orch / scout_orch /
+    # architecture_orch / retro_orch / cleanup_orch / skill_prune above.
+    "tickets_orch",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -2076,6 +2085,22 @@ def _rule_signal_classes(
         # idle-backfill). Registered last as a lowest-priority signal class —
         # spare capacity only, never preempting a pipeline dispatch.
         "wayfinder_orch",
+        # tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5 — one
+        # autonomous Pocock skill lineage; the delta/contract slice). The
+        # tickets-STAGE producer: turns a resolved plan/finding into one parent
+        # epic + N tracer-bullet child issues by dispatching the vendored upstream
+        # `to-tickets` skill + the thin Hydra AFK overlay (Option C compose,
+        # alpha #3420; hydra-prd is demoted to the called PrdInput->issue renderer
+        # library invoked BY that overlay). Structural sibling of wayfinder_orch
+        # (the plan-stage producer, also signal, also 1h) — NOT a pipeline slot.
+        # Fires on the precomputed `tickets_available` board signal (signal-seam
+        # discipline: collect-state.sh owns the enumeration and emits the signal;
+        # that emission is a follow-on, not this slice's Files-in-scope). 1h class
+        # cooldown (SIGNAL_COOLDOWNS["tickets_orch"]) is the back-stop; board state
+        # is the primary suppressor. NOT in BACKFILL_SIGNAL_CLASSES. Registered
+        # last as a lowest-priority signal class — spare capacity only, never
+        # preempting a pipeline dispatch.
+        "tickets_orch",
     ):
         if dispatch_blocked:
             out.events.append(
@@ -3326,6 +3351,41 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 "unblocked and unclaimed — work it"
             ),
         )
+    if sig == "tickets_orch":
+        # Issue #3423 (epic #3419, ADR-0030 Decision 2/5 — one autonomous Pocock
+        # skill lineage; the delta/contract slice that WIRES this selector). The
+        # tickets-STAGE producer: dispatch the vendored upstream `to-tickets`
+        # skill + the thin Hydra AFK overlay to turn a resolved plan/finding into
+        # one parent epic + N tracer-bullet child issues on the orchestrator GH
+        # board. `hydra-prd` is DEMOTED to the called PrdInput->issue renderer
+        # library invoked BY that overlay (scripts/ci/hydra-prd-render.ts) — it is
+        # no longer a standalone dispatch identity and has NO class row, so the
+        # selector dispatches `to-tickets` (the taxonomy `skill` column of the
+        # tickets_orch row), NEVER `hydra-prd`.
+        #
+        # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
+        # here. collect-state.sh owns the board enumeration ("does a resolved plan
+        # await ticketing?") and pre-resolves it into the precomputed
+        # `tickets_available` signal, which this selector reads VERBATIM. That
+        # emission is a follow-on (bootstrap.sh signal_last_fired seed + the
+        # collect-state.sh producer) outside this slice's Files-in-scope; until it
+        # lands the signal is simply absent and this arm is a clean no-op — the
+        # same expand-then-wire cadence wayfinder_orch used (its bootstrap seed was
+        # likewise deferred to a follow-on slice).
+        #
+        # 1h class cooldown (SIGNAL_COOLDOWNS["tickets_orch"], honored by the
+        # shared signal_is_cooled guard at the top of this function) is the
+        # back-stop; board state is the primary suppressor (an epic is only
+        # rendered when a resolved plan awaits ticketing). NOT in
+        # BACKFILL_SIGNAL_CLASSES (plan-anchored, not idle-backfill). The model
+        # param is OMITTED (producer work inherits the parent per #1093).
+        if _signal_present(state, events, "tickets_available"):
+            return make_dispatch(
+                sig,
+                "to-tickets",
+                reason="resolved plan awaits ticketing — render epic + tracer children",
+            )
+        return None
     return None
 
 

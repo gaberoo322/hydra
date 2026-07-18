@@ -73,6 +73,18 @@ const META_FRICTION_LABEL = "meta-friction";
  * match. Mirrors the `FRICTION_SKILLS` list the friction-patterns diagnostic
  * (`src/api/pattern-memory.ts`) and the retro bundle scan — the three
  * autopilot skills that POST `/memory/subagent-friction`.
+ *
+ * ADR-0030 silent-rename seam (issue #3423, epic #3419, Decision 5). This is one
+ * of the four non-derived seams that hardcode skill-name string literals and
+ * would break SILENTLY on a stage rename — a renamed friction-producing class
+ * dropped from this list without lock-stepping would stop having its resolved
+ * cues demoted (they would keep re-escalating a just-closed issue). It is
+ * migration-verified: the tickets-stage producer (`tickets_orch` → `to-tickets`,
+ * ADR-0030 Decision 2) POSTs no `/memory/subagent-friction` — it RENDERS issues
+ * and never runs the verification loop that emits friction — so `to-tickets` is
+ * CORRECTLY absent here. The dev/qa fork skill names below stay until the epsilon
+ * fork-identity retirement (#3424) and are updated in lock-step with any rename
+ * that lands, keeping this list identical to the two mirror lists above.
  */
 const DEFAULT_FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const;
 

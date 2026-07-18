@@ -438,6 +438,58 @@ describe("TS projections read the taxonomy (slice #1671)", () => {
     }
   });
 
+  // ADR-0030 delta seam (issue #3423, epic #3419, Decision 5). The learning loop
+  // must not be silently severed when the stage identities move. The two
+  // hand-enumerated learning seams — subagent-capture.ts's SubagentSkill union
+  // (which learningAgent rows train pattern-memory) and demotion.ts's
+  // DEFAULT_FRICTION_SKILLS (which skills' resolved cues get demoted) — are the
+  // "break silently on a rename" surfaces Decision 5 flags. The tickets-stage
+  // producer (`tickets_orch` → `to-tickets`) is a NON-learning producer
+  // (learningAgent null; it renders issues, POSTs no /memory/subagent-friction),
+  // so it is CORRECTLY excluded from BOTH seams — the learning-capture pathway is
+  // untouched for the classes that DO learn.
+  test("ADR-0030: to-tickets is a non-learning producer, absent from both learning seams (#3423)", async () => {
+    const cap = await import("../src/pattern-memory/subagent-capture.ts");
+    // Learning seam #1 — subagent-capture.ts: to-tickets is NOT a valid
+    // lesson-producing skill (learningAgent null → isValidSkill false).
+    assert.equal(
+      cap.isValidSkill("to-tickets"),
+      false,
+      "to-tickets renders issues (learningAgent null) — it must not be a lesson skill",
+    );
+    const ticketsRow = classBySkill("to-tickets");
+    assert.ok(ticketsRow, "tickets_orch row must resolve by its to-tickets skill");
+    assert.equal(
+      ticketsRow.learningAgent,
+      null,
+      "the tickets producer trains no pattern-memory agent",
+    );
+    // Learning seam #2 — demotion.ts DEFAULT_FRICTION_SKILLS mirrors the friction
+    // producers (the skills that POST /memory/subagent-friction). Read the source
+    // list and confirm to-tickets is absent (renders issues, emits no friction)
+    // and every learning-class fork skill is still present (not silently dropped).
+    const demotionSrc = readFileSync(
+      join(REPO_ROOT, "src", "pattern-memory", "demotion.ts"),
+      "utf-8",
+    );
+    const listMatch = demotionSrc.match(
+      /DEFAULT_FRICTION_SKILLS\s*=\s*\[([^\]]*)\]/,
+    );
+    assert.ok(listMatch, "DEFAULT_FRICTION_SKILLS array literal must be present");
+    const frictionSkills = listMatch[1];
+    assert.equal(
+      /["']to-tickets["']/.test(frictionSkills),
+      false,
+      "to-tickets emits no friction — it must not be in DEFAULT_FRICTION_SKILLS",
+    );
+    for (const forkSkill of ["hydra-dev", "hydra-qa", "hydra-target-build"]) {
+      assert.ok(
+        new RegExp(`["']${forkSkill}["']`).test(frictionSkills),
+        `${forkSkill} friction capture must not be silently severed (#3423)`,
+      );
+    }
+  });
+
   test("scout CLASS_COOLDOWN_DAYS equals the scout_orch row's cooldownSeconds", async () => {
     const { CLASS_COOLDOWN_DAYS } = await import("../src/scout/calendar-walk.ts");
     const row = classByName("scout_orch");

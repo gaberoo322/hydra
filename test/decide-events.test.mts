@@ -74,6 +74,10 @@ const SIGNAL_CLASSES = [
   // wayfinder_orch (issue #3351, epic #3350, ADR-0029) — the wayfinder-map AFK
   // working class: works the next unblocked frontier ticket (orch, 1h cadence).
   "wayfinder_orch",
+  // tickets_orch (issue #3423, epic #3419, ADR-0030 Decision 2/5) — the
+  // tickets-stage producer: dispatches the upstream to-tickets skill to render a
+  // resolved plan into an epic + tracer children (orch, 1h cadence).
+  "tickets_orch",
 ] as const;
 const ALL_CLASSES = [...PIPELINE_CLASSES, ...SIGNAL_CLASSES];
 
@@ -278,7 +282,7 @@ describe("decide.py — dispatch_decision per candidate class", () => {
   test("emits exactly one dispatch_decision per candidate class on an idle turn", () => {
     const plan = runDecide(baseState());
     const decisions = eventsOfType(plan, "dispatch_decision");
-    // ALL_CLASSES = 7 pipeline + 14 signal = 21 total.
+    // ALL_CLASSES = 7 pipeline + 15 signal = 22 total.
     assert.equal(
       decisions.length,
       ALL_CLASSES.length,

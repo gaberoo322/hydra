@@ -46,6 +46,19 @@ import { InvariantViolationError } from "../errors.ts";
  * literal union below is the compile-time mirror of those rows; the runtime
  * list and the skill→agent mapping derive from the table itself, and
  * test/taxonomy-classes.test.mts pins union and table in lock-step.
+ *
+ * ADR-0030 silent-rename seam (issue #3423, epic #3419, Decision 5). This union
+ * is one of the four non-derived seams that hardcode skill-name string literals
+ * and would break SILENTLY on a stage rename — if a renamed learning class fell
+ * out of this union without lock-stepping, `isValidSkill` would reject its
+ * lessons and per-class pattern capture would stop with NO error. It is
+ * migration-verified: the tickets-stage producer (`tickets_orch` → `to-tickets`,
+ * ADR-0030 Decision 2) carries `learningAgent: null` (it RENDERS issues; it
+ * neither implements nor reviews), so `to-tickets` is CORRECTLY absent here — the
+ * taxonomy tripwire asserts every `learningAgent === null` row's skill is
+ * rejected by `isValidSkill`. The dev/qa fork skill names below stay until the
+ * epsilon fork-identity retirement (#3424); this union tracks the taxonomy's
+ * `learningAgent` rows and is updated in lock-step with any rename that lands.
  */
 export type SubagentSkill =
   | "hydra-qa"
