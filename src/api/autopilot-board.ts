@@ -59,45 +59,18 @@ import {
   fetchOpenBlockerNumbers,
 } from "../github/blockers.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
+import {
+  ORCH_BOARD_LABELS,
+  STALE_IN_PROGRESS_SECONDS,
+  STALE_BLOCKED_SECONDS,
+} from "../board-labels.ts";
 
 // ---------------------------------------------------------------------------
-// The orchestrator board label vocabulary — one authoritative copy
+// The orchestrator board label vocabulary lives in the pure `src/board-labels.ts`
+// leaf (issue #3484) — imported above. This router is a downward consumer, not
+// the definition site: a pure vocabulary constant flows from a leaf to its
+// consumers, never from an HTTP controller to a leaf.
 // ---------------------------------------------------------------------------
-
-/**
- * The triage/dispatch label literals the autopilot board projection counts.
- * Each maps a response field to the GitHub label name it counts. This is the
- * SINGLE place the bash `--jq` bucketing used to re-spell; a label rename is
- * now a one-line edit here, not a parallel edit in `collect-state.sh`.
- *
- * NOTE: this is the orchestrator's triage vocabulary (see
- * `docs/agents/triage-labels.md`), distinct from the Dispatch-Class Taxonomy
- * Module's provenance vocabulary (`PROVENANCE_LABELS` in
- * `src/taxonomy/classes.ts`) which buckets issues by *which filing pipeline
- * produced them*, not by *board state*.
- */
-export const ORCH_BOARD_LABELS = {
-  needs_qa: "needs-qa",
-  ready_for_agent: "ready-for-agent",
-  needs_triage: "needs-triage",
-  needs_research: "needs-research",
-  in_progress: "in-progress",
-  blocked: "blocked",
-  // `target-backlog` is the routing label for Target work (code in
-  // hydra-betting), NOT an orchestrator board state. It excludes an issue from
-  // the orch `ready_for_agent` count so a Target-scope issue that also carries
-  // `ready-for-agent` (e.g. #2701) is not counted as orch-pipeline work and
-  // does not drive an orchestrator-scope grill / dispatch (issue #2704).
-  target_backlog: "target-backlog",
-} as const;
-
-/**
- * Staleness windows (seconds) — preserved verbatim from `collect-state.sh`:
- * an `in-progress` issue untouched for 90 min, or a `blocked` issue untouched
- * for 12 h, is "stale" and listed by number so the autopilot can re-route it.
- */
-export const STALE_IN_PROGRESS_SECONDS = 5400; // 90 min
-export const STALE_BLOCKED_SECONDS = 43200; // 12 h
 
 /** `--json` field set this projection needs — the canonical set plus `updatedAt`. */
 const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;

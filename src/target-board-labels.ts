@@ -36,7 +36,7 @@
  * orch vocabulary and defines constants — no I/O, no decisions.
  */
 
-import { ORCH_BOARD_LABELS } from "./api/autopilot-board.ts";
+import { ORCH_BOARD_LABELS } from "./board-labels.ts";
 
 /**
  * The Target-specific labels that survive the Redis→GitHub-Issues migration

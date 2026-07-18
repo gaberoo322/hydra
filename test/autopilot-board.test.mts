@@ -21,11 +21,13 @@ import assert from "node:assert/strict";
 import {
   createAutopilotBoardRouter,
   deriveBoardState,
+  type AutopilotBoardRouterDeps,
+} from "../src/api/autopilot-board.ts";
+import {
   ORCH_BOARD_LABELS,
   STALE_IN_PROGRESS_SECONDS,
   STALE_BLOCKED_SECONDS,
-  type AutopilotBoardRouterDeps,
-} from "../src/api/autopilot-board.ts";
+} from "../src/board-labels.ts";
 import {
   AutopilotBoardStateResponseSchema,
   AutopilotBoardStateQuerySchema,

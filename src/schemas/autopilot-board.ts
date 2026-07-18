@@ -27,7 +27,7 @@
  * vocabulary (see `docs/agents/triage-labels.md`), not the Dispatch-Class
  * Taxonomy Module's provenance vocabulary (`PROVENANCE_LABELS` in
  * `src/taxonomy/classes.ts`); they live in `ORCH_BOARD_LABELS`
- * in `src/api/autopilot-board.ts`, the single place a bash copy used to mirror.
+ * in `src/board-labels.ts`, the single place a bash copy used to mirror.
  *
  * Schema discipline mirrors `src/schemas/autopilot-idle.ts` (ADR-0011):
  * `.strict()` objects, `z.infer<>` for canonical types, a
@@ -78,7 +78,7 @@ export const AutopilotBoardStateQuerySchema = z
  *
  * `*` count fields are non-negative integers. `stale_*` are issue-number lists
  * (the issues whose label has gone stale past its window — see the windows in
- * `src/api/autopilot-board.ts`).
+ * `src/board-labels.ts`).
  */
 export const AutopilotBoardStateResponseSchema = z
   .object({
