@@ -26,7 +26,7 @@
  * (`computeArtifactHash`), the gate predicates (`isFresh`, `gateCheck`,
  * `DESIGN_CONCEPT_MAX_AGE_MS`), and the green-light criterion
  * (`computeGreenLight` + `GREEN_LIGHT_WINDOW_DAYS` /
- * `GREEN_LIGHT_REQUIRED_DAYS` / `GreenLightMetrics`) — all live in
+ * `GREEN_LIGHT_REQUIRED_DAYS` / `GreenLightMetrics`) — all defined in
  * `src/design-concept-gate.ts` (issues #3039, #3414). That leaf imports only
  * the tier-classifier, so gate/identity/green-light tests need zero Redis
  * setup. This module imports the leaf and **re-exports** its public symbols,
@@ -104,7 +104,6 @@ export {
   GREEN_LIGHT_WINDOW_DAYS,
   GREEN_LIGHT_REQUIRED_DAYS,
   type DesignConcept,
-  type GreenLightMetrics,
 } from "./design-concept-gate.ts";
 
 // File-private status alias — used by `saveDesignConcept` / `hydrate`. Kept
