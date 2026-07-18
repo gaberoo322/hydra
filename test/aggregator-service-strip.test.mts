@@ -21,7 +21,7 @@ import {
   type ProbeResult,
   type ServiceStripDeps,
 } from "../src/aggregators/service-strip.ts";
-import { STRIP_PROBE_DESCRIPTORS } from "../src/health/fan-out.ts";
+import { STRIP_PROBE_DESCRIPTORS } from "../src/health/strip-probes.ts";
 
 // Issue #2597: the strip now runs six probes; embed-backend + ollamaVlm default
 // to real network producers. Inject hermetic stubs (all "up") so the existing

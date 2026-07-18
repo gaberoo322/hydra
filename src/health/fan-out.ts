@@ -73,7 +73,7 @@ import { evaluateDarkOutcomes } from "../scheduler/chores/wiring-liveness-outcom
 // onto the snapshot via ProbeInputs.reflectionOutcomesLiveness — the deep-health
 // reflection-outcomes rule then reads it from the snapshot, staying pure.
 import { projectReflectionOutcomesLiveness } from "./reflection-outcomes-liveness.ts";
-import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult, type ProbeOutcome } from "./probe.ts";
+import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
 import { parseRedisInfoSnapshot } from "./diagnostics.ts";
 // Issue #3230: the ProbeInputs named-record type comes from the zero-logic leaf.
 // Issue #3393: the pure settled-record → ProbeInputs mapping (assembleProbeInputs)
@@ -586,160 +586,16 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
   };
 }
 
-// ---- Now-page strip probe enumeration (issue #2597) ------------------------
+// ---- Now-page strip probe enumeration ---------------------------------------
 //
-// Why this lives HERE (the #2597 deepening):
-//   The fan-out is the single owner of "which external services does the
-//   orchestrator monitor?" — the positional array above enumerates the full
-//   19-probe deep-health set. But the Now-page health strip
-//   (src/aggregators/service-strip.ts) is a SECOND consumer that wants only the
-//   user-facing subset of EXTERNAL-SERVICE LIVENESS probes (orchestrator, redis,
-//   vikingdb, openviking, embed-backend, ollamaVlm) projected as display rows.
-//   Before #2597 the strip hand-maintained its OWN 4-probe fan-out inline, so it
-//   silently drifted from this file: it omitted embed-backend (#2013) and
-//   ollamaVlm (#2278) — the two silent-failure probes the operator most needs at
-//   a glance. Adding a probe meant editing both lists.
-//
-//   This ordered descriptor enumeration is the single source of that subset. The
-//   strip maps each descriptor to a ServiceRow via the shared classifiers in the
-//   ServiceProbe Adapter Seam (src/health/probe.ts) — it no longer decides WHICH
-//   probes appear or in WHAT order. Adding a probe to the strip is now a
-//   one-entry edit HERE.
-//
-// Scope boundary (design concept #2597 rejected-alternative): this is the
-// LIVENESS subset the strip wants, NOT the full HealthSnapshot fan-out. The
-// strip deliberately does not pull collectProbeInputs (that couples it to
-// Redis/host reads it does not want and blows its 3s-per-probe budget). The
-// /health/deep wire envelope keeps its own explicit named projection (#1869) —
-// this enumeration does not change it.
-
-/**
- * The generic HTTP probe the strip injects: receives a URL + timeout, returns a
- * never-throwing {@link ProbeOutcome} (`{ok, latencyMs, error?}`). Defaulted by
- * the strip to a real `fetch`-based probe; injectable for tests. The 3s cap the
- * strip contract guarantees is applied by the caller passing `timeoutMs`.
- */
-type StripHttpProbe = (url: string, timeoutMs: number) => Promise<ProbeOutcome>;
-
-/**
- * The minimal dependency bag a strip probe descriptor's `run` closure consumes.
- * Deliberately a SUPERSET-free subset of the strip's own `ServiceStripDeps` so
- * the descriptor enumeration lives in the fan-out (the probe owner) without the
- * fan-out importing the strip (which would be circular — the strip imports this
- * module). The strip passes its resolved deps through verbatim.
- *
- * Every field is required at call time (the strip fills defaults before calling
- * `run`), so a descriptor never has to defend against an absent dep.
- */
-export interface StripProbeDeps {
-  /** Generic HTTP liveness probe (vikingdb/openviking). */
-  probe: StripHttpProbe;
-  /** Redis ping — true on success, never throws (the redis/utility accessor swallows). */
-  pingRedis: () => Promise<boolean>;
-  /** Orchestrator self-check — true when the host process is healthy (no kill-switch). */
-  checkOrchestrator: () => Promise<boolean>;
-  /** OpenViking base URL (resolves OPENVIKING_URL via the OV Request Adapter, #954). */
-  ovBaseUrl: () => string;
-  /** Embed-backend liveness (issue #2013) — the OV dense-embedding backend probe. */
-  probeEmbedBackend: typeof probeEmbedBackend;
-  /** Tailnet Ollama VLM-host liveness (issue #2278). */
-  probeOllamaVlm: typeof probeOllamaVlm;
-}
-
-/**
- * One entry in the ordered strip-probe enumeration.
- *
- *  - `service`  — the display name the strip renders (and the row order).
- *  - `kind`     — how the shared classifier interprets the `run` result:
- *                   `boolean` → classifyServiceBoolean (up/down; `degradedMessage`
- *                               stamps a specific down reason, e.g. kill-switch).
- *                   `probe`   → classifyServiceProbe (ok/degraded/down by latency).
- *  - `run`      — a never-throwing closure that resolves the probe result from the
- *                 injected deps. A `boolean`-kind descriptor returns a boolean; a
- *                 `probe`-kind descriptor returns a {@link ProbeOutcome}.
- *  - `degradedMessage` — (boolean kind only) the down reason stamped when the
- *                 boolean check returns false.
- */
-export type StripProbeDescriptor =
-  | {
-      service: string;
-      kind: "boolean";
-      run: (deps: StripProbeDeps) => Promise<boolean>;
-      degradedMessage?: string;
-    }
-  | {
-      service: string;
-      kind: "probe";
-      run: (deps: StripProbeDeps) => Promise<ProbeOutcome>;
-    };
-
-/**
- * Adapt a fan-out {@link ServiceProbeResult} (`{status:"running"|"failed",
- * latencyMs:number|null}`) into the strip's {@link ProbeOutcome} (`{ok,
- * latencyMs, error?}`) shape the display classifier consumes. `failed` →
- * `ok:false` (latency null → 0 so the numeric field is uniform); `running` → ok
- * with its measured latency. Pure; the source producers never throw.
- */
-function serviceProbeToOutcome(r: ServiceProbeResult, downError: string): ProbeOutcome {
-  if (r.status === "running") {
-    return { ok: true, latencyMs: r.latencyMs ?? 0 };
-  }
-  return { ok: false, latencyMs: r.latencyMs ?? 0, error: downError };
-}
-
-/**
- * The ordered, shared enumeration of external-service liveness probes the
- * Now-page strip renders (issue #2597). ONE source of "which probes appear on
- * the strip and in what order". The strip maps this list to `ServiceRow[]` via
- * the shared classifiers — adding a probe is a one-entry edit here, with NO edit
- * to the strip's row-assembly logic (the #2597 deepening acceptance criterion).
- *
- * The first four entries preserve the strip's historical order + behaviour
- * (orchestrator, redis, vikingdb, openviking); the last two are the previously-
- * omitted embed-backend (#2013) and ollamaVlm (#2278) probes.
- */
-export const STRIP_PROBE_DESCRIPTORS: readonly StripProbeDescriptor[] = [
-  {
-    service: "orchestrator",
-    kind: "boolean",
-    run: (deps) => deps.checkOrchestrator(),
-    degradedMessage: "kill-switch active",
-  },
-  {
-    service: "redis",
-    kind: "boolean",
-    run: (deps) => deps.pingRedis(),
-  },
-  {
-    service: "vikingdb",
-    kind: "probe",
-    run: (deps) => deps.probe("http://localhost:5000/health", 3000),
-  },
-  {
-    service: "openviking",
-    kind: "probe",
-    run: (deps) => deps.probe(`${deps.ovBaseUrl()}/health`, 3000),
-  },
-  {
-    // Issue #2013: the OV dense-embedding backend, previously omitted from the
-    // strip. probeEmbedBackend is never-throwing and self-times (via the OV
-    // Request Adapter); a transport failure folds to `failed` → a down row.
-    service: "embed-backend",
-    kind: "probe",
-    run: async (deps) =>
-      serviceProbeToOutcome(await deps.probeEmbedBackend(), "embed backend unreachable"),
-  },
-  {
-    // Issue #2278: the Tailnet Ollama VLM host, previously omitted from the
-    // strip. probeOllamaVlm folds `down` to `status:"down"`; map it to the
-    // strip's ProbeOutcome (a `down` result → ok:false → a down row).
-    service: "ollamaVlm",
-    kind: "probe",
-    run: async (deps) => {
-      const r = await deps.probeOllamaVlm();
-      return r.status === "ok"
-        ? { ok: true, latencyMs: r.latencyMs }
-        : { ok: false, latencyMs: r.latencyMs, error: r.error || "VLM host unreachable" };
-    },
-  },
-];
+// Issue #3482: the strip-probe enumeration (STRIP_PROBE_DESCRIPTORS,
+// StripProbeDescriptor, StripProbeDeps, and the serviceProbeToOutcome adapter)
+// moved to its own focused leaf, src/health/strip-probes.ts. The fan-out is the
+// deep-health probe owner; the strip enumeration is the user-facing external-
+// service liveness subset that service-strip.ts renders. Co-locating them here
+// coupled service-strip's load path to the fan-out's heavy import closure (Redis
+// adapters, WoL gates, reflection/ledger readers) even though the strip needs
+// none of it. The enumeration now lives in a pure leaf that imports downward
+// only (src/health/probe.ts); the strip imports from there (or via ../health).
+// The #2597 invariant — ONE owner of which services appear on the strip, in what
+// order — is preserved; the owner is just the named leaf now.

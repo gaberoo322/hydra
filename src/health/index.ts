@@ -18,6 +18,10 @@ export * from "./diagnostics.ts";
 export * from "./fan-out.ts";
 export * from "./probe.ts";
 export * from "./rules.ts";
+// Issue #3482: the Now-page strip-probe enumeration leaf (STRIP_PROBE_DESCRIPTORS,
+// StripProbeDescriptor, StripProbeDeps) — extracted from fan-out.ts so consumers
+// import the pure leaf without the deep-health fan-out's heavy closure.
+export * from "./strip-probes.ts";
 export * from "./skill-catalog.ts";
 export * from "./wire.ts";
 // Issue #2570: the WoL Adapter (WakeGate, readWolConfig, attempt*Wake, and the
