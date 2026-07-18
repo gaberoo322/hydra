@@ -17,6 +17,7 @@ The skill is **dry-run by default**. To actually close epics, pass `--apply` (or
 
 - When the epic body is a vague feature request with no machine-parseable references. The classifier emits `skip` for those rather than guessing.
 - When the operator wants the epic to stay OPEN as a tracking issue even after all sub-issues land. Add the `keep-open` label (this skill treats `keep-open` as opt-out — see Decision table).
+- On a `wayfinder:map` issue. Maps look epic-shaped (they carry a `## Sub-issues` block by design) but their death is owned by the `hydra-review` handoff flow (§0.7): a cleared map must survive until the operator hands it off to `hydra-prd` / `/to-spec`, then `hydra-review` closes it (or sets `keep-open`). Step 1c drops every `wayfinder:map` from the candidate scan so this sweeper never closes one out from under a pending handoff.
 - Inside a `dev_orch` / `dev_target` subagent — those work on a single issue and don't operate on the epic board. This skill belongs to the autopilot parent context or a manual operator invocation.
 
 ## Decision table
@@ -51,11 +52,14 @@ gh issue list --repo gaberoo322/hydra --state open \
   --search '"## Sub-issues" in:body OR "## Children" in:body' \
   --json number,title,body,labels,state --limit 200 > /tmp/epic-cands-b.json
 
-# 1c) union by .number, drop any labeled keep-open
+# 1c) union by .number, drop any labeled keep-open, and drop wayfinder:map —
+#     maps are GC'd by the hydra-review handoff flow (§0.7), never this sweeper,
+#     so a cleared map is never closed before the operator can hand it off.
 jq -s '
   (.[0] + .[1])
   | unique_by(.number)
   | map(select((.labels | map(.name) | index("keep-open")) | not))
+  | map(select((.labels | map(.name) | index("wayfinder:map")) | not))
 ' /tmp/epic-cands-a.json /tmp/epic-cands-b.json > /tmp/epic-cands.json
 ```
 

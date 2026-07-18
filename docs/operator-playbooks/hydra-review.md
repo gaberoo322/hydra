@@ -1,22 +1,45 @@
 ---
 name: hydra-review
-description: Interactive operator review of issues needing human attention — drains the overnight `Operator decision queue YYYY-MM-DD` first, then walks `ready-for-human` and stale-blocked issues one at a time with recommended resolutions.
-when_to_use: "When the user says 'review issues', 'what needs my attention', 'check blocked issues', or wants to clear the ready-for-human queue. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
+description: The operator's HITL pipeline cockpit — surfaces every in-flight initiative by its stage and walks each one toward AFK-dispatchable: overnight queue, wayfinder maps (chart→approve→resolve→handoff), specs awaiting decomposition, ready-for-human, and stale-blocked.
+when_to_use: "When the user says 'review issues', 'what needs my attention', 'what can I do', 'check blocked issues', or wants to advance stuck work toward autopilot. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 claude_only: true
 ---
 
-# Operator Review
+# Operator Review — the HITL pipeline cockpit
 
-Interactive session to resolve issues needing human judgment. Drains these buckets in order:
+Interactive session to advance every initiative that needs the operator's hand,
+from wherever it sits toward **AFK-dispatchable** — the point where `hydra-autopilot`
+can work it with no operator in the loop. Not just a decision-queue drainer: it
+classifies each in-flight initiative onto the pipeline ladder and names the single
+action that pushes it up a rung.
 
-1. **Overnight operator-decision queue** — today's `Operator decision queue YYYY-MM-DD` issue, written by `/hydra-autopilot` running in unattended mode (issue #413). One row per Tier-0 / non-mechanical PR that would have called `AskUserQuestion` if the operator had been awake.
-2. **Destination-pending wayfinder maps** — open `wayfinder:map` issues carrying the `wayfinder:destination-pending` draft-gate label (ADR-0029 Decision 1). Each is a machine-charted map awaiting operator sign-off on its proposed Destination before its AFK frontier becomes dispatchable.
-3. **Wayfinder HITL frontier tickets** — open, unblocked, unclaimed `wayfinder:grilling` / `wayfinder:prototype` sub-issues on approved maps (ADR-0029 Decision 3). The `wayfinder_orch` autopilot class never dispatches these; they need operator judgment and resolve via `/wayfinder`.
-4. **`ready-for-human`** — issues requiring operator decisions
-5. **Stale-blocked** — `blocked` issues where no linked open issue justifies the block
+## The pipeline ladder
 
-The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board. Wayfinder HITL tickets drain after that: an unresolved HITL ticket stalls its whole map's AFK frontier (the autopilot cannot advance past a blocking decision), so clearing one is high-leverage too.
+Every foggy initiative climbs the same ladder. Each rung has exactly one operator
+action; the ✓ rungs are the finish lines where autopilot takes over.
+
+| Rung | State | Operator action here | Then worked by |
+|------|-------|----------------------|----------------|
+| 0 | uncharted idea | `/hydra-wayfinder` (chart) — offered at wrap-up (§6) | — |
+| 1 | destination-pending map | approve the gate (§0.5) | — |
+| 2 | map w/ open **HITL** frontier | resolve grilling/prototype via `/wayfinder` (§0.6) | — |
+| 3 | map w/ **AFK-only** frontier | *nothing* | **autopilot** `wayfinder_orch` ✓ |
+| 4 | map frontier **empty** | **handoff** → `hydra-prd` \| `/to-spec` (§0.7) | — |
+| 5 | spec written, un-ticketed | `/to-tickets` slice + quiz (§0.8) | — |
+| 6 | tracer-bullet children | *nothing* | **autopilot** `hydra-dev` ✓✓ |
+
+## Buckets, in drain order
+
+1. **Overnight operator-decision queue** (§0) — today's `Operator decision queue YYYY-MM-DD` issue, written by `/hydra-autopilot` running in unattended mode (issue #413). One row per Tier-0 / non-mechanical PR that would have called `AskUserQuestion` if the operator had been awake.
+2. **Destination-pending wayfinder maps** (§0.5, rung 1) — open `wayfinder:map` issues carrying the `wayfinder:destination-pending` draft-gate label (ADR-0029 Decision 1). Each is a machine-charted map awaiting operator sign-off on its proposed Destination before its AFK frontier becomes dispatchable.
+3. **Wayfinder HITL frontier tickets** (§0.6, rung 2) — open, unblocked, unclaimed `wayfinder:grilling` / `wayfinder:prototype` sub-issues on approved maps (ADR-0029 Decision 3). The `wayfinder_orch` autopilot class never dispatches these; they need operator judgment and resolve via `/wayfinder`.
+4. **Handoff-ready wayfinder maps** (§0.7, rung 4) — open approved maps whose frontier is **empty** (every ticket closed): the way is clear and the map is waiting to be converted into an implementation epic (`hydra-prd`) or a spec (`/to-spec`). This is the rung that turns a cleared map into AFK-dispatchable work.
+5. **Specs awaiting decomposition** (§0.8, rung 5) — open issues labelled `needs-tickets`: a published spec that has not yet been sliced into tracer-bullet build issues. Run `/to-tickets` to emit the `ready-for-agent` children autopilot's `hydra-dev` picks up.
+6. **`ready-for-human`** — issues requiring operator decisions
+7. **Stale-blocked** — `blocked` issues where no linked open issue justifies the block
+
+The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board. Wayfinder HITL tickets drain after that: an unresolved HITL ticket stalls its whole map's AFK frontier (the autopilot cannot advance past a blocking decision), so clearing one is high-leverage too. Handoff-ready maps and un-ticketed specs (§0.7, §0.8) drain after the wayfinder frontier: they are the far end of the pipeline — a single handoff there can emit a whole epic's worth of AFK-dispatchable children in one action.
 
 ## Procedure
 
@@ -164,6 +187,127 @@ contract keeps the machine out of the human's decision.
 > in the **Stale?** column (the row's `Age` shows how long) so the operator
 > prioritises the genuinely stalled ones first.
 
+### 0.7. Drain handoff-ready wayfinder maps (rung 4 → epic/spec)
+
+A map whose frontier has gone **empty** — every ticket CLOSED — has reached its
+destination: the way is clear and nothing is left to decide. It is now waiting on
+the one operator action the whole map was building toward: **handoff**, which
+converts the map's Decisions-so-far into AFK-dispatchable work. This is the bucket
+the pre-cockpit `/hydra-review` was missing — cleared maps used to sit inert until
+the operator remembered to hand them off by hand.
+
+**Lifecycle (ADR-0029 + cockpit).** `hydra-epic-close` **no longer auto-GCs
+`wayfinder:map` issues** (see `hydra-epic-close` decision table) — the handoff flow
+owns a map's death, so there is no race where a map is closed before it can be
+handed off. When a map's frontier empties, this step marks it
+`wayfinder:handoff-pending` (the board-visible "waiting on you" signal) and drives
+the handoff; the map is closed **here**, as the final handoff step, or kept as a
+reference with `keep-open`.
+
+List open **approved** maps (no `wayfinder:destination-pending` gate) with **zero
+open sub-issues** — the empty-frontier condition:
+
+```bash
+APPROVED_MAPS=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
+  --json number,labels --jq '
+    [ .[] | select((.labels | map(.name) | index("wayfinder:destination-pending")) | not) | .number ]
+    | sort | .[]')
+
+for m in $APPROVED_MAPS; do
+  gh api graphql -F n="$m" -f query='query($n:Int!){
+    repository(owner:"gaberoo322", name:"hydra"){ issue(number:$n){
+      title createdAt
+      subIssues(first:100){ nodes { state } } } } }' \
+    --jq '.data.repository.issue as $i
+      | ($i.subIssues.nodes | length) as $total
+      | ([$i.subIssues.nodes[] | select(.state=="OPEN")] | length) as $open
+      # handoff-ready = at least one ticket ever, and none still open
+      | select($total > 0 and $open == 0)
+      | "'$m'\t\($i.createdAt)\t\($i.title)"'
+done
+```
+
+> A map with **zero** sub-issues ever is *not* handoff-ready — it is under-charted
+> (charted but no tickets). Surface it under §0.5/§0.6 handling or send it back to
+> `/hydra-wayfinder`; do not hand off an empty map.
+
+Walk the handoff-ready maps oldest-first, one at a time. Read the map body's
+`## Destination` section — its **handoff-type** decides the route. Mark the map
+`wayfinder:handoff-pending` when you begin so the board shows it is mid-handoff:
+
+```bash
+gh issue edit <map> --repo gaberoo322/hydra --add-label 'wayfinder:handoff-pending'
+```
+
+Present the map's Destination + a two-line gist of its `## Decisions so far`, then
+offer the route that matches the handoff-type:
+
+- **Handoff → implementation epic** (Destination handoff-type = *implementation-epic*).
+  The Hydra-native route is **`hydra-prd`** (NOT `/to-spec` — ADR-0029 Decision 4).
+  A capstone synthesises the map's Decisions-so-far (each closed ticket is a primary
+  source) into an ADR + structured PRD JSON, then `hydra-prd --apply` emits the
+  parent epic + dependency-ordered tracer-bullet children stamped `Expected tier: N`
+  and `ready-for-agent`. Those children are **rung 6 — AFK-dispatchable**. Then close
+  the map (below).
+- **Handoff → spec** (Destination handoff-type = *spec*). Run **`/to-spec`**,
+  synthesising the map's Decisions-so-far into a spec issue. **Then relabel that spec
+  so it lands in §0.8, not the AFK board** — `/to-spec` stamps its output
+  `ready-for-agent`, which would let `hydra-dev` grab an un-sliced spec as one issue:
+
+  ```bash
+  gh issue edit <spec> --repo gaberoo322/hydra --add-label 'needs-tickets' --remove-label 'ready-for-agent'
+  ```
+
+  The spec now surfaces in §0.8 for `/to-tickets`. Then close the map (below).
+- **Handoff → locked decision** (Destination handoff-type = *decision-ADR-only*).
+  Record the decision as an ADR (`docs/adr/NNNN-*.md`) if it governs future work.
+  Then close the map.
+- **Handoff → in-place change** (Destination handoff-type = *in-place-change*). The
+  map's tickets are the plan; file the build as a `ready-for-agent` issue (or an
+  epic via `hydra-prd` if multi-slice) and close the map.
+- **Not ready** — the frontier looks empty but a decision is actually still open
+  (a fog patch never got ticketed). Remove `wayfinder:handoff-pending`, send it back
+  to `/hydra-wayfinder` to chart the remaining fog, and move on.
+
+**Close the map** as the final handoff step (unless it should persist as a
+reference — then add `keep-open` instead of closing):
+
+```bash
+gh issue edit <map> --repo gaberoo322/hydra --remove-label 'wayfinder:handoff-pending'
+gh issue close <map> --repo gaberoo322/hydra --comment '> *This was generated by AI during operator review.*
+> Handed off: <epic #N | spec #N | ADR-NNNN | build #N>. Destination reached; closing the map.'
+```
+
+Do not yield to the later steps until every handoff-ready map is routed or explicitly skipped.
+
+### 0.8. Drain specs awaiting decomposition (rung 5 → tracer-bullet tickets)
+
+A spec produced by the §0.7 spec route (or written directly) is a **decompose-me**
+artifact, not a tracer bullet — `hydra-dev` must not build it whole. It carries
+`needs-tickets` until it is sliced. This step runs the slice.
+
+```bash
+gh issue list --repo gaberoo322/hydra --state open --label 'needs-tickets' \
+  --json number,title,createdAt --jq 'sort_by(.createdAt) | .[] | "\(.number)\t\(.createdAt)\t\(.title)"'
+```
+
+Walk them oldest-first, one at a time. For each spec:
+
+- **Slice now** — run **`/to-tickets <spec#>`**: it reads the spec, drafts
+  tracer-bullet vertical slices with native blocking edges, quizzes the operator on
+  granularity, and (on approval) publishes the children in dependency order,
+  labelling each `ready-for-agent`. Those children are **rung 6 — AFK-dispatchable**.
+  When the children exist, drop `needs-tickets` from the spec (leave the spec open as
+  the parent, or close it if the children fully carry it):
+  ```bash
+  gh issue edit <spec> --repo gaberoo322/hydra --remove-label 'needs-tickets'
+  ```
+- **Defer** — leave `needs-tickets`; it re-surfaces tomorrow.
+- **Reframe** — the spec is too big or mis-scoped; send it back to `/hydra-wayfinder`
+  to chart, or edit it before slicing.
+
+Do not yield to the later steps until every `needs-tickets` spec is sliced or explicitly skipped.
+
 ### 1. Gather
 
 ```bash
@@ -189,6 +333,14 @@ For each blocked issue, check body/comments for "blocked by #N", "depends on #N"
 ### Wayfinder HITL frontier tickets (H) — flag past-threshold rows STALE (§0.6)
 | # | Map | Type | Age | Stale? | Title |
 |---|-----|------|-----|--------|-------|
+
+### Handoff-ready wayfinder maps (F) — frontier cleared, awaiting handoff (§0.7)
+| # | Map title | Age | Handoff-type | Destination gist |
+|---|-----------|-----|--------------|------------------|
+
+### Specs awaiting decomposition (S) — needs-tickets (§0.8)
+| # | Spec title | Age | Route |
+|---|------------|-----|-------|
 
 ### Ready-for-human (M)
 | # | Title | Age | Why here |
@@ -244,6 +396,18 @@ Explore the codebase before asking obvious questions.
 - **Reframe** — fix a mis-typed ticket's `wayfinder:*` label, or close it if it is no longer a real decision, so the frontier advances
 - Never assign, never relabel `ready-for-agent`, never auto-answer — the HITL contract keeps the machine out of the human's decision (ADR-0029 Decision 3)
 
+#### Handoff-ready wayfinder map (frontier empty, §0.7)
+- **Handoff → epic** — run `hydra-prd` (implementation-epic destination); emits `ready-for-agent` tracer children, then close the map
+- **Handoff → spec** — run `/to-spec`, then relabel the spec `needs-tickets` (remove `ready-for-agent`) so it enters §0.8, then close the map
+- **Handoff → decision / in-place** — record the ADR / file the build, then close the map
+- **Not ready** — a fog patch is still open; remove `wayfinder:handoff-pending`, send back to `/hydra-wayfinder`
+- Close the map here as the final handoff step (or `keep-open` to keep it as a reference) — `hydra-epic-close` no longer GCs maps
+
+#### Spec awaiting decomposition (needs-tickets, §0.8)
+- **Slice now** — run `/to-tickets <spec#>`; publishes `ready-for-agent` tracer children, then drop `needs-tickets` from the spec
+- **Defer** — leave `needs-tickets` for tomorrow
+- **Reframe** — send back to `/hydra-wayfinder`, or edit the spec before slicing
+
 #### Triage origin (judgment/design needed)
 - **Make it agent-ready** — write agent brief, relabel `ready-for-agent`
 - **Break it down** — create child issues, convert to tracking parent or close
@@ -277,11 +441,30 @@ Explore the codebase before asking obvious questions.
 
 Resolved: X | Deferred: Y | Remaining: Z
 Overnight queue: applied=A, overridden=O, deferred=D, dropped=R
+Pipeline: maps-handed-off=H (→ E epics, P specs), specs-sliced=T (→ C tracer children)
 ```
+
+Report how much work crossed the AFK line this session: every handed-off map and
+sliced spec turns operator judgment into `ready-for-agent` children that autopilot
+picks up on its next tick. That is the point of the cockpit — count it.
+
+### 6. Offer to chart something new (rung 0)
+
+The buckets above are grounded in existing tracker artifacts, so an **uncharted**
+initiative (a foggy idea with no map yet) can't be surfaced — only offered. At
+wrap-up, ask once:
+
+> "Anything new too big for one session you want to chart? I can start a
+> `/hydra-wayfinder` map for it."
+
+If yes, launch `/hydra-wayfinder` (chart mode) on the operator's initiative — the
+top of the ladder. If no, end the session.
 
 ## Rules
 
-- **Drain the overnight queue first, then destination-pending maps, then the wayfinder HITL frontier tickets.** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029); an unresolved HITL ticket then stalls its own map's AFK frontier. Don't reorder any of the three ahead of `ready-for-human` / stale-blocked.
+- **Drain order: overnight queue → destination-pending maps → wayfinder HITL tickets → handoff-ready maps → un-ticketed specs → ready-for-human → stale-blocked.** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029); an unresolved HITL ticket then stalls its own map's AFK frontier; handoff-ready maps and un-ticketed specs sit at the far end of the pipeline where one action emits a whole epic's worth of AFK children. Don't reorder any of the wayfinder/spec buckets ahead of the overnight queue, or behind `ready-for-human` / stale-blocked.
+- **The handoff flow owns a map's death, not `hydra-epic-close`.** A cleared map is closed in §0.7 as the final handoff step (or kept with `keep-open`). `hydra-epic-close` excludes `wayfinder:map` from auto-GC precisely so a map is never closed before it can be handed off. Mark a map `wayfinder:handoff-pending` when you begin its handoff; remove it when you close/keep the map.
+- **A spec is a decompose-me artifact, never a tracer bullet.** After `/to-spec`, always relabel the spec `needs-tickets` and remove `ready-for-agent`, so `hydra-dev` can't grab the whole spec as one issue. The spec becomes AFK-dispatchable only via its `/to-tickets` children (§0.8), each of which carries `ready-for-agent`.
 - **A destination-pending map amendment edits the Destination, THEN removes the gate label.** Never remove the label without first landing the operator's edit — the gate is the only thing holding an unwanted destination out of autopilot's frontier. A rejection **closes** the map; it does not just leave the label on (that would strand it for the staleness sweep).
 - **Never resolve a wayfinder HITL ticket for the machine.** `wayfinder_orch` structurally never dispatches `wayfinder:grilling` / `wayfinder:prototype` tickets (ADR-0029 Decision 3 — no autopilot answer-ingestion path); the operator resolves them via `/wayfinder`. Never `--add-assignee` (assignment is the AFK-worker claim signal), never relabel `ready-for-agent` (the off-radar rule keeps `wayfinder:*` off the ordinary board).
 - One issue at a time. No batching.
