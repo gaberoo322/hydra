@@ -40,6 +40,7 @@ if [ "${IN_PROGRESS:-0}" -ge 3 ]; then
   gh api -X GET search/issues \
     -f q='repo:gaberoo322/hydra-betting is:issue is:open label:in-progress' \
     --jq '.items[] | "  #\(.number) — \(.title[0:60])"'
+  exit 1
 fi
 ```
 
