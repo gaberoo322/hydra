@@ -27,18 +27,19 @@ Live state (parallel):
 ```bash
 cd ~/hydra-betting && npm test 2>&1 | tail -5
 
-hydra backlog ls | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for lane in ['queued','inProgress','blocked','triage','done']:
-    items = d.get(lane,[])
-    print(f'{lane}: {len(items)}')
-    for i in items[:3]: print(f'  - {i.get(\"title\",\"?\")[:80]}')
-total = sum(len(d.get(l,[])) for l in ['queued','inProgress','blocked','triage'])
-print(f'TOTAL ACTIVE BACKLOG: {total} (target: 30+)')
-"
+# Board state — GitHub Issues on gaberoo322/hydra-betting (ADR-0031). REST only
+# (gh api repos/...), never gh --json / GraphQL on the hot path (Decision 6).
+REPO=gaberoo322/hydra-betting
+TOTAL_ACTIVE=0
+for lane in ready-for-agent in-progress blocked needs-triage; do
+  n=$(gh api --paginate "repos/$REPO/issues?state=open&labels=$lane&per_page=100" \
+        --jq '[.[] | select(has("pull_request")|not)] | length' 2>/dev/null \
+        | python3 -c "import sys; print(sum(int(x) for x in sys.stdin.split() if x.strip()))" 2>/dev/null || echo 0)
+  echo "$lane: $n"
+  TOTAL_ACTIVE=$((TOTAL_ACTIVE + n))
+done
+echo "TOTAL ACTIVE BOARD: $TOTAL_ACTIVE (target: 30+)"
 
-echo -n "Work queue: " && docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null
 hydra metrics --count 20 | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -53,7 +54,7 @@ for t in titles[:10]: print(f'  - {t[:80]}')
 cd ~/hydra-betting && git log --oneline -10
 ```
 
-Compute **backlog gap**: `gap = max(0, 30 - total_active_backlog)`.
+Compute **backlog gap**: `gap = max(0, 30 - $TOTAL_ACTIVE)` (the open-board active count from the loop above).
 
 If `$focus` provided, pass it to ALL researcher agents.
 
@@ -160,9 +161,9 @@ Drop anything matching "What's been completed" or recently merged.
 
 ### 3d. Classify
 - **Top 7** → `priorities.md` (replacing current priority tasks)
-- **Next 5–8 high-priority** → work queue (`hydra queue add`)
-- **Remaining medium** → backlog triage
-- **Low-priority** → backlog triage with priority=0
+- **Next 5–8 high-priority** → filed as `ready-for-agent` issues on the board (`gh issue create`)
+- **Remaining medium** → filed as `needs-triage` issues
+- **Low-priority** → filed as `needs-triage` issues (the sweep promotes the well-described ones)
 
 ## Phase 4: Write outputs
 
@@ -232,19 +233,40 @@ in the main checkout is the exact regression this step exists to prevent — do
 not skip it, and do not "fix" a dirty tree later by gitignoring or stashing the
 docs (that orphans their tracked history / silently discards a cycle's output).
 
-### 4. Queue items
+### 4. File items as GitHub issues (ADR-0031)
 
-High-priority (5–8):
+Items are filed on the **GitHub-Issues board (`gaberoo322/hydra-betting`)** via `gh issue create`, not the retired Redis work-queue / `/backlog` API. **Dedup before filing** with a lexical `gh issue list --search` (ADR-0031 Decision 5 — lexical, not OpenViking semantic dedup); skip a candidate whose significant words already match an open issue.
+
 ```bash
-hydra queue add "<title>" -d "<why>"
+REPO=gaberoo322/hydra-betting
+
+# Dedup guard: skip if a lexically-similar open issue already exists.
+# REST search pool only (gh api search/issues), never gh --json/GraphQL
+# (ADR-0031 Decision 6 — keep the money-critical Target loop off the saturated
+# GraphQL pool).
+file_if_new() {  # $1=title  $2=body  $3=extra label (ready-for-agent | needs-triage)
+  local title="$1" body="$2" label="$3"
+  local q hit
+  q=$(printf '%s' "repo:$REPO is:issue is:open in:title \"$title\"" | jq -sRr @uri)
+  hit=$(gh api "search/issues?q=$q" --jq '.total_count' 2>/dev/null || echo 0)
+  if [ "${hit:-0}" != "0" ]; then
+    echo "skip (lexical dup): $title"; return 0
+  fi
+  gh issue create --repo "$REPO" --title "$title" --body "$body" --label "$label"
+}
 ```
 
-Backlog/triage (10–20):
+High-priority (5–8) → `ready-for-agent`:
 ```bash
-hydra raw POST /backlog '{"title":"<title>","category":"<category>","priority":0,"description":"<context>","source":"claude-research"}'
+file_if_new "<title>" "<why>" ready-for-agent
 ```
 
-**Target: total active backlog ≥30.**
+Medium / low (10–20) → `needs-triage`:
+```bash
+file_if_new "<title>" "<context>" needs-triage
+```
+
+**Target: total active open board ≥30.**
 
 ## Phase 5: Report
 

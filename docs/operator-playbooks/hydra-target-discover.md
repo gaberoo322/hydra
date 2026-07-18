@@ -1,6 +1,6 @@
 ---
 name: hydra-target-discover
-description: Runtime diagnostic discovery for the target project (hydra-betting). Checks API health, execution metrics, database state, and production logs to find anomalies. Creates target-backlog issues for findings.
+description: Runtime diagnostic discovery for the target project (hydra-betting). Checks API health, execution metrics, database state, and production logs to find anomalies. Files needs-triage issues on the gaberoo322/hydra-betting board for findings.
 when_to_use: "When the user says 'check target health', 'target discover', 'production health', or wants runtime diagnostics on the hydra-betting project. Also dispatched by hydra-autopilot."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 ---
@@ -29,7 +29,8 @@ systemctl --user status hydra-betting-web.service 2>&1 | head -5
 # production data. PR-time CI never sees the production database, so a runtime
 # curl crawl is the only place this class of failure surfaces. Curl-tier only —
 # no browser (browser smoke is the CI tier, #2733). Dry-run here just prints the
-# per-route table; --apply (step 3) files the deduped, capped target-backlog items.
+# per-route table; --apply (step 3) files the deduped, capped needs-triage issues
+# on the Target board (gaberoo322/hydra-betting, ADR-0031).
 npx tsx ~/hydra/scripts/ci/target-route-crawl.ts
 
 # Recent API errors
@@ -94,9 +95,10 @@ the per-run cap, and the error-digest body (the #1449 "invoke the runner, not a
 loop" lesson):
 
 ```bash
-# files at most ROUTE_CRAWL_EMIT_CAP deduped target-backlog issues, one per
-# non-200 route; a healthy crawl files nothing; a downed service files nothing
-# (that's the health check's job, not per-route drift)
+# files at most ROUTE_CRAWL_EMIT_CAP deduped needs-triage issues on the Target
+# board (gaberoo322/hydra-betting, ADR-0031 — REST-first dedup, never
+# gh --json/GraphQL), one per non-200 route; a healthy crawl files nothing; a
+# downed service files nothing (that's the health check's job, not per-route drift)
 npx tsx ~/hydra/scripts/ci/target-route-crawl.ts --apply
 ```
 
@@ -104,24 +106,33 @@ npx tsx ~/hydra/scripts/ci/target-route-crawl.ts --apply
 1. Quantitative — backed by number/count/measurement
 2. Persistent — not a one-time blip
 3. Actionable — concrete fix
-4. Not already tracked — dedup against `target-backlog`:
+4. Not already tracked — dedup lexically against the open Target board (ADR-0031
+   Decision 5 — lexical `gh issue list --search`; the underlying reads draw from
+   the REST search pool, never `gh --json`/GraphQL, Decision 6):
    ```bash
-   gh issue list --repo gaberoo322/hydra --label "target-backlog" --state open --json number,title --jq '.[].title'
-   gh issue list --repo gaberoo322/hydra --state closed --json number,title,closedAt \
-     --jq '[.[] | select(.closedAt > "'$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)'")] | .[].title'
+   REPO=gaberoo322/hydra-betting
+   # Open board titles (any lane):
+   gh api "repos/$REPO/issues?state=open&per_page=100" \
+     --jq '.[] | select(has("pull_request")|not) | .title'
+   # Recently-closed titles (last 7 days) to avoid re-filing just-shipped work:
+   gh api "repos/$REPO/issues?state=closed&since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)&per_page=100" \
+     --jq '.[] | select(has("pull_request")|not) | .title'
    ```
 
 The `Source: …` provenance footer comes from the shared helper
 (`scripts/hydra/footer.sh`, issue #2556) — composed OUTSIDE the single-quoted
-heredoc so the `<<'EOF'` injection-safety quoting is preserved:
+heredoc so the `<<'EOF'` injection-safety quoting is preserved. Findings file to
+the **Target board (`gaberoo322/hydra-betting`)** with `needs-triage` (ADR-0031 —
+`target-backlog` was the orch-side routing label and is not part of the Target's
+own board vocabulary):
 
 ```bash
 . ~/hydra/scripts/hydra/footer.sh
-gh issue create --repo gaberoo322/hydra --title "..." --label "target-backlog" --body "$(cat <<'EOF'
+gh issue create --repo gaberoo322/hydra-betting --title "..." --label "needs-triage" --body "$(cat <<'EOF'
 ## Problem
 ## Evidence
 ## Suggested fix
-## Context for orchestrator
+## Context for the target build
 ---
 EOF
 )
