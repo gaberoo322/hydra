@@ -7,7 +7,9 @@ state sync, friction report, and the final summary table.
 
 ### 7. Merge (with merge lock)
 
-Before merging, if this build went via a PR (orchestrator-side changes), the PR body MUST include the self-declared scope captured in Step 3.5:
+**Close-discipline (ADR-0031 Decision 5 — enforced `Closes #N`).** When this build was anchored on a `gaberoo322/hydra-betting` GitHub issue (Step 2 priority 3, the board pick), the Target PR body MUST end with `Closes #<ANCHOR_NUM>` for the issue it resolves. The (emulated automerge) merge then **auto-closes the issue and removes it from the open board for free** — this is the label-model replacement for the retired Redis merged/shipped-subject suppression cascade. There is NO separate suppression / lane-move / work-queue-eviction step to take the item off the board; the issue-close IS the terminal signal. A failing-test / priorities-doc anchor has no issue number, so it opens a PR with no `Closes` line (nothing to close), exactly as before.
+
+Before merging, the PR body MUST include the self-declared scope captured in Step 3.5:
 
 ```markdown
 ## Self-declared scope
@@ -19,6 +21,8 @@ The build picked this task autonomously — these are the files the planner inte
 $SCOPE_IN_LIST
 
 $SCOPE_JUSTIFICATIONS
+
+Closes #$ANCHOR_NUM   <!-- only when the anchor was a hydra-betting board issue; omit for failing-test / priorities-doc anchors -->
 ```
 
 Just before merging, capture the **pre-merge health baseline** for the Step 8.6
@@ -321,36 +325,32 @@ git -C ~/hydra-betting branch -d "feature/$CYCLE_ID" 2>&1 || \
 
 ### 9. State sync (critical)
 
-Move backlog item to done:
+`$TASK_TITLE` (used by the metrics / event / lesson writes below) is the anchor's subject — set it to the board issue's title for a board anchor, otherwise the plan's task title:
 ```bash
-TASK_TITLE="<title>"
-ITEM_ID=$(hydra backlog ls | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-title=sys.argv[1].lower()
-for lane in ['inProgress','queued','backlog']:
-    for item in d.get(lane,[]):
-        if title in item.get('title','').lower() or item.get('title','').lower() in title:
-            print(item['id']); sys.exit(0)
-print('')" "$TASK_TITLE")
-[ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" done
+TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 ```
 
-If this build opened a PR instead of merging direct-to-main (orchestrator-side changes, or any flow that produces a remote PR that has not yet merged at this point), tag the inProgress kanban item with the PR-number marker BEFORE moving it to done. This is the convention `/api/anchor/candidates` uses to suppress the just-shipped anchor between PR-open and merge (issue #640):
+**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking now lives as GitHub Issues on `gaberoo322/hydra-betting`, so there is NO Redis backlog lane to move to `done`, and NO `POST/PATCH /backlog` write of any kind. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) auto-closes the issue on merge — that close removes it from the open board and IS the terminal state-sync. Nothing else is required:
+
+- **No `hydra backlog move … done`.** The old `hydra backlog ls` → `hydra backlog move "$ITEM_ID" done` idiom is retired — the Redis kanban lanes no longer track Target work.
+- **No `pr-<n>` claimedBy PATCH marker.** The old inProgress `claimedBy":"pr-<n>"` PATCH to `/api/backlog/${ITEM_ID}/move` (the issue-#640 just-shipped-anchor suppression) is retired. On the GitHub board the in-flight signal is the `in-progress` label the claim stamped (Step 2), and the terminal signal is the issue-close on merge (`Closes #N`) — the board read never re-surfaces a closed issue, so there is no window for decide.py to re-dispatch onto the same anchor.
+- **No work-queue `COMPLETED:`/`CLOSED:` marker.** The old `hydra queue add "COMPLETED: <task title>"` idiom is retired with the whole `hydra:anchors:work-queue` — completion is recorded by the issue-close plus the metrics record and `cycle:completed` event below.
+
+(The Redis backlog subsystem itself is NOT deleted by this change — that is the gated final step 5 of ADR-0031, blocked on no Orchestrator-self path depending on it. This step just stops the skill *writing* to it.)
 
 ```bash
-# Only when a PR was opened and is still open.
-PR_NUM=<pr-number>
-if [ -n "$ITEM_ID" ] && [ -n "$PR_NUM" ]; then
-  curl -fsS -X PATCH "http://localhost:4000/api/backlog/${ITEM_ID}/move" \
-    -H 'content-type: application/json' \
-    -d "{\"lane\":\"inProgress\",\"claimedBy\":\"pr-${PR_NUM}\"}" >/dev/null
+# Board anchor: the PR's `Closes #$ANCHOR_NUM` (Step 7) auto-closed the issue on
+# merge — no state-sync write is needed. Belt-and-suspenders: if the emulated
+# automerge squashed a body whose `Closes` linkage GitHub did not honor (rare),
+# close the issue explicitly via REST (never GraphQL — ADR-0031 Decision 6).
+if [ -n "${ANCHOR_NUM:-}" ]; then
+  STATE=$(gh api "repos/gaberoo322/hydra-betting/issues/${ANCHOR_NUM}" --jq '.state')
+  if [ "$STATE" = "open" ]; then
+    gh issue close "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+      --reason completed --comment "Closed by merged PR #${PR_NUM} (Closes-linkage fallback)."
+  fi
 fi
 ```
-
-The `pr-<n>` claimedBy marker is what the candidates API's `excludeInFlight` filter (default true, 30-min freshness window) looks for. Without it, decide.py will re-dispatch dev_target onto the same anchor every tick until the PR merges — burning 50-150k tokens per duplicate dispatch (the original failure mode in run `ab97a2d5`). The marker is cleared automatically when the next `applyLaneTransition` runs (e.g. when the item moves to `done` post-merge).
-
-Do **not** record completion by pushing a `COMPLETED:`/`CLOSED:` marker onto the work-queue (the old `hydra queue add "COMPLETED: <task title>"` idiom). That marker is a terminal-state note, not actionable work — it pollutes `hydra:anchors:work-queue` and resurfaces as a no-op dev_target candidate. As of #1854 the four queue-write layers (`pushToWorkQueue`, `POST /queue`, anchor-candidates read-reap, startup GC) refuse such markers, so the call is now a guaranteed 422 no-op; emitting it only re-fires the meta-friction cue. Completion is recorded by the metrics record and the `cycle:completed` event below — no work-queue write is needed.
 
 Record metrics (shared with Codex):
 ```bash
