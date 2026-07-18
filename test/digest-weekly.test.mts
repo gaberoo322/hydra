@@ -34,12 +34,11 @@ describe("buildWeeklySummary", () => {
       ],
       getFixFeatureRatio: async () => ({ fixes: 0, features: 0, ratio: 0 }),
       getCurrentMilestoneProgress: async () => null,
-      getBacklogCounts: async () => ({}),
     });
     assert.equal(out, null);
   });
 
-  it("summarises cycles, fix:feature ratio, milestone, and backlog", async () => {
+  it("summarises cycles, fix:feature ratio, and milestone", async () => {
     const out = await buildWeeklySummary({
       now: () => fixedNow,
       getMetricsTrend: async () => [
@@ -55,7 +54,6 @@ describe("buildWeeklySummary", () => {
         total: 5,
         remainingTitles: ["A", "B", "C", "D"],
       }),
-      getBacklogCounts: async () => ({ queued: 4, blocked: 0, triage: 2 }),
     });
     assert.ok(out !== null);
     assert.match(out!, /📈 \*Hydra Weekly Summary\*/);
@@ -63,10 +61,9 @@ describe("buildWeeklySummary", () => {
     assert.match(out!, /\*Fix:Feature ratio:\* 3:2 \(1\.5:1\)/);
     assert.match(out!, /\*Milestone:\* Beta — 60% \(3\/5 epics\)/);
     assert.match(out!, /\*Remaining:\* A, B, C \+1 more/);
-    assert.match(out!, /\*Backlog:\* 4 queued, 0 blocked, 2 triage/);
   });
 
-  it("emits warnings for a high fix ratio, rollbacks, blocked items, and a completed milestone", async () => {
+  it("emits warnings for a high fix ratio, rollbacks, and a completed milestone", async () => {
     const out = await buildWeeklySummary({
       now: () => fixedNow,
       getMetricsTrend: async () => [
@@ -82,12 +79,10 @@ describe("buildWeeklySummary", () => {
         total: 5,
         remainingTitles: [],
       }),
-      getBacklogCounts: async () => ({ queued: 0, blocked: 2, triage: 0 }),
     });
     assert.ok(out !== null);
     assert.match(out!, /⚠️ Fix ratio is 3:1 — most cycles are fixing previous work/);
     assert.match(out!, /⚠️ 3 rollbacks this week — executor quality needs attention/);
-    assert.match(out!, /⚠️ 2 items blocked — check Telegram for unblock commands/);
     assert.match(out!, /🎉 Milestone "Beta" is 100% complete — ready for operator review/);
   });
 });

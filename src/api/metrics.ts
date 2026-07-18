@@ -11,7 +11,6 @@ import {
 import { projectAnchorDistribution } from "../metrics/stats-projection.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
-import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { getCascadeTelemetry } from "../redis/cascade-telemetry.ts";
 import {
   getCostByClass,
@@ -68,13 +67,11 @@ export function createMetricsRouter() {
     try {
       const stats = await getAggregateStats(20);
       const acc = await getCumulativeAccomplishments(20);
-      const queueLen = await getWorkQueueLen();
 
       const lines = [
         `Hydra V2 — ${stats.cycles} cycles completed`,
         `Merged: ${stats.mergedRate}% | Failed: ${stats.failedRate}% | Regressed: ${stats.regressionRate}%`,
         `Avg cycle: ${stats.avgDurationHuman}`,
-        `Work queue: ${queueLen} item(s)`,
         "",
         "Accomplished:",
         ...acc.map((a) => `  - ${a.title} (tests ${a.tests})`),

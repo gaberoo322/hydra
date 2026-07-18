@@ -66,17 +66,14 @@ function findHandler(router: any, method: string, path: string): Function | null
   return null;
 }
 
-// Backlog-count shape the handler reads (triage, blocked, total, inProgress).
-function counts(over: Partial<{ triage: number; blocked: number; total: number; inProgress: number }> = {}) {
-  return { triage: 0, blocked: 0, total: 5, inProgress: 1, ...over };
-}
-
 // Build a router with fully-controlled deps, then return its /recommendations
-// handler. Defaults are the "nothing to flag" baseline: non-empty backlog, no
-// triage/blocked, scheduler running, no priorities.md, no kill file.
+// handler. Defaults are the "nothing to flag" baseline: scheduler running, no
+// priorities.md, no kill file. (The triage / blocked / empty-pipeline action-item
+// categories that read the Redis backlog were retired with the Redis backlog
+// subsystem — ADR-0031 contract phase, issue #3439 — so `getBacklogCounts` is no
+// longer a dep of this router.)
 function handlerWith(over: RecommendationsReaderDeps = {}): Function {
   const deps: RecommendationsReaderDeps = {
-    getBacklogCounts: async () => counts() as any,
     getSchedulerStatus: async () => ({ running: true } as any),
     readPriorities: async () => {
       throw new Error("ENOENT");
@@ -113,30 +110,7 @@ describe("GET /recommendations — operator action items (issue #1322)", () => {
     assert.deepEqual(res._body, []);
   });
 
-  test("category 1: triage items awaiting review", async () => {
-    const res = await run({ getBacklogCounts: async () => counts({ triage: 3 }) as any });
-    const rec = res._body.find((r: any) => r.type === "review");
-    assert.ok(rec, "a review rec is emitted when triage > 0");
-    assert.equal(rec.priority, 2);
-    assert.match(rec.title, /3 items in Triage/);
-    assert.equal(rec.link, "/backlog");
-  });
-
-  test("category 1: singular wording when triage === 1", async () => {
-    const res = await run({ getBacklogCounts: async () => counts({ triage: 1 }) as any });
-    const rec = res._body.find((r: any) => r.type === "review");
-    assert.match(rec.title, /1 item in Triage/);
-  });
-
-  test("category 2: blocked items need intervention", async () => {
-    const res = await run({ getBacklogCounts: async () => counts({ blocked: 2 }) as any });
-    const rec = res._body.find((r: any) => /blocked item/.test(r.title));
-    assert.ok(rec);
-    assert.equal(rec.priority, 1);
-    assert.equal(rec.type, "action");
-  });
-
-  test("category 3: scheduler stopped", async () => {
+  test("scheduler stopped", async () => {
     const res = await run({ getSchedulerStatus: async () => ({ running: false } as any) });
     const rec = res._body.find((r: any) => r.title === "Scheduler is stopped");
     assert.ok(rec);
@@ -144,17 +118,7 @@ describe("GET /recommendations — operator action items (issue #1322)", () => {
     assert.equal(rec.link, "/");
   });
 
-  test("category 4: empty work pipeline", async () => {
-    const res = await run({
-      getBacklogCounts: async () => counts({ total: 0, inProgress: 0, triage: 0 }) as any,
-    });
-    const rec = res._body.find((r: any) => r.title === "Work pipeline is empty");
-    assert.ok(rec);
-    assert.equal(rec.priority, 3);
-    assert.equal(rec.type, "info");
-  });
-
-  test("category 5: priorities.md [BLOCKED] headers surface", async () => {
+  test("priorities.md [BLOCKED] headers surface", async () => {
     const md = [
       "## 1) [BLOCKED] Wire the payout adapter",
       "  - Blocked on operator: provide the Stripe key",
@@ -170,7 +134,7 @@ describe("GET /recommendations — operator action items (issue #1322)", () => {
     assert.match(rec.description, /provide the Stripe key/);
   });
 
-  test("category 5: missing priorities.md degrades silently (no rec, no throw)", async () => {
+  test("missing priorities.md degrades silently (no rec, no throw)", async () => {
     const res = await run({
       readPriorities: async () => {
         throw new Error("ENOENT: no such file");
@@ -180,7 +144,7 @@ describe("GET /recommendations — operator action items (issue #1322)", () => {
     assert.ok(!res._body.some((r: any) => /blocked on operator action/.test(r.title)));
   });
 
-  test("category 6: kill switch active", async () => {
+  test("kill switch active", async () => {
     const res = await run({ killFileExists: () => true });
     const rec = res._body.find((r: any) => r.title === "Kill switch is active");
     assert.ok(rec);
@@ -190,18 +154,19 @@ describe("GET /recommendations — operator action items (issue #1322)", () => {
 
   test("recs are sorted by priority ascending (1=urgent first)", async () => {
     const res = await run({
-      getBacklogCounts: async () => counts({ triage: 1, blocked: 1 }) as any,
+      getSchedulerStatus: async () => ({ running: false } as any),
       killFileExists: () => true,
     });
     const priorities = res._body.map((r: any) => r.priority);
     const sorted = [...priorities].sort((a, b) => a - b);
     assert.deepEqual(priorities, sorted, "priorities are non-decreasing");
     assert.equal(priorities[0], 1, "the most urgent rec is first");
+    assert.ok(priorities.length >= 2, "both scheduler-stopped and kill-switch recs are emitted");
   });
 
-  test("error contract: a throwing backlog read yields 200 with a partial array, NOT a 500", async () => {
+  test("error contract: a throwing scheduler read yields 200 with a partial array, NOT a 500", async () => {
     const res = await run({
-      getBacklogCounts: async () => {
+      getSchedulerStatus: async () => {
         throw new Error("redis down");
       },
     });

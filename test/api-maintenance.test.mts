@@ -132,15 +132,18 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
       "design-concept-snapshot should run on a clean DB",
     );
 
-    // Issue #1876: the two cleanup chores folded out of cleanup.ts must be in
-    // the chore list and run on a clean DB.
+    // Issue #1876: the stale-key sweep folded out of cleanup.ts must be in the
+    // chore list and run on a clean DB. (The former `stale-inprogress-return`
+    // no-guard cleanup chore was retired with the Redis backlog subsystem —
+    // ADR-0031 contract phase, issue #3439; `review-pickup-notify` is now the
+    // representative no-guard "always runs" chore.)
     assert.ok(
       body.ran.includes("stale-key-prune"),
       "stale-key-prune should run on a clean DB (daily guard unset)",
     );
     assert.ok(
-      body.ran.includes("stale-inprogress-return"),
-      "stale-inprogress-return should run (no guard — always runs)",
+      body.ran.includes("review-pickup-notify"),
+      "review-pickup-notify should run (no guard — always runs)",
     );
   });
 
@@ -167,10 +170,10 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
       !res2._body.ran.includes("stale-key-prune"),
       "second call must NOT re-run stale-key-prune",
     );
-    // stale-inprogress-return has no guard, so it runs every time.
+    // review-pickup-notify has no guard, so it runs every time.
     assert.ok(
-      res2._body.ran.includes("stale-inprogress-return"),
-      "stale-inprogress-return runs every call (no guard)",
+      res2._body.ran.includes("review-pickup-notify"),
+      "review-pickup-notify runs every call (no guard)",
     );
   });
 
@@ -340,7 +343,6 @@ describe("runChore guarded-chore runner (issue #1864)", () => {
  */
 describe("cleanup chores folded into housekeeping (issue #1876)", () => {
   let pruneStaleRedisKeys: any;
-  let returnStaleInProgressItems: any;
   let redis2: any;
 
   async function cleanKeys2() {
@@ -356,7 +358,6 @@ describe("cleanup chores folded into housekeeping (issue #1876)", () => {
     if (!pruneStaleRedisKeys) {
       const mod = await import("../src/scheduler/housekeeping.ts");
       pruneStaleRedisKeys = mod.pruneStaleRedisKeys;
-      returnStaleInProgressItems = mod.returnStaleInProgressItems;
     }
   });
 
@@ -391,47 +392,8 @@ describe("cleanup chores folded into housekeeping (issue #1876)", () => {
     assert.equal(await redis2.exists(ttlKey), 1, "a key with a TTL must not be pruned");
   });
 
-  test("returnStaleInProgressItems moves a >24h inProgress item back to queued", async () => {
-    const id = "item-1876-stale";
-    const item = { id, title: "stale build", lane: "inProgress", meta: {} };
-    await redis2.hset("hydra:backlog:items", id, JSON.stringify(item));
-    // Score it 25h in the past so it crosses STALE_IN_PROGRESS_MS (24h).
-    const staleScore = Date.now() - 25 * 60 * 60 * 1000;
-    await redis2.zadd("hydra:backlog:lane:inProgress", staleScore, id);
-
-    await returnStaleInProgressItems();
-
-    assert.equal(
-      await redis2.zscore("hydra:backlog:lane:inProgress", id),
-      null,
-      "the stale item should be removed from the inProgress lane",
-    );
-    assert.ok(
-      await redis2.zscore("hydra:backlog:lane:queued", id),
-      "the stale item should be added to the queued lane",
-    );
-    const moved = JSON.parse(await redis2.hget("hydra:backlog:items", id));
-    assert.equal(moved.lane, "queued", "the item's lane field should be updated to queued");
-    assert.equal(moved.meta.returnedReason, "stale_in_progress", "an audit stamp should be set");
-  });
-
-  test("returnStaleInProgressItems leaves a fresh inProgress item alone", async () => {
-    const id = "item-1876-fresh";
-    const item = { id, title: "fresh build", lane: "inProgress", meta: {} };
-    await redis2.hset("hydra:backlog:items", id, JSON.stringify(item));
-    // Scored now → well within the 24h window.
-    await redis2.zadd("hydra:backlog:lane:inProgress", Date.now(), id);
-
-    await returnStaleInProgressItems();
-
-    assert.ok(
-      await redis2.zscore("hydra:backlog:lane:inProgress", id),
-      "a fresh item should stay in the inProgress lane",
-    );
-    assert.equal(
-      await redis2.zscore("hydra:backlog:lane:queued", id),
-      null,
-      "a fresh item should NOT be moved to queued",
-    );
-  });
+  // The `returnStaleInProgressItems` cleanup chore (and its two tests) was
+  // retired with the Redis backlog subsystem — ADR-0031 contract phase, issue
+  // #3439. The Target now tracks work as GitHub Issues, so there is no Redis
+  // inProgress lane to sweep. `pruneStaleRedisKeys` (above) survives.
 });

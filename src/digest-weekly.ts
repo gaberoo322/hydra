@@ -11,10 +11,12 @@
  * weekly grammar can evolve without an engineer editing past the daily
  * heartbeat code.
  *
- * `buildWeeklySummary` is a mini fan-out orchestrator: it reads from four
+ * `buildWeeklySummary` is a mini fan-out orchestrator: it reads from several
  * independent sub-sources (metrics trend, fix:feature ratio, roadmap milestone
- * progress, target backlog counts), assembles the on-wire Telegram string, and
- * returns `null` when no metrics were recorded in the last 7 days.
+ * progress), assembles the on-wire Telegram string, and returns `null` when no
+ * metrics were recorded in the last 7 days. (The Redis "Backlog" lane-depth
+ * line was retired with the Redis backlog subsystem — ADR-0031 contract phase,
+ * issue #3439.)
  *
  * Each reader is injectable via `deps` (defaulting to the real import), the same
  * pattern as `src/aggregators/builder-health.ts`, so the assembler stays
@@ -26,7 +28,6 @@
 import { getMetricsTrend as defaultGetMetricsTrend } from "./metrics/trend.ts";
 import { getFixFeatureRatio as defaultGetFixFeatureRatio } from "./metrics/aggregate.ts";
 import { getCurrentMilestoneProgress as defaultGetCurrentMilestoneProgress } from "./config/roadmap.ts";
-import { getBacklogCounts as defaultGetBacklogCounts } from "./backlog/reads.ts";
 
 /**
  * Injectable readers for `buildWeeklySummary`. Each defaults to the real
@@ -38,7 +39,6 @@ export interface WeeklySummaryDeps {
   getMetricsTrend?: (n: number) => Promise<any[]>;
   getFixFeatureRatio?: (n: number) => Promise<any>;
   getCurrentMilestoneProgress?: () => Promise<any>;
-  getBacklogCounts?: () => Promise<any>;
   now?: () => number;
 }
 
@@ -60,7 +60,6 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
   const getFixFeatureRatio = deps.getFixFeatureRatio ?? defaultGetFixFeatureRatio;
   const getCurrentMilestoneProgress =
     deps.getCurrentMilestoneProgress ?? defaultGetCurrentMilestoneProgress;
-  const getBacklogCounts = deps.getBacklogCounts ?? defaultGetBacklogCounts;
 
   const trend = await getMetricsTrend(50);
   const weekAgo = now() - 7 * 24 * 60 * 60 * 1000;
@@ -77,7 +76,6 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
   const abandoned = thisWeek.filter(m => parseInt(m.tasksAbandoned) > 0).length;
   const ratio = await getFixFeatureRatio(thisWeek.length);
   const milestone = await getCurrentMilestoneProgress();
-  const counts = await getBacklogCounts();
 
   const lines = [
     `📈 *Hydra Weekly Summary*`,
@@ -93,7 +91,6 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
     }
   }
 
-  lines.push(`*Backlog:* ${counts.queued || 0} queued, ${counts.blocked || 0} blocked, ${counts.triage || 0} triage`);
   lines.push("");
 
   // Warnings
@@ -102,9 +99,6 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
   }
   if (rolledBack >= 3) {
     lines.push(`⚠️ ${rolledBack} rollbacks this week — executor quality needs attention`);
-  }
-  if ((counts.blocked || 0) > 0) {
-    lines.push(`⚠️ ${counts.blocked} items blocked — check Telegram for unblock commands`);
   }
   if (milestone && milestone.pctComplete === 100) {
     lines.push(`🎉 Milestone "${milestone.name}" is 100% complete — ready for operator review`);

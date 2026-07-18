@@ -4,7 +4,6 @@ import { readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 
 import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
-import { getBacklogCounts } from "../backlog/reads.ts";
 
 // Issue #1322: the operator-action-items surface — extracted out of
 // createHealthRouter (src/api/health.ts) into its own deep, named home. This
@@ -35,7 +34,6 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config
  * injection pattern.
  */
 export interface RecommendationsReaderDeps {
-  getBacklogCounts?: typeof getBacklogCounts;
   getSchedulerStatus?: typeof getSchedulerStatus;
   /** Read+return the raw priorities.md text; rejects/throws if the file is absent. */
   readPriorities?: () => Promise<string>;
@@ -54,7 +52,6 @@ function defaultKillFileExists(): boolean {
 export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}) {
   const router = Router();
 
-  const readBacklogCounts = deps.getBacklogCounts ?? getBacklogCounts;
   const readSchedulerStatus = deps.getSchedulerStatus ?? getSchedulerStatus;
   const readPriorities = deps.readPriorities ?? defaultReadPriorities;
   const killFileExists = deps.killFileExists ?? defaultKillFileExists;
@@ -68,32 +65,7 @@ export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}
   router.get("/recommendations", async (req, res) => {
     const recs = [];
     try {
-      // 1. Triage items awaiting approval
-      const counts = await readBacklogCounts();
-      if (counts.triage > 0) {
-        recs.push({
-          type: "review",
-          priority: 2,
-          title: `${counts.triage} item${counts.triage > 1 ? "s" : ""} in Triage awaiting review`,
-          description: "Research suggestions need approval before entering the backlog",
-          action: "Review on the Backlog page",
-          link: "/backlog",
-        });
-      }
-
-      // 2. Blocked backlog items
-      if (counts.blocked > 0) {
-        recs.push({
-          type: "action",
-          priority: 1,
-          title: `${counts.blocked} blocked item${counts.blocked > 1 ? "s" : ""} need intervention`,
-          description: "These items can't proceed without operator action",
-          action: "Unblock on the Backlog page",
-          link: "/backlog",
-        });
-      }
-
-      // 3. Scheduler not running
+      // 1. Scheduler not running
       const sched = await readSchedulerStatus();
       if (!sched.running) {
         recs.push({
@@ -106,19 +78,7 @@ export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}
         });
       }
 
-      // 4. Empty work pipeline
-      if (counts.total === 0 && counts.inProgress === 0 && counts.triage === 0) {
-        recs.push({
-          type: "info",
-          priority: 3,
-          title: "Work pipeline is empty",
-          description: "No items in triage, backlog, or queue. Hydra will fall back to priorities.md or run research to find work.",
-          action: "Add items on the Backlog page or update Vision",
-          link: "/backlog",
-        });
-      }
-
-      // 5. Check priorities.md for BLOCKED items
+      // 2. Check priorities.md for BLOCKED items
       try {
         const prioritiesContent = await readPriorities();
         const blockedHeaders = prioritiesContent.match(/^##.*\[BLOCKED\].*$/gim) || [];
@@ -137,7 +97,7 @@ export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}
         }
       } catch { /* intentional: no priorities file present yet — degrade silently */ }
 
-      // 6. Kill file present
+      // 3. Kill file present
       if (killFileExists()) {
         recs.push({
           type: "action",

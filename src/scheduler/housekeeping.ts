@@ -51,18 +51,12 @@ import {
 } from "../redis/housekeeping.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
 
-import { runBlockedItemEscalation } from "./chores/blocked-escalation.ts";
 import { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
-import { runDoneLanePrune } from "./chores/done-lane-prune.ts";
 import { runWeeklyDigest } from "./chores/weekly-digest.ts";
 import { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 import { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
-import { runWorkQueueHygiene } from "./chores/work-queue-hygiene.ts";
-import { runMergedItemReconciler } from "./chores/merged-item-reconciler.ts";
 import { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
-import { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
-import { runLaneIndexReconcile } from "./chores/lane-index-reconcile.ts";
 import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
 import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
@@ -81,15 +75,12 @@ import { runAttributionRecord } from "../outcome-attribution/index.ts";
 // housekeeping.ts; each chore's deps type is consumed only inside its own
 // `./chores/<name>.ts` source (stale re-exports removed, issue #2105).
 // ---------------------------------------------------------------------------
-export { runBlockedItemEscalation } from "./chores/blocked-escalation.ts";
 export { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
-export { runDoneLanePrune } from "./chores/done-lane-prune.ts";
 export { runWeeklyDigest } from "./chores/weekly-digest.ts";
 export { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 export { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
 export { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
-export { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
 export { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 
 // ---------------------------------------------------------------------------
@@ -295,20 +286,10 @@ async function runHousekeeping(
   // `src/redis/housekeeping.ts` accessors and `Date.now` exactly as before.
   const chores: Chore[] = [
     {
-      name: "blocked-escalation",
-      work: () => runBlockedItemEscalation(eventBus),
-    },
-
-    {
       name: "review-pickup-notify",
       work: async () => {
         await runReviewPickupNotify(eventBus);
       },
-    },
-
-    {
-      name: "prune-done",
-      work: () => runDoneLanePrune(),
     },
 
     {
@@ -345,16 +326,6 @@ async function runHousekeeping(
     },
 
     {
-      name: "work-queue-hygiene",
-      work: () => runWorkQueueHygiene(),
-    },
-
-    {
-      name: "merged-item-reconciler",
-      work: () => runMergedItemReconciler(),
-    },
-
-    {
       name: "forecast-calibration-brier",
       work: () => runForecastCalibrationBrier({ publishBrierMetric: deps.publishBrierMetric }),
     },
@@ -367,16 +338,6 @@ async function runHousekeeping(
       guard: () =>
         choreGuard(deps.getCleanupLastDaily ?? getCleanupLastDaily, DAY_MS, deps.now),
       work: () => pruneStaleRedisKeys(),
-    },
-
-    {
-      name: "stale-inprogress-return",
-      work: () => returnStaleInProgressItems(),
-    },
-
-    {
-      name: "lane-index-reconcile",
-      work: () => runLaneIndexReconcile(),
     },
 
     {
@@ -515,10 +476,6 @@ export {
   // assert the uniform guard → work → bookkeeping → error-log + Sentry
   // pattern without standing up the maintenance endpoint or Redis.
   runChore,
-  // Issue #2057: exported so a unit test can inject the reconciler result + a
-  // fake `setReconcilerHealth` and assert the last-run health snapshot is
-  // persisted (feed liveness + batch metrics) without standing up Redis.
-  runMergedItemReconciler,
   // Issue #3091: the canonical cadence-check, exported so a unit test can assert
   // the guard-windowing decision (null → always-run, stale ts → passes, fresh
   // ts → blocks) as pure time-arithmetic over an injected getter + frozen clock,

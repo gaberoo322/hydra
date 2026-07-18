@@ -7,7 +7,6 @@ import { stopKnowledgeIndexer } from "./knowledge-base/indexer.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest } from "./digest.ts";
 import { initLearning } from "./learning-lifecycle.ts";
-import { cleanWorkQueue } from "./redis/work-queue.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { gitExec } from "./github/git.ts";
 import { isGhFailure, isGhOk } from "./github/exec.ts";
@@ -153,32 +152,6 @@ async function main() {
 
   // Initialize learning system (migrates rules, registers OV skills, starts indexer)
   await initLearning();
-
-  // Clean work queue: remove COMPLETED: items and deduplicate
-  try {
-    await cleanWorkQueue();
-  } catch (err: any) {
-    console.error(`[Hydra] Work queue cleanup failed: ${err.message}`);
-  }
-
-  // Reconcile backlog lane indices against the canonical items hash (issue
-  // #2056). A transition writes the hash first and the lane zset second, so a
-  // crash / Redis restart (the #1990 desync) can leave items unreachable via
-  // the sorted-set read paths. This startup sweep re-indexes any hash item
-  // missing from its lane zset and removes orphan zset members. Best-effort and
-  // never-throwing — a reconciler fault must never block server.listen. The
-  // same self-healing function also runs hourly as a housekeeping chore.
-  try {
-    const { reconcileLaneIndices } = await import("./backlog/index-reconciler.ts");
-    const rec = await reconcileLaneIndices();
-    if (rec.reindexed > 0 || rec.orphansRemoved > 0 || rec.unLaned > 0) {
-      console.log(
-        `[Hydra] Lane-index reconcile: re-indexed ${rec.reindexed}, removed ${rec.orphansRemoved} orphan(s), ${rec.unLaned} un-laned (scanned ${rec.scanned})`,
-      );
-    }
-  } catch (err: any) {
-    console.error(`[Hydra] Lane-index reconcile failed: ${err.message}`);
-  }
 
   // Start background consumers (notifications, meta, DLQ)
   startConsumers(eventBus);
