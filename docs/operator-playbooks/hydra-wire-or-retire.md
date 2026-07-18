@@ -15,33 +15,37 @@ mechanical demote-only sweep. `/hydra-target-cleanup` files **`wire-or-retire`**
 stalled (wire it) or died (retire it). Those items are the **decision queue**; deciding which
 requires **recovering the intent**, which a static tool cannot do. This skill makes the call.
 
-The prompt-shaped resolver protocol was already drafted inside each item's body, but a
-prompt-only rule is what failed: two items (`item-685`, `item-687`) were laundered into the
-`backlog` lane where no sweep looks — so issue **#2721** added a code-level lane guard
-(`moveItemToLane` rejects `triage → backlog` for a `wire-or-retire`-labelled item; the only
-exits are a WIRE/RETIRE `queued` task or a `ready-for-human` `blocked` item). This skill is
-issue **#2722**: the class that *dispatches a resolver* so the queue actually drains.
+The prompt-shaped resolver protocol is drafted inside each item's body. Under ADR-0031 the
+Target decision queue is the **GitHub-Issues board on `gaberoo322/hydra-betting`**: an open
+issue carrying **`wire-or-retire` + `needs-triage`**. The only exits are a WIRE/RETIRE
+`ready-for-agent` task (relabel) or a `ready-for-human` operator hand-off (relabel) — there is
+no destructive lane. (The retired Redis `moveItemToLane` `triage → backlog` guard of issue
+**#2721** is subsumed: on the label board there is no `backlog` lane to launder an item into,
+so the label-only exits are the whole state machine.) This skill is issue **#2722**: the class
+that *dispatches a resolver* so the queue actually drains.
 
 ## What it is vs. what it is not
 
 | | `/hydra-target-cleanup` (mechanical) | `/hydra-wire-or-retire` (judgment) |
 |---|---|---|
-| Input | knip report + wiring-status ledger | the open `wire-or-retire` items in the **triage** lane |
+| Input | knip report + wiring-status ledger | the open `wire-or-retire` + `needs-triage` issues on `gaberoo322/hydra-betting` |
 | Decision | deterministic (demote-only, self-checking) | an **opinion** — recover intent, then decide |
-| Output | `ready-for-agent` demote items → `queued` | per item: a rewritten WIRE/RETIRE task → `queued`, OR `ready-for-human` → `blocked` |
+| Output | `ready-for-agent` demote issues | per issue: a rewritten WIRE/RETIRE task relabelled `ready-for-agent`, OR relabelled `ready-for-human` |
 | Deletes anything? | never | never (it rewrites items into tasks; the *follow-up* task may delete) |
 | Cadence | 1h (`target_backfill_idle`) | 24h (`wire_or_retire_target_available`) |
 
 This skill **never edits the Target working tree** and **never deletes a module**. It only
-reads (`git log`, `rg`, config/direction, the backlog) and **rewrites backlog items** into the
-next actionable task via the backlog API. The deletion, if any, happens later inside the
+reads (`git log`, `rg`, config/direction, the board) and **rewrites the anchor issue** into the
+next actionable task via `gh issue edit` (body + labels) on `gaberoo322/hydra-betting` — never
+the retired Redis `/backlog` API. The deletion, if any, happens later inside the
 `ready-for-agent` retirement task a human/agent picks up.
 
 ## Trigger
 
 Dispatched by the autopilot `wire_or_retire_target` signal class (issue #2722) when
-`collect-state.sh` emits **`wire_or_retire_target_available`** — true when ≥1 open item
-carrying the `wire-or-retire` label sits in the Target **triage** lane. The class carries a
+`collect-state.sh` emits **`wire_or_retire_target_available`** — true when ≥1 open issue
+carrying **`wire-or-retire` + `needs-triage`** sits on the Target board
+(`gaberoo322/hydra-betting`). The class carries a
 **24h cooldown** (`SIGNAL_COOLDOWNS["wire_or_retire_target"]`, seeded in `bootstrap.sh`'s
 `signal_last_fired` so it survives the pace-gate relaunch — the #2575 cooldown-bootstrap bug
 class), and this skill **resolves at most 2 items per run**. The dispatch **omits the model
@@ -51,22 +55,25 @@ judgment work, and the documented Haiku-premature-exit failure mode (a low-tier 
 
 ## The resolution loop
 
-Read the triage lane, pick the up-to-2 oldest open `wire-or-retire` items, and for **each**:
+Read the board (`gh api repos/gaberoo322/hydra-betting/issues?state=open&labels=wire-or-retire`
+— REST, never `gh --json`/GraphQL, ADR-0031 Decision 6), pick the up-to-2 oldest open
+`wire-or-retire` issues, and for **each** (`$ANCHOR_NUM` = its issue number):
 
 ### 1. Verify first (the ledger / triage snapshot may be a regeneration behind)
 
 - The module path is in the item title (`cleanup(target): wire-or-retire web/src/lib/<path>`).
 - Confirm the module still exists on current `main` in `~/hydra-betting` AND still has **no
   runtime importer** — `rg` its import path under `web/src`, excluding test files.
-- If the module was wired or removed since the scan, **close this item as stale** (rewrite the
-  body to say so; move to `done`) and go to the next item. Do **not** regenerate the ledger.
+- If the module was wired or removed since the scan, **close this issue as stale**
+  (`gh issue close $ANCHOR_NUM --repo gaberoo322/hydra-betting --reason completed --comment "Stale — module wired/removed since scan."`)
+  and go to the next item. Do **not** regenerate the ledger.
 
 ### 2. Hard carve-out — risk / live-execution modules ALWAYS route ready-for-human
 
 Before recovering intent, check the module path against the carve-out. If the path is under
 **`web/src/lib/risk/`** OR is a **live-execution path** (the interim hardcoded list below),
-route **`ready-for-human`** immediately and STOP for this item — do not attempt a
-wire-vs-retire verdict, do not queue a retirement.
+relabel **`ready-for-human`** immediately (`gh issue edit $ANCHOR_NUM --repo gaberoo322/hydra-betting --remove-label needs-triage --add-label ready-for-human`)
+and STOP for this item — do not attempt a wire-vs-retire verdict, do not queue a retirement.
 
 Interim hardcoded carve-out list (until issue **#2701**'s `classifyTargetRisk` exists, at
 which point this skill switches to calling it):
@@ -85,29 +92,35 @@ human. (Target `CLAUDE.md` rule 6: ambiguity never resolves to deletion.)
   alongside what feature. Read the commit messages of the introducing PR.
 - Cross-reference **`~/hydra/config/direction/`** (vision, priorities, roadmap, outcomes): is
   the feature this module belongs to a **current** priority, a **superseded** one, or absent?
-- Search the **Target backlog** (`GET /api/backlog`) **open AND done** lanes for the feature:
-  a `done` item that superseded / retired the feature is decisive evidence for RETIRE; an
-  open queued item that needs this module is decisive evidence for WIRE.
+- Search the **Target board** (`gh issue list --repo gaberoo322/hydra-betting --search "<feature>" --state all`)
+  across **open AND closed** issues for the feature: a **closed** issue that superseded / retired
+  the feature is decisive evidence for RETIRE; an open `ready-for-agent` issue that needs this
+  module is decisive evidence for WIRE. (Lexical search — REST-first, never `gh --json`/GraphQL.)
 - Note the ADR context: e.g. cross-venue arbitrage was **retired** (hydra-betting ADR-0002);
   a module in `lib/arbitrage/` for cross-venue residual risk is almost certainly RETIRE.
 
 ### 4. Decide — exactly one of
 
+All three exits are `gh issue edit` label + body edits on `gaberoo322/hydra-betting` — never a
+Redis lane move. Drop **both** `needs-triage` and `wire-or-retire` on a WIRE/RETIRE resolution
+(the decision is made — the issue is now an actionable task, not a pending decision).
+
 - **(a) WIRE** — the intent is live (matches a current `config/direction` priority, or an
-  obvious runtime seam exists to wire it into). **Rewrite the item** into a concrete wiring
+  obvious runtime seam exists to wire it into). **Rewrite the issue body** into a concrete wiring
   task: name the entry point / route / runner to wire the module into, state the acceptance
   criteria ("module is imported from a runtime entry point; `npm test` + `npm run typecheck`
-  pass; the wiring-status ledger no longer lists it"). Set labels to **`ready-for-agent`**
-  (drop `needs-triage`) and **move the item to `queued`**.
+  pass; the wiring-status ledger no longer lists it"). Then:
+  `gh issue edit $ANCHOR_NUM --repo gaberoo322/hydra-betting --body-file <task> --remove-label needs-triage --remove-label wire-or-retire --add-label ready-for-agent`.
 - **(b) RETIRE** — the intent is gone (superseded, venue dropped, experiment concluded).
-  **Rewrite the item** into a retirement task using the **standard RETIRE-task body template**
+  **Rewrite the issue body** into a retirement task using the **standard RETIRE-task body template**
   below (delete the module AND its test files, sweep orphaned imports, run
   `npm run deadcode:update-baseline`, verify with `npm run test:raw` + typecheck, commit citing
-  the scan per Target `CLAUDE.md` rule 3). Set labels to **`ready-for-agent`** (drop
-  `needs-triage`) and **move the item to `queued`**.
-- **(c) UNCLEAR** — the intent cannot be established either way. Set labels to
-  **`ready-for-human`** (drop `needs-triage`), **move the item to `blocked`**, and STOP for
-  this item. **Ambiguity never resolves to deletion** (Target `CLAUDE.md` rule 6, fail closed).
+  the scan per Target `CLAUDE.md` rule 3). Then:
+  `gh issue edit $ANCHOR_NUM --repo gaberoo322/hydra-betting --body-file <task> --remove-label needs-triage --remove-label wire-or-retire --add-label ready-for-agent`.
+- **(c) UNCLEAR** — the intent cannot be established either way. Relabel to **`ready-for-human`**
+  (drop `needs-triage`; keep `wire-or-retire` so the operator sees the decision class):
+  `gh issue edit $ANCHOR_NUM --repo gaberoo322/hydra-betting --remove-label needs-triage --add-label ready-for-human`,
+  and STOP for this item. **Ambiguity never resolves to deletion** (Target `CLAUDE.md` rule 6, fail closed).
 
 ## Standard RETIRE-task body template (issue #2723)
 
@@ -211,31 +224,34 @@ The template's precondition block re-states that carve-out so the follow-up
 > this orchestrator PR (see the issue's "Related (Target repo)" note). Tracked as a follow-up
 > Target-repo change.
 
-## The backlog API seam
+## The `gh`-write seam (ADR-0031)
 
-The Target's tracker is the Redis backlog; go through the API, never the internals.
+The Target's tracker is the **GitHub-Issues board on `gaberoo322/hydra-betting`**; all reads
+and writes go through `gh` (REST-first, never `gh --json`/GraphQL on the hot path).
 
 ```bash
-# Read the board (triage lane holds the decision queue):
-curl -sf http://localhost:4000/api/backlog
+REPO=gaberoo322/hydra-betting
 
-# Rewrite an item's title / body / labels (WIRE or RETIRE task, or stale note):
-curl -sf -X PATCH http://localhost:4000/api/backlog/<item-id> \
-  -H 'content-type: application/json' \
-  -d '{"title":"...","description":"...","labels":["ready-for-agent"]}'
+# Read the decision queue (open wire-or-retire + needs-triage issues) — REST:
+gh api "repos/$REPO/issues?state=open&labels=wire-or-retire,needs-triage&per_page=100" \
+  --jq '.[] | select(has("pull_request")|not) | "#\(.number)\t\(.title)"'
 
-# Move the lane (the transition is guarded by #2721 — the ONLY exits from
-# triage for a wire-or-retire item are queued and blocked):
-curl -sf -X PATCH http://localhost:4000/api/backlog/<item-id>/move \
-  -H 'content-type: application/json' \
-  -d '{"toLane":"queued"}'    # WIRE / RETIRE
-  # or {"toLane":"blocked"} for UNCLEAR (ready-for-human)
+# Rewrite an issue's body + labels (WIRE or RETIRE task):
+gh issue edit "$ANCHOR_NUM" --repo "$REPO" --body-file <task> \
+  --remove-label needs-triage --remove-label wire-or-retire --add-label ready-for-agent
+
+# UNCLEAR → operator hand-off (keep wire-or-retire so the class is visible):
+gh issue edit "$ANCHOR_NUM" --repo "$REPO" \
+  --remove-label needs-triage --add-label ready-for-human
+
+# Stale (module wired/removed since the scan) → close as completed:
+gh issue close "$ANCHOR_NUM" --repo "$REPO" --reason completed \
+  --comment "Stale — module wired/removed since scan."
 ```
 
-The lane guard (#2721) rejects `triage → backlog`, returning
-`{ok:false, error:"wire-or-retire items leave triage only as a WIRE task, a RETIRE task, or ready-for-human"}`
-— if a move is rejected, you tried the wrong exit; re-check the verdict (WIRE/RETIRE → `queued`,
-UNCLEAR → `blocked`).
+The only exits are a WIRE/RETIRE `ready-for-agent` task, a `ready-for-human` operator hand-off,
+or a stale close — enforced by the label vocabulary itself (there is no `backlog` lane to
+launder an item into, which is what the retired Redis lane guard #2721 protected against).
 
 ## Report
 
@@ -243,9 +259,9 @@ UNCLEAR → `blocked`).
 hydra-wire-or-retire — Target (~/hydra-betting) — <ISO>
 triage wire-or-retire items open: <N>
 resolved this run (cap 2):
-• item-685 web/src/lib/compliance/cftc-rulemaking-watch.ts → RETIRE (arbitrage-era, ADR-0002) → queued
-• item-687 web/src/lib/opticodds.ts                        → WIRE (odds-ingestion priority live) → queued
-skipped: item-6xx web/src/lib/risk/...  → CARVE-OUT → ready-for-human (blocked)
+• #685 web/src/lib/compliance/cftc-rulemaking-watch.ts → RETIRE (arbitrage-era, ADR-0002) → ready-for-agent
+• #687 web/src/lib/opticodds.ts                        → WIRE (odds-ingestion priority live) → ready-for-agent
+skipped: #6xx web/src/lib/risk/...  → CARVE-OUT → ready-for-human
 ```
 
 ## Rules
@@ -257,9 +273,10 @@ skipped: item-6xx web/src/lib/risk/...  → CARVE-OUT → ready-for-human (block
 - **Risk / live-execution → ready-for-human, always.** The carve-out is checked BEFORE intent
   recovery. Interim hardcoded list until #2701's `classifyTargetRisk`.
 - **Ambiguity never resolves to deletion** (Target `CLAUDE.md` rule 6). UNCLEAR is
-  `ready-for-human` / `blocked`, never a RETIRE task.
-- **Never touch the Target working tree.** This skill reads and rewrites backlog items; the
-  module change happens in the follow-up `ready-for-agent` task.
+  `ready-for-human`, never a RETIRE task.
+- **Never touch the Target working tree.** This skill reads and relabels/rewrites board issues
+  via `gh`; the module change happens in the follow-up `ready-for-agent` task.
+- **REST-first reads (ADR-0031 Decision 6).** Board reads use `gh api repos/...` / `gh issue list --search`, never `gh --json`/GraphQL.
 - **One pass, then exit.**
 
 ## Manual smoke test
@@ -268,15 +285,15 @@ skipped: item-6xx web/src/lib/risk/...  → CARVE-OUT → ready-for-human (block
 /hydra-wire-or-retire
 ```
 
-Expected: reads the Target triage lane, resolves ≤2 open `wire-or-retire` items into
-`queued` WIRE/RETIRE tasks (or `blocked` ready-for-human on UNCLEAR / carve-out), leaves the
-rest for the next 24h tick, and reports the verdicts. A triage lane with no open
-`wire-or-retire` items is a no-op (the `wire_or_retire_target_available` signal is false, so
-the autopilot never dispatches this in the first place).
+Expected: reads the Target board (open `wire-or-retire` + `needs-triage` issues), resolves ≤2
+into `ready-for-agent` WIRE/RETIRE tasks (or `ready-for-human` on UNCLEAR / carve-out), leaves
+the rest for the next 24h tick, and reports the verdicts. A board with no open `wire-or-retire`
+issues is a no-op (the `wire_or_retire_target_available` signal is false, so the autopilot never
+dispatches this in the first place).
 
 ## Dispatch wiring
 
 Dispatched by the autopilot `wire_or_retire_target` signal class on the
 `wire_or_retire_target_available` signal, at a 24h cooldown. Tracked by issue
-#2722 under epic #2720. Items are filed into the Target triage lane by
-`/hydra-target-cleanup`; this skill resolves at most 2 per run.
+#2722 under epic #2720. Issues are filed with `wire-or-retire` + `needs-triage` on the Target
+board by `/hydra-target-cleanup`; this skill resolves at most 2 per run.

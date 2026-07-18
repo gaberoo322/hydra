@@ -1,6 +1,6 @@
 ---
 name: hydra-target-qa
-description: Independent QA for Target PRs — Standards on every PR, a Spec plus 2-reviewer adversarial fold on risk-critical changes, and a before/after visual QA pass on UI PRs; hard findings bounce to the reframe queue.
+description: Independent QA for Target PRs — Standards on every PR, a Spec plus 2-reviewer adversarial fold on risk-critical changes, and a before/after visual QA pass on UI PRs; verdicts post as issue comments and hard findings bounce via the reframe label + ready-for-human.
 when_to_use: "When a Target build opens a PR and needs an independent reviewer (today the executor grades its own work), the operator says 'QA the target PR', or hydra-autopilot dispatches Target QA."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Agent(*)
 arguments: [pr_ref]
@@ -200,13 +200,18 @@ travel with the PASS/FAIL but never change it.
 ## Routing the outcome — bounce, never escalate
 
 A hard finding from **any** consulted axis folds to a `FAIL` verdict whose
-action is `bounce-to-reframe`: push the work item to the existing **reframe
-queue** (`hydra:anchors:reframe-queue`), which `hydra-target-review` surfaces to
-the operator on the next review. There is **NO** new escalation path, **NO**
-`ready-for-human`-style operator channel, and **NO** deep-QA remediation loop —
-those are the Verifier-Core teeth epic #1052 explicitly declines to mirror for
-the Target. A `PASS` verdict's action is `merge`: the Target's normal
-merge-on-green path proceeds (this skill never merges directly).
+action is `bounce-to-reframe`: under ADR-0031 the reframe queue is now the
+**`reframe` label** on the anchor issue (`gaberoo322/hydra-betting`), stamped
+alongside `ready-for-human` so `hydra-target-review` surfaces it to the operator
+on the next review (the label pair replaces the retired
+`hydra:anchors:reframe-queue`). The QA **verdict itself is posted as a
+`gh issue comment`** on the anchor issue and the `needs-qa` label is stripped —
+mirroring the Orchestrator `hydra-qa` verdict-as-comment + relabel discipline.
+There is **NO** deep-QA remediation loop and **NO** Verifier-Core teeth — those
+are the containment gates epic #1052 explicitly declines to mirror for the
+Target; the `reframe` + `ready-for-human` label pair is the *only* operator
+surface, not a new escalation channel. A `PASS` verdict's action is `merge`: the
+Target's normal merge-on-green path proceeds (this skill never merges directly).
 
 ## Process
 
@@ -256,17 +261,28 @@ omission).
 
 ### 5. Execute the routing
 
-- `action: "merge"` — report PASS; let the Target merge-on-green path proceed.
-- `action: "bounce-to-reframe"` — push the work item to the reframe queue and
-  report the finding. Do NOT escalate to the operator and do NOT open a
-  remediation loop.
+All routing is `gh` on the anchor issue (`gaberoo322/hydra-betting`) — REST-first
+(`gh issue comment` / `gh issue edit`), never the retired Redis `hydra backlog` /
+`/backlog` API. `$ANCHOR_NUM` is the anchor issue number the build claimed.
 
-```bash
-# Bounce: move the item to the reframe lane (the hydra-target-review pickup set).
-hydra backlog move <item-id> reframe
-# or, if the item is a free-form work-queue retry:
-#   hydra queue add "<title>" -d "reframe: <reason from the verdict>"
-```
+- `action: "merge"` — post the PASS verdict as an issue comment, strip `needs-qa`,
+  and let the Target merge-on-green path proceed:
+  ```bash
+  REPO=gaberoo322/hydra-betting
+  gh issue comment "$ANCHOR_NUM" --repo "$REPO" \
+    --body "QA verdict: **PASS** ($PATH_TAKEN). $VERDICT_REASON"
+  gh issue edit "$ANCHOR_NUM" --repo "$REPO" --remove-label needs-qa
+  ```
+- `action: "bounce-to-reframe"` — post the FAIL verdict as an issue comment, then
+  stamp the reframe label pair so `hydra-target-review` picks it up. Do NOT escalate
+  through any other channel and do NOT open a remediation loop.
+  ```bash
+  REPO=gaberoo322/hydra-betting
+  gh issue comment "$ANCHOR_NUM" --repo "$REPO" \
+    --body "QA verdict: **FAIL** ($PATH_TAKEN). Bounce-to-reframe: $VERDICT_REASON"
+  gh issue edit "$ANCHOR_NUM" --repo "$REPO" \
+    --remove-label needs-qa --add-label reframe --add-label ready-for-human
+  ```
 
 ### 6. Report
 
@@ -283,8 +299,11 @@ multi-check rollup).
 - **The fold lives in one pure function** — `classifyTargetQaVerdict()`,
   unit-tested in `test/target-qa-verdict.test.mts`. The playbook collects
   reviewer verdicts; it does not re-implement the AND/short-circuit logic.
-- **FAIL bounces to the reframe queue. Never escalates.** The only operator
-  surface is the existing `hydra-target-review` drain of the reframe lane.
+- **FAIL bounces via the `reframe` + `ready-for-human` label pair. Never
+  escalates.** The verdict posts as a `gh issue comment` and `needs-qa` is
+  stripped; the only operator surface is the existing `hydra-target-review` drain
+  of `reframe`-labelled issues (ADR-0031 — the label replaces the retired Redis
+  reframe-queue).
 - **Render-robustness is a Standards-axis requirement on every UI-touching PR**
   — a render path that can `500` on a missing/stale/unknown-enum data state is a
   hard finding. New venues/sports/enum values arrive in production before the UI
@@ -313,7 +332,7 @@ multi-check rollup).
 - `scripts/target/target-qa-verdict.ts` — the pure verdict fold.
 - `scripts/ci/qa-verdict.ts` — the Orchestrator's analogous one-pass verdict
   classifier (the shape this skill mirrors, minus the tier ladder).
-- `docs/operator-playbooks/hydra-target-review.md` — drains the reframe queue.
+- `docs/operator-playbooks/hydra-target-review.md` — drains the `reframe`-labelled issues.
 - Issue #2734 / epic #2732 — the render-robustness (degrade-never-throw)
   convention and the four live-`500` routes that motivated it; exemplar fixes
   item-737 (missing reconciliation checkpoint) and item-738 (unknown sport key).

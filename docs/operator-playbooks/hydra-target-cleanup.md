@@ -9,7 +9,7 @@ claude_only: true
 
 # Hydra Target Cleanup (headless demote-only dead-export sweep)
 
-`hydra-target-cleanup` is the **Target mirror of `/hydra-cleanup`**: a non-interactive, deterministic dead-code detector for **`~/hydra-betting`**. It runs `knip` over `web/`, filters the findings down to the **demote-only** class the Target's own policy authorises, and files each surviving file as a Redis backlog item (the Target's tracker — NOT GitHub issues) whose acceptance criterion is self-checking: *"drop the `export` keyword AND `npm test` / `npm run typecheck` / `npm run deadcode:check` still pass with a tightened baseline"*.
+`hydra-target-cleanup` is the **Target mirror of `/hydra-cleanup`**: a non-interactive, deterministic dead-code detector for **`~/hydra-betting`**. It runs `knip` over `web/`, filters the findings down to the **demote-only** class the Target's own policy authorises, and files each surviving file as a **GitHub issue on `gaberoo322/hydra-betting`** (ADR-0031 — the Target tracker is now the GitHub-Issues board, exactly like the orch sweep, not the retired Redis backlog) whose acceptance criterion is self-checking: *"drop the `export` keyword AND `npm test` / `npm run typecheck` / `npm run deadcode:check` still pass with a tightened baseline"*. Filing is `gh issue create --repo gaberoo322/hydra-betting`, deduped by a lexical `gh issue list --search` against the open board (ADR-0031 Decision 5 — lexical, not the retired OpenViking semantic dedup).
 
 It is **step 2 of the Target dead-code cleanup plan** (step 1 — the deadcode ratchet + CLAUDE.md policy — shipped as hydra-betting PR #93). The Target accumulates dead exports structurally: Hydra builds modules with tests first and wires them into runtime later, so knip-with-tests-as-usage findings (~440 at the 2026-06-10 baseline) are the high-confidence, mechanically-verifiable backlog this skill drains.
 
@@ -18,7 +18,7 @@ It is **step 2 of the Target dead-code cleanup plan** (step 1 — the deadcode r
 | | `/hydra-cleanup` (orch) | `/hydra-target-cleanup` (this skill) |
 |---|---|---|
 | Surface | `~/hydra` | `~/hydra-betting/web` |
-| Findings sink | GitHub issues (`gaberoo322/hydra`) | Redis target backlog via `POST /api/backlog` (labels `cleanup-scan` + `ready-for-agent`, moved to the `queued` lane) |
+| Findings sink | GitHub issues (`gaberoo322/hydra`) | GitHub issues (`gaberoo322/hydra-betting`) via `gh issue create` (labels `cleanup-scan` + `ready-for-agent`) — ADR-0031 |
 | Fix classes emitted | demote AND delete (classified per finding) | **demote ONLY** — delete-class and whole-file findings are dropped and deferred to the wire-or-retire phase |
 | Grace period | none | **45-day wiring grace** (Target CLAUDE.md rule 3): findings in files touched within 45 days are dropped — young dead exports are usually wiring-in-flight |
 | Item granularity | one issue per finding | **one backlog item per FILE** (all demote-class symbols batched) — `addToBacklog()` fuzzy-title dedup rejects near-identical per-symbol titles, and the picker ships one small PR per file anyway |
@@ -43,7 +43,7 @@ The Target's `CLAUDE.md` forbids ad-hoc cleanup commits, with one carve-out (rul
 
 ## When NOT to run this
 
-- **Board saturated**: more than 10 open backlog items carrying the `cleanup-scan` label (any lane except `done`). The emit runner checks this itself; the autopilot's `target_cleanup_board_saturated` signal suppresses the dispatch upstream.
+- **Board saturated**: more than 10 open board issues carrying the `cleanup-scan` label (any open state). The emit runner checks this itself (a lexical `gh issue list --search` count); the autopilot's `target_cleanup_board_saturated` signal suppresses the dispatch upstream.
 - **From inside a `dev_orch` / `dev_target` subagent** — those work a single item and must not produce sibling work.
 - **When the orchestrator API (port 4000) is down** — the runner aborts rather than emit without dedup/saturation inputs (fail closed).
 
@@ -79,7 +79,7 @@ If knip is not installed, print a one-line hint (`npm ci` in `web/`) and exit cl
 # Dry-run (prints the plan: every title + body + drop reasons, files nothing):
 npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json
 
-# Apply (files one cleanup-scan + ready-for-agent backlog item per file, moved to queued):
+# Apply (files one cleanup-scan + ready-for-agent GitHub issue per file on hydra-betting):
 npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json --apply
 ```
 
@@ -88,8 +88,8 @@ The runner (`planTargetCleanupEmit()`, pure + tested) owns the whole pipeline:
 1. **Validate** (blank-title guard, shared `validateFinding()`).
 2. **Demote-only filter**: whole-file findings, test/`.d.ts` paths, delete-class exports (no in-file reference), and unknown-source findings are all dropped. Only `classifyExportFix() === "demote"` survives.
 3. **Wiring-grace gate**: file age from `git log -1 --format=%ct` in the Target; `< 45` days → dropped; unknown age → dropped (fail closed).
-4. **Group per file**, dedup per file against the open `cleanup-scan` board (identity = the path parsed from the canonical title), cap at 8 files per run, largest demote batch first.
-5. **Render** title + body from the same group in one pass (the #1449/#1005 drift guard) and file via `POST /api/backlog` + move to `queued`.
+4. **Group per file**, dedup per file against the open `cleanup-scan` board (identity = the path parsed from the canonical title; the board read is a lexical `gh issue list --search` on `gaberoo322/hydra-betting`, ADR-0031 Decision 5/6 — REST-first, never `gh --json`/GraphQL), cap at 8 files per run, largest demote batch first.
+5. **Render** title + body from the same group in one pass (the #1449/#1005 drift guard) and file via `gh issue create --repo gaberoo322/hydra-betting --label cleanup-scan --label ready-for-agent`.
 
 Every emitted item carries labels **`cleanup-scan` + `ready-for-agent`** (the label is the saturation/dedup count seam; the routing is the confidence decision — the acceptance check is deterministic, so no triage gate is needed) and instructs the picker to: demote each listed symbol, run `npm test` + `npm run typecheck`, run `npm run deadcode:update-baseline`, and commit with the scan citation the Target's CLAUDE.md rule 3 requires.
 
@@ -101,13 +101,13 @@ After the demote emit, run the second deterministic emitter. Its input is the Ta
 # Dry-run (prints the plan, files nothing):
 npx tsx scripts/ci/hydra-target-wire-or-retire-emit.ts
 
-# Apply (files one needs-triage decision item per module, moved to the triage lane):
+# Apply (files one needs-triage wire-or-retire decision issue per module on hydra-betting):
 npx tsx scripts/ci/hydra-target-wire-or-retire-emit.ts --apply
 ```
 
-The runner (`planWireOrRetireEmit()`, pure + tested) keeps only ledger rows with status `wire-or-retire` (modules past the 45-day grace with no runtime importer — `awaiting-wiring` and `protected-provider` rows are never eligible), dedups per module against open `wire-or-retire`-labelled items, caps at **3 per run** (oldest last-touched first; saturation back-stop at 5 open items), and renders title + body from the same row.
+The runner (`planWireOrRetireEmit()`, pure + tested) keeps only ledger rows with status `wire-or-retire` (modules past the 45-day grace with no runtime importer — `awaiting-wiring` and `protected-provider` rows are never eligible), dedups per module against open `wire-or-retire`-labelled issues (lexical `gh issue list --search` on the Target repo), caps at **3 per run** (oldest last-touched first; saturation back-stop at 5 open items), and files each via `gh issue create --repo gaberoo322/hydra-betting --label needs-triage --label wire-or-retire`, rendering title + body from the same row.
 
-**Confidence routing — this is the judgment half of the gate.** Where a demote is mechanically verifiable (→ `ready-for-agent`), wire-vs-retire is an *opinion*: the module was built with intent that either stalled or died, and deciding which requires recovering that intent. So these items route to **`needs-triage`** (the `triage` lane), mirroring how `hydra-architecture-scan` routes judgment candidates on the orch side. The item body carries the three-way decision protocol for the sweep agent or operator: **(a) WIRE** — intent live → rewrite into a concrete ready-for-agent wiring task; **(b) RETIRE** — intent gone → rewrite into a ready-for-agent retirement task citing the scan (Target CLAUDE.md rule 3); **(c) UNCLEAR** — route to `ready-for-human` and stop. **Ambiguity never resolves to deletion** (rule 6); nothing is deleted while an item sits in triage.
+**Confidence routing — this is the judgment half of the gate.** Where a demote is mechanically verifiable (→ `ready-for-agent`), wire-vs-retire is an *opinion*: the module was built with intent that either stalled or died, and deciding which requires recovering that intent. So these items file with **`needs-triage` + `wire-or-retire`** labels (mirroring how `hydra-architecture-scan` routes judgment candidates on the orch side), and `hydra-wire-or-retire` / `hydra-target-review` resolve them off the board. The issue body carries the three-way decision protocol for the resolver or operator: **(a) WIRE** — intent live → relabel `ready-for-agent` with a concrete wiring task; **(b) RETIRE** — intent gone → relabel `ready-for-agent` with a retirement task citing the scan (Target CLAUDE.md rule 3); **(c) UNCLEAR** — relabel `ready-for-human` and stop. **Ambiguity never resolves to deletion** (rule 6); nothing is deleted while an issue carries `wire-or-retire` + `needs-triage`.
 
 ### 4. Report
 
@@ -128,7 +128,7 @@ dropped 180: within the 45-day wiring grace period (...)
 - **Demote-only.** This skill never emits a deletion of any kind. `src/lib/providers/` is demote-only by Target rule 1; this sweep treats the whole Target that way.
 - **45-day wiring grace, fail closed.** Young files and unknown-age files are never swept.
 - **Deterministic detection + emit.** knip's report through the tested runner — never a hand-rolled loop, never a model guess.
-- **Backlog, not GitHub.** The Target's tracker is the Redis backlog; items go through `POST /api/backlog` and the `queued` lane.
+- **GitHub Issues, not Redis (ADR-0031).** The Target's tracker is the GitHub-Issues board on `gaberoo322/hydra-betting`; items are filed with `gh issue create` and dedup/saturation reads use lexical `gh issue list --search` (REST-first, never `gh --json`/GraphQL).
 - **Saturation back-stop**: emit nothing above 10 open `cleanup-scan` items. **Dedup per file** against the open board.
 - **Dry-run default.** Only `--apply` files items. **One pass**, then exit.
 
@@ -144,8 +144,8 @@ Expected: demote-class findings batch one-item-per-file with the symbol-led titl
 ## Files
 
 - `docs/operator-playbooks/hydra-target-cleanup.md` — this playbook (source of truth; the skill is generated by `scripts/sync-skills.sh`).
-- `scripts/ci/hydra-target-cleanup-emit.ts` — the demote-phase emit runner: `planTargetCleanupEmit()` (pure) + the thin fs/git/API wrapper.
-- `scripts/ci/hydra-target-wire-or-retire-emit.ts` — the judgment-phase emit runner: `planWireOrRetireEmit()` (pure, ledger-driven) + the thin fs/API wrapper; routes to `needs-triage`.
+- `scripts/ci/hydra-target-cleanup-emit.ts` — the demote-phase emit runner: `planTargetCleanupEmit()` (pure) + the thin fs/git/`gh` wrapper (files `cleanup-scan` + `ready-for-agent` issues on `gaberoo322/hydra-betting`).
+- `scripts/ci/hydra-target-wire-or-retire-emit.ts` — the judgment-phase emit runner: `planWireOrRetireEmit()` (pure, ledger-driven) + the thin fs/`gh` wrapper; files `needs-triage` + `wire-or-retire` issues on `gaberoo322/hydra-betting`.
 - `test/hydra-target-wire-or-retire-emit.test.mts` — ledger parse, eligibility (only wire-or-retire rows), dedup, cap, decision-protocol rendering, fail-closed ambiguity.
 - `scripts/ci/hydra-cleanup-render.ts` — shared pure helpers (`parseKnipReport`, `validateFinding`, `classifyExportFix`).
 - `test/hydra-target-cleanup-emit.test.mts` — demote-only filter, grace gate, per-file batching, dedup, cap, title/body coherence, fuzzy-dedup title diversity.
