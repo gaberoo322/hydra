@@ -26,12 +26,14 @@ import { computeArtifactHash } from "../src/design-concept.ts";
 // Force test DB before any module that reads REDIS_URL is loaded.
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
-// All design-concept domain symbols live in the single deep module (issue #2316).
-// `dc` is the main namespace; `gate` is an alias to the same module so the
-// test bodies can reference `gate.gateCheck` and `gate.isFresh` without
-// rewriting every call site.
+// The persistence half of the design-concept domain lives in the Redis-backed
+// module; the pure gate predicates (`gateCheck`, `isFresh`) live in the gate
+// leaf `design-concept-gate.ts` and are consumed directly from there by their
+// callers (the barrel no longer relays them — issues #3466, #3468). `dc` is the
+// persistence namespace; `gate` binds the leaf so the test bodies can reference
+// `gate.gateCheck` and `gate.isFresh` without rewriting every call site.
 const dc = await import("../src/design-concept.ts");
-const gate = dc;
+const gate = await import("../src/design-concept-gate.ts");
 const dcSeam = await import("../src/redis/design-concept.ts");
 
 // The 7-day freshness window is module-private in src/design-concept.ts

@@ -29,10 +29,12 @@
  * `GREEN_LIGHT_REQUIRED_DAYS` / `GreenLightMetrics`) — all defined in
  * `src/design-concept-gate.ts` (issues #3039, #3414). That leaf imports only
  * the tier-classifier, so gate/identity/green-light tests need zero Redis
- * setup. This module imports the leaf and **re-exports** its public symbols,
- * so a caller can still `import { gateCheck, computeGreenLight,
+ * setup. This module imports the leaf and **re-exports** its persistence-facing
+ * public symbols, so a caller can still `import { computeGreenLight,
  * getDesignConcept } from "./design-concept.ts"` on one line — preserving the
- * single-source import surface that motivated the #2316 consolidation.
+ * single-source import surface that motivated the #2316 consolidation. The pure
+ * gate predicates (`isFresh`, `gateCheck`) are imported directly from the leaf
+ * by their sole callers, so they are no longer relayed through this barrel.
  *
  * This module retains:
  *
@@ -92,14 +94,14 @@ import {
 // ---------------------------------------------------------------------------
 //
 // The pure gate/identity leaf lives in `design-concept-gate.ts`. Re-export its
-// public surface here so existing callers keep their single-source import
-// (`import { gateCheck, getDesignConcept } from "./design-concept.ts"`) — this
-// is the back-compat relay that keeps the #3039 re-extraction from
-// reintroducing the 3-way import fan-out that motivated the #2316 re-merge.
+// persistence-facing surface here so existing callers keep their single-source
+// import (`import { computeGreenLight, getDesignConcept } from
+// "./design-concept.ts"`) — this is the back-compat relay that keeps the #3039
+// re-extraction from reintroducing the 3-way import fan-out that motivated the
+// #2316 re-merge. `isFresh` / `gateCheck` are consumed directly from the leaf by
+// their sole callers, so they are not relayed here (issues #3466, #3468).
 export {
   computeArtifactHash,
-  isFresh,
-  gateCheck,
   computeGreenLight,
   GREEN_LIGHT_WINDOW_DAYS,
   GREEN_LIGHT_REQUIRED_DAYS,
