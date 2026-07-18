@@ -230,31 +230,3 @@ export async function _resetRevertCount(date: string): Promise<void> {
   const r = getRedisConnection();
   await r.del(holdbackRevertCountKey(date));
 }
-
-// ---------------------------------------------------------------------------
-// Back-compat re-exports (issue #3415)
-//
-// The pending-enroll registry + enrolled-marker (issue #2622/#2623) and the
-// merge-watch health snapshot moved to the focused `redis/holdback-merge-watch.ts`
-// leaf: they are consumed exclusively by the merge-watch family and share no
-// callers with the baseline + revert-counter concerns retained above. These
-// re-exports preserve the existing import surface for callers that still import
-// these symbols from `redis/holdback.ts`; migrate those imports to
-// `redis/holdback-merge-watch.ts` and then retire this block (the #2125
-// precedent for retiring a back-compat re-export shim once callers migrate).
-// ---------------------------------------------------------------------------
-export {
-  pendingEnrollAdd,
-  pendingEnrollList,
-  pendingEnrollRemove,
-  _resetPendingEnroll,
-  wasEnrolledMarked,
-  markEnrolled,
-  _resetEnrolledMarker,
-  setMergeWatchHealth,
-  getMergeWatchHealth,
-  type PendingEnrollEntry,
-  type PendingEnrollAddResult,
-  type PendingEnrollListResult,
-  type MergeWatchHealthRecord,
-} from "./holdback-merge-watch.ts";

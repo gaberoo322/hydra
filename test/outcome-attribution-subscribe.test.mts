@@ -68,7 +68,7 @@ import {
   ATTRIBUTION_DEFAULT_WINDOW_MS,
   type MergeWindowContext,
 } from "../src/outcome-attribution/windows.ts";
-import type { PendingEnrollEntry } from "../src/redis/holdback.ts";
+import type { PendingEnrollEntry } from "../src/redis/holdback-merge-watch.ts";
 import {
   runAttributionRecord,
   type AttributionRecordDeps,
