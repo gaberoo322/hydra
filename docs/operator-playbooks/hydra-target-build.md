@@ -113,7 +113,10 @@ esac
 # hydra-betting these resolve to `npm ci --prefer-offline` in `web/`.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 INSTALL_CMD=$(jq -r '.verify.install' "$TARGET_WT/.hydra/manifest.json")
-(cd "$TARGET_WT/$APP_SUBDIR" && $INSTALL_CMD --no-audit --no-fund)
+# eval word-splits the multi-word manifest command under zsh (which does NOT
+# IFS-split a bare `$INSTALL_CMD` — it would be taken as one command word, e.g.
+# `command not found: npm ci --prefer-offline`). Portable across bash + zsh.
+(cd "$TARGET_WT/$APP_SUBDIR" && eval "$INSTALL_CMD --no-audit --no-fund")
 
 # Mirror the Target SDLC gate scripts into the worktree (issue #1451). The gate
 # scripts (mutation-check / target-design-concept / post-merge-health) and their
@@ -150,9 +153,11 @@ MANIFEST="$TARGET_WT/.hydra/manifest.json"
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
 TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
-cd "$TARGET_WT/$APP_SUBDIR"     # appSubdir='' => repo root
-$TEST_CMD                        # betting: `npm run test:raw` (the real suite), NEVER bare `npm test`
-$TYPECHECK_CMD
+cd "$TARGET_WT/$APP_SUBDIR"      # appSubdir='' => repo root
+# eval word-splits the multi-word manifest commands under zsh (a bare `$TEST_CMD`
+# is taken as one command word — `command not found: npm run test:raw`). Portable.
+eval "$TEST_CMD"                  # betting: `npm run test:raw` (the real suite), NEVER bare `npm test`
+eval "$TYPECHECK_CMD"
 git log --oneline -5
 git status --short
 ```
@@ -408,8 +413,10 @@ APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
 TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
 cd "$TARGET_WT/$APP_SUBDIR"
-$TYPECHECK_CMD       # must pass
-$TEST_CMD            # betting: `npm run test:raw`; must pass; count must not decrease
+# eval word-splits the multi-word manifest commands under zsh (a bare `$TYPECHECK_CMD`
+# is taken as one command word — `command not found: npm run typecheck`). Portable.
+eval "$TYPECHECK_CMD"  # must pass
+eval "$TEST_CMD"       # betting: `npm run test:raw`; must pass; count must not decrease
 ```
 
 After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
