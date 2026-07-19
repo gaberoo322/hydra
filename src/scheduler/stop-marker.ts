@@ -27,25 +27,6 @@ import {
 } from "../redis/scheduler.ts";
 
 /**
- * The reason a stop occurred — the discriminant the watchdog reads to decide
- * whether to auto-restart (issue #388).
- *
- *   - "deliberate"      — POST /scheduler/stop (operator intent). A 24h Redis
- *                         marker is written; the watchdog must NOT auto-restart.
- *   - "circuit-breaker" — auto-pause (consecutive-no-op-merge halt). NO marker
- *                         written; the watchdog SHOULD restart once work queues.
- *   - "error-cap"       — auto-pause (consecutive errors). NO marker written;
- *                         the watchdog SHOULD restart. Same recovery contract as
- *                         circuit-breaker.
- *   - null              — never stopped, or the last action was `start()`.
- *
- * (`"shutdown"` is a stop *input* reason handled by the controller — SIGTERM /
- * SIGINT process exit — but it is never a persisted marker value, so it is not
- * part of this discriminant type.)
- */
-export type StopReason = "deliberate" | "circuit-breaker" | "error-cap" | null;
-
-/**
  * The on-the-wire shape of the deliberate-stop marker persisted to Redis
  * (`hydra:scheduler:deliberate-stop`). JSON-serialized on write, parsed +
  * validated on rehydrate.
