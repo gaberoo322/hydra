@@ -36,6 +36,7 @@ import {
   type LoadOutcomesResult,
 } from "../../outcomes.ts";
 import type { OutcomeVerdict } from "./wiring-liveness-types.ts";
+import { logger } from "../../logger.ts";
 
 /**
  * Grace window (ms) after which a present-but-old reading is STALE, not LIVE.
@@ -186,8 +187,9 @@ export async function evaluateDarkOutcomes(
     // A load failure is not a per-outcome dark condition — the outcomes loader
     // already logs the parse/schema errors. Surface nothing here so a malformed
     // manifest never masquerades as a flock of dark outcomes.
-    console.error(
-      `[Housekeeping] wiring-liveness dark-outcome check: could not load outcomes — ${loaded.errors.join("; ")}`,
+    logger.error(
+      { errors: loaded.errors },
+      "wiring-liveness dark-outcome check: could not load outcomes",
     );
     return { darkOutcomes, staleOutcomes, outcomeVerdicts };
   }

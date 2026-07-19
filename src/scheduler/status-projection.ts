@@ -18,6 +18,7 @@ import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getReconcilerHealth } from "../redis/reconciler.ts";
 import type { ReconcilerHealthRecord } from "../redis/reconciler.ts";
 import { getIndexerErrorStats } from "../knowledge-base/indexer-stats.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Duration formatter — used by buildSchedulerStatus (below) and by the
@@ -177,14 +178,14 @@ export async function buildSchedulerStatus(
   try {
     autopilotPause = await resolveAutopilotPaused();
   } catch (err: any) {
-    console.error(`[Heartbeat] getStatus autopilot-pause read failed: ${err?.message ?? err}`);
+    logger.error({ err }, "getStatus autopilot-pause read failed");
   }
 
   let reconciler: ReconcilerHealthRecord | null = null;
   try {
     reconciler = await resolveReconcilerHealth();
   } catch (err: any) {
-    console.error(`[Heartbeat] getStatus reconciler-health read failed: ${err?.message ?? err}`);
+    logger.error({ err }, "getStatus reconciler-health read failed");
   }
 
   const { indexerErrors, indexerRetries } = getIndexerErrorStats();

@@ -8,6 +8,7 @@
 import { setDigestLastWeekly } from "../../redis/housekeeping.ts";
 import { buildWeeklySummary as buildWeeklySummaryImpl } from "../../digest.ts";
 import { sendToTelegram as sendToTelegramImpl } from "../../notify.ts";
+import { logger } from "../../logger.ts";
 
 /** External touchpoints of the weekly-digest chore. */
 export interface WeeklyDigestDeps {
@@ -29,6 +30,6 @@ export async function runWeeklyDigest(deps: WeeklyDigestDeps = {}): Promise<void
     const sendToTelegram = deps.sendToTelegram ?? sendToTelegramImpl;
     await sendToTelegram(summary);
     await setLastWeekly(Date.now().toString());
-    console.log("[Housekeeping] Sent weekly summary");
+    logger.info({}, "weekly-digest: sent weekly summary");
   }
 }

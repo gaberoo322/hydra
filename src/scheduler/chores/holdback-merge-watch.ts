@@ -59,6 +59,7 @@ import { enrollHoldback, type EnrollResult } from "../../holdback.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
 import { isEnrolledTier } from "../../holdback-policy.ts";
 import { viewPr } from "../../github/issues.ts";
+import { logger } from "../../logger.ts";
 
 /**
  * Normalized merge-landing status for one PR. `state` is the `gh pr view` state
@@ -191,7 +192,7 @@ export async function runHoldbackMergeWatch(
   if (listed.ok === false) {
     // Can't read the registry this tick — log, persist an empty health snapshot,
     // and bail. Never throws.
-    console.error(`[Housekeeping] merge-watch: pendingEnrollList failed: ${listed.error}`);
+    logger.error({ err: { message: listed.error } }, "merge-watch: pendingEnrollList failed");
     await persistHealth(setHealth, result);
     return result;
   }
@@ -214,8 +215,15 @@ export async function runHoldbackMergeWatch(
   await persistHealth(setHealth, result);
 
   if (result.landed > 0 || result.droppedExempt > 0) {
-    console.log(
-      `[Housekeeping] merge-watch: pending=${result.pendingDepth} landed=${result.landed} droppedExempt=${result.droppedExempt} stillOpen=${result.stillOpen} retried=${result.retried}`,
+    logger.info(
+      {
+        pending: result.pendingDepth,
+        landed: result.landed,
+        droppedExempt: result.droppedExempt,
+        stillOpen: result.stillOpen,
+        retried: result.retried,
+      },
+      "merge-watch: pass complete",
     );
   }
 
@@ -248,7 +256,7 @@ async function processOne(
     const status = await ctx.fetchMergeStatus(prNumber);
     if (status == null) {
       // gh/API failure — leave the entry for the next tick (AC5).
-      console.error(`[Housekeeping] merge-watch: mergeStatus fetch failed for pr ${prNumber}; retrying next tick`);
+      logger.error({ prNumber }, "merge-watch: mergeStatus fetch failed; retrying next tick");
       ctx.result.retried += 1;
       return;
     }
@@ -278,7 +286,7 @@ async function processOne(
       tier: entry.tier,
     });
     if (enrollRes.ok === false) {
-      console.error(`[Housekeeping] merge-watch: enroll failed for pr ${prNumber}: ${enrollRes.error}; retrying next tick`);
+      logger.error({ prNumber, err: { message: enrollRes.error } }, "merge-watch: enroll failed; retrying next tick");
       ctx.result.retried += 1;
       return;
     }
@@ -322,7 +330,10 @@ async function processOne(
     if (entry.anchorType) cycleBody.anchorType = entry.anchorType;
     const cycleRes = await ctx.recordCycleRecord(cycleBody);
     if (cycleRes.ok === false) {
-      console.error(`[Housekeeping] merge-watch: cycle-record enrichment failed for pr ${prNumber} (cycle ${entry.cycleId}): ${cycleRes.detail || cycleRes.code}`);
+      logger.error(
+        { prNumber, cycleId: entry.cycleId, err: { message: cycleRes.detail || cycleRes.code, code: cycleRes.code } },
+        "merge-watch: cycle-record enrichment failed",
+      );
     }
 
     // Mark processed BEFORE removing so a marker-write failure leaves the entry
@@ -330,7 +341,7 @@ async function processOne(
     // remove once the mark landed.
     const marked = await ctx.mark(prNumber, commitSha);
     if (marked.ok === false) {
-      console.error(`[Housekeeping] merge-watch: markEnrolled failed for pr ${prNumber}; leaving pending entry to retry`);
+      logger.error({ prNumber }, "merge-watch: markEnrolled failed; leaving pending entry to retry");
       ctx.result.retried += 1;
       return;
     }
@@ -346,7 +357,7 @@ async function processOne(
   } catch (err: any) {
     // Defensive: no dep should throw (all are best-effort result-returning), but
     // if one does, log and leave the entry to retry — never abort the pass.
-    console.error(`[Housekeeping] merge-watch: unexpected error for pr ${prNumber}: ${err?.message || String(err)}`);
+    logger.error({ prNumber, err }, "merge-watch: unexpected error");
     ctx.result.retried += 1;
   }
 }
@@ -365,6 +376,6 @@ async function persistHealth(
       stillOpen: result.stillOpen,
     });
   } catch (err: any) {
-    console.error(`[Housekeeping] merge-watch: health persist failed: ${err?.message || String(err)}`);
+    logger.error({ err }, "merge-watch: health persist failed");
   }
 }

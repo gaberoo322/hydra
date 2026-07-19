@@ -43,6 +43,7 @@
  */
 
 import * as Sentry from "@sentry/node";
+import { logger } from "../logger.ts";
 import {
   getDigestLastWeekly,
   getMemoryLastConsolidation,
@@ -164,7 +165,7 @@ interface Chore {
  * Run one chore through the uniform guard → work → bookkeeping → error-log
  * pattern, appending its name to `ran` or `skipped` accordingly.
  *
- * Never throws: a chore that throws is logged (`console.error`), recorded as a
+ * Never throws: a chore that throws is logged (`logger.error`), recorded as a
  * Sentry breadcrumb, and routed to `skipped` so one failure doesn't abort the
  * remaining chores. This is the single place the error format + Sentry
  * breadcrumb live, so a change applies to all chores at once.
@@ -190,7 +191,7 @@ async function runChore(
     }
     ran.push(chore.name);
   } catch (err: any) {
-    console.error(`[Housekeeping] ${chore.name} failed: ${err.message}`);
+    logger.error({ err, chore: chore.name }, "housekeeping chore failed");
     Sentry.addBreadcrumb({
       category: "scheduler",
       message: `${chore.name} failed: ${err.message}`,

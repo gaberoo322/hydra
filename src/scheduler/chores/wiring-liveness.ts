@@ -73,6 +73,7 @@ import {
 // aggregate DOWN from the leaf and assembles it from all four check-family results.
 // `OutcomeVerdict` is imported for the dark-arm filter/Extract in the body below.
 import type { OutcomeVerdict, WiringLivenessResult } from "./wiring-liveness-types.ts";
+import { logger } from "../../logger.ts";
 
 // The two output-check type names `test/wiring-liveness.test.mts` consumes through
 // this module's surface (for its `runWiringLiveness` integration cases) are
@@ -163,14 +164,14 @@ export async function runWiringLiveness(
   try {
     const loaded = await loadManifest(deps.manifestPath);
     if (isLoadFailure(loaded)) {
-      console.error(`[Housekeeping] wiring-liveness: ${loaded.reason}`);
+      logger.error({ reason: loaded.reason }, "wiring-liveness: manifest load failed");
       return emptyResult({ evaluated: false, reason: loaded.reason });
     }
 
     const probe = await readTimers();
     if (isProbeFailure(probe)) {
       const reason = `host-probe failed (${probe.code})`;
-      console.error(`[Housekeeping] wiring-liveness: ${reason}`);
+      logger.error({ reason, code: probe.code }, "wiring-liveness: host-probe failed");
       return emptyResult({ evaluated: false, reason });
     }
 
@@ -261,8 +262,16 @@ export async function runWiringLiveness(
           .join("; ");
         parts.push(`stale leading outcomes: ${staleDetail}`);
       }
-      console.warn(
-        `[Housekeeping] wiring-liveness flagged declared entrypoints — ${parts.join("; ")}`,
+      logger.warn(
+        {
+          missing: result.missing,
+          stale: result.stale,
+          belowFloor: result.belowFloor,
+          darkOutcomes: result.darkOutcomes,
+          staleOutcomes: result.staleOutcomes,
+          detail: parts.join("; "),
+        },
+        "wiring-liveness flagged declared entrypoints",
       );
     }
 
@@ -271,7 +280,7 @@ export async function runWiringLiveness(
     // Defense in depth: nothing above should throw, but a never-throw chore must
     // never leak an exception even if a dep does. Fail loud, return a result.
     const reason = `unexpected error: ${err?.message || err}`;
-    console.error(`[Housekeeping] wiring-liveness: ${reason}`);
+    logger.error({ err }, "wiring-liveness: unexpected error");
     return emptyResult({ evaluated: false, reason });
   }
 }

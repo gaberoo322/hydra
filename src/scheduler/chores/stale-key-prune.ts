@@ -26,6 +26,7 @@ import {
   deleteKeysBatch,
 } from "../../redis/utility.ts";
 import { setCleanupLastDaily } from "../../redis/housekeeping.ts";
+import { logger } from "../../logger.ts";
 
 // Prefix shapes used by the stale-key sweep. Kept inline (rather than importing
 // from redis/keys.ts) because this is a housekeeping sweep, not a domain owner —
@@ -96,17 +97,17 @@ export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): P
     const removed = await pruneMetricsIndexFn(cutoffMs);
     if (removed > 0) {
       totalPruned += removed;
-      console.log(`[Housekeeping] Pruned ${removed} old metrics index entries`);
+      logger.info({ removed }, "stale-key-prune: pruned old metrics index entries");
     }
     // Trim to max entries as a safety cap
     const indexSize = await getMetricsIndexSizeFn();
     if (indexSize > METRICS_INDEX_MAX_ENTRIES) {
       const excess = indexSize - METRICS_INDEX_MAX_ENTRIES;
       await trimMetricsIndexFn(excess);
-      console.log(`[Housekeeping] Trimmed metrics index by ${excess} (cap: ${METRICS_INDEX_MAX_ENTRIES})`);
+      logger.info({ excess, cap: METRICS_INDEX_MAX_ENTRIES }, "stale-key-prune: trimmed metrics index");
     }
   } catch (err: any) {
-    console.error(`[Housekeeping] Metrics index prune failed: ${err.message}`);
+    logger.error({ err }, "stale-key-prune: metrics index prune failed");
   }
 
   // Prune old cycle/task/metrics keys by scanning and checking timestamps.
@@ -157,10 +158,10 @@ export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): P
       if (toDelete.length > 0) {
         await deleteKeysBatchFn(toDelete);
         totalPruned += toDelete.length;
-        console.log(`[Housekeeping] Pruned ${toDelete.length} stale ${prefix}* keys`);
+        logger.info({ prefix, pruned: toDelete.length }, "stale-key-prune: pruned stale keys");
       }
     } catch (err: any) {
-      console.error(`[Housekeeping] ${prefix}* prune failed: ${err.message}`);
+      logger.error({ prefix, err }, "stale-key-prune: prefix prune failed");
     }
   }
 
@@ -178,14 +179,14 @@ export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): P
     if (legacyType === "list") {
       await deleteKeysBatchFn([LEGACY_METRICS_LIST_KEY]);
       totalPruned += 1;
-      console.log(`[Housekeeping] Removed legacy metrics list key ${LEGACY_METRICS_LIST_KEY} (issue #2927)`);
+      logger.info({ key: LEGACY_METRICS_LIST_KEY }, "stale-key-prune: removed legacy metrics list key (issue #2927)");
     }
   } catch (err: any) {
-    console.error(`[Housekeeping] Legacy metrics list prune failed: ${err.message}`);
+    logger.error({ err }, "stale-key-prune: legacy metrics list prune failed");
   }
 
   if (totalPruned > 0) {
-    console.log(`[Housekeeping] Total stale Redis keys pruned: ${totalPruned}`);
+    logger.info({ totalPruned }, "stale-key-prune: total stale Redis keys pruned");
   }
   // Stamp the daily guard key so an immediate second housekeeping invocation
   // skips this chore. Consistent with `runWeeklyDigest`, `runMemoryConsolidation`,

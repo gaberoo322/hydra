@@ -42,6 +42,7 @@ import {
   type StagnationAlertStateStore,
 } from "../notification/stagnation-alerts.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Injectable dependencies for {@link emitTickStagnationAlerts} (all optional).
@@ -101,6 +102,6 @@ export async function emitTickStagnationAlerts(
     const scorecard = await readScorecard();
     await emitStagnationAlerts(scorecard, bus as PublishableBus, { store });
   } catch (err: any) {
-    console.error(`[Heartbeat] builder-health stagnation scan failed: ${err?.message ?? err}`);
+    logger.error({ err }, "builder-health stagnation scan failed");
   }
 }

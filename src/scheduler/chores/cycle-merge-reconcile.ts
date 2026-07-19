@@ -76,6 +76,7 @@ import {
   setReconcilerHealth,
   type ReconcilerHealthRecord,
 } from "../../redis/reconciler.ts";
+import { logger } from "../../logger.ts";
 
 /** How many recent cycle records to scan per tick (newest first). */
 const DEFAULT_SCAN_LIMIT = 50;
@@ -225,9 +226,7 @@ export async function runCycleMergeReconcile(
   try {
     pendingSet = await listPending();
   } catch (err: any) {
-    console.error(
-      `[Housekeeping] cycle-merge-reconcile: pending-enroll list failed; self-arm disabled this tick: ${err?.message || String(err)}`,
-    );
+    logger.error({ err }, "cycle-merge-reconcile: pending-enroll list failed; self-arm disabled this tick");
     pendingSet = null;
   }
 
@@ -235,7 +234,7 @@ export async function runCycleMergeReconcile(
   try {
     ids = await listRecent(scanLimit);
   } catch (err: any) {
-    console.error(`[Housekeeping] cycle-merge-reconcile: listRecent failed: ${err?.message || String(err)}`);
+    logger.error({ err }, "cycle-merge-reconcile: listRecent failed");
     return result;
   }
 
@@ -269,7 +268,7 @@ export async function runCycleMergeReconcile(
       const prState = await fetchPrState(prNumber);
       if (prState == null) {
         // gh/API failure — leave the record for the next tick.
-        console.error(`[Housekeeping] cycle-merge-reconcile: state fetch failed for pr ${prNumber} (cycle ${cycleId}); retrying next tick`);
+        logger.error({ prNumber, cycleId }, "cycle-merge-reconcile: state fetch failed; retrying next tick");
         result.fetchFailed += 1;
         continue;
       }
@@ -296,8 +295,9 @@ export async function runCycleMergeReconcile(
           // wasEnrolledMarked itself never throws (it fails closed to true), but
           // an injected dep might — fail closed to "already enrolled" so we never
           // double-arm on an unknown state.
-          console.error(
-            `[Housekeeping] cycle-merge-reconcile: self-arm enrolled-check failed for pr ${prNumber} (cycle ${cycleId}); skipping arm: ${err?.message || String(err)}`,
+          logger.error(
+            { prNumber, cycleId, err },
+            "cycle-merge-reconcile: self-arm enrolled-check failed; skipping arm",
           );
           enrolledAlready = true;
         }
@@ -321,8 +321,9 @@ export async function runCycleMergeReconcile(
             armed = { ok: false, error: err?.message || String(err) };
           }
           if (armed.ok === false) {
-            console.error(
-              `[Housekeeping] cycle-merge-reconcile: self-arm pendingEnrollAdd failed for pr ${prNumber} (cycle ${cycleId}); retrying next tick: ${armed.error}`,
+            logger.error(
+              { prNumber, cycleId, err: { message: armed.error } },
+              "cycle-merge-reconcile: self-arm pendingEnrollAdd failed; retrying next tick",
             );
             result.selfArmFailed += 1;
           } else {
@@ -357,7 +358,10 @@ export async function runCycleMergeReconcile(
         anchorType: anchorType || undefined,
       });
       if (rec.ok === false) {
-        console.error(`[Housekeeping] cycle-merge-reconcile: upgrade re-post failed for pr ${prNumber} (cycle ${cycleId}): ${rec.detail || rec.code}`);
+        logger.error(
+          { prNumber, cycleId, err: { message: rec.detail || rec.code, code: rec.code } },
+          "cycle-merge-reconcile: upgrade re-post failed",
+        );
         result.upgradeFailed += 1;
         continue;
       }
@@ -365,13 +369,24 @@ export async function runCycleMergeReconcile(
     } catch (err: any) {
       // Defensive: no dep should throw, but if one does, log and continue —
       // never abort the pass.
-      console.error(`[Housekeeping] cycle-merge-reconcile: unexpected error for cycle ${cycleId}: ${err?.message || String(err)}`);
+      logger.error({ cycleId, err }, "cycle-merge-reconcile: unexpected error");
     }
   }
 
   if (result.upgraded > 0 || result.selfArmed > 0) {
-    console.log(
-      `[Housekeeping] cycle-merge-reconcile: scanned=${result.scanned} candidates=${result.candidates} upgraded=${result.upgraded} notMerged=${result.notMerged} fetchFailed=${result.fetchFailed} upgradeFailed=${result.upgradeFailed} selfArmed=${result.selfArmed} selfArmSkipped=${result.selfArmSkipped} selfArmFailed=${result.selfArmFailed}`,
+    logger.info(
+      {
+        scanned: result.scanned,
+        candidates: result.candidates,
+        upgraded: result.upgraded,
+        notMerged: result.notMerged,
+        fetchFailed: result.fetchFailed,
+        upgradeFailed: result.upgradeFailed,
+        selfArmed: result.selfArmed,
+        selfArmSkipped: result.selfArmSkipped,
+        selfArmFailed: result.selfArmFailed,
+      },
+      "cycle-merge-reconcile: pass complete",
     );
   }
 
@@ -409,8 +424,9 @@ export async function runCycleMergeReconcile(
   try {
     await setHealth(health);
   } catch (err: any) {
-    console.error(
-      `[Housekeeping] cycle-merge-reconcile: health-record persist failed; status ranAt will stay stale until next tick: ${err?.message || String(err)}`,
+    logger.error(
+      { err },
+      "cycle-merge-reconcile: health-record persist failed; status ranAt will stay stale until next tick",
     );
   }
 

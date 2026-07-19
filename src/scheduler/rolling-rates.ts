@@ -12,6 +12,7 @@
 
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { computeRollingMergeRateFromTrend, computeEmptyRateFromTrend } from "../metrics/stats-projection.ts";
+import { logger } from "../logger.ts";
 
 // Rolling merge-rate window (issue #232): the operator-visible mergeRate is
 // computed from the last N cycles in cycle-history (same source as
@@ -60,7 +61,7 @@ export async function defaultComputeRollingMergeRate(window: number = ROLLING_ME
       cyclesInWindow: trend.length,
     };
   } catch (err: any) {
-    console.error(`[Heartbeat] Rolling merge-rate computation failed: ${err?.message || err}`);
+    logger.error({ err }, "rolling merge-rate computation failed");
     return { mergeRate: null, cyclesInWindow: 0 };
   }
 }
@@ -91,7 +92,7 @@ export async function defaultComputeRollingEmptyRate(window: number = ROLLING_EM
       cyclesInWindow: trend.length,
     };
   } catch (err: any) {
-    console.error(`[Heartbeat] Rolling empty-rate computation failed: ${err?.message || err}`);
+    logger.error({ err }, "rolling empty-rate computation failed");
     return { emptyRate: null, cyclesInWindow: 0 };
   }
 }

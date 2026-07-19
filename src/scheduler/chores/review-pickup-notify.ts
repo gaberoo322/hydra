@@ -24,6 +24,7 @@ import {
 } from "../../redis/review.ts";
 import { getReviewPickupSet } from "../../review-pickup.ts";
 import type { PublishableBus } from "../../event-bus-seams.ts";
+import { logger } from "../../logger.ts";
 
 /**
  * External touchpoints of the review-pickup-notify chore. `deps` is injectable
@@ -61,7 +62,7 @@ export async function runReviewPickupNotify(
     // Set is empty — re-arm if a prior notification is still suppressing.
     if (alreadyNotified) {
       await clearNotified();
-      console.log("[Housekeeping] Review pickup set drained — re-armed notify hook");
+      logger.info({}, "review-pickup-notify: set drained — re-armed notify hook");
       return { fired: false, count: 0, transitioned: true };
     }
     return { fired: false, count: 0, transitioned: false };
@@ -88,6 +89,6 @@ export async function runReviewPickupNotify(
     },
   });
   await setNotified();
-  console.log(`[Housekeeping] Review pickup set non-empty (${count}) — sent notify`);
+  logger.info({ count }, "review-pickup-notify: set non-empty — sent notify");
   return { fired: true, count, transitioned: true };
 }
