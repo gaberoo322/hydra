@@ -285,9 +285,15 @@ describe("runChore guarded-chore runner (issue #1864)", () => {
   test("a throwing chore is caught, recorded as skipped, and does not propagate", async () => {
     const ran: string[] = [];
     const skipped: string[] = [];
-    const originalError = console.error;
+    // ADR-0027: runChore's error arm now logs through the pino structured-logger
+    // seam (module singleton → process.stderr) instead of a freeform
+    // `console.error` string. Capture the serialized JSON line and assert the
+    // structured fields carry the data the old format string embedded — the
+    // chore name (`chore`) and the fail-loud error (`err.message`) — rather than
+    // grepping a freeform prose string.
+    const originalWrite = process.stderr.write.bind(process.stderr);
     let logged = "";
-    console.error = (msg: any) => { logged = String(msg); };
+    (process.stderr as any).write = (chunk: any) => { logged += String(chunk); return true; };
     try {
       await runChore(
         {
@@ -298,19 +304,25 @@ describe("runChore guarded-chore runner (issue #1864)", () => {
         skipped,
       );
     } finally {
-      console.error = originalError;
+      (process.stderr as any).write = originalWrite;
     }
     assert.deepEqual(skipped, ["c-throws"], "a throwing chore appends to skipped");
     assert.deepEqual(ran, [], "a throwing chore does not append to ran");
-    assert.match(logged, /c-throws failed: boom/, "the error is logged with the chore name");
+    const line = logged.split("\n").find((l) => l.trim());
+    assert.ok(line, "the error is logged (fail-loud)");
+    const obj = JSON.parse(line!) as Record<string, any>;
+    assert.equal(obj.chore, "c-throws", "the chore name is a structured field");
+    assert.equal(obj.err?.message, "boom", "the error is a structured field, not embedded in prose");
+    assert.equal(obj.msg, "housekeeping chore failed", "the log message is the stable event name");
   });
 
   test("a guard that throws is caught and recorded as skipped", async () => {
     const ran: string[] = [];
     const skipped: string[] = [];
     let workInvoked = false;
-    const originalError = console.error;
-    console.error = () => {};
+    // Silence the pino stderr line for this behavioral-only case.
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = () => true;
     try {
       await runChore(
         {
@@ -322,7 +334,7 @@ describe("runChore guarded-chore runner (issue #1864)", () => {
         skipped,
       );
     } finally {
-      console.error = originalError;
+      (process.stderr as any).write = originalWrite;
     }
     assert.equal(workInvoked, false, "work must NOT run when the guard throws");
     assert.deepEqual(skipped, ["c-guard-throws"], "a throwing guard appends to skipped");

@@ -40,6 +40,7 @@ import {
   isDarkOutcomeFiled,
   markDarkOutcomeFiled,
 } from "../../redis/wiring-liveness-dark-outcomes.ts";
+import { logger } from "../../logger.ts";
 
 // `DarkAlarmOutcome` (per-outcome alarm verdict) and `DarkAlarmResult` (the
 // aggregate alarm-pass result — the return type of `runDarkOutcomeAlarm` below) are
@@ -159,8 +160,9 @@ async function fileNeedsTriage(
     "needs-triage",
   ]);
   if (isFilerFailure(result)) {
-    console.error(
-      `[Housekeeping] wiring-liveness dark-alarm: gh issue create failed for ${verdict.name} (${result.code})`,
+    logger.error(
+      { name: verdict.name, code: result.code },
+      "wiring-liveness dark-alarm: gh issue create failed",
     );
     return { ok: false, reason: result.code };
   }
@@ -204,8 +206,9 @@ export async function runDarkOutcomeAlarm(
     try {
       await clearStreak(name);
     } catch (err: any) {
-      console.error(
-        `[Housekeeping] wiring-liveness dark-alarm: failed to clear recovered streak for ${name}: ${err?.message || err}`,
+      logger.error(
+        { name, err },
+        "wiring-liveness dark-alarm: failed to clear recovered streak",
       );
     }
   }
@@ -249,14 +252,20 @@ export async function runDarkOutcomeAlarm(
         darkForMs,
         issueNumber: fileResult.issueNumber,
       });
-      console.warn(
-        `[Housekeeping] wiring-liveness dark-alarm: filed needs-triage issue #${fileResult.issueNumber} for dark leading outcome '${verdict.name}' (dark ${Math.floor(darkForMs / (24 * 60 * 60 * 1000))}d)`,
+      logger.warn(
+        {
+          issueNumber: fileResult.issueNumber,
+          name: verdict.name,
+          darkForDays: Math.floor(darkForMs / (24 * 60 * 60 * 1000)),
+        },
+        "wiring-liveness dark-alarm: filed needs-triage issue for dark leading outcome",
       );
     } catch (err: any) {
       // Defense in depth: a Redis read/write throw for one outcome must not abort
       // the whole pass. Fail loud, record file-failed, continue.
-      console.error(
-        `[Housekeeping] wiring-liveness dark-alarm: unexpected error for ${verdict.name}: ${err?.message || err}`,
+      logger.error(
+        { name: verdict.name, err },
+        "wiring-liveness dark-alarm: unexpected error",
       );
       outcomes.push({
         name: verdict.name,

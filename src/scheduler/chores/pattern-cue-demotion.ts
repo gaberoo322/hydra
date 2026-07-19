@@ -24,6 +24,7 @@
 
 import { runCueDemotion } from "../../pattern-memory/demotion.ts";
 import { setLastDemotionCount } from "../../redis/agent-memory.ts";
+import { logger } from "../../logger.ts";
 
 /**
  * Injectable touchpoints so the chore's wiring is testable without `gh`/Redis.
@@ -50,23 +51,22 @@ export async function runPatternCueDemotion(
     try {
       await persistCount(result.demotions.length);
     } catch (err: any) {
-      console.error(
-        `[Housekeeping] pattern-cue-demotion count-persist failed: ${err?.message || err}`,
-      );
+      logger.error({ err }, "pattern-cue-demotion: count-persist failed");
     }
     if (result.demotions.length > 0) {
-      console.log(
-        `[Housekeeping] pattern-cue-demotion: demoted ${result.demotions.length} cue(s) ` +
-          `from ${result.scanned} closed meta-friction issue(s)`,
+      logger.info(
+        { demoted: result.demotions.length, scanned: result.scanned },
+        "pattern-cue-demotion: demoted cue(s) from closed meta-friction issue(s)",
       );
     }
     if (result.errors.length > 0) {
-      console.error(
-        `[Housekeeping] pattern-cue-demotion: ${result.errors.length} per-issue error(s): ${result.errors.join("; ")}`,
+      logger.error(
+        { errorCount: result.errors.length, errors: result.errors },
+        "pattern-cue-demotion: per-issue error(s)",
       );
     }
   } catch (err: any) {
     // Defence-in-depth — runCueDemotion is written to resolve, not raise.
-    console.error(`[Housekeeping] pattern-cue-demotion failed: ${err?.message || err}`);
+    logger.error({ err }, "pattern-cue-demotion failed");
   }
 }

@@ -52,6 +52,7 @@ import { getTargetWorkspace } from "../../target-config.ts";
 import { gitExec } from "../../github/git.ts";
 import { isLivePid } from "../../process-probe.ts";
 import { pruneOrphanedTargetWorktrees } from "../../worktree-orphan.ts";
+import { logger } from "../../logger.ts";
 
 /**
  * External touchpoints of the orphan-worktree prune chore, injected so the chore
@@ -113,15 +114,16 @@ export async function runWorktreeOrphanPrune(
       now,
     });
     if (reclaimed > 0) {
-      console.log(
-        `[Housekeeping] worktree-orphan-prune: reclaimed ${reclaimed} orphan worktree(s) (issue #3136)`,
+      logger.info(
+        { reclaimed },
+        "worktree-orphan-prune: reclaimed orphan worktree(s) (issue #3136)",
       );
     }
     return reclaimed;
   } catch (err: any) {
     // Defense in depth: the pruner is already never-throwing, but a never-throw
     // chore must not leak an exception even if a dep does. Fail loud, return 0.
-    console.error(`[Housekeeping] worktree-orphan-prune failed: ${err?.message || err}`);
+    logger.error({ err }, "worktree-orphan-prune failed");
     return 0;
   }
 }
