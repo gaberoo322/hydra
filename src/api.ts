@@ -11,6 +11,7 @@ import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createMaintenanceRouter } from "./api/maintenance.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
+import { createMetricsCostRouter } from "./api/metrics-cost.ts";
 import { createMetricsTokensRouter } from "./api/metrics-tokens.ts";
 import { createTierRouter } from "./api/tier.ts";
 import { createDigestRouter } from "./api/digest.ts";
@@ -94,6 +95,11 @@ function createApi(eventBus: EventBus) {
   // Maintenance — hourly housekeeping endpoint (issue #723, scheduler fold PR-3/4).
   api.use(createMaintenanceRouter(eventBus));
   api.use(createMetricsRouter());
+  // Cost-accounting read seam (issue #3495) — split out of the metrics read
+  // router; mounts prefix-less at the same /api base so the five cost reads
+  // (GET /metrics/cost, /metrics/cost-by-class, /metrics/cost-per-merged-pr,
+  // /metrics/cost-efficiency, /metrics/cost-by-outcome) resolve byte-identically.
+  api.use(createMetricsCostRouter());
   // Token-recording write seam (issue #3322) — split out of the metrics read
   // router; mounts prefix-less at the same /api base so POST /metrics/tokens
   // resolves byte-identically.
