@@ -295,8 +295,32 @@ export const PREFIX_ANCHOR_TYPE: Readonly<Record<string, string>> = (() => {
  * Neither leg can swallow a bare-UUID / short-hex / harness-branch cycleId
  * (#2822 invariant): each requires the token to be a REAL taxonomy skill or an
  * unambiguous class prefix, which a random hex/UUID segment is not.
+ *
+ * Issue #3486: the `hydra-target-build` cycleId shape `claude-cycle-YYYY-MM-DD-HHMM`
+ * (and its inline-mode twin `inline-YYYY-MM-DD-HHMM`) carried NO class token in a
+ * position the legs above inspect — its tail is a `date` timestamp, not a class
+ * name/prefix — so ~22% of the live 50-cycle window fell through to the
+ * `unclassified` sentinel. But the shape is unambiguous BY ITS LITERAL PREFIX:
+ * `hydra-target-build` Step 0 (`docs/operator-playbooks/hydra-target-build.md`) is
+ * the sole emitter of `claude-cycle-*`, registering it with `source: "claude"`,
+ * and the inline-mode fragment is the sole emitter of `inline-*`. Both are a Target
+ * build — the `dev_target` dispatch class, whose lane is `work-queue`.
+ * {@link matchTargetBuildLane} decodes these via a LITERAL-prefix + timestamp-tail
+ * match that runs before the fence. The timestamp anchor
+ * (`\d{4}-\d{2}-\d{2}-\d{4}` from `date -u +%Y-%m-%d-%H%M`, optionally with a
+ * trailing `-<suffix>` as `item284`-style runs append) keeps this from swallowing
+ * a bare UUID or short-hex (#2822): only a real target-build timestamp tail
+ * matches. The lane is DERIVED from `ANCHOR_TYPE_BY_CLASS.dev_target`, not
+ * hard-coded, so it tracks the taxonomy alphabet like every other leg.
  */
 export function inferAnchorTypeFromCycleId(cycleId: string): string | undefined {
+  // Issue #3486 target-build leg: `hydra-target-build`'s cycleId
+  // (`claude-cycle-YYYY-MM-DD-HHMM`, inline twin `inline-YYYY-MM-DD-HHMM`) has a
+  // timestamp tail carrying no class token, so it misses every other leg. Its
+  // literal prefix + timestamp anchor unambiguously names the `dev_target` class
+  // (→ work-queue). Runs before the fence — the id carries no `-t{N}-` middle.
+  const targetLane = matchTargetBuildLane(cycleId);
+  if (targetLane !== undefined) return targetLane;
   // Issue #3403 skill-name leg: the whole cycleId is the bare skill name the
   // dispatch runs (`hydra-dev`, `hydra-qa`, …). Runs before the fence because a
   // skill name carries no `-t{N}-` middle. Only a REAL taxonomy skill matches,
@@ -332,6 +356,39 @@ export function inferAnchorTypeFromCycleId(cycleId: string): string | undefined 
   if (hyphen === -1) return undefined;
   const head = cycleId.slice(0, hyphen);
   return head in PREFIX_ANCHOR_TYPE ? PREFIX_ANCHOR_TYPE[head] : undefined;
+}
+
+/**
+ * The literal-prefixed timestamp shape `hydra-target-build` emits for its cycleId
+ * (issue #3486): `claude-cycle-2026-07-18-2101` and the inline-mode twin
+ * `inline-2026-07-18-2101`. The timestamp is `date -u +%Y-%m-%d-%H%M`
+ * (`\d{4}-\d{2}-\d{2}-\d{4}`); a trailing `-<suffix>` is allowed for the
+ * `-itemNNN`-style manual runs the reports directory shows. Anchored `^…$` so it
+ * only matches the WHOLE cycleId — it can never fire on a random hex segment.
+ */
+const TARGET_BUILD_CYCLE_ID =
+  /^(?:claude-cycle|inline)-\d{4}-\d{2}-\d{2}-\d{4}(?:-[a-z0-9]+)?$/;
+
+/**
+ * Decode a `hydra-target-build` cycleId to its anchorType lane, or `undefined`
+ * when the id is not a target-build cycleId (issue #3486).
+ *
+ * A `claude-cycle-*` / `inline-*` cycleId is emitted ONLY by `hydra-target-build`
+ * (Step 0 of `docs/operator-playbooks/hydra-target-build.md`, and the inline-mode
+ * fragment), which registers it with `source: "claude"`. Every such cycle is a
+ * Target build — the `dev_target` dispatch class. The lane is DERIVED from
+ * {@link ANCHOR_TYPE_BY_CLASS} (`dev_target` → `work-queue`) rather than
+ * hard-coded, so if the taxonomy ever re-lanes `dev_target` this leg follows.
+ *
+ * The literal prefix + timestamp anchor is what makes this safe under the #2822
+ * "never guess" invariant: a bare UUID / short-hex / harness-branch cycleId has no
+ * `claude-cycle-`/`inline-` prefix and no `date`-shaped timestamp tail, so it can
+ * never match.
+ */
+function matchTargetBuildLane(cycleId: string): string | undefined {
+  return TARGET_BUILD_CYCLE_ID.test(cycleId)
+    ? ANCHOR_TYPE_BY_CLASS.dev_target
+    : undefined;
 }
 
 /**
