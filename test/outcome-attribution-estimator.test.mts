@@ -70,6 +70,7 @@ function effectOf(metric: { effects: { producerClass: string }[] }, cls: string)
     collinear: boolean;
     collinearWith: string[];
     belowNoiseFloor: boolean;
+    nonZeroObservationCount: number;
     identifiabilitySuspect: boolean;
   };
 }
@@ -173,6 +174,7 @@ describe("attribution estimator — σ0 & below-noise-floor (AC3)", () => {
     const m = onlyMetric(rows, { lambda: 0.05, noiseFloorK: 2 });
 
     assert.ok(m.sigma0 !== null, "σ0 computed");
+    assert.equal(m.sigma0Source, "empty-windows", "empty windows fed σ0");
     assert.ok(Math.abs(m.sigma0! - 0.8165) < 0.01, `σ0 ~0.816, got ${m.sigma0}`);
     assert.equal(m.emptyWindowCount, 6);
 
@@ -184,18 +186,118 @@ describe("attribution estimator — σ0 & below-noise-floor (AC3)", () => {
     assert.equal(tiny.belowNoiseFloor, true, `tiny β=${tiny.beta} should be below floor`);
   });
 
-  test("no empty windows → σ0 null and no below-noise-floor markers", () => {
+  test("no empty windows → σ0 falls back to residual variance (issue #3488)", () => {
+    // A cleanly-linear metric (Δ = 5·a, no noise) with ≥ NOISE_FLOOR_K non-zero
+    // observations per class so the minimum-observation guard does NOT fire —
+    // isolating the residual-fallback behavior. Pre-#3488 σ0 was null here and
+    // belowNoiseFloor could never fire; now σ0 comes from the residuals.
     const rows = [
       obs("edge", 5, { a: 1 }),
       obs("edge", 10, { a: 2 }),
       obs("edge", 15, { a: 3 }),
     ];
-    const m = onlyMetric(rows);
-    assert.equal(m.sigma0, null);
+    const m = onlyMetric(rows, { lambda: 0.01, noiseFloorK: 2 });
+    assert.equal(m.emptyWindowCount, 0, "no empty windows");
+    // σ0 is now non-null via the residual fallback, tagged as such.
+    assert.ok(m.sigma0 !== null, "σ0 derived from residual variance, not null");
+    assert.equal(m.sigma0Source, "residual");
+    // The fit is near-perfect, so residuals (hence σ0) are tiny; a's β (~5) far
+    // exceeds k·σ0 → the noise-floor comparison does NOT flag it. And a has 3
+    // non-zero observations (≥ k=2) so the min-observation guard is silent too.
+    const a = effectOf(m, "a");
+    assert.equal(a.nonZeroObservationCount, 3);
+    assert.equal(
+      a.belowNoiseFloor,
+      false,
+      "well-observed strong effect is above the residual floor",
+    );
+  });
+});
+
+describe("attribution estimator — noise floor at high merge cadence (issue #3488)", () => {
+  test("N=1 class is forced belowNoiseFloor by the minimum-observation guard, even with a huge β", () => {
+    // The dev_orch N=1 case from #3487: a class observed in a SINGLE window, with
+    // a large fitted β. Its effect is under-determined and must NOT surface as
+    // signal. There are no empty windows (high merge cadence), so pre-#3488 σ0
+    // stayed null and belowNoiseFloor could never fire; the minimum-observation
+    // guard now flags it regardless of σ0 or β magnitude.
+    // `common` drives a clean strong signal Δ ≈ 6·common; `rare` appears in
+    // exactly ONE window with a modest extra bump. Residuals stay small so
+    // `common`'s large β clears the floor — isolating the min-observation guard
+    // as the ONLY reason `rare` is flagged.
+    const rows: AttributionObservation[] = [
+      obs("edge", 6, { common: 1 }),
+      obs("edge", 12, { common: 2 }),
+      obs("edge", 18, { common: 3 }),
+      obs("edge", 24, { common: 4 }),
+      obs("edge", 33, { common: 5, rare: 1 }), // 6·5 + 3·1 = 33
+    ];
+    const m = onlyMetric(rows, { lambda: 0.05, noiseFloorK: 2 });
+    assert.equal(m.emptyWindowCount, 0, "no empty windows (high cadence)");
+
+    const rare = effectOf(m, "rare");
+    assert.equal(rare.nonZeroObservationCount, 1, "rare seen in exactly 1 window");
+    assert.equal(
+      rare.belowNoiseFloor,
+      true,
+      "N=1 class flagged below noise floor by the min-observation guard",
+    );
+
+    // A well-observed class with a genuinely strong effect is NOT flagged — the
+    // guard must not over-fire and blanket-suppress real signal.
+    const common = effectOf(m, "common");
+    assert.ok(
+      common.nonZeroObservationCount >= 2,
+      "common is well-observed (≥ k windows)",
+    );
+    assert.equal(
+      common.belowNoiseFloor,
+      false,
+      "well-observed strong effect stays above the floor",
+    );
+  });
+
+  test("residual fallback lets a small well-observed effect be flagged below-floor at high cadence", () => {
+    // No empty windows, but a class whose β is small relative to the residual
+    // noise. Pre-#3488 this could NEVER be flagged (σ0 null). Now the residual
+    // fallback supplies σ0 and the noise-floor comparison fires. The class has
+    // ≥ NOISE_FLOOR_K non-zero observations so the min-observation guard is NOT
+    // what does the flagging here — the noise-floor comparison is.
+    const rows: AttributionObservation[] = [
+      // Metric is essentially pure noise around ~0 with a tiny `weak` signal, so
+      // residual std-dev is large and |β_weak| lands within k·σ0.
+      obs("edge", 5, { weak: 1 }),
+      obs("edge", -4, { weak: 2 }),
+      obs("edge", 6, { weak: 3 }),
+      obs("edge", -5, { weak: 4 }),
+      obs("edge", 4, { weak: 5 }),
+      obs("edge", -6, { weak: 6 }),
+    ];
+    const m = onlyMetric(rows, { lambda: 0.1, noiseFloorK: 2 });
     assert.equal(m.emptyWindowCount, 0);
-    for (const e of m.effects) {
-      assert.equal(e.belowNoiseFloor, false, "no floor without σ0");
-    }
+    assert.ok(m.sigma0 !== null, "residual fallback supplies σ0");
+    assert.equal(m.sigma0Source, "residual");
+
+    const weak = effectOf(m, "weak");
+    assert.ok(
+      weak.nonZeroObservationCount >= 2,
+      "weak is well-observed, so the min-observation guard is not the cause",
+    );
+    // |β_weak| is small vs the large residual noise → below floor via the
+    // noise-floor comparison, which is only possible thanks to the fallback.
+    assert.ok(
+      Math.abs(weak.beta) <= 2 * m.sigma0!,
+      `|β_weak|=${weak.beta} within k·σ0=${2 * m.sigma0!}`,
+    );
+    assert.equal(
+      weak.belowNoiseFloor,
+      true,
+      "small effect flagged below the residual-derived floor",
+    );
+  });
+
+  test("empty input still yields no metrics (σ0Source path is a clean no-op)", () => {
+    assert.deepEqual(estimateMarginalEffects([]), { metrics: [] });
   });
 });
 
