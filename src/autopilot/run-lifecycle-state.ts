@@ -33,8 +33,11 @@
  * caller migrated to importing them from this leaf directly (issue #3147).
  *
  * The pid-liveness probe is imported directly from the canonical
- * {@link isLivePid} predicate in `worktree-orphan.ts` — the same source the
- * `isPidAlive` alias in `run-projections.ts` re-exports.
+ * {@link isLivePid} predicate in the focused `process-probe.ts` leaf (extracted
+ * in issue #3503) — the same source the `isPidAlive` alias in
+ * `run-projections.ts` re-exports. Importing the OS probe from a process-domain
+ * leaf (not a worktree-management module) keeps this reader's cross-module edge
+ * conceptually appropriate.
  */
 
 import { classBySkill } from "../taxonomy/classes.ts";
@@ -42,7 +45,7 @@ import {
   epochFromIsoOrNow,
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
-import { isLivePid } from "../worktree-orphan.ts";
+import { isLivePid } from "../process-probe.ts";
 import { numberOrDefault } from "./run-result.ts";
 
 // ---------------------------------------------------------------------------

@@ -50,7 +50,8 @@
 import { readFileSync, statSync } from "node:fs";
 import { getTargetWorkspace } from "../../target-config.ts";
 import { gitExec } from "../../github/git.ts";
-import { isLivePid, pruneOrphanedTargetWorktrees } from "../../worktree-orphan.ts";
+import { isLivePid } from "../../process-probe.ts";
+import { pruneOrphanedTargetWorktrees } from "../../worktree-orphan.ts";
 
 /**
  * External touchpoints of the orphan-worktree prune chore, injected so the chore

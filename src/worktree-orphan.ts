@@ -31,6 +31,14 @@
  * a test. See test/worktree-orphan.test.mts.
  */
 
+// The OS-level `isLivePid` probe and its `LivePidCheck` type live in the focused
+// `src/process-probe.ts` leaf (extracted in issue #3503) — this module imports
+// DOWN from that leaf (a downward edge, not cross-domain) and keeps taking
+// `LivePidCheck` as an injectable dep in its impure orchestration below. The
+// production caller wires the real `isLivePid` value from `process-probe.ts`
+// into the deps bag; this module only needs the `LivePidCheck` type here.
+import type { LivePidCheck } from "./process-probe.ts";
+
 /** Minimal worktree shape parsed out of `git worktree list --porcelain`. */
 export interface WorktreeRow {
   /** Absolute path to the worktree dir (the "worktree <path>" line). */
@@ -114,46 +122,6 @@ export function parseWorktreeList(
     rows.push({ path, branch, lockedByPid: parseLockPid(lockBody) });
   }
   return rows;
-}
-
-/** Live-PID predicate — true iff the given PID is currently running on this host. */
-type LivePidCheck = (pid: number) => boolean;
-
-/**
- * Canonical host liveness predicate — the ONE `kill -0` probe the orchestrator
- * shares across the startup prune, the branch-prune runner, and the run-
- * projection sweeper (previously three subtly-divergent private copies;
- * consolidated in issue #2816).
- *
- * Returns `true` (LIVE — do NOT reclaim) for:
- *   (a) a pid whose `process.kill(pid, 0)` succeeds (the process exists), OR
- *   (b) `EPERM` — the process exists but we lack permission to signal it, OR
- *   (c) ANY invalid pid: `!Number.isFinite(pid) || pid <= 0`.
- *
- * Returns `false` (DEAD — reclaimable) ONLY when `process.kill(pid, 0)` throws
- * a non-`EPERM` error (`ESRCH` = no such process) for a finite, positive pid.
- *
- * The invalid-pid → LIVE rail is the safety-critical decision (issue #2816):
- * the most dangerous caller (pruneOrphanedTargetWorktrees / branch-prune
- * reclamation) DESTROYS a worktree/lock when this returns `false`. A garbage
- * pid (e.g. a `Number('')`/`Number(undefined)` → `NaN` from a truncated lock
- * body) means UNKNOWN, not KNOWN-DEAD; classifying unknown as dead could delete
- * an active agent's worktree (data loss), while classifying it as live merely
- * defers reclamation one boot (free, self-healing). Invalid == unknown ==
- * conservative-live. The two former unguarded copies (src/index.ts,
- * scripts/ci/branch-prune-runner.ts) omitted this guard and returned `false`
- * on a non-finite pid — that was the latent bug this consolidation fixes.
- */
-export function isLivePid(pid: number): boolean {
-  if (!Number.isFinite(pid) || pid <= 0) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: any) {
-    // ESRCH = no such process (dead); EPERM = exists but unsignalable (live).
-    if (err && err.code === "EPERM") return true;
-    return false;
-  }
 }
 
 type OrphanAction =
