@@ -72,6 +72,10 @@ import {
   type PendingEnrollEntry,
   type PendingEnrollAddResult,
 } from "../../redis/holdback-merge-watch.ts";
+import {
+  setReconcilerHealth,
+  type ReconcilerHealthRecord,
+} from "../../redis/reconciler.ts";
 
 /** How many recent cycle records to scan per tick (newest first). */
 const DEFAULT_SCAN_LIMIT = 50;
@@ -133,6 +137,12 @@ export interface CycleMergeReconcileDeps {
   wasEnrolled?: (prNumber: number) => Promise<boolean>;
   /** Arm a confirmed-merged-but-unregistered PR into the registry. Defaults to `pendingEnrollAdd`. */
   armPending?: (entry: PendingEnrollEntry) => Promise<PendingEnrollAddResult>;
+  /**
+   * Persist the last-run health snapshot so `GET /api/scheduler/status` reports a
+   * fresh `reconciler.ranAt` (issue #3509). Defaults to `setReconcilerHealth`.
+   * Best-effort — a write failure is logged and never aborts the chore.
+   */
+  setHealth?: (record: ReconcilerHealthRecord) => Promise<void>;
 }
 
 /** Per-run summary the chore returns (never throws). */
@@ -190,6 +200,11 @@ export async function runCycleMergeReconcile(
     });
   const wasEnrolled = deps.wasEnrolled ?? wasEnrolledMarked;
   const armPending = deps.armPending ?? pendingEnrollAdd;
+  const setHealth = deps.setHealth ?? setReconcilerHealth;
+
+  // Wall-clock start of this run — carried into the persisted health record's
+  // duration (issue #3509).
+  const startedAt = Date.now();
 
   const result: CycleMergeReconcileResult = {
     scanned: 0,
@@ -357,6 +372,45 @@ export async function runCycleMergeReconcile(
   if (result.upgraded > 0 || result.selfArmed > 0) {
     console.log(
       `[Housekeeping] cycle-merge-reconcile: scanned=${result.scanned} candidates=${result.candidates} upgraded=${result.upgraded} notMerged=${result.notMerged} fetchFailed=${result.fetchFailed} upgradeFailed=${result.upgradeFailed} selfArmed=${result.selfArmed} selfArmSkipped=${result.selfArmSkipped} selfArmFailed=${result.selfArmFailed}`,
+    );
+  }
+
+  // Persist the last-run health snapshot so `GET /api/scheduler/status` surfaces a
+  // fresh `reconciler.ranAt` instead of a stale timestamp (issue #3509). This
+  // chore is the sole surviving reconciler, so it is the sole writer of the
+  // health record the status projection reads. The `ReconcilerHealthRecord` shape
+  // predates this chore (it mirrored the removed merge→done reconciler), so the
+  // per-run counters map onto it as follows:
+  //   feed.prs.examined       — candidate PRs confirmed via `gh pr view` this tick
+  //   feed.commits.examined   — 0 (this reconciler has no commit feed)
+  //   metrics.scanned         — cycle records scanned
+  //   metrics.referencesFound — completed-with-prNumber candidates
+  //   metrics.itemsReconciled — records upgraded completed→merged
+  //   metrics.itemsEscalated  — PRs self-armed into the pending-enroll registry
+  //   metrics.movesFailed     — retryable failures (fetch + upgrade + self-arm)
+  //   metrics.durationMs      — wall-clock run duration
+  // Best-effort per CLAUDE.md — a Redis write failure is logged and never aborts
+  // (the chore already returned its work); it is retried on the next hourly tick.
+  const health: ReconcilerHealthRecord = {
+    ranAt: new Date(startedAt).toISOString(),
+    feed: {
+      prs: { examined: result.candidates },
+      commits: { examined: 0 },
+    },
+    metrics: {
+      referencesFound: result.candidates,
+      movesFailed: result.fetchFailed + result.upgradeFailed + result.selfArmFailed,
+      itemsReconciled: result.upgraded,
+      itemsEscalated: result.selfArmed,
+      scanned: result.scanned,
+      durationMs: Date.now() - startedAt,
+    },
+  };
+  try {
+    await setHealth(health);
+  } catch (err: any) {
+    console.error(
+      `[Housekeeping] cycle-merge-reconcile: health-record persist failed; status ranAt will stay stale until next tick: ${err?.message || String(err)}`,
     );
   }
 

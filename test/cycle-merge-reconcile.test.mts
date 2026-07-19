@@ -20,6 +20,7 @@ import {
   runCycleMergeReconcile,
   type CycleMergeReconcileDeps,
 } from "../src/scheduler/chores/cycle-merge-reconcile.ts";
+import type { ReconcilerHealthRecord } from "../src/redis/reconciler.ts";
 
 // ---------------------------------------------------------------------------
 // In-memory fixture — a metrics store + a scripted PR-state map + a spy on the
@@ -46,12 +47,16 @@ interface Fixture {
   enrolled?: Set<number>;
   /** Every pendingEnrollAdd the self-arm branch fired. */
   arms?: Array<{ prNumber: number; cycleId: string; tier: number | null; anchorType?: string }>;
+  // --- Health-record persistence spy (issue #3509) ---------------------------
+  /** Every ReconcilerHealthRecord the chore persisted via setHealth. */
+  healthWrites?: ReconcilerHealthRecord[];
 }
 
 function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): CycleMergeReconcileDeps {
   const pending = (fx.pending ??= new Set());
   const enrolled = (fx.enrolled ??= new Set());
   const arms = (fx.arms ??= []);
+  const healthWrites = (fx.healthWrites ??= []);
   return {
     listRecent: async (count) => Array.from(fx.metrics.keys()).slice(0, count),
     getMetrics: async (cycleId) => ({ ...(fx.metrics.get(cycleId) ?? {}) }),
@@ -82,6 +87,11 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
       });
       pending.add(entry.prNumber);
       return { ok: true };
+    },
+    // Health-record persistence spy (issue #3509): capture every record the chore
+    // writes so a test can assert ranAt + the counter mapping, with NO live Redis.
+    setHealth: async (record) => {
+      healthWrites.push(record);
     },
     ...over,
   };
@@ -414,5 +424,90 @@ describe("cycle-merge-reconcile — pending-enroll self-arm backstop (#3078)", (
       fx.arms!.map((a) => a.prNumber).sort((a, b) => a - b),
       [700, 701, 702],
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Health-record persistence (#3509): after every run the chore must persist a
+// ReconcilerHealthRecord via setReconcilerHealth so `GET /api/scheduler/status`
+// reports a fresh `reconciler.ranAt` instead of a stale (32h+) timestamp. The
+// record's counters map the run result onto the (pre-existing) health shape.
+// New top-level suite (own lifecycle, pure per-case fixtures) per the CLAUDE.md
+// shared-Redis-teardown authoring rule.
+// ---------------------------------------------------------------------------
+describe("cycle-merge-reconcile — health-record persistence (#3509)", () => {
+  test("persists a health record with a fresh ranAt after a run that upgraded a cycle", async () => {
+    const before = Date.now();
+    const fx: Fixture = {
+      metrics: new Map([["c1", { status: "completed", prNumber: "100", tasksMerged: "0" }]]),
+      prState: new Map([[100, "MERGED"]]),
+      reposts: [],
+      healthWrites: [],
+    };
+    await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(fx.healthWrites!.length, 1, "exactly one health record persisted per run");
+    const rec = fx.healthWrites![0];
+    // ranAt is a fresh ISO timestamp at/after the run started.
+    const ranAtMs = Date.parse(rec.ranAt);
+    assert.ok(!Number.isNaN(ranAtMs), "ranAt is a parseable ISO timestamp");
+    assert.ok(ranAtMs >= before && ranAtMs <= Date.now(), "ranAt is within the run window");
+    // Counters map the run result onto the health shape.
+    assert.equal(rec.metrics.scanned, 1);
+    assert.equal(rec.metrics.referencesFound, 1);
+    assert.equal(rec.metrics.itemsReconciled, 1, "one upgraded → itemsReconciled=1");
+    assert.equal(rec.feed.prs.examined, 1);
+    assert.equal(rec.feed.commits.examined, 0, "no commit feed on this reconciler");
+    assert.ok(rec.metrics.durationMs >= 0, "durationMs is non-negative");
+  });
+
+  test("persists a health record even on an empty (no-op) window — so ranAt never goes stale", async () => {
+    const fx: Fixture = { metrics: new Map(), prState: new Map(), reposts: [], healthWrites: [] };
+    await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(fx.healthWrites!.length, 1, "a no-op run still stamps ranAt");
+    const rec = fx.healthWrites![0];
+    assert.ok(!Number.isNaN(Date.parse(rec.ranAt)));
+    assert.equal(rec.metrics.scanned, 0);
+    assert.equal(rec.metrics.itemsReconciled, 0);
+  });
+
+  test("maps self-arm and retryable-failure counters onto the health record", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["c-armed", { status: "completed", prNumber: "800", tasksMerged: "0" }],
+        ["c-fetchfail", { status: "completed", prNumber: "801", tasksMerged: "0" }],
+      ]),
+      prState: new Map([[800, "MERGED"], [801, null]]), // 801 fetch fails
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+      healthWrites: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 1);
+    assert.equal(r.fetchFailed, 1);
+    const rec = fx.healthWrites![0];
+    assert.equal(rec.metrics.itemsEscalated, 1, "selfArmed → itemsEscalated");
+    // movesFailed aggregates the retryable failures (fetch + upgrade + self-arm).
+    assert.equal(rec.metrics.movesFailed, 1, "the fetch failure counts as a retryable move failure");
+  });
+
+  test("a setHealth write failure is swallowed and never aborts the run (best-effort)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c1", { status: "completed", prNumber: "100", tasksMerged: "0" }]]),
+      prState: new Map([[100, "MERGED"]]),
+      reposts: [],
+      healthWrites: [],
+    };
+    // The chore must still return its work summary even when the health write throws.
+    const r = await runCycleMergeReconcile(
+      makeDeps(fx, {
+        setHealth: async () => {
+          throw new Error("redis down");
+        },
+      }),
+    );
+    assert.equal(r.upgraded, 1, "the run's work completed despite the health-write failure");
+    assert.equal(fx.reposts.length, 1);
   });
 });
