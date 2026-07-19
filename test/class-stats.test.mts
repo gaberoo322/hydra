@@ -195,6 +195,8 @@ describe("class-stats — producer-class yield (spine β, identifiability)", () 
           metric: "forecast_brier",
           intercept: 0,
           sigma0: 0.01,
+          // emptyWindowCount 5 > 0, so σ0 came from the empty-window std-dev.
+          sigma0Source: "empty-windows",
           observationCount: 20,
           emptyWindowCount: 5,
           effects: [
@@ -205,6 +207,11 @@ describe("class-stats — producer-class yield (spine β, identifiability)", () 
               collinear: false,
               collinearWith: [],
               belowNoiseFloor: flags.belowNoiseFloor ?? false,
+              // observationCount 20 − emptyWindowCount 5 = 15 non-empty windows,
+              // comfortably above NOISE_FLOOR_K (2) so the minimum-observation
+              // guard never forces belowNoiseFloor here — the flag stays driven
+              // solely by the flags.belowNoiseFloor param the helper receives.
+              nonZeroObservationCount: 15,
               identifiabilitySuspect: flags.identifiabilitySuspect ?? false,
             },
           ],

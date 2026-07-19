@@ -38,11 +38,17 @@
  *     individually identifiable), so a separate pairwise-collinearity flag is
  *     mandatory.
  *
- *   - **σ0 from empty windows only.** The exogenous-drift floor `σ0` is the
- *     standard deviation of the deltas over the EMPTY (zero-merge,
- *     `classCounts = {}`) windows — the null-model rows the recorder emits.
- *     `|β_c| ≤ k · σ0` sets the below-noise-floor marker: the effect is within
- *     exogenous drift and indistinguishable from noise. (AC3.)
+ *   - **σ0 with a residual-variance fallback.** The exogenous-drift floor `σ0`
+ *     PREFERS the standard deviation of the deltas over the EMPTY (zero-merge,
+ *     `classCounts = {}`) windows — the null-model rows the recorder emits. When
+ *     a metric has NO empty windows (the high-merge-cadence case, issue #3488),
+ *     σ0 FALLS BACK to the population std-dev of the ridge residuals (`y − Xβ̂`),
+ *     the model's own estimate of unexplained/exogenous variation. `sigma0Source`
+ *     records which path supplied it. Without the fallback σ0 stayed `null`
+ *     forever at cadence and `belowNoiseFloor` could never fire (#3487). `|β_c| ≤
+ *     k · σ0` sets the below-noise-floor marker; INDEPENDENTLY, a class observed
+ *     in fewer than `k` non-zero windows is forced below-noise-floor by a
+ *     minimum-observation guard (its β is under-determined). (AC3.)
  *
  *   - **Intercept β0 is NOT regularized.** The ridge diagonal carries `0` on the
  *     intercept term. β0 is anchored by the empty/null-model windows and
@@ -145,11 +151,29 @@ interface ClassEffect {
    */
   collinearWith: string[];
   /**
-   * `true` when `|β| ≤ NOISE_FLOOR_K · σ0` — the effect is within exogenous
-   * drift and indistinguishable from noise. Distinct from the identifiability
-   * flags: a below-noise-floor effect is well-determined but small.
+   * `true` when this class's β cannot be trusted as a real signal. Set by EITHER
+   * of two independent guards (issue #3488):
+   *   1. **Noise-floor comparison** — `|β| ≤ NOISE_FLOOR_K · σ0`: the effect is
+   *      within exogenous drift and indistinguishable from noise. σ0 is now
+   *      derived from a residual-variance fallback when the metric has no empty
+   *      windows (see {@link MetricEstimate.sigma0}), so this guard fires at high
+   *      merge cadence too — previously it could never fire (σ0 stayed null).
+   *   2. **Minimum-observation guard** — the class was observed with a non-zero
+   *      count in FEWER than `NOISE_FLOOR_K` windows (see
+   *      {@link ClassEffect.nonZeroObservationCount}). Such a β is under-determined
+   *      (e.g. dev_orch's N=1 in issue #3487) and must NOT surface as signal
+   *      regardless of its magnitude — this guard is independent of σ0.
+   * Distinct from the identifiability flags: a below-noise-floor effect is either
+   * well-determined but small, or too weakly-observed to determine at all.
    */
   belowNoiseFloor: boolean;
+  /**
+   * Count of windows in which this class had a NON-ZERO merge count — the number
+   * of observations that actually inform its β. A class with
+   * `nonZeroObservationCount < NOISE_FLOOR_K` is under-determined and forced
+   * `belowNoiseFloor = true` by the minimum-observation guard (issue #3488).
+   */
+  nonZeroObservationCount: number;
   /**
    * Convenience roll-up: `true` when EITHER identifiability flag is set. A `true`
    * value means "β cannot be trusted as this class's individual effect", which
@@ -167,11 +191,26 @@ export interface MetricEstimate {
   /** One entry per producer class observed for this metric. */
   effects: ClassEffect[];
   /**
-   * Exogenous-drift floor: std-dev of the deltas over the EMPTY (zero-merge)
-   * windows for this metric. `null` when the metric had no empty windows (then
-   * no below-noise-floor marker can be set — every `belowNoiseFloor` is `false`).
+   * Exogenous-drift floor used for the noise-floor comparison. Derived per
+   * {@link MetricEstimate.sigma0Source} (issue #3488):
+   *   - `"empty-windows"` — the population std-dev of the deltas over the EMPTY
+   *     (zero-merge) windows: the original, most-direct estimate of drift.
+   *   - `"residual"` — the FALLBACK when the metric has no empty windows: the
+   *     population std-dev of the ridge residuals (`y − Xβ̂`), the model's own
+   *     estimate of unexplained/exogenous variation. At high merge cadence there
+   *     are no empty windows, so without this fallback σ0 stayed `null` forever
+   *     and `belowNoiseFloor` could never fire (the #3487/#3488 defect).
+   *   - `null` only when there is nothing to estimate from (no rows / degenerate
+   *     fit); then the noise-floor comparison is skipped (the minimum-observation
+   *     guard still applies).
    */
   sigma0: number | null;
+  /**
+   * Provenance of {@link MetricEstimate.sigma0} (issue #3488). `"empty-windows"`
+   * when at least one empty window fed it, `"residual"` when the residual-variance
+   * fallback supplied it, `"none"` when σ0 could not be estimated (σ0 is `null`).
+   */
+  sigma0Source: "empty-windows" | "residual" | "none";
   /** Total observation rows fitted for this metric (incl. empty windows). */
   observationCount: number;
   /** Count of empty (zero-merge) windows that fed σ0 and anchored β0. */
@@ -376,8 +415,6 @@ function fitMetric(
     }
   }
 
-  // σ0 + β0 anchor: the empty (zero-merge) windows for THIS metric.
-  const sigma0 = computeSigmaZero(rows);
   const emptyWindowCount = rows.reduce(
     (n, r) => (isEmptyWindow(r.classCounts) ? n + 1 : n),
     0,
@@ -401,6 +438,16 @@ function fitMetric(
   // intercept term (index 0) is NOT regularized.
   const beta = solveRidge(X, y, cfg.lambda);
 
+  // σ0 (exogenous-drift floor) with a residual-variance fallback (issue #3488).
+  // PREFER the empty (zero-merge) windows — the most direct estimate of drift.
+  // But at high merge cadence there are NO empty windows, so that estimate stays
+  // `null` forever and `belowNoiseFloor` can never fire (the #3487/#3488 defect).
+  // FALL BACK to the population std-dev of the ridge residuals (`y − Xβ̂`) — the
+  // model's own estimate of the variation it could not explain, a documented
+  // statistical proxy for exogenous drift. Stays PURE (deterministic function of
+  // the input rows; no I/O).
+  const { sigma0, sigma0Source } = computeNoiseFloor(rows, X, y, beta);
+
   // Identifiability lens over the CLASS columns ONLY (intercept excluded).
   const classColumns: number[][] = [];
   for (let j = 0; j < P; j++) {
@@ -413,15 +460,29 @@ function fitMetric(
 
   const effects: ClassEffect[] = flags.map((f, j) => {
     const b = beta[j + 1]; // +1: skip intercept
-    const belowNoiseFloor =
+    // Non-zero-observation count for THIS class column — how many windows
+    // actually inform its β (issue #3488).
+    const nonZeroObservationCount = classColumns[j].reduce(
+      (n, v) => (v !== 0 ? n + 1 : n),
+      0,
+    );
+    // belowNoiseFloor fires on EITHER guard (issue #3488):
+    //   1. noise-floor comparison |β| ≤ k·σ0 (σ0 now always available when there
+    //      is anything to fit, thanks to the residual fallback), OR
+    //   2. minimum-observation guard: fewer than k non-zero observations → the β
+    //      is under-determined and must not surface as signal, whatever its size
+    //      (this is the dev_orch N=1 case from #3487).
+    const belowFloorByNoise =
       sigma0 !== null && Math.abs(b) <= cfg.noiseFloorK * sigma0;
+    const belowFloorByMinObs = nonZeroObservationCount < cfg.noiseFloorK;
     return {
       producerClass: f.producerClass,
       beta: b,
       lowVariance: f.lowVariance,
       collinear: f.collinear,
       collinearWith: f.collinearWith,
-      belowNoiseFloor,
+      belowNoiseFloor: belowFloorByNoise || belowFloorByMinObs,
+      nonZeroObservationCount,
       identifiabilitySuspect: f.lowVariance || f.collinear,
     };
   });
@@ -431,9 +492,54 @@ function fitMetric(
     intercept: beta[0],
     effects,
     sigma0,
+    sigma0Source,
     observationCount: rows.length,
     emptyWindowCount,
   };
+}
+
+/**
+ * The exogenous-drift floor σ0 for one metric, with the residual-variance
+ * fallback (issue #3488). PURE — deterministic function of its inputs, no I/O.
+ *
+ * Preference order:
+ *   1. **Empty windows** — the population std-dev of the deltas over the empty
+ *      (zero-merge) windows. The most direct estimate of drift; used whenever at
+ *      least one empty window exists (`sigma0Source: "empty-windows"`).
+ *   2. **Ridge residuals** — when there are NO empty windows, the population
+ *      std-dev of the fit residuals `y − Xβ̂`. This is the model's own estimate
+ *      of the variation it could not explain, a principled proxy for exogenous
+ *      drift that DOES exist at high merge cadence (`sigma0Source: "residual"`).
+ *   3. **None** — when there is nothing to estimate from (no rows), σ0 is `null`
+ *      and the noise-floor comparison is simply skipped downstream
+ *      (`sigma0Source: "none"`). The minimum-observation guard still applies.
+ *
+ * @param rows Per-metric ledger rows (read-only).
+ * @param X Design matrix (intercept column at index 0), one row per observation.
+ * @param y Target deltas, index-aligned with `X`.
+ * @param beta The fitted ridge coefficients (intercept at index 0).
+ */
+function computeNoiseFloor(
+  rows: AttributionObservation[],
+  X: number[][],
+  y: number[],
+  beta: number[],
+): { sigma0: number | null; sigma0Source: "empty-windows" | "residual" | "none" } {
+  const fromEmpty = computeSigmaZero(rows);
+  if (fromEmpty !== null) {
+    return { sigma0: fromEmpty, sigma0Source: "empty-windows" };
+  }
+  if (X.length === 0) {
+    return { sigma0: null, sigma0Source: "none" };
+  }
+  // Residual fallback: population std-dev of `y − Xβ̂`.
+  const residuals = y.map((yi, i) => {
+    let pred = 0;
+    const row = X[i];
+    for (let j = 0; j < row.length; j++) pred += row[j] * beta[j];
+    return yi - pred;
+  });
+  return { sigma0: populationStd(residuals), sigma0Source: "residual" };
 }
 
 function isEmptyWindow(classCounts: Record<string, number>): boolean {
