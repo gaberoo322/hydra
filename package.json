@@ -47,7 +47,6 @@
   },
   "devDependencies": {
     "@lavamoat/allow-scripts": "5.0.2",
-    "@standard-schema/spec": "^1.1.0",
     "@types/express": "^5.0.6",
     "knip": "^6.15.0",
     "lockfile-lint": "5.0.0",
