@@ -101,16 +101,41 @@ export interface CleanupFinding {
 }
 
 /**
- * The subset of knip's `--reporter json` shape this skill consumes. knip emits
- * a top-level `files` array (unused whole files, as path strings) plus an
- * `issues` array of per-file objects whose `exports` / `types` arrays hold the
- * unused-symbol objects (`{ name, line, col, pos }`). We deliberately ignore
- * knip's softer categories (dependencies, unlisted, unresolved, duplicates).
+ * The subset of knip's `--reporter json` shape this skill consumes.
+ *
+ * Two layouts exist across knip versions, and this parser is tolerant of BOTH
+ * (issue #3497):
+ *
+ *   - **Legacy (≤ some pre-6.15 shape):** a top-level `files` array of unused
+ *     whole-file path strings, plus an `issues` array of per-file objects whose
+ *     `exports` / `types` arrays hold the unused-symbol objects
+ *     (`{ name, line, col, pos }`).
+ *   - **knip v6.15.0:** NO top-level `files` key. Each `issues[]` object carries
+ *     its own unused whole files NESTED under `issues[].files` — an array of
+ *     `{ name }` objects (the repo-relative path is the `name`), alongside the
+ *     same per-file `exports` / `types` arrays. Verified live:
+ *     `npx knip --reporter json | jq 'has("files")'` → `false`; top-level keys
+ *     are `["issues"]`; the unused file surfaces at `issues[0].files[0].name`.
+ *
+ * Reading whole-file findings from ONLY the absent top-level `files` (the
+ * pre-#3497 behaviour) silently dropped every whole-file finding under
+ * v6.15.0 — when the only finding was a whole-file one the runner parsed 0 and
+ * the skill reported a spurious blocker. So we read whole-file findings from
+ * both locations. We deliberately ignore knip's softer categories
+ * (dependencies, unlisted, unresolved, duplicates).
  */
 export interface KnipReport {
-  /** Unused whole files, as repo-relative path strings. */
+  /**
+   * Legacy top-level unused whole files. Historically a `string[]` of
+   * repo-relative paths; typed `unknown` so a malformed report degrades to a
+   * dropped finding rather than a crash. Absent under knip v6.15.0.
+   */
   files?: unknown;
-  /** Per-file finding objects. */
+  /**
+   * Per-file finding objects. Each carries `file` (the path), `exports` /
+   * `types` (unused-symbol objects), and — under knip v6.15.0 — its own
+   * `files` array of `{ name }` whole-file findings.
+   */
   issues?: unknown;
 }
 
@@ -133,9 +158,26 @@ function exportName(entry: unknown): string {
 }
 
 /**
- * Parse a knip JSON report into normalised findings. Whole-file findings come
- * from the top-level `files` array; export/type findings come from each
- * `issues[].exports` and `issues[].types` array, paired with that issue's
+ * Extract the repo-relative path from one knip whole-file entry (issue #3497).
+ * The legacy top-level `files` array holds bare path strings; knip v6.15.0's
+ * nested `issues[].files` holds `{ name }` objects where `name` is the path.
+ * Handle both, and return "" for anything else so validateFinding can drop it
+ * rather than rendering a blank-path title.
+ */
+function fileEntryPath(entry: unknown): string {
+  if (typeof entry === "string") return entry.trim();
+  if (entry && typeof entry === "object" && "name" in entry) {
+    return asString((entry as { name: unknown }).name);
+  }
+  return "";
+}
+
+/**
+ * Parse a knip JSON report into normalised findings. Whole-file findings are
+ * read from BOTH the legacy top-level `files` array AND the knip v6.15.0 nested
+ * `issues[].files` array (issue #3497) — a knip that emits only one of these
+ * layouts still yields every whole-file finding. Export/type findings come from
+ * each `issues[].exports` and `issues[].types` array, paired with that issue's
  * `file`.
  *
  * Crucially, the symbol `name` (for exports) and the `path` (for files) are
@@ -151,19 +193,32 @@ function exportName(entry: unknown): string {
 export function parseKnipReport(report: KnipReport): CleanupFinding[] {
   const out: CleanupFinding[] = [];
 
-  // Top-level unused whole files.
+  // Legacy top-level unused whole files (bare path strings). Absent under knip
+  // v6.15.0, present in the pre-6.15 shape.
   if (Array.isArray(report.files)) {
     for (const f of report.files) {
-      const path = asString(f);
-      out.push({ kind: "file", path, name: "" });
+      out.push({ kind: "file", path: fileEntryPath(f), name: "" });
     }
   }
 
-  // Per-file unused exports / exported types.
+  // Per-file findings. Under knip v6.15.0 each issue also carries its OWN
+  // whole-file findings nested at `issues[].files` (an array of `{ name }`),
+  // so extract those here in addition to the exports/types (issue #3497).
   if (Array.isArray(report.issues)) {
     for (const issue of report.issues) {
       if (!issue || typeof issue !== "object") continue;
       const file = asString((issue as { file?: unknown }).file);
+
+      // Nested unused whole files (knip v6.15.0). The path is the entry's
+      // `name`, NOT the issue's `file` (which is the still-analysed source).
+      const filesArr = (issue as { files?: unknown }).files;
+      if (Array.isArray(filesArr)) {
+        for (const entry of filesArr) {
+          out.push({ kind: "file", path: fileEntryPath(entry), name: "" });
+        }
+      }
+
+      // Unused exports / exported types.
       const exportsArr = (issue as { exports?: unknown }).exports;
       const typesArr = (issue as { types?: unknown }).types;
       for (const arr of [exportsArr, typesArr]) {

@@ -117,6 +117,79 @@ describe("parseKnipReport — normalises knip JSON into well-formed findings", (
     assert.equal(findings[0].name, "");
     assert.equal(findings[0].path, "src/scheduler/heartbeat.ts");
   });
+
+  test("extracts whole-file findings from knip v6.15.0's nested issues[].files (no top-level files) — #3497", () => {
+    // knip v6.15.0's `--reporter json` has NO top-level `files` key; each
+    // unused whole file is nested under `issues[].files` as a `{ name }` object
+    // (the path is the `name`). Verified live:
+    //   npx knip --reporter json | jq 'has("files")'  → false
+    //   .issues[0].files[0].name  → "src/schemas/standard.ts"
+    // Reading ONLY the absent top-level `files` dropped whole-file findings to
+    // zero (the #3497 defect). This fixture mirrors the real v6.15.0 shape.
+    const report: KnipReport = {
+      issues: [
+        {
+          file: "src/schemas/standard.ts",
+          exports: [],
+          types: [],
+          files: [{ name: "src/schemas/standard.ts" }],
+        },
+      ],
+    };
+    const findings = parseKnipReport(report);
+    assert.deepEqual(findings, [
+      { kind: "file", path: "src/schemas/standard.ts", name: "" },
+    ]);
+  });
+
+  test("nested issues[].files coexist with per-file exports/types in the same issue — #3497", () => {
+    // A single knip v6.15.0 issue object can carry a nested whole-file finding
+    // AND unused exports/types. Both must be extracted; the whole-file path is
+    // the entry's `name`, the export path is the issue's `file`.
+    const report: KnipReport = {
+      issues: [
+        {
+          file: "src/foo.ts",
+          exports: [{ name: "deadExport", line: 3, col: 1, pos: 40 }],
+          types: [{ name: "DeadType", line: 9, col: 1, pos: 120 }],
+          files: [{ name: "src/orphan.ts" }],
+        },
+      ],
+    };
+    const findings = parseKnipReport(report);
+    assert.deepEqual(findings, [
+      { kind: "file", path: "src/orphan.ts", name: "" },
+      { kind: "export", path: "src/foo.ts", name: "deadExport" },
+      { kind: "export", path: "src/foo.ts", name: "DeadType" },
+    ]);
+  });
+
+  test("tolerates BOTH layouts at once — legacy top-level files + nested issues[].files — #3497", () => {
+    // Defensive: a report that carries both a legacy top-level `files` array
+    // and a v6.15.0 nested `issues[].files` must surface every whole-file
+    // finding from both locations (parser is layout-tolerant, not exclusive).
+    const report: KnipReport = {
+      files: ["dashboard/src/legacy.jsx"],
+      issues: [{ file: "src/mod.ts", exports: [], types: [], files: [{ name: "src/nested-dead.ts" }] }],
+    };
+    const findings = parseKnipReport(report);
+    assert.deepEqual(findings, [
+      { kind: "file", path: "dashboard/src/legacy.jsx", name: "" },
+      { kind: "file", path: "src/nested-dead.ts", name: "" },
+    ]);
+  });
+
+  test("tolerates a bare-string entry in nested issues[].files (edge shape) — #3497", () => {
+    // fileEntryPath handles both `{ name }` objects and bare path strings, so a
+    // future/edge knip shape that emits nested files as strings still parses.
+    const report: KnipReport = {
+      issues: [{ file: "src/mod.ts", exports: [], types: [], files: ["src/bare-dead.ts"] }],
+    };
+    const findings = parseKnipReport(report);
+    assert.deepEqual(findings, [
+      { kind: "file", path: "src/bare-dead.ts", name: "" },
+    ]);
+  });
 });
 
 describe("validateFinding — the blank-title root-cause guard (#1167 cause 1)", () => {
