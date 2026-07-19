@@ -3,8 +3,10 @@
  *
  * The Redis-backed per-agent / per-skill pattern store (`hydra:memory:{agent}:patterns`,
  * `hydra:friction:{skill}:patterns`) that captures recurring lessons and friction from
- * cycle outcomes, auto-promotes them to `config/feedback/to-{agent}.md` at the 3-hit
- * threshold, and escalates recurring friction to GitHub issues. See **Pattern Memory**
+ * cycle outcomes, promotes them (stamping `promoted`/`promotedAt` on the Redis pattern
+ * record) at the 3-hit threshold, and escalates recurring friction to GitHub issues. The
+ * old promote→`config/feedback/to-{agent}.md` write path was retired once its Codex
+ * consumers were deleted (issue #2962; ADR-0006 / #710). See **Pattern Memory**
  * in `CONTEXT.md`. The domain is a nine-file cluster; before this barrel, six of the
  * nine sub-files were imported directly by external callers, forcing every consumer to
  * navigate the internal split to find which leaf owns a given export.
@@ -27,7 +29,7 @@
 
 // --- Recording (write path) -------------------------------------------------
 // The core record→promote lifecycle: capture a lesson/friction pattern, promote it
-// to the feedback file at threshold, and the daily consolidation prune.
+// (stamping the Redis pattern record) at threshold, and the daily consolidation prune.
 export {
   recordPattern,
   loadAgentMemory,
