@@ -65,8 +65,26 @@ import {
   getSchedulerCyclesUnaccounted,
   getSchedulerStateVersion,
   getSchedulerStateRaw,
-  getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
 } from "../redis/scheduler.ts";
+// Deliberate-stop marker contract (issue #388) was lifted into a focused leaf
+// (`./stop-marker.ts`, issue #3500) so the "what does deliberate vs
+// circuit-breaker mean, what TTL, what payload shape?" question is answerable
+// in one file with no timer / counter / rate deps in scope. The leaf is now the
+// single importer of the raw deliberate-stop Redis accessors; the controller
+// imports the leaf's typed wrappers (as the production defaults for its
+// unchanged flat dep fields) plus the two pure serialize/parse folds and the
+// TTL constant. The `stopReason` / `deliberateStoppedAt` in-memory discriminant
+// fields STAY on HeartbeatState below — getStatus projects them off the state
+// snapshot. Mirrors the rolling-rates.ts / status-projection.ts /
+// tick-stagnation-alert.ts extraction precedent (#2974 / #3371).
+import {
+  DELIBERATE_STOP_TTL_SECONDS,
+  serializeDeliberateStopMarker,
+  parseDeliberateStopMarker,
+  readDeliberateStop,
+  writeDeliberateStop,
+  clearDeliberateStop,
+} from "./stop-marker.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getReconcilerHealth } from "../redis/reconciler.ts";
 // Builder-health stagnation emit (issue #3290) was lifted OUT of this heartbeat
@@ -197,11 +215,9 @@ function freshState(): HeartbeatState {
   };
 }
 
-// Issue #388: TTL for the deliberate-stop Redis marker. 24h is the
-// operator-friendly maximum — if the operator forgets to restart the
-// scheduler within a day, the marker self-clears so the watchdog regains
-// the ability to recover from genuine self-stops.
-const DELIBERATE_STOP_TTL_SECONDS = 24 * 60 * 60;
+// Issue #388: the deliberate-stop TTL, marker payload shape, and serialize/parse
+// are now owned by `./stop-marker.ts` (issue #3500). `DELIBERATE_STOP_TTL_SECONDS`
+// is imported at the top of this file.
 
 /**
  * Injectable dependencies for {@link HeartbeatController} (issue #2195). All
@@ -297,9 +313,13 @@ export class HeartbeatController {
     this.getSchedulerCyclesFailed = deps.getSchedulerCyclesFailed ?? getSchedulerCyclesFailed;
     this.getSchedulerCyclesUnaccounted = deps.getSchedulerCyclesUnaccounted ?? getSchedulerCyclesUnaccounted;
     this.getSchedulerStateVersion = deps.getSchedulerStateVersion ?? getSchedulerStateVersion;
-    this.getSchedulerDeliberateStop = deps.getSchedulerDeliberateStop ?? getSchedulerDeliberateStop;
-    this.setSchedulerDeliberateStop = deps.setSchedulerDeliberateStop ?? setSchedulerDeliberateStop;
-    this.clearSchedulerDeliberateStop = deps.clearSchedulerDeliberateStop ?? clearSchedulerDeliberateStop;
+    // Issue #3500: production defaults now point at the stop-marker leaf's typed
+    // wrappers (which call through to the unmodified redis/scheduler.ts
+    // accessors). The deps-bag field names are unchanged so every existing
+    // injection in test/heartbeat-controller.test.mts keeps resolving.
+    this.getSchedulerDeliberateStop = deps.getSchedulerDeliberateStop ?? readDeliberateStop;
+    this.setSchedulerDeliberateStop = deps.setSchedulerDeliberateStop ?? writeDeliberateStop;
+    this.clearSchedulerDeliberateStop = deps.clearSchedulerDeliberateStop ?? clearDeliberateStop;
     this.getAutopilotPaused = deps.getAutopilotPaused ?? getAutopilotPaused;
     this.getReconcilerHealth = deps.getReconcilerHealth ?? getReconcilerHealth;
     this.emitTickStagnationAlerts = deps.emitTickStagnationAlerts ?? emitTickStagnationAlerts;
@@ -386,19 +406,14 @@ export class HeartbeatController {
       // Redis the operator stopped the scheduler before the restart — we keep
       // running=false (loadSchedulerState doesn't auto-start) and surface the
       // reason so the watchdog still refuses to restart after a service bounce.
-      try {
-        const rawDeliberateStop = await this.getSchedulerDeliberateStop();
-        if (rawDeliberateStop) {
-          const parsed = JSON.parse(rawDeliberateStop);
-          if (parsed && typeof parsed.reason === "string") {
-            state.stopReason = parsed.reason;
-          }
-          if (parsed && typeof parsed.stoppedAt === "string") {
-            state.deliberateStoppedAt = parsed.stoppedAt;
-          }
-        }
-      } catch (err: any) {
-        logger.error({ err }, "failed to load deliberate-stop marker");
+      // The parse + field-type guard lives in the stop-marker leaf
+      // (parseDeliberateStopMarker, issue #3500); it never throws — a
+      // malformed marker parses to null and is treated as "no marker".
+      const rawDeliberateStop = await this.getSchedulerDeliberateStop();
+      const marker = parseDeliberateStopMarker(rawDeliberateStop);
+      if (marker) {
+        state.stopReason = marker.reason as HeartbeatState["stopReason"];
+        state.deliberateStoppedAt = marker.stoppedAt;
       }
 
       logger.info({ cyclesRun: state.cyclesRun, cyclesMerged: state.cyclesMerged, cyclesFailed: state.cyclesFailed, stateVersion: state._stateVersion, stopReason: state.stopReason ?? "none" }, "persisted state loaded");
@@ -552,7 +567,7 @@ export class HeartbeatController {
       state.deliberateStoppedAt = stoppedAt;
       try {
         await this.setSchedulerDeliberateStop(
-          JSON.stringify({ reason: "deliberate", stoppedAt }),
+          serializeDeliberateStopMarker("deliberate", stoppedAt),
           DELIBERATE_STOP_TTL_SECONDS,
         );
       } catch (err: any) {
