@@ -37,14 +37,19 @@
  * it is the highest-consequence concern (a false negative silently skips a call
  * that should have fired, and it short-circuits on the sole sanctioned real-USD
  * cap), so a pure leaf gives its policy an independent, narrow test surface that
- * loads neither the Anthropic adapter nor Redis. The daily-cap ledger stays
- * HERE: it is internally cohesive with the engine factory and has no
- * independent caller.
+ * loads neither the Anthropic adapter nor Redis. #3499 then RE-EXTRACTED the
+ * daily-cap ledger to its own focused leaf (`recommendation-cap.ts`): the cap's
+ * mutable-ledger state (its behavior under reset / time-advance / date-rollover)
+ * has a separate test-surface identity that the engine-factory coupling
+ * obscured, so a pure leaf lets a cap test import zero Anthropic/prompt/engine
+ * surface. The engine re-exports its symbols so the consumer + test surface is
+ * byte-identical.
  *
  * The engine imports the prompt grammar (types + `buildPrompt` +
  * `parseLlmResponse` + `PROMPT_SIZE_BUDGET_BYTES`) from the prompt leaf and the
  * materiality gate (`shouldFire` + the signature helpers) from the materiality
- * leaf, and RE-EXPORTS the types + functions it needs, so the `EngineDeps` /
+ * leaf, the daily-cap ledger (`createCapEnforcer` + its types) from the cap leaf
+ * (#3499), and RE-EXPORTS the types + functions it needs, so the `EngineDeps` /
  * `LlmResult` surface `recommendation-consumer.ts` consumes stays byte-identical
  * — no interface change is visible to the consumer.
  *
@@ -62,7 +67,9 @@
  *   2. Materiality-gate re-exports — the pure fire-decision logic from the
  *      `recommendation-materiality.ts` leaf (#3099), re-exported to keep the
  *      consumer-facing + test surface stable.
- *   4. Daily-cap ledger — the billing concern + oak_resting latch (was recommendation-cap.ts)
+ *   4. Daily-cap ledger re-exports — the billing concern + oak_resting latch
+ *      from the `recommendation-cap.ts` leaf (#3499), re-exported to keep the
+ *      consumer-facing + test surface stable.
  *   5. Engine factory — `createRecommendationEngine` composing 2+4 + the prompt leaf with the Redis/LLM deps
  *   6. Production LLM client — the thin Anthropic Request Adapter wrapper
  */
@@ -88,6 +95,7 @@ import {
   summariseSlotStatus,
   shouldFire,
 } from "./recommendation-materiality.ts";
+import { createCapEnforcer, type CapEnforcer } from "./recommendation-cap.ts";
 
 // ---------------------------------------------------------------------------
 // SECTION 1 — Prompt-grammar re-exports (leaf: recommendation-prompt.ts, #2867)
@@ -207,166 +215,42 @@ export {
 } from "./recommendation-materiality.ts";
 
 // ---------------------------------------------------------------------------
-// SECTION 4 — Daily-cap ledger (was recommendation-cap.ts, issue #2119)
+// SECTION 4 — Daily-cap ledger re-exports (leaf: recommendation-cap.ts, #3499)
 //
 // The recs-engine's **billing concern** — the single sanctioned real-USD
 // surface on the orchestrator (CONTEXT.md L203 / ADR-0005:
 // `recommendation-engine.ts` bills outside the subscription via the direct
-// Anthropic API, so `HYDRA_RECS_DAILY_CAP_USD` is a live cost gate).
+// Anthropic API, so `HYDRA_RECS_DAILY_CAP_USD` is a live cost gate) — lives in
+// the `recommendation-cap.ts` leaf (#3499). It owns the cap amount, the
+// spend read/charge, the UTC date stamper, and the once-per-UTC-day
+// `oak_resting` broadcast latch, with NO Anthropic/prompt/engine imports, so a
+// cap test can import it in isolation. We re-export the symbols the consumer +
+// tests already import from here so their surface is byte-identical.
 //
-// What lives here:
-//   - DEFAULT_DAILY_CAP_USD + envDailyCap() — the ONE home for
-//     HYDRA_RECS_DAILY_CAP_USD resolution.
-//   - the UTC date stamper (utcDateStamp / today()).
-//   - the spend READ (getDailySpendUsd) + post-success CHARGE
-//     (incrDailySpendUsd) calls.
-//   - the once-per-UTC-day `oak_resting` broadcast latch (maybeEmitResting),
-//     with date-rollover reset.
-//   - getDailyCapUsd().
-//
-// What deliberately does NOT live here (load-bearing money-safety boundary):
-//   - the cap > interval > no-change ordering. That stays the SINGLE authority
-//     of `shouldFire()` in SECTION 2. This ledger FEEDS `daily_spend_usd` +
+// The load-bearing money-safety boundary is UNCHANGED by the extraction:
+//   - the cap > interval > no-change ordering stays the SINGLE authority of
+//     `shouldFire()` in SECTION 2. The ledger FEEDS `daily_spend_usd` +
 //     `daily_cap_usd` into that decision; it never re-implements the `>=`
 //     comparison or reorders the skip reasons. One short-circuit point means a
 //     capped day can never fire a paid LLM call.
 //   - the micro-USD INT rounding (USD*1e6 + INCRBY integer-safety) stays
-//     entirely inside the Redis accessor (`src/redis/recommendations.ts`); no
-//     float math crosses this seam.
+//     entirely inside the Redis accessor (`src/redis/recommendations.ts`).
 //
-// The four cost invariants are preserved 1:1:
-//   1. READ-BEFORE-FIRE — daily spend is read before shouldFire, which
-//      short-circuits on cap before any paid call.
-//   2. CHARGE-AFTER-SUCCESS-ONLY — chargeIfPositive() fires only when
-//      cost_usd > 0, after a successful LLM call.
-//   3. MICRO-USD INT confined to the Redis accessor (this ledger only passes a
-//      USD float through to it).
-//   4. BROADCAST-ONCE-PER-UTC-DAY — the pauseDayState latch + rollover reset.
+// The four cost invariants are preserved 1:1 (see the leaf's header):
+//   1. READ-BEFORE-FIRE     2. CHARGE-AFTER-SUCCESS-ONLY
+//   3. MICRO-USD INT confined to the Redis accessor
+//   4. BROADCAST-ONCE-PER-UTC-DAY (the pauseDayState latch + rollover reset).
 // ---------------------------------------------------------------------------
 
-/** Default daily cost cap in USD when HYDRA_RECS_DAILY_CAP_USD is unset/invalid. */
-export const DEFAULT_DAILY_CAP_USD = 1.0;
-
-/**
- * Resolve the recs-engine daily cap from `HYDRA_RECS_DAILY_CAP_USD`. This is
- * the ONLY home for that env resolution — the engine delegates to it so the
- * cap amount has a single source of truth (CONTEXT.md L203 / ADR-0005).
- */
-export function envDailyCap(): number {
-  const raw = process.env.HYDRA_RECS_DAILY_CAP_USD;
-  if (!raw) return DEFAULT_DAILY_CAP_USD;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0) return DEFAULT_DAILY_CAP_USD;
-  return n;
-}
-
-/** UTC `YYYY-MM-DD` stamp — the per-day bucket key for the spend ledger. */
-export function utcDateStamp(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-/**
- * The narrow Redis surface the cap ledger needs — the micro-USD INT spend
- * accessors. The integer-safety (USD*1e6 rounding + INCRBY) stays inside
- * `src/redis/recommendations.ts`; this ledger only passes USD floats through.
- */
-export interface CapRedisFacade {
-  getDailySpendUsd(date: string): Promise<number>;
-  incrDailySpendUsd(date: string, usd: number): Promise<number>;
-}
-
-export interface CapEnforcerDeps {
-  /** Spend ledger accessor — defaults to the production Redis seam. */
-  redis?: CapRedisFacade;
-  /** Broadcaster for the one-shot `oak_resting` WS event. */
-  broadcastResting?: (runId: string, daily_spend_usd: number, cap_usd: number) => void;
-  /** Clock — defaults to `() => Math.floor(Date.now() / 1000)`. */
-  now?: () => number;
-  /** Date stamper — defaults to UTC YYYY-MM-DD. */
-  today?: () => string;
-  /** Daily cap in USD — defaults to env or DEFAULT_DAILY_CAP_USD. */
-  dailyCapUsd?: number;
-}
-
-/**
- * The constructed cap-enforcer. It owns the billing ledger but NOT the fire
- * decision — `readDailySpend()` + `getDailyCapUsd()` feed the engine's
- * `shouldFire()` call; the enforcer never decides whether to proceed.
- */
-export interface CapEnforcer {
-  /** The resolved daily cap in USD. */
-  getDailyCapUsd(): number;
-  /** Current UTC date stamp — the spend-ledger bucket key. */
-  today(): string;
-  /** Read the recs-engine daily spend in USD for the given date. */
-  readDailySpend(date: string): Promise<number>;
-  /**
-   * Charge a successful call's USD cost into the daily tally — a no-op when
-   * `costUsd <= 0` (CHARGE-AFTER-SUCCESS-ONLY invariant: only paid calls
-   * charge). The caller invokes this only after a successful LLM call.
-   */
-  chargeIfPositive(date: string, costUsd: number): Promise<void>;
-  /**
-   * Emit the one-shot `oak_resting` WS broadcast for the current UTC day.
-   * Returns `true` if it broadcast this call, `false` if already emitted
-   * today. Resets on date rollover (BROADCAST-ONCE-PER-UTC-DAY invariant).
-   */
-  maybeEmitResting(spendUsd: number): boolean;
-}
-
-/**
- * Construct the cap enforcer. Mirrors `createRecommendationEngine`'s deps
- * defaulting (redis/now/today/cap all overridable for tests).
- */
-export function createCapEnforcer(deps: CapEnforcerDeps = {}): CapEnforcer {
-  const redis = deps.redis ?? (defaultRedis as CapRedisFacade);
-  const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
-  const today = deps.today ?? (() => utcDateStamp(new Date(now() * 1000)));
-  const dailyCapUsd = Number.isFinite(deps.dailyCapUsd as number)
-    ? (deps.dailyCapUsd as number)
-    : envDailyCap();
-
-  // Tracks whether we've already broadcast the `oak_resting` pause event
-  // for this UTC day. Reset on date rollover.
-  const pauseDayState = { date: "", emitted: false };
-
-  return {
-    getDailyCapUsd: () => dailyCapUsd,
-
-    today,
-
-    async readDailySpend(date: string): Promise<number> {
-      return redis.getDailySpendUsd(date);
-    },
-
-    async chargeIfPositive(date: string, costUsd: number): Promise<void> {
-      if (costUsd > 0) {
-        await redis.incrDailySpendUsd(date, costUsd);
-      }
-    },
-
-    maybeEmitResting(spendUsd: number): boolean {
-      const date = today();
-      if (pauseDayState.date !== date) {
-        pauseDayState.date = date;
-        pauseDayState.emitted = false;
-      }
-      if (pauseDayState.emitted) return false;
-      pauseDayState.emitted = true;
-      try {
-        deps.broadcastResting?.("__system__", spendUsd, dailyCapUsd);
-      } catch (err: any) {
-        console.error(
-          `[recs-engine] oak_resting broadcaster threw: ${err?.message || err}`,
-        );
-      }
-      return true;
-    },
-  };
-}
+export {
+  DEFAULT_DAILY_CAP_USD,
+  envDailyCap,
+  utcDateStamp,
+  createCapEnforcer,
+  type CapRedisFacade,
+  type CapEnforcerDeps,
+  type CapEnforcer,
+} from "./recommendation-cap.ts";
 
 // ---------------------------------------------------------------------------
 // SECTION 5 — Engine factory
