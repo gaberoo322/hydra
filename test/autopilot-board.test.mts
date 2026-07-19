@@ -20,9 +20,11 @@ import assert from "node:assert/strict";
 
 import {
   createAutopilotBoardRouter,
-  deriveBoardState,
   type AutopilotBoardRouterDeps,
 } from "../src/api/autopilot-board.ts";
+// `deriveBoardState` moved to its domain leaf (issue #3505) — the pure
+// bucketing unit test imports it directly, without Express in scope.
+import { deriveBoardState } from "../src/autopilot/board-state.ts";
 import {
   ORCH_BOARD_LABELS,
   STALE_IN_PROGRESS_SECONDS,

@@ -30,7 +30,10 @@
  * exactly the orch six-count + two-stale-list projection for both scopes.
  * Surfacing the Target-specific labels as their own counts is a deliberately
  * deferred follow-on — doing it here would fork `deriveBoardState`, which the
- * ADR forbids.
+ * ADR forbids. That projection now lives in the `src/autopilot/board-state.ts`
+ * leaf (issue #3505), NOT the Express route file, so a future multi-scope reader
+ * can import `deriveBoardState` from its domain home directly — the seam-count
+ * invariant is achievable without a route file in the import closure.
  *
  * This module is leaf-level infrastructure: it imports only the single-source
  * orch vocabulary and defines constants — no I/O, no decisions.
