@@ -46,11 +46,16 @@ import {
   cacheHitRatio,
 } from "./token-math.ts";
 import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
-// TranscriptScan seam (issue #1971): the empty-breakdown constants + per-family
-// accumulator helpers, plus the `ScanResult` boundary type the OAuth-rebase /
-// since-reset folds read slices of. One-way import (this leaf never imports back).
-import { EMPTY_BREAKDOWN, emptyByModel, addBreakdown, DISPATCH_KINDS } from "./transcript-scan.ts";
-import type { ScanResult, DispatchKind } from "./transcript-scan.ts";
+// Token-breakdown data-model leaf (issue #3513): the empty-breakdown constant +
+// per-family accumulator helpers + the dispatch-kind vocabulary tuple are PURE
+// primitives, so this pure leaf imports them from the pure `./token-breakdown.ts`
+// leaf directly — a pure→pure edge that no longer drags in the filesystem-I/O
+// transitive closure the old `./transcript-scan.ts` import did.
+import { EMPTY_BREAKDOWN, emptyByModel, addBreakdown, DISPATCH_KINDS } from "./token-breakdown.ts";
+import type { DispatchKind } from "./token-breakdown.ts";
+// TranscriptScan seam (issue #1971): only the `ScanResult` I/O-boundary type the
+// OAuth-rebase / since-reset folds read slices of. Type-only, one-way import.
+import type { ScanResult } from "./transcript-scan.ts";
 // Env-config readers (issue #1896) the relocated `assembleSnapshot` (issue #2988)
 // consumes to gate the quota math on the calibration env vars. Pure, IO-free
 // leaf — importing VALUES from it introduces no cycle (config.ts imports nothing
