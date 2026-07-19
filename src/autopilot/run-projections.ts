@@ -44,7 +44,7 @@ import {
 } from "../redis/autopilot-runs.ts";
 import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
-import { isLivePid } from "../worktree-orphan.ts";
+import { isLivePid } from "../process-probe.ts";
 import { WEDGE_AGE_THRESHOLD_S } from "./run-lifecycle-state.ts";
 
 // ---------------------------------------------------------------------------
@@ -90,7 +90,8 @@ export const RUN_TURNS_MAX_FETCH = 10000;
  * sweeper doesn't promote rows from older writers that never stamped a pid.
  *
  * This is now a re-export of the canonical {@link isLivePid} predicate in
- * src/worktree-orphan.ts (consolidated in issue #2816 — the semantics were
+ * src/process-probe.ts (consolidated in issue #2816, extracted to its focused
+ * leaf in issue #3503 — the semantics were
  * already identical here; the two former unguarded copies in src/index.ts and
  * scripts/ci/branch-prune-runner.ts diverged only on non-finite pids). The
  * `isPidAlive` name is kept as an alias so the ~6 downstream deps-bag

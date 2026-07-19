@@ -32,9 +32,15 @@
  * window; the lifecycle-type re-exports it once carried were retired once every
  * caller migrated to importing them from this leaf directly (issue #3147).
  *
- * The pid-liveness probe is imported directly from the canonical
- * {@link isLivePid} predicate in `worktree-orphan.ts` — the same source the
- * `isPidAlive` alias in `run-projections.ts` re-exports.
+ * The pid-liveness probe defaults to the canonical {@link isLivePid} predicate
+ * in the focused `process-probe.ts` leaf (extracted in issue #3503) — the same
+ * source the `isPidAlive` alias in `run-projections.ts` re-exports — but
+ * `deriveLifecycleState` takes it as an OPTIONAL injectable `pidCheck` param
+ * (issue #3503, Invariant 4). Production callers pass a single argument and get
+ * the real `kill -0` probe; tests inject a stub predicate, at which point this
+ * leaf's zero-I/O claim is literally true (no `process.kill` syscall runs).
+ * Importing the OS probe from a process-domain leaf (not a worktree-management
+ * module) keeps this reader's cross-module edge conceptually appropriate.
  */
 
 import { classBySkill } from "../taxonomy/classes.ts";
@@ -42,7 +48,7 @@ import {
   epochFromIsoOrNow,
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
-import { isLivePid } from "../worktree-orphan.ts";
+import { isLivePid, type LivePidCheck } from "../process-probe.ts";
 import { numberOrDefault } from "./run-result.ts";
 
 // ---------------------------------------------------------------------------
@@ -108,9 +114,19 @@ export interface AutopilotLifecycle {
  * row has already been promoted to `killed`/`crash`; the pid re-check
  * here is belt-and-braces for callers (e.g. raw projections) that skip
  * the sweep.
+ *
+ * The `pidCheck` param is the ONE point of impurity — the `kill -0` OS probe.
+ * It defaults to the real {@link isLivePid}, so production callers pass a
+ * single argument and behave byte-identically; tests inject a deterministic
+ * stub predicate (`() => true` / `() => false`) to remove OS pid-recycling
+ * flakiness and make the module-header zero-I/O claim literally true. The
+ * default keeps every existing single-arg call site (the route layer, the
+ * raw projections, `sweep-reader.ts`) unchanged — this is an additive
+ * `extend`, not a breaking change (issue #3503, Invariant 4).
  */
 export function deriveLifecycleState(
   row: Record<string, string> | null | undefined,
+  pidCheck: LivePidCheck = isLivePid,
 ): AutopilotLifecycle {
   if (!row || !row.status) {
     return { state: "idle", run_id: null, term_reason: null, ended_epoch: null };
@@ -124,7 +140,7 @@ export function deriveLifecycleState(
 
   if (status === "running") {
     const pid = Number(row.pid || "0");
-    if (isLivePid(pid)) {
+    if (pidCheck(pid)) {
       return { state: "running", run_id: runId, term_reason: null, ended_epoch: null };
     }
     // Dead-pid running row a sweep would have promoted — report crashed.

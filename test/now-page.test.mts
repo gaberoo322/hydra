@@ -35,12 +35,16 @@ describe("deriveLifecycleState — pure derivation (issue #888)", () => {
   });
 
   test("running status + live pid → running", () => {
-    // process.pid is alive by definition for this test process.
-    const lc = deriveLifecycleState({
-      run_id: "ap-1",
-      status: "running",
-      pid: String(process.pid),
-    });
+    // Inject a deterministic live-pid stub (issue #3503, Invariant 4) so the
+    // derivation is pinned without a real `kill -0` syscall / OS pid recycling.
+    const lc = deriveLifecycleState(
+      {
+        run_id: "ap-1",
+        status: "running",
+        pid: "12345",
+      },
+      () => true,
+    );
     assert.equal(lc.state, "running");
     assert.equal(lc.run_id, "ap-1");
     assert.equal(lc.term_reason, null);
@@ -48,13 +52,17 @@ describe("deriveLifecycleState — pure derivation (issue #888)", () => {
   });
 
   test("running status + dead pid → crashed (belt-and-braces re-check)", () => {
-    // pid 999999999 is not a live process in CI/dev sandboxes.
-    const lc = deriveLifecycleState({
-      run_id: "ap-2",
-      status: "running",
-      pid: "999999999",
-      ended_epoch: "1700",
-    });
+    // Inject a deterministic dead-pid stub (issue #3503, Invariant 4) instead of
+    // fabricating pid 999999999 — no dependence on OS pid liveness in CI/dev.
+    const lc = deriveLifecycleState(
+      {
+        run_id: "ap-2",
+        status: "running",
+        pid: "999999999",
+        ended_epoch: "1700",
+      },
+      () => false,
+    );
     assert.equal(lc.state, "crashed");
     assert.equal(lc.term_reason, "crash");
     assert.equal(lc.ended_epoch, 1700);

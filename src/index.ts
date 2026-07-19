@@ -10,7 +10,8 @@ import { initLearning } from "./learning-lifecycle.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { gitExec } from "./github/git.ts";
 import { isGhFailure, isGhOk } from "./github/exec.ts";
-import { isLivePid, pruneOrphanedTargetWorktrees } from "./worktree-orphan.ts";
+import { isLivePid } from "./process-probe.ts";
+import { pruneOrphanedTargetWorktrees } from "./worktree-orphan.ts";
 import { statSync, readFileSync } from "node:fs";
 import { startConsumers } from "./notification-consumer.ts";
 import { slotEventsBridgeConsumer } from "./autopilot/slot-events-bridge.ts";
@@ -64,13 +65,14 @@ function stopObservabilityBridges(): void {
 // ---------------------------------------------------------------------------
 // Startup orphan-worktree prune (issue #2465, recurrence of #2115)
 //
-// The prune logic (both the `isLivePid` liveness predicate and the
-// `pruneOrphanedTargetWorktrees` orchestration) now lives in
+// The `pruneOrphanedTargetWorktrees` orchestration lives in
 // src/worktree-orphan.ts, next to its pure classifier — consolidated in issue
-// #2816 so the ONE `isLivePid` contract is shared with the branch-prune runner
-// and the run-projection sweeper, and so the pruner is unit-testable via an
-// injected deps bag. index.ts is now only the caller that wires the live deps
-// (github/git::gitExec, node:fs, Date.now, isLivePid) at the call site below.
+// #2816 so the pruner is unit-testable via an injected deps bag. The ONE
+// `isLivePid` liveness predicate it shares with the branch-prune runner and the
+// run-projection sweeper now lives in the focused src/process-probe.ts leaf
+// (extracted in issue #3503). index.ts is now only the caller that wires the
+// live deps (github/git::gitExec, node:fs, Date.now, isLivePid) at the call
+// site below.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

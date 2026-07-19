@@ -81,7 +81,7 @@ import {
 // rootDir-constrained the way `src/` is — so it imports the ONE canonical
 // liveness predicate directly from src (consolidated in issue #2816),
 // retiring the private copy that formerly diverged on non-finite pids.
-import { isLivePid } from "../../src/worktree-orphan.ts";
+import { isLivePid } from "../../src/process-probe.ts";
 
 interface RunnerInput {
   branchesRaw?: string;
