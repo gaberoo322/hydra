@@ -23,11 +23,17 @@
 #     and the cascade-routing escalation-provenance deposit at
 #       ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-escalation-<task_id>   (issue #3284)
 #   - <task_id> is the HARNESS task id. For the reflect/grounding modes the
-#     PRIMARY source is the `agent-<HASH>` worktree-dir basename (12+ hex chars),
-#     which is the branch suffix `worktree-agent-<HASH>` and the slot `task_id`
-#     reap reads (#1945 — env vars alone are the WRONG key inside a worktree
-#     subagent). Fallback: HYDRA_AUTOPILOT_TASK_ID then CLAUDE_CODE_SESSION_ID,
-#     only when cwd is not an agent-<HASH> worktree.
+#     PRIMARY source is the `agent-<HASH>` worktree-dir basename (12+ hex chars).
+#     Fallback: HYDRA_AUTOPILOT_TASK_ID then CLAUDE_CODE_SESSION_ID, only when
+#     cwd is not an agent-<HASH> worktree.
+#     NOTE (#3477): the long-standing claim that this basename IS the `task_id`
+#     reap reads is FALSE for an Agent(isolation="worktree") dispatch — reap
+#     reads under the harness `.task.id` reported to the SubagentStop hook, a
+#     DIFFERENT identifier, so these deposits never joined and `testsAfter`
+#     recorded null on every pipeline cycle. The join is now bridged on the read
+#     side: `scripts/autopilot/hooks/on-subagent-stop.sh` re-keys these deposits
+#     from this basename onto the emitted `task_id` when the child completes.
+#     (#1945 — env vars alone are the WRONG key inside a worktree subagent.)
 #   - The `escalation` mode is DIFFERENT (issue #3284): it is invoked by the
 #     autopilot HARNESS at escalation-dispatch time, NOT by a worktree subagent,
 #     so the harness is not inside the escalated worktree and cwd carries no

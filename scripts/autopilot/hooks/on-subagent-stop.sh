@@ -21,6 +21,16 @@
 #   summary=<truncated 200-char text>
 #   ts_epoch=<unix-epoch-seconds>
 #
+# Side effect: grounding/reflection deposit re-key (issue #3477)
+# --------------------------------------------------------------
+# Besides emitting the event, this hook re-keys the completing child's
+# grounding/reflection/anchor deposits from the `agent-<HASH>` worktree-dir
+# basename they were written under (reflection-deposit.sh derive_task_id) onto
+# the emitted `task_id` reap.py reads them under. For an
+# Agent(isolation="worktree") dispatch those two identifiers differ, so before
+# this the deposit was written correctly and never joined — `testsAfter`
+# recorded null on every pipeline cycle. See `rekey_worktree_deposits` below.
+#
 # Slot parsing
 # ------------
 # The autopilot dispatches each subagent with a description that STARTS
@@ -115,6 +125,7 @@ summary=""
 description=""
 error_message=""
 response_text=""
+cwd=""
 
 if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
   # We accept either `task.*` (the documented SubagentStop shape from
@@ -127,6 +138,19 @@ if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
   ' 2>/dev/null || printf '')"
   task_id="$(printf '%s' "$payload" | jq -r '
     (.task.id // .task_id // .session_id // .id // "") | tostring
+  ' 2>/dev/null || printf '')"
+  # Issue #3477: the child's own working directory. Claude Code hook payloads
+  # carry the subagent cwd at the top level (same shape the PostToolUse hook
+  # reads at on-subagent-tool-call.sh — `.cwd // .project_dir`). For a worktree
+  # dispatch this is `.../.claude/worktrees/agent-<HASH>`, whose basename hash
+  # is the key `reflection-deposit.sh derive_task_id()` used to WRITE the
+  # grounding/reflection/anchor deposits. reap.py READS those deposits under the
+  # emitted `task_id` (the harness `.task.id`), which — for an
+  # `Agent(isolation="worktree")` dispatch — is NOT that hash, so the join
+  # silently misses and `testsAfter` records null on every pipeline cycle. We
+  # use this below to re-key the child's deposits onto `task_id`.
+  cwd="$(printf '%s' "$payload" | jq -r '
+    (.cwd // .project_dir // .task.cwd // .task.working_directory // "") | tostring
   ' 2>/dev/null || printf '')"
   error_message="$(printf '%s' "$payload" | jq -r '
     (.task.result.error_message // .result.error_message // .error_message // .error // "") | tostring
@@ -185,6 +209,53 @@ if [ "$status" = "failure" ] && [ -n "$error_message" ]; then
 else
   summary="$(truncate_field "${response_text:-$description}")"
 fi
+
+# Issue #3477: re-key the child's grounding/reflection/anchor deposits from the
+# worktree-dir hash they were WRITTEN under (`reflection-deposit.sh
+# derive_task_id()` keys on the `agent-<HASH>` cwd basename) onto the emitted
+# `task_id` that reap.py READS them under. For an `Agent(isolation="worktree")`
+# pipeline dispatch these two identifiers differ, so the deposit is written
+# correctly and then never joined — `testsAfter` (issue #2754) records null on
+# every pipeline cycle. This hook fires on the host AFTER the child has written
+# its deposits to the shared `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}`, and it knows
+# BOTH the child's cwd (→ the write key) and the `task_id` it emits (→ the read
+# key), so it is the one place that can bridge the two namespaces. A copy (not a
+# move) is used so the original cwd-keyed deposit still satisfies any legacy
+# reader. Best-effort and fully non-fatal: a missing/non-worktree cwd, an absent
+# deposit, an already-aligned key, or an I/O error all no-op.
+rekey_worktree_deposits() {
+  local dir base cand wt_hash prefix src dst
+  dir="${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}"
+  [ -n "$task_id" ] || return 0
+  [ -n "$cwd" ] || return 0
+  base="$(basename -- "$cwd")"
+  case "$base" in
+    agent-*) ;;
+    *) return 0 ;;               # not an agent-<HASH> worktree cwd
+  esac
+  cand="${base#agent-}"
+  case "$cand" in
+    *[!0-9a-f]*) return 0 ;;      # not pure hex → not the harness worktree hash
+  esac
+  [ "${#cand}" -ge 12 ] || return 0   # 12+ hex chars (mirrors derive_task_id)
+  wt_hash="$cand"
+  # Already aligned (legacy dispatches whose emitted task_id IS the dir hash) →
+  # the existing read already joins; copying onto itself would be a no-op churn.
+  [ "$wt_hash" != "$task_id" ] || return 0
+  for prefix in hydra-grounding-tests hydra-refl-sources hydra-refl-anchor; do
+    src="${dir}/${prefix}-${wt_hash}"
+    dst="${dir}/${prefix}-${task_id}"
+    if [ -f "$src" ] && [ ! -e "$dst" ]; then
+      if cp -- "$src" "$dst" 2>/dev/null; then
+        printf '[autopilot-hook] on-subagent-stop: rekeyed %s %s -> %s\n' \
+          "$prefix" "$wt_hash" "$task_id" >&2
+      else
+        warn "rekey-failed ${prefix} ${wt_hash} -> ${task_id}"
+      fi
+    fi
+  done
+}
+rekey_worktree_deposits
 
 now_epoch="$(date +%s)"
 
