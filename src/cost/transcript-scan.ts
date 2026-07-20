@@ -131,8 +131,10 @@ export function firstUserMessageText(lines: readonly string[]): string | null {
 
 // `EMPTY_BREAKDOWN`, `emptyByModel`, and `addBreakdown` moved to the pure
 // `./token-breakdown.ts` leaf (issue #3513); imported at the top of this file
-// (the scan accumulator shares them) and re-exported at the bottom for the
-// `usage-tracker.ts` + `snapshot-assembly.ts` importers.
+// because the scan accumulator shares them. `EMPTY_BREAKDOWN` + `emptyByModel`
+// are also re-exported at the bottom for the `usage-tracker.ts` +
+// `snapshot-assembly.ts` importers; `addBreakdown` is NOT re-exported (issue
+// #3525 — those callers import it directly from `./token-breakdown.ts`).
 
 /**
  * Derive a transcript's sessionId from its file path. The SessionStart capture
@@ -612,7 +614,6 @@ export {
   deriveDispatchKind,
   EMPTY_BREAKDOWN,
   emptyByModel,
-  addBreakdown,
   emptyByDispatchKind,
 };
 export type { SkillResolver, DispatchKind };
