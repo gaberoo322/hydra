@@ -248,8 +248,6 @@ export {
   utcDateStamp,
   createCapEnforcer,
   type CapRedisFacade,
-  type CapEnforcerDeps,
-  type CapEnforcer,
 } from "./recommendation-cap.ts";
 
 // ---------------------------------------------------------------------------
