@@ -57,6 +57,7 @@ import {
   DEFAULT_SOURCE_PATHS,
   type SourcePath,
 } from "./source-enumerator.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Constants (preserved from indexer.ts Section 1a and Section 2).
@@ -193,19 +194,21 @@ export class HashDedupAdapter {
     );
     if (!isOvFailure(result)) {
       if (hash) this.indexedConfigHashes.set(filePath, hash);
-      console.log(`[Learning:Indexer] Indexed file: ${rel} -> ${targetUri}`);
+      logger.info({ rel, targetUri }, "[Learning:Indexer] Indexed file");
     } else {
       const err = result.body ?? "";
       if (err.includes("not exist") || err.includes("ENOENT")) {
-        console.log(`[Learning:Indexer] Skipped (removed): ${rel}`);
+        logger.info({ rel }, "[Learning:Indexer] Skipped (removed)");
         this.indexedConfigHashes.delete(filePath);
       } else if (err.includes("file exists") || err.includes("point lock")) {
-        console.warn(
-          `[Learning:Indexer] Transient OV conflict on ${rel} — will retry on next change: ${err.slice(0, 160)}`
+        logger.warn(
+          { rel, body: err.slice(0, 160) },
+          "[Learning:Indexer] Transient OV conflict — will retry on next change",
         );
       } else {
-        console.error(
-          `[Learning:Indexer] Failed to index ${rel}: ${result.code} ${err.slice(0, 200)}`
+        logger.error(
+          { rel, code: result.code, body: err.slice(0, 200) },
+          "[Learning:Indexer] Failed to index file",
         );
       }
     }
@@ -292,8 +295,9 @@ export class HashDedupAdapter {
       content = await readFile(filePath, "utf-8");
     } catch (err: any) {
       if (err.code !== "ENOENT") {
-        console.error(
-          `[Learning:Indexer] readFile failed for ${filePath}: ${err.message}`
+        logger.error(
+          { path: filePath, err },
+          "[Learning:Indexer] readFile failed",
         );
       }
       return "error";
@@ -395,8 +399,9 @@ export class HashDedupAdapter {
         setTimeout(() => {
           pending.delete(fullPath);
           this.indexSourceFile(fullPath, source).catch((err: any) =>
-            console.error(
-              `[Learning:Indexer] Source change index failed for ${fullPath}: ${err.message}`
+            logger.error(
+              { path: fullPath, err },
+              "[Learning:Indexer] Source change index failed",
             )
           );
         }, debounceMs)

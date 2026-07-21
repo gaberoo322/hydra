@@ -41,6 +41,7 @@
 
 import { OPENVIKING_URL, OPENVIKING_HEADERS } from "./ov-config.ts";
 import type { HydraErrorCode } from "../errors.ts";
+import { logger } from "../logger.ts";
 
 /** The subset of `HydraErrorCode` the OpenViking Request Adapter can return. */
 export type OvErrorCode = Extract<HydraErrorCode, `ov-${string}`>;
@@ -291,7 +292,7 @@ export async function ovRequest<T = any>(
     });
   } catch (err: any) {
     const code = classifyThrown(err);
-    console.error(`[ov-request] ${path} ${code}: ${err?.message ?? err}`);
+    logger.error({ path, code, err }, "[ov-request] request threw");
     return { ok: false, code };
   }
 
@@ -308,10 +309,16 @@ export async function ovRequest<T = any>(
       // cannot be None" 500 stops masquerading as a real failure in the logs.
       // NOT fail-loud-bypassing: the event is still logged (with context), just
       // at the level its expectedness warrants.
-      console.log(`[ov-request] ${path} expected non-2xx (liveness probe): ${res.status} ${text.slice(0, 200)}`);
+      logger.info(
+        { path, status: res.status, body: text.slice(0, 200) },
+        "[ov-request] expected non-2xx (liveness probe)",
+      );
     } else {
       // Fail loud: a non-2xx no caller anticipated must stay an error in the logs.
-      console.error(`[ov-request] ${path} ov-non-2xx: ${res.status} ${text.slice(0, 200)}`);
+      logger.error(
+        { path, status: res.status, body: text.slice(0, 200) },
+        "[ov-request] ov-non-2xx",
+      );
     }
     return { ok: false, code: "ov-non-2xx", body: text };
   }
@@ -328,7 +335,7 @@ export async function ovRequest<T = any>(
     const data = (await res.json()) as T;
     return { ok: true, data };
   } catch (err: any) {
-    console.error(`[ov-request] ${path} ov-malformed-json: ${err?.message ?? err}`);
+    logger.error({ path, err }, "[ov-request] ov-malformed-json");
     return { ok: false, code: "ov-malformed-json" };
   }
 }

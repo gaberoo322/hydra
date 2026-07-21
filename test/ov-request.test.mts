@@ -119,27 +119,53 @@ describe("ov-request: the four error modes", () => {
 });
 
 describe("ov-request: expectNon2xx log level (issue #2365)", () => {
+  // ADR-0027: ov-request now logs through the pino structured-logger seam
+  // (module singleton → process.stderr) instead of freeform console.* strings.
+  // Capture the serialized JSON lines and assert on the structured `level`
+  // field (pino: info=30, error=50) + the stable event message + fields —
+  // rather than grepping prose. This preserves the #2365 invariant: an
+  // UNexpected non-2xx stays fail-loud (level 50), an EXPECTED liveness-probe
+  // non-2xx is demoted to info (level 30).
+  function captureStderr(): { lines: () => Record<string, any>[]; restore: () => void } {
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let buf = "";
+    (process.stderr as any).write = (chunk: any) => {
+      buf += String(chunk);
+      return true;
+    };
+    return {
+      lines: () =>
+        buf
+          .split("\n")
+          .filter((l) => l.trim())
+          .map((l) => JSON.parse(l) as Record<string, any>),
+      restore: () => {
+        (process.stderr as any).write = originalWrite;
+      },
+    };
+  }
+
   test("an UNexpected non-2xx logs the alarming ov-non-2xx line at error level", async () => {
     globalThis.fetch = (async () =>
       fakeResponse({ ok: false, status: 500, text: async () => "Skill data cannot be None" })) as any;
-    const errLines: string[] = [];
-    const logLines: string[] = [];
-    console.error = (...a: unknown[]) => { errLines.push(a.map(String).join(" ")); };
-    console.log = (...a: unknown[]) => { logLines.push(a.map(String).join(" ")); };
-
-    const r = await ovPostJson("/api/v1/skills", { data: null });
+    const cap = captureStderr();
+    let r: any;
+    try {
+      r = await ovPostJson("/api/v1/skills", { data: null });
+    } finally {
+      cap.restore();
+    }
 
     // Result shape is unchanged — still the ov-non-2xx failure arm with body.
     assert.equal(r.ok === false && r.code, "ov-non-2xx");
     assert.equal(r.ok === false && r.body, "Skill data cannot be None");
-    // The default (no flag) caller keeps fail-loud: the error log fires.
+    // The default (no flag) caller keeps fail-loud: an error-level line fires.
+    const errLines = cap.lines().filter((o) => o.level === 50 && o.msg === "[ov-request] ov-non-2xx");
+    assert.equal(errLines.length, 1, "an unexpected non-2xx must stay an error-level log (fail-loud preserved)");
+    assert.equal(errLines[0].status, 500, "the error line carries the status as a structured field");
+    // The info-level "expected non-2xx" line must NOT fire without the flag.
     assert.equal(
-      errLines.filter((l) => l.includes("ov-non-2xx: 500")).length,
-      1,
-      "an unexpected non-2xx must stay a console.error (fail-loud preserved)",
-    );
-    assert.equal(
-      logLines.filter((l) => l.includes("expected non-2xx")).length,
+      cap.lines().filter((o) => o.msg === "[ov-request] expected non-2xx (liveness probe)").length,
       0,
       "the info-level line must NOT fire without the expectNon2xx flag",
     );
@@ -148,29 +174,32 @@ describe("ov-request: expectNon2xx log level (issue #2365)", () => {
   test("an EXPECTED non-2xx logs at info level, not error — same result returned", async () => {
     globalThis.fetch = (async () =>
       fakeResponse({ ok: false, status: 500, text: async () => "Skill data cannot be None" })) as any;
-    const errLines: string[] = [];
-    const logLines: string[] = [];
-    console.error = (...a: unknown[]) => { errLines.push(a.map(String).join(" ")); };
-    console.log = (...a: unknown[]) => { logLines.push(a.map(String).join(" ")); };
-
-    const r = await ovRequest(
-      "/api/v1/skills",
-      { method: "POST", body: JSON.stringify({ data: null }) },
-      { expectNon2xx: true },
-    );
+    const cap = captureStderr();
+    let r: any;
+    try {
+      r = await ovRequest(
+        "/api/v1/skills",
+        { method: "POST", body: JSON.stringify({ data: null }) },
+        { expectNon2xx: true },
+      );
+    } finally {
+      cap.restore();
+    }
 
     // Classification is IDENTICAL — the flag only changes the log level.
     assert.equal(r.ok === false && r.code, "ov-non-2xx");
     assert.equal(r.ok === false && r.body, "Skill data cannot be None");
     // The deliberate liveness reject is logged at info level, NOT as an error.
     assert.equal(
-      errLines.filter((l) => l.includes("ov-non-2xx")).length,
+      cap.lines().filter((o) => o.level === 50 && o.msg === "[ov-request] ov-non-2xx").length,
       0,
-      "an expected non-2xx must NOT fire the alarming console.error",
+      "an expected non-2xx must NOT fire the alarming error-level log",
     );
-    const infoLines = logLines.filter((l) => l.includes("expected non-2xx (liveness probe)"));
+    const infoLines = cap
+      .lines()
+      .filter((o) => o.level === 30 && o.msg === "[ov-request] expected non-2xx (liveness probe)");
     assert.equal(infoLines.length, 1, "the expected non-2xx is logged once at info level");
-    assert.ok(infoLines[0].includes("500"), "the info line keeps the status + body context for debugging");
+    assert.equal(infoLines[0].status, 500, "the info line keeps the status context as a structured field");
   });
 });
 

@@ -54,6 +54,7 @@ import {
   type CoverageStats,
   defaultHashAdapter,
 } from "./hash-dedup.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Shared constants (deduped across the merged modules — identical definitions).
@@ -278,8 +279,9 @@ export async function probeOvSourceResourcesPresent(
   } catch (err: any) {
     // Fail safe (CLAUDE.md "fail loud" + never-throw): log, then report present
     // so the caller does NOT clear the cache on a probe failure.
-    console.error(
-      `[source-freshness] probe failed: ${err?.message || String(err)} — defaulting to present (no clear)`,
+    logger.error(
+      { err },
+      "[source-freshness] probe failed — defaulting to present (no clear)",
     );
     return true;
   }

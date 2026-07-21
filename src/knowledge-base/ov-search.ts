@@ -45,6 +45,7 @@ import { defaultMetrics, OvSearchMetricsCounter } from "./ov-search-counter.ts";
 // indexer.ts facade delegator would recreate the #3229 import cycle.
 import { rankLexicalFallback } from "./fallback-scorer.ts";
 import { defaultHashAdapter } from "./hash-dedup.ts";
+import { logger } from "../logger.ts";
 
 export const OV_URL = OPENVIKING_URL;
 export const OV_KEY = OPENVIKING_API_KEY;
@@ -156,7 +157,10 @@ export async function trackedOvSearch(
 
     if (isOvFailure(result)) {
       counter.recordError(latencyMs);
-      console.log(`[OV Search] query="${query.slice(0, 80)}" status=${result.code} latency=${latencyMs}ms ERROR`);
+      logger.info(
+        { query: query.slice(0, 80), status: result.code, latencyMs },
+        "[OV Search] search error",
+      );
       // Issue #3341: OV is unavailable (any ov-* failure code) — degrade to an
       // in-process lexical-distance ranking over the indexed-path corpus
       // instead of forcing callers into zero-context. Resources only (uri =
@@ -170,14 +174,22 @@ export async function trackedOvSearch(
         const ranked = rankLexicalFallback(query, corpusPaths(), limit);
         if (ranked.length > 0) {
           const served = ranked.map(({ path, score }) => ({ uri: path, score }));
-          console.log(
-            `[OV Search] lexical fallback query="${query.slice(0, 80)}" code=${result.code} rankingMode=lexical served=${served.length} latency=${Date.now() - startMs}ms`,
+          logger.info(
+            {
+              query: query.slice(0, 80),
+              code: result.code,
+              rankingMode: "lexical",
+              served: served.length,
+              latencyMs: Date.now() - startMs,
+            },
+            "[OV Search] lexical fallback",
           );
           return { resources: served, memories: [], rankingMode: "lexical" };
         }
       } catch (fbErr: any) {
-        console.error(
-          `[OV Search] lexical fallback error: ${fbErr?.message ?? fbErr} — degrading to empty result`,
+        logger.error(
+          { err: fbErr },
+          "[OV Search] lexical fallback error — degrading to empty result",
         );
       }
       return { resources: [], memories: [] };
@@ -192,7 +204,10 @@ export async function trackedOvSearch(
     rankingMode = "semantic";
 
     if (resultCount === 0) {
-      console.log(`[OV Search] query="${query.slice(0, 80)}" results=0 latency=${latencyMs}ms -- attempting fallback`);
+      logger.info(
+        { query: query.slice(0, 80), results: 0, latencyMs },
+        "[OV Search] no results -- attempting fallback",
+      );
 
       // Fallback: simplified query
       const fallbackQuery = buildFallbackQuery(query);
@@ -217,21 +232,33 @@ export async function trackedOvSearch(
             counter.recordFallbackSuccess();
             resources = fbResources;
             memories = fbMemories;
-            console.log(`[OV Search] fallback query="${fallbackQuery.slice(0, 80)}" results=${fbCount} latency=${fbLatencyMs}ms SUCCESS`);
+            logger.info(
+              { query: fallbackQuery.slice(0, 80), results: fbCount, latencyMs: fbLatencyMs },
+              "[OV Search] fallback SUCCESS",
+            );
           } else {
-            console.log(`[OV Search] fallback query="${fallbackQuery.slice(0, 80)}" results=0 latency=${fbLatencyMs}ms -- no results`);
+            logger.info(
+              { query: fallbackQuery.slice(0, 80), results: 0, latencyMs: fbLatencyMs },
+              "[OV Search] fallback -- no results",
+            );
           }
         }
       } catch (err: any) {
-        console.error(`[OV Search] fallback error: ${err.message}`);
+        logger.error({ err }, "[OV Search] fallback error");
       }
     } else {
-      console.log(`[OV Search] query="${query.slice(0, 80)}" results=${resultCount} latency=${latencyMs}ms`);
+      logger.info(
+        { query: query.slice(0, 80), results: resultCount, latencyMs },
+        "[OV Search] search complete",
+      );
     }
   } catch (err: any) {
     const latencyMs = Date.now() - startMs;
     counter.recordError(latencyMs);
-    console.error(`[OV Search] query="${query.slice(0, 80)}" error="${err.message}" latency=${latencyMs}ms`);
+    logger.error(
+      { query: query.slice(0, 80), err, latencyMs },
+      "[OV Search] search threw",
+    );
   }
 
   // Issue #1440: opportunistic, time-gated, never-throw flush of the counter

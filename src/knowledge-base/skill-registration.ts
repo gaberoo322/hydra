@@ -17,6 +17,7 @@ import type { OvErrorCode } from "./ov-request.ts";
 // load-gated (indexing-bound). The startup pass now pre-flights it too, mirroring
 // what the hourly recovery chore already does (#2163).
 import { probeOllamaVlm, probeSkillsEndpoint } from "../health/probe.ts";
+import { logger } from "../logger.ts";
 
 // Issue #1828: skill registration timed out systematically (~8-12x/hour) under
 // OpenViking indexing load — a fire-and-forget single attempt with a 60s budget
@@ -282,18 +283,24 @@ async function registerOneSkill(
       (result.code === "ov-non-2xx" &&
         isOvServerTimeout((result as { ok: false; code: OvErrorCode; body?: string }).body));
     if (!retryable || lastAttempt) {
-      console.error(
-        `[Learning] Failed to register skill ${skill.name}: ${result.code}` +
-          (retryable ? ` (gave up after ${attempt} attempts)` : ""),
+      logger.error(
+        { skill: skill.name, code: result.code, retryable, attempts: attempt },
+        "[Learning] Failed to register skill",
       );
       return { ok: false, code: result.code };
     }
 
     // Exponential backoff: base, 2×base, 4×base, … before the next attempt.
     const backoff = backoffBaseMs * 2 ** (attempt - 1);
-    console.error(
-      `[Learning] Transient OV failure registering skill ${skill.name}: ${result.code} — ` +
-        `retrying in ${backoff}ms (attempt ${attempt}/${SKILL_REGISTER_MAX_ATTEMPTS})`,
+    logger.error(
+      {
+        skill: skill.name,
+        code: result.code,
+        backoffMs: backoff,
+        attempt,
+        maxAttempts: SKILL_REGISTER_MAX_ATTEMPTS,
+      },
+      "[Learning] Transient OV failure registering skill — retrying",
     );
     await sleep(backoff);
   }
@@ -331,7 +338,7 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
     /* intentional: the probe folds its own I/O errors to {status:"down"} and
        never throws, but guard defensively so a probe bug can never block startup
        registration — degrade to "attempt anyway" (the pre-#2277 behaviour). */
-    console.error(`[Learning] VLM liveness pre-check threw, attempting registration anyway: ${err?.message || String(err)}`);
+    logger.error({ err }, "[Learning] VLM liveness pre-check threw, attempting registration anyway");
     vlmStatus = "ok";
   }
 
@@ -353,11 +360,12 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
     // mode triggers" acceptance). Fail-loud convention: error level, names the
     // root cause + the no-restart recovery path so the operator does not chase OV
     // load or restart the service.
-    console.error(
-      `[Learning] OV skill catalog DEFERRED — Tailnet Ollama VLM backend (gabes-desktop-1:11434) is down, ` +
-        `so all ${OV_SKILLS.length} skill registrations were skipped to avoid the timeout cascade (#2277). ` +
-        `Planners run without skill context until the VLM recovers; the hourly Housekeeping chore re-registers ` +
-        `automatically once it is reachable (no restart needed) — see docs/operator-playbooks/ollama-recovery.md.`,
+    logger.error(
+      { total: OV_SKILLS.length, reason: "vlm-down" },
+      "[Learning] OV skill catalog DEFERRED — Tailnet Ollama VLM backend (gabes-desktop-1:11434) is down, " +
+        "so all skill registrations were skipped to avoid the timeout cascade (#2277). " +
+        "Planners run without skill context until the VLM recovers; the hourly Housekeeping chore re-registers " +
+        "automatically once it is reachable (no restart needed) — see docs/operator-playbooks/ollama-recovery.md.",
     );
     return;
   }
@@ -390,7 +398,7 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
     /* intentional: probeSkillsEndpoint folds its own I/O to a ServiceProbeResult
        and never throws, but guard so a probe bug degrades to attempt-anyway rather
        than a spurious deferral — do NOT mask a healthy handler behind a probe crash. */
-    console.error(`[Learning] Skills-endpoint liveness pre-check threw, attempting registration anyway: ${err?.message || String(err)}`);
+    logger.error({ err }, "[Learning] Skills-endpoint liveness pre-check threw, attempting registration anyway");
     skillsStatus = "running";
   }
 
@@ -414,12 +422,13 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
     // Exactly ONE operator-visible alert (mirrors the #2277 VLM-deferred contract:
     // one alert, no second cascade of per-attempt timeout logs). Fail-loud: error
     // level, names the load-gated skills handler + the no-restart recovery path.
-    console.error(
-      `[Learning] OV skill catalog DEFERRED — /api/v1/skills POST handler is load-gated ` +
-        `(VLM reachable, but the handler did not answer the 3s liveness probe under OV indexing load), ` +
-        `so all ${OV_SKILLS.length} skill registrations were skipped to avoid the 4×3×120s timeout cascade (#3402). ` +
-        `Planners run without skill context until OV load clears; the hourly Housekeeping chore re-registers ` +
-        `automatically once the handler is responsive (no restart needed) — see issue #3402.`,
+    logger.error(
+      { total: OV_SKILLS.length, reason: "skills-handler-load-gated" },
+      "[Learning] OV skill catalog DEFERRED — /api/v1/skills POST handler is load-gated " +
+        "(VLM reachable, but the handler did not answer the 3s liveness probe under OV indexing load), " +
+        "so all skill registrations were skipped to avoid the 4×3×120s timeout cascade (#3402). " +
+        "Planners run without skill context until OV load clears; the hourly Housekeeping chore re-registers " +
+        "automatically once the handler is responsive (no restart needed) — see issue #3402.",
     );
     return;
   }
@@ -462,14 +471,15 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
   skillCatalogState.skillsDeferred = false;
 
   if (registered > 0) {
-    console.log(`[Learning] Registered ${registered}/${OV_SKILLS.length} OV skills`);
+    logger.info({ registered, total: OV_SKILLS.length }, "[Learning] Registered OV skills");
   } else {
     // Fail loud (repo convention): a fully-empty catalog is the #1968 failure
     // mode — surface it distinctly from the per-skill failures above so the
     // operator (and /api/health/skills) sees "catalog empty", not just N logs.
-    console.error(
-      `[Learning] OV skill catalog EMPTY — all ${OV_SKILLS.length} skill registrations failed. ` +
-        `Planners will run without skill context (see issue #1968); check OpenViking load (#1924/#1831).`,
+    logger.error(
+      { total: OV_SKILLS.length },
+      "[Learning] OV skill catalog EMPTY — all skill registrations failed. " +
+        "Planners will run without skill context (see issue #1968); check OpenViking load (#1924/#1831).",
     );
   }
 }
@@ -574,17 +584,25 @@ export async function reRegisterMissingSkills(
   // 0-recovery pass logs at error level (work happened but did not heal the
   // catalog), a recovering pass logs at info level.
   if (recovered > 0) {
-    console.log(
-      `[Learning] OV skill catalog recovery: re-registered ${recovered} skill(s), ` +
-        `now ${skillCatalogState.registered}/${skillCatalogState.total}` +
-        (stillMissing > 0 ? ` (${stillMissing} still missing)` : ""),
+    logger.info(
+      {
+        recovered,
+        registered: skillCatalogState.registered,
+        total: skillCatalogState.total,
+        stillMissing,
+      },
+      "[Learning] OV skill catalog recovery: re-registered skill(s)",
     );
   } else {
-    console.error(
-      `[Learning] OV skill catalog recovery pass ran but recovered 0 skill(s) — ` +
-        `still ${skillCatalogState.registered}/${skillCatalogState.total} ` +
-        `(${stillMissing} missing). OV answered the liveness gate but the skill ` +
-        `registrations still failed this pass (see per-skill logs above; #2163).`,
+    logger.error(
+      {
+        registered: skillCatalogState.registered,
+        total: skillCatalogState.total,
+        stillMissing,
+      },
+      "[Learning] OV skill catalog recovery pass ran but recovered 0 skill(s) — " +
+        "OV answered the liveness gate but the skill registrations still failed this pass " +
+        "(see per-skill logs above; #2163).",
     );
   }
   return { attempted: true, recovered, stillMissing };

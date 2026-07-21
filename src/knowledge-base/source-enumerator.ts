@@ -27,6 +27,7 @@
 
 import { extname, join, relative, basename, resolve } from "node:path";
 import { readdir } from "node:fs/promises";
+import { logger } from "../logger.ts";
 
 /** Directory names never descended into / never indexed. */
 export const SKIP_DIRS = new Set([".git", "node_modules"]);
@@ -126,8 +127,9 @@ export async function enumerateSourceFiles(
     } catch (err: any) {
       // Missing directory is fine — operator may not have docs/ for example.
       if (err.code !== "ENOENT") {
-        console.error(
-          `[Learning:Indexer] readdir failed for ${dir}: ${err.message}`
+        logger.error(
+          { dir, err },
+          "[Learning:Indexer] readdir failed",
         );
       }
       return;

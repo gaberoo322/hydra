@@ -44,6 +44,7 @@ import {
   type OvSearchMetricsDelta,
   OV_SEARCH_METRIC_FIELDS,
 } from "../redis/ov-search-metrics.ts";
+import { logger } from "../logger.ts";
 
 // ===========================================================================
 // Metrics (in-memory, resets on restart)
@@ -226,7 +227,7 @@ export class OvSearchMetricsCounter {
       this.flushedSnapshot = { ...this.metrics };
     } catch (err: any) {
       // Fail-loud-but-non-fatal: observability must never break the search path.
-      console.error(`[OV Search] metrics flush failed (will retry next window): ${err?.message ?? err}`);
+      logger.error({ err }, "[OV Search] metrics flush failed (will retry next window)");
     }
   }
 }

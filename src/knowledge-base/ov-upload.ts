@@ -53,6 +53,7 @@ import {
 } from "./ov-request.ts";
 import type { OvErrorCode } from "./ov-request.ts";
 import { recordIndexerError, recordIndexerRetry } from "./indexer-stats.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Add-resource retry policy (issue #2658)
@@ -217,7 +218,7 @@ export async function indexText(
             { timeout: ADD_RESOURCE_TIMEOUT_MS },
           );
           if (!isOvFailure(addResult)) {
-            console.log(`[Learning:Indexer] Indexed text: ${title}`);
+            logger.info({ title }, "[Learning:Indexer] Indexed text");
             addSucceeded = true;
             break;
           }
@@ -231,11 +232,15 @@ export async function indexText(
             const retryable = isRetryableAddResource(failure);
             // Fail loud (CLAUDE.md): a give-up stays an error line, now naming the
             // attempt budget so an exhausted transient failure is legible.
-            console.error(
-              `[Learning:Indexer] Failed to add text "${title}": ${failure.code} body=${(failure.body ?? "").slice(
-                0,
-                200
-              )}` + (retryable ? ` (gave up after ${attempt} attempts)` : "")
+            logger.error(
+              {
+                title,
+                code: failure.code,
+                body: (failure.body ?? "").slice(0, 200),
+                retryable,
+                attempts: attempt,
+              },
+              "[Learning:Indexer] Failed to add text",
             );
             break;
           }
@@ -245,9 +250,15 @@ export async function indexText(
           const base = backoffBaseMs * 2 ** (attempt - 1);
           const backoff = Math.round(base * (0.5 + jitter() * 0.5));
           recordIndexerRetry();
-          console.warn(
-            `[Learning:Indexer] Transient OV conflict adding "${title}": ${failure.code} — ` +
-              `retrying in ${backoff}ms (attempt ${attempt}/${maxAttempts})`
+          logger.warn(
+            {
+              title,
+              code: failure.code,
+              backoffMs: backoff,
+              attempt,
+              maxAttempts,
+            },
+            "[Learning:Indexer] Transient OV conflict adding text — retrying",
           );
           await sleep(backoff);
         }
@@ -262,24 +273,23 @@ export async function indexText(
       } else {
         // Fail loud (CLAUDE.md convention): log the full response body so a
         // future API shape change is debuggable from logs alone.
-        console.error(
-          `[Learning:Indexer] indexText "${title}": no temp_path in upload response — body=${JSON.stringify(
-            uploadData
-          ).slice(0, 300)}`
+        logger.error(
+          { title, body: JSON.stringify(uploadData).slice(0, 300) },
+          "[Learning:Indexer] indexText: no temp_path in upload response",
         );
       }
     } else {
-      console.error(
-        `[Learning:Indexer] Failed to upload text "${title}": ${uploadResult.code} body=${(uploadResult.body ?? "").slice(
-          0,
-          200
-        )}`
+      logger.error(
+        {
+          title,
+          code: uploadResult.code,
+          body: (uploadResult.body ?? "").slice(0, 200),
+        },
+        "[Learning:Indexer] Failed to upload text",
       );
     }
   } catch (err: any) {
-    console.error(
-      `[Learning:Indexer] Failed to index text "${title}": ${err.message}`
-    );
+    logger.error({ title, err }, "[Learning:Indexer] Failed to index text");
   } finally {
     await unlink(tmpFile).catch(() => {
       /* intentional: best-effort temp file cleanup */
