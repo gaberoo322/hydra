@@ -55,6 +55,7 @@
 import { ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { PROMOTION_THRESHOLD } from "./constants.ts";
+import { logger } from "../logger.ts";
 import {
   loadPatterns as loadPatternsReal,
   savePatterns as savePatternsReal,
@@ -259,7 +260,7 @@ export async function runCueDemotion(
     closed = await fetchClosedIssues();
   } catch (err: any) {
     const msg = err?.message || String(err);
-    console.error(`[demotion] fetchClosedIssues failed: ${msg}`);
+    logger.error({ err }, "demotion: fetchClosedIssues failed");
     result.errors.push(msg);
     return result;
   }
@@ -297,9 +298,9 @@ export async function runCueDemotion(
           hitCountBefore: before,
           hitCountAfter: match.hitCount,
         });
-        console.log(
-          `[demotion] Demoted cue "${cue}" (${skill}) ${before}→${match.hitCount} ` +
-            `on close of issue #${issue.number}`,
+        logger.info(
+          { cue, skill, hitCountBefore: before, hitCountAfter: match.hitCount, issueNumber: issue.number },
+          "demotion: cue demoted on issue close",
         );
         demoted = true;
         break; // one cue lives in one skill's set; stop after the match
@@ -311,7 +312,7 @@ export async function runCueDemotion(
       if (!demoted) continue; // no live pattern for this cue — nothing to demote
     } catch (err: any) {
       const msg = err?.message || String(err);
-      console.error(`[demotion] issue #${issue.number} failed: ${msg}`);
+      logger.error({ err, issueNumber: issue.number }, "demotion: per-issue processing failed");
       result.errors.push(`#${issue.number}: ${msg}`);
     }
   }
