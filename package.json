@@ -37,6 +37,9 @@
   "lavamoat": {
     "allowScripts": {}
   },
+  "overrides": {
+    "brace-expansion": "^5.0.7"
+  },
   "dependencies": {
     "@sentry/node": "^10.48.0",
     "express": "^5.2.1",
