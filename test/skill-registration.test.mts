@@ -51,6 +51,33 @@ function muteConsole() {
   console.log = () => {};
 }
 
+/**
+ * ADR-0027: skill-registration now logs through the pino structured-logger seam
+ * (module singleton → process.stderr) instead of freeform console.* strings.
+ * Capture the serialized JSON lines so the "exactly one recovery/deferral line"
+ * invariants can be asserted on the stable event `msg` (and structured fields)
+ * rather than on grepped prose. Returns a parse-on-demand accessor + a restore
+ * hook; call restore() in a finally so a throwing case never leaks the patch.
+ */
+function captureStderrLines(): { lines: () => Record<string, any>[]; restore: () => void } {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
+  };
+  return {
+    lines: () =>
+      buf
+        .split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l) as Record<string, any>),
+    restore: () => {
+      (process.stderr as any).write = originalWrite;
+    },
+  };
+}
+
 function okResponse(): any {
   return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
 }
@@ -310,57 +337,66 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
 describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", () => {
   test("a 0-recovery attempted pass emits exactly one log line (not silent)", async () => {
     // Empty catalog after a failing startup.
-    console.error = () => {};
-    console.log = () => {};
+    muteConsole();
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
     await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
-    // Capture only the recovery-pass output: count [Learning] recovery lines
-    // across BOTH console.error and console.log. The per-skill [Learning] logs
-    // from registerOneSkill are present too, so we match the recovery-pass
-    // marker phrase specifically.
-    const lines: string[] = [];
-    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
-    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
-
-    // OV still down during recovery → attempted:true, recovered:0.
-    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+    // Capture the recovery-pass pino output. The per-skill [Learning] logs from
+    // registerOneSkill are present too, so we match the recovery-pass event
+    // messages specifically (the two stable `msg` strings the module emits).
+    const cap = captureStderrLines();
+    let result: any;
+    try {
+      // OV still down during recovery → attempted:true, recovered:0.
+      result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+    } finally {
+      cap.restore();
+    }
     assert.equal(result.attempted, true);
     assert.equal(result.recovered, 0);
 
-    const recoveryLines = lines.filter((l) => l.includes("OV skill catalog recovery"));
+    const recoveryLines = cap
+      .lines()
+      .filter((o) => typeof o.msg === "string" && o.msg.includes("OV skill catalog recovery"));
     assert.equal(
       recoveryLines.length,
       1,
       "an executed pass must emit EXACTLY one recovery log line, even with 0 recovered",
     );
     assert.ok(
-      recoveryLines[0].includes("recovered 0 skill(s)"),
-      "the 0-recovery line must state recovered/still-missing so ran-but-failed is visible",
+      recoveryLines[0].msg.includes("recovered 0 skill(s)"),
+      "the 0-recovery line must be the ran-but-failed error event so ran-but-failed is visible",
     );
+    assert.equal(recoveryLines[0].level, 50, "the 0-recovery line stays fail-loud at error level");
+    assert.equal(recoveryLines[0].stillMissing, 4, "it carries the still-missing count as a structured field");
   });
 
   test("a recovering pass logs the recovery line (info path unchanged)", async () => {
-    console.error = () => {};
-    console.log = () => {};
+    muteConsole();
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
     await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsUp });
 
-    const lines: string[] = [];
-    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
-    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
-
     globalThis.fetch = (async () => okResponse()) as any;
-    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+    const cap = captureStderrLines();
+    let result: any;
+    try {
+      result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+    } finally {
+      cap.restore();
+    }
     assert.equal(result.recovered, 4);
 
-    const recoveryLines = lines.filter((l) => l.includes("OV skill catalog recovery"));
+    const recoveryLines = cap
+      .lines()
+      .filter((o) => typeof o.msg === "string" && o.msg.includes("OV skill catalog recovery"));
     assert.equal(recoveryLines.length, 1, "a recovering pass also logs exactly one recovery line");
-    assert.ok(recoveryLines[0].includes("re-registered 4 skill(s)"));
+    assert.ok(recoveryLines[0].msg.includes("re-registered skill(s)"));
+    assert.equal(recoveryLines[0].level, 30, "the recovering pass logs at info level");
+    assert.equal(recoveryLines[0].recovered, 4, "it carries the recovered count as a structured field");
   });
 });
 
@@ -470,25 +506,25 @@ describe("registerSkills: VLM-down graceful degradation (#2277)", () => {
   });
 
   test("emits EXACTLY ONE operator-visible alert on deferral", async () => {
-    // Capture console.error: the deferral path must emit exactly one [Learning]
-    // DEFERRED alert and nothing else (no per-skill failure spam, no EMPTY line).
-    console.error = () => {};
-    console.log = () => {};
+    // The deferral path must emit exactly one [Learning] DEFERRED pino line and
+    // nothing else (no per-skill failure spam, no EMPTY line). Capture stderr.
     globalThis.fetch = (async () => okResponse()) as any;
 
-    const lines: string[] = [];
-    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
-    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    const cap = captureStderrLines();
+    try {
+      await registerSkills({ backoffBaseMs: 0, probeVlm: vlmDown });
+    } finally {
+      cap.restore();
+    }
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmDown });
-
-    const deferredLines = lines.filter((l) => l.includes("DEFERRED"));
+    const msgs = cap.lines().map((o) => (typeof o.msg === "string" ? o.msg : ""));
+    const deferredLines = msgs.filter((m) => m.includes("DEFERRED"));
     assert.equal(deferredLines.length, 1, "exactly one operator-visible deferral alert");
     assert.match(deferredLines[0], /VLM/, "the alert names the VLM root cause");
     assert.match(deferredLines[0], /no restart needed/, "the alert states the no-restart recovery path");
     // No #1968 EMPTY line — deferral replaces, not augments, the failure framing.
     assert.equal(
-      lines.filter((l) => l.includes("EMPTY")).length,
+      msgs.filter((m) => m.includes("EMPTY")).length,
       0,
       "a deferral must NOT also emit the #1968 EMPTY alert (would be a double alert)",
     );
@@ -546,25 +582,25 @@ describe("registerSkills: skills-endpoint load-gated deferral (#3402)", () => {
   });
 
   test("emits EXACTLY ONE operator-visible alert on a skills-handler deferral", async () => {
-    // The deferral path must emit exactly one [Learning] DEFERRED alert and
+    // The deferral path must emit exactly one [Learning] DEFERRED pino line and
     // nothing else — no per-skill timeout spam, no #1968 EMPTY line (the whole
-    // point of mirroring the #2277 one-alert contract).
-    console.error = () => {};
-    console.log = () => {};
+    // point of mirroring the #2277 one-alert contract). Capture stderr.
     globalThis.fetch = (async () => okResponse()) as any;
 
-    const lines: string[] = [];
-    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
-    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    const cap = captureStderrLines();
+    try {
+      await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsDownProbe });
+    } finally {
+      cap.restore();
+    }
 
-    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp, probeSkills: skillsDownProbe });
-
-    const deferredLines = lines.filter((l) => l.includes("DEFERRED"));
+    const msgs = cap.lines().map((o) => (typeof o.msg === "string" ? o.msg : ""));
+    const deferredLines = msgs.filter((m) => m.includes("DEFERRED"));
     assert.equal(deferredLines.length, 1, "exactly one operator-visible deferral alert");
     assert.match(deferredLines[0], /\/api\/v1\/skills/, "the alert names the load-gated skills handler");
     assert.match(deferredLines[0], /no restart needed/, "the alert states the no-restart recovery path");
     assert.equal(
-      lines.filter((l) => l.includes("EMPTY")).length,
+      msgs.filter((m) => m.includes("EMPTY")).length,
       0,
       "a deferral must NOT also emit the #1968 EMPTY alert (would be a double alert)",
     );

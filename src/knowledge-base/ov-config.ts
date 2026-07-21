@@ -17,6 +17,8 @@
  * named exports rather than reading process.env directly.
  */
 
+import { logger } from "../logger.ts";
+
 export const OPENVIKING_URL =
   process.env.OPENVIKING_URL || "http://localhost:1933";
 
@@ -44,7 +46,7 @@ if (
   !process.env.OPENVIKING_API_KEY &&
   process.env.NODE_ENV === "production"
 ) {
-  console.warn(
+  logger.warn(
     "[ov-config] OPENVIKING_API_KEY is not set in production — falling back to compiled-in default. Set it in the environment to silence this warning.",
   );
 }

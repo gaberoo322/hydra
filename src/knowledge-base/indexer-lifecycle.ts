@@ -46,6 +46,7 @@ import { indexText } from "./ov-upload.ts";
 // DEFAULT_SOURCE_SPEC_LC duplicates and their silent forward-slash-vs-join()
 // divergence).
 import { DEFAULT_SOURCE_PATHS, type SourcePath } from "./source-enumerator.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Internal constants (Section 4 — preserved 1:1 from indexer.ts)
@@ -251,8 +252,9 @@ export class IndexerController {
       setTimeout(() => {
         this.indexerPending.delete(fullPath);
         indexFileFn(fullPath).catch((err: any) =>
-          console.error(
-            `[Learning:Indexer] Config change index failed for ${fullPath}: ${err.message}`
+          logger.error(
+            { path: fullPath, err },
+            "[Learning:Indexer] Config change index failed"
           )
         );
       }, this._debounceMs)
@@ -287,7 +289,7 @@ export class IndexerController {
         }
       }
     } catch (err: any) {
-      console.error(`[Learning:Indexer] Redis poll failed: ${err.message}`);
+      logger.error({ err }, "[Learning:Indexer] Redis poll failed");
     }
   }
 
@@ -300,9 +302,10 @@ export class IndexerController {
    * startKnowledgeIndexer in indexer.ts Section 4.
    */
   start(): void {
-    console.log(`[Learning:Indexer] Watching configs: ${this._configPath}`);
-    console.log(
-      `[Learning:Indexer] Polling Redis every ${this._redisPollMs / 1000}s`
+    logger.info({ configPath: this._configPath }, "[Learning:Indexer] Watching configs");
+    logger.info(
+      { redisPollSeconds: this._redisPollMs / 1000 },
+      "[Learning:Indexer] Polling Redis"
     );
 
     // Record the live watch set for /api/learning/coverage (#210, INV-5):
@@ -322,7 +325,7 @@ export class IndexerController {
         this.onFileChange.bind(this)
       );
     } catch (err: any) {
-      console.error(`[Learning:Indexer] fs.watch failed: ${err.message}`);
+      logger.error({ err }, "[Learning:Indexer] fs.watch failed");
     }
 
     // Watch source paths (src/, docs/, test/) — shared indexerPending with config watcher
@@ -337,17 +340,20 @@ export class IndexerController {
             this._debounceMs
           )
         );
-        console.log(
-          `[Learning:Indexer] Watching source: ${source.root} (${source.ext})`
+        logger.info(
+          { root: source.root, ext: source.ext },
+          "[Learning:Indexer] Watching source"
         );
       } catch (err: any) {
         if (err.code === "ENOENT") {
-          console.log(
-            `[Learning:Indexer] Source path missing, skipping: ${source.root}`
+          logger.info(
+            { root: source.root },
+            "[Learning:Indexer] Source path missing, skipping"
           );
         } else {
-          console.error(
-            `[Learning:Indexer] fs.watch failed for ${source.root}: ${err.message}`
+          logger.error(
+            { root: source.root, err },
+            "[Learning:Indexer] fs.watch failed for source"
           );
         }
       }
@@ -356,25 +362,23 @@ export class IndexerController {
     // Hydrate dedup cache from Redis, then run initial source pass
     this._loadPersistedHashes()
       .then((loaded) => {
-        console.log(
-          `[Learning:Indexer] Loaded ${loaded} persisted source hashes`
+        logger.info(
+          { loaded },
+          "[Learning:Indexer] Loaded persisted source hashes"
         );
       })
       .catch((err: any) =>
-        console.error(
-          `[Learning:Indexer] Hash hydrate failed: ${err.message}`
-        )
+        logger.error({ err }, "[Learning:Indexer] Hash hydrate failed")
       )
       .then(() => this._runSourceInitialPass({ paths: this._sourcePaths }))
       .then(({ scanned, indexed, skipped }) => {
-        console.log(
-          `[Learning:Indexer] Initial source pass: scanned=${scanned} indexed=${indexed} skipped=${skipped}`
+        logger.info(
+          { scanned, indexed, skipped },
+          "[Learning:Indexer] Initial source pass complete"
         );
       })
       .catch((err: any) =>
-        console.error(
-          `[Learning:Indexer] Initial source pass failed: ${err.message}`
-        )
+        logger.error({ err }, "[Learning:Indexer] Initial source pass failed")
       );
 
     // Poll Redis for new content

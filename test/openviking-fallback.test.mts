@@ -60,10 +60,12 @@ const CORPUS = [
 const realFetch = globalThis.fetch;
 const realLog = console.log;
 const realErr = console.error;
+const realStderrWrite = process.stderr.write.bind(process.stderr);
 afterEach(() => {
   globalThis.fetch = realFetch;
   console.log = realLog;
   console.error = realErr;
+  (process.stderr as any).write = realStderrWrite;
 });
 
 /** Fresh, Redis-free metrics counter per case (per-case-isolation rule). */
@@ -71,13 +73,20 @@ function isolatedCounter() {
   return new OvSearchMetricsCounter({ persist: async () => undefined });
 }
 
+/**
+ * ADR-0027: trackedOvSearch now logs through the pino structured-logger seam
+ * (module singleton → process.stderr) instead of freeform console.* strings.
+ * Silence the seam and capture the serialized JSON lines as raw strings, pushed
+ * synchronously as pino writes them, so a case can parse the structured
+ * lexical-fallback event off the returned array.
+ */
 function silenceConsole(): string[] {
   const lines: string[] = [];
-  console.log = (...args: any[]) => {
-    lines.push(args.map(String).join(" "));
-  };
-  console.error = (...args: any[]) => {
-    lines.push(args.map(String).join(" "));
+  (process.stderr as any).write = (chunk: any) => {
+    for (const line of String(chunk).split("\n")) {
+      if (line.trim()) lines.push(line);
+    }
+    return true;
   };
   return lines;
 }
@@ -220,16 +229,28 @@ describe("trackedOvSearch lexical fallback on OV failure (issue #3341)", () => {
     }
     // The failed semantic search still records an error (metrics unchanged).
     assert.equal(counter.snapshot().errors, 1);
-    // Observability: one info line carrying the ov-* code + served count.
+    // Observability: one structured info line carrying the ov-* code + served
+    // count (ADR-0027 — assert on the parsed pino fields, not grepped prose).
+    const fallbackLine = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, any>;
+        } catch {
+          return null;
+        }
+      })
+      .find((o) => o && o.msg === "[OV Search] lexical fallback");
     assert.ok(
-      lines.some(
-        (l) =>
-          l.includes("lexical fallback") &&
-          l.includes("code=ov-non-2xx") &&
-          l.includes("rankingMode=lexical") &&
-          l.includes(`served=${out.resources.length}`),
-      ),
+      fallbackLine,
       `expected lexical-fallback info log line, got: ${JSON.stringify(lines)}`,
+    );
+    assert.equal(fallbackLine!.level, 30, "the lexical-fallback line is info level");
+    assert.equal(fallbackLine!.code, "ov-non-2xx", "it carries the ov-* code as a structured field");
+    assert.equal(fallbackLine!.rankingMode, "lexical", "it carries the lexical ranking mode");
+    assert.equal(
+      fallbackLine!.served,
+      out.resources.length,
+      "it carries the served count as a structured field",
     );
   });
 

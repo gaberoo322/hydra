@@ -51,23 +51,44 @@ function installFetchStub(
   };
 }
 
+/**
+ * ADR-0027: indexText + the ov-request adapter now log through the pino
+ * structured-logger seam (module singleton → process.stderr) instead of freeform
+ * console.* strings. Capture the serialized JSON lines and bucket them by pino
+ * level (error=50, warn=40, info=30). Each bucket keeps the RAW serialized JSON
+ * line as its string — the migration carries the same tokens the old prose did
+ * (`503`, `service overloaded`, `ov-non-2xx`, `Failed to add text`, the response
+ * envelope), just as structured fields + the stable `msg`, so the existing
+ * substring assertions keep holding against the JSON text. The arrays are
+ * populated at restore() time (pino buffers to stderr synchronously).
+ */
 function captureConsole(): { errors: string[]; logs: string[]; restore: () => void } {
   const errors: string[] = [];
   const logs: string[] = [];
-  const origErr = console.error;
-  const origLog = console.log;
-  console.error = (...args: any[]) => {
-    errors.push(args.map(String).join(" "));
-  };
-  console.log = (...args: any[]) => {
-    logs.push(args.map(String).join(" "));
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
   };
   return {
     errors,
     logs,
     restore: () => {
-      console.error = origErr;
-      console.log = origLog;
+      (process.stderr as any).write = originalWrite;
+      for (const line of buf.split("\n")) {
+        if (!line.trim()) continue;
+        let obj: Record<string, any>;
+        try {
+          obj = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        // Bucket error+warn (>= 40) as "errors", info (30) as "logs" — mirroring
+        // the old console.error / console.log split the assertions rely on.
+        if (typeof obj.level === "number" && obj.level >= 40) errors.push(line);
+        else logs.push(line);
+      }
     },
   };
 }
