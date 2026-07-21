@@ -42,6 +42,7 @@
 
 import { appendRuleAction, readRecentRuleActions } from "../redis/agent-memory.ts";
 import { loadPatterns, savePatterns, type MemoryPattern } from "./pattern-store.ts";
+import { logger } from "../logger.ts";
 
 // Issue #2962 — the demote-side feedback-file grammar
 // (`removePromotedRuleBlock` / `demotePromotedRuleFromFeedbackFile`) was retired
@@ -296,7 +297,7 @@ async function recordRuleAction(entry: RuleActionLogEntry): Promise<void> {
   try {
     await appendRuleAction(JSON.stringify(entry), RULE_ACTION_LOG_CAP);
   } catch (err: any) {
-    console.error(`[Learning] recordRuleAction failed: ${err.message}`);
+    logger.error({ err }, "recordRuleAction failed");
   }
 }
 
@@ -312,7 +313,7 @@ export async function getRuleActionLog(limit = 50): Promise<RuleActionLogEntry[]
     }
     return out;
   } catch (err: any) {
-    console.error(`[Learning] getRuleActionLog failed: ${err.message}`);
+    logger.error({ err }, "getRuleActionLog failed");
     return [];
   }
 }
@@ -461,10 +462,17 @@ async function processPromotedPatternEffectiveness(
     actions.push(entry);
     await recordRuleAction(entry);
     changed = true;
-    console.log(
-      `[Learning] Auto-demoted ${agentName}/${p.category} — ` +
-        `${ev.hitsSincePromotion} hits over ${ev.daysSincePromotion}d ` +
-        `(postRate=${ev.postRate}/day, preRate=${ev.preRate}/day, reason=${reasonCode})`,
+    logger.info(
+      {
+        agentName,
+        category: p.category,
+        hitsSincePromotion: ev.hitsSincePromotion,
+        daysSincePromotion: ev.daysSincePromotion,
+        postRate: ev.postRate,
+        preRate: ev.preRate,
+        reasonCode,
+      },
+      "rule auto-demoted",
     );
   }
 
@@ -489,15 +497,13 @@ export async function consolidatePromotedRuleEffectiveness(
       const taken = await processPromotedPatternEffectiveness(agent, now, env);
       all.push(...taken);
     } catch (err: any) {
-      console.error(`[Learning] consolidatePromotedRuleEffectiveness(${agent}) failed: ${err.message}`);
+      logger.error({ err, agent }, "consolidatePromotedRuleEffectiveness failed");
     }
   }
   if (all.length > 0) {
     const demoted = all.filter(a => a.action === "demoted").length;
     const alerted = all.filter(a => a.action === "skipped-disabled").length;
-    console.log(
-      `[Learning] Rule-effectiveness pass: ${demoted} demoted, ${alerted} alerted (auto-demote disabled)`,
-    );
+    logger.info({ demoted, alerted }, "rule-effectiveness consolidation pass complete");
   }
   return all;
 }

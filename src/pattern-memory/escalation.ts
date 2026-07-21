@@ -50,6 +50,7 @@
 
 import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
+import { logger } from "../logger.ts";
 
 const REPO = process.env.HYDRA_GH_REPO || "gaberoo322/hydra";
 const META_FRICTION_LABEL = "meta-friction";
@@ -320,7 +321,7 @@ export async function escalatePatternToIssue(
     return { status: "created", issueNumber: num };
   } catch (err: any) {
     const msg = err?.stderr ? String(err.stderr).slice(0, 500) : err?.message || String(err);
-    console.error(`[escalation] escalatePatternToIssue failed for cue "${input.cue}": ${msg}`);
+    logger.error({ err, cue: input.cue }, "escalatePatternToIssue failed");
     return { status: "error", error: msg };
   }
 }
@@ -358,7 +359,7 @@ export async function escalateIfNeeded(
     // error in the dispatcher itself. Return the outcome as a value rather than
     // a bare log line so the caller can stamp it (issue #843).
     const msg = err?.message || String(err);
-    console.error(`[escalation] escalateIfNeeded(${context}) failed: ${msg}`);
+    logger.error({ err, context }, "escalateIfNeeded failed");
     return { status: "error", error: msg };
   }
 }

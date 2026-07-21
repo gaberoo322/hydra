@@ -32,6 +32,7 @@
  * markdown file, and `feedback-file.ts` was removed.
  */
 
+import { logger } from "../logger.ts";
 // Issue #2987 — the shared pattern-store seam (`loadPatterns`/`savePatterns`,
 // the `MemoryPattern` type, and the `PatternNamespace` selector) was hoisted out
 // of this module into the `pattern-store.ts` leaf. Both this module and the
@@ -167,7 +168,7 @@ async function sweepStalePromotions(agentName: string) {
       p.promotedAt = new Date().toISOString().split("T")[0];
       p.hitsAtPromotion = p.hitCount;
       changed = true;
-      console.log(`[Learning] Retroactive promotion: "${p.category}" (${p.hitCount} hits)`);
+      logger.info({ category: p.category, hitCount: p.hitCount }, "pattern retroactive-promotion");
     }
   }
 
@@ -317,8 +318,9 @@ export async function recordPattern(
       existing.aliases = [
         ...new Set([...(existing.aliases ?? []), category]),
       ].slice(0, MAX_ALIASES);
-      console.log(
-        `[Learning] Cue "${category}" fuzzy-merged into existing cue "${existing.category}" (${agentName}/${namespace})`,
+      logger.info(
+        { incomingCue: category, canonicalCue: existing.category, agentName, namespace },
+        "pattern cue fuzzy-merged",
       );
     }
     existing.hitCount++;
@@ -348,7 +350,7 @@ export async function recordPattern(
       existing.promotedAt = today;
       existing.hitsAtPromotion = existing.hitCount;
       crossedThreshold = true;
-      console.log(`[Learning] Promoted "${existing.category}" (${existing.hitCount} hits)`);
+      logger.info({ category: existing.category, hitCount: existing.hitCount }, "pattern promoted");
     }
     pattern = existing;
   } else {
@@ -417,9 +419,7 @@ export async function recordPattern(
     escalationResult = await escalate(escalation, escalationContext);
   } catch (err: any) {
     const msg = err?.message || String(err);
-    console.error(
-      `[Learning] recordPattern: escalate dispatch threw for ${escalationContext}: ${msg}`,
-    );
+    logger.error({ err, escalationContext }, "recordPattern: escalate dispatch threw");
     escalationResult = escalation ? { status: "error", error: msg } : null;
   }
 
@@ -445,9 +445,7 @@ export async function recordPattern(
     try {
       await savePatterns(agentName, patterns, namespace);
     } catch (err: any) {
-      console.error(
-        `[Learning] recordPattern: lastEscalation stamp-save failed for ${escalationContext}: ${err?.message || err}`,
-      );
+      logger.error({ err, escalationContext }, "recordPattern: lastEscalation stamp-save failed");
     }
   }
 
@@ -547,7 +545,10 @@ export async function consolidateAgentPatterns(): Promise<void> {
 
     if (kept.length < before) {
       await savePatterns(agent, kept);
-      console.log(`[Learning] Consolidated ${agent}: ${before} → ${kept.length} patterns (${before - kept.length} stale pruned)`);
+      logger.info(
+        { agent, before, after: kept.length, pruned: before - kept.length },
+        "pattern consolidation pruned stale entries",
+      );
     }
   }
 }
