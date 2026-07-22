@@ -187,10 +187,34 @@ export interface ClassStat {
   /** DEV role: merged-PR rate (`mergedCount / dispatches`). Null otherwise. */
   mergeRate: number | null;
   /**
-   * DEV role: total tokens across merged dispatches divided by mergedCount —
-   * "cost per merge". Null when non-dev OR no merges (undefined, not 0).
+   * DEV role: the **output-based** cost-per-merge — total raw output tokens
+   * across merged dispatches divided by mergedCount. Null when non-dev OR no
+   * merges (undefined, not 0).
+   *
+   * IMPORTANT (issue #3549): this is the OUTPUT-BASED figure and is preserved
+   * verbatim so dashboards and prior comparisons keep their meaning. It counts
+   * raw tokens the class emitted, NOT the model-weighted, cacheRead-inclusive
+   * subscription cost — that is the separate {@link weightedQuotaPerMerge} axis.
+   * The two are never conflated: `tokensPerMerge` stays the raw-output measure,
+   * `weightedQuotaPerMerge` is the true weighted-quota cost-per-shipped-PR.
    */
   tokensPerMerge: number | null;
+  /**
+   * DEV role: the **weighted-quota-per-merge** figure (issue #3549) — the true
+   * subscription cost per shipped PR: the class's Weighted-Quota Cost Axis
+   * ({@link weightedQuota}, ticket #3548) divided by {@link mergedCount}. Unlike
+   * the output-based {@link tokensPerMerge}, this folds the model-family burn
+   * weights + cacheRead weight, so it reflects what a merge actually COST the
+   * subscription, not just how many output tokens it emitted.
+   *
+   * NULL-vs-ZERO discipline (invariant): `null` when `mergedCount` is 0 (or
+   * null) OR when `weightedQuota` is null/undefined — "no data" / "can't divide",
+   * NEVER collapsed to 0. Null for non-dev roles (only dev classes open PRs, so
+   * only they have a per-merge cost). `undefined` (field absent) when the
+   * composer injected no usage inputs at all — additive-field back-compat,
+   * mirroring {@link weightedQuota}.
+   */
+  weightedQuotaPerMerge?: number | null;
   /**
    * PRODUCER role: the spine's marginal effect β_c for this class (the
    * downstream-merge attribution). Null when non-producer OR the class has no
@@ -346,7 +370,10 @@ function producerBeta(
  *   AND has a per-family breakdown gets its `weightedQuota` computed via the
  *   reused Cost fold. When ABSENT the field is left `undefined` on every row
  *   (additive back-compat); a class below the floor / with no breakdown gets
- *   `null` (never a fabricated 0).
+ *   `null` (never a fabricated 0). For DEV rows this also derives
+ *   `weightedQuotaPerMerge` = `weightedQuota / mergedCount` (issue #3549) — the
+ *   true subscription cost per shipped PR, distinct from the output-based
+ *   `tokensPerMerge`; `null` when there are no merges or `weightedQuota` is null.
  */
 export function computeClassScoreboard(
   records: DispatchOutcomeRecord[],
@@ -383,6 +410,35 @@ export function computeClassScoreboard(
     return weightedQuotaBurn(byModel, wq.cacheReadWeight, wq.burnWeights);
   };
 
+  /**
+   * The per-class **weighted-quota-per-merge** value for a DEV row (issue #3549):
+   * the class's Weighted-Quota Cost Axis divided by its merged-PR count. Mirrors
+   * {@link weightedQuotaFor}'s null-vs-zero discipline:
+   *   - `undefined` when the composer injected no usage inputs (`wq` absent) —
+   *     the field stays off the row (additive back-compat).
+   *   - `null` when there are no merges (`mergedCount` 0) OR the class's
+   *     `weightedQuota` is null (below floor / no breakdown) — "can't divide" /
+   *     "no data", NEVER a fabricated 0.
+   *   - otherwise `round(weightedQuota / mergedCount)`.
+   * Non-dev callers never invoke this — only dev classes open PRs.
+   */
+  const weightedQuotaPerMergeFor = (
+    weightedQuota: number | null | undefined,
+    mergedCount: number,
+  ): number | null | undefined => {
+    if (weightedQuota === undefined) return undefined;
+    if (weightedQuota === null || mergedCount <= 0) return null;
+    return Math.round(weightedQuota / mergedCount);
+  };
+
+  /**
+   * Non-dev rows never have a per-merge cost (only dev classes open PRs), but
+   * they still honor the additive-field back-compat: `undefined` when the
+   * composer injected no usage inputs at all, else `null`.
+   */
+  const nonDevWeightedQuotaPerMerge = (): null | undefined =>
+    wq === undefined ? undefined : null;
+
   // Bucket in-window records by class. A record with a null class is dropped
   // from the per-class rollup (it cannot be attributed) but never fabricated.
   type Acc = { dispatches: number; merged: number; mergedTokens: number };
@@ -412,6 +468,7 @@ export function computeClassScoreboard(
 
     if (dispatches < minSample) {
       // Below the floor → no verdict, regardless of role (null-vs-zero).
+      const weightedQuota = weightedQuotaFor(name, false);
       return {
         className: name,
         role,
@@ -419,9 +476,17 @@ export function computeClassScoreboard(
         mergedCount: role === "dev" ? acc.merged : null,
         mergeRate: null,
         tokensPerMerge: null,
+        // Below-floor weightedQuota is null (or undefined when no inputs), so
+        // per-merge is null (undefined when absent) — never a fabricated 0.
+        weightedQuotaPerMerge:
+          role === "dev"
+            ? weightedQuotaPerMergeFor(weightedQuota, acc.merged)
+            : weightedQuota === undefined
+              ? undefined
+              : null,
         beta: null,
         betaSuspect: role === "producer" ? true : null,
-        weightedQuota: weightedQuotaFor(name, false),
+        weightedQuota,
         verdict: "insufficient-sample",
       };
     }
@@ -431,6 +496,7 @@ export function computeClassScoreboard(
       const tokensPerMerge = acc.merged > 0 ? Math.round(acc.mergedTokens / acc.merged) : null;
       const verdict: ClassVerdict =
         mergeRate <= DEV_WEAK_MERGE_RATE ? "underperforming" : "healthy";
+      const weightedQuota = weightedQuotaFor(name, true);
       return {
         className: name,
         role,
@@ -438,9 +504,10 @@ export function computeClassScoreboard(
         mergedCount: acc.merged,
         mergeRate: Math.round(mergeRate * 1000) / 1000,
         tokensPerMerge,
+        weightedQuotaPerMerge: weightedQuotaPerMergeFor(weightedQuota, acc.merged),
         beta: null,
         betaSuspect: null,
-        weightedQuota: weightedQuotaFor(name, true),
+        weightedQuota,
         verdict,
       };
     }
@@ -458,6 +525,7 @@ export function computeClassScoreboard(
           mergedCount: null,
           mergeRate: null,
           tokensPerMerge: null,
+          weightedQuotaPerMerge: nonDevWeightedQuotaPerMerge(),
           beta,
           betaSuspect: true,
           weightedQuota: weightedQuotaFor(name, true),
@@ -473,6 +541,7 @@ export function computeClassScoreboard(
         mergedCount: null,
         mergeRate: null,
         tokensPerMerge: null,
+        weightedQuotaPerMerge: nonDevWeightedQuotaPerMerge(),
         beta: Math.round(beta * 1000) / 1000,
         betaSuspect: false,
         weightedQuota: weightedQuotaFor(name, true),
@@ -488,6 +557,7 @@ export function computeClassScoreboard(
       mergedCount: null,
       mergeRate: null,
       tokensPerMerge: null,
+      weightedQuotaPerMerge: nonDevWeightedQuotaPerMerge(),
       beta: null,
       betaSuspect: null,
       weightedQuota: weightedQuotaFor(name, true),

@@ -33,6 +33,14 @@
  *     backs `/api/usage`'s `weightedBurn7d`. Serialized here as-is (an additive
  *     field); best-effort → `null` on a usage-read failure, never a fabricated 0.
  *
+ *   - **Weighted-quota-per-merge for dev classes (issue #3549).** Dev-role rows
+ *     also carry `weightedQuotaPerMerge` = `weightedQuota / mergedCount` — the
+ *     true subscription cost per shipped PR. The output-based `tokensPerMerge` is
+ *     PRESERVED unchanged alongside it, so the weighted and raw-output figures are
+ *     never confused. Both serialize verbatim through the row (additive fields);
+ *     `weightedQuotaPerMerge` is `null` (never 0) when there are no merges or
+ *     `weightedQuota` is null.
+ *
  *   - **Never throws to the client.** `buildClassScoreboard` degrades to an empty
  *     scoreboard on a Redis-read failure (never throws); a defensive catch still
  *     guards the handler so Express never returns a bodyless 500.
