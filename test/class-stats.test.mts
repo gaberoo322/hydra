@@ -484,6 +484,111 @@ describe("class-stats — weighted-quota cost axis: pure leaf (issue #3548)", ()
 });
 
 // ---------------------------------------------------------------------------
+// Weighted-quota-per-merge for dev classes (issue #3549) — the pure leaf
+// ---------------------------------------------------------------------------
+
+describe("class-stats — weighted-quota-per-merge for dev classes (issue #3549)", () => {
+  test("derives weightedQuotaPerMerge = weightedQuota / mergedCount for a dev class", () => {
+    // 10 dispatches, 6 merged; skill burned 300k weighted quota in-window.
+    const records = batch("dev_orch", 10, 6, 60_000);
+    const byModel = familyBreakdown("opus", 300_000);
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: { dev_orch: byModel },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.mergedCount, 6);
+    assert.equal(dev.weightedQuota, 300_000);
+    // 300_000 / 6 = 50_000 — the true subscription cost per shipped PR.
+    assert.equal(dev.weightedQuotaPerMerge, 50_000);
+    // The output-based figure is PRESERVED and UNCHANGED (raw output tokens per
+    // merge = 60k), never silently repurposed into the weighted figure.
+    assert.equal(dev.tokensPerMerge, 60_000);
+    assert.notEqual(dev.weightedQuotaPerMerge, dev.tokensPerMerge);
+  });
+
+  test("weightedQuotaPerMerge is null (not 0) when the dev class has zero merges", () => {
+    const records = batch("dev_orch", 10, 0); // above the floor, but no merges
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: { dev_orch: familyBreakdown("opus", 200_000) },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.mergedCount, 0);
+    assert.equal(dev.weightedQuota, 200_000, "the cost axis itself is still present");
+    assert.equal(dev.weightedQuotaPerMerge, null, "no merges → null per-merge, never 0");
+    assert.equal(dev.tokensPerMerge, null, "output-based per-merge is also null with no merges");
+  });
+
+  test("weightedQuotaPerMerge is null when weightedQuota is null (below floor / no breakdown)", () => {
+    // Cleared the floor with merges, but the skill burned nothing (absent
+    // breakdown) → weightedQuota null → per-merge null, never a fabricated 0.
+    const records = batch("dev_orch", 10, 6);
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: {}, // dev_orch absent
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.weightedQuota, null);
+    assert.equal(dev.weightedQuotaPerMerge, null, "null weightedQuota → null per-merge");
+  });
+
+  test("weightedQuotaPerMerge is null below the min-sample floor (null-vs-zero)", () => {
+    const records = batch("dev_orch", CLASS_STATS_MIN_SAMPLE - 1, 3);
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: { dev_orch: familyBreakdown("opus", 999_999) },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.verdict, "insufficient-sample");
+    assert.equal(dev.weightedQuota, null, "below-floor weightedQuota is null");
+    assert.equal(dev.weightedQuotaPerMerge, null, "below-floor per-merge is null, never 0");
+  });
+
+  test("weightedQuotaPerMerge is undefined when the composer injects NO usage inputs (back-compat)", () => {
+    const records = batch("dev_orch", 10, 6);
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.weightedQuota, undefined, "no inputs → weightedQuota absent");
+    assert.equal(dev.weightedQuotaPerMerge, undefined, "no inputs → per-merge absent too");
+  });
+
+  test("non-dev classes never carry a weighted-quota-per-merge (only dev opens PRs)", () => {
+    const records = [
+      ...batch("dev_orch", 10, 6),
+      ...batch("research_orch", 20, 0),
+    ];
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: {
+        dev_orch: familyBreakdown("opus", 300_000),
+        research_orch: familyBreakdown("sonnet", 400_000),
+      },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    // Producer role: has a cost axis but no per-merge (null, not undefined —
+    // inputs WERE injected).
+    const p = find(sb, "research_orch");
+    assert.equal(p.role, "producer");
+    assert.equal(p.weightedQuota, 400_000);
+    assert.equal(p.weightedQuotaPerMerge, null, "producer never has a per-merge cost");
+    // Other role (qa) with no dispatches: null when inputs injected.
+    const qa = find(sb, "qa_orch");
+    assert.equal(qa.role, "other");
+    assert.equal(qa.weightedQuotaPerMerge, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Weighted-Quota Cost Axis (issue #3548) — the composer (className→skill join)
 // ---------------------------------------------------------------------------
 

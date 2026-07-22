@@ -190,4 +190,52 @@ describe("GET /api/autopilot/class-stats (issue #2943)", () => {
     assert.ok(qa);
     assert.equal(qa.weightedQuota, null);
   });
+
+  test("serializes weightedQuotaPerMerge alongside the preserved tokensPerMerge (issue #3549)", async () => {
+    // 10 dispatches, 6 merged @ 60k output tokens each; skill burned 300k
+    // weighted quota in-window → per-merge = 300k / 6 = 50k.
+    const records: DispatchOutcomeRecord[] = [];
+    for (let i = 0; i < 10; i++) {
+      records.push({
+        cycleId: "worktree-agent-277e4476-t4-dev_orch",
+        runIdPrefix: "277e4476",
+        turn: 4,
+        className: "dev_orch",
+        skill: "hydra-dev",
+        outcome: i < 6 ? "merged" : "failed",
+        tokens: 60_000,
+        durationMs: 60_000,
+        escalationAttempt: null,
+        escalatedModel: null,
+        recordedAt: NOW - (i + 1) * 60_000,
+      });
+    }
+    const board = computeClassScoreboard(records, { metrics: [] }, {
+      now: NOW,
+      weightedQuota: {
+        byClassBreakdown: {
+          dev_orch: {
+            opus: { input: 300_000, output: 0, cacheCreation: 0, cacheRead: 0, total: 300_000 },
+            sonnet: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 },
+            haiku: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 },
+            unknown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 },
+          },
+        },
+        cacheReadWeight: 1.0,
+        burnWeights: { opus: 1, sonnet: 1, haiku: 1 },
+      },
+    });
+    const res = await callRoute(async () => board);
+    assert.equal(res._status, 200);
+    const dev = res._body.scoreboard.classes.find((c: any) => c.className === "dev_orch");
+    assert.ok(dev, "dev_orch row serialized");
+    // The weighted (subscription-cost) figure and the output-based figure both
+    // serialize, and are distinct — never conflated.
+    assert.equal(dev.weightedQuotaPerMerge, 50_000, "weighted-quota-per-merge serialized");
+    assert.equal(dev.tokensPerMerge, 60_000, "output-based tokensPerMerge preserved unchanged");
+    // A non-dev class carries no per-merge cost (null when inputs are injected).
+    const qa = res._body.scoreboard.classes.find((c: any) => c.className === "qa_orch");
+    assert.ok(qa);
+    assert.equal(qa.weightedQuotaPerMerge, null);
+  });
 });
