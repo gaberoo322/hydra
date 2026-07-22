@@ -31,22 +31,83 @@ import {
   type AttributionEstimate,
 } from "../outcome-attribution/index.ts";
 import { computeClassScoreboard, CLASS_STATS_WINDOW_MS } from "./class-stats-math.ts";
-import type { ClassScoreboard } from "./class-stats-math.ts";
+import type { ClassScoreboard, WeightedQuotaInputs } from "./class-stats-math.ts";
+import { DISPATCH_CLASSES } from "../taxonomy/classes.ts";
+// The Cost module seam for the Weighted-Quota Cost Axis (issue #3548). This
+// composer is ALREADY the I/O tier (it reads `listDispatchOutcomes` +
+// `getObservations`), so adding the 60s-cached `getUsage()` read here — NOT in
+// the pure leaf — preserves the leaf's zero-IO contract. `getUsage` runs the
+// cached `assembleSnapshot`; the eligibility route already calls it every turn,
+// so the transcript scan is amortized per turn. The env-config readers resolve
+// the SAME calibration gate `assembleSnapshot` uses, so the scoreboard's weights
+// match `/api/usage` exactly (one calibration surface, two consumers).
+import {
+  getUsage,
+  getCacheReadWeight,
+  getQuotaWeightOpus,
+  getQuotaWeightSonnet,
+  getQuotaWeightHaiku,
+  type UsageSnapshot,
+} from "../cost/index.ts";
 
 // ---------------------------------------------------------------------------
 // Composer — the Redis reads (the API view calls this)
 // ---------------------------------------------------------------------------
 
-/** The two seam reads the composer needs (injectable for tests). */
+/** The seam reads the composer needs (injectable for tests). */
 export interface ClassScoreboardDeps {
   listRecords: (opts: { sinceMs: number }) => ReturnType<typeof listDispatchOutcomes>;
   loadObservations: () => Promise<LoadObservationsResult>;
+  /**
+   * Reads the 60s-cached usage snapshot for the Weighted-Quota Cost Axis (issue
+   * #3548). Defaults to the Cost module's `getUsage()`. Injected by tests to pin
+   * `bySkillByModel` (or to assert the degrade-to-null path on a read failure)
+   * without a live transcript scan.
+   */
+  loadUsage: () => Promise<UsageSnapshot>;
 }
 
 const defaultDeps: ClassScoreboardDeps = {
   listRecords: listDispatchOutcomes,
   loadObservations: defaultGetObservations,
+  loadUsage: getUsage,
 };
+
+/**
+ * Resolve the Weighted-Quota Cost Axis inputs (issue #3548) from the cached usage
+ * snapshot. Maps each dispatch-class name → its taxonomy skill and pulls that
+ * skill's per-family breakdown out of `snapshot.bySkillByModel`; a class whose
+ * skill produced zero in-window tokens is simply ABSENT from `byClassBreakdown`
+ * (→ its `weightedQuota` is null, never a fabricated 0). Applies the IDENTICAL
+ * `quotaWeightCalibrated` gate the usage snapshot uses — env weights when all
+ * three are positive, else `{opus:1,sonnet:1,haiku:1}` identity — so the
+ * scoreboard weights burn exactly like `/api/usage`. Pure over the snapshot +
+ * the resolved env scalars; no I/O of its own.
+ */
+function resolveWeightedQuotaInputs(snapshot: UsageSnapshot): WeightedQuotaInputs {
+  const byClassBreakdown: WeightedQuotaInputs["byClassBreakdown"] = {};
+  for (const row of DISPATCH_CLASSES) {
+    const breakdown = snapshot.bySkillByModel[row.skill];
+    // Only classes whose skill produced in-window tokens carry a breakdown;
+    // absent → weightedQuota null downstream (never a fabricated 0).
+    if (breakdown !== undefined) byClassBreakdown[row.name] = breakdown;
+  }
+  const weights = {
+    opus: getQuotaWeightOpus(),
+    sonnet: getQuotaWeightSonnet(),
+    haiku: getQuotaWeightHaiku(),
+  };
+  // SAME calibration gate as snapshot-assembly.ts:641/657 — one calibration
+  // surface, two consumers. In prod today these env vars are unset, so the model
+  // axis is dormant (identity weights) while the cacheRead axis stays active.
+  const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
+  const burnWeights = quotaWeightCalibrated ? weights : { opus: 1, sonnet: 1, haiku: 1 };
+  return {
+    byClassBreakdown,
+    cacheReadWeight: getCacheReadWeight(),
+    burnWeights,
+  };
+}
 
 /**
  * Read the per-dispatch records + spine observations and compute the scoreboard.
@@ -99,9 +160,33 @@ export async function buildClassScoreboard(
     );
   }
 
+  // Weighted-Quota Cost Axis inputs (issue #3548). Best-effort: a usage-read
+  // failure degrades `weightedQuota` to null on EVERY class (empty
+  // `byClassBreakdown` → breakdown absent → null) while PRESERVING the yield
+  // verdict each class already has — the axis never throws and never fabricates a
+  // cost number from absent data (mirrors the empty-scoreboard degradation on a
+  // Redis-read failure above). We always inject inputs (never `undefined`), so a
+  // failure yields explicit `null`s rather than an absent field.
+  let weightedQuota: WeightedQuotaInputs = {
+    byClassBreakdown: {},
+    cacheReadWeight: getCacheReadWeight(),
+    burnWeights: { opus: 1, sonnet: 1, haiku: 1 },
+  };
+  try {
+    const snapshot = await deps.loadUsage();
+    weightedQuota = resolveWeightedQuotaInputs(snapshot);
+  } catch (err: any) {
+    /* intentional: a usage-read failure degrades weightedQuota to null on every
+       class (empty breakdown), never throws — the yield axis is untouched. */
+    console.error(
+      `[class-stats] getUsage threw (weightedQuota degrades to null): ${err?.message || String(err)}`,
+    );
+  }
+
   return computeClassScoreboard(records, estimate, {
     now,
     minSample: opts.minSample,
     windowMs,
+    weightedQuota,
   });
 }

@@ -63,6 +63,14 @@ export {
   getWeeklyResetAnchorMs,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,
+  // Per-model-family Quota Weight readers (issue #691). Re-exported on the public
+  // barrel for the Class Yield Scoreboard's Weighted-Quota Cost Axis (issue #3548):
+  // its composer resolves the SAME calibration gate `assembleSnapshot` uses
+  // (all-three-positive → the env weights, else identity) so the scoreboard and
+  // `/api/usage` weight burn identically — one calibration surface, two consumers.
+  getQuotaWeightOpus,
+  getQuotaWeightSonnet,
+  getQuotaWeightHaiku,
   getDriftReferencePercent,
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
@@ -115,6 +123,22 @@ export type { UsageSnapshot } from "./types.ts";
 export type {
   SkillResolver,
 } from "./usage-tracker.ts";
+
+// ---------------------------------------------------------------------------
+// Weighted-quota fold — the ONE Quota-Weight definition (issue #873, #3548)
+// ---------------------------------------------------------------------------
+// `weightedQuotaBurn(byModel, cacheReadWeight, burnWeights)` is the two-axis
+// quota-burn numerator that backs `/api/usage`'s `weightedBurn7d`. Promoted from a
+// module-internal `snapshot-assembly.ts` helper onto the public barrel (issue
+// #3548) so the Class Yield Scoreboard's per-class **Weighted-Quota Cost Axis**
+// reuses the IDENTICAL fold on each `bySkillByModel[skill]` breakdown — the
+// scoreboard and the usage snapshot share ONE weighting definition (the CONTEXT.md
+// single-definition-of-Quota-Weight rule) rather than the scoreboard re-deriving a
+// second, divergent formula. The remaining snapshot-assembly folds stay
+// module-internal (test-only exports).
+export {
+  weightedQuotaBurn,
+} from "./snapshot-assembly.ts";
 
 // ---------------------------------------------------------------------------
 // Eligibility — the pure dispatch-gating fold over UsageSnapshot (issue #1377)

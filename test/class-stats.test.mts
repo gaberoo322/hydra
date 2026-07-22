@@ -39,8 +39,33 @@ import {
 } from "../src/autopilot/class-stats.ts";
 import type { DispatchOutcomeRecord } from "../src/redis/dispatch-outcomes.ts";
 import type { AttributionEstimate } from "../src/outcome-attribution/estimator.ts";
+import type { UsageSnapshot } from "../src/cost/index.ts";
+import { weightedQuotaBurn } from "../src/cost/index.ts";
+import { emptyByModel, EMPTY_BREAKDOWN } from "../src/cost/token-breakdown.ts";
+import type { ModelFamily, TokenBreakdown } from "../src/cost/token-math.ts";
+import type { WeightedQuotaInputs } from "../src/autopilot/class-stats-math.ts";
+import { DISPATCH_CLASSES } from "../src/taxonomy/classes.ts";
 
 const NOW = 1_800_000_000_000;
+
+/**
+ * A minimal fake usage snapshot carrying only the `bySkillByModel` cross-tab the
+ * composer reads for the Weighted-Quota Cost Axis (issue #3548). Cast through
+ * `unknown` because the composer touches ONLY `bySkillByModel` — the other ~40
+ * snapshot fields are irrelevant to this seam and never read.
+ */
+function fakeUsage(
+  bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {},
+): UsageSnapshot {
+  return { bySkillByModel } as unknown as UsageSnapshot;
+}
+
+/** A per-family breakdown with `total` tokens routed through `input` (cacheRead 0). */
+function familyBreakdown(family: ModelFamily, total: number): Record<ModelFamily, TokenBreakdown> {
+  const acc = emptyByModel();
+  acc[family] = { ...EMPTY_BREAKDOWN, input: total, total };
+  return acc;
+}
 
 function rec(over: Partial<DispatchOutcomeRecord> = {}): DispatchOutcomeRecord {
   return {
@@ -334,6 +359,7 @@ describe("class-stats — composer degrades on Redis-read failure (never throws)
     const deps: ClassScoreboardDeps = {
       listRecords: async () => ({ ok: false, error: "redis down" }),
       loadObservations: async () => ({ ok: false, error: "redis down" }),
+      loadUsage: async () => fakeUsage(),
     };
     const sb = await buildClassScoreboard({ now: NOW, deps });
     assert.ok(sb.classes.length > 0, "scoreboard still lists every class");
@@ -347,11 +373,163 @@ describe("class-stats — composer degrades on Redis-read failure (never throws)
     const deps: ClassScoreboardDeps = {
       listRecords: async () => ({ ok: true, records: batch("dev_orch", 10, 7) }),
       loadObservations: async () => ({ ok: true, observations: [] }),
+      loadUsage: async () => fakeUsage(),
     };
     const sb = await buildClassScoreboard({ now: NOW, deps });
     const dev = find(sb, "dev_orch");
     assert.equal(dev.dispatches, 10);
     assert.equal(dev.mergedCount, 7);
     assert.equal(dev.verdict, "healthy");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Weighted-Quota Cost Axis (issue #3548) — the pure leaf
+// ---------------------------------------------------------------------------
+
+const IDENTITY_WEIGHTS = { opus: 1, sonnet: 1, haiku: 1 };
+
+/** Look up the taxonomy skill a dispatch class dispatches (dev_orch → hydra-dev). */
+function skillFor(className: string): string {
+  const row = DISPATCH_CLASSES.find((r) => r.name === className);
+  assert.ok(row, `taxonomy must carry a row for ${className}`);
+  return row.skill;
+}
+
+describe("class-stats — weighted-quota cost axis: pure leaf (issue #3548)", () => {
+  test("undefined when the composer injects NO usage inputs (additive back-compat)", () => {
+    const records = batch("dev_orch", 10, 6, 60_000);
+    // No `weightedQuota` opt at all → the field is left off every row.
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.weightedQuota, undefined, "field absent when no inputs injected");
+  });
+
+  test("computes the reused weightedQuotaBurn fold for a class above the floor", () => {
+    const records = batch("dev_orch", 10, 6, 60_000);
+    const byModel = familyBreakdown("opus", 500_000);
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: { dev_orch: byModel },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    // Reconciles EXACTLY to the shipped Cost fold — one weighting definition.
+    assert.equal(dev.weightedQuota, weightedQuotaBurn(byModel, 1.0, IDENTITY_WEIGHTS));
+    // With cacheRead 0 + identity weights this equals the raw total.
+    assert.equal(dev.weightedQuota, 500_000);
+  });
+
+  test("null (not 0) below the min-sample floor — no-data is never a computed zero", () => {
+    const records = batch("dev_orch", CLASS_STATS_MIN_SAMPLE - 1, 0);
+    const wq: WeightedQuotaInputs = {
+      // Even WITH a breakdown present, a below-floor class reports null.
+      byClassBreakdown: { dev_orch: familyBreakdown("opus", 999_999) },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.verdict, "insufficient-sample");
+    assert.equal(dev.weightedQuota, null, "below-floor → null, never a fabricated 0");
+  });
+
+  test("null when the class cleared the floor but has NO breakdown (skill burned nothing)", () => {
+    const records = batch("dev_orch", 10, 6);
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: {}, // dev_orch absent → no in-window tokens for its skill
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.weightedQuota, null, "absent breakdown → null, never a fabricated 0");
+  });
+
+  test("a producer with a suspect β (cleared the dispatch floor) STILL carries a cost axis", () => {
+    // The cost axis is independent of the YIELD verdict: a suspect-β producer
+    // reports insufficient-sample yield but has genuine cost data.
+    const records = batch("research_orch", 20, 0);
+    const byModel = familyBreakdown("sonnet", 120_000);
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: { research_orch: byModel },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const p = find(sb, "research_orch");
+    assert.equal(p.verdict, "insufficient-sample", "yield axis unaffected");
+    assert.equal(p.weightedQuota, 120_000, "cost axis computed independently of the yield verdict");
+  });
+
+  test("cacheRead weight + non-identity burn weights compose exactly like the Cost fold", () => {
+    const records = batch("dev_orch", 10, 6);
+    // A breakdown with cacheRead tokens so the cacheReadWeight axis bites.
+    const byModel = emptyByModel();
+    byModel.opus = { ...EMPTY_BREAKDOWN, input: 10_000, cacheRead: 90_000, total: 100_000 };
+    const cacheReadWeight = 0.1;
+    const burnWeights = { opus: 5, sonnet: 1, haiku: 1 };
+    const wq: WeightedQuotaInputs = {
+      byClassBreakdown: { dev_orch: byModel },
+      cacheReadWeight,
+      burnWeights,
+    };
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW, weightedQuota: wq });
+    const dev = find(sb, "dev_orch");
+    // opus family weight 5 × (input 10k + 0.1×cacheRead 90k) = 5 × 19k = 95k.
+    assert.equal(dev.weightedQuota, weightedQuotaBurn(byModel, cacheReadWeight, burnWeights));
+    assert.equal(dev.weightedQuota, 95_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Weighted-Quota Cost Axis (issue #3548) — the composer (className→skill join)
+// ---------------------------------------------------------------------------
+
+describe("class-stats — weighted-quota cost axis: composer (issue #3548)", () => {
+  test("maps className→skill via the taxonomy and attributes the skill's burn", async () => {
+    const devSkill = skillFor("dev_orch");
+    const deps: ClassScoreboardDeps = {
+      listRecords: async () => ({ ok: true, records: batch("dev_orch", 10, 7) }),
+      loadObservations: async () => ({ ok: true, observations: [] }),
+      // The usage snapshot keys by SKILL; the composer must re-key by class name.
+      loadUsage: async () => fakeUsage({ [devSkill]: familyBreakdown("opus", 300_000) }),
+    };
+    const sb = await buildClassScoreboard({ now: NOW, deps });
+    const dev = find(sb, "dev_orch");
+    // In the test env HYDRA_QUOTA_WEIGHT_* are unset (identity weights) and
+    // HYDRA_USAGE_CACHE_READ_WEIGHT defaults to 1.0, so this reduces to the raw
+    // total — the same numbers /api/usage would report (one calibration surface).
+    assert.equal(dev.weightedQuota, 300_000);
+  });
+
+  test("a class whose skill produced no in-window tokens gets weightedQuota null", async () => {
+    const deps: ClassScoreboardDeps = {
+      listRecords: async () => ({ ok: true, records: batch("dev_orch", 10, 7) }),
+      loadObservations: async () => ({ ok: true, observations: [] }),
+      loadUsage: async () => fakeUsage({}), // no skill produced tokens
+    };
+    const sb = await buildClassScoreboard({ now: NOW, deps });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.weightedQuota, null);
+  });
+
+  test("a usage-read failure degrades weightedQuota to null on EVERY class, yield preserved", async () => {
+    const deps: ClassScoreboardDeps = {
+      listRecords: async () => ({ ok: true, records: batch("dev_orch", 10, 8) }),
+      loadObservations: async () => ({ ok: true, observations: [] }),
+      loadUsage: async () => {
+        throw new Error("usage snapshot unavailable");
+      },
+    };
+    const sb = await buildClassScoreboard({ now: NOW, deps });
+    const dev = find(sb, "dev_orch");
+    // Yield axis untouched by the cost-read failure.
+    assert.equal(dev.verdict, "healthy");
+    // Cost axis degrades to null on every class (never throws, never fabricates).
+    for (const c of sb.classes) {
+      assert.equal(c.weightedQuota, null, `${c.className} weightedQuota degrades to null`);
+    }
   });
 });

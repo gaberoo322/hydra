@@ -113,8 +113,16 @@ import type { UsageSnapshot, SkillWoWEntry } from "./types.ts";
  * and returns its slice of the snapshot, never a `UsageSnapshot` (which
  * does not exist yet during assembly), mirroring eligibility.ts's
  * {@link deriveHardStop}.
+ *
+ * Exported + re-exported via the `cost/index.ts` public barrel (issue #3548): the
+ * per-class **Weighted-Quota Cost Axis** on the Class Yield Scoreboard reuses this
+ * exact fold on each `bySkillByModel[skill]` per-family breakdown, so the
+ * scoreboard and `/api/usage` share ONE weighting definition (the CONTEXT.md
+ * single-definition-of-Quota-Weight rule) rather than the scoreboard defining a
+ * second, divergent formula. It is the ONE snapshot-assembly fold on the public
+ * barrel; the rest stay module-internal (test-only exports).
  */
-function weightedQuotaBurn(
+export function weightedQuotaBurn(
   byModel: Record<ModelFamily, TokenBreakdown>,
   wCache: number,
   weights: { opus: number; sonnet: number; haiku: number },

@@ -26,6 +26,13 @@
  *     producer classes carry the spine β (respecting identifiability flags);
  *     everything else is `not-scored`. Never raw merge-rate for a producer.
  *
+ *   - **Weighted-Quota Cost Axis (issue #3548).** Each `ClassStat` additionally
+ *     carries `weightedQuota` — the model-weighted, cacheRead-inclusive quota
+ *     burn attributed to the class's skill, computed by `buildClassScoreboard`
+ *     via the SAME `weightedQuotaBurn` fold + `quotaWeightCalibrated` gate that
+ *     backs `/api/usage`'s `weightedBurn7d`. Serialized here as-is (an additive
+ *     field); best-effort → `null` on a usage-read failure, never a fabricated 0.
+ *
  *   - **Never throws to the client.** `buildClassScoreboard` degrades to an empty
  *     scoreboard on a Redis-read failure (never throws); a defensive catch still
  *     guards the handler so Express never returns a bodyless 500.

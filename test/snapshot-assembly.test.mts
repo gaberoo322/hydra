@@ -9,7 +9,11 @@ import { strict as assert } from "node:assert";
 // prior-week read), proving the assembler earns its own seam. Before the move it
 // could only be reached through `getUsage()`, which requires a fixture directory
 // + a mocked OAuth reader.
-import { assembleSnapshot } from "../src/cost/snapshot-assembly.ts";
+import { assembleSnapshot, weightedQuotaBurn } from "../src/cost/snapshot-assembly.ts";
+// The same fold re-exported on the public barrel (issue #3548): assert the two
+// paths reference the identical function so consumers (the Class Yield
+// Scoreboard) and `assembleSnapshot` share ONE weighting definition.
+import { weightedQuotaBurn as weightedQuotaBurnBarrel } from "../src/cost/index.ts";
 import {
   EMPTY_BREAKDOWN,
   emptyByModel,
@@ -201,5 +205,43 @@ describe("assembleSnapshot (direct, no-IO)", () => {
     assert.equal(wowNew.current, 700);
     assert.equal(wowNew.prior, null);
     assert.equal(wowNew.deltaPct, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// weightedQuotaBurn — the now-exported two-axis fold (issue #873, #3548)
+// ---------------------------------------------------------------------------
+describe("weightedQuotaBurn (exported fold — issue #3548)", () => {
+  function famBreakdown(family: ModelFamily, over: Partial<TokenBreakdown>): Record<ModelFamily, TokenBreakdown> {
+    const acc = emptyByModel();
+    acc[family] = { ...EMPTY_BREAKDOWN, ...over };
+    return acc;
+  }
+
+  test("the snapshot-assembly export and the cost/index barrel export are the SAME fn", () => {
+    // One weighting definition, two consumers — assert reference identity.
+    assert.equal(weightedQuotaBurn, weightedQuotaBurnBarrel);
+  });
+
+  test("identity weights + cacheReadWeight 1.0 reduce to the raw cache-weighted sum", () => {
+    const byModel = famBreakdown("opus", { input: 100, cacheRead: 900, total: 1000 });
+    // input 100 + 1.0×cacheRead 900 = 1000, opus weight 1.
+    assert.equal(weightedQuotaBurn(byModel, 1.0, { opus: 1, sonnet: 1, haiku: 1 }), 1000);
+  });
+
+  test("cacheReadWeight (Axis A) discounts cacheRead tokens inside a family", () => {
+    const byModel = famBreakdown("opus", { input: 100, cacheRead: 900, total: 1000 });
+    // input 100 + 0.1×cacheRead 900 = 190.
+    assert.equal(weightedQuotaBurn(byModel, 0.1, { opus: 1, sonnet: 1, haiku: 1 }), 190);
+  });
+
+  test("per-family burn weight (Axis B) scales the family total; axes compose", () => {
+    const byModel = famBreakdown("opus", { input: 100, cacheRead: 900, total: 1000 });
+    // opus weight 5 × (100 + 0.1×900) = 5 × 190 = 950.
+    assert.equal(weightedQuotaBurn(byModel, 0.1, { opus: 5, sonnet: 1, haiku: 1 }), 950);
+  });
+
+  test("an all-zero breakdown folds to 0 (a genuine computed zero)", () => {
+    assert.equal(weightedQuotaBurn(emptyByModel(), 1.0, { opus: 1, sonnet: 1, haiku: 1 }), 0);
   });
 });

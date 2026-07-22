@@ -145,4 +145,49 @@ describe("GET /api/autopilot/class-stats (issue #2943)", () => {
     assert.equal(res._status, 500);
     assert.ok(res._body.error, "500 carries an error body");
   });
+
+  test("serializes the weightedQuota cost axis on each ClassStat (issue #3548)", async () => {
+    // Build a board WITH weighted-quota inputs so dev_orch carries a computed
+    // axis; assert the API passes it through the JSON body verbatim.
+    const records: DispatchOutcomeRecord[] = [];
+    for (let i = 0; i < 10; i++) {
+      records.push({
+        cycleId: "worktree-agent-277e4476-t4-dev_orch",
+        runIdPrefix: "277e4476",
+        turn: 4,
+        className: "dev_orch",
+        skill: "hydra-dev",
+        outcome: i < 6 ? "merged" : "failed",
+        tokens: 40_000,
+        durationMs: 60_000,
+        escalationAttempt: null,
+        escalatedModel: null,
+        recordedAt: NOW - (i + 1) * 60_000,
+      });
+    }
+    const board = computeClassScoreboard(records, { metrics: [] }, {
+      now: NOW,
+      weightedQuota: {
+        byClassBreakdown: {
+          dev_orch: {
+            opus: { input: 250_000, output: 0, cacheCreation: 0, cacheRead: 0, total: 250_000 },
+            sonnet: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 },
+            haiku: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 },
+            unknown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, total: 0 },
+          },
+        },
+        cacheReadWeight: 1.0,
+        burnWeights: { opus: 1, sonnet: 1, haiku: 1 },
+      },
+    });
+    const res = await callRoute(async () => board);
+    assert.equal(res._status, 200);
+    const dev = res._body.scoreboard.classes.find((c: any) => c.className === "dev_orch");
+    assert.ok(dev, "dev_orch row serialized");
+    assert.equal(dev.weightedQuota, 250_000, "weightedQuota serialized verbatim");
+    // A class whose skill produced no tokens (absent breakdown) serializes null.
+    const qa = res._body.scoreboard.classes.find((c: any) => c.className === "qa_orch");
+    assert.ok(qa);
+    assert.equal(qa.weightedQuota, null);
+  });
 });
