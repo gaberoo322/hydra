@@ -49,12 +49,6 @@ import type { SkillCatalogState } from "../knowledge-base/skill-registration.ts"
 // dark-outcome check produces, so the deep-health dark-outcome rule is a pure
 // function of the snapshot like every other rule.
 import type { OutcomeVerdict } from "../scheduler/chores/wiring-liveness-outcomes.ts";
-// Issue #3251: HealthSnapshot.reflectionOutcomesLiveness carries the retired
-// reflection-outcomes ledger's liveness verdict. The projecting VALUE function
-// (`projectReflectionOutcomesLiveness`) stays imported in fan-out.ts (it is
-// logic run at fan-out time over the probed ledger state); only its report TYPE
-// lives on the snapshot vocabulary here.
-import type { ReflectionOutcomesLivenessReport } from "./reflection-outcomes-liveness.ts";
 
 // ---- Service Probe Map — the extensible external-service health record ----
 //
@@ -143,14 +137,6 @@ export interface HealthSnapshot {
   // (success-criterion 2). An empty array is honest-none (no dark outcome, or the
   // check could not run) — the rule no-ops, never a phantom alarm.
   darkOutcomes: OutcomeVerdict[];
-  // Issue #3251: the retired reflection-outcomes ledger's liveness verdict, read
-  // live at fan-out time and carried here so the deep-health reflection-outcomes
-  // rule is pure over the snapshot. Its default (`retired-empty`) is honest-none
-  // — the rule fires a plain INFO explaining the retirement (turning an invisible
-  // corpse into a self-documenting signal so the discover/arch-review loop stops
-  // re-filing the phantom), and only escalates to a WARNING on the surprising
-  // `unexpected-live-tail`. Mirrors the #2492/#2805 discoverability deepenings.
-  reflectionOutcomesLiveness: ReflectionOutcomesLivenessReport;
   ovSearch: { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number };
   // Issue #2278: the Tailnet Ollama VLM host (gabes-desktop-1:11434) liveness
   // probe. A DIRECT reachability check of the host OpenViking uses for its
@@ -284,14 +270,6 @@ export interface ProbeInputs {
   // to the parseProbes empty-array default (the dark-outcome rule no-ops),
   // honest-none exactly as a rejected async probe would.
   darkOutcomes: HealthSnapshot["darkOutcomes"] | null;
-  // Issue #3251: the retired reflection-outcomes ledger's liveness report,
-  // PROJECTED at fan-out time from the raw ZSET probe (like the darkOutcomes
-  // direct read — the projection needs a clock, so it runs in the I/O owner, not
-  // in the clock-free parseProbes seam). `| null` so a fan-out that cannot
-  // resolve it degrades to the parseProbes honest-none default
-  // (`retired-empty` → the rule fires the plain retirement INFO), exactly as a
-  // rejected async probe would.
-  reflectionOutcomesLiveness: HealthSnapshot["reflectionOutcomesLiveness"] | null;
   ovSearch: HealthSnapshot["ovSearch"] | null;
   // Issue #2278: the Tailnet Ollama VLM host liveness probe result. `| null` on a
   // rejected settle (the never-throwing probe folds its own failures to a `down`
@@ -337,13 +315,12 @@ export type AsyncProbeKey = Exclude<keyof ProbeInputs, InlineProbeKey>;
 /**
  * The `ProbeInputs` fields fed by a direct in-process read (issue #3372):
  * skillCatalog (#2386, sync in-memory copy), darkOutcomes (#2805, async chore read
- * that plucks `.outcomeVerdicts`), reflectionOutcomesLiveness (#3251, async ledger
- * probe + clock projection). Each carries a SEMANTIC honest-none `fallback` (empty
- * catalog / [] / retired-empty report) — which is why they are inline descriptors
- * rather than async settle-array probes: a rejected async settle coalesces to
- * `null`, losing the meaningful default these reads must preserve.
+ * that plucks `.outcomeVerdicts`). Each carries a SEMANTIC honest-none `fallback`
+ * (empty catalog / []) — which is why they are inline descriptors rather than
+ * async settle-array probes: a rejected async settle coalesces to `null`, losing
+ * the meaningful default these reads must preserve.
  */
-export type InlineProbeKey = "skillCatalog" | "darkOutcomes" | "reflectionOutcomesLiveness";
+export type InlineProbeKey = "skillCatalog" | "darkOutcomes";
 
 /** A key→settled-result record — the keyed successor to the positional array. */
 export type SettledByKey = Partial<
@@ -380,15 +357,6 @@ export const INLINE_FALLBACKS: { [K in InlineProbeKey]: ProbeInputs[K] } = {
   },
   // Empty verdict list — the dark-outcome rule no-ops.
   darkOutcomes: [],
-  // The `retired-empty` report — the reflection-outcomes rule fires the plain
-  // retirement INFO, never a phantom alarm.
-  reflectionOutcomesLiveness: {
-    verdict: "retired-empty",
-    count: 0,
-    latestEntryMs: null,
-    ageMs: null,
-    note: "Retired reflection-outcomes ledger is empty/absent (writer removed #1006, reader swept #1655) — expected.",
-  },
 };
 
 // ---- assembleProbeInputs — maps the keyed settled record to named ProbeInputs --
@@ -450,8 +418,8 @@ export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
     knowledgeContext: val<ProbeInputs["knowledgeContext"]>("knowledgeContext"),
     // Issue #2278: the Tailnet Ollama VLM-host liveness probe.
     ollamaVlm: val<ProbeInputs["ollamaVlm"]>("ollamaVlm"),
-    // Issue #3372: the three inline in-process reads (skillCatalog #2386,
-    // darkOutcomes #2805, reflectionOutcomesLiveness #3251) are seeded from their
+    // Issue #3372: the inline in-process reads (skillCatalog #2386,
+    // darkOutcomes #2805) are seeded from their
     // shared honest-none fallbacks — NOT hardcoded `null` placeholders — and are
     // OVERRIDDEN by collectProbeInputs with the live read. A direct caller of
     // assembleProbeInputs (e.g. the round-trip test) therefore gets the honest-none

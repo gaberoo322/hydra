@@ -47,7 +47,7 @@ import { redisInfo as getRedisInfo } from "../redis/utility.ts";
 // returned 0/empty after ADR-0031 retired the Redis backlog subsystem; the four
 // rules that gated on queueDepth/blCounts could never fire. The fields have been
 // removed from HealthSnapshot and ProbeInputs.
-import { countReflectionKeys, probeReflectionOutcomesLedger } from "../redis/reflections.ts";
+import { countReflectionKeys } from "../redis/reflections.ts";
 // Issue #3270: the attribution ledger LLEN probe — a best-effort LLEN read that
 // surfaces ledger-dark state to the deep-health rule without fetching all rows.
 import { getLedgerLen } from "../redis/attribution-ledger.ts";
@@ -66,13 +66,6 @@ import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // ProbeInputs.darkOutcomes — the deep-health dark-outcome rule then reads it from
 // the snapshot, staying pure. `evaluateDarkOutcomes` is contractually never-throw.
 import { evaluateDarkOutcomes } from "../scheduler/chores/wiring-liveness-outcomes.ts";
-// Issue #3251: project the retired reflection-outcomes ledger's residual state
-// (read via probeReflectionOutcomesLedger) into a liveness report at fan-out
-// time. Like the darkOutcomes read above, this is a direct never-throwing read;
-// the projection needs a clock so it runs HERE (the I/O owner) and is carried
-// onto the snapshot via ProbeInputs.reflectionOutcomesLiveness — the deep-health
-// reflection-outcomes rule then reads it from the snapshot, staying pure.
-import { projectReflectionOutcomesLiveness } from "./reflection-outcomes-liveness.ts";
 import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
 import { parseRedisInfoSnapshot } from "./diagnostics.ts";
 // Issue #3230: the ProbeInputs named-record type comes from the zero-logic leaf.
@@ -141,8 +134,8 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 //
 // Issue #3263 replaced the positional array with a NAMED registry: each async
 // probe became a `{ key, run }` descriptor whose `key` is the `ProbeInputs` field
-// it feeds. The integer subscript vanished — but the three in-process reads
-// (skillCatalog #2386, darkOutcomes #2805, reflectionOutcomesLiveness #3251) were
+// it feeds. The integer subscript vanished — but the in-process reads
+// (skillCatalog #2386, darkOutcomes #2805) were
 // left OUTSIDE that registry: an `Exclude<...>` type carved them out of the async
 // key set, `assembleProbeInputs` hardcoded them to `null` placeholders, and
 // `collectProbeInputs` ran three bespoke try/catch blocks after the fan-out to
@@ -160,9 +153,9 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 //     the SEMANTIC honest-none value (empty catalog / [] / retired-empty report),
 //     NOT raw `null` — which is exactly why these reads could never be ordinary
 //     async probes (a rejected async settle coalesces to `null`, losing the
-//     meaningful default). The true common property of the three reads is this
+//     meaningful default). The true common property of these reads is this
 //     honest-none fallback, NOT "runs synchronously": only skillCatalog is truly
-//     sync; darkOutcomes and reflectionOutcomesLiveness are awaited.
+//     sync; darkOutcomes is awaited.
 //
 // `collectProbeInputs` builds ONE descriptor list, partitions by `kind`, fans out
 // the async subset through `Promise.allSettled`, runs the inline subset with a
@@ -279,22 +272,6 @@ export interface CollectProbeDeps {
    * metric files.
    */
   darkOutcomesEval?: typeof evaluateDarkOutcomes;
-  /**
-   * Issue #3251: the read-only liveness probe of the RETIRED reflection-outcomes
-   * ledger (default: the real probeReflectionOutcomesLedger). A never-throwing
-   * ZSET read — NOT a Promise.allSettled probe — so the full fan-out pipeline (and
-   * the deep-health reflection-outcomes rule downstream) is testable with an
-   * injected ledger state, no real Redis. Its result is projected through
-   * projectReflectionOutcomesLiveness onto the snapshot.
-   */
-  reflectionOutcomesLedgerProbe?: typeof probeReflectionOutcomesLedger;
-  /**
-   * Issue #3251: injectable clock (ms) for the reflection-outcomes liveness
-   * projection's staleness boundary (defaults to Date.now via the projector). A
-   * test pins this to make the retired-frozen-tail vs unexpected-live-tail
-   * boundary deterministic without touching wall-clock.
-   */
-  reflectionOutcomesNow?: () => number;
   targetServiceName?: () => string;
   /**
    * Issue #2498/#2570: the embed-backend Wake-on-LAN gate forwarded to
@@ -341,8 +318,6 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeOllamaVlmImpl = probeOllamaVlm,
     skillCatalogState = getSkillCatalogState,
     darkOutcomesEval = evaluateDarkOutcomes,
-    reflectionOutcomesLedgerProbe = probeReflectionOutcomesLedger,
-    reflectionOutcomesNow,
     targetServiceName = getTargetServiceName,
     // Issue #2498/#2570: default to the WoL Adapter's process-lifetime gate pair
     // (src/health/wol.ts getWolGates()) so a no-gate production caller is
@@ -521,21 +496,6 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       key: "darkOutcomes",
       run: async () => (await darkOutcomesEval({})).outcomeVerdicts,
       fallback: INLINE_FALLBACKS.darkOutcomes,
-    },
-    {
-      // Issue #3251: probe the retired reflection-outcomes ledger (async, never
-      // throws — folds a Redis error to the absent state) and project its residual
-      // state into a liveness report with the injected clock. `fallback` is the
-      // `retired-empty` report → the reflection-outcomes rule fires the plain
-      // retirement INFO, never a phantom alarm.
-      kind: "inline",
-      key: "reflectionOutcomesLiveness",
-      run: async () =>
-        projectReflectionOutcomesLiveness(
-          await reflectionOutcomesLedgerProbe(),
-          reflectionOutcomesNow ? { now: reflectionOutcomesNow } : {},
-        ),
-      fallback: INLINE_FALLBACKS.reflectionOutcomesLiveness,
     },
   ];
 

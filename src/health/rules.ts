@@ -435,53 +435,6 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
       autoRecovery: false,
     };
   },
-  // Issue #3251: surface the RETIRED reflection-outcomes ledger's residual state
-  // through the deep-health fold so an operator (or an architecture-review /
-  // discover pass) checking /api/health/deep sees WHY the ledger's last entry is
-  // frozen at 2026-05-13 — closing the discoverability gap that re-filed the
-  // phantom "reflection outcomes stale, producer disconnected" (#3251). The ledger
-  // is DELIBERATELY RETIRED (writer removed #1006, reader swept #1655); there is no
-  // producer to resume. The liveness verdict rides the snapshot
-  // (s.reflectionOutcomesLiveness, projected at fan-out time), so this rule is a
-  // PURE function of the snapshot like every other rule.
-  //
-  // Fires (mirroring the #2492/#2805 honest-none discipline):
-  //   - `retired-empty`        → NOTHING (fully swept; nothing to explain).
-  //   - `retired-frozen-tail`  → a single INFO explaining the retirement — the
-  //                              EXACT state that gets misread as a broken producer,
-  //                              so make it visible-and-self-documenting.
-  //   - `unexpected-live-tail` → a WARNING: the retired key has a FRESH entry but
-  //                              no writer exists, so something is unexpectedly
-  //                              writing it — the one genuinely surprising case.
-  (s) => {
-    const liveness = s.reflectionOutcomesLiveness;
-    if (liveness.verdict === "retired-empty") return null;
-    if (liveness.verdict === "unexpected-live-tail") {
-      return {
-        severity: "warning",
-        component: "intelligence",
-        what: "Unexpected write to the retired reflection-outcomes ledger",
-        why: `${liveness.note} (${liveness.count} member${liveness.count === 1 ? "" : "s"}, newest ~${liveness.ageMs !== null ? Math.round(liveness.ageMs / 1000) + "s" : "?"} old)`,
-        impact:
-          "The reflection-outcomes ledger has no live reader (swept #1655), so any new write is dead data accumulating under a retired key — and it may indicate a resurrected/rogue producer that should not exist.",
-        action:
-          "Identify what is writing hydra:learning:reflection:outcomes (the writer was removed at 5b6683e/#1006). If the learning loop is being intentionally revived, wire a live reader + a health producer-liveness gate first; otherwise stop the writer and DEL the retired key.",
-        autoRecovery: false,
-      };
-    }
-    // retired-frozen-tail — the misread-as-a-bug state. INFO, never an alarm.
-    return {
-      severity: "info",
-      component: "intelligence",
-      what: "Reflection-outcomes ledger is retired (frozen tail)",
-      why: liveness.note,
-      impact:
-        "None — the reflection-outcomes ledger was intentionally retired (writer removed #1006, reader swept #1655 as an ADR-0023 'producers cut, consumers kept' corpse). Its frozen last-entry timestamp is NOT a disconnected producer; the live learning-context path is the per-anchor/by-file reflection seam (src/reflections/index.ts, #841/#1119).",
-      action:
-        "No action needed. This INFO exists so a stale-tail read is not re-filed as a producer bug (#3251). To reclaim the residual Redis memory, DEL hydra:learning:reflection:outcomes — it has no live reader.",
-      autoRecovery: true,
-    };
-  },
   // Issue #3270: warn when the attribution ledger is empty. The attribution
   // spine (epic #2628) was designed to populate `hydra:attribution:ledger` with
   // per-merge observation rows as soon as PRs land and their windows close. An

@@ -88,17 +88,6 @@ function healthySnapshot(): HealthSnapshot {
     // fires ONLY when at least one verdict has status "dark", so an empty array
     // keeps the baseline "fires zero diagnostics" assertion holding.
     darkOutcomes: [],
-    // Issue #3251: the retired reflection-outcomes ledger fully swept — the
-    // reflection-outcomes rule fires ONLY on `retired-frozen-tail` (INFO) and
-    // `unexpected-live-tail` (WARNING), so `retired-empty` keeps the baseline
-    // "fires zero diagnostics" assertion holding.
-    reflectionOutcomesLiveness: {
-      verdict: "retired-empty",
-      count: 0,
-      latestEntryMs: null,
-      ageMs: null,
-      note: "Retired reflection-outcomes ledger is empty/absent (writer removed #1006, reader swept #1655) — expected.",
-    },
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
     // Issue #2278: the Tailnet Ollama VLM-host liveness probe — healthy by default.
     ollamaVlm: { status: "ok", latencyMs: 12 },
@@ -947,10 +936,6 @@ describe("parseProbes", () => {
       // Issue #2805: null = the fan-out could not run the dark-outcome check;
       // parseProbes defaults it to [] so the dark-outcome rule no-ops (honest-none).
       darkOutcomes: null,
-      // Issue #3251: null = the fan-out could not project the retired-ledger probe;
-      // parseProbes defaults it to the `retired-empty` report so the
-      // reflection-outcomes rule no-ops (honest-none).
-      reflectionOutcomesLiveness: null,
       // Issue #3270: null = the ledger LLEN probe settle rejected; parseProbes
       // coalesces to 0 (honest-zero → empty-ledger) so the attribution-ledger-dark
       // rule fires. This is intentional in the "all probes failed" baseline.
@@ -1058,10 +1043,6 @@ describe("parseProbes", () => {
       // Issue #2805: no dark outcomes in this fan-out — the dark-outcome rule
       // must not add a diagnostic to the degraded-fan-out assertion below.
       darkOutcomes: [],
-      // Issue #3251: null → parseProbes coalesces to `retired-empty`, so the
-      // reflection-outcomes rule adds no diagnostic to this degraded-fan-out
-      // assertion (it fires only on frozen-tail INFO / live-tail WARNING).
-      reflectionOutcomesLiveness: null,
       // Issue #3270: non-zero count keeps the attribution-ledger-dark rule silent
       // in this degraded-fan-out test (only other degraded-path rules are expected).
       attributionLedgerCount: 1,
@@ -1306,9 +1287,6 @@ describe("projectHealthDeepResponse", () => {
       // Issue #2492: the reflection-deposit-health verdict now rides the
       // intelligence block so /api/health/deep surfaces it where operators look.
       "reflectionHealth",
-      // Issue #3251: the retired reflection-outcomes ledger liveness verdict rides
-      // the intelligence block so /api/health/deep explains the frozen tail inline.
-      "reflectionOutcomesLiveness",
       "reflections",
     ]);
   });
@@ -1319,18 +1297,6 @@ describe("projectHealthDeepResponse", () => {
     // when no deep-health diagnostic fires — that always-on visibility is the
     // discoverability fix that stops the #1912→#2450→#2467→#2492 re-file loop.
     assert.deepEqual(r.intelligence.reflectionHealth, healthySnapshot().reflectionHealth);
-  });
-
-  test("intelligence.reflectionOutcomesLiveness rides the wire envelope (issue #3251)", () => {
-    // The retired-ledger verdict ALWAYS rides the envelope (a pure read), even when
-    // no deep-health diagnostic fires — that always-on visibility is the
-    // discoverability fix that stops #3251-style re-files of the frozen tail.
-    const r = project(healthySnapshot());
-    assert.deepEqual(
-      r.intelligence.reflectionOutcomesLiveness,
-      healthySnapshot().reflectionOutcomesLiveness,
-    );
-    assert.equal(r.intelligence.reflectionOutcomesLiveness.verdict, "retired-empty");
   });
 
   test("intelligence.darkOutcomes rides the wire envelope carrying producer identity (issue #2805)", () => {
