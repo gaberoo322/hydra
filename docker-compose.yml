@@ -102,6 +102,66 @@ services:
           cpus: "4"
           memory: 6G
 
+  # Local CPU TEI (HF Text Embeddings Inference) on the hydra-server, the
+  # cutover replacement for ollama-embed as OpenViking's dense embedding
+  # backend (issue #3543, epic #3541). Serves nomic-embed-text (768-dim) over
+  # an OpenAI-compatible /v1/embeddings at http://tei-embed:80/v1. TEI is a
+  # purpose-built embedding server (Rust router, batched tokenization) so it
+  # is materially faster than routing embeddings through a general-purpose
+  # Ollama LLM runtime, while keeping the SAME model + dimension so the
+  # cutover is drop-in (cosine-parity-gated by scripts/ov-embed-parity-check.ts;
+  # at mean cosine >= 0.99 no reindex is needed).
+  #
+  # KEY INVARIANTS
+  #   - `--served-model-name nomic-embed-text` makes TEI answer the SAME model
+  #     string OpenViking sends (docker/ov.conf embedding.dense.model), so the
+  #     OpenAI-compatible request/response line up without touching ov.conf's
+  #     model/dimension.
+  #   - The nomic-ai/nomic-embed-text-v1.5 checkpoint is the HF home of the
+  #     `nomic-embed-text` model Ollama pulls; it is a 768-dim model, matching
+  #     ov.conf `dimension: 768`.
+  #   - NO `--default-prompt` / `--default-prompt-name` is passed: OpenViking
+  #     stays the SOLE source of the `search_document:` / `search_query:`
+  #     prefixes. Passing a TEI default prompt would double-prefix every input
+  #     and silently degrade retrieval — do NOT add one (issue #3543).
+  #   - `--auto-truncate` (TEI's default, made explicit) clamps over-long docs
+  #     instead of refusing the request, matching the prior Ollama behaviour.
+  #
+  # BRING-UP CONTRACT (mirrors ollama-embed, issue #1812): a full
+  # `docker compose up -d` (NO service argument) always pulls this in because
+  # `openviking` declares `depends_on: tei-embed (condition: service_healthy)`
+  # below. A targeted `docker compose up -d openviking` ALSO honours it, but a
+  # targeted bring-up of any OTHER service will NOT create tei-embed. The named
+  # `tei-embed-data` volume caches the downloaded model across restarts.
+  tei-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    command:
+      - "--model-id"
+      - "nomic-ai/nomic-embed-text-v1.5"
+      - "--served-model-name"
+      - "nomic-embed-text"
+      - "--port"
+      - "80"
+      - "--auto-truncate"
+    volumes:
+      # TEI persists downloaded model weights under /data.
+      - tei-embed-data:/data
+    healthcheck:
+      # TEI exposes a /health endpoint; healthy only once the model is loaded
+      # and the router is accepting requests. Uses wget (present in the TEI
+      # image) rather than curl.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6G
+
   openviking:
     init: true
     image: ghcr.io/volcengine/openviking:main
@@ -125,10 +185,12 @@ services:
         condition: service_started
       vikingdb:
         condition: service_started
-      # Wait for the local embedding server to have pulled the model before OV
+      # Wait for the local embedding server to have loaded the model before OV
       # starts trying to embed — avoids a cold-start window where the hot search
-      # path errors while the model is still downloading.
-      ollama-embed:
+      # path errors while the model is still downloading. Repointed from
+      # ollama-embed to tei-embed at the TEI cutover (issue #3543): TEI is now
+      # the live dense-embedding backend (docker/ov.conf embedding.dense.api_base).
+      tei-embed:
         condition: service_healthy
     restart: unless-stopped
     deploy:
@@ -147,4 +209,6 @@ volumes:
   vikingdb-data:
     driver: local
   ollama-embed-data:
+    driver: local
+  tei-embed-data:
     driver: local
