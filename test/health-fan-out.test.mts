@@ -75,16 +75,6 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
         },
       ],
     })) as any,
-    // Issue #3251: stub the retired reflection-outcomes ledger probe + pin the
-    // projection clock so collectProbeInputs' merged reflectionOutcomesLiveness is
-    // deterministic (no dependency on real Redis or wall-clock). A present, stale
-    // tail → `retired-frozen-tail` (the expected corpse), so the merge is observable.
-    reflectionOutcomesLedgerProbe: (async () => ({
-      present: true,
-      count: 3,
-      latestEntryMs: 1_000_000, // ancient — far older than the fresh window
-    })) as any,
-    reflectionOutcomesNow: () => 1_000_000 + 48 * 60 * 60 * 1000, // +48h
     // Issue #3270: stub the attribution ledger LLEN probe so the fan-out never
     // hits real Redis in tests. A non-zero count (7) makes the merge observable.
     attributionLedgerLen: (async () => 7) as any,
@@ -149,13 +139,6 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.darkOutcomes as any)?.length, 1);
     assert.equal((probes.darkOutcomes as any)?.[0]?.status, "dark");
     assert.equal((probes.darkOutcomes as any)?.[0]?.name, "forecast-calibration-brier");
-
-    // Issue #3251 — the retired reflection-outcomes ledger probe (a direct
-    // never-throw read + projection, like the dark-outcome read) is merged onto
-    // the named record. The stubbed present+stale tail projects to
-    // `retired-frozen-tail` (the expected corpse), NOT an alarm.
-    assert.equal((probes.reflectionOutcomesLiveness as any)?.verdict, "retired-frozen-tail");
-    assert.equal((probes.reflectionOutcomesLiveness as any)?.count, 3);
 
     // Issue #3270 — the attribution ledger LLEN (an async settle-array probe).
     assert.equal(probes.attributionLedgerCount, 7);
@@ -246,20 +229,18 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
   });
 
   // Issue #3372: the unified registry's `inline` descriptor variant. Each of the
-  // three in-process reads (skillCatalog sync #2386, darkOutcomes async #2805,
-  // reflectionOutcomesLiveness async #3251) runs inside a per-descriptor try/catch
-  // that yields its SEMANTIC honest-none `fallback` on error — NOT raw null, never
-  // propagating, and never blocking the async settle-array fan-out. This is the
-  // new invariant the descriptor-union refactor introduces (formerly three bespoke
-  // post-fan-out try/catch blocks); the three reads previously had no error-path
-  // coverage in this suite.
+  // in-process reads (skillCatalog sync #2386, darkOutcomes async #2805) runs
+  // inside a per-descriptor try/catch that yields its SEMANTIC honest-none
+  // `fallback` on error — NOT raw null, never propagating, and never blocking the
+  // async settle-array fan-out. This is the invariant the descriptor-union
+  // refactor introduces; these reads previously had no error-path coverage in
+  // this suite.
   test("a throwing inline read folds to its semantic honest-none fallback without blocking the async fan-out (issue #3372)", async () => {
     const probes = await collectProbeInputs(happyDeps({
       // The genuinely-synchronous read throws.
       skillCatalogState: (() => { throw new Error("registry not built"); }) as any,
-      // The two async inline reads reject.
+      // The async inline read rejects.
       darkOutcomesEval: (async () => { throw new Error("outcomes.yaml unreadable"); }) as any,
-      reflectionOutcomesLedgerProbe: (async () => { throw new Error("redis down"); }) as any,
     }));
 
     // skillCatalog folds to the un-run empty catalog (completed:false → both
@@ -275,10 +256,6 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     });
     // darkOutcomes folds to [] (the dark-outcome rule no-ops), NOT null.
     assert.deepEqual(probes.darkOutcomes, []);
-    // reflectionOutcomesLiveness folds to the `retired-empty` report (the rule
-    // fires the plain retirement INFO), NOT null.
-    assert.equal((probes.reflectionOutcomesLiveness as any)?.verdict, "retired-empty");
-    assert.equal((probes.reflectionOutcomesLiveness as any)?.count, 0);
 
     // ...and every async settle-array probe still resolved (no inline failure
     // blocked the fan-out — the Promise.allSettled guarantee is intact).

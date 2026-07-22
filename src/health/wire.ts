@@ -149,15 +149,6 @@ export interface HealthDeepResponse {
     // fires only when at least one outcome is dark; this always rides the envelope
     // (empty array when nothing was evaluated).
     darkOutcomes: HealthSnapshot["darkOutcomes"];
-    // Issue #3251: the retired reflection-outcomes ledger's liveness verdict,
-    // ALSO surfaced here so an operator (or an architecture-review/discover pass)
-    // reading /api/health/deep sees WHY the ledger's last entry is frozen at
-    // 2026-05-13 inline — closing the discoverability gap that re-filed the
-    // phantom "producer disconnected" (#3251). ALWAYS rides the envelope
-    // (`retired-empty` when the fan-out could not project it). Distinct from the
-    // deep-health diagnostic, which fires INFO only on `retired-frozen-tail` and
-    // WARNING only on `unexpected-live-tail`.
-    reflectionOutcomesLiveness: HealthSnapshot["reflectionOutcomesLiveness"];
     ovSearch: HealthSnapshot["ovSearch"];
     ovSearchTrend: unknown;
     knowledgeContext: unknown;
@@ -175,7 +166,7 @@ export function projectHealthDeepResponse(
   probes: ProbeInputs,
 ): HealthDeepResponse {
   // Issue #3459: queueDepth + blCounts removed from destructure (no longer on snapshot).
-  const { health, svcProbes, sched, patterns, reflCount, reflectionHealth, darkOutcomes, reflectionOutcomesLiveness, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  const { health, svcProbes, sched, patterns, reflCount, reflectionHealth, darkOutcomes, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
 
   // Issue #1440: coalesce the two persisted OV-quality reads.
@@ -215,7 +206,7 @@ export function projectHealthDeepResponse(
     // (resets on restart). `ovSearchTrend` is the restart-surviving 24h
     // hour-bucketed rollup (zeroResultRate/fallbackSuccessRate trends) and
     // `knowledgeContext` the 7d per-day context-availability rate.
-    intelligence: { patterns, reflections: reflCount, reflectionHealth, darkOutcomes, reflectionOutcomesLiveness, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
+    intelligence: { patterns, reflections: reflCount, reflectionHealth, darkOutcomes, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
     diagnostics,
   };
 }
