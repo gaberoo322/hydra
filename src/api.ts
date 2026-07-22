@@ -49,6 +49,7 @@ import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
 import { createExplorePageRouter } from "./api/explore-page.ts";
 import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
+import { createVlmRouter } from "./api/vlm.ts";
 import type { EventBus } from "./event-bus.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -187,6 +188,13 @@ function createApi(eventBus: EventBus) {
   // regression-check write surface that finally feeds digest.ts's orphaned
   // holdback.* consumer. Needs eventBus to emit on hydra:notifications.
   api.use(createHoldbackRouter(eventBus));
+
+  // VLM claude-cli shim (issue #3542, epic #3541) — MOUNTS AT APP-ROOT /vlm,
+  // NOT under the /api Router. OpenViking's ov.conf vlm.api_base is
+  // http://host.docker.internal:4000/vlm/v1, so /vlm/v1/chat/completions must
+  // resolve at the app level (like express.static/CORS). Mounting under /api
+  // would land it at /api/vlm and silently 404 every OpenViking VLM call.
+  app.use("/vlm", createVlmRouter());
 
   // Sentry error handler — must be after all routes, before other error handlers
   Sentry.setupExpressErrorHandler(app);
