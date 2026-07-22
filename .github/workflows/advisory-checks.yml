@@ -1,0 +1,258 @@
+name: advisory-checks
+
+# Consolidated advisory static-analysis fleet (issue #3545).
+#
+# This single workflow folds the eleven former advisory sibling workflows —
+# ast-grep-lint, biome-check, comby-check, control-plane-drift, coupling-check,
+# dep-boundary-check, eval-gate, lockfile-lint, seam-checks, wiring-check,
+# skill-size-ratchet — into ONE job: one checkout, one shared `npm ci`, each
+# former workflow's command a sequential step guarded by `if: always()` so a red
+# step surfaces its own annotation WITHOUT masking the others. This cuts per-PR
+# advisory runner-slot allocations from 11 to 1 (workflow files 19 → 9). It is a
+# direct generalization of the already-live 4→1 `seam-checks.yml` fold.
+#
+# WHY OUTSIDE ci.yml (unchanged rationale, formerly repeated in each sibling's
+# header): ci.yml is exact-match Verifier Core (ADR-0001 / ADR-0015: "the gate
+# that gates the gate", operator-only / Tier-4). These checks are NEW
+# verifications, not changes to the merge gate, so they live in a sibling that
+# lands as a normal Tier-3 change (operator memory
+# feedback_ci_gate_separate_workflow_avoids_tier0). Only ci.yml / deploy.yml /
+# deep-qa-gate.yml are exact-match untouchable. Consolidating siblings into a
+# different sibling preserves that invariant — adding a check later is one new
+# `if: always()` step here, still T3, zero Tier-4 contact.
+#
+# NOT REQUIRED CHECKS: none of these eleven are required branch-protection
+# contexts (verified 2026-07-22; the required 9 don't overlap), so consolidating
+# cannot orphan a required check and a red advisory step can never wedge the
+# merge queue (operator memory reference_seam_checks_advisory_only).
+#
+# ADVISORY CONTRACT is preserved per-check exactly as it was in each source
+# workflow: the exit-0 checks (ast-grep, biome, comby, dep-boundary, eval-gate,
+# wiring-check) still emit annotations and exit 0; the exit-non-zero checks
+# (control-plane-drift, coupling-check, lockfile-lint, seam-checks,
+# skill-size-ratchet) still go red on a real violation — but because this
+# workflow is not a required context, that red X surfaces the finding to
+# reviewers without hard-blocking auto-merge. `if: always()` guarantees every
+# step runs even after an earlier step's red X, so no check masks another.
+#
+# TOOL LANE (unchanged): ast-grep / comby / dep-boundary-cruiser / biome /
+# promptfoo / lockfile-lint are all invoked via pinned `npx`/docker, never as
+# package.json runtime deps — keeping them off the ADR-0005 allowlist and the
+# lavamoat allow-scripts gate. See CLAUDE.md § Structural code search. comby runs
+# from its official pinned alpine Docker image (it dynamic-links libev/libpcre
+# the self-hosted runners don't ship).
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: advisory-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned, version-tagged alpine image for comby (carries comby + its
+  # libev/libpcre runtime). Bump to update.
+  COMBY_IMAGE: "comby/comby:alpine-3.14-1.8.1"
+
+jobs:
+  advisory-checks:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      # One shared install so every `npx tsx` step below resolves tsx
+      # deterministically (replaces the per-workflow npm ci / ambient-resolve mix).
+      - name: Install deps (shared npm ci)
+        run: npm ci
+
+      # ── ast-grep-lint (issue #1797) ────────────────────────────────────────
+      # AST-exact structural lint over src/ast-grep-rules/. Advisory: emits
+      # GitHub annotations and exits 0. Pinned version MUST match
+      # scripts/ast-search.ts's AST_GREP_SPEC.
+      - name: ast-grep structural scan (advisory; rules in src/ast-grep-rules/)
+        if: always()
+        run: npx --yes -p @ast-grep/cli@0.43.0 ast-grep scan --format github
+
+      # ── biome-check (issue #2204) ──────────────────────────────────────────
+      # Advisory lint diagnostics over src/ via scripts/ci/biome-check.ts
+      # (biome.jsonc rules ship at warn; wrapper run WITHOUT --error → exits 0).
+      - name: biome lint diagnostics (advisory; rules in biome.jsonc)
+        if: always()
+        run: npx tsx scripts/ci/biome-check.ts
+
+      # ── comby-check (issue #1798) ──────────────────────────────────────────
+      # Structural lint for the non-TS long tail (YAML/shell) via the pinned
+      # comby alpine image. Advisory: reports matches as annotations, exits 0.
+      - name: Pull pinned comby image
+        if: always()
+        run: docker pull "$COMBY_IMAGE"
+
+      - name: comby structural scan (advisory; rules in scripts/comby-rules/)
+        if: always()
+        run: |
+          set -uo pipefail
+          # Advisory: report matches as GitHub annotations, always exit 0.
+          # Apply every rule's match template from scripts/comby-rules/ over the
+          # GitHub workflow YAML. -match-only suppresses rewrite (these are
+          # match-only rules). comby has no dedicated YAML matcher (`comby -list`
+          # ships only .txt and .generic), so .generic is used — it matches the
+          # balanced :[hole] token structurally without tripping on the pattern
+          # text inside a comment or string, which is the false-positive class a
+          # line-regex grep can't avoid.
+          found=0
+          for rule in scripts/comby-rules/*.toml; do
+            [ -e "$rule" ] || continue
+            echo "::group::comby rule $rule"
+            out=$(docker run --rm -v "$PWD:/work:ro" -w /work "$COMBY_IMAGE" \
+                    -config "/work/$rule" -matcher .generic -match-only \
+                    -directory .github/workflows -extensions .yml,.yaml 2>/dev/null || true)
+            if [ -n "$out" ]; then
+              found=1
+              printf '%s\n' "$out"
+              # Emit a GitHub-Actions warning annotation so the finding surfaces in the PR.
+              echo "::warning title=comby-check::Structural match from rule $rule (advisory — see job log)"
+            else
+              echo "no matches for $rule"
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$found" = "0" ]; then
+            echo "comby-check: no structural matches across scripts/comby-rules/ (clean)"
+          fi
+          exit 0
+
+      # ── control-plane-drift (issue #2611) ──────────────────────────────────
+      # Re-parses the control-plane census sources in --check mode and exits 1 if
+      # the committed dashboard/src/data/control-plane.json is stale.
+      - name: Re-parse control-plane census and diff against the committed JSON
+        if: always()
+        # `--check` re-parses the repo sources and compares against
+        # dashboard/src/data/control-plane.json WITHOUT writing; it exits 1 (with
+        # a "regenerate with ..." message) when the committed copy is stale.
+        run: node dashboard/scripts/parse-control-plane.mjs --check
+
+      # ── coupling-check (issue #731) ────────────────────────────────────────
+      # Target-coupling gate (ADR-0013 swap-seam guard). Fails on any NEW
+      # hardcoded target reference in src/. Includes a classifier self-test.
+      - name: Target-coupling check (ADR-0013 swap-seam guard)
+        if: always()
+        run: npx tsx scripts/ci/target-coupling-check.ts
+
+      - name: Self-test the coupling classifier (proves it catches a planted leak)
+        if: always()
+        run: npx tsx scripts/ci/target-coupling-check.ts --self-test
+
+      # ── dep-boundary-check (issue #2205) ───────────────────────────────────
+      # dependency-cruiser import-graph scan over src/ (rules in
+      # .dependency-cruiser.cjs ship at warn; wrapper run WITHOUT --error → exits 0).
+      - name: dependency-cruiser import-graph scan (advisory; rules in .dependency-cruiser.cjs)
+        if: always()
+        run: npx tsx scripts/ci/dep-boundary-check.ts
+
+      # ── eval-gate (issue #1802) ────────────────────────────────────────────
+      # promptfoo evals over evals/*.yaml, offline echo provider (no API key).
+      # Advisory: surfaces failures as annotations, exits 0.
+      - name: promptfoo evals (advisory; offline echo provider — no API key)
+        if: always()
+        run: |
+          set -uo pipefail
+          # No provider secrets are exported — the echo provider makes no LLM
+          # calls. PROMPTFOO_DISABLE_TELEMETRY/UPDATE keep CI hermetic & quiet.
+          # Run every config under evals/ (one per skill / agent class). Adding
+          # an eval = dropping a new evals/*.yaml; this loop picks it up with no
+          # workflow edit. golden.yaml = harness smoke + prompt-invariant guard;
+          # hydra-dev.yaml = agent-authored TypeScript scorer (issue #1803).
+          for cfg in evals/*.yaml; do
+            echo "::group::promptfoo eval (${cfg})"
+            if PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 \
+               npx --yes -p promptfoo@0.121.15 promptfoo eval -c "${cfg}"; then
+              echo "eval-gate: ${cfg} PASSED"
+            else
+              # Advisory: surface the failure as an annotation, do not block merge.
+              echo "::warning title=eval-gate::promptfoo eval ${cfg} reported a failure (advisory — see job log)"
+            fi
+            echo "::endgroup::"
+          done
+          exit 0
+
+      # ── lockfile-lint (issue #1042) ────────────────────────────────────────
+      # Supply-chain lockfile gate: every resolved package must come from the npm
+      # registry over https with an integrity hash. Reads only committed lockfiles.
+      - name: Lint root package-lock.json
+        if: always()
+        run: |
+          npx --yes lockfile-lint@5.0.0 \
+            --path package-lock.json \
+            --type npm \
+            --allowed-hosts npm \
+            --validate-https \
+            --validate-integrity
+
+      - name: Lint dashboard package-lock.json
+        if: always()
+        run: |
+          npx --yes lockfile-lint@5.0.0 \
+            --path dashboard/package-lock.json \
+            --type npm \
+            --allowed-hosts npm \
+            --validate-https \
+            --validate-integrity
+
+      # ── seam-checks (issue #1654) ──────────────────────────────────────────
+      # Eight seam-adapter closure ratchets, each a thin Adapter over
+      # scripts/ci/seam-check-lib.ts. Each scans the tracked tree against its own
+      # shrink-only baseline; a NEW violation fails the named step.
+      - name: Schema-seam check (ADR-0011 req.body validation ratchet, #893)
+        if: always()
+        run: npx tsx scripts/ci/schema-seam-check.ts
+
+      - name: Query-seam check (ADR-0022 req.query validation ratchet, #1040)
+        if: always()
+        run: npx tsx scripts/ci/query-seam-check.ts
+
+      - name: GitHub-seam check (GitHub CLI Adapter closure ratchet, #899)
+        if: always()
+        run: npx tsx scripts/ci/github-seam-check.ts
+
+      - name: Host-probe-seam check (Host-Probe Adapter closure ratchet, #939)
+        if: always()
+        run: npx tsx scripts/ci/host-probe-seam-check.ts
+
+      - name: Journal-seam check (Journal Adapter closure ratchet, #1958)
+        if: always()
+        run: npx tsx scripts/ci/journal-seam-check.ts
+
+      - name: OpenViking-seam check (OpenViking Request Adapter closure ratchet, #954)
+        if: always()
+        run: npx tsx scripts/ci/openviking-seam-check.ts
+
+      - name: Anthropic-seam check (Anthropic Request Adapter closure ratchet, #1959)
+        if: always()
+        run: npx tsx scripts/ci/anthropic-seam-check.ts
+
+      - name: Telegram-seam check (Telegram Notification Adapter closure ratchet, #2201)
+        if: always()
+        run: npx tsx scripts/ci/telegram-seam-check.ts
+
+      # ── wiring-check (issue #2289) ─────────────────────────────────────────
+      # Caller-reachability advisory: flags declared `type: caller` symbols in
+      # config/direction/liveness.yaml with zero references. Exits 0 (|| true).
+      - name: caller-reachability scan (advisory; reads config/direction/liveness.yaml)
+        if: always()
+        run: |
+          node --no-warnings --experimental-strip-types \
+            scripts/ci/wiring-caller-check.ts || true
+
+      # ── skill-size-ratchet (issue #2946) ───────────────────────────────────
+      # Shrink-only word-count gate over playbook-generated skill sources. Exits
+      # non-zero on growth. (Formerly path-filtered to docs/operator-playbooks/**;
+      # now runs every PR — deterministic and a no-op when nothing changed.)
+      - name: Skill-size ratchet (issue #2946 shrink-only word-count baseline)
+        if: always()
+        run: npx tsx scripts/ci/skill-size-ratchet.ts
