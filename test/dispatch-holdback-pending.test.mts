@@ -143,6 +143,63 @@ describe("dispatch.sh holdback-pending → arms the pending-enroll registry (iss
     assert.deepEqual(body, { prNumber: 4245, tier: 2, cycleId: "cycle-jkl" });
   });
 
+  // Issue #3539: the worktree-branch (5th arg) overrides the task_id (3rd arg) as
+  // the pending entry's cycleId, so the merge-watch enrichment keys on the SAME
+  // `effective_cycle_id = worktree_branch or task_id` reap keyed its classified
+  // cycle-record on (reap.py:650). This is the load-bearing part of the fix — the
+  // enrichment now lands on reap's already-classified BRANCH hash instead of
+  // minting an un-joinable bare-UUID first write that buckets `unclassified`.
+  test("keys the pending entry on the worktree branch (5th arg) — the divergent-cycleId merge bump now joins reap's classified record (#3539)", () => {
+    // 3rd arg is the bare autopilot task_id (a UUID); 5th arg is the synthesised
+    // worktree branch. reap wrote its CLASSIFIED record under the BRANCH, so the
+    // pending entry — and thus the merge-watch enrichment — must ALSO use it.
+    const taskId = "fe21f30e-1234-4abc-9def-0123456789ab";
+    const branch = "worktree-agent-a7101d965f686ea65-t5-dev_orch";
+    const { status, body } = armPending([
+      "3539",
+      "3",
+      taskId,
+      "work-queue",
+      branch,
+    ]);
+    assert.equal(status, 0);
+    // The cycleId is the BRANCH, not the bare task_id — the whole #3539 fix.
+    assert.equal(
+      body!.cycleId,
+      branch,
+      "the worktree branch must override the task_id as the join key so the enrichment lands on reap's classified branch-keyed record",
+    );
+    assert.notEqual(
+      body!.cycleId,
+      taskId,
+      "must NOT key on the bare-UUID task_id (the un-joinable twin that becomes an unclassified first write)",
+    );
+    // The anchorType backstop is still forwarded verbatim.
+    assert.deepEqual(body, {
+      prNumber: 3539,
+      tier: 3,
+      cycleId: branch,
+      anchorType: "work-queue",
+    });
+  });
+
+  // The branch-override is opt-in: a branch-less (signal-class) arm omits the 5th
+  // arg and the cycleId stays the task_id — mirroring reap's own
+  // `effective_cycle_id = worktree_branch or task_id` degradation. This proves the
+  // fix does not disturb the branch-less path (no false override on an empty arg).
+  test("a branch-less arm (empty 5th arg) keeps keying on the task_id (#3539 degradation)", () => {
+    const taskId = "signal-class-task-id";
+    const { status, body } = armPending(["3540", "null", taskId, "sweep", ""]);
+    assert.equal(status, 0);
+    assert.equal(
+      body!.cycleId,
+      taskId,
+      "an empty worktree-branch arg must not override — the cycleId stays the task_id (its cycleId IS the task_id)",
+    );
+    assert.equal(body!.anchorType, "sweep");
+    assert.equal(body!.tier, null);
+  });
+
   test("exits non-zero (usage error) when prNumber is missing", () => {
     // Only two positional args → cycle_id resolves empty → usage guard fires.
     const { status, stderr } = armPending(["", "3"]);

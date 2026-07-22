@@ -370,20 +370,51 @@ print(json.dumps(body))
     # or unreachable endpoint is logged non-fatally and the autopilot proceeds —
     # arming NEVER blocks a merge (the merge is already armed by `gh pr merge`).
     #
-    # Usage: dispatch.sh holdback-pending <pr_number> <tier> <cycle_id> [anchor_type]
+    # Usage: dispatch.sh holdback-pending <pr_number> <tier> <cycle_id> [anchor_type] [worktree_branch]
     #   <tier>       integer 1–4, or the literal `null` / empty for unknown-tier.
     #                enrollHoldback enforces the T1/unknown-tier carry-up exemption
     #                SERVER-SIDE — do NOT filter tiers here (invariant: no client-
     #                side `if tier in {2,3,4}` guard, #3078).
     #   [anchor_type] optional explicit dispatch-class anchorType (#2800); omitted
     #                → the merge-watch enrichment infers, then `unclassified`.
+    #   [worktree_branch] optional synthesised worktree branch of the dispatch that
+    #                opened the PR (issue #3539). When present it becomes the
+    #                effective cycleId of the pending entry, mirroring reap's
+    #                `effective_cycle_id = worktree_branch or task_id`
+    #                (reap.py:650). This is the load-bearing part of the #3539 fix:
+    #                on a worktree/feature-branch dispatch reap keys its CLASSIFIED
+    #                cycle-record on the BRANCH, but arming previously keyed the
+    #                pending entry (and thus the merge-watch enrichment) on the bare
+    #                task_id — so the enrichment landed as an UN-JOINABLE bare-UUID
+    #                FIRST write with no anchorType → the classifier honours #2822
+    #                NEVER-GUESS and buckets `unclassified` (the recurring 14% gap,
+    #                the #3391 un-joinable-twin defect recurring on the anchorType
+    #                axis). Registering under the branch makes the enrichment land
+    #                on reap's ALREADY-CLASSIFIED hash — an enrich, not a bare first
+    #                write. A signal-class / branch-less dispatch omits it and the
+    #                cycleId stays the task_id (its cycleId IS the task_id), exactly
+    #                as reap's `worktree_branch or task_id` degrades. This unifies
+    #                the join key WITHOUT touching the read-side #2822 classifier and
+    #                WITHOUT a lifetime-counter-double-counting reap dual-write.
     pr_number="${1:-}"
     tier="${2:-}"
     cycle_id="${3:-}"
     anchor_type="${4:-}"
+    worktree_branch="${5:-}"
     if [ -z "$pr_number" ] || [ -z "$cycle_id" ]; then
-      echo "dispatch.sh: holdback-pending requires <pr_number> <tier> <cycle_id> [anchor_type]" >&2
+      echo "dispatch.sh: holdback-pending requires <pr_number> <tier> <cycle_id> [anchor_type] [worktree_branch]" >&2
       exit 2
+    fi
+    # Issue #3539: prefer the worktree branch as the join key when the caller
+    # supplied one — reap keys its classified cycle-record on the branch for a
+    # worktree dispatch (reap.py:650 `effective_cycle_id = worktree_branch or
+    # task_id`), so the pending entry (which the merge-watch enrichment keys on)
+    # MUST use the same id or the enrichment mints an un-joinable bare-UUID twin.
+    # Branch-less (signal-class) callers omit the arg → cycleId stays the task_id,
+    # matching reap's own `or task_id` degradation. This is a pure key selection:
+    # the anchorType backstop (4th arg) is unchanged and still forwarded.
+    if [ -n "$worktree_branch" ]; then
+      cycle_id="$worktree_branch"
     fi
     payload=$(python3 -c "
 import json, sys
@@ -438,7 +469,7 @@ Usage:
   dispatch.sh log <class> <skill> [ts]
   dispatch.sh capacity-writeback <pr_number> <commit_sha> <skill> <files_json>
   dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed] [grounding_tests_json] [tokens]
-  dispatch.sh holdback-pending <pr_number> <tier> <cycle_id> [anchor_type]
+  dispatch.sh holdback-pending <pr_number> <tier> <cycle_id> [anchor_type] [worktree_branch]
 
 Environment:
   HYDRA_AUTOPILOT_LOG   Path to the nightly run log
