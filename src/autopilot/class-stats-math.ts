@@ -51,6 +51,16 @@ import type { DispatchOutcomeRecord } from "../redis/dispatch-outcomes.ts";
 import type { AttributionEstimate } from "../outcome-attribution/index.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
 import { DISPATCH_CLASSES } from "../taxonomy/classes.ts";
+// The Cost module's shipped weighted-quota fold + its per-family breakdown types
+// (issue #3548). This leaf REUSES `weightedQuotaBurn` — the same fold backing
+// `/api/usage`'s `weightedBurn7d` — so the scoreboard's Weighted-Quota Cost Axis
+// carries ONE weighting definition, never a second divergent formula (CONTEXT.md
+// single-definition-of-Quota-Weight rule). The fold is a pure Σ over already-read
+// scalars, so calling it adds no I/O: the leaf stays a zero-IO deterministic
+// function of its args. The per-class breakdown + resolved weights are PASSED IN
+// by the composer, exactly as `records`/`estimate`/`now` already are.
+import { weightedQuotaBurn } from "../cost/index.ts";
+import type { ModelFamily, TokenBreakdown } from "../cost/token-math.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables (named constants, not magic literals — mirrors the estimator's
@@ -196,8 +206,52 @@ export interface ClassStat {
    * `insufficient-sample`. Null for non-producer roles.
    */
   betaSuspect: boolean | null;
+  /**
+   * The class's **Weighted-Quota Cost Axis** over the window (issue #3548): the
+   * model-weighted, cacheRead-inclusive quota burn attributed to this class's
+   * skill via `weightedQuotaBurn(bySkillByModel[skill], cacheReadWeight,
+   * burnWeights)` — the SAME fold backing `/api/usage`'s `weightedBurn7d`, so the
+   * scoreboard's per-class weighted-quota totals reconcile to the usage
+   * snapshot's 7d weighted burn.
+   *
+   * NULL-vs-ZERO discipline (invariant): `null` when the usage breakdown is
+   * unavailable (the composer's usage read failed / was absent) OR when the class
+   * is below the min-sample floor — "no data", NEVER collapsed to 0. A genuine
+   * computed 0 (a class that cleared the floor but whose skill truly burned zero
+   * weighted tokens in-window) is legitimate but practically unreachable, never
+   * fabricated. `undefined` (field absent) when the composer injected no usage
+   * inputs at all — additive-field back-compat for callers that never pass them.
+   */
+  weightedQuota?: number | null;
   /** The verdict for this class. */
   verdict: ClassVerdict;
+}
+
+/**
+ * The Weighted-Quota Cost Axis inputs the composer injects into the pure leaf
+ * (issue #3548). Mirrors the injection discipline of `records`/`estimate`/`now`:
+ * the leaf reads NO Redis / `getUsage()` / `process.env` — the composer resolves
+ * these from the 60s-cached usage snapshot + the env-derived weights and passes
+ * the already-computed values in.
+ */
+export interface WeightedQuotaInputs {
+  /**
+   * Per-class cacheRead-inclusive per-family token breakdown over the window,
+   * keyed by dispatch-class name. The composer builds this by mapping each
+   * `className → skill` (via the taxonomy) and reading `snapshot.bySkillByModel[skill]`.
+   * A class whose skill produced zero in-window tokens is simply ABSENT from this
+   * map → its `weightedQuota` is `null` (never a fabricated 0).
+   */
+  byClassBreakdown: Record<string, Record<ModelFamily, TokenBreakdown>>;
+  /** Axis A: the resolved cacheRead weight (`getCacheReadWeight()`, default 1.0). */
+  cacheReadWeight: number;
+  /**
+   * Axis B: the resolved per-model-family burn weights. The composer applies the
+   * SAME calibration gate the usage snapshot uses (`quotaWeightCalibrated`
+   * ? env weights : `{opus:1,sonnet:1,haiku:1}` identity) so the axis matches
+   * `/api/usage` exactly — dormant identity weights in prod today.
+   */
+  burnWeights: { opus: number; sonnet: number; haiku: number };
 }
 
 /** The full rolling scoreboard. */
@@ -287,16 +341,47 @@ function producerBeta(
  * @param opts.now Decision clock (epoch ms). Injected for deterministic tests.
  * @param opts.minSample Override the min-sample floor (tests).
  * @param opts.windowMs Override the window width (tests).
+ * @param opts.weightedQuota Optional Weighted-Quota Cost Axis inputs (issue
+ *   #3548). When present, each in-window class that cleared the min-sample floor
+ *   AND has a per-family breakdown gets its `weightedQuota` computed via the
+ *   reused Cost fold. When ABSENT the field is left `undefined` on every row
+ *   (additive back-compat); a class below the floor / with no breakdown gets
+ *   `null` (never a fabricated 0).
  */
 export function computeClassScoreboard(
   records: DispatchOutcomeRecord[],
   estimate: AttributionEstimate,
-  opts: { now: number; minSample?: number; windowMs?: number },
+  opts: {
+    now: number;
+    minSample?: number;
+    windowMs?: number;
+    weightedQuota?: WeightedQuotaInputs;
+  },
 ): ClassScoreboard {
   const now = opts.now;
   const minSample = opts.minSample ?? CLASS_STATS_MIN_SAMPLE;
   const windowMs = opts.windowMs ?? CLASS_STATS_WINDOW_MS;
   const since = now - windowMs;
+  const wq = opts.weightedQuota;
+
+  /**
+   * The per-class Weighted-Quota value for a row, respecting null-vs-zero:
+   *   - `undefined` when the composer injected no usage inputs (`wq` absent) —
+   *     the field stays off the row entirely (additive back-compat).
+   *   - `null` when the class is below the min-sample floor (`cleared` false) OR
+   *     the usage breakdown has no entry for this class ("no data", never 0).
+   *   - otherwise the reused `weightedQuotaBurn` fold over the class's breakdown.
+   */
+  const weightedQuotaFor = (
+    className: string,
+    cleared: boolean,
+  ): number | null | undefined => {
+    if (wq === undefined) return undefined;
+    if (!cleared) return null;
+    const byModel = wq.byClassBreakdown[className];
+    if (byModel === undefined) return null;
+    return weightedQuotaBurn(byModel, wq.cacheReadWeight, wq.burnWeights);
+  };
 
   // Bucket in-window records by class. A record with a null class is dropped
   // from the per-class rollup (it cannot be attributed) but never fabricated.
@@ -336,6 +421,7 @@ export function computeClassScoreboard(
         tokensPerMerge: null,
         beta: null,
         betaSuspect: role === "producer" ? true : null,
+        weightedQuota: weightedQuotaFor(name, false),
         verdict: "insufficient-sample",
       };
     }
@@ -354,6 +440,7 @@ export function computeClassScoreboard(
         tokensPerMerge,
         beta: null,
         betaSuspect: null,
+        weightedQuota: weightedQuotaFor(name, true),
         verdict,
       };
     }
@@ -373,6 +460,7 @@ export function computeClassScoreboard(
           tokensPerMerge: null,
           beta,
           betaSuspect: true,
+          weightedQuota: weightedQuotaFor(name, true),
           verdict: "insufficient-sample",
         };
       }
@@ -387,6 +475,7 @@ export function computeClassScoreboard(
         tokensPerMerge: null,
         beta: Math.round(beta * 1000) / 1000,
         betaSuspect: false,
+        weightedQuota: weightedQuotaFor(name, true),
         verdict,
       };
     }
@@ -401,6 +490,7 @@ export function computeClassScoreboard(
       tokensPerMerge: null,
       beta: null,
       betaSuspect: null,
+      weightedQuota: weightedQuotaFor(name, true),
       verdict: "not-scored",
     };
   });
