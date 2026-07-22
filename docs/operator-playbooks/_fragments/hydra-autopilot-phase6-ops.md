@@ -16,10 +16,17 @@ The cycle-record write fires at **reap time**:
 
 1. **`reap.py completion`** — when a code-writing class (`hydra-dev` /
    `hydra-target-build`) reaps, it fires cycle-record with `status=completed`
-   (or `status=failed` if the soft cap was tripped). The autopilot task_id
-   is the `cycleId`, which gives natural dedup across retries. This write has
-   no PR number (reap.py runs before the merge lands), so it files the record
-   with NO PR/files data.
+   (or `status=failed` if the soft cap was tripped). The `cycleId` is the
+   dispatch's **`effective_cycle_id = worktree_branch or task_id`** (reap.py:650,
+   issue #3391): for a worktree/feature-branch dispatch it is the synthesised
+   worktree branch (`worktree-agent-<runToken>-t<N>-<slot>`); only a branch-less
+   signal-class completion keys on the bare autopilot task_id. Either way the id
+   gives natural dedup across retries. This write has no PR number (reap.py runs
+   before the merge lands), so it files the record with NO PR/files data — the
+   merged-status enrichment (below) fills them in **and MUST key on the SAME
+   `effective_cycle_id`**, or it mints an un-joinable bare-UUID twin with no
+   anchorType → `unclassified` (issue #3539). The arming step therefore forwards
+   the worktree branch to `holdback-pending` (see the register handoff below).
 
 The **merged-status enrichment** — the follow-up that stamps `filesChanged` +
 `prNumber` on the already-recorded metrics hash (issue #2063) — is NO LONGER
@@ -62,7 +69,7 @@ After `gh pr merge --auto --squash` succeeds for an
 # The ONLY post-merge follow-up the handler makes. $pr_number is the just-armed
 # PR; $pr_tier is the integer tier from the auto-merge action payload
 # (state.actions[].tier, 1–4 per ADR-0015, or empty/`null` for unknown-tier);
-# $task_id is the autopilot cycleId. Best-effort: a non-2xx or unreachable
+# $task_id is the autopilot task_id. Best-effort: a non-2xx or unreachable
 # endpoint is logged and the autopilot cycle proceeds — registration NEVER blocks
 # or delays a merge.
 #
@@ -79,15 +86,28 @@ After `gh pr merge --auto --squash` succeeds for an
 # classifies the cycle even when it becomes the FIRST cycle-record write (the
 # qa_orch relay case, where reap never wrote a record for this cycleId). Without
 # it, the bare-UUID cycleId falls through the slot-suffix inference to the
-# `unclassified` sentinel — the 32%-unclassified data-quality gap. Map the
-# auto-merge action's dispatch class to its anchorType, mirroring
-# `scripts/autopilot/dispatch.sh`: code-writing dispatches (dev_orch/dev_target)
-# are `work-queue`; a bare `auto-merge` action with no resolvable class defaults
-# to `work-queue` (the dominant armed-PR case). Omitting the 4th arg degrades to
-# the prior inference-then-`unclassified` behaviour.
+# `unclassified` sentinel — the data-quality gap. Map the auto-merge action's
+# dispatch class to its anchorType, mirroring `scripts/autopilot/dispatch.sh`:
+# code-writing dispatches (dev_orch/dev_target) are `work-queue`; a bare
+# `auto-merge` action with no resolvable class defaults to `work-queue` (the
+# dominant armed-PR case). Omitting the 4th arg degrades to the prior
+# inference-then-`unclassified` behaviour.
+#
+# Issue #3539: pass the dispatch's synthesised worktree branch (5th arg). It
+# becomes the pending entry's cycleId, so the merge-watch enrichment keys on the
+# SAME `effective_cycle_id = worktree_branch or task_id` reap used for its
+# CLASSIFIED cycle-record (reap.py:650). Without it, arming keyed the pending
+# entry on the bare $task_id while reap keyed its classified record on the branch
+# — divergent keys — so on every worktree dispatch the enrichment became an
+# un-joinable bare-UUID FIRST write with no anchorType → `unclassified` (the
+# recurring 14% gap, the #3391 un-joinable-twin defect on the anchorType axis).
+# $pr_worktree_branch is the branch of the dispatch slot that opened the PR
+# (`state.slots.<class>.branch`); empty for a branch-less signal-class arm (then
+# the cycleId stays $task_id, matching reap's `or task_id`). Omitting the 5th arg
+# degrades to the prior task_id-keyed behaviour.
 pr_anchor_type="${pr_anchor_type:-work-queue}"
 scripts/autopilot/dispatch.sh holdback-pending \
-  "$pr_number" "${pr_tier:-null}" "$task_id" "$pr_anchor_type"
+  "$pr_number" "${pr_tier:-null}" "$task_id" "$pr_anchor_type" "${pr_worktree_branch:-}"
 ```
 
 `POST /api/holdback/pending` (`src/api/holdback.ts`, issue #2622) records the
