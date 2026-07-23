@@ -16,8 +16,6 @@ Take a structured `PrdInput` and emit one **parent epic** issue plus **N tracer-
 - Parent body: a `## Sub-issues` markdown checklist (`- [ ] #N`) — the exact format `hydra-epic-close`'s `parseEpicReferences()` parses.
 - Each child body: a `## Parent` section pointing back at the parent's real GitHub number.
 
-This renderer exists because the **Specs subsystem** (in-process multi-cycle task decomposition under `src/specs.ts`, the `/api/specs` endpoints, and the `spec-starvation` instrumentation) was retired in issue #513 — the in-process control loop that produced and consumed specs was already gone, and the autopilot's child-dispatch model superseded it. After #513, multi-issue research findings had nowhere durable to live. The `hydra-prd` renderer is the GitHub-native replacement: each slice becomes a separately mergeable issue that the **Orchestrator**'s autopilot can then advance through the one-lineage **implement** stage (`dev_orch`, or `dev_target` for Target work) independently, with the parent epic auto-closing once every child closes.
-
 Unlike the generic upstream `/to-spec` skill (renamed from `/to-prd` in Pocock v1.1 — it was always a spec, not a PRD) — which interviews the operator via `AskUserQuestion` — `hydra-prd` is **fully parameterised**: input is structured JSON, output is GitHub issues. There are zero `AskUserQuestion` calls in this playbook; if the input is malformed, the skill stops with a validation report rather than asking for clarification.
 
 The skill is **dry-run by default**. To actually create issues on `gaberoo322/hydra`, pass `--apply` (or `apply=true`). Dry-run prints the rendered parent and child bodies plus the validation report, so the operator can review before committing.
@@ -238,8 +236,6 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the c
 | Cross-skill contract | Parent's `## Sub-issues` is parseable by `hydra-epic-close`'s `parseEpicReferences()` — see the cross-test in `test/hydra-prd-template.test.mts` |
 
 ## Tier classification — live API
-
-This skill ships entirely as new files under `docs/operator-playbooks/`, `scripts/ci/`, and `test/`. None of those are in the **Untouchable Core**; the live `/api/tier` classifier rates the change as **Tier 3** (`operator-review change`). A future PR that wires `hydra-prd` into the `hydra-research` autopilot path will need its own tier check.
 
 The emitted child issues each carry an `Expected tier: N` line stamped from `/api/tier` against their `filesInScope`. CI's tier-gate runs the same classifier on the PR, so if the slice's actual file changes diverge from the stamped scope, the tier-gate catches it.
 
