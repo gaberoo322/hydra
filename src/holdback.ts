@@ -53,6 +53,7 @@ import {
   type LeadingOutcomeSample,
 } from "./outcome-regression.ts";
 import { markMergeReverted } from "./redis/attribution-reverted.ts";
+import { logger } from "./logger.ts";
 
 /** Stream the digest consumer reads from (see src/index.ts startConsumers). */
 const NOTIFICATIONS_STREAM = "hydra:notifications";
@@ -134,7 +135,7 @@ export async function enrollHoldback(input: EnrollInput): Promise<EnrollResult> 
     leading = await snapshotLeadingOutcomes(input.outcomesFile);
   } catch (err: any) {
     const msg = `[holdback] enroll: snapshotLeadingOutcomes threw: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ commitSha: input.commitSha, tier: input.tier, err }, "[holdback] enroll: snapshotLeadingOutcomes threw");
     return { ok: false, error: msg };
   }
 
@@ -236,7 +237,7 @@ export async function checkHoldback(
     current = await snapshotLeadingOutcomes(input.outcomesFile);
   } catch (err: any) {
     const msg = `[holdback] check: snapshotLeadingOutcomes threw: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ commitSha: input.commitSha, err }, "[holdback] check: snapshotLeadingOutcomes threw");
     return { ok: false, error: msg };
   }
 
@@ -287,9 +288,9 @@ export async function checkHoldback(
           revertedAt: Date.now(),
         });
         if (marked.ok === false) {
-          console.error(
-            `[holdback] check: failed to register reverted merge for attribution void ` +
-              `(commitSha=${baseline.commitSha} prNumber=${baseline.prNumber ?? "null"}): ${marked.error}`,
+          logger.error(
+            { commitSha: baseline.commitSha, prNumber: baseline.prNumber ?? null, error: marked.error },
+            "[holdback] check: failed to register reverted merge for attribution void",
           );
         }
       }
@@ -335,6 +336,7 @@ async function publishSafe(
   try {
     await eventBus.publish(NOTIFICATIONS_STREAM, { type, source: "holdback-producer", payload });
   } catch (err: any) {
-    console.error(`[holdback] publish ${type} failed: ${err?.message || String(err)}`);
+    const commitSha = (payload as { commitSha?: unknown })?.commitSha;
+    logger.error({ type, commitSha, err }, "[holdback] publish failed");
   }
 }

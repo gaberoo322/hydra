@@ -47,6 +47,7 @@ import {
   formatAlertMessage,
   classifyAlertSeverity,
 } from "./notification/alert-grammar.ts";
+import { logger } from "./logger.ts";
 
 export const MAX_CONSUMER_RESTARTS = 5;
 export const BACKOFF_BASE_MS = 5000;
@@ -116,9 +117,12 @@ export async function startConsumerWithRecovery(
       break;
     } catch (err: any) {
       restarts++;
-      console.error(`[Consumer] ${name} crashed (restart ${restarts}/${MAX_CONSUMER_RESTARTS}):`, err.message);
+      logger.error(
+        { name, restarts, maxRestarts: MAX_CONSUMER_RESTARTS, err },
+        "[Consumer] crashed",
+      );
       if (restarts > MAX_CONSUMER_RESTARTS) {
-        console.error(`[Consumer] ${name} exceeded max restarts — giving up`);
+        logger.error({ name, restarts }, "[Consumer] exceeded max restarts — giving up");
         await sendNotification({
           type: E.CONSUMER_DEAD,
           payload: { consumer: name, error: err.message, restarts },
@@ -126,7 +130,7 @@ export async function startConsumerWithRecovery(
         break;
       }
       const delay = BACKOFF_BASE_MS * restarts;
-      console.log(`[Consumer] Restarting ${name} in ${delay}ms...`);
+      logger.info({ name, delay, restarts }, "[Consumer] restarting after backoff");
       await sleep(delay);
     }
   }
@@ -184,7 +188,10 @@ export function startConsumers(eventBus: EventBus): void {
   startConsumerWithRecovery("dlq", () =>
     eventBus.consume(STREAMS.DLQ, "dlq-processor", `dlq-${process.pid}`, async (event) => {
       const { originalStream, originalGroup, originalEvent, error, deliveryCount } = (event as NotificationEvent).payload || {} as any;
-      console.error(`[DLQ] Failed event from ${originalStream}/${originalGroup}: ${originalEvent?.type} — ${error} (${deliveryCount} attempts)`);
+      logger.error(
+        { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
+        "[DLQ] failed event",
+      );
       await sendNotification({
         type: E.DLQ_ALERT,
         payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
@@ -208,7 +215,8 @@ export function startConsumers(eventBus: EventBus): void {
     startRecommendationConsumer(eventBus),
   );
 
-  console.log(
-    "[Hydra] Background consumers started (notifications, dlq, slot-events-bridge, recs-engine)",
+  logger.info(
+    { consumers: ["notifications", "dlq", "slot-events-bridge", "recs-engine"] },
+    "[Hydra] background consumers started",
   );
 }
