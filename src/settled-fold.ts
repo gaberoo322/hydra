@@ -40,11 +40,11 @@
  * (`test/aggregator-settle.test.mts`).
  */
 
-/** Format the fail-loud log line for a rejected sub-read. */
-function rejectionMessage(label: string, reason: unknown): string {
-  const detail =
-    (reason as { message?: string } | null | undefined)?.message ?? reason;
-  return `[aggregators] sub-source failed (${label}): ${detail}`;
+import { logger } from "./logger.ts";
+
+/** Emit the fail-loud structured log line for a rejected sub-read. */
+function logRejection(label: string, reason: unknown): void {
+  logger.error({ label, err: reason }, "[aggregators] sub-source failed");
 }
 
 /**
@@ -58,7 +58,7 @@ export function settle<T>(
   label: string,
 ): T {
   if (result.status === "fulfilled") return result.value;
-  console.error(rejectionMessage(label, result.reason));
+  logRejection(label, result.reason);
   return fallback;
 }
 
@@ -77,7 +77,7 @@ export function settledOrEmpty<T>(
   if (result.status === "fulfilled") {
     return Array.isArray(result.value) ? result.value : [];
   }
-  console.error(rejectionMessage(label, result.reason));
+  logRejection(label, result.reason);
   return [];
 }
 
@@ -110,6 +110,6 @@ export function settledOrNull<T>(
   label: string,
 ): T | null {
   if (result.status === "fulfilled") return result.value ?? null;
-  console.error(rejectionMessage(label, result.reason));
+  logRejection(label, result.reason);
   return null;
 }

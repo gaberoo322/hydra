@@ -32,6 +32,7 @@
 
 import type { Request, Response } from "express";
 import type { z } from "zod";
+import { logger } from "../logger.ts";
 
 /**
  * The 400 envelope shape returned on a failed query parse. Mirrors the
@@ -73,8 +74,9 @@ export async function isolateAggregator<T>(
     const body = await produce();
     return res.json(body);
   } catch (err: any) {
-    console.error(
-      `[${routeLabel}] aggregator threw despite never-throw contract: ${err?.message || err}`,
+    logger.error(
+      { routeLabel, err },
+      "aggregator threw despite never-throw contract",
     );
     return res.status(500).json({ error: err?.message || String(err) });
   }
