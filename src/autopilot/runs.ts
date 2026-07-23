@@ -188,6 +188,7 @@ const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 // stays module-internal to the leaf.
 import { errRedis, numberOrDefault } from "./run-result.ts";
 import type { Ok, Err } from "./run-result.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Injectable run/turn-lifecycle-write deps (issue #2158; narrowed by #2768)
@@ -469,8 +470,9 @@ export async function endRun(
           const worklessUntilMs = nowMs + worklessBackoffSec() * 1000;
           await deps.stampWorklessHint(worklessUntilMs, nowMs);
         } catch (err: any) {
-          console.error(
-            `[autopilot] endRun workless-hint stamp failed (run_id=${runId}); pace-gate will launch normally: ${err?.message || err}`,
+          logger.error(
+            { runId, err },
+            "[autopilot] endRun workless-hint stamp failed; pace-gate will launch normally",
           );
         }
       }

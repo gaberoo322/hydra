@@ -73,6 +73,7 @@ import { listFrictionPatterns } from "../pattern-memory/index.ts";
 import { getAutopilotHealth } from "../aggregators/autopilot-health.ts";
 import type { StuckSignal } from "./run-health.ts";
 import type { MemoryPattern } from "../pattern-memory/index.ts";
+import { logger } from "../logger.ts";
 // Pure projection surface — moved to `retro-projections.ts` (issue #1952). The
 // assembler below uses these directly from their canonical home; callers that
 // want the projections import them from `retro-projections.ts` too (issue
@@ -206,7 +207,7 @@ async function safeSource<T>(
     return await fn();
   } catch (err) {
     const detail = toDetail(err);
-    console.error(`[retro-bundle] sub-source failed (${source}): ${detail}`);
+    logger.error({ source, err }, "[retro-bundle] sub-source failed");
     errors.push({ source, detail });
     return fallback;
   }

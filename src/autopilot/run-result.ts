@@ -44,6 +44,8 @@
  * but has no external importer (cleanup-scan #2788 rationale, preserved).
  */
 
+import { logger } from "../logger.ts";
+
 type ErrorCode = "duplicate" | "not-found" | "invalid" | "redis";
 
 export type Ok<T> = { ok: true; code?: undefined; detail?: undefined } & T;
@@ -56,7 +58,7 @@ export type Err = { ok: false; code: ErrorCode; detail?: string };
  */
 export function errRedis(err: any): Err {
   const detail = err?.message || String(err);
-  console.error(`[autopilot] redis error: ${detail}`);
+  logger.error({ err }, "[autopilot] redis error");
   return { ok: false, code: "redis", detail };
 }
 

@@ -43,6 +43,7 @@ import type { CycleRecordBody } from "./schemas.ts";
 import { parseDispatchCycleId, classByName } from "../taxonomy/classes.ts";
 // Shared zero-I/O coercion helpers (issue #3087 / #3323).
 import { numberOrDefault, filesChangedCount } from "./run-result.ts";
+import { logger } from "../logger.ts";
 
 /**
  * The durable per-dispatch outcome-record seam (issue #2942). `put` fires on
@@ -141,13 +142,15 @@ export async function writeDispatchOutcomeRecord(
       recordedAt: deps.now(),
     });
     if (result.ok === false) {
-      console.error(
-        `[cycle-close] dispatch-outcome record write failed for cycle=${cycleId}: ${result.error}`,
+      logger.error(
+        { cycleId, error: result.error },
+        "[cycle-close] dispatch-outcome record write failed",
       );
     }
   } catch (err: any) {
-    console.error(
-      `[cycle-close] dispatch-outcome record write threw for cycle=${cycleId}: ${err?.message || String(err)}`,
+    logger.error(
+      { cycleId, err },
+      "[cycle-close] dispatch-outcome record write threw",
     );
   }
 }
@@ -186,13 +189,15 @@ export async function upgradeDispatchOutcomeRecord(
       patch.escalatedModel = body.escalatedModel;
     const upgradeResult = await deps.dispatchOutcomes.upgrade(cycleId, patch);
     if (upgradeResult.ok === false) {
-      console.error(
-        `[cycle-close] dispatch-outcome record upgrade failed for cycle=${cycleId}: ${upgradeResult.error}`,
+      logger.error(
+        { cycleId, error: upgradeResult.error },
+        "[cycle-close] dispatch-outcome record upgrade failed",
       );
     }
   } catch (err: any) {
-    console.error(
-      `[cycle-close] dispatch-outcome record upgrade threw for cycle=${cycleId}: ${err?.message || String(err)}`,
+    logger.error(
+      { cycleId, err },
+      "[cycle-close] dispatch-outcome record upgrade threw",
     );
   }
 }

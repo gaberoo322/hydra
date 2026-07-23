@@ -88,6 +88,7 @@ import {
   type PullRequestSnapshot,
   type PrLifecycleEvent,
 } from "./pr-lifecycle-snapshot.ts";
+import { logger } from "../logger.ts";
 
 /** The orchestrator's own repo — the one constant across target swaps. */
 const ORCHESTRATOR_REPO = "gaberoo322/hydra";
@@ -162,7 +163,7 @@ async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
   // narrow the union — use the seam's type guard, mirroring its own *OrEmpty
   // wrappers (see github/issues.ts docstring on isIssueReadFailure).
   if (isIssueReadFailure(res)) {
-    console.error(`[pr-lifecycle-bridge] gh pr list ${repo} failed (${res.code})`);
+    logger.error({ repo, code: res.code }, "[pr-lifecycle-bridge] gh pr list failed");
     return [];
   }
   return res.rows.map(prRowToSnapshot);
@@ -234,9 +235,7 @@ export async function startPrLifecycleBridge(
 
         snapshots.set(repo, curr);
       } catch (err: any) {
-        console.error(
-          `[pr-lifecycle-bridge] tick ${repo} failed: ${err?.message || err}`,
-        );
+        logger.error({ repo, err }, "[pr-lifecycle-bridge] tick failed");
       }
     }
   }
@@ -250,8 +249,9 @@ export async function startPrLifecycleBridge(
     };
   }
 
-  console.log(
-    `[pr-lifecycle-bridge] starting (interval=${pollIntervalMs}ms repos=${repos.join(",")})`,
+  logger.info(
+    { intervalMs: pollIntervalMs, repos },
+    "[pr-lifecycle-bridge] starting",
   );
 
   timer = setInterval(() => {
@@ -267,7 +267,7 @@ export async function startPrLifecycleBridge(
         clearInterval(timer);
         timer = null;
       }
-      console.log("[pr-lifecycle-bridge] stopped");
+      logger.info("[pr-lifecycle-bridge] stopped");
     },
   };
 }

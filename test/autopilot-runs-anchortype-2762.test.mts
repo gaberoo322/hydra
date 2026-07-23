@@ -23,6 +23,29 @@ import {
 } from "../src/autopilot/cycle-close.ts";
 import { UNCLASSIFIED_ANCHOR_TYPE } from "../src/autopilot/anchor-type.ts";
 
+// ADR-0027: the fail-loud unclassified-anchorType alarm now logs through the
+// pino structured-logger seam (module singleton → process.stderr) instead of a
+// freeform console.warn. Capture the serialized JSON lines and assert on the
+// structured `level` field (pino: warn=40) rather than grepping console.warn.
+function captureStderr(): { lines: () => Record<string, any>[]; restore: () => void } {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
+  };
+  return {
+    lines: () =>
+      buf
+        .split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l) as Record<string, any>),
+    restore: () => {
+      (process.stderr as any).write = originalWrite;
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Minimal in-memory deps fixture (same shape as autopilot-runs-deps.test.mts,
 // but scoped to only the stores this suite exercises).
@@ -269,53 +292,43 @@ describe("recordCycle — worktreeBranch cycleId anchorType inference (#2762)", 
     // fall through to the unclassified sentinel + warn.
     const store = newStore();
     const deps = makeDeps(store);
-    const warnings: string[] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
+    const cap = captureStderr();
     try {
       await recordCycle(
         { cycleId: "worktree-agent-ab3a8b01c3f11f366", status: "completed" } as any,
         deps,
       );
     } finally {
-      console.warn = orig;
+      cap.restore();
     }
     assert.equal(
       store.metrics.get("worktree-agent-ab3a8b01c3f11f366")!.anchorType,
       UNCLASSIFIED_ANCHOR_TYPE,
     );
-    assert.equal(warnings.length, 1, "warns for a slot-less harness branch");
+    const warns = cap.lines().filter((o) => o.level === 40);
+    assert.equal(warns.length, 1, "warns for a slot-less harness branch");
   });
 
-  test("does NOT emit a console.warn when anchorType is inferred from the cycleId", async () => {
+  test("does NOT emit a warn line when anchorType is inferred from the cycleId", async () => {
     const store = newStore();
     const deps = makeDeps(store);
-    const warnings: string[] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
+    const cap = captureStderr();
     try {
       await recordCycle(
         { cycleId: "worktree-agent-568fde2a-t9-dev_orch", status: "completed" } as any,
         deps,
       );
     } finally {
-      console.warn = orig;
+      cap.restore();
     }
-    assert.equal(warnings.length, 0, "no warn when anchorType can be inferred from cycleId");
+    const warns = cap.lines().filter((o) => o.level === 40);
+    assert.equal(warns.length, 0, "no warn when anchorType can be inferred from cycleId");
   });
 
   test("still falls back to unclassified for an unknown slot suffix in worktree-branch cycleId", async () => {
     const store = newStore();
     const deps = makeDeps(store);
-    const warnings: string[] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
+    const cap = captureStderr();
     try {
       await recordCycle(
         {
@@ -325,13 +338,14 @@ describe("recordCycle — worktreeBranch cycleId anchorType inference (#2762)", 
         deps,
       );
     } finally {
-      console.warn = orig;
+      cap.restore();
     }
     assert.equal(
       store.metrics.get("worktree-agent-aabbccdd-t1-unknown_class")!.anchorType,
       UNCLASSIFIED_ANCHOR_TYPE,
     );
-    assert.equal(warnings.length, 1, "still warns for unknown slot");
+    const warns = cap.lines().filter((o) => o.level === 40);
+    assert.equal(warns.length, 1, "still warns for unknown slot");
   });
 });
 
@@ -352,11 +366,7 @@ describe("recordCycle — malformed anchorType rejection (#2806)", () => {
   test("rejects a leaked `--status` flag and records unclassified", async () => {
     const store = newStore();
     const deps = makeDeps(store);
-    const warnings: string[] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
+    const cap = captureStderr();
     try {
       await recordCycle(
         {
@@ -369,13 +379,14 @@ describe("recordCycle — malformed anchorType rejection (#2806)", () => {
         deps,
       );
     } finally {
-      console.warn = orig;
+      cap.restore();
     }
     assert.equal(
       store.metrics.get("11111111-2222-3333-4444-555555555555")!.anchorType,
       UNCLASSIFIED_ANCHOR_TYPE,
     );
-    assert.equal(warnings.length, 1, "warns for the rejected malformed value");
+    const warns = cap.lines().filter((o) => o.level === 40);
+    assert.equal(warns.length, 1, "warns for the rejected malformed value");
   });
 
   test("rejects the `unmapped:<skill>` sentinel and records unclassified", async () => {

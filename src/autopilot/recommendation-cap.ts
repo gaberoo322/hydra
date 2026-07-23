@@ -57,6 +57,7 @@
  */
 
 import * as defaultRedis from "../redis/recommendations.ts";
+import { logger } from "../logger.ts";
 
 /** Default daily cost cap in USD when HYDRA_RECS_DAILY_CAP_USD is unset/invalid. */
 export const DEFAULT_DAILY_CAP_USD = 1.0;
@@ -173,9 +174,7 @@ export function createCapEnforcer(deps: CapEnforcerDeps = {}): CapEnforcer {
       try {
         deps.broadcastResting?.("__system__", spendUsd, dailyCapUsd);
       } catch (err: any) {
-        console.error(
-          `[recs-engine] oak_resting broadcaster threw: ${err?.message || err}`,
-        );
+        logger.error({ err }, "[recs-engine] oak_resting broadcaster threw");
       }
       return true;
     },

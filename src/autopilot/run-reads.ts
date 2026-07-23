@@ -66,6 +66,7 @@ import { readLifecycleState, sweepLoadedRow } from "./sweep-reader.ts";
 // that leaf — the same leaf the write module `runs.ts` imports — so a read
 // module no longer depends sideways on the write module for its result types.
 import { type Ok, type Err, errRedis } from "./run-result.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Reader: high-level — compose Redis reads + the projections in
@@ -185,7 +186,7 @@ export async function readInflightSlotSeed(): Promise<
     const dispatches = await listActiveSubagentDispatches();
     return deriveInflightSlotSeed(dispatches);
   } catch (err) {
-    console.error("[autopilot] readInflightSlotSeed failed:", err);
+    logger.error({ err }, "[autopilot] readInflightSlotSeed failed");
     return {};
   }
 }

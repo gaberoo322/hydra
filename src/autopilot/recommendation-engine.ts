@@ -77,6 +77,7 @@
 import { RUN_TTL_SECONDS } from "./sweep-reader.ts";
 import * as defaultRedis from "../redis/recommendations.ts";
 import { anthropicMessages, isAnthropicFailure } from "../anthropic/request.ts";
+import { logger } from "../logger.ts";
 import {
   buildPrompt,
   parseLlmResponse,
@@ -345,9 +346,9 @@ export function createRecommendationEngine(deps: EngineDeps): RecommendationEngi
       try {
         llmResult = await deps.llm.generate(promptInput);
       } catch (err: any) {
-        console.error(
-          `[recs-engine] LLM threw for run=${runId} turn=${payload.turn_n}:` +
-            ` ${err?.message || err}`,
+        logger.error(
+          { runId, turn: payload.turn_n, err },
+          "[recs-engine] LLM threw",
         );
         return { fired: false, reason: "llm-error" };
       }

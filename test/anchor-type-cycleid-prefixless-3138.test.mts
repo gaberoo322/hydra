@@ -35,6 +35,29 @@ import {
   UNCLASSIFIED_ANCHOR_TYPE,
 } from "../src/autopilot/anchor-type.ts";
 
+// ADR-0027: the unclassified-anchorType fail-loud alarm now logs through the
+// pino structured-logger seam (module singleton → process.stderr) instead of a
+// freeform console.warn. Capture the serialized JSON lines and assert on the
+// structured `level` field (pino: warn=40) rather than grepping console.warn.
+function captureStderr(): { lines: () => Record<string, any>[]; restore: () => void } {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
+  };
+  return {
+    lines: () =>
+      buf
+        .split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l) as Record<string, any>),
+    restore: () => {
+      (process.stderr as any).write = originalWrite;
+    },
+  };
+}
+
 describe("classifyAnchorType — prefix-less relay cycleId inference (#3138)", () => {
   // (1) The reported id plus one variant per slot family. Each is the
   // prefix-less twin of a worktree-agent-prefixed id the #2762 suite pins.
@@ -66,18 +89,15 @@ describe("classifyAnchorType — prefix-less relay cycleId inference (#3138)", (
     );
   });
 
-  test("does NOT emit a console.warn when a prefix-less id resolves", () => {
-    const warnings: string[] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
+  test("does NOT emit a warn-level line when a prefix-less id resolves", () => {
+    const cap = captureStderr();
     try {
       assert.equal(classifyAnchorType("6fd1300b-t1-qa_orch", undefined), "qa-review");
     } finally {
-      console.warn = orig;
+      cap.restore();
     }
-    assert.equal(warnings.length, 0, "no warn when the slot is decodable");
+    const warns = cap.lines().filter((o) => o.level === 40);
+    assert.equal(warns.length, 0, "no warn when the slot is decodable");
   });
 });
 

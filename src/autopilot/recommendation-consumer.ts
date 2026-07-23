@@ -42,6 +42,7 @@ import {
   type SignalsSnapshot,
   type PermissionWaitEvent,
 } from "./recommendation-engine.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Stream consumer wiring — bound to the `hydra:autopilot:slot-events`
@@ -136,7 +137,7 @@ async function defaultReadRecentTurns(
     }
     return out;
   } catch (err: any) {
-    console.error(`[recs-engine] readRecentTurns: ${err?.message || err}`);
+    logger.error({ err }, "[recs-engine] readRecentTurns");
     return [];
   }
 }
@@ -223,9 +224,7 @@ export async function startRecommendationConsumer(eventBus: {
           },
         });
       } catch (err: any) {
-        console.error(
-          `[recs-engine] broadcastResting threw: ${err?.message || err}`,
-        );
+        logger.error({ err }, "[recs-engine] broadcastResting threw");
       }
     },
   });
@@ -240,9 +239,14 @@ export async function startRecommendationConsumer(eventBus: {
   });
 
   const consumerName = defaultRecsConsumerName();
-  console.log(
-    `[recs-engine] consuming ${SLOT_EVENTS_STREAM} group=${RECS_CONSUMER_GROUP}` +
-      ` consumer=${consumerName} cap_usd=${engine.getDailyCapUsd()}`,
+  logger.info(
+    {
+      stream: SLOT_EVENTS_STREAM,
+      group: RECS_CONSUMER_GROUP,
+      consumer: consumerName,
+      capUsd: engine.getDailyCapUsd(),
+    },
+    "[recs-engine] consuming",
   );
 
   await eventBus.consume(
@@ -255,9 +259,9 @@ export async function startRecommendationConsumer(eventBus: {
       try {
         await engine.onTurnEnd(turnEnd);
       } catch (err: any) {
-        console.error(
-          `[recs-engine] onTurnEnd threw for run=${turnEnd.run_id}` +
-            ` turn=${turnEnd.turn_n}: ${err?.message || err}`,
+        logger.error(
+          { runId: turnEnd.run_id, turn: turnEnd.turn_n, err },
+          "[recs-engine] onTurnEnd threw",
         );
       }
     },
