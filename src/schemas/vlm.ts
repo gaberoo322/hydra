@@ -22,7 +22,7 @@
 import { z } from "zod";
 
 /** A text content-part: `{ type: "text", text }`. */
-export const VlmTextPartSchema = z.object({
+const VlmTextPartSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
 });
@@ -31,7 +31,7 @@ export const VlmTextPartSchema = z.object({
  * An image content-part: `{ type: "image_url", image_url: { url } }`.
  * `url` is a `data:` URI (base64-embedded bytes) or an `http(s)` URL.
  */
-export const VlmImagePartSchema = z.object({
+const VlmImagePartSchema = z.object({
   type: z.literal("image_url"),
   image_url: z.object({
     url: z.string().min(1),
@@ -41,13 +41,13 @@ export const VlmImagePartSchema = z.object({
 });
 
 /** A single content-part is either a text part or an image_url part. */
-export const VlmContentPartSchema = z.union([VlmTextPartSchema, VlmImagePartSchema]);
+const VlmContentPartSchema = z.union([VlmTextPartSchema, VlmImagePartSchema]);
 
 /**
  * A chat message. `content` is either a plain string (text-only) or an array
  * of typed parts (the multimodal form the VLM client uses for images).
  */
-export const VlmMessageSchema = z.object({
+const VlmMessageSchema = z.object({
   role: z.string().min(1),
   content: z.union([z.string(), z.array(VlmContentPartSchema)]),
 });
@@ -62,8 +62,5 @@ export const VlmChatCompletionRequestSchema = z.object({
   model: z.string().optional(),
 });
 
-export type VlmTextPart = z.infer<typeof VlmTextPartSchema>;
-export type VlmImagePart = z.infer<typeof VlmImagePartSchema>;
 export type VlmContentPart = z.infer<typeof VlmContentPartSchema>;
 export type VlmMessage = z.infer<typeof VlmMessageSchema>;
-export type VlmChatCompletionRequest = z.infer<typeof VlmChatCompletionRequestSchema>;
