@@ -25,6 +25,7 @@
 // ---------------------------------------------------------------------------
 
 import type Redis from "ioredis";
+import { logger } from "./logger.ts";
 
 /**
  * A parsed inbound event handed to a `consume()` handler. `parseStreamFields`
@@ -129,20 +130,21 @@ export async function reapStaleConsumers(
       try {
         await redis.xgroup("DELCONSUMER", stream, group, name);
         reaped.push(name);
-        console.log(
-          `[EventBus] Reaped stale consumer ${name} on ${stream}/${group} (idle ${idle}ms)`,
+        logger.info(
+          { stream, group, consumer: name, idle },
+          "[EventBus] reaped stale consumer",
         );
       } catch (err: any) {
-        console.error(
-          `[EventBus] DELCONSUMER ${name} on ${stream}/${group} failed:`,
-          err?.message || err,
+        logger.error(
+          { stream, group, consumer: name, err },
+          "[EventBus] DELCONSUMER failed",
         );
       }
     }
   } catch (err: any) {
-    console.error(
-      `[EventBus] reapStaleConsumers failed on ${stream}/${group}:`,
-      err?.message || err,
+    logger.error(
+      { stream, group, err },
+      "[EventBus] reapStaleConsumers failed",
     );
   }
   return reaped;
@@ -260,7 +262,7 @@ export async function promoteToDlqIfExhausted(
   err: Error,
   publishDlq: DlqPublisher,
 ): Promise<boolean> {
-  console.error(`[EventBus] Handler failed for ${event.type}:`, err.message);
+  logger.error({ stream, group, msgId, eventType: event.type, err }, "[EventBus] handler failed");
 
   const deliveryCount = await getDeliveryCount(redis, stream, group, msgId);
   if (!shouldPromoteToDlq(deliveryCount)) return false;
@@ -273,7 +275,10 @@ export async function promoteToDlqIfExhausted(
     deliveryCount,
   });
   await redis.xack(stream, group, msgId);
-  console.error(`[EventBus] Moved ${event.type} to DLQ after ${deliveryCount} attempts`);
+  logger.error(
+    { stream, group, msgId, eventType: event.type, deliveryCount },
+    "[EventBus] moved to DLQ after exhausting attempts",
+  );
   return true;
 }
 
@@ -331,7 +336,7 @@ export async function runAutoclaimRecovery(
         if (!fields || fields.length === 0) continue; // deleted message
         const event = parseStreamFields(fields);
         try {
-          console.log(`[EventBus] Reclaimed orphan ${event.type} on ${stream}/${group} (msg ${msgId})`);
+          logger.info({ stream, group, msgId, eventType: event.type }, "[EventBus] reclaimed orphan");
           await deps.handler(event);
           await deps.ack(msgId);
         } catch (err: any) {
@@ -342,7 +347,7 @@ export async function runAutoclaimRecovery(
       startId = nextId;
     }
   } catch (err: any) {
-    console.error(`[EventBus] XAUTOCLAIM failed on ${stream}/${group}:`, err.message);
+    logger.error({ stream, group, err }, "[EventBus] XAUTOCLAIM failed");
   }
 }
 
@@ -397,7 +402,7 @@ export async function runLongPollLoop(
       }
     } catch (err: any) {
       if (isActive()) {
-        console.error(`[EventBus] consume error on ${stream}/${group}:`, err.message);
+        logger.error({ stream, group, err }, "[EventBus] consume error");
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
