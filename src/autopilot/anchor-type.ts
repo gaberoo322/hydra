@@ -35,6 +35,7 @@
 
 import { DISPATCH_CLASSES } from "../taxonomy/classes.ts";
 import { InvariantViolationError } from "../errors.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Sentinel anchorType for a cycle-record whose caller supplied no explicit,
@@ -483,8 +484,9 @@ export function classifyAnchorType(cycleId: string, raw: unknown): string {
   // requiring the caller to forward the field.
   const inferred = inferAnchorTypeFromCycleId(cycleId);
   if (inferred !== undefined) return inferred;
-  console.warn(
-    `[autopilot] recordCycle: cycle '${cycleId}' has no explicit anchorType — recording '${UNCLASSIFIED_ANCHOR_TYPE}' (data-quality gap; the caller should send a mapped anchorType)`,
+  logger.warn(
+    { cycleId, unclassifiedSentinel: true, anchorType: UNCLASSIFIED_ANCHOR_TYPE },
+    "[autopilot] recordCycle: cycle has no explicit anchorType — recording unclassified (data-quality gap; the caller should send a mapped anchorType)",
   );
   return UNCLASSIFIED_ANCHOR_TYPE;
 }

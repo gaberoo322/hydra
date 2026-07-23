@@ -32,6 +32,7 @@
 import type { EventBus } from "../event-bus.ts";
 import type { WsBroadcastRegistry } from "../ws-broadcast-registry.ts";
 import { cascadeRecordFromEvent, recordCascade } from "../redis/cascade-telemetry.ts";
+import { logger } from "../logger.ts";
 
 const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const CONSUMER_GROUP = "now-pixel-bridge";
@@ -76,8 +77,9 @@ export async function startSlotEventsBridge(
   // backlog on every restart would re-fire stale sprite animations.
   await eventBus.ensureConsumerGroup(SLOT_EVENTS_STREAM, CONSUMER_GROUP, "$");
 
-  console.log(
-    `[slot-events-bridge] consuming ${SLOT_EVENTS_STREAM} group=${CONSUMER_GROUP} consumer=${consumerName}`,
+  logger.info(
+    { stream: SLOT_EVENTS_STREAM, group: CONSUMER_GROUP, consumer: consumerName },
+    "[slot-events-bridge] consuming",
   );
 
   await eventBus.consume(
@@ -113,9 +115,7 @@ export async function persistCascadeTelemetry(event: any): Promise<void> {
     if (rec) await recordCascade(rec);
   } catch (err: any) {
     // Never propagate — telemetry must not break the bridge (fail-loud log).
-    console.error(
-      `[slot-events-bridge] cascade telemetry persist failed: ${err?.message || err}`,
-    );
+    logger.error({ err }, "[slot-events-bridge] cascade telemetry persist failed");
   }
 }
 

@@ -70,6 +70,7 @@ import {
 // (beside the projection that produces it), no longer re-declared locally.
 export type { EligibilityView } from "../cost/index.ts";
 import { getStatus as defaultGetSchedulerStatus } from "../scheduler/heartbeat.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Field-group shapes
@@ -237,9 +238,7 @@ export async function getAutopilotStatusSnapshot(
     try {
       osHb = readOsHb(nowS);
     } catch (err: any) {
-      console.error(
-        `[autopilot-status] os-heartbeat read failed: ${err?.message || err}`,
-      );
+      logger.error({ err }, "[autopilot-status] os-heartbeat read failed");
       osHb = null;
     }
 

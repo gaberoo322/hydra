@@ -49,6 +49,7 @@ import {
   getQuotaWeightHaiku,
   type UsageSnapshot,
 } from "../cost/index.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Composer — the Redis reads (the API view calls this)
@@ -135,14 +136,12 @@ export async function buildClassScoreboard(
     const listed = await deps.listRecords({ sinceMs: now - windowMs });
     if (listed.ok === true) records = listed.records;
     else {
-      console.error(`[class-stats] listDispatchOutcomes failed: ${listed.error}`);
+      logger.error({ error: listed.error }, "[class-stats] listDispatchOutcomes failed");
     }
   } catch (err: any) {
     /* intentional: a read failure degrades to an empty scoreboard (all
        insufficient-sample), never throws — the shadow path must not wedge. */
-    console.error(
-      `[class-stats] listDispatchOutcomes threw: ${err?.message || String(err)}`,
-    );
+    logger.error({ err }, "[class-stats] listDispatchOutcomes threw");
   }
 
   let estimate: AttributionEstimate = { metrics: [] };
@@ -150,14 +149,12 @@ export async function buildClassScoreboard(
     const loaded = await deps.loadObservations();
     if (loaded.ok === true) estimate = estimateMarginalEffects(loaded.observations);
     else {
-      console.error(`[class-stats] getObservations failed: ${loaded.error}`);
+      logger.error({ error: loaded.error }, "[class-stats] getObservations failed");
     }
   } catch (err: any) {
     /* intentional: an estimator/read failure degrades to no β (producer classes
        fall to insufficient-sample), never throws. */
-    console.error(
-      `[class-stats] estimate threw: ${err?.message || String(err)}`,
-    );
+    logger.error({ err }, "[class-stats] estimate threw");
   }
 
   // Weighted-Quota Cost Axis inputs (issue #3548). Best-effort: a usage-read
@@ -178,8 +175,9 @@ export async function buildClassScoreboard(
   } catch (err: any) {
     /* intentional: a usage-read failure degrades weightedQuota to null on every
        class (empty breakdown), never throws — the yield axis is untouched. */
-    console.error(
-      `[class-stats] getUsage threw (weightedQuota degrades to null): ${err?.message || String(err)}`,
+    logger.error(
+      { err },
+      "[class-stats] getUsage threw (weightedQuota degrades to null)",
     );
   }
 

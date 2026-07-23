@@ -46,6 +46,7 @@ import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
 import { isLivePid } from "../process-probe.ts";
 import { WEDGE_AGE_THRESHOLD_S } from "./run-lifecycle-state.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Back-compat re-export relay (issue #3106, #2125 migration window)
@@ -116,7 +117,7 @@ function parseCrashDetail(raw: string | undefined): Record<string, unknown> | nu
     }
     return null;
   } catch (err) {
-    console.error(`[autopilot] failed to parse crash_detail: ${err}`);
+    logger.error({ err }, "[autopilot] failed to parse crash_detail");
     return null;
   }
 }
@@ -174,7 +175,7 @@ export async function fetchTurnsWithJoins(
     try {
       parsed = JSON.parse(member);
     } catch (err) {
-      console.error(`[autopilot] failed to parse turn member: ${err}`);
+      logger.error({ err }, "[autopilot] failed to parse turn member");
       continue;
     }
     if (!parsed || typeof parsed !== "object") continue;
@@ -254,7 +255,7 @@ export function projectRunView(
     try {
       limits = JSON.parse(row.limits);
     } catch (err) {
-      console.error(`[autopilot] corrupt limits JSON in run row — degrading to {}: ${err}`);
+      logger.error({ err }, "[autopilot] corrupt limits JSON in run row — degrading to {}");
       limits = {};
     }
   }

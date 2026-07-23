@@ -833,13 +833,36 @@ describe("getRunDispatchClasses — injected listTurnsDesc, no Redis (#2640)", (
 // ---------------------------------------------------------------------------
 
 describe("recordCycle — anchorType classification (#2689)", () => {
-  // Suppress the intentional fail-loud console.warn for the unclassified cases
-  // so the suite output stays clean; restore after each test.
+  // ADR-0027: the intentional fail-loud unclassified-anchorType alarm now logs
+  // through the pino structured-logger seam (module singleton → process.stderr)
+  // instead of console.warn. Capture (and thereby suppress) the serialized JSON
+  // lines so the suite output stays clean while still letting the fail-loud test
+  // assert on the structured fields (level 40, cycleId, unclassifiedSentinel).
+  function captureStderr(): { lines: () => Record<string, any>[]; restore: () => void } {
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let buf = "";
+    (process.stderr as any).write = (chunk: any) => {
+      buf += String(chunk);
+      return true;
+    };
+    return {
+      lines: () =>
+        buf
+          .split("\n")
+          .filter((l) => l.trim())
+          .map((l) => JSON.parse(l) as Record<string, any>),
+      restore: () => {
+        (process.stderr as any).write = originalWrite;
+      },
+    };
+  }
+
+  // Suppress the intentional fail-loud warn line for the unclassified cases so
+  // the suite output stays clean; restore after each test.
   function withSilencedWarn<T>(fn: () => Promise<T>): Promise<T> {
-    const orig = console.warn;
-    console.warn = () => {};
+    const cap = captureStderr();
     return fn().finally(() => {
-      console.warn = orig;
+      cap.restore();
     });
   }
 
@@ -895,21 +918,21 @@ describe("recordCycle — anchorType classification (#2689)", () => {
     assert.equal(store.metrics.get("c-at-trim")!.anchorType, "grill");
   });
 
-  test("emits a fail-loud console.warn naming the cycle when classification falls back", async () => {
+  test("emits a fail-loud warn line naming the cycle when classification falls back", async () => {
     const store = newStore();
     const deps = makeDeps(store);
-    const orig = console.warn;
-    const warnings: string[] = [];
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
-    };
+    const cap = captureStderr();
     try {
       await recordCycle({ cycleId: "c-at-warn", status: "completed" } as any, deps);
     } finally {
-      console.warn = orig;
+      cap.restore();
     }
-    assert.equal(warnings.length, 1, "exactly one warning for one unclassified cycle");
-    assert.match(warnings[0], /c-at-warn/, "warning names the offending cycleId");
-    assert.match(warnings[0], /anchorType/i);
+    // ADR-0027: assert on the structured pino fields, not a prose string. The
+    // offending cycleId is now an addressable `cycleId` field (not interpolated),
+    // and the data-quality alarm carries the `unclassifiedSentinel` marker.
+    const warns = cap.lines().filter((o) => o.level === 40 && o.cycleId === "c-at-warn");
+    assert.equal(warns.length, 1, "exactly one warn-level line for one unclassified cycle");
+    assert.equal(warns[0].unclassifiedSentinel, true, "carries the unclassified-sentinel marker");
+    assert.match(warns[0].msg, /anchorType/i);
   });
 });
