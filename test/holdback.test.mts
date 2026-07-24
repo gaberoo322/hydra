@@ -710,7 +710,7 @@ function makeWatchHarness(
   const registry = new Map(pending.map((e) => [e.prNumber, e]));
   const marked = new Set<number>();
   const enrollCalls: Array<{ commitSha: string; prNumber?: number | null; tier?: number | null }> = [];
-  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string; status?: string; tasksMerged?: number; tasksAttempted?: number }> = [];
+  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string; worktreeBranch?: string; status?: string; tasksMerged?: number; tasksAttempted?: number }> = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
 
@@ -791,6 +791,79 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
       { cycleId: "cyc-522", prNumber: 522, filesChanged: 4, status: "merged", tasksMerged: 1, tasksAttempted: 1 },
     ]);
     assert.equal("anchorType" in h.cycleCalls[0], false, "anchorType key is absent");
+  });
+
+  test("#3579: the merged PR head-branch ref is forwarded as worktreeBranch when the entry has NO explicit anchorType", async () => {
+    // The live #3579 first-write case: reap never wrote a record for this cycleId
+    // (a bare UUID). The merge-watch enrichment is the FIRST write, and the entry
+    // carries no explicit anchorType. Forward the merged PR's head branch as
+    // `worktreeBranch` so classifyAnchorType can decode the class from a fenced
+    // branch (`worktree-agent-<tok>-t{N}-<slot>`) that the bare cycleId lacks.
+    const h = makeWatchHarness(
+      [{ prNumber: 531, tier: 3, cycleId: "afa22ef1-7e11-41e6", registeredAt: 1 }],
+      {
+        531: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 5,
+          headRefName: "worktree-agent-afa22ef1-t2-dev_orch-3564",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.cycleCalls, [
+      {
+        cycleId: "afa22ef1-7e11-41e6",
+        prNumber: 531,
+        filesChanged: 5,
+        worktreeBranch: "worktree-agent-afa22ef1-t2-dev_orch-3564",
+        status: "merged",
+        tasksMerged: 1,
+        tasksAttempted: 1,
+      },
+    ]);
+  });
+
+  test("#3579: an explicit anchorType SUPPRESSES the worktreeBranch fallback (no redundant field / no clobber)", async () => {
+    // When the arm DID forward an explicit anchorType, that is authoritative —
+    // classifyAnchorType returns it before ever consulting the branch, so the
+    // watcher does not bother forwarding the head branch as a decode source.
+    const h = makeWatchHarness(
+      [{ prNumber: 532, tier: 3, cycleId: "cyc-532", registeredAt: 1, anchorType: "grill" }],
+      {
+        532: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 2,
+          headRefName: "worktree-agent-x-t2-dev_orch",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.cycleCalls, [
+      { cycleId: "cyc-532", prNumber: 532, filesChanged: 2, anchorType: "grill", status: "merged", tasksMerged: 1, tasksAttempted: 1 },
+    ]);
+    assert.equal("worktreeBranch" in h.cycleCalls[0], false, "worktreeBranch is omitted when an explicit anchorType exists");
+  });
+
+  test("#3579: a null/absent head-branch ref omits worktreeBranch (truthful unknown)", async () => {
+    // The merge-status fetch didn't report a head branch — the field must be
+    // ABSENT on the enrichment body, not present-and-empty.
+    const h = makeWatchHarness(
+      [{ prNumber: 533, tier: 3, cycleId: "cyc-533", registeredAt: 1 }],
+      { 533: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 1, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.equal("worktreeBranch" in h.cycleCalls[0], false, "worktreeBranch is absent when the head branch is unknown");
   });
 
   test("AC2: a still-open PR (no merge commit) is left in the registry and NOT enrolled", async () => {

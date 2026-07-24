@@ -353,7 +353,13 @@ export async function recordCycle(
       // invisible to metrics. classifyAnchorType always returns a non-empty
       // string (the caller's value, or the "unclassified" sentinel), so the
       // metrics record can never carry an absent anchorType.
-      anchorType: classifyAnchorType(cycleId, body.anchorType),
+      // Issue #3579: pass the merged PR's head-branch ref (`body.worktreeBranch`,
+      // which the merge-completion watcher now forwards) as a SECOND decode source.
+      // It is consulted only when `body.anchorType` is absent AND the cycleId is
+      // itself undecodable — the merge-watch first-write case where the cycleId is
+      // a bare UUID but the head branch carries a decodable `-t{N}-<slot>` fence.
+      // Same fence parser → never a guess (#2822).
+      anchorType: classifyAnchorType(cycleId, body.anchorType, body.worktreeBranch),
       anchorReference: body.anchorReference,
       taskTitle: body.taskTitle,
       tasksAttempted: numberOrDefault(body.tasksAttempted, total),
