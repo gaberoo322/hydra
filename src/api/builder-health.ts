@@ -35,6 +35,7 @@ import {
   ScopeViolationBodySchema,
   DispatchPrBodySchema,
 } from "../schemas/builder-health.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 export interface BuilderHealthRouterDeps {
   /** Override the scorecard aggregator — tests stub the underlying sources. */
@@ -64,17 +65,15 @@ export function createBuilderHealthRouter(deps: BuilderHealthRouterDeps = {}) {
         issues: parsed.error.issues,
       });
     }
-    try {
-      const result = await scorecard({
+    // The aggregator never throws by contract; the isolateAggregator seam is
+    // belt-and-braces (route-helpers.ts, #909) — the 500 envelope + pino
+    // `err`-field log live there once (ADR-0027 eighth sweep).
+    return isolateAggregator(res, "builder-health", () =>
+      scorecard({
         prWindow: parsed.data.prWindow,
         windowDays: parsed.data.windowDays,
-      });
-      res.json(result);
-    } catch (err: any) {
-      // The aggregator never throws by contract; this is belt-and-braces.
-      console.error(`[builder-health] scorecard failed: ${err?.message || err}`);
-      res.status(500).json({ error: err?.message || String(err) });
-    }
+      }),
+    );
   });
 
   // POST /builder-health/scope-violation — CI scope-check gate writer.
@@ -86,14 +85,11 @@ export function createBuilderHealthRouter(deps: BuilderHealthRouterDeps = {}) {
         issues: parsed.error.issues,
       });
     }
-    try {
+    return isolateAggregator(res, "builder-health/scope-violation", async () => {
       const date = parsed.data.date ?? utcToday();
       const total = await incrViolation(date, parsed.data.count ?? 1);
-      res.json({ ok: true, date, total });
-    } catch (err: any) {
-      console.error(`[builder-health] scope-violation incr failed: ${err?.message || err}`);
-      res.status(500).json({ error: err?.message || String(err) });
-    }
+      return { ok: true, date, total };
+    });
   });
 
   // POST /builder-health/dispatch-pr — dispatch->PR link writer.

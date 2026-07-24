@@ -24,7 +24,7 @@
  * ({@link deriveBoardState}) the tests pin directly.
  *
  * Never-throw contract (CLAUDE.md): an unreachable `gh` yields the all-zero
- * SAFE DEFAULT with `degraded: true` plus a logged `console.error`, NOT a 500.
+ * SAFE DEFAULT with `degraded: true` plus a logged `logger.error`, NOT a 500.
  * The only non-200 is a 400 `schema-validation-failed` for a malformed query.
  * The `degraded` flag lets `collect-state.sh` fall back to its inline `gh`
  * call so a transient outage never wedges the autopilot turn.
@@ -59,6 +59,7 @@ import {
   deriveBoardState,
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // The pure board-state projection (`deriveBoardState`) and its I/O companion
@@ -163,8 +164,13 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       const result = await readOpenIssues();
       if (result.ok === false) {
         degraded = true;
-        console.error(
-          `[autopilot/board-state] gh issue list failed (${result.code}) — degraded all-zero board`,
+        // Not a 500: the degraded all-zero board (with degraded:true) IS the
+        // never-throw SAFE DEFAULT collect-state.sh parses, so the
+        // isolateAggregator seam does not apply. ADR-0027 eighth sweep: the log
+        // adopts the pino `err`-field seam.
+        logger.error(
+          { code: result.code },
+          "[autopilot/board-state] gh issue list failed — degraded all-zero board",
         );
       } else {
         // Pre-resolve the OPEN strict-blocker set (async) and inject it into
@@ -177,8 +183,9 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       // Belt-and-braces: the seam never throws, but honour the never-throw
       // contract here too — a thrown read degrades, it does not 500.
       degraded = true;
-      console.error(
-        `[autopilot/board-state] open-issue read threw despite never-throw seam: ${err?.message || err}`,
+      logger.error(
+        { err },
+        "[autopilot/board-state] open-issue read threw despite never-throw seam",
       );
     }
 

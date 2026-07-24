@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 
 import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
+import { logger } from "../logger.ts";
 
 // Issue #1322: the operator-action-items surface — extracted out of
 // createHealthRouter (src/api/health.ts) into its own deep, named home. This
@@ -112,7 +113,11 @@ export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}
       // Sort by priority (1=urgent first)
       recs.sort((a, b) => a.priority - b.priority);
     } catch (err: any) {
-      console.error(`[API] recommendations error: ${err.message}`);
+      // Not an isolateAggregator route: the contract is 200-with-partial-array —
+      // a throw logs and returns whatever `recs` accumulated (never a 500), which
+      // the seam would convert to a 500. ADR-0027 eighth sweep: the catch adopts
+      // the pino `err`-field seam.
+      logger.error({ err }, "[API] recommendations error");
     }
     res.json(recs);
   });

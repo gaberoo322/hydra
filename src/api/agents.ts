@@ -41,6 +41,7 @@ import {
   listRecentAutopilotRunIds,
 } from "../redis/autopilot-runs.ts";
 import { fetchTurnsWithJoins } from "../autopilot/run-projections.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Query schema for `GET /agents/stream?agent=<worktreeBranch>` (ADR-0022).
@@ -166,7 +167,11 @@ export function createAgentsRouter() {
         reason: `no dispatch action found with worktreeBranch=${agent} in the most recent ${recentRunIds.length} autopilot runs`,
       });
     } catch (err: any) {
-      console.error(`[agentsAPI] /agents/stream failed: ${err?.message || err}`);
+      // Not an isolateAggregator route: the success path writes 400 / 404
+      // branches (bespoke `agent` param, no-runs, no-match) directly, which the
+      // seam (JSON-at-200 of produce's return) can't express. ADR-0027 eighth
+      // sweep: the catch adopts the pino `err`-field seam.
+      logger.error({ err }, "[agentsAPI] /agents/stream failed");
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });

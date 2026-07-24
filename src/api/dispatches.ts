@@ -41,6 +41,8 @@ import {
 } from "../schemas/dispatches.ts";
 import { resolveTranscriptPath } from "../transcript-store.ts";
 import { parseTranscript, paginate } from "../transcript-projection.ts";
+import { logger } from "../logger.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 // ===========================================================================
 // Transcript reading (issue #695).
@@ -73,17 +75,21 @@ export function createDispatchesRouter() {
   const router = Router();
 
   // POST /dispatches/subagent — register a subagent session.
+  //
+  // Issue #909 / ADR-0027 eighth sweep: the schema-validation 400 stays inline;
+  // the never-throw-500 isolation + pino `err`-field log come from the
+  // isolateAggregator seam (route-helpers.ts) once.
   router.post("/dispatches/subagent", async (req, res) => {
-    try {
-      const parsed = SubagentDispatchPostBodySchema.safeParse(req.body || {});
-      if (!parsed.success) {
-        return res.status(400).json({
-          code: "schema-validation-failed",
-          issues: parsed.error.issues,
-        });
-      }
-      const body = parsed.data;
+    const parsed = SubagentDispatchPostBodySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const body = parsed.data;
 
+    return isolateAggregator(res, "api/dispatches/subagent", async () => {
       // startedAt is optional on the wire — stamp capture time when omitted so
       // the index score is always meaningful.
       const startedAt = body.startedAt || new Date().toISOString();
@@ -100,41 +106,38 @@ export function createDispatchesRouter() {
       if (body.prRef !== undefined) dispatch.prRef = body.prRef;
 
       await registerSubagentDispatch(dispatch);
-      res.json({ registered: true, dispatch });
-    } catch (err: any) {
-      console.error("[api/dispatches] POST /dispatches/subagent failed:", err);
-      res.status(500).json({ error: err.message });
-    }
+      return { registered: true, dispatch };
+    });
   });
 
   // PATCH /dispatches/subagent/:sessionId/current-step — update the step.
   router.patch("/dispatches/subagent/:sessionId/current-step", async (req, res) => {
-    try {
-      const sessionId = (req.params.sessionId || "").trim();
-      if (!sessionId) {
-        return res.status(400).json({
-          code: "schema-validation-failed",
-          issues: [{ path: ["sessionId"], message: "sessionId path param is required" }],
-        });
-      }
-      const parsed = SubagentDispatchStepPatchBodySchema.safeParse(req.body || {});
-      if (!parsed.success) {
-        return res.status(400).json({
-          code: "schema-validation-failed",
-          issues: parsed.error.issues,
-        });
-      }
-
-      await setSubagentDispatchStep(sessionId, parsed.data.currentStep);
-      const updated = await getSubagentDispatch(sessionId);
-      res.json({ updated: true, dispatch: updated });
-    } catch (err: any) {
-      console.error(
-        "[api/dispatches] PATCH /dispatches/subagent/:sessionId/current-step failed:",
-        err,
-      );
-      res.status(500).json({ error: err.message });
+    const sessionId = (req.params.sessionId || "").trim();
+    if (!sessionId) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: [{ path: ["sessionId"], message: "sessionId path param is required" }],
+      });
     }
+    const parsed = SubagentDispatchStepPatchBodySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+
+    // Issue #909 / ADR-0027 eighth sweep: the two validation 400s stay inline;
+    // the never-throw-500 isolation + pino `err`-field log come from the seam.
+    return isolateAggregator(
+      res,
+      "api/dispatches/subagent/current-step",
+      async () => {
+        await setSubagentDispatchStep(sessionId, parsed.data.currentStep);
+        const updated = await getSubagentDispatch(sessionId);
+        return { updated: true, dispatch: updated };
+      },
+    );
   });
 
   // GET /dispatches/:dispatchId/transcript — render a subagent session's
@@ -193,9 +196,10 @@ export function createDispatchesRouter() {
       } catch (err) {
         // The file vanished between resolve and read, or is unreadable. Treat
         // as not-available rather than 500 — same contract as a missing file.
-        console.error(
-          `[api/dispatches] transcript read failed for ${dispatchId} at ${path}:`,
-          err,
+        // ADR-0027 eighth sweep: the catch adopts the pino `err`-field seam.
+        logger.error(
+          { dispatchId, path, err },
+          "[api/dispatches] transcript read failed",
         );
         return res.json({
           transcriptStatus: "not-available",
@@ -218,9 +222,12 @@ export function createDispatchesRouter() {
         sessionMetadata,
       });
     } catch (err: any) {
-      console.error(
-        `[api/dispatches] GET /dispatches/${dispatchId}/transcript failed:`,
-        err,
+      // Not an isolateAggregator route: the success path writes 404 /
+      // not-available branches directly, which the seam can't express. ADR-0027
+      // eighth sweep: the catch adopts the pino `err`-field seam.
+      logger.error(
+        { dispatchId, err },
+        "[api/dispatches] GET transcript failed",
       );
       res.status(500).json({ error: err.message });
     }

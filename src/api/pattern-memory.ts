@@ -17,6 +17,8 @@ import {
 } from "../schemas/pattern-memory.ts";
 import { RuleActionLogQuerySchema } from "../schemas/learning.ts";
 import { getLastDemotionCount } from "../redis/agent-memory.ts";
+import { logger } from "../logger.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 // The friction-patterns diagnostic aggregates over the same skills the
 // subagent-capture write routes above accept (issue #3006, relocated with the
@@ -63,7 +65,9 @@ export function createPatternMemoryRouter() {
         issues: parsed.error.issues,
       });
     }
-    try {
+    // Issue #909 / ADR-0027 eighth sweep: the 500 envelope + pino `err`-field
+    // log live in the isolateAggregator seam (route-helpers.ts) once.
+    return isolateAggregator(res, "memory/pattern", async () => {
       const { category, action, example, cycleId, severity } = parsed.data;
       const result = await recordPattern(req.params.agent, category, {
         severity: severity || "prevent",
@@ -71,18 +75,21 @@ export function createPatternMemoryRouter() {
         example: example || "",
         cycleId: cycleId || `claude-${Date.now()}`,
       });
-      res.json({ ok: true, escalation: result.escalationResult ?? null });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true, escalation: result.escalationResult ?? null };
+    });
   });
 
   // GET /memory/:agent — load the formatted agent memory string.
+  //
+  // Not an isolateAggregator route: the success path is a text/plain send, not a
+  // JSON body, so the seam (which JSONs its produce result) does not fit. ADR-0027
+  // eighth sweep: the catch adopts the pino `err`-field seam instead.
   router.get("/memory/:agent", async (req, res) => {
     try {
       const memory = await loadAgentMemory(req.params.agent);
       res.type("text/plain").send(memory);
     } catch (err: any) {
+      logger.error({ agent: req.params.agent, err }, "[pattern-memory-api] load agent memory failed");
       res.status(500).json({ error: err.message });
     }
   });
@@ -109,7 +116,10 @@ export function createPatternMemoryRouter() {
         error: `Invalid or missing 'outcome' — expected qa-fail | verification-failure | no-diff | rollback`,
       });
     }
-    try {
+    // Issue #909 / ADR-0027 eighth sweep: the domain guards above keep their
+    // bespoke 400s; the never-throw-500 isolation + pino `err`-field log come
+    // from the isolateAggregator seam (route-helpers.ts) once.
+    return isolateAggregator(res, "memory/subagent-lesson", async () => {
       const result = await captureSubagentLesson({
         skill,
         outcome,
@@ -119,11 +129,8 @@ export function createPatternMemoryRouter() {
         severity: severity === "reinforce" ? "reinforce" : "prevent",
         cycleId: typeof cycleId === "string" ? cycleId : undefined,
       });
-      res.json({ ok: true, ...result });
-    } catch (err: any) {
-      console.error(`[api/memory/subagent-lesson] failed:`, err.message);
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true, ...result };
+    });
   });
 
   // POST /memory/subagent-friction (issue #512) — soft-friction capture for
@@ -145,7 +152,10 @@ export function createPatternMemoryRouter() {
         error: `Invalid or missing 'skill' — expected a skill whose dispatch class carries a learningAgent in the Dispatch-Class Taxonomy (scripts/autopilot/classes.json)`,
       });
     }
-    try {
+    // Issue #909 / ADR-0027 eighth sweep: domain guards keep their 400s; the
+    // never-throw-500 isolation + pino `err`-field log come from the
+    // isolateAggregator seam (route-helpers.ts) once.
+    return isolateAggregator(res, "memory/subagent-friction", async () => {
       const result = await captureSubagentFriction({
         skill,
         cue,
@@ -153,11 +163,8 @@ export function createPatternMemoryRouter() {
         context: typeof context === "string" ? context : "",
         cycleId: typeof cycleId === "string" ? cycleId : undefined,
       });
-      res.json({ ok: true, ...result });
-    } catch (err: any) {
-      console.error(`[api/memory/subagent-friction] failed:`, err.message);
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true, ...result };
+    });
   });
 
   // =========================================================================
@@ -207,7 +214,11 @@ export function createPatternMemoryRouter() {
       const totalIneffective = planner.length + executor.length + skeptic.length;
       res.json({ planner, executor, skeptic, totalIneffective });
     } catch (err: any) {
-      console.error(`[pattern-memory-api] ineffective-rules failed: ${err?.message || String(err)}`);
+      // Not an isolateAggregator route: the 500 carries a DEGRADED, fully-shaped
+      // body (empty per-agent arrays + `errors`) the dashboard renders, not the
+      // seam's bare `{ error }`. ADR-0027 eighth sweep: the catch adopts the pino
+      // `err`-field seam; the specialized envelope stays.
+      logger.error({ err }, "[pattern-memory-api] ineffective-rules failed");
       res.status(500).json({
         planner: [],
         executor: [],
@@ -235,7 +246,9 @@ export function createPatternMemoryRouter() {
       const entries = await getRuleActionLog(limit);
       res.json({ entries, count: entries.length });
     } catch (err: any) {
-      console.error(`[pattern-memory-api] rule-action-log failed: ${err?.message || String(err)}`);
+      // Degraded, fully-shaped 500 body (empty `entries` + `errors`) — kept per
+      // the specialized-envelope rule; catch adopts the pino seam (ADR-0027 8th).
+      logger.error({ err }, "[pattern-memory-api] rule-action-log failed");
       res.status(500).json({ entries: [], count: 0, errors: [err?.message || String(err)] });
     }
   });
@@ -262,7 +275,9 @@ export function createPatternMemoryRouter() {
       const lastDemotionCount = await getLastDemotionCount();
       res.json({ ...out, totalPatterns: total, lastDemotionCount });
     } catch (err: any) {
-      console.error(`[pattern-memory-api] friction-patterns failed: ${err?.message || String(err)}`);
+      // Degraded, fully-shaped 500 body (`totalPatterns: 0` + `errors`) — kept
+      // per the specialized-envelope rule; catch adopts the pino seam (8th sweep).
+      logger.error({ err }, "[pattern-memory-api] friction-patterns failed");
       res.status(500).json({
         totalPatterns: 0,
         errors: [err?.message || String(err)],
