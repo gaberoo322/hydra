@@ -10,9 +10,9 @@ import { API_BASE } from "../lib/autopilot-format.js";
 //
 // Extracted from dashboard/src/pages/Autopilot.jsx (issue #3589) into a named,
 // reusable hook module so a future page that wants the taxonomy can import it.
-export const FALLBACK_PIPELINE_SLOTS = ["dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target"];
-export const FALLBACK_SIGNAL_CLASSES = ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"];
-export const FALLBACK_SIGNAL_COOLDOWN_SEC = {
+const FALLBACK_PIPELINE_SLOTS = ["dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target"];
+const FALLBACK_SIGNAL_CLASSES = ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"];
+const FALLBACK_SIGNAL_COOLDOWN_SEC = {
   health: 0,
   sweep_orch: 900,
   sweep_target: 900,
@@ -56,5 +56,3 @@ export function useTaxonomy() {
   }, []);
   return taxonomy;
 }
-
-export default useTaxonomy;
