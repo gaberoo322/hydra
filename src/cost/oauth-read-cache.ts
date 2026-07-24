@@ -19,6 +19,11 @@
  *      GETs into one shared read.
  *   4. The Redis backoff-persistence side-channel (issue #2840) that RESUMES the
  *      backoff ladder across a `systemctl restart` instead of resetting it.
+ *   5. The sustained-OAuth-failure alarm (issue #3601) — a single WARN emitted
+ *      off the existing `oauthBackoff.failures` counter when it crosses a
+ *      threshold, so a prolonged 429/outage is a greppable alarm and not just an
+ *      inference from the per-failure backoff lines. Purely additive
+ *      observability: the gate math and the #1124 fail-open invariant are untouched.
  *
  * The transcript-scan concern (`transcript-scan.ts`) coordinates this seam via
  * `makeReadOAuth()`, which wires the persistence adapter and returns the cached-
@@ -85,6 +90,20 @@ interface OAuthBackoffState {
 }
 
 let oauthBackoff: OAuthBackoffState | null = null;
+
+/**
+ * Sustained-OAuth-failure alarm threshold (issue #3601): the consecutive-failure
+ * count at which a single WARN-level alarm fires so a prolonged 429/outage is
+ * VISIBLE, rather than only inferrable from the per-failure backoff lines. 3 is
+ * the value the issue itself asked for ("notify on 3+ consecutive failures") and
+ * sits one rung above the transient shared-bucket 429 blips the last-good +
+ * exponential-backoff seam is designed to ride out silently — a 429 wave that
+ * clears within one or two re-probes never trips it, but a genuinely stuck meter
+ * (expired token, hard account limit) does. Purely observability: nothing gates
+ * on it, and the backoff ladder / gate math / #1124 fail-open invariant are all
+ * untouched (design concept issue-3601, scope: additive off `oauthBackoff.failures`).
+ */
+const OAUTH_SUSTAINED_FAILURE_THRESHOLD = 3;
 
 /**
  * Backoff-state persistence side-channel (issue #2840). The exponential-backoff
@@ -481,6 +500,26 @@ async function attemptOAuthRead(
         ? ` — server Retry-After ${retryAfterMs}ms lengthened the ${exponentialMs}ms exponential delay`
         : ""),
   );
+
+  // Sustained-failure alarm (issue #3601): fire a single WARN when the
+  // consecutive-failure count CROSSES the threshold, so a prolonged 429/outage
+  // (expired token, hard account limit) becomes an explicit, greppable alarm
+  // instead of only being inferrable from the per-failure backoff lines above.
+  // `failures` increments by exactly one per failed GET and resets to null on
+  // the next success, so `=== threshold` is the single crossing instant of each
+  // sustained-failure episode — it fires ONCE per episode, never per scan, and a
+  // transient 429 blip that recovers before the third consecutive failure never
+  // trips it. Purely observability: this emits a signal and returns nothing; the
+  // backoff/recovery bookkeeping and the #1124 fail-open gate are untouched.
+  if (failures === OAUTH_SUSTAINED_FAILURE_THRESHOLD) {
+    console.error(
+      `[usage-tracker] ALARM: OAuth meter has failed ${failures} consecutive reads ` +
+        `(last: ${result.code}); the subscription meter may be genuinely stuck ` +
+        `(expired OAuth token or a hard account rate-limit) rather than riding out a ` +
+        `transient 429 wave. Usage gating is running on the last-good/estimate fallback ` +
+        `until a read succeeds (fail-open #1124; auto-clears on recovery — issue #3601).`,
+    );
+  }
 
   // Capture the last-known real meter value for the AC3 divergence detector
   // (issue #2832) BEFORE any eviction below — it is the baseline the fail-open
