@@ -1,5 +1,6 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { Section } from "./Section.jsx";
+import LocalTimestamp from "../../LocalTimestamp.jsx";
 
 /**
  * CacheEconomics — point-in-time cache-hit ratios from the Subscription
@@ -33,7 +34,13 @@ export function CacheEconomics() {
     <Section
       title="Cache economics"
       subtitle="Cache-hit ratio as a leading indicator of quota burn. Higher is better."
-      right={data?.generatedAt && `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`}
+      right={
+        data?.generatedAt && (
+          <>
+            Updated <LocalTimestamp ts={data.generatedAt} />
+          </>
+        )
+      }
       loading={loading}
       error={error}
       empty={!loading && !error && ratio5h === null && ratio7d === null}

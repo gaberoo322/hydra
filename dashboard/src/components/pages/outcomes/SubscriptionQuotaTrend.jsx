@@ -1,6 +1,7 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { Section } from "./Section.jsx";
 import { Sparkline } from "./Sparkline.jsx";
+import LocalTimestamp from "../../LocalTimestamp.jsx";
 
 /**
  * SubscriptionQuotaTrend — % burned (area-style) + headroom (inverse line)
@@ -27,7 +28,13 @@ export function SubscriptionQuotaTrend({ windowDays = 7 }) {
           ? `Weekly burn vs headroom (current reading).`
           : `Uncalibrated — set HYDRA_USAGE_WEEKLY_QUOTA_TOKENS and HYDRA_USAGE_5H_QUOTA_TOKENS to enable.`
       }
-      right={data?.generatedAt && `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`}
+      right={
+        data?.generatedAt && (
+          <>
+            Updated <LocalTimestamp ts={data.generatedAt} />
+          </>
+        )
+      }
       loading={loading}
       error={error}
       empty={!loading && !error && burned.length === 0 && headroom.length === 0}

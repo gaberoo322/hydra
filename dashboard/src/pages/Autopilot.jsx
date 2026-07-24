@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useApi } from "../hooks/useApi.js";
+import LocalTimestamp from "../components/LocalTimestamp.jsx";
 
 // Slice 1 of epic #496 — "Is it alive?" header strip.
 // Slice 2 of epic #496 (issue #498) — pipeline snapshot + turn timeline.
@@ -90,12 +91,6 @@ function formatElapsed(seconds) {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
-}
-
-function formatClockTime(epoch) {
-  if (!Number.isFinite(epoch) || epoch <= 0) return "—";
-  const d = new Date(epoch * 1000);
-  return d.toLocaleTimeString();
 }
 
 function formatTokens(n) {
@@ -337,7 +332,7 @@ function TurnRow({ turn, expandedDefault }) {
       >
         <div className="flex items-baseline gap-3 min-w-0">
           <span className="text-sm font-mono text-zinc-200">Turn {turn.turn_n}</span>
-          <span className="text-xs text-zinc-500 font-mono">{formatClockTime(turn.epoch)}</span>
+          <LocalTimestamp ts={turn.epoch} className="text-xs text-zinc-500 font-mono" />
           <span className="text-xs text-zinc-400 truncate">
             {actions.length} {actions.length === 1 ? "action" : "actions"}
             {typeSummary ? `: ${typeSummary}` : ""}

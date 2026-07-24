@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useApi } from "../../../hooks/useApi.js";
 import { Section } from "./Section.jsx";
 import { Sparkline } from "./Sparkline.jsx";
+import LocalTimestamp from "../../LocalTimestamp.jsx";
 
 /**
  * BuilderHealth — the Builder-Health Scorecard widget (issue #732) plus the
@@ -58,7 +59,13 @@ export function BuilderHealth({ windowDays = 7, prWindow = 50 }) {
     <Section
       title="Builder health"
       subtitle="Is the 25% self-improvement investment producing a measurably better builder?"
-      right={data?.generatedAt && `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`}
+      right={
+        data?.generatedAt && (
+          <>
+            Updated <LocalTimestamp ts={data.generatedAt} />
+          </>
+        )
+      }
       loading={loading}
       error={error}
       empty={!loading && !error && isEmpty}

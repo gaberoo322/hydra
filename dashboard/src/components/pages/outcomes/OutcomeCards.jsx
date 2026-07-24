@@ -1,6 +1,7 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { Section } from "./Section.jsx";
 import { Sparkline } from "./Sparkline.jsx";
+import LocalTimestamp from "../../LocalTimestamp.jsx";
 
 /**
  * OutcomeCards — one card per declared Target Outcome. Renders gracefully
@@ -20,7 +21,13 @@ export function OutcomeCards({ windowDays = 7 }) {
     <Section
       title="Outcome trends"
       subtitle={`Per-outcome current reading vs baseline.`}
-      right={data?.generatedAt && `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`}
+      right={
+        data?.generatedAt && (
+          <>
+            Updated <LocalTimestamp ts={data.generatedAt} />
+          </>
+        )
+      }
       loading={loading}
       error={error}
       empty={!loading && !error && outcomes.length === 0}
