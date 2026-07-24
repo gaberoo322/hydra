@@ -8,7 +8,8 @@ import {
 } from "../redis/alerts.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { SentryWebhookPayloadSchema } from "../schemas/webhooks.ts";
-import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
+import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Alerts + Sentry webhook routes.
@@ -42,7 +43,11 @@ export function createAlertsRouter() {
     }),
   );
 
-  // POST /alerts/:id/dismiss — Dismiss an alert
+  // POST /alerts/:id/dismiss — Dismiss an alert.
+  //
+  // Not an isolateAggregator route: the success path writes a 404 for a
+  // not-found id directly, which the seam (JSON-at-200 of produce's return)
+  // can't express. ADR-0027 eighth sweep: the catch adopts the pino seam.
   router.post("/alerts/:id/dismiss", async (req, res) => {
     try {
       const all = await readAllAlerts();
@@ -56,19 +61,21 @@ export function createAlertsRouter() {
       }
       res.status(404).json({ error: "Alert not found" });
     } catch (err: any) {
+      logger.error({ alertId: req.params.id, err }, "[api/alerts] dismiss failed");
       res.status(500).json({ error: err.message });
     }
   });
 
-  // POST /alerts/dismiss-all — Dismiss all alerts
-  router.post("/alerts/dismiss-all", async (_req, res) => {
-    try {
+  // POST /alerts/dismiss-all — Dismiss all alerts.
+  //
+  // Issue #909 / ADR-0027 eighth sweep: the 500 envelope + pino `err`-field log
+  // live in the isolateAggregator seam (route-helpers.ts) once.
+  router.post("/alerts/dismiss-all", async (_req, res) =>
+    isolateAggregator(res, "api/alerts/dismiss-all", async () => {
       await clearAlerts();
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return { ok: true };
+    }),
+  );
 
   // POST /webhooks/sentry — Sentry alert webhook
   //
@@ -80,7 +87,7 @@ export function createAlertsRouter() {
     try {
       const parseResult = SentryWebhookPayloadSchema.safeParse(req.body);
       if (!parseResult.success) {
-        console.error(`[Sentry Webhook] Schema validation failed: ${JSON.stringify(parseResult.error.issues)}`);
+        logger.error({ issues: parseResult.error.issues }, "[Sentry Webhook] schema validation failed");
         return res.status(400).json(schemaValidationError(parseResult.error));
       }
       const payload = parseResult.data;
@@ -112,10 +119,10 @@ export function createAlertsRouter() {
         payload: { project, title, culprit, url },
       }), ALERTS_MAX);
 
-      console.log(`[Sentry Webhook] Alerted: "${title}" from ${project}`);
+      logger.info({ title, project }, "[Sentry Webhook] alerted");
       res.json({ queued: true, title });
     } catch (err: any) {
-      console.error(`[Sentry Webhook] Failed: ${err.message}`);
+      logger.error({ err }, "[Sentry Webhook] failed");
       res.status(500).json({ error: err.message });
     }
   });

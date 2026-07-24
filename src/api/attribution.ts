@@ -60,6 +60,7 @@ import {
 } from "../outcome-attribution/index.ts";
 import { loadOutcomes } from "../outcomes.ts";
 import { AttributionImpactQuerySchema } from "../schemas/attribution.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 /**
  * The one dependency the handler needs: the append-only ledger read. Defaults to
@@ -119,27 +120,24 @@ export function createAttributionRouter(
 
   // GET /attribution — per-metric ranked β_c with identifiability + noise-floor
   // flags on every row. Read-only; dark/empty → 200 empty; Redis-read fail → 500.
-  router.get("/attribution", async (_req, res) => {
-    try {
+  router.get("/attribution", async (_req, res) =>
+    // Issue #909 / ADR-0027 eighth sweep: the 500 envelope + pino `err`-field
+    // log live in the isolateAggregator seam (route-helpers.ts) once. The ONLY
+    // 500 (a `getObservations()` ledger-read failure) is surfaced by throwing
+    // its error string so the seam returns the identical `{ error }` body; the
+    // seam's own catch is the belt-and-braces guard the estimator's purity makes
+    // unreachable.
+    isolateAggregator(res, "attribution", async () => {
       const loaded = await loadObservations();
       if (loaded.ok === false) {
         // The only 500: the append-only ledger could not be read.
-        return res.status(500).json({ error: loaded.error });
+        throw new Error(loaded.error);
       }
-
       const estimate = estimateMarginalEffects(loaded.observations);
       const metrics = estimate.metrics.map(rankByMagnitude);
-      res.json({ metrics });
-    } catch (err: any) {
-      // Defensive — the seam returns a result object and the estimator is pure,
-      // so neither throws; this guard just guarantees Express never returns a
-      // bodyless 500 if that contract is ever broken upstream.
-      console.error(
-        `[attribution-api] unexpected error: ${err?.message || String(err)}`,
-      );
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      return { metrics };
+    }),
+  );
 
   // GET /attribution/impact — the reverse-loop read surface (issue #3283, epic
   // #2628). Ranks producer classes by FAVORABLE outcome impact
@@ -149,22 +147,25 @@ export function createAttributionRouter(
   // ones. Read-only; dark/empty ledger → 200 with rows:[] (no impact signal
   // yet); Redis-read fail → 500. Optional `?topN=N` caps the ranking.
   router.get("/attribution/impact", async (req, res) => {
-    try {
-      // ADR-0022: route the WHOLE query through the schema before reading any
-      // named field. A malformed `topN` (non-numeric / fractional / negative)
-      // is a 400; absent ⇒ `undefined` ⇒ return all ranked rows.
-      const parsed = AttributionImpactQuerySchema.safeParse(req.query);
-      if (!parsed.success) {
-        return res
-          .status(400)
-          .json({ code: "schema-validation-failed", issues: parsed.error.issues });
-      }
-      const { topN } = parsed.data;
+    // ADR-0022: route the WHOLE query through the schema before reading any
+    // named field. A malformed `topN` (non-numeric / fractional / negative)
+    // is a 400; absent ⇒ `undefined` ⇒ return all ranked rows. The bespoke 400
+    // stays inline; the never-throw-500 isolation comes from the
+    // isolateAggregator seam (route-helpers.ts, #909; ADR-0027 eighth sweep).
+    const parsed = AttributionImpactQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    const { topN } = parsed.data;
 
+    return isolateAggregator(res, "attribution/impact", async () => {
       const loaded = await loadObservations();
       if (loaded.ok === false) {
-        // The only 500: the append-only ledger could not be read.
-        return res.status(500).json({ error: loaded.error });
+        // The only 500: the append-only ledger could not be read. Thrown so the
+        // seam returns the identical `{ error }` body.
+        throw new Error(loaded.error);
       }
 
       // Direction load is best-effort — an empty map degrades to raw signed β,
@@ -172,20 +173,11 @@ export function createAttributionRouter(
       // orientation is still a usable notice-vs-impact signal).
       const metricDirections = await loadMetricDirections();
 
-      const ranking = getTopImpactProducerClasses(loaded.observations, {
+      return getTopImpactProducerClasses(loaded.observations, {
         metricDirections,
         topN,
       });
-      res.json(ranking);
-    } catch (err: any) {
-      // Defensive — the seam returns a result object and the lens is pure, so
-      // neither throws; this guard just guarantees Express never returns a
-      // bodyless 500 if that contract is ever broken upstream.
-      console.error(
-        `[attribution-api] unexpected error (impact): ${err?.message || String(err)}`,
-      );
-      res.status(500).json({ error: err?.message || String(err) });
-    }
+    });
   });
 
   return router;

@@ -18,6 +18,7 @@ import {
 } from "../cost/index.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { aggregatorRouteNoQuery, isolateAggregator, schemaValidationError } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 import { z } from "zod";
 
 /**
@@ -34,7 +35,11 @@ const SessionTokensQuerySchema = z.object({
 export function createMetricsRouter() {
   const router = Router();
 
-  // GET /summary — Human-readable system summary
+  // GET /summary — Human-readable system summary.
+  //
+  // Not an isolateAggregator route: the success path is a text/plain send, not a
+  // JSON body, so the seam (which JSONs its produce result) does not fit. ADR-0027
+  // eighth sweep: the catch adopts the pino `err`-field seam instead.
   router.get("/summary", async (req, res) => {
     try {
       const stats = await getAggregateStats(20);
@@ -51,6 +56,7 @@ export function createMetricsRouter() {
 
       res.type("text/plain").send(lines.join("\n"));
     } catch (err: any) {
+      logger.error({ err }, "[api/metrics] /summary failed");
       res.status(500).json({ error: err.message });
     }
   });
@@ -80,7 +86,7 @@ export function createMetricsRouter() {
       try {
         costByClass = await getRollingCostByClass();
       } catch (costErr: any) {
-        console.error(`[api/metrics] costByClass projection failed: ${costErr?.message || costErr}`);
+        logger.error({ err: costErr }, "[api/metrics] costByClass projection failed");
       }
       return { stats, trend, costByClass };
     }),
@@ -107,8 +113,10 @@ export function createMetricsRouter() {
       const result = await getQualityGateTrend(count);
       res.json(result);
     } catch (err: any) {
-      // AC: never 500 on this endpoint — empty state instead
-      console.error(`[api/metrics] /metrics/quality-gates failed: ${err.message}`);
+      // AC: never 500 on this endpoint — empty state instead. Not an
+      // isolateAggregator route (its 500 would regress this 200-empty fallback);
+      // ADR-0027 eighth sweep: the catch adopts the pino `err`-field seam.
+      logger.error({ err }, "[api/metrics] /metrics/quality-gates failed");
       res.status(200).json({
         trend: [],
         summary: {
@@ -140,7 +148,7 @@ export function createMetricsRouter() {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
 
       const trend = await getMetricsTrend(count).catch((err: any) => {
-        console.error(`[api/metrics] anchor-distribution: trend read failed: ${err.message}`);
+        logger.error({ err }, "[api/metrics] anchor-distribution: trend read failed");
         return [];
       });
 

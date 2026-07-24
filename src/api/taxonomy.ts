@@ -30,7 +30,7 @@
  * IMPORT time on a malformed file (its documented fail-loud invariant), so a
  * served process always has a valid table. As belt-and-braces this route still
  * degrades a runtime read failure to the empty SAFE DEFAULT with
- * `degraded: true` plus a logged `console.error`, NOT a 500. The only non-200
+ * `degraded: true` plus a logged `logger.error`, NOT a 500. The only non-200
  * is a 400 `schema-validation-failed` for a malformed query. No `eventBus`
  * parameter is needed (pure read), consistent with `createAutopilotBoardRouter`.
  */
@@ -49,6 +49,7 @@ import {
   SIGNAL_CLASS_COOLDOWNS,
   type DispatchClassRow,
 } from "../taxonomy/classes.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // The loaded views the route reads — one authoritative source
@@ -170,8 +171,12 @@ export function createTaxonomyRouter(deps: TaxonomyRouterDeps = {}) {
       // has a valid table; honour the never-throw contract here anyway — a
       // thrown load degrades to the empty default, it does not 500.
       degraded = true;
-      console.error(
-        `[taxonomy/classes] taxonomy load threw — degraded empty alphabet: ${err?.message || err}`,
+      // Not a 500: the empty-alphabet body (with degraded:true) IS the
+      // never-throw SAFE DEFAULT, so the isolateAggregator seam does not apply.
+      // ADR-0027 eighth sweep: the log adopts the pino `err`-field seam.
+      logger.error(
+        { err },
+        "[taxonomy/classes] taxonomy load threw — degraded empty alphabet",
       );
     }
 
