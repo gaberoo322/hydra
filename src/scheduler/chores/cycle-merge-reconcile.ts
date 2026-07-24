@@ -304,6 +304,19 @@ export async function runCycleMergeReconcile(
         if (enrolledAlready) {
           result.selfArmSkipped += 1;
         } else {
+          // Issue #3579: forward the anchorType read off the metrics hash this
+          // chore is already upgrading — do NOT hardcode `work-queue`. The prior
+          // hardcode wrote a WRONG lane for every non-dev self-armed cycle (a
+          // signal-class / grill / qa cycle would be mislabelled `work-queue`),
+          // and because the merge-watch chore later forwards `entry.anchorType`
+          // onto the FIRST cycle-record write for an un-joinable bare-UUID
+          // cycleId, that wrong lane became the record's permanent
+          // classification. DEGRADE-TRUTHFULLY: when the hash carries no explicit
+          // anchorType, OMIT the field so the entry inherits the merge-watch
+          // enrichment's inference-then-`unclassified` path — an honest
+          // `unclassified` beats a confidently-wrong `work-queue` (NEVER-GUESS,
+          // #2822). A blank/whitespace value degrades the same way.
+          const hashAnchorType = (m.anchorType || "").trim();
           const armEntry: PendingEnrollEntry = {
             prNumber,
             // Tier is unknown from the cycle-metrics hash here; null is the
@@ -311,9 +324,9 @@ export async function runCycleMergeReconcile(
             // resolves the real tier server-side at landing time.
             tier: null,
             cycleId,
-            anchorType: "work-queue",
             registeredAt: Date.now(),
           };
+          if (hashAnchorType) armEntry.anchorType = hashAnchorType;
           let armed: PendingEnrollAddResult;
           try {
             armed = await armPending(armEntry);

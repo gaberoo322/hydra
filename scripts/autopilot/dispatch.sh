@@ -23,6 +23,42 @@ set -uo pipefail
 
 LOG="${HYDRA_AUTOPILOT_LOG:-/tmp/hydra-autopilot-nightly.log}"
 
+# resolve_anchor_type_from_skill <skill>
+#
+# SINGLE SOURCE OF TRUTH for the skill→anchorType lane mapping (issue #3579).
+# Echoes the first-class anchorType lane for a dispatch skill, or an
+# `unmapped:<skill>` sentinel (never an empty string) for an unknown skill. Both
+# `cycle-record` (the reap-time first-write) and `holdback-pending` (the arming
+# write) resolve through this ONE function so the two write seams can never
+# disagree — a divergence would split one lane across two buckets in the
+# aggregator. Lanes MUST stay aligned with ANCHOR_TYPE_BY_CLASS in
+# src/autopilot/anchor-type.ts (the class-name equivalent read-side classifier).
+# Every orchestrator skill has a `hydra-target-*` sibling that shares the lane
+# (dev_orch/dev_target → work-queue, etc.).
+#
+# A blank skill yields a bare `unmapped` (never an empty string) — the empty
+# string is exactly what the metrics aggregator (src/metrics/aggregate.ts)
+# buckets as "unknown", the data-quality failure this mapping exists to avoid.
+resolve_anchor_type_from_skill() {
+  case "${1:-}" in
+    hydra-dev|hydra-target-build) echo "work-queue" ;;
+    hydra-qa|hydra-target-qa) echo "qa-review" ;;
+    hydra-grill) echo "grill" ;;
+    hydra-cleanup|hydra-target-cleanup) echo "cleanup" ;;
+    hydra-research|hydra-issue-research|hydra-target-research) echo "research" ;;
+    hydra-sweep|hydra-target-sweep) echo "sweep" ;;
+    hydra-discover|hydra-target-discover) echo "discover" ;;
+    hydra-tool-scout) echo "scout" ;;
+    hydra-architect|hydra-architecture-scan) echo "architecture" ;;
+    hydra-retro|hydra-target-retro) echo "retro" ;;
+    hydra-wire-or-retire) echo "wire-or-retire" ;;
+    hydra-design-qa) echo "design-qa" ;;
+    hydra-doctor) echo "health" ;;
+    "") echo "unmapped" ;;
+    *) echo "unmapped:${1}" ;;
+  esac
+}
+
 cmd="${1:-}"
 shift || true
 
@@ -179,38 +215,20 @@ print(json.dumps({
     # classifiers never disagree — a divergence would split one lane across two
     # buckets in the aggregator. Every orchestrator skill has a `hydra-target-*`
     # sibling that shares the lane (dev_orch/dev_target → work-queue, etc.).
-    case "$skill" in
-      hydra-dev|hydra-target-build) anchor_type="work-queue" ;;
-      hydra-qa|hydra-target-qa) anchor_type="qa-review" ;;
-      hydra-grill) anchor_type="grill" ;;
-      # Issue #3284: a cascade escalation re-dispatches a cheap signal class
-      # (today `cleanup_orch`/`hydra-cleanup`) at a stronger tier; reap now
-      # fires a cycle-record for that escalated completion so its outcome record
-      # carries the escalation provenance. Map the skill so the escalated cleanup
-      # cycle buckets to a first-class `cleanup` anchorType, not `unmapped:*`.
-      hydra-cleanup|hydra-target-cleanup) anchor_type="cleanup" ;;
-      hydra-research|hydra-issue-research|hydra-target-research) anchor_type="research" ;;
-      hydra-sweep|hydra-target-sweep) anchor_type="sweep" ;;
-      hydra-discover|hydra-target-discover) anchor_type="discover" ;;
-      hydra-tool-scout) anchor_type="scout" ;;
-      hydra-architect|hydra-architecture-scan) anchor_type="architecture" ;;
-      hydra-retro|hydra-target-retro) anchor_type="retro" ;;
-      hydra-cleanup|hydra-target-cleanup) anchor_type="cleanup" ;;
-      hydra-wire-or-retire) anchor_type="wire-or-retire" ;;
-      hydra-design-qa) anchor_type="design-qa" ;;
-      hydra-doctor) anchor_type="health" ;;
-      *)
-        # A skill with no first-class mapping. Emit a diagnostic so the gap is
-        # visible (and actionable — add a case above), and record a non-empty,
-        # self-describing sentinel so the cycle is NEVER bucketed as "unknown".
-        # A blank $skill (shouldn't happen — it's validated non-empty above)
-        # degrades to a bare "unmapped" rather than an empty string.
-        echo "[autopilot] dispatch: cycle-record skill '$skill' has no anchor_type mapping — recording 'unmapped:$skill' (add a case in dispatch.sh)" >&2
-        if [ -n "$skill" ]; then
-          anchor_type="unmapped:$skill"
-        else
-          anchor_type="unmapped"
-        fi
+    # Issue #3579: resolve through the shared `resolve_anchor_type_from_skill`
+    # function (defined at the top of this script) — the ONE source of truth the
+    # arming path (`holdback-pending`) also uses, so the two write seams can never
+    # disagree. Issue #3284: a cascade escalation re-dispatches a cheap signal
+    # class (e.g. `cleanup_orch`/`hydra-cleanup`) at a stronger tier; reap fires a
+    # cycle-record for that escalated completion, and the shared mapping buckets
+    # it to a first-class lane rather than an `unmapped:*` sentinel.
+    anchor_type="$(resolve_anchor_type_from_skill "$skill")"
+    # A skill with no first-class mapping resolves to `unmapped:<skill>` (never an
+    # empty string). Emit a diagnostic so the gap is visible and actionable — add
+    # a case in `resolve_anchor_type_from_skill` above.
+    case "$anchor_type" in
+      unmapped|unmapped:*)
+        echo "[autopilot] dispatch: cycle-record skill '$skill' has no anchor_type mapping — recording '$anchor_type' (add a case in resolve_anchor_type_from_skill)" >&2
         ;;
     esac
     # Map status → task-counter buckets so /api/metrics sees the right
@@ -377,6 +395,17 @@ print(json.dumps(body))
     #                side `if tier in {2,3,4}` guard, #3078).
     #   [anchor_type] optional explicit dispatch-class anchorType (#2800); omitted
     #                → the merge-watch enrichment infers, then `unclassified`.
+    #                Issue #3579: when this positional is empty AND the caller
+    #                exports `HYDRA_ARM_SKILL=<dispatch-skill>`, the anchorType is
+    #                resolved through the SHARED `resolve_anchor_type_from_skill`
+    #                mapping — the same one `cycle-record` uses — so the arming
+    #                write and the reap-time first-write can never disagree on the
+    #                lane. This lets the arming caller pass the dispatch class it
+    #                already knows instead of hardcoding a literal `work-queue` for
+    #                EVERY arm (the wrong lane for a signal-class arm). A skill with
+    #                no mapping resolves to `unmapped:*`, which is DROPPED (omit →
+    #                unclassified) rather than written — an honest `unclassified`
+    #                beats a confidently-wrong lane (NEVER-GUESS, #2822).
     #   [worktree_branch] optional synthesised worktree branch of the dispatch that
     #                opened the PR (issue #3539). When present it becomes the
     #                effective cycleId of the pending entry, mirroring reap's
@@ -404,6 +433,25 @@ print(json.dumps(body))
     if [ -z "$pr_number" ] || [ -z "$cycle_id" ]; then
       echo "dispatch.sh: holdback-pending requires <pr_number> <tier> <cycle_id> [anchor_type] [worktree_branch]" >&2
       exit 2
+    fi
+    # Issue #3579: resolve anchorType from the dispatch skill when the caller left
+    # the literal 4th positional empty but exported HYDRA_ARM_SKILL. This routes
+    # the arming write through the SAME shared mapping the reap-time first-write
+    # uses, so the arming caller can pass the class it already knows instead of a
+    # blanket `work-queue` default (which mislabels every signal-class arm). An
+    # unmapped skill resolves to `unmapped:*` — DROP it (leave anchor_type empty →
+    # omit → the merge-watch infers-then-`unclassified` path) rather than write a
+    # bogus lane: DEGRADE-TRUTHFULLY over NEVER-GUESS (#2822).
+    if [ -z "$anchor_type" ] && [ -n "${HYDRA_ARM_SKILL:-}" ]; then
+      resolved_arm_anchor_type="$(resolve_anchor_type_from_skill "$HYDRA_ARM_SKILL")"
+      case "$resolved_arm_anchor_type" in
+        unmapped|unmapped:*)
+          echo "[autopilot] dispatch: holdback-pending skill '$HYDRA_ARM_SKILL' has no anchor_type mapping — omitting anchorType (degrades to unclassified) rather than writing a wrong lane (issue #3579)" >&2
+          ;;
+        *)
+          anchor_type="$resolved_arm_anchor_type"
+          ;;
+      esac
     fi
     # Issue #3539: prefer the worktree branch as the join key when the caller
     # supplied one — reap keys its classified cycle-record on the branch for a
