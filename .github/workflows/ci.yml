@@ -128,8 +128,29 @@ jobs:
           npm audit --omit=dev --audit-level=high || true
           exit $STATUS
 
+  # Scoped advisory allowlist (issue #3607, operator-authored Tier-4).
+  #
+  # GHSA-qwww-vcr4-c8h2 ("React Router: RSC Mode CSRF Bypass Allows Action
+  # Execution Before 400 Response") covers the ENTIRE published react-router
+  # 7.x `>=7.12.0` range (transitively via react-router-dom). There is no
+  # autonomous forward fix: the latest published react-router-dom is 7.18.1
+  # (in range), `>=8.3.0` does not exist on npm yet, and npm's only suggested
+  # "fix" is a semver-major DOWNGRADE that reopens the 4 HIGH advisories PR
+  # #3598 (e46181f9) just closed — strictly worse. Crucially, the Hydra
+  # dashboard is a Vite SPA and does NOT use React Router's RSC (React Server
+  # Components) mode, so this RSC-mode-specific CSRF advisory does not apply
+  # to how the dashboard renders; `npm audit` flags it purely on version
+  # range. We therefore waive this ONE advisory id via AUDIT_ALLOWLIST. Any
+  # other high/critical advisory — including any future react-router CVE with
+  # a different GHSA id — still fails the gate. Remove this waiver once
+  # react-router-dom `>=8.3.0` publishes and the dep is bumped forward.
   npm-audit-dashboard:
     runs-on: self-hosted
+    env:
+      # Comma-separated GHSA ids waived from the dashboard audit gate. See the
+      # block comment above before adding an id — each is an operator-authored
+      # Tier-4 exception, justified in the PR that introduces it.
+      AUDIT_ALLOWLIST: GHSA-qwww-vcr4-c8h2
     steps:
       - uses: actions/checkout@v4
 
@@ -145,10 +166,14 @@ jobs:
           {
             echo "## npm audit — dashboard (high+ / critical, prod deps)"
             echo ""
+            if [ -n "$AUDIT_ALLOWLIST" ]; then
+              echo "_Scoped allowlist active (issue #3607): \`$AUDIT_ALLOWLIST\` — SPA, not RSC mode._"
+              echo ""
+            fi
             if [ "$STATUS" -eq 0 ]; then
               echo "No high or critical advisories found."
             else
-              echo "Advisories blocking merge:"
+              echo "Advisories found (allowlisted ids do not block):"
               echo ""
               echo "| Package | Severity | Range | Advisories |"
               echo "| --- | --- | --- | --- |"
@@ -167,7 +192,33 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           npm audit --omit=dev --audit-level=high || true
-          exit $STATUS
+          # Pass/fail decision with the scoped allowlist applied. A high/critical
+          # vuln blocks merge only if it carries at least one advisory (a `via`
+          # object) whose GHSA id is NOT in AUDIT_ALLOWLIST. Pure-transitive
+          # entries (via-string only, no advisory object) inherit from their
+          # parent package and never block on their own — the parent is judged
+          # directly, so a new CVE cannot slip through a transitive alias.
+          node -e "
+            const a = require('./audit.json');
+            const allow = new Set((process.env.AUDIT_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean));
+            const v = a.vulnerabilities || {};
+            const blocking = [], waived = [];
+            for (const [name, info] of Object.entries(v)) {
+              if (!['high','critical'].includes(info.severity)) continue;
+              const advs = (info.via || []).filter(x => typeof x === 'object' && x.url);
+              if (advs.length === 0) continue; // pure-transitive; parent is evaluated
+              const ids = advs.map(x => (x.url.match(/GHSA-[a-z0-9-]+/i) || [x.url])[0]);
+              const unwaived = ids.filter(id => !allow.has(id));
+              if (unwaived.length) blocking.push(name + ' (' + unwaived.join(', ') + ')');
+              else waived.push(name + ' (' + ids.join(', ') + ')');
+            }
+            if (waived.length) console.log('Waived by AUDIT_ALLOWLIST: ' + waived.join('; '));
+            if (blocking.length) {
+              console.error('Blocking high/critical advisories: ' + blocking.join('; '));
+              process.exit(1);
+            }
+            console.log('No non-allowlisted high or critical advisories. Gate passes.');
+          "
 
   # Tier gate (issue #243, ADR-0001 + ADR-0004 + ADR-0015 work-order step 3).
   # Classifies changed files into the monotonic Modification Tier ladder
