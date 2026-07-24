@@ -33,6 +33,7 @@ import {
   saveDesignConcept,
   getDesignConcept,
   listDesignConcepts,
+  pruneDesignConceptIndex,
   approveDesignConcept,
   resolveDesignConceptForQa,
   computeGreenLight,
@@ -208,6 +209,12 @@ export function createDesignConceptsRouter() {
       const scope: DesignConceptScope | undefined = parsedQuery.data?.scope;
       const limit = parsedQuery.data?.limit ?? 50;
 
+      // Keep the index consistent on the list route. The prune used to be an
+      // implicit side-effect of `listDesignConcepts`; issue #3605 split it out
+      // into the explicit `pruneDesignConceptIndex` write, so the read path is
+      // now side-effect-free and the "prune-then-list" behavior lives here at
+      // the call site where it is visible.
+      await pruneDesignConceptIndex();
       const items = await listDesignConcepts({ scope, limit });
       return { items, count: items.length };
     }),
