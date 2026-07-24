@@ -61,46 +61,10 @@ services:
           cpus: "2"
           memory: 4G
 
-  # Local CPU Ollama on the hydra-server, serving ONLY the dense embedding
-  # model (nomic-embed-text, 768-dim). This removes OpenViking's hot search
-  # path from its hard dependency on the gaming PC (gabes-desktop-1): when the
-  # gaming PC is offline, embeddings (and therefore searchKnowledge / text
-  # indexing) stay up locally; only the VLM-dependent image/document indexing
-  # degrades. The heavy GPU-bound VLM (gemma4:e4b) intentionally stays on the
-  # gaming PC. See docs/reference.md "OpenViking embedding/VLM backend split"
-  # and issue #1795. The nomic-embed-text model is ~270MB and runs fine on the
-  # hydra-server's CPU (8 cores / 62GB, no GPU).
-  #
-  # BRING-UP CONTRACT (issue #1812): start the stack with a bare
-  # `docker compose up -d` (NO service argument). `openviking` declares
-  # `depends_on: ollama-embed (condition: service_healthy)` below, so a full
-  # bring-up always pulls this service in. A targeted `docker compose up -d
-  # openviking` ALSO honours that dependency — but a targeted bring-up of any
-  # OTHER service (e.g. `up -d postgres`) will NOT create ollama-embed, leaving
-  # OpenViking's hot embedding path with an unreachable backend and a failing
-  # health probe. `restart: unless-stopped` only re-honours an already-created
-  # container across host reboots; it does not create the container on first
-  # bring-up. /hydra-doctor detects a missing ollama-embed and re-creates it.
-  ollama-embed:
-    image: ollama/ollama:latest
-    entrypoint: ["/bin/sh", "/entrypoint.sh"]
-    volumes:
-      - ollama-embed-data:/root/.ollama
-      - ./docker/ollama-embed-entrypoint.sh:/entrypoint.sh:ro
-    healthcheck:
-      # Healthy only once the embedding model is actually pulled and loadable —
-      # /api/tags lists locally-available models; grep ensures the pull landed.
-      test: ["CMD-SHELL", "ollama list | grep -q nomic-embed-text || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: 6G
+  # (The `ollama-embed` dense-embedding service was retired at the TEI cutover,
+  # issue #3543 / teardown #3544 — its replacement `tei-embed` is defined below.
+  # The VLM backend it once shared the gaming PC with also moved off that host
+  # onto the in-repo claude-cli /vlm shim, #3542.)
 
   # Local CPU TEI (HF Text Embeddings Inference) on the hydra-server, the
   # cutover replacement for ollama-embed as OpenViking's dense embedding
@@ -172,12 +136,12 @@ services:
       - ./docker/ov.conf:/app/ov.conf:ro
       - /home/gabe/hydra/config:/config:ro
     extra_hosts:
+      # OpenViking reaches the in-repo claude-cli /vlm shim (issue #3542) and the
+      # local TEI embedding backend (issue #3543) over host.docker.internal — see
+      # docker/ov.conf `vlm.api_base` / `embedding.dense.api_base`. The Tailnet
+      # `gabes-desktop-1` (gaming-PC Ollama) mapping was removed at the VLM cutover
+      # (#3544): OpenViking no longer talks to the gaming PC.
       - "host.docker.internal:host-gateway"
-      # Local Ollama (gaming PC) over Tailnet — serves OV's VLM backend only
-      # now (embedding moved to the local ollama-embed service, issue #1795).
-      # Container has no MagicDNS, so map the Tailscale IP here and reference
-      # the hostname in docker/ov.conf. See ADR / hydra-doctor 2026-06-05.
-      - "gabes-desktop-1:100.69.55.127"
     environment:
       - OPENVIKING_CONFIG_FILE=/app/ov.conf
     depends_on:
@@ -207,8 +171,6 @@ volumes:
   openviking-data:
     driver: local
   vikingdb-data:
-    driver: local
-  ollama-embed-data:
     driver: local
   tei-embed-data:
     driver: local

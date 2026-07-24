@@ -22,14 +22,12 @@ import {
   probeOv,
   probeEmbedBackend,
   probeSkillsEndpoint,
-  probeOllamaVlm,
   classifyOvSearchProbe,
   classifyServiceProbe,
   classifyServiceBoolean,
   DEGRADED_LATENCY_THRESHOLD_MS,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type ServiceProbeResult,
-  type OllamaVlmProbeResult,
   type ProbeOutcome,
 } from "../src/health/probe.ts";
 import type { OvResult } from "../src/knowledge-base/ov-request.ts";
@@ -308,69 +306,11 @@ describe("probeSkillsEndpoint", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// probeOllamaVlm — Tailnet VLM-host liveness (issue #2278). A DIRECT
-// reachability check of gabes-desktop-1:11434 (the host OpenViking uses for its
-// vision/indexing model), distinct from the OV-internal embed-backend probe.
-// Folds to {status:'ok'|'down', latencyMs, error?} — `ok` on ANY HTTP answer
-// (liveness, not a contract endpoint), `down` only on a transport failure /
-// timeout (the recurring silent skill-catalog failure #2277/#2269/…).
-// ---------------------------------------------------------------------------
-
-describe("probeOllamaVlm", () => {
-  test("2xx response → ok with a numeric latency", async () => {
-    const fetchImpl = (async () => ({ ok: true }) as Response) as typeof globalThis.fetch;
-    const r = await probeOllamaVlm({ fetchImpl });
-    assert.equal(r.status, "ok");
-    assert.equal(typeof r.latencyMs, "number");
-    assert.ok(r.latencyMs >= 0);
-    assert.equal(r.error, undefined);
-  });
-
-  test("targets ${url}/api/health (the issue's documented liveness path)", async () => {
-    let calledUrl: string | undefined;
-    const fetchImpl = (async (u: string) => {
-      calledUrl = u;
-      return { ok: true } as Response;
-    }) as typeof globalThis.fetch;
-    await probeOllamaVlm({ url: "http://gabes-desktop-1:11434", fetchImpl });
-    assert.equal(calledUrl, "http://gabes-desktop-1:11434/api/health");
-  });
-
-  test("non-2xx response → STILL ok (liveness: any HTTP answer proves reachability)", async () => {
-    // Ollama 404s on an unmapped path, but a 404 still proves the HTTP server
-    // answered — the host is reachable, so this is `ok`, not `down`. The probe is
-    // a liveness check, not a contract endpoint, so it does NOT gate on r.ok.
-    const fetchImpl = (async () => ({ ok: false, status: 404 }) as Response) as typeof globalThis.fetch;
-    const r = await probeOllamaVlm({ fetchImpl });
-    assert.equal(r.status, "ok");
-    assert.equal(typeof r.latencyMs, "number");
-  });
-
-  test("AbortSignal timeout (TimeoutError) → {down, error}, never re-throws", async () => {
-    const fetchImpl = (async () => {
-      const err = new Error("The operation was aborted due to timeout");
-      err.name = "TimeoutError";
-      throw err;
-    }) as typeof globalThis.fetch;
-    let r: OllamaVlmProbeResult;
-    await assert.doesNotReject(async () => {
-      r = await probeOllamaVlm({ fetchImpl });
-    });
-    assert.equal(r!.status, "down");
-    assert.equal(typeof r!.latencyMs, "number", "latency is the elapsed wall-clock, always numeric");
-    assert.match(r!.error!, /aborted due to timeout/);
-  });
-
-  test("transport failure (ECONNREFUSED — host off) → {down, error}", async () => {
-    const fetchImpl = (async () => {
-      throw new Error("connect ECONNREFUSED");
-    }) as typeof globalThis.fetch;
-    const r = await probeOllamaVlm({ fetchImpl });
-    assert.equal(r.status, "down");
-    assert.match(r.error!, /ECONNREFUSED/);
-  });
-});
+// Issue #3544: the `probeOllamaVlm` (Tailnet VLM-host liveness, #2278) test
+// block was removed with the probe itself at the OpenViking VLM cutover —
+// OpenViking's VLM backend moved off the gaming-PC Ollama host onto the in-repo
+// claude-cli shim (#3542), so a direct reachability probe of that host measured
+// nothing OpenViking depends on.
 
 // ---------------------------------------------------------------------------
 // classifyOvSearchProbe — pure timeout-vs-failure mapping (issue #1032).

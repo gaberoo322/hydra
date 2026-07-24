@@ -66,7 +66,7 @@ import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // ProbeInputs.darkOutcomes — the deep-health dark-outcome rule then reads it from
 // the snapshot, staying pure. `evaluateDarkOutcomes` is contractually never-throw.
 import { evaluateDarkOutcomes } from "../scheduler/chores/wiring-liveness-outcomes.ts";
-import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
+import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
 import { parseRedisInfoSnapshot } from "./diagnostics.ts";
 // Issue #3230: the ProbeInputs named-record type comes from the zero-logic leaf.
 // Issue #3393: the pure settled-record → ProbeInputs mapping (assembleProbeInputs)
@@ -88,38 +88,36 @@ import {
   getWolGates,
   WakeGate,
   maybeWakeEmbedBackend,
-  maybeWakeVlmHost,
 } from "./wol.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
-// ---- Wake-on-LAN auto-recovery (issues #2228 + #2335 + #2570 + #2834) -------
+// ---- Wake-on-LAN auto-recovery (issues #2228 + #2570 + #2834) ---------------
 //
-// The probe-failure wake TRIGGERS (`maybeWakeEmbedBackend` / `maybeWakeVlmHost`)
-// are recovery POLICY, not probe enumeration, so issue #2834 relocated them into
-// the WoL module that already owns the mechanism (packet build, `WakeGate` timing,
-// `sendMagicPacket`, `attempt*Wake`). The fan-out now IMPORTS them from
-// src/health/wol.ts and calls them from its probe steps — it no longer owns a
-// slice of the WoL policy itself.
+// The probe-failure wake TRIGGER (`maybeWakeEmbedBackend`) is recovery POLICY,
+// not probe enumeration, so issue #2834 relocated it into the WoL module that
+// already owns the mechanism (packet build, `WakeGate` timing, `sendMagicPacket`,
+// `attempt*Wake`). The fan-out now IMPORTS it from src/health/wol.ts and calls it
+// from its embed-backend probe step — it no longer owns a slice of the WoL policy
+// itself. (Issue #3544: the parallel VLM-host wake trigger `maybeWakeVlmHost`
+// #2335 was retired at the VLM cutover.)
 //
-// The cooldown + max-attempt state for both triggers must persist ACROSS
-// heartbeats/health-deep requests (the fan-out runs once per request), so each is
-// a single process-lifetime WakeGate — not a per-call object. Those two singletons
-// (embed-backend gate #2228 + VLM-host gate #2335) once lived HERE as module-level
-// `new WakeGate(...)` instances, which left this fan-out holding mutable
-// module-global state and bled the gates' retry budget across test cases.
+// The cooldown + max-attempt state for the trigger must persist ACROSS
+// heartbeats/health-deep requests (the fan-out runs once per request), so it is
+// a single process-lifetime WakeGate — not a per-call object. That singleton
+// (embed-backend gate #2228) once lived HERE as a module-level `new WakeGate(...)`
+// instance, which left this fan-out holding mutable module-global state and bled
+// the gate's retry budget across test cases.
 //
 // Issue #2570 relocated that singleton lifecycle into the WoL Adapter that owns
 // WakeGate (src/health/wol.ts `getWolGates()` / `resetWolGates()`). The adapter
-// lazily constructs the SAME embed + vlm pair from the WoL config and hands it
-// back on every call — preserving cross-request persistence — while the two gates
-// stay distinct so the embed and VLM wake budgets remain independent. The embed
-// gate is reset the moment the embed-backend probe reads `running` again; the VLM
-// gate the moment the VLM-host probe reads `ok` again, so a future outage gets a
-// fresh budget of wakes. `collectProbeInputs` reads NO module-global mutable state
-// — the gates flow in through the injectable deps bag, defaulting to the adapter's
-// singletons (so a no-gate production caller is unchanged).
+// lazily constructs the embed gate from the WoL config and hands it back on every
+// call — preserving cross-request persistence. The embed gate is reset the moment
+// the embed-backend probe reads `running` again, so a future outage gets a fresh
+// budget of wakes. `collectProbeInputs` reads NO module-global mutable state —
+// the gate flows in through the injectable deps bag, defaulting to the adapter's
+// singleton (so a no-gate production caller is unchanged).
 
 // ---- The unified probe registry — keyed, position-free (issue #3263/#3372) ----
 //
@@ -254,8 +252,6 @@ export interface CollectProbeDeps {
   probeServiceImpl?: typeof probeService;
   probeOvImpl?: typeof probeOv;
   probeEmbedBackendImpl?: typeof probeEmbedBackend;
-  /** Issue #2278: the Tailnet Ollama VLM-host liveness probe (default: real fetch). */
-  probeOllamaVlmImpl?: typeof probeOllamaVlm;
   /**
    * Issue #2386: the in-process OV skill-catalog read (default: the real
    * getSkillCatalogState). A synchronous, never-throwing in-memory copy — NOT a
@@ -283,14 +279,6 @@ export interface CollectProbeDeps {
    * touching the adapter singleton.
    */
   embedWakeGate?: WakeGate;
-  /**
-   * Issue #2498/#2570: the VLM-host Wake-on-LAN gate forwarded to
-   * {@link maybeWakeVlmHost} (default: the WoL Adapter's `vlm` singleton,
-   * src/health/wol.ts `getWolGates().vlm`). Kept distinct from `embedWakeGate`
-   * so the two wake budgets stay independent — no cross-wiring even though both
-   * wake the same physical host.
-   */
-  vlmWakeGate?: WakeGate;
 }
 
 export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeInputs> {
@@ -315,20 +303,19 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeServiceImpl = probeService,
     probeOvImpl = probeOv,
     probeEmbedBackendImpl = probeEmbedBackend,
-    probeOllamaVlmImpl = probeOllamaVlm,
     skillCatalogState = getSkillCatalogState,
     darkOutcomesEval = evaluateDarkOutcomes,
     targetServiceName = getTargetServiceName,
-    // Issue #2498/#2570: default to the WoL Adapter's process-lifetime gate pair
-    // (src/health/wol.ts getWolGates()) so a no-gate production caller is
+    // Issue #2498/#2570: default to the WoL Adapter's process-lifetime embed gate
+    // (src/health/wol.ts getWolGates().embed) so a no-gate production caller is
     // identical to today and keeps cross-request cooldown/attempt persistence
-    // (ONE embed + ONE vlm budget across requests). A test injects a fresh
-    // WakeGate to exercise exhaustion without touching the singleton — and, for
-    // the default path, can call resetWolGates() to clear the memo between cases.
-    // Distinct local names (embedGate/vlmGate) avoid self-referential destructure
-    // shadowing against the same-named CollectProbeDeps fields.
+    // (ONE embed budget across requests). A test injects a fresh WakeGate to
+    // exercise exhaustion without touching the singleton — and, for the default
+    // path, can call resetWolGates() to clear the memo between cases. The distinct
+    // local name (embedGate) avoids self-referential destructure shadowing against
+    // the same-named CollectProbeDeps field. (Issue #3544: the parallel VLM-host
+    // wake gate was retired with the VLM cutover.)
     embedWakeGate: embedGate = getWolGates().embed,
-    vlmWakeGate: vlmGate = getWolGates().vlm,
   } = deps;
 
   // Issue #3263/#3372: the unified probe registry — the SINGLE source of the
@@ -448,25 +435,13 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     // projectHealthDeepResponse (not parseProbes).
     { kind: "async", key: "ovSearchWindow", run: () => ovSearchWindow(24) },
     { kind: "async", key: "knowledgeContext", run: () => knowledgeContextAvailability(7) },
-    {
-      kind: "async",
-      // Issue #2278: DIRECT liveness probe of the Tailnet Ollama VLM host
-      // (gabes-desktop-1:11434) — the host OpenViking uses for its vision/indexing
-      // model. Distinct from the serviceProbes embed-backend probe (OV-internal
-      // ollama-embed). A `down` result is surfaced as `ollamaVlm` on the wire and
-      // flips the deep-health envelope to `degraded: true` (a visibility signal,
-      // never a 5xx). The probe is contractually never-throwing.
-      // Issue #2335: if the VLM host reads `status:down`, FIRE a best-effort
-      // Wake-on-LAN of the gaming PC and return the current probe result
-      // immediately (never block the fan-out on a re-probe). This is the host that
-      // OpenViking's skill-registration handler blocks on, so waking it lets the
-      // FROZEN registration chore self-heal the empty skill catalog on the next
-      // hourly tick once the box answers. THIS tick still surfaces `down` so the
-      // #2278 degraded signal + #2131 alert stay correct. NEVER throws.
-      key: "ollamaVlm",
-      run: async () => maybeWakeVlmHost(await probeOllamaVlmImpl(), { gate: vlmGate }),
-    },
-    // ---- The three inline in-process reads (issue #3372) --------------------
+    // Issue #3544: the Tailnet Ollama VLM-host liveness probe (`ollamaVlm`, #2278)
+    // + its VLM-host Wake-on-LAN wire-up (#2335) were retired at the VLM cutover —
+    // OpenViking's VLM backend moved off the gaming-PC Ollama host onto the in-repo
+    // claude-cli shim (#3542), so a direct reachability probe of that host measured
+    // nothing OpenViking depends on. The embed-backend probe (in `serviceProbes`
+    // above) and its embed WoL wake are unaffected.
+    // ---- The inline in-process reads (issue #3372) --------------------------
     //
     // Not async settle-array probes — direct in-process reads whose failure mode
     // is a SEMANTIC honest-none `fallback` (empty catalog / [] / retired-empty),

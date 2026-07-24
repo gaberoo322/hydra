@@ -89,8 +89,6 @@ function healthySnapshot(): HealthSnapshot {
     // keeps the baseline "fires zero diagnostics" assertion holding.
     darkOutcomes: [],
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
-    // Issue #2278: the Tailnet Ollama VLM-host liveness probe — healthy by default.
-    ollamaVlm: { status: "ok", latencyMs: 12 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },
     emergencyBrake: { engaged: false },
     disk: { availableGb: 120, totalGb: 500, usedPercent: 60 },
@@ -926,9 +924,6 @@ describe("parseProbes", () => {
       patterns: null, reflections: null, ovSearch: null,
       redisInfo: null, emergencyBrake: null,
       ovSearchWindow: null, knowledgeContext: null,
-      // Issue #2278: null = the VLM probe settle rejected; parseProbes defaults it
-      // to a `down` result (honest-none, never a phantom `ok`).
-      ollamaVlm: null,
       // Issue #2386: null = the fan-out could not resolve the live skill-catalog
       // read; parseProbes defaults it to an un-run empty catalog so both
       // skill-catalog rules no-op (honest-none, never a phantom populated catalog).
@@ -1028,7 +1023,6 @@ describe("parseProbes", () => {
       emergencyBrake: { engaged: false },
       ovSearchWindow: null,
       knowledgeContext: null,
-      ollamaVlm: { status: "ok", latencyMs: 8 },
       // Issue #2386: a fully-registered catalog so the skill-catalog rules don't
       // add a diagnostic to this degraded-fan-out assertion.
       skillCatalog: {
@@ -1240,36 +1234,41 @@ describe("projectHealthDeepResponse", () => {
     assert.equal(r.status, "healthy");
     assert.equal(r.checkedAt, CHECKED_AT);
     assert.match(r.summary, /All systems operational/);
+    // Issue #3544: the `ollamaVlm` wire field was removed with the VLM-host probe
+    // at the VLM cutover. `degraded` stays on the envelope (its only historical
+    // source was that probe) but is now always `false`.
     assert.deepEqual(Object.keys(r).sort(), [
       "activeCycle",
       "checkedAt",
-      // Issue #2278: the top-level VLM-host visibility flag + probe result.
       "degraded",
       "diagnostics",
       "infrastructure",
       "intelligence",
-      "ollamaVlm",
       "pipeline",
       "services",
       "status",
       "summary",
     ]);
-    // Issue #2278: a healthy snapshot's VLM probe is `ok` → not degraded.
     assert.equal(r.degraded, false);
-    assert.deepEqual(r.ollamaVlm, { status: "ok", latencyMs: 12 });
   });
 
-  test("a down Ollama VLM host flips degraded:true but keeps the 200 envelope (issue #2278)", () => {
-    const r = project(
+  test("degraded is always false — its only source (the Ollama VLM host probe) was retired at the VLM cutover (issue #3544)", () => {
+    // The #2278 VLM-host visibility probe drove `degraded`; at the VLM cutover it
+    // was removed (OpenViking's VLM moved off the gaming-PC host onto the in-repo
+    // claude-cli shim, #3542). The `degraded` field is retained on the wire so a
+    // future soft-down probe can flip it without an envelope change, but nothing
+    // sets it true now — assert the always-false invariant on both a healthy and a
+    // failing snapshot, and confirm the field is a plain boolean.
+    assert.equal(project(healthySnapshot()).degraded, false);
+    const failing = project(
       clone((s) => {
-        s.ollamaVlm = { status: "down", latencyMs: 5000, error: "TimeoutError" };
+        s.health.redis = false; // an unrelated failure must not resurrect `degraded`
       }),
     );
-    assert.equal(r.degraded, true, "a down VLM host is a visibility-degraded signal");
-    assert.deepEqual(r.ollamaVlm, { status: "down", latencyMs: 5000, error: "TimeoutError" });
-    // It is a VISIBILITY probe, not a hard gate: the rule-derived `status` is
-    // unaffected (no VLM rule fires) and the route still answers 200.
-    assert.equal(r.status, "healthy");
+    assert.equal(failing.degraded, false);
+    assert.equal(typeof failing.degraded, "boolean");
+    // `degraded` is a visibility flag, never the HTTP status: the route still 200s.
+    assert.equal(project(healthySnapshot()).status, "healthy");
   });
 
   test("intelligence carries the EXACT field names (ovSearchTrend, knowledgeContext — typo regression guard)", () => {

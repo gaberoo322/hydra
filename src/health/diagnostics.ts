@@ -33,7 +33,7 @@ import { projectReflectionHealth } from "../metrics/reflection-health.ts";
 // ServiceProbeMap, HealthSnapshot, HealthSeverity, HealthDiagnostic,
 // HealthAssessment, ProbeMetricsInput, ProbeInputs) plus the external-probe
 // `import type` fan-in that HealthSnapshot embeds (OvSearchProbeStatus,
-// OllamaVlmProbeResult, SkillCatalogState, OutcomeVerdict, ReflectionHealthReport)
+// SkillCatalogState, OutcomeVerdict, ReflectionHealthReport)
 // were extracted into the zero-logic leaf `types.ts`. This module — the parse
 // seam — imports the vocabulary DOWN from the leaf and keeps ALL assessment
 // logic. The leaf carries no logic, so importing it adds no runtime edge and
@@ -73,7 +73,7 @@ export type {
 // ServiceProbe, ServiceProbeMap, HealthSnapshot (incl. the Service Probe Map
 // #1869 design), HealthSeverity, HealthDiagnostic, HealthAssessment,
 // ProbeMetricsInput, and ProbeInputs — plus the external-probe `import type`
-// fan-in they embed (OvSearchProbeStatus/OllamaVlmProbeResult from probe.ts,
+// fan-in they embed (OvSearchProbeStatus from probe.ts,
 // SkillCatalogState from knowledge-base/skill-registration.ts, OutcomeVerdict
 // from scheduler/chores/wiring-liveness-outcomes.ts, ReflectionHealthReport
 // from metrics/reflection-health.ts) — now live in the zero-logic leaf
@@ -232,15 +232,6 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   // no-ops. Never a phantom populated verdict.
   const darkOutcomes = probes.darkOutcomes || [];
   const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
-  // Issue #2278: a rejected settle (probes.ollamaVlm === null) defaults to a
-  // `down` result — honest-none (the whole probe settle failed), never a phantom
-  // `ok`. carries a synthetic error so the operator can tell it apart from a real
-  // transport failure surfaced by the probe itself.
-  const ollamaVlm = probes.ollamaVlm || {
-    status: "down" as const,
-    latencyMs: 0,
-    error: "probe settle rejected",
-  };
   const redisInfo = probes.redisInfo ?? null;
   // Issue #744: emergency-brake state. Fail-safe to disengaged if the read
   // rejected (probes.emergencyBrake === null) so a Redis blip never reports a phantom brake.
@@ -279,7 +270,6 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     skillCatalog,
     darkOutcomes,
     ovSearch,
-    ollamaVlm,
     redisInfo,
     emergencyBrake,
     disk,

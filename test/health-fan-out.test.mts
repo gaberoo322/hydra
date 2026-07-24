@@ -45,9 +45,6 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
     probeServiceImpl: (async () => ({ status: "running", latencyMs: 5 })) as any,
     probeOvImpl: (async () => ({ status: "running", latencyMs: 6 })) as any,
     probeEmbedBackendImpl: (async () => ({ status: "running", latencyMs: 7 })) as any,
-    // Issue #2278: stub the Tailnet VLM-host probe so the fan-out never hits the
-    // real gabes-desktop-1:11434 host from a test/CI environment.
-    probeOllamaVlmImpl: (async () => ({ status: "ok", latencyMs: 9 })) as any,
     // Issue #2386: stub the in-process skill-catalog read so the assembled
     // ProbeInputs.skillCatalog is deterministic in tests (no dependency on the
     // process-lifetime registerSkills singleton).
@@ -124,10 +121,6 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.redisInfo as any)?.memoryHuman, "512M");
     assert.equal((probes.redisInfo as any)?.connectedClients, 3);
 
-    // index 19 — the Tailnet Ollama VLM-host liveness probe (issue #2278).
-    assert.equal((probes.ollamaVlm as any)?.status, "ok");
-    assert.equal((probes.ollamaVlm as any)?.latencyMs, 9);
-
     // Issue #2386 — the in-process skill-catalog read (not an async settle-array
     // probe) is merged onto the named record by collectProbeInputs.
     assert.equal((probes.skillCatalog as any)?.registered, 4);
@@ -173,13 +166,8 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal(probes.attributionLedgerCount, 0);
   });
 
-  test("a down VLM host flows into ollamaVlm (issue #2278)", async () => {
-    const probes = await collectProbeInputs(happyDeps({
-      probeOllamaVlmImpl: (async () => ({ status: "down", latencyMs: 5000, error: "timeout" })) as any,
-    }));
-    assert.equal((probes.ollamaVlm as any)?.status, "down");
-    assert.equal((probes.ollamaVlm as any)?.error, "timeout");
-  });
+  // Issue #3544: the "a down VLM host flows into ollamaVlm (#2278)" test was
+  // removed with the ollamaVlm probe at the VLM cutover.
 
   test("pingRedis=false flows into basicHealth.redis", async () => {
     const probes = await collectProbeInputs(happyDeps({ pingRedis: async () => false }));
@@ -265,17 +253,18 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
   });
 });
 
-// Issue #2498: the WakeGate injection seam. `maybeWakeEmbedBackend` /
-// `maybeWakeVlmHost` already accept an injectable `gate` (the #2228 seam), but
-// before #2498 `collectProbeInputs` forwarded NO gate — so a test that wanted
-// to exercise gate exhaustion or cross-request leakage had to reset the
-// module-level singletons (impossible without a module-reset harness this repo
-// lacks). These tests inject a FRESH WakeGate through CollectProbeDeps and
-// assert the fan-out forwards it to the right wake call site, without touching
-// module state. WoL is enabled for these cases so a `failed`/`down` probe
-// actually consults the gate (`recordSend` advances the count before the
-// best-effort, never-throwing UDP broadcast). Each case constructs its own
-// gate, so there is no cross-test leakage.
+// Issue #2498: the WakeGate injection seam. `maybeWakeEmbedBackend` accepts an
+// injectable `gate` (the #2228 seam), but before #2498 `collectProbeInputs`
+// forwarded NO gate — so a test that wanted to exercise gate exhaustion or
+// cross-request leakage had to reset the module-level singleton (impossible
+// without a module-reset harness this repo lacks). These tests inject a FRESH
+// WakeGate through CollectProbeDeps and assert the fan-out forwards it to the
+// wake call site, without touching module state. WoL is enabled for these cases
+// so a `failed` probe actually consults the gate (`recordSend` advances the
+// count before the best-effort, never-throwing UDP broadcast). Each case
+// constructs its own gate, so there is no cross-test leakage. (Issue #3544: the
+// parallel `vlmWakeGate` injection tests were removed with the VLM-host probe at
+// the VLM cutover.)
 describe("collectProbeInputs — injectable WakeGate seam (issue #2498)", () => {
   const PRIOR_WOL = process.env.HYDRA_WOL_ENABLED;
   // Enable WoL so the wake path is reached; restore afterward so no sibling
@@ -309,42 +298,9 @@ describe("collectProbeInputs — injectable WakeGate seam (issue #2498)", () => 
     }
   });
 
-  test("a down VLM host consumes the INJECTED vlmWakeGate", async () => {
-    enableWol();
-    try {
-      const vlmGate = new WakeGate(0, 1);
-      await collectProbeInputs(happyDeps({
-        probeOllamaVlmImpl: (async () => ({ status: "down", latencyMs: 5000, error: "timeout" })) as any,
-        vlmWakeGate: vlmGate,
-      }));
-      assert.equal(vlmGate.attemptCount, 1);
-      assert.equal(vlmGate.exhausted, true);
-    } finally {
-      restoreWol();
-    }
-  });
-
-  test("the embed and vlm gate budgets stay independent — no cross-wiring", async () => {
-    enableWol();
-    try {
-      const embedGate = new WakeGate(0, 3);
-      const vlmGate = new WakeGate(0, 3);
-      // Only the embed probe fails; the VLM probe is healthy.
-      await collectProbeInputs(happyDeps({
-        probeEmbedBackendImpl: (async () => ({ status: "failed", latencyMs: 0, error: "down" })) as any,
-        probeOllamaVlmImpl: (async () => ({ status: "ok", latencyMs: 9 })) as any,
-        embedWakeGate: embedGate,
-        vlmWakeGate: vlmGate,
-      }));
-      // The embed gate recorded one wake; the VLM gate was reset by the healthy
-      // read (and never consumed the embed budget).
-      assert.equal(embedGate.attemptCount, 1);
-      assert.equal(vlmGate.attemptCount, 0);
-      assert.equal(vlmGate.exhausted, false);
-    } finally {
-      restoreWol();
-    }
-  });
+  // Issue #3544: the "a down VLM host consumes the INJECTED vlmWakeGate" and the
+  // "embed and vlm gate budgets stay independent" tests were removed with the
+  // VLM-host probe + its wake gate at the VLM cutover.
 
   test("a healthy embed read resets the injected gate (cross-request re-arm)", async () => {
     // No WoL needed: a non-failed probe takes the reset() branch unconditionally.

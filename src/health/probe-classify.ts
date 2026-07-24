@@ -12,8 +12,8 @@
 // It holds ONLY the display-status classifiers and the constants/types they
 // reason about: the three-way ok|degraded|down service DISPLAY vocabulary
 // (#2281) and the OV-search deep-health probe classification (#2023). The IO
-// probe PRODUCERS (probeService/probeOv/probeEmbedBackend/probeSkillsEndpoint/
-// probeOllamaVlm) and their producer output contract (ServiceProbeResult,
+// probe PRODUCERS (probeService/probeOv/probeEmbedBackend/probeSkillsEndpoint)
+// and their producer output contract (ServiceProbeResult,
 // running|failed) stay in probe.ts, which re-exports every symbol below so all
 // existing importers keep their EXACT current import from ./probe.ts (zero-diff
 // relay — the split does not push work onto callers).
