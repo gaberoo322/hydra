@@ -76,7 +76,10 @@ describe("dispatch.sh holdback-pending → arms the pending-enroll registry (iss
   // Run dispatch.sh with `hydra` NOT resolvable so the curl fallback fires and
   // hits the mock. HYDRA_API points at the mock; HYDRA_API_BASE / HYDRA_BASE_URL
   // are unset so the legacy HYDRA_API path is taken.
-  function armPending(args: string[]): { status: number; stderr: string; body?: Record<string, unknown> } {
+  function armPending(
+    args: string[],
+    extraEnv: Record<string, string> = {},
+  ): { status: number; stderr: string; body?: Record<string, unknown> } {
     const realPath = process.env.PATH ?? "";
     const keptDirs = realPath.split(":").filter((d) => d && !existsSync(join(d, "hydra")));
     const trimmedPath = [binDir, ...keptDirs].join(":");
@@ -87,6 +90,7 @@ describe("dispatch.sh holdback-pending → arms the pending-enroll registry (iss
         delete e.HYDRA_API_BASE;
         delete e.HYDRA_BASE_URL;
         e.HYDRA_API = `${liveBase}/api`;
+        Object.assign(e, extraEnv);
         return e;
       })(),
       encoding: "utf-8",
@@ -198,6 +202,43 @@ describe("dispatch.sh holdback-pending → arms the pending-enroll registry (iss
     );
     assert.equal(body!.anchorType, "sweep");
     assert.equal(body!.tier, null);
+  });
+
+  // Issue #3579: when the 4th positional anchorType is empty but HYDRA_ARM_SKILL
+  // names a mapped dispatch skill, the anchorType is RESOLVED through the shared
+  // `resolve_anchor_type_from_skill` table — the same one `cycle-record` uses — so
+  // the arming write and the reap-time first-write can never disagree on the lane.
+  test("resolves anchorType from HYDRA_ARM_SKILL when the 4th arg is empty (#3579)", () => {
+    const { status, body } = armPending(["3579", "2", "cycle-discover", ""], {
+      HYDRA_ARM_SKILL: "hydra-discover",
+    });
+    assert.equal(status, 0);
+    assert.equal(
+      body!.anchorType,
+      "discover",
+      "the discover skill resolves to the discover lane via the shared mapping, not a blanket work-queue",
+    );
+    assert.deepEqual(body, { prNumber: 3579, tier: 2, cycleId: "cycle-discover", anchorType: "discover" });
+  });
+
+  test("an explicit 4th-arg anchorType takes precedence over HYDRA_ARM_SKILL (#3579)", () => {
+    const { status, body } = armPending(["3580", "3", "cycle-explicit", "grill"], {
+      HYDRA_ARM_SKILL: "hydra-discover",
+    });
+    assert.equal(status, 0);
+    assert.equal(body!.anchorType, "grill", "the literal 4th positional wins over the env resolution");
+  });
+
+  // An unmapped skill must DROP to unclassified (omit the field) rather than write
+  // a bogus `unmapped:*` lane — DEGRADE-TRUTHFULLY over NEVER-GUESS (#2822).
+  test("omits anchorType (degrades to unclassified) for an unmapped HYDRA_ARM_SKILL (#3579)", () => {
+    const { status, stderr, body } = armPending(["3581", "1", "cycle-unmapped", ""], {
+      HYDRA_ARM_SKILL: "hydra-nonexistent-skill",
+    });
+    assert.equal(status, 0);
+    assert.ok(!("anchorType" in body!), "an unmapped skill must omit anchorType, never write unmapped:*");
+    assert.match(stderr, /no anchor_type mapping/);
+    assert.deepEqual(body, { prNumber: 3581, tier: 1, cycleId: "cycle-unmapped" });
   });
 
   test("exits non-zero (usage error) when prNumber is missing", () => {

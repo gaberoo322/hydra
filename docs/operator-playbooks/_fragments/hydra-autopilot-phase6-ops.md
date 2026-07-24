@@ -86,12 +86,23 @@ After `gh pr merge --auto --squash` succeeds for an
 # classifies the cycle even when it becomes the FIRST cycle-record write (the
 # qa_orch relay case, where reap never wrote a record for this cycleId). Without
 # it, the bare-UUID cycleId falls through the slot-suffix inference to the
-# `unclassified` sentinel — the data-quality gap. Map the auto-merge action's
-# dispatch class to its anchorType, mirroring `scripts/autopilot/dispatch.sh`:
-# code-writing dispatches (dev_orch/dev_target) are `work-queue`; a bare
-# `auto-merge` action with no resolvable class defaults to `work-queue` (the
-# dominant armed-PR case). Omitting the 4th arg degrades to the prior
-# inference-then-`unclassified` behaviour.
+# `unclassified` sentinel — the data-quality gap.
+#
+# Issue #3579: RESOLVE the anchorType from the arming action's dispatch SKILL
+# through the ONE shared `resolve_anchor_type_from_skill` mapping in
+# `scripts/autopilot/dispatch.sh` — do NOT blanket-default to `work-queue`. The
+# old `${pr_anchor_type:-work-queue}` default mislabelled EVERY non-dev arm (a
+# discover/architecture/qa/grill arm all became `work-queue`), and because the
+# merge-watch chore forwards the pending entry's anchorType onto the FIRST
+# cycle-record write for an un-joinable cycleId, that wrong lane became the
+# record's permanent classification. Export `HYDRA_ARM_SKILL=<dispatch-skill>`
+# (the `hydra-*` skill of the auto-merge action's producing class) and let the
+# subcommand resolve it: a mapped skill yields its true lane; an unmapped/unknown
+# skill (or an unset HYDRA_ARM_SKILL with no literal 4th arg) omits the field and
+# degrades to the merge-watch inference-then-`unclassified` path — an honest
+# `unclassified` beats a confidently-wrong lane (NEVER-GUESS, #2822). A caller
+# that already holds the literal lane may still pass it as the 4th positional
+# (which takes precedence over HYDRA_ARM_SKILL).
 #
 # Issue #3539: pass the dispatch's synthesised worktree branch (5th arg). It
 # becomes the pending entry's cycleId, so the merge-watch enrichment keys on the
@@ -105,9 +116,13 @@ After `gh pr merge --auto --squash` succeeds for an
 # (`state.slots.<class>.branch`); empty for a branch-less signal-class arm (then
 # the cycleId stays $task_id, matching reap's `or task_id`). Omitting the 5th arg
 # degrades to the prior task_id-keyed behaviour.
-pr_anchor_type="${pr_anchor_type:-work-queue}"
+# Resolve the anchorType from the producing dispatch skill (issue #3579). Export
+# HYDRA_ARM_SKILL so the subcommand maps the class → lane through the one shared
+# table; leave $pr_anchor_type empty (no blanket work-queue default) so an
+# unmapped class degrades to omit → unclassified rather than a wrong lane.
+HYDRA_ARM_SKILL="${pr_arm_skill:-}" \
 scripts/autopilot/dispatch.sh holdback-pending \
-  "$pr_number" "${pr_tier:-null}" "$task_id" "$pr_anchor_type" "${pr_worktree_branch:-}"
+  "$pr_number" "${pr_tier:-null}" "$task_id" "${pr_anchor_type:-}" "${pr_worktree_branch:-}"
 ```
 
 `POST /api/holdback/pending` (`src/api/holdback.ts`, issue #2622) records the

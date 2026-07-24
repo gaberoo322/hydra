@@ -309,14 +309,72 @@ describe("cycle-merge-reconcile — pending-enroll self-arm backstop (#3078)", (
     assert.equal(r.selfArmSkipped, 0);
     assert.equal(r.selfArmFailed, 0);
     assert.equal(fx.arms!.length, 1);
+    // Issue #3579: this metrics hash carries NO explicit anchorType, so the
+    // self-arm entry OMITS the field (degrades to unclassified via the merge-watch
+    // inference path) rather than hardcoding a (wrong) `work-queue` lane. An honest
+    // `unclassified` beats a confidently-wrong lane (NEVER-GUESS, #2822). Was
+    // `anchorType: "work-queue"` before the #3579 write-seam-completeness fix.
     assert.deepEqual(fx.arms![0], {
       prNumber: 100,
       cycleId: "c1",
       tier: null, // tier unknown from the metrics hash; enrollHoldback resolves it server-side
-      anchorType: "work-queue",
+      anchorType: undefined,
     });
     // The metrics upgrade still fires alongside the arm (both are merge-coupled).
     assert.equal(r.upgraded, 1);
+  });
+
+  test("self-arm forwards the metrics-hash anchorType verbatim, not a hardcoded lane (#3579)", async () => {
+    // A signal-class cycle (reap classified it `discover`) whose arm was dropped.
+    // The self-arm entry MUST carry the real `discover` lane read off the hash —
+    // the old hardcoded `work-queue` would mislabel it, and because the merge-watch
+    // chore forwards this entry's anchorType onto the FIRST cycle-record write for
+    // an un-joinable cycleId, that wrong lane would become the record's permanent
+    // classification. This is the regression the #3579 fix pins.
+    const fx: Fixture = {
+      metrics: new Map([
+        ["c-discover", { status: "completed", prNumber: "150", tasksMerged: "0", anchorType: "discover" }],
+      ]),
+      prState: new Map([[150, "MERGED"]]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 1);
+    assert.equal(fx.arms!.length, 1);
+    assert.equal(
+      fx.arms![0].anchorType,
+      "discover",
+      "the self-arm entry carries the hash's true lane, never a hardcoded work-queue",
+    );
+  });
+
+  test("self-arm trims a whitespace-padded anchorType and omits an empty one (#3579)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["c-pad", { status: "completed", prNumber: "160", tasksMerged: "0", anchorType: "  grill  " }],
+        ["c-blank", { status: "completed", prNumber: "161", tasksMerged: "0", anchorType: "   " }],
+      ]),
+      prState: new Map([
+        [160, "MERGED"],
+        [161, "MERGED"],
+      ]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+    };
+    await runCycleMergeReconcile(makeDeps(fx));
+    const padded = fx.arms!.find((a) => a.prNumber === 160);
+    const blank = fx.arms!.find((a) => a.prNumber === 161);
+    assert.equal(padded?.anchorType, "grill", "padded anchorType is trimmed to its lane");
+    assert.equal(
+      blank?.anchorType,
+      undefined,
+      "whitespace-only anchorType ⇒ omitted (degrade to unclassified), not a wrong lane",
+    );
   });
 
   test("does NOT arm a PR already present in the pending-enroll registry (idempotent)", async () => {
