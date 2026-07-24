@@ -33,6 +33,8 @@ import {
   clearAutopilotPaused,
 } from "../redis/autopilot-pause.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
+import { logger } from "../logger.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 /**
  * @param eventBus - optional; when provided, pause/resume emit a
@@ -55,7 +57,7 @@ export function createAutopilotControlRouter(eventBus?: PublishableBus) {
         payload,
       });
     } catch (err: any) {
-      console.error(`[autopilot] pause event publish failed: ${err?.message || err}`);
+      logger.error({ type, err }, "[autopilot] pause event publish failed");
     }
   }
 
@@ -67,15 +69,11 @@ export function createAutopilotControlRouter(eventBus?: PublishableBus) {
   // -------------------------------------------------------------------------
 
   // GET /autopilot/emergency-brake — read current brake state.
-  router.get("/autopilot/emergency-brake", async (_req, res) => {
-    try {
-      const state = await getEmergencyBrake();
-      return res.json(state);
-    } catch (err: any) {
-      console.error(`[autopilot] emergency-brake read failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get("/autopilot/emergency-brake", async (_req, res) =>
+    // Issue #909 / ADR-0027 eighth sweep: the 500 envelope + pino `err`-field
+    // log live in the isolateAggregator seam (route-helpers.ts) once.
+    isolateAggregator(res, "autopilot/emergency-brake", () => getEmergencyBrake()),
+  );
 
   // POST /autopilot/emergency-brake — engage/disengage. Operator-only.
   router.post("/autopilot/emergency-brake", async (req, res) => {
@@ -83,17 +81,13 @@ export function createAutopilotControlRouter(eventBus?: PublishableBus) {
     if (!parsed.success) {
       return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
-    try {
+    return isolateAggregator(res, "autopilot/emergency-brake", async () => {
       if (parsed.data.engaged) {
-        const state = await setEmergencyBrake(parsed.data.engagedBy ?? "operator");
-        return res.json(state);
+        return setEmergencyBrake(parsed.data.engagedBy ?? "operator");
       }
       await clearEmergencyBrake();
-      return res.json({ engaged: false });
-    } catch (err: any) {
-      console.error(`[autopilot] emergency-brake write failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+      return { engaged: false };
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -105,15 +99,9 @@ export function createAutopilotControlRouter(eventBus?: PublishableBus) {
   // -------------------------------------------------------------------------
 
   // GET /autopilot/paused — read current pause state.
-  router.get("/autopilot/paused", async (_req, res) => {
-    try {
-      const state = await getAutopilotPaused();
-      return res.json(state);
-    } catch (err: any) {
-      console.error(`[autopilot] paused read failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get("/autopilot/paused", async (_req, res) =>
+    isolateAggregator(res, "autopilot/paused", () => getAutopilotPaused()),
+  );
 
   // POST /autopilot/paused — pause/resume. Operator-only.
   router.post("/autopilot/paused", async (req, res) => {
@@ -121,19 +109,16 @@ export function createAutopilotControlRouter(eventBus?: PublishableBus) {
     if (!parsed.success) {
       return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
-    try {
+    return isolateAggregator(res, "autopilot/paused", async () => {
       if (parsed.data.paused) {
         const state = await setAutopilotPaused();
         await publishPauseEvent("autopilot-paused", { paused: true, since: state.since });
-        return res.json(state);
+        return state;
       }
       await clearAutopilotPaused();
       await publishPauseEvent("autopilot-resumed", { paused: false });
-      return res.json({ paused: false });
-    } catch (err: any) {
-      console.error(`[autopilot] paused write failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+      return { paused: false };
+    });
   });
 
   return router;

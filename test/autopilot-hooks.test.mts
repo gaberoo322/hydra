@@ -258,6 +258,126 @@ describe("scripts/autopilot/hooks/on-subagent-stop.sh", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b. on-subagent-stop.sh — grounding/reflection deposit re-key (issue #3477)
+//
+// The child writes its grounding/reflection/anchor deposits under the
+// `agent-<HASH>` worktree-dir basename (reflection-deposit.sh derive_task_id),
+// but reap.py reads them under the emitted `task_id` (the harness `.task.id`).
+// For an Agent(isolation="worktree") dispatch those differ, so `testsAfter`
+// never joined. The hook now re-keys the deposits onto the emitted task_id.
+// These tests need NO redis (the re-key runs before the XADD emit), so they
+// point HYDRA_REDIS_HOST at an unreachable port and always run.
+// ---------------------------------------------------------------------------
+
+describe("scripts/autopilot/hooks/on-subagent-stop.sh — deposit re-key (#3477)", () => {
+  const UNREACHABLE_REDIS = { HYDRA_REDIS_HOST: "127.0.0.1", HYDRA_REDIS_PORT: "1" };
+
+  function runStop(payload: object, reflDir: string) {
+    return spawnSync(HOOK_STOP, [], {
+      input: JSON.stringify(payload),
+      env: {
+        ...process.env,
+        ...UNREACHABLE_REDIS,
+        HYDRA_AUTOPILOT_REFL_DIR: reflDir,
+      },
+      encoding: "utf-8",
+    });
+  }
+
+  test("re-keys grounding/refl/anchor deposits from worktree hash onto emitted task_id", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rekey-hit-"));
+    try {
+      const wtHash = "a24389894567414d3"; // 17 hex chars — a real worktree hash shape
+      const taskId = "task-harness-xyz-789"; // the emitted .task.id reap reads under
+      writeFileSync(join(dir, `hydra-grounding-tests-${wtHash}`), '{"testsAfter":6222,"testsPassingAfter":6216}');
+      writeFileSync(join(dir, `hydra-refl-sources-${wtHash}`), "per-anchor,by-file");
+      writeFileSync(join(dir, `hydra-refl-anchor-${wtHash}`), "issue-3477");
+
+      const r = runStop(
+        {
+          cwd: `/home/gabe/hydra/.claude/worktrees/agent-${wtHash}`,
+          task: { id: taskId, description: "dev_orch — implement #3477", subagent_type: "hydra-dev", result: { response: "done" } },
+        },
+        dir,
+      );
+      assert.equal(r.status, 0, `hook exited ${r.status}: ${r.stderr}`);
+
+      // The task_id-keyed copies now exist with identical content (reap joins on these).
+      assert.equal(
+        readFileSync(join(dir, `hydra-grounding-tests-${taskId}`), "utf-8"),
+        '{"testsAfter":6222,"testsPassingAfter":6216}',
+      );
+      assert.equal(readFileSync(join(dir, `hydra-refl-sources-${taskId}`), "utf-8"), "per-anchor,by-file");
+      assert.equal(readFileSync(join(dir, `hydra-refl-anchor-${taskId}`), "utf-8"), "issue-3477");
+      // The original worktree-hash deposit is preserved (copy, not move).
+      assert.ok(existsSync(join(dir, `hydra-grounding-tests-${wtHash}`)), "original deposit must survive");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-op when cwd is not an agent-<HASH> worktree (non-worktree dispatch)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rekey-nonwt-"));
+    try {
+      const taskId = "sess-uuid-1";
+      writeFileSync(join(dir, `hydra-grounding-tests-${taskId}`), '{"testsAfter":10}');
+      const before = readFileSync(join(dir, `hydra-grounding-tests-${taskId}`), "utf-8");
+      const r = runStop(
+        { cwd: "/home/gabe/hydra", task: { id: taskId, description: "sweep_orch — scan", result: { response: "done" } } },
+        dir,
+      );
+      assert.equal(r.status, 0);
+      // Nothing new created; the existing deposit is untouched.
+      assert.equal(readFileSync(join(dir, `hydra-grounding-tests-${taskId}`), "utf-8"), before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no-op when worktree hash already equals the emitted task_id (legacy join)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rekey-aligned-"));
+    try {
+      const wtHash = "a39a597efb3710a2e";
+      writeFileSync(join(dir, `hydra-grounding-tests-${wtHash}`), '{"testsAfter":6410}');
+      const r = runStop(
+        {
+          cwd: `/home/gabe/hydra/.claude/worktrees/agent-${wtHash}`,
+          task: { id: wtHash, description: "dev_orch — legacy", subagent_type: "hydra-dev", result: { response: "done" } },
+        },
+        dir,
+      );
+      assert.equal(r.status, 0);
+      // Only the one file — no self-copy churn.
+      assert.equal(readFileSync(join(dir, `hydra-grounding-tests-${wtHash}`), "utf-8"), '{"testsAfter":6410}');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not overwrite an existing task_id-keyed deposit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rekey-noclobber-"));
+    try {
+      const wtHash = "b111111111111111c";
+      const taskId = "task-clobber-guard";
+      writeFileSync(join(dir, `hydra-grounding-tests-${wtHash}`), '{"testsAfter":999}');
+      writeFileSync(join(dir, `hydra-grounding-tests-${taskId}`), '{"testsAfter":1}'); // pre-existing dest
+      const r = runStop(
+        {
+          cwd: `/tmp/agent-${wtHash}`,
+          task: { id: taskId, description: "dev_orch — noclobber", subagent_type: "hydra-dev", result: { response: "done" } },
+        },
+        dir,
+      );
+      assert.equal(r.status, 0);
+      // Existing dest is preserved (guarded by `[ ! -e "$dst" ]`).
+      assert.equal(readFileSync(join(dir, `hydra-grounding-tests-${taskId}`), "utf-8"), '{"testsAfter":1}');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3 + 4. on-subagent-permission-wait.sh
 // ---------------------------------------------------------------------------
 
