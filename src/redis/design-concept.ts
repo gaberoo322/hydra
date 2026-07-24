@@ -150,7 +150,7 @@ export async function listRecentDesignConceptRefs(limit: number): Promise<string
  * NOTE (issue #3236): this canonicalizing removal cannot evict a **legacy
  * non-canonical** member (a bare `"705"` written to the index *before* the
  * #736 normalization landed) — normalizing `705`→`issue-705` targets a member
- * that isn't in the index. The stale-index prune (`pruneStaleIndex` in
+ * that isn't in the index. The stale-index prune (`pruneDesignConceptIndex` in
  * `design-concept.ts`) handles that case directly via
  * `removeExactDesignConceptFromIndex` below, which removes the raw member it
  * read verbatim. Keep THIS accessor canonicalizing so anchor-shaped callers

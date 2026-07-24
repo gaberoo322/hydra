@@ -52,8 +52,10 @@
  *   hydra:design-concept:{anchorRef}  → Hash (full body, JSON-encoded fields)
  *   hydra:design-concept:index         → Sorted set (score = createdAt)
  *
- * TTL: 7 days from createdAt. The index is opportunistically pruned of
- * stale entries on every read.
+ * TTL: 7 days from createdAt. The index is pruned of stale entries by the
+ * dedicated `pruneDesignConceptIndex` write operation, which callers invoke
+ * explicitly (issue #3605) — it is NOT a hidden side-effect of the read path
+ * (`listDesignConcepts`).
  *
  * Phase A scope: persistence + HTTP surface + gate semantics only. No
  * autopilot wiring (Phase B), no CI hook (Phase C). The `dev_orch` gate
@@ -438,15 +440,25 @@ export async function resolveDesignConceptForQa(
 }
 
 /**
- * Opportunistic prune of stale (>7d) entries from the index. Reads the
- * whole index, drops members whose score is older than `cutoff`. Cheap
- * for the expected index size (≤ a few hundred entries; 7-day TTL caps
- * growth). Returns the number of entries pruned.
+ * Prune stale (>7d) entries from the index. Reads the whole index, drops
+ * members whose score is older than `cutoff`. Cheap for the expected index
+ * size (≤ a few hundred entries; 7-day TTL caps growth). Returns the number
+ * of entries pruned.
  *
  * The hash keys themselves are reaped by Redis via EXPIRE, so this only
  * keeps the index consistent.
+ *
+ * This is the WRITE half of the design-concept index lifecycle, extracted
+ * from `listDesignConcepts` (issue #3605). The read path (`listDesignConcepts`)
+ * no longer triggers it as a hidden side-effect — a caller (the API handler,
+ * a housekeeping chore) invokes this explicitly on its own schedule. `now`
+ * defaults to `Date.now()` so callers that don't need to pin the cutoff (the
+ * common case) omit it; tests inject a fixed `now` to build deterministic
+ * stale/fresh fixtures.
  */
-async function pruneStaleIndex(now: number): Promise<number> {
+export async function pruneDesignConceptIndex(
+  now: number = Date.now(),
+): Promise<number> {
   const cutoff = now - DESIGN_CONCEPT_MAX_AGE_MS;
   const allRefs = await listAllDesignConceptRefs();
   let pruned = 0;
@@ -470,8 +482,13 @@ async function pruneStaleIndex(now: number): Promise<number> {
 }
 
 /**
- * List design concepts in reverse-chronological order. The index is
- * pruned of stale entries on every call (see `pruneStaleIndex`).
+ * List design concepts in reverse-chronological order. Reads only — this
+ * function NEVER writes (issue #3605). Index hygiene (pruning stale members)
+ * is the separate `pruneDesignConceptIndex` operation, which a caller invokes
+ * explicitly; a reader of this signature can rely on it having no write
+ * side-effect. Callers that want the old "prune-then-list" behavior call
+ * `pruneDesignConceptIndex()` before this function (see
+ * `src/api/design-concepts.ts`).
  *
  * Filters:
  *   - `scope`: only return artifacts for this scope.
@@ -480,11 +497,7 @@ async function pruneStaleIndex(now: number): Promise<number> {
 export async function listDesignConcepts(opts: {
   scope?: DesignConceptScope;
   limit?: number;
-  now?: number;
 } = {}): Promise<DesignConcept[]> {
-  const now = opts.now ?? Date.now();
-  await pruneStaleIndex(now);
-
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const refs = await listRecentDesignConceptRefs(limit);
   const out: DesignConcept[] = [];

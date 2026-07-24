@@ -7,7 +7,7 @@
  * pruned, so the live index diverged from the set of live hashes (observed:
  * 168 index members against 86 live hashes).
  *
- * Root cause: `pruneStaleIndex` reads members VERBATIM out of the ZSET and,
+ * Root cause: `pruneDesignConceptIndex` reads members VERBATIM out of the ZSET and,
  * when it decides one is stale, must remove that exact member string. The old
  * code called `removeDesignConceptFromIndex`, which NORMALIZES its argument
  * (`"705"` → `"issue-705"`) before `zrem` — so a legacy **non-canonical**
@@ -17,7 +17,7 @@
  * forever, bloating the index without bound.
  *
  * The fix adds `removeExactDesignConceptFromIndex` (a verbatim, non-normalizing
- * removal) and points `pruneStaleIndex` at it. These tests pin:
+ * removal) and points `pruneDesignConceptIndex` at it. These tests pin:
  *   1. The write→read round-trip resolves via the canonical handle (control).
  *   2. A legacy non-canonical index member whose hash is gone IS actually
  *      evicted by the prune (the previously-missing case).
@@ -104,9 +104,9 @@ describe("design-concept index hygiene (#3236)", () => {
       "precondition: the legacy non-canonical member is in the index",
     );
 
-    // A list call runs `pruneStaleIndex` opportunistically. The stale
-    // non-canonical member must now be gone.
-    await dc.listDesignConcepts({ limit: 200 });
+    // The explicit prune write (#3605 extracted this from the list read) must
+    // evict the stale non-canonical member.
+    await dc.pruneDesignConceptIndex();
 
     members = await redis.zrange(INDEX_KEY, 0, -1);
     assert.ok(
