@@ -1,6 +1,7 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { Section } from "./Section.jsx";
 import { Sparkline } from "./Sparkline.jsx";
+import LocalTimestamp from "../../LocalTimestamp.jsx";
 
 /**
  * LessonsTrend — promotion-rate sparkline + top-5 friction table + the
@@ -23,7 +24,13 @@ export function LessonsTrend({ windowDays = 7 }) {
     <Section
       title="Lessons trend"
       subtitle={`Friction promotions in the last ${windowDays}d (threshold ${threshold} hits → meta-friction).`}
-      right={data?.generatedAt && `Updated ${new Date(data.generatedAt).toLocaleTimeString()}`}
+      right={
+        data?.generatedAt && (
+          <>
+            Updated <LocalTimestamp ts={data.generatedAt} />
+          </>
+        )
+      }
       loading={loading}
       error={error}
       empty={!loading && !error && isEmpty}

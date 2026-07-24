@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import LocalTimestamp from "../../components/LocalTimestamp.jsx";
 
 /**
  * PokedexModal — chronological timeline of milestone events for a single
@@ -18,15 +19,6 @@ const CATEGORY_COLOR = {
   wait: "#facc15",      // yellow-400— slot_waiting_permission
   pr: "#34d399",        // emerald-400— pr_opened
 };
-
-function formatTime(epochSec) {
-  if (!epochSec) return "";
-  try {
-    return new Date(epochSec * 1000).toLocaleTimeString();
-  } catch {
-    return "";
-  }
-}
 
 export default function PokedexModal({ row, entries = [], onClose = () => {} }) {
   const closeBtnRef = useRef(null);
@@ -123,9 +115,10 @@ export default function PokedexModal({ row, entries = [], onClose = () => {} }) 
                     paddingLeft: 6,
                   }}
                 >
-                  <span className="text-zinc-500 font-mono w-16 shrink-0">
-                    {formatTime(e.ts)}
-                  </span>
+                  <LocalTimestamp
+                    ts={e.ts}
+                    className="text-zinc-500 font-mono w-16 shrink-0"
+                  />
                   <span
                     className="font-mono uppercase text-[9px] w-20 shrink-0"
                     style={{ color: CATEGORY_COLOR[e.category] ?? "#a1a1aa" }}

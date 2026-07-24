@@ -1,4 +1,5 @@
 import { useApi } from "../../hooks/useApi.js";
+import LocalTimestamp from "../../components/LocalTimestamp.jsx";
 
 /**
  * RetroPanel — recent persisted retrospectives (issue #921, retro-4 of epic
@@ -43,9 +44,6 @@ function RefBadge({ ref }) {
 function RetroRow({ artifact }) {
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const emitted = Array.isArray(artifact.emitted) ? artifact.emitted : [];
-  const when = artifact.generatedAt
-    ? new Date(artifact.generatedAt).toLocaleString()
-    : "—";
 
   return (
     <li
@@ -57,7 +55,10 @@ function RetroRow({ artifact }) {
         <span className="text-[11px] font-mono text-zinc-400 truncate">
           {artifact.run_id}
         </span>
-        <span className="text-[10px] text-zinc-500 whitespace-nowrap">{when}</span>
+        <LocalTimestamp
+          ts={artifact.generatedAt}
+          className="text-[10px] text-zinc-500 whitespace-nowrap"
+        />
       </div>
 
       {artifact.summary && (

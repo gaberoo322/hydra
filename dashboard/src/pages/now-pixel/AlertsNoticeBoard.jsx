@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
+import LocalTimestamp from "../../components/LocalTimestamp.jsx";
 
 /**
  * AlertsNoticeBoard — red-flag stack pinned to the Autopilot Pavilion.
@@ -16,14 +17,6 @@ const SEVERITY_PALETTE = {
   warning: "#facc15",
   info: "#38bdf8",
 };
-
-function formatTime(ts) {
-  try {
-    return ts ? new Date(ts).toLocaleTimeString() : "";
-  } catch {
-    return "";
-  }
-}
 
 export default function AlertsNoticeBoard() {
   const { data } = useApi("/now/alerts?sinceMinutes=60", { poll: 30_000 });
@@ -107,9 +100,7 @@ export default function AlertsNoticeBoard() {
                   >
                     {alert.severity ?? "info"}
                   </span>
-                  <span className="text-zinc-500" style={{ fontSize: 10 }}>
-                    {formatTime(alert.timestamp)}
-                  </span>
+                  <LocalTimestamp ts={alert.timestamp} className="text-zinc-500 text-[10px]" />
                 </div>
                 <p className="mt-0.5 break-words">{alert.message}</p>
               </li>

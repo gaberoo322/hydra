@@ -1,5 +1,6 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { TabShell } from "./TabShell.jsx";
+import { formatDateTime } from "../../../lib/page-item-format.ts";
 
 /**
  * ArchitectureTab — compact reshape of the existing `/api/architecture`
@@ -16,7 +17,7 @@ export function ArchitectureTab() {
   const empty = !loading && !error && groups.length === 0;
 
   const subtitle = data
-    ? `${data.moduleCount ?? nodes.length} modules · ${data.edgeCount ?? edges.length} edges · scanned ${data.scannedAt ? new Date(data.scannedAt).toLocaleTimeString() : ""}`
+    ? `${data.moduleCount ?? nodes.length} modules · ${data.edgeCount ?? edges.length} edges · scanned ${data.scannedAt ? formatDateTime(data.scannedAt) : ""}`
     : "Per-group module + edge counts from the orchestrator source graph.";
 
   const groupCounts = groups.map((g) => ({

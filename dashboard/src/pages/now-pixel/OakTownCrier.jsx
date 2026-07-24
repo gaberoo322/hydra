@@ -11,6 +11,7 @@ import {
   TAB_LIVE,
   TAB_RECS,
 } from "./oak-tab-state.ts";
+import { formatDateTime } from "../../lib/page-item-format.ts";
 
 /**
  * OakTownCrier — right-edge panel anchored on the Professor Oak sprite.
@@ -34,14 +35,6 @@ import {
  */
 const MAX_BUBBLES = 50;
 const COLLAPSE_STORAGE_KEY = "hydra:now-pixel:oak-collapsed";
-
-function isoToTime(ts) {
-  try {
-    return ts ? new Date(ts).toLocaleTimeString() : "";
-  } catch {
-    return "";
-  }
-}
 
 function eventSummary(frame) {
   // Slot events from the bridge: { type:"slot-event", payload:{event, slot, status, ...} }
@@ -103,7 +96,7 @@ function LiveFeedTab({ bubbles, scrollRef, onHover, onUnhover }) {
                 paddingLeft: 6,
                 color: "#d4d4d8",
               }}
-              title={`${b.source} · ${isoToTime(b.ts)}`}
+              title={`${b.source} · ${formatDateTime(b.ts)}`}
             >
               <span
                 style={{

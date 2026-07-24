@@ -4,6 +4,7 @@ import { StuckItems } from "../components/pages/today/StuckItems.jsx";
 import { RecentMerges } from "../components/pages/today/RecentMerges.jsx";
 import { NewTargetFindings } from "../components/pages/today/NewTargetFindings.jsx";
 import { LessonsOvernight } from "../components/pages/today/LessonsOvernight.jsx";
+import LocalTimestamp from "../components/LocalTimestamp.jsx";
 
 /**
  * Dashboard v2 — `/today` page (issues #616, #617, PRD #615).
@@ -328,7 +329,7 @@ function OvernightBanner({ summary }) {
       </div>
       {summary?.generatedAt && (
         <p className="text-xs text-zinc-500">
-          Updated {new Date(summary.generatedAt).toLocaleTimeString()}
+          Updated <LocalTimestamp ts={summary.generatedAt} />
         </p>
       )}
     </div>
