@@ -11,7 +11,7 @@
  * they are pinned once, directly against the helper.
  */
 
-import { test, describe, mock } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
 
@@ -39,6 +39,34 @@ function mockRes(): any {
     },
   };
   return res;
+}
+
+/**
+ * The never-throw catch now logs through the pino structured-logger seam
+ * (module singleton → process.stderr, ADR-0027) instead of a freeform
+ * console.error. Capture the serialized JSON lines and assert on the
+ * structured `routeLabel`/`msg` fields rather than mocking console.error.
+ */
+function captureStderr(): {
+  lines: () => Record<string, any>[];
+  restore: () => void;
+} {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
+  };
+  return {
+    lines: () =>
+      buf
+        .split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l) as Record<string, any>),
+    restore: () => {
+      (process.stderr as any).write = originalWrite;
+    },
+  };
 }
 
 const WindowSchema = z
@@ -116,22 +144,23 @@ describe("aggregatorRoute — validate half", () => {
 
 describe("aggregatorRoute — never-throw half", () => {
   test("aggregator throws → logged 500 { error }, no crash", async () => {
-    const errMock = mock.method(console, "error", () => {});
+    const cap = captureStderr();
     try {
       const handler = aggregatorRoute(WindowSchema, "test/route", async () => {
         throw new Error("aggregator boom");
       });
       const res = mockRes();
       await handler(mockReq({ window: 7 }), res);
+      cap.restore();
       assert.equal(res._status, 500);
       assert.equal(res._body.error, "aggregator boom");
       // fail-loud: the catch logged with the route label + canonical literal
-      assert.equal(errMock.mock.callCount(), 1);
-      const logged = String(errMock.mock.calls[0].arguments[0]);
-      assert.match(logged, /\[test\/route\]/);
-      assert.match(logged, /never-throw contract/);
+      const lines = cap.lines();
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0]!.routeLabel, "test/route");
+      assert.match(String(lines[0]!.msg), /never-throw contract/);
     } finally {
-      errMock.mock.restore();
+      cap.restore();
     }
   });
 });
@@ -148,34 +177,36 @@ describe("aggregatorRouteNoQuery", () => {
   });
 
   test("aggregator throws → logged 500 { error }", async () => {
-    const errMock = mock.method(console, "error", () => {});
+    const cap = captureStderr();
     try {
       const handler = aggregatorRouteNoQuery("test/noquery", async () => {
         throw new Error("noquery boom");
       });
       const res = mockRes();
       await handler(mockReq(), res);
+      cap.restore();
       assert.equal(res._status, 500);
       assert.equal(res._body.error, "noquery boom");
-      assert.equal(errMock.mock.callCount(), 1);
+      assert.equal(cap.lines().length, 1);
     } finally {
-      errMock.mock.restore();
+      cap.restore();
     }
   });
 });
 
 describe("isolateAggregator", () => {
   test("non-Error throw stringifies into the 500 body", async () => {
-    const errMock = mock.method(console, "error", () => {});
+    const cap = captureStderr();
     try {
       const res = mockRes();
       await isolateAggregator(res, "test/iso", async () => {
         throw "string failure";
       });
+      cap.restore();
       assert.equal(res._status, 500);
       assert.equal(res._body.error, "string failure");
     } finally {
-      errMock.mock.restore();
+      cap.restore();
     }
   });
 });

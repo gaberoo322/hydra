@@ -12,8 +12,8 @@
  *   - settledOrEmpty — degrade `T[]` to `[]` (with the Array.isArray guard)
  *   - settledOr      — degrade `T` to an arbitrary fallback
  *   - settledOrNull  — degrade `T` to `null`
- * plus the core invariant: rejection logs to console.error AND returns the
- * fallback (never throws).
+ * plus the core invariant: rejection logs (to the pino structured-logger seam)
+ * AND returns the fallback (never throws).
  */
 
 import { test, describe } from "node:test";
@@ -36,19 +36,38 @@ function rejected<T>(reason: unknown): PromiseSettledResult<T> {
   return { status: "rejected", reason };
 }
 
-/** Capture console.error calls for the duration of `fn`. */
-function withCapturedErrors<T>(fn: () => T): { result: T; calls: unknown[][] } {
-  const orig = console.error;
-  const calls: unknown[][] = [];
-  console.error = (...args: unknown[]) => {
-    calls.push(args);
+/**
+ * The rejection log now flows through the pino structured-logger seam
+ * (module singleton → process.stderr, ADR-0027) instead of a freeform
+ * console.error. Capture the serialized JSON lines and assert on the
+ * structured `label`/`err`/`msg` fields rather than grepping a format string.
+ */
+function withCapturedErrors<T>(
+  fn: () => T,
+): { result: T; calls: Record<string, any>[] } {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
   };
   try {
     const result = fn();
+    const calls = buf
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, any>);
     return { result, calls };
   } finally {
-    console.error = orig;
+    (process.stderr as any).write = originalWrite;
   }
+}
+
+/** Render a captured structured log line back to a greppable string. */
+function logText(entry: Record<string, any>): string {
+  const err = entry.err;
+  const reason = err && typeof err === "object" ? err.message ?? err : err;
+  return `${entry.msg ?? ""} (${entry.label ?? ""}): ${reason ?? ""}`;
 }
 
 describe("settle (core fold)", () => {
@@ -66,10 +85,9 @@ describe("settle (core fold)", () => {
     );
     assert.equal(result, 7);
     assert.equal(calls.length, 1);
-    const line = String(calls[0][0]);
-    // The label and the error message both reach the log line.
-    assert.match(line, /core\/fail/);
-    assert.match(line, /boom/);
+    // The label and the error message both reach the structured log line.
+    assert.equal(calls[0]!.label, "core/fail");
+    assert.match(logText(calls[0]!), /boom/);
   });
 
   test("rejected with a non-Error reason logs the raw reason", () => {
@@ -77,7 +95,7 @@ describe("settle (core fold)", () => {
       settle(rejected("plain-string-reason"), "fb", "core/raw"),
     );
     assert.equal(result, "fb");
-    assert.match(String(calls[0][0]), /plain-string-reason/);
+    assert.match(logText(calls[0]!), /plain-string-reason/);
   });
 });
 
@@ -96,7 +114,7 @@ describe("settledOrEmpty", () => {
     );
     assert.deepEqual(result, []);
     assert.equal(calls.length, 1);
-    assert.match(String(calls[0][0]), /list\/fail/);
+    assert.equal(calls[0]!.label, "list/fail");
   });
 
   test("fulfilled non-array degrades to [] (the Array.isArray guard)", () => {
@@ -130,7 +148,7 @@ describe("settledOr", () => {
     const { calls } = withCapturedErrors(() =>
       settledOr(rejected(new Error("x")), 0, "cost/usage"),
     );
-    assert.match(String(calls[0][0]), /cost\/usage/);
+    assert.equal(calls[0]!.label, "cost/usage");
   });
 
   test("a falsy fulfilled value is NOT replaced by the fallback", () => {
@@ -157,7 +175,7 @@ describe("settledOrNull", () => {
     );
     assert.equal(result, null);
     assert.equal(calls.length, 1);
-    assert.match(String(calls[0][0]), /null\/fail/);
+    assert.equal(calls[0]!.label, "null/fail");
   });
 
   test("fulfilled nullish is coalesced to null", () => {
