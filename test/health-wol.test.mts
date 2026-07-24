@@ -31,9 +31,7 @@ import {
   WakeGate,
   readWolConfig,
   attemptEmbedBackendWake,
-  attemptVlmHostWake,
   maybeWakeEmbedBackend,
-  maybeWakeVlmHost,
   getWolGates,
   resetWolGates,
   type WolConfig,
@@ -318,182 +316,50 @@ describe("maybeWakeEmbedBackend — fan-out integration (criterion 2)", () => {
   });
 });
 
-// Issue #2335: the VLM-host wake trigger. The Tailnet Ollama VLM HOST is what
-// OpenViking's skill-registration handler blocks on, so a down VLM host (the
-// verified #2335 root cause) must ALSO fire the WoL recovery — not just the
-// embed-backend probe. attemptVlmHostWake is a thin alias over the generic
-// attemptHostWake; maybeWakeVlmHost is the fan-out integration mirroring
-// maybeWakeEmbedBackend for the `{status:"ok"|"down"}` VLM-probe vocabulary.
-describe("attemptVlmHostWake — VLM-host wake trigger (issue #2335)", () => {
-  test("disabled config → no-op, never sends", async () => {
-    let sent = false;
-    const out = await attemptVlmHostWake(enabledConfig({ enabled: false }), new WakeGate(0, 3), 0, {
-      send: async () => {
-        sent = true;
-        return { ok: true, bytesPerPort: 102, ports: [...WOL_PORTS] };
-      },
-    });
-    assert.deepEqual(out, { attempted: false, reason: "disabled" });
-    assert.equal(sent, false);
-  });
+// Issue #3544: the VLM-host wake trigger (`attemptVlmHostWake` / `maybeWakeVlmHost`,
+// issue #2335) and their describe blocks were removed with the probe at the
+// OpenViking VLM cutover — OpenViking's VLM backend moved off the gaming-PC Ollama
+// host onto the in-repo claude-cli shim (#3542), so nothing depends on that host.
+// The embed-backend wake path (asserted above) is unchanged.
 
-  test("enabled + allowed → sends the magic packet to the SAME gaming-PC host", async () => {
-    const gate = new WakeGate(1000, 3);
-    let calledWith: [string, string] | null = null;
-    const out = await attemptVlmHostWake(enabledConfig(), gate, 0, {
-      send: async (mac, broadcast) => {
-        calledWith = [mac, broadcast];
-        return { ok: true, bytesPerPort: 102, ports: [...WOL_PORTS] };
-      },
-    });
-    assert.equal(out.attempted, true);
-    // Same physical box as the embed-backend wake — one host, one MAC/broadcast.
-    assert.deepEqual(calledWith, [WOL_DEFAULT_MAC, WOL_DEFAULT_BROADCAST]);
-    assert.equal(gate.attemptCount, 1);
-  });
-
-  test("cooldown + max-attempts honoured (independent gate)", async () => {
-    const send = async () => ({ ok: true as const, bytesPerPort: 102, ports: [...WOL_PORTS] });
-    // maxAttempts:2 so the FIRST send leaves the gate non-exhausted, letting us
-    // assert the cooldown branch (checked AFTER exhausted in attemptHostWake)
-    // before the cap is reached.
-    const gate = new WakeGate(1000, 2);
-    await attemptVlmHostWake(enabledConfig({ maxAttempts: 2 }), gate, 0, { send });
-    // Second call within cooldown, cap not yet hit → blocked on cooldown.
-    const within = await attemptVlmHostWake(enabledConfig({ maxAttempts: 2 }), gate, 500, { send });
-    assert.deepEqual(within, { attempted: false, reason: "cooldown" });
-    // Cooldown elapsed → second send lands, hitting the cap (2).
-    await attemptVlmHostWake(enabledConfig({ maxAttempts: 2 }), gate, 2000, { send });
-    // Cooldown elapsed again but the cap (2) is now hit → exhausted.
-    const after = await attemptVlmHostWake(enabledConfig({ maxAttempts: 2 }), gate, 4000, { send });
-    assert.deepEqual(after, { attempted: false, reason: "exhausted" });
-  });
-
-  test("send error is surfaced as attempted-but-not-ok, never throws", async () => {
-    const out = await attemptVlmHostWake(enabledConfig(), new WakeGate(0, 3), 0, {
-      send: async () => ({ ok: false, reason: "send-error", error: "ENETUNREACH" }),
-    });
-    assert.equal(out.attempted, true);
-    assert.equal((out as any).sent.ok, false);
-  });
-});
-
-describe("maybeWakeVlmHost — fan-out integration (issue #2335)", () => {
-  const down = { status: "down" as const, latencyMs: 5000, error: "operation aborted due to timeout" };
-  const ok = { status: "ok" as const, latencyMs: 12 };
-
-  test("healthy probe (status:ok) → returns it unchanged and resets the gate", async () => {
-    const gate = new WakeGate(1000, 3);
-    gate.recordSend(0); // pretend a prior attempt happened
-    const out = await maybeWakeVlmHost(ok, { config: enabledConfig(), gate });
-    assert.equal(out.status, "ok");
-    assert.equal(gate.attemptCount, 0, "healthy read re-arms the budget");
-  });
-
-  test("down probe + enabled → fires the wake and returns the down result (next tick re-probes)", async () => {
-    const gate = new WakeGate(0, 3);
-    let woke = false;
-    const out = await maybeWakeVlmHost(down, {
-      config: enabledConfig(),
-      gate,
-      wake: async () => {
-        woke = true;
-        return { attempted: true, sent: { ok: true, bytesPerPort: 102, ports: [...WOL_PORTS] } };
-      },
-    });
-    assert.equal(woke, true, "wake fired best-effort on a down VLM host");
-    assert.equal(out.status, "down", "returns the current down result — no inline re-probe blocks the path");
-  });
-
-  test("down probe → status:down surfaces this tick (degraded signal + alert preserved)", async () => {
-    const out = await maybeWakeVlmHost(down, {
-      config: enabledConfig(),
-      gate: new WakeGate(0, 3),
-      wake: async () => ({ attempted: true, sent: { ok: true, bytesPerPort: 102, ports: [...WOL_PORTS] } }),
-    });
-    // Visibility invariant (#2278/#2335): the down signal MUST still surface so
-    // the degraded envelope + #2131 alert fire; the wake is a next-tick recovery.
-    assert.equal(out.status, "down");
-  });
-
-  test("disabled → fires the no-op wake and returns the original down result", async () => {
-    let woke = false;
-    const out = await maybeWakeVlmHost(down, {
-      config: enabledConfig({ enabled: false }),
-      gate: new WakeGate(0, 3),
-      wake: async () => {
-        woke = true;
-        return { attempted: false, reason: "disabled" };
-      },
-    });
-    assert.equal(out.status, "down");
-    assert.equal(woke, true, "wake is still consulted (it self-noops when disabled)");
-  });
-
-  test("send-error (cross-subnet) → original down result returned synchronously", async () => {
-    const out = await maybeWakeVlmHost(down, {
-      config: enabledConfig(),
-      gate: new WakeGate(0, 3),
-      wake: async () => ({ attempted: true, sent: { ok: false, reason: "send-error", error: "ENETUNREACH" } }),
-    });
-    assert.equal(out.status, "down");
-  });
-});
-
-// Issue #2570: the WoL Adapter that owns the process-lifetime WakeGate singleton
-// pair. Before #2570 the embed + vlm gates were module-level `new WakeGate(...)`
-// constants in src/health/fan-out.ts, which left the fan-out holding mutable
-// module-global state and bled the retry budget across test cases (no module-reset
-// harness could clear them). getWolGates() relocates that lifecycle here:
-// lazily-constructed, memoized, distinct-but-paired gates; resetWolGates() clears
-// the memo so a test gets a fresh pair. Each case resets in a beforeEach so the
-// singleton state never leaks across cases (the very isolation the adapter exists
-// to provide).
+// Issue #2570: the WoL Adapter that owns the process-lifetime WakeGate singleton.
+// Before #2570 the embed gate was a module-level `new WakeGate(...)` constant in
+// src/health/fan-out.ts, which left the fan-out holding mutable module-global state
+// and bled the retry budget across test cases (no module-reset harness could clear
+// it). getWolGates() relocates that lifecycle here: lazily-constructed, memoized;
+// resetWolGates() clears the memo so a test gets a fresh gate. Each case resets in a
+// beforeEach so the singleton state never leaks across cases (the very isolation the
+// adapter exists to provide). (Issue #3544: the parallel vlm gate was retired with
+// the VLM cutover, so the adapter now owns a single embed gate.)
 describe("WoL Adapter — getWolGates()/resetWolGates() singleton lifecycle (issue #2570)", () => {
   // resetWolGates is a per-case isolation reset (NOT a once-per-suite before) so
   // a gate budget consumed by one case never bleeds into the next.
   beforeEach(() => resetWolGates());
   afterEach(() => resetWolGates());
 
-  test("returns the SAME memoized pair across calls (cross-request persistence)", () => {
+  test("returns the SAME memoized gate across calls (cross-request persistence)", () => {
     const a = getWolGates();
     const b = getWolGates();
     assert.strictEqual(a.embed, b.embed, "embed gate is the same instance across calls");
-    assert.strictEqual(a.vlm, b.vlm, "vlm gate is the same instance across calls");
   });
 
-  test("embed and vlm are DISTINCT instances (independent budgets)", () => {
-    const gates = getWolGates();
-    assert.notStrictEqual(gates.embed, gates.vlm, "the two host budgets must be separate gates");
-    // Exhausting one budget must not touch the other.
-    gates.embed.recordSend(0);
-    assert.equal(gates.embed.attemptCount, 1);
-    assert.equal(gates.vlm.attemptCount, 0, "consuming the embed budget left the vlm budget untouched");
-  });
-
-  test("the pair starts with a zero attempt budget", () => {
+  test("the embed gate starts with a zero attempt budget", () => {
     const gates = getWolGates();
     assert.equal(gates.embed.attemptCount, 0);
-    assert.equal(gates.vlm.attemptCount, 0);
     assert.equal(gates.embed.exhausted, false);
-    assert.equal(gates.vlm.exhausted, false);
   });
 
-  test("resetWolGates() rebuilds a fresh, zero-budget pair (test-isolation defect fixed)", () => {
+  test("resetWolGates() rebuilds a fresh, zero-budget gate (test-isolation defect fixed)", () => {
     const first = getWolGates();
     first.embed.recordSend(0);
-    first.vlm.recordSend(0);
     assert.equal(first.embed.attemptCount, 1);
-    assert.equal(first.vlm.attemptCount, 1);
 
     resetWolGates();
     const second = getWolGates();
-    // A brand-new pair: different instances, zero budget — the retry budget did
+    // A brand-new gate: different instance, zero budget — the retry budget did
     // NOT bleed across the reset (the module-singleton isolation defect #2570 cites).
     assert.notStrictEqual(second.embed, first.embed);
-    assert.notStrictEqual(second.vlm, first.vlm);
     assert.equal(second.embed.attemptCount, 0);
-    assert.equal(second.vlm.attemptCount, 0);
   });
 
   test("the gates are seeded from readWolConfig() cooldown + max-attempts", () => {

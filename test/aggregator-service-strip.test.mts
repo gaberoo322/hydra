@@ -3,12 +3,13 @@
  *
  * Covers:
  *   - pure classifiers: classifyBoolean, classifyProbe (ok / degraded / down)
- *   - happy path: all six services up
+ *   - happy path: all five services up
  *   - degraded latency (probe ok but >=1000ms)
  *   - down state for orchestrator + vendor probes
  *   - sub-source failure isolation (a probe throws → row still renders)
  *   - issue #2597: the strip is driven by the shared STRIP_PROBE_DESCRIPTORS
- *     enumeration and now includes embed-backend (#2013) + ollamaVlm (#2278)
+ *     enumeration and includes embed-backend (#2013). (Issue #3544: the ollamaVlm
+ *     strip probe (#2278) was retired at the VLM cutover.)
  */
 
 import { test, describe } from "node:test";
@@ -23,13 +24,12 @@ import {
 } from "../src/aggregators/service-strip.ts";
 import { STRIP_PROBE_DESCRIPTORS } from "../src/health/strip-probes.ts";
 
-// Issue #2597: the strip now runs six probes; embed-backend + ollamaVlm default
-// to real network producers. Inject hermetic stubs (all "up") so the existing
-// four-service cases stay offline and deterministic — a case that wants one of
-// them down overrides the relevant stub.
-const upStubProbes: Pick<ServiceStripDeps, "probeEmbedBackend" | "probeOllamaVlm"> = {
+// Issue #2597/#3544: the strip runs five probes; embed-backend defaults to a real
+// network producer. Inject a hermetic stub (up) so the existing four-service cases
+// stay offline and deterministic — a case that wants it down overrides the stub.
+// (The ollamaVlm strip probe was retired at the VLM cutover, #3544.)
+const upStubProbes: Pick<ServiceStripDeps, "probeEmbedBackend"> = {
   probeEmbedBackend: async () => ({ status: "running", latencyMs: 42 }),
-  probeOllamaVlm: async () => ({ status: "ok", latencyMs: 42 }),
 };
 
 // ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ describe("classifyProbe — pure helper", () => {
 // ---------------------------------------------------------------------------
 
 describe("getServiceStrip — happy path", () => {
-  test("all six services up, all ok, in the shared enumeration order", async () => {
+  test("all five services up, all ok, in the shared enumeration order", async () => {
     const now = new Date("2026-05-26T12:00:00.000Z");
     const rows = await getServiceStrip({
       now,
@@ -145,20 +145,21 @@ describe("getServiceStrip — happy path", () => {
       checkOrchestrator: async () => true,
       ...upStubProbes,
     });
-    assert.equal(rows.length, 6);
+    assert.equal(rows.length, 5);
     for (const row of rows) {
       assert.equal(row.status, "ok", `expected ${row.service} ok`);
       assert.equal(row.lastChecked, now.toISOString());
     }
     // Order is driven by STRIP_PROBE_DESCRIPTORS (issue #2597) — the strip no
     // longer hard-codes it. Assert the rows match that enumeration exactly.
+    // (Issue #3544: the ollamaVlm probe was retired at the VLM cutover.)
     assert.deepEqual(
       rows.map((r) => r.service),
       STRIP_PROBE_DESCRIPTORS.map((d) => d.service),
     );
     assert.deepEqual(
       rows.map((r) => r.service),
-      ["orchestrator", "redis", "vikingdb", "openviking", "embed-backend", "ollamaVlm"],
+      ["orchestrator", "redis", "vikingdb", "openviking", "embed-backend"],
     );
   });
 });
@@ -230,27 +231,14 @@ describe("getServiceStrip — down state", () => {
       pingRedis: async () => true,
       checkOrchestrator: async () => true,
       probeEmbedBackend: async () => ({ status: "failed", latencyMs: null }),
-      probeOllamaVlm: async () => ({ status: "ok", latencyMs: 30 }),
     });
     const embed = rows.find((r) => r.service === "embed-backend");
     assert.equal(embed?.status, "down");
     assert.match(embed?.lastError ?? "", /embed backend unreachable/i);
   });
 
-  // Issue #2278/#2597: the ollamaVlm probe (previously omitted) now renders a
-  // row; a `down` producer result folds to a down row carrying its error.
-  test("ollamaVlm probe down → ollamaVlm row is down with the probe error", async () => {
-    const rows = await getServiceStrip({
-      probe: async () => ({ ok: true, latencyMs: 80 }),
-      pingRedis: async () => true,
-      checkOrchestrator: async () => true,
-      probeEmbedBackend: async () => ({ status: "running", latencyMs: 20 }),
-      probeOllamaVlm: async () => ({ status: "down", latencyMs: 5000, error: "fetch timeout" }),
-    });
-    const vlm = rows.find((r) => r.service === "ollamaVlm");
-    assert.equal(vlm?.status, "down");
-    assert.equal(vlm?.lastError, "fetch timeout");
-  });
+  // Issue #3544: the "ollamaVlm probe down → ollamaVlm row is down" test was
+  // removed with the ollamaVlm strip probe at the VLM cutover.
 });
 
 describe("getServiceStrip — sub-source failure isolation", () => {
@@ -264,7 +252,7 @@ describe("getServiceStrip — sub-source failure isolation", () => {
       checkOrchestrator: async () => true,
       ...upStubProbes,
     });
-    assert.equal(rows.length, 6);
+    assert.equal(rows.length, 5);
     const ov = rows.find((r) => r.service === "openviking");
     const vdb = rows.find((r) => r.service === "vikingdb");
     assert.equal(ov?.status, "down");
@@ -296,9 +284,8 @@ describe("getServiceStrip — sub-source failure isolation", () => {
       probeEmbedBackend: async () => {
         throw new Error("boom");
       },
-      probeOllamaVlm: async () => ({ status: "ok", latencyMs: 30 }),
     });
-    assert.equal(rows.length, 6);
+    assert.equal(rows.length, 5);
     const embed = rows.find((r) => r.service === "embed-backend");
     assert.equal(embed?.status, "down");
     assert.equal(embed?.lastError, "boom");

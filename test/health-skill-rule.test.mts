@@ -79,7 +79,6 @@ function healthySnapshot(): HealthSnapshot {
     // no-ops, keeping this baseline clean for skill-catalog-rule assertions.
     darkOutcomes: [],
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
-    ollamaVlm: { status: "ok", latencyMs: 12 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },
     emergencyBrake: { engaged: false },
     disk: { availableGb: 120, totalGb: 500, usedPercent: 60 },
@@ -193,9 +192,12 @@ describe("skill-catalog Health-Assessment population rule (#1968, snapshot-sourc
   });
 });
 
-// Issue #2277/#2386: the registration-FAILURE-RATE alert, now driven entirely off
-// the snapshot's `skillCatalog` + `ollamaVlm` fields — no singleton, no fetch
-// stub. The VLM-down vs VLM-ok branch is exercised by setting `ollamaVlm.status`.
+// Issue #2277/#2386: the registration-FAILURE-RATE alert, driven entirely off the
+// snapshot's `skillCatalog` field — no singleton, no fetch stub. Issue #3544: the
+// alert once correlated the failure rate with a `ollamaVlm` liveness facet to
+// distinguish a VLM-offline cascade from an OV-load failure; that facet was retired
+// at the VLM cutover, so the alert now reports the single remaining cause
+// (OpenViking overloaded under indexing load).
 
 describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)", () => {
   test("fully-registered catalog (0% failed) → no alert", () => {
@@ -203,7 +205,7 @@ describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)"
     assert.equal(failRateDiag(healthySnapshot()), undefined, "0% failure rate must not alert");
   });
 
-  test("failure rate above threshold + VLM down → warning naming the VLM root cause", () => {
+  test("failure rate above threshold → warning pointing at OpenViking load (VLM correlation retired, #3544)", () => {
     const s = withCatalog({
       skills: [],
       registered: 0,
@@ -213,23 +215,23 @@ describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)"
       vlmDeferred: false,
       skillsDeferred: false,
     });
-    s.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
     const d = failRateDiag(s);
     assert.ok(d, "100% failed must alert");
     // `warning` so it annotates the population verdict without escalating the fold.
     assert.equal(d!.severity, "warning");
     assert.equal(d!.component, "intelligence");
     assert.match(d!.what, /failure rate 100% \(4\/4 failed\)/);
-    assert.match(d!.why, /Ollama VLM backend/);
-    assert.match(d!.action, /ollama-recovery\.md/);
-    assert.equal(d!.autoRecovery, true, "VLM-down path recovers via the hourly chore");
+    assert.match(d!.why, /OpenViking is likely overloaded/);
+    assert.match(d!.action, /OpenViking load/);
+    // Issue #3544: no VLM host to wake any more → no auto-recovery framing.
+    assert.equal(d!.autoRecovery, false);
     // The population rule fires `error` (empty catalog) on this same snapshot →
     // the fold stays unhealthy from THAT error; the failure-rate `warning`
     // annotates it without escalating further.
     assert.equal(assessHealth(s).status, "unhealthy");
   });
 
-  test("failure rate above threshold + VLM ok → warning pointing at OpenViking load, NOT the VLM", () => {
+  test("failure rate above threshold (partial catalog) → warning at 25%", () => {
     const s = withCatalog({
       skills: [],
       registered: 3,
@@ -239,11 +241,9 @@ describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)"
       vlmDeferred: false,
       skillsDeferred: false,
     });
-    // ollamaVlm defaults to status:ok in healthySnapshot().
     const d = failRateDiag(s);
     assert.ok(d, "25% failed must alert");
     assert.match(d!.what, /failure rate 25% \(1\/4 failed\)/);
-    assert.match(d!.why, /NOT the usual VLM-offline cascade/);
     assert.match(d!.action, /OpenViking load/);
     assert.equal(d!.autoRecovery, false);
   });
@@ -251,7 +251,9 @@ describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)"
   test("vlm-deferred pass → no failure-rate alert (deliberate degradation, not failed registration)", () => {
     // vlmDeferred:true means registration was SKIPPED, not failed — the failure-
     // rate framing would be misleading, so the alert suppresses (assessRegistration-
-    // FailureRate's #2277 short-circuit).
+    // FailureRate's #2277 short-circuit). Issue #3544: the pre-flight that once set
+    // vlmDeferred:true was retired, so this asserts the suppression still holds for a
+    // manually-flagged snapshot (defensive: the flag stays on the state type).
     const s = withCatalog({
       skills: [],
       registered: 0,
@@ -261,7 +263,6 @@ describe("skill-registration failure-rate alert (#2277, snapshot-sourced #2386)"
       vlmDeferred: true,
       skillsDeferred: false,
     });
-    s.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
     assert.equal(failRateDiag(s), undefined, "a deferred pass must not fire the failure-rate alert");
   });
 

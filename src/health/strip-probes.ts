@@ -7,7 +7,7 @@
 //   countReflectionKeys, getLedgerLen, getSkillCatalogState, etc. The Now-page
 //   health strip (src/aggregators/service-strip.ts) is a SECOND consumer that
 //   wants only the user-facing subset of EXTERNAL-SERVICE LIVENESS probes
-//   (orchestrator, redis, vikingdb, openviking, embed-backend, ollamaVlm)
+//   (orchestrator, redis, vikingdb, openviking, embed-backend)
 //   projected as display rows. The strip's enumeration originally lived in the
 //   fan-out body ("the fan-out owns which external services the orchestrator
 //   monitors"), which meant service-strip.ts pulled the fan-out's entire heavy
@@ -36,7 +36,6 @@
 
 import {
   probeEmbedBackend,
-  probeOllamaVlm,
   type ServiceProbeResult,
   type ProbeOutcome,
 } from "./probe.ts";
@@ -70,8 +69,6 @@ export interface StripProbeDeps {
   ovBaseUrl: () => string;
   /** Embed-backend liveness (issue #2013) — the OV dense-embedding backend probe. */
   probeEmbedBackend: typeof probeEmbedBackend;
-  /** Tailnet Ollama VLM-host liveness (issue #2278). */
-  probeOllamaVlm: typeof probeOllamaVlm;
 }
 
 /**
@@ -123,8 +120,9 @@ function serviceProbeToOutcome(r: ServiceProbeResult, downError: string): ProbeO
  * to the strip's row-assembly logic (the #2597 deepening acceptance criterion).
  *
  * The first four entries preserve the strip's historical order + behaviour
- * (orchestrator, redis, vikingdb, openviking); the last two are the previously-
- * omitted embed-backend (#2013) and ollamaVlm (#2278) probes.
+ * (orchestrator, redis, vikingdb, openviking); the last is the previously-omitted
+ * embed-backend (#2013) probe. (Issue #3544: the ollamaVlm strip probe (#2278) was
+ * retired at the VLM cutover — OpenViking no longer uses the gaming-PC VLM host.)
  */
 export const STRIP_PROBE_DESCRIPTORS: readonly StripProbeDescriptor[] = [
   {
@@ -156,18 +154,5 @@ export const STRIP_PROBE_DESCRIPTORS: readonly StripProbeDescriptor[] = [
     kind: "probe",
     run: async (deps) =>
       serviceProbeToOutcome(await deps.probeEmbedBackend(), "embed backend unreachable"),
-  },
-  {
-    // Issue #2278: the Tailnet Ollama VLM host, previously omitted from the
-    // strip. probeOllamaVlm folds `down` to `status:"down"`; map it to the
-    // strip's ProbeOutcome (a `down` result → ok:false → a down row).
-    service: "ollamaVlm",
-    kind: "probe",
-    run: async (deps) => {
-      const r = await deps.probeOllamaVlm();
-      return r.status === "ok"
-        ? { ok: true, latencyMs: r.latencyMs }
-        : { ok: false, latencyMs: r.latencyMs, error: r.error || "VLM host unreachable" };
-    },
   },
 ];

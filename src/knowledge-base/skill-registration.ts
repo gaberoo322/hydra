@@ -16,7 +16,7 @@ import type { OvErrorCode } from "./ov-request.ts";
 // — the VLM can be UP while OV's `/api/v1/skills` POST handler is itself
 // load-gated (indexing-bound). The startup pass now pre-flights it too, mirroring
 // what the hourly recovery chore already does (#2163).
-import { probeOllamaVlm, probeSkillsEndpoint } from "../health/probe.ts";
+import { probeSkillsEndpoint } from "../health/probe.ts";
 import { logger } from "../logger.ts";
 
 // Issue #1828: skill registration timed out systematically (~8-12x/hour) under
@@ -233,15 +233,6 @@ export interface RegisterSkillsOptions {
   /** Base backoff in ms (doubles each retry). Defaults to {@link SKILL_REGISTER_BACKOFF_BASE_MS}. */
   backoffBaseMs?: number;
   /**
-   * Probe the Tailnet Ollama VLM backend liveness (issue #2277). Defaults to the
-   * real `probeOllamaVlm`. Injected by tests to drive the up/down branches
-   * deterministically without a live network. When it returns `status:"down"`,
-   * `registerSkills` short-circuits into the deferred/degraded path instead of
-   * burning the full 4×3×120s timeout budget against a handler that cannot answer
-   * while the VLM is offline.
-   */
-  probeVlm?: typeof probeOllamaVlm;
-  /**
    * Probe the OV `/api/v1/skills` POST handler liveness (issue #3402). Defaults to
    * the real `probeSkillsEndpoint` — the SAME probe the hourly recovery chore gates
    * on (#2163). Injected by tests to drive the responsive/load-gated branches
@@ -309,81 +300,33 @@ async function registerOneSkill(
 
 export async function registerSkills(opts: RegisterSkillsOptions = {}) {
   const backoffBaseMs = opts.backoffBaseMs ?? SKILL_REGISTER_BACKOFF_BASE_MS;
-  const probeVlm = opts.probeVlm ?? probeOllamaVlm;
   const probeSkills = opts.probeSkills ?? probeSkillsEndpoint;
 
-  // Issue #2277 — graceful degradation when the VLM backend is offline.
+  // Issue #3544 — the #2277 VLM-liveness pre-flight was retired at the VLM cutover.
   //
-  // OV's `POST /api/v1/skills` performs VLM-dependent semantic enrichment
-  // SYNCHRONOUSLY (verified: it blocks ~52s and returns INTERNAL/"Request timed
-  // out." even with `wait:false` when the Tailnet Ollama VLM host is down). So a
-  // normal pass against a down VLM burns the entire 4 skills × 3 attempts × 120s
-  // budget — up to ~24 min of blocked I/O and ~200+ timeout log lines — and STILL
-  // lands the catalog at 0/4 empty. That is the recurring #2277/#2269/#1831
-  // cascade.
-  //
-  // Pre-flight the VLM liveness probe (#2278). When it is `down`, DEFER the pass:
-  // record every skill as un-registered with the VLM-deferred marker, flag the
-  // state `vlmDeferred:true`, and emit EXACTLY ONE operator-visible alert — then
-  // return WITHOUT POSTing anything. We do not call OV at all (its handler cannot
-  // succeed while the VLM is offline), so we stop the cascade instead of feeding
-  // it. The hourly Housekeeping chore (`reRegisterMissingSkills`, gated on the
-  // skills-endpoint liveness) re-registers the deferred skills once OV/VLM
-  // recovers — no restart needed. A reachable VLM (`ok`) falls through to the
-  // normal registration loop below, which resets `vlmDeferred` to false.
-  let vlmStatus: "ok" | "down" = "ok";
-  try {
-    vlmStatus = (await probeVlm()).status;
-  } catch (err: any) {
-    /* intentional: the probe folds its own I/O errors to {status:"down"} and
-       never throws, but guard defensively so a probe bug can never block startup
-       registration — degrade to "attempt anyway" (the pre-#2277 behaviour). */
-    logger.error({ err }, "[Learning] VLM liveness pre-check threw, attempting registration anyway");
-    vlmStatus = "ok";
-  }
+  // That pre-flight probed the Tailnet Ollama VLM host (gabes-desktop-1:11434) and,
+  // when it was `down`, DEFERRED the whole pass (flagging `vlmDeferred:true`) to
+  // avoid the 4×3×120s timeout cascade against an OV handler that blocked on the
+  // offline VLM. At the VLM cutover OpenViking's VLM backend moved off that host
+  // onto the in-repo claude-cli shim (#3542), so a reachability probe of the gaming
+  // PC no longer predicts anything about the skills handler — the probe was
+  // removed. The #3402 skills-endpoint pre-flight below is now the SOLE
+  // graceful-degradation gate: it probes the actual `/api/v1/skills` POST handler,
+  // which is the resource the registration cascade depends on. `vlmDeferred` stays
+  // a permanently-`false` flag on the catalog state (its wire/rule consumers are
+  // untouched); nothing sets it true any more.
 
-  if (vlmStatus === "down") {
-    const deferredEntries: SkillRegistrationEntry[] = OV_SKILLS.map((s) => ({
-      name: s.name,
-      registered: false,
-      lastError: VLM_DEFERRED_MARKER,
-      lastSuccessAt: null,
-    }));
-    skillCatalogState.skills = deferredEntries;
-    skillCatalogState.registered = 0;
-    skillCatalogState.total = OV_SKILLS.length;
-    skillCatalogState.completed = true;
-    skillCatalogState.lastAttemptAt = Date.now();
-    skillCatalogState.vlmDeferred = true;
-
-    // Exactly ONE operator-visible alert (the #2277 "emit one alert when degraded
-    // mode triggers" acceptance). Fail-loud convention: error level, names the
-    // root cause + the no-restart recovery path so the operator does not chase OV
-    // load or restart the service.
-    logger.error(
-      { total: OV_SKILLS.length, reason: "vlm-down" },
-      "[Learning] OV skill catalog DEFERRED — Tailnet Ollama VLM backend (gabes-desktop-1:11434) is down, " +
-        "so all skill registrations were skipped to avoid the timeout cascade (#2277). " +
-        "Planners run without skill context until the VLM recovers; the hourly Housekeeping chore re-registers " +
-        "automatically once it is reachable (no restart needed) — see docs/operator-playbooks/ollama-recovery.md.",
-    );
-    return;
-  }
-
-  // Issue #3402 — graceful degradation when the VLM is UP but OV's own
-  // `/api/v1/skills` POST handler is load-gated.
+  // Issue #3402 — graceful degradation when OV's own `/api/v1/skills` POST handler
+  // is load-gated.
   //
-  // The #2277 VLM gate above covers "the Tailnet VLM host is offline". But the
-  // recurring #3402 cascade is a DIFFERENT mode: the VLM is reachable, yet OV's
-  // skills handler blocks synchronously on VLM-dependent semantic enrichment under
-  // OV's OWN indexing load and cannot answer. The VLM gate passes, the startup
-  // pass falls through, and every POST hits "Request timed out." — all 3 retries
-  // exhaust per skill, burning up to ~24min of blocked I/O and STILL landing the
-  // catalog at 0/4. The hourly recovery chore already pre-flights this exact case
-  // (`probeSkillsEndpoint`, #2163); the STARTUP pass did not — that asymmetry IS
-  // issue-3402.
+  // The recurring #3402 cascade: OV's skills handler blocks synchronously on
+  // VLM-dependent semantic enrichment under OV's OWN indexing load and cannot
+  // answer. Without a pre-flight the startup pass falls through and every POST hits
+  // "Request timed out." — all 3 retries exhaust per skill, burning up to ~24min of
+  // blocked I/O and STILL landing the catalog at 0/4. The hourly recovery chore
+  // already pre-flights this exact case (`probeSkillsEndpoint`, #2163).
   //
-  // Pre-flight the SAME skills-endpoint liveness probe here. When it folds to
+  // Pre-flight the skills-endpoint liveness probe here. When it folds to
   // `failed` (the handler cannot answer a cheap 3s probe), DEFER: record every
   // skill un-registered with SKILLS_DEFERRED_MARKER, flag `skillsDeferred:true`,
   // emit EXACTLY ONE operator alert, and return WITHOUT POSTing anything — the

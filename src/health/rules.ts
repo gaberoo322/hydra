@@ -470,14 +470,13 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // Issue #2277: the registration-FAILURE-RATE alert. Distinct from the
   // population gate above (empty/partial): this reads the last completed pass's
   // failure rate from `s.skillCatalog` (issue #2386 — sourced from the snapshot,
-  // not a live getSkillCatalogState() read) and correlates it with the #2284
-  // Ollama VLM liveness probe also carried on the snapshot (`s.ollamaVlm`). It
-  // fires a `warning` when the failure rate exceeds 10% and, when the VLM host is
-  // down, names that root cause + the ollama-recovery playbook. `warning` (not
-  // `error`) so it ANNOTATES the population verdict without escalating the
-  // deep-health fold above it. Read-only: it adds no export to skill-registration
-  // and never mutates state.
-  (s) => assessRegistrationFailureRate(s.skillCatalog, s.ollamaVlm),
+  // not a live getSkillCatalogState() read). It fires a `warning` when the failure
+  // rate exceeds 10% and points at OpenViking load + the ollama-recovery playbook.
+  // `warning` (not `error`) so it ANNOTATES the population verdict without
+  // escalating the deep-health fold above it. Read-only: it adds no export to
+  // skill-registration and never mutates state. (Issue #3544: the Ollama VLM
+  // liveness correlation was retired at the VLM cutover — see the rule body.)
+  (s) => assessRegistrationFailureRate(s.skillCatalog),
 ];
 
 // ---- fmtUp — uptime humanizer shared by assessHealth + the wire projection -

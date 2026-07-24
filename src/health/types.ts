@@ -37,9 +37,10 @@
 // on the snapshot vocabulary here.
 import type { ReflectionHealthReport } from "../metrics/reflection-health.ts";
 // Issue #2023: HealthSnapshot.ovSearch.status names the OV-search probe's result
-// vocabulary, owned by the ServiceProbe Adapter Seam. Issue #2278:
-// HealthSnapshot.ollamaVlm carries the Tailnet Ollama VLM host probe result.
-import type { OvSearchProbeStatus, OllamaVlmProbeResult } from "./probe.ts";
+// vocabulary, owned by the ServiceProbe Adapter Seam. (The Tailnet Ollama VLM
+// host probe result that HealthSnapshot once carried was retired at the VLM
+// cutover, #3544.)
+import type { OvSearchProbeStatus } from "./probe.ts";
 // Issue #2386: HealthSnapshot.skillCatalog carries the in-process OV
 // skill-registration state so the two skill-catalog rules read it FROM the
 // snapshot rather than calling getSkillCatalogState() out-of-band.
@@ -138,11 +139,6 @@ export interface HealthSnapshot {
   // check could not run) — the rule no-ops, never a phantom alarm.
   darkOutcomes: OutcomeVerdict[];
   ovSearch: { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number };
-  // Issue #2278: the Tailnet Ollama VLM host (gabes-desktop-1:11434) liveness
-  // probe. A DIRECT reachability check of the host OpenViking uses for its
-  // vision/indexing model — distinct from the OV-internal embed-backend probe.
-  // `down` surfaces the recurring silent skill-catalog failure (#2277/#2269/…).
-  ollamaVlm: OllamaVlmProbeResult;
   redisInfo: {
     memoryHuman: string;
     connectedClients: number;
@@ -271,10 +267,6 @@ export interface ProbeInputs {
   // honest-none exactly as a rejected async probe would.
   darkOutcomes: HealthSnapshot["darkOutcomes"] | null;
   ovSearch: HealthSnapshot["ovSearch"] | null;
-  // Issue #2278: the Tailnet Ollama VLM host liveness probe result. `| null` on a
-  // rejected settle (the never-throwing probe folds its own failures to a `down`
-  // result, so null only ever means the whole settle rejected upstream).
-  ollamaVlm: HealthSnapshot["ollamaVlm"] | null;
   redisInfo: HealthSnapshot["redisInfo"];
   emergencyBrake: HealthSnapshot["emergencyBrake"] | null;
   // Indices 17/18: consumed by projectHealthDeepResponse for OV quality trends.
@@ -416,8 +408,6 @@ export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
     emergencyBrake: val<ProbeInputs["emergencyBrake"]>("emergencyBrake"),
     ovSearchWindow: val<ProbeInputs["ovSearchWindow"]>("ovSearchWindow"),
     knowledgeContext: val<ProbeInputs["knowledgeContext"]>("knowledgeContext"),
-    // Issue #2278: the Tailnet Ollama VLM-host liveness probe.
-    ollamaVlm: val<ProbeInputs["ollamaVlm"]>("ollamaVlm"),
     // Issue #3372: the inline in-process reads (skillCatalog #2386,
     // darkOutcomes #2805) are seeded from their
     // shared honest-none fallbacks — NOT hardcoded `null` placeholders — and are

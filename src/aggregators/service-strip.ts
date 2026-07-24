@@ -24,9 +24,10 @@
  * service liveness probes — is the single `STRIP_PROBE_DESCRIPTORS` enumeration
  * exported from the fan-out (src/health/fan-out.ts), the module that already owns
  * "which external services does the orchestrator monitor?". This closed the
- * silent drift where the strip omitted embed-backend (#2013) and ollamaVlm
- * (#2278). Adding a probe to the strip is now a one-entry edit to that
- * enumeration — NO change to the row-assembly logic here.
+ * silent drift where the strip omitted embed-backend (#2013). Adding a probe to
+ * the strip is now a one-entry edit to that enumeration — NO change to the
+ * row-assembly logic here. (Issue #3544: the ollamaVlm strip probe (#2278) was
+ * retired at the VLM cutover.)
  */
 
 import { existsSync } from "node:fs";
@@ -50,7 +51,6 @@ import {
   classifyServiceBoolean,
   classifyServiceProbe,
   probeEmbedBackend,
-  probeOllamaVlm,
   type ProbeStatus,
 } from "../health/probe.ts";
 // Issue #2597/#3482: the ordered, shared enumeration of which external-service
@@ -101,11 +101,6 @@ export interface ServiceStripDeps {
    * throws.
    */
   probeEmbedBackend?: typeof probeEmbedBackend;
-  /**
-   * Issue #2278/#2597: the Tailnet Ollama VLM-host liveness probe. Defaults to
-   * the shared `probeOllamaVlm` producer; injectable for tests. Never throws.
-   */
-  probeOllamaVlm?: typeof probeOllamaVlm;
 }
 
 export interface ProbeResult {
@@ -132,7 +127,6 @@ export async function getServiceStrip(deps: ServiceStripDeps = {}): Promise<Serv
     checkOrchestrator: deps.checkOrchestrator ?? defaultOrchestratorOk,
     ovBaseUrl,
     probeEmbedBackend: deps.probeEmbedBackend ?? probeEmbedBackend,
-    probeOllamaVlm: deps.probeOllamaVlm ?? probeOllamaVlm,
   };
 
   // Run every descriptor's probe in parallel — none depends on another, and a
