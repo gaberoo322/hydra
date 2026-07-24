@@ -228,7 +228,28 @@ describe("design-concept Redis store + gate", () => {
     assert.deepEqual(orchRefs, ["test:list-3", "test:list-1"]);
   });
 
-  test("listDesignConcepts prunes stale (>7d) entries from the index", async () => {
+  test("listDesignConcepts is read-only — it does NOT prune the index (#3605)", async () => {
+    const now = Date.now();
+    const stale = now - DESIGN_CONCEPT_MAX_AGE_MS - 60_000;
+    await dc.saveDesignConcept(
+      buildComplete({ anchorRef: "test:ro-stale" } as any),
+      stale,
+    );
+    // Clear the hash so the entry is a prune candidate (score older than cutoff
+    // AND hash gone). If `listDesignConcepts` still pruned, this member would be
+    // evicted from the index.
+    await testRedis.del("hydra:design-concept:test:ro-stale");
+
+    // A read must NOT mutate the index — the stale member survives the read.
+    await dc.listDesignConcepts({ limit: 200 });
+    const afterRead = await testRedis.zrange("hydra:design-concept:index", 0, -1);
+    assert.ok(
+      afterRead.includes("test:ro-stale"),
+      "listDesignConcepts must be read-only: the stale index member must survive a read",
+    );
+  });
+
+  test("pruneDesignConceptIndex evicts stale (>7d) entries from the index (#3605)", async () => {
     const now = Date.now();
     const stale = now - DESIGN_CONCEPT_MAX_AGE_MS - 60_000;
     await dc.saveDesignConcept(
@@ -242,13 +263,18 @@ describe("design-concept Redis store + gate", () => {
     // Manually clear the hash for the stale entry so the prune sees a gap.
     await testRedis.del("hydra:design-concept:test:stale");
 
-    const items = await dc.listDesignConcepts({ now, limit: 10 });
-    const refs = items.map((x) => x.anchorRef);
-    assert.ok(refs.includes("test:fresh"));
-    assert.ok(!refs.includes("test:stale"));
+    // The prune is now an explicit, separate write operation.
+    await dc.pruneDesignConceptIndex(now);
 
     const indexMembers = await testRedis.zrange("hydra:design-concept:index", 0, -1);
     assert.ok(!indexMembers.includes("test:stale"), "stale removed from index");
+    assert.ok(indexMembers.includes("test:fresh"), "fresh survives the prune");
+
+    // A subsequent list reflects the pruned state.
+    const items = await dc.listDesignConcepts({ limit: 10 });
+    const refs = items.map((x) => x.anchorRef);
+    assert.ok(refs.includes("test:fresh"));
+    assert.ok(!refs.includes("test:stale"));
   });
 
   // -------------------------------------------------------------------------
