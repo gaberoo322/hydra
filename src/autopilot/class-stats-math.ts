@@ -105,6 +105,33 @@ const DAMPENER_REPROBE_HOURS = 24;
 export const DEV_WEAK_MERGE_RATE = 0.1;
 const PRODUCER_WEAK_BETA = 0;
 
+/**
+ * The weighted-quota-per-merge ceiling above which a dev class — even one with a
+ * perfectly healthy merge rate — is reported as **cost-ineffective** (verdict
+ * `expensive`, issue #3550). This is the true *weighted-quota* cost of one
+ * shipped PR (model-family burn weights + cacheRead-inclusive; see
+ * {@link ClassStat.weightedQuotaPerMerge}), NOT the raw output-token figure — so
+ * it makes an Opus-over-huge-context class visible as expensive even when its raw
+ * `tokensPerMerge` looks ordinary.
+ *
+ * DELIBERATELY conservative (mirrors {@link DEV_WEAK_MERGE_RATE}'s discipline):
+ * a named exported constant, never a magic literal, tuned high enough that only a
+ * genuinely extreme cost-per-merge trips it. In the test env the burn weights are
+ * identity and the cacheRead weight is 1.0, so this ceiling is expressed in the
+ * same raw-token units the calibration-dormant prod snapshot uses today.
+ *
+ * NULL-vs-ZERO discipline (invariant, AC #3): this verdict is ONLY reachable when
+ * `weightedQuotaPerMerge` is a real finite number. An `insufficient-sample` class
+ * (below the min-sample floor) and a class whose `weightedQuotaPerMerge` is
+ * `null`/`undefined` (no merges, no breakdown, or no usage inputs injected) are
+ * NEVER given a cost verdict — "no data" is never read as "cheap" OR "expensive".
+ *
+ * Like the sibling tunables in this leaf, this is a plain exported constant (the
+ * leaf is PURE and reads no `process.env`); the composer/env layer is free to
+ * override it the same way it would override the others.
+ */
+export const DEV_EXPENSIVE_WEIGHTED_QUOTA_PER_MERGE = 5_000_000;
+
 // ---------------------------------------------------------------------------
 // Class role — which yield metric is appropriate for a given class
 // ---------------------------------------------------------------------------
@@ -169,6 +196,18 @@ type ClassVerdict =
   | "healthy"
   /** Enough sample but a weak yield — a future live mode would dampen. */
   | "underperforming"
+  /**
+   * DEV role only: a healthy merge rate but an EXTREME weighted-quota-per-merge
+   * (above {@link DEV_EXPENSIVE_WEIGHTED_QUOTA_PER_MERGE}) — the class ships PRs
+   * but each one costs far too much weighted quota (e.g. Opus over a huge
+   * context). Distinct from `underperforming` (which is about the *merge rate*):
+   * an `expensive` class is *productive* but *cost-ineffective*. SHADOW-ONLY —
+   * like `healthy`, its dampener multiplier is 1.0, so surfacing it changes what
+   * the scoreboard *reports*, never what autopilot *dispatches* (#2943/#3550
+   * byte-identical invariant). Only reachable when `weightedQuotaPerMerge` is a
+   * real finite number (never for `insufficient-sample` / null-cost classes).
+   */
+  | "expensive"
   /** Below the min-sample floor — NO verdict; multiplier forced to 1.0. */
   | "insufficient-sample"
   /** A class with no class-appropriate yield metric (qa / health / …). */
@@ -494,9 +533,30 @@ export function computeClassScoreboard(
     if (role === "dev") {
       const mergeRate = acc.merged / dispatches;
       const tokensPerMerge = acc.merged > 0 ? Math.round(acc.mergedTokens / acc.merged) : null;
-      const verdict: ClassVerdict =
-        mergeRate <= DEV_WEAK_MERGE_RATE ? "underperforming" : "healthy";
       const weightedQuota = weightedQuotaFor(name, true);
+      const weightedQuotaPerMerge = weightedQuotaPerMergeFor(weightedQuota, acc.merged);
+      // Base verdict is the merge-rate signal (unchanged). A weak merge rate
+      // dominates — a class that barely ships is `underperforming` regardless of
+      // per-merge cost. Only when the merge rate is HEALTHY do we consider the
+      // weighted-quota cost axis: a productive-but-cost-ineffective class
+      // (extreme weighted-quota-per-merge) is reported `expensive` instead.
+      //
+      // NULL-vs-ZERO discipline (AC #3): the cost verdict is ONLY reachable when
+      // `weightedQuotaPerMerge` is a real finite number. `null`/`undefined` (no
+      // merges, no breakdown, or no usage inputs injected) is "no data" and never
+      // read as expensive. `insufficient-sample` classes never reach this branch
+      // (the min-sample floor is handled above). SHADOW-ONLY: `expensive` maps to
+      // the healthy dampener multiplier (1.0), so this changes reporting, never
+      // dispatch (#3550 byte-identical invariant).
+      let verdict: ClassVerdict =
+        mergeRate <= DEV_WEAK_MERGE_RATE ? "underperforming" : "healthy";
+      if (
+        verdict === "healthy" &&
+        typeof weightedQuotaPerMerge === "number" &&
+        weightedQuotaPerMerge > DEV_EXPENSIVE_WEIGHTED_QUOTA_PER_MERGE
+      ) {
+        verdict = "expensive";
+      }
       return {
         className: name,
         role,
@@ -504,7 +564,7 @@ export function computeClassScoreboard(
         mergedCount: acc.merged,
         mergeRate: Math.round(mergeRate * 1000) / 1000,
         tokensPerMerge,
-        weightedQuotaPerMerge: weightedQuotaPerMergeFor(weightedQuota, acc.merged),
+        weightedQuotaPerMerge,
         beta: null,
         betaSuspect: null,
         weightedQuota,
@@ -576,8 +636,11 @@ export function computeClassScoreboard(
  *   - `underperforming` → DAMPENER_MAX_MULTIPLIER (2x cooldown), re-probe after
  *     `reprobeHours`. A dampened class still runs — just at half cadence — so it
  *     keeps producing the fresh evidence a suppression was warranted.
- *   - everything else (`healthy` / `insufficient-sample` / `not-scored`) → 1.0
- *     (no change), `reprobeAt: null`.
+ *   - everything else (`healthy` / `expensive` / `insufficient-sample` /
+ *     `not-scored`) → 1.0 (no change), `reprobeAt: null`. Note `expensive`
+ *     (issue #3550) is a REPORTING-ONLY cost verdict: it deliberately maps to the
+ *     same 1.0 multiplier as `healthy`, so introducing it leaves the dampener plan
+ *     byte-identical to the pre-#3550 baseline (actuates nothing).
  *
  * v1 NEVER applies this — it is logged by `decide.py`'s shadow path and thrown
  * away. The math is unit-tested so the flip to live is a config change, not a
