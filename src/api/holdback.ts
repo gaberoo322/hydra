@@ -33,6 +33,7 @@ import {
 } from "../schemas/holdback.ts";
 import { enrollHoldback, checkHoldback, reportRevertFailed, type HoldbackEventBus } from "../holdback.ts";
 import { pendingEnrollAdd, type PendingEnrollEntry } from "../redis/holdback-merge-watch.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 export function createHoldbackRouter(eventBus: HoldbackEventBus) {
   const router = Router();
@@ -74,13 +75,12 @@ export function createHoldbackRouter(eventBus: HoldbackEventBus) {
     if (!parsed.success) {
       return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
-    try {
+    // Issue #909 / ADR-0027 eighth sweep: the 500 envelope + pino `err`-field
+    // log live in the isolateAggregator seam (route-helpers.ts) once.
+    return isolateAggregator(res, "holdback/revert-failed", async () => {
       await reportRevertFailed(eventBus, parsed.data.commitSha, parsed.data.reason);
-      res.json({ ok: true });
-    } catch (err: any) {
-      console.error(`[holdback-api] revert-failed emit failed: ${err?.message || String(err)}`);
-      res.status(500).json({ error: err?.message || String(err) });
-    }
+      return { ok: true };
+    });
   });
 
   // POST /holdback/pending — register an armed-but-not-landed PR (issue #2622).

@@ -33,6 +33,7 @@ import { projectReflectionHealth } from "../metrics/reflection-health.ts";
 // lives in src/learning/composition.ts (see that module's header for the full
 // #2225 → #2333 → #2497 lineage).
 import { getContext } from "../learning/composition.ts";
+import { aggregatorRouteNoQuery, isolateAggregator } from "./route-helpers.ts";
 
 // ===========================================================================
 // Learning diagnostics router (issue #3006 — focused after the split).
@@ -174,9 +175,12 @@ export function createLearningRouter() {
       ? filesParam.split(",").map(s => s.trim()).filter(Boolean)
       : undefined;
 
-    try {
+    // The bespoke 400 above stays inline; the never-throw-500 isolation now
+    // comes from the isolateAggregator seam (route-helpers.ts, #909) — the 500
+    // envelope + pino `err`-field log live there once (ADR-0027 eighth sweep).
+    return isolateAggregator(res, "learning/context-trace", async () => {
       const ctx = await getContext(agent, { type, reference, files });
-      res.json({
+      return {
         blocks: ctx.blocks.map(b => ({
           source: b.source,
           status: b.status,
@@ -185,11 +189,8 @@ export function createLearningRouter() {
           ...(b.error ? { error: b.error } : {}),
         })),
         promptBytes: ctx.toPrompt().length,
-      });
-    } catch (err: any) {
-      console.error(`[learning-api] context-trace failed: ${err?.message || String(err)}`);
-      res.status(500).json({ error: err?.message || String(err) });
-    }
+      };
+    });
   });
 
   /**
@@ -215,18 +216,21 @@ export function createLearningRouter() {
    *
    * Response (200): a `ReflectionHealthReport`.
    */
-  router.get("/learning/reflection-health", async (req, res) => {
-    try {
+  // Issue #909 / ADR-0027 eighth sweep: never-throw-500 isolation via the
+  // aggregatorRouteNoQuery seam (route-helpers.ts). `count` keeps its soft-parse
+  // (default-on-garbage 20, clamp [1,200], NO behaviour-changing 400) inside
+  // `produce`, per the common.ts guidance that lenient read routes own their
+  // `safeParse`.
+  router.get(
+    "/learning/reflection-health",
+    aggregatorRouteNoQuery("learning/reflection-health", async (req) => {
       // ADR-0022: read `count` through the Schemas seam. The schema reuses
       // countQuerySchema's coercion (default-on-garbage 20, clamp [1,200]).
       const count = ReflectionHealthQuerySchema.safeParse(req.query).data?.count ?? 20;
       const cycles = await getMetricsTrend(count);
-      res.json(projectReflectionHealth(cycles));
-    } catch (err: any) {
-      console.error(`[learning-api] reflection-health failed: ${err?.message || String(err)}`);
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      return projectReflectionHealth(cycles);
+    }),
+  );
 
   return router;
 }
