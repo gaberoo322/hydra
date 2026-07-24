@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useApi } from "../hooks/useApi.js";
+import LocalTimestamp from "../components/LocalTimestamp.jsx";
 
 // Issue #695 — subagent transcript viewer.
 //
@@ -239,7 +240,7 @@ function MessageCard({ message }) {
       <div className="flex items-center gap-2">
         <span className={`px-1.5 py-0.5 text-[10px] rounded border ${role.chip}`}>{role.label}</span>
         {message.timestamp && (
-          <span className="text-[10px] text-zinc-600 font-mono">{message.timestamp}</span>
+          <LocalTimestamp ts={message.timestamp} className="text-[10px] text-zinc-600 font-mono" />
         )}
       </div>
       <div className="space-y-1">{rendered}</div>
@@ -265,9 +266,16 @@ function MetaStrip({ meta }) {
       {cells.map(([k, v]) => (
         <div key={k} className="flex flex-col gap-0.5 min-w-0">
           <span className="text-[10px] uppercase tracking-widest text-zinc-500">{k}</span>
-          <span className="text-xs text-zinc-200 font-mono truncate" title={v || "—"}>
-            {v || "—"}
-          </span>
+          {k === "startedAt" ? (
+            // Route the one UTC-ISO cell through the shared local-time seam:
+            // browser-local wall-clock in the cell, full local date+time on
+            // hover, em-dash on null/invalid (LocalTimestamp handles all three).
+            <LocalTimestamp ts={v} className="text-xs text-zinc-200 font-mono truncate" />
+          ) : (
+            <span className="text-xs text-zinc-200 font-mono truncate" title={v || "—"}>
+              {v || "—"}
+            </span>
+          )}
         </div>
       ))}
     </div>
