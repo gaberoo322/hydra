@@ -76,39 +76,31 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 // semantics and needs no Redis round-trip on the /health hot path.
 // ---------------------------------------------------------------------------
 
-/**
- * The deferred marker recorded as a skill's `lastError` when the registration
- * pass was SKIPPED (not attempted) because the Tailnet Ollama VLM backend was
- * probed `down` (issue #2277). Distinct from the `ov-*` codes — those mean OV
- * was reached and the POST failed; this means the orchestrator never POSTed,
- * deliberately, to avoid burning the 4×3×120s timeout budget against a handler
- * that cannot answer while the VLM is offline. The hourly Housekeeping chore
- * (`reRegisterMissingSkills`) re-attempts these once OV/VLM recovers.
- */
-export const VLM_DEFERRED_MARKER = "vlm-deferred" as const;
+// Issue #3544: `VLM_DEFERRED_MARKER` ("vlm-deferred") was removed with the #2277
+// VLM-liveness pre-flight at the VLM cutover. Nothing records that marker any
+// more — the #3402 skills-endpoint pre-flight (SKILLS_DEFERRED_MARKER below) is
+// now the sole graceful-degradation gate.
 
 /**
  * The deferred marker recorded as a skill's `lastError` when the STARTUP
  * registration pass was SKIPPED (not attempted) because the OV `/api/v1/skills`
  * POST handler was probed load-gated/failed while the VLM was UP (issue #3402).
  *
- * Distinct from {@link VLM_DEFERRED_MARKER}: that means the Tailnet VLM backend
- * was offline; this means the VLM is reachable but OV's own skills handler is
- * indexing-bound and cannot answer even a cheap 3s liveness probe — so a full
- * 4×3×120s registration pass is guaranteed to burn ~24min of blocked I/O and
- * STILL land the catalog at 0/4. We defer instead, POSTing nothing, and let the
- * hourly Housekeeping chore (`reRegisterMissingSkills`, gated on this same probe)
- * re-register once the handler is responsive — no restart needed.
+ * The VLM is reachable but OV's own skills handler is indexing-bound and cannot
+ * answer even a cheap 3s liveness probe — so a full 4×3×120s registration pass is
+ * guaranteed to burn ~24min of blocked I/O and STILL land the catalog at 0/4. We
+ * defer instead, POSTing nothing, and let the hourly Housekeeping chore
+ * (`reRegisterMissingSkills`, gated on this same probe) re-register once the
+ * handler is responsive — no restart needed.
  */
 export const SKILLS_DEFERRED_MARKER = "skills-deferred" as const;
 
 /**
- * A skill's last-failure marker: an OV failure code, the VLM-deferred marker, the
- * skills-handler-deferred marker (#3402), or null (never failed).
+ * A skill's last-failure marker: an OV failure code, the skills-handler-deferred
+ * marker (#3402), or null (never failed).
  */
 type SkillLastError =
   | OvErrorCode
-  | typeof VLM_DEFERRED_MARKER
   | typeof SKILLS_DEFERRED_MARKER
   | null;
 
