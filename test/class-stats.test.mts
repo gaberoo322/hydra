@@ -31,6 +31,7 @@ import {
   DAMPENER_MAX_MULTIPLIER,
   DAMPENER_MIN_MULTIPLIER,
   DEV_WEAK_MERGE_RATE,
+  DEV_WEAK_COST_PER_MERGE,
   type ClassStat,
 } from "../src/autopilot/class-stats-math.ts";
 import {
@@ -585,6 +586,220 @@ describe("class-stats — weighted-quota-per-merge for dev classes (issue #3549)
     const qa = find(sb, "qa_orch");
     assert.equal(qa.role, "other");
     assert.equal(qa.weightedQuotaPerMerge, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Weighted-quota cost verdict for dev classes (issue #3550) — shadow-mode
+// `cost-ineffective` verdict; actuates NOTHING (the #2943 invariant).
+// ---------------------------------------------------------------------------
+
+describe("class-stats — weighted-quota cost verdict (issue #3550)", () => {
+  /** Build weighted-quota inputs attributing `burn` weighted tokens to a class. */
+  function wqFor(className: string, burn: number): WeightedQuotaInputs {
+    return {
+      byClassBreakdown: { [className]: familyBreakdown("opus", burn) },
+      cacheReadWeight: 1.0,
+      burnWeights: IDENTITY_WEIGHTS,
+    };
+  }
+
+  test("healthy merge rate + extreme weighted-quota-per-merge → cost-ineffective, not healthy", () => {
+    // 10 dispatches, 2 merged → rate 0.2 (> DEV_WEAK_MERGE_RATE 0.1, so NOT
+    // underperforming). Burn 6M / 2 merges = 3M per merge ≥ 2M threshold.
+    const records = batch("dev_orch", 10, 2);
+    const burn = DEV_WEAK_COST_PER_MERGE * 3; // 6M with the default 2M threshold
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, {
+      now: NOW,
+      weightedQuota: wqFor("dev_orch", burn),
+    });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.mergedCount, 2);
+    assert.ok(dev.mergeRate! > DEV_WEAK_MERGE_RATE, "merge rate is healthy, not weak");
+    assert.equal(dev.weightedQuotaPerMerge, Math.round(burn / 2));
+    assert.ok(
+      dev.weightedQuotaPerMerge! >= DEV_WEAK_COST_PER_MERGE,
+      "per-merge cost is at/above the extreme threshold",
+    );
+    assert.equal(
+      dev.verdict,
+      "cost-ineffective",
+      "an expensive-but-shipping dev class is no longer unconditionally healthy",
+    );
+  });
+
+  test("weighted-quota-per-merge just BELOW the threshold stays healthy", () => {
+    // 10 dispatches, 5 merged (rate 0.5, healthy). Burn just under 5 × threshold
+    // → per-merge just under the threshold → healthy, not cost-ineffective.
+    const records = batch("dev_orch", 10, 5);
+    const burn = DEV_WEAK_COST_PER_MERGE * 5 - 5; // per-merge = threshold - 1
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, {
+      now: NOW,
+      weightedQuota: wqFor("dev_orch", burn),
+    });
+    const dev = find(sb, "dev_orch");
+    assert.ok(dev.weightedQuotaPerMerge! < DEV_WEAK_COST_PER_MERGE);
+    assert.equal(dev.verdict, "healthy", "below the cost threshold is still healthy");
+  });
+
+  test("a weak merge rate is underperforming even with an extreme cost (merge-rate takes precedence)", () => {
+    // 12 dispatches, 1 merged → rate ~0.083 ≤ threshold → underperforming.
+    // Even a huge per-merge cost does not downgrade it to cost-ineffective:
+    // the class isn't shipping, so the weak-yield verdict dominates.
+    const records = batch("dev_orch", 12, 1);
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, {
+      now: NOW,
+      weightedQuota: wqFor("dev_orch", DEV_WEAK_COST_PER_MERGE * 10),
+    });
+    const dev = find(sb, "dev_orch");
+    assert.ok(dev.mergeRate! <= DEV_WEAK_MERGE_RATE);
+    assert.equal(dev.verdict, "underperforming");
+  });
+
+  test("a null weightedQuotaPerMerge never yields a cost verdict (null-vs-zero discipline)", () => {
+    // Cleared the floor with a healthy merge rate, but the class's breakdown is
+    // ABSENT → weightedQuota null → per-merge null → the cost axis can't judge it,
+    // so it stays healthy (a null cost is not an extreme cost).
+    const records = batch("dev_orch", 10, 5);
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, {
+      now: NOW,
+      weightedQuota: { byClassBreakdown: {}, cacheReadWeight: 1.0, burnWeights: IDENTITY_WEIGHTS },
+    });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.weightedQuotaPerMerge, null);
+    assert.equal(dev.verdict, "healthy", "null cost never becomes cost-ineffective");
+  });
+
+  test("an undefined weightedQuotaPerMerge (no usage inputs injected) never yields a cost verdict", () => {
+    // No weightedQuota inputs at all → the field is undefined → back-compat: the
+    // verdict is exactly the pre-#3550 merge-rate verdict (healthy).
+    const records = batch("dev_orch", 10, 5);
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, { now: NOW });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.weightedQuotaPerMerge, undefined);
+    assert.equal(dev.verdict, "healthy", "no usage inputs → pre-#3550 merge-rate verdict");
+  });
+
+  test("an insufficient-sample dev class is never given a cost verdict", () => {
+    // Below the floor with an extreme per-merge burn: still insufficient-sample.
+    const records = batch("dev_orch", CLASS_STATS_MIN_SAMPLE - 1, 3);
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, {
+      now: NOW,
+      weightedQuota: wqFor("dev_orch", DEV_WEAK_COST_PER_MERGE * 100),
+    });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.verdict, "insufficient-sample");
+    assert.equal(dev.weightedQuota, null, "below-floor cost axis is null");
+  });
+
+  test("producer classes never get a cost verdict — β still drives their verdict (#3550)", () => {
+    // A producer class with a clean positive β AND a huge weighted quota: the
+    // weighted-quota figure is reported alongside but does NOT override β.
+    const records = batch("research_orch", 20, 0);
+    const est: AttributionEstimate = {
+      metrics: [
+        {
+          metric: "forecast_brier",
+          intercept: 0,
+          sigma0: 0.01,
+          sigma0Source: "empty-windows",
+          observationCount: 20,
+          emptyWindowCount: 5,
+          effects: [
+            {
+              producerClass: "research_orch",
+              beta: 2.0,
+              lowVariance: false,
+              collinear: false,
+              collinearWith: [],
+              belowNoiseFloor: false,
+              nonZeroObservationCount: 15,
+              identifiabilitySuspect: false,
+            },
+          ],
+        },
+      ],
+    };
+    const sb = computeClassScoreboard(records, est, {
+      now: NOW,
+      weightedQuota: wqFor("research_orch", DEV_WEAK_COST_PER_MERGE * 50),
+    });
+    const p = find(sb, "research_orch");
+    assert.equal(p.role, "producer");
+    assert.ok(p.weightedQuota! >= DEV_WEAK_COST_PER_MERGE, "a large cost axis IS reported");
+    assert.equal(p.weightedQuotaPerMerge, null, "producers never have a per-merge cost");
+    assert.equal(p.verdict, "healthy", "β drives the producer verdict, cost never overrides it");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shadow dampener actuates NOTHING for cost-ineffective (issue #3550) — the
+// #2943 byte-identical-dispatch invariant.
+// ---------------------------------------------------------------------------
+
+describe("class-stats — cost-ineffective actuates nothing (issue #3550)", () => {
+  test("a cost-ineffective class dampener multiplier is byte-identical to a healthy class (1.0)", () => {
+    // Build a scoreboard where dev_orch is cost-ineffective (healthy rate, extreme
+    // cost). Its shadow-dampener decision must be indistinguishable from healthy.
+    const records = batch("dev_orch", 10, 2);
+    const sb = computeClassScoreboard(records, EMPTY_ESTIMATE, {
+      now: NOW,
+      weightedQuota: {
+        byClassBreakdown: { dev_orch: familyBreakdown("opus", DEV_WEAK_COST_PER_MERGE * 6) },
+        cacheReadWeight: 1.0,
+        burnWeights: IDENTITY_WEIGHTS,
+      },
+    });
+    const dev = find(sb, "dev_orch");
+    assert.equal(dev.verdict, "cost-ineffective", "precondition: dev_orch is cost-ineffective");
+
+    const plan = shadowDampener(sb);
+    const v = plan.verdicts.find((x) => x.className === "dev_orch");
+    assert.ok(v);
+    // Actuates nothing: multiplier 1.0, no re-probe — identical to a healthy class.
+    assert.equal(v!.multiplier, DAMPENER_MIN_MULTIPLIER, "cost-ineffective never dampens");
+    assert.equal(v!.reprobeAt, null, "cost-ineffective is not time-boxed");
+    // The verdict is carried into the shadow log, but the actuation is unchanged.
+    assert.equal(v!.verdict, "cost-ineffective");
+  });
+
+  test("the WHOLE dampener plan is byte-identical whether dev_orch is healthy or cost-ineffective", () => {
+    // Same dispatch/merge counts; the ONLY difference is the weighted-quota burn
+    // that flips the verdict healthy↔cost-ineffective. The dispatch decision
+    // (every multiplier + reprobeAt) must be identical — the #2943 invariant.
+    const records = batch("dev_orch", 10, 2);
+    const opts = { now: NOW };
+
+    // Baseline: no usage inputs → dev_orch is plain healthy.
+    const baseline = computeClassScoreboard(records, EMPTY_ESTIMATE, opts);
+    assert.equal(find(baseline, "dev_orch").verdict, "healthy");
+    const basePlan = shadowDampener(baseline);
+
+    // Variant: extreme cost → dev_orch is cost-ineffective.
+    const variant = computeClassScoreboard(records, EMPTY_ESTIMATE, {
+      ...opts,
+      weightedQuota: {
+        byClassBreakdown: { dev_orch: familyBreakdown("opus", DEV_WEAK_COST_PER_MERGE * 6) },
+        cacheReadWeight: 1.0,
+        burnWeights: IDENTITY_WEIGHTS,
+      },
+    });
+    assert.equal(find(variant, "dev_orch").verdict, "cost-ineffective");
+    const variantPlan = shadowDampener(variant);
+
+    // The ACTUATION (multiplier + reprobeAt per class) is byte-identical; only
+    // the reported `verdict` string differs. Compare the actuating fields only.
+    const actuation = (p: typeof basePlan) =>
+      p.verdicts.map((v) => ({
+        className: v.className,
+        multiplier: v.multiplier,
+        reprobeAt: v.reprobeAt,
+      }));
+    assert.deepEqual(
+      actuation(variantPlan),
+      actuation(basePlan),
+      "cost-ineffective changes NO dispatch multiplier — actuates nothing",
+    );
   });
 });
 
