@@ -151,3 +151,102 @@ export function formatTimeOfDay(ts: string | number | null | undefined): string 
     return "";
   }
 }
+
+/**
+ * The em-dash the dashboard renders for an absent/invalid timestamp — a
+ * single visible placeholder so a missing time reads as "—", never as a
+ * blank gap or a thrown row. Shared by the local-time helpers below so
+ * every current and future timestamp site guards uniformly.
+ */
+export const EMPTY_TIMESTAMP = "—";
+
+/**
+ * Normalise the two timestamp shapes the API emits into epoch-milliseconds:
+ *   - a `number` is Unix epoch **seconds** (PokedexModal's `e.ts`, and every
+ *     Redis `Date.now()/1000` feed) → multiplied by 1000
+ *   - a `string` is ISO-8601 UTC (AlertsNow's `alert.timestamp`, the merges
+ *     feed) → parsed via Date.parse
+ * Returns `null` for null/undefined/empty/unparseable/epoch-zero input so the
+ * callers below can render EMPTY_TIMESTAMP instead of ever throwing or
+ * printing an "Invalid Date" string.
+ *
+ * Interpreting a bare number as *seconds* (not millis) is the deliberate
+ * contract: it matches the two now-pixel `formatTime` helpers this seam
+ * subsumes, and the API sends epoch-seconds everywhere.
+ */
+export function toEpochMs(ts: string | number | null | undefined): number | null {
+  if (ts === null || ts === undefined || ts === "") return null;
+  const ms = typeof ts === "number" ? ts * 1000 : Date.parse(ts);
+  if (!Number.isFinite(ms) || ms === 0) return null;
+  return ms;
+}
+
+/**
+ * Compact local date + time in the **browser's timezone** (e.g. "6/1, 8:00 AM"
+ * in America/New_York for a 12:00Z instant). Accepts an ISO-8601-UTC string
+ * or Unix-epoch-seconds (see toEpochMs). Returns EMPTY_TIMESTAMP for
+ * missing/invalid input, never throws.
+ *
+ * `toLocaleString` with an explicit options bag (no explicit `timeZone`)
+ * renders in the host's local zone by design — this is the single source of
+ * truth that makes every migrated site local-by-default.
+ */
+export function formatDateTime(ts: string | number | null | undefined): string {
+  const ms = toEpochMs(ts);
+  if (ms === null) return EMPTY_TIMESTAMP;
+  try {
+    return new Date(ms).toLocaleString([], {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    /* intentional: never throw into a row; a locale/options edge renders as em-dash */
+    return EMPTY_TIMESTAMP;
+  }
+}
+
+/**
+ * Full local date + time in the browser's timezone — the disambiguating form
+ * carried in the hover `title` tooltip (weekday + year + seconds). Same input
+ * contract as formatDateTime; returns "" (empty title) rather than an em-dash
+ * for absent input, since an empty `title` attribute reads as "no tooltip"
+ * while "—" would render a stray tooltip on hover.
+ */
+export function formatDateTimeFull(ts: string | number | null | undefined): string {
+  const ms = toEpochMs(ts);
+  if (ms === null) return "";
+  try {
+    return new Date(ms).toLocaleString([], {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    /* intentional: never throw; a locale/options edge yields no tooltip */
+    return "";
+  }
+}
+
+/**
+ * The pure props a `<LocalTimestamp>` needs: the compact string the row shows
+ * and the full string its hover `title` carries. Extracting this into the
+ * pure seam lets node:test pin the timezone-conversion + guard behaviour
+ * without a React tree (the same reason the formatters above live here).
+ */
+export interface LocalTimestampParts {
+  /** Compact local date+time (formatDateTime) — what the cell renders. */
+  compact: string;
+  /** Full local date+time (formatDateTimeFull) — the hover-title tooltip. */
+  title: string;
+}
+
+/** Build both display strings for one timestamp in a single call. */
+export function localTimestampParts(ts: string | number | null | undefined): LocalTimestampParts {
+  return { compact: formatDateTime(ts), title: formatDateTimeFull(ts) };
+}
