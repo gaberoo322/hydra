@@ -174,11 +174,15 @@ export function createMetricsRouter() {
   // Locality) — the anchorType-filter + rate math is NOT re-implemented here,
   // mirroring the /metrics/anchor-distribution → projectAnchorDistribution split.
   // Payload is the aggregator's body RAW: `{ windowCycles, unclassified:
-  // [{cycleId, classification, prNumber?, anchorReference?, taskTitle?}], rate,
-  // fixable, noAttribution, fixableRate }` — no envelope. Issue #3602 added the
-  // `fixable` vs `no-attribution` sub-bucket split + `fixableRate`: the
-  // architectural-review trigger keys on `fixableRate` (genuine classifier gaps),
-  // not the total `rate`, so structurally-undecodable harness noise can't trip it.
+  // [{cycleId, classification, prNumber?, anchorReference?, taskTitle?, shape?}],
+  // rate, fixable, noAttribution, fixableRate, noAttributionShapes }` — no
+  // envelope. Issue #3602 added the `fixable` vs `no-attribution` sub-bucket split
+  // + `fixableRate`: the architectural-review trigger keys on `fixableRate`
+  // (genuine classifier gaps), not the total `rate`, so structurally-undecodable
+  // harness noise can't trip it. Issue #3623 added the per-row `shape` token +
+  // the `noAttributionShapes` count breakdown, so the no-attribution residue
+  // documents WHY each cycle is undecodable (`harness-branch` / `bare-uuid` /
+  // `autopilot-turn` / `descriptive-branch`) instead of being an opaque count.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   router.get(

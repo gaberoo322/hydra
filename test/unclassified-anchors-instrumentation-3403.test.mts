@@ -215,3 +215,102 @@ describe("getUnclassifiedAnchors — #3602 fixable vs no-attribution sub-bucket 
     assert.equal(result.fixableRate, 25);
   });
 });
+
+describe("getUnclassifiedAnchors — #3623 no-attribution shape diagnostic", () => {
+  let redis: any;
+
+  async function cleanKeys() {
+    const keys = await redis.keys("hydra:*");
+    if (keys.length > 0) await redis.del(...keys);
+  }
+
+  beforeEach(async () => {
+    if (!redis) redis = new Redis(REDIS_URL);
+    await cleanKeys();
+  });
+
+  after(async () => {
+    await cleanKeys();
+    if (redis) redis.disconnect();
+  });
+
+  test("each no-attribution row carries its structural `shape`; fixable rows do not", async () => {
+    // A bare-UUID merge-watch first-write (no branch) → bare-uuid.
+    await recordCycleMetrics("72d9770f-40b9-41b9-bea4-59c93f1e2ebe", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      prNumber: "3606",
+      tasksMerged: 1,
+    });
+    // A bare harness branch (Agent-tool dispatch) → harness-branch.
+    await recordCycleMetrics("worktree-agent-a0f1d230dcdda8f78", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      worktreeBranch: "worktree-agent-a0f1d230dcdda8f78",
+      prNumber: "3621",
+      tasksMerged: 1,
+    });
+    // A fixable cycle (decodable branch) carries NO shape — "why undecodable"
+    // does not apply to a cycle that HAS a recoverable lane.
+    await recordCycleMetrics("afa22ef1-1234-4abc-9def-0123456789ab", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      worktreeBranch: "worktree-agent-afa22ef1-t2-dev_orch-3564",
+      tasksMerged: 1,
+    });
+
+    const result = await getUnclassifiedAnchors(10);
+    const bareUuid = result.unclassified.find(
+      (r) => r.cycleId === "72d9770f-40b9-41b9-bea4-59c93f1e2ebe",
+    );
+    const harness = result.unclassified.find(
+      (r) => r.cycleId === "worktree-agent-a0f1d230dcdda8f78",
+    );
+    const fixableRow = result.unclassified.find(
+      (r) => r.cycleId === "afa22ef1-1234-4abc-9def-0123456789ab",
+    );
+    assert.equal(bareUuid!.classification, "no-attribution");
+    assert.equal(bareUuid!.shape, "bare-uuid");
+    assert.equal(harness!.classification, "no-attribution");
+    assert.equal(harness!.shape, "harness-branch");
+    assert.equal(fixableRow!.classification, "fixable");
+    assert.equal(fixableRow!.shape, undefined, "a fixable row has no shape");
+  });
+
+  test("`noAttributionShapes` breaks the no-attribution count down by shape and sums to noAttribution", async () => {
+    // Two bare-uuid + one autopilot-turn + one harness-branch = 4 no-attribution.
+    await recordCycleMetrics("72d9770f-40b9-41b9-bea4-59c93f1e2ebe", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      tasksMerged: 1,
+    });
+    await recordCycleMetrics("4a2fc33e-9478-49dc-88cd-69dd393787dd", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      tasksMerged: 1,
+    });
+    await recordCycleMetrics("autopilot-2b5a625c-t2", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      tasksMerged: 1,
+    });
+    await recordCycleMetrics("worktree-agent-a25d39d935737145d", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      worktreeBranch: "worktree-agent-a25d39d935737145d",
+      tasksMerged: 1,
+    });
+
+    const result = await getUnclassifiedAnchors(10);
+    assert.equal(result.noAttribution, 4);
+    assert.deepEqual(result.noAttributionShapes, {
+      "bare-uuid": 2,
+      "autopilot-turn": 1,
+      "harness-branch": 1,
+    });
+    const shapeSum = Object.values(result.noAttributionShapes).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    assert.equal(shapeSum, result.noAttribution, "shape counts sum to noAttribution");
+  });
+
+  test("an empty window reports an empty shape breakdown (no divide-by-zero)", async () => {
+    const result = await getUnclassifiedAnchors(10);
+    assert.equal(result.noAttribution, 0);
+    assert.deepEqual(result.noAttributionShapes, {});
+  });
+});
