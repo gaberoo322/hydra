@@ -16,6 +16,21 @@
 
 import type { HealthSnapshot, HealthDiagnostic } from "./types.ts";
 import { assessSkillCatalog, assessRegistrationFailureRate } from "./skill-catalog.ts";
+// Issue #3634: the four complex multi-policy rule bodies (embed-backend bespoke,
+// reflection-health, dark-leading-outcomes, attribution-ledger-empty) were
+// extracted into named, individually-testable assessor functions in the sibling
+// assessors.ts (mirroring the skill-catalog.ts precedent). Each stays a thin
+// same-slot pass-through below — `(s) => assessX(s.slice)` — so the load-bearing
+// RULES ordering (diagnostics.ts quotes diagnostics[0].what) is preserved and the
+// emitted diagnostics array is byte-identical. The genuinely-shallow one-liner
+// rules stay inline; the SVC_PROBES_WITH_BESPOKE_RULES registration policy below
+// stays here (assessEmbedBackendProbe covers only the bespoke diagnostic).
+import {
+  assessEmbedBackendProbe,
+  assessReflectionHealth,
+  assessDarkLeadingOutcomes,
+  assessAttributionLedger,
+} from "./assessors.ts";
 // Issue #2386: the OV skill-catalog state is now carried ON the HealthSnapshot
 // (`s.skillCatalog`), read live once at fan-out time in collectProbeInputs — the
 // module that already owns every other in-process probe read. The two
@@ -204,18 +219,8 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // the ovSearch probe to "timeout" → `info` "OV search slow" (the embed-backend
   // probe only fails on a transport-level ov-service-down / ov-timeout — OV
   // answering at all, even slowly, reads "running"), so no false alert fires.
-  (s) =>
-    s.svcProbes["embed-backend"]?.status === "failed"
-      ? {
-          severity: "warning",
-          component: "embed-backend",
-          what: "Embedding/VLM backend unreachable",
-          why: "The OpenViking dense-embedding + VLM backend (the gaming-PC Ollama endpoint, gabes-desktop-1:11434, reached over Tailscale — #980/#1795) did not answer the embedding-exercising search probe. OpenViking itself may be up while this backend is offline.",
-          impact: "Knowledge-plane search degrades to empty and the learning indexer stalls — agents run cycles with reduced context until the backend recovers.",
-          action: "Wake/check the gaming PC (Wake-on-LAN recovery: #1794). Verify the backend: curl -m5 http://gabes-desktop-1:11434/api/tags. See OpenViking embedding/VLM backend split in docs/reference.md.",
-          autoRecovery: true,
-        }
-      : null,
+  // Issue #3634: body extracted to assessEmbedBackendProbe in assessors.ts.
+  (s) => assessEmbedBackendProbe(s.svcProbes),
   // Issue #2013: a SINGLE generic "external service not running" rule that
   // iterates the keyed ServiceProbeMap (#1869) and fires for any monitored
   // service in a non-running state that does NOT already have a bespoke rule
@@ -391,20 +396,8 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // on `served-but-bucketed-none`: a cycle DID carry a present reflectionSources
   // deposit yet still bucketed `none` — the genuine candidate false-none worth an
   // operator's eye (deposit/read plumbing), distinct from the honest empty store.
-  (s) =>
-    s.reflectionHealth.verdict === "served-but-bucketed-none"
-      ? {
-          severity: "info",
-          component: "intelligence",
-          what: "Reflection deposit served but bucketed 'none'",
-          why: s.reflectionHealth.note,
-          impact:
-            "A reflection deposit landed yet did not register as applied context — a candidate false-none (distinct from the EXPECTED all-none of an empty store on a high-merge run, which is not surfaced here). Learning-context telemetry may under-count what reached a retry.",
-          action:
-            "Inspect the deposit/read path: GET /api/learning/reflection-health for the full distribution; confirm reap.py reflection_sources forwarding and the per-anchor/by-file read seam (src/reflections/index.ts).",
-          autoRecovery: true,
-        }
-      : null,
+  // Issue #3634: body extracted to assessReflectionHealth in assessors.ts.
+  (s) => assessReflectionHealth(s.reflectionHealth),
   // Issue #2805: surface a DARK leading outcome (a `kind: leading` outcome whose
   // reading is null — no data ever produced) through the deep-health fold so an
   // operator watching /api/health/deep sees the vision's primary-path blindness
@@ -417,24 +410,8 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // is dark and where it should write (Invariant 6). Fires only when at least one
   // leading outcome reads dark; an all-live (or empty) snapshot no-ops — honest-
   // none, never a phantom alarm (mirrors the #2492/#2386 discipline).
-  (s) => {
-    const dark = (s.darkOutcomes || []).filter((v) => v.status === "dark");
-    if (dark.length === 0) return null;
-    const detail = dark
-      .map((v) => `${v.name} (${v.producerHint}) → should write ${v.query}`)
-      .join("; ");
-    return {
-      severity: "warning",
-      component: "intelligence",
-      what: `Dark leading outcome${dark.length > 1 ? "s" : ""}: ${dark.map((v) => v.name).join(", ")}`,
-      why: `A kind:leading outcome has read null (no data ever produced). ${detail}`,
-      impact:
-        "Silent Outcome-Holdback blindness — every holdback baseline carries value:null for this outcome, so the system cannot tell whether its learning improves the vision's primary-path metric.",
-      action:
-        "Diagnose the named producer chain and bring it live; the wiring-liveness dark-outcome alarm (issue #2805) auto-files a needs-triage issue once the outcome has been continuously dark for 7+ days.",
-      autoRecovery: false,
-    };
-  },
+  // Issue #3634: body extracted to assessDarkLeadingOutcomes in assessors.ts.
+  (s) => assessDarkLeadingOutcomes(s.darkOutcomes),
   // Issue #3270: warn when the attribution ledger is empty. The attribution
   // spine (epic #2628) was designed to populate `hydra:attribution:ledger` with
   // per-merge observation rows as soon as PRs land and their windows close. An
@@ -444,18 +421,8 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // pipeline. Fires only when count === 0 (never on partial population); the
   // honest-zero default on probe failure means this rule no-ops when the probe
   // itself fails (honest-none, never a phantom alarm).
-  (s) => {
-    if (s.attributionLedgerCount > 0) return null;
-    return {
-      severity: "warning" as const,
-      component: "intelligence",
-      what: "Attribution ledger is empty — merger→ledger flow never fired",
-      why: "The outcome-attribution spine (epic #2628) wires `runAttributionRecord` as a housekeeping chore (issue #2632) to populate `hydra:attribution:ledger` with per-merge observation rows. The ledger has 0 rows, meaning the producer flow (open window on PR landing → close window after duration → append row) has not completed a single cycle. The issue #3113 ordering fix (attribution-record before holdback-merge-watch in housekeeping.ts) must be applied AND at least one PR must have landed AND its window must have elapsed.",
-      impact: "The ridge estimator (#2630) and per-class scoreboard (#2943) have no data — `estimateMarginalEffects` returns empty results and the outcome-attribution spine is dark despite the wiring existing.",
-      action: "Check `runAttributionRecord` logs (`journalctl --user -u hydra-orchestrator.service | grep '\[attribution\]'`). Verify: (1) holdback pending-enroll registry has/had entries (`HGETALL hydra:holdback:pending-enroll`); (2) attribution-record chore runs BEFORE holdback-merge-watch in housekeeping.ts (issue #3113); (3) at least one window has elapsed (`HGETALL hydra:attribution:windows`).",
-      autoRecovery: false,
-    };
-  },
+  // Issue #3634: body extracted to assessAttributionLedger in assessors.ts.
+  (s) => assessAttributionLedger(s.attributionLedgerCount),
     // Issue #1968: surface the silent empty/partial OV skill catalog through the
   // deep-health Health Assessment fold so an operator watching /api/health/deep
   // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a
