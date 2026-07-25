@@ -25,6 +25,7 @@ import {
   type ProbeResult,
   type ProbeExecOptions,
 } from "./exec.ts";
+import { logger } from "../logger.ts";
 
 export { isProbeFailure, isProbeOk } from "./exec.ts";
 export type { ProbeResult } from "./exec.ts";
@@ -107,12 +108,12 @@ export async function readDisk(opts: ProbeExecOptions = {}): Promise<ProbeResult
   const raw = await runProbe(dfBin(), ["-B1", "--output=avail,size,pcent", "/"], opts);
   if (raw.exitCode !== 0 || raw.timedOut || raw.spawnErrorCode) {
     const code = classifyProbeFailure(raw);
-    console.error(`[host-probe] df failed (${code}): ${raw.stderr.slice(0, 200)}`);
+    logger.error({ code, stderr: raw.stderr.slice(0, 200) }, "[host-probe] df failed");
     return { ok: false, code };
   }
   const parsed = parseDfOutput(raw.stdout);
   if (!parsed) {
-    console.error("[host-probe] df produced no parseable data row");
+    logger.error("[host-probe] df produced no parseable data row");
     return { ok: false, code: "host-probe-empty" };
   }
   return { ok: true, data: parsed };
@@ -127,12 +128,12 @@ export async function readMem(opts: ProbeExecOptions = {}): Promise<ProbeResult<
   const raw = await runProbe(freeBin(), ["-b"], opts);
   if (raw.exitCode !== 0 || raw.timedOut || raw.spawnErrorCode) {
     const code = classifyProbeFailure(raw);
-    console.error(`[host-probe] free failed (${code}): ${raw.stderr.slice(0, 200)}`);
+    logger.error({ code, stderr: raw.stderr.slice(0, 200) }, "[host-probe] free failed");
     return { ok: false, code };
   }
   const parsed = parseFreeOutput(raw.stdout);
   if (!parsed) {
-    console.error("[host-probe] free produced no Mem: row");
+    logger.error("[host-probe] free produced no Mem: row");
     return { ok: false, code: "host-probe-empty" };
   }
   return { ok: true, data: parsed };
@@ -161,7 +162,7 @@ export async function readServiceStatus(
   // Spawn/timeout failures have no usable stdout — surface a code.
   if (raw.spawnErrorCode || raw.timedOut) {
     const code = classifyProbeFailure(raw);
-    console.error(`[host-probe] systemctl is-active ${unit} failed (${code})`);
+    logger.error({ unit, code }, "[host-probe] systemctl is-active failed");
     return { ok: false, code };
   }
   const state = raw.stdout.trim();
@@ -172,8 +173,9 @@ export async function readServiceStatus(
   }
   // No stdout AND non-zero with no spawn/timeout marker: genuinely empty.
   if (raw.exitCode !== 0) {
-    console.error(
-      `[host-probe] systemctl is-active ${unit} exited ${raw.exitCode} with no state word`,
+    logger.error(
+      { unit, exitCode: raw.exitCode },
+      "[host-probe] systemctl is-active exited non-zero with no state word",
     );
     return { ok: false, code: "host-probe-failed" };
   }
@@ -237,12 +239,15 @@ export async function readUserTimers(
   );
   if (raw.exitCode !== 0 || raw.timedOut || raw.spawnErrorCode) {
     const code = classifyProbeFailure(raw);
-    console.error(`[host-probe] systemctl list-timers failed (${code}): ${raw.stderr.slice(0, 200)}`);
+    logger.error(
+      { code, stderr: raw.stderr.slice(0, 200) },
+      "[host-probe] systemctl list-timers failed",
+    );
     return { ok: false, code };
   }
   const parsed = parseListTimersOutput(raw.stdout);
   if (!parsed) {
-    console.error("[host-probe] systemctl list-timers produced no parseable JSON array");
+    logger.error("[host-probe] systemctl list-timers produced no parseable JSON array");
     return { ok: false, code: "host-probe-empty" };
   }
   return { ok: true, data: parsed };

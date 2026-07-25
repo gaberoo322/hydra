@@ -32,6 +32,7 @@ import {
   nextGhRateLimitBackoff,
   recordGhRateLimited,
 } from "../redis/oauth-backoff.ts";
+import { logger } from "../logger.ts";
 
 /**
  * On a `gh-rate-limited` classification (issue #3137), advance the persisted
@@ -58,16 +59,22 @@ async function armGhRateLimitGate(argsJoined: string): Promise<void> {
     const next = nextGhRateLimitBackoff(failures, Date.now());
     await writeGhRateLimitBackoff(next);
     const waitMs = Math.max(0, next.nextAttemptMs - Date.now());
-    console.error(
-      `[github/gh] gh ${argsJoined} rate-limited (gh-rate-limited) — ` +
-        `consecutive=${failures}, backing off ~${Math.round(waitMs / 1000)}s ` +
-        `(next attempt ${new Date(next.nextAttemptMs).toISOString()}). ` +
-        `NOTE: gh hides x-ratelimit-* headers; backoff keyed off the structured error.`,
+    logger.error(
+      {
+        args: argsJoined,
+        code: "gh-rate-limited",
+        consecutive: failures,
+        backoffSeconds: Math.round(waitMs / 1000),
+        nextAttempt: new Date(next.nextAttemptMs).toISOString(),
+      },
+      "[github/gh] gh rate-limited — backing off " +
+        "(NOTE: gh hides x-ratelimit-* headers; backoff keyed off the structured error)",
     );
   } catch (err: any) {
     // Fail open — an observability/gate failure must never break the gh call.
-    console.error(
-      `[github/gh] failed to arm rate-limit backoff gate (degrading to no gate): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[github/gh] failed to arm rate-limit backoff gate (degrading to no gate)",
     );
   }
 }
@@ -83,8 +90,9 @@ async function clearGhRateLimitGateOnSuccess(): Promise<void> {
     const prior = await readGhRateLimitBackoff();
     if (prior !== null) await clearGhRateLimitBackoff();
   } catch (err: any) {
-    console.error(
-      `[github/gh] failed to clear rate-limit backoff gate (stale gate self-expires at TTL): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[github/gh] failed to clear rate-limit backoff gate (stale gate self-expires at TTL)",
     );
   }
 }
@@ -125,8 +133,9 @@ export async function ghExec(
   }
   const code = classifyFailure(raw);
   recordGhRateLimitSignal(code, args.join(" "));
-  console.error(
-    `[github/gh] gh ${args.join(" ")} failed (${code}): ${raw.stderr.slice(0, 300)}`,
+  logger.error(
+    { args: args.join(" "), code, stderr: raw.stderr.slice(0, 300) },
+    "[github/gh] gh command failed",
   );
   return { ok: false, code, stderr: raw.stderr };
 }
@@ -152,8 +161,9 @@ export async function ghJson<T = unknown>(
   if (raw.exitCode !== 0 || raw.timedOut || raw.spawnErrorCode) {
     const code = classifyFailure(raw);
     recordGhRateLimitSignal(code, args.join(" "));
-    console.error(
-      `[github/gh] gh ${args.join(" ")} failed (${code}): ${raw.stderr.slice(0, 300)}`,
+    logger.error(
+      { args: args.join(" "), code, stderr: raw.stderr.slice(0, 300) },
+      "[github/gh] gh command failed",
     );
     return { ok: false, code, stderr: raw.stderr };
   }
@@ -162,7 +172,10 @@ export async function ghJson<T = unknown>(
 
   const trimmed = raw.stdout.trim();
   if (trimmed.length === 0) {
-    console.error(`[github/gh] gh ${args.join(" ")} produced empty stdout (gh-empty)`);
+    logger.error(
+      { args: args.join(" "), code: "gh-empty" },
+      "[github/gh] gh command produced empty stdout",
+    );
     return { ok: false, code: "gh-empty", stderr: raw.stderr };
   }
 
@@ -170,8 +183,9 @@ export async function ghJson<T = unknown>(
     const data = JSON.parse(trimmed) as T;
     return { ok: true, data };
   } catch (err: any) {
-    console.error(
-      `[github/gh] gh ${args.join(" ")} returned malformed JSON (gh-malformed-json): ${err?.message || err}`,
+    logger.error(
+      { args: args.join(" "), code: "gh-malformed-json", err },
+      "[github/gh] gh command returned malformed JSON",
     );
     return { ok: false, code: "gh-malformed-json", stderr: raw.stderr };
   }

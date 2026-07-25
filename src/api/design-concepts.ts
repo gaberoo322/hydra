@@ -64,6 +64,7 @@ import {
   EXEMPT_LOG_DEFAULT_LIMIT,
 } from "../schemas/design-concept.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Green-light criterion (issue #736)
@@ -137,15 +138,15 @@ export function createDesignConceptsRouter() {
             items.push(parsed);
           } else {
             // Surface schema drift without dropping the rest of the log.
-            console.error(
+            logger.error(
+              { raw },
               "[api/design-concepts] exempt-log entry rejected — bad shape",
-              raw,
             );
           }
         } catch (parseErr) {
-          console.error(
-            "[api/design-concepts] exempt-log entry parse failed",
+          logger.error(
             { raw, err: parseErr },
+            "[api/design-concepts] exempt-log entry parse failed",
           );
         }
       }
@@ -189,7 +190,7 @@ export function createDesignConceptsRouter() {
       await appendExemptLogEntry(JSON.stringify(entry));
       res.status(201).json(entry);
     } catch (err: any) {
-      console.error("[api/design-concepts] exempt-log write failed", err);
+      logger.error({ err }, "[api/design-concepts] exempt-log write failed");
       res
         .status(500)
         .json({ error: err?.message ?? "exempt-log write failed" });
@@ -258,17 +259,17 @@ export function createDesignConceptsRouter() {
       }
       // Miss — loud server-side log; a missing artifact at QA time is a real
       // gap, not noise. The handle names exactly where we looked.
-      console.error("[api/design-concepts] QA resolve MISS", {
-        handle: resolution.handle,
-        reason: resolution.reason,
-      });
+      logger.error(
+        { handle: resolution.handle, reason: resolution.reason },
+        "[api/design-concepts] QA resolve MISS",
+      );
       res.status(404).json({
         found: false,
         handle: resolution.handle,
         reason: resolution.reason,
       });
     } catch (err: any) {
-      console.error("[api/design-concepts] QA resolve failed", err);
+      logger.error({ err }, "[api/design-concepts] QA resolve failed");
       res.status(500).json({ error: err?.message ?? "resolve failed" });
     }
   });
@@ -299,7 +300,7 @@ export function createDesignConceptsRouter() {
       const gate = gateCheck(dc, Date.now());
       res.json({ ...dc, gate });
     } catch (err: any) {
-      console.error("[api/design-concepts] get failed", err);
+      logger.error({ err }, "[api/design-concepts] get failed");
       res.status(500).json({ error: err?.message ?? "get failed" });
     }
   });
@@ -334,7 +335,7 @@ export function createDesignConceptsRouter() {
       });
       res.status(201).json(dc);
     } catch (err: any) {
-      console.error("[api/design-concepts] create failed", err);
+      logger.error({ err }, "[api/design-concepts] create failed");
       res.status(500).json({ error: err?.message ?? "create failed" });
     }
   });
@@ -370,7 +371,7 @@ export function createDesignConceptsRouter() {
         res.status(404).json({ error: msg });
         return;
       }
-      console.error("[api/design-concepts] approve failed", err);
+      logger.error({ err }, "[api/design-concepts] approve failed");
       res.status(500).json({ error: msg });
     }
   });

@@ -30,6 +30,7 @@ import {
   type ShareResult,
 } from "../capacity-floor.ts";
 import { getTargetWebUrl } from "../target-config.ts";
+import { logger } from "../logger.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 
@@ -58,7 +59,10 @@ function resolveMetricPath(p: string): string {
  */
 export async function writeMetricFile(value: number, filePath: string): Promise<boolean> {
   if (!Number.isFinite(value)) {
-    console.error(`[metrics-publisher] refusing to write non-finite value ${value} to ${filePath}`);
+    logger.error(
+      { value, filePath },
+      "[metrics-publisher] refusing to write non-finite value",
+    );
     return false;
   }
   const resolved = resolveMetricPath(filePath);
@@ -71,9 +75,7 @@ export async function writeMetricFile(value: number, filePath: string): Promise<
     await writeFile(resolved, serialized, "utf-8");
     return true;
   } catch (err: any) {
-    console.error(
-      `[metrics-publisher] failed to write ${resolved}: ${err?.message || String(err)}`,
-    );
+    logger.error({ path: resolved, err }, "[metrics-publisher] failed to write metric file");
     return false;
   }
 }
@@ -108,8 +110,9 @@ export async function publishOrchestratorShareMetric(
   try {
     share = await getSelfImprovementShare(windowCycles);
   } catch (err: any) {
-    console.error(
-      `[metrics-publisher] getSelfImprovementShare failed (non-fatal): ${err?.message || String(err)}`,
+    logger.error(
+      { err },
+      "[metrics-publisher] getSelfImprovementShare failed (non-fatal)",
     );
     return { ok: false, value: 0, windowCount: 0, path: resolveMetricPath(filePath) };
   }
@@ -197,15 +200,17 @@ export async function publishForecastCalibrationBrierMetric(
   try {
     response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
   } catch (err: any) {
-    console.error(
-      `[metrics-publisher] forecast-calibration-brier: target fetch failed (${url}): ${err?.message || String(err)} — leaving ${path} untouched`,
+    logger.error(
+      { url, path, err },
+      "[metrics-publisher] forecast-calibration-brier: target fetch failed — leaving file untouched",
     );
     return { ok: false, reason: "fetch-failed", path };
   }
 
   if (!response.ok) {
-    console.error(
-      `[metrics-publisher] forecast-calibration-brier: target returned HTTP ${response.status} (${url}) — leaving ${path} untouched`,
+    logger.error(
+      { url, path, status: response.status },
+      "[metrics-publisher] forecast-calibration-brier: target returned non-200 — leaving file untouched",
     );
     return { ok: false, reason: "non-200", path };
   }
@@ -214,16 +219,19 @@ export async function publishForecastCalibrationBrierMetric(
   try {
     body = await response.json();
   } catch (err: any) {
-    console.error(
-      `[metrics-publisher] forecast-calibration-brier: malformed JSON from ${url}: ${err?.message || String(err)} — leaving ${path} untouched`,
+    logger.error(
+      { url, path, err },
+      "[metrics-publisher] forecast-calibration-brier: malformed JSON — leaving file untouched",
     );
     return { ok: false, reason: "malformed-response", path };
   }
 
   const brierScore = (body as { brierScore?: unknown } | null)?.brierScore;
   if (typeof brierScore !== "number" || !Number.isFinite(brierScore)) {
-    console.error(
-      `[metrics-publisher] forecast-calibration-brier: brierScore is ${JSON.stringify(brierScore ?? null)} (null until enough resolved forecasts exist) — leaving ${path} untouched`,
+    logger.error(
+      { url, path, brierScore: brierScore ?? null },
+      "[metrics-publisher] forecast-calibration-brier: brierScore is null/non-finite " +
+        "(null until enough resolved forecasts exist) — leaving file untouched",
     );
     return { ok: false, reason: "no-score", path };
   }
