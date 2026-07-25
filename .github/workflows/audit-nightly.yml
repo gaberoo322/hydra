@@ -1,0 +1,114 @@
+name: audit-nightly
+
+# Scheduled npm-audit → dep-bump issue (issue #3650).
+#
+# The counterpart to demoting npm-audit-{orchestrator,dashboard} from required
+# ci.yml gates to advisory surfaces. Those gates queried the LIVE advisory DB,
+# so a freshly-published CVE against an already-installed dep reddened them
+# repo-wide with zero code change — freezing every merge and deploy (the
+# "ambient poison pill", two instances 2026-07-24). Demoting them stops the
+# freeze; THIS workflow preserves the actionable signal: once a day it runs the
+# same fail-closed evaluator (scripts/ci/npm-audit-scan.ts) over both prod dep
+# trees and, on a new non-allowlisted high/critical, files (or updates) a single
+# dep-bump issue labelled ready-for-agent so autopilot picks it up. A fresh CVE
+# becomes tracked work, never a merge/deploy freeze.
+#
+# NOT a required check and touches no Verifier-Core path — lands as a normal
+# Tier-3 sibling workflow (operator memory
+# feedback_ci_gate_separate_workflow_avoids_tier0).
+
+on:
+  schedule:
+    # Daily at 07:00 UTC. Advisory-DB churn is slow; once a day is plenty.
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: audit-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit-nightly:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      # Root install so `npx tsx` resolves deterministically. The audit itself
+      # uses --package-lock-only (see the script), so no dashboard install.
+      - name: Install deps (for tsx)
+        run: npm ci
+
+      - name: Scan orchestrator + dashboard for new high/critical advisories
+        id: scan
+        env:
+          # Same waiver as the dashboard advisory surface — a genuinely
+          # inapplicable, no-forward-fix advisory should not file a daily issue.
+          AUDIT_ALLOWLIST: GHSA-qwww-vcr4-c8h2
+        run: |
+          set -uo pipefail
+          orch=$(npx tsx scripts/ci/npm-audit-scan.ts --dir . --label orchestrator --format json)
+          dash=$(npx tsx scripts/ci/npm-audit-scan.ts --dir dashboard --label dashboard --allowlist "$AUDIT_ALLOWLIST" --format json)
+          echo "orchestrator: $orch"
+          echo "dashboard:    $dash"
+          # Render the union of blocking findings to an issue body file. Reads the
+          # two JSON scans from argv (never interpolated into the shell), so a
+          # package name cannot inject. Empty body ⇒ nothing to file.
+          node -e '
+            const scans = [JSON.parse(process.argv[1]), JSON.parse(process.argv[2])];
+            const rows = [];
+            for (const s of scans) {
+              for (const b of s.blocking) {
+                rows.push(`- **${s.label}**: \`${b.name}\` (${b.severity}, range ${b.range}) — ${b.ids.join(", ")}`);
+              }
+            }
+            const fs = require("node:fs");
+            if (rows.length === 0) { fs.writeFileSync("audit-findings.md", ""); process.exit(0); }
+            const body = [
+              "The nightly `audit-nightly` scan found high/critical **production** advisories not covered by the dashboard allowlist. Each needs a forward dep-bump (or, only if no forward fix exists, an operator-reviewed allowlist entry).",
+              "",
+              "## Advisories",
+              ...rows,
+              "",
+              "## How to resolve",
+              "1. Reproduce: `npm audit --omit=dev --audit-level=high` (root) and `cd dashboard && npm audit --omit=dev --audit-level=high`.",
+              "2. Bump the offending dependency — or add/raise an `overrides` floor — so the advisory clears; run `npm test`.",
+              "3. If there is genuinely NO forward fix, add the GHSA id to the `AUDIT_ALLOWLIST` env in advisory-checks.yml + audit-nightly.yml with written justification (operator review).",
+              "",
+              "_Auto-filed by audit-nightly. Advisory only — does not block merges or deploys (issue #3650)._",
+            ].join("\n");
+            fs.writeFileSync("audit-findings.md", body);
+          ' "$orch" "$dash"
+          if [ -s audit-findings.md ]; then
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+            echo "No non-allowlisted high/critical advisories. Nothing to file."
+          fi
+
+      - name: File or update the dep-bump issue
+        if: steps.scan.outputs.has_findings == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          MARKER="npm-audit-nightly"
+          # Idempotent marker label so we upsert a single open issue, never a
+          # daily pile of duplicates.
+          gh label create "$MARKER" --repo "$REPO" --force --color B60205 \
+            --description "Nightly npm-audit found a high/critical advisory needing a dep-bump" || true
+          existing=$(gh issue list --repo "$REPO" --state open --label "$MARKER" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file audit-findings.md
+            echo "Updated existing dep-bump issue #$existing"
+          else
+            gh issue create --repo "$REPO" \
+              --title "chore(deps): npm-audit high/critical advisory needs a dep-bump" \
+              --body-file audit-findings.md \
+              --label "$MARKER" --label ready-for-agent
+          fi

@@ -10,44 +10,43 @@ ADR-0006).
 
 ## Gates
 
-### `npm-audit-orchestrator` / `npm-audit-dashboard`
+### npm audit (advisory — orchestrator + dashboard)
 
-**What it does.** Runs `npm audit --omit=dev --audit-level=high` against the
-installed lockfile after `npm ci`. Fails the workflow on any `high` or
-`critical` advisory in a production dependency. The orchestrator (`./`) and
-the dashboard (`./dashboard/`) get their own jobs so each tree fails
-independently and the step summary names the offending package set
-explicitly. Added in [issue #479](https://github.com/gaberoo322/hydra/issues/479).
+> **Demoted from a required gate to an advisory surface** in
+> [issue #3650](https://github.com/gaberoo322/hydra/issues/3650). Originally
+> ([#479](https://github.com/gaberoo322/hydra/issues/479)) these were two
+> **required** `ci.yml` jobs listed in `deploy.needs`. Because they run
+> `npm audit` against the **live** advisory DB, a newly-published CVE against
+> an already-installed dependency reddened them repo-wide with **zero code
+> change** — freezing every merge and deploy (the "ambient poison pill", two
+> instances 2026-07-24). They no longer block.
 
-**Threshold.** `--audit-level=high` — only `high` and `critical` block. `low`
-and `moderate` advisories are intentionally ignored on the first cut (per
-issue #479's "start strict on high+ only"). Tighten via `--audit-level=moderate`
-in `ci.yml` if/when the operator chooses.
+**What it does.** Runs `npm audit --omit=dev --audit-level=high` (via
+`scripts/ci/npm-audit-scan.ts`, using `--package-lock-only` so no `npm ci` is
+needed) against the orchestrator (`./`) and dashboard (`./dashboard/`)
+production dep trees. Only `high`/`critical` advisories are considered; `low`
+and `moderate` are ignored.
 
-**Inputs.** `package-lock.json` plus the locally-resolved `node_modules` from
-`npm ci`. Transitive deps in the lockfile are scanned; dev deps are excluded
-via `--omit=dev`.
+**Where it runs now (two surfaces, neither blocking):**
+- **`advisory-checks.yml`** — a non-blocking step per tree on every PR. A
+  non-allowlisted high/critical shows a red X for visibility, but the
+  `advisory-checks` workflow is not a required branch-protection context, so it
+  never blocks auto-merge.
+- **`audit-nightly.yml`** — a daily scheduled scan that files (or updates) a
+  single `ready-for-agent` dep-bump issue on a new non-allowlisted
+  high/critical, so a fresh CVE becomes tracked work instead of a freeze.
 
-**Step summary.** Each job emits a `GITHUB_STEP_SUMMARY` table listing every
-high/critical advisory: package name, severity, vulnerable range, and the
-advisory URLs pulled from the npm advisory DB. Empty findings render as
-"No high or critical advisories found." The human-readable `npm audit`
-output is also echoed to the step log via a second invocation so the raw
-report is one click away.
+**Fail-closed allowlist.** `scripts/ci/npm-audit-scan.ts` is the single tested
+source of the pass/fail logic (`test/npm-audit-scan.test.mts`): a package
+blocks only if it carries an advisory whose GHSA id is **not** in
+`AUDIT_ALLOWLIST`; pure-transitive entries are skipped (their advisory-bearing
+parent is judged directly); anything not provably waived blocks. The dashboard
+surface waives `GHSA-qwww-vcr4-c8h2` (react-router RSC CSRF — inapplicable to
+the Vite SPA, no forward fix).
 
-**No-fix policy.** `npm audit fix` is **not** run automatically. Advisory
-remediation is an operator decision — a high-severity bump may itself
-require a version-pin discussion. This gate only blocks merge; it does not
-upgrade deps.
-
-**Deploy linkage.** Both jobs are listed in `deploy.needs` so a failing
-audit also blocks the master-branch auto-deploy job, mirroring how `test`
-and `dashboard-build` gate deployment.
-
-**No bypass.** Unlike `mutation-test` and `scope-check`, the audit gate has
-no `[quick-fix]` bypass — a known-vulnerable production dependency is
-never a quick-fix. Operator override is to either upgrade the dep or
-relax `--audit-level` in the workflow (and then revert).
+**No-fix policy.** `npm audit fix` is **not** run automatically. Remediation is
+a forward dep-bump (or, only when no forward fix exists, an operator-reviewed
+`AUDIT_ALLOWLIST` entry).
 
 ### `mutation-test`
 
