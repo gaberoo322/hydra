@@ -64,6 +64,7 @@
 
 import { getRecentMetricIdsDesc, getCycleMetrics } from "../../redis/cycle-metrics.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
+import { UNCLASSIFIED_ANCHOR_TYPE } from "../../autopilot/anchor-type.ts";
 import { viewPr } from "../../github/issues.ts";
 import {
   pendingEnrollList,
@@ -83,21 +84,62 @@ const DEFAULT_SCAN_LIMIT = 50;
 /** How many candidate PRs to confirm via `gh` per tick (bounds the API cost). */
 const DEFAULT_CONFIRM_LIMIT = 10;
 
-/** Raw `gh pr view <n> --json state` shape. */
+/**
+ * Is a trimmed stored anchorType a data-quality SENTINEL rather than a genuine
+ * class (issue #3604)? A sentinel (`unclassified`, the aggregator's catch-all
+ * `unknown`, or an empty value) must NOT be forwarded verbatim onto a re-post or
+ * pending-enroll entry — doing so would make `recordCycle` return it unchanged
+ * and permanently bake the sentinel in, defeating the head-branch decode + heal.
+ * A genuine class returns false and IS forwarded (it is authoritative).
+ */
+function isSentinelReconcileAnchorType(trimmed: string): boolean {
+  const t = trimmed.toLowerCase();
+  return t.length === 0 || t === UNCLASSIFIED_ANCHOR_TYPE || t === "unknown";
+}
+
+/** Raw `gh pr view <n> --json state,headRefName` shape. */
 interface RawPrState {
   state?: string | null;
+  headRefName?: string | null;
 }
 
 /**
- * Default merge-confirmation fetch: `gh pr view <n> --json state`. Returns the
- * PR state string (`MERGED`/`OPEN`/`CLOSED`) or `null` on any failure. `viewPr`
- * never throws. The REST transport carries `state` inline, so no GraphQL pool
- * cost is incurred.
+ * The normalized merge-confirmation result: the PR `state` string
+ * (`MERGED`/`OPEN`/`CLOSED`) plus, for the anchorType-heal decode source (issue
+ * #3604), the merged PR's head-branch ref. `headRefName` is `null` when the view
+ * didn't report one.
  */
-async function fetchPrStateViaGh(prNumber: number): Promise<string | null> {
-  const view = await viewPr<RawPrState>(prNumber, "state");
+export interface ReconcilePrView {
+  state: string | null;
+  headRefName: string | null;
+}
+
+/**
+ * Default merge-confirmation fetch: `gh pr view <n> --json state,headRefName`.
+ * Returns `{ state, headRefName }` or `null` on any failure. `viewPr` never
+ * throws.
+ *
+ * Issue #3604: `headRefName` rides along on the SAME view — a plain scalar field
+ * carried inline on both transports, so it adds no extra call. It is the second
+ * anchorType decode source the enrichment-path heal needs: a bare-UUID
+ * `completed` cycle (which reaches THIS backstop, never the merge-watch path) can
+ * only recover its dispatch class from the merged PR's fenced head branch
+ * (`worktree-agent-<tok>-t{N}-<slot>`), since the bare cycleId itself carries no
+ * class token. Fetched via GraphQL for parity with holdback-merge-watch's
+ * `headRefName` fetch; the confirmation set is bounded by `confirmLimit` per tick.
+ */
+async function fetchPrStateViaGh(prNumber: number): Promise<ReconcilePrView | null> {
+  const view = await viewPr<RawPrState>(prNumber, "state,headRefName", {
+    transport: "graphql",
+  });
   if (view == null) return null;
-  return typeof view.state === "string" ? view.state : null;
+  return {
+    state: typeof view.state === "string" ? view.state : null,
+    headRefName:
+      typeof view.headRefName === "string" && view.headRefName.length > 0
+        ? view.headRefName
+        : null,
+  };
 }
 
 /** External touchpoints (all injectable for tests so the logic runs without gh / live Redis). */
@@ -106,8 +148,12 @@ export interface CycleMergeReconcileDeps {
   listRecent?: (count: number) => Promise<string[]>;
   /** Fetch a cycle's metrics hash. Defaults to `getCycleMetrics`. */
   getMetrics?: (cycleId: string) => Promise<Record<string, string>>;
-  /** Fetch a PR's state string. Defaults to a `gh pr view` call. */
-  fetchPrState?: (prNumber: number) => Promise<string | null>;
+  /**
+   * Fetch a PR's `{ state, headRefName }`. Defaults to a `gh pr view` call.
+   * (Issue #3604 widened the return from a bare `state` string to carry the head
+   * branch as the anchorType-heal decode source.)
+   */
+  fetchPrState?: (prNumber: number) => Promise<ReconcilePrView | null>;
   /** Fire the completed→merged upgrade re-post. Defaults to `recordCycle`. */
   recordCycleRecord?: (body: {
     cycleId: string;
@@ -121,6 +167,16 @@ export interface CycleMergeReconcileDeps {
      * which case `classifyAnchorType` re-infers from the cycleId as before.
      */
     anchorType?: string;
+    /**
+     * The merged PR's head-branch ref (issue #3604), forwarded as the SECOND
+     * anchorType decode source so `recordCycle`'s enrichment-path heal can decode
+     * a bare-UUID cycle's dispatch class from a fenced branch
+     * (`worktree-agent-<tok>-t{N}-<slot>`) when the cycleId carries no class token
+     * and the metrics hash stored the `unclassified` sentinel. Omitted when the
+     * hash already carries a genuine anchorType (it is authoritative) or no head
+     * branch was reported. Same never-guess fence parser → never a guess (#2822).
+     */
+    worktreeBranch?: string;
   }) => Promise<CycleRecordResult>;
   /** Max recent records to scan this tick. Defaults to 50. */
   scanLimit?: number;
@@ -265,14 +321,14 @@ export async function runCycleMergeReconcile(
 
       result.candidates += 1;
 
-      const prState = await fetchPrState(prNumber);
-      if (prState == null) {
+      const prView = await fetchPrState(prNumber);
+      if (prView == null) {
         // gh/API failure — leave the record for the next tick.
         logger.error({ prNumber, cycleId }, "cycle-merge-reconcile: state fetch failed; retrying next tick");
         result.fetchFailed += 1;
         continue;
       }
-      if (prState.toUpperCase() !== "MERGED") {
+      if ((prView.state || "").toUpperCase() !== "MERGED") {
         // Still open, or closed unmerged — not a merged-status miss.
         result.notMerged += 1;
         continue;
@@ -316,7 +372,15 @@ export async function runCycleMergeReconcile(
           // enrichment's inference-then-`unclassified` path — an honest
           // `unclassified` beats a confidently-wrong `work-queue` (NEVER-GUESS,
           // #2822). A blank/whitespace value degrades the same way.
+          // Issue #3604: a stored SENTINEL (`unclassified`/`unknown`) is NOT a
+          // real class — forwarding it onto the pending entry would make the
+          // merge-watch enrichment bake the sentinel in as the record's permanent
+          // classification. Omit it (like a blank value) so merge-watch falls
+          // through to its own head-branch decode + heal (NEVER-GUESS, #2822).
           const hashAnchorType = (m.anchorType || "").trim();
+          const genuineArmAnchorType = isSentinelReconcileAnchorType(hashAnchorType)
+            ? ""
+            : hashAnchorType;
           const armEntry: PendingEnrollEntry = {
             prNumber,
             // Tier is unknown from the cycle-metrics hash here; null is the
@@ -326,7 +390,7 @@ export async function runCycleMergeReconcile(
             cycleId,
             registeredAt: Date.now(),
           };
-          if (hashAnchorType) armEntry.anchorType = hashAnchorType;
+          if (genuineArmAnchorType) armEntry.anchorType = genuineArmAnchorType;
           let armed: PendingEnrollAddResult;
           try {
             armed = await armPending(armEntry);
@@ -362,14 +426,40 @@ export async function runCycleMergeReconcile(
       // `unclassified`, silently dropping the real class on ~12% of records. Read
       // it back from the hash and forward it; leave undefined (→ re-infer) only
       // when the hash carried no explicit anchorType.
-      const anchorType = (m.anchorType || "").trim();
-      const rec = await recordCycleRecord({
+      //
+      // Issue #3604: a STORED SENTINEL (`unclassified`/`unknown`) is NOT a real
+      // anchorType — forwarding it verbatim would make `recordCycle` return it
+      // unchanged and permanently bake the sentinel in. Treat it as "no explicit
+      // value" (omit the field) so the enrichment-path heal falls through to the
+      // head-branch decode below. Only a GENUINE stored class is forwarded (it is
+      // authoritative — the heal never overwrites it).
+      const storedAnchorType = (m.anchorType || "").trim();
+      const genuineAnchorType = isSentinelReconcileAnchorType(storedAnchorType)
+        ? undefined
+        : storedAnchorType;
+      const upgradeBody: {
+        cycleId: string;
+        status: string;
+        tasksMerged: number;
+        prNumber: number;
+        anchorType?: string;
+        worktreeBranch?: string;
+      } = {
         cycleId,
         status: "merged",
         tasksMerged: 1,
         prNumber,
-        anchorType: anchorType || undefined,
-      });
+        anchorType: genuineAnchorType,
+      };
+      // Issue #3604: when the hash carried NO genuine anchorType, forward the
+      // merged PR's fenced head branch as the heal's decode source so a bare-UUID
+      // cycle recovers its class from `worktree-agent-<tok>-t{N}-<slot>` (the same
+      // never-guess parser reap/merge-watch use). Suppressed when a genuine class
+      // exists (authoritative) or no head branch was reported.
+      if (!genuineAnchorType && prView.headRefName) {
+        upgradeBody.worktreeBranch = prView.headRefName;
+      }
+      const rec = await recordCycleRecord(upgradeBody);
       if (rec.ok === false) {
         logger.error(
           { prNumber, cycleId, err: { message: rec.detail || rec.code, code: rec.code } },

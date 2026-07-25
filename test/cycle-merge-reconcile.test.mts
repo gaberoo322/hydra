@@ -30,6 +30,11 @@ import type { ReconcilerHealthRecord } from "../src/redis/reconciler.ts";
 interface Fixture {
   metrics: Map<string, Record<string, string>>;
   prState: Map<number, string | null>;
+  /**
+   * Per-PR merged head-branch ref the fetch reports (issue #3604). Optional —
+   * unset ⇒ `headRefName: null`, preserving pre-#3604 case behaviour.
+   */
+  headRef?: Map<number, string>;
   /** Records of every recordCycle re-post the chore fired. */
   reposts: Array<{
     cycleId: string;
@@ -37,6 +42,7 @@ interface Fixture {
     tasksMerged: number;
     prNumber: number;
     anchorType?: string;
+    worktreeBranch?: string;
   }>;
   // --- Self-arm backstop fixture state (issue #3078) --------------------------
   // Optional so the pre-existing #2860 case literals ({ metrics, prState, reposts })
@@ -60,8 +66,16 @@ function makeDeps(fx: Fixture, over: Partial<CycleMergeReconcileDeps> = {}): Cyc
   return {
     listRecent: async (count) => Array.from(fx.metrics.keys()).slice(0, count),
     getMetrics: async (cycleId) => ({ ...(fx.metrics.get(cycleId) ?? {}) }),
-    fetchPrState: async (prNumber) =>
-      fx.prState.has(prNumber) ? fx.prState.get(prNumber)! : null,
+    fetchPrState: async (prNumber) => {
+      // A scripted `null` (or an unmapped PR) models a gh/API FETCH FAILURE — the
+      // whole view is null, as the real `fetchPrStateViaGh` returns on failure.
+      const state = fx.prState.has(prNumber) ? fx.prState.get(prNumber) : null;
+      if (state == null) return null;
+      // Issue #3604: the fetch now returns { state, headRefName }. The head branch
+      // is scripted per-PR via fx.headRef (default null when unset), so pre-#3604
+      // cases that only set fx.prState keep their behaviour (headRefName: null).
+      return { state, headRefName: fx.headRef?.get(prNumber) ?? null };
+    },
     recordCycleRecord: async (body) => {
       fx.reposts.push({ ...body });
       // Simulate the recordCycle upgrade: flip the stored metric so a re-scan
@@ -268,6 +282,58 @@ describe("cycle-merge-reconcile — completed→merged backstop (#2860)", () => 
     );
   });
 
+  // Issue #3604: a STORED SENTINEL (`unclassified`/`unknown`) must NOT be
+  // forwarded verbatim (that would re-bake it); instead omit it AND forward the
+  // merged PR's fenced head branch so the enrichment-path heal decodes the class
+  // the bare-UUID cycleId lacks.
+  test("omits a stored 'unclassified' sentinel and forwards the fenced head branch as the heal decode source (#3604)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        // A bare-UUID cycle first-written `unclassified` — the exact #3604 shape.
+        [
+          "4a2fc33e-9478-49dc-88cd-69dd393787dd",
+          { status: "completed", prNumber: "3600", tasksMerged: "0", anchorType: "unclassified" },
+        ],
+      ]),
+      prState: new Map([[3600, "MERGED"]]),
+      // The merged PR's fenced head branch decodes the dev_orch class.
+      headRef: new Map([[3600, "worktree-agent-4a2fc33e-t2-dev_orch-3600"]]),
+      reposts: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.upgraded, 1);
+    const post = fx.reposts[0];
+    assert.equal(
+      post.anchorType,
+      undefined,
+      "the stored sentinel is omitted (not forwarded verbatim), so the heal can re-decode",
+    );
+    assert.equal(
+      post.worktreeBranch,
+      "worktree-agent-4a2fc33e-t2-dev_orch-3600",
+      "the merged PR's fenced head branch is forwarded as the heal decode source",
+    );
+  });
+
+  test("does NOT forward a head branch when a GENUINE anchorType is stored (it is authoritative) (#3604)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([
+        ["c-genuine", { status: "completed", prNumber: "3601", tasksMerged: "0", anchorType: "grill" }],
+      ]),
+      prState: new Map([[3601, "MERGED"]]),
+      headRef: new Map([[3601, "worktree-agent-abc123-t2-dev_orch-3601"]]),
+      reposts: [],
+    };
+    await runCycleMergeReconcile(makeDeps(fx));
+    const post = fx.reposts[0];
+    assert.equal(post.anchorType, "grill", "the genuine stored class is forwarded");
+    assert.equal(
+      post.worktreeBranch,
+      undefined,
+      "no head branch is forwarded — the genuine class is authoritative, the heal never fires",
+    );
+  });
+
   test("trims a whitespace-padded anchorType and drops an empty one to undefined (#3122)", async () => {
     const fx: Fixture = {
       metrics: new Map([
@@ -374,6 +440,29 @@ describe("cycle-merge-reconcile — pending-enroll self-arm backstop (#3078)", (
       blank?.anchorType,
       undefined,
       "whitespace-only anchorType ⇒ omitted (degrade to unclassified), not a wrong lane",
+    );
+  });
+
+  test("self-arm OMITS a stored 'unclassified' sentinel so merge-watch re-decodes it, not re-bakes it (#3604)", async () => {
+    // A bare-UUID cycle first-written `unclassified`. If the self-arm forwarded
+    // that sentinel onto the pending entry, the merge-watch enrichment would bake
+    // it in as the record's permanent class — the exact re-bake #3604 fixes.
+    const fx: Fixture = {
+      metrics: new Map([
+        ["c-sentinel", { status: "completed", prNumber: "170", tasksMerged: "0", anchorType: "unclassified" }],
+      ]),
+      prState: new Map([[170, "MERGED"]]),
+      reposts: [],
+      pending: new Set(),
+      enrolled: new Set(),
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 1, "the merged, unregistered PR is still armed");
+    assert.equal(
+      fx.arms!.find((a) => a.prNumber === 170)?.anchorType,
+      undefined,
+      "the sentinel is omitted from the arm entry so merge-watch re-decodes, never re-bakes it",
     );
   });
 
