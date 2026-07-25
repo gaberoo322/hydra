@@ -32,7 +32,7 @@
 //   - `attemptEmbedBackendWake()` (and the `sendMagicPacket` mechanism it
 //     drives) is the IO side. It NEVER throws (CLAUDE.md: never throw from the
 //     health/verification path); every failure folds to a result object and a
-//     fail-loud `console.error`.
+//     fail-loud structured `logger.error` (ADR-0027 pino seam).
 //
 // `assessHealth()` stays pure and is untouched — it never sends a packet. The
 // send is wired into the fan-out's embed-backend probe step (the IO layer that
@@ -45,6 +45,7 @@ import {
   WOL_DEFAULT_BROADCAST,
 } from "./wol-send.ts";
 import type { ServiceProbeResult } from "./probe.ts";
+import { logger } from "../logger.ts";
 
 /** Conservative default: at most one wake every 5 minutes. */
 const WOL_DEFAULT_COOLDOWN_MS = 5 * 60_000;
@@ -176,7 +177,7 @@ export async function attemptEmbedBackendWake(
  * a future gaming-PC-hosted backend can re-use it.
  *
  * NEVER throws — every failure path inside `send` / `sendMagicPacket` already
- * folds to a result object + fail-loud console.error. `reason` is a short label
+ * folds to a result object + fail-loud structured `logger.error`. `reason` is a short label
  * (`"embed-backend"`) folded into the success log so the operator can tell which
  * down-signal triggered the wake.
  */
@@ -193,9 +194,15 @@ async function attemptHostWake(
   gate.recordSend(now);
   const sent = await send(config.mac, config.broadcast);
   if (sent.ok) {
-    console.error(
-      `[wol] ${reason} down — broadcast magic packet to ${config.broadcast} (MAC ${config.mac}); ` +
-        `attempt ${gate.attemptCount}/${config.maxAttempts}`,
+    logger.error(
+      {
+        reason,
+        broadcast: config.broadcast,
+        mac: config.mac,
+        attempt: gate.attemptCount,
+        maxAttempts: config.maxAttempts,
+      },
+      "[wol] backend down — broadcast magic packet",
     );
   }
   return { attempted: true, sent };
@@ -230,7 +237,7 @@ async function attemptHostWake(
  * starts fresh.
  *
  * NEVER throws — every failure path inside `attemptEmbedBackendWake` /
- * `sendMagicPacket` already folds to a result object + fail-loud console.error.
+ * `sendMagicPacket` already folds to a result object + fail-loud structured `logger.error`.
  *
  * Injectable `config`, `gate`, and `wake` keep this unit-testable without a real
  * socket, clock, or network — and there is no clock/sleep to inject anymore.

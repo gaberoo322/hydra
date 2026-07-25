@@ -18,8 +18,10 @@
 //     6-byte MAC). No network. Unit-tested directly.
 //   - `sendMagicPacket()` is the IO side. It NEVER throws (CLAUDE.md: never
 //     throw from the health/verification path); every failure folds to a
-//     result object and a fail-loud `console.error`.
+//     result object and a fail-loud structured `logger.error` (ADR-0027 pino seam).
 import { createSocket } from "node:dgram";
+
+import { logger } from "../logger.ts";
 
 /** A 6-octet MAC, lowercased and `:`-separated (the canonical form we emit). */
 const MAC_OCTET_COUNT = 6;
@@ -85,7 +87,7 @@ export type WolSendResult =
  * NEVER throws. A bad MAC folds to `{ok:false, reason:"invalid-mac"}`; any
  * socket / send error (e.g. the service is on a different subnet so the L2
  * broadcast can't reach the NIC, or `EACCES` binding broadcast) folds to
- * `{ok:false, reason:"send-error"}` after a fail-loud `console.error`. The
+ * `{ok:false, reason:"send-error"}` after a fail-loud structured `logger.error`. The
  * heartbeat keeps running either way.
  *
  * `socketFactory` is injectable so the unit test can drive the send/error paths
@@ -98,7 +100,7 @@ export async function sendMagicPacket(
 ): Promise<WolSendResult> {
   const packet = buildMagicPacket(mac);
   if (!packet) {
-    console.error(`[wol] refusing to send: invalid MAC ${JSON.stringify(mac)}`);
+    logger.error({ mac }, "[wol] refusing to send: invalid MAC");
     return { ok: false, reason: "invalid-mac" };
   }
   return new Promise<WolSendResult>((resolve) => {
@@ -117,18 +119,18 @@ export async function sendMagicPacket(
     try {
       socket = socketFactory("udp4");
     } catch (err) {
-      console.error(`[wol] failed to create UDP socket: ${(err as Error)?.message}`);
+      logger.error({ err }, "[wol] failed to create UDP socket");
       return resolve({ ok: false, reason: "send-error", error: (err as Error)?.message });
     }
     socket.once("error", (err) => {
-      console.error(`[wol] socket error broadcasting to ${broadcast}: ${err?.message}`);
+      logger.error({ broadcast, err }, "[wol] socket error broadcasting");
       done({ ok: false, reason: "send-error", error: err?.message });
     });
     socket.bind(() => {
       try {
         socket.setBroadcast(true);
       } catch (err) {
-        console.error(`[wol] setBroadcast failed: ${(err as Error)?.message}`);
+        logger.error({ err }, "[wol] setBroadcast failed");
         return done({ ok: false, reason: "send-error", error: (err as Error)?.message });
       }
       let remaining = WOL_PORTS.length;
@@ -137,7 +139,7 @@ export async function sendMagicPacket(
         socket.send(packet, 0, packet.length, port, broadcast, (err) => {
           if (err && !sendErr) {
             sendErr = err.message;
-            console.error(`[wol] send to ${broadcast}:${port} failed: ${err.message}`);
+            logger.error({ broadcast, port, err }, "[wol] send failed");
           }
           if (--remaining === 0) {
             if (sendErr) done({ ok: false, reason: "send-error", error: sendErr });
