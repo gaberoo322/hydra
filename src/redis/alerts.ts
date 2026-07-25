@@ -22,6 +22,18 @@ import { logger } from "../logger.ts";
  * This is a fail-loud reject: the bad alert is logged with its raw payload and
  * dropped, never stored. Returns `false` when the alert was rejected, `true`
  * when stored, so callers/tests can discriminate without re-reading Redis.
+ *
+ * The LPUSH + LTRIM run inside a single Lua script (issue #3619) so no other
+ * client's command can interleave between them — Redis executes a script
+ * atomically. The prior two-await sequence left a transient window where the
+ * list held `maxLen + 1` items with a concurrent `POST /alerts/:id/dismiss`
+ * (`readAllAlerts` → `LSET`) racing on shifted indices — that index desync (not
+ * any impossible LRANGE partial read; Redis returns whole list elements
+ * atomically) is what let a mis-indexed `LSET` corrupt a neighbouring entry and
+ * surface as an `Unexpected end of JSON input` at the scout reader. Collapsing
+ * push+trim into one atomic script closes that window: a concurrent
+ * reader/dismiss only ever observes the list at or below capacity, never the
+ * intermediate over-capacity state.
  */
 export async function pushAlert(alertJson: string, maxLen: number): Promise<boolean> {
   if (typeof alertJson !== "string" || alertJson.length === 0) {
@@ -41,10 +53,24 @@ export async function pushAlert(alertJson: string, maxLen: number): Promise<bool
     return false;
   }
   const r = getRedisConnection();
-  await r.lpush(redisKeys.alerts(), alertJson);
-  await r.ltrim(redisKeys.alerts(), 0, maxLen - 1);
+  // Atomic push-and-trim: a Lua script runs atomically in Redis, so no other
+  // client's command interleaves between the LPUSH and the LTRIM. The list is
+  // never observed in its transient `maxLen + 1` over-capacity state (issue
+  // #3619). Matches the existing eval-based atomic pattern in redis/scheduler.ts.
+  await r.eval(PUSH_ALERT_LUA, 1, redisKeys.alerts(), alertJson, String(maxLen));
   return true;
 }
+
+/**
+ * Atomic LPUSH + LTRIM (issue #3619). KEYS[1] = alerts list; ARGV[1] = alert
+ * JSON string; ARGV[2] = maxLen. Executed atomically so a concurrent
+ * reader/dismiss never observes the intermediate over-capacity list state.
+ */
+const PUSH_ALERT_LUA = `
+redis.call('LPUSH', KEYS[1], ARGV[1])
+redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
+return 'OK'
+`;
 
 /** Read the most recent alerts (LPUSH-ed list — index 0 is newest). */
 export async function readRecentAlerts(limit: number): Promise<string[]> {

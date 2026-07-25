@@ -480,3 +480,81 @@ describe("advanceAlertCursor", () => {
     await assert.rejects(() => advanceAlertCursor(undefined as any), TypeError);
   });
 });
+
+// ===========================================================================
+// 6. issue #3619 — empty/corrupt entry no longer surfaces `Unexpected end of
+//    JSON input`, and pushAlert stores+trims atomically (parseable invariant).
+// ===========================================================================
+
+const { pushAlert, readAllAlerts } = await import("../src/redis/alerts.ts");
+
+describe("alert-listener empty-entry guard (issue #3619)", () => {
+  beforeEach(async () => {
+    await cleanAlertListenerKeys();
+  });
+
+  test("empty-string entry is skipped, valid alert still dispatches", async () => {
+    const r = getTestRedis();
+    // A legacy empty entry already in the list must not throw
+    // `Unexpected end of JSON input` from the reader — it is skipped before
+    // JSON.parse, and a valid alert alongside it still plans a dispatch.
+    await r.lpush("hydra:alerts", "");
+    await r.lpush(
+      "hydra:alerts",
+      JSON.stringify({
+        id: "good",
+        type: "pattern:test_decline",
+        timestamp: "2026-05-19T11:00:00Z",
+      }),
+    );
+    const plan = await planAlertDispatches(new Date("2026-05-19T12:00:00Z"));
+    assert.equal(plan.eligible.length, 1);
+    assert.equal(plan.eligible[0].alertId, "good");
+  });
+
+  test("whitespace-only entry is skipped", async () => {
+    const r = getTestRedis();
+    await r.lpush("hydra:alerts", "   ");
+    const plan = await planAlertDispatches(new Date("2026-05-19T12:00:00Z"));
+    assert.equal(plan.eligible.length, 0);
+    assert.equal(plan.skipped.length, 0);
+  });
+});
+
+describe("pushAlert atomic push+trim (issue #3619)", () => {
+  beforeEach(async () => {
+    await cleanAlertListenerKeys();
+  });
+
+  test("caps the list at maxLen and every stored entry is parseable JSON", async () => {
+    const maxLen = 5;
+    for (let i = 0; i < 12; i++) {
+      const stored = await pushAlert(
+        JSON.stringify({
+          id: `a${i}`,
+          type: "pattern:test_decline",
+          timestamp: new Date(Date.now() + i).toISOString(),
+        }),
+        maxLen,
+      );
+      assert.equal(stored, true);
+    }
+    const all = await readAllAlerts();
+    assert.equal(all.length, maxLen, "list trimmed to maxLen");
+    // Every surviving element parses — the atomic push+trim never leaves the
+    // list in an over-capacity transient state a reader could catch mid-flight.
+    for (const raw of all) {
+      const parsed = JSON.parse(raw);
+      assert.equal(typeof parsed.id, "string");
+    }
+    // Newest-first ordering preserved (LPUSH semantics): index 0 is the last push.
+    assert.equal(JSON.parse(all[0]).id, "a11");
+  });
+
+  test("rejects an empty/unparseable payload before store (never lands in list)", async () => {
+    assert.equal(await pushAlert("", 5), false);
+    assert.equal(await pushAlert("{not json", 5), false);
+    const all = await readAllAlerts();
+    assert.equal(all.length, 0);
+  });
+});
