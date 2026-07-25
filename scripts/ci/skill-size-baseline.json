@@ -112,8 +112,8 @@
       "description": 41
     },
     "docs/operator-playbooks/hydra-review.md": {
-      "body": 4296,
-      "description": 30
+      "body": 5051,
+      "description": 39
     },
     "docs/operator-playbooks/hydra-skill-prune.md": {
       "body": 1205,
@@ -128,7 +128,7 @@
       "description": 38
     },
     "docs/operator-playbooks/hydra-target-cleanup.md": {
-      "body": 1939,
+      "body": 1943,
       "description": 34
     },
     "docs/operator-playbooks/hydra-target-discover.md": {
@@ -140,7 +140,7 @@
       "description": 36
     },
     "docs/operator-playbooks/hydra-target-qa.md": {
-      "body": 2599,
+      "body": 2612,
       "description": 43
     },
     "docs/operator-playbooks/hydra-target-research.md": {
@@ -150,10 +150,6 @@
     "docs/operator-playbooks/hydra-target-retro.md": {
       "body": 1443,
       "description": 45
-    },
-    "docs/operator-playbooks/hydra-target-review.md": {
-      "body": 750,
-      "description": 27
     },
     "docs/operator-playbooks/hydra-target-sweep.md": {
       "body": 1376,

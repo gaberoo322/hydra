@@ -1,7 +1,7 @@
 ---
 name: hydra-review
-description: The operator's HITL pipeline cockpit — surfaces every in-flight initiative by its stage and walks each one toward AFK-dispatchable: overnight queue, wayfinder maps (chart→approve→resolve→handoff), specs awaiting decomposition, ready-for-human, and stale-blocked.
-when_to_use: "When the user says 'review issues', 'what needs my attention', 'what can I do', 'check blocked issues', or wants to advance stuck work toward autopilot. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
+description: The operator's HITL pipeline cockpit — surfaces every in-flight initiative by its stage and walks each one toward AFK-dispatchable: overnight queue, wayfinder maps (chart→approve→resolve→handoff), specs awaiting decomposition, ready-for-human, stale-blocked, AND every configured Target project's operator-attention items (ready-for-human, reframe, stale-blocked).
+when_to_use: "When the user says 'review issues', 'what needs my attention', 'what can I do', 'check blocked issues', 'review target work', or wants to advance stuck work (orchestrator OR any Target project) toward autopilot. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 claude_only: true
 ---
@@ -13,6 +13,18 @@ from wherever it sits toward **AFK-dispatchable** — the point where `hydra-aut
 can work it with no operator in the loop. Not just a decision-queue drainer: it
 classifies each in-flight initiative onto the pipeline ladder and names the single
 action that pushes it up a rung.
+
+**Scope: the Orchestrator plus every configured Target project.** This one cockpit
+covers both boards (ADR-0031 unified the Target onto a GitHub-Issues board, exactly
+like the Orchestrator's). The Orchestrator's full pipeline ladder (overnight queue →
+wayfinder maps → specs) applies to `gaberoo322/hydra` only — Target work has no
+wayfinder pipeline — but the operator-attention tail (`ready-for-human`, `reframe`,
+stale-`blocked`) is walked for the Orchestrator **and** each Target board in one
+session (§1.5). This retires the separate `/hydra-target-review` skill, which read a
+now-dead Redis backlog and was blind to the live Target GitHub board. The Target
+enumeration is a **loop** over `target-config.ts` (`getTargetGithubRepo()`), so it is
+N-ready; today Hydra is a single swappable Target (ADR-0013), so the loop has one
+entry (`gaberoo322/hydra-betting`).
 
 ## The pipeline ladder
 
@@ -36,10 +48,11 @@ action; the ✓ rungs are the finish lines where autopilot takes over.
 3. **Wayfinder HITL frontier tickets** (§0.6, rung 2) — open, unblocked, unclaimed `wayfinder:grilling` / `wayfinder:prototype` sub-issues on approved maps (ADR-0029 Decision 3). The `wayfinder_orch` autopilot class never dispatches these; they need operator judgment and resolve via `/wayfinder`.
 4. **Handoff-ready wayfinder maps** (§0.7, rung 4) — open approved maps whose frontier is **empty** (every ticket closed): the way is clear and the map is waiting to be converted into an implementation epic (`hydra-prd`) or a spec (`/to-spec`). This is the rung that turns a cleared map into AFK-dispatchable work.
 5. **Specs awaiting decomposition** (§0.8, rung 5) — open issues labelled `needs-tickets`: a published spec that has not yet been sliced into tracer-bullet build issues. Run `/to-tickets` to emit the `ready-for-agent` children autopilot's `hydra-dev` picks up.
-6. **`ready-for-human`** — issues requiring operator decisions
-7. **Stale-blocked** — `blocked` issues where no linked open issue justifies the block
+6. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions
+7. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
+8. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
 
-The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board. Wayfinder HITL tickets drain after that: an unresolved HITL ticket stalls its whole map's AFK frontier (the autopilot cannot advance past a blocking decision), so clearing one is high-leverage too. Handoff-ready maps and un-ticketed specs (§0.7, §0.8) drain after the wayfinder frontier: they are the far end of the pipeline — a single handoff there can emit a whole epic's worth of AFK-dispatchable children in one action.
+The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board. Wayfinder HITL tickets drain after that: an unresolved HITL ticket stalls its whole map's AFK frontier (the autopilot cannot advance past a blocking decision), so clearing one is high-leverage too. Handoff-ready maps and un-ticketed specs (§0.7, §0.8) drain after the wayfinder frontier: they are the far end of the pipeline — a single handoff there can emit a whole epic's worth of AFK-dispatchable children in one action. Per-Target items drain **last**: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier.
 
 ## Procedure
 
@@ -308,7 +321,7 @@ Walk them oldest-first, one at a time. For each spec:
 
 Do not yield to the later steps until every `needs-tickets` spec is sliced or explicitly skipped.
 
-### 1. Gather
+### 1. Gather (Orchestrator)
 
 ```bash
 gh issue list --repo gaberoo322/hydra --label "ready-for-human" --state open --json number,title,labels,createdAt,updatedAt
@@ -316,6 +329,33 @@ gh issue list --repo gaberoo322/hydra --label "blocked" --state open --json numb
 ```
 
 For each blocked issue, check body/comments for "blocked by #N", "depends on #N", or links. Referenced issue closed or no blocker referenced → stale-blocked.
+
+### 1.5. Gather (per Target board)
+
+Enumerate the configured Target repos and gather each board's operator-attention
+labels. The enumeration mirrors `target-config.ts` (`getTargetGithubRepo()` / the
+`HYDRA_TARGET_GITHUB_REPO` env, default `gaberoo322/hydra-betting`) as an **array**,
+so this is N-ready — today it resolves to one Target (ADR-0013 single swappable
+Target):
+
+```bash
+# N-ready: one line to update if/when target-config exposes multiple Targets.
+TARGET_REPOS=("${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}")
+
+for TREPO in "${TARGET_REPOS[@]}"; do
+  echo "=== target: $TREPO ==="
+  gh issue list --repo "$TREPO" --label "ready-for-human" --state open --json number,title,labels,createdAt,updatedAt
+  gh issue list --repo "$TREPO" --label "reframe"         --state open --json number,title,labels,body,createdAt,updatedAt
+  gh issue list --repo "$TREPO" --label "blocked"          --state open --json number,title,labels,body,createdAt,updatedAt
+done
+```
+
+Same stale-blocked test as the Orchestrator: for each Target `blocked` issue, check
+body/comments for a "blocked by #N" reference — referenced issue closed, or no
+blocker referenced, → stale-blocked. **Do not** gather `needs-triage` (that is
+`hydra-target-sweep`'s autonomous lane). A `reframe` item is a Target build that
+failed 2+ times (stamped by `hydra-target-qa` alongside `ready-for-human`); surface
+its prior-attempt history so the operator decides informed.
 
 ### 2. Present
 
@@ -342,26 +382,31 @@ For each blocked issue, check body/comments for "blocked by #N", "depends on #N"
 | # | Spec title | Age | Route |
 |---|------------|-----|-------|
 
-### Ready-for-human (M)
+### Ready-for-human (M) — Orchestrator
 | # | Title | Age | Why here |
 |---|-------|-----|----------|
 
-### Stale-blocked (K)
+### Stale-blocked (K) — Orchestrator
 | # | Title | Age | Blocker status |
 |---|-------|-----|----------------|
+
+### Target: <repo> — ready-for-human / reframe / stale-blocked (T) — §1.5
+(one block per configured Target board; omit a Target with nothing needing attention)
+| # | Kind | Title | Age | Why here / prior attempts |
+|---|------|-------|-----|---------------------------|
 ```
 
 Then: "I'll walk through these one at a time, starting with the overnight queue. Ready?"
 
 ### 3. Review loop (one issue at a time)
 
-1. Read full issue (body, comments, labels, linked PRs)
-2. Identify entry path (queue row / triage / tracking parent / dev failure / blocked)
+1. Read full issue (body, comments, labels, linked PRs) — for a Target row, against that Target's repo
+2. Identify entry path (queue row / triage / tracking parent / dev failure / blocked / **Target ready-for-human / reframe / stale-blocked**)
 3. Present concise summary
 4. Offer 2–4 resolution options (see below)
 5. Include your recommendation with brief reasoning. For queue rows, the autopilot's recommendation is already the default.
 6. Wait for operator's choice
-7. Execute via `gh` CLI
+7. Execute via `gh` CLI — **always pass the row's own repo** (`--repo gaberoo322/hydra` for Orchestrator rows, `--repo <TREPO>` for Target rows); explore that repo's checkout (`~/hydra` vs the Target workspace, e.g. `~/hydra-betting/web`) before asking obvious questions
 8. Move on
 
 **Transcript deep-link (issue #695).** Whenever a row references a subagent
@@ -431,6 +476,26 @@ Explore the codebase before asking obvious questions.
 - **Still blocked (update reference)** — link the actual open blocker
 - **No longer relevant** — close `wontfix`
 
+#### Target `ready-for-human` (§1.5)
+An item `hydra-target-qa` (or the Target build loop) routed to the operator. Resolve against the Target repo (`--repo <TREPO>`); explore the Target workspace (e.g. `~/hydra-betting/web`) before deciding.
+- **Make it agent-ready** — write the agent brief, relabel `ready-for-agent` so `hydra-target-sweep` / `dev_target` picks it up (strip `ready-for-human`)
+- **Provide guidance** — add specific hints (files, functions, criteria), then relabel `ready-for-agent`
+- **Needs more info** — post questions, relabel `needs-info`
+- **Won't do** — close `wontfix`
+
+#### Target `reframe` (build failed 2+ times)
+Always surface the prior attempts first (the failure history names the dispatching `hydra-target-build` session — include its transcript deep-link). Then offer:
+- **Narrow scope** — rewrite as a smaller task, relabel `ready-for-agent` (remove `reframe`)
+- **Provide implementation approach** — operator insight added as a comment, relabel `ready-for-agent`
+- **Split into steps** — file child issues, then close/keep the parent
+- **Abandon** — repeated failure means infeasible / not worth the cost; close `wontfix`
+
+#### Target stale-blocked
+Same as the Orchestrator stale-blocked, against the Target repo.
+- **Unblock** — remove `blocked`, apply next state
+- **Still blocked (update reference)** — link the actual open blocker
+- **No longer relevant** — close `wontfix`
+
 ### 5. Wrap-up
 
 ```
@@ -442,6 +507,7 @@ Explore the codebase before asking obvious questions.
 Resolved: X | Deferred: Y | Remaining: Z
 Overnight queue: applied=A, overridden=O, deferred=D, dropped=R
 Pipeline: maps-handed-off=H (→ E epics, P specs), specs-sliced=T (→ C tracer children)
+Targets: <repo> — agent-ready=G, reframed=F, unblocked=U, abandoned=B (one line per Target board touched)
 ```
 
 Report how much work crossed the AFK line this session: every handed-off map and
@@ -462,7 +528,8 @@ top of the ladder. If no, end the session.
 
 ## Rules
 
-- **Drain order: overnight queue → destination-pending maps → wayfinder HITL tickets → handoff-ready maps → un-ticketed specs → ready-for-human → stale-blocked.** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029); an unresolved HITL ticket then stalls its own map's AFK frontier; handoff-ready maps and un-ticketed specs sit at the far end of the pipeline where one action emits a whole epic's worth of AFK children. Don't reorder any of the wayfinder/spec buckets ahead of the overnight queue, or behind `ready-for-human` / stale-blocked.
+- **Drain order: overnight queue → destination-pending maps → wayfinder HITL tickets → handoff-ready maps → un-ticketed specs → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029); an unresolved HITL ticket then stalls its own map's AFK frontier; handoff-ready maps and un-ticketed specs sit at the far end of the pipeline where one action emits a whole epic's worth of AFK children. Don't reorder any of the wayfinder/spec buckets ahead of the overnight queue, or behind `ready-for-human` / stale-blocked. **Per-Target items always drain last** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
+- **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (e.g. `~/hydra-betting/web`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
 - **The handoff flow owns a map's death, not `hydra-epic-close`.** A cleared map is closed in §0.7 as the final handoff step (or kept with `keep-open`). `hydra-epic-close` excludes `wayfinder:map` from auto-GC precisely so a map is never closed before it can be handed off. Mark a map `wayfinder:handoff-pending` when you begin its handoff; remove it when you close/keep the map.
 - **A spec is a decompose-me artifact, never a tracer bullet.** After `/to-spec`, always relabel the spec `needs-tickets` and remove `ready-for-agent`, so `hydra-dev` can't grab the whole spec as one issue. The spec becomes AFK-dispatchable only via its `/to-tickets` children (§0.8), each of which carries `ready-for-agent`.
 - **A destination-pending map amendment edits the Destination, THEN removes the gate label.** Never remove the label without first landing the operator's edit — the gate is the only thing holding an unwanted destination out of autopilot's frontier. A rejection **closes** the map; it does not just leave the label on (that would strand it for the staleness sweep).
