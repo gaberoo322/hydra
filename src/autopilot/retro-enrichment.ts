@@ -49,6 +49,10 @@
 import type { getCycleHash } from "../redis/cycle-tracking.ts";
 import type { getCycleMetrics } from "../redis/cycle-metrics.ts";
 import type { DispatchOutcomeRecord } from "../redis/dispatch-outcomes.ts";
+// Issue #3628: the never-throw sub-source runner type is the shared
+// `BoundSafeSource` promoted to `src/settled-fold.ts` — imported instead of
+// re-declared here (see the `SafeSource` alias below).
+import type { BoundSafeSource } from "../settled-fold.ts";
 import {
   bucketOf,
   dedupByCanonicalCycleId,
@@ -83,16 +87,18 @@ export const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
 /**
  * Never-throw sub-source runner, threaded in from the assembler so a failed
  * cycle-metrics / cycle-hash read lands in the bundle's `errors[]` exactly as
- * every other sub-source does. Mirrors `assembleRetroBundle`'s private
- * `safeSource` signature: `(source, fallback, fn) => Promise<T>`. The assembler
- * binds it to the bundle's `errors[]` before passing it in, so this module
- * never touches the error array directly.
+ * every other sub-source does. The assembler binds it to the bundle's
+ * `errors[]` before passing it in, so this module never touches the error
+ * array directly.
+ *
+ * Issue #3628: this is the shared {@link BoundSafeSource} — the `errors`-bound
+ * `safeSource` closure — promoted to `src/settled-fold.ts` (the single home for
+ * the never-throw degrade-and-log family). This module previously re-declared
+ * the type locally with an explicit "mirrors `assembleRetroBundle`'s private
+ * `safeSource`" comment; it now imports the real type instead. `SafeSource` is
+ * re-exported here as the local name callers/tests in this module already use.
  */
-export type SafeSource = <T>(
-  source: string,
-  fallback: T,
-  fn: () => Promise<T>,
-) => Promise<T>;
+export type SafeSource = BoundSafeSource;
 
 /**
  * Injectable deps for the enrichment join. The assembler wires the live

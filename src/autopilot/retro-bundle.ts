@@ -73,7 +73,16 @@ import { listFrictionPatterns } from "../pattern-memory/index.ts";
 import { getAutopilotHealth } from "../aggregators/autopilot-health.ts";
 import type { StuckSignal } from "./run-health.ts";
 import type { MemoryPattern } from "../pattern-memory/index.ts";
-import { logger } from "../logger.ts";
+// Issue #3628: the never-throw-with-error-provenance sub-source wrapper +
+// its `{source, detail}` error type are the shared, caller-agnostic variant
+// of the settled-fold never-throw family — promoted out of this file so
+// `retro-enrichment.ts` can call the real implementation instead of
+// re-mirroring the signature. `errors[]` stays structurally identical, so the
+// served /api/reports/retro JSON is byte-identical.
+import {
+  safeSource,
+  type SafeSourceError,
+} from "../settled-fold.ts";
 // Pure projection surface — moved to `retro-projections.ts` (issue #1952). The
 // assembler below uses these directly from their canonical home; callers that
 // want the projections import them from `retro-projections.ts` too (issue
@@ -93,14 +102,6 @@ import { enrichDispatchesWithCycleData } from "./retro-enrichment.ts";
 // ---------------------------------------------------------------------------
 // Bundle shape
 // ---------------------------------------------------------------------------
-
-/** One sub-source that failed to load — surfaced instead of thrown. */
-interface RetroBundleError {
-  /** Stable, machine-readable source name, e.g. `"run-record"`, `"friction"`. */
-  source: string;
-  /** The error message (best-effort string coercion). */
-  detail: string;
-}
 
 /** A per-anchor reflection narrative attached to a flagged dispatch. */
 interface RetroReflection {
@@ -149,7 +150,7 @@ export interface RetroBundle {
   /** Friction-pattern store snapshot across the known dispatch skills. */
   frictionPatterns: MemoryPattern[];
   /** Sub-sources that failed to load. Empty on a fully-clean assembly. */
-  errors: RetroBundleError[];
+  errors: SafeSourceError[];
 }
 
 /**
@@ -182,38 +183,6 @@ const DEFAULT_FRICTION_SKILLS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-function toDetail(err: unknown): string {
-  if (err && typeof err === "object" && "message" in err) {
-    const m = (err as { message?: unknown }).message;
-    if (typeof m === "string") return m;
-  }
-  return String(err);
-}
-
-/**
- * Run a sub-source reader under the never-throw contract. On rejection: log
- * with context, push a typed entry onto `errors`, and return `fallback`.
- */
-async function safeSource<T>(
-  source: string,
-  errors: RetroBundleError[],
-  fallback: T,
-  fn: () => Promise<T>,
-): Promise<T> {
-  try {
-    return await fn();
-  } catch (err) {
-    const detail = toDetail(err);
-    logger.error({ source, err }, "[retro-bundle] sub-source failed");
-    errors.push({ source, detail });
-    return fallback;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Public entrypoint
 // ---------------------------------------------------------------------------
 
@@ -239,7 +208,7 @@ export async function assembleRetroBundle(
   const frictionSkills = deps.frictionSkills ?? DEFAULT_FRICTION_SKILLS;
   const generatedAt = (deps.now ?? new Date()).toISOString();
 
-  const errors: RetroBundleError[] = [];
+  const errors: SafeSourceError[] = [];
 
   // 1. Run record + turn timeline (the spine of the bundle).
   const runResult = await safeSource(
