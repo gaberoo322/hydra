@@ -42,6 +42,25 @@ Run these numbered steps.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
+8b. **Author a changelog fragment (or opt out) BEFORE tier classification** (issue
+    #3658, epic #3676). This MUST run before step 9 so the `.changelog/<issue>-<slug>.md`
+    file is part of the diff the tier classifier reads. If the change ships anything
+    user- or operator-visible, write **one** file `.changelog/<issue>-<slug>.md` —
+    `<issue>` is the issue this PR closes, `<slug>` a short kebab-case description —
+    whose sole line is a curated, imperative, user-facing note (NOT the issue title):
+    ```
+    - <type>: <description> (#<issue>)
+    ```
+    `<type>` is a Conventional-Commits type (`feat`/`fix`/`perf`/`refactor`/
+    `docs`/`test`/`build`/`ci`/`chore`/`revert`); the dashboard groups by type at
+    render time and links the note to the issue. Commit the fragment with your
+    change. For a genuinely user-invisible change (pure chore, test-only, internal
+    refactor with no observable effect) apply the **`skip-changelog`** label to the
+    PR instead of adding an empty fragment. There is no committed `CHANGELOG.md`;
+    per-PR fragment files are conflict-free across parallel PRs. Full convention:
+    `.changelog/README.md`. The advisory `changelog-check.yml` workflow posts a
+    non-blocking sticky comment when a PR adds no fragment and lacks the label — it
+    never blocks merge.
 9. **Classify the change via the live tier API** (see "Tier classification"
    below). Never self-classify by path patterns.
 9a. **Reconcile the diff against the design-concept artifact BEFORE opening the

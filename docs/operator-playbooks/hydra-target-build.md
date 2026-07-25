@@ -544,6 +544,20 @@ If "ADR impact" is not `none`:
 
 Gating discipline: the criteria are deliberately strict. **Both** ADR criteria must hold (hard-to-reverse AND surprising-to-a-reader AND has a real trade-off). Glossary updates fire only when you can write the one-line gloss now — if you can't, there's no glossary entry to add. Most builds will declare `none / none` — that's the expected steady state. The design-concept gate (hydra-grill) already caught the anticipated terms upfront; this step covers only the residual case where new vocabulary surfaced during implementation.
 
+### 6.7. Changelog fragment (or opt out)
+
+Before opening the code PR (or, for direct-to-main merges, before merging), author a per-PR changelog fragment for any user- or operator-visible change (issue #3658, epic #3676). This mirrors the Orchestrator convention on the Target board.
+
+**Only when the Target repo has adopted the `.changelog/` convention** (a `.changelog/README.md` exists in `~/hydra-betting/`): write **one** file `.changelog/<issue>-<slug>.md` — `<issue>` is the issue this build closes, `<slug>` a short kebab-case description — whose sole line is a curated, imperative, user-facing note (NOT the issue title):
+
+```
+- <type>: <description> (#<issue>)
+```
+
+`<type>` is a Conventional-Commits type (`feat`/`fix`/`perf`/`refactor`/`docs`/`test`/`build`/`ci`/`chore`/`revert`); the dashboard groups by type at render time and links the note to the issue. Commit the fragment with your change. For a genuinely user-invisible change (pure chore, test-only, internal refactor with no observable effect), apply the **`skip-changelog`** label to the PR instead of adding an empty fragment. There is no committed `CHANGELOG.md`; per-PR fragment files are conflict-free across parallel builds.
+
+**Graceful no-op until the Target adopts the convention:** if `~/hydra-betting/.changelog/README.md` is absent, the Target board has not yet mirrored this convention — skip this step entirely (the Target's Versions card degrades to "no releases yet"). Do NOT create the directory or the `skip-changelog` label yourself; that is the follow-on Target adoption ticket's job. QA gets no changelog role.
+
 ### 7–10. Merge, deploy, verify, state sync, and report
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY on both direct-to-main AND auto-merge/PR paths), merge lock, direct-to-main git merge, auto-merge/PR path (already-merged-post-green is SUCCESS not friction), deploy + post-deploy health, post-merge verify (auto-rollback on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
