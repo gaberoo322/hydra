@@ -53,6 +53,7 @@ import {
 } from "./digest-format.ts";
 import { buildDailyHeartbeat } from "./digest-fanout.ts";
 import { buildWeeklySummary } from "./digest-weekly.ts";
+import { logger } from "./logger.ts";
 
 // Re-export the pure-core formatters so existing importers of ./digest.ts that
 // reach for these (e.g. formatBuilderHealthLines, previously exported here;
@@ -233,9 +234,9 @@ export class DigestAccumulator {
     );
     if (!verdict.send) {
       if (verdict.reason === "quiet-hours") {
-        console.log("[Digest] Quiet hours — skipping digest");
+        logger.info("[Digest] Quiet hours — skipping digest");
       } else {
-        console.log("[Digest] No events since last digest — skipping");
+        logger.info("[Digest] No events since last digest — skipping");
       }
       return;
     }
@@ -250,7 +251,7 @@ export class DigestAccumulator {
     try {
       capacitySnapshot = await this.getCapacity();
     } catch (err: any) {
-      console.error(`[Digest] capacity-floor snapshot failed (non-fatal): ${err.message}`);
+      logger.error({ err }, "[Digest] capacity-floor snapshot failed (non-fatal)");
     }
 
     // Issue #732: Builder-Health Scorecard for the digest. The aggregator
@@ -260,17 +261,17 @@ export class DigestAccumulator {
     try {
       builderHealth = await this.getBuilderHealth();
     } catch (err: any) {
-      console.error(`[Digest] builder-health scorecard failed (non-fatal): ${err.message}`);
+      logger.error({ err }, "[Digest] builder-health scorecard failed (non-fatal)");
     }
 
     const message = buildDigestMessage(events, capacitySnapshot, builderHealth);
     await this.send(message);
-    console.log(`[Digest] Sent digest (${events.length} events)`);
+    logger.info({ eventCount: events.length }, "[Digest] Sent digest");
   }
 
   private async sendImmediate(message: string): Promise<void> {
     if (this.isQuietHours()) {
-      console.log("[Digest] Critical alert during quiet hours — sending anyway");
+      logger.info("[Digest] Critical alert during quiet hours — sending anyway");
     }
     await this.send(message);
   }
@@ -284,12 +285,17 @@ export class DigestAccumulator {
     // no empty-skip gate) so the operator always gets one push per day.
     this.heartbeatTimer = setInterval(() => {
       this.sendDailyHeartbeat().catch((err) =>
-        console.error(`[Digest] daily heartbeat failed (non-fatal): ${err?.message || err}`),
+        logger.error({ err }, "[Digest] daily heartbeat failed (non-fatal)"),
       );
     }, HEARTBEAT_INTERVAL_MS);
-    console.log(
-      `[Digest] Started — summaries every ${DIGEST_INTERVAL_MS / 3600_000}h, quiet ${QUIET_START_HOUR}:00-${QUIET_END_HOUR}:00; ` +
-        `daily heartbeat every ${HEARTBEAT_INTERVAL_MS / 3600_000}h`,
+    logger.info(
+      {
+        summaryIntervalHours: DIGEST_INTERVAL_MS / 3600_000,
+        quietStartHour: QUIET_START_HOUR,
+        quietEndHour: QUIET_END_HOUR,
+        heartbeatIntervalHours: HEARTBEAT_INTERVAL_MS / 3600_000,
+      },
+      "[Digest] Started — periodic summaries + daily heartbeat",
     );
   }
 
@@ -311,7 +317,7 @@ export class DigestAccumulator {
   async sendDailyHeartbeat(): Promise<void> {
     const message = await buildDailyHeartbeat();
     await this.send(message);
-    console.log("[Digest] Sent daily heartbeat");
+    logger.info("[Digest] Sent daily heartbeat");
   }
 }
 
