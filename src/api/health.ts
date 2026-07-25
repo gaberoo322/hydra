@@ -32,6 +32,11 @@ import {
   assessHealth,
   projectHealthDeepResponse,
   collectProbeInputs,
+  // Issue #3626: the embed-backend Wake-on-LAN recovery is now an EXPLICIT
+  // post-assembly step this route composes after collectProbeInputs — no longer a
+  // side-effect buried in the fan-out. It is fire-and-return (returns the probe
+  // record byte-for-byte unchanged) and never throws.
+  applyEmbedBackendRecovery,
   probeService,
   probeOv,
   probeEmbedBackend,
@@ -229,6 +234,17 @@ export function createHealthRouter(eventBus: PingableBus) {
         try { await eventBus.publisher.ping(); return true; } catch { /* intentional: ping failure reflected via redisOk=false */ return false; }
       },
     });
+
+    // Issue #3626: fire the embed-backend Wake-on-LAN recovery EXPLICITLY here,
+    // after the fan-out has assembled the probe record — no longer a side-effect
+    // buried in the enumeration. It reads the assembled
+    // serviceProbes['embed-backend'] result, fires a best-effort WoL wake through
+    // the process-lifetime gate (getWolGates().embed) if the backend read failed,
+    // and writes the UNCHANGED result back (fire-and-return): the record parseProbes
+    // sees is byte-for-byte identical, so the #2131 down-alert still fires this
+    // tick and recovery is observed on the next scheduled tick — exactly as before.
+    // NEVER throws; never blocks the response waiting for the box to POST.
+    await applyEmbedBackendRecovery(probeInputs);
 
     // Issue #840: parse the named probe record into the normalized Health
     // Snapshot, then run the pure Health Assessment ruleset. The handler owns

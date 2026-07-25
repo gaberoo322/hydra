@@ -32,10 +32,12 @@ import {
   readWolConfig,
   attemptEmbedBackendWake,
   maybeWakeEmbedBackend,
+  applyEmbedBackendRecovery,
   getWolGates,
   resetWolGates,
   type WolConfig,
 } from "../src/health/wol.ts";
+import type { ProbeInputs } from "../src/health/types.ts";
 
 describe("buildMagicPacket — packet layout (criterion 1)", () => {
   test("emits exactly 102 bytes: 6×0xFF sync header + 16× the MAC", () => {
@@ -382,5 +384,77 @@ describe("WoL Adapter — getWolGates()/resetWolGates() singleton lifecycle (iss
       if (PRIOR.max === undefined) delete process.env.HYDRA_WOL_MAX_ATTEMPTS; else process.env.HYDRA_WOL_MAX_ATTEMPTS = PRIOR.max;
       resetWolGates();
     }
+  });
+});
+
+// Issue #3626: the post-assembly embed-backend recovery step. Before #3626 the
+// WoL wake fired INSIDE the fan-out's serviceProbes descriptor, and the
+// injectable-WakeGate seam (the #2498 suite) lived in test/health-fan-out.test.mts
+// asserting `collectProbeInputs` forwarded an injected gate to the wake. That
+// coupled a probe-ordering test to the WoL gate budget. #3626 relocates the wake to
+// an explicit step, `applyEmbedBackendRecovery`, that the GET /health/deep caller
+// composes after assembly. These cases are the MIGRATED #2498 seam, re-pointed at
+// that step: they inject a fresh WakeGate and assert the recovery step consumes it
+// (a failed read) / resets it (a healthy read) — WITHOUT touching the fan-out or the
+// module singleton. The step's byte-for-byte output invariant is asserted too: the
+// probe record it returns carries the embed-backend result unchanged.
+describe("applyEmbedBackendRecovery — post-assembly recovery step (issue #3626, migrated #2498 seam)", () => {
+  const PRIOR_WOL = process.env.HYDRA_WOL_ENABLED;
+  // Enable WoL so a `failed` read actually consults the gate (recordSend advances
+  // the count before the best-effort, never-throwing UDP broadcast); restore
+  // afterward so no sibling suite inherits the flag.
+  const enableWol = () => { process.env.HYDRA_WOL_ENABLED = "true"; };
+  const restoreWol = () => {
+    if (PRIOR_WOL === undefined) delete process.env.HYDRA_WOL_ENABLED;
+    else process.env.HYDRA_WOL_ENABLED = PRIOR_WOL;
+  };
+
+  // A minimal ProbeInputs carrying just the embed-backend probe result — the only
+  // field the recovery step reads. Cast because the step ignores every other field.
+  const probeInputsWithEmbed = (embed: any): ProbeInputs =>
+    ({ serviceProbes: { "embed-backend": embed } } as unknown as ProbeInputs);
+
+  test("a failed embed result consumes the INJECTED gate (not the module singleton)", async () => {
+    enableWol();
+    try {
+      // A fresh gate with a 1-attempt budget and no cooldown: a single failed read
+      // must exhaust it.
+      const embedGate = new WakeGate(0, 1);
+      assert.equal(embedGate.attemptCount, 0);
+      assert.equal(embedGate.exhausted, false);
+
+      const inputs = probeInputsWithEmbed({ status: "failed", latencyMs: null });
+      const out = await applyEmbedBackendRecovery(inputs, { gate: embedGate });
+
+      // The injected gate is the one the recovery step forwarded to
+      // maybeWakeEmbedBackend → attemptEmbedBackendWake → recordSend.
+      assert.equal(embedGate.attemptCount, 1);
+      assert.equal(embedGate.exhausted, true);
+      // Byte-for-byte: the embed-backend result is returned UNCHANGED (fire-and-return).
+      assert.deepEqual((out.serviceProbes as any)["embed-backend"], { status: "failed", latencyMs: null });
+    } finally {
+      restoreWol();
+    }
+  });
+
+  test("a healthy embed result resets the INJECTED gate (cross-request re-arm)", async () => {
+    // No WoL needed: a non-failed read takes the reset() branch unconditionally.
+    const embedGate = new WakeGate(0, 1);
+    embedGate.recordSend(0); // simulate a prior consumed budget
+    assert.equal(embedGate.exhausted, true);
+
+    const inputs = probeInputsWithEmbed({ status: "running", latencyMs: 7 });
+    const out = await applyEmbedBackendRecovery(inputs, { gate: embedGate });
+
+    // The healthy read cleared the budget so a future outage starts fresh.
+    assert.equal(embedGate.attemptCount, 0);
+    assert.equal(embedGate.exhausted, false);
+    assert.deepEqual((out.serviceProbes as any)["embed-backend"], { status: "running", latencyMs: 7 });
+  });
+
+  test("a null serviceProbes map (rejected settle) is a no-op that never throws", async () => {
+    const inputs = ({ serviceProbes: null } as unknown as ProbeInputs);
+    const out = await applyEmbedBackendRecovery(inputs, { gate: new WakeGate(0, 1) });
+    assert.equal(out.serviceProbes, null);
   });
 });

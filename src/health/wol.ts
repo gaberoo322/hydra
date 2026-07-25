@@ -45,6 +45,7 @@ import {
   WOL_DEFAULT_BROADCAST,
 } from "./wol-send.ts";
 import type { ServiceProbeResult } from "./probe.ts";
+import type { ProbeInputs } from "./types.ts";
 import { logger } from "../logger.ts";
 
 /** Conservative default: at most one wake every 5 minutes. */
@@ -265,6 +266,85 @@ export async function maybeWakeEmbedBackend(
   // already done inside attemptEmbedBackendWake; nothing here blocks on it.
   await wake(config, gate);
   return initial;
+}
+
+// ---- The post-assembly embed-backend recovery step (issue #3626) ------------
+//
+// WHY THIS STEP LIVES HERE (the #3626 split)
+//   Before #3626 the fan-out (src/health/fan-out.ts) called `maybeWakeEmbedBackend`
+//   INSIDE its `serviceProbes` descriptor — so the probe-enumeration module owned
+//   a slice of WoL recovery policy, imported this module, and carried the
+//   `embedWakeGate` gate through its `CollectProbeDeps` bag. A test that only
+//   wanted to assert probe ordering had to stub the cross-request WakeGate budget,
+//   a concern that belongs to the WoL module. #3626 makes `collectProbeInputs` a
+//   PURE enumerator: `serviceProbes['embed-backend']` carries the RAW probe result,
+//   and the ONE caller (`GET /health/deep`) invokes this recovery step EXPLICITLY
+//   after assembly — an explicit call, not a side-effect buried in the fan-out.
+//
+// WHY /health/deep OUTPUT IS BYTE-FOR-BYTE UNCHANGED
+//   `maybeWakeEmbedBackend` returns the ORIGINAL probe result on a failed read
+//   (fire-and-return); it only mutates gate state, never the returned probe. So
+//   whether the wake fires inside the descriptor (old) or here on the assembled
+//   `probeInputs.serviceProbes['embed-backend']` (new), the value `parseProbes`
+//   sees is identical — the #2131 down-alert still fires for THIS tick, recovery
+//   is observed on the NEXT tick, exactly as before.
+//
+// CROSS-REQUEST GATE PERSISTENCE
+//   The gate defaults to `getWolGates().embed` (the memoized process-lifetime
+//   singleton), so a no-gate production caller shares ONE embed budget across
+//   heartbeats — a down backend is not wake-spammed once per request. A test
+//   injects a fresh `WakeGate` to exercise exhaustion, or calls `resetWolGates()`
+//   for the default path. NEVER throws (health/verification rule).
+
+/**
+ * The explicit post-assembly WoL recovery step for `GET /health/deep` (issue
+ * #3626). Reads the assembled embed-backend probe result off `probeInputs`, runs
+ * the fire-and-return WoL wake through the cross-request gate, and writes the
+ * (unchanged) result back so the probe record the projection sees is byte-for-byte
+ * identical to today.
+ *
+ * A no-op when there is no embed-backend result (a rejected `serviceProbes`
+ * settle coalesced the whole map to `null`): there is nothing to assess for a
+ * wake, so the input is returned untouched. NEVER throws — `maybeWakeEmbedBackend`
+ * already folds every failure path to a result object + fail-loud logger.error.
+ *
+ * `gate` defaults to the WoL Adapter's `embed` singleton so a production caller
+ * keeps cross-request cooldown/attempt persistence; a test injects a fresh
+ * `WakeGate` to exercise gate exhaustion at this seam without touching the
+ * singleton. `wake` is injectable for the same test-isolation reason.
+ */
+export async function applyEmbedBackendRecovery(
+  probeInputs: ProbeInputs,
+  {
+    config = readWolConfig(),
+    gate = getWolGates().embed,
+    wake = maybeWakeEmbedBackend,
+  }: {
+    config?: WolConfig;
+    gate?: WakeGate;
+    wake?: typeof maybeWakeEmbedBackend;
+  } = {},
+): Promise<ProbeInputs> {
+  const embed = probeInputs.serviceProbes?.["embed-backend"];
+  if (!embed) {
+    // No embed-backend probe result (the whole serviceProbes map coalesced to
+    // null on a rejected settle) — nothing to wake-assess. Return untouched.
+    return probeInputs;
+  }
+  // The assembled map holds a broad `ServiceProbe` (status: string), but the wake
+  // trigger consumes the narrow `ServiceProbeResult` (status: "failed"|"running") —
+  // the probeEmbedBackend producer only ever emits those two. Narrow to the
+  // producer contract so the wake decision (fires only on "failed") is faithful,
+  // and normalise the optional latencyMs to the result's `number | null`.
+  const result: ServiceProbeResult = {
+    status: embed.status === "failed" ? "failed" : "running",
+    latencyMs: embed.latencyMs ?? null,
+  };
+  // Fire-and-return: maybeWakeEmbedBackend returns `result` unchanged on a failed
+  // read (only the gate mutates) and re-arms the gate on a healthy read. Writing
+  // the returned value back keeps the embed-backend probe identical to today.
+  probeInputs.serviceProbes!["embed-backend"] = await wake(result, { config, gate });
+  return probeInputs;
 }
 
 // ---- WoL Adapter — owns the cross-request WakeGate singleton lifecycle (#2570) --
