@@ -28,8 +28,9 @@
  *     adversarial 2-reviewer fold. ALL of Standards, Spec, and BOTH adversarial
  *     reviewers must pass; a single hard finding from any of them is a FAIL.
  *
- * A hard finding bounces the item to the existing **reframe queue**
- * (`hydra:anchors:reframe-queue`, surfaced by `hydra-target-review`). There is
+ * A hard finding bounces the item via the **`reframe` label** (ADR-0031 — the
+ * label replaced the retired `hydra:anchors:reframe-queue`), surfaced to the
+ * operator by `/hydra-review`'s per-Target drain (§1.5). There is
  * NO deep-QA remediation loop and NO operator-escalation path — those are the
  * Verifier-Core teeth the epic explicitly declines to mirror for the Target.
  *

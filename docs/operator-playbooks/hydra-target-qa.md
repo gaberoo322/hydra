@@ -202,7 +202,7 @@ travel with the PASS/FAIL but never change it.
 A hard finding from **any** consulted axis folds to a `FAIL` verdict whose
 action is `bounce-to-reframe`: under ADR-0031 the reframe queue is now the
 **`reframe` label** on the anchor issue (`gaberoo322/hydra-betting`), stamped
-alongside `ready-for-human` so `hydra-target-review` surfaces it to the operator
+alongside `ready-for-human` so `/hydra-review` (its per-Target drain, §1.5) surfaces it to the operator
 on the next review (the label pair replaces the retired
 `hydra:anchors:reframe-queue`). The QA **verdict itself is posted as a
 `gh issue comment`** on the anchor issue and the `needs-qa` label is stripped —
@@ -274,7 +274,7 @@ All routing is `gh` on the anchor issue (`gaberoo322/hydra-betting`) — REST-fi
   gh issue edit "$ANCHOR_NUM" --repo "$REPO" --remove-label needs-qa
   ```
 - `action: "bounce-to-reframe"` — post the FAIL verdict as an issue comment, then
-  stamp the reframe label pair so `hydra-target-review` picks it up. Do NOT escalate
+  stamp the reframe label pair so `/hydra-review` (per-Target drain) picks it up. Do NOT escalate
   through any other channel and do NOT open a remediation loop.
   ```bash
   REPO=gaberoo322/hydra-betting
@@ -301,7 +301,7 @@ multi-check rollup).
   reviewer verdicts; it does not re-implement the AND/short-circuit logic.
 - **FAIL bounces via the `reframe` + `ready-for-human` label pair. Never
   escalates.** The verdict posts as a `gh issue comment` and `needs-qa` is
-  stripped; the only operator surface is the existing `hydra-target-review` drain
+  stripped; the only operator surface is the `/hydra-review` per-Target drain
   of `reframe`-labelled issues (ADR-0031 — the label replaces the retired Redis
   reframe-queue).
 - **Render-robustness is a Standards-axis requirement on every UI-touching PR**
@@ -332,7 +332,7 @@ multi-check rollup).
 - `scripts/target/target-qa-verdict.ts` — the pure verdict fold.
 - `scripts/ci/qa-verdict.ts` — the Orchestrator's analogous one-pass verdict
   classifier (the shape this skill mirrors, minus the tier ladder).
-- `docs/operator-playbooks/hydra-target-review.md` — drains the `reframe`-labelled issues.
+- `docs/operator-playbooks/hydra-review.md` — its per-Target drain (§1.5) surfaces the `reframe`-labelled issues to the operator.
 - Issue #2734 / epic #2732 — the render-robustness (degrade-never-throw)
   convention and the four live-`500` routes that motivated it; exemplar fixes
   item-737 (missing reconciliation checkpoint) and item-738 (unknown sport key).

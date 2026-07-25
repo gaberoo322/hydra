@@ -14,7 +14,7 @@
  * (hydra-architecture-scan precedent) — items route to **`needs-triage`**
  * (the `triage` lane), NOT `ready-for-agent`. The item body carries the
  * decision protocol; hydra-target-sweep (or the operator via
- * hydra-target-review) advances it into one of three outcomes:
+ * /hydra-review's per-Target drain) advances it into one of three outcomes:
  *
  *   (a) WIRE   — intent recoverable: rewrite into a concrete ready-for-agent
  *                wiring task.
