@@ -814,6 +814,170 @@ describe("scripts/sync-skills.sh — compose_base vendored-base composition (iss
   });
 });
 
+describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)", () => {
+  /**
+   * sync-skills.sh only ever WROTE generated skills; a playbook deleted from
+   * docs/operator-playbooks/ left its already-synced ~/.claude/skills/<name>/
+   * and ~/.codex/skills/<name>/ dirs lingering forever (bit the
+   * /hydra-target-review retirement, PR #3692). The prune pass removes orphaned
+   * GENERATED dirs — a dir whose SKILL.md carries the "DO NOT EDIT. Generated
+   * from docs/operator-playbooks/<X>.md" banner but whose source playbook <X>.md
+   * is gone. A dir whose SKILL.md LACKS that banner (a third-party / upstream
+   * skill like code-review) is NEVER removed — the banner match is the safety
+   * guard. Honors --dry-run and the CLAUDE_SKILLS_DIR / CODEX_SKILLS_DIR
+   * overrides.
+   *
+   * Hermetic throwaway-repo idiom (mirrors the suites above): REPO_ROOT = script
+   * dir's parent, playbooks at docs/operator-playbooks/, the REAL sync-skills.sh
+   * copied in so the logic under test is production.
+   */
+  const GENERATED_BANNER =
+    "<!-- DO NOT EDIT. Generated from docs/operator-playbooks/NAME.md. Run scripts/sync-skills.sh after editing the playbook. -->";
+
+  function makePruneRepo(): { dir: string; script: string; playbooks: string } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-prune-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(playbooks, { recursive: true });
+    const script = join(scripts, "sync-skills.sh");
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    return { dir, script, playbooks };
+  }
+
+  // Seed a pre-existing skill dir with a SKILL.md — as if a prior sync wrote it.
+  function seedSkill(
+    skillsDir: string,
+    name: string,
+    opts: { generated: boolean },
+  ): string {
+    const skillDir = join(skillsDir, name);
+    mkdirSync(skillDir, { recursive: true });
+    const banner = opts.generated
+      ? GENERATED_BANNER.replace("NAME", name) + "\n\n"
+      : "";
+    writeFileSync(join(skillDir, "SKILL.md"), `---\nname: ${name}\n---\n\n${banner}body\n`);
+    return skillDir;
+  }
+
+  function runSync(
+    repo: { dir: string; script: string },
+    args: string[],
+    dirs: { claudeDir: string; codexDir: string },
+  ): { status: number | null; stdout: string; stderr: string } {
+    const r = spawnSync("bash", [repo.script, ...args], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: dirs.claudeDir,
+        CODEX_SKILLS_DIR: dirs.codexDir,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  }
+
+  test("removes a generated skill dir whose source playbook was deleted — in BOTH the claude and codex dirs", () => {
+    const repo = makePruneRepo();
+    const claudeDir = join(repo.dir, "claude");
+    const codexDir = join(repo.dir, "codex");
+    try {
+      // A live playbook that still exists — its generated dirs must survive.
+      writeFileSync(
+        join(repo.playbooks, "live.md"),
+        "---\nname: live\ndescription: a live skill\n---\n\n# Live\n\nbody\n",
+      );
+      // Pre-seed a GENERATED "orphan" whose playbook does NOT exist, in both dirs.
+      const orphanClaude = seedSkill(claudeDir, "retired-skill", { generated: true });
+      const orphanCodex = seedSkill(codexDir, "retired-skill", { generated: true });
+      // Also pre-seed the live skill's dirs so we can prove they survive.
+      const liveClaude = seedSkill(claudeDir, "live", { generated: true });
+      const liveCodex = seedSkill(codexDir, "live", { generated: true });
+
+      const r = runSync(repo, [], { claudeDir, codexDir });
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+
+      assert.ok(
+        !existsSync(orphanClaude),
+        "the orphaned generated claude skill dir must be pruned",
+      );
+      assert.ok(
+        !existsSync(orphanCodex),
+        "the orphaned generated codex skill dir must be pruned",
+      );
+      assert.match(
+        r.stdout,
+        /pruned orphaned skill: retired-skill/,
+        "the prune must announce the removed skill by name",
+      );
+      // The live skill (source playbook still present) must survive the prune.
+      assert.ok(existsSync(liveClaude), "the live claude skill must NOT be pruned");
+      assert.ok(existsSync(liveCodex), "the live codex skill must NOT be pruned");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a skill dir whose SKILL.md LACKS the generated banner is NEVER removed (third-party guard)", () => {
+    const repo = makePruneRepo();
+    const claudeDir = join(repo.dir, "claude");
+    const codexDir = join(repo.dir, "codex");
+    try {
+      // A hand-authored / upstream skill with NO generated banner, and NO
+      // matching playbook — the very case a naive "no playbook → delete" sweep
+      // would wrongly nuke. It must be left untouched.
+      const thirdParty = seedSkill(claudeDir, "code-review", { generated: false });
+      const marker = join(thirdParty, "extra.md");
+      writeFileSync(marker, "hand-authored\n");
+
+      const r = runSync(repo, [], { claudeDir, codexDir });
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+
+      assert.ok(
+        existsSync(thirdParty),
+        "a non-banner (third-party) skill dir must survive the prune",
+      );
+      assert.ok(existsSync(marker), "the third-party skill's contents must be intact");
+      assert.doesNotMatch(
+        r.stdout,
+        /pruned orphaned skill: code-review/,
+        "a non-banner dir must never be reported as pruned",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--dry-run prints the would-prune line but deletes nothing", () => {
+    const repo = makePruneRepo();
+    const claudeDir = join(repo.dir, "claude");
+    const codexDir = join(repo.dir, "codex");
+    try {
+      const orphan = seedSkill(claudeDir, "retired-skill", { generated: true });
+
+      const r = runSync(repo, ["--dry-run"], { claudeDir, codexDir });
+      assert.equal(r.status, 0, `dry-run sync failed: ${r.stderr}`);
+
+      assert.ok(
+        existsSync(orphan),
+        "--dry-run must not delete the orphaned dir — it only reports",
+      );
+      assert.match(
+        r.stdout,
+        /would prune orphaned skill: retired-skill/,
+        "--dry-run must announce the would-be prune",
+      );
+      assert.doesNotMatch(
+        r.stdout,
+        /^pruned orphaned skill:/m,
+        "--dry-run must not print the actual-prune line",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/setup-git-hooks.sh (issue #433)", () => {
   /**
    * Create a throwaway git repo with a `scripts/sync-skills.sh` stub and a
