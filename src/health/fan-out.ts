@@ -89,6 +89,7 @@ import {
   WakeGate,
   maybeWakeEmbedBackend,
 } from "./wol.ts";
+import { logger } from "../logger.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -509,8 +510,9 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       (inline as any)[d.key] = await Promise.resolve(d.run());
     } catch (err: any) {
       (inline as any)[d.key] = d.fallback;
-      console.error(
-        `[health/fan-out] inline probe '${d.key}' failed (folding to honest-none fallback): ${err?.message || err}`,
+      logger.error(
+        { probeKey: d.key, err },
+        "[health/fan-out] inline probe failed (folding to honest-none fallback)",
       );
     }
   }

@@ -32,6 +32,7 @@ import { resolve } from "node:path";
 
 import { gitExec as defaultGitExec } from "../github/git.ts";
 import { isGhFailure } from "../github/exec.ts";
+import { logger } from "../logger.ts";
 
 // $HYDRA_ROOT is the checkout deploy.sh leaves on master HEAD; the SHA read is a
 // `git rev-parse HEAD` against it.
@@ -88,7 +89,10 @@ export async function getDeployedSha(deps: DeployedShaDeps = {}): Promise<string
   if (isGhFailure(result)) {
     // Log once-per-cache-window so a misconfigured host is visible without
     // spamming, then omit the field.
-    console.error(`[API] /health deployedSha unavailable (${result.code}): ${result.stderr.slice(0, 200)}`);
+    logger.error(
+      { code: result.code, stderr: result.stderr.slice(0, 200) },
+      "[API] /health deployedSha unavailable",
+    );
     deployedShaCache = { sha: null, at };
     return null;
   }
