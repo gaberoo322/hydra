@@ -53,6 +53,7 @@ import {
   getFiveHourThrottleT1,
   getFiveHourThrottleT2,
 } from "./config.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Length of the fixed weekly window in ms. Duplicated as a private const here
@@ -370,11 +371,9 @@ function projectPacingCurve(
   if (!Number.isFinite(currentMs) || !Number.isFinite(nowMs)) {
     // Defensive: a malformed timestamp on a snapshot we own. Stay neutral
     // rather than projecting a NaN curve. Logged so the bad value is visible.
-    console.error(
-      `[usage-tracker] projectPacingCurve got an unparseable timestamp ` +
-        `(weeklyResetAnchor=${JSON.stringify(anchorIso)}, generatedAt=${JSON.stringify(
-          snapshot.generatedAt,
-        )}); treating Pacing Curve as neutral`,
+    logger.error(
+      { weeklyResetAnchor: anchorIso, generatedAt: snapshot.generatedAt },
+      "[usage-tracker] projectPacingCurve got an unparseable timestamp; treating Pacing Curve as neutral",
     );
     return { paceState: "on", targetPercent: 0, sinceResetPercent };
   }

@@ -45,6 +45,7 @@ import {
   tokensBySkillDailyKey,
   tokensByCycleKey,
 } from "../redis/cost.ts";
+import { logger } from "../logger.ts";
 
 // Re-export the key helpers for tests that probe Redis directly with a
 // raw client. The seam module owns the shapes; this file is the import
@@ -182,7 +183,7 @@ async function readDailyTokens(date: string): Promise<number> {
     const n = parseInt(raw, 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
   } catch (err: any) {
-    console.error(`[cost-surrogate] readDailyTokens ${date} failed: ${err?.message || err}`);
+    logger.error({ date, err }, "[cost-surrogate] readDailyTokens failed");
     return 0;
   }
 }
@@ -194,7 +195,7 @@ async function readSkillHashField(date: string, skill: string): Promise<number> 
     const n = parseInt(v, 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
   } catch (err: any) {
-    console.error(`[cost-surrogate] readSkillHashField ${date}/${skill} failed: ${err?.message || err}`);
+    logger.error({ date, skill, err }, "[cost-surrogate] readSkillHashField failed");
     return 0;
   }
 }
@@ -206,7 +207,7 @@ async function readCycleTokens(cycleId: string): Promise<number> {
     const n = parseInt(v, 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
   } catch (err: any) {
-    console.error(`[cost-surrogate] readCycleTokens ${cycleId} failed: ${err?.message || err}`);
+    logger.error({ cycleId, err }, "[cost-surrogate] readCycleTokens failed");
     return 0;
   }
 }
@@ -264,7 +265,7 @@ async function safeSkillTokensAll(date: string): Promise<Record<string, string> 
   try {
     return await getSkillTokensAll(date);
   } catch (err: any) {
-    console.error(`[cost-surrogate] getSkillTokensAll ${date} failed: ${err?.message || err}`);
+    logger.error({ date, err }, "[cost-surrogate] getSkillTokensAll failed");
     return null;
   }
 }

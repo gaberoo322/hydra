@@ -41,6 +41,7 @@ import {
 } from "../transcript-store.ts";
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { logger } from "../logger.ts";
 import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
 import { modelToFamily, parseUsageLine, parseObservedResetMs } from "./token-math.ts";
@@ -247,7 +248,7 @@ export async function tokensForSession(
   try {
     primary = await resolvePath(id);
   } catch (err) {
-    console.error(`[transcript-scan] tokensForSession resolve failed for ${id}:`, err);
+    logger.error({ id, err }, "[transcript-scan] tokensForSession resolve failed");
     return 0;
   }
   if (!primary) return 0;
@@ -261,7 +262,7 @@ export async function tokensForSession(
     } catch (err) {
       // A shard that vanished between listing and read is non-fatal — log and
       // keep summing the rest (fail-loud-then-proceed).
-      console.error(`[transcript-scan] tokensForSession read failed for ${file}:`, err);
+      logger.error({ file, err }, "[transcript-scan] tokensForSession read failed");
       continue;
     }
     total += sumSessionTokens(content.split("\n"));
@@ -423,7 +424,7 @@ export async function transcriptScan(
     try {
       content = await readFile(file, "utf-8");
     } catch (err: any) {
-      console.error(`[usage-tracker] read failed for ${file}: ${err?.message || err}`);
+      logger.error({ file, err }, "[usage-tracker] transcript read failed");
       continue;
     }
 
@@ -515,12 +516,12 @@ export async function transcriptScan(
   if (unknownModelsSeen.size > 0) {
     // Once per scan, not per line. An above-zero unknown bucket means the
     // family prefix table (modelToFamily) needs a new entry.
-    console.warn(
-      `[usage-tracker] ${unknownModelsSeen.size} unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0): ${[
-        ...unknownModelsSeen,
-      ]
-        .map((m) => (m === "" ? "<missing>" : m))
-        .join(", ")}`,
+    logger.warn(
+      {
+        count: unknownModelsSeen.size,
+        models: [...unknownModelsSeen].map((m) => (m === "" ? "<missing>" : m)),
+      },
+      "[usage-tracker] unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0)",
     );
   }
 

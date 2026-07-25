@@ -34,6 +34,7 @@
  * unchanged from the pre-#2923 `transcript-scan.ts`.
  */
 
+import { logger } from "../logger.ts";
 import { isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult, OAuthUsageData } from "./oauth-usage.ts";
 import {
@@ -234,7 +235,7 @@ async function hydrateOAuthBackoff(nowMs: number): Promise<void> {
     persisted = await oauthBackoffPersistence.read();
   } catch (err: any) {
     // Defence-in-depth: the seam already never throws, but a test double might.
-    console.error(`[usage-tracker] OAuth backoff hydrate failed (in-memory-only): ${err?.message || err}`);
+    logger.error({ err }, "[usage-tracker] OAuth backoff hydrate failed (in-memory-only)");
     return;
   }
   if (persisted === null) return;
@@ -250,9 +251,9 @@ async function hydrateOAuthBackoff(nowMs: number): Promise<void> {
     return;
   }
   oauthBackoff = { failures: persisted.failures, nextAttemptMs: clampedNext };
-  console.error(
-    `[usage-tracker] OAuth backoff resumed from persistence: failure #${persisted.failures}, ` +
-      `next GET in ${clampedNext - nowMs}ms (restart did not reset the ladder — issue #2840)`,
+  logger.error(
+    { failures: persisted.failures, nextGetMs: clampedNext - nowMs },
+    "[usage-tracker] OAuth backoff resumed from persistence (restart did not reset the ladder — issue #2840)",
   );
 }
 
@@ -459,9 +460,9 @@ async function attemptOAuthRead(
     // resume the healthy fixed-TTL cadence immediately (issue #2619 recovery).
     oauthCache = { data: result.data, storedAt: nowMs };
     if (oauthBackoff !== null) {
-      console.error(
-        `[usage-tracker] OAuth meter recovered after ${oauthBackoff.failures} ` +
-          `consecutive failure(s); backoff cleared, resuming fixed-TTL cadence`,
+      logger.error(
+        { failures: oauthBackoff.failures },
+        "[usage-tracker] OAuth meter recovered; backoff cleared, resuming fixed-TTL cadence",
       );
       oauthBackoff = null;
       // Clear the persisted gate too (issue #2840) so a restart right after
@@ -493,12 +494,16 @@ async function attemptOAuthRead(
   // so a restart while inside this window RESUMES the ladder instead of resetting
   // it to failure #1. Fire-and-forget, fail-open — the seam never throws.
   void oauthBackoffPersistence.write({ failures, nextAttemptMs: oauthBackoff.nextAttemptMs });
-  console.error(
-    `[usage-tracker] OAuth meter read failed (${result.code}); backing off ` +
-      `${delayMs}ms before next GET (consecutive failure #${failures})` +
-      (retryAfterMs !== undefined && retryAfterMs > exponentialMs
-        ? ` — server Retry-After ${retryAfterMs}ms lengthened the ${exponentialMs}ms exponential delay`
-        : ""),
+  logger.error(
+    {
+      code: result.code,
+      delayMs,
+      failures,
+      ...(retryAfterMs !== undefined && retryAfterMs > exponentialMs
+        ? { retryAfterMs, exponentialMs }
+        : {}),
+    },
+    "[usage-tracker] OAuth meter read failed; backing off before next GET",
   );
 
   // Sustained-failure alarm (issue #3601): fire a single WARN when the
@@ -512,12 +517,17 @@ async function attemptOAuthRead(
   // trips it. Purely observability: this emits a signal and returns nothing; the
   // backoff/recovery bookkeeping and the #1124 fail-open gate are untouched.
   if (failures === OAUTH_SUSTAINED_FAILURE_THRESHOLD) {
-    console.error(
-      `[usage-tracker] ALARM: OAuth meter has failed ${failures} consecutive reads ` +
-        `(last: ${result.code}); the subscription meter may be genuinely stuck ` +
-        `(expired OAuth token or a hard account rate-limit) rather than riding out a ` +
-        `transient 429 wave. Usage gating is running on the last-good/estimate fallback ` +
-        `until a read succeeds (fail-open #1124; auto-clears on recovery — issue #3601).`,
+    logger.error(
+      {
+        failures,
+        code: result.code,
+        context:
+          "the subscription meter may be genuinely stuck (expired OAuth token or a hard " +
+          "account rate-limit) rather than riding out a transient 429 wave; usage gating is " +
+          "running on the last-good/estimate fallback until a read succeeds " +
+          "(fail-open #1124; auto-clears on recovery — issue #3601)",
+      },
+      `[usage-tracker] ALARM: OAuth meter has failed ${failures} consecutive reads`,
     );
   }
 
@@ -537,9 +547,9 @@ async function attemptOAuthRead(
     }
     // Too stale: evict so a future success starts a clean age clock, and fall
     // through to the failure (estimate). Logged so a sustained outage is visible.
-    console.error(
-      `[usage-tracker] OAuth last-good value is too stale (age ${ageMs}ms ≥ ` +
-        `TTL+maxStale); falling through to the transcript estimate (last read: ${result.code})`,
+    logger.error(
+      { ageMs, code: result.code },
+      "[usage-tracker] OAuth last-good value is too stale (age ≥ TTL+maxStale); falling through to the transcript estimate",
     );
     oauthCache = null;
   }

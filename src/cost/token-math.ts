@@ -50,7 +50,7 @@ export interface TokenBreakdown {
  * deliberately no `HYDRA_QUOTA_WEIGHT_UNKNOWN` env var because the
  * CONTEXT.md Quota-Weight formula is opus/sonnet/haiku only; an unknown
  * bucket above zero signals the family table needs a new prefix, which the
- * once-per-scan `console.warn` surfaces.
+ * once-per-scan `logger.warn` surfaces.
  */
 export type ModelFamily = "opus" | "sonnet" | "haiku" | "unknown";
 
@@ -87,7 +87,7 @@ export function familyWeight(
     case "unknown":
       // Implicit 1.0 — no HYDRA_QUOTA_WEIGHT_UNKNOWN env var exists; the
       // formula is three-family. Drift here is surfaced by the
-      // once-per-scan console.warn, not absorbed by a tunable.
+      // once-per-scan logger.warn, not absorbed by a tunable.
       return 1;
   }
 }

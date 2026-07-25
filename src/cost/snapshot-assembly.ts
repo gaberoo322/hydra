@@ -15,7 +15,7 @@
  *
  * PURE: no IO (no readFile/stat), no Redis, no `process.env` reads, no
  * `Date.now()` — every time/env/scalar input enters as a function argument. The
- * `console.warn`/`console.error` calls retained here (the OAuth-fallback fail-loud,
+ * `logger.warn`/`logger.error` calls retained here (the OAuth-fallback fail-loud,
  * the Anchor auto-correct, the drift detector) are intrinsic to the derivation
  * each helper performs, NOT assembly orchestration. The import direction is
  * strictly one-way: this leaf imports its primitives from the sibling pure leaves
@@ -31,6 +31,7 @@
  * same module-internal visibility as eligibility.ts's `deriveHardStop`.
  */
 
+import { logger } from "../logger.ts";
 import { isOAuthUsageOk } from "./oauth-usage.ts";
 // Pure math leaf (issue #1909 / #2279): the weighted-token unit, the reset-window
 // projection, the cache-hit ratio, and the shared family primitives
@@ -278,7 +279,7 @@ export interface OAuthRebase {
  *
  * HARD INVARIANT (#1083/#1124): on ANY failed/expired/garbage read the estimate
  * stands; the headline NEVER silently reads 0 (which would unblock dispatch
- * during an outage). The `console.error` fail-loud on fallback is retained here
+ * during an outage). The `logger.error` fail-loud on fallback is retained here
  * — it is intrinsic to the rebase decision, not assembly orchestration. A
  * served-stale last-good value (issue #1090) stays `usageSource:"oauth"` with
  * `oauthError:"oauth-usage-stale"` + `oauthStale:true`, so stale-but-real still
@@ -318,8 +319,9 @@ export function rebaseOnOAuth(
   // failure with no last-good, or a last-good aged past TTL+maxStale). Logged
   // (fail-loud) so a persistent OAuth outage is visible, but the gate stays
   // conservative on the estimate rather than reading 0.
-  console.error(
-    `[usage-tracker] OAuth usage meter unavailable (${oauth.code}); falling back to transcript estimate for percentLast5h/percentLast7d`,
+  logger.error(
+    { code: oauth.code },
+    "[usage-tracker] OAuth usage meter unavailable; falling back to transcript estimate for percentLast5h/percentLast7d",
   );
   return {
     percentLast5h: estimatePercentLast5h,
@@ -349,7 +351,7 @@ export interface SinceReset {
  * `> envBoundary && <= now`). Nothing is persisted. Returns neutral
  * (all-zero/0/null) when the Anchor env var is unset (`anchorEnvMs === null`),
  * mirroring the uncalibrated-returns-neutral discipline. The auto-correct
- * `console.warn` is retained here — it announces the boundary override, an
+ * `logger.warn` is retained here — it announces the boundary override, an
  * effect intrinsic to this derivation, not assembly orchestration.
  *
  * Takes the already-computed scalars/sub-accumulators (anchor env ms, the
@@ -395,11 +397,13 @@ export function deriveSinceReset(input: {
     mostRecentObservedResetMs > effectiveBoundaryMs &&
     mostRecentObservedResetMs <= nowMs
   ) {
-    console.warn(
-      `[usage-tracker] Weekly Reset Anchor auto-corrected: observed reset ` +
-        `${new Date(mostRecentObservedResetMs).toISOString()} overrides env projection ` +
-        `${new Date(effectiveBoundaryMs).toISOString()} (env anchor ` +
-        `${new Date(anchorEnvMs).toISOString()})`,
+    logger.warn(
+      {
+        observedReset: new Date(mostRecentObservedResetMs).toISOString(),
+        envProjection: new Date(effectiveBoundaryMs).toISOString(),
+        envAnchor: new Date(anchorEnvMs).toISOString(),
+      },
+      "[usage-tracker] Weekly Reset Anchor auto-corrected: observed reset overrides env projection",
     );
     effectiveBoundaryMs = mostRecentObservedResetMs;
   }
@@ -519,13 +523,16 @@ export function detectCalibrationDrift(input: {
   const tooHigh = percentSinceReset > driftReference * driftFactor;
   const tooLow = percentSinceReset < driftReference / driftFactor;
   if (tooHigh || tooLow) {
-    console.warn(
-      `[usage-tracker] calibration drift: percentSinceReset ` +
-        `${percentSinceReset.toFixed(2)}% diverges from reference ` +
-        `${driftReference.toFixed(2)}% by more than ${driftFactor}x ` +
-        `(cacheReadWeight=${input.cacheReadWeight}, weeklyQuota=${input.weeklyQuota}); ` +
-        `re-derive HYDRA_USAGE_WEEKLY_QUOTA_TOKENS / HYDRA_USAGE_CACHE_READ_WEIGHT ` +
-        `against a fresh /usage reading`,
+    logger.warn(
+      {
+        percentSinceReset: Number(percentSinceReset.toFixed(2)),
+        reference: Number(driftReference.toFixed(2)),
+        driftFactor,
+        cacheReadWeight: input.cacheReadWeight,
+        weeklyQuota: input.weeklyQuota,
+      },
+      "[usage-tracker] calibration drift: percentSinceReset diverges from reference by more than driftFactor; " +
+        "re-derive HYDRA_USAGE_WEEKLY_QUOTA_TOKENS / HYDRA_USAGE_CACHE_READ_WEIGHT against a fresh /usage reading",
     );
   }
 }
@@ -577,13 +584,15 @@ export function detectEstimateOAuthDivergence(input: {
   const tooHigh = estimatePercentLast7d > lastKnownOAuthPercent * divergenceFactor;
   const tooLow = estimatePercentLast7d < lastKnownOAuthPercent / divergenceFactor;
   if (tooHigh || tooLow) {
-    console.warn(
-      `[usage-tracker] estimate/OAuth divergence: transcript estimate ` +
-        `${estimatePercentLast7d.toFixed(2)}% (7d) diverges from the last-known OAuth ` +
-        `utilization ${lastKnownOAuthPercent.toFixed(2)}% by more than ${divergenceFactor}x ` +
-        `during an OAuth outage — dispatch gating is currently on the fail-open ` +
-        `estimate; verify real weekly utilization at claude.ai before the next ` +
-        `autopilot window`,
+    logger.warn(
+      {
+        estimatePercentLast7d: Number(estimatePercentLast7d.toFixed(2)),
+        lastKnownOAuthPercent: Number(lastKnownOAuthPercent.toFixed(2)),
+        divergenceFactor,
+      },
+      "[usage-tracker] estimate/OAuth divergence: transcript estimate (7d) diverges from the last-known OAuth " +
+        "utilization by more than divergenceFactor during an OAuth outage — dispatch gating is currently on the " +
+        "fail-open estimate; verify real weekly utilization at claude.ai before the next autopilot window",
     );
   }
 }
