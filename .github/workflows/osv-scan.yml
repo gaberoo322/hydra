@@ -7,13 +7,15 @@ name: osv-scan
 # Vulnerabilities) database. Uploads the JSON results as an artifact for
 # operator/agent inspection.
 #
-# WHY OSV (complements the required `npm audit` gate, does NOT replace it):
-# npm audit queries only the npm advisory registry and is a REQUIRED check, so a
-# new CVE there reddens the merge queue repo-wide with zero code change (operator
-# memory reference_npm_audit_required_check_ambient_poison_pill). osv-scanner
-# queries the broader OSV database (GitHub Advisory + NVD + OSS-Fuzz aggregated),
-# so this advisory scan can surface a CVE — with a stable, agent-parseable OSV ID
-# — BEFORE it lands in the npm advisory DB and wedges auto-merge.
+# WHY OSV (complements the `npm audit` advisory surface, does NOT replace it):
+# npm audit queries only the npm advisory registry. As of issue #3650 it is an
+# ADVISORY surface (advisory-checks.yml + audit-nightly.yml), no longer a
+# required gate — it was demoted precisely because, as a required check against
+# the live advisory DB, a new CVE reddened the merge queue repo-wide with zero
+# code change (operator memory reference_npm_audit_required_check_ambient_poison_pill).
+# osv-scanner queries the broader OSV database (GitHub Advisory + NVD + OSS-Fuzz
+# aggregated), so this advisory scan can surface a CVE — with a stable,
+# agent-parseable OSV ID — BEFORE it lands in the npm advisory DB.
 #
 # WHY OUTSIDE ci.yml: ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015).
 # This is a NEW advisory scan — not a change to the merge gate — so it lives in a

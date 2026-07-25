@@ -71,6 +71,36 @@ jobs:
       - name: Install deps (shared npm ci)
         run: npm ci
 
+      # ── npm-audit (orchestrator + dashboard) (issue #3650) ─────────────────
+      # DEMOTED from required ci.yml gates to advisory surfaces. These jobs were
+      # required branch-protection checks that queried the LIVE advisory DB, so a
+      # newly-published CVE against an already-installed dep reddened them
+      # repo-wide with zero code change — freezing every merge/deploy (the
+      # "ambient poison pill", two instances 2026-07-24). They now surface a red X
+      # here (non-required workflow) for PR visibility WITHOUT blocking; the
+      # actionable signal is audit-nightly.yml, which files a dep-bump issue.
+      # scripts/ci/npm-audit-scan.ts is the single tested source of the
+      # fail-closed allowlist logic (test/npm-audit-scan.test.mts). Uses
+      # --package-lock-only, so no per-dir npm ci is needed.
+      - name: npm audit — orchestrator (advisory; high+/critical, prod deps)
+        if: always()
+        run: |
+          npx tsx scripts/ci/npm-audit-scan.ts --dir . --label orchestrator \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # AUDIT_ALLOWLIST — comma-separated GHSA ids waived from the DASHBOARD audit
+      # surface. GHSA-qwww-vcr4-c8h2 (react-router RSC-mode CSRF) does not apply
+      # to the Vite SPA (no RSC mode) and has no forward fix; waiving it keeps the
+      # advisory signal focused on actionable findings. Remove once
+      # react-router-dom >=8.3.0 publishes and the dep is bumped forward.
+      - name: npm audit — dashboard (advisory; high+/critical, prod deps)
+        if: always()
+        env:
+          AUDIT_ALLOWLIST: GHSA-qwww-vcr4-c8h2
+        run: |
+          npx tsx scripts/ci/npm-audit-scan.ts --dir dashboard --label dashboard \
+            --allowlist "$AUDIT_ALLOWLIST" >> "$GITHUB_STEP_SUMMARY"
+
       # ── ast-grep-lint (issue #1797) ────────────────────────────────────────
       # AST-exact structural lint over src/ast-grep-rules/. Advisory: emits
       # GitHub annotations and exits 0. Pinned version MUST match

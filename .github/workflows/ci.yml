@@ -70,156 +70,6 @@ jobs:
       - run: cd dashboard && npm ci
       - run: cd dashboard && npm run build
 
-  # npm audit gate (issue #479). Fails CI when production dependencies
-  # carry `high` or `critical` advisories. We deliberately run `npm audit`
-  # against the installed tree (after `npm ci`) so the lockfile's transitive
-  # deps are scanned too. Dev-only advisories are excluded via `--omit=dev`
-  # — dev tooling drift is a separate concern handled by reviewer
-  # judgement, and `npm audit fix` is intentionally NOT run here (out of
-  # scope per the issue — manual review only).
-  #
-  # `npm audit` exits non-zero on findings at or above `--audit-level`, so
-  # the step naturally fails the job. We capture `--json` first so we can
-  # render a readable advisory table in `GITHUB_STEP_SUMMARY`, then surface
-  # the human-readable report in the log via a second invocation. Both runs
-  # are cheap (single advisory-DB lookup against the local lockfile).
-  npm-audit-orchestrator:
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install deps
-        run: npm ci
-
-      - name: npm audit (orchestrator, prod deps, high+ only)
-        run: |
-          set +e
-          npm audit --omit=dev --audit-level=high --json > audit.json
-          STATUS=$?
-          {
-            echo "## npm audit — orchestrator (high+ / critical, prod deps)"
-            echo ""
-            if [ "$STATUS" -eq 0 ]; then
-              echo "No high or critical advisories found."
-            else
-              echo "Advisories blocking merge:"
-              echo ""
-              echo "| Package | Severity | Range | Advisories |"
-              echo "| --- | --- | --- | --- |"
-              # Emit one row per vulnerable package, listing each advisory
-              # title + URL. `via` entries may be strings (transitive
-              # parent package names) or objects (direct advisory records);
-              # we only render the object form here.
-              node -e "
-                const a = require('./audit.json');
-                const v = a.vulnerabilities || {};
-                for (const [name, info] of Object.entries(v)) {
-                  if (!['high','critical'].includes(info.severity)) continue;
-                  const advisories = (info.via || [])
-                    .filter(x => typeof x === 'object' && x.url)
-                    .map(x => \`[\${x.title || x.source}](\${x.url})\`)
-                    .join('<br>') || '(transitive)';
-                  console.log(\`| \${name} | \${info.severity} | \${info.range || ''} | \${advisories} |\`);
-                }
-              "
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          # Re-run plain to surface the human-readable report in the log.
-          npm audit --omit=dev --audit-level=high || true
-          exit $STATUS
-
-  # Scoped advisory allowlist (issue #3607, operator-authored Tier-4).
-  #
-  # GHSA-qwww-vcr4-c8h2 ("React Router: RSC Mode CSRF Bypass Allows Action
-  # Execution Before 400 Response") covers the ENTIRE published react-router
-  # 7.x `>=7.12.0` range (transitively via react-router-dom). There is no
-  # autonomous forward fix: the latest published react-router-dom is 7.18.1
-  # (in range), `>=8.3.0` does not exist on npm yet, and npm's only suggested
-  # "fix" is a semver-major DOWNGRADE that reopens the 4 HIGH advisories PR
-  # #3598 (e46181f9) just closed — strictly worse. Crucially, the Hydra
-  # dashboard is a Vite SPA and does NOT use React Router's RSC (React Server
-  # Components) mode, so this RSC-mode-specific CSRF advisory does not apply
-  # to how the dashboard renders; `npm audit` flags it purely on version
-  # range. We therefore waive this ONE advisory id via AUDIT_ALLOWLIST. Any
-  # other high/critical advisory — including any future react-router CVE with
-  # a different GHSA id — still fails the gate. Remove this waiver once
-  # react-router-dom `>=8.3.0` publishes and the dep is bumped forward.
-  npm-audit-dashboard:
-    runs-on: self-hosted
-    env:
-      # Comma-separated GHSA ids waived from the dashboard audit gate. See the
-      # block comment above before adding an id — each is an operator-authored
-      # Tier-4 exception, justified in the PR that introduces it.
-      AUDIT_ALLOWLIST: GHSA-qwww-vcr4-c8h2
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install deps
-        run: cd dashboard && npm ci
-
-      - name: npm audit (dashboard, prod deps, high+ only)
-        run: |
-          set +e
-          cd dashboard
-          npm audit --omit=dev --audit-level=high --json > audit.json
-          STATUS=$?
-          {
-            echo "## npm audit — dashboard (high+ / critical, prod deps)"
-            echo ""
-            if [ -n "$AUDIT_ALLOWLIST" ]; then
-              echo "_Scoped allowlist active (issue #3607): \`$AUDIT_ALLOWLIST\` — SPA, not RSC mode._"
-              echo ""
-            fi
-            if [ "$STATUS" -eq 0 ]; then
-              echo "No high or critical advisories found."
-            else
-              echo "Advisories found (allowlisted ids do not block):"
-              echo ""
-              echo "| Package | Severity | Range | Advisories |"
-              echo "| --- | --- | --- | --- |"
-              node -e "
-                const a = require('./audit.json');
-                const v = a.vulnerabilities || {};
-                for (const [name, info] of Object.entries(v)) {
-                  if (!['high','critical'].includes(info.severity)) continue;
-                  const advisories = (info.via || [])
-                    .filter(x => typeof x === 'object' && x.url)
-                    .map(x => \`[\${x.title || x.source}](\${x.url})\`)
-                    .join('<br>') || '(transitive)';
-                  console.log(\`| \${name} | \${info.severity} | \${info.range || ''} | \${advisories} |\`);
-                }
-              "
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          npm audit --omit=dev --audit-level=high || true
-          # Pass/fail decision with the scoped allowlist applied. A high/critical
-          # vuln blocks merge only if it carries at least one advisory (a `via`
-          # object) whose GHSA id is NOT in AUDIT_ALLOWLIST. Pure-transitive
-          # entries (via-string only, no advisory object) inherit from their
-          # parent package and never block on their own — the parent is judged
-          # directly, so a new CVE cannot slip through a transitive alias.
-          node -e "
-            const a = require('./audit.json');
-            const allow = new Set((process.env.AUDIT_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean));
-            const v = a.vulnerabilities || {};
-            const blocking = [], waived = [];
-            for (const [name, info] of Object.entries(v)) {
-              if (!['high','critical'].includes(info.severity)) continue;
-              const advs = (info.via || []).filter(x => typeof x === 'object' && x.url);
-              if (advs.length === 0) continue; // pure-transitive; parent is evaluated
-              const ids = advs.map(x => (x.url.match(/GHSA-[a-z0-9-]+/i) || [x.url])[0]);
-              const unwaived = ids.filter(id => !allow.has(id));
-              if (unwaived.length) blocking.push(name + ' (' + unwaived.join(', ') + ')');
-              else waived.push(name + ' (' + ids.join(', ') + ')');
-            }
-            if (waived.length) console.log('Waived by AUDIT_ALLOWLIST: ' + waived.join('; '));
-            if (blocking.length) {
-              console.error('Blocking high/critical advisories: ' + blocking.join('; '));
-              process.exit(1);
-            }
-            console.log('No non-allowlisted high or critical advisories. Gate passes.');
-          "
-
   # Tier gate (issue #243, ADR-0001 + ADR-0004 + ADR-0015 work-order step 3).
   # Classifies changed files into the monotonic Modification Tier ladder
   # T1 (shallowest) → T4 (deepest) and surfaces the result to the PR step
@@ -478,7 +328,12 @@ jobs:
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [test, dashboard-build, npm-audit-orchestrator, npm-audit-dashboard]
+    # npm-audit-{orchestrator,dashboard} were removed from this needs list when
+    # they were demoted from required gates to advisory surfaces (issue #3650):
+    # a newly-published CVE against an already-installed dep must never freeze
+    # deploys of already-merged code. The audit now runs in advisory-checks.yml
+    # (non-blocking) + audit-nightly.yml (files a dep-bump issue).
+    needs: [test, dashboard-build]
     runs-on: self-hosted
     steps:
       # Issue #631: delegate the full deploy flow (sync → npm ci → sync-skills
