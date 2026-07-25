@@ -1,0 +1,123 @@
+name: changelog-check
+
+# Advisory changelog-fragment check (issue #3678, dashboard-version epic #3676;
+# wayfinder tickets #3662/#3657).
+#
+# WHAT: On every PR, checks whether the diff adds a `.changelog/<issue>-<slug>.md`
+# fragment. If it does NOT — and the PR is not labeled `skip-changelog` — this
+# posts (or updates) a single sticky, non-blocking comment nudging the author to
+# add one. If a fragment IS added or the label is present, it passes silently.
+#
+# ADVISORY-ONLY (invariant): this workflow ALWAYS exits 0. Its only side effect
+# is one sticky PR comment. It is NOT a job in ci.yml, NOT in deploy.needs, and
+# MUST NEVER be added to the branch-protection required-check list. A "missing
+# fragment" therefore can never block a merge or a deploy.
+#
+# WHY OUTSIDE ci.yml: ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015)
+# and its jobs are required-gate-shaped. This is a NEW advisory surface — not a
+# change to the merge gate — so it lives in a Tier-3 sibling workflow (operator
+# memory feedback_ci_gate_separate_workflow_avoids_tier0), and being a required
+# check is exactly the npm-audit poison-pill failure mode we avoid
+# (reference_npm_audit_required_check_ambient_poison_pill).
+#
+# WHY A GITHUB-HOSTED RUNNER: unlike design-concept-comment.yml, this check needs
+# NO orchestrator API (localhost:4000) — it only reads the git diff + PR labels
+# and posts via gh. A default GitHub-hosted runner keeps it off the single
+# self-hosted runner pool and avoids serializing with CI/deploy.
+#
+# STICKY COMMENT: identified by a hidden HTML marker (<!-- hydra-changelog-check -->).
+# Each run lists PR comments via `gh api`, finds the marker comment, and PATCHes
+# it in place (or POSTs a fresh one) — never accumulating duplicates across
+# pushes. We deliberately do NOT use `gh pr comment --edit-last`, which targets
+# the most-recent comment regardless of author/marker and would clobber the
+# sibling design-concept-comment.yml comment on a busy PR.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+concurrency:
+  # One in-flight run per PR; a newer push supersedes an older comment update.
+  group: changelog-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for base..head diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Advisory changelog-fragment check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Comma-separated label names from the PR event payload; the pure
+          # checker splits on both commas and newlines.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -uo pipefail
+
+          # --- 1. Compute ADDED files on the PR (base..head, added-only). ---
+          # --diff-filter=A restricts to Added paths; the pure checker only
+          # cares about newly-added .changelog/ fragments.
+          ADDED_FILES=$(git diff --name-status --diff-filter=A "$BASE_SHA...$HEAD_SHA" \
+            | awk '{ $1=""; sub(/^\t?/, ""); print }' | sed 's/^[[:space:]]*//' || true)
+          export ADDED_FILES
+          echo "Added files on PR #$PR_NUM:"
+          printf '%s\n' "$ADDED_FILES"
+
+          # --- 2. Run the pure checker → JSON verdict on the first stdout line. ---
+          VERDICT_OUT=$(npx tsx scripts/ci/changelog-check.ts)
+          VERDICT_JSON=$(printf '%s\n' "$VERDICT_OUT" | head -n1)
+          echo "Verdict: $VERDICT_JSON"
+          NAG=$(printf '%s' "$VERDICT_JSON" | grep -oE '"nag":(true|false)' | grep -oE 'true|false' || echo "false")
+
+          MARKER='<!-- hydra-changelog-check -->'
+
+          # --- 3. Find any existing sticky comment by its hidden marker. ---
+          # gh api paginates over all PR comments; jq selects the first whose
+          # body contains the marker and prints its numeric id (empty if none).
+          EXISTING_ID=$(gh api --paginate \
+            "repos/$REPO/issues/$PR_NUM/comments" \
+            --jq "map(select(.body | contains(\"$MARKER\"))) | (.[0].id // empty)" 2>/dev/null || true)
+          echo "Existing sticky comment id: ${EXISTING_ID:-<none>}"
+
+          if [ "$NAG" = "true" ]; then
+            # Body = everything after the JSON verdict line (the nag markdown).
+            BODY=$(printf '%s\n' "$VERDICT_OUT" | tail -n +2)
+            if [ -n "${EXISTING_ID:-}" ]; then
+              echo "Updating sticky comment $EXISTING_ID in place."
+              gh api --method PATCH \
+                "repos/$REPO/issues/comments/$EXISTING_ID" \
+                -f body="$BODY" >/dev/null || echo "PATCH failed (advisory — ignored)."
+            else
+              echo "Posting new sticky comment."
+              gh api --method POST \
+                "repos/$REPO/issues/$PR_NUM/comments" \
+                -f body="$BODY" >/dev/null || echo "POST failed (advisory — ignored)."
+            fi
+          else
+            echo "Silent pass — PR adds a .changelog/ fragment or has skip-changelog."
+            # If a prior nag exists (author since added a fragment / applied the
+            # label), update it to a resolved note so the stale nag doesn't linger.
+            if [ -n "${EXISTING_ID:-}" ]; then
+              RESOLVED="$MARKER
+          > *Advisory changelog check (#3678)* — resolved: a changelog fragment is present or this PR is labeled \`skip-changelog\`."
+              gh api --method PATCH \
+                "repos/$REPO/issues/comments/$EXISTING_ID" \
+                -f body="$RESOLVED" >/dev/null || echo "PATCH failed (advisory — ignored)."
+            fi
+          fi
+
+          # ADVISORY: always succeed.
+          exit 0
