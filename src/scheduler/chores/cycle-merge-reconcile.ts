@@ -51,20 +51,22 @@
  * the merge-completion watcher and the ledger stays dark — observed at 7+ days of
  * zero entries. This chore ALREADY confirms, per merged PR, exactly the signal the
  * arming step needed (`gh pr view` → MERGED). So on a confirmed-merged candidate it
- * ALSO self-arms: if that PR is absent from the pending-enroll registry AND not
- * already enrolled-marked, it calls `pendingEnrollAdd` (records intent only — never
- * arms/blocks/performs a merge) so the merge-watch chore enrolls it on the next
- * tick. This recovers a dropped arming POST with NO new webhook/event surface,
- * reusing the polling this chore already does. It is idempotent (skips a PR already
- * in the registry or already enrolled), never-throws (a Redis error for one PR is
- * logged and that PR left for the next tick), and NEVER filters by tier — the
- * T1/unknown-tier carry-up exemption stays enforced server-side in `enrollHoldback`
- * (which the merge-watch chore calls), not here at arm time.
+ * ALSO self-arms it. The arm POLICY — the eligibility check, the enrolled-check,
+ * the sentinel-omission, and the arm-entry shape — was extracted into the
+ * `attribution-self-arm.ts` leaf (issue #3639): this chore owns the tick lifecycle
+ * (the once-per-tick pending-enroll LIST snapshot + arm-blind avoidance + counter
+ * aggregation) and delegates the per-PR arm decision to
+ * `selfArmConfirmedMergedPr`. That leaf co-locates the attribution-arm knowledge in
+ * the attribution domain rather than in this cycle-hash enrichment file. The
+ * behavior is unchanged: a merged PR absent from the registry AND not already
+ * enrolled-marked is armed (records intent only — never arms/blocks/performs a
+ * merge) so the merge-watch chore enrolls it on the next tick; idempotent,
+ * never-throws, and NEVER tier-filtering (the T1/unknown-tier carry-up exemption
+ * stays enforced server-side in `enrollHoldback`, not here at arm time).
  */
 
 import { getRecentMetricIdsDesc, getCycleMetrics } from "../../redis/cycle-metrics.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
-import { UNCLASSIFIED_ANCHOR_TYPE } from "../../autopilot/anchor-type.ts";
 import { viewPr } from "../../github/issues.ts";
 import {
   pendingEnrollList,
@@ -77,25 +79,16 @@ import {
   setReconcilerHealth,
   type ReconcilerHealthRecord,
 } from "../../redis/reconciler.ts";
+import {
+  selfArmConfirmedMergedPr,
+  isSentinelReconcileAnchorType,
+} from "./attribution-self-arm.ts";
 import { logger } from "../../logger.ts";
 
 /** How many recent cycle records to scan per tick (newest first). */
 const DEFAULT_SCAN_LIMIT = 50;
 /** How many candidate PRs to confirm via `gh` per tick (bounds the API cost). */
 const DEFAULT_CONFIRM_LIMIT = 10;
-
-/**
- * Is a trimmed stored anchorType a data-quality SENTINEL rather than a genuine
- * class (issue #3604)? A sentinel (`unclassified`, the aggregator's catch-all
- * `unknown`, or an empty value) must NOT be forwarded verbatim onto a re-post or
- * pending-enroll entry — doing so would make `recordCycle` return it unchanged
- * and permanently bake the sentinel in, defeating the head-branch decode + heal.
- * A genuine class returns false and IS forwarded (it is authoritative).
- */
-function isSentinelReconcileAnchorType(trimmed: string): boolean {
-  const t = trimmed.toLowerCase();
-  return t.length === 0 || t === UNCLASSIFIED_ANCHOR_TYPE || t === "unknown";
-}
 
 /** Raw `gh pr view <n> --json state,headRefName` shape. */
 interface RawPrState {
@@ -335,84 +328,23 @@ export async function runCycleMergeReconcile(
       }
 
       // Confirmed merged — self-arm the pending-enroll registry (issue #3078)
-      // BEFORE the metrics upgrade. This recovers a dropped `POST /api/holdback/
-      // pending` arm: a merged PR absent from the registry AND not yet enrolled-
-      // marked is armed so the merge-watch chore enrolls it next tick. Skipped
-      // when the tick's registry read failed (pendingSet===null → arm-blind
-      // avoidance) or the PR is already registered/enrolled. Never filters by
-      // tier — the T1/unknown-tier exemption lives server-side in enrollHoldback.
-      // Best-effort: a failed arm is counted and retried next tick, never aborts
-      // the upgrade below.
-      if (pendingSet !== null && !pendingSet.has(prNumber)) {
-        let enrolledAlready = false;
-        try {
-          enrolledAlready = await wasEnrolled(prNumber);
-        } catch (err: any) {
-          // wasEnrolledMarked itself never throws (it fails closed to true), but
-          // an injected dep might — fail closed to "already enrolled" so we never
-          // double-arm on an unknown state.
-          logger.error(
-            { prNumber, cycleId, err },
-            "cycle-merge-reconcile: self-arm enrolled-check failed; skipping arm",
-          );
-          enrolledAlready = true;
-        }
-        if (enrolledAlready) {
-          result.selfArmSkipped += 1;
-        } else {
-          // Issue #3579: forward the anchorType read off the metrics hash this
-          // chore is already upgrading — do NOT hardcode `work-queue`. The prior
-          // hardcode wrote a WRONG lane for every non-dev self-armed cycle (a
-          // signal-class / grill / qa cycle would be mislabelled `work-queue`),
-          // and because the merge-watch chore later forwards `entry.anchorType`
-          // onto the FIRST cycle-record write for an un-joinable bare-UUID
-          // cycleId, that wrong lane became the record's permanent
-          // classification. DEGRADE-TRUTHFULLY: when the hash carries no explicit
-          // anchorType, OMIT the field so the entry inherits the merge-watch
-          // enrichment's inference-then-`unclassified` path — an honest
-          // `unclassified` beats a confidently-wrong `work-queue` (NEVER-GUESS,
-          // #2822). A blank/whitespace value degrades the same way.
-          // Issue #3604: a stored SENTINEL (`unclassified`/`unknown`) is NOT a
-          // real class — forwarding it onto the pending entry would make the
-          // merge-watch enrichment bake the sentinel in as the record's permanent
-          // classification. Omit it (like a blank value) so merge-watch falls
-          // through to its own head-branch decode + heal (NEVER-GUESS, #2822).
-          const hashAnchorType = (m.anchorType || "").trim();
-          const genuineArmAnchorType = isSentinelReconcileAnchorType(hashAnchorType)
-            ? ""
-            : hashAnchorType;
-          const armEntry: PendingEnrollEntry = {
-            prNumber,
-            // Tier is unknown from the cycle-metrics hash here; null is the
-            // permissive "unknown-tier" the enroll schema accepts. enrollHoldback
-            // resolves the real tier server-side at landing time.
-            tier: null,
-            cycleId,
-            registeredAt: Date.now(),
-          };
-          if (genuineArmAnchorType) armEntry.anchorType = genuineArmAnchorType;
-          let armed: PendingEnrollAddResult;
-          try {
-            armed = await armPending(armEntry);
-          } catch (err: any) {
-            armed = { ok: false, error: err?.message || String(err) };
-          }
-          if (armed.ok === false) {
-            logger.error(
-              { prNumber, cycleId, err: { message: armed.error } },
-              "cycle-merge-reconcile: self-arm pendingEnrollAdd failed; retrying next tick",
-            );
-            result.selfArmFailed += 1;
-          } else {
-            // Keep the local snapshot consistent so a second merged cycle sharing
-            // this prNumber in the same tick isn't double-armed.
-            pendingSet.add(prNumber);
-            result.selfArmed += 1;
-          }
-        }
-      } else if (pendingSet !== null) {
-        // Already in the registry — the merge-watch will enroll it; nothing to do.
-        result.selfArmSkipped += 1;
+      // BEFORE the metrics upgrade, recovering a dropped `POST /api/holdback/
+      // pending` arm. The per-PR arm POLICY (eligibility, enrolled-check,
+      // sentinel-omission, arm-entry shape) lives in the `attribution-self-arm.ts`
+      // leaf (issue #3639); this coordinator owns the tick lifecycle: it disables
+      // self-arm for the whole tick when the once-per-tick registry read failed
+      // (pendingSet===null → arm-blind avoidance) and maps the leaf's per-PR
+      // outcome onto its counters. Best-effort: a `failed` outcome is counted and
+      // retried next tick, never aborting the upgrade below.
+      if (pendingSet !== null) {
+        const outcome = await selfArmConfirmedMergedPr(
+          { prNumber, cycleId, hashAnchorType: m.anchorType },
+          pendingSet,
+          { wasEnrolled, armPending },
+        );
+        if (outcome === "armed") result.selfArmed += 1;
+        else if (outcome === "skipped") result.selfArmSkipped += 1;
+        else result.selfArmFailed += 1;
       }
 
       // Confirmed merged — fire the completed→merged upgrade re-post. recordCycle's
