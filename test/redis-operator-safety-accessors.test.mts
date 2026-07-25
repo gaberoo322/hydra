@@ -257,45 +257,70 @@ describe("redis/alerts capped list", () => {
     await getTestRedis().del(redisKeys.alerts());
   });
 
+  // NOTE (#3609): pushAlert now pre-validates its argument as parseable JSON
+  // and rejects anything else (a truncated/corrupt string can't reach the
+  // scout listener). These plumbing tests therefore push valid JSON strings
+  // (`"a1"` is itself a valid JSON string literal — a JSON-encoded string) so
+  // they exercise the LPUSH/LTRIM mechanics through the validation gate.
   test("push is newest-first (LPUSH); readRecentAlerts respects limit", async (t) => {
     if (!(await redisReachable())) return t.skip("Redis unreachable");
-    await pushAlert("a1", 10);
-    await pushAlert("a2", 10);
-    await pushAlert("a3", 10);
+    await pushAlert('"a1"', 10);
+    await pushAlert('"a2"', 10);
+    await pushAlert('"a3"', 10);
     // LPUSH => index 0 is the most recent push.
-    assert.deepEqual(await readRecentAlerts(2), ["a3", "a2"]);
-    assert.deepEqual(await readAllAlerts(), ["a3", "a2", "a1"]);
+    assert.deepEqual(await readRecentAlerts(2), ['"a3"', '"a2"']);
+    assert.deepEqual(await readAllAlerts(), ['"a3"', '"a2"', '"a1"']);
   });
 
   test("push caps the list to maxLen (LTRIM), dropping the oldest", async (t) => {
     if (!(await redisReachable())) return t.skip("Redis unreachable");
-    for (let i = 1; i <= 5; i++) await pushAlert(`a${i}`, 3);
+    for (let i = 1; i <= 5; i++) await pushAlert(`"a${i}"`, 3);
     const all = await readAllAlerts();
     // Only the 3 newest survive; the two oldest (a1, a2) are trimmed away.
     assert.equal(all.length, 3);
-    assert.deepEqual(all, ["a5", "a4", "a3"]);
+    assert.deepEqual(all, ['"a5"', '"a4"', '"a3"']);
   });
 
   test("readRecentAlerts with limit <= 0 short-circuits to [] without a Redis read", async (t) => {
     if (!(await redisReachable())) return t.skip("Redis unreachable");
-    await pushAlert("a1", 10);
+    await pushAlert('"a1"', 10);
     assert.deepEqual(await readRecentAlerts(0), []);
     assert.deepEqual(await readRecentAlerts(-3), []);
   });
 
   test("setAlertAt overwrites a position in place", async (t) => {
     if (!(await redisReachable())) return t.skip("Redis unreachable");
-    await pushAlert("a1", 10);
-    await pushAlert("a2", 10); // list is now ["a2", "a1"]
-    await setAlertAt(0, "a2-dismissed");
-    assert.deepEqual(await readAllAlerts(), ["a2-dismissed", "a1"]);
+    await pushAlert('"a1"', 10);
+    await pushAlert('"a2"', 10); // list is now ['"a2"', '"a1"']
+    await setAlertAt(0, '"a2-dismissed"');
+    assert.deepEqual(await readAllAlerts(), ['"a2-dismissed"', '"a1"']);
   });
 
   test("clearAlerts empties the list", async (t) => {
     if (!(await redisReachable())) return t.skip("Redis unreachable");
-    await pushAlert("a1", 10);
+    await pushAlert('"a1"', 10);
     await clearAlerts();
     assert.deepEqual(await readAllAlerts(), []);
+  });
+
+  // Regression (#3609): pushAlert rejects unparseable / truncated JSON before
+  // storing, so the scout alert-listener never faces a corrupt entry.
+  test("pushAlert rejects unparseable / truncated JSON before storing", async (t) => {
+    if (!(await redisReachable())) return t.skip("Redis unreachable");
+    // Truncated object (the exact "Unexpected end of JSON input" shape from
+    // the incident logs), a bare non-JSON token, and empty string.
+    assert.equal(await pushAlert('{"id":"x","type":"pattern:test_de', 10), false);
+    assert.equal(await pushAlert("not json", 10), false);
+    assert.equal(await pushAlert("", 10), false);
+    // Nothing stored — the list stays empty.
+    assert.deepEqual(await readAllAlerts(), []);
+  });
+
+  test("pushAlert stores a valid JSON object and reports true", async (t) => {
+    if (!(await redisReachable())) return t.skip("Redis unreachable");
+    const good = JSON.stringify({ id: "ok", type: "pattern:test_decline" });
+    assert.equal(await pushAlert(good, 10), true);
+    assert.deepEqual(await readAllAlerts(), [good]);
   });
 });
 
