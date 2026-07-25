@@ -91,7 +91,7 @@ export async function getCumulativeAccomplishments(count = 15) {
  *     gap; a producer-side "emit anchorType at reap" change is the only honest
  *     fix and is out of scope of #3602.
  */
-export type UnclassifiedClassification = "fixable" | "no-attribution";
+type UnclassifiedClassification = "fixable" | "no-attribution";
 
 /**
  * A single still-unclassified cycle's attribution metadata (issue #3403).
