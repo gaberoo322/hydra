@@ -2,7 +2,7 @@
   "name": "hydra-orchestrator",
   "version": "1.0.0",
   "type": "module",
-  "description": "Hydra autonomous multi-agent development framework — data plane orchestrator",
+  "description": "Hydra autonomous multi-agent development framework \u2014 data plane orchestrator",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -30,7 +30,9 @@
     "eval": "npx --yes -p promptfoo@0.121.15 promptfoo eval -c evals/golden.yaml",
     "eval:ts": "npx --yes -p promptfoo@0.121.15 promptfoo eval -c evals/hydra-dev.yaml",
     "lockfile-lint": "lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity",
-    "allow-scripts": "allow-scripts"
+    "allow-scripts": "allow-scripts",
+    "deps:check": "npx taze@19 --json --include dependencies",
+    "deps:check:all": "npx taze@19 --json"
   },
   "author": "Gabe",
   "license": "AGPL-3.0-only",
