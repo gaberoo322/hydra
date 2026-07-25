@@ -32,6 +32,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /** Redis key for the persisted OAuth-meter backoff gate. */
 const OAUTH_BACKOFF_KEY = "hydra:metrics:oauth-usage:backoff";
@@ -83,7 +84,7 @@ export async function readOAuthBackoff(): Promise<PersistedOAuthBackoff | null> 
   } catch (err: any) {
     // Fail OPEN: a Redis outage must not break the meter read. Logged (repo
     // fail-loud convention) but degrades to "no persisted state".
-    console.error(`[oauth-backoff] read failed (degrading to no persisted state): ${err?.message || err}`);
+    logger.error({ err }, "[oauth-backoff] read failed (degrading to no persisted state)");
     return null;
   }
   if (raw === null) return null;
@@ -91,11 +92,11 @@ export async function readOAuthBackoff(): Promise<PersistedOAuthBackoff | null> 
   try {
     parsed = JSON.parse(raw);
   } catch (err: any) {
-    console.error(`[oauth-backoff] stored value is not valid JSON (ignoring): ${err?.message || err}`);
+    logger.error({ err }, "[oauth-backoff] stored value is not valid JSON (ignoring)");
     return null;
   }
   if (!isValidBackoff(parsed)) {
-    console.error(`[oauth-backoff] stored value is malformed (ignoring): ${raw.slice(0, 120)}`);
+    logger.error({ preview: raw.slice(0, 120) }, "[oauth-backoff] stored value is malformed (ignoring)");
     return null;
   }
   return parsed;
@@ -111,7 +112,7 @@ export async function writeOAuthBackoff(state: PersistedOAuthBackoff): Promise<v
     const r = getRedisConnection();
     await r.set(OAUTH_BACKOFF_KEY, JSON.stringify(state), "EX", OAUTH_BACKOFF_TTL_SECONDS);
   } catch (err: any) {
-    console.error(`[oauth-backoff] write failed (ladder will reset on next restart): ${err?.message || err}`);
+    logger.error({ err }, "[oauth-backoff] write failed (ladder will reset on next restart)");
   }
 }
 
@@ -125,7 +126,7 @@ export async function clearOAuthBackoff(): Promise<void> {
     const r = getRedisConnection();
     await r.del(OAUTH_BACKOFF_KEY);
   } catch (err: any) {
-    console.error(`[oauth-backoff] clear failed (stale gate self-expires at TTL): ${err?.message || err}`);
+    logger.error({ err }, "[oauth-backoff] clear failed (stale gate self-expires at TTL)");
   }
 }
 
@@ -219,8 +220,9 @@ export async function readGhRateLimitBackoff(
     const r = getRedisConnection();
     raw = await r.get(GH_RATE_LIMIT_BACKOFF_KEY);
   } catch (err: any) {
-    console.error(
-      `[gh-rate-limit-backoff] read failed (degrading to no persisted state): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[gh-rate-limit-backoff] read failed (degrading to no persisted state)",
     );
     return null;
   }
@@ -229,14 +231,16 @@ export async function readGhRateLimitBackoff(
   try {
     parsed = JSON.parse(raw);
   } catch (err: any) {
-    console.error(
-      `[gh-rate-limit-backoff] stored value is not valid JSON (ignoring): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[gh-rate-limit-backoff] stored value is not valid JSON (ignoring)",
     );
     return null;
   }
   if (!isValidGhBackoff(parsed)) {
-    console.error(
-      `[gh-rate-limit-backoff] stored value is malformed (ignoring): ${raw.slice(0, 120)}`,
+    logger.error(
+      { preview: raw.slice(0, 120) },
+      "[gh-rate-limit-backoff] stored value is malformed (ignoring)",
     );
     return null;
   }
@@ -266,8 +270,9 @@ export async function writeGhRateLimitBackoff(
       GH_RATE_LIMIT_BACKOFF_TTL_SECONDS,
     );
   } catch (err: any) {
-    console.error(
-      `[gh-rate-limit-backoff] write failed (ladder will reset on next restart): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[gh-rate-limit-backoff] write failed (ladder will reset on next restart)",
     );
   }
 }
@@ -282,8 +287,9 @@ export async function clearGhRateLimitBackoff(): Promise<void> {
     const r = getRedisConnection();
     await r.del(GH_RATE_LIMIT_BACKOFF_KEY);
   } catch (err: any) {
-    console.error(
-      `[gh-rate-limit-backoff] clear failed (stale gate self-expires at TTL): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[gh-rate-limit-backoff] clear failed (stale gate self-expires at TTL)",
     );
   }
 }
@@ -356,8 +362,9 @@ export async function recordGhRateLimited(now: Date = new Date()): Promise<strin
     pipe.expire(key, GH_RATE_LIMIT_COUNTER_TTL_SECONDS);
     await pipe.exec();
   } catch (err: any) {
-    console.error(
-      `[gh-rate-limit-counter] increment failed (counter under-counts this hour): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[gh-rate-limit-counter] increment failed (counter under-counts this hour)",
     );
   }
   return hour;
@@ -387,8 +394,9 @@ export async function getGhRateLimitedWindow(
     for (const hour of hourKeys) pipe.hget(ghRateLimitCounterKey(hour), "count");
     results = await pipe.exec();
   } catch (err: any) {
-    console.error(
-      `[gh-rate-limit-counter] window read failed (degrading to zero window): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[gh-rate-limit-counter] window read failed (degrading to zero window)",
     );
     results = null;
   }

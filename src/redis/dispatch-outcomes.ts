@@ -42,6 +42,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -226,7 +227,7 @@ export async function putDispatchOutcome(
     return { ok: true };
   } catch (err: any) {
     const msg = `[dispatch-outcomes] putDispatchOutcome failed for cycle=${record.cycleId}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ cycleId: record.cycleId, err }, "[dispatch-outcomes] putDispatchOutcome failed");
     return { ok: false, error: msg };
   }
 }
@@ -268,7 +269,7 @@ export async function upgradeDispatchOutcome(
     return { ok: true };
   } catch (err: any) {
     const msg = `[dispatch-outcomes] upgradeDispatchOutcome failed for cycle=${cycleId}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ cycleId, err }, "[dispatch-outcomes] upgradeDispatchOutcome failed");
     return { ok: false, error: msg };
   }
 }
@@ -313,7 +314,7 @@ export async function getDispatchOutcomesForRun(
     return { ok: true, records: records.filter((rec) => rec.runIdPrefix === prefix) };
   } catch (err: any) {
     const msg = `[dispatch-outcomes] getDispatchOutcomesForRun failed for run=${runId}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ runId, err }, "[dispatch-outcomes] getDispatchOutcomesForRun failed");
     return { ok: false, error: msg };
   }
 }
@@ -337,7 +338,7 @@ export async function listDispatchOutcomes(opts: {
     return { ok: true, records };
   } catch (err: any) {
     const msg = `[dispatch-outcomes] listDispatchOutcomes failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[dispatch-outcomes] listDispatchOutcomes failed");
     return { ok: false, error: msg };
   }
 }

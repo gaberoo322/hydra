@@ -31,6 +31,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables (ADR-0005 — named, not magic literals; env-overridable).
@@ -145,7 +146,7 @@ export async function recordBaseline(baseline: HoldbackBaseline): Promise<Record
     return { ok: true };
   } catch (err: any) {
     const msg = `[holdback] recordBaseline failed for ${baseline.commitSha}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ commitSha: baseline.commitSha, err }, "[holdback] recordBaseline failed");
     return { ok: false, error: msg };
   }
 }
@@ -164,7 +165,7 @@ export async function loadBaseline(commitSha: string): Promise<LoadBaselineResul
     return { ok: true, baseline: parsed };
   } catch (err: any) {
     const msg = `[holdback] loadBaseline failed for ${commitSha}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ commitSha, err }, "[holdback] loadBaseline failed");
     return { ok: false, error: msg };
   }
 }
@@ -177,7 +178,7 @@ export async function clearBaseline(commitSha: string): Promise<void> {
   } catch (err: any) {
     /* intentional: clearing a resolved baseline is best-effort cleanup; the
        TTL guarantees eventual removal even if this DEL fails. */
-    console.error(`[holdback] clearBaseline failed for ${commitSha}: ${err?.message || String(err)}`);
+    logger.error({ commitSha, err }, "[holdback] clearBaseline failed");
   }
 }
 
@@ -200,7 +201,7 @@ export async function getRevertCount(date: string = utcDateKey()): Promise<numbe
     const raw = await r.get(holdbackRevertCountKey(date));
     return typeof raw === "string" ? Number(raw) || 0 : 0;
   } catch (err: any) {
-    console.error(`[holdback] getRevertCount failed for ${date}: ${err?.message || String(err)}`);
+    logger.error({ date, err }, "[holdback] getRevertCount failed");
     // Fail closed: report the cap as already reached so a Redis blip can never
     // license an unbounded revert run. "No false revert" > "no missed revert".
     return Number.MAX_SAFE_INTEGER;
@@ -220,7 +221,7 @@ export async function incrRevertCount(date: string = utcDateKey()): Promise<numb
     await r.expire(key, HOLDBACK_REVERT_COUNT_TTL_SECONDS);
     return total;
   } catch (err: any) {
-    console.error(`[holdback] incrRevertCount failed for ${date}: ${err?.message || String(err)}`);
+    logger.error({ date, err }, "[holdback] incrRevertCount failed");
     return Number.MAX_SAFE_INTEGER;
   }
 }

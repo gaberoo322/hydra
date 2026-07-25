@@ -32,6 +32,7 @@
 
 import { getRedisConnection } from "./connection.ts";
 import { ATTRIBUTION_LEDGER_TTL_SECONDS } from "./attribution-constants.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -169,7 +170,7 @@ export async function appendObservation(
     return { ok: true };
   } catch (err: any) {
     const msg = `[attribution] appendObservation failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[attribution] appendObservation failed");
     return { ok: false, error: msg };
   }
 }
@@ -192,7 +193,7 @@ export async function appendVoidMarker(
     return { ok: true };
   } catch (err: any) {
     const msg = `[attribution] appendVoidMarker failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[attribution] appendVoidMarker failed");
     return { ok: false, error: msg };
   }
 }
@@ -214,15 +215,16 @@ export async function getLedger(): Promise<LoadLedgerResult> {
         /* intentional: skip a single malformed row rather than fail the whole
            read — the ledger is append-only, so a bad row can't be repaired
            here and must not block the estimator from reading the good rows. */
-        console.error(
-          `[attribution] getLedger: skipping malformed row: ${parseErr?.message || String(parseErr)}`,
+        logger.error(
+          { err: parseErr },
+          "[attribution] getLedger: skipping malformed row",
         );
       }
     }
     return { ok: true, rows };
   } catch (err: any) {
     const msg = `[attribution] getLedger failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[attribution] getLedger failed");
     return { ok: false, error: msg };
   }
 }
@@ -263,7 +265,7 @@ export async function getLedgerLen(): Promise<number> {
     const r = getRedisConnection();
     return await r.llen(attributionLedgerKey());
   } catch (err: any) {
-    console.error(`[attribution] getLedgerLen failed: ${err?.message || String(err)}`);
+    logger.error({ err }, "[attribution] getLedgerLen failed");
     return 0;
   }
 }

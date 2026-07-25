@@ -47,6 +47,7 @@
 
 import { redisKeys } from "./keys.ts";
 import { hashGetAll, hashIncrBy, hashSetField } from "./kv.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,10 +91,9 @@ export async function getRetroSeen(): Promise<Record<string, RetroSeenEntry>> {
     try {
       out[cue] = JSON.parse(value) as RetroSeenEntry;
     } catch (err) {
-      console.error(
-        `[retro] skipping corrupt seen-list entry for cue "${cue}": ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+      logger.error(
+        { cue, err },
+        "[retro] skipping corrupt seen-list entry",
       );
     }
   }

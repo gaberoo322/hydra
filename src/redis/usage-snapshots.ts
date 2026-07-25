@@ -24,6 +24,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /** TTL for a weekly snapshot — 30 days, mirroring the daily-token-key convention. */
 export const WEEKLY_SNAPSHOT_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -109,9 +110,7 @@ export async function readWeeklyUsageSnapshot(isoWeek: string): Promise<WeeklyUs
   } catch (err: any) {
     // Fail loud (repo convention) but degrade to a clean miss — a corrupt
     // stored value must not throw out of the read-side projection path.
-    console.error(
-      `[usage-snapshots] failed to parse weekly snapshot for ${isoWeek}: ${err?.message || err}`,
-    );
+    logger.error({ isoWeek, err }, "[usage-snapshots] failed to parse weekly snapshot");
     return null;
   }
 }

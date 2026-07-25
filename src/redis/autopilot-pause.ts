@@ -36,6 +36,7 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 export interface AutopilotPauseState {
   /** True only when paused. Absent flag => false. */
@@ -68,8 +69,9 @@ export async function getAutopilotPaused(): Promise<AutopilotPauseState> {
     return { ...NOT_PAUSED };
   } catch (err: any) {
     // Fail loud, fail safe: log the corrupt blob, treat as not paused.
-    console.error(
-      `[autopilot-pause] corrupt pause blob, treating as not paused: ${err?.message ?? err}`,
+    logger.error(
+      { err },
+      "[autopilot-pause] corrupt pause blob, treating as not paused",
     );
     return { ...NOT_PAUSED };
   }
