@@ -1,0 +1,1 @@
+- docs: record GLM dev-drainer decision as ADR-0032 (#3686)
