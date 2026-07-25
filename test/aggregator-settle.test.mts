@@ -24,6 +24,9 @@ import {
   settledOrEmpty,
   settledOr,
   settledOrNull,
+  safeSource,
+  toDetail,
+  type SafeSourceError,
 } from "../src/settled-fold.ts";
 
 /** Build a fulfilled PromiseSettledResult without an await. */
@@ -183,5 +186,132 @@ describe("settledOrNull", () => {
       settledOrNull(fulfilled(undefined), "null/nullish"),
     );
     assert.equal(result, null);
+  });
+});
+
+/**
+ * The accumulating-error-provenance variant (issue #3628). Promoted out of
+ * `retro-bundle.ts` (where it was private and then re-mirrored a second time in
+ * `retro-enrichment.ts`) into the settled-fold family. Unlike `settle*` — which
+ * degrade an already-settled `Promise.allSettled` slot into the void — this
+ * wraps the ad-hoc async CALL and, on rejection, ALSO pushes a structured
+ * `{source, detail}` entry onto a caller-owned `errors[]` array. Tested here
+ * directly (no `RetroBundle` fixture) — the leverage the issue calls out.
+ *
+ * `withCapturedErrors` is synchronous; `safeSource` is async, so this suite
+ * captures the pino stderr lines around an `await`.
+ */
+async function withCapturedErrorsAsync<T>(
+  fn: () => Promise<T>,
+): Promise<{ result: T; calls: Record<string, any>[] }> {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let buf = "";
+  (process.stderr as any).write = (chunk: any) => {
+    buf += String(chunk);
+    return true;
+  };
+  try {
+    const result = await fn();
+    const calls = buf
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, any>);
+    return { result, calls };
+  } finally {
+    (process.stderr as any).write = originalWrite;
+  }
+}
+
+describe("safeSource (accumulating-error-provenance variant)", () => {
+  test("fulfilled read returns the value and accumulates no errors", async () => {
+    const errors: SafeSourceError[] = [];
+    const { result, calls } = await withCapturedErrorsAsync(() =>
+      safeSource("run-record", errors, "fallback", async () => "loaded"),
+    );
+    assert.equal(result, "loaded");
+    assert.deepEqual(errors, []);
+    assert.equal(calls.length, 0, "no fail-loud log on success");
+  });
+
+  test("rejection returns the fallback, never throws", async () => {
+    const errors: SafeSourceError[] = [];
+    const { result } = await withCapturedErrorsAsync(() =>
+      safeSource<string[]>("friction", errors, [], async () => {
+        throw new Error("redis down");
+      }),
+    );
+    assert.deepEqual(result, []);
+  });
+
+  test("rejection accumulates a {source, detail} entry onto errors[]", async () => {
+    const errors: SafeSourceError[] = [];
+    await withCapturedErrorsAsync(() =>
+      safeSource("friction", errors, [] as string[], async () => {
+        throw new Error("redis down");
+      }),
+    );
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].source, "friction");
+    assert.equal(errors[0].detail, "redis down");
+  });
+
+  test("multiple failing sub-sources accumulate onto the SAME shared array (the assembler-binds-once contract)", async () => {
+    const errors: SafeSourceError[] = [];
+    await safeSource("a", errors, 0, async () => {
+      throw new Error("a boom");
+    });
+    await safeSource("b", errors, 0, async () => {
+      throw new Error("b boom");
+    });
+    await safeSource("c", errors, 0, async () => 42); // succeeds — no entry
+    assert.deepEqual(
+      errors.map((e) => e.source),
+      ["a", "b"],
+    );
+    assert.deepEqual(
+      errors.map((e) => e.detail),
+      ["a boom", "b boom"],
+    );
+  });
+
+  test("rejection emits a fail-loud structured log with the source in context", async () => {
+    const errors: SafeSourceError[] = [];
+    const { calls } = await withCapturedErrorsAsync(() =>
+      safeSource("stuck-signals", errors, null, async () => {
+        throw new Error("boom");
+      }),
+    );
+    assert.equal(calls.length, 1);
+    const line = logText(calls[0]);
+    assert.match(line, /sub-source failed/);
+    // Provenance stays in the structured `source` field.
+    assert.equal(calls[0].source, "stuck-signals");
+    assert.match(String(calls[0].err?.message ?? calls[0].err ?? ""), /boom/);
+  });
+
+  test("a non-Error rejection coerces to a string detail (toDetail contract)", async () => {
+    const errors: SafeSourceError[] = [];
+    await withCapturedErrorsAsync(() =>
+      safeSource("weird", errors, null, async () => {
+        throw "just a string"; // eslint-disable-line no-throw-literal
+      }),
+    );
+    assert.equal(errors[0].detail, "just a string");
+  });
+});
+
+describe("toDetail", () => {
+  test("extracts .message from an Error", () => {
+    assert.equal(toDetail(new Error("kaboom")), "kaboom");
+  });
+
+  test("extracts .message from a plain object carrying a string message", () => {
+    assert.equal(toDetail({ message: "structured" }), "structured");
+  });
+
+  test("String-coerces a value with no string .message", () => {
+    assert.equal(toDetail(42), "42");
+    assert.equal(toDetail("bare"), "bare");
+    assert.equal(toDetail({ message: 5 }), "[object Object]");
   });
 });

@@ -38,6 +38,20 @@
  * All three route through {@link settle}, so the "never throws / always logs"
  * contract has one referent and one test surface
  * (`test/aggregator-settle.test.mts`).
+ *
+ * The fourth shape — {@link safeSource} — is the **accumulating-error-provenance**
+ * variant of the same never-throw family (issue #3628). Where `settle*` degrade
+ * an *already-settled* `Promise.allSettled` slot into the void (log + fallback,
+ * no trace), `safeSource` wraps the ad-hoc async CALL itself and, on rejection,
+ * ALSO pushes a structured `{source, detail}` entry onto a caller-owned
+ * `errors[]` array — so a multi-source assembler can surface *which* sub-sources
+ * degraded rather than only logging them. It was promoted here from
+ * `src/autopilot/retro-bundle.ts`, where it had been re-implemented privately
+ * and then re-mirrored (as a bare type) a second time in
+ * `src/autopilot/retro-enrichment.ts` after a single release cycle — the exact
+ * copy-paste-drift pattern this module exists to end. It lives alongside
+ * `settle*` because it is the same "sub-source fails → log + degrade to
+ * fallback" contract; only the error-accumulation differs.
  */
 
 import { logger } from "./logger.ts";
@@ -113,3 +127,82 @@ export function settledOrNull<T>(
   logRejection(label, result.reason);
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// safeSource — the accumulating-error-provenance variant (issue #3628)
+// ---------------------------------------------------------------------------
+
+/**
+ * One sub-source that failed to load — surfaced (accumulated) instead of
+ * thrown. Caller-agnostic shape: `{source, detail}`. Promoted from
+ * `retro-bundle.ts`'s private `RetroBundleError` so the retro bundle's served
+ * `errors[]` JSON stays byte-identical while the type has a single home.
+ */
+export interface SafeSourceError {
+  /** Stable, machine-readable source name, e.g. `"run-record"`, `"friction"`. */
+  source: string;
+  /** The error message (best-effort string coercion). */
+  detail: string;
+}
+
+/** Best-effort string coercion of a thrown value's `.message` (else `String`). */
+export function toDetail(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    const m = (err as { message?: unknown }).message;
+    if (typeof m === "string") return m;
+  }
+  return String(err);
+}
+
+/**
+ * Run a sub-source reader under the never-throw contract WITH structured error
+ * provenance (issue #3628). On rejection: log the failure (CLAUDE.md fail-loud),
+ * push a `{source, detail}` entry onto the caller-owned `errors` array, and
+ * return `fallback`. Never throws.
+ *
+ * This is the "accumulating errors" sibling of {@link settledOr} et al.: those
+ * degrade an already-settled `Promise.allSettled` slot into the void; this wraps
+ * the ad-hoc async CALL and records *which* source degraded so a composing
+ * assembler can surface a partial-result trace (`bundle.errors[]`) rather than
+ * only logging the rejection.
+ *
+ * The `errors` array is caller-owned and mutated in place, so a multi-source
+ * assembler can bind one array once (`(source, fallback, fn) => safeSource(source, errors, fallback, fn)`)
+ * and thread the bound closure into sub-coordinators — they accumulate onto the
+ * same array without ever touching it directly.
+ */
+export async function safeSource<T>(
+  source: string,
+  errors: SafeSourceError[],
+  fallback: T,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const detail = toDetail(err);
+    logger.error({ source, err }, "[settled-fold] sub-source failed");
+    errors.push({ source, detail });
+    return fallback;
+  }
+}
+
+/**
+ * The {@link safeSource} closure a multi-source assembler passes DOWN to its
+ * sub-coordinators — {@link safeSource} with the `errors[]` argument already
+ * bound: `(source, fallback, fn) => Promise<T>`.
+ *
+ * A composing assembler binds its own `errors[]` once
+ * (`(source, fallback, fn) => safeSource(source, errors, fallback, fn)`) and
+ * threads THIS closure into a sub-coordinator (e.g. `retro-enrichment`'s
+ * `enrichDispatchesWithCycleData`), so the sub-coordinator accumulates onto the
+ * assembler's array without ever touching it directly. Promoted from
+ * `retro-enrichment.ts`, which previously re-declared this exact type as a
+ * local `SafeSource` that explicitly mirrored the assembler's private helper
+ * (issue #3628).
+ */
+export type BoundSafeSource = <T>(
+  source: string,
+  fallback: T,
+  fn: () => Promise<T>,
+) => Promise<T>;
