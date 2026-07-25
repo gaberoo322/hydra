@@ -417,12 +417,60 @@ not assume child output is parseable beyond what the child explicitly emits.
   fi
 done
 
+# ---- Banner-guarded orphan prune (issue #3693) ----
+# sync-skills.sh only ever WROTE generated skills; a playbook deleted from
+# docs/operator-playbooks/ left its already-synced skill dirs lingering on every
+# host until someone manually rm -rf'd them (bit the /hydra-target-review
+# retirement, PR #3692). This pass removes those orphans — but ONLY dirs we own.
+#
+# Ownership signal: a generated SKILL.md carries the exact banner
+#   <!-- DO NOT EDIT. Generated from docs/operator-playbooks/<X>.md. ... -->
+# (emitted at the banner_claude/banner_codex lines above). We extract <X> from
+# that line and prune the dir iff docs/operator-playbooks/<X>.md no longer
+# exists. A dir whose SKILL.md LACKS that banner is a third-party / upstream
+# skill (code-review, grilling, prototype, deep-research, …) and is NEVER
+# touched — the banner match is the whole safety guard. Honors $DRY_RUN and the
+# CLAUDE_SKILLS_DIR / CODEX_SKILLS_DIR overrides (via $CLAUDE_DIR / $CODEX_DIR).
+pruned_count=0
+prune_orphans() {
+  local skills_dir="$1"
+  [ -d "$skills_dir" ] || return 0
+  local d skill_md src_name
+  for d in "$skills_dir"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    skill_md="$d/SKILL.md"
+    [ -f "$skill_md" ] || continue
+    # Extract the source playbook name from the generation banner, if present.
+    # Anchored to the exact banner shape so an incidental mention of the phrase
+    # elsewhere in a hand-authored SKILL.md can never match.
+    src_name=$(sed -n \
+      's|^<!-- DO NOT EDIT\. Generated from docs/operator-playbooks/\(.*\)\.md\. Run scripts/sync-skills\.sh after editing the playbook\. -->$|\1|p' \
+      "$skill_md" | head -n1)
+    # No banner → not ours; leave it untouched (the safety guard).
+    [ -n "$src_name" ] || continue
+    # Banner present but the named source playbook still exists → keep.
+    [ -f "$PLAYBOOKS/$src_name.md" ] && continue
+    # Banner-owned dir whose source playbook is gone → orphan; prune it.
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "would prune orphaned skill: $(basename "$d") ($d)"
+    else
+      rm -rf "$d"
+      echo "pruned orphaned skill: $(basename "$d")"
+    fi
+    pruned_count=$((pruned_count+1))
+  done
+}
+prune_orphans "$CLAUDE_DIR"
+prune_orphans "$CODEX_DIR"
+
 echo
 echo "sync-skills summary:"
 echo "  playbooks read: ${#PLAYBOOK_FILES[@]} (minus README)"
 echo "  claude skills written: $generated_count"
 echo "  codex skills written: $codex_count"
 echo "  claude_only skills (no codex output): $claude_only_count"
+echo "  orphaned skills pruned: $pruned_count"
 echo "  errors: $errors"
 if [ "$DRY_RUN" = 1 ]; then
   echo "  (dry-run; no files modified)"

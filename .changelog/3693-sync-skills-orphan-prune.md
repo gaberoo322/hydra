@@ -1,0 +1,1 @@
+- feat: sync-skills.sh now auto-prunes orphaned generated skill dirs when their source playbook is deleted (banner-guarded; never touches third-party skills) (#3693)
