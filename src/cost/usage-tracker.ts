@@ -81,7 +81,7 @@
  *   - HYDRA_USAGE_DRIFT_REFERENCE_PERCENT — an operator-seeded reference
  *     `percentSinceReset` reading (e.g. captured from the interactive `/usage`
  *     view). When set to a positive number AND the quota is calibrated, the
- *     scan emits ONE fail-loud `console.warn` per scan if the tracker's
+ *     scan emits ONE fail-loud `logger.warn` per scan if the tracker's
  *     `percentSinceReset` diverges from the reference by more than a factor
  *     (HYDRA_USAGE_DRIFT_FACTOR, default 2x) in either direction. Unset =>
  *     inert (no false alarms), mirroring the uncalibrated-returns-neutral
@@ -131,6 +131,7 @@ import type { UsageSnapshot } from "./types.ts";
 // `SkillWoWEntry` (formerly imported here for the `UsageSnapshot` interface)
 // moved with that interface to `./types.ts` (issue #3071).
 import { assembleSnapshot } from "./snapshot-assembly.ts";
+import { logger } from "../logger.ts";
 // Weekly Usage Snapshot seam (issue #2404): the typed Redis accessor for the
 // persisted per-ISO-week per-skill rollup. The ONLY Redis touch on the read
 // path is the prior-week READ here in `getUsage()` (the I/O coordinator) —
@@ -362,8 +363,9 @@ export async function getUsage(opts: {
   try {
     priorWeek = await readPriorWeek(now);
   } catch (err: any) {
-    console.error(
-      `[usage-tracker] prior-week snapshot read failed (week-over-week trend degrades to 'new'): ${err?.message || err}`,
+    logger.error(
+      { err },
+      "[usage-tracker] prior-week snapshot read failed (week-over-week trend degrades to 'new')",
     );
   }
 

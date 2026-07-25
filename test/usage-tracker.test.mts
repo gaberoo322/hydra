@@ -120,6 +120,48 @@ import { isoWeekLabel } from "../src/redis/usage-snapshots.ts";
 // helper expects without importing the whole ScanResult boundary type.
 import type { CachedOAuthRead as ScanResultOAuth } from "../src/cost/transcript-scan.ts";
 
+// ADR-0027: the cost module now logs through the pino structured-logger seam
+// (module singleton → process.stderr) instead of freeform console.* strings.
+// The fail-loud detectors under test (unknown-model warn, calibration-drift
+// warn, estimate/OAuth divergence warn) therefore emit serialized JSON lines on
+// stderr, not console.warn/console.error calls. `captureLoggerLines` intercepts
+// `process.stderr.write`, parses each pino line, and collects its `msg` string —
+// the human-readable message is preserved on the `msg` field, so the existing
+// substring filters (`.includes("[usage-tracker]")`, `.includes("calibration
+// drift")`, `.includes("estimate/OAuth divergence")`) keep matching unchanged.
+// The corresponding pino JSON object is also exposed via `.records()` for tests
+// that want to assert on structured fields / level.
+function captureLoggerLines(): {
+  lines: () => string[];
+  records: () => Array<Record<string, any>>;
+  restore: () => void;
+} {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  const msgs: string[] = [];
+  const objs: Array<Record<string, any>> = [];
+  (process.stderr as any).write = (chunk: any) => {
+    for (const raw of String(chunk).split("\n")) {
+      if (!raw.trim()) continue;
+      let obj: Record<string, any>;
+      try {
+        obj = JSON.parse(raw);
+      } catch {
+        continue; // not a pino line
+      }
+      objs.push(obj);
+      if (typeof obj.msg === "string") msgs.push(obj.msg);
+    }
+    return true;
+  };
+  return {
+    lines: () => msgs,
+    records: () => objs,
+    restore: () => {
+      (process.stderr as any).write = originalWrite;
+    },
+  };
+}
+
 function breakdown(p: Partial<TokenBreakdown> = {}): TokenBreakdown {
   const input = p.input ?? 0;
   const output = p.output ?? 0;
@@ -809,13 +851,9 @@ describe("usage-tracker", () => {
       }
     });
 
-    test("unknown-family records trigger a once-per-scan console.warn (not per-line)", async () => {
+    test("unknown-family records trigger a once-per-scan logger.warn (not per-line)", async () => {
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
-      const warnings: string[] = [];
-      const originalWarn = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warnings.push(args.map((a) => String(a)).join(" "));
-      };
+      const cap = captureLoggerLines();
       try {
         const now = new Date("2026-05-25T12:00:00Z");
         const t = "2026-05-25T11:00:00Z";
@@ -828,22 +866,19 @@ describe("usage-tracker", () => {
 
         await getUsage({ now, projectsRoot: root, force: true });
 
-        const trackerWarnings = warnings.filter((w) => w.includes("[usage-tracker]"));
+        const trackerWarnings = cap
+          .lines()
+          .filter((w) => w.includes("[usage-tracker]") && w.includes("unrecognised model"));
         assert.equal(trackerWarnings.length, 1, "expected exactly one warn per scan");
-        assert.ok(trackerWarnings[0].includes("unrecognised model"));
       } finally {
-        console.warn = originalWarn;
+        cap.restore();
         await rm(root, { recursive: true, force: true });
       }
     });
 
     test("no unknown-model warn fires when every model string is recognised", async () => {
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
-      const warnings: string[] = [];
-      const originalWarn = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warnings.push(args.map((a) => String(a)).join(" "));
-      };
+      const cap = captureLoggerLines();
       try {
         const now = new Date("2026-05-25T12:00:00Z");
         await writeFixture(root, "p/s.jsonl", [
@@ -852,10 +887,10 @@ describe("usage-tracker", () => {
         ]);
 
         await getUsage({ now, projectsRoot: root, force: true });
-        const trackerWarnings = warnings.filter((w) => w.includes("[usage-tracker]"));
+        const trackerWarnings = cap.lines().filter((w) => w.includes("unrecognised model"));
         assert.equal(trackerWarnings.length, 0);
       } finally {
-        console.warn = originalWarn;
+        cap.restore();
         await rm(root, { recursive: true, force: true });
       }
     });
@@ -2389,24 +2424,19 @@ describe("usage-tracker", () => {
   });
 
   // AC3: the pure estimate-vs-OAuth divergence detector (issue #2832). Fires a
-  // single console.warn when the fail-open transcript estimate has drifted far
+  // single logger.warn when the fail-open transcript estimate has drifted far
   // from the last-known real meter value DURING an OAuth outage.
   describe("detectEstimateOAuthDivergence — pure detector (issue #2832 AC3)", () => {
-    let warnings: string[];
-    let origWarn: typeof console.warn;
+    let cap: ReturnType<typeof captureLoggerLines>;
     beforeEach(() => {
-      warnings = [];
-      origWarn = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warnings.push(args.join(" "));
-      };
+      cap = captureLoggerLines();
     });
     afterEach(() => {
-      console.warn = origWarn;
+      cap.restore();
     });
 
     function divergenceWarnings(): string[] {
-      return warnings.filter((w) => w.includes("estimate/OAuth divergence"));
+      return cap.lines().filter((w) => w.includes("estimate/OAuth divergence"));
     }
 
     test("inert while the headline is on OAuth (never fires with a live/stale meter)", () => {
@@ -2478,25 +2508,20 @@ describe("usage-tracker", () => {
   // last-known OAuth value exists that the estimate has drifted far from.
   describe("estimate/OAuth divergence detector wired through getUsage (issue #2832 AC3)", () => {
     let restore: () => void;
-    let warnings: string[];
-    let origWarn: typeof console.warn;
+    let cap: ReturnType<typeof captureLoggerLines>;
     beforeEach(() => {
       restore = withEnvSnapshot();
       clearUsageCache();
-      warnings = [];
-      origWarn = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warnings.push(args.join(" "));
-      };
+      cap = captureLoggerLines();
     });
     afterEach(() => {
-      console.warn = origWarn;
+      cap.restore();
       restore();
       clearUsageCache();
     });
 
     function divergenceWarnings(): string[] {
-      return warnings.filter((w) => w.includes("estimate/OAuth divergence"));
+      return cap.lines().filter((w) => w.includes("estimate/OAuth divergence"));
     }
 
     function countingMeter(results: Array<{ ok: boolean; five?: number; seven?: number; code?: any }>) {
@@ -2747,25 +2772,20 @@ describe("usage-tracker", () => {
 
   describe("drift detector warns (issue #873)", () => {
     let restore: () => void;
-    let warnings: string[];
-    let origWarn: typeof console.warn;
+    let cap: ReturnType<typeof captureLoggerLines>;
     beforeEach(() => {
       restore = withEnvSnapshot();
       clearUsageCache();
-      warnings = [];
-      origWarn = console.warn;
-      console.warn = (...args: unknown[]) => {
-        warnings.push(args.join(" "));
-      };
+      cap = captureLoggerLines();
     });
     afterEach(() => {
-      console.warn = origWarn;
+      cap.restore();
       restore();
       clearUsageCache();
     });
 
     function driftWarnings(): string[] {
-      return warnings.filter((w) => w.includes("calibration drift"));
+      return cap.lines().filter((w) => w.includes("calibration drift"));
     }
 
     async function rootWithBurn(): Promise<string> {
@@ -4541,19 +4561,18 @@ describe("deriveSinceReset (pure fixed-window helper, issue #2188)", () => {
 });
 
 describe("detectCalibrationDrift (pure fail-loud detector, issue #2188)", () => {
-  // Capture console.warn so we can assert it fires exactly once (or not at all).
+  // ADR-0027: the detector now logs through the pino seam (process.stderr), so
+  // capture the serialized JSON lines and collect the `msg` of each calibration-
+  // drift record — the `detectCalibrationDrift` fn is pure and emits at most this
+  // one warn, so filtering on the stable message keeps the exactly-once asserts.
   function withWarnCapture(fn: () => void): string[] {
-    const warns: string[] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warns.push(args.map(String).join(" "));
-    };
+    const cap = captureLoggerLines();
     try {
       fn();
     } finally {
-      console.warn = orig;
+      cap.restore();
     }
-    return warns;
+    return cap.lines().filter((w) => w.includes("calibration drift"));
   }
 
   const base = {

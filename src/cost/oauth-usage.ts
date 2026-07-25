@@ -47,6 +47,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HydraErrorCode } from "../errors.ts";
+import { logger } from "../logger.ts";
 import { getOAuthUsageMaxStaleMs } from "./config.ts";
 
 /** The subset of `HydraErrorCode` the OAuth Usage Adapter can return. */
@@ -154,23 +155,19 @@ async function readAccessToken(path: string = credentialsPath()): Promise<string
     // A missing/unreadable credentials file is an expected state (logged out,
     // relocated home dir). Logged so a persistent mis-config is visible, but
     // it degrades to the transcript estimate, never a throw.
-    console.error(
-      `[oauth-usage] credentials file unreadable at ${path}: ${err?.message || err}`,
-    );
+    logger.error({ path, err }, "[oauth-usage] credentials file unreadable");
     return null;
   }
   let obj: any;
   try {
     obj = JSON.parse(raw);
   } catch (err: any) {
-    console.error(`[oauth-usage] credentials file is not valid JSON at ${path}: ${err?.message || err}`);
+    logger.error({ path, err }, "[oauth-usage] credentials file is not valid JSON");
     return null;
   }
   const token = obj?.claudeAiOauth?.accessToken;
   if (typeof token !== "string" || token === "") {
-    console.error(
-      `[oauth-usage] credentials file has no claudeAiOauth.accessToken at ${path}`,
-    );
+    logger.error({ path }, "[oauth-usage] credentials file has no claudeAiOauth.accessToken");
     return null;
   }
   return token;
@@ -330,7 +327,7 @@ export async function readOAuthUsage(
     });
   } catch (err: any) {
     const code = classifyThrown(err);
-    console.error(`[oauth-usage] ${code}: ${err?.message ?? err}`);
+    logger.error({ code, err }, "[oauth-usage] read threw");
     return { ok: false, code };
   }
 
@@ -349,10 +346,9 @@ export async function readOAuthUsage(
         getOAuthUsageMaxStaleMs(),
       );
       const text = await res.text().catch(() => "");
-      console.error(
-        `[oauth-usage] oauth-usage-rate-limited: 429` +
-          (retryAfterMs !== undefined ? ` (Retry-After ${retryAfterMs}ms)` : "") +
-          ` ${text.slice(0, 200)}`,
+      logger.error(
+        { code: "oauth-usage-rate-limited", status: 429, retryAfterMs, body: text.slice(0, 200) },
+        "[oauth-usage] oauth-usage-rate-limited: 429",
       );
       return retryAfterMs !== undefined
         ? { ok: false, code: "oauth-usage-rate-limited", retryAfterMs }
@@ -367,7 +363,7 @@ export async function readOAuthUsage(
         ? "oauth-usage-token-expired"
         : "oauth-usage-non-2xx";
     const text = await res.text().catch(() => "");
-    console.error(`[oauth-usage] ${code}: ${res.status} ${text.slice(0, 200)}`);
+    logger.error({ code, status: res.status, body: text.slice(0, 200) }, "[oauth-usage] non-2xx status");
     return { ok: false, code };
   }
 
@@ -375,7 +371,7 @@ export async function readOAuthUsage(
   try {
     body = await res.json();
   } catch (err: any) {
-    console.error(`[oauth-usage] oauth-usage-parse (JSON.parse): ${err?.message ?? err}`);
+    logger.error({ code: "oauth-usage-parse", err }, "[oauth-usage] oauth-usage-parse (JSON.parse)");
     return { ok: false, code: "oauth-usage-parse" };
   }
 
@@ -384,8 +380,9 @@ export async function readOAuthUsage(
     // A 2xx with a body we can't read a usable window out of. Treat exactly
     // like a failed read for gating-safety — fall back to the estimate, NEVER
     // coerce a missing utilization to 0.
-    console.error(
-      `[oauth-usage] oauth-usage-parse: 2xx body missing a usable five_hour/seven_day window`,
+    logger.error(
+      { code: "oauth-usage-parse" },
+      "[oauth-usage] oauth-usage-parse: 2xx body missing a usable five_hour/seven_day window",
     );
     return { ok: false, code: "oauth-usage-parse" };
   }

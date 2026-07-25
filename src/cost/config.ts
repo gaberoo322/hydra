@@ -15,10 +15,12 @@
  *
  * Each reader's parse/fallback/fail-loud semantics are moved VERBATIM from
  * `usage-tracker.ts` (and, for `getWeeklyPaceCeiling`, from `eligibility.ts`):
- * unset/empty → default; non-empty-but-bad → `console.error` + default; the
+ * unset/empty → default; non-empty-but-bad → `logger.error` + default; the
  * quota/weight family is all-or-nothing (0 unless explicitly set positive). The
  * env-var meanings are documented at length in the `usage-tracker.ts` header.
  */
+
+import { logger } from "../logger.ts";
 
 /**
  * Default OAuth-meter cache TTL (issue #1090): how long a successful OAuth
@@ -151,9 +153,9 @@ export function getOAuthUsageTtlMs(): number {
   if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_TTL_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_OAUTH_USAGE_TTL_MS is set but not a positive finite ` +
-        `number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_TTL_MS}`,
+    logger.error(
+      { envVar: "HYDRA_OAUTH_USAGE_TTL_MS", raw, fallback: DEFAULT_OAUTH_USAGE_TTL_MS },
+      "[usage-tracker] HYDRA_OAUTH_USAGE_TTL_MS is set but not a positive finite number; falling back to default",
     );
     return DEFAULT_OAUTH_USAGE_TTL_MS;
   }
@@ -184,9 +186,9 @@ export function getOAuthUsageMaxStaleMs(): number {
   if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_MAX_STALE_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_OAUTH_USAGE_MAX_STALE_MS is set but not a positive ` +
-        `finite number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_MAX_STALE_MS}`,
+    logger.error(
+      { envVar: "HYDRA_OAUTH_USAGE_MAX_STALE_MS", raw, fallback: DEFAULT_OAUTH_USAGE_MAX_STALE_MS },
+      "[usage-tracker] HYDRA_OAUTH_USAGE_MAX_STALE_MS is set but not a positive finite number; falling back to default",
     );
     return DEFAULT_OAUTH_USAGE_MAX_STALE_MS;
   }
@@ -209,9 +211,9 @@ export function getOAuthUsageBackoffBaseMs(): number {
   if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS is set but not a positive ` +
-        `finite number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS}`,
+    logger.error(
+      { envVar: "HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS", raw, fallback: DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS },
+      "[usage-tracker] HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS is set but not a positive finite number; falling back to default",
     );
     return DEFAULT_OAUTH_USAGE_BACKOFF_BASE_MS;
   }
@@ -231,9 +233,9 @@ export function getOAuthUsageBackoffMaxMs(): number {
   if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS is set but not a positive ` +
-        `finite number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS}`,
+    logger.error(
+      { envVar: "HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS", raw, fallback: DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS },
+      "[usage-tracker] HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS is set but not a positive finite number; falling back to default",
     );
     return DEFAULT_OAUTH_USAGE_BACKOFF_MAX_MS;
   }
@@ -253,10 +255,9 @@ export function getWeeklyResetAnchorMs(): number | null {
   if (raw === undefined || raw === "") return null;
   const parsed = Date.parse(raw);
   if (!Number.isFinite(parsed)) {
-    console.error(
-      `[usage-tracker] HYDRA_USAGE_WEEKLY_RESET_ANCHOR is set but not a valid ISO-8601 instant (${JSON.stringify(
-        raw,
-      )}); treating Weekly Reset Anchor as unset`,
+    logger.error(
+      { envVar: "HYDRA_USAGE_WEEKLY_RESET_ANCHOR", raw },
+      "[usage-tracker] HYDRA_USAGE_WEEKLY_RESET_ANCHOR is set but not a valid ISO-8601 instant; treating Weekly Reset Anchor as unset",
     );
     return null;
   }
@@ -276,10 +277,9 @@ export function getCacheReadWeight(): number {
   if (raw === undefined || raw === "") return DEFAULT_CACHE_READ_WEIGHT;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_USAGE_CACHE_READ_WEIGHT is set but not a positive ` +
-        `finite number (${JSON.stringify(raw)}); falling back to default ` +
-        `${DEFAULT_CACHE_READ_WEIGHT}`,
+    logger.error(
+      { envVar: "HYDRA_USAGE_CACHE_READ_WEIGHT", raw, fallback: DEFAULT_CACHE_READ_WEIGHT },
+      "[usage-tracker] HYDRA_USAGE_CACHE_READ_WEIGHT is set but not a positive finite number; falling back to default",
     );
     return DEFAULT_CACHE_READ_WEIGHT;
   }
@@ -297,9 +297,9 @@ export function getDriftReferencePercent(): number | null {
   if (raw === undefined || raw === "") return null;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_USAGE_DRIFT_REFERENCE_PERCENT is set but not a ` +
-        `positive finite number (${JSON.stringify(raw)}); drift detection inert`,
+    logger.error(
+      { envVar: "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT", raw },
+      "[usage-tracker] HYDRA_USAGE_DRIFT_REFERENCE_PERCENT is set but not a positive finite number; drift detection inert",
     );
     return null;
   }
@@ -316,9 +316,9 @@ export function getDriftFactor(): number {
   if (raw === undefined || raw === "") return DEFAULT_DRIFT_FACTOR;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 1) {
-    console.error(
-      `[usage-tracker] HYDRA_USAGE_DRIFT_FACTOR is set but not a finite number ` +
-        `> 1 (${JSON.stringify(raw)}); falling back to default ${DEFAULT_DRIFT_FACTOR}`,
+    logger.error(
+      { envVar: "HYDRA_USAGE_DRIFT_FACTOR", raw, fallback: DEFAULT_DRIFT_FACTOR },
+      "[usage-tracker] HYDRA_USAGE_DRIFT_FACTOR is set but not a finite number > 1; falling back to default",
     );
     return DEFAULT_DRIFT_FACTOR;
   }
@@ -338,10 +338,13 @@ export function getOAuthEstimateDivergenceFactor(): number {
   if (raw === undefined || raw === "") return DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 1) {
-    console.error(
-      `[usage-tracker] HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR is set but not a ` +
-        `finite number > 1 (${JSON.stringify(raw)}); falling back to default ` +
-        `${DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR}`,
+    logger.error(
+      {
+        envVar: "HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR",
+        raw,
+        fallback: DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
+      },
+      "[usage-tracker] HYDRA_OAUTH_ESTIMATE_DIVERGENCE_FACTOR is set but not a finite number > 1; falling back to default",
     );
     return DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR;
   }
@@ -378,10 +381,9 @@ export function getWeeklyPaceCeiling(): number {
   if (raw === undefined || raw === "") return DEFAULT_WEEKLY_PACE_CEILING;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_USAGE_WEEKLY_PACE_CEILING is set but not a finite number in (0, 1] (${JSON.stringify(
-        raw,
-      )}); falling back to default ${DEFAULT_WEEKLY_PACE_CEILING}`,
+    logger.error(
+      { envVar: "HYDRA_USAGE_WEEKLY_PACE_CEILING", raw, fallback: DEFAULT_WEEKLY_PACE_CEILING },
+      "[usage-tracker] HYDRA_USAGE_WEEKLY_PACE_CEILING is set but not a finite number in (0, 1]; falling back to default",
     );
     return DEFAULT_WEEKLY_PACE_CEILING;
   }
@@ -396,7 +398,7 @@ export const DEFAULT_FIVE_HOUR_THROTTLE_T2 = 0.75;
 /**
  * Read a 5h-throttle threshold env var as a fraction in (0, 1). Unset/empty →
  * `fallback`. Set-but-invalid (non-finite, ≤0, or ≥1) → `fallback` with a
- * fail-loud `console.error`, mirroring {@link getWeeklyPaceCeiling}'s discipline
+ * fail-loud `logger.error`, mirroring {@link getWeeklyPaceCeiling}'s discipline
  * (a mis-configured env var is visible, never silently honoured). (issue #1087)
  *
  * Relocated VERBATIM out of `eligibility.ts` into this pure env-reader leaf
@@ -410,10 +412,9 @@ function getFiveHourThrottleThreshold(envVar: string, fallback: number): number 
   if (raw === undefined || raw === "") return fallback;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) {
-    console.error(
-      `[usage-tracker] ${envVar} is set but not a finite fraction in (0, 1) (${JSON.stringify(
-        raw,
-      )}); falling back to default ${fallback}`,
+    logger.error(
+      { envVar, raw, fallback },
+      "[usage-tracker] env var is set but not a finite fraction in (0, 1); falling back to default",
     );
     return fallback;
   }

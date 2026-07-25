@@ -3,18 +3,23 @@
  *
  * The alarm is a PURELY ADDITIVE observability signal emitted off the existing
  * `oauthBackoff.failures` counter in `src/cost/oauth-read-cache.ts`: a single
- * WARN-level `console.error` fires the instant the consecutive-failure count
- * CROSSES the threshold (3), so a prolonged 429/outage (expired token, hard
- * account rate-limit) is greppable rather than only inferrable from the
- * per-failure backoff lines. It must fire EXACTLY ONCE per sustained-failure
- * episode — not on failures 1 or 2 (a transient blip the last-good +
- * exponential-backoff seam is designed to ride out), not again on failure 4+,
- * and it must re-arm after a recovery so a fresh episode alarms again.
+ * error-level log fires the instant the consecutive-failure count CROSSES the
+ * threshold (3), so a prolonged 429/outage (expired token, hard account
+ * rate-limit) is greppable rather than only inferrable from the per-failure
+ * backoff lines. It must fire EXACTLY ONCE per sustained-failure episode — not
+ * on failures 1 or 2 (a transient blip the last-good + exponential-backoff seam
+ * is designed to ride out), not again on failure 4+, and it must re-arm after a
+ * recovery so a fresh episode alarms again.
  *
- * The alarm is a log side effect only: this suite captures `console.error` and
- * asserts the alarm-line count. It does NOT touch the gate math, recovery
- * bookkeeping, or the #1124 fail-open invariant — those are covered by the
- * existing usage-tracker / oauth-backoff-persist suites.
+ * The alarm is a log side effect only. ADR-0027: `oauth-read-cache` now logs
+ * through the pino structured-logger seam (module singleton → process.stderr)
+ * instead of a freeform `console.error` string, so this suite captures the
+ * serialized JSON lines off `process.stderr`, asserts on the structured `level`
+ * field (pino error === 50) + the stable alarm `msg`, and reads the
+ * `oauth-usage-*` code + fail-open context out of the structured fields rather
+ * than grepping prose. It does NOT touch the gate math, recovery bookkeeping,
+ * or the #1124 fail-open invariant — those are covered by the existing
+ * usage-tracker / oauth-backoff-persist suites.
  *
  * Driven DIRECTLY through the exported `readOAuthCached(readUsage, nowMs)` seam
  * with an injected reader and the default no-op persistence adapter (invariant
@@ -80,8 +85,9 @@ const ALARM_MARKER = "ALARM: OAuth meter has failed";
 
 describe("sustained-OAuth-failure alarm (issue #3601)", () => {
   let saved: Map<string, string | undefined>;
-  let alarmLines: string[];
-  let restoreConsole: () => void;
+  /** The captured alarm log records (pino JSON objects with the alarm `msg`). */
+  let alarmLines: Array<Record<string, any>>;
+  let restoreStderr: () => void;
 
   beforeEach(() => {
     saved = new Map();
@@ -92,21 +98,33 @@ describe("sustained-OAuth-failure alarm (issue #3601)", () => {
     process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = String(BACKOFF_MAX_MS);
     clearOAuthCache();
 
-    // Capture only the alarm lines; keep other console.error output silent so
-    // the noisy per-failure backoff lines don't clutter the test log.
+    // Capture pino's serialized JSON lines off process.stderr and keep only the
+    // alarm records; the noisy per-failure backoff lines are parsed and dropped
+    // so they don't clutter the assertions. Non-JSON stderr chunks are ignored.
     alarmLines = [];
-    const orig = console.error;
-    console.error = (...args: unknown[]) => {
-      const line = args.map(String).join(" ");
-      if (line.includes(ALARM_MARKER)) alarmLines.push(line);
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (chunk: any) => {
+      for (const raw of String(chunk).split("\n")) {
+        if (!raw.trim()) continue;
+        let obj: Record<string, any>;
+        try {
+          obj = JSON.parse(raw);
+        } catch {
+          continue; // not a pino line
+        }
+        if (typeof obj.msg === "string" && obj.msg.includes(ALARM_MARKER)) {
+          alarmLines.push(obj);
+        }
+      }
+      return true;
     };
-    restoreConsole = () => {
-      console.error = orig;
+    restoreStderr = () => {
+      (process.stderr as any).write = originalWrite;
     };
   });
 
   afterEach(() => {
-    restoreConsole();
+    restoreStderr();
     clearOAuthCache();
     for (const [k, v] of saved) {
       if (v === undefined) delete process.env[k];
@@ -139,18 +157,24 @@ describe("sustained-OAuth-failure alarm (issue #3601)", () => {
     const calls = await driveFailures(3, t0);
     assert.equal(calls, 3, "all three reads re-probed");
     assert.equal(alarmLines.length, 1, "the crossing fires exactly one alarm");
+    assert.equal(alarmLines[0].level, 50, "the alarm is emitted at pino error level (50)");
     assert.match(
-      alarmLines[0],
+      alarmLines[0].msg,
       /3 consecutive reads/,
-      "alarm reports the consecutive-failure count",
+      "alarm msg reports the consecutive-failure count",
+    );
+    assert.equal(
+      alarmLines[0].failures,
+      3,
+      "alarm carries the consecutive-failure count as a structured field",
+    );
+    assert.equal(
+      alarmLines[0].code,
+      "oauth-usage-non-2xx",
+      "alarm carries the last failure code as a structured field",
     );
     assert.match(
-      alarmLines[0],
-      /oauth-usage-non-2xx/,
-      "alarm carries the last failure code",
-    );
-    assert.match(
-      alarmLines[0],
+      alarmLines[0].context,
       /#1124|fail-open/,
       "alarm names the fail-open gating context, not a hard-stop",
     );
