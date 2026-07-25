@@ -467,8 +467,29 @@ export function isMalformedAnchorType(trimmed: string): boolean {
  * `src/api/metrics.ts`, which calls `recordCycleMetrics` WITHOUT going through
  * `recordCycle` — can apply the identical classification and stop leaving its
  * cycles in the aggregator's "unknown" bucket (~30% of cycles).
+ *
+ * `branchRef` (issue #3579) is an OPTIONAL second decode SOURCE — the merged
+ * PR's head-branch ref, which the merge-completion watcher fetches at landing
+ * time. It is consulted ONLY after the explicit `raw` value AND the cycleId
+ * itself both fail to yield a class, and it is fed to the IDENTICAL
+ * {@link inferAnchorTypeFromCycleId} fence parser. This is what recovers the
+ * live #3579 first-write case: a merge-watch first-write (reap never wrote a
+ * record for this cycleId — the qa_orch relay / dropped-arm case) whose cycleId
+ * is a bare UUID (`afa22ef1-…`, no class token) but whose head branch carries a
+ * decodable `worktree-agent-<tok>-t{N}-<slot>` fence
+ * (`worktree-agent-afa22ef1-t2-dev_orch-3564`). Because the branch is decoded by
+ * the SAME parser — which only accepts a real `-t{N}-<slot>` fence, a real
+ * taxonomy skill, or an unambiguous class prefix — this can NEVER fabricate a
+ * class (#2822 invariant): a bare-hash / descriptive head branch
+ * (`worktree-agent-<longhash>`, `issue-3527-…`) yields `undefined` and the
+ * honest `unclassified` sentinel still stands. It is a second source of the same
+ * honest decode, not a guess.
  */
-export function classifyAnchorType(cycleId: string, raw: unknown): string {
+export function classifyAnchorType(
+  cycleId: string,
+  raw: unknown,
+  branchRef?: string,
+): string {
   if (typeof raw === "string") {
     const trimmed = raw.trim();
     // Issue #2806: a non-empty but MALFORMED value (a leaked `--flag`, or
@@ -484,6 +505,16 @@ export function classifyAnchorType(cycleId: string, raw: unknown): string {
   // requiring the caller to forward the field.
   const inferred = inferAnchorTypeFromCycleId(cycleId);
   if (inferred !== undefined) return inferred;
+  // Issue #3579: the cycleId itself carried no decodable class token (a bare
+  // UUID / short-hex / bare `worktree-agent-<longhash>` / `autopilot-<hash>-t{N}`
+  // first-write). Try the merged PR's head-branch ref as a SECOND decode source
+  // via the SAME fence parser — a decodable `-t{N}-<slot>` branch recovers the
+  // class; an undecodable branch (or no branch) falls through to the sentinel,
+  // preserving the #2822 never-guess invariant.
+  if (typeof branchRef === "string" && branchRef.trim().length > 0) {
+    const fromBranch = inferAnchorTypeFromCycleId(branchRef.trim());
+    if (fromBranch !== undefined) return fromBranch;
+  }
   logger.warn(
     { cycleId, unclassifiedSentinel: true, anchorType: UNCLASSIFIED_ANCHOR_TYPE },
     "[autopilot] recordCycle: cycle has no explicit anchorType — recording unclassified (data-quality gap; the caller should send a mapped anchorType)",
