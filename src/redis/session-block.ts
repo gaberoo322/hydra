@@ -33,6 +33,7 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Extra seconds of TTL beyond the reset instant, absorbing clock skew between
@@ -56,8 +57,9 @@ export async function getSessionBlockedUntil(nowMs: number = Date.now()): Promis
   if (!raw) return null;
   const ms = Number(raw);
   if (!Number.isFinite(ms) || ms <= 0) {
-    console.error(
-      `[session-block] unparseable session-block value, treating as no block: ${JSON.stringify(raw)}`,
+    logger.error(
+      { raw },
+      "[session-block] unparseable session-block value, treating as no block",
     );
     return null;
   }
@@ -80,8 +82,9 @@ export async function setSessionBlockedUntil(
   nowMs: number = Date.now(),
 ): Promise<number | null> {
   if (!Number.isFinite(blockedUntilMs) || blockedUntilMs <= nowMs) {
-    console.error(
-      `[session-block] refusing to record non-future session block (blockedUntilMs=${blockedUntilMs}, now=${nowMs})`,
+    logger.error(
+      { blockedUntilMs, now: nowMs },
+      "[session-block] refusing to record non-future session block",
     );
     return null;
   }

@@ -710,7 +710,7 @@ function makeWatchHarness(
   const registry = new Map(pending.map((e) => [e.prNumber, e]));
   const marked = new Set<number>();
   const enrollCalls: Array<{ commitSha: string; prNumber?: number | null; tier?: number | null }> = [];
-  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string; status?: string; tasksMerged?: number; tasksAttempted?: number }> = [];
+  const cycleCalls: Array<{ cycleId: string; prNumber: number; filesChanged?: number; anchorType?: string; worktreeBranch?: string; status?: string; tasksMerged?: number; tasksAttempted?: number }> = [];
   const removeCalls: number[] = [];
   const healthWrites: any[] = [];
 
@@ -742,7 +742,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("AC1: a landed T3 PR enrolls with the merge SHA + tier and enriches the cycle record", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 501, tier: 3, cycleId: "cyc-501", registeredAt: 1 }],
-      { 501: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 7 } },
+      { 501: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 7, headRefName: null } },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
@@ -761,7 +761,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("#2800: an explicit anchorType on the pending entry is forwarded onto the cycle-record enrichment body", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 521, tier: 3, cycleId: "cyc-521", registeredAt: 1, anchorType: "work-queue" }],
-      { 521: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 4 } },
+      { 521: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 4, headRefName: null } },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
@@ -778,7 +778,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("#2800: a pending entry WITHOUT an anchorType omits the field (degrades to prior inference behaviour)", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 522, tier: 3, cycleId: "cyc-522", registeredAt: 1 }],
-      { 522: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 4 } },
+      { 522: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 4, headRefName: null } },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
@@ -793,10 +793,83 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal("anchorType" in h.cycleCalls[0], false, "anchorType key is absent");
   });
 
+  test("#3579: the merged PR head-branch ref is forwarded as worktreeBranch when the entry has NO explicit anchorType", async () => {
+    // The live #3579 first-write case: reap never wrote a record for this cycleId
+    // (a bare UUID). The merge-watch enrichment is the FIRST write, and the entry
+    // carries no explicit anchorType. Forward the merged PR's head branch as
+    // `worktreeBranch` so classifyAnchorType can decode the class from a fenced
+    // branch (`worktree-agent-<tok>-t{N}-<slot>`) that the bare cycleId lacks.
+    const h = makeWatchHarness(
+      [{ prNumber: 531, tier: 3, cycleId: "afa22ef1-7e11-41e6", registeredAt: 1 }],
+      {
+        531: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 5,
+          headRefName: "worktree-agent-afa22ef1-t2-dev_orch-3564",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.cycleCalls, [
+      {
+        cycleId: "afa22ef1-7e11-41e6",
+        prNumber: 531,
+        filesChanged: 5,
+        worktreeBranch: "worktree-agent-afa22ef1-t2-dev_orch-3564",
+        status: "merged",
+        tasksMerged: 1,
+        tasksAttempted: 1,
+      },
+    ]);
+  });
+
+  test("#3579: an explicit anchorType SUPPRESSES the worktreeBranch fallback (no redundant field / no clobber)", async () => {
+    // When the arm DID forward an explicit anchorType, that is authoritative —
+    // classifyAnchorType returns it before ever consulting the branch, so the
+    // watcher does not bother forwarding the head branch as a decode source.
+    const h = makeWatchHarness(
+      [{ prNumber: 532, tier: 3, cycleId: "cyc-532", registeredAt: 1, anchorType: "grill" }],
+      {
+        532: {
+          state: "MERGED",
+          mergeCommitSha: "abc1234def",
+          changedFiles: 2,
+          headRefName: "worktree-agent-x-t2-dev_orch",
+        },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.deepEqual(h.cycleCalls, [
+      { cycleId: "cyc-532", prNumber: 532, filesChanged: 2, anchorType: "grill", status: "merged", tasksMerged: 1, tasksAttempted: 1 },
+    ]);
+    assert.equal("worktreeBranch" in h.cycleCalls[0], false, "worktreeBranch is omitted when an explicit anchorType exists");
+  });
+
+  test("#3579: a null/absent head-branch ref omits worktreeBranch (truthful unknown)", async () => {
+    // The merge-status fetch didn't report a head branch — the field must be
+    // ABSENT on the enrichment body, not present-and-empty.
+    const h = makeWatchHarness(
+      [{ prNumber: 533, tier: 3, cycleId: "cyc-533", registeredAt: 1 }],
+      { 533: { state: "MERGED", mergeCommitSha: "abc1234def", changedFiles: 1, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1);
+    assert.equal("worktreeBranch" in h.cycleCalls[0], false, "worktreeBranch is absent when the head branch is unknown");
+  });
+
   test("AC2: a still-open PR (no merge commit) is left in the registry and NOT enrolled", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 502, tier: 3, cycleId: "cyc-502", registeredAt: 1 }],
-      { 502: { state: "OPEN", mergeCommitSha: null, changedFiles: null } },
+      { 502: { state: "OPEN", mergeCommitSha: null, changedFiles: null, headRefName: null } },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
@@ -811,7 +884,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("AC3: enroll + enrichment fire at most once per PR across repeated ticks", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 503, tier: 2, cycleId: "cyc-503", registeredAt: 1 }],
-      { 503: { state: "MERGED", mergeCommitSha: "deadbeef99", changedFiles: 2 } },
+      { 503: { state: "MERGED", mergeCommitSha: "deadbeef99", changedFiles: 2, headRefName: null } },
     );
 
     await runHoldbackMergeWatch(h.deps);
@@ -828,7 +901,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("AC4: a landed T1 PR is dropped from the registry WITHOUT a baseline being enrolled", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 504, tier: 1, cycleId: "cyc-504", registeredAt: 1 }],
-      { 504: { state: "MERGED", mergeCommitSha: "f00dcafe11", changedFiles: 1 } },
+      { 504: { state: "MERGED", mergeCommitSha: "f00dcafe11", changedFiles: 1, headRefName: null } },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
@@ -845,7 +918,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("AC4: an unknown-tier (null) landed PR is likewise dropped without enrolling", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 505, tier: null, cycleId: "cyc-505", registeredAt: 1 }],
-      { 505: { state: "MERGED", mergeCommitSha: "aaaabbbbcc", changedFiles: 0 } },
+      { 505: { state: "MERGED", mergeCommitSha: "aaaabbbbcc", changedFiles: 0, headRefName: null } },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
@@ -872,7 +945,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("AC5: an entry whose enroll returns a hard error is left to retry, not dropped", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 507, tier: 3, cycleId: "cyc-507", registeredAt: 1 }],
-      { 507: { state: "MERGED", mergeCommitSha: "111222333c", changedFiles: 4 } },
+      { 507: { state: "MERGED", mergeCommitSha: "111222333c", changedFiles: 4, headRefName: null } },
     );
     // Override enroll to fail hard.
     h.deps.enroll = async () => ({ ok: false as const, error: "boom" });
@@ -893,8 +966,8 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
         { prNumber: 509, tier: 3, cycleId: "cyc-509", registeredAt: 2 },
       ],
       {
-        508: { state: "MERGED", mergeCommitSha: "aaa", changedFiles: 1 },
-        509: { state: "MERGED", mergeCommitSha: "bbbbbbb", changedFiles: 3 },
+        508: { state: "MERGED", mergeCommitSha: "aaa", changedFiles: 1, headRefName: null },
+        509: { state: "MERGED", mergeCommitSha: "bbbbbbb", changedFiles: 3, headRefName: null },
       },
     );
     const realFetch = h.deps.fetchMergeStatus!;
@@ -913,7 +986,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   test("a landed enrolled-tier PR with no changedFiles still enrolls (filesChanged omitted)", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 510, tier: 4, cycleId: "cyc-510", registeredAt: 1 }],
-      { 510: { state: "MERGED", mergeCommitSha: "c0ffee1234", changedFiles: null } },
+      { 510: { state: "MERGED", mergeCommitSha: "c0ffee1234", changedFiles: null, headRefName: null } },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
@@ -932,9 +1005,9 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
         { prNumber: 522, tier: 1, cycleId: "c522", registeredAt: 3 }, // dropped exempt
       ],
       {
-        520: { state: "MERGED", mergeCommitSha: "s520", changedFiles: 2 },
-        521: { state: "OPEN", mergeCommitSha: null, changedFiles: null },
-        522: { state: "MERGED", mergeCommitSha: "s522", changedFiles: 1 },
+        520: { state: "MERGED", mergeCommitSha: "s520", changedFiles: 2, headRefName: null },
+        521: { state: "OPEN", mergeCommitSha: null, changedFiles: null, headRefName: null },
+        522: { state: "MERGED", mergeCommitSha: "s522", changedFiles: 1, headRefName: null },
       },
     );
 
@@ -1029,7 +1102,7 @@ describe("Merge-completion watcher (#2623) — marker + health (Redis)", () => {
     const enrollCalls: any[] = [];
     const cycleCalls: any[] = [];
     const deps: HoldbackMergeWatchDeps = {
-      fetchMergeStatus: async () => ({ state: "MERGED", mergeCommitSha: "sha710xyz", changedFiles: 3 }),
+      fetchMergeStatus: async () => ({ state: "MERGED", mergeCommitSha: "sha710xyz", changedFiles: 3, headRefName: null }),
       enroll: async (input: any) => { enrollCalls.push(input); return { ok: true as const, enrolled: true as const, leadingCount: 1, baseline: {} as any }; },
       recordCycleRecord: async (body: any) => { cycleCalls.push(body); return { ok: true as const, cycleId: body.cycleId, status: "completed", bucketed: null, deduped: true, enriched: true }; },
       // Real Redis accessors for listPending/removePending/wasEnrolled/mark/setHealth (defaults).

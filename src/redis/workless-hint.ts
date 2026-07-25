@@ -41,6 +41,7 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Default backoff window: how long to treat the board as workless after a
@@ -87,8 +88,9 @@ export async function getWorklessUntil(nowMs: number = Date.now()): Promise<numb
   if (!raw) return null;
   const ms = Number(raw);
   if (!Number.isFinite(ms) || ms <= 0) {
-    console.error(
-      `[workless-hint] unparseable workless-until value, treating as not workless: ${JSON.stringify(raw)}`,
+    logger.error(
+      { raw },
+      "[workless-hint] unparseable workless-until value, treating as not workless",
     );
     return null;
   }
@@ -111,8 +113,9 @@ export async function setWorklessUntil(
   nowMs: number = Date.now(),
 ): Promise<number | null> {
   if (!Number.isFinite(worklessUntilMs) || worklessUntilMs <= nowMs) {
-    console.error(
-      `[workless-hint] refusing to record non-future workless hint (worklessUntilMs=${worklessUntilMs}, now=${nowMs})`,
+    logger.error(
+      { worklessUntilMs, now: nowMs },
+      "[workless-hint] refusing to record non-future workless hint",
     );
     return null;
   }

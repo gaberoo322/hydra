@@ -4,6 +4,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /** Read a Redis INFO section (e.g. "memory", "stats"). Diagnostic helper. */
 export async function redisInfo(section: string): Promise<string> {
@@ -27,7 +28,7 @@ export async function pingRedis(): Promise<boolean> {
     const reply = await getRedisConnection().ping();
     return reply === "PONG" || reply === "PONG\n" || reply === "PONG\r\n";
   } catch (err: any) {
-    console.error(`[redis/utility] ping failed: ${err?.message || err}`);
+    logger.error({ err }, "[redis/utility] ping failed");
     return false;
   }
 }

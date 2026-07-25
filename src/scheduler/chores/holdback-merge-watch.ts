@@ -71,13 +71,22 @@ export interface MergeStatus {
   state: string | null;
   mergeCommitSha: string | null;
   changedFiles: number | null;
+  /**
+   * The merged PR's head-branch ref (issue #3579). Carried so the cycle-record
+   * FIRST-write (the qa_orch relay / dropped-arm case where reap never wrote a
+   * record for this cycleId) can decode the dispatch class from a fenced branch
+   * (`worktree-agent-<tok>-t{N}-<slot>`) when the bare cycleId itself carries no
+   * class token. `null` when the view didn't report one.
+   */
+  headRefName: string | null;
 }
 
-/** Raw `gh pr view --json state,mergeCommit,changedFiles` shape. */
+/** Raw `gh pr view --json state,mergeCommit,changedFiles,headRefName` shape. */
 interface RawPrView {
   state?: string | null;
   mergeCommit?: { oid?: string | null } | null;
   changedFiles?: number | null;
+  headRefName?: string | null;
 }
 
 /**
@@ -90,15 +99,25 @@ interface RawPrView {
  * returns `null` on any failure and never throws.
  */
 async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStatus | null> {
-  const view = await viewPr<RawPrView>(prNumber, "state,mergeCommit,changedFiles", {
-    transport: "graphql",
-  });
+  const view = await viewPr<RawPrView>(
+    prNumber,
+    // Issue #3579: `headRefName` rides along on the SAME view — it is a plain
+    // scalar field carried inline on both transports, so it adds no extra call.
+    "state,mergeCommit,changedFiles,headRefName",
+    {
+      transport: "graphql",
+    },
+  );
   if (view == null) return null;
   const oid = view.mergeCommit?.oid;
   return {
     state: typeof view.state === "string" ? view.state : null,
     mergeCommitSha: typeof oid === "string" && oid.length > 0 ? oid : null,
     changedFiles: typeof view.changedFiles === "number" ? view.changedFiles : null,
+    headRefName:
+      typeof view.headRefName === "string" && view.headRefName.length > 0
+        ? view.headRefName
+        : null,
   };
 }
 
@@ -127,6 +146,13 @@ export interface HoldbackMergeWatchDeps {
     // record for this cycleId) classifies explicitly instead of bucketing to
     // `unclassified`. Absent for pre-#2800 entries → prior inference behaviour.
     anchorType?: string;
+    // Issue #3579: the merged PR's head-branch ref, forwarded as a SECOND
+    // anchorType decode source for the FIRST-write case. classifyAnchorType
+    // consults it (via the same fence parser) only when the entry carried no
+    // explicit anchorType AND the bare cycleId is itself undecodable — so a
+    // fenced branch (`worktree-agent-<tok>-t{N}-<slot>`) recovers the class the
+    // cycleId lacks, never a guess (#2822). Absent → prior behaviour.
+    worktreeBranch?: string;
     // Issue #2854: a landed PR merged. For the qa_orch relay case (reap never
     // wrote a prior cycle-record) this enrichment is the FIRST write, so it must
     // carry the merged status + counters or recordCycle defaults them to 0 and
@@ -301,6 +327,7 @@ async function processOne(
       prNumber: number;
       filesChanged?: number;
       anchorType?: string;
+      worktreeBranch?: string;
       status?: string;
       tasksMerged?: number;
       tasksAttempted?: number;
@@ -328,6 +355,16 @@ async function processOne(
     // pre-#2800 entry (no anchorType) omits the field and degrades to the prior
     // inference behaviour. classifyAnchorType (cycle-close.ts) trims the value.
     if (entry.anchorType) cycleBody.anchorType = entry.anchorType;
+    // Issue #3579: when the entry carries NO explicit anchorType (the dropped-arm
+    // / qa_orch relay first-write case), forward the merged PR's head-branch ref
+    // so classifyAnchorType can decode the class from a fenced branch that the
+    // bare cycleId lacks. Suppressed when an explicit anchorType exists (it is
+    // authoritative — classifyAnchorType returns it before ever consulting the
+    // branch, so the extra field would be dead weight). Absent head branch →
+    // omitted (truthful "unknown"), degrading to the prior cycleId-only inference.
+    if (!entry.anchorType && status.headRefName) {
+      cycleBody.worktreeBranch = status.headRefName;
+    }
     const cycleRes = await ctx.recordCycleRecord(cycleBody);
     if (cycleRes.ok === false) {
       logger.error(

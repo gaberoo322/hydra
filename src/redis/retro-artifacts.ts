@@ -36,13 +36,14 @@
  *
  * NEVER-THROW contract (CLAUDE.md merge/grounding/verification convention):
  * every accessor returns a result object or a sentinel (`null` / `[]`) and
- * logs `console.error` with context on failure — a Redis outage degrades the
+ * logs via the structured logger (src/logger.ts) with context on failure — a Redis outage degrades the
  * Retro surface to "no data", it never throws into a caller. The persist path
  * returns a `{ ok }` result object so a failed write is legible to the skill
  * without aborting its run.
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /**
  * The narrow slice of the Redis connection these accessors use. Declaring it
@@ -179,8 +180,9 @@ export async function persistRetroArtifact(
     return { ok: true };
   } catch (err) {
     const detail = toDetail(err);
-    console.error(
-      `[retro] persistRetroArtifact failed for run ${artifact.run_id}: ${detail}`,
+    logger.error(
+      { runId: artifact.run_id, err },
+      "[retro] persistRetroArtifact failed",
     );
     return { ok: false, code: "redis-error", detail };
   }
@@ -206,7 +208,7 @@ export async function getRetroArtifact(
     const parsed = JSON.parse(raw) as RetroArtifact;
     return parsed;
   } catch (err) {
-    console.error(`[retro] getRetroArtifact failed for run ${runId}: ${toDetail(err)}`);
+    logger.error({ runId, err }, "[retro] getRetroArtifact failed");
     return null;
   }
 }
@@ -237,7 +239,7 @@ export async function listRecentRetroArtifacts(
     }
     return out;
   } catch (err) {
-    console.error(`[retro] listRecentRetroArtifacts failed: ${toDetail(err)}`);
+    logger.error({ err }, "[retro] listRecentRetroArtifacts failed");
     return [];
   }
 }

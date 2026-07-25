@@ -16,6 +16,7 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /** TTL on the health record — 2 days, longer than the hourly run cadence so a
  * present record is always the genuine last run, but short enough that a
@@ -64,7 +65,7 @@ export async function getReconcilerHealth(): Promise<ReconcilerHealthRecord | nu
   try {
     return JSON.parse(raw) as ReconcilerHealthRecord;
   } catch (err: any) {
-    console.error(`[Redis] getReconcilerHealth: unparseable health record: ${err?.message ?? err}`);
+    logger.error({ err }, "[Redis] getReconcilerHealth: unparseable health record");
     return null;
   }
 }
