@@ -1,0 +1,1 @@
+- feat: stamp idempotent semver git tags at deploy + deployed-version health reader (#3677)
