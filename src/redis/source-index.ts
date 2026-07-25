@@ -28,6 +28,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Single hash holding the whole `path -> sha1` dedup map. Not TTLed — a stale
@@ -59,9 +60,7 @@ export async function loadSourceHashes(): Promise<Map<string, string>> {
     }
     return out;
   } catch (err: any) {
-    console.error(
-      `[source-index] loadSourceHashes failed: ${err?.message || String(err)}`,
-    );
+    logger.error({ err }, "[source-index] loadSourceHashes failed");
     return new Map();
   }
 }
@@ -82,9 +81,7 @@ export async function persistSourceHash(path: string, hash: string): Promise<voi
     /* intentional: persistence is best-effort. A failed write only costs one
        redundant re-embed of this file after the next restart — never a crash,
        never a blocked index. */
-    console.error(
-      `[source-index] persistSourceHash failed for ${path}: ${err?.message || String(err)}`,
-    );
+    logger.error({ path, err }, "[source-index] persistSourceHash failed");
   }
 }
 
@@ -105,9 +102,7 @@ export async function countSourceHashes(): Promise<number> {
     const n = await r.hlen(sourceHashesKey());
     return typeof n === "number" ? n : 0;
   } catch (err: any) {
-    console.error(
-      `[source-index] countSourceHashes failed: ${err?.message || String(err)}`,
-    );
+    logger.error({ err }, "[source-index] countSourceHashes failed");
     return 0;
   }
 }
@@ -131,9 +126,7 @@ export async function clearSourceHashes(): Promise<boolean> {
     await r.del(sourceHashesKey());
     return true;
   } catch (err: any) {
-    console.error(
-      `[source-index] clearSourceHashes failed: ${err?.message || String(err)}`,
-    );
+    logger.error({ err }, "[source-index] clearSourceHashes failed");
     return false;
   }
 }

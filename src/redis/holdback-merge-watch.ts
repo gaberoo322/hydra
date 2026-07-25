@@ -36,6 +36,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Key builders (ADR-0009 — key shape lives in the seam).
@@ -160,7 +161,7 @@ export async function pendingEnrollAdd(entry: PendingEnrollEntry): Promise<Pendi
     return { ok: true };
   } catch (err: any) {
     const msg = `[holdback] pendingEnrollAdd failed for pr ${entry.prNumber}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ prNumber: entry.prNumber, err }, "[holdback] pendingEnrollAdd failed");
     return { ok: false, error: msg };
   }
 }
@@ -180,8 +181,9 @@ export async function pendingEnrollList(): Promise<PendingEnrollListResult> {
       try {
         entries.push(JSON.parse(raw) as PendingEnrollEntry);
       } catch (err: any) {
-        console.error(
-          `[holdback] pendingEnrollList: skipping malformed field ${field}: ${err?.message || String(err)}`,
+        logger.error(
+          { field, err },
+          "[holdback] pendingEnrollList: skipping malformed field",
         );
       }
     }
@@ -189,7 +191,7 @@ export async function pendingEnrollList(): Promise<PendingEnrollListResult> {
     return { ok: true, entries };
   } catch (err: any) {
     const msg = `[holdback] pendingEnrollList failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[holdback] pendingEnrollList failed");
     return { ok: false, error: msg };
   }
 }
@@ -207,7 +209,7 @@ export async function pendingEnrollRemove(prNumber: number): Promise<void> {
     /* intentional: removing a landed pending entry is best-effort cleanup; a
        stale field is harmless and the #2623 watcher re-reconciles on its next
        pass. */
-    console.error(`[holdback] pendingEnrollRemove failed for pr ${prNumber}: ${err?.message || String(err)}`);
+    logger.error({ prNumber, err }, "[holdback] pendingEnrollRemove failed");
   }
 }
 
@@ -235,9 +237,7 @@ export async function wasEnrolledMarked(prNumber: number): Promise<boolean> {
     const v = await r.hget(holdbackEnrolledMarkerKey(), String(prNumber));
     return v != null;
   } catch (err: any) {
-    console.error(
-      `[holdback] wasEnrolledMarked failed for pr ${prNumber}: ${err?.message || String(err)}`,
-    );
+    logger.error({ prNumber, err }, "[holdback] wasEnrolledMarked failed");
     return true;
   }
 }
@@ -259,7 +259,7 @@ export async function markEnrolled(
     return { ok: true };
   } catch (err: any) {
     const msg = `[holdback] markEnrolled failed for pr ${prNumber}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ prNumber, err }, "[holdback] markEnrolled failed");
     return { ok: false, error: msg };
   }
 }
@@ -295,7 +295,7 @@ export async function setMergeWatchHealth(record: MergeWatchHealthRecord): Promi
   } catch (err: any) {
     /* intentional: health persistence is observability, not correctness — a
        write failure is logged and swallowed so the watcher's own work stands. */
-    console.error(`[holdback] setMergeWatchHealth failed: ${err?.message || String(err)}`);
+    logger.error({ err }, "[holdback] setMergeWatchHealth failed");
   }
 }
 
@@ -308,7 +308,7 @@ export async function getMergeWatchHealth(): Promise<MergeWatchHealthRecord | nu
     if (!raw) return null;
     return JSON.parse(raw) as MergeWatchHealthRecord;
   } catch (err: any) {
-    console.error(`[holdback] getMergeWatchHealth: unreadable health record: ${err?.message || String(err)}`);
+    logger.error({ err }, "[holdback] getMergeWatchHealth: unreadable health record");
     return null;
   }
 }

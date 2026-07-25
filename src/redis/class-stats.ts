@@ -22,6 +22,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 import type { ClassScoreboard } from "../autopilot/class-stats-math.ts";
 
 /** The single snapshot key. JSON {@link ClassScoreboard}. */
@@ -56,7 +57,7 @@ export async function putClassScoreboard(
     return { ok: true };
   } catch (err: any) {
     const msg = `[class-stats] putClassScoreboard failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[class-stats] putClassScoreboard failed");
     return { ok: false, error: msg };
   }
 }
@@ -72,9 +73,7 @@ export async function getClassScoreboard(): Promise<ClassScoreboard | null> {
     if (!raw) return null;
     return JSON.parse(raw) as ClassScoreboard;
   } catch (err: any) {
-    console.error(
-      `[class-stats] getClassScoreboard failed: ${err?.message || String(err)}`,
-    );
+    logger.error({ err }, "[class-stats] getClassScoreboard failed");
     return null;
   }
 }

@@ -29,6 +29,7 @@
 
 import { getRedisConnection } from "./connection.ts";
 import { ATTRIBUTION_LEDGER_TTL_SECONDS } from "./attribution-constants.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Key builder (ADR-0009 — key shape lives in the seam).
@@ -90,7 +91,7 @@ export async function markMergeReverted(entry: RevertedMerge): Promise<MarkRever
     return { ok: true };
   } catch (err: any) {
     const msg = `[attribution] markMergeReverted failed for ${field}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ field, err }, "[attribution] markMergeReverted failed");
     return { ok: false, error: msg };
   }
 }
@@ -108,15 +109,16 @@ export async function listRevertedMerges(): Promise<ListRevertedResult> {
       try {
         reverts.push(JSON.parse(raw) as RevertedMerge);
       } catch (err: any) {
-        console.error(
-          `[attribution] listRevertedMerges: skipping malformed field ${field}: ${err?.message || String(err)}`,
+        logger.error(
+          { field, err },
+          "[attribution] listRevertedMerges: skipping malformed field",
         );
       }
     }
     return { ok: true, reverts };
   } catch (err: any) {
     const msg = `[attribution] listRevertedMerges failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[attribution] listRevertedMerges failed");
     return { ok: false, error: msg };
   }
 }
@@ -137,7 +139,7 @@ export async function removeRevertedMerge(
   } catch (err: any) {
     /* intentional: removing a drained revert entry is best-effort cleanup; a
        stale entry re-appends an idempotent void next tick. */
-    console.error(`[attribution] removeRevertedMerge failed for ${field}: ${err?.message || String(err)}`);
+    logger.error({ field, err }, "[attribution] removeRevertedMerge failed");
   }
 }
 

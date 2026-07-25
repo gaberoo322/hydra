@@ -29,6 +29,7 @@
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 export interface EmergencyBrakeState {
   /** True only when the brake is engaged. Absent flag => false. */
@@ -63,7 +64,7 @@ export async function getEmergencyBrake(): Promise<EmergencyBrakeState> {
     return { ...DISENGAGED };
   } catch (err: any) {
     // Fail loud, fail safe: log the corrupt blob, treat as disengaged.
-    console.error(`[emergency-brake] corrupt brake blob, treating as disengaged: ${err?.message ?? err}`);
+    logger.error({ err }, "[emergency-brake] corrupt brake blob, treating as disengaged");
     return { ...DISENGAGED };
   }
 }

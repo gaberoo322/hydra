@@ -22,6 +22,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
+import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
 // Key builder (ADR-0009 — key shape lives in the seam).
@@ -98,7 +99,7 @@ export async function openWindow(window: AttributionWindow): Promise<OpenWindowR
     return { ok: true };
   } catch (err: any) {
     const msg = `[attribution] openWindow failed for ${window.id}: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ windowId: window.id, err }, "[attribution] openWindow failed");
     return { ok: false, error: msg };
   }
 }
@@ -117,8 +118,9 @@ export async function listOpenWindows(): Promise<ListWindowsResult> {
       try {
         windows.push(JSON.parse(raw) as AttributionWindow);
       } catch (err: any) {
-        console.error(
-          `[attribution] listOpenWindows: skipping malformed field ${field}: ${err?.message || String(err)}`,
+        logger.error(
+          { field, err },
+          "[attribution] listOpenWindows: skipping malformed field",
         );
       }
     }
@@ -126,7 +128,7 @@ export async function listOpenWindows(): Promise<ListWindowsResult> {
     return { ok: true, windows };
   } catch (err: any) {
     const msg = `[attribution] listOpenWindows failed: ${err?.message || String(err)}`;
-    console.error(msg);
+    logger.error({ err }, "[attribution] listOpenWindows failed");
     return { ok: false, error: msg };
   }
 }
@@ -143,7 +145,7 @@ export async function closeWindow(id: string): Promise<void> {
   } catch (err: any) {
     /* intentional: removing a closed window is best-effort cleanup; a stale
        field just gets re-closed as a no-op on the next tick. */
-    console.error(`[attribution] closeWindow failed for ${id}: ${err?.message || String(err)}`);
+    logger.error({ windowId: id, err }, "[attribution] closeWindow failed");
   }
 }
 
