@@ -1,16 +1,19 @@
 import { Router } from "express";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { logger } from "../logger.ts";
+import { VlmChatCompletionRequestSchema } from "../schemas/vlm.ts";
 import {
-  VlmChatCompletionRequestSchema,
-  type VlmContentPart,
-  type VlmMessage,
-} from "../schemas/vlm.ts";
+  collectImageUrls,
+  collectText,
+  materializeImage,
+  resolveTimeoutMs,
+  runClaude,
+  type ClaudeCliEnvelope,
+  type MaterializedImage,
+  type SpawnFn,
+} from "../vlm/index.ts";
 
 /**
  * VLM claude-cli shim — an OpenAI-compatible `/vlm/v1/chat/completions` route
@@ -19,6 +22,13 @@ import {
  * OpenViking knowledge plane: OpenViking's `vlm.api_base` points at
  * `http://host.docker.internal:4000/vlm/v1`, so this MUST mount at app-root
  * `/vlm` (see api.ts), NOT under the `/api` Router.
+ *
+ * This module is the THIN HTTP ADAPTER (issue #3633): schema validation, the
+ * no-image 400, the OpenAI-envelope response, and the 400/502 error mapping. It
+ * composes two focused leaves under `src/vlm/`: image-materializer.ts (the pure
+ * content-part collection + data-URI decode + temp-file cluster) and
+ * claude-cli-runner.ts (the runClaude spawn/SIGKILL-timeout logic with the
+ * spawnImpl CI-safety seam). See src/vlm/index.ts.
  *
  * Design (design-concept issue-3542, "approved"):
  *   - HOST-SIDE ONLY. `claude -p` needs the host's ambient `~/.claude/` OAuth
@@ -42,20 +52,14 @@ import {
  *   - TIMEOUT. Raised well above the betting text-fetcher's 120s default: VLM
  *     image understanding with a Read-tool round-trip is slower and OV indexing
  *     is a latency-tolerant background workload. Bounded (SIGKILL on deadline),
- *     never an unbounded hang.
+ *     never an unbounded hang. The deadline (DEFAULT_REQUEST_TIMEOUT_MS) and the
+ *     runClaude seam now live in src/vlm/claude-cli-runner.ts.
  *   - CI SAFETY. The spawn is injected via `spawnImpl` so the unit test drives
  *     a mocked envelope; no live `claude` process launches in CI.
  */
 
 const DEFAULT_CLAUDE_BIN = "claude";
 const DEFAULT_MODEL = "sonnet";
-/**
- * Per-call deadline. Strictly greater than the betting text-fetcher's 120s
- * default (design-concept invariant): VLM image understanding via a Read-tool
- * round-trip is slower, and OpenViking indexing is a latency-tolerant
- * background workload — but still bounded so the route can never hang forever.
- */
-const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 
 /**
  * Prompt used when the VLM client sends only an image with no accompanying
@@ -63,8 +67,6 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
  * this default drives a plain describe-the-image caption.
  */
 const DEFAULT_CAPTION_INSTRUCTION = "Describe this image in detail.";
-
-type SpawnFn = typeof spawn;
 
 export interface VlmRouterDeps {
   /** Path or bare name of the `claude` binary. Defaults to `claude` (PATH-resolved). */
@@ -79,195 +81,6 @@ export interface VlmRouterDeps {
    * (acceptance criterion: no live subscription call in CI).
    */
   spawnImpl?: SpawnFn;
-}
-
-type ClaudeCliEnvelope = {
-  type?: unknown;
-  subtype?: unknown;
-  is_error?: unknown;
-  result?: unknown;
-  usage?: unknown;
-  total_cost_usd?: unknown;
-  duration_ms?: unknown;
-};
-
-type ClaudeCliRun = {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-};
-
-function resolveTimeoutMs(raw: number | undefined): number {
-  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
-    return Math.floor(raw);
-  }
-  return DEFAULT_REQUEST_TIMEOUT_MS;
-}
-
-/**
- * Run `claude` and resolve on close REGARDLESS of exit code — ported verbatim
- * from the betting fetcher's `runClaude`. The CLI reports model/auth/quota
- * failures as an `is_error` envelope on STDOUT while exiting 1, and that
- * envelope's `.result` carries the human message; rejecting on `code !== 0`
- * before parsing would swallow it. stdin is ignored so the CLI never blocks
- * waiting on it; a timeout SIGKILLs the child and rejects.
- */
-function runClaude(
-  spawnImpl: SpawnFn,
-  bin: string,
-  args: readonly string[],
-  timeoutMs: number,
-): Promise<ClaudeCliRun> {
-  return new Promise((resolve, reject) => {
-    let child: ReturnType<SpawnFn>;
-    try {
-      child = spawnImpl(bin, [...args], { stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      reject(
-        new Error(
-          `claude-cli spawn failed: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
-      return;
-    }
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const finish = (fn: () => void): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      fn();
-    };
-
-    const timer = setTimeout(() => {
-      finish(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* intentional: child may already be gone; the timeout error is what matters */
-        }
-        reject(new Error(`claude-cli timed out after ${timeoutMs}ms`));
-      });
-    }, timeoutMs);
-
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", (error) => {
-      finish(() => {
-        reject(
-          new Error(
-            `claude-cli spawn failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
-      });
-    });
-    child.on("close", (code) => {
-      finish(() => {
-        resolve({ code, stdout, stderr });
-      });
-    });
-  });
-}
-
-/** Flatten a message's `content` into its text parts, joined. */
-function messageText(message: VlmMessage): string {
-  if (typeof message.content === "string") return message.content;
-  return message.content
-    .filter((part): part is Extract<VlmContentPart, { type: "text" }> => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-}
-
-/** Collect every image content-part URL across all messages. */
-function collectImageUrls(messages: VlmMessage[]): string[] {
-  const urls: string[] = [];
-  for (const message of messages) {
-    if (typeof message.content === "string") continue;
-    for (const part of message.content) {
-      if (part.type === "image_url") urls.push(part.image_url.url);
-    }
-  }
-  return urls;
-}
-
-/** Collect every text instruction across all messages, joined. */
-function collectText(messages: VlmMessage[]): string {
-  return messages
-    .map((message) => messageText(message))
-    .filter((text) => text.length > 0)
-    .join("\n\n")
-    .trim();
-}
-
-const DATA_URI_RE = /^data:(?<mime>[^;,]+)?(?<base64>;base64)?,(?<data>.*)$/s;
-
-/** Map an image MIME type to a file extension for the temp file. */
-function extensionForMime(mime: string | undefined): string {
-  switch ((mime ?? "").toLowerCase()) {
-    case "image/png":
-      return "png";
-    case "image/jpeg":
-    case "image/jpg":
-      return "jpg";
-    case "image/gif":
-      return "gif";
-    case "image/webp":
-      return "webp";
-    default:
-      return "png";
-  }
-}
-
-/**
- * Decode a `data:` URI into raw bytes + extension. Returns null for a non-data
- * URL (e.g. an http(s) URL, which is handed to the model as-is). Base64 and
- * URL-encoded (percent) data URIs are both handled.
- */
-function decodeDataUri(url: string): { bytes: Buffer; ext: string } | null {
-  const match = DATA_URI_RE.exec(url);
-  if (!match || !match.groups) return null;
-  const { mime, base64, data } = match.groups;
-  const bytes = base64
-    ? Buffer.from(data, "base64")
-    : Buffer.from(decodeURIComponent(data), "utf8");
-  return { bytes, ext: extensionForMime(mime) };
-}
-
-/**
- * Materialize the first image reference for `claude -p`. A `data:` URI decodes
- * to a temp file under `os.tmpdir()` (NEVER the repo tree) and the returned
- * `cleanup` unlinks the temp dir; an http(s) URL is passed through as-is with a
- * no-op cleanup (the model fetches it via the Read/WebFetch path — but the shim
- * only allows Read, so a remote URL is best-effort). Returns the on-disk path
- * or URL the prompt should reference, plus the cleanup to run in a `finally`.
- */
-async function materializeImage(
-  url: string,
-): Promise<{ reference: string; cleanup: () => Promise<void> }> {
-  const decoded = decodeDataUri(url);
-  if (!decoded) {
-    // Non-data URL: hand it to the model verbatim, nothing to clean up.
-    return { reference: url, cleanup: async () => {} };
-  }
-  const dir = await mkdtemp(join(tmpdir(), "hydra-vlm-"));
-  const file = join(dir, `image-${randomBytes(6).toString("hex")}.${decoded.ext}`);
-  await writeFile(file, decoded.bytes);
-  return {
-    reference: file,
-    cleanup: async () => {
-      // rm the whole temp dir; recursive+force so a partially-written file or
-      // an already-removed dir cannot throw out of the finally.
-      await rm(dir, { recursive: true, force: true });
-    },
-  };
 }
 
 /**
@@ -333,7 +146,7 @@ export function createVlmRouter(deps: VlmRouterDeps = {}): Router {
     // Materialize the first image; the shim captions one image per call (the
     // OpenViking VLM client sends one image per document). Any additional
     // images are ignored — a caption over the primary image is the contract.
-    let materialized: { reference: string; cleanup: () => Promise<void> } | undefined;
+    let materialized: MaterializedImage | undefined;
     try {
       materialized = await materializeImage(imageUrls[0]);
       const prompt = `Read the image file at ${materialized.reference} and then respond to this request: ${instruction}`;
