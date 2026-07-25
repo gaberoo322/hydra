@@ -521,3 +521,75 @@ export function classifyAnchorType(
   );
   return UNCLASSIFIED_ANCHOR_TYPE;
 }
+
+/**
+ * The stable kebab-case token naming WHY a `no-attribution` cycle is
+ * structurally undecodable (issue #3623).
+ *
+ *   - `harness-branch` — a bare `worktree-agent-<longhash>` Agent-tool branch
+ *     (as the cycleId itself OR the stored `worktreeBranch`). It carries no
+ *     `-t{N}-<slot>` fence, so the #2822 never-guess invariant deliberately
+ *     excludes it. This is the harness's own branch name for an
+ *     `Agent(isolation:"worktree")` dispatch that never rode the autopilot's
+ *     synthesised `worktree-agent-<tok>-t{N}-<slot>` branch.
+ *   - `descriptive-branch` — a human/feature branch (`feat/3605-…`,
+ *     `vlm-claude-cli-shim-3542`) with an issue number but NO dispatch-class
+ *     token. Undecodable because there is no class to recover.
+ *   - `autopilot-turn` — the autopilot's own `autopilot-<hash>-t{N}` turn-scoped
+ *     cycleId: it has a `-t{N}` turn fence but no trailing `-<slot>` class token.
+ *   - `bare-uuid` — a bare UUID cycleId with no branch to decode: the dominant
+ *     merge-status-enrichment / cycle-merge-reconcile first-write shape, where
+ *     the writer knew only the cycleId + PR number, never a dispatch class.
+ *   - `unknown-shape` — an undecodable cycle fitting none of the above known
+ *     shapes; a stable non-empty fallback so a caller never reasons about a novel
+ *     residual by hand.
+ */
+export type NoAttributionShape =
+  | "harness-branch"
+  | "descriptive-branch"
+  | "autopilot-turn"
+  | "bare-uuid"
+  | "unknown-shape";
+
+/** A bare `worktree-agent-<longhash>` Agent-tool branch (no `-t{N}-<slot>` fence). */
+const BARE_HARNESS_BRANCH = /^worktree-agent-[0-9a-f]+$/;
+/** The autopilot's own turn-scoped cycleId: `autopilot-<hash>-t{N}` (no slot). */
+const AUTOPILOT_TURN_CYCLE_ID = /^autopilot-[0-9a-z-]+-t\d+$/;
+/** A canonical bare UUID (8-4-4-4-12 hex). */
+const BARE_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Classify a `no-attribution` cycle by its structural SHAPE (issue #3623).
+ *
+ * Pure and zero-I/O — string inputs alone, no Redis, no async. It NEVER guesses
+ * a lane (that would violate #2822); it only names the structural reason a cycle
+ * carries no decodable dispatch-class token, so the `no-attribution` residue is
+ * self-documenting instead of an opaque count. The caller ({@link
+ * getUnclassifiedAnchors} in `src/metrics/aggregate.ts`) has already established
+ * this cycle is `no-attribution` — NEITHER the cycleId NOR the branch decodes via
+ * {@link inferAnchorTypeFromCycleId} — so this is a diagnostic split, not a
+ * second decode attempt.
+ *
+ * The stored `worktreeBranch` is consulted FIRST when present, because a branch
+ * shape (`harness-branch` / `descriptive-branch`) explains the undecodability
+ * more precisely than the generic `bare-uuid` cycleId shape. Always returns a
+ * stable, non-empty kebab-case token (`unknown-shape` for a novel residual).
+ */
+export function classifyNoAttributionShape(
+  cycleId: string,
+  branchRef: string | undefined,
+): NoAttributionShape {
+  const branch = typeof branchRef === "string" ? branchRef.trim() : "";
+  if (branch.length > 0) {
+    if (BARE_HARNESS_BRANCH.test(branch)) return "harness-branch";
+    // A branch that is neither a decodable fence (the caller already confirmed it
+    // is undecodable) nor a bare harness longhash is a descriptive/feature branch.
+    return "descriptive-branch";
+  }
+  const id = cycleId.trim();
+  if (BARE_HARNESS_BRANCH.test(id)) return "harness-branch";
+  if (AUTOPILOT_TURN_CYCLE_ID.test(id)) return "autopilot-turn";
+  if (BARE_UUID.test(id)) return "bare-uuid";
+  return "unknown-shape";
+}

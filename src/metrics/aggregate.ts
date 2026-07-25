@@ -30,7 +30,11 @@ import {
   projectCostByOutcome,
   projectCumulativeAccomplishments,
 } from "./stats-projection.ts";
-import { inferAnchorTypeFromCycleId } from "../autopilot/anchor-type.ts";
+import {
+  inferAnchorTypeFromCycleId,
+  classifyNoAttributionShape,
+  type NoAttributionShape,
+} from "../autopilot/anchor-type.ts";
 
 /**
  * Get the token cost broken down by cycle outcome over a recent trend window.
@@ -114,6 +118,15 @@ export interface UnclassifiedAnchorRecord {
    * {@link UnclassifiedClassification}.
    */
   classification: UnclassifiedClassification;
+  /**
+   * For a `no-attribution` cycle only (issue #3623): the stable kebab-case token
+   * naming WHY it is structurally undecodable (`harness-branch`, `bare-uuid`,
+   * `autopilot-turn`, `descriptive-branch`, `unknown-shape`). Absent on a
+   * `fixable` row — a fixable cycle HAS a recoverable lane, so "why undecodable"
+   * does not apply. This makes the `no-attribution` residue self-documenting: the
+   * operator sees the reason inline instead of re-deriving it per cycleId by hand.
+   */
+  shape?: NoAttributionShape;
 }
 
 /**
@@ -158,11 +171,22 @@ export async function getUnclassifiedAnchors(count = 50): Promise<{
   fixable: number;
   noAttribution: number;
   fixableRate: number;
+  /**
+   * Issue #3623: the `no-attribution` count broken down by the structural SHAPE
+   * that makes each cycle undecodable, keyed by the {@link NoAttributionShape}
+   * token. Sums to `noAttribution`. This is the "document the undecodable shape"
+   * root-cause capture the issue calls for — an operator (or the discover class)
+   * can read WHY the residue is dark (e.g. `{ "harness-branch": 5, "bare-uuid":
+   * 6, "autopilot-turn": 2, "descriptive-branch": 1 }`) without fetching each
+   * cycleId/branch and re-deriving the shape by hand.
+   */
+  noAttributionShapes: Record<string, number>;
 }> {
   const trend = await getMetricsTrend(count);
   const unclassified: UnclassifiedAnchorRecord[] = [];
   let fixable = 0;
   let noAttribution = 0;
+  const noAttributionShapes: Record<string, number> = {};
   for (const m of trend) {
     if ((m.anchorType && String(m.anchorType).trim()) !== "unclassified") continue;
     // #3602 split: the read path already tried the cycleId, so fixability hinges
@@ -180,12 +204,26 @@ export async function getUnclassifiedAnchors(count = 50): Promise<{
       branch !== undefined && inferAnchorTypeFromCycleId(branch) !== undefined
         ? "fixable"
         : "no-attribution";
+    const cycleId = String(m.cycleId);
+    // Issue #3623: name the structural shape of a no-attribution cycle so the
+    // residue is self-documenting. Never guesses a lane (#2822) — it only labels
+    // WHY the cycle carries no decodable class token.
+    const shape =
+      classification === "no-attribution"
+        ? classifyNoAttributionShape(cycleId, branch)
+        : undefined;
     if (classification === "fixable") fixable++;
-    else noAttribution++;
+    else {
+      noAttribution++;
+      if (shape !== undefined) {
+        noAttributionShapes[shape] = (noAttributionShapes[shape] ?? 0) + 1;
+      }
+    }
     const record: UnclassifiedAnchorRecord = {
-      cycleId: String(m.cycleId),
+      cycleId,
       classification,
     };
+    if (shape !== undefined) record.shape = shape;
     if (m.prNumber !== undefined && m.prNumber !== null && String(m.prNumber).length > 0) {
       record.prNumber = String(m.prNumber);
     }
@@ -206,6 +244,9 @@ export async function getUnclassifiedAnchors(count = 50): Promise<{
     // structurally-undecodable harness noise (`no-attribution`) can no longer
     // trip the >10% gate.
     fixableRate: pct(fixable),
+    // #3623: the no-attribution count split by structural shape (sums to
+    // `noAttribution`) so the dark residue is self-documenting.
+    noAttributionShapes,
   };
 }
 
