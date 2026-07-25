@@ -88,12 +88,15 @@ Alerts:
 - Any anchor type >50% empty over 5+ cycles → performance finding
 - Any anchor type 0% merge over 5+ cycles → architectural finding
 - Overall empty rate >25% → performance finding
-- Unclassified-anchor rate >10% → architectural finding (the classifier can't
-  attribute those cycles to a lane; drill into the offending cycleIds below)
+- Unclassified-anchor **fixable** rate >10% → architectural finding (a genuine
+  classifier/attribution gap the pipeline could close; drill into the offending
+  cycleIds below). Issue #3602: key the trigger on `fixableRate`, NOT the total
+  `rate` — the total conflates fixable gaps with structurally-undecodable harness
+  noise (`no-attribution`) that no classifier change can attribute.
 
-**Unclassified-residue drill-down (issue #3403 instrumentation, exposed #3443).**
-When the anchor-type breakdown shows an `unclassified` bucket over the >10%
-threshold, root-cause it by pulling the offending cycles' attribution metadata —
+**Unclassified-residue drill-down (issue #3403 instrumentation, exposed #3443;
+#3602 sub-bucket split).** When the anchor-type breakdown shows an `unclassified`
+bucket, root-cause it by pulling the offending cycles' attribution metadata —
 each carries the `cycleId` and, where the writer forwarded one, the `prNumber`
 you can trace back to a specific PR:
 
@@ -102,15 +105,26 @@ hydra raw GET /metrics/unclassified            # default 50-cycle window
 # or widen/narrow the window:  hydra raw GET /metrics/unclassified?count=200
 ```
 
-Payload: `{ windowCycles, unclassified: [{ cycleId, prNumber?, anchorReference?,
-taskTitle? }], rate }` — `rate` is the unclassified percentage over
-`windowCycles`, and each `unclassified` entry maps a residual cycle back to a
-named PR / anchor (a *documented exception*) rather than an opaque count. Most
-residual rows are the holdback-merge-watch merged-status enrichment write (they
-carry a `prNumber` but no forwarded `anchorType`, and their bare-UUID / harness
-branch cycleId has no decodable dispatch slot — the known #2800 upstream forward
-gap); file an architectural finding only when the residue reflects a NEW
-undecodable id shape.
+Payload: `{ windowCycles, unclassified: [{ cycleId, classification, prNumber?,
+anchorReference?, taskTitle? }], rate, fixable, noAttribution, fixableRate }`.
+`rate` is the TOTAL sentinel percentage over `windowCycles`; `fixableRate` is the
+percentage that is `fixable` — **the number the >10% architectural trigger keys
+on.** Each `unclassified` entry carries a `classification`:
+
+- `fixable` — the cycle's `worktreeBranch` head ref DOES decode to a real lane via
+  the never-guess parser, but the stored anchorType is still the sentinel (the
+  #3602 Shape-B first-write timing gap the #3604 write-path heal closes). A
+  persistent `fixable` residue is a real gap worth a finding.
+- `no-attribution` — neither the cycleId nor the branch carries a decodable class
+  token (#3602 Shapes A/C: bare UUID + descriptive/longhash branch,
+  `autopilot-<hash>-t{N}`, bare `worktree-agent-<longhash>`). Structurally
+  undecodable BY DESIGN under the #2822 never-guess invariant — inherent harness
+  noise. Do NOT file an architectural finding on `no-attribution` residue; the
+  only honest fix is producer-side (emit an explicit anchorType at reap), a
+  separate larger change.
+
+File an architectural finding only when `fixableRate` crosses 10% or the residue
+reflects a NEW undecodable id shape.
 
 ### 2a-impact. Outcome-impact ranking — the reverse loop (issue #3283)
 

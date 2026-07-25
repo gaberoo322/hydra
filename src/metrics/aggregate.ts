@@ -30,6 +30,7 @@ import {
   projectCostByOutcome,
   projectCumulativeAccomplishments,
 } from "./stats-projection.ts";
+import { inferAnchorTypeFromCycleId } from "../autopilot/anchor-type.ts";
 
 /**
  * Get the token cost broken down by cycle outcome over a recent trend window.
@@ -67,6 +68,28 @@ export async function getCumulativeAccomplishments(count = 15) {
 }
 
 /**
+ * The two-way classification of an `unclassified`-sentinel cycle (issue #3602).
+ *
+ *   - `fixable` — the STORED anchorType is the sentinel, but a SECOND decode
+ *     source (the cycle's `worktreeBranch` head ref) DOES decode to a real lane
+ *     via the same never-guess {@link inferAnchorTypeFromCycleId} parser. This is
+ *     the #3602 "Shape B" gap: a bare-UUID cycleId reap first-wrote `unclassified`
+ *     (no branch known at reap), then a decodable branch arrived on a later
+ *     enrichment write. The #3604 write-path heal upgrades these in place once it
+ *     deploys, so a `fixable` residue is a genuine classifier/attribution gap a
+ *     forward fix can (and does) close.
+ *   - `no-attribution` — NEITHER the cycleId NOR the `worktreeBranch` carries any
+ *     decodable class token (#3602 "Shapes A/C": a bare UUID with a
+ *     descriptive/longhash branch, `autopilot-<hash>-t{N}`, a bare
+ *     `worktree-agent-<longhash>`). These are structurally undecodable BY DESIGN
+ *     under the #2822 never-guess invariant — there is no lane to recover without
+ *     guessing. This is inherent harness-cycle noise, not a fixable classifier
+ *     gap; a producer-side "emit anchorType at reap" change is the only honest
+ *     fix and is out of scope of #3602.
+ */
+export type UnclassifiedClassification = "fixable" | "no-attribution";
+
+/**
  * A single still-unclassified cycle's attribution metadata (issue #3403).
  *
  * Exposed by {@link getUnclassifiedAnchors} so the residue that survives the
@@ -85,6 +108,12 @@ export interface UnclassifiedAnchorRecord {
   anchorReference?: string;
   /** The human task title, when the writer forwarded one. */
   taskTitle?: string;
+  /**
+   * The #3602 two-way split: `fixable` (a second decode source recovers a lane)
+   * vs `no-attribution` (structurally undecodable, inherent harness noise). See
+   * {@link UnclassifiedClassification}.
+   */
+  classification: UnclassifiedClassification;
 }
 
 /**
@@ -92,25 +121,71 @@ export interface UnclassifiedAnchorRecord {
  *
  * Surfaces the metadata of every cycle in the recent window whose anchorType is
  * the `unclassified` sentinel — the root-cause capture the #3403 proposed
- * solution (#3) calls for. Most residual unclassified cycles are the
- * holdback-merge-watch merged-status enrichment write (they carry a `prNumber`
- * but no forwarded anchorType, and their cycleId is a bare UUID / harness branch
- * name with no decodable dispatch slot — the known #2800 upstream forward gap).
- * Emitting the cycleId + prNumber makes each a "documented exception" the
- * operator can map back to its PR, satisfying the issue's success criterion that
- * every unclassified cycle map to a named type OR a documented exception.
+ * solution (#3) calls for. Emitting the cycleId + prNumber makes each a
+ * "documented exception" the operator can map back to its PR, satisfying the
+ * #3403 success criterion that every unclassified cycle map to a named type OR a
+ * documented exception.
+ *
+ * Issue #3602 — the two-way SUB-BUCKET split. The single `unclassified` bucket
+ * conflated two structurally different populations, so the discovery playbook's
+ * >10%-unclassified architectural-review trigger fired on inherent harness noise
+ * that no classifier change can fix:
+ *
+ *   - `fixable` — the STORED anchorType is the sentinel, but the cycle's
+ *     `worktreeBranch` head ref DOES decode to a real lane via the same
+ *     never-guess {@link inferAnchorTypeFromCycleId} parser (the #3602 Shape-B
+ *     first-write timing gap the #3604 write-path heal closes). NOTE: the read
+ *     path (`getMetricsTrend`) already re-runs the parser over the CYCLEID for
+ *     sentinel rows, so a row still sentinel here has an undecodable cycleId; the
+ *     `worktreeBranch` is the residual second source that distinguishes a fixable
+ *     gap from inherent noise.
+ *   - `no-attribution` — neither the cycleId nor the `worktreeBranch` carries a
+ *     decodable class token (#3602 Shapes A/C). Structurally undecodable under the
+ *     #2822 never-guess invariant — inherent harness-cycle noise, not a fixable
+ *     classifier gap.
+ *
+ * `fixableRate` (the % of the window that is `fixable`) is what the architectural
+ * trigger should key on, so undecodable-by-design residue can no longer trip it.
+ * `rate` (the total sentinel %) is preserved verbatim for back-compat.
  *
  * Thin wrapper: fetch the trend (the `count` knob), then filter/shape the
  * sentinel rows — mirrors the other `getX` aggregators in this module.
  */
-export async function getUnclassifiedAnchors(
-  count = 50,
-): Promise<{ windowCycles: number; unclassified: UnclassifiedAnchorRecord[]; rate: number }> {
+export async function getUnclassifiedAnchors(count = 50): Promise<{
+  windowCycles: number;
+  unclassified: UnclassifiedAnchorRecord[];
+  rate: number;
+  fixable: number;
+  noAttribution: number;
+  fixableRate: number;
+}> {
   const trend = await getMetricsTrend(count);
   const unclassified: UnclassifiedAnchorRecord[] = [];
+  let fixable = 0;
+  let noAttribution = 0;
   for (const m of trend) {
     if ((m.anchorType && String(m.anchorType).trim()) !== "unclassified") continue;
-    const record: UnclassifiedAnchorRecord = { cycleId: String(m.cycleId) };
+    // #3602 split: the read path already tried the cycleId, so fixability hinges
+    // on whether the STORED worktreeBranch (a second decode source) decodes via
+    // the SAME never-guess parser. A decodable branch → `fixable` (Shape B, the
+    // #3604 heal closes it); no decodable branch → `no-attribution` (Shapes A/C,
+    // structurally undecodable — inherent harness noise, never a guess).
+    const branch =
+      m.worktreeBranch !== undefined &&
+      m.worktreeBranch !== null &&
+      String(m.worktreeBranch).trim().length > 0
+        ? String(m.worktreeBranch).trim()
+        : undefined;
+    const classification: UnclassifiedClassification =
+      branch !== undefined && inferAnchorTypeFromCycleId(branch) !== undefined
+        ? "fixable"
+        : "no-attribution";
+    if (classification === "fixable") fixable++;
+    else noAttribution++;
+    const record: UnclassifiedAnchorRecord = {
+      cycleId: String(m.cycleId),
+      classification,
+    };
     if (m.prNumber !== undefined && m.prNumber !== null && String(m.prNumber).length > 0) {
       record.prNumber = String(m.prNumber);
     }
@@ -119,10 +194,19 @@ export async function getUnclassifiedAnchors(
     unclassified.push(record);
   }
   const windowCycles = trend.length;
-  const rate = windowCycles > 0
-    ? +((unclassified.length / windowCycles) * 100).toFixed(1)
-    : 0;
-  return { windowCycles, unclassified, rate };
+  const pct = (n: number) =>
+    windowCycles > 0 ? +((n / windowCycles) * 100).toFixed(1) : 0;
+  return {
+    windowCycles,
+    unclassified,
+    rate: pct(unclassified.length),
+    fixable,
+    noAttribution,
+    // #3602: the architectural-review trigger keys on THIS, not `rate`, so
+    // structurally-undecodable harness noise (`no-attribution`) can no longer
+    // trip the >10% gate.
+    fixableRate: pct(fixable),
+  };
 }
 
 /**
