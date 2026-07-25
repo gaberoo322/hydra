@@ -45,8 +45,8 @@
  * dispatch-outcome plane, and DELEGATES the numeric fold to the pure aggregator
  * leaf `src/aggregators/cascade-routing.ts` (issue #3638). The count/score folds
  * (`rollupCascadeTelemetry`, `rollupEscalationOutcomes`) and their record/rollup
- * types live there; they are re-exported here so existing seam callers keep a
- * stable import surface.
+ * types live in the aggregator and are imported here for internal use by the
+ * I/O operations, but NOT re-exported (callers must import from the aggregator).
  */
 
 import { boundedJsonList } from "./bounded-list.ts";
@@ -62,9 +62,10 @@ import type {
   EscalationOutcomeFold,
 } from "../aggregators/cascade-routing.ts";
 
-// Re-export the pure aggregator surface so callers that reach for the record /
-// rollup types (or the folds) through the redis seam keep a stable import path.
-export { rollupCascadeTelemetry, rollupEscalationOutcomes, EMPTY_ESCALATION_OUTCOME_FOLD };
+// The pure aggregator surface (rollupCascadeTelemetry, rollupEscalationOutcomes,
+// EMPTY_ESCALATION_OUTCOME_FOLD) and their types now live in
+// src/aggregators/cascade-routing.ts. Callers MUST import them directly from the
+// aggregator, not from the redis seam. The redis seam is I/O only.
 export type { CascadeRecord, CascadeTelemetryRollup, EscalationOutcomeFold };
 
 /**
