@@ -58,7 +58,9 @@ describe("metrics-cost router — route registration (issue #3652)", () => {
     for (const layer of createMetricsCostRouter().stack ?? []) {
       const route = layer.route;
       if (!route) continue;
-      const methods = Object.keys(route.methods ?? {});
+      const methods = Object.keys(
+        (route as { methods?: Record<string, boolean> }).methods ?? {},
+      );
       assert.deepEqual(
         methods,
         ["get"],

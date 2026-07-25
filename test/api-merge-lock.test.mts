@@ -48,7 +48,9 @@ describe("merge-lock router — route registration (issue #3652)", () => {
     for (const layer of createMergeLockRouter().stack ?? []) {
       const route = layer.route;
       if (!route) continue;
-      const methods = Object.keys(route.methods ?? {});
+      const methods = Object.keys(
+        (route as { methods?: Record<string, boolean> }).methods ?? {},
+      );
       assert.deepEqual(
         methods,
         ["post"],
