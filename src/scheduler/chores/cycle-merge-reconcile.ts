@@ -102,7 +102,7 @@ interface RawPrState {
  * #3604), the merged PR's head-branch ref. `headRefName` is `null` when the view
  * didn't report one.
  */
-export interface ReconcilePrView {
+interface ReconcilePrView {
   state: string | null;
   headRefName: string | null;
 }
