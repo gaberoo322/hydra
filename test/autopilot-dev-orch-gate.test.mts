@@ -167,6 +167,64 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
     assert.equal(r.stdout, "3", "three fresh hydra-dev PRs out of five total");
   });
 
+  // --- GLM dev-drainer partition (ADR-0032 / issue #3687) -------------------
+  // The drainer authors in a git worktree, so its PR head branch carries the
+  // SAME `worktree-agent-*` prefix as an Opus dev_orch PR. Provenance is
+  // therefore a LABEL, not a branch name (ADR-0032 Decision 5 / invariant 9),
+  // and the collector must subtract `glm-authored` PRs — otherwise an open
+  // drainer PR inflates `active_dev_orch` and idles the Opus dev_orch slot on
+  // quota the drainer isn't spending.
+
+  test("fresh glm-authored PR on worktree-agent- head is NOT counted (#3687)", () => {
+    const prs = [
+      {
+        headRefName: "worktree-agent-ab3a8b01c3f11f366",
+        updatedAt: iso(60),
+        labels: [{ name: "glm-authored" }],
+      },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(
+      r.stdout,
+      "0",
+      "a glm-authored drainer PR must not gate the Opus dev_orch slot",
+    );
+  });
+
+  test("glm-authored is subtracted while a sibling Opus PR still counts (#3687)", () => {
+    const prs = [
+      // drainer PR — same branch prefix, discriminated only by the label
+      {
+        headRefName: "worktree-agent-deadbeef",
+        updatedAt: iso(60),
+        labels: [{ name: "glm-authored" }, { name: "enhancement" }],
+      },
+      // genuine Opus dev_orch PR — still counts
+      {
+        headRefName: "worktree-agent-cafebabe",
+        updatedAt: iso(60),
+        labels: [{ name: "enhancement" }],
+      },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(
+      r.stdout,
+      "1",
+      "only the non-glm-authored PR counts — the branch prefix is identical",
+    );
+  });
+
+  test("PR row with no labels field is not treated as glm-authored (#3687)", () => {
+    // Totality guard: `.labels // []` must keep the filter safe on a row that
+    // omits `labels` entirely, rather than erroring or dropping the PR.
+    const prs = [{ headRefName: "issue-412-no-labels-field", updatedAt: iso(60) }];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, "1", "missing labels ⇒ not glm-authored ⇒ still counted");
+  });
+
   test("collector script is executable and emits active_dev_orch line", () => {
     // Belt-and-braces: confirm the line is actually printed when the
     // script runs. We don't assert the value (it depends on live
@@ -220,6 +278,18 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
       collector,
       /active_dev_orch/,
       "Phase 1 collector must emit the live-PR signal so the model can set signals.active_dev_orch",
+    );
+  });
+
+  test("active_dev_orch gh query requests labels so the glm filter can see them (#3687)", () => {
+    // The `glm-authored` exclusion is invisible unless `labels` is in the
+    // --json field list: `gh` would omit the key, `.labels // []` would yield
+    // `[]`, and EVERY drainer PR would silently re-inflate the counter. Pin
+    // the field list so dropping it fails loudly here instead of in prod.
+    assert.match(
+      collector,
+      /gh pr list --repo gaberoo322\/hydra --state open --json [^\n]*\blabels\b/,
+      "active_dev_orch collector must request `labels` from gh",
     );
   });
 });

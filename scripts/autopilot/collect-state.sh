@@ -122,9 +122,16 @@ keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress'
 print(json.dumps({k:d[k] for k in keys}))"
 else
   # Fallback: orchestrator down or its gh read degraded — read directly.
+  # This jq MUST stay behaviourally identical to `deriveBoardState`
+  # (`src/autopilot/board-state.ts`) — including BOTH `ready_for_agent`
+  # partition exclusions: `target-backlog` (issue #2704, Target-scope routing)
+  # and `glm-eligible` (ADR-0032 / issue #3687, authored by the GLM dev-drainer
+  # on z.ai's independent quota, so it must not inflate the Opus `dev_orch`
+  # authoring pool). The strict-blocker exclusion (#3059) is endpoint-only and
+  # deliberately absent here — the degraded path stays a single `gh` read.
   gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
     needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
-    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not))] | length,
+    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not) and (($n | index("glm-eligible")) | not))] | length,
     needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
     in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,
@@ -420,14 +427,25 @@ echo "$ORCH_GRILL_PICK"
 # and the harness-created `worktree-agent-<hash>` (Claude Agent tool
 # isolation=worktree). 5400s = 90 min, matching the Phase 1.5 stale
 # threshold so the two signals line up.
+#
+# GLM PARTITION (ADR-0032 / issue #3687): a `glm-authored` PR is EXCLUDED. The
+# dev-drainer authors in a git worktree too, so its head branch carries the SAME
+# `worktree-agent-*` prefix as an Opus dev_orch PR — a branch-name carve-out
+# cannot discriminate them (ADR-0032 Decision 5 / invariant 9, which is exactly
+# why provenance is a label). Without this filter every open drainer PR would
+# inflate `active_dev_orch`, and decide.py's busy-slot guard would idle the Opus
+# dev_orch slot on quota the drainer isn't even spending — inverting the whole
+# point of the lane. `.labels // []` keeps the filter total: a PR row with no
+# labels field is simply not glm-authored.
 echo -n "active_dev_orch="
-gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName --jq '[
+gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,labels --jq '[
   .[]
   | select(
       (.headRefName | startswith("issue-"))
       or (.headRefName | startswith("hydra-dev/"))
       or (.headRefName | startswith("worktree-agent-"))
     )
+  | select(((.labels // []) | map(.name) | index("glm-authored")) | not)
   | select((now - (.updatedAt | fromdateiso8601)) < 5400)
 ] | length' 2>/dev/null || echo 0
 

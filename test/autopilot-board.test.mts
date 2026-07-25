@@ -17,6 +17,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve, join } from "node:path";
 
 import {
   createAutopilotBoardRouter,
@@ -113,6 +116,54 @@ describe("deriveBoardState — counts + stale lists (issue #934)", () => {
     );
     // Only the pure orch issue counts; the dual-labeled Target issue is excluded.
     assert.equal(out.ready_for_agent, 1);
+  });
+
+  test("glm-eligible + ready-for-agent is NOT counted as orch ready_for_agent (#3687)", () => {
+    // ADR-0032: a glm-eligible issue is authored by the GLM dev-drainer on
+    // z.ai's independent quota. `ready_for_agent` is the Opus `dev_orch`
+    // AUTHORING pool that decide.py consumes, so counting a drainer-owned
+    // issue there dispatches a second author onto work already claimed.
+    const out = deriveBoardState(
+      [
+        // pure orch ready-for-agent → counted
+        row({ number: 1, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+        // drainer-owned: carries BOTH labels → excluded from the orch count
+        row({
+          number: 3687,
+          labels: [
+            ORCH_BOARD_LABELS.ready_for_agent,
+            ORCH_BOARD_LABELS.glm_eligible,
+          ],
+        }),
+        // glm-eligible alone (no ready-for-agent) → not counted anyway
+        row({ number: 3, labels: [ORCH_BOARD_LABELS.glm_eligible] }),
+      ],
+      NOW_MS,
+    );
+    assert.equal(out.ready_for_agent, 1);
+  });
+
+  test("glm-eligible does not disturb the other board counts (#3687)", () => {
+    // The exclusion is scoped to the dev_orch authoring count ONLY. A
+    // glm-eligible issue that is also needs-qa / in-progress must still be
+    // counted there — and design_concept_orch (which reads no board count
+    // gated on glm-eligible) stays active on it per ADR-0032 Decision 1.
+    const out = deriveBoardState(
+      [
+        row({
+          number: 42,
+          labels: [
+            ORCH_BOARD_LABELS.glm_eligible,
+            ORCH_BOARD_LABELS.needs_qa,
+            ORCH_BOARD_LABELS.in_progress,
+          ],
+        }),
+      ],
+      NOW_MS,
+    );
+    assert.equal(out.ready_for_agent, 0);
+    assert.equal(out.needs_qa, 1);
+    assert.equal(out.in_progress, 1);
   });
 
   test("empty board → all zero, empty stale lists", () => {
@@ -602,5 +653,108 @@ describe("Target board-label leaf — single definition (issue #3434)", () => {
       ),
       false,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh degraded-path parity — the GLM partition (ADR-0032, #3687)
+// ---------------------------------------------------------------------------
+
+/**
+ * `scripts/autopilot/collect-state.sh` reads `ready_for_agent` from the
+ * orchestrator's `/autopilot/board-state` endpoint (which runs
+ * `deriveBoardState` above). When that endpoint is DOWN or reports
+ * `degraded:true`, it falls back to an inline `gh issue list --jq` that
+ * re-spells the same bucketing in bash.
+ *
+ * That fallback is why the GLM partition has to land in BOTH places: a
+ * `glm-eligible` exclusion applied only in TypeScript would silently evaporate
+ * on the exact degraded turn where a double-dispatch is most costly. These
+ * cases run the committed bash filter through real `jq` so the two
+ * implementations cannot drift.
+ */
+describe("collect-state.sh degraded fallback — glm-eligible partition (#3687)", () => {
+  const COLLECTOR = join(
+    resolve(import.meta.dirname, ".."),
+    "scripts",
+    "autopilot",
+    "collect-state.sh",
+  );
+
+  /** Pull the `ready_for_agent:` line out of the committed fallback `--jq`. */
+  function extractReadyForAgentFilter(): string {
+    const src = readFileSync(COLLECTOR, "utf-8");
+    const match = src.match(/^\s*ready_for_agent: (\[.*\] \| length),$/m);
+    assert.ok(match, "could not locate the fallback ready_for_agent jq filter");
+    return match[1];
+  }
+
+  function countReadyForAgent(
+    filter: string,
+    issues: readonly { labels: string[] }[],
+  ): string {
+    const input = issues.map((i) => ({
+      labels: i.labels.map((name) => ({ name })),
+    }));
+    const r = spawnSync("jq", [filter], {
+      input: JSON.stringify(input),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `jq failed: ${r.stderr}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  const filter = extractReadyForAgentFilter();
+
+  test("plain ready-for-agent issues are counted", () => {
+    assert.equal(
+      countReadyForAgent(filter, [
+        { labels: ["ready-for-agent"] },
+        { labels: ["ready-for-agent", "enhancement"] },
+        { labels: ["needs-triage"] },
+      ]),
+      "2",
+    );
+  });
+
+  test("glm-eligible + ready-for-agent is excluded", () => {
+    assert.equal(
+      countReadyForAgent(filter, [
+        { labels: ["ready-for-agent"] },
+        { labels: ["ready-for-agent", "glm-eligible"] },
+        { labels: ["glm-eligible"] },
+      ]),
+      "1",
+      "a drainer-owned issue must not inflate the Opus dev_orch authoring pool",
+    );
+  });
+
+  test("the pre-existing target-backlog exclusion still holds", () => {
+    assert.equal(
+      countReadyForAgent(filter, [
+        { labels: ["ready-for-agent"] },
+        { labels: ["ready-for-agent", "target-backlog"] },
+      ]),
+      "1",
+      "issue #2704's exclusion must survive the #3687 edit",
+    );
+  });
+
+  test("bash fallback agrees with deriveBoardState on the same board", () => {
+    // The load-bearing invariant: same input, same number, either path.
+    const board = [
+      { labels: ["ready-for-agent"] },
+      { labels: ["ready-for-agent", "glm-eligible"] },
+      { labels: ["ready-for-agent", "target-backlog"] },
+      { labels: ["ready-for-agent", "glm-eligible", "target-backlog"] },
+      { labels: ["needs-qa"] },
+    ];
+    const bash = Number(countReadyForAgent(filter, board));
+    const ts = deriveBoardState(
+      board.map((b, i) => row({ number: i + 1, labels: b.labels })),
+      NOW_MS,
+    ).ready_for_agent;
+    assert.equal(bash, ts, "degraded bash path must match the TS seam exactly");
+    assert.equal(ts, 1);
   });
 });
