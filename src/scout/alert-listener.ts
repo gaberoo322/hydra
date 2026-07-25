@@ -76,6 +76,7 @@
  */
 
 import { readRecentAlerts } from "../redis/alerts.ts";
+import { logger } from "../logger.ts";
 import {
   getScoutAlertCursor,
   getScoutCategoryLastWalked,
@@ -154,12 +155,19 @@ export async function planAlertDispatches(
   // Parse + drop unparseable entries.
   const parsed: RawAlert[] = [];
   for (const raw of rawAlerts) {
+    // Defensive skip (issue #3619): an empty / whitespace-only element would
+    // throw `Unexpected end of JSON input` from JSON.parse. The write boundary
+    // (`pushAlert`) now pre-validates and pushes+trims atomically, so a corrupt
+    // entry should never reach here — but guard the reader anyway so a legacy
+    // empty entry already in the list is skipped silently rather than logged as
+    // a per-tick parse failure (the ~14/hour symptom).
+    if (typeof raw !== "string" || raw.trim().length === 0) continue;
     try {
       const a = JSON.parse(raw);
       if (a && typeof a === "object") parsed.push(a as RawAlert);
     } catch (err) {
       // Log + continue — a corrupt entry shouldn't poison the whole tick.
-      console.error("alert-listener: failed to parse alert:", err);
+      logger.error({ err, rawLen: raw.length }, "alert-listener: failed to parse alert");
     }
   }
 
