@@ -98,5 +98,120 @@ describe("getUnclassifiedAnchors — surfaces residual sentinel metadata (#3403)
     assert.equal(result.windowCycles, 0);
     assert.equal(result.unclassified.length, 0);
     assert.equal(result.rate, 0);
+    // #3602: the sub-bucket surface is 0/0 on an empty window too.
+    assert.equal(result.fixable, 0);
+    assert.equal(result.noAttribution, 0);
+    assert.equal(result.fixableRate, 0);
+  });
+});
+
+describe("getUnclassifiedAnchors — #3602 fixable vs no-attribution sub-bucket split", () => {
+  let redis: any;
+
+  async function cleanKeys() {
+    const keys = await redis.keys("hydra:*");
+    if (keys.length > 0) await redis.del(...keys);
+  }
+
+  beforeEach(async () => {
+    if (!redis) redis = new Redis(REDIS_URL);
+    await cleanKeys();
+  });
+
+  after(async () => {
+    await cleanKeys();
+    if (redis) redis.disconnect();
+  });
+
+  test("a sentinel cycle whose worktreeBranch decodes is classified `fixable`", async () => {
+    // Shape B: bare-UUID cycleId (undecodable, so the read path can't recover it)
+    // but the stored head branch carries a decodable `-t{N}-<slot>` fence. The
+    // #3604 write-path heal closes this; it is a genuine attribution gap.
+    const cycleId = "afa22ef1-1234-4abc-9def-0123456789ab";
+    await recordCycleMetrics(cycleId, {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      worktreeBranch: "worktree-agent-afa22ef1-t2-dev_orch-3564",
+      prNumber: "3581",
+      tasksMerged: 1,
+    });
+
+    const result = await getUnclassifiedAnchors(10);
+    const row = result.unclassified.find((r) => r.cycleId === cycleId);
+    assert.ok(row, "the sentinel cycle is surfaced");
+    assert.equal(row!.classification, "fixable");
+    assert.equal(result.fixable, 1);
+    assert.equal(result.noAttribution, 0);
+    assert.equal(result.fixableRate, 100);
+  });
+
+  test("a sentinel cycle with no decodable branch is classified `no-attribution`", async () => {
+    // Shape A/C: bare UUID + a descriptive/longhash branch that carries NO class
+    // token anywhere. Structurally undecodable under the #2822 never-guess
+    // invariant — inherent harness noise, not a fixable classifier gap.
+    const cycleId = "2b5a625c-9999-4000-8000-abcdefabcdef";
+    await recordCycleMetrics(cycleId, {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      worktreeBranch: "worktree-agent-2b5a625cdeadbeefcafef00dba5eba11",
+      prNumber: "3553",
+      tasksMerged: 1,
+    });
+
+    const result = await getUnclassifiedAnchors(10);
+    const row = result.unclassified.find((r) => r.cycleId === cycleId);
+    assert.ok(row, "the sentinel cycle is surfaced");
+    assert.equal(row!.classification, "no-attribution");
+    assert.equal(result.fixable, 0);
+    assert.equal(result.noAttribution, 1);
+    assert.equal(result.fixableRate, 0);
+  });
+
+  test("a sentinel cycle with NO worktreeBranch at all is `no-attribution`", async () => {
+    // The dominant residual shape: a merge-status enrichment write with a
+    // prNumber but no branch to decode. Nothing to attribute → no-attribution.
+    const cycleId = "b8a3071f-a783-4812-bec5-8fa0f5079a08";
+    await recordCycleMetrics(cycleId, {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      prNumber: "3379",
+      tasksMerged: 1,
+    });
+
+    const result = await getUnclassifiedAnchors(10);
+    const row = result.unclassified.find((r) => r.cycleId === cycleId);
+    assert.ok(row);
+    assert.equal(row!.classification, "no-attribution");
+    assert.equal(result.noAttribution, 1);
+  });
+
+  test("fixableRate keys the architectural trigger on genuine gaps only", async () => {
+    // 1 fixable + 3 no-attribution in a 4-cycle window: total sentinel rate 100%,
+    // but only 25% is fixable — so the >10% trigger keyed on fixableRate still
+    // fires here, yet a window of ONLY no-attribution noise would report
+    // fixableRate 0 and NOT trip it.
+    await recordCycleMetrics("afa22ef1-aaaa-4abc-9def-000000000001", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      worktreeBranch: "worktree-agent-afa22ef1-t2-qa_orch",
+      tasksMerged: 1,
+    });
+    await recordCycleMetrics("autopilot-2b5a625c-t1", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      tasksMerged: 1,
+    });
+    await recordCycleMetrics("11111111-2222-3333-4444-555555555555", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      worktreeBranch: "issue-3527-some-descriptive-branch",
+      tasksMerged: 1,
+    });
+    await recordCycleMetrics("66666666-7777-8888-9999-aaaaaaaaaaaa", {
+      anchorType: UNCLASSIFIED_ANCHOR_TYPE,
+      tasksMerged: 1,
+    });
+
+    const result = await getUnclassifiedAnchors(10);
+    assert.equal(result.windowCycles, 4);
+    assert.equal(result.unclassified.length, 4);
+    assert.equal(result.rate, 100);
+    assert.equal(result.fixable, 1);
+    assert.equal(result.noAttribution, 3);
+    assert.equal(result.fixableRate, 25);
   });
 });

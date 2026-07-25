@@ -98,7 +98,7 @@ const UNDECODABLE = [
 
 describe("GET /metrics/unclassified (issue #3443)", () => {
   before(async () => {
-    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL!);
   });
 
   beforeEach(async () => {
@@ -149,6 +149,14 @@ describe("GET /metrics/unclassified (issue #3443)", () => {
     assert.equal(res._body.windowCycles, 5);
     assert.equal(res._body.rate, 40.0, "2 of 5 cycles unclassified → 40.0%");
     assert.equal(res._body.unclassified.length, 2);
+    // #3602 sub-bucket split: both fixtures are bare UUIDs with NO worktreeBranch,
+    // so nothing decodes → both `no-attribution`, fixableRate 0.
+    assert.equal(res._body.fixable, 0);
+    assert.equal(res._body.noAttribution, 2);
+    assert.equal(res._body.fixableRate, 0);
+    for (const u of res._body.unclassified) {
+      assert.equal(u.classification, "no-attribution");
+    }
 
     const byId = Object.fromEntries(
       res._body.unclassified.map((u: any) => [u.cycleId, u]),

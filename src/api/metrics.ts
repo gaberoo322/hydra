@@ -40,7 +40,7 @@ export function createMetricsRouter() {
   // Not an isolateAggregator route: the success path is a text/plain send, not a
   // JSON body, so the seam (which JSONs its produce result) does not fit. ADR-0027
   // eighth sweep: the catch adopts the pino `err`-field seam instead.
-  router.get("/summary", async (req, res) => {
+  router.get("/summary", async (_req, res) => {
     try {
       const stats = await getAggregateStats(20);
       const acc = await getCumulativeAccomplishments(20);
@@ -174,7 +174,11 @@ export function createMetricsRouter() {
   // Locality) — the anchorType-filter + rate math is NOT re-implemented here,
   // mirroring the /metrics/anchor-distribution → projectAnchorDistribution split.
   // Payload is the aggregator's body RAW: `{ windowCycles, unclassified:
-  // [{cycleId, prNumber?, anchorReference?, taskTitle?}], rate }` — no envelope.
+  // [{cycleId, classification, prNumber?, anchorReference?, taskTitle?}], rate,
+  // fixable, noAttribution, fixableRate }` — no envelope. Issue #3602 added the
+  // `fixable` vs `no-attribution` sub-bucket split + `fixableRate`: the
+  // architectural-review trigger keys on `fixableRate` (genuine classifier gaps),
+  // not the total `rate`, so structurally-undecodable harness noise can't trip it.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   router.get(
