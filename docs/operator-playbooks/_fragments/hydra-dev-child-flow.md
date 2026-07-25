@@ -51,6 +51,24 @@ Run these numbered steps.
    introduce the forbidden behavior. If ANY invariant cannot be satisfied, do
    NOT open the PR — emit a `## Friction Report` naming the unmet invariant and
    stop. A 404 at planning time makes this a clean no-op.
+9b. **Author a changelog fragment (or opt out) BEFORE opening the PR** (issue
+    #3658, epic #3676). If the change ships anything user- or operator-visible,
+    write **one** file `.changelog/<issue>-<slug>.md` — `<issue>` is the issue
+    this PR closes, `<slug>` a short kebab-case description — whose sole line is a
+    curated, imperative, user-facing note (NOT the issue title):
+    ```
+    - <type>: <description> (#<issue>)
+    ```
+    `<type>` is a Conventional-Commits type (`feat`/`fix`/`perf`/`refactor`/
+    `docs`/`test`/`build`/`ci`/`chore`/`revert`); the dashboard groups by type at
+    render time and links the note to the issue. Commit the fragment with your
+    change. For a genuinely user-invisible change (pure chore, test-only, internal
+    refactor with no observable effect) apply the **`skip-changelog`** label to the
+    PR instead of adding an empty fragment. There is no committed `CHANGELOG.md`;
+    per-PR fragment files are conflict-free across parallel PRs. Full convention:
+    `.changelog/README.md`. The advisory `changelog-check.yml` workflow posts a
+    non-blocking sticky comment when a PR adds no fragment and lacks the label — it
+    never blocks merge.
 10. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
     issue's section, and a `Tier: <0|1|2|3>` line from the API. Acceptance
     criteria MUST be checkboxes with a mechanical "verified by:" assertion —
