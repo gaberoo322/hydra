@@ -41,16 +41,17 @@ import {
   incrSchedulerCyclesUnaccounted,
 } from "../redis/scheduler.ts";
 import { recordCycleMetrics, type CycleMetricsInput } from "../metrics/record.ts";
-// Read-back of the stored metrics hash — used ONLY by the enrichment-path
-// anchorType HEAL (issue #3604) to check whether the stored anchorType is a
-// data-quality sentinel before re-classifying from a newly-arrived decode source.
+// Read-back of the stored metrics hash. It is no longer used by the coordinator
+// directly — the enrichment-path anchorType HEAL moved to the `cycle-metrics-heal.ts`
+// leaf (issue #3627). This import survives ONLY to bind the default
+// `CycleCloseDeps.metrics.getCycleMetrics` accessor below; the coordinator hands
+// that facade to the heal leaf, which owns the read-back call.
 import { getCycleMetrics } from "../redis/cycle-metrics.ts";
 import {
   putDispatchOutcome,
   upgradeDispatchOutcome,
 } from "../redis/dispatch-outcomes.ts";
 import { getCycleTokensRaw } from "../redis/cost.ts";
-import { logger } from "../logger.ts";
 import type { CycleRecordBody } from "./schemas.ts";
 import { bucketCycleStatus } from "./cycle-status.ts";
 // The dispatch-outcome record concern (issue #2942) — attribution
@@ -65,6 +66,14 @@ import {
   upgradeDispatchOutcomeRecord,
   type AutopilotDispatchOutcomesFacade,
 } from "./outcome-record.ts";
+// The enrichment-path anchorType HEAL concern (issue #3604), extracted into its
+// own focused I/O leaf in issue #3627 so the coordinator no longer inlines the
+// sentinel-detection + re-classify logic and no longer reaches for the
+// `redis/cycle-metrics` read-back directly. This coordinator calls
+// `healSentinelAnchorType` on the dedup/enrichment arm, handing it the injected
+// `deps.metrics` facade; the leaf owns the sentinel test, the re-classification,
+// and the best-effort dark-tolerance contract.
+import { healSentinelAnchorType } from "./cycle-metrics-heal.ts";
 // Shared result-type primitives + coercion helpers. They live in the zero-I/O
 // leaf `run-result.ts` (issue #3087), imported DOWN from here — the same leaf
 // the run/turn writers (`runs.ts`) import — so this write module no longer
@@ -79,13 +88,15 @@ import {
   filesChangedCount,
 } from "./run-result.ts";
 // Anchor-type classification POLICY — the pure, zero-I/O leaf extracted in
-// issue #2858. `recordCycle` uses `classifyAnchorType` (and, transitively,
-// `UNCLASSIFIED_ANCHOR_TYPE`) to classify a cycle-record's anchorType. The
-// policy has no Redis imports and is exercisable with string inputs alone;
-// keeping it in a named sibling means the read-path callers (`metrics/trend.ts`,
-// `api/metrics.ts`) import it from its own home rather than from this write
-// coordinator. See `anchor-type.ts` for the split rationale.
-import { classifyAnchorType, UNCLASSIFIED_ANCHOR_TYPE } from "./anchor-type.ts";
+// issue #2858. `recordCycle` uses `classifyAnchorType` to classify a
+// cycle-record's anchorType at first-write. The policy has no Redis imports and
+// is exercisable with string inputs alone; keeping it in a named sibling means
+// the read-path callers (`metrics/trend.ts`, `api/metrics.ts`) import it from its
+// own home rather than from this write coordinator. See `anchor-type.ts` for the
+// split rationale. (The `UNCLASSIFIED_ANCHOR_TYPE` sentinel constant moved with
+// the enrichment-path heal into `cycle-metrics-heal.ts` in issue #3627, which is
+// now its sole in-coordinator-adjacent consumer.)
+import { classifyAnchorType } from "./anchor-type.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -189,7 +200,7 @@ const defaultCycleCloseDeps: CycleCloseDeps = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers (cycle-close-only — sole caller is recordCycle)
+// Extracted concerns (no coordinator-private helpers remain)
 //
 // The dispatch-outcome record helpers (`resolveDispatchTokens`,
 // `writeDispatchOutcomeRecord`) and the `filesChangedCount` coercion they used
@@ -197,75 +208,10 @@ const defaultCycleCloseDeps: CycleCloseDeps = {
 // (attribution instrumentation), `filesChangedCount` DOWN to `run-result.ts`
 // (a shared zero-I/O coercion primitive with a second importer). The metrics
 // path below still uses `filesChangedCount` (imported from `run-result.ts`).
+// The enrichment-path anchorType heal (`isSentinelAnchorType`,
+// `healSentinelAnchorType`) moved to `cycle-metrics-heal.ts` in issue #3627,
+// called via `deps.metrics` on the dedup/enrichment arm below.
 // ---------------------------------------------------------------------------
-
-/**
- * Is a stored anchorType a data-quality SENTINEL — a value the enrichment-path
- * heal is allowed to overwrite (issue #3604)? True for the explicit
- * `unclassified` sentinel, the aggregator's catch-all `unknown`, and every
- * absent/blank form (`""`, missing, and the `String(null)`/`String(undefined)`
- * flattenings a pre-#2689 write could persist). A genuine class
- * (`work-queue`/`qa-review`/…) returns false, so the heal never clobbers it.
- */
-function isSentinelAnchorType(stored: string | undefined): boolean {
-  const t = (stored ?? "").trim().toLowerCase();
-  return (
-    t.length === 0 ||
-    t === UNCLASSIFIED_ANCHOR_TYPE ||
-    t === "unknown" ||
-    t === "null" ||
-    t === "undefined"
-  );
-}
-
-/**
- * Enrichment-path anchorType HEAL (issue #3604). When an already-recorded
- * cycle's STORED anchorType is a {@link isSentinelAnchorType} data-quality
- * sentinel, re-classify from the newly-arrived decode sources on THIS
- * enrichment write — the explicit `body.anchorType`, the merged PR's head-branch
- * `body.worktreeBranch`, and the cycleId — via the SAME never-guess
- * {@link classifyAnchorType} parser reap uses at first-write. If a REAL
- * (non-sentinel) class is recovered, upgrade the stored anchorType in place with
- * a metrics-hash-only additive HSET (no lifetime counter re-fire). Returns true
- * iff it wrote a heal.
- *
- * Safety contract (mirrors the write-path invariants):
- *   - NEVER-DOWNGRADE / NEVER-OVERWRITE: fires ONLY when the stored value is a
- *     sentinel, so a genuine class is never clobbered — even if a later
- *     enrichment forwards a differently-decodable source.
- *   - NEVER-GUESS (#2822): the recovered value is written ONLY when it is itself
- *     a real class; an undecodable follow-up leaves `classifyAnchorType`
- *     returning the sentinel, which we do NOT re-write (the stored sentinel
- *     already stands).
- *
- * Best-effort: a read/write failure is logged and never alters the caller's
- * result — the heal is observability, not correctness.
- */
-async function healSentinelAnchorType(
-  cycleId: string,
-  body: CycleRecordBody,
-  deps: CycleCloseDeps,
-): Promise<boolean> {
-  // A deps bag without a metrics reader (older fixtures) skips the heal — it is
-  // best-effort observability, so the absence degrades to the prior behaviour.
-  if (typeof deps.metrics.getCycleMetrics !== "function") return false;
-  try {
-    const stored = await deps.metrics.getCycleMetrics(cycleId);
-    if (!isSentinelAnchorType(stored?.anchorType)) return false;
-    const recovered = classifyAnchorType(cycleId, body.anchorType, body.worktreeBranch);
-    // Only heal to a REAL class — if the parser still returns the sentinel there
-    // was nothing new to decode, so leave the stored sentinel untouched (#2822).
-    if (isSentinelAnchorType(recovered)) return false;
-    await deps.metrics.recordCycleMetrics(cycleId, { anchorType: recovered });
-    return true;
-  } catch (err: any) {
-    logger.error(
-      { cycleId, err },
-      "cycle-close: enrichment-path anchorType heal failed (best-effort)",
-    );
-    return false;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Lifecycle: cycle-record
@@ -403,7 +349,7 @@ export async function recordCycle(
       // undecodable follow-up returns the sentinel and the stored value is left
       // untouched. NEVER-DOWNGRADE / NEVER-OVERWRITE: the heal fires only when the
       // stored value IS a sentinel, so a genuine class is never clobbered.
-      const healed = await healSentinelAnchorType(cycleId, body, deps);
+      const healed = await healSentinelAnchorType(cycleId, body, deps.metrics);
       if (healed) enriched = true;
 
       // Issue #2942: keep the durable per-dispatch outcome record's `outcome`
