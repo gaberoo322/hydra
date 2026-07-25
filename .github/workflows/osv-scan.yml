@@ -1,0 +1,80 @@
+name: osv-scan
+
+# Advisory OSV vulnerability scan (tool-scout #3642).
+#
+# Runs `scripts/osv-scan.sh` — downloads the pinned osv-scanner binary, verifies
+# its SHA256, and scans the repo lockfiles against the OSV (Open Source
+# Vulnerabilities) database. Uploads the JSON results as an artifact for
+# operator/agent inspection.
+#
+# WHY OSV (complements the required `npm audit` gate, does NOT replace it):
+# npm audit queries only the npm advisory registry and is a REQUIRED check, so a
+# new CVE there reddens the merge queue repo-wide with zero code change (operator
+# memory reference_npm_audit_required_check_ambient_poison_pill). osv-scanner
+# queries the broader OSV database (GitHub Advisory + NVD + OSS-Fuzz aggregated),
+# so this advisory scan can surface a CVE — with a stable, agent-parseable OSV ID
+# — BEFORE it lands in the npm advisory DB and wedges auto-merge.
+#
+# WHY OUTSIDE ci.yml: ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015).
+# This is a NEW advisory scan — not a change to the merge gate — so it lives in a
+# Tier-3 sibling (operator memory feedback_ci_gate_separate_workflow_avoids_tier0).
+#
+# NOT A REQUIRED CHECK: never added to branch protection. The scan runs with
+# `|| true` so a found vulnerability surfaces via the uploaded artifact + a
+# warning annotation without wedging the merge queue — advisory, not blocking.
+#
+# TOOL LANE (ADR-0005): osv-scanner is a pinned pre-built binary downloaded on
+# demand — no npm distribution, no package.json entry, no install scripts, no
+# lavamoat allow-scripts gate impact. Same lane as the comby binary / ast-grep
+# npx pin. scripts/osv-scan.sh verifies the SHA256 before executing the binary.
+#
+# SCAN-ONLY: this never runs `osv-scanner fix` (which rewrites package-lock.json
+# destructively) — that is an operator-confirmed action, never autonomous.
+
+on:
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly Monday 08:15 UTC (offset from deps-check's 08:00 to stagger runners)
+    - cron: '15 8 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: osv-scan-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  osv-scan:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan lockfiles for OSV vulnerabilities (advisory)
+        run: |
+          set -uo pipefail
+          # Advisory: always exit 0. osv-scanner exits non-zero when it finds a
+          # vulnerability; `|| true` keeps this from wedging the merge queue, and
+          # the JSON artifact carries the findings for agent/operator triage.
+          bash scripts/osv-scan.sh . > osv-results.json || true
+          echo "::group::osv-scan results"
+          cat osv-results.json
+          echo "::endgroup::"
+          # Surface a warning annotation when any vulnerability is present so the
+          # finding is visible in the PR checks tab without a hard block.
+          if jq -e '[.results[]?.packages[]?.vulnerabilities[]?] | length > 0' osv-results.json >/dev/null 2>&1; then
+            count=$(jq '[.results[]?.packages[]?.vulnerabilities[]?.id] | length' osv-results.json 2>/dev/null || echo '?')
+            echo "::warning title=osv-scan::${count} OSV vulnerability finding(s) — see the osv-results artifact (advisory)"
+          else
+            echo "osv-scan: no OSV vulnerabilities found (clean)"
+          fi
+
+      - name: Upload OSV scan results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: osv-results-${{ github.run_id }}
+          path: osv-results.json
+          retention-days: 14
