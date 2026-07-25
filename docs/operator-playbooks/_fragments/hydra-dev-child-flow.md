@@ -42,20 +42,12 @@ Run these numbered steps.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
-9. **Classify the change via the live tier API** (see "Tier classification"
-   below). Never self-classify by path patterns.
-9a. **Reconcile the diff against the design-concept artifact BEFORE opening the
-   PR** (issue #2537). If an artifact was fetched at planning time, run the
-   "Design-concept reconciliation gate" below: cite the diff hunk that satisfies
-   each invariant; for each MUST-NOT invariant confirm the diff does not
-   introduce the forbidden behavior. If ANY invariant cannot be satisfied, do
-   NOT open the PR — emit a `## Friction Report` naming the unmet invariant and
-   stop. A 404 at planning time makes this a clean no-op.
-9b. **Author a changelog fragment (or opt out) BEFORE opening the PR** (issue
-    #3658, epic #3676). If the change ships anything user- or operator-visible,
-    write **one** file `.changelog/<issue>-<slug>.md` — `<issue>` is the issue
-    this PR closes, `<slug>` a short kebab-case description — whose sole line is a
-    curated, imperative, user-facing note (NOT the issue title):
+8b. **Author a changelog fragment (or opt out) BEFORE tier classification** (issue
+    #3658, epic #3676). This MUST run before step 9 so the `.changelog/<issue>-<slug>.md`
+    file is part of the diff the tier classifier reads. If the change ships anything
+    user- or operator-visible, write **one** file `.changelog/<issue>-<slug>.md` —
+    `<issue>` is the issue this PR closes, `<slug>` a short kebab-case description —
+    whose sole line is a curated, imperative, user-facing note (NOT the issue title):
     ```
     - <type>: <description> (#<issue>)
     ```
@@ -69,6 +61,15 @@ Run these numbered steps.
     `.changelog/README.md`. The advisory `changelog-check.yml` workflow posts a
     non-blocking sticky comment when a PR adds no fragment and lacks the label — it
     never blocks merge.
+9. **Classify the change via the live tier API** (see "Tier classification"
+   below). Never self-classify by path patterns.
+9a. **Reconcile the diff against the design-concept artifact BEFORE opening the
+   PR** (issue #2537). If an artifact was fetched at planning time, run the
+   "Design-concept reconciliation gate" below: cite the diff hunk that satisfies
+   each invariant; for each MUST-NOT invariant confirm the diff does not
+   introduce the forbidden behavior. If ANY invariant cannot be satisfied, do
+   NOT open the PR — emit a `## Friction Report` naming the unmet invariant and
+   stop. A 404 at planning time makes this a clean no-op.
 10. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
     issue's section, and a `Tier: <0|1|2|3>` line from the API. Acceptance
     criteria MUST be checkboxes with a mechanical "verified by:" assertion —

@@ -544,7 +544,7 @@ If "ADR impact" is not `none`:
 
 Gating discipline: the criteria are deliberately strict. **Both** ADR criteria must hold (hard-to-reverse AND surprising-to-a-reader AND has a real trade-off). Glossary updates fire only when you can write the one-line gloss now — if you can't, there's no glossary entry to add. Most builds will declare `none / none` — that's the expected steady state. The design-concept gate (hydra-grill) already caught the anticipated terms upfront; this step covers only the residual case where new vocabulary surfaced during implementation.
 
-### 6.6. Changelog fragment (or opt out)
+### 6.7. Changelog fragment (or opt out)
 
 Before opening the code PR (or, for direct-to-main merges, before merging), author a per-PR changelog fragment for any user- or operator-visible change (issue #3658, epic #3676). This mirrors the Orchestrator convention on the Target board.
 
