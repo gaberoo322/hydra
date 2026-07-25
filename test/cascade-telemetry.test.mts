@@ -30,14 +30,14 @@ import Redis from "ioredis";
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/2";
 
-const {
-  cascadeRecordFromEvent,
-  rollupCascadeTelemetry,
-  rollupEscalationOutcomes,
-  recordCascade,
-  getCascadeTelemetry,
-  clearCascadeTelemetry,
-} = await import("../src/redis/cascade-telemetry.ts");
+// The pure count/score folds live in the aggregator leaf (issue #3638) and are
+// imported directly from it — this pure-fold suite pulls in zero Redis surface.
+const { rollupCascadeTelemetry, rollupEscalationOutcomes } = await import(
+  "../src/aggregators/cascade-routing.ts"
+);
+// The I/O seam (event parsing, ring read/write) stays in the redis adapter.
+const { cascadeRecordFromEvent, recordCascade, getCascadeTelemetry, clearCascadeTelemetry } =
+  await import("../src/redis/cascade-telemetry.ts");
 const { putDispatchOutcome, dispatchOutcomesIndexKey, dispatchOutcomeKey } = await import(
   "../src/redis/dispatch-outcomes.ts"
 );
