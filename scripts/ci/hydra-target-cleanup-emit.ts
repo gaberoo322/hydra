@@ -22,11 +22,10 @@
  *   - PROVIDERS: demoting is allowed everywhere including src/lib/providers/
  *     (rule 1 forbids file deletion there, not visibility demotion).
  *
- * Findings sink: the Hydra Redis target backlog via the orchestrator API
- * (POST /api/backlog), NOT GitHub issues — the Target's tracker is the
- * backlog (hydra-betting docs/agents/issue-tracker.md). Items are filed with
- * labels [cleanup-scan, ready-for-agent] and moved to the `queued` lane
- * (the ready-for-agent lane per docs/agents/triage-labels.md).
+ * Findings sink: GitHub Issues on gaberoo322/hydra-betting (ADR-0031) via
+ * `gh issue create` — the Target's tracker is the GitHub-Issues board, not
+ * the Redis backlog. Items are filed with labels [cleanup-scan, ready-for-agent].
+ * Dedup and saturation checks use lexical `gh issue list --search` (REST-first).
  *
  * ONE ITEM PER FILE, not per symbol. Two reasons:
  *   1. addToBacklog() fuzzy-dedups on title word overlap (70%); per-symbol
@@ -48,7 +47,7 @@
  *   # dry-run: prints the plan (titles + bodies) and files nothing
  *   npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json
  *
- *   # apply: files one cleanup-scan + ready-for-agent backlog item per file
+ *   # apply: files one cleanup-scan + ready-for-agent GitHub issue per file on hydra-betting
  *   npx tsx scripts/ci/hydra-target-cleanup-emit.ts /tmp/knip-target-report.json --apply
  */
 
@@ -76,7 +75,7 @@ export const CLEANUP_SCAN_LABEL = "cleanup-scan";
 
 export const TARGET_ROOT = "/home/gabe/hydra-betting";
 export const TARGET_WEB = `${TARGET_ROOT}/web`;
-const API_BASE = "http://localhost:4000/api";
+export const TARGET_REPO = "gaberoo322/hydra-betting";
 
 /** One planned backlog item: every demote-class symbol in one target file. */
 export interface PlannedTargetCleanupItem {
@@ -348,65 +347,74 @@ export function planTargetCleanupEmit(
 }
 
 // ---------------------------------------------------------------------------
-// Thin CLI wrapper (the only part that touches fs / git / the orchestrator API).
+// Thin CLI wrapper (the only part that touches fs / git / gh).
 // ---------------------------------------------------------------------------
 
-interface BacklogItemRow {
-  id?: string | number;
+interface IssueTitle {
   title?: string;
-  labels?: string[];
 }
 
 /**
- * Read every NON-done backlog item carrying the cleanup-scan label. Aborts the
- * run when the board can't be read — emitting without the dedup/saturation
- * inputs is exactly how a flood happens (fail closed).
+ * Read every open GitHub Issue on the Target repo carrying the cleanup-scan
+ * label (used for dedup and saturation check). Aborts if the board can't be
+ * read — emitting without dedup/saturation inputs is exactly how a flood
+ * happens (fail closed).
  */
-async function readOpenCleanupItems(): Promise<BacklogItemRow[]> {
-  const res = await fetch(`${API_BASE}/backlog`);
-  if (!res.ok) {
-    throw new Error(`GET /backlog returned ${res.status}`);
+function readOpenCleanupItemTitles(): string[] {
+  try {
+    const out = execFileSync(
+      "gh",
+      [
+        "issue",
+        "list",
+        "--repo",
+        TARGET_REPO,
+        "--label",
+        CLEANUP_SCAN_LABEL,
+        "--json",
+        "title",
+      ],
+      { encoding: "utf-8" },
+    );
+    const issues = JSON.parse(out) as IssueTitle[];
+    return issues.map((i) => i.title ?? "").filter(Boolean);
+  } catch (err) {
+    throw new Error(
+      `gh issue list --label ${CLEANUP_SCAN_LABEL} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  const lanes = (await res.json()) as Record<string, unknown>;
-  const open: BacklogItemRow[] = [];
-  for (const [lane, rows] of Object.entries(lanes)) {
-    if (lane === "done" || lane === "counts" || !Array.isArray(rows)) continue;
-    for (const row of rows as BacklogItemRow[]) {
-      const labels = Array.isArray(row?.labels) ? row.labels : [];
-      if (labels.includes(CLEANUP_SCAN_LABEL)) open.push(row);
-    }
-  }
-  return open;
 }
 
-/** File one item: POST /backlog, then move it to the queued lane (ready-for-agent). */
-async function createBacklogItem(title: string, body: string): Promise<string> {
-  const res = await fetch(`${API_BASE}/backlog`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      title,
-      description: body,
-      category: "cleanup",
-      labels: [CLEANUP_SCAN_LABEL, "ready-for-agent"],
-    }),
-  });
-  if (!res.ok) throw new Error(`POST /backlog returned ${res.status}`);
-  const out = (await res.json()) as { added?: boolean; id?: string | number; reason?: string };
-  if (!out.added || out.id === undefined) {
-    return `skipped (${out.reason ?? "not added"})`;
+/** File one item via GitHub Issues on the Target repo with the cleanup-scan label. */
+function createTargetIssue(title: string, body: string): string {
+  try {
+    const out = execFileSync(
+      "gh",
+      [
+        "issue",
+        "create",
+        "--repo",
+        TARGET_REPO,
+        "--title",
+        title,
+        "--body",
+        body,
+        "--label",
+        CLEANUP_SCAN_LABEL,
+        "--label",
+        "ready-for-agent",
+      ],
+      { encoding: "utf-8" },
+    );
+    // gh issue create prints the issue URL on success
+    const urlMatch = out.trim().match(/github\.com\/.*\/issues\/(\d+)/);
+    const issueNum = urlMatch?.[1] ?? "?";
+    return `filed as #${issueNum}`;
+  } catch (err) {
+    throw new Error(
+      `gh issue create failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  const move = await fetch(`${API_BASE}/backlog/${out.id}/move`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ lane: "queued" }),
-  });
-  if (!move.ok) {
-    // The item exists but stayed in the backlog lane — report it loudly so the
-    // operator (or a sweep) promotes it; never silently lose the filing.
-    return `filed as ${out.id} but move-to-queued failed (${move.status})`;
-  }
-  return `filed as ${out.id} → queued`;
 }
 
 /** Days since the last commit touching web/<path> in the Target repo, or null. */
@@ -425,7 +433,7 @@ function gitFileAgeDays(path: string): number | null {
   }
 }
 
-async function main(argv: string[]): Promise<void> {
+function main(argv: string[]): void {
   const args = argv.slice(2);
   const apply = args.includes("--apply");
   const reportPath = args.find((a) => !a.startsWith("--")) ?? "/tmp/knip-target-report.json";
@@ -448,20 +456,20 @@ async function main(argv: string[]): Promise<void> {
     process.exit(1);
   }
 
-  let openItems: BacklogItemRow[];
+  let openTitles: string[];
   try {
-    openItems = await readOpenCleanupItems();
+    openTitles = readOpenCleanupItemTitles();
   } catch (err) {
     console.error(
-      "hydra-target-cleanup-emit: failed to read the target backlog — aborting (cannot dedup or check saturation safely):",
+      "hydra-target-cleanup-emit: failed to read the target board — aborting (cannot dedup or check saturation safely):",
       err instanceof Error ? err.message : String(err),
     );
     process.exit(1);
   }
 
-  if (openItems.length > TARGET_SATURATION_CAP) {
+  if (openTitles.length > TARGET_SATURATION_CAP) {
     console.log(
-      `hydra-target-cleanup-emit: board saturated (${openItems.length} open cleanup-scan items > ${TARGET_SATURATION_CAP} cap) — emitting nothing.`,
+      `hydra-target-cleanup-emit: board saturated (${openTitles.length} open cleanup-scan items > ${TARGET_SATURATION_CAP} cap) — emitting nothing.`,
     );
     return;
   }
@@ -475,7 +483,6 @@ async function main(argv: string[]): Promise<void> {
       return ""; /* intentional: classification falls back to unknown → fail closed */
     }
   };
-  const openTitles = openItems.map((i) => (typeof i.title === "string" ? i.title : "")).filter(Boolean);
 
   const plan = planTargetCleanupEmit(report, openTitles, readSource, gitFileAgeDays, isoDate);
 
@@ -495,8 +502,14 @@ async function main(argv: string[]): Promise<void> {
       console.log(item.body.replace(/^/gm, "  "));
       console.log("");
     } else {
-      const outcome = await createBacklogItem(item.title, item.body);
-      console.log(`  ✓ ${outcome}`);
+      try {
+        const outcome = createTargetIssue(item.title, item.body);
+        console.log(`  ✓ ${outcome}`);
+      } catch (err) {
+        console.error(
+          `  ✗ filing failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
@@ -506,11 +519,11 @@ async function main(argv: string[]): Promise<void> {
 
   if (!apply) {
     console.log("");
-    console.log("(dry-run; no backlog items created — pass --apply to file them)");
+    console.log("(dry-run; no issues created — pass --apply to file them on GitHub)");
   }
 }
 
 // Only run when executed directly (not when imported by the test).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  void main(process.argv);
+  main(process.argv);
 }
