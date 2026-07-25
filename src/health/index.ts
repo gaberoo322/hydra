@@ -25,8 +25,11 @@ export * from "./strip-probes.ts";
 export * from "./skill-catalog.ts";
 export * from "./wire.ts";
 // Issue #2570: the WoL Adapter (WakeGate, readWolConfig, attempt*Wake, and the
-// process-lifetime getWolGates()/resetWolGates() singleton lifecycle that the
-// fan-out now reads its gate pair from). Re-exported through the barrel like the
-// other modules so consumers go through `../health` rather than reaching into
-// the submodule directly.
+// process-lifetime getWolGates()/resetWolGates() singleton lifecycle). Issue #3626:
+// the embed-backend recovery composition (`applyEmbedBackendRecovery`) now lives
+// here too — the fan-out is a pure enumerator, and the GET /health/deep route
+// composes this explicit post-assembly recovery step (imported through this barrel)
+// after collectProbeInputs, rather than the fan-out firing the wake as a
+// side-effect. Re-exported through the barrel like the other modules so consumers
+// go through `../health` rather than reaching into the submodule directly.
 export * from "./wol.ts";

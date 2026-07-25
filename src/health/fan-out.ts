@@ -84,41 +84,25 @@ import {
   type SettledByKey,
 } from "./types.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
-import {
-  getWolGates,
-  WakeGate,
-  maybeWakeEmbedBackend,
-} from "./wol.ts";
 import { logger } from "../logger.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
-// ---- Wake-on-LAN auto-recovery (issues #2228 + #2570 + #2834) ---------------
+// ---- Wake-on-LAN recovery lives OUTSIDE the fan-out (issue #3626) ------------
 //
-// The probe-failure wake TRIGGER (`maybeWakeEmbedBackend`) is recovery POLICY,
-// not probe enumeration, so issue #2834 relocated it into the WoL module that
-// already owns the mechanism (packet build, `WakeGate` timing, `sendMagicPacket`,
-// `attempt*Wake`). The fan-out now IMPORTS it from src/health/wol.ts and calls it
-// from its embed-backend probe step — it no longer owns a slice of the WoL policy
-// itself. (Issue #3544: the parallel VLM-host wake trigger `maybeWakeVlmHost`
-// #2335 was retired at the VLM cutover.)
-//
-// The cooldown + max-attempt state for the trigger must persist ACROSS
-// heartbeats/health-deep requests (the fan-out runs once per request), so it is
-// a single process-lifetime WakeGate — not a per-call object. That singleton
-// (embed-backend gate #2228) once lived HERE as a module-level `new WakeGate(...)`
-// instance, which left this fan-out holding mutable module-global state and bled
-// the gate's retry budget across test cases.
-//
-// Issue #2570 relocated that singleton lifecycle into the WoL Adapter that owns
-// WakeGate (src/health/wol.ts `getWolGates()` / `resetWolGates()`). The adapter
-// lazily constructs the embed gate from the WoL config and hands it back on every
-// call — preserving cross-request persistence. The embed gate is reset the moment
-// the embed-backend probe reads `running` again, so a future outage gets a fresh
-// budget of wakes. `collectProbeInputs` reads NO module-global mutable state —
-// the gate flows in through the injectable deps bag, defaulting to the adapter's
-// singleton (so a no-gate production caller is unchanged).
+// The embed-backend probe-failure WoL wake is recovery POLICY, not probe
+// enumeration. It used to fire INSIDE the `serviceProbes` descriptor below, which
+// left this enumeration module importing src/health/wol.ts and carrying an
+// `embedWakeGate` through `CollectProbeDeps` — so a test of probe ordering had to
+// stub the cross-request WakeGate budget, a concern that belongs to wol.ts. Issue
+// #3626 makes this module a PURE enumerator: the `serviceProbes` descriptor now
+// returns the RAW embed-backend probe result, and the ONE caller (GET /health/deep
+// in src/api/health.ts) invokes the recovery step (`applyEmbedBackendRecovery`,
+// src/health/wol.ts) EXPLICITLY after assembly — an explicit call, not a
+// side-effect buried in the fan-out. The wake mechanism (packet build, WakeGate
+// timing, sendMagicPacket) and its cross-request singleton (getWolGates(), #2570)
+// already lived in wol.ts; #3626 only relocated the last invocation-site residue.
 
 // ---- The unified probe registry — keyed, position-free (issue #3263/#3372) ----
 //
@@ -270,16 +254,11 @@ export interface CollectProbeDeps {
    */
   darkOutcomesEval?: typeof evaluateDarkOutcomes;
   targetServiceName?: () => string;
-  /**
-   * Issue #2498/#2570: the embed-backend Wake-on-LAN gate forwarded to
-   * {@link maybeWakeEmbedBackend} (default: the WoL Adapter's `embed` singleton,
-   * src/health/wol.ts `getWolGates().embed`, so production callers passing no
-   * gate are byte-for-byte identical and keep cross-request cooldown/attempt
-   * persistence). Injecting a fresh `new WakeGate(cooldown, maxAttempts)` lets a
-   * test exercise gate exhaustion at the `collectProbeInputs` seam without
-   * touching the adapter singleton.
-   */
-  embedWakeGate?: WakeGate;
+  // Issue #3626: the embed-backend Wake-on-LAN gate (`embedWakeGate`) was removed
+  // from this deps bag. The WoL recovery no longer fires inside the fan-out — it
+  // is an explicit post-assembly step (applyEmbedBackendRecovery, src/health/wol.ts)
+  // owned by the GET /health/deep caller, which owns the gate. The fan-out is a
+  // pure enumerator: the 19-probe pipeline is now testable with ZERO WoL mocking.
 }
 
 export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeInputs> {
@@ -307,16 +286,9 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     skillCatalogState = getSkillCatalogState,
     darkOutcomesEval = evaluateDarkOutcomes,
     targetServiceName = getTargetServiceName,
-    // Issue #2498/#2570: default to the WoL Adapter's process-lifetime embed gate
-    // (src/health/wol.ts getWolGates().embed) so a no-gate production caller is
-    // identical to today and keeps cross-request cooldown/attempt persistence
-    // (ONE embed budget across requests). A test injects a fresh WakeGate to
-    // exercise exhaustion without touching the singleton — and, for the default
-    // path, can call resetWolGates() to clear the memo between cases. The distinct
-    // local name (embedGate) avoids self-referential destructure shadowing against
-    // the same-named CollectProbeDeps field. (Issue #3544: the parallel VLM-host
-    // wake gate was retired with the VLM cutover.)
-    embedWakeGate: embedGate = getWolGates().embed,
+    // Issue #3626: the embed-backend WakeGate no longer flows through here — the
+    // WoL recovery moved out of the fan-out to an explicit post-assembly step in
+    // the GET /health/deep caller (applyEmbedBackendRecovery, src/health/wol.ts).
   } = deps;
 
   // Issue #3263/#3372: the unified probe registry — the SINGLE source of the
@@ -362,14 +334,14 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
           probeOvImpl(),
           probeEmbedBackendImpl(),
         ]);
-        // Issue #2228: if the embed-backend probe failed, FIRE a best-effort
-        // Wake-on-LAN of the gaming PC and return the current probe result
-        // immediately — never block the /health/deep fan-out waiting for the box
-        // to POST. The powered-off box self-heals (the #1794 stretch goal) by the
-        // NEXT scheduled health tick; this tick still surfaces the failure (so the
-        // #2131 alert fires correctly while it's down). NEVER throws.
-        const embedFinal = await maybeWakeEmbedBackend(embedBackend, { gate: embedGate });
-        return { vikingdb, openviking: ov, "embed-backend": embedFinal };
+        // Issue #3626: this descriptor is a PURE enumerator — it returns the RAW
+        // embed-backend probe result. The best-effort Wake-on-LAN recovery (#2228)
+        // that used to fire HERE now runs as an explicit post-assembly step
+        // (applyEmbedBackendRecovery, src/health/wol.ts) invoked by the ONE caller,
+        // GET /health/deep. maybeWakeEmbedBackend returns the probe result unchanged
+        // (fire-and-return), so /health/deep output is byte-for-byte identical: the
+        // #2131 down-alert still fires this tick, recovery is observed next tick.
+        return { vikingdb, openviking: ov, "embed-backend": embedBackend };
       },
     },
     { kind: "async", key: "scheduler", run: () => schedulerStatus() },
