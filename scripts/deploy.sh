@@ -136,3 +136,52 @@ else
   echo "==> WARNING: Health check failed after deploy!"
   exit 1
 fi
+
+echo "==> Stamping semver version tag (issue #3677)..."
+# STRICTLY AFTER the health gate: a failed deploy never mints a version, so the
+# tag always equals deployed-AND-healthy reality (#3655). We are still inside the
+# flock re-exec'd at the top, so concurrent deploys serialize and there is no
+# tag race. This step creates a git REF (`git tag`) and pushes it — it does NOT
+# stage, commit, or checkout any tracked file, so it does NOT dirty the working
+# tree and does NOT trip the line-34 dirty-tree guard (the #2663 stale-prod
+# hazard). deploy.sh's changelog role is exactly zero (#3656 computed-join): the
+# dashboard computes per-version notes from the .changelog/ tag-window diff.
+#
+# IDEMPOTENT: if HEAD already carries an exact tag, skip. This is mandatory (not
+# cosmetic) — a bare 2nd `git tag <existing>` errors under `set -e`, and it makes
+# the step safe under the ci.yml cancel-in-progress hazard: a cancelled-then-
+# reran deploy on the same SHA sees the exact-match tag and no-ops.
+if git describe --tags --exact-match HEAD >/dev/null 2>&1; then
+  echo "    HEAD already tagged $(git describe --tags --exact-match HEAD) — skipping (idempotent)."
+else
+  # Previous tag (empty on a fresh repo => derive-version-bump baselines v1.0.0).
+  PREV_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+  # Commit range since the previous tag (whole history when no prior tag). The
+  # NUL-subject / RS-record framing keeps multi-line bodies intact for
+  # BREAKING-CHANGE detection; derive-version-bump.ts parses this exact shape.
+  if [ -n "$PREV_TAG" ]; then
+    GIT_LOG="$(git log "${PREV_TAG}..HEAD" --format='%s%x00%b%x1e')"
+  else
+    GIT_LOG="$(git log HEAD --format='%s%x00%b%x1e')"
+  fi
+  NEW_TAG="$(PREV_TAG="$PREV_TAG" GIT_LOG="$GIT_LOG" \
+    node --experimental-strip-types scripts/ci/derive-version-bump.ts)"
+  if [ -z "$NEW_TAG" ]; then
+    echo "    WARNING: could not derive a version tag — skipping (deploy already healthy)."
+  else
+    COMMIT_COUNT="$(git rev-list "${PREV_TAG:+${PREV_TAG}..}HEAD" --count 2>/dev/null || echo '?')"
+    # Annotated tag (#3655): carries author/date/message, preferred by
+    # `git describe --tags`, and makes the version's provenance auditable.
+    git tag -a "$NEW_TAG" -m "release ${NEW_TAG} (${COMMIT_COUNT} commits since ${PREV_TAG:-baseline})"
+    echo "    Tagged ${NEW_TAG} on $(git rev-parse --short HEAD)."
+    # Push the tag so `git describe --tags` is stable across fresh checkouts and
+    # the /api/versions read (#3680) sees it. Tolerate a push failure (no remote
+    # write, offline) — the local tag already reflects deployed reality and the
+    # deploy itself succeeded; a failed tag push must not fail a healthy deploy.
+    if git push origin "$NEW_TAG"; then
+      echo "    Pushed ${NEW_TAG} to origin."
+    else
+      echo "    WARNING: failed to push ${NEW_TAG} to origin (local tag stands)."
+    fi
+  fi
+fi
