@@ -66,7 +66,7 @@ import type {
 // EMPTY_ESCALATION_OUTCOME_FOLD) and their types now live in
 // src/aggregators/cascade-routing.ts. Callers MUST import them directly from the
 // aggregator, not from the redis seam. The redis seam is I/O only.
-export type { CascadeRecord, CascadeTelemetryRollup, EscalationOutcomeFold };
+export type { CascadeRecord, CascadeTelemetryRollup };
 
 /**
  * Cap on retained cascade records. Escalations are rare (a cheap-tier no_op /
