@@ -48,6 +48,25 @@ export const ORCH_BOARD_LABELS = {
   // `ready-for-agent` (e.g. #2701) is not counted as orch-pipeline work and
   // does not drive an orchestrator-scope grill / dispatch (issue #2704).
   target_backlog: "target-backlog",
+  // `glm-eligible` is the ISSUE-side eligibility label for the GLM dev-drainer
+  // worker lane (ADR-0032, issue #3687). An issue carries it when it is a
+  // designed, shallow, in-fence `dev_orch` item the drainer may author. It
+  // excludes the issue from the orch `ready_for_agent` count for exactly the
+  // same reason `target-backlog` does: that count is the *Opus `dev_orch`
+  // authoring* pool, and a glm-eligible issue is authored by the drainer on
+  // z.ai's independent quota — counting it would drive a duplicate
+  // orchestrator-scope dispatch onto work the drainer already owns.
+  // `design_concept_orch` stays active on glm-eligible issues (the brain
+  // designs, GLM authors — ADR-0032 Decision 1), so this is a `dev_orch`
+  // authoring-count exclusion only.
+  //
+  // Its PR-side sibling `glm-authored` is deliberately NOT in this vocabulary:
+  // ADR-0032 invariant 9 keeps the two label spaces distinct
+  // (`glm-eligible` ↔ issues/`ready-for-agent`, `glm-authored` ↔
+  // PRs/`active_dev_orch`), and this leaf is the *board-state* (issue) label
+  // set. `glm-authored` is consumed by the `active_dev_orch` PR collector in
+  // `scripts/autopilot/collect-state.sh`, which reads no TS vocabulary.
+  glm_eligible: "glm-eligible",
 } as const;
 
 /**

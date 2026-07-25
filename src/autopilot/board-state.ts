@@ -85,9 +85,15 @@ export function deriveBoardState(
     // ALSO exclude an issue that declares an OPEN strict blocker (issue #3059):
     // `decide.py` consumes this count, so a dependency-blocked issue must not
     // inflate the dispatchable pool until its blocker closes.
+    // ALSO exclude `glm-eligible` issues (ADR-0032, issue #3687): they are
+    // authored by the GLM dev-drainer on z.ai's independent quota, so counting
+    // them in the Opus `dev_orch` authoring pool would dispatch a second
+    // author onto work the drainer already owns. `design_concept_orch` is
+    // unaffected — it still designs every glm-eligible issue.
     if (
       labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
       !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
+      !labels.has(ORCH_BOARD_LABELS.glm_eligible) &&
       !hasOpenStrictBlocker(row, openBlockers)
     )
       ready_for_agent++;
@@ -172,9 +178,13 @@ export async function resolveOpenBlockers(
   const referenced = new Set<number>();
   for (const row of rows) {
     const labels = new Set(row.labels);
+    // Mirror `deriveBoardState`'s exclusions exactly: a row that cannot count
+    // toward `ready_for_agent` never needs its blockers resolved, so a
+    // `target-backlog` or `glm-eligible` row costs no `gh` round-trip.
     if (
       !labels.has(ORCH_BOARD_LABELS.ready_for_agent) ||
-      labels.has(ORCH_BOARD_LABELS.target_backlog)
+      labels.has(ORCH_BOARD_LABELS.target_backlog) ||
+      labels.has(ORCH_BOARD_LABELS.glm_eligible)
     )
       continue;
     for (const n of extractStrictBlockerRefs(row.body)) {
