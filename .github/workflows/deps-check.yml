@@ -1,0 +1,55 @@
+name: deps-check
+
+# Advisory dependency-staleness scan (tool-scout #3641).
+#
+# Runs `npm run deps:check` (taze@19 --json --include dependencies) against the
+# runtime dep set and uploads a JSON artifact for operator/agent inspection.
+#
+# WHY OUTSIDE ci.yml: ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015).
+# This is a NEW advisory scan — not a change to the merge gate — so it lives in a
+# Tier-3 sibling (operator memory feedback_ci_gate_separate_workflow_avoids_tier0).
+#
+# NOT A REQUIRED CHECK: never added to branch protection. A red advisory step
+# surfaces the finding without wedging the merge queue.
+#
+# TOOL LANE: taze is invoked via pinned `npx taze@19` — no package.json entry,
+# no install-script risk, same no-dependency lane as ast-grep/comby (ADR-0005).
+
+on:
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly Monday 08:00 UTC
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: deps-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deps-check:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan runtime dep staleness (taze@19, advisory)
+        run: |
+          set -uo pipefail
+          # --include dependencies = runtime deps only (skip devDeps).
+          # --json = machine-readable output; advisory, always exit 0.
+          npx --yes taze@19 --json --include dependencies > deps-staleness.json || true
+          echo "::group::deps-staleness report"
+          cat deps-staleness.json
+          echo "::endgroup::"
+
+      - name: Upload staleness report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deps-staleness-${{ github.run_id }}
+          path: deps-staleness.json
+          retention-days: 14
