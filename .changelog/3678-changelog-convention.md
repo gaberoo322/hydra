@@ -1,0 +1,1 @@
+- feat: add per-PR .changelog/ fragment convention + advisory changelog-check workflow (#3678)

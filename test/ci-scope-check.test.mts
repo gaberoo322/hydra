@@ -14,6 +14,7 @@ import {
   extractScopeJustifications,
   classifyScope,
   isTargetRepoPath,
+  ALWAYS_IN_SCOPE,
 } from "../scripts/ci/scope-check.ts";
 
 describe("extractScopeFromBody", () => {
@@ -414,5 +415,40 @@ describe("isTargetRepoPath (#2175)", () => {
   test("treats empty / whitespace input as not-Target", () => {
     assert.equal(isTargetRepoPath(""), false);
     assert.equal(isTargetRepoPath("   "), false);
+  });
+});
+
+describe("ALWAYS_IN_SCOPE (issue #3678)", () => {
+  test("includes the .changelog/ prefix", () => {
+    assert.ok(ALWAYS_IN_SCOPE.includes(".changelog/"));
+  });
+
+  test("a changelog fragment is in scope when unioned into inScope, even with an empty scope section", () => {
+    // Mirrors main()'s union: ALWAYS_IN_SCOPE ∪ (empty PR/issue scope).
+    const inScope = [...ALWAYS_IN_SCOPE];
+    const result = classifyScope([".changelog/3678-changelog-convention.md"], inScope);
+    assert.equal(result.blocked, false);
+    assert.deepEqual(result.outOfScope, []);
+  });
+
+  test("a fragment-only PR does not trip the ratio gate", () => {
+    const inScope = [...ALWAYS_IN_SCOPE];
+    const changed = [
+      ".changelog/3678-a.md",
+      ".changelog/3678-b.md",
+      ".changelog/3678-c.md",
+      ".changelog/3678-d.md",
+    ];
+    const result = classifyScope(changed, inScope);
+    assert.equal(result.blocked, false);
+    assert.equal(result.outOfScope.length, 0);
+  });
+
+  test("does not whitelist non-changelog paths", () => {
+    const inScope = [...ALWAYS_IN_SCOPE];
+    const result = classifyScope(["src/a.ts"], inScope);
+    // src/a.ts is not covered by .changelog/, so it is out-of-scope (though a
+    // single file never trips the ratio+count block on its own).
+    assert.deepEqual(result.outOfScope, ["src/a.ts"]);
   });
 });
