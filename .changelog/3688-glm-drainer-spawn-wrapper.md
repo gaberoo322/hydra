@@ -1,0 +1,1 @@
+- feat: GLM dev-drainer spawn wrapper — fenced z.ai env override, forbidden-read deny list, and a secret-scan + Verifier-Core preflight that aborts before the drainer can open a PR (#3688)

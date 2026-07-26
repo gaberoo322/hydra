@@ -1,0 +1,44 @@
+{
+  "_comment": "GLM dev-drainer settings (issue #3688, ADR-0032 invariant 8, input-side half of the two-layer secret fence). Handed to the drainer's `claude` process via `--settings` by src/glm/drainer-runner.ts buildDrainerArgs(). The `deny` block is the load-bearing part: z.ai offers no training opt-out (ADR-0032 accepted risk), so credential material must never enter the drainer's context in the first place. Claude Code evaluates deny BEFORE allow, so the broad `allow` tool grants below cannot re-open a denied path. Deliberately NOT run under --dangerously-skip-permissions: an explicit allow list plus a deny fence keeps the precedence unambiguous. Note the Bash denials are prefix-matched and therefore defense-in-depth, not a hard sandbox — the Read denials are the real fence.",
+
+  "permissions": {
+    "defaultMode": "acceptEdits",
+
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "TodoWrite",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch"
+    ],
+
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/*.env)",
+      "Read(**/secrets/**)",
+      "Read(**/*credential*)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/id_rsa*)",
+      "Read(//home/gabe/.claude/.credentials.json)",
+      "Read(//home/gabe/.ssh/**)",
+      "Read(//home/gabe/.aws/**)",
+      "Read(//home/gabe/.config/gh/**)",
+
+      "Bash(env)",
+      "Bash(printenv:*)",
+      "Bash(cat:*.env*)",
+      "Bash(cat:*credentials*)"
+    ],
+
+    "additionalDirectories": []
+  }
+}
