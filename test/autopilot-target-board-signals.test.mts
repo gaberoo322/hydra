@@ -11,12 +11,22 @@
  *
  *   - target_ready_for_agent  (drives target_board_work_available → dev_target)
  *   - target_needs_qa         (drives needs_qa_target             → qa_target)
+ *   - target_needs_triage     (drives needs_triage_target         → sweep_target)
  *   - target_needs_research   (surfaced for symmetry)
+ *
+ * `target_needs_triage` was added by issue #3709: decide.py's `sweep_target`
+ * selector had always read `needs_triage_target`, but collect-state.sh never
+ * emitted the count behind it, so the signal had ZERO producers and the arm
+ * was permanently dead (the same defect class as #959's `orch_idle`).
  *
  * The `ready_for_agent` count the endpoint returns is already open-blocker
  * excluded via the inherited #3059 filter (ADR-0031 Decision 5), so the
  * blocked-exclusion is enforced upstream at the board read — this collector
- * just surfaces the already-filtered count.
+ * just surfaces the already-filtered count. That filter applies to
+ * `ready_for_agent` ONLY: `needs_triage` is a raw label tally upstream, so the
+ * healthy branch and the `gh`-REST fallback agree by construction and NEITHER
+ * excludes blocked items (triage is precisely the act of re-examining a
+ * blocked item's lane — excluding them would deadlock them out of triage).
  *
  * This test pins the EMISSION side: the exact python emitter the script pipes
  * `$TARGET_BOARD_STATE_JSON` through, exercised against synthetic board JSON so
@@ -63,14 +73,14 @@ function runEmitter(board: Record<string, unknown>): Record<string, string> {
 }
 
 describe("collect-state.sh — Target board-state emission (issue #3435, ADR-0031)", () => {
-  test("emits the three target_-prefixed counts decide.py's Target branch reads", () => {
+  test("emits the four target_-prefixed counts decide.py's Target branch reads", () => {
     const out = runEmitter({
       ready_for_agent: 3,
       needs_qa: 2,
+      needs_triage: 5,
       needs_research: 1,
       // Extra board fields the endpoint returns must be ignored — the Target
-      // branch only consumes these three counts.
-      needs_triage: 5,
+      // branch only consumes these four counts.
       in_progress: 4,
       blocked: 7,
       stale_in_progress: [10, 11],
@@ -79,9 +89,29 @@ describe("collect-state.sh — Target board-state emission (issue #3435, ADR-003
     assert.equal(out.target_ready_for_agent, "3");
     assert.equal(out.target_needs_qa, "2");
     assert.equal(out.target_needs_research, "1");
+    assert.equal(
+      out.target_needs_triage,
+      "5",
+      "issue #3709: without this count needs_triage_target has no producer and sweep_target is a dead arm",
+    );
     // Never leak the orch-collision-prone unprefixed keys.
     assert.equal(out.ready_for_agent, undefined);
     assert.equal(out.needs_qa, undefined);
+    assert.equal(out.needs_triage, undefined);
+  });
+
+  test("a triage-only board still emits target_needs_triage (the sweep_target trigger)", () => {
+    // The live shape that exposed #3709: the Target board held 9 needs-triage
+    // items and nothing else actionable, yet sweep_target reported "no
+    // triggering signal" every turn because this count was never printed.
+    const out = runEmitter({
+      ready_for_agent: 0,
+      needs_qa: 0,
+      needs_triage: 9,
+      needs_research: 0,
+    });
+    assert.equal(out.target_needs_triage, "9");
+    assert.equal(out.target_ready_for_agent, "0");
   });
 
   test("an empty target board emits zero ready_for_agent (drives research, not dev)", () => {
@@ -103,6 +133,7 @@ describe("collect-state.sh — Target board-state emission (issue #3435, ADR-003
     const out = runEmitter({ ready_for_agent: 5 });
     assert.equal(out.target_ready_for_agent, "5");
     assert.equal(out.target_needs_qa, "0");
+    assert.equal(out.target_needs_triage, "0");
     assert.equal(out.target_needs_research, "0");
   });
 });
@@ -138,6 +169,88 @@ describe("collect-state.sh — Target board-state seam wiring (issue #3435)", ()
       src,
       /TARGET_GH_REPO="\$\{HYDRA_TARGET_GITHUB_REPO:-gaberoo322\/hydra-betting\}"/,
       "the Target repo handle must be env-overridable with the hydra-betting default (ADR-0002)",
+    );
+  });
+});
+
+/**
+ * The degraded/`gh`-REST fallback branch (issue #3709).
+ *
+ * When the orchestrator endpoint is down or reports `degraded:true`, the same
+ * four `target_` counts are re-spelled as an inline `gh issue list --jq`.
+ * These cases run the COMMITTED bash filter through real `jq` so the two
+ * implementations cannot drift, mirroring the orch-side precedent in
+ * test/autopilot-board.test.mts.
+ */
+describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () => {
+  /** Pull one `<key>: [...] | length` line out of the committed fallback --jq. */
+  function extractFilter(key: string): string {
+    const match = src.match(new RegExp(`^\\s*${key}: (\\[.*\\] \\| length),?$`, "m"));
+    assert.ok(match, `could not locate the fallback ${key} jq filter`);
+    return match[1];
+  }
+
+  function count(filter: string, issues: readonly { labels: string[] }[]): string {
+    const input = issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) }));
+    const r = spawnSync("jq", [filter], { input: JSON.stringify(input), encoding: "utf-8" });
+    assert.equal(r.status, 0, `jq failed: ${r.stderr}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  test("counts open needs-triage issues", () => {
+    assert.equal(
+      count(extractFilter("target_needs_triage"), [
+        { labels: ["needs-triage"] },
+        { labels: ["needs-triage", "enhancement"] },
+        { labels: ["ready-for-agent"] },
+        { labels: [] },
+      ]),
+      "2",
+    );
+  });
+
+  test("does NOT exclude blocked items — triage is how a blocked lane gets re-examined", () => {
+    // Deliberate divergence from `target_ready_for_agent`, which IS
+    // open-blocker excluded upstream (#3059). `needs_triage` is a raw label
+    // tally on BOTH branches; filtering blocked items here would deadlock them
+    // out of triage forever.
+    assert.equal(
+      count(extractFilter("target_needs_triage"), [
+        { labels: ["needs-triage"] },
+        { labels: ["needs-triage", "blocked"] },
+        { labels: ["needs-triage", "target-backlog"] },
+      ]),
+      "3",
+      "every open needs-triage issue counts, blocked ones included",
+    );
+  });
+
+  test("no needs-triage labels → 0 (never a phantom sweep_target dispatch)", () => {
+    assert.equal(
+      count(extractFilter("target_needs_triage"), [
+        { labels: ["ready-for-agent"] },
+        { labels: ["needs-qa"] },
+      ]),
+      "0",
+    );
+  });
+
+  test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+    assert.match(
+      src,
+      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+      "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+    );
+  });
+
+  test("the fallback gh read carries --limit 100, matching listOpenIssues DEFAULT_LIMIT", () => {
+    // Without it gh defaults to 30 and silently truncates: the Target repo had
+    // 35 open issues when #3709 was filed, so every target_ count was
+    // under-reported on the degraded path.
+    assert.match(
+      src,
+      /gh issue list --repo "\$TARGET_GH_REPO" --state open --json number,labels --limit 100 --jq/,
+      "the Target fallback must page to the same DEFAULT_LIMIT=100 the healthy path uses",
     );
   });
 });

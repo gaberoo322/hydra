@@ -154,13 +154,26 @@ fi
 # filter (ADR-0031 Decision 5), so a Target issue "blocked by #N" for an OPEN
 # #N never inflates the dispatchable count — the blocked-exclusion is free.
 #
-# We emit the three counts decide.py's Target branch consumes as its dispatch
+# We emit the four counts decide.py's Target branch consumes as its dispatch
 # signals, prefixed `target_` so they never collide with the orch board counts
 # above:
 #   - `target_ready_for_agent` — >0 → the autopilot sets
 #     `target_board_work_available`, which decide.py's `dev_target` selector
 #     reads (ready-for-agent present → dispatch hydra-target-build).
 #   - `target_needs_qa`        — >0 → `needs_qa_target` → `qa_target`.
+#   - `target_needs_triage`    — >0 → `needs_triage_target` → `sweep_target`
+#     (issue #3709). This is the exact Target mirror of the orch
+#     `needs_triage` > 0 → `needs_triage_orch` → `sweep_orch` mapping. Until
+#     #3709 this count was never emitted, so `needs_triage_target` had ZERO
+#     producers and decide.py's `sweep_target` arm (decide.py:~2901) was DEAD
+#     — the same defect class as #959's `orch_idle`. UNLIKE
+#     `target_ready_for_agent`, this is a RAW label tally with no
+#     blocked-exclusion: `deriveBoardState` applies the #3059 open-blocker
+#     filter to `ready_for_agent` ONLY, and that is correct on the merits —
+#     `ready_for_agent` is a DISPATCHABILITY count (you cannot build atop an
+#     open blocker) whereas `needs_triage` is a HYGIENE-BACKLOG count, and
+#     triage is precisely the act of re-examining a blocked item's lane.
+#     Excluding blocked items would deadlock them out of triage forever.
 #   - `target_needs_research`  — surfaced for completeness / symmetry.
 # `dev_target` empty (target_ready_for_agent==0) → the autopilot sets
 # `target_board_research_due`, which decide.py's `research_target` selector
@@ -192,19 +205,31 @@ d=json.load(sys.stdin)
 # they never collide with the orch board counts above.
 print('target_ready_for_agent=' + str(d.get('ready_for_agent', 0)))
 print('target_needs_qa=' + str(d.get('needs_qa', 0)))
+print('target_needs_triage=' + str(d.get('needs_triage', 0)))
 print('target_needs_research=' + str(d.get('needs_research', 0)))"
 else
   # Fallback: orchestrator down or its gh read degraded — read the Target repo
   # directly over REST (never GraphQL — ADR-0031 Decision 6). Note this fallback
   # does NOT apply the #3059 open-blocker filter (which needs the async blocker
   # resolve the endpoint owns); the healthy endpoint path above is the
-  # blocked-excluding source of truth. Best-effort: any failure emits zeros.
-  gh issue list --repo "$TARGET_GH_REPO" --state open --json number,labels --jq '{
+  # blocked-excluding source of truth. That caveat scopes to
+  # `target_ready_for_agent` ONLY — `deriveBoardState` applies the blocker
+  # filter to that one branch and tallies `needs_triage` as a bare label count,
+  # so `target_needs_triage` here AGREES WITH THE HEALTHY BRANCH BY
+  # CONSTRUCTION. Do not "fix" it by adding a blocked-exclusion (issue #3709):
+  # triage is exactly the act of re-examining a blocked item's lane, so
+  # filtering would deadlock blocked items out of triage forever.
+  # `--limit 100` mirrors the healthy path's `listOpenIssues` DEFAULT_LIMIT
+  # (src/github/issues.ts) — without it gh defaults to 30 and silently
+  # truncates the Target board (35 open issues at #3709), under-counting every
+  # lane. Best-effort: any failure emits zeros.
+  gh issue list --repo "$TARGET_GH_REPO" --state open --json number,labels --limit 100 --jq '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
+    target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
   } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null \
-    || { echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_research=0"; }
+    || { echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; }
 fi
 
 # untriaged-orphans triage backstop (issue #2426).
