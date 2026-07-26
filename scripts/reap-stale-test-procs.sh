@@ -94,6 +94,12 @@ Membership in a service cgroup ALONE never spares a process: every autopilot
 Claude descendant inherits the hydra-autopilot.service cgroup, so a membership
 test would spare the leaked grandchildren issue #226 exists to reap.
 
+If the MainPID query itself FAILS (systemd/D-Bus unreachable) the process is
+SPARED and a WARN naming the pid and unit is logged, and the summary reports a
+separate spared-unknown count. "We could not tell" is never treated as "not
+supervised": a missed kill leaks memory until the next hourly sweep, a wrong
+kill takes down the production Target web server.
+
 Otherwise a process is considered stale when its --max-age threshold is
 exceeded AND no living ancestor in its pid tree matches "hydra-orchestrator",
 "claude", or "codex" interactive sessions. When in doubt, the reaper leaves
@@ -155,14 +161,33 @@ cgroup_of() {
   cat "${PROC_ROOT}/$1/cgroup" 2>/dev/null || true
 }
 
-# MainPID of a systemd unit, or empty when the unit is unknown/inactive.
+# MainPID of a systemd unit. THREE distinct outcomes, because collapsing them is
+# how this reaper killed prod (issue #3730 QA):
+#   rc 0 + pid on stdout — the query answered
+#   rc 1                 — the query answered "no MainPID" (unit inactive/unknown)
+#   rc 2                 — THE QUERY ITSELF FAILED (systemd/D-Bus unreachable)
+# rc 2 is NOT the same answer as rc 1. The original code wrote
+# `systemctl ... 2>/dev/null || true`, which swallowed the failure and let the
+# caller fall through to "not supervised" — so a broken D-Bus session
+# (`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`) made the reaper SIGKILL the
+# production Target web server again, silently, through a brand-new trigger.
+# Callers MUST treat rc 2 as "spare, and say so loudly".
 unit_main_pid() {
-  local unit="$1" scope="$2"
+  local unit="$1" scope="$2" out rc
   if [[ -n "$UNIT_MAINPID_FILE" ]]; then
-    awk -F'\t' -v u="$unit" '$1 == u { print $2; exit }' "$UNIT_MAINPID_FILE" 2>/dev/null || true
-    return
+    out=$(awk -F'\t' -v u="$unit" '$1 == u { print $2; exit }' "$UNIT_MAINPID_FILE" 2>/dev/null)
+    rc=$?
+    (( rc == 0 )) || return 2  # fixture unreadable — same unknown as a dead bus
+    [[ -n "$out" ]] || return 1
+    printf '%s' "$out"
+    return 0
   fi
-  systemctl "$scope" show "$unit" -p MainPID --value 2>/dev/null || true
+  out=$(systemctl "$scope" show "$unit" -p MainPID --value 2>/dev/null)
+  rc=$?
+  (( rc == 0 )) || return 2
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+  return 0
 }
 
 # Returns 0 when $2 appears as a living ancestor of $1. A pid whose parents
@@ -220,11 +245,24 @@ supervising_unit() {
 # descendant was already spared by has_live_hydra_ancestor(), so this changes
 # the reason and the count, never the set of processes killed.
 is_systemd_supervised() {
-  local pid="$1" resolved unit scope mainpid
+  local pid="$1" resolved unit scope mainpid rc
   resolved=$(supervising_unit "$pid") || return 1
   unit="${resolved%% *}"
   scope="${resolved##* }"
   mainpid=$(unit_main_pid "$unit" "$scope")
+  rc=$?
+  # FAIL SAFE, NOT FAIL OPEN (issue #3730 QA). We could not determine whether a
+  # unit supervises this pid, so we decline to kill it and the caller WARNs. The
+  # asymmetry is deliberate: a missed kill leaks some memory until the next
+  # hourly sweep, a wrong kill takes down the production Target web server for a
+  # ~2m24s cold start. `unknown` is only ever reached for a process that IS in a
+  # *.service cgroup — a leak with no service cgroup never consults systemd at
+  # all, so a dead bus does not make the reaper a no-op for the #226 class.
+  if (( rc == 2 )); then
+    printf '%s:unknown' "$unit"
+    return 0
+  fi
+  (( rc == 0 )) || return 1
   mainpid="${mainpid//[!0-9]/}"
   [[ -n "$mainpid" && "$mainpid" != "0" ]] || return 1
   if [[ "$pid" == "$mainpid" ]]; then
@@ -268,6 +306,7 @@ candidates=$(proc_snapshot)
 
 killed=0
 spared=0
+spared_unknown=0
 considered=0
 below_age=0
 would_kill=0
@@ -288,9 +327,18 @@ while IFS='|' read -r pid pgid age cmd; do
   # silently skipped — `spared=0` on every run is what hid this bug for weeks.
   if supervisor=$(is_systemd_supervised "$pid"); then
     spared=$((spared + 1))
-    if [[ "$supervisor" == *:main ]]; then
-      log "SPARE pid=$pid unit=${supervisor%:main} reason=systemd-mainpid cmd=$cmd"
-    fi
+    case "$supervisor" in
+      *:main)
+        log "SPARE pid=$pid unit=${supervisor%:main} reason=systemd-mainpid cmd=$cmd"
+        ;;
+      *:unknown)
+        # Loud by contract (CLAUDE.md fail-loud): a silent fall-through here is
+        # exactly what re-created the #3730 incident. Never downgrade this to a
+        # quiet skip, and never make it conditional on DRY_RUN.
+        spared_unknown=$((spared_unknown + 1))
+        log "WARN pid=$pid unit=${supervisor%:unknown} reason=systemd-query-failed action=spared-on-unknown (cue: reaper-systemd-query-failed) cmd=$cmd"
+        ;;
+    esac
     continue
   fi
 
@@ -331,10 +379,19 @@ done <<< "$candidates"
 # It used to be computed as `considered - spared`, but `considered` counts every
 # pattern match before the age filter runs, so a quiet dry run reported
 # `would-kill=9` while printing zero STALE lines.
+# `spared-unknown` is broken out of `spared` deliberately (issue #3730 QA): a
+# process spared because systemd confirmed it is a unit's MainPID is a healthy
+# steady state, whereas one spared because the query FAILED means this host's
+# systemd/D-Bus is unreachable and the reaper is running degraded. Those must
+# never be indistinguishable in the summary — a non-zero spared-unknown is an
+# operator signal, not routine.
 if (( DRY_RUN == 1 )); then
-  log "DRY RUN — considered=$considered spared=$spared below-age=$below_age would-kill=$would_kill"
+  log "DRY RUN — considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age would-kill=$would_kill"
 else
-  log "considered=$considered spared=$spared below-age=$below_age killed=$killed"
+  log "considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age killed=$killed"
+fi
+if (( spared_unknown > 0 )); then
+  log "WARN degraded sweep — $spared_unknown process(es) spared because the systemd MainPID query failed; systemd/D-Bus may be unreachable (cue: reaper-systemd-query-failed)"
 fi
 
 # Always exit 0; the timer should not fire failure alerts on a quiet run.

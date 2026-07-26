@@ -62,11 +62,18 @@ type ReaperRun = { stdout: string; staleLines: string[]; summary: string };
 /**
  * Materialise a fixture /proc tree + snapshot files, run the real script under
  * --dry-run, and return its output. Cleans up the temp dir before returning.
+ *
+ * Passing `unitMainPids: null` leaves HYDRA_REAP_UNIT_MAINPID UNSET, so the
+ * script consults the REAL `systemctl`. That is how the systemd-query-failure
+ * path is exercised for real (issue #3730 QA: every test previously drove the
+ * fixture branch, which is exactly why the fail-open bug got through) — combine
+ * it with a broken D-Bus address in `extraEnv`.
  */
 function runReaper(
   procs: ProcFixture[],
-  unitMainPids: Record<string, number>,
+  unitMainPids: Record<string, number> | null,
   extraArgs: string[] = [],
+  extraEnv: Record<string, string> = {},
 ): ReaperRun {
   const dir = mkdtempSync(join(tmpdir(), "hydra-reap-fixture-"));
   try {
@@ -82,22 +89,28 @@ function runReaper(
     const snapshotPath = join(dir, "ps-snapshot");
     writeFileSync(snapshotPath, procs.map((p) => p.record).join("\n") + "\n");
 
-    const mainPidPath = join(dir, "unit-mainpids");
-    writeFileSync(
-      mainPidPath,
-      Object.entries(unitMainPids)
-        .map(([unit, pid]) => `${unit}\t${pid}`)
-        .join("\n") + "\n",
-    );
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      HYDRA_REAP_PROC_ROOT: procRoot,
+      HYDRA_REAP_PS_SNAPSHOT: snapshotPath,
+      ...extraEnv,
+    };
+    if (unitMainPids === null) {
+      delete env.HYDRA_REAP_UNIT_MAINPID;
+    } else {
+      const mainPidPath = join(dir, "unit-mainpids");
+      writeFileSync(
+        mainPidPath,
+        Object.entries(unitMainPids)
+          .map(([unit, pid]) => `${unit}\t${pid}`)
+          .join("\n") + "\n",
+      );
+      env.HYDRA_REAP_UNIT_MAINPID = mainPidPath;
+    }
 
     const res = spawnSync("bash", [SCRIPT_PATH, "--dry-run", ...extraArgs], {
       encoding: "utf-8",
-      env: {
-        ...process.env,
-        HYDRA_REAP_PROC_ROOT: procRoot,
-        HYDRA_REAP_PS_SNAPSHOT: snapshotPath,
-        HYDRA_REAP_UNIT_MAINPID: mainPidPath,
-      },
+      env,
     });
     assert.equal(res.status, 0, `script must always exit 0; stderr: ${res.stderr}`);
     const stdout = res.stdout ?? "";
@@ -216,6 +229,80 @@ describe("scripts/reap-stale-test-procs.sh — systemd-supervision spare (issue 
   });
 });
 
+describe("scripts/reap-stale-test-procs.sh — systemd query failure fails SAFE (issue #3730 QA)", () => {
+  /**
+   * A broken D-Bus session makes the REAL `systemctl --user show` exit 1. The
+   * original code wrote `systemctl ... 2>/dev/null || true`, collapsing "the
+   * query failed" into "this pid is not a MainPID", so the reaper fell through
+   * and SIGKILLed the production web server again — silently, through a brand
+   * new trigger. These tests pass `unitMainPids: null` so the genuine systemctl
+   * call runs, and break the bus exactly as the QA repro did.
+   */
+  const BROKEN_BUS = {
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent",
+    XDG_RUNTIME_DIR: "/nonexistent",
+  };
+
+  test("spares a service-cgroup process when the MainPID query itself fails", () => {
+    const run = runReaper([webServerProc], null, ["--max-age", "0"], BROKEN_BUS);
+
+    assert.ok(
+      !run.stdout.includes(`STALE pid=${PID_WEB}`),
+      `a process must never be killed on an UNRESOLVABLE supervision query; got: ${run.stdout}`,
+    );
+    assert.equal(summaryCount(run.summary, "would-kill"), 0);
+    assert.equal(summaryCount(run.summary, "spared"), 1);
+  });
+
+  test("logs a loud WARN naming the pid and unit when the query fails", () => {
+    const run = runReaper([webServerProc], null, ["--max-age", "0"], BROKEN_BUS);
+
+    assert.match(
+      run.stdout,
+      new RegExp(
+        `WARN pid=${PID_WEB} unit=hydra-betting-web\\.service reason=systemd-query-failed action=spared-on-unknown`,
+      ),
+      "the failure must never be silent (CLAUDE.md fail-loud convention)",
+    );
+    assert.match(
+      run.stdout,
+      /WARN degraded sweep — 1 process\(es\) spared because the systemd MainPID query failed/,
+      "the summary must carry an operator-visible degraded-sweep warning",
+    );
+  });
+
+  test("counts a spared-on-unknown separately from a confirmed-MainPID spare", () => {
+    const degraded = runReaper([webServerProc], null, ["--max-age", "0"], BROKEN_BUS);
+    assert.equal(
+      summaryCount(degraded.summary, "spared-unknown"),
+      1,
+      "a degraded sweep must be distinguishable from a healthy one in the summary",
+    );
+
+    // The healthy path resolves the MainPID, so nothing is 'unknown'.
+    const healthy = runReaper([webServerProc], { "hydra-betting-web.service": PID_WEB });
+    assert.equal(
+      summaryCount(healthy.summary, "spared-unknown"),
+      0,
+      "a confirmed-MainPID spare must not inflate the degraded counter",
+    );
+    assert.equal(summaryCount(healthy.summary, "spared"), 1);
+  });
+
+  test("a dead bus does NOT make the reaper a no-op — a leak with no service cgroup is still reaped", () => {
+    // The fail-safe must not become a blanket amnesty: a process outside any
+    // *.service cgroup never consults systemd at all, so the issue-#226 leak
+    // class is still reaped while the bus is down.
+    const run = runReaper([leakedTsxNoUnitProc], null, ["--max-age", "0"], BROKEN_BUS);
+
+    assert.equal(run.staleLines.length, 1, `got: ${run.stdout}`);
+    assert.match(run.staleLines[0], new RegExp(`STALE pid=${PID_LEAK_NO_UNIT}`));
+    assert.equal(summaryCount(run.summary, "spared"), 0);
+    assert.equal(summaryCount(run.summary, "spared-unknown"), 0);
+    assert.equal(summaryCount(run.summary, "would-kill"), 1);
+  });
+});
+
 describe("scripts/reap-stale-test-procs.sh — dry-run would-kill arithmetic (issue #3730)", () => {
   test("would-kill equals the number of STALE lines printed, not considered-minus-spared", () => {
     // The old summary computed `would-kill=$((considered - spared))`, but
@@ -285,6 +372,16 @@ describe("scripts/reap-stale-test-procs.sh — help text matches the implementat
       /systemd-managed\s+hydra-\*\s+unit/,
       "the help must not re-promise the hydra-*-only guard (issue #3730)",
     );
+  });
+
+  test("documents the fail-safe when the MainPID query itself fails", () => {
+    const text = help();
+    assert.match(
+      text,
+      /query itself FAILS/,
+      "the help must document that an unresolvable supervision query spares the process",
+    );
+    assert.match(text, /spared-unknown/, "the help must name the degraded-sweep counter");
   });
 
   test("states that service-cgroup membership alone never spares a process", () => {
