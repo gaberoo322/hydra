@@ -50,6 +50,7 @@ import { createExplorePageRouter } from "./api/explore-page.ts";
 import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
 import { createVlmRouter } from "./api/vlm.ts";
+import { createVersionsRouter } from "./api/versions.ts";
 import type { EventBus } from "./event-bus.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -188,6 +189,11 @@ function createApi(eventBus: EventBus) {
   // regression-check write surface that finally feeds digest.ts's orphaned
   // holdback.* consumer. Needs eventBus to emit on hydra:notifications.
   api.use(createHoldbackRouter(eventBus));
+  // Versions read surface (issue #3680, epic #3676) — joins the deploy-stamped
+  // semver tags (#3677) with the per-PR .changelog/ fragments (#3678) into
+  // per-repository release notes for the #3681 dashboard panel. Pure read, no
+  // eventBus, no query schema.
+  api.use(createVersionsRouter());
 
   // VLM claude-cli shim (issue #3542, epic #3541) — MOUNTS AT APP-ROOT /vlm,
   // NOT under the /api Router. OpenViking's ov.conf vlm.api_base is
