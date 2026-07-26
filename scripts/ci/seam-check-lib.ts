@@ -38,6 +38,118 @@ const execFileAsync = promisify(execFile);
 export const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 
 /**
+ * Characters after which a `/` starts a REGEX literal rather than a division.
+ * Deliberately excludes `)` and `]`, after which a `/` is division
+ * (`(a + b) / 2`, `xs[i] / 2`). Misjudging in the conservative direction is
+ * safe here: an unrecognised regex literal is scanned as ordinary code, and a
+ * `/` inside a regex body must be escaped (`\/`), so no unescaped `//` or `/*`
+ * can arise to be mistaken for a comment.
+ */
+const REGEX_START_PREDECESSORS = "(,=:[!&|?{};+-*%<>~^";
+
+/**
+ * Strip JavaScript/TypeScript comments from `source`, PRESERVING string and
+ * template literals (issue #3703).
+ *
+ * Token-keyed Seam checks (journal's `journalctl`, and the same shape in the
+ * openviking / anthropic / telegram ratchets) ask "does this file name binary X
+ * AND hold a spawn capability?". Matching the token against RAW source conflates
+ * two very different facts: *spawning* `journalctl` and merely *writing the word*
+ * in a doc comment. The journal ratchet's own docstring already drew that line —
+ * "Naming `journalctl` in prose/comments alone ... is not a violation" — but the
+ * regex never stripped comments, so the stated contract and the implementation
+ * disagreed.
+ *
+ * That gap is a trap for exactly the files most likely to name a sibling seam:
+ * a new process Adapter whose header documents the other Adapters. It fired on
+ * `src/claude-cli/exec.ts`, and the historical fix was worse than the bug — the
+ * `src/github/` and `src/host-probe/` families carry directory carve-outs in
+ * `journal-seam-check.ts` PURELY so their doc-prose would stop tripping the
+ * gate. Stripping comments removes the need to keep minting such carve-outs.
+ *
+ * String literals are deliberately KEPT: a spawned binary name lives in one
+ * (`spawn("journalctl", …)`), so stripping them would make the gate permissive.
+ * The scanner tracks quote state precisely (including backslash escapes) so a
+ * `//` inside a URL string never truncates the line — the classic naive-stripper
+ * bug, which would silently hide a real violation.
+ */
+export function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  /** Last non-whitespace character emitted — decides regex-vs-division. */
+  let prev = "";
+
+  while (i < n) {
+    const c = source[i]!;
+    const next = i + 1 < n ? source[i + 1] : "";
+
+    // Line comment — drop through end of line, keep the newline.
+    if (c === "/" && next === "/") {
+      while (i < n && source[i] !== "\n") i++;
+      continue;
+    }
+
+    // Block comment — drop, leaving a space so neighbouring tokens don't glue.
+    if (c === "/" && next === "*") {
+      i += 2;
+      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      i += 2;
+      out += " ";
+      continue;
+    }
+
+    // String or template literal — copy verbatim, honouring escapes.
+    if (c === '"' || c === "'" || c === "`") {
+      out += c;
+      i++;
+      while (i < n) {
+        const ch = source[i]!;
+        if (ch === "\\") {
+          out += ch + (i + 1 < n ? source[i + 1] : "");
+          i += 2;
+          continue;
+        }
+        out += ch;
+        i++;
+        if (ch === c) break;
+      }
+      prev = c;
+      continue;
+    }
+
+    // Regex literal — copy verbatim so an escaped slash never reads as a comment.
+    if (c === "/" && (prev === "" || REGEX_START_PREDECESSORS.includes(prev))) {
+      out += c;
+      i++;
+      let inClass = false;
+      while (i < n) {
+        const ch = source[i]!;
+        if (ch === "\\") {
+          out += ch + (i + 1 < n ? source[i + 1] : "");
+          i += 2;
+          continue;
+        }
+        if (ch === "\n") break;
+        out += ch;
+        i++;
+        if (ch === "[") inClass = true;
+        else if (ch === "]") inClass = false;
+        else if (ch === "/" && !inClass) break;
+      }
+      prev = "/";
+      continue;
+    }
+
+    out += c;
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+
+  return out;
+}
+
+/**
  * The on-disk baseline shape, shared by all four Seam checks: a sorted list of
  * tolerated `src/...` caller paths plus a free-form regeneration note.
  */

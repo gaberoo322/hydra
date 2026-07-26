@@ -86,6 +86,70 @@ describe("journal-seam-check: carve-outs", () => {
     );
   });
 
+  test("a doc-comment mention alone never violates, in ANY directory (issue #3703)", () => {
+    // THE regression. src/claude-cli/exec.ts documents its sibling Seams — one
+    // of which is the Journal Adapter — and imports node:child_process to spawn
+    // the `claude` binary. It names `journalctl` ONLY in prose and never spawns
+    // it, but the token regex matched raw source, so the gate fired and kept
+    // advisory-checks red. The detector's own docstring already promised this:
+    // "Naming `journalctl` in prose/comments alone ... is not a violation".
+    // Fixing the detector (rather than adding a fifth directory carve-out)
+    // closes the whole class: every future Adapter that documents its siblings
+    // would otherwise hit the same trap.
+    assert.equal(
+      fileViolatesJournalSeam(
+        "src/claude-cli/exec.ts",
+        `/**\n * Sibling to the Journal Adapter (src/journal/exec.ts, journalctl).\n */\nimport { spawn } from "node:child_process";\nspawn("claude", args);`,
+      ),
+      false,
+    );
+  });
+
+  test("a line-comment mention alone never violates (issue #3703)", () => {
+    assert.equal(
+      fileViolatesJournalSeam(
+        "src/some/new/adapter.ts",
+        `import { spawn } from "node:child_process";\n// unlike journalctl, this spawns the claude binary\nspawn("claude");`,
+      ),
+      false,
+    );
+  });
+
+  test("a REAL spawn is still flagged — the gate is not weakened (issue #3703)", () => {
+    // Code-level tokens survive stripping, including inside string literals,
+    // which is exactly where a spawned binary name lives.
+    assert.equal(
+      fileViolatesJournalSeam(
+        "src/some/new/adapter.ts",
+        `/* we should not spawn journalctl inline */\nimport { spawn } from "node:child_process";\nspawn("journalctl", ["--user"]);`,
+      ),
+      true,
+    );
+  });
+
+  test("a commented-out child_process import does not count as the spawn capability (issue #3703)", () => {
+    assert.equal(
+      fileViolatesJournalSeam(
+        "src/some/new/adapter.ts",
+        `// import { spawn } from "node:child_process";\nconst bin = "journalctl";`,
+      ),
+      false,
+    );
+  });
+
+  test("stripping does not swallow code after an escaped-slash regex (issue #3703)", () => {
+    // Guard against a naive stripper treating `\/\/` inside a regex literal as
+    // a line comment and eating the rest of the file — that would turn the gate
+    // silently permissive.
+    assert.equal(
+      fileViolatesJournalSeam(
+        "src/some/new/adapter.ts",
+        `const re = /https?:\\/\\//;\nimport { spawn } from "node:child_process";\nspawn("journalctl");`,
+      ),
+      true,
+    );
+  });
+
   test("exempts sibling process Seams that name journalctl in prose (github / host-probe)", () => {
     // exec-file-compat.ts lists journalctl as an example non-gh binary in its
     // doc comment while importing child_process for the gh/git boundary.
