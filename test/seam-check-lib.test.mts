@@ -20,8 +20,51 @@ const {
   loadBaseline,
   writeBaselineFile,
   isCliEntrypoint,
+  stripComments,
   REPO_ROOT,
 } = await import("../scripts/ci/seam-check-lib.ts");
+
+describe("seam-check-lib: stripComments (token-scan preprocessing, issue #3703)", () => {
+  test("removes block and line comments", () => {
+    assert.equal(stripComments(`/* journalctl */ const a = 1;`).includes("journalctl"), false);
+    assert.equal(stripComments(`const a = 1; // journalctl`).includes("journalctl"), false);
+    assert.equal(
+      stripComments(`/**\n * journalctl\n */\nconst a = 1;`).includes("journalctl"),
+      false,
+    );
+  });
+
+  test("PRESERVES string and template literals — a spawned binary name lives there", () => {
+    assert.equal(stripComments(`spawn("journalctl");`).includes("journalctl"), true);
+    assert.equal(stripComments(`spawn('journalctl');`).includes("journalctl"), true);
+    assert.equal(stripComments("const b = `journalctl`;").includes("journalctl"), true);
+  });
+
+  test("does not treat // inside a string literal as a comment", () => {
+    // The classic naive-stripper bug: truncating at `//` inside a URL would eat
+    // the rest of the line and silently hide a real token.
+    const out = stripComments(`const url = "http://x"; spawn("journalctl");`);
+    assert.equal(out.includes("journalctl"), true);
+  });
+
+  test("does not treat an escaped slash inside a regex literal as a comment", () => {
+    const out = stripComments(`const re = /https?:\\/\\//; spawn("journalctl");`);
+    assert.equal(out.includes("journalctl"), true);
+  });
+
+  test("handles an escaped quote inside a string without losing the terminator", () => {
+    const out = stripComments(`const s = "a\\"b"; // journalctl\nspawn("df");`);
+    assert.equal(out.includes("journalctl"), false);
+    assert.equal(out.includes("df"), true);
+  });
+
+  test("leaves ordinary code untouched", () => {
+    assert.equal(
+      stripComments(`import { spawn } from "node:child_process";`),
+      `import { spawn } from "node:child_process";`,
+    );
+  });
+});
 
 describe("seam-check-lib: diffBaseline (shrink-only ratchet)", () => {
   test("a current violation absent from the baseline is NEW (fail closed)", () => {

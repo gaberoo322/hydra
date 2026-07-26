@@ -46,7 +46,12 @@
  */
 
 import { join } from "node:path";
-import { REPO_ROOT, isCliEntrypoint, runAsCli } from "./seam-check-lib.ts";
+import {
+  REPO_ROOT,
+  isCliEntrypoint,
+  runAsCli,
+  stripComments,
+} from "./seam-check-lib.ts";
 
 const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/journal-seam-baseline.json");
 
@@ -90,15 +95,26 @@ const CHILD_PROCESS_PATTERNS = [
  * A file violates when it BOTH names the `journalctl` binary AND imports
  * `node:child_process` — the shape of an inline journal spawn. The Journal
  * Adapter family itself is exempt (it IS the seam — `exec.ts` owns the one
- * sanctioned spawn). Naming `journalctl` in prose/comments alone (without a
- * child_process import) is not a violation, so a doc reference does not trip the
- * gate.
+ * sanctioned spawn). Naming `journalctl` in prose/comments alone is not a
+ * violation, so a doc reference does not trip the gate.
+ *
+ * Both signals are matched against COMMENT-STRIPPED source (issue #3703). The
+ * gate previously matched raw text, so a file that merely *documented* the
+ * journal boundary while importing child_process for an unrelated binary was
+ * flagged — which is precisely how a new sibling Adapter (`src/claude-cli/
+ * exec.ts`, whose header describes the other process Seams) tripped it and kept
+ * `advisory-checks` red. That made the implementation contradict the promise in
+ * this very docstring. Stripping comments realigns the two and closes the class,
+ * rather than minting a fifth directory carve-out for every Adapter that
+ * documents its siblings. String literals are preserved, so a genuine
+ * `spawn("journalctl", …)` is still caught.
  */
 export function fileViolatesJournalSeam(relPath: string, body: string): boolean {
   if (relPath.startsWith(JOURNAL_DIR_PREFIX)) return false;
   if (SIBLING_SEAM_PREFIXES.some((p) => relPath.startsWith(p))) return false;
-  if (!JOURNALCTL_TOKEN.test(body)) return false;
-  return CHILD_PROCESS_PATTERNS.some((re) => re.test(body));
+  const code = stripComments(body);
+  if (!JOURNALCTL_TOKEN.test(code)) return false;
+  return CHILD_PROCESS_PATTERNS.some((re) => re.test(code));
 }
 
 const CONFIG = {

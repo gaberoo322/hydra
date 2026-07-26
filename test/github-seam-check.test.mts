@@ -123,6 +123,39 @@ describe("github-seam-check: non-gh/git spawner carve-out", () => {
     );
   });
 
+  test("exempts the Claude CLI Adapter family (src/claude-cli/*) — sibling Seam, issue #3703", () => {
+    // src/claude-cli/exec.ts owns the `claude` CLI spawn as a separate Seam, NOT
+    // a gh/git caller. Before #3703 the three claude spawn sites were flagged
+    // here with no correct adapter to migrate to, which reddened
+    // advisory-checks on every run.
+    assert.equal(
+      fileViolatesGithubSeam(
+        "src/claude-cli/exec.ts",
+        `import { spawn } from "node:child_process";`,
+      ),
+      false,
+    );
+  });
+
+  test("the migrated claude spawn sites are no longer flagged (issue #3703)", () => {
+    // They now import from src/claude-cli/exec.ts, so there is no
+    // node:child_process import left to flag — and no baseline entry either.
+    for (const f of [
+      "src/vlm/claude-cli-runner.ts",
+      "src/glm/drainer-runner.ts",
+      "src/api/vlm.ts",
+    ]) {
+      assert.equal(
+        fileViolatesGithubSeam(
+          f,
+          `import { runClaudeCli, type SpawnFn } from "../claude-cli/exec.ts";`,
+        ),
+        false,
+        `${f} should route through the Claude CLI Adapter`,
+      );
+    }
+  });
+
   test("exempts the Host-Probe Adapter family (src/host-probe/*) — sibling Seam, issue #939", () => {
     // src/host-probe/exec.ts owns the host-info spawn (df/free/systemctl) as a
     // separate Seam, NOT a gh/git caller. It is carved out of this scan and

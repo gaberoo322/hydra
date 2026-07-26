@@ -43,7 +43,7 @@
  * the `runClaude` contract it mirrors.
  */
 
-import { spawn } from "node:child_process";
+import { runClaudeCli, type SpawnFn } from "../claude-cli/exec.ts";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -98,7 +98,12 @@ export const STRIPPED_ENV_KEYS: readonly string[] = Object.freeze([
   "ANTHROPIC_AUTH_TOKEN_FILE",
 ]);
 
-export type SpawnFn = typeof spawn;
+/**
+ * Re-exported from the Claude CLI Adapter (`src/claude-cli/exec.ts`), the seam
+ * that owns the one `node:child_process` import for the `claude` binary — so
+ * existing importers need no edit (issue #3703, INV-6).
+ */
+export type { SpawnFn };
 
 export type GlmEnvResult =
   | { ok: true; env: NodeJS.ProcessEnv }
@@ -198,65 +203,10 @@ export function runGlmClaude(
   timeoutMs: number,
   options: RunGlmClaudeOptions,
 ): Promise<GlmClaudeRun> {
-  return new Promise((resolvePromise, reject) => {
-    let child: ReturnType<SpawnFn>;
-    try {
-      child = spawnImpl(bin, [...args], {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: options.env,
-        cwd: options.cwd,
-      });
-    } catch (error) {
-      reject(
-        new Error(
-          `glm-drainer spawn failed: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
-      return;
-    }
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const finish = (fn: () => void): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      fn();
-    };
-
-    const timer = setTimeout(() => {
-      finish(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* intentional: child may already be gone; the timeout error is what matters */
-        }
-        reject(new Error(`glm-drainer timed out after ${timeoutMs}ms`));
-      });
-    }, timeoutMs);
-
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", (error) => {
-      finish(() => {
-        reject(
-          new Error(
-            `glm-drainer spawn failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
-      });
-    });
-    child.on("close", (code) => {
-      finish(() => {
-        resolvePromise({ code, stdout, stderr });
-      });
-    });
+  return runClaudeCli(spawnImpl, bin, args, timeoutMs, {
+    label: "glm-drainer",
+    env: options.env,
+    cwd: options.cwd,
   });
 }
 

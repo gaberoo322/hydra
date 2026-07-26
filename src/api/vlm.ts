@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+
+import { defaultClaudeSpawn } from "../claude-cli/exec.ts";
 
 import { logger } from "../logger.ts";
 import { VlmChatCompletionRequestSchema } from "../schemas/vlm.ts";
@@ -76,9 +77,11 @@ export interface VlmRouterDeps {
   /** Per-call wall-clock deadline in ms. Defaults to 300_000. Non-positive/invalid → default. */
   requestTimeoutMs?: number;
   /**
-   * Injectable spawn for tests — production defaults to node:child_process
-   * spawn. Tests MUST inject this so no real `claude` CLI launches
-   * (acceptance criterion: no live subscription call in CI).
+   * Injectable spawn for tests — production defaults to `defaultClaudeSpawn`
+   * from the Claude CLI Adapter (`src/claude-cli/exec.ts`), which owns the one
+   * `node:child_process` import for the `claude` binary (issue #3703). Tests
+   * MUST inject this so no real `claude` CLI launches (acceptance criterion: no
+   * live subscription call in CI).
    */
   spawnImpl?: SpawnFn;
 }
@@ -117,7 +120,7 @@ function buildChatCompletion(model: string, content: string): unknown {
 export function createVlmRouter(deps: VlmRouterDeps = {}): Router {
   const router = Router();
   const claudeBinPath = deps.claudeBinPath?.trim() || DEFAULT_CLAUDE_BIN;
-  const spawnImpl = deps.spawnImpl ?? spawn;
+  const spawnImpl = deps.spawnImpl ?? defaultClaudeSpawn;
   const requestTimeoutMs = resolveTimeoutMs(deps.requestTimeoutMs);
 
   router.post("/v1/chat/completions", async (req, res) => {

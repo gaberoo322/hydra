@@ -103,6 +103,22 @@ const HOST_PROBE_DIR_PREFIX = "src/host-probe/";
 const JOURNAL_DIR_PREFIX = "src/journal/";
 
 /**
+ * The Claude CLI Adapter family prefix. Files under `src/claude-cli/` own the
+ * `claude` CLI external-process boundary on their own private spawn primitive —
+ * a sibling Seam to the GitHub CLI Adapter, NOT a gh/git caller. They are exempt
+ * from THIS scan and policed by their own `claude-cli-seam-check` ratchet (issue
+ * #3703). Before that seam existed, the three claude spawn sites
+ * (`src/vlm/claude-cli-runner.ts`, `src/glm/drainer-runner.ts`,
+ * `src/api/vlm.ts`) were flagged here with no correct adapter to migrate to —
+ * they shell out to neither gh/git nor a host binary — which reddened
+ * `advisory-checks` on every run. They now route through
+ * `src/claude-cli/exec.ts` and drop off this scan entirely; the baseline stays
+ * closed at zero. Trailing slash so it matches the family directory, not an
+ * incidental `src/claude-cli-foo.ts`.
+ */
+const CLAUDE_CLI_DIR_PREFIX = "src/claude-cli/";
+
+/**
  * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
  * import `node:child_process`? Exported so the regression test can pin the
  * grammar without shelling out to git. `relPath` decides the
@@ -121,6 +137,9 @@ export function fileViolatesGithubSeam(relPath: string, body: string): boolean {
   // Issue #1958: the Journal Adapter family owns its own `journalctl` spawn —
   // a sibling Seam, not a gh/git caller — so it is carved out of this scan.
   if (relPath.startsWith(JOURNAL_DIR_PREFIX)) return false;
+  // Issue #3703: the Claude CLI Adapter family owns its own `claude` spawn —
+  // a sibling Seam, not a gh/git caller — so it is carved out of this scan.
+  if (relPath.startsWith(CLAUDE_CLI_DIR_PREFIX)) return false;
   for (const re of CHILD_PROCESS_PATTERNS) {
     if (re.test(body)) return true;
   }

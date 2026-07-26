@@ -1,0 +1,4 @@
+{
+  "callers": [],
+  "note": "Hand-seeded at ZERO by issue #3703. Claude CLI Adapter closure ratchet: shrink only. Seeded empty — every `claude` CLI child_process spawn lives behind src/claude-cli/exec.ts, matching the host-probe precedent that a new Seam is never seeded with its own violations."
+}

@@ -94,6 +94,15 @@ const GITHUB_DIR_PREFIX = "src/github/";
 const JOURNAL_DIR_PREFIX = "src/journal/";
 
 /**
+ * The Claude CLI Adapter family prefix — owns the `claude` CLI spawn, a separate
+ * Seam (issue #3703). Exempt here and policed by `claude-cli-seam-check`. Before
+ * that seam existed the three claude spawn sites were flagged by BOTH this
+ * ratchet and the github one with no correct adapter to migrate to, reddening
+ * `advisory-checks` on every run.
+ */
+const CLAUDE_CLI_DIR_PREFIX = "src/claude-cli/";
+
+/**
  * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
  * import `node:child_process` in violation of the Host-Probe Adapter Seam?
  * Exported so the regression test can pin the grammar without shelling out to
@@ -107,6 +116,9 @@ export function fileViolatesHostProbeSeam(relPath: string, body: string): boolea
   if (relPath.startsWith(HOST_PROBE_DIR_PREFIX)) return false;
   if (relPath.startsWith(GITHUB_DIR_PREFIX)) return false;
   if (relPath.startsWith(JOURNAL_DIR_PREFIX)) return false;
+  // Issue #3703: the Claude CLI Adapter family owns its own `claude` spawn —
+  // a sibling Seam, not a host-info caller — so it is carved out of this scan.
+  if (relPath.startsWith(CLAUDE_CLI_DIR_PREFIX)) return false;
   if (NON_HOST_PROBE_SPAWNERS.has(relPath)) return false;
   for (const re of CHILD_PROCESS_PATTERNS) {
     if (re.test(body)) return true;
