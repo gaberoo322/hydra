@@ -23,6 +23,26 @@
 
 set -uo pipefail
 
+# Shared page size for EVERY `gh issue list` in this script (issue #3710).
+#
+# `gh issue list` defaults to 30 results with no warning, so an unlimited call
+# silently truncates once a board exceeds 30 — and because gh sorts
+# newest-first it drops the OLDEST issues, which is exactly the cohort the
+# age-sensitive consumers (wire-or-retire's 45-day ledger, the backfill-idle
+# checks) care about. The Target board was already past 30 when this was
+# filed, so five open issues were invisible on every turn.
+#
+# 100 is the GitHub API's maximum single-page size: the largest value
+# obtainable in ONE request on a per-turn hot path, and the same value as
+# `DEFAULT_LIMIT` in src/github/issues.ts, so the degraded shell path and the
+# healthy API path agree by construction. Deliberately NOT `--paginate` — that
+# would trade a silent truncation for unbounded per-turn latency and
+# rate-limit cost. Breaching 100 is made observable instead, via
+# `target_board_signals_truncated` (see the Target board block below).
+#
+# One constant, referenced everywhere: nine literals would drift apart.
+GH_ISSUE_LIST_LIMIT="${HYDRA_GH_ISSUE_LIST_LIMIT:-100}"
+
 # health
 hydra health 2>/dev/null | python3 -c "
 import json,sys
@@ -129,7 +149,7 @@ else
   # on z.ai's independent quota, so it must not inflate the Opus `dev_orch`
   # authoring pool). The strict-blocker exclusion (#3059) is endpoint-only and
   # deliberately absent here — the degraded path stays a single `gh` read.
-  gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
+  gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt --jq '{
     needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not) and (($n | index("glm-eligible")) | not))] | length,
     needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
@@ -223,7 +243,7 @@ else
   # (src/github/issues.ts) — without it gh defaults to 30 and silently
   # truncates the Target board (35 open issues at #3709), under-counting every
   # lane. Best-effort: any failure emits zeros.
-  gh issue list --repo "$TARGET_GH_REPO" --state open --json number,labels --limit 100 --jq '{
+  gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
@@ -266,7 +286,7 @@ fi
 # emits `untriaged_orphans=0` so a transient gh outage never spuriously
 # triggers a sweep.
 echo -n "untriaged_orphans="
-gh issue list --repo gaberoo322/hydra --state open --json number,labels --jq '
+gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '
   [ .[]
     | select(
         (.labels | map(.name)) as $n
@@ -344,7 +364,7 @@ echo -n "orch_pending_grill_anchor="
 # `design_concept_orch` grill against target code — a scope mismatch that
 # re-fires every idle turn. Drop such issues from the candidate list up front,
 # mirroring how the untriaged-orphans jq excludes label sets above.
-ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt,body,labels,title --jq '
+ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
   | sort_by(.updatedAt) | reverse | .[0:10]
 ' 2>/dev/null || true)
@@ -510,7 +530,7 @@ echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchor
 # doesn't have to grep state JSON.
 echo -n "scout_last_walk_iso="; docker exec hydra-redis-1 redis-cli GET hydra:scout:last-calendar-walk 2>/dev/null | tr -d '"' || echo ""
 echo -n "scout_board_open_enhancements="
-gh issue list --repo gaberoo322/hydra --state open --label enhancement --json number --jq 'length' 2>/dev/null || echo 0
+gh issue list --repo gaberoo322/hydra --state open --label enhancement --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq 'length' 2>/dev/null || echo 0
 
 # Tool Scout — Phase B cost-cap (issue #532).
 #
@@ -600,7 +620,7 @@ CLEANUP_BOARD_SATURATION_CAP=10
 # Single board read: the three actionable-label counts plus the
 # architecture-sourced and cleanup-sourced counts, in one gh call to keep this
 # collector cheap.
-ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --json number,labels --jq "{
+ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq "{
   ready_for_agent: [.[] | select((.labels | map(.name)) as \$n | (\$n | index(\"ready-for-agent\")) and ((\$n | index(\"target-backlog\")) | not))] | length,
   needs_research: [.[] | select(.labels | map(.name) | index(\"needs-research\"))] | length,
   needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,
@@ -701,11 +721,27 @@ TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
 # hot path). On an UNREACHABLE read we still fall to the suppressing defaults
 # (fail closed) BUT now emit an OBSERVABLE `target_board_signals_degraded=true`
 # line so a degraded read is a visible signal rather than an invisible zero-set.
+#
+# TRUNCATION (issue #3710) is a SEPARATE, ORTHOGONAL signal from degradation,
+# and the two must never be folded together — they have opposite semantics:
+#   degraded  = the read FAILED       -> suppress dispatch (fail closed)
+#   truncated = the read SUCCEEDED but is INCOMPLETE -> keep dispatching
+# Overloading `degraded` would stall the whole Target lane on a merely-large
+# board. `target_board_signals_truncated` is therefore ADVISORY ONLY: nothing
+# in decide.py gates on it, exactly like `target_board_signals_degraded`.
+#
+# Detection is `len(rows) >= limit` on the array already materialised above —
+# ZERO extra API calls, and the only in-band evidence available without a
+# second request. It is emitted in BOTH branches so decide.py never sees a
+# missing key. This is what keeps `--limit 100` from re-arming the identical
+# silent failure at 100 instead of 30: breaching the page size becomes loud.
 TARGET_BOARD_ISSUES_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open \
+  --limit "$GH_ISSUE_LIST_LIMIT" \
   --json number,labels --jq '[ .[] | { labels: (.labels | map(.name)) } ]' 2>/dev/null || echo '')
 if [ -n "$TARGET_BOARD_ISSUES_JSON" ]; then
   echo "target_board_signals_degraded=false"
   printf '%s' "$TARGET_BOARD_ISSUES_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
+    GH_ISSUE_LIST_LIMIT="$GH_ISSUE_LIST_LIMIT" \
     TARGET_CLEANUP_SCAN_LABEL="$TARGET_CLEANUP_SCAN_LABEL" \
     TARGET_WIRE_OR_RETIRE_LABEL="$TARGET_WIRE_OR_RETIRE_LABEL" \
     TARGET_DESIGN_QA_LABEL="$TARGET_DESIGN_QA_LABEL" \
@@ -746,6 +782,11 @@ try:
       wor_triage += 1
   idle = (triage_count == 0 and queued_count == 0 and wq == 0)
   dqa_saturated = (open_design_qa > dqa_cap)
+  # Advisory truncation flag (issue #3710): the read succeeded, but a row count
+  # at the page size means gh almost certainly dropped the OLDEST issues, so
+  # every count below is a floor, not a total. Never gates dispatch.
+  limit = int(os.environ.get('GH_ISSUE_LIST_LIMIT', '100') or 100)
+  print('target_board_signals_truncated=' + ('true' if len(rows) >= limit else 'false'))
   print('target_backfill_idle=' + ('true' if idle else 'false'))
   print('target_cleanup_board_open_scan=' + str(open_scan))
   print('target_cleanup_board_saturated=' + ('true' if open_scan > cap else 'false'))
@@ -755,6 +796,7 @@ try:
   print('design_qa_target_saturated=' + ('true' if dqa_saturated else 'false'))
   print('design_qa_target_due=' + ('false' if dqa_saturated else 'true'))
 except Exception:
+  print('target_board_signals_truncated=false')
   print('target_backfill_idle=false')
   print('target_cleanup_board_open_scan=0')
   print('target_cleanup_board_saturated=true')
@@ -763,12 +805,15 @@ except Exception:
   print('design_qa_target_open=0')
   print('design_qa_target_saturated=true')
   print('design_qa_target_due=false')
-" 2>/dev/null || { echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
+" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
 else
   # Fail closed AND observable: the board read was unreachable/empty, so emit
   # the suppressing defaults (never dispatch a scan/resolver that cannot read
   # its own board) but flag the degradation so it is not an invisible zero-set.
   echo "target_board_signals_degraded=true"
+  # Emitted in BOTH branches so decide.py never sees a missing key. A read that
+  # never happened is not a truncated read — it is a degraded one.
+  echo "target_board_signals_truncated=false"
   echo "target_backfill_idle=false"
   echo "target_cleanup_board_open_scan=0"
   echo "target_cleanup_board_saturated=true"
@@ -868,6 +913,7 @@ except Exception:
 # never counted and never picked — they route to /wayfinder only.
 echo -n "wayfinder_orch_frontier="
 WF_MAPS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label 'wayfinder:map' \
+  --limit "$GH_ISSUE_LIST_LIMIT" \
   --json number,labels --jq '
     [ .[]
       | select((.labels | map(.name) | index("wayfinder:destination-pending")) | not)
@@ -987,6 +1033,7 @@ echo "wayfinder_staleness_threshold_sec=${WAYFINDER_STALENESS_THRESHOLD_SEC}"
 echo -n "wayfinder_stale_maps="
 gh issue list --repo gaberoo322/hydra --state open \
   --label 'wayfinder:map' --label 'wayfinder:destination-pending' \
+  --limit "$GH_ISSUE_LIST_LIMIT" \
   --json number,createdAt --jq "
     [ .[]
       | select((now - (.createdAt | fromdateiso8601)) > ${WAYFINDER_STALENESS_THRESHOLD_SEC}) ]

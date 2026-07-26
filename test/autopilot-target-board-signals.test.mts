@@ -153,7 +153,7 @@ describe("collect-state.sh — Target board-state seam wiring (issue #3435)", ()
     // saturated GraphQL pool.
     assert.match(
       src,
-      /gh issue list --repo "\$TARGET_GH_REPO" --state open --json/,
+      /gh issue list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json/,
       "the Target fallback must be a REST gh issue list against the Target repo",
     );
     const targetBlock = src.slice(src.indexOf("TARGET_BOARD_STATE_JSON"));
@@ -243,14 +243,333 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     );
   });
 
-  test("the fallback gh read carries --limit 100, matching listOpenIssues DEFAULT_LIMIT", () => {
-    // Without it gh defaults to 30 and silently truncates: the Target repo had
-    // 35 open issues when #3709 was filed, so every target_ count was
-    // under-reported on the degraded path.
+  test("the fallback gh read carries the shared limit, matching listOpenIssues DEFAULT_LIMIT", () => {
+    // Without a limit gh defaults to 30 and silently truncates: the Target repo
+    // had 35 open issues when #3709 was filed, so every target_ count was
+    // under-reported on the degraded path. #3709 fixed this site with a literal
+    // `--limit 100`; #3710 replaced that literal with the shared
+    // GH_ISSUE_LIST_LIMIT constant so the nine call sites cannot drift apart.
     assert.match(
       src,
-      /gh issue list --repo "\$TARGET_GH_REPO" --state open --json number,labels --limit 100 --jq/,
-      "the Target fallback must page to the same DEFAULT_LIMIT=100 the healthy path uses",
+      /gh issue list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json number,labels --jq/,
+      "the Target fallback must page via the shared constant, not a private literal",
+    );
+    // Scoped to parsed commands, not raw source: the script's own comments
+    // discuss `--limit 100` in prose, and asserting over raw text would fail on
+    // documentation. (This is the same class of false positive that makes a
+    // grep-based version of the ratchet below untrustworthy.)
+    for (const c of logicalCommands(src).filter((x) => x.text.includes("gh issue list"))) {
+      assert.doesNotMatch(
+        c.text,
+        /--limit 100/,
+        `line ${c.line}: no site may re-inline the literal 100 — the point of #3710 is one constant`,
+      );
+    }
+  });
+});
+
+/**
+ * Every `gh issue list` in collect-state.sh carries an explicit `--limit`
+ * (issue #3710).
+ *
+ * `gh issue list` defaults to 30 with no error and no warning, and it sorts
+ * newest-first — so an unlimited call silently drops the OLDEST issues, which
+ * is precisely the cohort the age-sensitive consumers care about
+ * (`wire_or_retire_target_available` gates on a 45-day ledger;
+ * `target_backfill_idle` flips true on a board whose only remaining triage
+ * items were truncated away). The Target board was already past 30 when #3710
+ * was filed: five open issues were invisible to the collector every turn.
+ *
+ * WHY THIS TEST IS NOT A GREP. The issue originally proposed
+ * `grep 'gh issue list' | grep -v -- '--limit'`. That is actively misleading
+ * against this file, in BOTH directions:
+ *
+ *   - FALSE FAILURES: three of the twelve `gh issue list` occurrences are
+ *     comment prose (the header docs, the ADR-0031 REST-only note, the
+ *     wayfinder cost note), not invocations at all.
+ *   - FALSE PASSES: three real invocations span line continuations, so a
+ *     line-oriented grep stops reading before the flag. The Target healthy-path
+ *     call deliberately carries its `--limit` on a continuation line, which a
+ *     naive grep would report as unlimited.
+ *
+ * So the assertion runs over LOGICAL shell commands: comment lines are dropped
+ * at command boundaries only (inside an open quote a leading `#` is data, not a
+ * comment), and physical lines are joined across both continuation forms —
+ * a trailing backslash AND an unterminated quote (the `--jq '` blocks).
+ */
+
+type QuoteState = null | "'" | '"';
+
+/** Advance shell quote state across one physical line. */
+function scanQuotes(text: string, state: QuoteState): QuoteState {
+  let s = state;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (s === "'") {
+      // Single quotes are literal in shell: nothing escapes, only `'` closes.
+      if (c === "'") s = null;
+      continue;
+    }
+    if (s === '"') {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === '"') s = null;
+      continue;
+    }
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"') s = c;
+  }
+  return s;
+}
+
+type LogicalCommand = { line: number; text: string };
+
+/** Split shell source into logical commands, skipping whole-line comments. */
+function logicalCommands(source: string): LogicalCommand[] {
+  const lines = source.split("\n");
+  const out: LogicalCommand[] = [];
+  let buf = "";
+  let startLine = 0;
+  let quote: QuoteState = null;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (buf === "") {
+      // A leading `#` is a comment ONLY at a command boundary. Mid-command it
+      // is data (a jq comment, prose inside a quoted body) and dropping it
+      // would corrupt the join — and comment prose is full of apostrophes
+      // ("decide.py's"), which would wreck the quote scanner if fed to it.
+      if (raw.trim() === "" || /^\s*#/.test(raw)) continue;
+      startLine = i + 1;
+      buf = raw;
+    } else {
+      buf += "\n" + raw;
+    }
+    quote = scanQuotes(raw, quote);
+    // Continue on an unterminated quote (multi-line `--jq '...'`) or on an
+    // explicit backslash line continuation.
+    if (quote !== null || /\\$/.test(raw)) continue;
+    out.push({ line: startLine, text: buf });
+    buf = "";
+  }
+  if (buf !== "") out.push({ line: startLine, text: buf });
+  return out;
+}
+
+const ghIssueListCommands = () =>
+  logicalCommands(src).filter((c) => c.text.includes("gh issue list"));
+
+describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", () => {
+  test("the parser skips comment prose and joins BOTH continuation forms", () => {
+    // A miniature of the exact shapes in collect-state.sh. If this fixture
+    // parses correctly, the assertion below is trustworthy; if the parser ever
+    // regresses to line-oriented matching, this fails first and explains why.
+    const fixture = [
+      "#!/usr/bin/env bash",
+      "# Prose: one `gh issue list` fetch, per decide.py's cost note.",
+      "#   - Another `gh issue list` mention, with an apostrophe's worth of risk.",
+      "LIMITED=$(gh issue list --repo o/r --state open \\",
+      '  --limit "$L" \\',
+      "  --json number --jq 'length')",
+      "gh issue list --repo o/r --state open --json number --jq '",
+      "  [ .[] | .number ]",
+      "  | length'",
+      "echo done",
+    ].join("\n");
+
+    const cmds = logicalCommands(fixture).filter((c) => c.text.includes("gh issue list"));
+
+    assert.equal(
+      cmds.length,
+      2,
+      "three of the five `gh issue list` occurrences are prose — a grep would see five",
+    );
+    assert.ok(
+      cmds[0].text.includes('--limit "$L"'),
+      "the backslash-continued invocation must be joined so its continuation-line --limit is visible",
+    );
+    assert.ok(
+      cmds[1].text.includes("| length'"),
+      "the unterminated-quote invocation must be joined through its closing quote",
+    );
+    assert.deepEqual(
+      cmds.filter((c) => !c.text.includes("--limit")).map((c) => c.line),
+      [7],
+      "exactly the one genuinely unlimited invocation is flagged, by its real line number",
+    );
+  });
+
+  test("every gh issue list invocation carries an explicit --limit", () => {
+    const cmds = ghIssueListCommands();
+    const unlimited = cmds.filter((c) => !c.text.includes("--limit"));
+    assert.deepEqual(
+      unlimited.map((c) => `line ${c.line}`),
+      [],
+      "gh defaults to 30 and truncates newest-first — an unlimited list silently drops the oldest issues",
+    );
+  });
+
+  test("every invocation sources its limit from the one shared constant", () => {
+    for (const c of ghIssueListCommands()) {
+      assert.ok(
+        c.text.includes('--limit "$GH_ISSUE_LIST_LIMIT"'),
+        `line ${c.line}: limit must come from GH_ISSUE_LIST_LIMIT, not a private literal that can drift`,
+      );
+    }
+  });
+
+  test("the parser resolves the file's real invocations without over-joining", () => {
+    const cmds = ghIssueListCommands();
+    assert.ok(
+      cmds.length >= 9,
+      `expected at least the 9 known call sites, parsed ${cmds.length} — the parser lost invocations`,
+    );
+    for (const c of cmds) {
+      const occurrences = c.text.split("gh issue list").length - 1;
+      assert.equal(
+        occurrences,
+        1,
+        `line ${c.line}: two commands were joined into one, so a missing --limit could hide behind a sibling's`,
+      );
+    }
+  });
+
+  test("the shared constant defaults to 100 — the GitHub API's max single page", () => {
+    assert.match(
+      src,
+      /^GH_ISSUE_LIST_LIMIT="\$\{HYDRA_GH_ISSUE_LIST_LIMIT:-100\}"$/m,
+      "100 is one API page (zero extra round trips on a per-turn hot path) and matches DEFAULT_LIMIT in src/github/issues.ts",
+    );
+  });
+
+  test("never --paginate: unbounded paging is not the fix for a truncated hot-path read", () => {
+    // Again scoped to commands — the constant's own docstring names
+    // `--paginate` to explain why it was rejected.
+    for (const c of ghIssueListCommands()) {
+      assert.doesNotMatch(
+        c.text,
+        /--paginate/,
+        `line ${c.line}: paging trades a silent truncation for unbounded per-turn latency and rate-limit cost`,
+      );
+    }
+  });
+});
+
+/**
+ * `target_board_signals_truncated` — the advisory incompleteness signal
+ * (issue #3710).
+ *
+ * A flat `--limit 100` fixes today's instance but leaves the defect CLASS
+ * intact: a truncated read stays indistinguishable from a complete one, just at
+ * a higher and rarer threshold — i.e. it next bites long after anyone
+ * remembers the fix. So the Target healthy-path read (the only site that both
+ * materialises the array AND already owns a published signal contract) checks
+ * `len(rows) >= limit` on data already in hand — zero extra API calls — and
+ * publishes the result.
+ *
+ * It is deliberately a SEPARATE key from `target_board_signals_degraded`,
+ * because the two mean opposite things:
+ *   degraded  = the read failed            -> suppress dispatch (fail closed)
+ *   truncated = the read is incomplete     -> keep dispatching
+ * Folding truncation into `degraded` would stall the entire Target lane on a
+ * merely-large board, which is a worse outcome than the under-count it fixes.
+ */
+describe("collect-state.sh — Target board truncation signal (issue #3710)", () => {
+  /** The Target lane-signal emitter (distinct from the board-state emitter above). */
+  function extractLaneEmitter(): string {
+    const match = src.match(/python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/);
+    assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
+    return match[1];
+  }
+
+  function runLaneEmitter(
+    rows: readonly { labels: string[] }[],
+    env: Record<string, string> = {},
+  ): Record<string, string> {
+    const r = spawnSync("python3", ["-c", extractLaneEmitter()], {
+      input: JSON.stringify(rows.map((row) => ({ labels: row.labels }))),
+      encoding: "utf-8",
+      env: { ...process.env, GH_ISSUE_LIST_LIMIT: "100", ...env },
+    });
+    assert.equal(r.status, 0, `lane emitter exited non-zero: ${r.stderr}`);
+    const out: Record<string, string> = {};
+    for (const line of (r.stdout ?? "").trim().split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return out;
+  }
+
+  const rows = (n: number, labels: string[] = ["needs-triage"]) =>
+    Array.from({ length: n }, () => ({ labels }));
+
+  test("a board under the page size reports truncated=false", () => {
+    const out = runLaneEmitter(rows(35), { GH_ISSUE_LIST_LIMIT: "100" });
+    assert.equal(out.target_board_signals_truncated, "false");
+  });
+
+  test("a row count exactly at the page size reports truncated=true", () => {
+    // `length == limit` is the only in-band evidence available without a second
+    // request. A board sitting at exactly the limit is itself worth surfacing,
+    // so the false-positive case is an acceptable — arguably desirable — cost.
+    const out = runLaneEmitter(rows(100), { GH_ISSUE_LIST_LIMIT: "100" });
+    assert.equal(out.target_board_signals_truncated, "true");
+  });
+
+  test("truncation is ADVISORY — it never flips a dispatch-gating signal", () => {
+    // The regression that matters: a large-but-healthy board must keep
+    // dispatching. If truncation ever starts suppressing, the Target lane
+    // stalls exactly when the board is busiest.
+    const out = runLaneEmitter(
+      [...rows(60, ["needs-triage"]), ...rows(40, ["wire-or-retire", "needs-triage"])],
+      { GH_ISSUE_LIST_LIMIT: "100" },
+    );
+    assert.equal(out.target_board_signals_truncated, "true");
+    assert.equal(
+      out.wire_or_retire_target_available,
+      "true",
+      "a truncated read is still a successful read — it must not suppress the resolver",
+    );
+    assert.equal(out.target_cleanup_board_saturated, "false");
+    assert.equal(out.design_qa_target_due, "true");
+  });
+
+  test("truncation and degradation stay separate keys with opposite meanings", () => {
+    const out = runLaneEmitter(rows(100), { GH_ISSUE_LIST_LIMIT: "100" });
+    assert.equal(
+      out.target_board_signals_degraded,
+      undefined,
+      "degraded is emitted by the shell branch, never folded into the truncation check",
+    );
+    assert.equal(out.target_board_signals_truncated, "true");
+  });
+
+  test("the emitter honours the shared limit rather than hardcoding 100", () => {
+    const out = runLaneEmitter(rows(30), { GH_ISSUE_LIST_LIMIT: "30" });
+    assert.equal(
+      out.target_board_signals_truncated,
+      "true",
+      "lowering HYDRA_GH_ISSUE_LIST_LIMIT must lower the truncation threshold with it",
+    );
+  });
+
+  test("the key is emitted on the degraded branch too, so decide.py never sees it missing", () => {
+    // A read that never happened is not a truncated read — it is a degraded
+    // one. Both branches must still publish the key.
+    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    assert.match(
+      degradedBranch.slice(0, 400),
+      /echo "target_board_signals_truncated=false"/,
+      "the unreachable-read branch must emit truncated=false, not omit the key",
+    );
+    assert.equal(
+      src.match(/target_board_signals_truncated=/g)?.length,
+      4,
+      "expected 4 emission sites: healthy, python-except, python-invocation-failure, and degraded",
     );
   });
 });
