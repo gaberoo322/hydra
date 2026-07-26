@@ -1,0 +1,1 @@
+- fix: merged Target PRs now close their `Closes #N` issue, so shipped work stops being re-dispatched (#3700)

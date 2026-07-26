@@ -330,19 +330,22 @@ git -C ~/hydra-betting branch -d "feature/$CYCLE_ID" 2>&1 || \
 TASK_TITLE="${ANCHOR_SUBJECT:-<task title>}"
 ```
 
-**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking now lives as GitHub Issues on `gaberoo322/hydra-betting`, so there is NO Redis backlog lane to move to `done`, and NO `POST/PATCH /backlog` write of any kind. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) auto-closes the issue on merge — that close removes it from the open board and IS the terminal state-sync. Nothing else is required:
+**Board close-out — `Closes #N` is the sole terminal signal (ADR-0031 Decision 4/5).** Target tracking now lives as GitHub Issues on `gaberoo322/hydra-betting`, so there is NO Redis backlog lane to move to `done`, and NO `POST/PATCH /backlog` write of any kind. When the anchor was a board issue, the PR body's `Closes #$ANCHOR_NUM` (Step 7) is what `automerge.yml` reads to close the issue on merge — that close removes it from the open board and IS the terminal state-sync. (The close is performed *explicitly* by the merge workflow; GitHub's native auto-close does not fire on the emulated-automerge path — ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700.) Nothing else is required:
 
 - **No `hydra backlog move … done`.** The old `hydra backlog ls` → `hydra backlog move "$ITEM_ID" done` idiom is retired — the Redis kanban lanes no longer track Target work.
-- **No `pr-<n>` claimedBy PATCH marker.** The old inProgress `claimedBy":"pr-<n>"` PATCH to `/api/backlog/${ITEM_ID}/move` (the issue-#640 just-shipped-anchor suppression) is retired. On the GitHub board the in-flight signal is the `in-progress` label the claim stamped (Step 2), and the terminal signal is the issue-close on merge (`Closes #N`) — the board read never re-surfaces a closed issue, so there is no window for decide.py to re-dispatch onto the same anchor.
+- **No `pr-<n>` claimedBy PATCH marker.** The old inProgress `claimedBy":"pr-<n>"` PATCH to `/api/backlog/${ITEM_ID}/move` (the issue-#640 just-shipped-anchor suppression) is retired. On the GitHub board the in-flight signal is the `in-progress` label the claim stamped (Step 2), and the terminal signal is the issue-close on merge (`Closes #N`), performed explicitly by `automerge.yml` rather than by GitHub's native auto-close (ADR-0031 Decision 5 as amended by gaberoo322/hydra#3700) — the board read never re-surfaces a closed issue, so there is no window for decide.py to re-dispatch onto the same anchor.
 - **No work-queue `COMPLETED:`/`CLOSED:` marker.** The old `hydra queue add "COMPLETED: <task title>"` idiom is retired with the whole `hydra:anchors:work-queue` — completion is recorded by the issue-close plus the metrics record and `cycle:completed` event below.
 
 (The Redis backlog subsystem itself is NOT deleted by this change — that is the gated final step 5 of ADR-0031, blocked on no Orchestrator-self path depending on it. This step just stops the skill *writing* to it.)
 
 ```bash
-# Board anchor: the PR's `Closes #$ANCHOR_NUM` (Step 7) auto-closed the issue on
-# merge — no state-sync write is needed. Belt-and-suspenders: if the emulated
-# automerge squashed a body whose `Closes` linkage GitHub did not honor (rare),
-# close the issue explicitly via REST (never GraphQL — ADR-0031 Decision 6).
+# Board anchor: automerge.yml closes the `Closes #$ANCHOR_NUM` issue explicitly,
+# within seconds of the merge (ADR-0031 Decision 5 as amended by
+# gaberoo322/hydra#3700 — GitHub's NATIVE auto-close does not fire here). This
+# block is the residual guard, NOT the mechanism: it only runs if this agent
+# survives to Step 9, which is why it failed to save #623. Keep it (one REST
+# read; covers merges that bypassed automerge.yml) but never rely on it as the
+# primary close. Never GraphQL here (ADR-0031 Decision 6).
 if [ -n "${ANCHOR_NUM:-}" ]; then
   STATE=$(gh api "repos/gaberoo322/hydra-betting/issues/${ANCHOR_NUM}" --jq '.state')
   if [ "$STATE" = "open" ]; then
