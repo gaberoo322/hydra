@@ -16,7 +16,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/redis/` | Redis Adapters | _lazy_ | ADR-0009 |
 | `src/schemas/` | Schemas | _lazy_ | ADR-0011, ADR-0022 |
 | `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | _lazy_ | — |
-| `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | _lazy_ | ADR-0006, ADR-0007, ADR-0012 |
+| `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012 |
 | `src/taxonomy/` | Dispatch-Class Taxonomy | _lazy_ | ADR-0012 |
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping, Research Floor | _lazy_ | ADR-0012 |
 | `src/pattern-memory/` | Pattern Memory | _lazy_ | — |
