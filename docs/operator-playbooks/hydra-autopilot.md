@@ -544,7 +544,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` |
 | `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |
 | `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch` |
-| `target_needs_triage > 0` (**target GH board**, scope=target — RAW `needs-triage` label count; the #3059 open-blocker filter applies to `ready_for_agent` ONLY, and blocked items MUST count here because triage is the act of re-examining a blocked item's lane) | `needs_triage_target` | `sweep_target` (issue #3709 — exact Target mirror of `needs_triage_orch` → `sweep_orch`. Before #3709 this count was never emitted, so the signal had zero producers and the `sweep_target` arm was dead. No saturation cap: `sweep_target` is a *drainer* of the lane it is gated on, so the 900s class cooldown is the only backstop, matching `sweep_orch`) |
+| `target_needs_triage > 0` (**target GH board**, scope=target — raw `needs-triage` label count; the #3059 blocker filter applies to `ready_for_agent` only) | `needs_triage_target` | `sweep_target` (issue #3709 — Target mirror of `needs_triage_orch`; no saturation cap, it drains the lane it gates on) |
 | `untriaged_orphans > 0` (orch GH board — open issues carrying NONE of {ready-for-agent, in-progress, blocked, needs-qa, needs-triage, needs-research, target-backlog}) | `untriaged_orphans_orch` | `sweep_orch` (issue #2426) — triage backstop: routes mislabeled/orphaned issues invisible to BOTH the dev_orch and needs_triage_orch paths into an actionable lane |
 | `health=FAIL` or `failed_services>0` | `health_fail` | `health` |
 | `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
