@@ -93,6 +93,20 @@ install -D -m 0755 scripts/housekeeping.sh "$HOME/.local/bin/hydra-housekeeping.
 install -D -m 0644 scripts/systemd/hydra-housekeeping.service "$HOME/.config/systemd/user/hydra-housekeeping.service"
 install -D -m 0644 scripts/systemd/hydra-housekeeping.timer "$HOME/.config/systemd/user/hydra-housekeeping.timer"
 
+echo "==> Installing stale-process reaper timer (issue #226, #3730)..."
+# The reaper units were host-managed and never deploy-managed, which turned the
+# issue-#3730 P1 mitigation into a permanent outage risk: `systemctl --user stop
+# hydra-test-proc-reaper.timer` halted the hourly SIGKILLs of the Target web
+# server, and nothing in the deploy path would ever have started it again — the
+# issue-#226 leak defense would have stayed silently off forever. Install AND
+# enable it here so a deploy always converges on "reaper running", exactly like
+# the watchdog block above. `enable --now` is idempotent on an already-running
+# timer.
+install -D -m 0644 scripts/systemd/hydra-test-proc-reaper.service "$HOME/.config/systemd/user/hydra-test-proc-reaper.service"
+install -D -m 0644 scripts/systemd/hydra-test-proc-reaper.timer "$HOME/.config/systemd/user/hydra-test-proc-reaper.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-test-proc-reaper.timer
+
 echo "==> Installing Pace Gate (ADR-0021, issue #858)..."
 # The Pace Gate (scripts/autopilot/pace-gate.sh) is the usage-paced admission
 # controller and the SOLE launcher of hydra-autopilot.service. It replaces the
