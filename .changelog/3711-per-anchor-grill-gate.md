@@ -1,0 +1,1 @@
+- perf: the grill-before-dev gate now blocks only the anchor awaiting a design concept instead of the whole board, so a growing issue queue no longer starves orchestrator development for a whole autopilot run (#3711)
