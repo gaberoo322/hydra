@@ -5,13 +5,24 @@
  * ADR-0031 migrates Target task tracking from Redis to GitHub Issues on the
  * Target repo. `collect-state.sh` now reads the scope=target board-state
  * (`GET /api/autopilot/board-state?scope=target`, issue #3434) and emits
- * `target_ready_for_agent` / `target_needs_qa` / `target_needs_research`
- * counts. The autopilot maps those to board signals which decide.py's Target
- * branch dispatches from — the orch-style Target decision:
+ * `target_ready_for_agent` / `target_needs_qa` / `target_needs_triage` /
+ * `target_needs_research` counts. The autopilot maps those to board signals
+ * which decide.py's Target branch dispatches from — the orch-style Target
+ * decision:
  *
  *   - `target_board_work_available` (ready-for-agent present) → `dev_target`
  *   - `target_board_research_due`   (board empty)             → `research_target`
  *   - `needs_qa_target`             (needs-qa present)        → `qa_target`
+ *   - `needs_triage_target`         (needs-triage present)    → `sweep_target`
+ *
+ * The `needs_triage_target` → `sweep_target` row is issue #3709: the selector
+ * had shipped since inception but `collect-state.sh` never emitted the
+ * `target_needs_triage` count behind it, so the signal had zero producers and
+ * the arm was permanently dead (same defect class as #959's `orch_idle`). It
+ * is the exact Target mirror of `needs_triage_orch` → `sweep_orch`, and like
+ * that sibling it carries NO saturation cap — `sweep_target` drains the very
+ * lane it is gated on, so a cap would guarantee the lane never drains; the
+ * 900s class cooldown is the backstop.
  *
  * BLOCKED EXCLUSION: the board's `ready_for_agent` count is already
  * open-blocker-excluded via the inherited #3059 strict blocked-by/depends-on
@@ -135,6 +146,7 @@ function findAction(plan: any, predicate: (a: any) => boolean): any | undefined 
 const devTarget = (a: any) => a.type === "dispatch" && a.slot === "dev_target";
 const researchTarget = (a: any) => a.type === "dispatch" && a.slot === "research_target";
 const qaTarget = (a: any) => a.type === "dispatch" && a.slot === "qa_target";
+const sweepTarget = (a: any) => a.type === "dispatch" && a.slot === "sweep_target";
 
 describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-0031)", () => {
   test("target_board_work_available → dev_target dispatches hydra-target-build", () => {
@@ -198,6 +210,59 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     assert.ok(a, "qa_target must dispatch when the target GH board has needs-qa work");
     assert.equal(a.skill, "hydra-qa");
     assert.equal((a.prompt_args ?? {}).scope, "target");
+  });
+
+  test("needs_triage_target (board target_needs_triage>0) → sweep_target dispatches hydra-target-sweep", () => {
+    const state = baseState({ signals: { needs_triage_target: true } });
+    const plan = runDecide(state, feedNoResearch);
+    const a = findAction(plan, sweepTarget);
+    assert.ok(
+      a,
+      "issue #3709: sweep_target must dispatch when the target GH board has needs-triage work",
+    );
+    assert.equal(a.skill, "hydra-target-sweep");
+    assert.equal(a.reason, "target board hygiene due");
+  });
+
+  test("no needs_triage_target signal → sweep_target idles", () => {
+    const state = baseState({ signals: {} });
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, sweepTarget),
+      undefined,
+      "a Target board with zero needs-triage items must not dispatch sweep_target",
+    );
+  });
+
+  test("sweep_target fires even when the Target board is otherwise busy (no saturation cap)", () => {
+    // sweep_target DRAINS the lane it is gated on, so — unlike the producer
+    // classes that carry a *_board_saturated cap — a full board is exactly
+    // when it must run. Its sibling sweep_orch has run capless since inception.
+    const state = baseState({
+      signals: {
+        needs_triage_target: true,
+        target_board_work_available: true,
+        needs_qa_target: true,
+      },
+    });
+    const plan = runDecide(state, feedNoResearch);
+    assert.ok(
+      findAction(plan, sweepTarget),
+      "a saturated triage lane must not suppress its own drainer",
+    );
+  });
+
+  test("sweep_target excluded under orch-only scope", () => {
+    const state = baseState({
+      scope: "orch-only",
+      signals: { needs_triage_target: true },
+    });
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, sweepTarget),
+      undefined,
+      "orch-only scope must exclude the Target sweep class",
+    );
   });
 
   test("dev_target board signal excluded under orch-only scope", () => {
