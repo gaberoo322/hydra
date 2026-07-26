@@ -43,7 +43,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -381,6 +381,139 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
     assert.equal(grill, undefined,
       "design_concept_orch is orch-scope; target-only scope must exclude it");
+  });
+});
+
+describe("decide.py — the #628 grill gate is PER-ANCHOR, not global (issue #3711)", () => {
+  // Pre-#3711 `dev_orch` yielded whenever `orch_pending_grill_anchor` was set
+  // to ANYTHING, so one un-grilled issue anywhere on the board blocked dev_orch
+  // from building EVERY issue — including ones whose artifacts were already
+  // approved. `collect-state.sh` now pre-resolves a second signal in the same
+  // loop pass, `orch_dev_ready_anchor` (the first already-GRILL-CLEAR anchor),
+  // and this selector pins dev_orch to it instead of yielding.
+  //
+  // Both directions are pinned below, per the originating issue's own caution:
+  // (a) the gated anchor is still skipped AND still grilled, and (b) a second
+  // eligible anchor still dispatches THE SAME TURN.
+
+  test("builds the grill-clear anchor while a DIFFERENT anchor is grilled (same turn)", () => {
+    // THE headline regression: grill fires on issue-3730, and dev_orch
+    // dispatches on issue-3707 in the same plan instead of yielding.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-3730",
+      orch_dev_ready_anchor: "issue-3707",
+    });
+    const plan = runDecide(state, { candidates: [] });
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+
+    assert.ok(grill, "the un-grilled anchor must STILL be grilled — the gate is not a no-op");
+    assert.equal(grill.prompt_args.anchor, "issue-3730",
+      "the grill must still target the anchor that lacks a design concept");
+
+    assert.ok(dev,
+      "dev_orch must NOT yield globally when a different grill-clear anchor is available (#3711)");
+    assert.equal(dev.skill, "hydra-dev");
+    assert.equal(dev.prompt_args.anchor, "issue-3707",
+      "dev_orch must be PINNED to the grill-clear anchor — an unpinned dispatch lets " +
+      "hydra-dev self-select via its own `gh issue list | .[0]` and land on the grilled anchor");
+    assert.match(dev.reason, /3711/,
+      "the dispatch reason should name the per-anchor gate for turn-journal forensics");
+  });
+
+  test("still yields when the ONLY grill-clear anchor IS the pending-grill anchor", () => {
+    // dev_orch must never build the anchor design_concept_orch is grilling
+    // this very turn — that is the #628 sequencing rule and it survives intact.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-3730",
+      orch_dev_ready_anchor: "issue-3730",
+    });
+    const plan = runDecide(state, { candidates: [] });
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.ok(grill, "grill still fires on the un-grilled anchor");
+    assert.equal(dev, undefined,
+      "dev_orch must yield when the grill-clear anchor is the one being grilled");
+  });
+
+  test("still yields when a grill is pending and NO grill-clear anchor exists", () => {
+    // Every ready-for-agent anchor is un-grilled → today's yield is correct.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-3730",
+      orch_dev_ready_anchor: "none",
+    });
+    const plan = runDecide(state, { candidates: [] });
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(dev, undefined,
+      "a board of only un-grilled anchors must still block dev_orch (gate not weakened)");
+  });
+
+  test("degraded signal (grill pending, dev-ready signal ABSENT) fails closed to a yield", () => {
+    // An older autopilot turn — or a collect-state.sh board read that failed —
+    // omits `orch_dev_ready_anchor` entirely. That must behave exactly like the
+    // pre-#3711 gate: yield. Fail CLOSED, never dispatch onto an un-grilled anchor.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-3730",
+    });
+    const plan = runDecide(state, { candidates: [] });
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(dev, undefined,
+      "an absent orch_dev_ready_anchor must fail closed onto the pre-#3711 yield");
+  });
+
+  test("malformed dev-ready signal (non-string) fails closed to a yield", () => {
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-3730",
+      orch_dev_ready_anchor: 3707,
+    });
+    const plan = runDecide(state, { candidates: [] });
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(dev, undefined,
+      "a non-string signal must never be mistaken for a real anchor ref");
+  });
+
+  test("no grill pending → dev_orch dispatches UNPINNED (pre-#3711 contract preserved)", () => {
+    // The pin exists only to route dev_orch around a pending grill. With no
+    // grill pending, hydra-dev keeps picking its own issue off the orch board
+    // (the issue #458 contract) — #3711 must not quietly narrow dev_orch to
+    // whatever single anchor collect-state happened to resolve first.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "none",
+      orch_dev_ready_anchor: "issue-3707",
+    });
+    const plan = runDecide(state, { candidates: [] });
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.ok(dev, "dev_orch dispatches when no grill is pending");
+    assert.equal(dev.prompt_args?.anchor, undefined,
+      "no grill pending → no pin; hydra-dev selects its own anchor per #458");
+  });
+
+  test("the selector stays pure — no I/O seam inside _select_for_slot", () => {
+    // The per-anchor decision must be a pure function of the two pre-resolved
+    // signals: the artifact-freshness lookup it would otherwise need lives in
+    // collect-state.sh precisely so this stays true. Guard it mechanically.
+    //
+    // Scoped to the SELECTOR body, not the whole file: decide.py's CLI wrapper
+    // legitimately does network I/O (the `smoke` probe and the run-end POST),
+    // and `decide()` purity is the actual invariant — the file is both the pure
+    // brain and its own CLI entry point.
+    const src = readFileSync(join(SCRIPTS, "decide.py"), "utf-8");
+    const start = src.indexOf("def _select_for_slot(");
+    assert.ok(start > 0, "could not locate _select_for_slot in decide.py");
+    const after = src.indexOf("\ndef ", start + 1);
+    const body = src.slice(start, after > 0 ? after : undefined);
+    assert.match(body, /orch_dev_ready_anchor/,
+      "sanity: the sliced region must be the selector that reads the new signal");
+    for (const forbidden of ["urllib", "subprocess", "socket", "requests", "redis", "open("]) {
+      assert.equal(body.includes(forbidden), false,
+        `_select_for_slot must stay pure — found I/O seam "${forbidden}"`);
+    }
   });
 });
 
