@@ -106,14 +106,29 @@ for line in sys.stdin:
 
 For each row printed (number, age, title):
 
-1. **Before recovering, confirm no open PR is driving it** — an `in-progress` issue with a live PR citing `Closes #NUM` is progressing, not stalled. Skip it if a matching open PR exists:
-   `gh api "repos/$REPO/pulls?state=open&per_page=100" --jq '.[] | select(.body | test("[Cc]loses #'"$NUM"'\\b")) | .number'`
-2. Auto-recover a truly-stalled issue: strip the claim so it's pickable again —
-   `gh issue edit $NUM --repo $REPO --remove-label in-progress --add-label ready-for-agent`
-3. Log the action under "Stall recoveries" with number, age, and reason `stalled-90min`.
+1. **Classify by linked PRs across ALL states — never `state=open` alone.** A merged PR is `state=closed`, so an open-only guard cannot see the PR that shipped the work and re-arms a finished issue instead of closing it (this wasted a `dev_target` dispatch on hydra-betting#623 — gaberoo322/hydra#3700). REST-only per ADR-0031 Decision 6:
+   ```bash
+   LINKED=$(gh api --paginate "repos/$REPO/pulls?state=all&per_page=100" \
+     --jq '.[] | select((.body // "") | test("[Cc]loses #'"$NUM"'\\b"))
+                | "\(.number)\t\(.state)\t\(.merged_at // "-")"')
+   ```
+2. **Branch three ways on `$LINKED`. Only the third may re-arm the issue:**
+   - **A linked PR with a non-empty `merged_at` → SHIPPED: close it.** Recovering it would re-dispatch an anchor already satisfied. This is also what keeps Step 5 from undoing Step 7.
+     ```bash
+     gh issue close $NUM --repo $REPO --reason completed \
+       --comment "Shipped by merged PR #<n> — closing (stall-recovery reconciler)."
+     for L in ready-for-agent in-progress queued; do
+       gh api -X DELETE "repos/$REPO/issues/$NUM/labels/$L" --silent 2>/dev/null || true
+     done
+     ```
+     (DELETE-per-label is idempotent — a 404 on an absent label is swallowed — unlike `gh issue edit --remove-label`, which errors.)
+   - **Else a linked PR still `open` → PROGRESSING: skip.**
+   - **Else no linked PR at all → genuinely stalled: recover.**
+     `gh issue edit $NUM --repo $REPO --remove-label in-progress --add-label ready-for-agent`
+3. Log under "Stall recoveries" with number, age, and which branch fired (`shipped-closed` / `progressing-skipped` / `stalled-90min`).
 4. If the same issue shows up here on consecutive sweeps, flag it for operator attention — repeated stalls usually mean a structural blocker, not a transient agent crash.
 
-The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up.
+The 90-minute version gives operators a fast feedback signal when the WIP slots silently fill up. The primary close is performed by hydra-betting's automerge.yml within seconds of the merge (ADR-0031 Decision 5); the merged branch above is the reconciler for whatever that path misses.
 
 ### 6. (retired) Prior-failures list
 
