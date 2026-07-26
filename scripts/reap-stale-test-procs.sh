@@ -16,11 +16,34 @@
 # those: a delayed, heuristic sweep, not the first line of defense.
 #
 # This reaper finds tsx, esbuild --service, npm-exec, and node --test
-# processes older than $MAX_AGE_MIN minutes whose ancestor tree no longer
-# contains a live Hydra orchestrator or interactive Claude/Codex session,
-# and SIGKILLs their entire process groups. It logs every kill to stdout
-# (which systemd captures into journalctl) so the operator can correlate
-# kills with cycle history.
+# processes older than $MAX_AGE_MIN minutes that are NOT supervised by a live
+# systemd unit and whose ancestor tree no longer contains a live Hydra
+# orchestrator or interactive Claude/Codex session, and SIGKILLs their entire
+# process groups. It logs every kill to stdout (which systemd captures into
+# journalctl) so the operator can correlate kills with cycle history.
+#
+# P1 INCIDENT — issue #3730 (2026-07-26). For weeks the help text below
+# promised a spare for "any current systemd-managed hydra-* unit" that was
+# never implemented: `has_live_hydra_ancestor()` only pattern-matched ancestor
+# COMMAND LINES, and a systemd service's ancestor is the systemd manager while
+# its own cmd is arbitrary (`npm exec next start --port 3333`). So the reaper
+# SIGKILLed the production Target web server (hydra-betting-web.service) once
+# an hour, 23 times in 24h, each costing a ~2m24s Next.js cold start that
+# failed every Target runner POSTing to :3333. `is_systemd_supervised()` below
+# implements the missing spare.
+#
+# WHY THE SPARE IS *NOT* "any .service cgroup member" (the obvious fix, and
+# the one #3730 originally proposed): on this host EVERY process an autopilot
+# Claude session spawns inherits the `hydra-autopilot.service` cgroup —
+# including exactly the leaked tsx grandchildren issue #226 exists to reap.
+# Cgroup membership is inherited at fork and survives reparenting to init, so
+# "is in a .service cgroup" (or "is in a hydra-*.service cgroup") is true of
+# the leak class too and would neuter this reaper completely. The predicate
+# that actually separates the two is SUPERVISION, not membership: a process is
+# spared when it IS the cgroup unit's MainPID, or is a still-live descendant of
+# it. The Target web server is its unit's MainPID; a leaked tsx whose parents
+# have died is neither (its ancestor walk reaches the systemd manager without
+# passing through the unit's MainPID).
 #
 # Default: dry-run unless `--apply` is passed. The systemd timer wrapper
 # always passes `--apply`.
@@ -40,7 +63,8 @@ MAX_AGE_MIN=30
 print_help() {
   cat <<EOF
 reap-stale-test-procs.sh — kill stale tsx/esbuild/npm-exec/node-test
-processes older than MAX_AGE_MIN whose Hydra/Claude ancestor is gone.
+processes older than MAX_AGE_MIN that no live systemd unit supervises and
+whose Hydra/Claude ancestor is gone.
 Defense in depth for issue #226 (process group cleanup leaks).
 
 Usage:
@@ -58,10 +82,28 @@ Targets (case-insensitive command match):
   npm exec
   node --test
 
-A process is considered stale when its --max-age threshold is exceeded
-AND no living ancestor in its pid tree matches "hydra-orchestrator",
-"claude", "codex" interactive sessions, or any current systemd-managed
-hydra-* unit. When in doubt, the reaper leaves the process alone.
+A process is SPARED, regardless of age, when a live systemd unit supervises
+it: its cgroup names a *.service unit and the process either IS that unit's
+MainPID or is a still-live descendant of it. This covers every long-running
+service on the host (hydra-betting-web.service, context7.service, ...) —
+including non-hydra units, deliberately: nothing this reaper is meant to catch
+is supervised by a service, and a narrower hydra-* match would still kill a
+third-party service that happens to run \`npm exec\` (issue #3730).
+
+Membership in a service cgroup ALONE never spares a process: every autopilot
+Claude descendant inherits the hydra-autopilot.service cgroup, so a membership
+test would spare the leaked grandchildren issue #226 exists to reap.
+
+If the MainPID query itself FAILS (systemd/D-Bus unreachable) the process is
+SPARED and a WARN naming the pid and unit is logged, and the summary reports a
+separate spared-unknown count. "We could not tell" is never treated as "not
+supervised": a missed kill leaks memory until the next hourly sweep, a wrong
+kill takes down the production Target web server.
+
+Otherwise a process is considered stale when its --max-age threshold is
+exceeded AND no living ancestor in its pid tree matches "hydra-orchestrator",
+"claude", or "codex" interactive sessions. When in doubt, the reaper leaves
+the process alone.
 EOF
 }
 
@@ -81,11 +123,157 @@ if ! [[ "$MAX_AGE_MIN" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-NOW_EPOCH=$(date +%s)
 MAX_AGE_SEC=$((MAX_AGE_MIN * 60))
+
+# ---------------------------------------------------------------------------
+# Test seams (issue #3730). Production leaves all three UNSET and every fact
+# is read from the live host. test/reap-stale-test-procs.test.mts points them
+# at fixture files so both sparing directions — spare the supervised service,
+# still kill the genuinely leaked tsx — are pinned deterministically without
+# spawning (or killing) a single real process.
+#   HYDRA_REAP_PROC_ROOT    — stands in for /proc (per-pid cgroup lookups)
+#   HYDRA_REAP_PS_SNAPSHOT  — file of `pid|pgid|age_seconds|cmd` records
+#   HYDRA_REAP_UNIT_MAINPID — file of `unit<TAB>mainpid` lines
+# ---------------------------------------------------------------------------
+PROC_ROOT="${HYDRA_REAP_PROC_ROOT:-/proc}"
+PS_SNAPSHOT_FILE="${HYDRA_REAP_PS_SNAPSHOT:-}"
+UNIT_MAINPID_FILE="${HYDRA_REAP_UNIT_MAINPID:-}"
 
 log() {
   printf '[reap-stale-test-procs] %s\n' "$*"
+}
+
+# One consistent snapshot of every process as `pid|pgid|age_seconds|cmd`.
+# `etimes` is elapsed wall-clock seconds straight from procps, which replaces
+# the former per-pid `ps -p <pid> -o lstart=` + `date -d` reparse: one fork
+# instead of N, and no second-sample skew between the age and the snapshot.
+proc_snapshot() {
+  if [[ -n "$PS_SNAPSHOT_FILE" ]]; then
+    cat "$PS_SNAPSHOT_FILE" 2>/dev/null || true
+    return
+  fi
+  ps -eo pid=,pgid=,etimes=,cmd= 2>/dev/null \
+    | awk '{ pid=$1; pgid=$2; age=$3; $1=""; $2=""; $3=""; sub(/^ +/, ""); print pid"|"pgid"|"age"|"$0 }'
+}
+
+# The cgroup blob for a pid (empty when the process is gone).
+cgroup_of() {
+  cat "${PROC_ROOT}/$1/cgroup" 2>/dev/null || true
+}
+
+# MainPID of a systemd unit. THREE distinct outcomes, because collapsing them is
+# how this reaper killed prod (issue #3730 QA):
+#   rc 0 + pid on stdout — the query answered
+#   rc 1                 — the query answered "no MainPID" (unit inactive/unknown)
+#   rc 2                 — THE QUERY ITSELF FAILED (systemd/D-Bus unreachable)
+# rc 2 is NOT the same answer as rc 1. The original code wrote
+# `systemctl ... 2>/dev/null || true`, which swallowed the failure and let the
+# caller fall through to "not supervised" — so a broken D-Bus session
+# (`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`) made the reaper SIGKILL the
+# production Target web server again, silently, through a brand-new trigger.
+# Callers MUST treat rc 2 as "spare, and say so loudly".
+unit_main_pid() {
+  local unit="$1" scope="$2" out rc
+  if [[ -n "$UNIT_MAINPID_FILE" ]]; then
+    out=$(awk -F'\t' -v u="$unit" '$1 == u { print $2; exit }' "$UNIT_MAINPID_FILE" 2>/dev/null)
+    rc=$?
+    (( rc == 0 )) || return 2  # fixture unreadable — same unknown as a dead bus
+    [[ -n "$out" ]] || return 1
+    printf '%s' "$out"
+    return 0
+  fi
+  out=$(systemctl "$scope" show "$unit" -p MainPID --value 2>/dev/null)
+  rc=$?
+  (( rc == 0 )) || return 2
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+  return 0
+}
+
+# Returns 0 when $2 appears as a living ancestor of $1. A pid whose parents
+# have all exited walks straight up to the systemd manager and returns 1.
+has_ancestor_pid() {
+  local pid="$1" target="$2"
+  local guard=20  # don't loop more than 20 levels (defensive)
+  [[ -n "$target" && "$target" != "0" ]] || return 1
+  while [[ -n "$pid" && "$pid" != "1" && "$pid" != "0" && $guard -gt 0 ]]; do
+    guard=$((guard - 1))
+    local ppid
+    ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
+    [[ -n "$ppid" ]] || return 1  # process gone mid-walk
+    [[ "$ppid" == "$target" ]] && return 0
+    pid="$ppid"
+  done
+  return 1
+}
+
+# Echoes the *.service unit that supervises $1, or nothing. The unit is the
+# deepest `.service` component of the pid's cgroup path; `user@<uid>.service`
+# is deliberately excluded because that is the per-user systemd MANAGER, whose
+# MainPID is an ancestor of essentially everything in the session — treating it
+# as a supervisor would spare every leaked process on the host.
+supervising_unit() {
+  local pid="$1" cg unit="" scope="--system" line tail
+  cg=$(cgroup_of "$pid")
+  [[ -n "$cg" ]] || return 1
+  while IFS= read -r line; do
+    tail="${line##*/}"
+    case "$tail" in
+      user@*.service) ;;
+      *.service)
+        unit="$tail"
+        # A user-manager cgroup path carries `/user@<uid>.service/`; anything
+        # else is a system-scope unit.
+        case "$line" in
+          */user@*) scope="--user" ;;
+          *)        scope="--system" ;;
+        esac
+        ;;
+    esac
+  done <<< "$cg"
+  [[ -n "$unit" ]] || return 1
+  printf '%s %s' "$unit" "$scope"
+}
+
+# The issue-#3730 spare: is this pid supervised by a live systemd unit?
+# Echoes `<unit>:main` when the pid IS the unit's MainPID (a genuine
+# long-running service — the hydra-betting-web.service case this incident was
+# about) and `<unit>:descendant` when it is merely a still-live child of it.
+# The caller logs only the `main` case: during an autopilot run every live tsx
+# under the Claude session is a descendant of hydra-autopilot.service's MainPID,
+# and a line each would drown the journal. Both are spared either way — a live
+# descendant was already spared by has_live_hydra_ancestor(), so this changes
+# the reason and the count, never the set of processes killed.
+is_systemd_supervised() {
+  local pid="$1" resolved unit scope mainpid rc
+  resolved=$(supervising_unit "$pid") || return 1
+  unit="${resolved%% *}"
+  scope="${resolved##* }"
+  mainpid=$(unit_main_pid "$unit" "$scope")
+  rc=$?
+  # FAIL SAFE, NOT FAIL OPEN (issue #3730 QA). We could not determine whether a
+  # unit supervises this pid, so we decline to kill it and the caller WARNs. The
+  # asymmetry is deliberate: a missed kill leaks some memory until the next
+  # hourly sweep, a wrong kill takes down the production Target web server for a
+  # ~2m24s cold start. `unknown` is only ever reached for a process that IS in a
+  # *.service cgroup — a leak with no service cgroup never consults systemd at
+  # all, so a dead bus does not make the reaper a no-op for the #226 class.
+  if (( rc == 2 )); then
+    printf '%s:unknown' "$unit"
+    return 0
+  fi
+  (( rc == 0 )) || return 1
+  mainpid="${mainpid//[!0-9]/}"
+  [[ -n "$mainpid" && "$mainpid" != "0" ]] || return 1
+  if [[ "$pid" == "$mainpid" ]]; then
+    printf '%s:main' "$unit"
+    return 0
+  fi
+  if has_ancestor_pid "$pid" "$mainpid"; then
+    printf '%s:descendant' "$unit"
+    return 0
+  fi
+  return 1
 }
 
 # A live "hydra ancestor" is an interactive Claude / Codex session, the
@@ -112,33 +300,18 @@ has_live_hydra_ancestor() {
   return 1
 }
 
-age_seconds() {
-  local pid="$1"
-  local lstart
-  lstart=$(ps -p "$pid" -o lstart= 2>/dev/null || true)
-  if [[ -z "$lstart" ]]; then
-    echo 0
-    return
-  fi
-  local started
-  started=$(date -d "$lstart" +%s 2>/dev/null || echo 0)
-  if [[ "$started" -eq 0 ]]; then
-    echo 0
-    return
-  fi
-  echo $((NOW_EPOCH - started))
-}
-
-# Walk every running process and pick the candidates. We use `ps -eo` once
-# rather than nested `pgrep`s so the snapshot is consistent.
-candidates=$(ps -eo pid=,pgid=,cmd= 2>/dev/null \
-  | awk '{ pid=$1; pgid=$2; $1=""; $2=""; sub(/^  */,""); cmd=$0; print pid"|"pgid"|"cmd }')
+# Walk every running process and pick the candidates. We take ONE `ps -eo`
+# snapshot rather than nested `pgrep`s so the view is consistent.
+candidates=$(proc_snapshot)
 
 killed=0
 spared=0
+spared_unknown=0
 considered=0
+below_age=0
+would_kill=0
 
-while IFS='|' read -r pid pgid cmd; do
+while IFS='|' read -r pid pgid age cmd; do
   # Only consider the targets named in the issue.
   case "$cmd" in
     *tsx*|*"esbuild --service"*|*"npm exec"*|*"npm-exec"*|*"node --test"*|*"node --experimental-strip-types --test"*)
@@ -149,17 +322,40 @@ while IFS='|' read -r pid pgid cmd; do
   esac
   considered=$((considered + 1))
 
-  age=$(age_seconds "$pid")
-  if (( age < MAX_AGE_SEC )); then
+  # Issue #3730: the systemd-supervision spare is checked FIRST, before the age
+  # filter, so a long-lived service is counted and logged as spared rather than
+  # silently skipped — `spared=0` on every run is what hid this bug for weeks.
+  if supervisor=$(is_systemd_supervised "$pid"); then
+    spared=$((spared + 1))
+    case "$supervisor" in
+      *:main)
+        log "SPARE pid=$pid unit=${supervisor%:main} reason=systemd-mainpid cmd=$cmd"
+        ;;
+      *:unknown)
+        # Loud by contract (CLAUDE.md fail-loud): a silent fall-through here is
+        # exactly what re-created the #3730 incident. Never downgrade this to a
+        # quiet skip, and never make it conditional on DRY_RUN.
+        spared_unknown=$((spared_unknown + 1))
+        log "WARN pid=$pid unit=${supervisor%:unknown} reason=systemd-query-failed action=spared-on-unknown (cue: reaper-systemd-query-failed) cmd=$cmd"
+        ;;
+    esac
     continue
   fi
 
+  if [[ ! "$age" =~ ^[0-9]+$ ]] || (( age < MAX_AGE_SEC )); then
+    below_age=$((below_age + 1))
+    continue
+  fi
+
+  # Ancestor spares stay counted-but-unlogged: during an autopilot run there
+  # are many live tsx children and a line each would drown the journal.
   if has_live_hydra_ancestor "$pid"; then
     spared=$((spared + 1))
     continue
   fi
 
   log "STALE pid=$pid pgid=$pgid age=${age}s cmd=$cmd"
+  would_kill=$((would_kill + 1))
   if (( DRY_RUN == 1 )); then
     continue
   fi
@@ -178,10 +374,24 @@ while IFS='|' read -r pid pgid cmd; do
   fi
 done <<< "$candidates"
 
+# Issue #3730: `would-kill` counts the processes that actually cleared BOTH the
+# spare checks and the age filter — i.e. exactly the STALE lines printed above.
+# It used to be computed as `considered - spared`, but `considered` counts every
+# pattern match before the age filter runs, so a quiet dry run reported
+# `would-kill=9` while printing zero STALE lines.
+# `spared-unknown` is broken out of `spared` deliberately (issue #3730 QA): a
+# process spared because systemd confirmed it is a unit's MainPID is a healthy
+# steady state, whereas one spared because the query FAILED means this host's
+# systemd/D-Bus is unreachable and the reaper is running degraded. Those must
+# never be indistinguishable in the summary — a non-zero spared-unknown is an
+# operator signal, not routine.
 if (( DRY_RUN == 1 )); then
-  log "DRY RUN — considered=$considered spared=$spared would-kill=$((considered - spared))"
+  log "DRY RUN — considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age would-kill=$would_kill"
 else
-  log "considered=$considered spared=$spared killed=$killed"
+  log "considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age killed=$killed"
+fi
+if (( spared_unknown > 0 )); then
+  log "WARN degraded sweep — $spared_unknown process(es) spared because the systemd MainPID query failed; systemd/D-Bus may be unreachable (cue: reaper-systemd-query-failed)"
 fi
 
 # Always exit 0; the timer should not fire failure alerts on a quiet run.
