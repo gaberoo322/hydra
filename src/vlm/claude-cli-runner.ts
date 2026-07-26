@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runClaudeCli, type SpawnFn } from "../claude-cli/exec.ts";
 
 /**
  * VLM claude-cli subprocess leaf (issue #3633) — the `runClaude` spawn /
@@ -6,6 +6,11 @@ import { spawn } from "node:child_process";
  * `src/api/vlm.ts`. The `SpawnFn` injection seam is preserved so tests drive a
  * mocked child and NO live `claude` process launches in CI (ADR-0005 / issue
  * acceptance criterion).
+ *
+ * Since issue #3703 the promise-wrapping spawn body itself lives behind the
+ * **Claude CLI Adapter** (`src/claude-cli/exec.ts`), the seam that owns the one
+ * `node:child_process` import for the `claude` binary — this leaf now composes
+ * that primitive and keeps `runClaude`'s signature and error wording verbatim.
  *
  * `runClaude` REJECTS its promise on spawn-failure / process-error / timeout
  * and RESOLVES regardless of exit code otherwise — it never throws
@@ -27,7 +32,11 @@ import { spawn } from "node:child_process";
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 
-export type SpawnFn = typeof spawn;
+/**
+ * Re-exported from the Claude CLI Adapter so existing importers
+ * (`src/vlm/index.ts` → `src/api/vlm.ts`) need no edit (issue #3703, INV-6).
+ */
+export type { SpawnFn };
 
 export type ClaudeCliEnvelope = {
   type?: unknown;
@@ -66,60 +75,5 @@ export function runClaude(
   args: readonly string[],
   timeoutMs: number,
 ): Promise<ClaudeCliRun> {
-  return new Promise((resolve, reject) => {
-    let child: ReturnType<SpawnFn>;
-    try {
-      child = spawnImpl(bin, [...args], { stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      reject(
-        new Error(
-          `claude-cli spawn failed: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
-      return;
-    }
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const finish = (fn: () => void): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      fn();
-    };
-
-    const timer = setTimeout(() => {
-      finish(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* intentional: child may already be gone; the timeout error is what matters */
-        }
-        reject(new Error(`claude-cli timed out after ${timeoutMs}ms`));
-      });
-    }, timeoutMs);
-
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", (error) => {
-      finish(() => {
-        reject(
-          new Error(
-            `claude-cli spawn failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
-      });
-    });
-    child.on("close", (code) => {
-      finish(() => {
-        resolve({ code, stdout, stderr });
-      });
-    });
-  });
+  return runClaudeCli(spawnImpl, bin, args, timeoutMs, { label: "claude-cli" });
 }

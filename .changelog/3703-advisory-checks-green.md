@@ -1,0 +1,1 @@
+- fix: restore a green `advisory-checks` surface — files that spawn the `claude` CLI now declare a `seam-exempt: claude-cli-spawn` carve-out instead of tripping the GitHub/Host-Probe seam ratchets, and the drifted skill-size baseline rows are reconciled (#3703)

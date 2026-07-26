@@ -94,6 +94,36 @@ describe("host-probe-seam-check: carve-outs", () => {
     );
   });
 
+  test("exempts the Claude CLI Adapter family (src/claude-cli/*) — sibling Seam, issue #3703", () => {
+    // src/claude-cli/exec.ts owns the `claude` CLI spawn as a separate Seam, NOT
+    // a host-info caller. Before #3703 the three claude spawn sites were flagged
+    // by BOTH this ratchet and the github one with no correct destination.
+    assert.equal(
+      fileViolatesHostProbeSeam(
+        "src/claude-cli/exec.ts",
+        `import { spawn } from "node:child_process";`,
+      ),
+      false,
+    );
+  });
+
+  test("the migrated claude spawn sites are no longer flagged (issue #3703)", () => {
+    for (const f of [
+      "src/vlm/claude-cli-runner.ts",
+      "src/glm/drainer-runner.ts",
+      "src/api/vlm.ts",
+    ]) {
+      assert.equal(
+        fileViolatesHostProbeSeam(
+          f,
+          `import { runClaudeCli, type SpawnFn } from "../claude-cli/exec.ts";`,
+        ),
+        false,
+        `${f} should route through the Claude CLI Adapter`,
+      );
+    }
+  });
+
   test("exempts the two acknowledged non-host spawners", () => {
     for (const f of ["src/exec-with-timeout.ts", "src/index.ts"]) {
       assert.equal(
