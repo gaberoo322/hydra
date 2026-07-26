@@ -1,0 +1,1 @@
+- feat: add GET /api/versions reporting each repository's current release and recent release notes (#3680)
