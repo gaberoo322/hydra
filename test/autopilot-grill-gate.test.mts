@@ -52,26 +52,61 @@ interface Issue {
   title: string;
 }
 
+interface OpenPr {
+  headRefName: string;
+  body: string;
+}
+
+interface GateOpts {
+  /**
+   * Issue numbers whose `/api/design-concepts/issue-<N>` probe returns a FRESH
+   * artifact (a `createdAt` of now). Everything else 404s. Post-#3711 this is
+   * what makes an anchor "grill-clear" and therefore a valid dev pin.
+   */
+  freshArtifacts?: number[];
+  /** Fixture for the `gh pr list --json headRefName,body` in-flight probe (#3711). */
+  openPrs?: OpenPr[];
+}
+
+interface GatePicks {
+  /** The `orch_pending_grill_anchor=` value. */
+  grill: string;
+  /** The `orch_dev_ready_anchor=` value (issue #3711). */
+  devReady: string;
+}
+
 /**
- * Run collect-state.sh with stubbed external binaries and return the value
- * of the `orch_pending_grill_anchor=` line.
+ * Run collect-state.sh with stubbed external binaries and return both anchor
+ * picks the grill loop emits.
  *
- * @param issues the fixture the `gh` stub returns for the grill-loop list
- *   call, in board order (newest-first — the script reads them in order).
+ * @param issues the fixture the `gh` stub returns for the grill-loop list call.
+ *   Post-#3711 the ORDER OF THIS ARRAY IS IRRELEVANT: the script sorts
+ *   candidates by issue number ascending (stable, oldest-first) rather than
+ *   walking gh's newest-first order, so a test can pass them in any order and
+ *   the walk order is deterministic. Several tests below pass them descending on
+ *   purpose, to pin exactly that.
  */
-function runGrillGate(issues: Issue[]): string {
+function runGate(issues: Issue[], opts: GateOpts = {}): GatePicks {
   const dir = mkdtempSync(join(tmpdir(), "grill-gate-"));
   try {
     const bin = join(dir, "bin");
     spawnSync("mkdir", ["-p", bin]);
 
-    const fixture = JSON.stringify(issues);
-    writeFileSync(join(dir, "issues.json"), fixture);
+    writeFileSync(join(dir, "issues.json"), JSON.stringify(issues));
+    writeFileSync(join(dir, "prs.json"), JSON.stringify(opts.openPrs ?? []));
+    // One issue number per line — the curl stub greps this for an exact match.
+    writeFileSync(
+      join(dir, "fresh.txt"),
+      (opts.freshArtifacts ?? []).map((n) => String(n)).join("\n") + "\n",
+    );
 
-    // `gh` stub: only the grill-loop invocation matters. It is the one
-    // `gh issue list ... --json number,updatedAt,body,labels` call. We emit
-    // the fixture for that and an empty array (or empty object) otherwise so
-    // the earlier board collectors degrade gracefully.
+    // `gh` stub: two invocations matter, both keyed on their exact `--json`
+    // field list. The grill-loop issue list, and (post-#3711) the open-PR probe
+    // that feeds the in-flight-dev exclusion. Everything else emits an empty
+    // array so the upstream collectors degrade gracefully.
+    //
+    // NOTE: the stub ignores `--jq`, so the script's own jq filters (the
+    // target-backlog exclusion) are not exercised here — the fixture arrives raw.
     writeStub(
       bin,
       "gh",
@@ -79,6 +114,10 @@ function runGrillGate(issues: Issue[]): string {
 for a in "$@"; do
   if [ "$a" = "number,updatedAt,body,labels,title" ]; then
     cat "${join(dir, "issues.json")}"
+    exit 0
+  fi
+  if [ "$a" = "headRefName,body" ]; then
+    cat "${join(dir, "prs.json")}"
     exit 0
   fi
 done
@@ -89,13 +128,27 @@ exit 0
 `,
     );
 
-    // `curl` stub: every /api/design-concepts/issue-<N> probe 404s (prints
-    // nothing, exits non-zero like `curl -sf` on 404) so every fixtured
-    // issue counts as "no fresh artifact". Any other curl prints nothing.
+    // `curl` stub: a /api/design-concepts/issue-<N> probe returns a FRESH
+    // artifact iff <N> is in fresh.txt; otherwise it mimics `curl -sf` on a 404
+    // (no body, non-zero exit) so the issue counts as "no fresh artifact".
     writeStub(
       bin,
       "curl",
       `#!/usr/bin/env bash
+url=""
+for a in "$@"; do
+  case "$a" in http*) url="$a" ;; esac
+done
+case "$url" in
+  */api/design-concepts/issue-*)
+    n="\${url##*/issue-}"
+    if grep -qxF "$n" "${join(dir, "fresh.txt")}" 2>/dev/null; then
+      # A fresh artifact: createdAt = now (ms), well inside the 7-day window.
+      echo "{\\"createdAt\\": $(( $(date +%s) * 1000 )), \\"status\\": \\"approved\\"}"
+      exit 0
+    fi
+    ;;
+esac
 # Mimic 'curl -sf' on a 404: no body, non-zero exit.
 exit 22
 `,
@@ -115,17 +168,26 @@ exit 22
     });
 
     // The script is best-effort and never exits non-zero on a collector miss.
-    const line = (r.stdout ?? "")
-      .split("\n")
-      .find((l) => l.startsWith("orch_pending_grill_anchor="));
-    assert.ok(
-      line !== undefined,
-      `collect-state.sh did not emit orch_pending_grill_anchor (stderr: ${r.stderr})`,
-    );
-    return line.slice("orch_pending_grill_anchor=".length).trim();
+    const read = (key: string): string => {
+      const line = (r.stdout ?? "").split("\n").find((l) => l.startsWith(`${key}=`));
+      assert.ok(
+        line !== undefined,
+        `collect-state.sh did not emit ${key} (stderr: ${r.stderr})`,
+      );
+      return line.slice(key.length + 1).trim();
+    };
+    return {
+      grill: read("orch_pending_grill_anchor"),
+      devReady: read("orch_dev_ready_anchor"),
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** Back-compat shim: the pre-#3711 tests assert only the grill pick. */
+function runGrillGate(issues: Issue[]): string {
+  return runGate(issues).grill;
 }
 
 function writeStub(bin: string, name: string, body: string): void {
@@ -364,5 +426,190 @@ describe("collect-state.sh — mechanical/non-implementable grill gate (issue #1
       "issue-701",
       "an ordinary anchor (title merely containing 'track', no cleanup-scan label) must still grill",
     );
+  });
+});
+
+describe("collect-state.sh — orch_dev_ready_anchor, the per-anchor half of the gate (issue #3711)", () => {
+  // The same loop pass now emits a SECOND signal: the first already-GRILL-CLEAR
+  // anchor. decide.py pins dev_orch to it instead of yielding board-wide, so a
+  // growing board can no longer starve orchestrator development for a whole run.
+  //
+  // Both directions, per the originating issue's caution: the gated anchor is
+  // still promoted for a grill AND a second eligible anchor is still offered to
+  // dev the same turn.
+
+  test("a fresh artifact makes an anchor dev-ready while a later anchor still grills", () => {
+    // THE headline both-directions case: issue-701 has an approved artifact,
+    // issue-702 does not. The grill still targets 702; dev gets 701.
+    const picks = runGate(
+      [issue(701, "Already grilled.\n"), issue(702, "Complex, no stamp.\n")],
+      { freshArtifacts: [701] },
+    );
+    assert.equal(picks.grill, "issue-702",
+      "the un-grilled anchor must still be promoted — the gate is not weakened");
+    assert.equal(picks.devReady, "issue-701",
+      "an anchor with a fresh artifact must be offered to dev_orch the same turn");
+  });
+
+  test("emits none/none on an empty board", () => {
+    const picks = runGate([]);
+    assert.equal(picks.grill, "none");
+    assert.equal(picks.devReady, "none", "no candidates → nothing for dev to be pinned to");
+  });
+
+  test("a board of only un-grilled anchors offers NO dev pin (gate holds)", () => {
+    // This is the case that must still block dev_orch entirely.
+    const picks = runGate([issue(703, "No stamp.\n"), issue(704, "No stamp either.\n")]);
+    assert.equal(picks.grill, "issue-703", "the oldest un-grilled anchor is promoted");
+    assert.equal(picks.devReady, "none",
+      "no grill-clear anchor exists, so decide.py must still yield");
+  });
+
+  test("a T1-stamped anchor is dev-ready (trivial gate #1088 → grill-clear)", () => {
+    const picks = runGate([
+      issue(710, "Trivial tweak.\n\nExpected tier: T1\n"),
+      issue(711, "Complex, no stamp.\n"),
+    ]);
+    assert.equal(picks.grill, "issue-711");
+    assert.equal(picks.devReady, "issue-710",
+      "a T1-stamped anchor needs no concept by construction, so it is a valid dev pin");
+  });
+
+  test("a cleanup-scan anchor is dev-ready (mechanical gate #1230 → grill-clear)", () => {
+    const picks = runGate([
+      issue(720, "remove dead export.\n", ["ready-for-agent", "cleanup-scan"]),
+      issue(721, "Complex, no stamp.\n"),
+    ]);
+    assert.equal(picks.grill, "issue-721");
+    assert.equal(picks.devReady, "issue-720",
+      "a cleanup-scan finding is self-checking and routes straight to dev");
+  });
+
+  test("a 'track:' tracker is suppressed for BOTH picks (not implementable now)", () => {
+    // The mechanical gate suppresses the grill for a calendar-bound tracker, but
+    // unlike cleanup-scan it must NOT become a dev pin — its window is open.
+    const picks = runGate([
+      issue(730, "Window closes later.\n", ["ready-for-agent"], "track: weekly merge-rate baseline"),
+    ]);
+    assert.equal(picks.grill, "none", "a track: tracker is not a grill candidate (#1230)");
+    assert.equal(picks.devReady, "none",
+      "a track: tracker is not implementable now, so it must never be pinned to dev");
+  });
+
+  test("the dev pick is the FIRST grill-clear anchor, not merely any of them", () => {
+    const picks = runGate(
+      [
+        issue(740, "No stamp.\n"),
+        issue(741, "Grilled.\n"),
+        issue(742, "Also grilled.\n"),
+      ],
+      { freshArtifacts: [741, 742] },
+    );
+    assert.equal(picks.grill, "issue-740");
+    assert.equal(picks.devReady, "issue-741",
+      "the lowest-numbered grill-clear anchor wins, mirroring the grill pick's stability");
+  });
+});
+
+describe("collect-state.sh — candidate order is STABLE, not newest-first (issue #3711)", () => {
+  // Pre-#3711 the candidate list was `sort_by(.updatedAt) | reverse` — so every
+  // newly-filed issue displaced the head and RE-EXTENDED the block. Filing a bug
+  // mid-run rotated the grill anchor to the new issue and restarted the gate from
+  // scratch (observed three times in run a1c24124). Ordering is now issue number
+  // ascending: monotonic in creation order, so the head only changes when the
+  // head itself drains.
+  //
+  // The `issue()` helper deliberately sets updatedAt DESCENDING with the issue
+  // number (higher number = older timestamp), so a newest-first implementation
+  // and a lowest-number-first implementation disagree — which is what makes
+  // these assertions load-bearing rather than incidental.
+
+  test("walks candidates lowest-issue-number first regardless of fixture order", () => {
+    const picks = runGate([issue(902, "No stamp.\n"), issue(901, "No stamp.\n")]);
+    assert.equal(picks.grill, "issue-901",
+      "the lowest-numbered (oldest) anchor is promoted, whatever order gh returned");
+  });
+
+  test("a newly-filed issue does NOT displace the head of the queue", () => {
+    // #3711's sub-defect (a) verbatim: filing issue-999 mid-run must not steal
+    // the anchor from the already-waiting issue-801.
+    const picks = runGate([issue(999, "Just filed.\n"), issue(801, "Waiting a while.\n")]);
+    assert.equal(picks.grill, "issue-801",
+      "a freshly-filed higher-numbered issue must sort to the BACK, never re-extend the block");
+  });
+
+  test("the 10-candidate cap keeps the OLDEST ten, so the pool itself is stable", () => {
+    // The cap moved out of the jq into the python extractor for this reason:
+    // capping a newest-first list rotates the candidate POOL, not just its order.
+    // 12 issues, all un-grilled — the pick must be the lowest number present.
+    const many = Array.from({ length: 12 }, (_, i) => issue(1000 + i, "No stamp.\n"));
+    const picks = runGate(many.reverse());
+    assert.equal(picks.grill, "issue-1000",
+      "the oldest candidate must survive the cap and win the pick");
+  });
+});
+
+describe("collect-state.sh — in-flight dev work is not a grill anchor (issue #3711)", () => {
+  // Sub-defect (b): the gate demanded a design concept for the very anchor
+  // dev_orch was implementing. An anchor with dev work already in flight is
+  // excluded from BOTH picks — a concept produced after the PR exists is
+  // retro-active waste, and dev must not re-pick it either.
+  //
+  // This cannot weaken the gate: the predicate needs POSITIVE evidence that dev
+  // work happened (an open PR referencing the issue, or the `in-progress`
+  // label). A never-built un-grilled anchor matches neither and still grills —
+  // pinned by the last two tests here.
+
+  test("an issue with an open PR on an `issue-<N>-` branch is excluded", () => {
+    const picks = runGate([issue(850, "No stamp.\n")], {
+      openPrs: [{ headRefName: "issue-850-fix-the-thing", body: "" }],
+    });
+    assert.equal(picks.grill, "none",
+      "an anchor that already has an open dev PR must not be promoted to a grill");
+    assert.equal(picks.devReady, "none", "nor offered to dev as a fresh pin");
+  });
+
+  test("a `Closes #N` body ref excludes the issue even from an anonymous branch", () => {
+    // The harness creates `worktree-agent-<hash>` branches that carry no issue
+    // number, so the PR body's closing keyword is the only available signal.
+    const picks = runGate([issue(851, "No stamp.\n")], {
+      openPrs: [{ headRefName: "worktree-agent-abc123def456", body: "Some work.\n\nCloses #851\n" }],
+    });
+    assert.equal(picks.grill, "none",
+      "a closing-keyword ref must exclude the anchor when the branch name cannot");
+  });
+
+  test("the `in-progress` label excludes an issue from both picks", () => {
+    const picks = runGate([issue(852, "No stamp.\n", ["ready-for-agent", "in-progress"])]);
+    assert.equal(picks.grill, "none", "an in-progress anchor is already being built");
+    assert.equal(picks.devReady, "none");
+  });
+
+  test("an in-flight anchor is skipped and a LATER anchor still grills", () => {
+    // The exclusion must behave like the mechanical/trivial gates: skip and
+    // keep walking, never abort the loop.
+    const picks = runGate([issue(860, "No stamp.\n"), issue(861, "No stamp.\n")], {
+      openPrs: [{ headRefName: "issue-860-wip", body: "" }],
+    });
+    assert.equal(picks.grill, "issue-861",
+      "an excluded in-flight anchor must not block grilling of a later anchor");
+  });
+
+  test("an unrelated open PR does NOT suppress a genuinely un-grilled anchor", () => {
+    // The load-bearing non-weakening guard: an open PR for some OTHER issue
+    // leaves issue-870 fully eligible, so it still gets its design concept.
+    const picks = runGate([issue(870, "No stamp.\n")], {
+      openPrs: [{ headRefName: "issue-999-unrelated", body: "Closes #998\n" }],
+    });
+    assert.equal(picks.grill, "issue-870",
+      "an un-grilled anchor with no dev work of its own must STILL be grilled");
+  });
+
+  test("a gh failure yields an empty exclusion set (degrades to pre-#3711 behaviour)", () => {
+    // `openPrs: []` is also what a gh outage produces — the exclusion is
+    // best-effort and its absence must never suppress a needed grill.
+    const picks = runGate([issue(880, "No stamp.\n")], { openPrs: [] });
+    assert.equal(picks.grill, "issue-880",
+      "no PR data → no exclusions → the anchor is promoted exactly as before");
   });
 });

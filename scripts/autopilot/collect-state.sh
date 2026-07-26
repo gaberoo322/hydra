@@ -341,22 +341,60 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
 #     complex unstamped issue goes straight to dev_orch without a design
 #     concept — so absence of a signal NEVER suppresses.
 #
+# PER-ANCHOR GATE (issue #3711) — this ONE loop pass now emits TWO signals:
+#
+#   - `orch_pending_grill_anchor` — the first candidate that still needs a
+#     grill (unchanged semantics).
+#   - `orch_dev_ready_anchor` — NEW: the first candidate that is already
+#     GRILL-CLEAR, i.e. it has a fresh artifact, or it qualifies for the
+#     mechanical (#1230) / trivial (#1088) exemption.
+#
+# WHY: decide.py's `dev_orch` selector used to yield whenever
+# `orch_pending_grill_anchor` was set to anything — a GLOBAL stop, not a
+# per-anchor one. One un-grilled issue anywhere on the board blocked dev_orch
+# from building EVERY issue, including ones whose artifacts were already
+# approved (autopilot run a1c24124 ended with 15 `ready-for-agent` issues all
+# gated behind one un-grilled anchor, zero dev PRs). The gate's intent — never
+# build an un-grilled anchor — is per-anchor, so the signal has to be too.
+#
+# `decide.py` MUST stay a pure function of `(state, events, now)`, so it cannot
+# ask "does the anchor dev_orch would pick have an artifact?" — it has no
+# network/FS/Redis. The pre-resolution therefore belongs HERE, exactly like
+# `wayfinder_orch_frontier` and `wire_or_retire_target_available`: this script
+# owns the enumeration, decide.py reads one pre-qualified string verbatim.
+# decide.py then pins dev_orch to `orch_dev_ready_anchor` via `prompt_args`
+# instead of yielding — which ALSO closes the self-selection gap, because a
+# pinned dispatch can no longer land on the un-grilled anchor via hydra-dev's
+# own unguarded `gh issue list ... | .[0]` pick.
+#
+# THE GATE IS NOT WEAKENED: `orch_dev_ready_anchor` is only ever set to an
+# anchor that is *already* grill-clear, and dev_orch still yields when the only
+# grill-clear anchor IS the pending-grill one (or when there is none). An
+# un-grilled anchor still gets grilled; it just no longer blocks unrelated work.
+#
 # Implementation notes:
 #
-#   - Top 10 ready-for-agent issue numbers (newest-first by updatedAt).
-#     The hot path is "the first one without a fresh artifact"; capping
-#     at 10 keeps this loop O(10) regardless of board size.
-#   - One `gh issue list` fetches number+updatedAt+body+labels for all 10,
-#     so the trivial gate needs no extra per-issue gh round-trip.
-#   - For each issue we curl `/api/design-concepts/issue-<N>`. A 200 with
-#     `gate.ok` true OR `status=approved` AND fresh means we skip. A 404
-#     or stale/draft-without-gate-ok means this is a grill candidate — but
-#     a provably-trivial candidate is suppressed (continue) rather than
-#     promoted, so the loop falls through to the next non-trivial anchor.
-#   - Emit the first matching `issue-<N>` ref, or `none`.
+#   - Candidate ORDER IS STABLE (issue #3711, sub-defect (a)): issues are
+#     walked by issue NUMBER ASCENDING (oldest first), then capped at 10.
+#     It used to be `sort_by(.updatedAt) | reverse` (newest-first), which meant
+#     every newly-filed issue displaced the head of the queue and RE-EXTENDED
+#     the block — filing a bug mid-run rotated the anchor to the new issue and
+#     restarted the gate from scratch (observed 3x in run a1c24124). Ascending
+#     issue number is monotonic in creation order, so the head only changes when
+#     the head itself drains: a newly-filed issue sorts to the BACK. The cap
+#     moved out of the jq and into the python3 extractor for the same reason —
+#     capping a newest-first list rotates the candidate POOL, not just its order.
+#   - One `gh issue list` fetches number+updatedAt+body+labels+title for the
+#     whole board, so the trivial gate needs no extra per-issue gh round-trip.
+#   - For each issue we curl `/api/design-concepts/issue-<N>`. A 200 that is
+#     fresh means the anchor is grill-clear. A 404 or a stale artifact means it
+#     is a grill candidate — unless the mechanical/trivial gates suppress it, in
+#     which case it is ALSO grill-clear (it needs no concept by construction).
+#   - The loop breaks as soon as BOTH picks are resolved, so the common case
+#     still costs one or two curls; the worst case stays the documented O(10).
+#   - Emit `issue-<N>` or `none` for each pick.
 #   - Best-effort: any failure prints `none` so dispatch is never blocked
 #     by a transient orchestrator outage.
-echo -n "orch_pending_grill_anchor="
 # Exclude `target-backlog` issues from the grill candidate set (issue #2704):
 # `target-backlog` is the routing label for Target work (code in hydra-betting).
 # An issue carrying BOTH `ready-for-agent` and `target-backlog` (e.g. #2701)
@@ -364,21 +402,82 @@ echo -n "orch_pending_grill_anchor="
 # `design_concept_orch` grill against target code — a scope mismatch that
 # re-fires every idle turn. Drop such issues from the candidate list up front,
 # mirroring how the untriaged-orphans jq excludes label sets above.
+#
+# IN-FLIGHT DEV-WORK EXCLUSION (issue #3711, sub-defect (b)). An anchor that
+# dev_orch has already built, or is building, must not be selected as a grill
+# anchor at all: a design concept produced *after* the PR exists is retro-active
+# waste, and it was one of the three ways a single anchor held this gate for a
+# whole run (run a1c24124 — the gate demanded a concept for the very anchor
+# dev_orch was mid-implementation on). Such an anchor is excluded from BOTH
+# picks, because dev must not re-pick it either.
+#
+# WHY THIS CANNOT WEAKEN THE GATE: the predicate requires POSITIVE evidence that
+# dev work already happened or is in flight — an open PR referencing the issue,
+# or the `in-progress` label. A never-built un-grilled anchor matches neither, so
+# it is still promoted and still gets grilled. (Contrast the mechanical/trivial
+# gates, which suppress on properties of the issue itself.)
+#
+# Two sources, both cheap:
+#   - open-PR refs: the head branch `issue-<N>-<slug>` (hydra-dev's branch
+#     convention) PLUS GitHub closing keywords in the PR body (`Closes #<N>`),
+#     which is the only signal available for a harness-created
+#     `worktree-agent-<hash>` branch — that name carries no issue number.
+#   - the `in-progress` label, for any path that applied it (the AFK inline
+#     dispatch does not relabel, so this is belt-and-braces, not the primary).
+#
+# Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
+# dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
+# set, which is exactly today's (no-exclusion) behaviour.
+ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json headRefName,body 2>/dev/null || true)
+ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "
+import json, re, sys
+try:
+  out = set()
+  for pr in json.load(sys.stdin):
+    m = re.match(r'issue-(\d+)\b', pr.get('headRefName') or '')
+    if m:
+      out.add(int(m.group(1)))
+    for m in re.finditer(
+        r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b',
+        pr.get('body') or '', re.IGNORECASE):
+      out.add(int(m.group(1)))
+  print(' '.join(str(x) for x in sorted(out)))
+except Exception:
+  pass
+" 2>/dev/null || true)
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
-  | sort_by(.updatedAt) | reverse | .[0:10]
 ' 2>/dev/null || true)
-ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
-import json, sys
+# Stable candidate order: issue number ASCENDING (oldest first), capped at 10,
+# minus every anchor with dev work already in flight. Both the ordering and the
+# cap live here rather than in the jq so a newly-filed issue can neither reorder
+# nor displace the pool (issue #3711, sub-defect (a)).
+ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_INFLIGHT_ISSUES="$ORCH_INFLIGHT_ISSUES" python3 -c "
+import json, os, sys
 try:
+  inflight = {int(x) for x in (os.environ.get('ORCH_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
+  nums = set()
   for it in json.load(sys.stdin):
-    print(it['number'])
+    n = it.get('number')
+    if not isinstance(n, int):
+      continue
+    labels = {l.get('name', '') for l in (it.get('labels') or [])}
+    if n in inflight or 'in-progress' in labels:
+      continue
+    nums.add(n)
+  for n in sorted(nums)[:10]:
+    print(n)
 except Exception:
   pass
 " 2>/dev/null || true)
 ORCH_GRILL_PICK="none"
+ORCH_DEV_READY_PICK="none"
 if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
   for n in $ORCH_GRILL_CANDIDATES; do
+    # Both picks resolved — stop paying for design-concept round-trips.
+    if [ "$ORCH_GRILL_PICK" != "none" ] && [ "$ORCH_DEV_READY_PICK" != "none" ]; then
+      break
+    fi
     DC_JSON=$(curl -sf --max-time 3 "http://localhost:4000/api/design-concepts/issue-${n}" 2>/dev/null || true)
     if [ -n "$DC_JSON" ]; then
       # Artifact exists. Skip ONLY if it's fresh (Phase B warn-only: a
@@ -396,7 +495,11 @@ try:
 except Exception:
   print('0')" 2>/dev/null || echo "0")
       if [ "$FRESH_OK" = "1" ]; then
-        # Fresh artifact already present — nothing to grill for this anchor.
+        # Fresh artifact already present — nothing to grill for this anchor,
+        # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711).
+        if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
+          ORCH_DEV_READY_PICK="issue-${n}"
+        fi
         continue
       fi
     fi
@@ -428,6 +531,23 @@ except Exception:
     if [ "$MECHANICAL" = "1" ]; then
       # Mechanical (cleanup-scan) or calendar-bound (track:) anchor — needs no
       # design concept. Suppress the grill and let dev_orch dispatch directly.
+      # `cleanup-scan` is grill-clear by construction (self-checking, routes
+      # straight to dev) so it is a valid dev pin. A `track:` tracker is NOT
+      # implementable now, so it must NOT be pinned — only the cleanup-scan arm
+      # records a dev-ready pick (issue #3711).
+      if [ "$ORCH_DEV_READY_PICK" = "none" ] \
+        && printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
+import json, sys
+target = int('${n}')
+try:
+  items = json.load(sys.stdin)
+  it = next((x for x in items if int(x.get('number', -1)) == target), None)
+  labels = {l.get('name', '') for l in ((it or {}).get('labels') or [])}
+  sys.exit(0 if 'cleanup-scan' in labels else 1)
+except Exception:
+  sys.exit(1)" 2>/dev/null; then
+        ORCH_DEV_READY_PICK="issue-${n}"
+      fi
       continue
     fi
     # Apply the trivial gate (issue #1088) next — suppress ONLY on a positive
@@ -455,14 +575,24 @@ except Exception:
   print('0')" 2>/dev/null || echo "0")
     if [ "$TRIVIAL" = "1" ]; then
       # Provably trivial (T1-stamped, no opt-in label) — suppress the grill
-      # and let this anchor fall straight through to dev_orch.
+      # and let this anchor fall straight through to dev_orch. Grill-clear by
+      # construction, so it is a valid dev pin (issue #3711).
+      if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
+        ORCH_DEV_READY_PICK="issue-${n}"
+      fi
       continue
     fi
-    ORCH_GRILL_PICK="issue-${n}"
-    break
+    # Needs a grill. Record the FIRST such anchor and keep walking — the loop
+    # must still find a grill-clear anchor for dev_orch to build this turn
+    # (issue #3711); pre-#3711 it `break`ed here, which is why decide.py only
+    # ever saw "some anchor somewhere is un-grilled".
+    if [ "$ORCH_GRILL_PICK" = "none" ]; then
+      ORCH_GRILL_PICK="issue-${n}"
+    fi
   done
 fi
-echo "$ORCH_GRILL_PICK"
+echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
+echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
 
 # active dev_orch detector (issue #412): an open PR on a hydra-dev head
 # branch updated within the last 90 minutes is the only reliable gate

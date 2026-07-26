@@ -2644,6 +2644,34 @@ def _design_concept_is_fresh(dc: dict | None) -> bool:
     return bool(dc.get("present")) and bool(dc.get("isFresh"))
 
 
+def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
+    """Read a collect-state anchor-ref signal, normalising "absent" spellings.
+
+    `collect-state.sh` emits the orch anchor signals (`orch_pending_grill_anchor`
+    and, post-#3711, `orch_dev_ready_anchor`) as a single string that is either
+    an `issue-<N>` ref or the literal `"none"` when there is no such anchor —
+    including the degraded case where the board read failed. The signal may also
+    be omitted from `state.signals` entirely by an older autopilot turn.
+
+    All three "no anchor" spellings (absent key, empty string, literal "none")
+    collapse to None here so callers branch on one condition instead of
+    re-deriving the triple. Anything non-string is also None: a malformed signal
+    must never be mistaken for a real anchor ref.
+
+    Pure: reads the passed-in dict only. No I/O (issue #3711 keeps decide.py a
+    pure function of (state, events, now)).
+    """
+    if not isinstance(signals, dict):
+        return None
+    raw = signals.get(key)
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw or raw == "none":
+        return None
+    return raw
+
+
 def _select_for_slot(
     cls: str,
     state: dict,
@@ -2698,12 +2726,61 @@ def _select_for_slot(
         # design_concept_orch selector will dispatch hydra-grill on this
         # turn — dev_orch MUST yield to maintain the grill-before-dev
         # sequencing rule. This is the ONLY remaining yield path.
+        #
+        # ISSUE #3711 — THE YIELD IS NOW PER-ANCHOR, NOT GLOBAL. The pre-#3711
+        # gate yielded whenever `orch_pending_grill_anchor` was set to ANYTHING,
+        # so one un-grilled issue anywhere on the board blocked dev_orch from
+        # building EVERY issue — including ones whose artifacts were already
+        # approved. Grills are serial (one pipeline slot, ~3-10 min each) while
+        # the board grows from several independent producers, so a growing board
+        # starved orchestrator development for a whole run (run a1c24124: 15
+        # `ready-for-agent` issues gated behind one un-grilled anchor, zero dev
+        # PRs).
+        #
+        # `collect-state.sh` now pre-resolves a SECOND signal in the same loop
+        # pass: `orch_dev_ready_anchor`, the first board anchor that is already
+        # GRILL-CLEAR (fresh artifact, or the mechanical #1230 / trivial #1088
+        # exemption). This selector stays a PURE function of
+        # (state, events, now) — it reads two pre-qualified strings and does no
+        # I/O, exactly like `wayfinder_orch_frontier` /
+        # `wire_or_retire_target_available`. decide.py cannot compute artifact
+        # freshness itself (that needs the design-concepts API), which is why the
+        # pre-resolution lives in collect-state.sh.
+        #
+        # When a grill is pending AND a DIFFERENT grill-clear anchor exists, we
+        # PIN dev_orch to it via `prompt_args.anchor` rather than yielding.
+        # Pinning is load-bearing, not a nicety: hydra-dev otherwise self-selects
+        # via its own unguarded `gh issue list --label ready-for-agent | .[0]`,
+        # which could land on the very anchor being grilled. Pinning closes that
+        # gap — a per-anchor gate that only relaxed the boolean would open it.
+        #
+        # THE GATE IS NOT WEAKENED. `orch_dev_ready_anchor` is only ever set to
+        # an already-grill-clear anchor, and we still yield when (a) there is no
+        # grill-clear anchor, or (b) the only grill-clear anchor IS the one
+        # pending grill. An un-grilled anchor still gets its design concept; it
+        # just no longer blocks unrelated work.
         signals = state.get("signals") if isinstance(state, dict) else None
-        orch_anchor = (
-            signals.get("orch_pending_grill_anchor") if isinstance(signals, dict) else None
-        )
-        if isinstance(orch_anchor, str) and orch_anchor and orch_anchor != "none":
-            return None
+        orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+        dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
+        if orch_anchor is not None:
+            if dev_ready_anchor is None or dev_ready_anchor == orch_anchor:
+                # Nothing grill-clear to build this turn — yield exactly as the
+                # pre-#3711 gate did. This is the correct fallback, and it is
+                # also the degraded-signal path: collect-state.sh emits `none`
+                # when the board read fails, so a gh outage fails CLOSED onto
+                # today's behaviour rather than dispatching onto an un-grilled
+                # anchor.
+                return None
+            return make_dispatch(
+                cls,
+                "hydra-dev",
+                prompt_args={"anchor": dev_ready_anchor},
+                reason=(
+                    f"orch board has a grill-clear ready-for-agent anchor "
+                    f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
+                    f"concept (per-anchor gate, #3711)"
+                ),
+            )
         return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
     if cls == "dev_target":
         # Use board signal (work_queue / target backlog) — dev_target dispatches
@@ -2848,11 +2925,11 @@ def _select_for_slot(
         if not _signal_present(state, events, "orch_work_available"):
             return None
 
+        # Same normalisation as the dev_orch gate above — one home for the
+        # absent/"none"/malformed collapse (issue #3711).
         signals = state.get("signals") if isinstance(state, dict) else None
-        orch_anchor = (
-            signals.get("orch_pending_grill_anchor") if isinstance(signals, dict) else None
-        )
-        if isinstance(orch_anchor, str) and orch_anchor and orch_anchor != "none":
+        orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
+        if orch_anchor is not None:
             return make_dispatch(
                 cls,
                 "hydra-grill",
