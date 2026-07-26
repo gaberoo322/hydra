@@ -29,6 +29,7 @@ import {
   buildGlmEnv,
   preflightBeforePr,
   runGlmClaude,
+  scanTierFence,
   scanVerifierCorePaths,
 } from "../src/glm/drainer-runner.ts";
 
@@ -324,6 +325,32 @@ describe("glm drainer-runner — pre-PR preflight (ADR-0032 invariant 8)", () =>
     assert.equal(result.ok, false);
   });
 
+  test("scanTierFence independently blocks a T4 diff (classifyChange corroboration)", () => {
+    const violation = scanTierFence(["src/untouchable.ts"]);
+    assert.notEqual(violation, null);
+    assert.equal(violation?.kind, "tier-fence");
+    assert.equal(violation?.kind === "tier-fence" && violation.tier, 4);
+  });
+
+  test("scanTierFence passes T1/T2/T3 diffs and an empty diff", () => {
+    assert.equal(scanTierFence(["config/agents/hydra-dev.md"]), null); // T1
+    assert.equal(scanTierFence(["dashboard/src/App.tsx"]), null); // T2
+    assert.equal(scanTierFence(["src/glm/drainer-runner.ts"]), null); // T3
+    assert.equal(scanTierFence([]), null);
+  });
+
+  test("the two T4 checks agree today, so preflight reports the path detail only once", async () => {
+    // scanTierFence would also flag this diff; preflight suppresses the
+    // duplicate so the actionable per-path violation is the only one reported.
+    const result = await preflightBeforePr({
+      changedPaths: ["src/untouchable.ts"],
+      secretScan: fakeScan(0),
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.deepEqual(result.violations.map((v) => v.kind), ["verifier-core"]);
+  });
+
   test("an empty diff short-circuits and never invokes the scanner", async () => {
     const calls: string[][] = [];
     const result = await preflightBeforePr({
@@ -380,5 +407,152 @@ describe("glm drainer settings.json — input-side secret fence", () => {
         `allow rule ${rule} names a credential surface`,
       );
     }
+  });
+});
+
+/**
+ * The Bash surface, pinned separately.
+ *
+ * The first draft of `drainer-settings.json` granted a bare, unscoped `Bash`
+ * and leaned on four `Bash(...)` deny prefixes plus the `Read(...)` deny rules.
+ * That is not a fence: `Read(...)` deny rules constrain the Read tool ONLY, so
+ * `less .env`, `head ~/.ssh/id_rsa`, `sed -n p .env`, `xxd`, `base64`, `dd`,
+ * `strings`, `grep '' .env` and `python3 -c "open(...).read()"` all reached the
+ * same credential bytes. QA caught it on PR #3701; these cases exist so it can
+ * never silently come back.
+ *
+ * The fence is now: headless `claude -p` (no `--dangerously-skip-permissions`,
+ * so an unmatched tool call cannot fall back to a prompt) + a scoped `allow`
+ * list = deny-by-default. Enumerating interpreters in `deny` is deliberately
+ * NOT attempted — it is unwinnable and reads as a fence that is not one.
+ */
+describe("glm drainer settings.json — Bash surface (PR #3701 QA blocker)", () => {
+  const settings = JSON.parse(readFileSync(DRAINER_SETTINGS_PATH, "utf8"));
+  const allow: string[] = settings.permissions.allow;
+  const deny: string[] = settings.permissions.deny;
+  const bashAllow = allow.filter((rule) => rule === "Bash" || rule.startsWith("Bash("));
+
+  /** Everything that can read arbitrary file bytes or execute arbitrary code. */
+  const FORBIDDEN_COMMAND_HEADS = [
+    "cat",
+    "less",
+    "more",
+    "head",
+    "tail",
+    "sed",
+    "awk",
+    "xxd",
+    "od",
+    "hexdump",
+    "strings",
+    "base64",
+    "dd",
+    "cp",
+    "mv",
+    "grep",
+    "egrep",
+    "rg",
+    "find",
+    "env",
+    "printenv",
+    "export",
+    "source",
+    "eval",
+    "exec",
+    "bash",
+    "sh",
+    "zsh",
+    "python",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "npx",
+    "curl",
+    "wget",
+    "nc",
+    "ssh",
+    "scp",
+    "sudo",
+    "tar",
+    "zip",
+    "openssl",
+  ];
+
+  test("grants no bare/unscoped Bash", () => {
+    assert.equal(
+      allow.includes("Bash"),
+      false,
+      "a bare `Bash` grant defeats every Read(...) deny rule — see this suite's docblock",
+    );
+    for (const rule of bashAllow) {
+      assert.equal(
+        rule === "Bash(*)" || rule === "Bash(:*)",
+        false,
+        `${rule} is a wildcard-equivalent unscoped Bash grant`,
+      );
+    }
+  });
+
+  test("every Bash grant is a scoped command prefix", () => {
+    assert.ok(bashAllow.length > 0, "the drainer needs some Bash to author code");
+    for (const rule of bashAllow) {
+      assert.match(
+        rule,
+        /^Bash\([a-z0-9][^()]*\)$/,
+        `${rule} is not a well-formed scoped Bash rule`,
+      );
+    }
+  });
+
+  test("no Bash grant is a file-read primitive, an interpreter, or a shell", () => {
+    for (const rule of bashAllow) {
+      const head = rule.slice("Bash(".length, -1).trim().split(/[\s:]/)[0];
+      assert.equal(
+        FORBIDDEN_COMMAND_HEADS.includes(head),
+        false,
+        `Bash grant ${rule} exposes \`${head}\`, which can read arbitrary file bytes or run arbitrary code`,
+      );
+    }
+  });
+
+  test("no Bash grant can open a PR or reach the GitHub API directly", () => {
+    // PR creation belongs to the drainer loop (#3689), AFTER preflightBeforePr()
+    // clears the diff — an in-session `gh pr create` would route around the
+    // output-side half of the fence. `gh api`/`gh secret` are arbitrary-endpoint
+    // surfaces, including secret endpoints.
+    for (const rule of bashAllow) {
+      const command = rule.slice("Bash(".length, -1);
+      for (const forbidden of ["gh pr create", "gh pr merge", "gh api", "gh secret", "gh auth"]) {
+        assert.equal(
+          command.startsWith(forbidden),
+          false,
+          `Bash grant ${rule} exposes \`${forbidden}\``,
+        );
+      }
+    }
+  });
+
+  test("the fence is the allow-list, not a Bash deny-list", () => {
+    // Pinning the decision, not just the state: a partial Bash deny-list is the
+    // exact flawed model that produced the PR #3701 blocker. If a future change
+    // adds one back, this fails and forces the reviewer to re-read the docblock.
+    assert.deepEqual(
+      deny.filter((rule) => rule.startsWith("Bash(")),
+      [],
+      "Bash deny-listing is unwinnable and must not be reintroduced as a claimed fence",
+    );
+  });
+
+  test("the _comment no longer claims the Read denials fence Bash", () => {
+    const comment = Array.isArray(settings._comment)
+      ? settings._comment.join(" ")
+      : String(settings._comment ?? "");
+    assert.equal(
+      /the Read denials are the real fence/i.test(comment),
+      false,
+      "the corrected model must not reassert that Read(...) denials constrain Bash",
+    );
+    assert.match(comment, /allow/i);
   });
 });

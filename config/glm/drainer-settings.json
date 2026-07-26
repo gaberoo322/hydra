@@ -1,11 +1,20 @@
 {
-  "_comment": "GLM dev-drainer settings (issue #3688, ADR-0032 invariant 8, input-side half of the two-layer secret fence). Handed to the drainer's `claude` process via `--settings` by src/glm/drainer-runner.ts buildDrainerArgs(). The `deny` block is the load-bearing part: z.ai offers no training opt-out (ADR-0032 accepted risk), so credential material must never enter the drainer's context in the first place. Claude Code evaluates deny BEFORE allow, so the broad `allow` tool grants below cannot re-open a denied path. Deliberately NOT run under --dangerously-skip-permissions: an explicit allow list plus a deny fence keeps the precedence unambiguous. Note the Bash denials are prefix-matched and therefore defense-in-depth, not a hard sandbox — the Read denials are the real fence.",
+  "_comment": [
+    "GLM dev-drainer settings (issue #3688, ADR-0032 invariant 8 — the input-side half of the two-layer secret fence). Handed to the drainer's `claude` process via `--settings` by src/glm/drainer-runner.ts buildDrainerArgs(). z.ai offers no training opt-out (ADR-0032 accepted risk), so credential material must never enter the drainer's context in the first place.",
+
+    "HOW THE FENCE ACTUALLY WORKS. The drainer runs headless (`claude -p`) and deliberately NOT under --dangerously-skip-permissions, so a tool call matching no `allow` rule cannot fall back to an interactive prompt — it is refused. `allow` is therefore the fence, and it is deny-by-default. `deny` is evaluated before `allow`, so the Read(...) rules below additionally hard-block those paths for the path-taking tools.",
+
+    "WHAT THIS FILE DELIBERATELY DOES NOT DO: deny-list Bash commands. A Read(...) deny rule constrains the Read tool ONLY — it has no effect on the Bash tool — and a Bash deny-list of file-reading primitives is unwinnable: `less`, `head`, `sed -n p`, `xxd`, `strings`, `base64`, `dd`, `grep '' .env`, `python3 -c \"open(...).read()\"` all reach the same bytes. A partial list reads as a fence that is not one. That exact mistake shipped in the first draft of this file — a bare `Bash` grant plus four `Bash(...)` deny prefixes, justified on the theory that the Read(...) rules fenced the Bash tool too — and was caught in QA on PR #3701. Bash is instead granted as an explicit, scoped command allow-list: the git / npm / gh / navigation verbs the authoring lane actually needs, with no shell, no interpreter, no generic file-read primitive, no `npx`, and no `gh api` / `gh secret`.",
+
+    "`gh pr create` is deliberately NOT granted. The drainer loop (#3689) opens the PR itself, AFTER preflightBeforePr() clears the diff — so the authoring session cannot route around the output-side gate.",
+
+    "RESIDUAL, stated plainly: `npm test` / `npm run *` execute repo-defined scripts, so this is a scoped-capability fence, not a sandbox. It stops incidental credential ingestion — the invariant-8 threat — not a determined exfiltration. The output-side half (preflightBeforePr's secret-scan + Verifier-Core/T4 diff gate) and the unchanged qa_orch + CI merge gate stay load-bearing."
+  ],
 
   "permissions": {
     "defaultMode": "acceptEdits",
 
     "allow": [
-      "Bash",
       "Read",
       "Edit",
       "Write",
@@ -14,7 +23,35 @@
       "TodoWrite",
       "NotebookEdit",
       "WebFetch",
-      "WebSearch"
+      "WebSearch",
+
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git restore:*)",
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git fetch:*)",
+      "Bash(git push:*)",
+      "Bash(git worktree:*)",
+
+      "Bash(npm test:*)",
+      "Bash(npm run:*)",
+
+      "Bash(gh issue view:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh pr checks:*)",
+
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(pwd)"
     ],
 
     "deny": [
@@ -31,12 +68,7 @@
       "Read(//home/gabe/.claude/.credentials.json)",
       "Read(//home/gabe/.ssh/**)",
       "Read(//home/gabe/.aws/**)",
-      "Read(//home/gabe/.config/gh/**)",
-
-      "Bash(env)",
-      "Bash(printenv:*)",
-      "Bash(cat:*.env*)",
-      "Bash(cat:*credentials*)"
+      "Read(//home/gabe/.config/gh/**)"
     ],
 
     "additionalDirectories": []

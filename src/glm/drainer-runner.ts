@@ -29,11 +29,13 @@
  *     quota. The token value never appears in a log line, an argv entry, or an
  *     error message produced here.
  *   - **Invariant 8 (two-layer secret fence)** — the *input* side is
- *     `config/glm/drainer-settings.json` (`permissions.deny` on `.env*` and
- *     credential paths, so secrets never enter z.ai's context); the *output*
- *     side is `preflightBeforePr`, which runs `scripts/ci/secret-scan.sh` over
- *     the diff AND rejects any Verifier-Core / T4 path, so the drainer can
- *     never author a fenced-out change.
+ *     `config/glm/drainer-settings.json`, whose fence is a **scoped
+ *     `permissions.allow` list** under headless deny-by-default (a bare `Bash`
+ *     grant would defeat every `Read(...)` deny rule, since those constrain the
+ *     Read tool only — see that file's `_comment`); the *output* side is
+ *     `preflightBeforePr`, which runs `scripts/ci/secret-scan.sh` over the diff
+ *     AND rejects any Verifier-Core / T4 path, so the drainer can never author a
+ *     fenced-out change.
  *
  * Nothing here throws: every failure mode is a discriminated result object, per
  * the never-throw-from-verification convention. `runGlmClaude` is the single
@@ -46,6 +48,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { execWithGroupCleanup } from "../exec-with-timeout.ts";
+import { classifyChange } from "../tier-classifier.ts";
 import { matchVerifierCore } from "../untouchable.ts";
 
 /** Repo root, derived from this module's location (`src/glm/` → `../..`). */
@@ -259,6 +262,7 @@ export function runGlmClaude(
 
 export type PreflightViolation =
   | { kind: "verifier-core"; path: string; matched: string }
+  | { kind: "tier-fence"; tier: number; reason: string }
   | { kind: "secret-scan"; detail: string };
 
 export type PreflightResult =
@@ -292,6 +296,33 @@ export function scanVerifierCorePaths(
   return violations;
 }
 
+/**
+ * Independent tier cross-check (ADR-0032 Decision 3; the design-concept
+ * artifact's `classifyChange()` half of the preflight).
+ *
+ * `scanVerifierCorePaths` matches the canonical Verifier-Core path list
+ * directly. This is the *second, independent* statement of the same fence: the
+ * drainer is scoped to T2/T3, so ANY T4 verdict from the classifier blocks —
+ * including one produced by a future T4 rule that is not a Verifier-Core path
+ * match.
+ *
+ * Today `classifyOne`'s only T4 branch IS `matchVerifierCore`, so the two agree
+ * by construction; the value here is that a later divergence fails CLOSED
+ * instead of silently opening the fence. `preflightBeforePr` therefore reports
+ * this violation only when the two checks *disagree* — otherwise the per-path
+ * `verifier-core` violations already carry the (more actionable) detail.
+ *
+ * Returns `null` when the diff classifies at T1–T3, and for an empty diff.
+ */
+export function scanTierFence(
+  changedPaths: readonly string[],
+): PreflightViolation | null {
+  if (changedPaths.length === 0) return null;
+  const classified = classifyChange([...changedPaths]);
+  if (classified.tier < 4) return null;
+  return { kind: "tier-fence", tier: classified.tier, reason: classified.reason };
+}
+
 /** Injected runner seam so tests never shell out to the real scanner. */
 export type SecretScanRunner = (
   files: readonly string[],
@@ -321,9 +352,14 @@ export interface PreflightOptions {
 }
 
 /**
- * The pre-`gh pr create` gate. Runs BOTH output-side checks and blocks on
- * either — the drainer must never open a PR that leaks a credential or that
- * touches the Verifier Core / T4.
+ * The pre-`gh pr create` gate. Runs ALL output-side checks and blocks on any of
+ * them — the drainer must never open a PR that leaks a credential or that
+ * touches the Verifier Core / T4:
+ *
+ *   1. `scanVerifierCorePaths` — canonical path-list match (per-path detail).
+ *   2. `scanTierFence` — independent `classifyChange` corroboration, reported
+ *      only when it disagrees with (1); see its docstring.
+ *   3. `scripts/ci/secret-scan.sh` over the diff.
  *
  * Never throws: an unexpected scanner failure is itself a `secret-scan`
  * violation (fail-closed — an unreadable gate is a closed gate). A `secret-scan.sh`
@@ -337,7 +373,17 @@ export async function preflightBeforePr(
   options: PreflightOptions,
 ): Promise<PreflightResult> {
   const changedPaths = options.changedPaths;
-  const violations: PreflightViolation[] = [...scanVerifierCorePaths(changedPaths)];
+  const coreViolations = scanVerifierCorePaths(changedPaths);
+  const violations: PreflightViolation[] = [...coreViolations];
+
+  // Corroborating tier check. Only reported when it DISAGREES with the path
+  // scan — i.e. the classifier calls the diff T4 for a reason that is not a
+  // Verifier-Core path match. Today that cannot happen; if it ever can, the
+  // fence closes rather than silently opening.
+  if (coreViolations.length === 0) {
+    const tierViolation = scanTierFence(changedPaths);
+    if (tierViolation) violations.push(tierViolation);
+  }
 
   if (changedPaths.length > 0) {
     const runScan = options.secretScan ?? defaultSecretScanRunner();
@@ -375,11 +421,15 @@ export async function preflightBeforePr(
       code: "glm-preflight-blocked",
       violations,
       message: `GLM drainer preflight BLOCKED (${violations.length} violation(s)): ${violations
-        .map((v) =>
-          v.kind === "verifier-core"
-            ? `Verifier-Core/T4 path ${v.path} (matches ${v.matched})`
-            : v.detail,
-        )
+        .map((v) => {
+          if (v.kind === "verifier-core") {
+            return `Verifier-Core/T4 path ${v.path} (matches ${v.matched})`;
+          }
+          if (v.kind === "tier-fence") {
+            return `diff classifies as T${v.tier}, outside the drainer's T2/T3 fence (${v.reason})`;
+          }
+          return v.detail;
+        })
         .join("; ")}`,
     };
   }
