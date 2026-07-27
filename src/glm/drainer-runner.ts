@@ -19,7 +19,9 @@
  *
  *   - **Invariant 4 (precise mechanism)** — `ANTHROPIC_BASE_URL` +
  *     `ANTHROPIC_AUTH_TOKEN` (never `ANTHROPIC_API_KEY`, never the Codex
- *     plugin), GLM-4.7 on the Sonnet slot. The env arrives from a systemd
+ *     plugin), plus an explicitly-spelled `glm-*` model name — the base-URL
+ *     override alone does NOT redirect an Anthropic slot alias (see
+ *     `GLM_MODEL`). The env arrives from a systemd
  *     `EnvironmentFile`; `buildGlmEnv` reads only the base env object handed to
  *     it and NEVER loads a dotenv — `.env.local` reproduces the paper-LLM
  *     MODEL-override gotcha where a dotenv silently overrode `ExecStart` flags.
@@ -62,7 +64,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const GLM_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
 
 /**
- * `API_TIMEOUT_MS` handed to the CLI (50 min). GLM-4.7 on z.ai is materially
+ * `API_TIMEOUT_MS` handed to the CLI (50 min). GLM on z.ai is materially
  * slower per turn than Sonnet on Anthropic, and a drainer run is a full
  * headless authoring session, so the CLI's own per-request deadline is raised
  * well above its default. The wall-clock kill in `runGlmClaude` is the real
@@ -71,10 +73,56 @@ export const GLM_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
 export const GLM_API_TIMEOUT_MS = 3_000_000;
 
 /**
- * GLM-4.7 is served on the **Sonnet slot** (ADR-0032 Decision 2) — the model
- * name is not spelled `glm-*`; z.ai maps the Sonnet alias onto GLM-4.7.
+ * The model name handed to `claude --model`, and the load-bearing half of the
+ * routing decision (issue #3758).
+ *
+ * ADR-0032 Decision 2 originally specified the **Sonnet slot** on the theory
+ * that `ANTHROPIC_BASE_URL` redirects whatever the CLI is asked for. Measured
+ * against the live endpoint, it does not: the CLI resolves an Anthropic slot
+ * alias (`sonnet` / `opus` / `haiku`) locally to a first-party model id and
+ * sends the request to **Anthropic**, ignoring the base-URL override — burning
+ * the very quota this lane exists to relieve, at metered USD. Only an
+ * explicitly-spelled `glm-*` name reaches z.ai.
+ *
+ * So the model name is a fence, not a preference. `assertGlmModel` enforces it.
  */
-export const GLM_MODEL_SLOT = "sonnet";
+export const GLM_MODEL = "glm-5.2";
+
+/**
+ * Anthropic slot aliases. Passing one of these to a base-URL-overridden run is
+ * the #3758 defect — it silently routes first-party instead of to z.ai.
+ */
+const ANTHROPIC_SLOT_ALIASES: readonly string[] = Object.freeze([
+  "sonnet",
+  "opus",
+  "haiku",
+]);
+
+/**
+ * Reject any model name that would route to Anthropic rather than z.ai.
+ *
+ * Returns a result rather than throwing, per the never-throw-from-verification
+ * convention. Callers abort the run on `ok: false` — a misrouted run is worse
+ * than no run, because it spends the quota the drainer exists to protect.
+ */
+export function assertGlmModel(
+  model: string,
+): { ok: true } | { ok: false; code: "glm-model-would-route-first-party"; message: string } {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.startsWith("glm-")) return { ok: true };
+  const alias = ANTHROPIC_SLOT_ALIASES.includes(normalized)
+    ? ` "${normalized}" is an Anthropic slot alias.`
+    : "";
+  return {
+    ok: false,
+    code: "glm-model-would-route-first-party",
+    message:
+      `Refusing to run the GLM drainer with model "${model}": the base-URL override ` +
+      `does NOT redirect a non-glm model name — the CLI resolves it locally and calls ` +
+      `Anthropic, burning the quota this lane exists to relieve (issue #3758).${alias} ` +
+      `Pass an explicit glm-* name, e.g. "${GLM_MODEL}".`,
+  };
+}
 
 /** Repo-relative path of the drainer settings file (input-side secret fence). */
 export const DRAINER_SETTINGS_RELATIVE_PATH = "config/glm/drainer-settings.json";
@@ -148,11 +196,18 @@ export interface DrainerArgsSpec {
   prompt: string;
   /** Absolute path to the drainer settings file. Defaults to the repo copy. */
   settingsPath?: string;
-  /** Model slot. Defaults to the Sonnet slot GLM-4.7 is served on. */
+  /**
+   * Model name. Defaults to {@link GLM_MODEL}. Must be an explicit `glm-*`
+   * name — an Anthropic slot alias routes first-party and is rejected (#3758).
+   */
   model?: string;
   /** Extra argv appended verbatim (the drainer loop's own flags). */
   extraArgs?: readonly string[];
 }
+
+export type DrainerArgsResult =
+  | { ok: true; args: string[] }
+  | { ok: false; code: "glm-model-would-route-first-party"; message: string };
 
 /**
  * Build the `claude` argv for a drainer run.
@@ -162,17 +217,29 @@ export interface DrainerArgsSpec {
  * run that somehow lost it must be visibly malformed rather than silently
  * unfenced. The auth token is NEVER an argv entry — argv is world-readable via
  * `/proc/<pid>/cmdline`; the token travels in the environment only.
+ *
+ * Returns a result rather than a bare argv because the model name is a routing
+ * fence (#3758): building argv that would silently spend Anthropic quota is a
+ * failure the caller must see, not a default it can drift past.
  */
-export function buildDrainerArgs(spec: DrainerArgsSpec): string[] {
-  return [
-    "--settings",
-    spec.settingsPath ?? DRAINER_SETTINGS_PATH,
-    "--model",
-    spec.model ?? GLM_MODEL_SLOT,
-    ...(spec.extraArgs ?? []),
-    "-p",
-    spec.prompt,
-  ];
+export function buildDrainerArgs(spec: DrainerArgsSpec): DrainerArgsResult {
+  const model = spec.model ?? GLM_MODEL;
+  const modelCheck = assertGlmModel(model);
+  if (modelCheck.ok !== true) {
+    return { ok: false, code: modelCheck.code, message: modelCheck.message };
+  }
+  return {
+    ok: true,
+    args: [
+      "--settings",
+      spec.settingsPath ?? DRAINER_SETTINGS_PATH,
+      "--model",
+      model,
+      ...(spec.extraArgs ?? []),
+      "-p",
+      spec.prompt,
+    ],
+  };
 }
 
 export type GlmClaudeRun = {
