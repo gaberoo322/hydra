@@ -8,6 +8,8 @@
 
     "`gh pr create` is deliberately NOT granted. The drainer loop (#3689) opens the PR itself, AFTER preflightBeforePr() clears the diff — so the authoring session cannot route around the output-side gate.",
 
+    "SINGLE-FILE TEST RUNS GO THROUGH `npm run test:file -- test/<name>.test.mts`, NOT a bare `node`. Bare `node` and `npx` stay ungranted on purpose: either one is a general interpreter (`node -e 'require(\"fs\").readFileSync(\".env\")'`) and would reinstate the exact incidental-credential-ingestion hole this allow-list closes — a targeted `Bash(node --experimental-strip-types --test:*)` prefix grant is no better, because prefix rules do not constrain what follows. The first live GLM authoring runs (2026-07-27) burned 5-7 turns each retrying blocked `node`/`npx` invocations before falling back to the full ~6-minute `npm test`, so the capability gap was real; the fix is a repo-defined script reached through the already-granted `Bash(npm run:*)`, which adds NO new capability class beyond the residual stated below. It is also strictly better than the bare `node` invocation it replaces: `test:file` routes through `scripts/test/redis-db-launch.mjs`, so a single-file run gets the same per-run Redis DB isolation as `npm test` and stops reproducing the documented cross-run flake class.",
+
     "RESIDUAL, stated plainly: `npm test` / `npm run *` execute repo-defined scripts, so this is a scoped-capability fence, not a sandbox. It stops incidental credential ingestion — the invariant-8 threat — not a determined exfiltration. The output-side half (preflightBeforePr's secret-scan + Verifier-Core/T4 diff gate) and the unchanged qa_orch + CI merge gate stay load-bearing."
   ],
 
