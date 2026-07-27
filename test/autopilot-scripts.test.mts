@@ -30,7 +30,15 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+  copyFileSync,
+  chmodSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -111,6 +119,150 @@ function runBootstrap(env: Record<string, string>, tmp: { state: string; heartbe
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
+}
+
+/**
+ * Issue #3742 — run bootstrap.sh underneath a synthetic, long-lived ancestor
+ * whose process name is `claude`, so `resolve_autopilot_pid()` has a real
+ * owning process to walk up to in EVERY environment.
+ *
+ * Why this exists: `resolve_autopilot_pid()` in bootstrap.sh climbs the
+ * process tree looking for a `claude`-named ancestor and deliberately falls
+ * back to `$$` when there is none (manual/standalone invocations). A test that
+ * simply spawns bootstrap.sh therefore depends on whether the SUITE ITSELF was
+ * launched from a Claude Code session: locally it is, so a live `claude`
+ * ancestor exists and the recorded pid is alive; on the self-hosted CI runner
+ * it is not, so the `$$` fallback fires and the recorded pid is dead by
+ * read-time. That is an environment dependency, not a race, and it made the
+ * assertion fail 100% of the time on CI.
+ *
+ * The synthetic ancestor is a copy of the bash binary renamed to `claude` —
+ * `ps -o comm=` reports the executable's basename, which is exactly what
+ * `resolve_autopilot_pid()` matches on. It runs bootstrap.sh as a child, then
+ * sleeps so it is unambiguously still alive when the assertions run.
+ *
+ * Everything is synchronous: the harness script blocks until bootstrap.sh has
+ * exited and recorded its status, so the caller never polls.
+ */
+function runBootstrapUnderFakeClaude(): {
+  statePath: string;
+  ownerPid: number;
+  bootstrapPid: number;
+  bootstrapStatus: number;
+  bootstrapOutput: string;
+  cleanup: () => void;
+} {
+  const tmp = makeTempState();
+  const cleanup = (owner?: number) => {
+    if (owner && owner > 0) {
+      try {
+        process.kill(owner, "SIGKILL");
+      } catch {
+        /* intentional: the fake ancestor may have already exited; nothing to reap */
+      }
+    }
+    rmSync(tmp.dir, { recursive: true, force: true });
+  };
+
+  try {
+    // Locate the real bash binary; `ps -o comm=` will report whatever
+    // basename we exec it under, so a copy named `claude` impersonates the
+    // owning CLI without needing the CLI installed.
+    const bashBin = execFileSync("sh", ["-c", "command -v bash"], { encoding: "utf-8" }).trim();
+    assert.ok(bashBin, "could not locate a bash binary to build the fake `claude` ancestor");
+    const fakeClaude = join(tmp.dir, "claude");
+    copyFileSync(bashBin, fakeClaude);
+    chmodSync(fakeClaude, 0o755);
+
+    const rcPath = join(tmp.dir, "bootstrap.rc");
+    const outPath = join(tmp.dir, "bootstrap.out");
+    const ownerPidPath = join(tmp.dir, "owner.pid");
+    const bootstrapPidPath = join(tmp.dir, "bootstrap.pid");
+    const harness = join(tmp.dir, "harness.sh");
+    const shim = join(tmp.dir, "shim.sh");
+
+    // The shim publishes its own $$ and then `exec`s bootstrap.sh, so
+    // bootstrap.sh RUNS AS that pid — handing the test the exact value the
+    // buggy implementation used to stamp into state.json.
+    writeFileSync(
+      shim,
+      `#!/usr/bin/env bash
+set -u
+echo "$$" > "${bootstrapPidPath}.tmp"
+mv "${bootstrapPidPath}.tmp" "${bootstrapPidPath}"
+exec "${join(SCRIPTS, "bootstrap.sh")}" > "${outPath}" 2>&1
+`,
+      { mode: 0o755 },
+    );
+
+    // The background job's stdio is redirected to /dev/null so spawnSync's
+    // pipe closes when the harness exits rather than when the 120s sleep does.
+    // `exit 0` after the sleep keeps bash from exec-optimizing itself into
+    // `sleep`, so the ancestor stays named `claude` for the whole test.
+    writeFileSync(
+      harness,
+      `#!/usr/bin/env bash
+set -u
+"${fakeClaude}" -c '
+  "${shim}"
+  echo "$?" > "${rcPath}.tmp"
+  mv "${rcPath}.tmp" "${rcPath}"
+  sleep 120
+  exit 0
+' > /dev/null 2>&1 &
+owner=$!
+echo "\${owner}" > "${ownerPidPath}"
+# Block until bootstrap.sh has finished and published its exit status.
+for _ in $(seq 1 600); do
+  [ -s "${rcPath}" ] && exit 0
+  kill -0 "\${owner}" 2>/dev/null || break
+  sleep 0.1
+done
+echo "fake-claude harness timed out or the ancestor died before bootstrap.sh finished" >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    const run = spawnSync(harness, [], {
+      env: {
+        ...process.env,
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+        HYDRA_AUTOPILOT_LOG: tmp.log,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+
+    const ownerPid = existsSync(ownerPidPath)
+      ? Number.parseInt(readFileSync(ownerPidPath, "utf-8").trim(), 10)
+      : 0;
+    const bootstrapOutput = existsSync(outPath) ? readFileSync(outPath, "utf-8") : "";
+
+    if (run.status !== 0) {
+      cleanup(ownerPid);
+      assert.fail(
+        `fake-claude harness failed (status=${run.status}): ${run.stderr ?? ""}\nbootstrap output:\n${bootstrapOutput}`,
+      );
+    }
+
+    return {
+      statePath: tmp.state,
+      ownerPid,
+      bootstrapPid: Number.parseInt(readFileSync(bootstrapPidPath, "utf-8").trim(), 10),
+      bootstrapStatus: Number.parseInt(readFileSync(rcPath, "utf-8").trim(), 10),
+      bootstrapOutput,
+      cleanup: () => cleanup(ownerPid),
+    };
+  } catch (err) {
+    // Never leak the tempdir (or a sleeping ancestor) on a setup failure.
+    const owner = existsSync(join(tmp.dir, "owner.pid"))
+      ? Number.parseInt(readFileSync(join(tmp.dir, "owner.pid"), "utf-8").trim(), 10)
+      : 0;
+    cleanup(owner);
+    throw err;
+  }
 }
 
 /**
@@ -590,23 +742,44 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   });
 
   test("records an alive owning-pid (not bootstrap.sh's short-lived $$)", () => {
-    const tmp = makeTempState();
+    // Issue #3742 — this assertion used to run bootstrap.sh as a plain child
+    // of the test process. That made it pass locally and fail on CI for a
+    // reason that had nothing to do with timing: resolve_autopilot_pid()
+    // walks the process tree for a `claude`-named ancestor and falls back to
+    // $$ when there is none. Locally the suite is run from inside a Claude
+    // Code session, so a real `claude` ancestor exists and the recorded pid
+    // is alive; on the self-hosted runner there is no such ancestor, so
+    // bootstrap correctly took its documented $$ fallback and the pid was
+    // dead by read-time. The fix is to give the test a deterministic
+    // long-lived `claude` ancestor of its own (see runBootstrapUnderFakeClaude)
+    // so the invariant is exercised identically in every environment — and to
+    // assert the STRONGER property: the recorded pid is the ancestor's, i.e.
+    // bootstrap actually walked up rather than stamping its own $$.
+    const r = runBootstrapUnderFakeClaude();
     try {
-      const r = runBootstrap({}, tmp);
-      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
-      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(r.bootstrapStatus, 0, `bootstrap exited non-zero: ${r.bootstrapOutput}`);
+      const s = JSON.parse(readFileSync(r.statePath, "utf-8"));
       assert.equal(typeof s.pid, "number", "state.pid must be a number");
       assert.ok(s.pid > 0, "state.pid must be positive");
-      // The recorded pid MUST be alive at the moment we read it. The
-      // bug we're guarding against wrote $$ (bootstrap's own pid), which
-      // is dead by the time the test reads state.json a few ms later.
-      // Use process.kill(pid, 0) — throws ESRCH if dead, succeeds otherwise.
+      assert.notEqual(
+        s.pid,
+        r.bootstrapPid,
+        "state.pid must NOT be bootstrap.sh's own short-lived $$ — that pid dies within seconds of Phase 0 and makes sweepRunIfDead() kill every live run",
+      );
+      assert.equal(
+        s.pid,
+        r.ownerPid,
+        `state.pid must be the owning \`claude\` ancestor (${r.ownerPid}), not ${s.pid} — resolve_autopilot_pid() failed to walk up the process tree`,
+      );
+      // Belt-and-braces on the original property: the recorded pid is a
+      // process that is genuinely alive at read-time. process.kill(pid, 0)
+      // throws ESRCH if dead, succeeds otherwise.
       assert.doesNotThrow(
         () => process.kill(s.pid, 0),
-        `state.pid=${s.pid} is dead at read-time — bootstrap stamped its own $$ instead of walking up to the owning process`,
+        `state.pid=${s.pid} is dead at read-time — bootstrap stamped a short-lived pid instead of the owning process`,
       );
     } finally {
-      rmSync(tmp.dir, { recursive: true, force: true });
+      r.cleanup();
     }
   });
 
