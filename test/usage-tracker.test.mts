@@ -63,6 +63,7 @@ import {
   projectResetWindow,
   weightedTokens,
   parseSessionLimitReset,
+  isForeignProviderModel,
   type TokenBreakdown,
   type ModelFamily,
 } from "../src/cost/token-math.ts";
@@ -1419,6 +1420,7 @@ describe("usage-tracker", () => {
         tokensLast5h: empty,
         tokensLast7d: empty,
         tokensLast24h: 0,
+        tokensForeignLast7d: 0,
         percentLast5h: 0,
         percentLast7d: 0,
         usageSource: "estimate",
@@ -4836,5 +4838,122 @@ describe("isoWeekLabel (pure ISO-8601 week math, issue #2404)", () => {
     const a = isoWeekLabel(new Date("2026-06-23T23:59:59.000Z"));
     const b = isoWeekLabel(new Date("2026-06-23T00:00:01.000Z"));
     assert.equal(a, b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Foreign-provider quota exclusion (issue #3769).
+//
+// The GLM dev-drainer lane (ADR-0032) authors on z.ai's quota, costing ZERO
+// Anthropic quota. Before this fix, `glm-*` model strings fell through
+// `modelToFamily` into the `unknown` bucket at an implicit Quota-Weight of 1.0
+// and were summed into the Anthropic totals — so the lane built to RELIEVE
+// `percentLast7d` raised it instead, throttling Opus harder the more GLM
+// worked. Measured 2026-07-27: two GLM runs moved `unknown` 73k -> 27.4M and
+// `percentLast7d` 94% -> 95%, against a 90% hard-stop cap.
+//
+// New top-level describe with its own lifecycle (no shared-Redis teardown to
+// piggyback on).
+// ---------------------------------------------------------------------------
+describe("foreign-provider tokens are excluded from Anthropic quota (issue #3769)", () => {
+  beforeEach(() => {
+    clearUsageCache();
+  });
+
+  test("a glm-* transcript moves NO Anthropic aggregate", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usage-foreign-"));
+    try {
+      const now = new Date("2026-05-25T12:00:00Z");
+      const oneHourAgo = "2026-05-25T11:00:00Z";
+
+      await writeFixture(root, "proj-a/session-1.jsonl", [
+        assistantLine(oneHourAgo, { in: 1_000_000, out: 500_000 }, "glm-5.2"),
+        assistantLine(oneHourAgo, { in: 250_000, out: 250_000 }, "glm-4.7"),
+      ]);
+
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+      // The load-bearing assertion: every Anthropic-meter quantity is zero.
+      assert.equal(snap.tokensLast5h.total, 0);
+      assert.equal(snap.tokensLast7d.total, 0);
+      assert.equal(snap.tokensLast24h, 0);
+      // Critically, NOT parked in `unknown` (weight 1.0) — that was the defect.
+      assert.equal(snap.byModel.unknown.total, 0);
+      assert.equal(snap.byModel.opus.total, 0);
+      assert.equal(snap.byModel.sonnet.total, 0);
+      assert.equal(snap.byModel.haiku.total, 0);
+
+      // But the spend is NOT discarded — it is reported on its own axis.
+      assert.equal(snap.tokensForeignLast7d, 2_000_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Anthropic tokens are unaffected when a glm-* line sits beside them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usage-foreign-mixed-"));
+    try {
+      const now = new Date("2026-05-25T12:00:00Z");
+      const oneHourAgo = "2026-05-25T11:00:00Z";
+
+      await writeFixture(root, "proj-a/session-1.jsonl", [
+        assistantLine(oneHourAgo, { in: 100, out: 200 }, "claude-opus-4-7"),
+        assistantLine(oneHourAgo, { in: 900_000, out: 900_000 }, "glm-5.2"),
+      ]);
+
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+      // The Anthropic side reads exactly as if the glm line were not there.
+      assert.equal(snap.tokensLast7d.total, 300);
+      assert.equal(snap.byModel.opus.total, 300);
+      assert.equal(snap.byModel.unknown.total, 0);
+      assert.equal(snap.tokensForeignLast7d, 1_800_000);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a glm-* line does not reach the per-skill or per-dispatch-kind cross-tabs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usage-foreign-xtab-"));
+    try {
+      const now = new Date("2026-05-25T12:00:00Z");
+      const oneHourAgo = "2026-05-25T11:00:00Z";
+
+      await writeFixture(root, "proj-a/session-1.jsonl", [
+        assistantLine(oneHourAgo, { in: 500_000, out: 500_000 }, "glm-5.2"),
+      ]);
+
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+      // Σ over every skill row must be zero — a foreign line must not create
+      // or inflate a skill bucket, or `costByClass` inherits the same inversion.
+      let skillTotal = 0;
+      for (const row of Object.values(snap.bySkillByModel ?? {})) {
+        for (const fam of Object.values(row)) skillTotal += fam.total;
+      }
+      assert.equal(skillTotal, 0);
+
+      let kindTotal = 0;
+      for (const row of Object.values(snap.byDispatchKind ?? {})) {
+        for (const fam of Object.values(row)) kindTotal += fam.total;
+      }
+      assert.equal(kindTotal, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("isForeignProviderModel classifies by prefix, case-insensitively", () => {
+    assert.equal(isForeignProviderModel("glm-5.2"), true);
+    assert.equal(isForeignProviderModel("glm-4.7"), true);
+    assert.equal(isForeignProviderModel("GLM-5.2"), true);
+    // Anthropic models and the genuine unknown-drift case stay non-foreign, so
+    // the `unknown` bucket keeps doing its real job (surfacing a missing prefix).
+    assert.equal(isForeignProviderModel("claude-opus-4-7"), false);
+    assert.equal(isForeignProviderModel("claude-sonnet-5"), false);
+    assert.equal(isForeignProviderModel("gpt-5"), false);
+    assert.equal(isForeignProviderModel(""), false);
+    assert.equal(isForeignProviderModel(null), false);
+    assert.equal(isForeignProviderModel(undefined), false);
   });
 });

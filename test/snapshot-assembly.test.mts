@@ -68,6 +68,10 @@ function makeScan(overrides: Partial<ScanResult> = {}): ScanResult {
     bySkillByModel: { "hydra-dev": familyOnly("opus", opus7d) },
     byDispatchKind: emptyDispatchKinds(),
     tokens24h: opus24h,
+    // Foreign-provider (non-Anthropic-quota) 7d spend, issue #3769. Zero here:
+    // this fixture models an Anthropic-only scan, and the assembly must not
+    // fold this field into any Anthropic total regardless of its value.
+    foreign7d: breakdown(0),
     // Failed OAuth read → estimate fallback. `lastKnownOAuth: null` keeps the
     // #2832 divergence detector inert (cold cache).
     oauth: {
