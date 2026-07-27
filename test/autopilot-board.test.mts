@@ -15,11 +15,12 @@
  * Express server, no real `gh`, no Redis.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, beforeEach, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import Redis from "ioredis";
 
 import {
   createAutopilotBoardRouter,
@@ -28,6 +29,11 @@ import {
 // `deriveBoardState` moved to its domain leaf (issue #3505) — the pure
 // bucketing unit test imports it directly, without Express in scope.
 import { deriveBoardState } from "../src/autopilot/board-state.ts";
+import {
+  getGlmDrainerLiveness,
+  GLM_DRAINER_ACTIVE_KEY,
+  GLM_DRAINER_HEARTBEAT_STALE_MS,
+} from "../src/redis/autopilot.ts";
 import {
   ORCH_BOARD_LABELS,
   STALE_IN_PROGRESS_SECONDS,
@@ -49,6 +55,13 @@ import type { IssueRow, IssueReadResult } from "../src/github/issues.ts";
 // ---------------------------------------------------------------------------
 
 const NOW_MS = Date.parse("2026-06-03T12:00:00.000Z");
+
+// Redis DB for the GLM-drainer accessor round-trips (issue #3754). Mirrors the
+// workless-hint / autopilot-pause pattern: the test launcher (or an explicit
+// override) sets REDIS_URL; we re-assert it so the accessor's shared singleton
+// connects to the same DB the suite's own client writes to.
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
+process.env.REDIS_URL = REDIS_URL;
 
 /** Build an IssueRow with sane defaults; override what the case cares about. */
 function row(partial: Partial<IssueRow> & { number: number }): IssueRow {
@@ -118,29 +131,32 @@ describe("deriveBoardState — counts + stale lists (issue #934)", () => {
     assert.equal(out.ready_for_agent, 1);
   });
 
-  test("glm-eligible + ready-for-agent is NOT counted as orch ready_for_agent (#3687)", () => {
-    // ADR-0032: a glm-eligible issue is authored by the GLM dev-drainer on
-    // z.ai's independent quota. `ready_for_agent` is the Opus `dev_orch`
-    // AUTHORING pool that decide.py consumes, so counting a drainer-owned
-    // issue there dispatches a second author onto work already claimed.
-    const out = deriveBoardState(
-      [
-        // pure orch ready-for-agent → counted
-        row({ number: 1, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
-        // drainer-owned: carries BOTH labels → excluded from the orch count
-        row({
-          number: 3687,
-          labels: [
-            ORCH_BOARD_LABELS.ready_for_agent,
-            ORCH_BOARD_LABELS.glm_eligible,
-          ],
-        }),
-        // glm-eligible alone (no ready-for-agent) → not counted anyway
-        row({ number: 3, labels: [ORCH_BOARD_LABELS.glm_eligible] }),
-      ],
-      NOW_MS,
+  test("glm-eligible is excluded from ready_for_agent only while the drainer is live (#3687, #3754)", () => {
+    // ADR-0032 + #3754: a glm-eligible issue is authored by the GLM dev-drainer
+    // on z.ai's independent quota, so while the drainer is LIVE it is excluded
+    // from the Opus `dev_orch` authoring pool. When the drainer is stale /
+    // absent the exclusion LIFTS (fail-open toward work) so Opus sees it again.
+    const board = [
+      // pure orch ready-for-agent → always counted
+      row({ number: 1, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+      // drainer-owned: carries BOTH labels → excluded ONLY while partition live
+      row({
+        number: 3687,
+        labels: [
+          ORCH_BOARD_LABELS.ready_for_agent,
+          ORCH_BOARD_LABELS.glm_eligible,
+        ],
+      }),
+      // glm-eligible alone (no ready-for-agent) → never counted anyway
+      row({ number: 3, labels: [ORCH_BOARD_LABELS.glm_eligible] }),
+    ];
+    // Default (no liveness resolved) = partition INACTIVE = fail-open: counted.
+    assert.equal(deriveBoardState(board, NOW_MS).ready_for_agent, 2);
+    // Partition ACTIVE (drainer live): the glm-eligible issue is excluded.
+    assert.equal(
+      deriveBoardState(board, NOW_MS, new Set(), true).ready_for_agent,
+      1,
     );
-    assert.equal(out.ready_for_agent, 1);
   });
 
   test("glm-eligible does not disturb the other board counts (#3687)", () => {
@@ -387,7 +403,14 @@ async function callRoute(
   deps: AutopilotBoardRouterDeps = {},
   query: Record<string, unknown> = {},
 ) {
-  const router = createAutopilotBoardRouter({ now: () => NOW_MS, ...deps });
+  // Default the GLM liveness reader to partition-INACTIVE so the existing
+  // route cases stay Redis-free and deterministic; cases that exercise the
+  // partition pass their own `glmDrainerLiveness` (issue #3754).
+  const router = createAutopilotBoardRouter({
+    now: () => NOW_MS,
+    glmDrainerLiveness: async () => false,
+    ...deps,
+  });
   const handler = findHandler(router, "GET", ROUTE);
   assert.ok(handler, "route handler must exist");
   const res = mockRes();
@@ -657,7 +680,7 @@ describe("Target board-label leaf — single definition (issue #3434)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// collect-state.sh degraded-path parity — the GLM partition (ADR-0032, #3687)
+// collect-state.sh degraded-path parity — the GLM partition (ADR-0032, #3754)
 // ---------------------------------------------------------------------------
 
 /**
@@ -667,13 +690,17 @@ describe("Target board-label leaf — single definition (issue #3434)", () => {
  * `degraded:true`, it falls back to an inline `gh issue list --jq` that
  * re-spells the same bucketing in bash.
  *
- * That fallback is why the GLM partition has to land in BOTH places: a
- * `glm-eligible` exclusion applied only in TypeScript would silently evaporate
- * on the exact degraded turn where a double-dispatch is most costly. These
- * cases run the committed bash filter through real `jq` so the two
- * implementations cannot drift.
+ * The degraded path is reached when the orchestrator HTTP service (and thus
+ * its Redis-backed heartbeat read) is unreachable, so the GLM drainer
+ * heartbeat CANNOT be read there — that is the STALE condition. `deriveBoardState`
+ * with a stale / absent heartbeat does NOT subtract `glm-eligible` (issue #3754:
+ * fail-open toward work), so the degraded bash jq must match that STALE arm
+ * exactly: it deliberately does NOT exclude `glm-eligible`. The healthy
+ * endpoint path applies the (liveness-conditional) subtraction; this fallback
+ * is the always-stale mirror. These cases run the committed bash filter
+ * through real `jq` so the two implementations cannot drift.
  */
-describe("collect-state.sh degraded fallback — glm-eligible partition (#3687)", () => {
+describe("collect-state.sh degraded fallback — glm-eligible partition (#3687, #3754)", () => {
   const COLLECTOR = join(
     resolve(import.meta.dirname, ".."),
     "scripts",
@@ -717,15 +744,18 @@ describe("collect-state.sh degraded fallback — glm-eligible partition (#3687)"
     );
   });
 
-  test("glm-eligible + ready-for-agent is excluded", () => {
+  test("glm-eligible + ready-for-agent is COUNTED in the degraded (always-stale) path (#3754)", () => {
+    // The degraded path cannot read the heartbeat, so it treats the drainer as
+    // stale → fail-open → glm-eligible is NOT subtracted. The bash jq therefore
+    // counts a drainer-owned issue so a down orchestrator never starves Opus.
     assert.equal(
       countReadyForAgent(filter, [
         { labels: ["ready-for-agent"] },
         { labels: ["ready-for-agent", "glm-eligible"] },
         { labels: ["glm-eligible"] },
       ]),
-      "1",
-      "a drainer-owned issue must not inflate the Opus dev_orch authoring pool",
+      "2",
+      "the degraded bash path must mirror deriveBoardState's stale-heartbeat arm (count glm-eligible)",
     );
   });
 
@@ -736,12 +766,14 @@ describe("collect-state.sh degraded fallback — glm-eligible partition (#3687)"
         { labels: ["ready-for-agent", "target-backlog"] },
       ]),
       "1",
-      "issue #2704's exclusion must survive the #3687 edit",
+      "issue #2704's exclusion is unconditional on liveness and must survive the #3754 edit",
     );
   });
 
-  test("bash fallback agrees with deriveBoardState on the same board", () => {
-    // The load-bearing invariant: same input, same number, either path.
+  test("bash fallback agrees with deriveBoardState's STALE arm on the same board (#3754)", () => {
+    // The load-bearing invariant: the degraded bash path (always stale) must
+    // match deriveBoardState with a stale/absent heartbeat (partition inactive)
+    // — same input, same number, either path. glm-eligible rows are COUNTED.
     const board = [
       { labels: ["ready-for-agent"] },
       { labels: ["ready-for-agent", "glm-eligible"] },
@@ -750,11 +782,215 @@ describe("collect-state.sh degraded fallback — glm-eligible partition (#3687)"
       { labels: ["needs-qa"] },
     ];
     const bash = Number(countReadyForAgent(filter, board));
+    // Default deriveBoardState (no liveness resolved) = partition inactive =
+    // the stale-heartbeat arm the degraded path mirrors.
     const ts = deriveBoardState(
       board.map((b, i) => row({ number: i + 1, labels: b.labels })),
       NOW_MS,
     ).ready_for_agent;
-    assert.equal(bash, ts, "degraded bash path must match the TS seam exactly");
-    assert.equal(ts, 1);
+    assert.equal(bash, ts, "degraded bash path must match the TS stale-arm exactly");
+    assert.equal(ts, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deriveBoardState — GLM liveness gates the glm-eligible partition (#3754)
+// ---------------------------------------------------------------------------
+
+describe("deriveBoardState — GLM liveness gates the glm-eligible partition (#3754)", () => {
+  // row 1 = plain ready-for-agent (always counts); row 2 = drainer-owned
+  // (counted only when the partition is inactive); row 3 = target-backlog
+  // (never counts).
+  const board = [
+    row({ number: 1, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+    row({
+      number: 2,
+      labels: [ORCH_BOARD_LABELS.ready_for_agent, ORCH_BOARD_LABELS.glm_eligible],
+    }),
+    row({
+      number: 3,
+      labels: [
+        ORCH_BOARD_LABELS.ready_for_agent,
+        ORCH_BOARD_LABELS.target_backlog,
+      ],
+    }),
+  ];
+
+  test("partition ACTIVE (drainer live) → glm-eligible excluded", () => {
+    assert.equal(
+      deriveBoardState(board, NOW_MS, new Set(), true).ready_for_agent,
+      1,
+    );
+  });
+
+  test("partition INACTIVE (stale/absent) → glm-eligible counted (fail-open)", () => {
+    assert.equal(
+      deriveBoardState(board, NOW_MS, new Set(), false).ready_for_agent,
+      2,
+    );
+  });
+
+  test("default (no liveness arg) = inactive = fail-open toward work", () => {
+    assert.equal(deriveBoardState(board, NOW_MS).ready_for_agent, 2);
+  });
+
+  test("target-backlog stays excluded regardless of partition liveness", () => {
+    // row 3 never counts in either arm; only the glm-eligible row toggles.
+    assert.equal(
+      deriveBoardState(board, NOW_MS, new Set(), true).ready_for_agent,
+      1,
+    );
+    assert.equal(
+      deriveBoardState(board, NOW_MS, new Set(), false).ready_for_agent,
+      2,
+    );
+  });
+
+  test("the partition flag does not touch the other board counts", () => {
+    const other = [
+      row({
+        number: 10,
+        labels: [
+          ORCH_BOARD_LABELS.glm_eligible,
+          ORCH_BOARD_LABELS.needs_qa,
+          ORCH_BOARD_LABELS.in_progress,
+        ],
+      }),
+    ];
+    const active = deriveBoardState(other, NOW_MS, new Set(), true);
+    const inactive = deriveBoardState(other, NOW_MS, new Set(), false);
+    assert.equal(active.needs_qa, 1);
+    assert.equal(active.in_progress, 1);
+    assert.equal(inactive.needs_qa, 1);
+    assert.equal(inactive.in_progress, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// src/redis/autopilot.ts — GLM drainer heartbeat liveness accessor (#3754)
+// ---------------------------------------------------------------------------
+
+describe("src/redis/autopilot.ts — GLM drainer heartbeat liveness (#3754)", () => {
+  // Self-contained Redis lifecycle: open one client for the suite, close it at
+  // the end, and wipe the heartbeat key before each case so cases stay
+  // isolated. The accessor under test uses the shared connection singleton
+  // (same DB via REDIS_URL); this client only sets/clears the key.
+  let redis: any;
+  before(() => {
+    redis = new Redis(REDIS_URL);
+  });
+  after(async () => {
+    if (redis) {
+      await redis.del(GLM_DRAINER_ACTIVE_KEY);
+      redis.disconnect();
+    }
+  });
+  beforeEach(async () => {
+    await redis.del(GLM_DRAINER_ACTIVE_KEY);
+  });
+
+  test("absent key => not live, reason absent, no heartbeatMs", async () => {
+    const l = await getGlmDrainerLiveness(Date.now());
+    assert.equal(l.live, false);
+    assert.equal(l.reason, "absent");
+    assert.equal(l.heartbeatMs, null);
+  });
+
+  test("fresh heartbeat (within the 45min window) => live, reason fresh", async () => {
+    const now = Date.now();
+    const hb = now - 10 * 60 * 1000; // 10 min ago
+    await redis.set(GLM_DRAINER_ACTIVE_KEY, String(hb));
+    const l = await getGlmDrainerLiveness(now);
+    assert.equal(l.live, true);
+    assert.equal(l.reason, "fresh");
+    assert.equal(l.heartbeatMs, hb);
+  });
+
+  test("stale heartbeat (older than 45min) => not live, reason stale", async () => {
+    const now = Date.now();
+    const hb = now - (GLM_DRAINER_HEARTBEAT_STALE_MS + 60_000); // just past window
+    await redis.set(GLM_DRAINER_ACTIVE_KEY, String(hb));
+    const l = await getGlmDrainerLiveness(now);
+    assert.equal(l.live, false);
+    assert.equal(l.reason, "stale");
+    assert.equal(l.heartbeatMs, hb);
+  });
+
+  test("boundary: just-under the window is fresh, just-over is stale", async () => {
+    const now = Date.now();
+    await redis.set(
+      GLM_DRAINER_ACTIVE_KEY,
+      String(now - (GLM_DRAINER_HEARTBEAT_STALE_MS - 1000)),
+    );
+    assert.equal((await getGlmDrainerLiveness(now)).live, true);
+    await redis.set(
+      GLM_DRAINER_ACTIVE_KEY,
+      String(now - (GLM_DRAINER_HEARTBEAT_STALE_MS + 1000)),
+    );
+    assert.equal((await getGlmDrainerLiveness(now)).live, false);
+  });
+
+  test("unreadable value => not live, reason unreadable, no heartbeatMs", async () => {
+    await redis.set(GLM_DRAINER_ACTIVE_KEY, "not-a-number");
+    const l = await getGlmDrainerLiveness(Date.now());
+    assert.equal(l.live, false);
+    assert.equal(l.reason, "unreadable");
+    assert.equal(l.heartbeatMs, null);
+  });
+
+  test("the staleness threshold is 45 minutes (three 15-min ticks)", () => {
+    assert.equal(GLM_DRAINER_HEARTBEAT_STALE_MS, 45 * 60 * 1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /autopilot/board-state — GLM liveness wires the partition (#3754)
+// ---------------------------------------------------------------------------
+
+describe("GET /autopilot/board-state — GLM liveness wires the partition (#3754)", () => {
+  // row 1 always counts; row 2 (drainer-owned) counts only when inactive.
+  const board = (): IssueRow[] => [
+    row({ number: 1, labels: [ORCH_BOARD_LABELS.ready_for_agent] }),
+    row({
+      number: 2,
+      labels: [ORCH_BOARD_LABELS.ready_for_agent, ORCH_BOARD_LABELS.glm_eligible],
+    }),
+  ];
+
+  test("a LIVE drainer excludes glm-eligible from ready_for_agent", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => okResult(board()),
+      glmDrainerLiveness: async () => true,
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ready_for_agent, 1);
+    assert.equal(res._body.degraded, false);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("a STALE drainer counts glm-eligible (fail-open toward work)", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => okResult(board()),
+      glmDrainerLiveness: async () => false,
+    });
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ready_for_agent, 2);
+    assert.equal(res._body.degraded, false);
+    AutopilotBoardStateResponseSchema.parse(res._body);
+  });
+
+  test("a liveness reader that THROWS fails open (work visible) and never 500s", async () => {
+    const res = await callRoute({
+      readOpenIssues: async () => okResult(board()),
+      glmDrainerLiveness: async () => {
+        throw new Error("redis down");
+      },
+    });
+    assert.equal(res._status, 200);
+    // The liveness read failure does NOT degrade the board — it only forces
+    // the partition inactive, so glm-eligible stays visible to Opus.
+    assert.equal(res._body.degraded, false);
+    assert.equal(res._body.ready_for_agent, 2);
+    AutopilotBoardStateResponseSchema.parse(res._body);
   });
 });

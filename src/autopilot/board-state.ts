@@ -61,11 +61,29 @@ import {
  * filtering: every `ready-for-agent` issue counts, so callers that don't
  * pre-resolve blockers get the pre-#3059 behavior. The filter is ADDITIVE to
  * the manual `blocked` label — it never toggles that label.
+ *
+ * **GLM partition liveness gate (issue #3754, ADR-0032 as amended by #3753).**
+ * The `glm-eligible` exclusion is CONDITIONAL on drainer liveness. When
+ * `glmPartitionActive` is true (the drainer heartbeat is fresh), a
+ * `glm-eligible` issue is excluded from `ready_for_agent` — the drainer owns
+ * it on z.ai's independent quota, so counting it would dispatch a second
+ * author. When `glmPartitionActive` is false (drainer absent / stale /
+ * unreachable), `glm-eligible` issues are NOT excluded — Opus sees them again,
+ * so a down drainer never starves the Opus `dev_orch` lane. The default
+ * (`false`) is the fail-open-toward-work direction: a caller that does not
+ * resolve liveness shows work rather than hiding it. Liveness is resolved
+ * async by the endpoint (via the typed accessor in `src/redis/autopilot.ts`)
+ * and injected here as a boolean — keeping this function pure/sync.
  */
 export function deriveBoardState(
   rows: readonly IssueRow[],
   nowMs: number,
   openBlockers: ReadonlySet<number> = new Set(),
+  /**
+   * Whether the GLM dev-drainer partition is LIVE (issue #3754). See the
+   * header doc for the fail-open semantics. Default `false`.
+   */
+  glmPartitionActive = false,
 ): Omit<AutopilotBoardStateResponse, "degraded" | "generatedAt"> {
   let needs_qa = 0;
   let ready_for_agent = 0;
@@ -85,15 +103,19 @@ export function deriveBoardState(
     // ALSO exclude an issue that declares an OPEN strict blocker (issue #3059):
     // `decide.py` consumes this count, so a dependency-blocked issue must not
     // inflate the dispatchable pool until its blocker closes.
-    // ALSO exclude `glm-eligible` issues (ADR-0032, issue #3687): they are
-    // authored by the GLM dev-drainer on z.ai's independent quota, so counting
-    // them in the Opus `dev_orch` authoring pool would dispatch a second
-    // author onto work the drainer already owns. `design_concept_orch` is
-    // unaffected — it still designs every glm-eligible issue.
+    // ALSO exclude `glm-eligible` issues — but ONLY when the GLM dev-drainer
+    // partition is LIVE (issue #3754, ADR-0032 as amended by #3753). When the
+    // drainer is up, a `glm-eligible` issue is authored by it on z.ai's
+    // independent quota, so counting it in the Opus `dev_orch` authoring pool
+    // would dispatch a second author onto work the drainer already owns. When
+    // the drainer is absent / stale / unreachable (`glmPartitionActive=false`),
+    // the exclusion is LIFTED — Opus sees the work again, so a down drainer
+    // never silently starves the Opus lane. `design_concept_orch` is
+    // unaffected either way — it still designs every glm-eligible issue.
     if (
       labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
       !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
-      !labels.has(ORCH_BOARD_LABELS.glm_eligible) &&
+      !(glmPartitionActive && labels.has(ORCH_BOARD_LABELS.glm_eligible)) &&
       !hasOpenStrictBlocker(row, openBlockers)
     )
       ready_for_agent++;
@@ -174,17 +196,29 @@ function hasOpenStrictBlocker(
 export async function resolveOpenBlockers(
   rows: readonly IssueRow[],
   githubRepo?: string,
+  /**
+   * Whether the GLM dev-drainer partition is LIVE (issue #3754). Mirrors
+   * `deriveBoardState`: a `glm-eligible` row is skipped (no `gh` blocker
+   * round-trip) ONLY when the partition is active — because then it cannot
+   * count toward `ready_for_agent`. When the partition is inactive the row
+   * CAN count, so its strict blockers must be resolved like any other.
+   * Default `false` (fail-open: resolve liberally, never starve on a skipped
+   * resolve).
+   */
+  glmPartitionActive = false,
 ): Promise<Set<number>> {
   const referenced = new Set<number>();
   for (const row of rows) {
     const labels = new Set(row.labels);
     // Mirror `deriveBoardState`'s exclusions exactly: a row that cannot count
-    // toward `ready_for_agent` never needs its blockers resolved, so a
-    // `target-backlog` or `glm-eligible` row costs no `gh` round-trip.
+    // toward `ready_for_agent` never needs its blockers resolved. The
+    // `glm-eligible` skip is liveness-conditional (issue #3754): when the
+    // partition is inactive a `glm-eligible` row CAN count, so it is NOT
+    // skipped here and its blockers resolve like any other ready-for-agent row.
     if (
       !labels.has(ORCH_BOARD_LABELS.ready_for_agent) ||
       labels.has(ORCH_BOARD_LABELS.target_backlog) ||
-      labels.has(ORCH_BOARD_LABELS.glm_eligible)
+      (glmPartitionActive && labels.has(ORCH_BOARD_LABELS.glm_eligible))
     )
       continue;
     for (const n of extractStrictBlockerRefs(row.body)) {
