@@ -15,6 +15,12 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
+import {
+  addIssueLabel,
+  isIssueLabelWriteFailure,
+  type IssueLabelTransport,
+} from "../src/github/issues.ts";
+
 const { fileViolatesGithubSeam } = await import("../scripts/ci/github-seam-check.ts");
 
 describe("github-seam-check: child_process import grammar", () => {
@@ -188,5 +194,67 @@ describe("github-seam-check: non-gh/git spawner carve-out", () => {
       ),
       true,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// addIssueLabel — the label-write transport seam (issue #3755).
+//
+// The seam was read-only until #3755; this is the ONE narrow write surface. The
+// tests pin (a) the exact `gh issue edit --add-label` argv the write rides on
+// and (b) the result-object mapping for both the success and the failed-`gh`
+// paths — WITHOUT spawning a real `gh`, by injecting a fake transport. New
+// top-level describe (own lifecycle; no shared Redis teardown to piggyback on).
+// ---------------------------------------------------------------------------
+describe("addIssueLabel: label-write transport seam (#3755)", () => {
+  test("success: builds the `gh issue edit --add-label` argv and returns ok", async () => {
+    let captured: { args: string[] } | null = null;
+    const transport: IssueLabelTransport = async (args) => {
+      captured = { args };
+      return { ok: true, data: { stdout: "", stderr: "" } };
+    };
+
+    const res = await addIssueLabel(42, "glm-eligible", {
+      repo: "gaberoo322/hydra",
+      transport,
+    });
+
+    // Success arm — ok:true, no throw.
+    assert.equal(res.ok, true);
+    assert.equal(isIssueLabelWriteFailure(res), false);
+    // The argv is the single sanctioned `gh issue edit` add-label shape, with
+    // the repo resolved through the seam (not re-spelled by the caller).
+    assert.deepEqual(captured!.args, [
+      "issue",
+      "edit",
+      "42",
+      "--repo",
+      "gaberoo322/hydra",
+      "--add-label",
+      "glm-eligible",
+    ]);
+  });
+
+  test("failure: a failed `gh` invocation maps to the failure arm carrying the code", async () => {
+    // Simulate `gh` exiting non-zero (e.g. auth/rate-limit/generic failure) —
+    // the transport returns the Adapter's failure shape verbatim.
+    const transport: IssueLabelTransport = async () => ({
+      ok: false,
+      code: "gh-failed",
+      stderr: "could not add label: HTTP 403",
+    });
+
+    const res = await addIssueLabel(42, "glm-eligible", {
+      repo: "gaberoo322/hydra",
+      transport,
+    });
+
+    // Failure arm — ok:false with a machine-readable code (not a throw). The
+    // caller discriminates on `code`, not stderr prose.
+    assert.equal(isIssueLabelWriteFailure(res), true);
+    if (isIssueLabelWriteFailure(res)) {
+      assert.equal(res.code, "gh-failed");
+      assert.equal(res.stderr, "could not add label: HTTP 403");
+    }
   });
 });

@@ -67,6 +67,32 @@ export const ORCH_BOARD_LABELS = {
   // set. `glm-authored` is consumed by the `active_dev_orch` PR collector in
   // `scripts/autopilot/collect-state.sh`, which reads no TS vocabulary.
   glm_eligible: "glm-eligible",
+  // `glm-withhold` is the sticky opt-out marker for the GLM dev-drainer worker
+  // lane (ADR-0032, issue #3755). Where `glm-eligible` says "the drainer may
+  // author this", `glm-withhold` says the OPPOSITE for one specific issue: "the
+  // brain judges this single issue genuinely needs frontier capability — skip
+  // it even though it looks glm-eligible." That is #3665's withhold clause (b),
+  // "any single issue the brain judges genuinely needs frontier capability",
+  // which a mechanical eligibility sweep cannot evaluate and so must read off a
+  // label instead.
+  //
+  // It is STICKY for idempotency: hand-removing `glm-eligible` from an issue
+  // does NOT withhold it, because the sweep re-adds the label on its next tick.
+  // Only a separate marker the sweep reads and skips actually withholds — hence
+  // a distinct `glm-withhold` label rather than the absence of `glm-eligible`.
+  // It follows the `design-concept-exempt` naming shape (an `-exempt`/`-withhold`
+  // opt-out alongside its opt-in sibling) already in the label vocabulary.
+  //
+  // This is NOT a safety boundary. `preflightBeforePr` in
+  // `src/glm/drainer-runner.ts` already hard-blocks Verifier-Core and T4 on the
+  // actual diff, which #3665 itself called the real fence. `glm-withhold` is an
+  // efficiency and judgment hook that avoids spending a GLM run on an issue
+  // known up front to need frontier capability. It is read (and skipped over)
+  // by the eligibility sweep chore, NOT by this board-state projection — so,
+  // unlike `glm-eligible`, it is not wired into the `ready_for_agent` exclusion
+  // in `src/autopilot/board-state.ts` (that wiring is the sweep's follow-on,
+  // out of scope of #3755).
+  glm_withhold: "glm-withhold",
 } as const;
 
 /**
