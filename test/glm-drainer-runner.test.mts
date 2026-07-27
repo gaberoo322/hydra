@@ -23,7 +23,8 @@ import {
   DRAINER_SETTINGS_RELATIVE_PATH,
   GLM_ANTHROPIC_BASE_URL,
   GLM_API_TIMEOUT_MS,
-  GLM_MODEL_SLOT,
+  GLM_MODEL,
+  assertGlmModel,
   STRIPPED_ENV_KEYS,
   buildDrainerArgs,
   buildGlmEnv,
@@ -78,10 +79,13 @@ function fakeScan(
 }
 
 describe("glm drainer-runner — env mechanism (ADR-0032 invariants 4 + 7)", () => {
-  test("pins the z.ai endpoint, the Sonnet slot, and the CLI timeout", () => {
+  test("pins the z.ai endpoint, an explicit glm-* model, and the CLI timeout", () => {
     assert.equal(GLM_ANTHROPIC_BASE_URL, "https://api.z.ai/api/anthropic");
     assert.equal(GLM_API_TIMEOUT_MS, 3_000_000);
-    assert.equal(GLM_MODEL_SLOT, "sonnet");
+    // #3758: the model name is a routing fence, not a preference. An Anthropic
+    // slot alias would be resolved locally by the CLI and sent first-party,
+    // ignoring the base-URL override and burning the quota this lane relieves.
+    assert.equal(GLM_MODEL.startsWith("glm-"), true, "default model must be an explicit glm-* name");
   });
 
   test("fail-closed: an absent ANTHROPIC_AUTH_TOKEN aborts instead of defaulting", () => {
@@ -142,31 +146,65 @@ describe("glm drainer-runner — env mechanism (ADR-0032 invariants 4 + 7)", () 
 });
 
 describe("glm drainer-runner — argv construction", () => {
-  test("always pins --settings and the Sonnet model slot", () => {
-    const args = buildDrainerArgs({ prompt: "work issue #1" });
+  test("always pins --settings and the default glm-* model", () => {
+    const built = buildDrainerArgs({ prompt: "work issue #1" });
+    assert.equal(built.ok, true);
+    if (!built.ok) return;
+    const args = built.args;
     assert.equal(args.includes("--settings"), true);
     assert.equal(args[args.indexOf("--settings") + 1], DRAINER_SETTINGS_PATH);
-    assert.equal(args[args.indexOf("--model") + 1], GLM_MODEL_SLOT);
+    assert.equal(args[args.indexOf("--model") + 1], GLM_MODEL);
     assert.equal(args[args.indexOf("-p") + 1], "work issue #1");
   });
 
   test("the auth token is never an argv entry (argv is world-readable)", () => {
     const env = buildGlmEnv({ ANTHROPIC_AUTH_TOKEN: FAKE_TOKEN });
     assert.equal(env.ok, true);
-    const args = buildDrainerArgs({ prompt: "author the change", extraArgs: ["--verbose"] });
-    assert.equal(args.join(" ").includes(FAKE_TOKEN), false);
-    assert.equal(args.join(" ").includes("ANTHROPIC_AUTH_TOKEN"), false);
-    assert.equal(args.includes("--verbose"), true);
+    const built = buildDrainerArgs({ prompt: "author the change", extraArgs: ["--verbose"] });
+    assert.equal(built.ok, true);
+    if (!built.ok) return;
+    assert.equal(built.args.join(" ").includes(FAKE_TOKEN), false);
+    assert.equal(built.args.join(" ").includes("ANTHROPIC_AUTH_TOKEN"), false);
+    assert.equal(built.args.includes("--verbose"), true);
   });
 
-  test("honors an explicit settings path and model override", () => {
-    const args = buildDrainerArgs({
+  test("honors an explicit settings path and a glm-* model override", () => {
+    const built = buildDrainerArgs({
       prompt: "p",
       settingsPath: "/tmp/other-settings.json",
-      model: "haiku",
+      model: "glm-4.7",
     });
-    assert.equal(args[args.indexOf("--settings") + 1], "/tmp/other-settings.json");
-    assert.equal(args[args.indexOf("--model") + 1], "haiku");
+    assert.equal(built.ok, true);
+    if (!built.ok) return;
+    assert.equal(built.args[built.args.indexOf("--settings") + 1], "/tmp/other-settings.json");
+    assert.equal(built.args[built.args.indexOf("--model") + 1], "glm-4.7");
+  });
+
+  // #3758 regression: the base-URL override does NOT redirect an Anthropic slot
+  // alias — the CLI resolves it locally and calls Anthropic first-party. These
+  // model names previously built valid argv, which is precisely the defect.
+  for (const alias of ["sonnet", "opus", "haiku", "claude-sonnet-5", "SONNET", " sonnet "]) {
+    test(`rejects the first-party-routing model name ${JSON.stringify(alias)}`, () => {
+      const built = buildDrainerArgs({ prompt: "p", model: alias });
+      assert.equal(built.ok, false, `${alias} must not build runnable argv`);
+      assert.equal(built.ok === false && built.code, "glm-model-would-route-first-party");
+      assert.match(built.ok === false ? built.message : "", /3758/);
+    });
+  }
+
+  test("assertGlmModel accepts glm-* names and rejects everything else", () => {
+    assert.equal(assertGlmModel("glm-5.2").ok, true);
+    assert.equal(assertGlmModel("glm-4.7").ok, true);
+    assert.equal(assertGlmModel("GLM-5.2").ok, true);
+    assert.equal(assertGlmModel("sonnet").ok, false);
+    assert.equal(assertGlmModel("").ok, false);
+  });
+
+  test("the rejection message never suggests an Anthropic slot alias as the fix", () => {
+    const built = buildDrainerArgs({ prompt: "p", model: "sonnet" });
+    assert.equal(built.ok, false);
+    if (built.ok) return;
+    assert.match(built.message, /glm-/);
   });
 });
 

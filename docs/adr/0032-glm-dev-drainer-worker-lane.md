@@ -1,6 +1,6 @@
 # ADR-0032: GLM dev-drainer worker lane
 
-Status: Accepted
+Status: Accepted (Decision 2 corrected 2026-07-27 by issue #3758 — see the **#3758 amendment**)
 Date: 2026-07-25
 Deciders: Operator + Hydra (wayfinder map #3663, which locked the six decisions transcribed here)
 Related: #3685 (epic), #3664 (viability research), #3666–#3671 (the six grilling decisions this ADR transcribes), #3687–#3690 (the sibling build slices this ADR governs), ADR-0012 (autopilot is the single brain — the decision this ADR upholds), ADR-0004 / ADR-0015 (self-modification tiers — the T2/T3 fence), ADR-0005 (operator escalation is narrow — credentials/secrets), ADR-0001 (Verifier Core — the permanently excluded surface)
@@ -35,7 +35,7 @@ These terms are defined authoritatively here so the sibling slices can cite ADR-
 - **worker lane** — the authoring-only role GLM occupies: it writes code the Opus brain has already decided to build, and its output flows through the identical `qa_orch` + CI merge gate. GLM is a worker, never a brain (Decision 1).
 - **glm-eligible** — the **issue-side** eligibility label. An issue carries `glm-eligible` when it is a designed, shallow, in-fence `dev_orch` item the drainer may pick. It lives in the issue / `ready-for-agent` label space.
 - **glm-authored** — the **PR-side** provenance label. A PR carries `glm-authored` when the drainer authored it. It lives in the PR / `active_dev_orch` label space. The two label spaces are distinct (Decision 5 / invariant 9).
-- **z.ai mechanism** — a **separate** `claude` process launched with `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` and `ANTHROPIC_AUTH_TOKEN` (Decision 2), mapping GLM-4.7 to the Sonnet slot.
+- **z.ai mechanism** — a **separate** `claude` process launched with `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`, `ANTHROPIC_AUTH_TOKEN`, **and an explicitly-spelled `glm-*` model name** (Decision 2 as amended). ~~mapping GLM-4.7 to the Sonnet slot~~ — see the #3758 amendment: the base-URL override does not redirect a slot alias.
 - **fail-closed creds** — the credential posture (invariant 7): the auth token has no default, so an absent token aborts the run rather than silently falling back to Anthropic quota.
 - **secret-scan preflight** — the output-side diff gate (`scripts/ci/secret-scan.sh`) that aborts *before* `gh pr create` if the diff would leak a secret or touch a fenced-out path (invariant 8).
 
@@ -51,7 +51,7 @@ The Opus/Fable autopilot remains the **sole decisional brain**. `design_concept_
 
 ### Decision 2 — Mechanism: a separate base-URL-overridden `claude` process
 
-Authoring runs in a **separate** `claude` process launched with `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` + `ANTHROPIC_AUTH_TOKEN` (**not** `ANTHROPIC_API_KEY`, **not** the Codex plugin), mapping **GLM-4.7 to the Sonnet slot**. The env is injected via **systemd** from an off-git `EnvironmentFile` — **never `.env.local`** (which reproduces the paper-LLM MODEL-override gotcha where a dotenv silently overrode `ExecStart` flags). Only a base-URL override on a first-party `claude` process shifts authoring load onto z.ai's quota; the Codex-plugin path cannot apply the override, so it would keep burning Anthropic quota (rejected below).
+Authoring runs in a **separate** `claude` process launched with `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` + `ANTHROPIC_AUTH_TOKEN` (**not** `ANTHROPIC_API_KEY`, **not** the Codex plugin) + an **explicitly-spelled `glm-*` model name** (`glm-5.2`; the **#3758 amendment** — the original text said "mapping GLM-4.7 to the Sonnet slot", which is wrong and unsafe). The env is injected via **systemd** from an off-git `EnvironmentFile` — **never `.env.local`** (which reproduces the paper-LLM MODEL-override gotcha where a dotenv silently overrode `ExecStart` flags). Only a base-URL override on a first-party `claude` process shifts authoring load onto z.ai's quota; the Codex-plugin path cannot apply the override, so it would keep burning Anthropic quota (rejected below).
 
 ### Decision 3 — Scope fence: `dev_orch` T2/T3, permanently excluding Verifier Core / T4 and all money-critical `dev_target`
 
@@ -76,7 +76,7 @@ The sibling slices (#3687–#3690) build against these. Every term/decision abov
 1. **ADR-0032 is the governing record** — #3687/#3688/#3689/#3690 cite it for the drainer's terminology and invariants; the terms defined here are the single source of truth.
 2. **Single-brain preserved** — the Opus/Fable autopilot is the sole brain; `design_concept_orch` designs every `glm-eligible` issue; GLM never self-selects or self-QAs; the identical `qa_orch` + CI is the merge gate. No second control loop.
 3. **Permanent, named scope fence** — `dev_orch` at T2/T3 only, excluding the Verifier Core and all T4, and excluding all money-critical `dev_target`. A standing fence, not a beachhead limit.
-4. **Precise mechanism** — a separate `claude` process via `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` + `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`, not the Codex plugin), GLM-4.7 on the Sonnet slot, env from a systemd `EnvironmentFile` (never `.env.local`).
+4. **Precise mechanism** — a separate `claude` process via `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` + `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`, not the Codex plugin) **and an explicit `glm-*` model name** (#3758 amendment; an Anthropic slot alias silently routes first-party), env from a systemd `EnvironmentFile` (never `.env.local`).
 5. **Concurrency exactly 1 via flock** — kernel auto-release, zero orphan risk; never a Redis enforcement lock. Redis appears only as a non-enforcing heartbeat key.
 6. **Kill-switch honors only operator `paused`** — deliberately ignores Anthropic `emergencyStop` / `paceState` / `weeklyEmergencyStop` (the inversion-avoidance decision: GLM runs on z.ai's independent quota).
 7. **Fail-closed credentials** — `ANTHROPIC_AUTH_TOKEN` has no default (absent token = abort, no live run); the token value never appears in a log, arg, or PR body; it reaches the process only via an off-git `EnvironmentFile` — never committed, never `ANTHROPIC_API_KEY`.
@@ -104,3 +104,25 @@ The sibling slices (#3687–#3690) build against these. Every term/decision abov
 **Accepted risk.** The z.ai training-legitimate-interest ambiguity — no self-serve training opt-out exists — is **accepted**, bounded by the money-critical + secrets fence: secrets are never read (two-layer fence, invariant 8), money-critical `dev_target` is never on GLM (Decision 3), and the repo is already public (#698) so `src` exposure is a non-issue. This is flagged in the design of record, not a blocker.
 
 **Out of scope.** This ADR records decisions; it builds nothing. The drainer machinery — the `glm-eligible` / `glm-authored` labels + `collect-state.sh` partitioning (#3687), the spawn wrapper + `secret-scan.sh` (#3688), the systemd drainer loop (#3689), and the beachhead report (#3690) — is delivered by the sibling slices this ADR governs. The Orchestrator's Opus autopilot loop, the design stage, and the QA + CI merge gate are unchanged.
+
+## Amendment — the model name, not the base URL, decides routing (2026-07-27, issue #3758)
+
+**What the original said.** Decision 2, the "z.ai mechanism" definition, and invariant 4 all stated that z.ai serves GLM on the **Sonnet slot**, so the drainer would pass `--model sonnet` and rely on `ANTHROPIC_BASE_URL` to redirect the request. `src/glm/drainer-runner.ts` encoded that as `GLM_MODEL_SLOT = "sonnet"`.
+
+**What is actually true.** Measured against the live endpoint with the drainer's own env (base URL + auth token present, `ANTHROPIC_API_KEY` absent):
+
+| `--model` passed | Server that answered | Reported usage |
+|---|---|---|
+| `sonnet` | first-party **Anthropic** | `claude-sonnet-5`, `provider: firstParty` |
+| `glm-5.2` | z.ai | `glm-5.2` |
+| `glm-4.7` | z.ai | `glm-4.7` |
+
+The CLI resolves an Anthropic slot alias locally to a first-party model id and calls Anthropic, **ignoring the base-URL override**. Only an explicitly-spelled `glm-*` name reaches z.ai.
+
+**Why this mattered.** As originally specified, every drainer run would have consumed the Anthropic quota the lane exists to relieve — and at metered USD, since a base-URL-overridden run authenticates with a token rather than the subscription login. That is the fail-over-instead-of-fail-closed outcome invariant 7 exists to prevent. Invariant 7 closed the hole on the *token* axis and the wrapper's `STRIPPED_ENV_KEYS` closed it on the *credential* axis; neither covered the **model-name** axis, which turns out to be the one that decides routing. Nothing had shipped against the defect — the drainer loop (#3689) was still unbuilt — so it was corrected pre-live.
+
+**The corrected rule.** The model name is a **fence, not a preference**. The drainer passes `GLM_MODEL` (`glm-5.2`), and `assertGlmModel` rejects any name that does not begin with `glm-`, returning a `glm-model-would-route-first-party` result the caller must abort on. Decision 2, the mechanism definition, and invariant 4 above are amended accordingly; the superseded claim is struck rather than deleted so the record stays legible.
+
+**Model version.** The original named GLM-4.7 because that is what the endpoint served at the time. It now serves **glm-5.2** (`glm-5` aliases to it). Since the fix must name the model explicitly regardless, it names `glm-5.2`.
+
+**Consequence for #3690.** The CLI computes `total_cost_usd` for GLM runs by applying an Anthropic price table to GLM token counts — a one-word GLM ping reported ~$0.106. Those figures are meaningless for a flat-rate z.ai plan, so the beachhead measurement must not consume `total_cost_usd` for `glm-authored` runs. Quota relief is measured on the Anthropic side (`percentLast7d`), which is the number the lane exists to move.
