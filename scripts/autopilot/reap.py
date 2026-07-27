@@ -285,6 +285,61 @@ REFL_PRESENCE_EMPTY = "deposit-empty"
 REFL_PRESENCE_PRESENT = "deposit-present"
 REFL_PRESENCE_READ_ERROR = "read-error"
 
+# Issue #3734: presence-state → friction cue for the deposit-health WARN. Only
+# the ANOMALOUS states carry a loud cue (see the gating block in run_completion);
+# the honest `deposit-absent` (the producer ran but correctly declined to write)
+# no longer cries wolf. Each anomaly keeps its own descriptive cue so an operator
+# — and the friction/pattern-memory escalation path — can tell an empty deposit
+# from an unreadable one from a missing task_id, instead of all three collapsing
+# into the retired false-alarm `refl-deposit-absent-on-code-write`.
+REFL_DEPOSIT_WARN_CUES: dict[str, str] = {
+    REFL_PRESENCE_EMPTY: "refl-deposit-empty-on-code-write",
+    REFL_PRESENCE_READ_ERROR: "refl-deposit-unreadable-on-code-write",
+    REFL_PRESENCE_NO_TASK_ID: "refl-deposit-no-task-id-on-code-write",
+}
+
+
+def _deposit_key_variants(task_id: str) -> tuple[str, ...]:
+    """The task_id forms to try when locating a task-scoped deposit (issue #3734).
+
+    The deposit writer (`scripts/reflection-deposit.sh::derive_task_id`) keys on
+    the bare worktree-hash basename — it strips a leading `agent-` — while the
+    reap completion path receives the harness `.task.id`, which on a worktree
+    dispatch IS `agent-<HASH>`. So a deposit written under one form is reaped
+    under the other and silently misses (the live symptom this issue opens on:
+    208 anchor deposits on disk yet `testsAfter` recorded null every cycle).
+
+    Resolve it at the READ boundary rather than fixing every caller: return the
+    exact `task_id` first, then its `agent-` counterpart (stripped if the input
+    is `agent-`-prefixed, prefixed if it is bare), so a deposit resolves whether
+    the caller passes the bare hash or the `agent-`-prefixed form. The two
+    variants are the SAME logical dispatch id rendered two ways (`agent-<HASH>`
+    vs bare `<HASH>`), so a cross-variant match is never a false positive.
+    """
+    if not task_id:
+        return ()
+    if task_id.startswith("agent-"):
+        bare = task_id[len("agent-"):]
+        return (task_id, bare) if bare else (task_id,)
+    return (task_id, "agent-" + task_id)
+
+
+def _resolve_deposit_path(prefix: str, task_id: str) -> Path | None:
+    """Resolve a task-scoped deposit path to the first existing file (issue #3734).
+
+    Tries the `task_id` key forms from `_deposit_key_variants` in order (exact
+    form first, then the `agent-` counterpart) and returns the first whose
+    deposit file exists, or None when no variant has a file. Pure path
+    resolution — never reads or raises. Applied uniformly by every task-scoped
+    deposit reader so the read key cannot drift from the write key for one
+    bucket but not another (the readers share this one resolver).
+    """
+    for variant in _deposit_key_variants(task_id):
+        path = REFL_SOURCES_DIR / f"{prefix}{variant}"
+        if path.exists():
+            return path
+    return None
+
 
 def _read_reflection_sources(task_id: str) -> tuple[str, str]:
     """Read the planning-time reflection-bucket deposit for `task_id` (issue #1136).
@@ -297,7 +352,9 @@ def _read_reflection_sources(task_id: str) -> tuple[str, str]:
     (Slice 2 of #1119). This keeps reap the SOLE cycle-record writer (no race
     with a competing skill-side POST) while still stamping what was injected.
 
-    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>.
+    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>
+    (issue #3734: resolved tolerantly via `_resolve_deposit_path`, so a deposit
+    written under the bare hash is found whether task_id is bare or `agent-`-prefixed).
     Best-effort and fully non-fatal: a missing file (the common case — most
     dispatches serve no reflections), an empty file, or any read error all
     yield "" so the cycle truthfully buckets to 'none'. Never blocks the reap.
@@ -312,8 +369,8 @@ def _read_reflection_sources(task_id: str) -> tuple[str, str]:
     if not task_id:
         return "", REFL_PRESENCE_NO_TASK_ID
     try:
-        path = REFL_SOURCES_DIR / f"hydra-refl-sources-{task_id}"
-        if not path.exists():
+        path = _resolve_deposit_path("hydra-refl-sources-", task_id)
+        if path is None:
             return "", REFL_PRESENCE_ABSENT
         sources = path.read_text(encoding="utf-8").strip()
         if not sources:
@@ -346,7 +403,9 @@ def _read_anchor_deposit(task_id: str) -> str | None:
     here. Same directory + task_id keying as the reflection-source deposit, so
     the two travel together.
 
-    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-<task_id>.
+    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-<task_id>
+    (issue #3734: resolved tolerantly via `_resolve_deposit_path`, so a deposit
+    written under the bare hash is found whether task_id is bare or `agent-`-prefixed).
     Best-effort and fully non-fatal: a missing file, an empty file, or any read
     error all yield None so the caller falls back to `slot.get("anchor")` and,
     failing that, degrades to the prior no-op. Never blocks the reap.
@@ -354,8 +413,8 @@ def _read_anchor_deposit(task_id: str) -> str | None:
     if not task_id:
         return None
     try:
-        path = REFL_SOURCES_DIR / f"hydra-refl-anchor-{task_id}"
-        if not path.exists():
+        path = _resolve_deposit_path("hydra-refl-anchor-", task_id)
+        if path is None:
             return None
         anchor = path.read_text(encoding="utf-8").strip()
         return anchor or None
@@ -376,7 +435,9 @@ def _read_grounding_tests(task_id: str) -> dict[str, int]:
     single cycle-record write.
 
     Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-grounding-tests-<task_id>
-    (same dir + task_id keying as the reflection deposit, so they travel together).
+    (same dir + task_id keying as the reflection deposit, so they travel together;
+    issue #3734: resolved tolerantly via `_resolve_deposit_path`, so a deposit
+    written under the bare hash is found whether task_id is bare or `agent-`-prefixed).
     Expected JSON shape (any subset; each key optional):
         {"testsBefore": N, "testsAfter": N,
          "testsPassingBefore": N, "testsPassingAfter": N}
@@ -390,8 +451,8 @@ def _read_grounding_tests(task_id: str) -> dict[str, int]:
     if not task_id:
         return {}
     try:
-        path = REFL_SOURCES_DIR / f"hydra-grounding-tests-{task_id}"
-        if not path.exists():
+        path = _resolve_deposit_path("hydra-grounding-tests-", task_id)
+        if path is None:
             return {}
         raw = path.read_text(encoding="utf-8").strip()
         if not raw:
@@ -439,7 +500,9 @@ def _read_escalation_deposit(task_id: str) -> str:
     postEscalationMergeRate (invariant 8) — no static token estimator.
 
     Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-escalation-<task_id>
-    (same dir + task_id keying as the other deposits, so they travel together).
+    (same dir + task_id keying as the other deposits, so they travel together;
+    issue #3734: resolved tolerantly via `_resolve_deposit_path`, so a deposit
+    written under either key form is found regardless of which form task_id carries).
     Expected JSON shape (any subset): {"escalationAttempt": N, "escalatedModel": "sonnet"}.
 
     Returns the RAW deposit string verbatim (dispatch.sh does the JSON parse +
@@ -450,8 +513,8 @@ def _read_escalation_deposit(task_id: str) -> str:
     if not task_id:
         return ""
     try:
-        path = REFL_SOURCES_DIR / f"hydra-escalation-{task_id}"
-        if not path.exists():
+        path = _resolve_deposit_path("hydra-escalation-", task_id)
+        if path is None:
             return ""
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
@@ -1329,23 +1392,31 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # non-escalation majority) → "" → both fields omitted from the POST body.
     escalation = _read_escalation_deposit(task_id)
 
-    # Issue #2450: warn when a code-writing class completes with no deposit file
-    # at all — deposit-absent on a REFLECTION_DEPOSIT_SKILLS slot means the
-    # deposit recipe either did not run or deposited under a miskeyed path. This
-    # distinguishes broken deposit plumbing (false-none) from an honest
-    # empty-reflection case where the store had nothing to serve.
-    # deposit-empty is the HONEST variant (recipe ran, served nothing, wrote an
-    # empty deposit) — only deposit-absent is the suspicious case.
-    # hydra-grill is excluded: it writes a design-concept artifact, not a
-    # reflection-source deposit, so a deposit-absent on grill is NOT a bug.
-    # Best-effort: print to stderr (operator-visible) AND append to the run log.
-    if (skill in REFLECTION_DEPOSIT_SKILLS and
-            reflection_presence == REFL_PRESENCE_ABSENT):
+    # Issue #3734: gate the deposit-health WARN on the ANOMALOUS presence states
+    # only. The honest `deposit-absent` (the producer ran `do_reflect` but
+    # correctly declined to write — the reflection store had nothing to serve,
+    # the common case) no longer fires a WARN: it was a false alarm that trained
+    # readers to ignore the cue (#2450 warned on exactly this, crying wolf).
+    # After the tolerant key resolver above, a miskeyed deposit (writer stripped
+    # `agent-`, reader kept it) is now RESOLVED rather than absent, so a genuine
+    # `deposit-absent` on a code-writing class is strong evidence the recipe
+    # simply served nothing — not broken plumbing. The states that DO warrant an
+    # operator's eye each carry their own descriptive cue (REFL_DEPOSIT_WARN_CUES)
+    # so the friction signal stays actionable:
+    #   deposit-empty  — a deposit FILE exists but is empty (the writer never
+    #                     writes an empty refl-sources file, so this is anomalous)
+    #   read-error     — a deposit file exists but could not be read
+    #   no-task-id     — no task_id to key the lookup on (plumbing defect)
+    # `refl_presence=<token>` is STILL stamped into the slot_complete line below
+    # unconditionally, so EVERY state — including the honest deposit-absent — is
+    # observable without a loud WARN. Non-code-writing classes never invoke the
+    # deposit recipe, so they are exempt regardless of presence.
+    warn_cue = REFL_DEPOSIT_WARN_CUES.get(reflection_presence)
+    if skill in REFLECTION_DEPOSIT_SKILLS and warn_cue:
         warn_msg = (
-            f"refl_deposit_absent skill={skill} task_id={task_id} "
-            f"anchor={anchor_ref or ''} — deposit recipe may not have run; "
-            f"check for refl-deposit-no-task-id / refl-deposit-write-failed "
-            f"in the child's stderr (cue: refl-deposit-absent-on-code-write)"
+            f"refl_deposit_anomaly skill={skill} task_id={task_id} "
+            f"presence={reflection_presence} anchor={anchor_ref or ''} "
+            f"(cue: {warn_cue})"
         )
         print(f"[autopilot] WARN {warn_msg}", file=sys.stderr)
         _append_log(f"WARN {warn_msg}")
