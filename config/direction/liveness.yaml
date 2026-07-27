@@ -42,10 +42,13 @@
 # each timer's nominal cadence so normal jitter never false-alarms.
 
 entries:
-  - unit: hydra-betting-scan.timer
-    type: timer
-    maxStaleMinutes: 120
-    description: Core market-scan loop — the primary betting ingest/scan entrypoint.
+  # NOTE: hydra-betting-scan.timer was removed here — its ExecStart is
+  # src/bin/arbitrage-scanner-runner.ts (the SoftBookEdgeScanner), which belongs
+  # to the cross-venue arbitrage strategy retired by hydra-betting ADR-0002. The
+  # unit was deliberately disabled on 2026-07-23 and stays disabled; leaving it
+  # declared here made wiring-liveness report it MISSING forever — the same
+  # false-flag mode that removed its ADR-0002 sibling timers below (see
+  # orchestrator issue #3613, and #2519 for the sibling precedent).
   - unit: hydra-betting-alerts.timer
     type: timer
     maxStaleMinutes: 120
