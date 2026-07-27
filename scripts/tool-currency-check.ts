@@ -26,6 +26,8 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildAlertMessage,
   buildReport,
@@ -37,6 +39,7 @@ import {
   type ToolReport,
   type Verdict,
 } from "./tool-currency-logic.ts";
+import { pushAlert } from "../src/redis/alerts.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -184,19 +187,26 @@ async function checkNode(): Promise<ToolReport> {
 }
 
 /**
- * Push a warning-level alert into the Redis alerts list. We talk to Redis
- * via the same docker exec the rest of the doctor playbook uses, rather
- * than importing ioredis — that keeps this script callable from a fresh
- * checkout without `npm install` (the doctor itself runs on the operator
- * box, not inside the orchestrator process).
+ * Push a warning-level alert into the Redis alerts list.
  *
- * Idempotency: we LPUSH a fresh entry every invocation and LTRIM to 100.
- * Repeated runs in close succession will push duplicates; the alerts UI
- * is expected to dedupe by `type` for display. The Sentry webhook in
- * `src/api/alerts.ts` follows the same pattern, so this matches the
- * established shape.
+ * Routed through the `pushAlert` seam (src/redis/alerts.ts) — NOT a redis-cli
+ * shell-out. The prior shape passed `{ input: payload }` to the *async*
+ * `execFile`, which has no `input` option (only the `*Sync` variants do): the
+ * option was silently ignored, `redis-cli -x` read EOF, and every fire LPUSHed
+ * the EMPTY string — dropping the real payload AND poisoning the list (#3743).
+ * `pushAlert` pre-validates the payload (#3609) and pushes+trims atomically
+ * (#3619), so neither failure can recur. Matches the write shape the Sentry
+ * webhook in `src/api/alerts.ts` already uses.
+ *
+ * Idempotency: a fresh entry is LPUSHed every invocation and trimmed to 100.
+ * Repeated runs in close succession push duplicates; the alerts UI dedupes by
+ * `type` for display. Best-effort — a Redis outage logs to stderr and never
+ * crashes the doctor run.
+ *
+ * Exported so the regression test (test/tool-currency.test.mts) can assert the
+ * stored element parses and round-trips the payload (#3743).
  */
-async function emitAlert(report: ToolReport): Promise<void> {
+export async function emitAlert(report: ToolReport): Promise<void> {
   const payload = JSON.stringify({
     id: `tool-currency-${report.tool}-${Date.now()}`,
     type: "tool-currency",
@@ -213,19 +223,7 @@ async function emitAlert(report: ToolReport): Promise<void> {
   });
 
   try {
-    // We can't use the redis-adapter here because the doctor playbook
-    // calls this script as a standalone subprocess. `docker exec` is how
-    // the rest of the doctor talks to Redis.
-    await execFileAsync(
-      "docker",
-      ["exec", "-i", "hydra-redis-1", "redis-cli", "-x", "LPUSH", "hydra:alerts"],
-      { input: payload, timeout: 4000, encoding: "utf8" },
-    );
-    await execFileAsync(
-      "docker",
-      ["exec", "hydra-redis-1", "redis-cli", "LTRIM", "hydra:alerts", "0", "99"],
-      { timeout: 4000, encoding: "utf8" },
-    );
+    await pushAlert(payload, 100);
   } catch (err: any) {
     // Redis unreachable. We log to stderr so the doctor surfaces it but
     // we never crash — alerting is best-effort.
@@ -263,11 +261,17 @@ async function main(): Promise<number> {
   return 0;
 }
 
-main()
-  .then(code => process.exit(code))
-  .catch(err => {
-    // Truly unexpected — log and exit nonzero so the operator notices.
-    // The doctor playbook treats nonzero as a collector failure.
-    console.error(`[tool-currency] unexpected error: ${err?.stack ?? err}`);
-    process.exit(1);
-  });
+// Only run the driver when invoked directly (shebang `npx tsx …`). Importing
+// this module — e.g. from the regression test — must NOT trigger the subprocess
+// / network I/O or `process.exit` (mirrors the `isCliEntrypoint` guard every CI
+// seam check uses).
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main()
+    .then(code => process.exit(code))
+    .catch(err => {
+      // Truly unexpected — log and exit nonzero so the operator notices.
+      // The doctor playbook treats nonzero as a collector failure.
+      console.error(`[tool-currency] unexpected error: ${err?.stack ?? err}`);
+      process.exit(1);
+    });
+}
