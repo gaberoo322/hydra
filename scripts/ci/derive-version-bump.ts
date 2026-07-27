@@ -13,9 +13,10 @@
  *
  * PURE CORE + THIN CLI (mirrors scripts/ci/changelog-check.ts): the bump math is
  * a set of pure functions unit-tested directly (test/derive-version-bump.test.mts).
- * The CLI entrypoint does the one git read (`git log <lastTag>..HEAD`) and prints
- * the next tag; deploy.sh consumes stdout. The pure functions take the commit
- * subjects/bodies as data so no test forks git.
+ * The CLI entrypoint reads the already-computed commit range on STDIN and prints
+ * the next tag; scripts/ci/stamp-version.sh owns the git reads and consumes
+ * stdout. The pure functions take the commit subjects/bodies as data so no test
+ * forks git.
  *
  * INVARIANTS (from the design concept for #3677):
  *  - feat -> MINOR; fix/chore/perf/refactor/security/test/docs/style/build/ci/
@@ -25,6 +26,8 @@
  *  - Unknown / non-conventional subjects default to PATCH (never skip a bump).
  *  - Baseline: if NO prior tag exists, the first tag is v1.0.0 (orch).
  */
+
+import { readFileSync } from "node:fs";
 
 /** The three Conventional-Commits bump levels, lowest -> highest precedence. */
 export type Bump = "patch" | "minor" | "major";
@@ -138,19 +141,53 @@ export function parseGitLog(raw: string): Array<{ subject: string; body: string 
 }
 
 /**
- * CLI entrypoint (invoked by deploy.sh). Reads the previous tag and the commit
- * range from the environment (deploy.sh runs the git commands and passes the
- * results in), then prints the next `vX.Y.Z` tag on stdout.
+ * Read the whole of stdin as UTF-8. Returns "" when stdin is unreadable (closed
+ * fd, no redirect) so an absent range degrades to "no commits" rather than a
+ * crash — `nextTag` still mints a tag from the previous one.
+ */
+function readStdin(): string {
+  try {
+    return readFileSync(0, "utf8");
+  } catch (err) {
+    // Fail loud but non-fatally: the caller (stamp-version.sh) always pipes,
+    // so reaching this means the invocation contract was broken somewhere.
+    console.error(
+      `derive-version-bump: could not read the commit range from stdin (${
+        (err as Error).message
+      }); treating the range as empty.`,
+    );
+    return "";
+  }
+}
+
+/**
+ * CLI entrypoint (invoked by scripts/ci/stamp-version.sh). Reads the previous
+ * tag from the environment and the commit range from STDIN, then prints the next
+ * `vX.Y.Z` tag on stdout.
  *
- *   PREV_TAG   — the previous tag (empty/unset => baseline v1.0.0)
- *   GIT_LOG    — `git log <prev>..HEAD --format=%s%x00%b%x1e` output
+ *   PREV_TAG — the previous tag (empty/unset => baseline v1.0.0). A ref name is a
+ *              bounded scalar, so the environment is a safe home for it.
+ *   stdin    — `git log <prev>..HEAD --format=%s%x00%b%x1e` output.
  *
- * Deterministic, no git process of its own, so deploy.sh owns the git reads and
- * this stays a pure transform. Prints ONLY the tag (deploy.sh captures it).
+ * The range arrives on STDIN, never in the environment (issue #3733). Two
+ * independent bugs came from the old `GIT_LOG=` env route, and a pipe kills both:
+ *
+ *  1. E2BIG. Linux caps a SINGLE argv/environ string at `MAX_ARG_STRLEN`
+ *     (32 pages = 131,072 bytes) regardless of the much larger `ARG_MAX`. The
+ *     no-prior-tag branch shipped the whole history — 1,575,596 bytes — so every
+ *     master deploy died with "Argument list too long" (exit 126) AFTER the
+ *     service was already healthy. A pipe has no size ceiling.
+ *  2. NUL stripping. Bash command substitution cannot carry NUL bytes and
+ *     silently drops them ("warning: ignored null byte in input"), destroying the
+ *     `%x00` subject/body framing that BREAKING-CHANGE detection depends on. A
+ *     pipe is byte-transparent.
+ *
+ * Deterministic, no git process of its own, so stamp-version.sh owns the git
+ * reads and this stays a pure transform. Prints ONLY the tag on stdout.
  */
 function main(): void {
   const prevTag = (process.env.PREV_TAG ?? "").trim() || null;
-  const commits = parseGitLog(process.env.GIT_LOG ?? "");
+  const commits = parseGitLog(readStdin());
   process.stdout.write(nextTag(prevTag, commits) + "\n");
 }
 
