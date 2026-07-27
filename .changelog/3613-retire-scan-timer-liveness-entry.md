@@ -1,0 +1,1 @@
+- fix: stop wiring-liveness false-flagging the retired hydra-betting-scan.timer as a missing entrypoint (#3613)
