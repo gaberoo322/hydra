@@ -1,0 +1,1 @@
+- fix: stop the master deploy job exiting 126 at the version-stamp step — pipe the commit range on stdin instead of the environment, skip the whole-history read when no prior tag exists, and warn (never fail) if stamping breaks after a healthy deploy (#3733)
