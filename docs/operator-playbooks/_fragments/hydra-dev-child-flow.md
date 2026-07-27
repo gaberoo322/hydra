@@ -64,12 +64,13 @@ Run these numbered steps.
 9. **Classify the change via the live tier API** (see "Tier classification"
    below). Never self-classify by path patterns.
 9a. **Reconcile the diff against the design-concept artifact BEFORE opening the
-   PR** (issue #2537). If an artifact was fetched at planning time, run the
-   "Design-concept reconciliation gate" below: cite the diff hunk that satisfies
-   each invariant; for each MUST-NOT invariant confirm the diff does not
-   introduce the forbidden behavior. If ANY invariant cannot be satisfied, do
-   NOT open the PR — emit a `## Friction Report` naming the unmet invariant and
-   stop. A 404 at planning time makes this a clean no-op.
+   PR** (issues #2537, #2528). If an artifact was fetched at planning time, run
+   the "Design-concept reconciliation gate" below and write its section into the
+   PR body. This is **mechanically enforced inside the REQUIRED `test` job** —
+   a missing, miscounted, misquoted or falsified entry fails `npm test` and
+   blocks auto-merge. If ANY invariant cannot be satisfied, do NOT open the
+   PR — emit a `## Friction Report` naming the unmet invariant and stop. A 404
+   at planning time makes this a clean no-op.
 10. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
     issue's section, and a `Tier: <0|1|2|3>` line from the API. Acceptance
     criteria MUST be checkboxes with a mechanical "verified by:" assertion —
@@ -162,20 +163,46 @@ There is no `/api/design-concept` route and no `?anchor=` query form. Response
 is NO `.concept` envelope, read `.invariants` directly. 404 → no artifact; do not
 retry alternate spellings.
 
-**Design-concept reconciliation gate (issue #2537 — MANDATORY pre-PR step when an
-artifact was fetched).** Run as child-step 9a — AFTER the change is committed and
-tier-classified, BEFORE `gh pr create`:
-1. Re-read the `invariants` array from the artifact (`.invariants` directly).
-2. For EACH invariant, cite the concrete evidence it holds — the diff hunk
-   (`git diff origin/master...HEAD`), a test name, or command output. For each
-   MUST-NOT / negative invariant, confirm the diff does not introduce the
-   forbidden behavior.
-3. Mirror the "verified by:" framing: each invariant pairs with a mechanical check.
-4. **If ANY invariant cannot be satisfied, do NOT open the PR.** Emit a
-   `## Friction Report` naming the unmet invariant and stop.
-5. A 404 at planning time makes this a clean no-op — proceed to `gh pr create`.
+**Design-concept reconciliation gate (issues #2537, #2528 — MANDATORY pre-PR
+step when an artifact was fetched).** Run as child-step 9a — AFTER the change is
+committed and tier-classified, BEFORE `gh pr create`. **Mechanical, not
+advisory:** `test/design-concept-reconcile-check.test.mts` runs in the REQUIRED
+`test` job, re-fetches the artifact for your `Closes #N` anchor and re-executes
+every assertion you declare.
 
-Include the reconciliation summary in the PR body so QA can re-verify it.
+Write this into the PR body as a TOP-LEVEL `##` heading, never nested inside
+`## Files in scope` (`scope-check` reads that section to the next heading and
+would swallow these backticked paths as scope entries):
+
+```
+## Design-concept reconciliation
+
+Artifact: `<first 12+ chars of .artifactHash>`
+
+- INV-1: "<verbatim prefix of invariants[0], >=16 chars>" — verified by: `file-contains: src/x.ts :: doThing(`
+- INV-2: "<verbatim prefix of invariants[1]>" — verified by: `file-lacks: src/api.ts :: pruneIndex(`
+```
+
+Rules: one `INV-<n>` bullet per invariant (count must match); the quote must be
+a verbatim whitespace-normalised **prefix** of that invariant (paraphrase
+fails); the cited hash must prefix the live `artifactHash`; and an invariant
+containing **MUST NOT / MUST NEVER cannot be discharged with `manual:` prose**.
+
+Assertion grammar (Node-stdlib only, evaluated against the tree at HEAD — never
+`git diff`; the `test` job checks out at depth 1): `file-exists: <path>` ·
+`file-absent: <path>` · `file-contains: <path> :: <literal>` ·
+`file-lacks: <path> :: <literal>` · `file-matches: <path> :: /<re>/<flags>` ·
+`file-not-matches: <path> :: /<re>/<flags>` ·
+`occurrences: <path> :: <literal> == <n>` (also `<=`, `>=`) · `manual: <prose>`
+(positive invariants only). `file-lacks` / `file-not-matches` FAIL on a missing
+file — never a vacuous pass.
+
+**If ANY invariant cannot be satisfied, do NOT open the PR**: emit a
+`## Friction Report` naming the unmet invariant and stop. A 404 at planning time
+is a clean no-op. The gate fails OPEN on transport misses (no artifact,
+orchestrator unreachable) so it never reddens on downtime, and it reads the PR
+body from the webhook payload — fixing the body needs a **new commit**, not just
+an edit.
 
 ## Tier classification — live API (issue #406)
 
