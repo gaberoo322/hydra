@@ -112,6 +112,21 @@ export async function writeDispatchOutcomeRecord(
   deps: OutcomeRecordDeps,
 ): Promise<void> {
   try {
+    // Issue #3739 defect (a): a cycleId that is itself a dispatch class/skill
+    // name is a field-shifted write — the real dispatch id landed in the
+    // `status`/outcome slot. The boundary guard in `putDispatchOutcome`
+    // rejects such a record (returns {ok:false}), so it can never enter the
+    // index. (Field-shifted records are rejected, not silently stored.)
+    //
+    // Issue #3739 defect (c): a `null` parse is the INTENTIONAL arm for
+    // NON-DISPATCH records — bare run/cycle UUIDs, bare hex task ids, and
+    // `agent-<hex>` harness task ids carry no `-t<N>-<class>` fence, so they
+    // yield null runIdPrefix/turn/className and are EXCLUDED from the per-run
+    // outcome index BY DESIGN (see the `runIdPrefix` docblock in
+    // `redis/dispatch-outcomes.ts`). They are written by non-dispatch consumers
+    // (qa_orch relay, reflection records, harness task ids); we never guess a
+    // run prefix from them (#2822). They stay reachable via listDispatchOutcomes
+    // but invisible to getDispatchOutcomesForRun.
     const parsed = parseDispatchCycleId(cycleId);
     const classRow = parsed ? classByName(parsed.className) : undefined;
     const tokens = await resolveDispatchTokens(body, cycleId, deps);
