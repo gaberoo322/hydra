@@ -159,6 +159,44 @@ export function modelToFamily(model: string | null | undefined): ModelFamily {
 }
 
 /**
+ * Model-name prefixes served by a NON-Anthropic provider on a SEPARATE quota
+ * (issue #3769). Today: `glm-*`, served by z.ai for the GLM dev-drainer worker
+ * lane (ADR-0032).
+ *
+ * Prefix-matched and lower-cased, mirroring {@link modelToFamily}. Add a prefix
+ * here when a new provider lane is introduced — the cost of forgetting is not a
+ * cosmetic miscount, it is the quota inversion described on
+ * {@link isForeignProviderModel}.
+ */
+export const FOREIGN_PROVIDER_MODEL_PREFIXES: readonly string[] = Object.freeze(["glm-"]);
+
+/**
+ * Is this model billed to a provider OTHER than the Anthropic subscription?
+ *
+ * Load-bearing, not cosmetic. The usage tracker exists to measure ONE quota —
+ * the Anthropic subscription that `percentLast7d` gates on. A GLM run costs
+ * z.ai's quota and zero Anthropic quota, so folding its tokens into the same
+ * totals produces a **quota inversion**: the GLM drainer lane (ADR-0032) exists
+ * to move authoring load OFF Anthropic, yet every run would RAISE
+ * `percentLast7d` and make the pace gate throttle Opus harder — the relief
+ * mechanism feeding the brake it was built to release. Measured 2026-07-27: two
+ * GLM authoring runs moved the `unknown` bucket 73k → 27.4M and `percentLast7d`
+ * 94% → 95%, against a 90% hard-stop cap.
+ *
+ * Note this is deliberately NOT a {@link ModelFamily} value. A family is a
+ * Quota-Weight bucket WITHIN the Anthropic meter; a foreign model is not on
+ * that meter at all, so representing it as a fourth family would put it back
+ * into every fold that sums `MODEL_FAMILIES`. The distinction is provider, one
+ * level above family.
+ *
+ * Pure + total.
+ */
+export function isForeignProviderModel(model: string | null | undefined): boolean {
+  const l = String(model ?? "").toLowerCase();
+  return FOREIGN_PROVIDER_MODEL_PREFIXES.some((p) => l.startsWith(p));
+}
+
+/**
  * The per-token-type weighted token count for one accumulator (issue #873):
  * `input + output + cacheCreation + w_cache*cacheRead`. This is the quota-burn
  * UNIT — it down-weights cache reads to match Anthropic's real meter (cache

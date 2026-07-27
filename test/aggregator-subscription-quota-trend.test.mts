@@ -29,6 +29,8 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     tokensLast5h: zero,
     tokensLast7d: { ...zero, total: 100 },
     tokensLast24h: 0,
+    // Non-Anthropic-quota 7d spend (issue #3769); zero for an Anthropic-only fixture.
+    tokensForeignLast7d: 0,
     percentLast5h: 0,
     percentLast7d: 40,
     usageSource: "estimate",

@@ -50,6 +50,8 @@ function snapshotWith(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     tokensLast5h: { ...emptyBreakdown },
     tokensLast7d: { ...emptyBreakdown },
     tokensLast24h: 0,
+    // Non-Anthropic-quota 7d spend (issue #3769); zero for an Anthropic-only fixture.
+    tokensForeignLast7d: 0,
     percentLast5h: 20,
     percentLast7d: 20,
     usageSource: "estimate",

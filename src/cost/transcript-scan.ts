@@ -44,7 +44,12 @@ import { dirname, join } from "node:path";
 import { logger } from "../logger.ts";
 import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
-import { modelToFamily, parseUsageLine, parseObservedResetMs } from "./token-math.ts";
+import {
+  modelToFamily,
+  isForeignProviderModel,
+  parseUsageLine,
+  parseObservedResetMs,
+} from "./token-math.ts";
 import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
 // The token-breakdown data-model primitives — the empty-breakdown constant, the
 // per-family / per-dispatch-kind accumulator factories + mutation, and the pure
@@ -301,6 +306,16 @@ export interface ScanResult {
   byDispatchKind: Record<DispatchKind, Record<ModelFamily, TokenBreakdown>>;
   /** Raw .total over the 24h window (the unchanged `tokensLast24h` field). */
   tokens24h: number;
+  /**
+   * 7d tokens spent on a NON-Anthropic provider's quota (issue #3769) — today
+   * `glm-*` on z.ai (ADR-0032). Deliberately EXCLUDED from every field above:
+   * `acc5h`/`acc7d`, `byModel*`, `bySkillByModel`, `byDispatchKind`, and
+   * `sinceResetEntries` are all Anthropic-meter quantities, and folding a
+   * different provider's spend into them inverts the quota signal the drainer
+   * lane exists to improve. Surfaced separately so the spend stays visible
+   * rather than discarded.
+   */
+  foreign7d: TokenBreakdown;
   /** The OAuth read result (fresh / served-stale / failed), already resolved. */
   oauth: CachedOAuthRead;
   /** Most recent observed rate-limit reset seen in transcripts, or null. (#856) */
@@ -382,6 +397,10 @@ export async function transcriptScan(
 
   // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
   const unknownModelsSeen = new Set<string>();
+  // Foreign-provider (non-Anthropic-quota) accumulation, issue #3769. Kept
+  // entirely OUTSIDE the Anthropic windows/families: this is a different meter.
+  const foreignModelsSeen = new Set<string>();
+  const foreign7d: TokenBreakdown = { ...EMPTY_BREAKDOWN };
   // Memoise sessionId → skill within a scan so a session with many transcript
   // shards resolves once, not once-per-shard (issue #693; preserved #2402).
   // (Distinct files usually carry distinct sessionIds, but a resumed session
@@ -463,6 +482,19 @@ export async function transcriptScan(
       const tsMs = parsed.tsMs;
       if (tsMs < cutoff7d) continue;
 
+      // Foreign-provider lines (issue #3769) are billed to a SEPARATE quota
+      // (today: `glm-*` on z.ai, ADR-0032) and must not touch a single
+      // Anthropic accumulator — not the flat window totals, not `byModel`, not
+      // the per-skill/per-kind cross-tabs, not the since-reset buffer. They are
+      // counted on their own axis so the spend stays visible. Placed BEFORE the
+      // family classification so a foreign model can never reach the `unknown`
+      // bucket, whose implicit 1.0 Quota-Weight is what inverted the meter.
+      if (isForeignProviderModel(parsed.model)) {
+        foreignModelsSeen.add(parsed.model);
+        addBreakdown(foreign7d, parsed.tokens);
+        continue;
+      }
+
       const family = modelToFamily(parsed.model);
       if (family === "unknown" && !unknownModelsSeen.has(parsed.model)) {
         unknownModelsSeen.add(parsed.model);
@@ -513,6 +545,19 @@ export async function transcriptScan(
     }
   }
 
+  if (foreignModelsSeen.size > 0) {
+    // NOT a warning: this is the designed path, not drift. Foreign-provider
+    // tokens are excluded from the Anthropic quota aggregates on purpose
+    // (issue #3769) — logged so the exclusion is observable rather than silent.
+    logger.info(
+      {
+        models: [...foreignModelsSeen],
+        tokens: foreign7d.total,
+      },
+      "[usage-tracker] foreign-provider tokens excluded from Anthropic quota aggregates (issue #3769)",
+    );
+  }
+
   if (unknownModelsSeen.size > 0) {
     // Once per scan, not per line. An above-zero unknown bucket means the
     // family prefix table (modelToFamily) needs a new entry.
@@ -536,6 +581,7 @@ export async function transcriptScan(
     bySkillByModel,
     byDispatchKind,
     tokens24h,
+    foreign7d,
     oauth,
     mostRecentObservedResetMs,
     sinceResetEntries,

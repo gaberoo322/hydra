@@ -58,6 +58,22 @@ export interface UsageSnapshot {
   /** Raw token total over the last 24h. Drives `projectedWeeklyPercent`. */
   tokensLast24h: number;
   /**
+   * Raw 7d token total spent on a NON-Anthropic provider's quota (issue #3769)
+   * — today `glm-*` on z.ai for the GLM dev-drainer worker lane (ADR-0032).
+   *
+   * Reported ALONGSIDE the Anthropic fields, never folded into them: every
+   * other field on this snapshot is an Anthropic-subscription quantity, and
+   * `percentLast7d` (which gates `weeklyEmergencyStop` and the Pacing Curve)
+   * must not move because a different provider did work. Treating these tokens
+   * as Anthropic spend inverts the drainer lane's purpose — see
+   * `isForeignProviderModel` for the measured case.
+   *
+   * This is the number the ADR-0032 beachhead report (#3690) plots against the
+   * Anthropic `percentLast7d` delta: GLM spend UP while Anthropic spend DOWN is
+   * the lane working.
+   */
+  tokensForeignLast7d: number;
+  /**
    * % of 5h quota consumed. SOURCE PRECEDENCE (issue #1083): the authoritative
    * OAuth `/api/oauth/usage` five_hour utilization when the meter read
    * succeeds; otherwise the transcript+calibration estimate (0 when

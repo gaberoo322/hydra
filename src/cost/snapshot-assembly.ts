@@ -637,6 +637,7 @@ export function assembleSnapshot(
     bySkillByModel,
     byDispatchKind,
     tokens24h,
+    foreign7d,
     mostRecentObservedResetMs,
     sinceResetEntries,
     filesScanned,
@@ -810,6 +811,11 @@ export function assembleSnapshot(
     tokensLast5h: acc5h,
     tokensLast7d: acc7d,
     tokensLast24h: tokens24h,
+    // Foreign-provider spend (issue #3769) — reported ALONGSIDE the Anthropic
+    // numbers, never folded into them. `tokensLast7d` above is Anthropic-only
+    // by construction, so this is additive information, not a subtraction the
+    // reader has to apply.
+    tokensForeignLast7d: foreign7d.total,
     percentLast5h,
     percentLast7d,
     usageSource,
