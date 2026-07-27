@@ -1,5 +1,7 @@
 /**
- * github/issues.ts — the GitHub Issue/PR **Read** seam (issue #908).
+ * github/issues.ts — the GitHub Issue/PR **Read** seam (issue #908), plus the
+ * ONE narrow issue-mutation surface the GLM eligibility sweep needs (issue
+ * #3755, ADR-0032): {@link addIssueLabel}.
  *
  * The **GitHub CLI Adapter** (`gh.ts`/`exec.ts`, issues #896/#897, closure
  * #899) owns the *raw process* boundary: it forbids `node:child_process`
@@ -29,6 +31,15 @@
  *      {@link listOpenIssues}, {@link viewPr}), reading through the Adapter's
  *      `ghJson`. (The PR-list query `listOpenPrs` lives in `./prs.ts` and is
  *      re-exported here.)
+ *   4. **The ONE narrow label-write surface** — {@link addIssueLabel} (issue
+ *      #3755). The seam was read-only for its first ~2k issues; this is the
+ *      single deliberately-narrow exception, added because the GLM eligibility
+ *      sweep must add one label to one issue and `github-seam-check` forbids a
+ *      caller from shelling out to `gh` directly. It rides the Adapter's
+ *      `ghExec` write primitive (not `ghJson` — a label-add returns no JSON),
+ *      takes an injectable transport so tests never spawn a real `gh`, and
+ *      returns a result object. There is deliberately no general-purpose
+ *      issue-mutation API here.
  *
  * Label *classification* does NOT live here: the provenance-label vocabulary
  * and classifier (`provenanceFromLabels`) belong to the Dispatch-Class
@@ -50,7 +61,10 @@
  * # What this is NOT
  *
  * - It does NOT own the raw spawn primitive (`exec.ts`, owned by #899) — it
- *   *consumes* `ghJson`, preserving the `child_process` seam.
+ *   *consumes* `ghJson`/`ghExec`, preserving the `child_process` seam.
+ * - It does NOT offer a general-purpose issue-mutation API. The single write
+ *   surface is {@link addIssueLabel} (add one label to one issue, issue #3755);
+ *   there is no remove-label / comment / state-mutate / create here, by design.
  * - It does NOT own the metric-join composition (`src/metrics/*`, owned by
  *   #820), nor the Redis-backed friction read (`aggregators/friction-source.ts`,
  *   #864).
@@ -59,8 +73,8 @@
  *   never-throw posture the aggregators already had.
  */
 
-import { ghJson } from "./gh.ts";
-import { isGhFailure, type GhErrorCode } from "./exec.ts";
+import { ghJson, ghExec } from "./gh.ts";
+import { isGhFailure, type GhErrorCode, type GhExecOptions, type GhResult } from "./exec.ts";
 import { viewPr as viewPrModule } from "./view-pr.ts";
 import type { ViewPrTransport, ViewPrCache } from "./view-pr.ts";
 
@@ -397,4 +411,113 @@ export async function listIssuesBySearchOrEmpty(
     return [];
   }
   return res.rows;
+}
+
+// ---------------------------------------------------------------------------
+// 4. The label-write path — the ONE narrow issue-mutation surface (issue #3755)
+// ---------------------------------------------------------------------------
+//
+// The seam above is read-only. The GLM eligibility sweep (ADR-0032) is the one
+// caller that must MUTATE an issue — it adds the `glm-eligible` label to a
+// designed, shallow, in-fence `dev_orch` item so the dev-drainer may author it.
+// `github-seam-check.ts` forbids that caller from importing `node:child_process`
+// to shell out itself, so the write MUST live here in the seam. The surface is
+// deliberately minimal: add ONE label to ONE issue, nothing more — no
+// remove-label / comment / state-mutate / create (issue #3755).
+
+/**
+ * The transport a label-write rides on. Structurally identical to the Adapter's
+ * {@link ghExec} write primitive — `(args, opts) => GhResult<{stdout,stderr}>` —
+ * so production defaults to the real `gh` invocation while a test injects a fake
+ * that records the argv and returns a canned result WITHOUT spawning a process.
+ * This is the label-write analogue of the read helpers' reliance on `ghJson`,
+ * surfaced as a parameter (not a re-bound module global) so the dependency is
+ * explicit and overridable per call.
+ */
+export type IssueLabelTransport = (
+  args: string[],
+  opts: GhExecOptions,
+) => Promise<GhResult<{ stdout: string; stderr: string }>>;
+
+/**
+ * The discriminated result a label-write returns. Narrower than
+ * {@link IssueReadResult} because a write has no rows: `ok:true` confirms the
+ * label was added; `ok:false` carries the seam's machine-readable `code`
+ * (a `gh-*` literal) plus `stderr` for logging. NEVER thrown — the calling chore
+ * decides how to report a failure (CLAUDE.md: never throw from
+ * verification-adjacent paths; return a result and let the caller decide).
+ */
+export type IssueLabelWriteResult =
+  | { ok: true }
+  | { ok: false; code: GhErrorCode; stderr: string };
+
+/**
+ * Type guard narrowing an {@link IssueLabelWriteResult} to its failure arm. The
+ * orchestrator's `tsconfig.json` runs `strict: false` (no `strictNullChecks`),
+ * so a boolean `ok` does not narrow via plain `if (!res.ok)` — see
+ * {@link isIssueReadFailure} for the full rationale. Prefer this guard over
+ * `if (!res.ok)` in label-write consumers.
+ */
+export function isIssueLabelWriteFailure(
+  res: IssueLabelWriteResult,
+): res is { ok: false; code: GhErrorCode; stderr: string } {
+  return res.ok === false;
+}
+
+/**
+ * Per-call knobs for {@link addIssueLabel}. Reuses {@link IssueQueryOptions} for
+ * the repo override + timeout/maxBuffer dials the read helpers already share,
+ * and adds the injectable {@link IssueLabelTransport | transport}.
+ */
+export type AddIssueLabelOptions = IssueQueryOptions & {
+  /** Write transport. Defaults to the Adapter's real {@link ghExec}. */
+  transport?: IssueLabelTransport;
+};
+
+/**
+ * Add ONE label to ONE issue — the single issue-mutation surface (issue #3755).
+ *
+ * Runs `gh issue edit <issueNumber> --add-label <label> --repo <repo>` through
+ * the Adapter's {@link ghExec} write primitive (NOT `ghJson`: a label-add
+ * succeeds with no structured output to parse). Returns a discriminated
+ * {@link IssueLabelWriteResult} and NEVER throws; a non-zero exit / spawn
+ * failure / timeout maps to the seam's `gh-*` `code` so the caller discriminates
+ * on the code, not on stderr prose.
+ *
+ * The transport is injectable (defaults to {@link ghExec}) so tests verify the
+ * argv + result mapping without shelling out to a real `gh`. The repo handle
+ * resolves through {@link resolveGithubRepo} (env-overridable), consistent with
+ * the read helpers; an empty resolved repo short-circuits to `{ ok: true }`,
+ * mirroring the readers' `if (!repo) return { ok: true, rows: [] }` skip-guard
+ * (an empty-string override is an explicit test/operator "skip this call", and
+ * never occurs in production where the repo resolves to the default handle).
+ *
+ * Keep this surface minimal: do NOT add remove-label / comment / state-mutate /
+ * create here (issue #3755). The sweep needs to add one label to one issue and
+ * nothing more.
+ */
+export async function addIssueLabel(
+  issueNumber: number,
+  label: string,
+  opts: AddIssueLabelOptions = {},
+): Promise<IssueLabelWriteResult> {
+  const repo = resolveGithubRepo(opts.repo);
+  if (!repo) return { ok: true };
+  const transport: IssueLabelTransport = opts.transport ?? ghExec;
+  const res = await transport(
+    [
+      "issue",
+      "edit",
+      String(issueNumber),
+      "--repo",
+      repo,
+      "--add-label",
+      label,
+    ],
+    execOpts(opts),
+  );
+  if (isGhFailure(res)) {
+    return { ok: false, code: res.code, stderr: res.stderr };
+  }
+  return { ok: true };
 }
