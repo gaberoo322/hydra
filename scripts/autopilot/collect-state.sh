@@ -143,15 +143,22 @@ print(json.dumps({k:d[k] for k in keys}))"
 else
   # Fallback: orchestrator down or its gh read degraded — read directly.
   # This jq MUST stay behaviourally identical to `deriveBoardState`
-  # (`src/autopilot/board-state.ts`) — including BOTH `ready_for_agent`
-  # partition exclusions: `target-backlog` (issue #2704, Target-scope routing)
-  # and `glm-eligible` (ADR-0032 / issue #3687, authored by the GLM dev-drainer
-  # on z.ai's independent quota, so it must not inflate the Opus `dev_orch`
-  # authoring pool). The strict-blocker exclusion (#3059) is endpoint-only and
-  # deliberately absent here — the degraded path stays a single `gh` read.
+  # (`src/autopilot/board-state.ts`) UNDER THE DEGRADED PATH'S CONDITION.
+  # The degraded path is reached when the orchestrator HTTP service (and thus
+  # its Redis-backed heartbeat read) is unreachable, so the GLM drainer
+  # heartbeat CANNOT be read here — that is exactly the STALE condition, and
+  # `deriveBoardState` with a stale / absent heartbeat does NOT subtract
+  # `glm-eligible` (issue #3754, ADR-0032 #3753 amendment: fail-open toward
+  # work so a down drainer never starves the Opus `dev_orch` lane). This jq
+  # therefore deliberately does NOT exclude `glm-eligible` — it matches the
+  # stale-heartbeat arm of `deriveBoardState` exactly. The healthy endpoint
+  # path above applies the (liveness-conditional) subtraction; this fallback
+  # is the always-stale mirror. The `target-backlog` exclusion (issue #2704)
+  # stays — it is unconditional on liveness. The strict-blocker exclusion
+  # (#3059) is endpoint-only and deliberately absent here, as before.
   gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt --jq '{
     needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
-    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not) and (($n | index("glm-eligible")) | not))] | length,
+    ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not))] | length,
     needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
     in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,

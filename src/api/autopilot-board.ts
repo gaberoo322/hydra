@@ -59,6 +59,7 @@ import {
   deriveBoardState,
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
+import { getGlmDrainerLiveness } from "../redis/autopilot.ts";
 import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -127,6 +128,16 @@ export interface AutopilotBoardRouterDeps {
   resolveOpenBlockers?: (
     rows: readonly IssueRow[],
   ) => Promise<Set<number>>;
+  /**
+   * Resolve whether the GLM dev-drainer partition is LIVE for this turn
+   * (issue #3754) — i.e. whether `glm-eligible` issues should be subtracted
+   * from `ready_for_agent`. Defaults to the typed heartbeat accessor in
+   * `src/redis/autopilot.ts` (`getGlmDrainerLiveness(nowMs).live`). Injected
+   * so the partition gate is testable without a live Redis; a reader that
+   * throws degrades to partition-inactive (fail-open toward work — see the
+   * never-throw catch in the handler).
+   */
+  glmDrainerLiveness?: (nowMs: number) => Promise<boolean>;
 }
 
 export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) {
@@ -152,9 +163,9 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     const repoOverride = scope === "target" ? getTargetGithubRepo() : undefined;
     const readOpenIssues =
       deps.readOpenIssues ?? (() => defaultReadOpenIssues(repoOverride));
-    const resolveBlockers =
-      deps.resolveOpenBlockers ??
-      ((rows: readonly IssueRow[]) => resolveOpenBlockers(rows, repoOverride));
+    const glmLiveness =
+      deps.glmDrainerLiveness ??
+      ((nowMs: number) => getGlmDrainerLiveness(nowMs).then((l) => l.live));
 
     const nowMs = clock();
     let counts = emptyCounts();
@@ -173,11 +184,36 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
           "[autopilot/board-state] gh issue list failed — degraded all-zero board",
         );
       } else {
+        // Resolve GLM drainer liveness (issue #3754): it gates BOTH the
+        // `glm-eligible` subtraction in `deriveBoardState` AND the matching
+        // skip in the blocker resolver. The accessor never throws; this inner
+        // try is belt-and-braces for an injected stub and the fail-open
+        // contract — any read failure → partition inactive → `glm-eligible`
+        // issues stay visible to Opus rather than being hidden by default.
+        let glmPartitionActive = false;
+        try {
+          glmPartitionActive = await glmLiveness(nowMs);
+        } catch (err: any) {
+          logger.error(
+            { err },
+            "[autopilot/board-state] glm drainer liveness read threw — partition inactive (fail-open, #3754)",
+          );
+          glmPartitionActive = false;
+        }
+        const resolveBlockers =
+          deps.resolveOpenBlockers ??
+          ((rows: readonly IssueRow[]) =>
+            resolveOpenBlockers(rows, repoOverride, glmPartitionActive));
         // Pre-resolve the OPEN strict-blocker set (async) and inject it into
         // the pure bucketer so the dependency-aware ready_for_agent filter
         // (issue #3059) stays golden-fixture testable.
         const openBlockers = await resolveBlockers(result.rows);
-        counts = deriveBoardState(result.rows, nowMs, openBlockers);
+        counts = deriveBoardState(
+          result.rows,
+          nowMs,
+          openBlockers,
+          glmPartitionActive,
+        );
       }
     } catch (err: any) {
       // Belt-and-braces: the seam never throws, but honour the never-throw
