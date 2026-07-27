@@ -1,0 +1,1 @@
+- docs: amend ADR-0032 — eligibility producer is a housekeeping chore, `glm-withhold` opt-out, load-bearing drainer heartbeat (#3753)
