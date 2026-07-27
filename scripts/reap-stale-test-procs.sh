@@ -45,6 +45,31 @@
 # have died is neither (its ancestor walk reaches the systemd manager without
 # passing through the unit's MainPID).
 #
+# P1 HAZARD — issue #3732 (2026-07-27). Sparing the *candidate* says nothing
+# about the other members of the candidate's process group, and this reaper
+# kills by group. On this host all five GitHub Actions runners are user-scope
+# units with `pid == pgid == sid == MainPID`, so EVERY process inside a CI job
+# inherits pgid = the runner's session leader. A genuine issue-#226 leak inside
+# a CI job is — correctly — not spared (its parents are dead, so the MainPID
+# ancestor walk fails) but it still carries the runner's pgid, so
+# `kill -KILL -- -$pgid` SIGKILLs the whole runner: Runner.Listener,
+# Runner.Worker and 10 more siblings. A killed runner can cancel a `deploy`
+# job, and a cancelled deploy leaves prod silently behind master with NO alarm
+# (the watchdog checks health, not SHA drift).
+#
+# The fix is a KILL-PLAN SAFETY predicate, not a new spare: a group-kill is
+# permitted only when no live member of that pgid — outside the candidate's own
+# process tree — would be spared by the predicates above. Otherwise the reaper
+# WARNs and downgrades to killing the candidate plus its live descendants,
+# which is the correct blast radius for a leaked grandchild anyway and keeps
+# the #226 esbuild-orphan case covered. A cmdline allowlist for
+# `Runner.Listener` / `actions-runner*` was deliberately NOT made the
+# load-bearing check: that is the exact shape of the #3730 bug.
+#
+# Every kill target is now logged as an explicit `PLAN` line, in dry-run too,
+# so the journal is self-documenting about blast radius and a dry run alone
+# pins the decision.
+#
 # Default: dry-run unless `--apply` is passed. The systemd timer wrapper
 # always passes `--apply`.
 #
@@ -104,6 +129,18 @@ Otherwise a process is considered stale when its --max-age threshold is
 exceeded AND no living ancestor in its pid tree matches "hydra-orchestrator",
 "claude", or "codex" interactive sessions. When in doubt, the reaper leaves
 the process alone.
+
+KILL PLAN (issue #3732). Sparing a process says nothing about the other
+members of its process GROUP, and this reaper kills by group. On this host
+every process inside a GitHub Actions job inherits pgid = the runner's session
+leader, so group-killing one leaked test process would SIGKILL the entire
+runner. A group-kill is therefore permitted only when no live member of that
+pgid — outside the candidate's own process tree — would itself be spared.
+Otherwise the reaper WARNs and downgrades to killing the candidate plus its
+live descendants. Every candidate's targets are logged as a PLAN line, in dry
+run too, so blast radius is auditable before anything is signalled. A
+candidate that has already exited by kill time is skipped outright: its
+recorded pgid is never group-killed on its behalf.
 EOF
 }
 
@@ -126,34 +163,52 @@ fi
 MAX_AGE_SEC=$((MAX_AGE_MIN * 60))
 
 # ---------------------------------------------------------------------------
-# Test seams (issue #3730). Production leaves all three UNSET and every fact
-# is read from the live host. test/reap-stale-test-procs.test.mts points them
-# at fixture files so both sparing directions — spare the supervised service,
-# still kill the genuinely leaked tsx — are pinned deterministically without
-# spawning (or killing) a single real process.
+# Test seams (issues #3730, #3732). Production leaves all five UNSET and every
+# fact is read from the live host. test/reap-stale-test-procs.test.mts points
+# them at fixture files so every direction — spare the supervised service, still
+# kill the genuinely leaked tsx, never group-kill a CI runner — is pinned
+# deterministically without spawning (or killing) a single real process.
 #   HYDRA_REAP_PROC_ROOT    — stands in for /proc (per-pid cgroup lookups)
-#   HYDRA_REAP_PS_SNAPSHOT  — file of `pid|pgid|age_seconds|cmd` records
+#   HYDRA_REAP_PS_SNAPSHOT  — file of `pid|ppid|pgid|age_seconds|cmd` records
 #   HYDRA_REAP_UNIT_MAINPID — file of `unit<TAB>mainpid` lines
+#   HYDRA_REAP_KILL_SINK    — file that RECORDS kill targets instead of
+#                             signalling, so --apply targeting is assertable
+#   HYDRA_REAP_VANISHED_PIDS— comma-separated pids to treat as already exited,
+#                             the only way to express the exit-mid-sweep race
+#
+# When HYDRA_REAP_PS_SNAPSHOT is set the snapshot IS the world: liveness is
+# snapshot membership rather than `kill -0`, because fixture pids sit above
+# pid_max and would otherwise all read as dead.
 # ---------------------------------------------------------------------------
 PROC_ROOT="${HYDRA_REAP_PROC_ROOT:-/proc}"
 PS_SNAPSHOT_FILE="${HYDRA_REAP_PS_SNAPSHOT:-}"
 UNIT_MAINPID_FILE="${HYDRA_REAP_UNIT_MAINPID:-}"
+KILL_SINK_FILE="${HYDRA_REAP_KILL_SINK:-}"
+VANISHED_PIDS="${HYDRA_REAP_VANISHED_PIDS:-}"
 
 log() {
   printf '[reap-stale-test-procs] %s\n' "$*"
 }
 
-# One consistent snapshot of every process as `pid|pgid|age_seconds|cmd`.
+# One consistent snapshot of every process as `pid|ppid|pgid|age_seconds|cmd`.
 # `etimes` is elapsed wall-clock seconds straight from procps, which replaces
 # the former per-pid `ps -p <pid> -o lstart=` + `date -d` reparse: one fork
 # instead of N, and no second-sample skew between the age and the snapshot.
+#
+# `ppid` joined the record in issue #3732. Reading ancestry, group membership
+# and descendants from this one snapshot (instead of forking `ps -p` per level)
+# buys three things: a process can no longer fail its own ancestry walk by
+# exiting mid-sweep — which is how a short-lived `node:test` child got
+# misclassified as an unsupervised leak and its runner-session pgid
+# group-killed — descendant enumeration becomes free, and a synthetic CI-runner
+# process tree becomes expressible as a test fixture.
 proc_snapshot() {
   if [[ -n "$PS_SNAPSHOT_FILE" ]]; then
     cat "$PS_SNAPSHOT_FILE" 2>/dev/null || true
     return
   fi
-  ps -eo pid=,pgid=,etimes=,cmd= 2>/dev/null \
-    | awk '{ pid=$1; pgid=$2; age=$3; $1=""; $2=""; $3=""; sub(/^ +/, ""); print pid"|"pgid"|"age"|"$0 }'
+  ps -eo pid=,ppid=,pgid=,etimes=,cmd= 2>/dev/null \
+    | awk '{ pid=$1; ppid=$2; pgid=$3; age=$4; $1=""; $2=""; $3=""; $4=""; sub(/^ +/, ""); print pid"|"ppid"|"pgid"|"age"|"$0 }'
 }
 
 # The cgroup blob for a pid (empty when the process is gone).
@@ -190,21 +245,71 @@ unit_main_pid() {
   return 0
 }
 
-# Returns 0 when $2 appears as a living ancestor of $1. A pid whose parents
-# have all exited walks straight up to the systemd manager and returns 1.
+# Returns 0 when $2 appears as an ancestor of $1. A pid whose parents have all
+# exited walks straight up to the systemd manager and returns 1.
+#
+# Issue #3732: ancestry is resolved from the ps snapshot, not from a per-level
+# `ps -p` fork. The old form asked the LIVE host about a pid the snapshot had
+# already observed, so a process that exited between the snapshot and the walk
+# answered "no parent" — indistinguishable from a genuine orphan, and the
+# reaper then group-killed that dead process's recorded pgid. Measured on this
+# host during a live CI run: 1-3 pattern-matching `node:test` children per
+# 150ms window were present in the snapshot and gone milliseconds later.
 has_ancestor_pid() {
   local pid="$1" target="$2"
   local guard=20  # don't loop more than 20 levels (defensive)
   [[ -n "$target" && "$target" != "0" ]] || return 1
   while [[ -n "$pid" && "$pid" != "1" && "$pid" != "0" && $guard -gt 0 ]]; do
     guard=$((guard - 1))
-    local ppid
-    ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
-    [[ -n "$ppid" ]] || return 1  # process gone mid-walk
+    local ppid="${PPID_OF[$pid]:-}"
+    [[ -n "$ppid" ]] || return 1  # not in the snapshot — treat as no ancestor
     [[ "$ppid" == "$target" ]] && return 0
     pid="$ppid"
   done
   return 1
+}
+
+# Is this pid still around at kill time? The snapshot ages while the sweep runs
+# (a MainPID query is a D-Bus round trip), so every signal is preceded by a
+# fresh liveness check — invariant: a vanished candidate is a NO-OP, never a
+# kill, and its recorded pgid is never group-killed on its behalf.
+#
+# `kill -0` fails with EPERM for a process we do not own, which would read as
+# "dead" and let it be group-killed as collateral; the /proc fallback keeps
+# such a process visible as a live group member.
+is_live() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" != "0" ]] || return 1
+  if [[ -n "$PS_SNAPSHOT_FILE" ]]; then
+    case ",${VANISHED_PIDS}," in *",$pid,"*) return 1 ;; esac
+    [[ -n "${CMD_OF[$pid]+set}" ]]
+    return
+  fi
+  kill -0 "$pid" 2>/dev/null && return 0
+  [[ -e "/proc/$pid" ]]
+}
+
+# Space-separated live descendants of $1 (excluding $1 itself), breadth-first
+# over the snapshot's pid->children index. This is the blast radius the reaper
+# falls back to when a group-kill is refused: issue #226 is fundamentally about
+# orphaned `esbuild --service` grandchildren, so a BARE single-pid kill would
+# lose the capability the group-kill exists to provide.
+live_descendants() {
+  local root="$1" queue="$1" out="" cur child guard=0
+  while [[ -n "$queue" ]]; do
+    guard=$((guard + 1))
+    (( guard > 5000 )) && break  # defensive: never spin on a malformed snapshot
+    cur="${queue%% *}"
+    if [[ "$cur" == "$queue" ]]; then queue=""; else queue="${queue#* }"; fi
+    for child in ${CHILDREN_OF[$cur]:-}; do
+      [[ "$child" == "$root" ]] && continue
+      case " $out " in *" $child "*) continue ;; esac
+      is_live "$child" || continue
+      out="${out:+$out }$child"
+      queue="${queue:+$queue }$child"
+    done
+  done
+  printf '%s' "$out"
 }
 
 # Echoes the *.service unit that supervises $1, or nothing. The unit is the
@@ -279,6 +384,16 @@ is_systemd_supervised() {
 # A live "hydra ancestor" is an interactive Claude / Codex session, the
 # orchestrator service, or anything else we explicitly want to spare.
 # Returns 0 if the given PID has such an ancestor; 1 otherwise.
+#
+# DELIBERATELY still reads the LIVE host rather than the snapshot, unlike
+# has_ancestor_pid above. This predicate matches COMMAND LINES and includes the
+# pid itself, and its `*/hydra*` arm matches any path under ~/hydra — so
+# feeding it snapshot cmds would make every leaked `.../hydra/node_modules/.bin/tsx`
+# spare ITSELF and silently neuter the whole issue-#226 reaper. Rescoping that
+# glob is a real but separate change; it is not smuggled into the #3732
+# kill-plan fix. The live-`ps` form fails closed on a gone process, which for
+# this predicate is the safe direction (it can only cause a kill of something
+# already dead, and is_live() now gates that too).
 has_live_hydra_ancestor() {
   local pid="$1"
   local guard=20  # don't loop more than 20 levels (defensive)
@@ -300,9 +415,84 @@ has_live_hydra_ancestor() {
   return 1
 }
 
+# THE #3732 GUARD. Echoes `<pid> <reason>` and returns 0 when the candidate's
+# process group contains a live member that this reaper's own predicates would
+# spare — i.e. when `kill -KILL -- -$pgid` would take out something we have
+# explicitly decided not to kill. Returns 1 (group-kill is safe) otherwise.
+#
+# The pgid LEADER is probed first because it short-circuits the case that
+# motivated this guard in a single systemctl call: all five GitHub Actions
+# runners on this host are user-scope units with pid == pgid == sid == MainPID,
+# so the leader of any CI job's group IS `github-actions-runner-N.service`'s
+# MainPID and resolves `<unit>:main` immediately.
+#
+# The candidate's OWN process tree is excluded from the blocker set on purpose:
+# those pids are killed under either plan, so they cannot inform the CHOICE
+# between plans, and counting them would downgrade almost every genuine leak
+# group for no gain. What this predicate asks is exactly: "does group-killing
+# reach anything spare-worthy OUTSIDE the tree we already intend to kill?"
+#
+# A `<unit>:unknown` member (the systemd query itself failed) blocks the
+# group-kill exactly like a confirmed MainPID — the #3730 fail-safe asymmetry
+# extends to blast radius, not just to the candidate.
+group_kill_blocker() {
+  local pgid="$1" candidate="$2" excluded="$3" member seen="" supervisor
+  for member in "$pgid" ${MEMBERS_OF_PGID[$pgid]:-}; do
+    [[ -n "$member" && "$member" != "0" ]] || continue
+    [[ "$member" == "$candidate" ]] && continue
+    case " $excluded " in *" $member "*) continue ;; esac
+    case " $seen " in *" $member "*) continue ;; esac
+    seen="${seen:+$seen }$member"
+    is_live "$member" || continue
+    if supervisor=$(is_systemd_supervised "$member"); then
+      printf '%s %s' "$member" "$supervisor"
+      return 0
+    fi
+    if has_live_hydra_ancestor "$member"; then
+      printf '%s %s' "$member" "live-hydra-ancestor"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Signal one target: a bare pid, or `-<pgid>` for a whole group. The kill sink
+# seam records targets instead of signalling so --apply TARGETING is assertable
+# in tests; without it no test could reach the kill path at all (every case
+# passes --dry-run), which is why the #3732 acceptance criterion was previously
+# unmeetable.
+send_kill() {
+  local target="$1"
+  if [[ -n "$KILL_SINK_FILE" ]]; then
+    printf '%s\n' "$target" >> "$KILL_SINK_FILE"
+    return 0
+  fi
+  kill -KILL -- "$target" 2>/dev/null
+}
+
 # Walk every running process and pick the candidates. We take ONE `ps -eo`
 # snapshot rather than nested `pgrep`s so the view is consistent.
 candidates=$(proc_snapshot)
+
+# Snapshot indices. Every ancestry / group / descendant question below is
+# answered from these, so age, supervision, group membership and blast radius
+# all resolve against ONE observation of the process table.
+declare -A PPID_OF=()
+declare -A CMD_OF=()
+declare -A MEMBERS_OF_PGID=()
+declare -A CHILDREN_OF=()
+
+while IFS='|' read -r s_pid s_ppid s_pgid s_age s_cmd; do
+  [[ -n "$s_pid" ]] || continue
+  PPID_OF["$s_pid"]="$s_ppid"
+  CMD_OF["$s_pid"]="$s_cmd"
+  if [[ -n "$s_pgid" ]]; then
+    MEMBERS_OF_PGID["$s_pgid"]="${MEMBERS_OF_PGID[$s_pgid]:-}${MEMBERS_OF_PGID[$s_pgid]:+ }$s_pid"
+  fi
+  if [[ -n "$s_ppid" && "$s_ppid" != "$s_pid" ]]; then
+    CHILDREN_OF["$s_ppid"]="${CHILDREN_OF[$s_ppid]:-}${CHILDREN_OF[$s_ppid]:+ }$s_pid"
+  fi
+done <<< "$candidates"
 
 killed=0
 spared=0
@@ -310,8 +500,10 @@ spared_unknown=0
 considered=0
 below_age=0
 would_kill=0
+downgraded=0
+vanished=0
 
-while IFS='|' read -r pid pgid age cmd; do
+while IFS='|' read -r pid ppid pgid age cmd; do
   # Only consider the targets named in the issue.
   case "$cmd" in
     *tsx*|*"esbuild --service"*|*"npm exec"*|*"npm-exec"*|*"node --test"*|*"node --experimental-strip-types --test"*)
@@ -354,24 +546,55 @@ while IFS='|' read -r pid pgid age cmd; do
     continue
   fi
 
+  # Issue #3732, invariant: A VANISHED CANDIDATE IS A NO-OP, NEVER A KILL.
+  # The snapshot ages while the sweep runs. If the candidate is already gone,
+  # killing "it" can only mean killing its recorded pgid — a group it no longer
+  # occupies, which on this host is routinely a CI runner's session. Skip.
+  if ! is_live "$pid"; then
+    vanished=$((vanished + 1))
+    log "VANISHED pid=$pid pgid=$pgid age=${age}s — exited during the sweep; its pgid is NOT group-killed cmd=$cmd"
+    continue
+  fi
+
   log "STALE pid=$pid pgid=$pgid age=${age}s cmd=$cmd"
   would_kill=$((would_kill + 1))
+
+  # Decide the blast radius BEFORE the dry-run bail, so a dry run pins the
+  # choice and the production journal documents exactly what was signalled.
+  descendants=$(live_descendants "$pid")
+  plan="group"
+  targets="-$pgid"
+  if [[ -z "$pgid" || "$pgid" == "0" ]]; then
+    plan="descendants"
+    log "  no pgid — falling back to candidate + live descendants"
+  elif blocker=$(group_kill_blocker "$pgid" "$pid" "$descendants"); then
+    plan="descendants"
+    downgraded=$((downgraded + 1))
+    log "  WARN pid=$pid pgid=$pgid reason=group-contains-spared-member blocker-pid=${blocker%% *} blocker-reason=${blocker#* } action=downgraded-to-candidate-plus-descendants (cue: reaper-group-kill-downgraded)"
+  fi
+  [[ "$plan" == "group" ]] || targets="$pid${descendants:+ $descendants}"
+  log "  PLAN pid=$pid plan=$plan targets=$targets"
+
   if (( DRY_RUN == 1 )); then
     continue
   fi
 
-  if [[ -z "$pgid" || "$pgid" == "0" ]]; then
-    log "  no pgid — falling back to single-pid SIGKILL"
-    kill -KILL "$pid" 2>/dev/null && killed=$((killed + 1)) || true
-  else
-    if kill -KILL -- "-$pgid" 2>/dev/null; then
-      log "  SIGKILL group -$pgid"
+  if [[ "$plan" == "group" ]]; then
+    if send_kill "$targets"; then
+      log "  SIGKILL group $targets"
       killed=$((killed + 1))
-    else
-      # Group may already be partially gone; fall back to single PID.
-      kill -KILL "$pid" 2>/dev/null && killed=$((killed + 1)) || true
+      continue
     fi
+    # Group may already be partially gone; fall back to the narrow plan.
+    plan="descendants"
+    targets="$pid${descendants:+ $descendants}"
+    log "  group SIGKILL failed — falling back plan=descendants targets=$targets"
   fi
+  signalled=0
+  for target in $targets; do
+    send_kill "$target" && signalled=1
+  done
+  (( signalled == 1 )) && killed=$((killed + 1))
 done <<< "$candidates"
 
 # Issue #3730: `would-kill` counts the processes that actually cleared BOTH the
@@ -386,12 +609,15 @@ done <<< "$candidates"
 # never be indistinguishable in the summary — a non-zero spared-unknown is an
 # operator signal, not routine.
 if (( DRY_RUN == 1 )); then
-  log "DRY RUN — considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age would-kill=$would_kill"
+  log "DRY RUN — considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age vanished=$vanished downgraded=$downgraded would-kill=$would_kill"
 else
-  log "considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age killed=$killed"
+  log "considered=$considered spared=$spared spared-unknown=$spared_unknown below-age=$below_age vanished=$vanished downgraded=$downgraded killed=$killed"
 fi
 if (( spared_unknown > 0 )); then
   log "WARN degraded sweep — $spared_unknown process(es) spared because the systemd MainPID query failed; systemd/D-Bus may be unreachable (cue: reaper-systemd-query-failed)"
+fi
+if (( downgraded > 0 )); then
+  log "WARN $downgraded group-kill(s) downgraded because the process group contained a supervised or otherwise spared member — the classic case is a leaked test process inside a GitHub Actions job, whose pgid is the runner's own session leader (issue #3732) (cue: reaper-group-kill-downgraded)"
 fi
 
 # Always exit 0; the timer should not fire failure alerts on a quiet run.
