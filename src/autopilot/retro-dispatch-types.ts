@@ -46,6 +46,19 @@ export interface RetroDispatch {
   anchorReference: string | null;
   /** PR number opened by the dispatch, when known. */
   prNumber: string | null;
+  /**
+   * The dispatch slot key this dispatch occupied (`dev_orch`, `qa_orch`,
+   * `dev_target`, ...), when known — read off the dispatch action's `slot`
+   * field or the `slots_snapshot` entry key. `null` when the slot could not be
+   * recovered. Carried through the projection so the post-enrichment identity
+   * dedup can collapse snapshot-derived rows that share NO durable `cycleId`
+   * but DO share a slot — a dispatch occupying one slot for N turns whose
+   * per-turn snapshot rows all land `cycleId: ""` (the #3738 double-count case):
+   * deduping on the slot key instead of the blank cycleId collapses them to one
+   * row. Identity-bearing rows (non-empty cycleId) still dedup on the cycleId;
+   * the slot is only the surrogate for the empty-cycleId population.
+   */
+  slot: string | null;
   /** Cycle status (`merged`, `failed`, `abandoned`, ...) or `null` if pending. */
   status: string | null;
   /** Coarse bucket derived from `status`. `null` == still pending. */
@@ -68,18 +81,22 @@ export interface RetroDispatch {
    */
   flagged: boolean;
   /**
-   * `true` when this dispatch carries a failure/abort signal but has NO
-   * transcript handle to drill — i.e. `cycleId === ""` (issue #1184). The
-   * empty-cycleId slots-snapshot-fallback population (the interrupted-run case:
-   * the slots snapshot carries no cycleId, and the metrics/transcript
-   * enrichment loop skips it via `if (!d.cycleId) continue;`) gets the #1168
-   * `run-interrupted` abandonReason backfill for visibility, but cannot be
-   * drilled — there is no transcript to read. So we record it `undrillable` and
-   * EXCLUDE it from the flagged/drill subset rather than flagging an undrillable
-   * dispatch (#1168 went from "flags zero" to "flags N undrillable"; this closes
-   * the chain). The retro skill can then honestly report "recorded N
-   * undrillable, flagged-for-drill 0" instead of reading zero transcripts on N
-   * flags. A drillable (cycleId-bearing) dispatch is always `undrillable: false`.
+   * `true` when this dispatch has NO terminal record attributable to the run —
+   * i.e. it carries neither a resolved `status` NOR a non-empty `cycleId`
+   * transcript handle. Issue #1184 introduced the flag for the empty-cycleId
+   * failure/abort case; issue #3738 broadened it to count ANY unresolved row
+   * (a still-in-flight dispatch on a `handoff` run has no failure signal
+   * either, yet its outcome is just as lost). After the #1352 confirm-or-drop
+   * pass a non-empty `cycleId` IS a confirmed terminal record, so "no terminal
+   * record" reduces to `status === null && cycleId === ""`. This is the
+   * population a handoff / crashed / budget-exhausted run's in-flight dispatch
+   * falls into: the run ended before its terminal cycle status was written, and
+   * no consumer re-reads a closed run, so its outcome is permanently lost to the
+   * learning loop. Recording it `undrillable` (and EXCLUDING it from the
+   * flagged/drill subset — there is no transcript to read) lets the retro
+   * summary say "0 drilled because N unresolved" instead of reporting a false
+   * clean on exactly the runs it exists to learn from (issue #3738). A resolved
+   * dispatch (status set OR cycleId-bearing) is always `undrillable: false`.
    */
   undrillable: boolean;
 }

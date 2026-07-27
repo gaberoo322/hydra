@@ -245,12 +245,14 @@ export function projectDispatches(
           typeof (a.prompt_args as any).anchor === "string" &&
           (a.prompt_args as any).anchor) ||
         null;
+      const slot = slotOfAction(a);
       const dispatch: RetroDispatch = {
         cycleId,
         turn_n: turnN,
         skill: typeof a.skill === "string" ? a.skill : null,
         anchorReference,
         prNumber,
+        slot,
         status,
         bucket: bucketOf(status),
         // abandonReason / regression are enriched from the metrics sidecar
@@ -265,7 +267,6 @@ export function projectDispatches(
         // backfill. Default to drillable here.
         undrillable: false,
       };
-      const slot = slotOfAction(a);
       // Cross-turn dedup (issue #1776): an identity already projected on an
       // earlier turn never emits a second row — the action only enriches the
       // canonical row's null fields. (In practice a dispatch action is
@@ -357,6 +358,7 @@ export function projectDispatches(
         skill: slotSkill,
         anchorReference: slotAnchor,
         prNumber: prNumberFromAnchor(slotAnchor),
+        slot,
         status: null,
         bucket: null,
         abandonReason: null,
