@@ -131,9 +131,19 @@ services:
       - tei-embed-data:/data
     healthcheck:
       # TEI exposes a /health endpoint; healthy only once the model is loaded
-      # and the router is accepting requests. Uses wget (present in the TEI
-      # image) rather than curl.
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/health || exit 1"]
+      # and the router is accepting requests.
+      #
+      # USES curl, NOT wget (issue #3746). The digest-pinned image ships curl at
+      # /usr/bin/curl and has NO wget — `wget -q -O /dev/null …` fails every
+      # probe with `/bin/sh: 1: wget: not found`, so the container never reaches
+      # `healthy` even while the router logs `Ready` and serves embeddings
+      # correctly. That silently blocks `openviking`, which gates on
+      # `depends_on: tei-embed (condition: service_healthy)`.
+      # Verified in-container: `curl -fsS -o /dev/null http://localhost:80/health`
+      # exits 0. Do NOT revert to wget without first confirming it exists in the
+      # pinned image — the previous comment asserted wget was present, which was
+      # true of cpu-1.9.3 and is inverted here.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:80/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
