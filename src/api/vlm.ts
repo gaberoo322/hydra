@@ -25,7 +25,8 @@ import {
  * `/vlm` (see api.ts), NOT under the `/api` Router.
  *
  * This module is the THIN HTTP ADAPTER (issue #3633): schema validation, the
- * no-image 400, the OpenAI-envelope response, and the 400/502 error mapping. It
+ * image/text path split, the OpenAI-envelope response, and the 400/502 error
+ * mapping. It
  * composes two focused leaves under `src/vlm/`: image-materializer.ts (the pure
  * content-part collection + data-URI decode + temp-file cluster) and
  * claude-cli-runner.ts (the runClaude spawn/SIGKILL-timeout logic with the
@@ -68,6 +69,50 @@ const DEFAULT_MODEL = "sonnet";
  * this default drives a plain describe-the-image caption.
  */
 const DEFAULT_CAPTION_INSTRUCTION = "Describe this image in detail.";
+
+/**
+ * Prompt used when a TEXT-ONLY request carries no instruction of its own.
+ * OpenViking's summary generation always sends the document text, so this is
+ * defensive.
+ */
+const DEFAULT_TEXT_INSTRUCTION = "Summarize the following content.";
+
+/**
+ * Tool policy for the TEXT-ONLY path (issue #3746).
+ *
+ * A text summarization has no file to read and no side effects, so every tool
+ * is denied — this also trims the tool schemas out of the loaded system prompt,
+ * cutting per-call subscription-token overhead. Mirrors the betting
+ * claude-cli-fetcher's `DISALLOWED_TOOLS`, the established precedent for a
+ * pure text→text `claude -p` call in this codebase.
+ *
+ * `--disallowedTools` accepts a single space-joined argument.
+ */
+const TEXT_DISALLOWED_TOOLS = [
+  "Bash",
+  "Edit",
+  "Write",
+  "Read",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "Task",
+  "NotebookEdit",
+].join(" ");
+
+/**
+ * Agentic-turn ceiling for the TEXT-ONLY path. Deliberately > 1.
+ *
+ * `--disallowedTools` DENIES rather than hides the tools, so a stray tool
+ * attempt — which the model makes stochastically even under a plain
+ * summarize-this prompt — consumes a turn on the denial. At `--max-turns 1`
+ * that exhausts the budget before any answer exists and the CLI exits
+ * `error_max_turns`. The betting fetcher measured exactly this: ~24% of calls
+ * lost (6/25) until issue #678 raised its ceiling to 4. Reusing that proven
+ * value rather than re-deriving it.
+ */
+const TEXT_MAX_TURNS = 4;
 
 export interface VlmRouterDeps {
   /** Path or bare name of the `claude` binary. Defaults to `claude` (PATH-resolved). */
@@ -135,24 +180,43 @@ export function createVlmRouter(deps: VlmRouterDeps = {}): Router {
     const model = deps.model?.trim() || parsed.data.model?.trim() || DEFAULT_MODEL;
 
     const imageUrls = collectImageUrls(messages);
-    const instruction = collectText(messages) || DEFAULT_CAPTION_INSTRUCTION;
+    const hasImage = imageUrls.length > 0;
+    const instruction =
+      collectText(messages) ||
+      (hasImage ? DEFAULT_CAPTION_INSTRUCTION : DEFAULT_TEXT_INSTRUCTION);
 
-    // No image → nothing for the VLM to caption. Reject rather than shelling a
-    // pointless text-only claude call through the image path.
-    if (imageUrls.length === 0) {
-      return res.status(400).json({
-        code: "vlm-no-image",
-        message: "VLM shim requires at least one image_url content-part",
-      });
-    }
-
-    // Materialize the first image; the shim captions one image per call (the
-    // OpenViking VLM client sends one image per document). Any additional
-    // images are ignored — a caption over the primary image is the contract.
+    // TEXT-ONLY vs IMAGE (issue #3746). OpenViking points ONE `vlm.api_base` at
+    // this shim and drives BOTH paths through it: image captioning AND document
+    // summary generation, which sends no image at all. The shim originally 400'd
+    // the no-image case as "nothing to caption", which is right for a pure VLM
+    // but wrong for OV's actual client — every text summary failed
+    // `vlm-no-image`, leaving the OV skill catalog partial. The no-image case is
+    // a plain text completion, not an error.
     let materialized: MaterializedImage | undefined;
     try {
-      materialized = await materializeImage(imageUrls[0]);
-      const prompt = `Read the image file at ${materialized.reference} and then respond to this request: ${instruction}`;
+      let prompt: string;
+      let toolArgs: string[];
+      let maxTurns: string;
+
+      if (hasImage) {
+        // Materialize the first image; the shim captions one image per call (the
+        // OpenViking VLM client sends one image per document). Any additional
+        // images are ignored — a caption over the primary image is the contract.
+        materialized = await materializeImage(imageUrls[0]);
+        prompt = `Read the image file at ${materialized.reference} and then respond to this request: ${instruction}`;
+        // INVERTS the betting fetcher's blanket --disallowedTools: the shim
+        // must ALLOW Read so `claude -p` can load the image off disk. Only Read
+        // is allowed — no Bash/Write/etc.
+        toolArgs = ["--allowedTools", "Read"];
+        maxTurns = "1";
+      } else {
+        // No image: pass the instruction straight through. Nothing is read off
+        // disk, so every tool is denied and the turn ceiling is raised — see
+        // TEXT_DISALLOWED_TOOLS / TEXT_MAX_TURNS for why > 1 is load-bearing.
+        prompt = instruction;
+        toolArgs = ["--disallowedTools", TEXT_DISALLOWED_TOOLS];
+        maxTurns = String(TEXT_MAX_TURNS);
+      }
 
       const args = [
         "-p",
@@ -162,13 +226,9 @@ export function createVlmRouter(deps: VlmRouterDeps = {}): Router {
         "--output-format",
         "json",
         "--max-turns",
-        "1",
+        maxTurns,
         "--dangerously-skip-permissions",
-        // INVERTS the betting fetcher's blanket --disallowedTools: the shim
-        // must ALLOW Read so `claude -p` can load the image off disk. Only Read
-        // is allowed — no Bash/Write/etc.
-        "--allowedTools",
-        "Read",
+        ...toolArgs,
       ];
 
       const { code, stdout, stderr } = await runClaude(
