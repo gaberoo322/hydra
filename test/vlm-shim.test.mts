@@ -16,7 +16,9 @@
  *     a finally on BOTH success and error paths;
  *   - the spawn is invoked with --allowedTools Read (INVERTING the betting
  *     fetcher's Read-disallowed posture) and --output-format json;
- *   - a body with no image_url part → 400 vlm-no-image;
+ *   - a body with no image_url part → 200 text completion on the TEXT tool
+ *     policy (all tools disallowed, --max-turns > 1), NOT a 400 — OpenViking
+ *     drives document summaries through the same api_base (issue #3746);
  *   - a malformed body (no messages) → 400 schema-validation-failed;
  *   - a claude is_error envelope → 502 vlm-cli-error AND the temp file is still
  *     cleaned up.
@@ -186,13 +188,60 @@ describe("vlm claude-cli shim (issue #3542)", () => {
     assert.match(records[0].args[promptIdx + 1], /Describe this image in detail\./);
   });
 
-  test("body with no image_url content-part → 400 vlm-no-image", async () => {
+  test("body with no image_url content-part → 200 text completion (issue #3746)", async () => {
+    // REGRESSION: this case previously asserted 400 vlm-no-image. OpenViking
+    // points one `vlm.api_base` at this shim and drives BOTH image captioning
+    // and DOCUMENT SUMMARY GENERATION through it; summaries carry no image, so
+    // the 400 failed every summary and left the OV skill catalog partial. A
+    // no-image body is a plain text completion, not an error.
     const body = { messages: [{ role: "user", content: "just text, no image" }] };
     const { res, records } = await invoke(body, OK_ENVELOPE, 0);
-    assert.equal(res._status, 400);
-    assert.equal(res._body.code, "vlm-no-image");
-    // No claude spawned when there's nothing to caption.
-    assert.equal(records.length, 0);
+
+    assert.equal(res._status, 200);
+    assert.equal(res._body.object, "chat.completion");
+    assert.equal(res._body.choices[0].message.role, "assistant");
+    assert.equal(res._body.choices[0].finish_reason, "stop");
+
+    // Exactly one claude spawn, on the TEXT tool policy.
+    assert.equal(records.length, 1);
+    const { args } = records[0];
+
+    // The instruction is passed straight through — no image-Read preamble.
+    const promptIdx = args.indexOf("-p");
+    assert.equal(args[promptIdx + 1], "just text, no image");
+    assert.ok(!args[promptIdx + 1].includes("Read the image file at"));
+
+    // Every tool denied (nothing is read off disk) — and Read specifically,
+    // INVERTING the image path's --allowedTools Read.
+    assert.ok(!args.includes("--allowedTools"));
+    const disallowIdx = args.indexOf("--disallowedTools");
+    assert.ok(disallowIdx >= 0, "text path must disallow tools");
+    for (const tool of ["Bash", "Edit", "Write", "Read", "WebFetch"]) {
+      assert.ok(
+        args[disallowIdx + 1].includes(tool),
+        `text path must disallow ${tool}`,
+      );
+    }
+
+    // --max-turns MUST exceed 1: --disallowedTools DENIES rather than hides the
+    // tools, so a stray tool attempt burns a turn on the denial. At a ceiling of
+    // 1 that exits error_max_turns before any answer exists — the ~24% loss the
+    // betting fetcher measured before issue #678 raised its ceiling to 4.
+    const turnsIdx = args.indexOf("--max-turns");
+    assert.ok(turnsIdx >= 0);
+    assert.ok(
+      Number(args[turnsIdx + 1]) > 1,
+      "text path --max-turns must be > 1 (issue #678 precedent)",
+    );
+  });
+
+  test("text-only body with no instruction falls back to a summarize prompt", async () => {
+    const body = { messages: [{ role: "user", content: "" }] };
+    const { res, records } = await invoke(body, OK_ENVELOPE, 0);
+    assert.equal(res._status, 200);
+    assert.equal(records.length, 1);
+    const promptIdx = records[0].args.indexOf("-p");
+    assert.match(records[0].args[promptIdx + 1], /Summarize the following content\./);
   });
 
   test("malformed body (no messages) → 400 schema-validation-failed", async () => {
