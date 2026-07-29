@@ -228,6 +228,19 @@ export function createVlmRouter(deps: VlmRouterDeps = {}): Router {
         "--max-turns",
         maxTurns,
         "--dangerously-skip-permissions",
+        // Load NO MCP servers (issue #3746 incident). `--strict-mcp-config`
+        // means "only use servers from --mcp-config"; passing no --mcp-config
+        // therefore yields an empty set.
+        //
+        // Without this, EVERY shim call inherits the host's ambient `~/.claude`
+        // MCP config and spawns those servers (sentry, context7) before the
+        // prompt even runs — and they are NOT reaped when `claude -p` exits.
+        // On 2026-07-28 that leaked 184 orphaned mcp-server processes burning
+        // 8.4 cores and 68% of RAM (load average 211), which starved the CI
+        // pool. A summarize-this-document call has no use for them, and the
+        // tool policy above already denies every tool, so an MCP server could
+        // not be invoked even if it loaded.
+        "--strict-mcp-config",
         ...toolArgs,
       ];
 

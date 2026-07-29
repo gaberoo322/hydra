@@ -168,6 +168,13 @@ describe("vlm claude-cli shim (issue #3542)", () => {
     const allowIdx = args.indexOf("--allowedTools");
     assert.ok(allowIdx >= 0 && args[allowIdx + 1] === "Read");
     assert.ok(!args.includes("--disallowedTools"));
+    // No ambient MCP servers (issue #3746 incident) — see the text-path case
+    // below for why this is load-bearing on BOTH paths.
+    assert.ok(
+      args.includes("--strict-mcp-config"),
+      "image path must load no MCP servers",
+    );
+    assert.ok(!args.includes("--mcp-config"));
     assert.ok(args.includes("--dangerously-skip-permissions"));
 
     // The temp file existed on disk at spawn time (so claude could Read it)...
@@ -232,6 +239,21 @@ describe("vlm claude-cli shim (issue #3542)", () => {
     assert.ok(
       Number(args[turnsIdx + 1]) > 1,
       "text path --max-turns must be > 1 (issue #678 precedent)",
+    );
+
+    // Load NO MCP servers. `--strict-mcp-config` with no `--mcp-config` yields
+    // an empty set. Without it every shim call inherits the host's ambient
+    // ~/.claude MCP config and spawns those servers before the prompt runs;
+    // they are not reaped when `claude -p` exits. On 2026-07-28 that leaked 184
+    // orphaned mcp-server processes (8.4 cores, 68% RAM, load average 211) and
+    // starved the CI pool.
+    assert.ok(
+      args.includes("--strict-mcp-config"),
+      "text path must load no MCP servers (issue #3746 incident)",
+    );
+    assert.ok(
+      !args.includes("--mcp-config"),
+      "--strict-mcp-config must be passed WITHOUT --mcp-config to yield an empty server set",
     );
   });
 
