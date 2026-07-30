@@ -1,4 +1,20 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
+import { apiFetch, useApi } from "../../hooks/useApi.js";
+import {
+  MUTE_CLASS_PATH,
+  NO_PENDING_REMOVALS,
+  RECS_PATH,
+  RECS_POLL_MS,
+  applyPendingRemovals,
+  dismissBody,
+  dismissPath,
+  muteClassBody,
+  normaliseRecsResponse,
+  runLabel,
+  severityColor,
+  withDismissedId,
+  withMutedSeverity,
+} from "./recommendations-tab-state.ts";
 
 /**
  * RecommendationsTab — Oak's third tab, lighting up the LLM-driven
@@ -17,90 +33,23 @@ import { useEffect, useState, useCallback } from "react";
  *   - "See full run journal" button opens the per-run history modal
  *     (`RecRunJournalModal`) listing every rec emitted this run, including
  *     ones that have since been dismissed or whose severity is muted.
+ *
+ * Issue #3706 made this file thin presentation: polling now routes through
+ * the shared `useApi` hook (which honours VITE_API_BASE — the hand-rolled
+ * fetch here did not), and every fold over the payload lives in
+ * `recommendations-tab-state.ts`, pinned by
+ * test/now-pixel-recommendations-tab-state.test.mts.
  */
-
-const POLL_MS = 5000;
-const RUN_ID_PARAM = "current";
-
-function severityColor(sev) {
-  switch (sev) {
-    case "critical":
-      return "#f87171"; // rose-400
-    case "warn":
-      return "#fbbf24"; // amber-400
-    case "info":
-    default:
-      return "#7dd3fc"; // sky-300
-  }
-}
-
-async function fetchActiveRecs() {
-  try {
-    const res = await fetch(
-      `/api/now/recommendations?run_id=${encodeURIComponent(RUN_ID_PARAM)}`,
-    );
-    if (!res.ok) return { ok: false, status: res.status, items: [], runId: null };
-    const body = await res.json();
-    return {
-      ok: true,
-      status: 200,
-      items: Array.isArray(body.items) ? body.items : [],
-      runId: typeof body.run_id === "string" ? body.run_id : null,
-    };
-  } catch {
-    return { ok: false, status: 0, items: [], runId: null };
-  }
-}
-
-async function postDismiss(recId, runId) {
-  try {
-    await fetch(`/api/now/recommendations/${encodeURIComponent(recId)}/dismiss`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ run_id: runId ?? RUN_ID_PARAM }),
-    });
-  } catch {
-    /* intentional: best-effort; next poll re-renders */
-  }
-}
-
-async function postMuteClass(severity, runId) {
-  try {
-    await fetch(`/api/now/recommendations/mute-class`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ run_id: runId ?? RUN_ID_PARAM, severity }),
-    });
-  } catch {
-    /* intentional */
-  }
-}
-
 export default function RecommendationsTab({ openJournal }) {
-  const [items, setItems] = useState([]);
-  const [runId, setRunId] = useState(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const { data, error, refresh } = useApi(RECS_PATH, { poll: RECS_POLL_MS });
+  // Operator actions the next poll has not yet reflected. Kept as an overlay
+  // so the poll remains the single source of truth for the list itself.
+  const [pending, setPending] = useState(NO_PENDING_REMOVALS);
   const [menu, setMenu] = useState(null); // { x, y, severity }
 
-  const refresh = useCallback(async () => {
-    const r = await fetchActiveRecs();
-    setLoadFailed(!r.ok);
-    setItems(r.items);
-    setRunId(r.runId);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    refresh();
-    const id = setInterval(() => {
-      if (cancelled) return;
-      refresh();
-    }, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [refresh]);
+  const { items: serverItems, runId } = normaliseRecsResponse(data);
+  const items = applyPendingRemovals(serverItems, pending);
+  const loadFailed = error != null;
 
   // Close the right-click menu on any click outside.
   useEffect(() => {
@@ -110,28 +59,44 @@ export default function RecommendationsTab({ openJournal }) {
     return () => window.removeEventListener("click", off);
   }, [menu]);
 
-  const handleDismiss = useCallback(
-    async (id) => {
-      setItems((prev) => prev.filter((r) => r.id !== id));
-      await postDismiss(id, runId);
-    },
-    [runId],
-  );
+  // Plain functions, not useCallback: `runId` is derived from the poll on
+  // every render, so a manual dependency list would be invalidated each time
+  // anyway — and the React Compiler cannot preserve the memoization over it.
+  async function handleDismiss(id) {
+    setPending((prev) => withDismissedId(prev, id));
+    try {
+      await apiFetch(dismissPath(id), {
+        method: "POST",
+        body: JSON.stringify(dismissBody(runId)),
+      });
+    } catch (err) {
+      console.error("[now-pixel] dismiss recommendation failed", { id, err });
+    }
+    refresh();
+  }
 
-  const handleMute = useCallback(
-    async (severity) => {
-      setMenu(null);
-      setItems((prev) => prev.filter((r) => r.severity !== severity));
-      await postMuteClass(severity, runId);
-    },
-    [runId],
-  );
+  async function handleMute(severity) {
+    setMenu(null);
+    setPending((prev) => withMutedSeverity(prev, severity));
+    try {
+      await apiFetch(MUTE_CLASS_PATH, {
+        method: "POST",
+        body: JSON.stringify(muteClassBody(runId, severity)),
+      });
+    } catch (err) {
+      console.error("[now-pixel] mute recommendation class failed", {
+        severity,
+        err,
+      });
+    }
+    refresh();
+  }
 
   return (
     <div className="flex flex-col" data-testid="oak-recs-tab">
       <div className="flex items-center justify-between mb-1">
         <div className="text-[9px] uppercase text-zinc-500">
-          {runId ? `run ${runId.slice(0, 8)}` : "no run"}
+          {runLabel(runId)}
         </div>
         <button
           type="button"
