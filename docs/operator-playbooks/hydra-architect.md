@@ -61,11 +61,12 @@ if isinstance(d,list):
 echo -n "Work queue depth: "
 docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null
 
-hydra backlog ls | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for lane in ['queued','inProgress','blocked','triage','done']: print(f'  {lane}: {len(d.get(lane,[]))}')
-"
+# `hydra backlog ls` (Redis kanban lanes) was retired by ADR-0031 (#3439, PR
+# #3455) — `/api/backlog` 404s and `hydra backlog` is a retired stub
+# pointing at the replacement (issue #3745). Orchestrator work tracking is
+# now GitHub Issues on gaberoo322/hydra:
+gh issue list --repo gaberoo322/hydra --state open --limit 200 \
+  --json labels --jq '[.[] | .labels[].name] | group_by(.) | map({(.[0]): length}) | add' 2>/dev/null
 ```
 
 ### Agent Quality

@@ -23,7 +23,11 @@ CYCLE_COUNT=50  # tune to period
 
 hydra metrics --count $CYCLE_COUNT
 hydra scheduler status
-hydra backlog ls
+# `hydra backlog ls` (Redis kanban) was retired by ADR-0031 (#3439, PR
+# #3455) — `hydra backlog` is now a retired stub (issue #3745). Board flow
+# is GitHub Issues on gaberoo322/hydra:
+gh issue list --repo gaberoo322/hydra --state open --limit 200 \
+  --json labels --jq '[.[] | .labels[].name] | group_by(.) | map({(.[0]): length}) | add'
 docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue
 
 cd ~/hydra-betting && git log --oneline --since="24 hours ago"
