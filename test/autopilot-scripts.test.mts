@@ -1784,3 +1784,127 @@ describe("collect-state.sh wayfinder frontier no-pick sentinel (#3400)", () => {
     );
   });
 });
+
+/**
+ * Regression test for issue #3728 — `collect-state.sh`'s `untriaged_orphans`
+ * backstop must NOT count wayfinder tickets.
+ *
+ * `wayfinder:*` tickets carry NO standard lifecycle label by design (the
+ * off-radar rule): they dispatch solely via `wayfinder_orch_frontier`, never
+ * through `dev_orch` / `needs_triage_orch`. Before #3728 the orphan query
+ * (issue #2426) counted every open wayfinder ticket as an untriaged orphan,
+ * so `untriaged_orphans > 0` was permanently true while any map was open and
+ * re-fired `sweep_orch` on its 900s cooldown forever — each dispatch ~82k
+ * tokens re-confirming there was nothing to route.
+ *
+ * The fix is a PREFIX test (`startswith("wayfinder:")`), not an enumeration of
+ * the known wayfinder label names, so a future ticket type cannot reintroduce
+ * the churn. These cases run the COMMITTED jq filter through real `jq` so the
+ * shipped logic cannot drift, mirroring the precedent in
+ * test/autopilot-target-board-signals.test.mts (#3709). Both directions matter:
+ * a `wayfinder:grilling`-only issue is NOT an orphan, but a genuinely
+ * label-less issue STILL is — the backstop is not weakened into a no-op.
+ */
+describe("collect-state.sh untriaged_orphans wayfinder prefix exclusion (#3728)", () => {
+  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+
+  /** Extract the committed untriaged_orphans jq filter verbatim from the script. */
+  function extractFilter(): string {
+    const start = src.indexOf('echo -n "untriaged_orphans="');
+    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
+    const jqOpen = src.indexOf("--jq '", start);
+    assert.ok(jqOpen >= 0, "untriaged_orphans gh read missing its --jq filter");
+    const filterStart = jqOpen + "--jq '".length;
+    // The filter body uses only double-quoted strings, so the first single
+    // quote after the opening delimiter is the closing one — robust to any
+    // whitespace reformatting inside the filter.
+    const filterEnd = src.indexOf("'", filterStart);
+    assert.ok(filterEnd >= 0, "untriaged_orphans --jq filter is never closed");
+    return src.slice(filterStart, filterEnd);
+  }
+
+  /** Run the committed filter against synthetic issues through real jq. */
+  function count(issues: readonly { labels: string[] }[]): string {
+    const input = JSON.stringify(
+      issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
+    );
+    const r = spawnSync("jq", [extractFilter()], { input, encoding: "utf-8" });
+    assert.equal(r.status, 0, `untriaged_orphans jq failed: ${r.stderr}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  test("an issue labelled only wayfinder:grilling is NOT an untriaged orphan", () => {
+    assert.equal(
+      count([{ labels: ["wayfinder:grilling"] }]),
+      "0",
+      "a wayfinder ticket dispatches via wayfinder_orch_frontier, not sweep_orch — counting it re-fires sweep forever",
+    );
+  });
+
+  test("an issue with genuinely no labels IS still an untriaged orphan (backstop intact)", () => {
+    assert.equal(
+      count([{ labels: [] }]),
+      "1",
+      "the orphan backstop's real target — do not weaken it into a no-op while excluding wayfinder",
+    );
+  });
+
+  test("every known wayfinder label type is excluded", () => {
+    assert.equal(
+      count([
+        { labels: ["wayfinder:map"] },
+        { labels: ["wayfinder:grilling"] },
+        { labels: ["wayfinder:research"] },
+        { labels: ["wayfinder:task"] },
+        { labels: ["wayfinder:prototype"] },
+        { labels: ["wayfinder:destination-pending"] },
+      ]),
+      "0",
+    );
+  });
+
+  test("a FUTURE wayfinder label type is excluded too (prefix test, not enumeration)", () => {
+    assert.equal(
+      count([{ labels: ["wayfinder:foo"] }]),
+      "0",
+      "enumerate the known names and a new wayfinder type silently reintroduces the churn (#3728 AC #1)",
+    );
+  });
+
+  test("a mixed board counts exactly the non-wayfinder orphans", () => {
+    assert.equal(
+      count([
+        { labels: ["wayfinder:map"] },
+        { labels: ["wayfinder:grilling"] },
+        { labels: [] }, // genuine orphan
+        { labels: ["needs-triage"] }, // excluded (lifecycle label)
+        { labels: ["ready-for-human"] }, // excluded (operator-wait label)
+        { labels: ["enhancement"] }, // genuine orphan (non-lifecycle label)
+      ]),
+      "2",
+    );
+  });
+
+  test("a label that merely contains the substring is NOT excluded (prefix, not substring)", () => {
+    // `xwayfinder:y` does not START with `wayfinder:`, so it stays an orphan.
+    // Guards against a substring/contains regression that would over-exclude.
+    assert.equal(count([{ labels: ["xwayfinder:y"] }]), "1");
+  });
+
+  test("the exclusion is a PREFIX test on the source, not an enumeration", () => {
+    // Pin the SOURCE so a future edit cannot regress to a literal `index`
+    // match that would silently miss a new wayfinder type.
+    const filter = extractFilter();
+    assert.match(
+      filter,
+      /startswith\("wayfinder:"\)/,
+      'wayfinder exclusion must use startswith("wayfinder:") so a new ticket type is covered by construction',
+    );
+    // And it must NOT spell out the known names as an alternative match path.
+    assert.doesNotMatch(
+      filter,
+      /index\("wayfinder:[a-z]+"\)/,
+      "enumerating wayfinder:map/grilling/... would reintroduce the churn on the next wayfinder type",
+    );
+  });
+});
