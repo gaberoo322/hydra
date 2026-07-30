@@ -124,7 +124,11 @@ test("spot-checked classes carry the expected kind/skill/model", () => {
     assert.equal(row!.model, model, `${name} model`);
   };
   // The exact classes the acceptance criteria names.
-  check("dev_orch", "pipeline", "hydra-dev", "fable");
+  // dev_orch demoted fable -> sonnet 2026-07-29 (playbook per-class routing
+  // table). This assertion is what makes the census a real mirror of the
+  // playbook rather than a snapshot: the generator parses the routing table, so
+  // changing the table MUST move this expectation.
+  check("dev_orch", "pipeline", "hydra-dev", "sonnet");
   check("qa_orch", "pipeline", "hydra-qa", "sonnet");
   check("retro_orch", "signal", "hydra-retro", "fable");
   check("cleanup_orch", "signal", "hydra-cleanup", "haiku");
