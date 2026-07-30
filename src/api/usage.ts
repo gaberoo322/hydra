@@ -130,6 +130,10 @@ export function createUsageRouter() {
       const meter = await getEligibilityUsage();
       const eligibility = await getEligibilityView({
         snapshot: meter.input,
+        // BLOCK when quota cannot be measured (2026-07-30 operator decision,
+        // replacing the #1124 fail-open). Only true after ~30 min with no
+        // usable meter reading — transient 429s are absorbed by last-good.
+        meterUnavailable: meter.meterUnavailable,
         readPaused: async () => (await getAutopilotPaused()).paused,
         readSessionBlockedUntil: () => getSessionBlockedUntil(),
         readWorklessUntil: () => getWorklessUntil(),
