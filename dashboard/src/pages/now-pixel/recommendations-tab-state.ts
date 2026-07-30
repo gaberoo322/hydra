@@ -110,36 +110,79 @@ export function normaliseRecsResponse(body: unknown): RecsSnapshot {
  * reflected. Held as an overlay over the server list rather than as a mutated
  * copy of it, so the poll stays the single source of truth and no effect has
  * to mirror server state into local state.
+ *
+ * The overlay is **scoped to the run it was applied in** — `runId` is part of
+ * the value, and every operation below compares against the run currently on
+ * screen. This is load-bearing, not bookkeeping: dismiss and mute are
+ * themselves run-scoped server-side (`dismissRecommendationForRun` /
+ * `muteSeverityClassForRun`), and the Recs tab is conditionally rendered
+ * rather than remounted per run. Without the run key, an operator who muted
+ * "warn" once and left the tab open would have every LATER run's "warn" rows
+ * silently filtered out — no error, no empty-state, just missing
+ * recommendations. Keying the overlay makes it expire with its run at the
+ * point of use, so no reset effect is needed.
  */
 export interface PendingRemovals {
+  /** Run these removals belong to; `null` is the pristine overlay. */
+  runId: string | null;
   ids: readonly string[];
   severities: readonly string[];
 }
 
-export const NO_PENDING_REMOVALS: PendingRemovals = { ids: [], severities: [] };
+export const NO_PENDING_REMOVALS: PendingRemovals = {
+  runId: null,
+  ids: [],
+  severities: [],
+};
+
+/** True when the overlay was applied during the run currently on screen. */
+function appliesTo(pending: PendingRemovals, runId: string | null | undefined): boolean {
+  return pending.runId !== null && pending.runId === runId;
+}
 
 export function withDismissedId(
   pending: PendingRemovals,
+  runId: string | null | undefined,
   id: string,
 ): PendingRemovals {
+  const current = runId ?? null;
+  // A new run starts a fresh overlay rather than accumulating across runs.
+  if (pending.runId !== current) {
+    return { runId: current, ids: [id], severities: [] };
+  }
   if (pending.ids.includes(id)) return pending;
-  return { ids: [...pending.ids, id], severities: pending.severities };
+  return { runId: current, ids: [...pending.ids, id], severities: pending.severities };
 }
 
 export function withMutedSeverity(
   pending: PendingRemovals,
+  runId: string | null | undefined,
   severity: string,
 ): PendingRemovals {
+  const current = runId ?? null;
+  if (pending.runId !== current) {
+    return { runId: current, ids: [], severities: [severity] };
+  }
   if (pending.severities.includes(severity)) return pending;
-  return { ids: pending.ids, severities: [...pending.severities, severity] };
+  return {
+    runId: current,
+    ids: pending.ids,
+    severities: [...pending.severities, severity],
+  };
 }
 
-/** Hide every row the operator dismissed by id or muted by severity class. */
+/**
+ * Hide every row the operator dismissed by id or muted by severity class —
+ * but only while the overlay's run is still the one being displayed. An
+ * overlay from a finished run filters nothing.
+ */
 export function applyPendingRemovals(
   items: readonly Recommendation[] | null | undefined,
   pending: PendingRemovals,
+  runId: string | null | undefined,
 ): Recommendation[] {
   if (!Array.isArray(items)) return [];
+  if (!appliesTo(pending, runId)) return [...items];
   return items.filter(
     (r) => !pending.ids.includes(r?.id) && !pending.severities.includes(r?.severity),
   );

@@ -136,14 +136,17 @@ test("normaliseRecsResponse ignores a non-string run_id", () => {
 
 // --- optimistic removal overlay ------------------------------------------
 
+const RUN_A = "run-aaaa1111";
+const RUN_B = "run-bbbb2222";
+
 test("applyPendingRemovals is the identity when nothing is pending", () => {
-  assert.deepEqual(applyPendingRemovals(RECS, NO_PENDING_REMOVALS), RECS);
-  assert.deepEqual(NO_PENDING_REMOVALS, { ids: [], severities: [] });
+  assert.deepEqual(applyPendingRemovals(RECS, NO_PENDING_REMOVALS, RUN_A), RECS);
+  assert.deepEqual(NO_PENDING_REMOVALS, { runId: null, ids: [], severities: [] });
 });
 
 test("withDismissedId hides exactly that row, leaving the rest", () => {
-  const pending = withDismissedId(NO_PENDING_REMOVALS, "r2");
-  const visible = applyPendingRemovals(RECS, pending);
+  const pending = withDismissedId(NO_PENDING_REMOVALS, RUN_A, "r2");
+  const visible = applyPendingRemovals(RECS, pending, RUN_A);
   assert.deepEqual(
     visible.map((r) => r.id),
     ["r1", "r3", "r4"],
@@ -151,8 +154,8 @@ test("withDismissedId hides exactly that row, leaving the rest", () => {
 });
 
 test("withMutedSeverity hides every row of that class in one action", () => {
-  const pending = withMutedSeverity(NO_PENDING_REMOVALS, "warn");
-  const visible = applyPendingRemovals(RECS, pending);
+  const pending = withMutedSeverity(NO_PENDING_REMOVALS, RUN_A, "warn");
+  const visible = applyPendingRemovals(RECS, pending, RUN_A);
   assert.deepEqual(
     visible.map((r) => r.id),
     ["r1", "r3"],
@@ -160,36 +163,99 @@ test("withMutedSeverity hides every row of that class in one action", () => {
 });
 
 test("dismissals and mutes compose", () => {
-  let pending = withMutedSeverity(NO_PENDING_REMOVALS, "warn");
-  pending = withDismissedId(pending, "r1");
+  let pending = withMutedSeverity(NO_PENDING_REMOVALS, RUN_A, "warn");
+  pending = withDismissedId(pending, RUN_A, "r1");
   assert.deepEqual(
-    applyPendingRemovals(RECS, pending).map((r) => r.id),
+    applyPendingRemovals(RECS, pending, RUN_A).map((r) => r.id),
     ["r3"],
   );
 });
 
 test("the overlay is immutable and de-duplicates repeat actions", () => {
-  const once = withDismissedId(NO_PENDING_REMOVALS, "r1");
-  const twice = withDismissedId(once, "r1");
+  const once = withDismissedId(NO_PENDING_REMOVALS, RUN_A, "r1");
+  const twice = withDismissedId(once, RUN_A, "r1");
   assert.equal(twice, once, "a repeat dismiss must not grow the overlay");
   assert.deepEqual(NO_PENDING_REMOVALS.ids, [], "the shared empty overlay stays empty");
 
-  const muted = withMutedSeverity(NO_PENDING_REMOVALS, "warn");
-  assert.equal(withMutedSeverity(muted, "warn"), muted);
+  const muted = withMutedSeverity(NO_PENDING_REMOVALS, RUN_A, "warn");
+  assert.equal(withMutedSeverity(muted, RUN_A, "warn"), muted);
   assert.deepEqual(NO_PENDING_REMOVALS.severities, []);
 });
 
 test("the overlay keeps hiding a row across a poll that still returns it", () => {
   // The POST is in flight; the next 5s poll has not caught up yet. The row
-  // must stay hidden rather than flickering back in.
-  const pending = withDismissedId(NO_PENDING_REMOVALS, "r2");
-  const secondPoll = normaliseRecsResponse({ items: RECS, run_id: "run-abc" });
-  assert.ok(!applyPendingRemovals(secondPoll.items, pending).some((r) => r.id === "r2"));
+  // must stay hidden rather than flickering back in — but only within the
+  // SAME run.
+  const pending = withDismissedId(NO_PENDING_REMOVALS, RUN_A, "r2");
+  const secondPoll = normaliseRecsResponse({ items: RECS, run_id: RUN_A });
+  assert.ok(
+    !applyPendingRemovals(secondPoll.items, pending, secondPoll.runId).some(
+      (r) => r.id === "r2",
+    ),
+  );
 });
 
 test("applyPendingRemovals tolerates a null item list", () => {
-  assert.deepEqual(applyPendingRemovals(null, NO_PENDING_REMOVALS), []);
-  assert.deepEqual(applyPendingRemovals(undefined, NO_PENDING_REMOVALS), []);
+  assert.deepEqual(applyPendingRemovals(null, NO_PENDING_REMOVALS, RUN_A), []);
+  assert.deepEqual(applyPendingRemovals(undefined, NO_PENDING_REMOVALS, RUN_A), []);
+});
+
+// --- run-boundary scoping (QA regression, PR #3797) -----------------------
+//
+// The pre-refactor component re-fetched `items` wholesale every 5s, so a
+// dismiss/mute was a ~5s optimistic overlay before run-scoped server truth
+// (dismissRecommendationForRun / muteSeverityClassForRun) took over. The
+// overlay must not outlive its run: the Recs tab is conditionally rendered,
+// not remounted per run, so an operator who mutes "warn" during one run and
+// leaves the tab open would otherwise have every LATER run's "warn" rows
+// silently hidden — no error, no empty-state, just missing recommendations.
+
+test("dismiss and mute do not leak across a run boundary", () => {
+  // Run A: the operator dismisses r2 and mutes the whole "warn" class.
+  let pending = withDismissedId(NO_PENDING_REMOVALS, RUN_A, "r2");
+  pending = withMutedSeverity(pending, RUN_A, "warn");
+
+  // Within run A both actions take effect.
+  assert.deepEqual(
+    applyPendingRemovals(RECS, pending, RUN_A).map((r) => r.id),
+    ["r1", "r3"],
+    "within the run, dismiss + mute both filter",
+  );
+
+  // Run B starts. The component is not remounted, so the same overlay object
+  // survives — but it must no longer filter anything.
+  assert.deepEqual(
+    applyPendingRemovals(RECS, pending, RUN_B).map((r) => r.id),
+    ["r1", "r2", "r3", "r4"],
+    "the next run's recommendations must be unfiltered",
+  );
+});
+
+test("acting under a new run replaces the previous run's overlay", () => {
+  let pending = withMutedSeverity(NO_PENDING_REMOVALS, RUN_A, "warn");
+  pending = withDismissedId(pending, RUN_B, "r1");
+
+  assert.equal(pending.runId, RUN_B, "the overlay re-keys to the current run");
+  assert.deepEqual(pending.ids, ["r1"]);
+  assert.deepEqual(pending.severities, [], "run A's mute is dropped, not carried");
+
+  // Only r1 is hidden under run B; the previously-muted "warn" rows are back.
+  assert.deepEqual(
+    applyPendingRemovals(RECS, pending, RUN_B).map((r) => r.id),
+    ["r2", "r3", "r4"],
+  );
+});
+
+test("an overlay from a finished run does not filter the pre-run null state", () => {
+  // useApi yields runId null until the first poll resolves; a stale overlay
+  // must not filter that window either.
+  const pending = withMutedSeverity(NO_PENDING_REMOVALS, RUN_A, "warn");
+  assert.deepEqual(applyPendingRemovals(RECS, pending, null).map((r) => r.id), [
+    "r1",
+    "r2",
+    "r3",
+    "r4",
+  ]);
 });
 
 // --- header label ---------------------------------------------------------

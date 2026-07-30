@@ -48,7 +48,10 @@ export default function RecommendationsTab({ openJournal }) {
   const [menu, setMenu] = useState(null); // { x, y, severity }
 
   const { items: serverItems, runId } = normaliseRecsResponse(data);
-  const items = applyPendingRemovals(serverItems, pending);
+  // The overlay carries the run it was applied in, so it stops filtering by
+  // itself once a new run starts — no reset effect, and no chance of a mute
+  // from one run silently hiding the next run's recommendations.
+  const items = applyPendingRemovals(serverItems, pending, runId);
   const loadFailed = error != null;
 
   // Close the right-click menu on any click outside.
@@ -63,7 +66,7 @@ export default function RecommendationsTab({ openJournal }) {
   // every render, so a manual dependency list would be invalidated each time
   // anyway — and the React Compiler cannot preserve the memoization over it.
   async function handleDismiss(id) {
-    setPending((prev) => withDismissedId(prev, id));
+    setPending((prev) => withDismissedId(prev, runId, id));
     try {
       await apiFetch(dismissPath(id), {
         method: "POST",
@@ -77,7 +80,7 @@ export default function RecommendationsTab({ openJournal }) {
 
   async function handleMute(severity) {
     setMenu(null);
-    setPending((prev) => withMutedSeverity(prev, severity));
+    setPending((prev) => withMutedSeverity(prev, runId, severity));
     try {
       await apiFetch(MUTE_CLASS_PATH, {
         method: "POST",
