@@ -1,0 +1,1 @@
+- fix: `hydra backlog` and hydra-doctor's board/TEI-reachability collectors no longer target routes retired in #3455 (#3745)
