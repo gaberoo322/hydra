@@ -45,6 +45,7 @@
  */
 
 import type { UsageSnapshot } from "./types.ts";
+import type { EligibilityUsageInput } from "./eligibility-usage.ts";
 // The **Pacing Ceiling** env reader moved to the pure-leaf config module
 // (issue #1896); we keep the Pacing-Curve math here and read the ceiling
 // fraction from there.
@@ -214,7 +215,7 @@ export const FIVE_HOUR_THROTTLE_T2_CLASSES: readonly string[] = Object.freeze([
  * never inverts.
  */
 export function fiveHourThrottleShed(
-  snapshot: UsageSnapshot,
+  snapshot: EligibilityUsageInput,
   t1: number,
   t2: number,
 ): readonly string[] {
@@ -336,7 +337,15 @@ export interface UsageEligibility {
    * unset/unparseable. (issue #857)
    */
   anchor: string | null;
-  usage: UsageSnapshot;
+  /**
+   * The usage input the verdict was computed from. Narrowed to
+   * {@link EligibilityUsageInput} (2026-07-30) so a meter-only read can satisfy
+   * it — the admission path no longer produces a full snapshot. No consumer
+   * reads this field: `pace-gate.sh` reads `.allow`/`.reasons`/`.paceState` and
+   * `decide.py` reads `.allow`/`.shed`/`.reasons`. It is retained for
+   * observability, not contract.
+   */
+  usage: EligibilityUsageInput;
 }
 
 /**
@@ -356,7 +365,7 @@ export interface UsageEligibility {
  * within ±{@link PACE_STATE_TOLERANCE_PERCENT} percentage points. (issue #857)
  */
 function projectPacingCurve(
-  snapshot: UsageSnapshot,
+  snapshot: EligibilityUsageInput,
   ceiling: number,
 ): { paceState: PaceState; targetPercent: number; sinceResetPercent: number } {
   const sinceResetPercent = snapshot.percentSinceReset;
@@ -401,7 +410,7 @@ function projectPacingCurve(
  * the tracker stays out of the way until the operator's env-var
  * calibration confirms it's reading real ground truth.
  */
-export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
+export function projectEligibility(snapshot: EligibilityUsageInput): UsageEligibility {
   // EITHER hard-stop (5h OR weekly) blocks every dispatch class. Both ride the
   // same allow=false drain path the operator pause uses.
   const allow = !snapshot.emergencyStop && !snapshot.weeklyEmergencyStop;
