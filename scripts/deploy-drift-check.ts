@@ -39,6 +39,7 @@ import { promisify } from "node:util";
 import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 import {
   buildDriftAlertMessage,
@@ -46,6 +47,7 @@ import {
   DEFAULT_DRIFT_GRACE_SECONDS,
   type DriftReport,
 } from "./deploy-drift-logic.ts";
+import { pushAlert } from "../src/redis/alerts.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -185,12 +187,22 @@ function driftAgeSeconds(drifting: boolean, now: number = Math.floor(Date.now() 
 
 /**
  * Push a critical-level alert into the Redis alerts list on sustained drift.
- * Talks to Redis via `docker exec` (the same path the doctor playbook uses)
- * rather than importing ioredis — this script runs standalone on the
- * operator box, not inside the orchestrator process. Best-effort: a Redis
- * outage logs to stderr and never crashes the check.
+ *
+ * Routed through the `pushAlert` seam (src/redis/alerts.ts) — NOT a redis-cli
+ * shell-out. The prior shape passed `{ input: payload }` to the *async*
+ * `execFile`, which has no `input` option (only the `*Sync` variants do): the
+ * option was silently ignored, `redis-cli -x` read EOF, and every fire LPUSHed
+ * the EMPTY string — dropping the real payload AND poisoning the list (#3743).
+ * `pushAlert` pre-validates the payload against empty/unparseable input (#3609)
+ * and pushes+trims atomically (#3619), so neither failure can recur.
+ *
+ * Best-effort: a Redis outage logs to stderr and never crashes the check.
+ *
+ * Exported so the regression test (test/deploy-drift.test.mts) can assert the
+ * stored element parses and round-trips the payload — the exact assertion that
+ * would have caught the silent empty-string push.
  */
-async function emitAlert(report: DriftReport): Promise<void> {
+export async function emitAlert(report: DriftReport): Promise<void> {
   const payload = JSON.stringify({
     id: `deploy-drift-${Date.now()}`,
     type: "deploy-drift",
@@ -205,19 +217,7 @@ async function emitAlert(report: DriftReport): Promise<void> {
     },
   });
   try {
-    await execFileAsync(
-      "docker",
-      ["exec", "-i", "hydra-redis-1", "redis-cli", "-x", "LPUSH", "hydra:alerts"],
-      // `input` is a valid child_process option but absent from the
-      // promisify overload's type — cast to reach it (same shape as
-      // scripts/tool-currency-check.ts emitAlert).
-      { input: payload, timeout: 4000, encoding: "utf8" } as any,
-    );
-    await execFileAsync(
-      "docker",
-      ["exec", "hydra-redis-1", "redis-cli", "LTRIM", "hydra:alerts", "0", "99"],
-      { timeout: 4000, encoding: "utf8" },
-    );
+    await pushAlert(payload, 100);
   } catch (err: any) {
     console.error(`[deploy-drift] alert emit failed: ${err?.message ?? err}`);
   }
@@ -266,9 +266,15 @@ async function main(): Promise<number> {
   return 0;
 }
 
-main()
-  .then(code => process.exit(code))
-  .catch(err => {
-    console.error(`[deploy-drift] unexpected error: ${err?.stack ?? err}`);
-    process.exit(1);
-  });
+// Only run the driver when invoked directly (shebang `npx tsx …`). Importing
+// this module — e.g. from the regression test — must NOT trigger the git /
+// network I/O or `process.exit` (mirrors the `isCliEntrypoint` guard every CI
+// seam check uses).
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main()
+    .then(code => process.exit(code))
+    .catch(err => {
+      console.error(`[deploy-drift] unexpected error: ${err?.stack ?? err}`);
+      process.exit(1);
+    });
+}

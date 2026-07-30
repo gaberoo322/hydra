@@ -23,17 +23,25 @@
 #     and the cascade-routing escalation-provenance deposit at
 #       ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-escalation-<task_id>   (issue #3284)
 #   - <task_id> is the HARNESS task id. For the reflect/grounding modes the
-#     PRIMARY source is the `agent-<HASH>` worktree-dir basename (12+ hex chars).
-#     Fallback: HYDRA_AUTOPILOT_TASK_ID then CLAUDE_CODE_SESSION_ID, only when
-#     cwd is not an agent-<HASH> worktree.
-#     NOTE (#3477): the long-standing claim that this basename IS the `task_id`
-#     reap reads is FALSE for an Agent(isolation="worktree") dispatch — reap
-#     reads under the harness `.task.id` reported to the SubagentStop hook, a
-#     DIFFERENT identifier, so these deposits never joined and `testsAfter`
-#     recorded null on every pipeline cycle. The join is now bridged on the read
-#     side: `scripts/autopilot/hooks/on-subagent-stop.sh` re-keys these deposits
-#     from this basename onto the emitted `task_id` when the child completes.
+#     PRIMARY source is the `agent-<HASH>` worktree-dir basename with the
+#     `agent-` prefix STRIPPED (12+ hex chars) — so every deposit this script
+#     writes is keyed on a BARE hash. Fallback: HYDRA_AUTOPILOT_TASK_ID then
+#     CLAUDE_CODE_SESSION_ID, only when cwd is not an agent-<HASH> worktree.
 #     (#1945 — env vars alone are the WRONG key inside a worktree subagent.)
+#     NOTE (#3477, corrected by #3675): reap does NOT read under this bare hash
+#     verbatim — it reads under the autopilot slot `task_id`, which carries a
+#     prefix these filenames do not (`worktree-agent-<HASH>` on the live slots,
+#     `agent-<HASH>` on an older generation). That one-prefix gap is why
+#     `testsAfter` recorded null on every pipeline cycle while ~90 populated
+#     grounding deposits sat unread in /tmp.
+#     The join is bridged on the READ side, in ONE place:
+#     `reap.py::_resolve_deposit_path` (+ `_deposit_key_candidates`) tries the
+#     verbatim task_id first, then the `worktree-agent-` / `agent-` stripped
+#     forms, for all four deposit kinds. If you ever change the key this script
+#     WRITES, change that resolver in the same commit — `test/autopilot-deposit-
+#     key-resolution.test.mts` pins both ends together so they cannot drift.
+#     (The earlier #3477 bridge — an on-subagent-stop.sh re-key — never executed:
+#     `SubagentStop` is registered in no settings source Claude Code loads.)
 #   - The `escalation` mode is DIFFERENT (issue #3284): it is invoked by the
 #     autopilot HARNESS at escalation-dispatch time, NOT by a worktree subagent,
 #     so the harness is not inside the escalated worktree and cwd carries no

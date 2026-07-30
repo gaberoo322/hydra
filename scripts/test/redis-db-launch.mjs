@@ -24,7 +24,13 @@
  * # Contract (pinned by test/redis-db-helper.test.mts)
  *
  *   - A pre-set REDIS_URL is respected VERBATIM (CI or operator override):
- *     no derivation, no flush, no rewriting.
+ *     no derivation, no rewriting. It IS still flushed at run start when its
+ *     DB index is one this launcher owns (ALLOWED_DB_INDEXES) — see #3764: the
+ *     4 self-hosted runners are pinned to distinct owned DBs via their runner
+ *     `.env`, and skipping the flush there would cost them the clean slate this
+ *     launcher exists to provide. A pre-set url on a NON-owned DB (0, 1, a
+ *     remote host) is never flushed — that is the case the verbatim rule
+ *     protects, and `flushDbOnce` hard-refuses it independently.
  *   - The derived index is stable for a given root path and always inside
  *     2..15 — NEVER 0 (production) and NEVER 1 (the legacy shared test DB).
  *   - Within 2..15, the legacy per-file hard-pinned indexes {2..7} are also
@@ -59,6 +65,7 @@
 
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { connect } from "node:net";
 import { spawn } from "node:child_process";
 import process from "node:process";
@@ -83,9 +90,40 @@ export function deriveDbIndex(rootPath) {
  * Resolve the run's REDIS_URL: a pre-set env value wins verbatim; otherwise
  * derive a per-run DB from the root path.
  */
+/**
+ * Parse the trailing `/<n>` DB index off a redis URL, but ONLY when that index
+ * is one this launcher owns (ALLOWED_DB_INDEXES). Returns null otherwise —
+ * including for DB 0/1, a remote host, or an unparseable URL.
+ *
+ * This is what makes flushing a PRE-SET url safe: an index outside the owned
+ * set is never returned, so it can never reach flushDbOnce (which independently
+ * hard-refuses it anyway — belt and braces).
+ */
+export function parseOwnedDbIndex(url) {
+  // The HOST must be the local Redis this launcher flushes. flushDbOnce always
+  // connects to 127.0.0.1, so claiming a DB off a REMOTE url would flush the
+  // local DB of that index while the caller is pointed somewhere else entirely
+  // — destroying data the operator never named. Only localhost:<REDIS_PORT> is
+  // ever claimed.
+  const match = new RegExp(
+    `^redis://(?:localhost|127\\.0\\.0\\.1):${REDIS_PORT}/(\\d+)$`,
+  ).exec(String(url ?? "").trim());
+  if (!match) return null;
+  const db = Number(match[1]);
+  return ALLOWED_DB_INDEXES.includes(db) ? db : null;
+}
+
 export function resolveRedisUrl(env, rootPath) {
   if (env.REDIS_URL) {
-    return { url: env.REDIS_URL, derived: false, db: null };
+    // Respected VERBATIM — never rewritten (issue #1676 contract). But a
+    // pre-set url pointing at a DB this launcher OWNS still gets the
+    // start-of-run flush (issue #3764): the 4 self-hosted CI runners are
+    // assigned distinct owned DBs by their runner `.env`, and without this they
+    // would silently lose the clean slate that #1676 added — trading a
+    // cross-runner flake for a same-runner one, since consecutive jobs reuse
+    // one workspace. `db: null` (a real/remote Redis, DB 0/1) still means no
+    // flush, which is the case the verbatim rule exists to protect.
+    return { url: env.REDIS_URL, derived: false, db: parseOwnedDbIndex(env.REDIS_URL) };
   }
   const db = deriveDbIndex(rootPath);
   return { url: `redis://localhost:${REDIS_PORT}/${db}`, derived: true, db };
@@ -150,6 +188,22 @@ function flushDbOnce(db) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// CLI entrypoint. Guarded so this module can be IMPORTED for its exported pure
+// helpers (deriveDbIndex / resolveRedisUrl / parseOwnedDbIndex) without running
+// the launcher. Before this guard the top-level ran on import, so an importer
+// hit the no-args usage branch and `process.exit(1)` — which made the exports
+// effectively unreachable and forced every contract test through a subprocess.
+// ---------------------------------------------------------------------------
+const isMain =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+  await main();
+}
+
+async function main() {
 const args = process.argv.slice(2);
 const resolved = resolveRedisUrl(process.env, process.cwd());
 
@@ -166,13 +220,18 @@ if (args.length === 0) {
   process.exit(1);
 }
 
-if (resolved.derived) {
+// Flush whenever the resolved DB is one this launcher OWNS — whether it was
+// derived from the worktree path or pre-set (issue #3764). A pre-set url on a
+// non-owned DB (0/1, remote) resolves db=null and is left untouched.
+if (resolved.db !== null) {
   await flushDbOnce(resolved.db);
   // Info to stderr so the node:test TAP footer on stdout (the CI MIN_TESTS
   // grep surface) stays untouched.
   console.error(
     `[redis-db-launch] per-run Redis DB ${resolved.db} ` +
-      `(derived from ${resolve(process.cwd())})`,
+      (resolved.derived
+        ? `(derived from ${resolve(process.cwd())})`
+        : `(pre-set REDIS_URL)`),
   );
 }
 
@@ -192,3 +251,4 @@ child.on("exit", (code, signal) => {
   }
   process.exit(code ?? 1);
 });
+}

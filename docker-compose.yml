@@ -97,8 +97,27 @@ services:
   # below. A targeted `docker compose up -d openviking` ALSO honours it, but a
   # targeted bring-up of any OTHER service will NOT create tei-embed. The named
   # `tei-embed-data` volume caches the downloaded model across restarts.
+  #
+  # IMAGE PIN — BY DIGEST, DELIBERATELY (issue #3746). The former `:cpu-1.9`
+  # tag (really cpu-1.9.3, built 2026-03-23) CANNOT START on this checkpoint:
+  # `nomic-embed-text-v1.5`'s config.json carries BOTH `max_position_embeddings`
+  # (line 33) and `n_positions` (line 42), which are serde aliases for the same
+  # field, so 1.9.3's Rust config parser rejects it —
+  #   Error: Failed to parse `config.json`
+  #   Caused by: duplicate field `max_position_embeddings` at line 42 column 15
+  # — and the container crash-loops forever, never reaching `service_healthy`.
+  # That is why tei-embed did not exist on the host: not deploy drift, a
+  # container that could never boot. Newer TEI builds accept the checkpoint
+  # (verified live: reaches `Ready`, serves nomic-embed-text at 768 dims,
+  # matching docker/ov.conf `dimension: 768`).
+  # A DIGEST, not a tag, because there is no newer VERSIONED tag to move to —
+  # cpu-1.9.3 is the newest semver published (cpu-1.10/1.11/2.0 all 404) and the
+  # fix ships only under the floating `cpu-latest`. Pinning the digest keeps the
+  # bring-up reproducible instead of silently tracking whatever `latest` becomes,
+  # the same discipline as the pinned comby / osv-scanner binaries (ADR-0005).
+  # Digest below == `cpu-latest` as of 2026-07-28 (revision 4150561d).
   tei-embed:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    image: ghcr.io/huggingface/text-embeddings-inference@sha256:cb570aabbfa016b86684f576b5bd72d1ee96cc0b7a00b0ad221b298762b32157
     command:
       - "--model-id"
       - "nomic-ai/nomic-embed-text-v1.5"
@@ -112,9 +131,19 @@ services:
       - tei-embed-data:/data
     healthcheck:
       # TEI exposes a /health endpoint; healthy only once the model is loaded
-      # and the router is accepting requests. Uses wget (present in the TEI
-      # image) rather than curl.
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/health || exit 1"]
+      # and the router is accepting requests.
+      #
+      # USES curl, NOT wget (issue #3746). The digest-pinned image ships curl at
+      # /usr/bin/curl and has NO wget — `wget -q -O /dev/null …` fails every
+      # probe with `/bin/sh: 1: wget: not found`, so the container never reaches
+      # `healthy` even while the router logs `Ready` and serves embeddings
+      # correctly. That silently blocks `openviking`, which gates on
+      # `depends_on: tei-embed (condition: service_healthy)`.
+      # Verified in-container: `curl -fsS -o /dev/null http://localhost:80/health`
+      # exits 0. Do NOT revert to wget without first confirming it exists in the
+      # pinned image — the previous comment asserted wget was present, which was
+      # true of cpu-1.9.3 and is inverted here.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:80/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
