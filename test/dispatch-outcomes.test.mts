@@ -39,6 +39,9 @@ import {
   DISPATCH_OUTCOME_TTL_SECONDS,
   type DispatchOutcomeRecord,
 } from "../src/redis/dispatch-outcomes.ts";
+// Issue #3739 defect (b): the run-attribution parser that getDispatchOutcomesForRun
+// depends on (its runIdPrefix is parsed from the cycleId by this function).
+import { parseDispatchCycleId } from "../src/taxonomy/classes.ts";
 
 function record(over: Partial<DispatchOutcomeRecord> = {}): DispatchOutcomeRecord {
   return {
@@ -253,5 +256,183 @@ describe("dispatch-outcomes Redis seam (issue #2942)", () => {
     assert.equal(res.ok, true);
     if (res.ok !== true) return;
     assert.equal(res.records.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #3739 — run-attribution invariants pinned at the write boundary.
+//
+// Three defects in the same malformed-cycleId population: (a) field-shifted
+// writes (class/skill name in cycleId), (b) suffix rejection, (c) non-dispatch
+// ids. The prior three issues (#3449/#3579/#3583) chased this against the
+// anchor-type classifier; measured against the run-attribution consumer the
+// orphan rate was still 38%, so these pin the invariant where BOTH consumers
+// benefit — the write boundary.
+//
+// Each describe below owns its OWN Redis connection + lifecycle (never nested
+// inside the suite above, whose after() disconnects its connection — per the
+// CLAUDE.md shared-Redis teardown rule). The parser describe is pure (no Redis).
+// ---------------------------------------------------------------------------
+
+describe("parseDispatchCycleId accepts a trailing modifier suffix (issue #3739 defect b)", () => {
+  // The run prefix, turn and class are all present in their fenced positions, so
+  // a remediation/retry dispatch IS a real dispatch that belongs to its run's
+  // outcome index. Brings the run-attribution parser into agreement with the
+  // anchor-type classifier (whose fence already accepted a suffix, #3390/#3403).
+  test("parses a remediation suffix", () => {
+    assert.deepEqual(
+      parseDispatchCycleId("worktree-agent-a1c24124-t5-dev_orch-remediate"),
+      { runIdPrefix: "a1c24124", turn: 5, className: "dev_orch" },
+    );
+  });
+
+  test("parses an issue-number suffix", () => {
+    assert.deepEqual(
+      parseDispatchCycleId("worktree-agent-a1c24124-t5-dev_orch-3170"),
+      { runIdPrefix: "a1c24124", turn: 5, className: "dev_orch" },
+    );
+  });
+
+  test("parses a multi-underscore class with a retry suffix", () => {
+    assert.deepEqual(
+      parseDispatchCycleId("worktree-agent-0a1b2c3d-t2-wire_or_retire_target-retry"),
+      { runIdPrefix: "0a1b2c3d", turn: 2, className: "wire_or_retire_target" },
+    );
+  });
+
+  test("the class capture excludes the suffix (className is the bare class token)", () => {
+    const parsed = parseDispatchCycleId("worktree-agent-deadbeef-t3-cleanup_orch-remediate");
+    assert.ok(parsed);
+    assert.equal(parsed!.className, "cleanup_orch");
+  });
+
+  test("still rejects a genuinely malformed id — the suffix is optional, the fence is not", () => {
+    // No -t<N>- fence.
+    assert.equal(parseDispatchCycleId("worktree-agent-277e4476-dev_orch"), null);
+    // No _orch/_target class tail.
+    assert.equal(parseDispatchCycleId("worktree-agent-277e4476-t4-devorch"), null);
+    // Bare UUID.
+    assert.equal(
+      parseDispatchCycleId("a1c24124-2cc0-4665-b179-4c8fc6851dc8"),
+      null,
+    );
+  });
+});
+
+describe("dispatch-outcomes run-attribution guard + non-dispatch exclusion (issue #3739)", () => {
+  let redis: any;
+
+  before(() => {
+    redis = new Redis(REDIS_URL);
+  });
+
+  beforeEach(async () => {
+    const keys = await redis.keys("hydra:autopilot:dispatch-outcome*");
+    if (keys.length > 0) await redis.del(...keys);
+  });
+
+  after(async () => {
+    const keys = await redis.keys("hydra:autopilot:dispatch-outcome*");
+    if (keys.length > 0) await redis.del(...keys);
+    await redis.quit();
+  });
+
+  test("defect (a): rejects a class name in the cycleId slot (field-shifted) — not stored", async () => {
+    // The real dispatch id landed in `outcome`; the status is lost. The record
+    // mirrors the exact field-shifted shape measured in the issue.
+    const rec = record({
+      cycleId: "dev_orch",
+      runIdPrefix: null,
+      turn: null,
+      className: null,
+      skill: null,
+      outcome: "worktree-agent-c36325a4-t2-dev_orch",
+    });
+    const res = await putDispatchOutcome(rec);
+    assert.equal(res.ok, false);
+
+    // Rejected at the boundary: no hash, no index member.
+    const hash = await redis.hgetall(dispatchOutcomeKey(rec.cycleId));
+    assert.equal(Object.keys(hash).length, 0);
+    const score = await redis.zscore(dispatchOutcomesIndexKey(), rec.cycleId);
+    assert.equal(score, null);
+  });
+
+  test("defect (a): rejects a skill name in the cycleId slot (field-shifted) — not stored", async () => {
+    const rec = record({
+      cycleId: "hydra-target-build",
+      runIdPrefix: null,
+      turn: null,
+      className: null,
+      skill: null,
+      outcome: "worktree-agent-73107509-t2-dev_target",
+    });
+    const res = await putDispatchOutcome(rec);
+    assert.equal(res.ok, false);
+    const score = await redis.zscore(dispatchOutcomesIndexKey(), rec.cycleId);
+    assert.equal(score, null);
+  });
+
+  test("defect (a): the guard is narrow — a real dispatch id is still accepted", async () => {
+    const rec = record(); // worktree-agent-277e4476-t4-dev_orch
+    const res = await putDispatchOutcome(rec);
+    assert.equal(res.ok, true);
+    const score = await redis.zscore(dispatchOutcomesIndexKey(), rec.cycleId);
+    assert.equal(Number(score), rec.recordedAt);
+  });
+
+  test("defect (c): a non-dispatch agent-<hex> cycleId is stored but excluded from the run index", async () => {
+    // Non-dispatch records (bare UUID / bare hex / agent-<hex>) are accepted
+    // (only class/skill names are rejected) but carry a null runIdPrefix, so
+    // they are reachable via the rolling window yet invisible to a per-run read.
+    const rec = record({
+      cycleId: "agent-abd79a6afa21aa714",
+      runIdPrefix: null,
+      turn: null,
+      className: null,
+      skill: null,
+    });
+    const res = await putDispatchOutcome(rec);
+    assert.equal(res.ok, true);
+
+    // Reachable via the cross-run rolling window.
+    const listed = await listDispatchOutcomes({ sinceMs: 0 });
+    assert.equal(listed.ok, true);
+    if (listed.ok !== true) return;
+    const got = listed.records.find((r) => r.cycleId === rec.cycleId);
+    assert.ok(got);
+    assert.equal(got!.runIdPrefix, null);
+
+    // Never returned by a per-run read (null prefix never matches).
+    const forRun = await getDispatchOutcomesForRun(
+      "abd79a6a-1234-5678-9abc-def012345678",
+    );
+    assert.equal(forRun.ok, true);
+    if (forRun.ok !== true) return;
+    assert.equal(
+      forRun.records.find((r) => r.cycleId === rec.cycleId),
+      undefined,
+    );
+  });
+
+  test("defect (b): a suffixed dispatch id is attributable to its run via getDispatchOutcomesForRun", async () => {
+    // End-to-end pin: the suffix-acceptance fix makes a remediation/retry
+    // dispatch visible to the run-attribution consumer that was orphaning it.
+    const rec = record({
+      cycleId: "worktree-agent-a1c24124-t5-dev_orch-remediate",
+      runIdPrefix: "a1c24124",
+      turn: 5,
+    });
+    const res = await putDispatchOutcome(rec);
+    assert.equal(res.ok, true);
+
+    const forRun = await getDispatchOutcomesForRun(
+      "a1c24124-2cc0-4665-b179-4c8fc6851dc8",
+    );
+    assert.equal(forRun.ok, true);
+    if (forRun.ok !== true) return;
+    assert.equal(forRun.records.length, 1);
+    assert.equal(forRun.records[0].cycleId, rec.cycleId);
+    assert.equal(forRun.records[0].runIdPrefix, "a1c24124");
   });
 });

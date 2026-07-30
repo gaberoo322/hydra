@@ -59,6 +59,7 @@ import { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
 import { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
+import { runGlmEligibilitySweep } from "./chores/glm-eligibility-sweep.ts";
 import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
@@ -263,10 +264,27 @@ async function runHousekeeping(
     getCleanupLastDaily?: () => Promise<string | null>;
     /** Injectable clock for the cadence guards; defaults to `Date.now`. */
     now?: () => number;
+    /**
+     * Injectable GLM eligibility sweep runner (issue #3756). Defaults to the
+     * real {@link runGlmEligibilitySweep} chore, so production is wired live.
+     * A unit test injects a no-op so `runHousekeeping` composition can be
+     * exercised WITHOUT a live GitHub write: the sweep is the one housekeeping
+     * chore that mutates an external service (`addIssueLabel`, #3755) and has no
+     * Redis substrate to fail-soft on the way the gh-reading chores do, so the
+     * composition tests must opt out of the real write rather than label real
+     * orchestrator issues.
+     */
+    runGlmEligibilitySweep?: () => Promise<number>;
   } = {},
 ): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
   const skipped: string[] = [];
+
+  // Issue #3756: the GLM eligibility sweep is injectable so a composition test
+  // can run `runHousekeeping` WITHOUT a live GitHub write (the sweep is the one
+  // chore that mutates an external service and has no Redis substrate to
+  // fail-soft on). Production binds the real chore via the default.
+  const runSweep = deps.runGlmEligibilitySweep ?? runGlmEligibilitySweep;
 
   // The chores as declarations. Each carries an optional `guard` (the cadence
   // window, read at the composition level) and a `work` thunk that delegates to
@@ -355,6 +373,28 @@ async function runHousekeeping(
       name: "worktree-orphan-prune",
       work: async () => {
         await runWorktreeOrphanPrune();
+      },
+    },
+
+    {
+      // Issue #3756: GLM eligibility sweep — the missing PRODUCER of the
+      // `glm-eligible` issue label (ADR-0032). #3687 built the consumer half
+      // (board-state subtracts a glm-eligible issue from the Opus
+      // ready_for_agent pool) but nothing applied the label, so a drainer would
+      // wake into an empty queue. This sweep labels every open ready-for-agent
+      // orchestrator issue lacking glm-eligible, skipping glm-withhold (sticky
+      // opt-out) and target-backlog (Target routing) — structurally the same
+      // reconcile-set-against-predicate job as worktree-orphan-prune. Writes
+      // through the seam addIssueLabel (#3755), never a direct gh shell-out.
+      // Fail-closed: an unreadable board labels nothing. No Redis time-guard —
+      // intrinsically idempotent (a labelled issue no longer lacks
+      // glm-eligible, so the next tick skips it), so an hourly tick against an
+      // all-labelled set is a guaranteed no-op. Never throws — faults fold to a
+      // logged 0. Logs the per-run labelled count so the beachhead report
+      // (#3690) and the operator can see the drainer pool forming.
+      name: "glm-eligibility-sweep",
+      work: async () => {
+        await runSweep();
       },
     },
 

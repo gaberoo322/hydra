@@ -43,6 +43,13 @@
 
 import { getRedisConnection } from "./connection.ts";
 import { logger } from "../logger.ts";
+// Issue #3739 defect (a): the write-boundary guard that rejects a field-shifted
+// cycleId (one that is itself a dispatch class/skill name). The taxonomy leaf
+// owns the class/skill alphabet; importing it here couples the seam to a
+// record-validity check, which is consistent with the domain semantics this
+// seam already encodes (escalation provenance, dark-tolerance field encoding).
+// redis-seam-check permits the edge (it forbids only the legacy Redis surface).
+import { cycleIdIsClassOrSkillName } from "../taxonomy/classes.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,6 +70,20 @@ export interface DispatchOutcomeRecord {
    * The cycleId-embedded prefix — not the currently-active run — attributes
    * the record to the run whose DECISION is being scored (the #1903 handoff
    * baton-pass routinely has the next run reap a prior run's dispatch).
+   *
+   * Issue #3739 defect (c): a null `runIdPrefix` is the INTENTIONAL, documented
+   * arm for NON-DISPATCH records — cycleIds that are not harness-stamped
+   * dispatch ids and so carry no decodable run/turn/class. The three known
+   * non-dispatch shape families are: a bare run/cycle UUID
+   * (`a1c24124-2cc0-…`), a bare hex task id (`abb6054033e7118ec`), and an
+   * `agent-<hex>` harness task id (`agent-abd79a6afa21aa714`). These are
+   * written by non-dispatch consumers (the qa_orch relay, reflection records,
+   * harness task ids) and are EXCLUDED from the per-run outcome index BY
+   * DESIGN: a null prefix never matches {@link getDispatchOutcomesForRun},
+   * which is correct — we do NOT guess a run prefix from a bare UUID's first
+   * 8 chars (#2822 never-guess, because those chars are not the dispatching
+   * run). Such records remain reachable via {@link listDispatchOutcomes} (the
+   * cross-run rolling window) but are never returned by a per-run read.
    */
   runIdPrefix: string | null;
   /** Autopilot turn number the dispatch was made on. Null when unparseable. */
@@ -212,6 +233,33 @@ export async function putDispatchOutcome(
   indexMax: number = DISPATCH_OUTCOMES_INDEX_MAX,
 ): Promise<DispatchOutcomeWriteResult> {
   try {
+    // Issue #3739 defect (a): write-boundary guard against field-shifted
+    // cycleIds. A dispatch cycleId is always harness-stamped, so one that IS a
+    // known class/skill name (`dev_orch`, `hydra-target-build`) is a positional-
+    // swap write bug — the real dispatch id landed in `outcome`, and the status
+    // is lost with it, so the record is unrecoverable. Reject it loud HERE, at
+    // the single chokepoint every dispatch-outcome record funnels through, so
+    // the malformed shape can never enter the index and BOTH consumers stay
+    // clean (run attribution via getDispatchOutcomesForRun, and the anchor-type
+    // classifier) — the lesson from #3583: fixing one consumer did not fix the
+    // other, so pin the invariant at the write boundary. Best-effort/never-
+    // throws: the rejection surfaces as a structured {ok:false} the caller logs
+    // and never blocks the reap path.
+    if (cycleIdIsClassOrSkillName(record.cycleId)) {
+      const msg =
+        `[dispatch-outcomes] putDispatchOutcome rejected field-shifted record: ` +
+        `cycleId "${record.cycleId}" is a dispatch class/skill name, not a ` +
+        `dispatch id (cue: dispatch-outcome-cycleid-is-class-or-skill-name, ` +
+        `issue #3739)`;
+      logger.warn(
+        {
+          cycleId: record.cycleId,
+          cue: "dispatch-outcome-cycleid-is-class-or-skill-name",
+        },
+        "[dispatch-outcomes] rejected field-shifted record (cycleId is a class/skill name, not a dispatch id)",
+      );
+      return { ok: false, error: msg };
+    }
     const r = getRedisConnection();
     const key = dispatchOutcomeKey(record.cycleId);
     const indexKey = dispatchOutcomesIndexKey();
