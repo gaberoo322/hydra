@@ -25,6 +25,7 @@ import {
   setSessionBlockedUntil,
 } from "../redis/session-block.ts";
 import { getWorklessUntil } from "../redis/workless-hint.ts";
+import { getEligibilityUsage } from "../cost/eligibility-usage.ts";
 import { getEligibilityView } from "../aggregators/usage-eligibility.ts";
 import { booleanFlag } from "../schemas/common.ts";
 
@@ -113,11 +114,22 @@ export function createUsageRouter() {
    * live Redis accessors, and formats the response.
    */
   router.get("/usage/eligibility", async (req, res) => {
-    const force = ForceQuerySchema.parse(req.query).force;
+    // METER-ONLY (2026-07-30). This handler deliberately does NOT call
+    // getUsage(): that runs the transcript scan, which grew to ~1.7 GB of
+    // in-window JSONL and stopped answering inside the Pace Gate's 10s probe
+    // budget, silently halting autopilot launches while /api/health stayed
+    // green. Every field the verdict reads comes from the Anthropic OAuth
+    // meter plus config — see src/cost/eligibility-usage.ts for the full
+    // rationale, including why this is also the more ACCURATE source.
+    //
+    // `?force=1` is accepted and ignored here: it exists to bust the snapshot
+    // scan cache, and there is no scan on this path. The meter has its own
+    // independent TTL + backoff and must not be forced by an HTTP caller —
+    // that is exactly how a rate-limited meter gets hammered.
     try {
-      const snapshot = await getUsage({ force });
+      const meter = await getEligibilityUsage();
       const eligibility = await getEligibilityView({
-        snapshot,
+        snapshot: meter.input,
         readPaused: async () => (await getAutopilotPaused()).paused,
         readSessionBlockedUntil: () => getSessionBlockedUntil(),
         readWorklessUntil: () => getWorklessUntil(),
