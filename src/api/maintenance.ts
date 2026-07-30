@@ -15,7 +15,18 @@ import type { PublishableBus } from "../event-bus-seams.ts";
  * own internal time-guard, so a second immediate call skips the guarded
  * chores. The `{ ran, skipped }` summary makes that observable.
  */
-export function createMaintenanceRouter(eventBus: PublishableBus) {
+export function createMaintenanceRouter(
+  eventBus: PublishableBus,
+  /**
+   * Optional housekeeping-deps override (issue #3756). Production passes nothing
+   * (every chore binds its real implementation); a test passes a no-op
+   * `runGlmEligibilitySweep` so the router can be exercised WITHOUT a live
+   * GitHub write (the sweep is the one chore that mutates an external service
+   * and has no Redis substrate to fail-soft on). Typed off `runHousekeeping`'s
+   * own deps param so this adapter stays agnostic to which deps exist.
+   */
+  opts: { housekeepingDeps?: Parameters<typeof runHousekeeping>[1] } = {},
+) {
   const router = Router();
 
   // POST /maintenance/housekeeping — run the housekeeping chores.
@@ -23,7 +34,7 @@ export function createMaintenanceRouter(eventBus: PublishableBus) {
   // a window are no-ops (reflected in the `skipped` array of the summary).
   router.post("/maintenance/housekeeping", async (req, res) => {
     try {
-      const summary = await runHousekeeping(eventBus);
+      const summary = await runHousekeeping(eventBus, opts.housekeepingDeps);
       res.json({ ok: true, ...summary });
     } catch (err: any) {
       // runHousekeeping is itself defensive (per-chore try/catch), but guard

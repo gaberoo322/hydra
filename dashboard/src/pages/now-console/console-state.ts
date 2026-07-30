@@ -7,8 +7,9 @@
  * three load-bearing derivations so they can be unit-tested in the
  * orchestrator suite (`test/now-console-state.test.mts`) the same way
  * `now-pixel/oak-tab-state.ts` is — the dashboard ships no JSX test runner
- * (see `dashboard/test/recommendations-tab.test.jsx`), so all real test
- * coverage lives in the pure `.ts` here.
+ * and deliberately will not adopt one (issue #3706: no required CI job runs
+ * inside `dashboard/`, so a JSX suite could never block a regression), so all
+ * real test coverage lives in the pure `.ts` here.
  *
  *   1. View-mode persistence (Console default ↔ Habitat pixel), deep-linked
  *      via `?view=` and persisted to localStorage.

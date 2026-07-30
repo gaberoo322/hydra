@@ -387,6 +387,10 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     getMemoryLastConsolidation: freshTs,
     getCleanupLastDaily: freshTs,
     now: () => now,
+    // Issue #3756: stub the GLM eligibility sweep so this composition test never
+    // performs a live GitHub write (the sweep mutates an external service with
+    // no Redis substrate to fail-soft on, unlike the gh-reading chores).
+    runGlmEligibilitySweep: async () => 0,
   };
   const guardedChores = [
     "weekly-summary",
@@ -424,6 +428,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
       getCleanupLastDaily: nullTs,
       now: () => now,
       publishBrierMetric: async () => ({ ok: true }),
+      runGlmEligibilitySweep: async () => 0,
     });
     const classified = new Set([...summary.ran, ...summary.skipped]);
     for (const name of guardedChores) {
@@ -441,6 +446,7 @@ describe("runHousekeeping — cadence guards injectable without Redis (issue #30
     // the default binding is intact (zero-diff for callers that pass nothing).
     const summary = await runHousekeeping(makeBus() as any, {
       publishBrierMetric: async () => ({ ok: true }),
+      runGlmEligibilitySweep: async () => 0,
     });
     assert.ok(Array.isArray(summary.ran), "ran is an array");
     assert.ok(Array.isArray(summary.skipped), "skipped is an array");
@@ -472,6 +478,7 @@ describe("runHousekeeping — attribution-record runs before holdback-merge-watc
   test("recorder is sequenced ahead of the registry-draining watch", async () => {
     const summary = await runHousekeeping(makeBus() as any, {
       publishBrierMetric: async () => ({ ok: true }),
+      runGlmEligibilitySweep: async () => 0,
     });
 
     const bothInRan =

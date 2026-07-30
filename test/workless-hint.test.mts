@@ -16,7 +16,10 @@
  *   - worklessBackoffSec: env override + fail-safe-to-default on garbage;
  *   - overlayWorklessEligibility (pure): surfaces reasons.worklessUntil while
  *     future WITHOUT flipping allow; no-op on null/past;
- *   - GET /api/usage/eligibility: folds the Redis hint into reasons.worklessUntil.
+ *   - the eligibility verdict's composition leaf (`getEligibilityView`, what the
+ *     GET /usage/eligibility route delegates to): folds the workless hint into
+ *     reasons.worklessUntil — pinned with injected deps, never live quota state
+ *     (issue #3765).
  *
  * The endRun zero-dispatch stamping is pinned in test/autopilot-runs-deps.test.mts
  * (the deps-injection suite that already owns the endRun idempotency cases).
@@ -40,7 +43,7 @@ import {
 import { overlayWorklessEligibility, projectEligibility } from "../src/cost/eligibility.ts";
 import type { UsageSnapshot } from "../src/cost/index.ts";
 import { redisKeys } from "../src/redis/keys.ts";
-import { createUsageRouter } from "../src/api/usage.ts";
+import { getEligibilityView, type EligibilityViewDeps } from "../src/aggregators/usage-eligibility.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
@@ -64,33 +67,47 @@ after(async () => {
   }
 });
 
-function mockReq(): any {
-  return { method: "GET", url: "/", headers: {}, query: {}, params: {}, body: {} };
-}
+/**
+ * A minimal snapshot that projects to a clean, fully-eligible verdict
+ * (`allow=true`, no shed) — the deterministic baseline the advisory workless
+ * overlay is folded onto. Shared by the pure-overlay and composition cases
+ * below. Cast through `unknown` so a test stub needn't build a whole
+ * `UsageSnapshot` (`projectEligibility` only reads the hard-stop + pacing
+ * scalars on this slice).
+ */
+const CLEAN_ELIGIBLE_SNAPSHOT = {
+  emergencyStop: false,
+  weeklyEmergencyStop: false,
+  calibrated: true,
+  weeklyResetAnchor: null,
+  percentSinceReset: 0,
+} as unknown as UsageSnapshot;
 
-function mockRes(): any {
-  const res: any = {
-    _status: 200,
-    _body: null,
-    status(code: number) { res._status = code; return res; },
-    json(body: any) { res._body = body; return res; },
-    send(body: any) { res._body = body; return res; },
-    setHeader() { return res; },
-    end() { return res; },
+// Fixed clock + a future workless-hint instant, injected into `getEligibilityView`
+// so the future-vs-past overlay cutoff never depends on wall-clock time or live
+// Redis (issue #3765).
+const NOW_MS = Date.parse("2026-06-02T12:00:00.000Z");
+const FUTURE_HINT_MS = NOW_MS + 30 * 60 * 1000; // +30m — a live workless hint
+
+/**
+ * Build a resolved `EligibilityViewDeps` bag pinned to the clean snapshot + a
+ * fixed clock, with the three overlay-input readers defaulting to their safe
+ * "nothing set" values. The workless reader — the one knob these cases vary —
+ * is the single overridable input. Mirrors the injection pattern in
+ * `test/aggregator-usage-eligibility.test.mts`, so the verdict is decided by
+ * the injected snapshot alone, NEVER by live production quota state.
+ */
+function eligibilityDeps(
+  overrides: Partial<EligibilityViewDeps> = {},
+): EligibilityViewDeps {
+  return {
+    snapshot: CLEAN_ELIGIBLE_SNAPSHOT,
+    readPaused: async () => false,
+    readSessionBlockedUntil: async () => null,
+    readWorklessUntil: async () => null,
+    now: () => NOW_MS,
+    ...overrides,
   };
-  return res;
-}
-
-function findHandler(router: any, method: string, path: string): Function | null {
-  for (const layer of router.stack) {
-    if (layer.route && layer.route.path === path) {
-      if (layer.route.methods[method.toLowerCase()]) {
-        const stack = layer.route.stack;
-        return stack[stack.length - 1].handle;
-      }
-    }
-  }
-  return null;
 }
 
 describe("workless-hint Redis accessor (issue #2956)", () => {
@@ -156,18 +173,11 @@ describe("worklessBackoffSec (issue #2956)", () => {
 });
 
 describe("overlayWorklessEligibility (pure) (issue #2956)", () => {
-  // A minimal snapshot that projects allow=true, paceState "on".
-  const snapshot = {
-    emergencyStop: false,
-    weeklyEmergencyStop: false,
-    calibrated: true,
-    weeklyResetAnchor: null,
-    percentSinceReset: 0,
-  } as unknown as UsageSnapshot;
+  // Reuses CLEAN_ELIGIBLE_SNAPSHOT (projects allow=true, paceState "on").
 
   test("a FUTURE hint surfaces reasons.worklessUntil WITHOUT flipping allow", () => {
     const now = Date.now();
-    const base = projectEligibility(snapshot);
+    const base = projectEligibility(CLEAN_ELIGIBLE_SNAPSHOT);
     assert.equal(base.allow, true, "precondition: base projection allows");
 
     const overlaid = overlayWorklessEligibility(base, now + 30 * 60 * 1000, now);
@@ -179,7 +189,7 @@ describe("overlayWorklessEligibility (pure) (issue #2956)", () => {
 
   test("a null hint returns the input UNCHANGED", () => {
     const now = Date.now();
-    const base = projectEligibility(snapshot);
+    const base = projectEligibility(CLEAN_ELIGIBLE_SNAPSHOT);
     const overlaid = overlayWorklessEligibility(base, null, now);
     assert.equal(overlaid.reasons.worklessUntil, null);
     assert.equal(overlaid.allow, base.allow);
@@ -187,37 +197,45 @@ describe("overlayWorklessEligibility (pure) (issue #2956)", () => {
 
   test("a PAST hint returns the input UNCHANGED (self-heals)", () => {
     const now = Date.now();
-    const base = projectEligibility(snapshot);
+    const base = projectEligibility(CLEAN_ELIGIBLE_SNAPSHOT);
     const overlaid = overlayWorklessEligibility(base, now - 1000, now);
     assert.equal(overlaid.reasons.worklessUntil, null);
   });
 });
 
 describe("GET /api/usage/eligibility folds the workless hint (issue #2956)", () => {
-  beforeEach(cleanKey);
+  // The verdict's `allow` is decided by the projected snapshot, NOT by the
+  // workless overlay. We exercise the pure composition leaf (`getEligibilityView`)
+  // the route delegates to, with a canned clean snapshot + injected readers + a
+  // fixed clock — NOT the real `createUsageRouter()` handler, which reads LIVE
+  // production quota state out of shared Redis (`getUsage`) and then asserts
+  // `allow`, going red whenever the weekly emergency stop is tripped (issue
+  // #3765). The workless overlay is advisory-only; these cases pin that boundary
+  // deterministically against injected state.
 
   test("a future workless hint appears under reasons.worklessUntil; allow stays true", async () => {
-    const now = Date.now();
-    await setWorklessUntil(now + 30 * 60 * 1000, now);
+    // Baseline: a clean snapshot with no hint admits (allow=true, worklessUntil=null).
+    const baseline = await getEligibilityView(
+      eligibilityDeps({ readWorklessUntil: async () => null }),
+    );
+    assert.equal(baseline.allow, true, "baseline: a clean snapshot allows");
+    assert.equal(baseline.reasons.worklessUntil, null);
 
-    const router = createUsageRouter();
-    const get = findHandler(router, "GET", "/usage/eligibility");
-    assert.ok(get, "GET /usage/eligibility handler should exist");
-    const res = mockRes();
-    await get!(mockReq(), res);
-
-    assert.equal(res._status, 200);
-    assert.equal(typeof res._body.reasons.worklessUntil, "string");
-    // Advisory only — must not force allow=false.
-    assert.equal(res._body.allow, true);
+    // With a future hint the overlay surfaces the instant but must NOT flip allow.
+    const overlaid = await getEligibilityView(
+      eligibilityDeps({ readWorklessUntil: async () => FUTURE_HINT_MS }),
+    );
+    assert.equal(overlaid.allow, true, "advisory overlay must not flip allow");
+    assert.equal(
+      overlaid.reasons.worklessUntil,
+      new Date(FUTURE_HINT_MS).toISOString(),
+    );
   });
 
   test("no hint => reasons.worklessUntil is null", async () => {
-    const router = createUsageRouter();
-    const get = findHandler(router, "GET", "/usage/eligibility");
-    const res = mockRes();
-    await get!(mockReq(), res);
-    assert.equal(res._status, 200);
-    assert.equal(res._body.reasons.worklessUntil, null);
+    const v = await getEligibilityView(
+      eligibilityDeps({ readWorklessUntil: async () => null }),
+    );
+    assert.equal(v.reasons.worklessUntil, null);
   });
 });

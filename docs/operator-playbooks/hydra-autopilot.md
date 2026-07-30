@@ -122,12 +122,20 @@ model field** (the README "Subagent Routing" design principle): the map lives in
 this playbook, not in `decide()`.
 
 Right-sized by **stakes × frequency** — drop the high-frequency non-authoring
-classes off the frontier model; keep authorship and behaviour-reshaping classes
-on Fable 5 (the frontier model, replacing Opus as of 2026-06-10).
+classes off the frontier model; keep behaviour-reshaping and money-critical
+authoring classes on Fable 5 (the frontier model, replacing Opus as of
+2026-06-10).
+
+**`dev_orch` demoted to Sonnet 2026-07-29 — on evidence, not a cost guess.** The
+GLM dev-drainer beachhead (ADR-0032) authored 9 CI-green PRs here on GLM-5.2, a
+model *below* Sonnet on SWE-bench. A sub-Sonnet model clearing this repo's
+`dev_orch` bar is direct evidence Sonnet clears it. `dev_target` does NOT inherit
+this: the beachhead is fenced off the Target board, so money-critical authoring
+was never measured. Frontier is retained where the evidence does not reach.
 
 | Class (`slot`) | Model | Rationale |
 |---|---|---|
-| `dev_orch` | Fable 5 (keep) | Multi-file, tier-gated self-modification |
+| `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. `qa_orch` + CI unchanged. |
 | `dev_target` | Fable 5 (keep) | Money-critical betting code |
 | `retro_orch` | Fable 5 (keep) | Reshapes future behaviour; per-run low volume |
 | `design_concept_orch` | Fable 5 (keep) | A weak design concept wastes a full dev+QA cycle |
@@ -300,11 +308,16 @@ not exist or you may not have access to it"* (0 tokens, 0 tool uses). When a
 `fable`-routed dispatch terminates immediately this way (no tool uses + a
 model-access error), **re-dispatch the identical action with `model: "opus"`
 (Opus 4.8) — do not leave the class unrun.** Opus 4.8 is the frontier-capable
-fallback for the authoring/behaviour-reshaping classes (`dev_orch`,
-`dev_target`, `retro_orch`, `design_concept_orch`). Fable 5 stays the primary;
-the fallback fires only on the model-access failure, so each class
-auto-upgrades back to Fable once the alias is entitled again — no manual revert.
-The Sonnet/Haiku-routed classes resolve independently and are unaffected.
+fallback for the remaining frontier-routed classes (`dev_target`, `retro_orch`,
+`design_concept_orch`). Fable 5 stays the primary; the fallback fires only on the
+model-access failure, so each class auto-upgrades back to Fable once the alias is
+entitled again — no manual revert. The Sonnet/Haiku-routed classes resolve
+independently and are unaffected.
+
+While `fable` stays unentitled — the standing state today — every class above
+runs on Opus on *every* dispatch, not just exceptionally. So frontier routing
+costs Opus in practice. Weigh that before adding a class back to the list.
+`dev_orch`'s `escalate_model` hint is `fable` and takes this same fallback.
 
 ## Phases (one-line each — full prose lives in code)
 

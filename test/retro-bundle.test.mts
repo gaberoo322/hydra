@@ -47,6 +47,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     skill: "hydra-dev",
     anchorReference: "issue-918",
     prNumber: null,
+    slot: null,
     status: "merged",
     bucket: "merged",
     abandonReason: null,
@@ -539,13 +540,21 @@ describe("dedupByCanonicalCycleId", () => {
     assert.deepEqual(out.map((d) => d.cycleId), ["c1", "c2"]);
   });
 
-  test("never merges empty-cycleId rows (no durable identity) (#1184/#1823)", () => {
-    // Two distinct undrillable dispatches both carry cycleId "" — they must NOT
-    // be collapsed into one (that would lose a real, distinct dispatch).
-    const a = dispatch({ cycleId: "", turn_n: 1, skill: "hydra-dev", anchorReference: "#1" });
-    const b = dispatch({ cycleId: "", turn_n: 2, skill: "hydra-qa", anchorReference: "PR#2" });
-    const out = dedupByCanonicalCycleId([a, b]);
-    assert.equal(out.length, 2, "empty-cycleId rows are never merged");
+  test("empty-cycleId rows merge on slot identity; distinct slots stay separate (#3738)", () => {
+    // The #3738 double-count: a slot occupied for N turns whose per-turn
+    // snapshot rows all land cycleId="" (no durable identity) used to emit one
+    // row per turn — `dedupByCanonicalCycleId` keyed on cycleId, which is empty
+    // precisely when the duplicates arise, so it left every copy. Now empty-
+    // cycleId rows dedup on the SLOT key (the snapshot's own identity): same
+    // slot across turns collapses to one (earliest turn canonical), while two
+    // genuinely-distinct slots stay separate.
+    const slot1TurnA = dispatch({ cycleId: "", slot: "dev_target", turn_n: 1, skill: "hydra-dev", anchorReference: "#1" });
+    const slot1TurnB = dispatch({ cycleId: "", slot: "dev_target", turn_n: 2, skill: "hydra-dev", anchorReference: "#1" });
+    const slot2 = dispatch({ cycleId: "", slot: "qa_orch", turn_n: 3, skill: "hydra-qa", anchorReference: "PR#2" });
+    const out = dedupByCanonicalCycleId([slot1TurnA, slot1TurnB, slot2]);
+    assert.equal(out.length, 2, "same-slot empty-cycleId rows merge; distinct slots stay separate");
+    const merged = out.find((d) => d.slot === "dev_target")!;
+    assert.equal(merged.turn_n, 1, "earliest-turn row is canonical after the slot merge");
   });
 
   test("is order-stable: survivors keep first-seen order", () => {
@@ -1085,18 +1094,20 @@ describe("assembleRetroBundle — composition", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Issue #1903 — INV-E: a `handoff` run (the honest baton-pass) stays
-  // retro-drillable. A completed dispatch on a handoff run flags exactly like
-  // one on any clean run (its own confirmed terminal cycle record drives the
-  // flag, NOT the run term_reason). An in-flight slot at handoff has NO terminal
-  // record yet — its candidate cycleId is dropped to "" and it is carried to the
-  // successor run's ledger (#1352), so it is NEITHER flagged NOR backfilled with
-  // a `run-handoff` failure abandonReason (handoff is clean, not in
-  // CRASH_TERM_REASONS): it is simply still pending. This proves the
-  // clean-reclassification re-illuminates retro instead of blinding it — the
-  // gap the design-concept artifact handed off (qaTrace turn 8).
+  // Issue #1903 + #3738 — a `handoff` run (the honest baton-pass) stays retro-
+  // drillable for its COMPLETED dispatches (#1903): a confirmed terminal cycle
+  // record drives the flag exactly like on any clean run, NOT the term_reason.
+  // But an in-flight slot at handoff has NO terminal record, and #3738 proved
+  // the #1903 premise ("it is carried to the successor run's ledger") FALSE —
+  // no consumer re-reads a closed run, so the outcome is permanently lost to the
+  // learning loop. The fix: tag the still-pending dispatch non-claiming
+  // (`run-handoff`, status stays null) and count it `undrillable` so the bundle
+  // can no longer masquerade a blind run as clean. The completed dispatch still
+  // flags; the in-flight one is now visibly unresolved instead of silently
+  // absent. (`handoff` stays OUT of CRASH_TERM_REASONS — a handoff-pending row
+  // is a different thing from a crashed row, distinguishable by the tag.)
   // -------------------------------------------------------------------------
-  test("handoff run: completed dispatch is drillable; in-flight slot stays pending (NOT run-handoff-backfilled) (#1903)", async () => {
+  test("handoff run: completed dispatch is drillable (#1903); in-flight slot is visibly unresolved, not silently pending (#3738)", async () => {
     const reflectionAnchors: string[] = [];
     const deps = baseDeps({
       readRun: async () =>
@@ -1110,7 +1121,7 @@ describe("assembleRetroBundle — composition", () => {
               slots_snapshot: {
                 // Genuinely completed before the baton-pass: reap wrote a terminal record.
                 dev_orch: { skill: "hydra-dev", anchor: "issue-1340", task_id: "tid-completed" },
-                // Still in-flight at handoff: re-seeded into the successor run (#1352).
+                // Still in-flight at handoff: no terminal record, and no successor re-read.
                 qa_orch: { skill: "hydra-qa", anchor: "PR#1341", task_id: "tid-inflight" },
               },
             },
@@ -1140,14 +1151,15 @@ describe("assembleRetroBundle — composition", () => {
     assert.equal(qa.cycleId, "", "in-flight slot's unconfirmed candidate is dropped to ''");
     assert.equal(
       qa.abandonReason,
-      null,
-      "handoff is CLEAN (not in CRASH_TERM_REASONS) — an in-flight slot is NOT backfilled run-handoff; it is genuinely pending in the successor",
+      "run-handoff",
+      "#3738: a still-in-flight handoff dispatch is tagged non-claiming run-handoff for visibility",
     );
-    assert.equal(qa.flagged, false, "a pending in-flight slot is NOT flagged");
+    assert.equal(qa.status, null, "non-claiming — no positive outcome fabricated on an unwritten status");
+    assert.equal(qa.flagged, false, "an empty-cycleId dispatch is NOT flagged (no transcript to drill)");
     assert.equal(
       qa.undrillable,
-      false,
-      "no failure signal + empty cycleId → pending, not undrillable (it drills in the successor)",
+      true,
+      "#3738: no terminal record → undrillable, so the run cannot read as a false clean",
     );
 
     // The completed failure's transcript IS deep-read — retro is re-illuminated.
@@ -1576,5 +1588,145 @@ describe("assembleRetroBundle — durable dispatch-outcome records (#2942)", () 
     assert.equal(bundle.runFound, false);
     assert.equal(reads, 0);
     assert.deepEqual(bundle.dispatchOutcomes, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #3738 — a `handoff`-terminated run with dispatches still in flight was
+// structurally blind: every status-less in-flight dispatch fell through the
+// retro bundle (cycleId blanked by the #1352 confirm-or-drop, no
+// CRASH_TERM_REASONS backfill, and `undrillable` gated on a failure signal it
+// never had), so hydra-retro reported flagged:0 / undrillable:0 / reflections:0
+// — indistinguishable from a clean run. The fix (options 2+3 + the snapshot
+// double-count): a handoff in-flight dispatch is tagged non-claiming
+// `run-handoff` and counted `undrillable`, and same-slot snapshot rows collapse
+// to one. These pin the bundle-level shape an operator reads off the endpoint.
+// ---------------------------------------------------------------------------
+
+describe("assembleRetroBundle — handoff-run outcome visibility (#3738)", () => {
+  test("a handoff run with a still-in-flight slot is visibly unresolved, not a false clean", async () => {
+    // Reproduces run 710f699d's shape: 1 recorded dispatch, still in flight when
+    // the pace-gate window closed (handoff). Before #3738 this dispatched read
+    // as a clean run (undrillable:0, flagged:0). After #3738 the dispatch is
+    // visibly unresolved so the summary can say "0 drilled because 1 unresolved".
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-710f699d", status: "ended", term_reason: "handoff", dispatches: 1 },
+          turns: [
+            {
+              turn_n: 2,
+              actions: [], // print-mode session handed off with the slot in flight
+              slots_snapshot: {
+                dev_target: { skill: "hydra-target-build", anchor: "issue-3700", task_id: "tid-inflight" },
+              },
+            },
+          ],
+        }) as any,
+      // No terminal cycle record for the in-flight task_id → #1352 drops it.
+      readCycleMetrics: async () => ({}),
+      readCycleHash: async () => ({}),
+    });
+
+    const bundle = await assembleRetroBundle("run-710f699d", deps);
+    assert.equal(bundle.dispatches.length, 1, "the one in-flight dispatch is projected");
+    const d = bundle.dispatches[0];
+    // Visibly unresolved (option 3): no terminal record → undrillable, so the
+    // run can no longer masquerade as clean.
+    assert.equal(d.undrillable, true, "no terminal record → undrillable (#3738)");
+    // Non-claiming visibility tag (option 2): run-handoff, status stays null.
+    assert.equal(d.abandonReason, "run-handoff", "tagged non-claiming run-handoff for visibility");
+    assert.equal(d.status, null, "never claims a positive outcome on an unwritten status");
+    assert.equal(d.cycleId, "", "unconfirmed in-flight candidate dropped — no transcript handle");
+    assert.equal(d.bucket, null, "no failure bucket fabricated");
+    // Not flagged (no handle to drill) — the run-handoff tag is visibility, not
+    // a drill claim.
+    assert.equal(d.flagged, false, "empty-cycleId dispatch is not flagged");
+    // The bundle's honest-accounting rollup: undrillable>0 distinguishes a blind
+    // run from a clean one.
+    assert.equal(
+      bundle.dispatches.filter((x) => x.undrillable).length,
+      1,
+      "the summary reports 1 unresolved, not a false clean",
+    );
+    assert.equal(bundle.dispatches.filter((x) => x.flagged).length, 0, "nothing drilled (no handle)");
+    assert.equal(bundle.reflections.length, 0, "no reflection read for an undrillable dispatch");
+  });
+
+  test("handoff double-count: a slot occupied for N turns is one unresolved row, not N (#3738)", async () => {
+    // The slots-snapshot fallback emitted one row per turn the slot stayed
+    // occupied, and dedupByCanonicalCycleId keyed on cycleId — empty precisely
+    // when the duplicates arise — so it left every copy (run 710f699d: 1
+    // dispatch, 2 bundle rows). Now empty-cycleId rows dedup on the slot.
+    const slotEntry = { skill: "hydra-target-build", anchor: "issue-3700" }; // identity-less: no task_id
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-double", status: "ended", term_reason: "handoff", dispatches: 1 },
+          turns: [
+            { turn_n: 1, actions: [], slots_snapshot: { dev_target: slotEntry } },
+            { turn_n: 2, actions: [], slots_snapshot: { dev_target: slotEntry } },
+            { turn_n: 3, actions: [], slots_snapshot: { dev_target: slotEntry } },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}),
+      readCycleHash: async () => ({}),
+    });
+
+    const bundle = await assembleRetroBundle("run-double", deps);
+    // One real dispatch → one bundle row, NOT one per turn of occupancy.
+    assert.equal(bundle.dispatches.length, 1, "slot dedup collapses N turns to one row (#3738)");
+    assert.ok(
+      bundle.dispatches.length <= 1,
+      "bundle dispatches[] no longer exceeds the run's recorded dispatch count (1)",
+    );
+    const d = bundle.dispatches[0];
+    assert.equal(d.turn_n, 1, "earliest-turn row is canonical");
+    assert.equal(d.abandonReason, "run-handoff", "the single row carries the run-handoff tag once");
+    assert.equal(d.undrillable, true, "and is visibly unresolved (not a false clean)");
+  });
+
+  test("a resolved dispatch on a clean (budget) run is NOT undrillable — option 3 creates no false positive", async () => {
+    // Guard for the #3738 broadening of `undrillable` (now "no terminal record",
+    // not "empty-cycleId + failure signal"): a dispatch that DID record a
+    // terminal status has a terminal record and must stay undrillable:false.
+    // A fully-resolved clean run still reads undrillable:0 — only genuinely
+    // unresolved dispatches (handoff / crash / budget in-flight) count.
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-resolved", status: "ended", term_reason: "budget", dispatches: 1 },
+          turns: [
+            {
+              turn_n: 2,
+              actions: [
+                {
+                  type: "dispatch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-merged",
+                  outcome: { cycleId: "c-merged", status: "merged", prNumber: "4000" },
+                },
+              ],
+            },
+          ],
+        }) as any,
+    });
+
+    const bundle = await assembleRetroBundle("run-resolved", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    const d = bundle.dispatches[0];
+    assert.equal(d.status, "merged");
+    assert.equal(d.cycleId, "c-merged");
+    assert.equal(d.undrillable, false, "a resolved dispatch is never undrillable");
+    assert.equal(d.abandonReason, null, "no run-handoff tag on a clean stop");
+    assert.equal(d.flagged, false, "the happy path is not drilled");
+    assert.equal(
+      bundle.dispatches.filter((x) => x.undrillable).length,
+      0,
+      "a fully-resolved clean run still reads undrillable:0 (no false positive)",
+    );
   });
 });

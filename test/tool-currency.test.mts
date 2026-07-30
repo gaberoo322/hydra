@@ -10,15 +10,15 @@
  *   - report-table formatting (stable column widths, notes line).
  *   - alert message shape.
  *
- * The driver script `scripts/tool-currency-check.ts` is intentionally NOT
- * exercised here because it does subprocess + network I/O. Per CLAUDE.md
- * test conventions ("Grounding tests mock execFileAsync by testing pure
- * functions") we test the pure logic and trust the wiring. The driver's
- * `safeFetchJson` / `safeVersion` paths fail closed by design — both
- * return null on any error and the merge logic produces `unknown`, so a
- * separate integration test would only re-prove what the unit tests cover.
+ * The driver script `scripts/tool-currency-check.ts` is exercised ONLY on its
+ * alert-emit path (the `--alert` suite at the bottom): that path was re-routed
+ * through the typed `pushAlert` seam in #3743, so it no longer depends on
+ * subprocess/docker I/O and is safe to drive against Redis. The rest of the
+ * driver — subprocess (`safeVersion`) + network (`safeFetchJson`) I/O — stays
+ * untested: both fail closed to `null` and the merge logic produces `unknown`,
+ * so an integration test would only re-prove the unit tests above.
  */
-import test from "node:test";
+import test, { describe, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -32,6 +32,15 @@ import {
   buildReport,
   buildAlertMessage,
 } from "../scripts/tool-currency-logic.ts";
+import { emitAlert } from "../scripts/tool-currency-check.ts";
+import { readAllAlerts, clearAlerts } from "../src/redis/alerts.ts";
+import { closeRedisConnections } from "../src/redis/connection.ts";
+
+// The driver's `emitAlert` routes through the `pushAlert` seam, which lazily
+// opens an ioredis connection. The test runner injects an isolated DB via
+// REDIS_URL; fall back to localhost DB 1 (same pattern as
+// scout-alert-listener.test.mts).
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 test("parseSemver: clean semver", () => {
   assert.deepEqual(parseSemver("1.2.3"), { major: 1, minor: 2, patch: 3 });
@@ -274,4 +283,72 @@ test("end-to-end: network failure -> unknown, never warn", () => {
   assert.equal(report.verdict, "unknown");
   assert.equal(report.severity, "info");
   assert.match(report.note ?? "", /couldn't reach/);
+});
+
+// ===========================================================================
+// Driver --alert emit (issue #3743). The `emitAlert` path must push a REAL,
+// parseable alert through the `pushAlert` seam — never the empty string the
+// prior `input`-on-async-execFile shell-out silently LPUSHed (which dropped
+// the payload AND 500'd GET /api/alerts). This suite is a NEW top-level
+// describe with its own Redis lifecycle (per the CLAUDE.md shared-Redis
+// teardown pitfall): beforeEach clears `hydra:alerts`; after closes the
+// singleton connection `pushAlert` opened.
+// ===========================================================================
+
+describe("scripts/tool-currency-check.ts — emitAlert (issue #3743, Redis-backed)", () => {
+  beforeEach(async () => {
+    await clearAlerts();
+  });
+
+  after(() => {
+    // Release the singleton ioredis connection pushAlert opened so the test
+    // process exits cleanly (mirrors scout-alert-listener.test.mts teardown).
+    closeRedisConnections();
+  });
+
+  test("pushes a real, parseable alert that round-trips the tool payload", async () => {
+    const report = buildReport({
+      tool: "gh",
+      installed: "2.45.0",
+      latest: "2.92.0",
+      verdicts: ["outdated"],
+    });
+    assert.equal(report.severity, "warning", "precondition: warning severity");
+
+    await emitAlert(report);
+
+    const all = await readAllAlerts();
+    assert.equal(all.length, 1, "expected exactly one alert pushed");
+    // The stored element must PARSE — the old shell-out silently LPUSHed "".
+    const parsed = JSON.parse(all[0]);
+    assert.equal(parsed.type, "tool-currency");
+    assert.equal(parsed.severity, "warning");
+    assert.equal(parsed.dismissed, false);
+    // Round-trip the payload fields — NOT just that the command exited 0 (an
+    // exit-code-only assertion is exactly what let the bug ship; issue #3743).
+    assert.equal(parsed.payload.tool, report.tool);
+    assert.equal(parsed.payload.installed, report.installed);
+    assert.equal(parsed.payload.latest, report.latest);
+    assert.equal(parsed.payload.verdict, report.verdict);
+    assert.match(parsed.message, /Tool gh is outdated/);
+  });
+
+  test("never writes an empty string to hydra:alerts", async () => {
+    const report = buildReport({
+      tool: "node",
+      installed: "18.20.0",
+      latest: "20.11.0",
+      verdicts: ["outdated"],
+    });
+    await emitAlert(report);
+
+    const all = await readAllAlerts();
+    assert.equal(all.length, 1);
+    for (const raw of all) {
+      assert.ok(raw.length > 0, "no empty-string element may be stored");
+      // Every entry must parse — GET /api/alerts and the scout reader
+      // JSON.parse each one; an empty/corrupt element 500s the route.
+      JSON.parse(raw);
+    }
+  });
 });
