@@ -282,16 +282,31 @@ fi
 # every turn against an issue sweep cannot advance — pure churn (observed
 # run 038937ae, 2026-07-06, issue #2956).
 #
+# `wayfinder:*` tickets (issue #3728) carry NO standard lifecycle label BY
+# DESIGN — the off-radar rule (wayfinder maps dispatch via
+# `wayfinder_orch_frontier`, never through `dev_orch` / `needs_triage_orch`)
+# means a `wayfinder:*` label is the ONLY marker that distinguishes them on
+# this board read. Without an exclusion they are permanently counted as
+# orphans, so `untriaged_orphans > 0` is true for as long as any wayfinder
+# map is open, re-firing `sweep_orch` on its 900s cooldown forever to
+# re-confirm there is nothing to route. They are dropped by a PREFIX test
+# (`startswith("wayfinder:")`), NOT by enumerating the known wayfinder label
+# names (wayfinder:map / :grilling / :research / :task / :prototype /
+# :destination-pending), so a future wayfinder ticket type cannot silently
+# reintroduce the churn. This MUST NOT weaken the backstop: an issue with
+# genuinely NO labels matches neither the exclusion set NOR the prefix, so it
+# is still counted — the orphan detector's actual target stays intact.
+#
 # This emits `untriaged_orphans` = the count of open issues carrying NONE of
-# that label set. The autopilot turn maps `untriaged_orphans > 0` → the
-# boolean `untriaged_orphans_orch` signal (mirroring the
-# `needs_triage > 0` → `needs_triage_orch` mapping), which decide.py's
-# `sweep_orch` selector reads as a SECONDARY trigger to dispatch hydra-sweep
-# and route the orphans into an actionable lane. This is a STANDALONE `gh`
-# read (not derived from the board-state seam) so the backstop holds whether
-# or not `/api/autopilot/board-state` is healthy. Best-effort: any failure
-# emits `untriaged_orphans=0` so a transient gh outage never spuriously
-# triggers a sweep.
+# that label set AND no `wayfinder:`-prefixed label. The autopilot turn maps
+# `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch` signal
+# (mirroring the `needs_triage > 0` → `needs_triage_orch` mapping), which
+# decide.py's `sweep_orch` selector reads as a SECONDARY trigger to dispatch
+# hydra-sweep and route the orphans into an actionable lane. This is a
+# STANDALONE `gh` read (not derived from the board-state seam) so the
+# backstop holds whether or not `/api/autopilot/board-state` is healthy.
+# Best-effort: any failure emits `untriaged_orphans=0` so a transient gh
+# outage never spuriously triggers a sweep.
 echo -n "untriaged_orphans="
 gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '
   [ .[]
@@ -302,6 +317,7 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
              "ready-for-human", "needs-info" ]
            | any(. as $lbl | $n | index($lbl))) | not
       )
+    | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
   ] | length' 2>/dev/null || echo 0
 
 # design-concept gate (issue #628): pick the first orch-board
