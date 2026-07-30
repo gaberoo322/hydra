@@ -286,6 +286,89 @@ REFL_PRESENCE_PRESENT = "deposit-present"
 REFL_PRESENCE_READ_ERROR = "read-error"
 
 
+# Issue #3675: the deposit READ key and the deposit WRITE key are derived by two
+# different actors from two different identifiers, and they do not agree.
+#
+#   WRITE side — `scripts/reflection-deposit.sh derive_task_id()` runs INSIDE the
+#   worktree subagent and keys on the `agent-<HASH>` worktree-dir basename with
+#   the `agent-` prefix STRIPPED. Every deposit on disk is therefore a bare hex
+#   hash (or, on a non-worktree layout, the CLAUDE_CODE_SESSION_ID UUID).
+#
+#   READ side — reap keys on the autopilot slot `task_id`, which is whatever the
+#   dispatch harness stamped. Measured live (2026-07-27) that value carries a
+#   prefix the deposits do not: the occupied slots read
+#   `task_id: "worktree-agent-<HASH>"` (the synthesised branch name), and older
+#   cycle records show an `agent-<HASH>` generation too. Both miss the bare-hash
+#   file by exactly one prefix, so `_read_grounding_tests` returned {} on every
+#   pipeline dispatch and `testsAfter` recorded null on 0/50 sampled trend rows
+#   while 90 fully-populated grounding deposits sat unread in /tmp.
+#
+# Fix: resolve the read key against an ORDERED candidate list — the verbatim
+# `task_id` first (so any already-aligned generation keeps its exact-match
+# behaviour), then the prefix-stripped forms. Read-side rather than write-side
+# because it retroactively joins the ~300 deposits already on disk and needs no
+# skill re-sync. This does NOT touch the cycle-record WRITE key: `_fire_cycle_record`
+# still keys on `worktree_branch or task_id` per #3391, so the test-count write and
+# the merge-watch enrichment still land on ONE indexed record. The deposit read key
+# and the record write key are deliberately different identifiers; only the former
+# changes here.
+DEPOSIT_KEY_STRIP_PREFIXES = ("worktree-agent-", "agent-")
+
+
+def _deposit_key_candidates(task_id: str) -> list[str]:
+    """Ordered read-key candidates for a task-scoped deposit (issue #3675).
+
+    The verbatim `task_id` is always tried FIRST so an already-aligned key keeps
+    its exact-match resolution; the `worktree-agent-` / `agent-` prefix-stripped
+    forms follow, recovering the bare worktree hash the writer actually used.
+    Order is significant and the list is de-duplicated, so a `task_id` that is
+    already bare yields exactly one candidate.
+
+    Candidates containing a path separator or a NUL are dropped: the key is
+    interpolated into a filename, and a separator would escape REFL_SOURCES_DIR.
+    """
+    if not task_id:
+        return []
+    out: list[str] = []
+    for cand in (task_id, *(
+        task_id[len(p):] for p in DEPOSIT_KEY_STRIP_PREFIXES if task_id.startswith(p)
+    )):
+        if not cand or "/" in cand or "\\" in cand or "\0" in cand:
+            continue
+        if cand not in out:
+            out.append(cand)
+    return out
+
+
+def _resolve_deposit_path(kind: str, task_id: str) -> Path | None:
+    """First existing `${REFL_SOURCES_DIR}/<kind>-<candidate>` path, or None (issue #3675).
+
+    `kind` is the deposit filename stem (`hydra-grounding-tests`,
+    `hydra-refl-anchor`, ...). Best-effort and fully non-fatal, matching every
+    caller's contract: an unprobeable candidate is logged and skipped, and an
+    exhausted candidate list yields None so the caller degrades to its existing
+    truthful-absence behaviour (never a throw, never a recorded 0).
+
+    A resolution that needed a FALLBACK candidate is logged — the read-key drift
+    this fixes was invisible for months precisely because every miss was silent.
+    """
+    for idx, key in enumerate(_deposit_key_candidates(task_id)):
+        path = REFL_SOURCES_DIR / f"{kind}-{key}"
+        try:
+            found = path.exists()
+        except OSError as exc:
+            _append_log(f"deposit_probe_skipped kind={kind} key={key} err={exc}")
+            continue
+        if found:
+            if idx > 0:
+                _append_log(
+                    f"deposit_key_fallback kind={kind} task_id={task_id} "
+                    f"resolved_key={key}"
+                )
+            return path
+    return None
+
+
 def _read_reflection_sources(task_id: str) -> tuple[str, str]:
     """Read the planning-time reflection-bucket deposit for `task_id` (issue #1136).
 
@@ -312,8 +395,10 @@ def _read_reflection_sources(task_id: str) -> tuple[str, str]:
     if not task_id:
         return "", REFL_PRESENCE_NO_TASK_ID
     try:
-        path = REFL_SOURCES_DIR / f"hydra-refl-sources-{task_id}"
-        if not path.exists():
+        # Issue #3675: resolve through the shared read-key resolver so a
+        # prefixed slot task_id still finds the bare-hash file the writer left.
+        path = _resolve_deposit_path("hydra-refl-sources", task_id)
+        if path is None:
             return "", REFL_PRESENCE_ABSENT
         sources = path.read_text(encoding="utf-8").strip()
         if not sources:
@@ -354,8 +439,9 @@ def _read_anchor_deposit(task_id: str) -> str | None:
     if not task_id:
         return None
     try:
-        path = REFL_SOURCES_DIR / f"hydra-refl-anchor-{task_id}"
-        if not path.exists():
+        # Issue #3675: shared read-key resolver — see `_resolve_deposit_path`.
+        path = _resolve_deposit_path("hydra-refl-anchor", task_id)
+        if path is None:
             return None
         anchor = path.read_text(encoding="utf-8").strip()
         return anchor or None
@@ -390,8 +476,17 @@ def _read_grounding_tests(task_id: str) -> dict[str, int]:
     if not task_id:
         return {}
     try:
-        path = REFL_SOURCES_DIR / f"hydra-grounding-tests-{task_id}"
-        if not path.exists():
+        # Issue #3675: shared read-key resolver — see `_resolve_deposit_path`.
+        path = _resolve_deposit_path("hydra-grounding-tests", task_id)
+        if path is None:
+            # Issue #3675: this branch was SILENT, which is why a months-long
+            # read-key drift went unnoticed. Log the exhausted candidate list so
+            # a future divergence is one grep away. Still returns {} — the
+            # truthful-absence contract is unchanged (never a recorded 0).
+            _append_log(
+                f"grounding_tests_deposit_absent task_id={task_id} "
+                f"tried={','.join(_deposit_key_candidates(task_id)) or '-'}"
+            )
             return {}
         raw = path.read_text(encoding="utf-8").strip()
         if not raw:
@@ -418,6 +513,15 @@ def _read_grounding_tests(task_id: str) -> dict[str, int]:
                         out[key] = n
                 except (TypeError, ValueError):
                     pass
+        # Issue #3675: log the RESOLVED counts. The cycle-record POST itself is
+        # fired through dispatch.sh and cannot be inspected, so this line is the
+        # only observable proof that a deposit was read and forwarded — it is
+        # what the regression test asserts on, and what an operator greps to
+        # confirm the post-deploy `testsAfter` acceptance criterion.
+        _append_log(
+            f"grounding_tests_resolved task_id={task_id} path={path.name} "
+            f"fields={','.join(f'{k}={v}' for k, v in sorted(out.items())) or '-'}"
+        )
         return out
     except (OSError, ValueError, TypeError) as exc:
         _append_log(f"grounding_tests_read_skipped task_id={task_id} err={exc}")
@@ -450,8 +554,13 @@ def _read_escalation_deposit(task_id: str) -> str:
     if not task_id:
         return ""
     try:
-        path = REFL_SOURCES_DIR / f"hydra-escalation-{task_id}"
-        if not path.exists():
+        # Issue #3675: shared read-key resolver. This deposit is written with an
+        # EXPLICITLY-passed task_id (the harness slot id), so the verbatim
+        # first candidate already resolves it today — routing it through the same
+        # resolver keeps all four deposit reads on ONE key-derivation seam so the
+        # two ends cannot drift apart again per-reader.
+        path = _resolve_deposit_path("hydra-escalation", task_id)
+        if path is None:
             return ""
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:

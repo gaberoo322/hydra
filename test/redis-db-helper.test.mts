@@ -169,6 +169,68 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
     );
   });
 
+  test("parseOwnedDbIndex claims only launcher-owned DBs (issue #3764)", async () => {
+    const { parseOwnedDbIndex } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+
+    // Owned indexes (8..15) are claimed → these DO get the start-of-run flush,
+    // which is what lets the 4 CI runners hold distinct pre-set DBs and still
+    // get a clean slate.
+    for (const db of [8, 9, 10, 11, 12, 13, 14, 15]) {
+      assert.equal(
+        parseOwnedDbIndex(`redis://localhost:6379/${db}`),
+        db,
+        `DB ${db} is launcher-owned and must be claimed`,
+      );
+    }
+
+    // NEVER claimed — production, the legacy shared DB, and the legacy per-file
+    // hard pins. Returning null here is what keeps a pre-set url un-flushed.
+    for (const db of [0, 1, 2, 3, 4, 5, 6, 7, 16]) {
+      assert.equal(
+        parseOwnedDbIndex(`redis://localhost:6379/${db}`),
+        null,
+        `DB ${db} must never be claimed for flushing`,
+      );
+    }
+
+    // 127.0.0.1 is the same local Redis as localhost, so it IS claimed.
+    assert.equal(parseOwnedDbIndex("redis://127.0.0.1:6379/9"), 9);
+
+    // A url with no DB path, a malformed one, or — critically — a REMOTE host
+    // is never claimed. flushDbOnce always connects to 127.0.0.1, so claiming a
+    // remote url's index would flush the LOCAL DB of that number while the
+    // caller is pointed elsewhere, destroying data the operator never named.
+    for (const url of [
+      "redis://localhost:6379",
+      "redis://localhost:6379/",
+      "redis://prod-redis.internal:6379/9",
+      "redis://10.0.0.5:6379/9",
+      "redis://localhost:6380/9",
+      "",
+      undefined,
+    ]) {
+      assert.equal(
+        parseOwnedDbIndex(url as string),
+        null,
+        `must not claim a DB from: ${String(url)}`,
+      );
+    }
+  });
+
+  test("a pre-set REDIS_URL is still not REWRITTEN, owned or not (#3764)", () => {
+    // The #3764 change narrows "no flush", NOT "no rewriting" — both an owned
+    // and a non-owned pre-set url must still pass through byte-identical.
+    for (const preset of ["redis://localhost:6379/9", "redis://localhost:6379/0"]) {
+      assert.equal(
+        launcherPrintUrl({ redisUrl: preset }),
+        preset,
+        `a pre-set REDIS_URL must pass through unrewritten: ${preset}`,
+      );
+    }
+  });
+
   test("derives an index in 2..15 — never DB 0, never DB 1", () => {
     // Several distinct roots: every derived index must stay inside 2..15
     // (production DB 0 and the legacy shared DB 1 are unreachable by
