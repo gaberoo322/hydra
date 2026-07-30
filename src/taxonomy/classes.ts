@@ -249,6 +249,33 @@ export function classBySkill(skill: string): DispatchClassRow | undefined {
 }
 
 /**
+ * Does `cycleId` look like a bare dispatch-class NAME or SKILL name (issue
+ * #3739 defect a)? A real dispatch cycleId is ALWAYS harness-stamped
+ * (`worktree-agent-<8hex>-t<N>-<class>…`), so a cycleId that IS itself a known
+ * class name (`dev_orch`) or skill name (`hydra-target-build`) is a
+ * FIELD-SHIFTED id — the real dispatch id landed in the wrong field (a
+ * positional swap at a cycle-record POSTer), and the status is lost with it.
+ *
+ * The write boundary ({@link putDispatchOutcome}) calls this to REJECT such a
+ * record rather than silently storing it, so the malformed shape can never
+ * enter the per-run outcome index — fixing it at the boundary lets BOTH
+ * consumers (run attribution via `getDispatchOutcomesForRun`, and the
+ * anchor-type classifier) benefit, the lesson from #3583 (fixing one consumer
+ * did not fix the other).
+ *
+ * Case-insensitive (class/skill names are stored lowercase); a genuine
+ * harness-stamped cycleId never equals a class/skill name even when lowercased,
+ * so this cannot false-reject a real dispatch id. PURE.
+ */
+export function cycleIdIsClassOrSkillName(
+  cycleId: string | null | undefined,
+): boolean {
+  if (!cycleId) return false;
+  const token = cycleId.trim().toLowerCase();
+  return BY_NAME.has(token) || BY_SKILL.has(token);
+}
+
+/**
  * The trailing `_orch` / `_target` class token an autopilot `cycleId` ends with
  * (e.g. `worktree-agent-<uuid>-t8-dev_orch` → `dev_orch`). The third class
  * lookup alongside {@link classByName} / {@link classBySkill}: it names a class
@@ -295,9 +322,23 @@ export interface ParsedDispatchCycleId {
  * alone): here the whole id must match so runIdPrefix/turn are trustworthy.
  * The class token allows interior underscores (`wire_or_retire_target`),
  * which the suffix regex's `[a-z0-9]+` deliberately under-matches.
+ *
+ * Issue #3739 defect (b): an OPTIONAL trailing modifier suffix
+ * (`(?:-[a-z0-9_-]+)?`) is accepted AFTER the class token — e.g.
+ * `worktree-agent-a1c24124-t5-dev_orch-remediate` (a remediation/retry
+ * re-dispatch) or `…-dev_orch-3170` (an issue-number tail). The run prefix,
+ * turn and class are all unambiguously present in their fenced positions, so a
+ * remediation/retry dispatch IS a real dispatch that belongs to its run's
+ * outcome index. This brings the run-attribution parser into agreement with the
+ * anchor-type classifier (`inferAnchorTypeFromCycleId` in `anchor-type.ts`),
+ * whose fence already accepted a trailing suffix via `resolveClassToken`
+ * (issues #3390/#3403) — the lesson from #3583: fixing ONE consumer's parser
+ * did not fix the OTHER, so the two parsers over the same cycleId must agree.
+ * The class CAPTURE group `m[3]` excludes the suffix (it is a separate
+ * non-capturing group), so `className` stays the bare class token.
  */
 const DISPATCH_CYCLE_ID =
-  /^worktree-agent-([0-9a-f]{8})-t(\d+)-([a-z][a-z0-9_]*_(?:orch|target))$/i;
+  /^worktree-agent-([0-9a-f]{8})-t(\d+)-([a-z][a-z0-9_]*_(?:orch|target))(?:-[a-z0-9_-]+)?$/i;
 
 /**
  * Parse a dispatch `cycleId` into its `{runIdPrefix, turn, className}` triple,

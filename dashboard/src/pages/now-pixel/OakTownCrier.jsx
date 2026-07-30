@@ -4,13 +4,18 @@ import RecommendationsTab from "./RecommendationsTab.jsx";
 import RecRunJournalModal from "./RecRunJournalModal.jsx";
 import TurnJournalTab from "./TurnJournalTab.jsx";
 import {
-  DEFAULT_OAK_TAB,
-  isOakTabId,
-  OAK_TAB_STORAGE_KEY,
+  readStoredOakTab,
   TAB_JOURNAL,
   TAB_LIVE,
   TAB_RECS,
+  writeStoredOakTab,
 } from "./oak-tab-state.ts";
+import {
+  appendBubble,
+  bubbleFrom,
+  eventSummary,
+  restingNoteFrom,
+} from "./oak-crier-state.ts";
 import { formatDateTime } from "../../lib/page-item-format.ts";
 
 /**
@@ -32,43 +37,29 @@ import { formatDateTime } from "../../lib/page-item-format.ts";
  *
  * Clicking the Oak sprite still toggles the entire panel collapsed —
  * the tab strip is hidden in that state so the rail stays narrow.
+ *
+ * Issue #3706 moved this file's pure folds — WS-frame classification, the
+ * bubble ring buffer, and the `oak_resting` envelope parse — into
+ * `oak-crier-state.ts`, and replaced the hand-inlined tab-key localStorage
+ * round-trip with the `oak-tab-state.ts` helpers this file was already
+ * importing constants from. What stays here is lifecycle: the WS
+ * subscription, the hover-pause auto-scroll, and the collapse toggle.
  */
-const MAX_BUBBLES = 50;
 const COLLAPSE_STORAGE_KEY = "hydra:now-pixel:oak-collapsed";
 
-function eventSummary(frame) {
-  // Slot events from the bridge: { type:"slot-event", payload:{event, slot, status, ...} }
-  if (frame?.type === "slot-event") {
-    const p = frame.payload || {};
-    if (p.event === "subagent_stop") {
-      return {
-        source: p.slot || p.subagent_type,
-        text: `${p.slot ?? "slot"} ${p.status ?? "stopped"}${p.summary ? ` · ${p.summary}` : ""}`,
-        kind: "stop",
-      };
-    }
-    if (p.event === "slot_waiting_permission") {
-      return {
-        source: p.slot || p.subagent_type,
-        text: `${p.slot ?? "slot"} waiting on permission${p.tool ? ` (${p.tool})` : ""}`,
-        kind: "wait",
-      };
-    }
-    return {
-      source: p.slot || p.subagent_type,
-      text: p.event || "slot event",
-      kind: "slot",
-    };
+/**
+ * localStorage, or null when the browser denies access (sandboxed iframe,
+ * storage disabled). Reading the global itself can throw, which is why this
+ * wraps the access and not just the get/set — the oak-tab-state helpers
+ * already no-op on a null store.
+ */
+function safeStorage() {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    /* intentional: storage access throws in sandboxed frames */
+    return null;
   }
-  // Generic events surface as a one-line type + message.
-  if (frame?.type === "connected") return null; // suppress the heartbeat hello
-  const p = frame?.payload || {};
-  const msg = p.message || p.text || p.summary || frame?.type || "event";
-  return {
-    source: p.source || p.subagent_type || frame?.type,
-    text: msg.slice(0, 120),
-    kind: "generic",
-  };
 }
 
 function LiveFeedTab({ bubbles, scrollRef, onHover, onUnhover }) {
@@ -145,14 +136,7 @@ export default function OakTownCrier({ ws }) {
       return false;
     }
   });
-  const [tab, setTab] = useState(() => {
-    try {
-      const stored = localStorage.getItem(OAK_TAB_STORAGE_KEY);
-      return isOakTabId(stored) ? stored : DEFAULT_OAK_TAB;
-    } catch {
-      return DEFAULT_OAK_TAB;
-    }
-  });
+  const [tab, setTab] = useState(() => readStoredOakTab(safeStorage()));
   const [hovered, setHovered] = useState(false);
   const [journalOpen, setJournalOpen] = useState(false);
   const [restingNote, setRestingNote] = useState(null); // { spend, cap, ts } | null
@@ -170,46 +154,34 @@ export default function OakTownCrier({ ws }) {
 
   // Persist tab selection.
   useEffect(() => {
-    try {
-      localStorage.setItem(OAK_TAB_STORAGE_KEY, tab);
-    } catch {
-      /* intentional: storage may be disabled */
-    }
+    writeStoredOakTab(safeStorage(), tab);
   }, [tab]);
 
   // WS subscription via wildcard so we hear every event the server emits.
   useEffect(() => {
     if (!ws || typeof ws.subscribe !== "function") return undefined;
     const off = ws.subscribe("*", (frame) => {
+      const nowIso = new Date().toISOString();
       // Slice F (#674): the engine broadcasts an `oak_resting` envelope
       // when the daily cap is hit. Surface a small inline note rather
       // than a bubble, so the operator notices without filling the live
       // feed.
-      if (frame && frame.type === "oak_resting") {
-        const p = frame.payload || {};
-        setRestingNote({
-          spend: Number(p.daily_spend_usd ?? 0),
-          cap: Number(p.daily_cap_usd ?? 0),
-          ts: frame.timestamp || new Date().toISOString(),
-        });
+      const resting = restingNoteFrom(frame, nowIso);
+      if (resting) {
+        setRestingNote(resting);
         return;
       }
       const s = eventSummary(frame);
       if (!s) return;
       idRef.current += 1;
-      const bubble = {
-        id: idRef.current,
-        ts: frame?.timestamp || new Date().toISOString(),
-        color: resolveBubbleColor(s.source),
-        source: s.source ?? "system",
-        text: s.text,
-        kind: s.kind,
-      };
-      setBubbles((prev) => {
-        const next = [...prev, bubble];
-        if (next.length > MAX_BUBBLES) next.splice(0, next.length - MAX_BUBBLES);
-        return next;
-      });
+      const bubble = bubbleFrom(
+        frame,
+        s,
+        idRef.current,
+        resolveBubbleColor(s.source),
+        nowIso,
+      );
+      setBubbles((prev) => appendBubble(prev, bubble));
     });
     return () => off?.();
   }, [ws]);

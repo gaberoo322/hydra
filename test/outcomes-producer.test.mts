@@ -208,6 +208,9 @@ describe("Housekeeping wiring (issue #1657 — seventh chore)", () => {
           calls++;
           return { ok: true };
         },
+        // Issue #3756: stub the sweep so this composition test performs no live
+        // GitHub write (the sweep mutates an external service).
+        runGlmEligibilitySweep: async () => 0,
       },
     );
     assert.equal(calls, 1, "producer must be invoked exactly once per housekeeping run");
@@ -221,7 +224,7 @@ describe("Housekeeping wiring (issue #1657 — seventh chore)", () => {
     const { runHousekeeping } = await import("../src/scheduler/housekeeping.ts");
     const summary = await runHousekeeping(
       { publish: async () => {} },
-      { publishBrierMetric: async () => ({ ok: false }) },
+      { publishBrierMetric: async () => ({ ok: false }), runGlmEligibilitySweep: async () => 0 },
     );
     assert.ok(
       summary.ran.includes("forecast-calibration-brier"),
@@ -237,6 +240,7 @@ describe("Housekeeping wiring (issue #1657 — seventh chore)", () => {
         publishBrierMetric: async () => {
           throw new Error("unexpected producer crash");
         },
+        runGlmEligibilitySweep: async () => 0,
       },
     );
     assert.ok(

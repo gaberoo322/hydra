@@ -102,13 +102,23 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
   });
 
   test("POST /maintenance/housekeeping handler exists", async () => {
-    const router = createMaintenanceRouter(mockEventBus());
+    // Issue #3756: stub the GLM eligibility sweep so exercising the router never
+    // performs a live GitHub write (the sweep mutates an external service with no
+    // Redis substrate to fail-soft on, unlike the gh-reading chores).
+    const router = createMaintenanceRouter(mockEventBus(), {
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+    });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
     assert.ok(handler, "POST /maintenance/housekeeping handler should exist");
   });
 
   test("first call runs and returns a { ran, skipped } summary", async () => {
-    const router = createMaintenanceRouter(mockEventBus());
+    // Issue #3756: stub the GLM eligibility sweep so exercising the router never
+    // performs a live GitHub write (the sweep mutates an external service with no
+    // Redis substrate to fail-soft on, unlike the gh-reading chores).
+    const router = createMaintenanceRouter(mockEventBus(), {
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+    });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
     const res = mockRes();
@@ -150,7 +160,12 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
   // Issue #1876: the daily-guarded stale-key sweep must skip on the second
   // immediate call, exactly like memory-consolidation / weekly-summary.
   test("stale-key-prune skips on a second immediate call (daily guard)", async () => {
-    const router = createMaintenanceRouter(mockEventBus());
+    // Issue #3756: stub the GLM eligibility sweep so exercising the router never
+    // performs a live GitHub write (the sweep mutates an external service with no
+    // Redis substrate to fail-soft on, unlike the gh-reading chores).
+    const router = createMaintenanceRouter(mockEventBus(), {
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+    });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
     const res1 = mockRes();
@@ -178,7 +193,12 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
   });
 
   test("second immediate call skips the time-guarded chores (idempotent)", async () => {
-    const router = createMaintenanceRouter(mockEventBus());
+    // Issue #3756: stub the GLM eligibility sweep so exercising the router never
+    // performs a live GitHub write (the sweep mutates an external service with no
+    // Redis substrate to fail-soft on, unlike the gh-reading chores).
+    const router = createMaintenanceRouter(mockEventBus(), {
+      housekeepingDeps: { runGlmEligibilitySweep: async () => 0 },
+    });
     const handler = findHandler(router, "POST", "/maintenance/housekeeping");
 
     // First call — performs the guarded chores and sets their guard keys.
