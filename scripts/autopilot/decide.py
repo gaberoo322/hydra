@@ -608,7 +608,7 @@ DEFAULT_FAILURE_LOG = "/tmp/hydra-autopilot-failures.jsonl"
 # LAYERING (design-concept invariant 2): this policy is a decide.py CONSTANT,
 # NOT a classes.json field. classes.json is the class-taxonomy ALPHABET; dispatch
 # POLICY lives here + in the playbook. A class ABSENT from this dict never
-# escalates (invariant 5) — so dev_orch (already Sonnet) is untouched.
+# escalates (invariant 5).
 #
 # PURITY (design-concept invariant 1, issue #1093): decide.py emits NO concrete
 # model field. `decide_escalation` returns only an `escalate_model` HINT that the
@@ -633,6 +633,27 @@ ESCALATION_POLICY: dict[str, dict] = {
     "cleanup_orch": {
         "triggers": ("subagent_noop", "subagent_failure"),
         "model": "sonnet",
+        "max_attempts": 2,
+    },
+    # dev_orch was demoted from the frontier tier to Sonnet on 2026-07-29 (see
+    # the playbook's per-class routing table for the evidence: the GLM-5.2
+    # beachhead cleared this repo's dev_orch bar from BELOW Sonnet). This row is
+    # the safety net that makes the demotion reversible per-dispatch instead of
+    # per-config — a real capability miss self-rescues at the frontier tier
+    # rather than stalling the class until an operator notices.
+    #
+    # Triggers on "subagent_failure" ONLY, deliberately NOT "subagent_noop".
+    # A dev_orch no_op is overwhelmingly board-driven, not capability-driven
+    # (nothing labelled ready-for-agent, every candidate already has an open PR,
+    # the glm-eligible partition subtracted the queue). Escalating those would
+    # burn a frontier dispatch to re-discover an empty board — the same
+    # saturation-vs-capability distinction cleanup_orch's row draws above, and
+    # the reason that row gates its no_op on board freshness.
+    #
+    # max_attempts 2 = at most ONE frontier retry (invariant 4).
+    "dev_orch": {
+        "triggers": ("subagent_failure",),
+        "model": "fable",
         "max_attempts": 2,
     },
 }

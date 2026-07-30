@@ -18,8 +18,14 @@
  *   3. A no_op on a SATURATED board never escalates (saturation-driven, not
  *      capability-driven).
  *   4. Escalation never exceeds maxAttempts (default 2) — no third dispatch.
- *   5. A class ABSENT from ESCALATION_POLICY never escalates (dev_orch untouched).
+ *   5. A class ABSENT from ESCALATION_POLICY never escalates (qa_orch).
  *   6. Recording no_op in failure_log changes VISIBILITY only.
+ *
+ * `dev_orch` gained a policy row on 2026-07-29 when the class was demoted from
+ * the frontier tier to Sonnet (playbook per-class routing table). It is the
+ * safety net for that demotion, and its trigger set is deliberately NARROWER
+ * than cleanup_orch's: failure only, never no_op. Pinned in its own suite below
+ * — the asymmetry is the design, not an omission.
  *
  * We exercise decide.py through its `decide` CLI subcommand so the tests also
  * pin the JSON wire contract the playbook prose consumes. The `--now` flag
@@ -216,13 +222,15 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
     );
   });
 
-  test("a class ABSENT from ESCALATION_POLICY never escalates (dev_orch unaffected, invariant 5)", () => {
-    const state = baseState({ slotEvents: [stopEvent("dev_orch", "no_op")] });
+  test("a class ABSENT from ESCALATION_POLICY never escalates (qa_orch, invariant 5)", () => {
+    // Was dev_orch until 2026-07-29; dev_orch now HAS a policy row (see the
+    // dev_orch suite below), so invariant 5 needs a genuinely-absent class.
+    const state = baseState({ slotEvents: [stopEvent("qa_orch", "no_op")] });
     const plan = runDecide(state);
     assert.equal(
-      escalationFor(plan, "dev_orch"),
+      escalationFor(plan, "qa_orch"),
       undefined,
-      "dev_orch is not in ESCALATION_POLICY — zero behavior change",
+      "qa_orch is not in ESCALATION_POLICY — zero behavior change",
     );
   });
 
@@ -528,5 +536,90 @@ print(m.strategy_for(m.PATTERN_SUBAGENT_NOOP).action)
       "none",
       "a no_op is not a GitHub-issue re-queue — escalation is decide.py's reducer",
     );
+  });
+});
+
+describe("decide.py — dev_orch Sonnet demotion safety net (2026-07-29)", () => {
+  // dev_orch was demoted from the frontier tier to Sonnet in the playbook's
+  // per-class model routing table. ESCALATION_POLICY gained a dev_orch row so
+  // that a genuine capability miss self-rescues at the frontier tier on the
+  // next dispatch instead of stalling the class until an operator notices.
+  //
+  // The row's trigger set is NARROWER than cleanup_orch's on purpose, and that
+  // asymmetry is the substance of the design — see the no_op case below.
+
+  test("a dev_orch verification FAILURE escalates to the frontier tier", () => {
+    const state = baseState({
+      slotEvents: [
+        stopEvent("dev_orch", "failure", "tDEV", "npm test failed in worktree"),
+      ],
+    });
+    const plan = runDecide(state);
+    const esc = escalationFor(plan, "dev_orch");
+    assert.ok(esc, "a dev_orch failure is capability-driven and must escalate");
+    assert.equal(
+      esc.prompt_args.escalate_model,
+      "fable",
+      "escalates to the frontier alias, not back to Sonnet — a Sonnet retry of a Sonnet failure buys nothing",
+    );
+  });
+
+  test("decide.py stays PURE — the escalation carries a HINT, never a concrete model field (invariant 1)", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("dev_orch", "failure", "tDEV", "tsc failed")],
+    });
+    const plan = runDecide(state);
+    const esc = escalationFor(plan, "dev_orch");
+    assert.ok(esc);
+    assert.equal(
+      esc.model,
+      undefined,
+      "decide.py must not stamp a concrete `model` field — the lever lives in the playbook (#1093)",
+    );
+  });
+
+  test("a dev_orch no_op does NOT escalate — a no_op here is board-driven, not capability-driven", () => {
+    // This is the deliberate asymmetry vs cleanup_orch, which DOES escalate a
+    // fresh-board no_op. A dev_orch no_op overwhelmingly means the board had
+    // nothing dispatchable (nothing ready-for-agent, every candidate already
+    // carries an open PR, the glm-eligible partition subtracted the queue) —
+    // escalating that would burn a frontier dispatch to re-discover an empty
+    // board. Same saturation-vs-capability distinction, different default.
+    const state = baseState({ slotEvents: [stopEvent("dev_orch", "no_op")] });
+    const plan = runDecide(state);
+    assert.equal(
+      escalationFor(plan, "dev_orch"),
+      undefined,
+      "dev_orch triggers on subagent_failure only — a no_op must not escalate",
+    );
+  });
+
+  test("attempt cap: an escalated dev_orch failure does NOT trigger a third dispatch (invariant 4)", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("dev_orch", "failure", "tDEV", "still failing")],
+      slots: {
+        dev_orch: { attempt: 2, skill: "hydra-dev", task_id: "tDEV" },
+        qa_orch: null,
+        research_orch: null,
+        dev_target: null,
+        qa_target: null,
+        research_target: null,
+        design_concept_orch: null,
+      },
+    });
+    const plan = runDecide(state);
+    assert.equal(
+      escalationFor(plan, "dev_orch"),
+      undefined,
+      "attempt 2 >= max_attempts 2 — the frontier retry is the last one",
+    );
+  });
+
+  test("a dev_orch SUCCESS never escalates", () => {
+    const state = baseState({
+      slotEvents: [stopEvent("dev_orch", "success", "tDEV")],
+    });
+    const plan = runDecide(state);
+    assert.equal(escalationFor(plan, "dev_orch"), undefined);
   });
 });

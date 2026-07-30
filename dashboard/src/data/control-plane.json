@@ -12,7 +12,7 @@
       "skill": "hydra-dev",
       "scope": "orch",
       "cooldownSeconds": null,
-      "model": "fable",
+      "model": "sonnet",
       "sourcePath": "scripts/autopilot/classes.json"
     },
     {
