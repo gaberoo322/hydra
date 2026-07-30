@@ -39,6 +39,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     skill: "hydra-dev",
     anchorReference: "issue-3055",
     prNumber: null,
+    slot: null,
     status: "merged",
     bucket: "merged",
     abandonReason: null,
@@ -253,10 +254,15 @@ describe("enrichDispatchesWithCycleData — crash-term-reason backfill (#975/#11
     assert.equal(out[0].abandonReason, null, "no fabricated failure on a clean stop");
   });
 
-  test("handoff (clean) does NOT backfill — an in-flight slot stays pending (#1903)", async () => {
+  test("handoff backfills a still-in-flight dispatch non-claiming (run-handoff, status stays null) (#3738)", async () => {
     const rows = [dispatch({ cycleId: "", status: null, bucket: null, abandonReason: null })];
     const out = await enrichDispatchesWithCycleData(rows, baseDeps({ termReason: "handoff" }));
-    assert.equal(out[0].abandonReason, null, "handoff is not in CRASH_TERM_REASONS — no run-handoff stamp");
+    assert.equal(
+      out[0].abandonReason,
+      "run-handoff",
+      "#3738: a still-in-flight handoff dispatch is visible-tagged run-handoff (distinct from a crash's run-<reason>)",
+    );
+    assert.equal(out[0].status, null, "non-claiming — no positive outcome fabricated on an unwritten status");
   });
 
   test("the backfill only fills a status-less row — a resolved status keeps its abandonReason null", async () => {
