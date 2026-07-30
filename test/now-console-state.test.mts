@@ -2,8 +2,8 @@
  * test/now-console-state.test.mts — pure plumbing for the /now Console view
  * (issue #891, now-console-4, parent #887).
  *
- * The dashboard ships no JSX test runner (see
- * dashboard/test/recommendations-tab.test.jsx), so the load-bearing Console
+ * The dashboard ships no JSX test runner and deliberately will not adopt one
+ * (issue #3706), so the load-bearing Console
  * derivations live in dashboard/src/pages/now-console/console-state.ts and are
  * pinned here in the orchestrator suite — the same pattern as
  * now-pixel-oak-tab-state.test.mts.
