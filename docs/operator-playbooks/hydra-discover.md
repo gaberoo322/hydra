@@ -36,7 +36,7 @@ Counter controls tier:
 hydra metrics --count 50
 hydra scheduler status
 hydra health
-hydra raw GET /backlog/counts
+hydra raw GET /autopilot/board-state | jq -r 'if .degraded then "board-state: degraded (gh read failed)" else "ready_for_agent=\(.ready_for_agent) needs_qa=\(.needs_qa) needs_triage=\(.needs_triage) needs_research=\(.needs_research) in_progress=\(.in_progress) blocked=\(.blocked)" end'
 docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue
 systemctl --user list-units --type=service --state=failed 2>/dev/null | grep hydra
 journalctl --user -u hydra-orchestrator.service --since "10 min ago" --no-pager 2>/dev/null | tail -80
