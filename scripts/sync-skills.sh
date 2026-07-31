@@ -198,14 +198,41 @@ if compose_base:
             + "well-formed upstream SKILL.md"
         )
     base_body = bm.group(2)
-    # Compose: vendored upstream base body, then a separator, then the overlay.
-    resolved = (
-        base_body.rstrip("\n")
-        + "\n\n---\n\n## Hydra AFK overlay ("
-        + skill_name
-        + ")\n\n"
-        + resolved.lstrip("\n")
-    )
+
+    # Compose-seam supersession marker (issue #3818, from the #3815 design
+    # concept: "an explicit supersede marker emitted by sync-skills.sh"). An
+    # overlay MAY place a `<!-- compose-seam-supersede -->` marker line in its
+    # own body. Everything BEFORE that marker is hoisted to precede the
+    # vendored base body, instead of the default "base, then overlay" order.
+    # This is the ONLY mechanism that lets an overlay's own prose land ahead
+    # of the base's instructions in the composed file — needed when the base
+    # carries an instruction (e.g. "spawn N sub-agents in parallel") that a
+    # LATER overlay step supersedes: a model reading top-down must hit the
+    # override BEFORE the instruction it overrides, not only after it (the
+    # default compose order previously made that impossible — the overlay
+    # always followed the base in its entirety). The marker line itself is
+    # stripped and never shipped, same convention as `@include`. A playbook
+    # that never declares the marker composes exactly as before (byte-
+    # identical) — this is purely additive.
+    SUPERSEDE_MARKER = "<!-- compose-seam-supersede -->"
+    preface = ""
+    overlay_rest = resolved
+    if SUPERSEDE_MARKER in resolved:
+        pre, _, post = resolved.partition(SUPERSEDE_MARKER)
+        preface = pre.strip("\n")
+        overlay_rest = post.lstrip("\n")
+
+    # Compose: [optional hoisted preface], vendored upstream base body, a
+    # separator, then the rest of the overlay.
+    segments = []
+    if preface:
+        segments.append(preface)
+        segments.append("---")
+    segments.append(base_body.rstrip("\n"))
+    segments.append("---")
+    segments.append("## Hydra AFK overlay (" + skill_name + ")")
+    segments.append(overlay_rest.lstrip("\n"))
+    resolved = "\n\n".join(segments)
 
 print(json.dumps({"fm": fm, "body": resolved, "compose": compose}))
 PY

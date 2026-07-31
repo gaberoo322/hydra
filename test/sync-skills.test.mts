@@ -814,6 +814,188 @@ describe("scripts/sync-skills.sh — compose_base vendored-base composition (iss
   });
 });
 
+describe("scripts/sync-skills.sh — compose-seam supersede marker (issue #3818)", () => {
+  /**
+   * #3815's design-concept grill diagnosed the ~5.9 reviewers/PR overspend as
+   * a compose-seam defect (AC2): the vendored `code-review` base's own
+   * "### 4. Spawn both sub-agents in parallel" step sits BEFORE the hydra-qa
+   * overlay's "### 7. Spawn the review sub-agents in parallel" step in the
+   * composed SKILL.md, and nothing told the model the overlay supersedes the
+   * base — so a top-down read could execute both fan-outs (2 + 4 = 6).
+   *
+   * The fix (#3818) is the marker mechanism the artifact named as the
+   * cheapest lever: "an explicit supersede marker emitted by sync-skills.sh".
+   * A `<!-- compose-seam-supersede -->` line in an overlay's body hoists
+   * everything BEFORE it to precede the vendored base body in the composed
+   * output — the only way an overlay's own prose can land ahead of the
+   * base's instructions, since the base always came first before this fix.
+   * The marker line itself is stripped, never shipped (same convention as
+   * `@include`), and a playbook that never declares it composes exactly as
+   * before (covered by the byte-identical assertions in the suite above).
+   */
+  function makeMarkerRepo(): {
+    dir: string;
+    script: string;
+    playbooks: string;
+    vendor: string;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-supersede-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    const vendor = join(playbooks, "_vendor");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(vendor, { recursive: true });
+    const script = join(scripts, "sync-skills.sh");
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    return { dir, script, playbooks, vendor };
+  }
+
+  function runMarkerSync(repo: {
+    dir: string;
+    script: string;
+  }): { status: number | null; stderr: string; claudeDir: string } {
+    const claudeDir = join(repo.dir, "out-claude");
+    const codexDir = join(repo.dir, "out-codex");
+    const r = spawnSync("bash", [repo.script], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: codexDir,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stderr: r.stderr, claudeDir };
+  }
+
+  test("content before the marker is hoisted ahead of the vendored base body, and the marker itself is stripped", () => {
+    const repo = makeMarkerRepo();
+    try {
+      writeFileSync(
+        join(repo.vendor, "code-review.md"),
+        "---\nname: code-review\ndescription: upstream two-axis review\n---\n\nBASE-INTRO\n\n### 4. Spawn both sub-agents in parallel\n\nBASE-SPAWN-INSTRUCTION do the thing\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\n---\n\n# Hydra QA\n\nPREFACE-SUPERSEDE-NOTE this replaces the base step\n\n<!-- compose-seam-supersede -->\n\nOVERLAY-MAIN-BODY rest of the overlay\n",
+      );
+      const r = runMarkerSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(join(r.claudeDir, "hydra-qa", "SKILL.md"), "utf-8");
+
+      const prefaceIdx = out.indexOf("PREFACE-SUPERSEDE-NOTE");
+      const baseSpawnIdx = out.indexOf("BASE-SPAWN-INSTRUCTION");
+      const overlayIdx = out.indexOf("OVERLAY-MAIN-BODY");
+      assert.ok(prefaceIdx >= 0, "the hoisted preface must appear in the composed output");
+      assert.ok(baseSpawnIdx >= 0, "the base's own spawn instruction must still be present (untouched vendored text)");
+      assert.ok(overlayIdx >= 0, "the rest of the overlay must still be present");
+      assert.ok(
+        prefaceIdx < baseSpawnIdx,
+        "the hoisted preface (supersession note) must precede the base's spawn instruction — a top-down read must hit the override before the instruction it overrides",
+      );
+      assert.ok(
+        baseSpawnIdx < overlayIdx,
+        "the base body must still precede the rest of the overlay (compose order otherwise unchanged)",
+      );
+      assert.doesNotMatch(
+        out,
+        /compose-seam-supersede/,
+        "the marker line itself must never be shipped, same convention as @include",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an overlay WITHOUT the marker composes in the original base-then-overlay order (purely additive, no perturbation)", () => {
+    const repo = makeMarkerRepo();
+    try {
+      writeFileSync(
+        join(repo.vendor, "code-review.md"),
+        "---\nname: code-review\ndescription: upstream\n---\n\nBASE-BODY-UNMARKED\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\n---\n\nOVERLAY-BODY-UNMARKED\n",
+      );
+      const r = runMarkerSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(join(r.claudeDir, "hydra-qa", "SKILL.md"), "utf-8");
+      const baseIdx = out.indexOf("BASE-BODY-UNMARKED");
+      const overlayIdx = out.indexOf("OVERLAY-BODY-UNMARKED");
+      assert.ok(baseIdx >= 0 && overlayIdx >= 0);
+      assert.ok(baseIdx < overlayIdx, "without the marker, the base body must still precede the overlay body");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the LIVE hydra-qa playbook's supersession note precedes the base's spawn step, and review depth (fan-out counts/roles) is unchanged", () => {
+    // Golden check against the REAL repo (issue #3818 acceptance criteria):
+    // regressing the marker placement, or accidentally deleting it, must fail
+    // this REQUIRED test — not just an advisory workflow.
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-supersede-live-"));
+    try {
+      const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+        env: {
+          ...process.env,
+          CLAUDE_SKILLS_DIR: join(dir, "claude"),
+          CODEX_SKILLS_DIR: join(dir, "codex"),
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+      const out = readFileSync(join(dir, "claude", "hydra-qa", "SKILL.md"), "utf-8");
+
+      const supersedeIdx = out.indexOf("Compose-seam supersession");
+      const baseSpawnIdx = out.indexOf("### 4. Spawn both sub-agents in parallel");
+      const overlaySpawnIdx = out.indexOf("### 7. Spawn the review sub-agents in parallel");
+
+      assert.ok(supersedeIdx >= 0, "the composed skill must carry the compose-seam supersession note");
+      assert.ok(baseSpawnIdx >= 0, "the vendored base's own spawn step must still be present (untouched upstream text)");
+      assert.ok(overlaySpawnIdx >= 0, "the overlay's own spawn step must still be present, unchanged");
+      assert.ok(
+        supersedeIdx < baseSpawnIdx,
+        "the supersession note must appear AT OR BEFORE the base's spawn instruction — a model reading top-down must hit the override before the instruction it overrides (#3818 acceptance criterion)",
+      );
+      assert.match(
+        out.slice(supersedeIdx, baseSpawnIdx),
+        /Do NOT execute the base's step 4 spawn instruction/,
+        "the note between the supersession heading and the base's spawn step must contain an explicit imperative not to execute the base step",
+      );
+
+      // Review depth (fan-out count, reviewer roles, Target risk-critical fold)
+      // must be UNCHANGED — only the base's duplicate spawn is suppressed.
+      assert.match(
+        out,
+        /Spawn exactly two parallel sub-agents/,
+        "the overlay's T1\\/T2 single-pass fan-out (2 sub-agents) must be unchanged",
+      );
+      for (const reviewer of [
+        "reviewer-A-standards",
+        "reviewer-A-spec",
+        "reviewer-B-standards",
+        "reviewer-B-spec",
+      ]) {
+        assert.ok(
+          out.includes(reviewer),
+          `the overlay's T3\\/T4 adversarial fan-out must still name ${reviewer} — review depth must not change`,
+        );
+      }
+
+      // The marker line itself must never leak into the shipped skill.
+      assert.doesNotMatch(
+        out,
+        /compose-seam-supersede/,
+        "the compose-seam-supersede marker must be stripped, never shipped literally",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)", () => {
   /**
    * sync-skills.sh only ever WROTE generated skills; a playbook deleted from
