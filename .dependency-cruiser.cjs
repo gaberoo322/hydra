@@ -59,18 +59,6 @@ module.exports = {
       to: { dependencyTypes: ["npm"], path: "^ioredis$" },
     },
     {
-      name: "no-reaching-into-backlog-internal-helpers",
-      comment:
-        "src/backlog/internal.ts is the Module's PRIVATE helper surface — its own header states " +
-        '"Nothing in this file is exported outside src/backlog/. Callers reach the Module through ' +
-        'the role-keyed surface files (reads/items/lanes/claims/wip/reaper)." Anything outside ' +
-        "src/backlog/ importing internal.ts directly is a seam breach (and lane mutations must go " +
-        "through src/backlog/lanes.ts → moveItemToLane per CLAUDE.md, never internal.ts).",
-      severity: "warn",
-      from: { path: "^src/", pathNot: "^src/backlog/" },
-      to: { path: "^src/backlog/internal\\.ts$" },
-    },
-    {
       name: "no-cross-redis-from-outside-adapters",
       comment:
         "Belt-and-braces for the Redis seam: anything outside src/redis/ that imports the raw " +

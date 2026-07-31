@@ -87,7 +87,7 @@ broad consumers are:
   `recommendations`, `openviking/search`, `health*`.
 - **Skill subagents** (`hydra-dev`, `hydra-qa`, `hydra-autopilot`, …):
   `reflections`, `design-concepts/*`, `tier`, `holdback/*`, `memory/*`,
-  `backlog/*`, `cycle/*`, `metrics/*`, `merge/*`.
+  `cycle/*`, `metrics/*`, `merge/*`.
 - **`decide.py` / autopilot control loop**: `autopilot/*`, `queue*`,
   `anchor/candidates`, `capacity*`, `scout/*`.
 - **External / webhook**: `webhooks/sentry` (Sentry alert ingestion).
@@ -170,23 +170,6 @@ broad consumers are:
 | GET | `/api/autopilot/runs/:runId` | stable |
 | GET | `/api/autopilot/runs/:runId/retro` | stable |
 | GET | `/api/autopilot/runs/current` | stable |
-
-### `src/api/backlog.ts`
-
-| Method | Path | Stability |
-|---|---|---|
-| DELETE | `/api/backlog/:id` | stable |
-| GET | `/api/backlog` | stable |
-| GET | `/api/backlog/:id/children` | stable |
-| GET | `/api/backlog/audit` | stable |
-| GET | `/api/backlog/counts` | stable |
-| GET | `/api/backlog/stale-claims` | stable |
-| PATCH | `/api/backlog/:id` | stable |
-| PATCH | `/api/backlog/:id/move` | stable |
-| POST | `/api/backlog` | stable |
-| POST | `/api/backlog/:id/approve` | stable |
-| POST | `/api/backlog/claim` | stable |
-| POST | `/api/backlog/stale-claims/reap` | stable |
 
 ### `src/api/builder-health.ts`
 
