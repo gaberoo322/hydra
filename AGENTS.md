@@ -74,7 +74,6 @@ Relevant local endpoints and commands:
 - API health: `curl -s http://localhost:4000/api/health`
 - Cycle status: `curl -s http://localhost:4000/api/cycle/status`
 - Scheduler: `curl -s http://localhost:4000/api/scheduler/status`
-- Backlog: `curl -s http://localhost:4000/api/backlog`
 - Redis: `docker exec hydra-redis-1 redis-cli`
 - Service: `systemctl --user status hydra-orchestrator.service`
 

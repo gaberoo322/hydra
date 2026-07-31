@@ -32,6 +32,7 @@
  * against the injected deps (e.g. "workless read throws → worklessUntil null").
  */
 
+import type { EligibilityUsageInput } from "../cost/eligibility-usage.ts";
 import {
   projectEligibility,
   overlayPauseEligibility,
@@ -55,7 +56,7 @@ export interface EligibilityViewDeps {
   /** The already-read usage snapshot to project. The route reads this via
    * `getUsage({ force })` OUTSIDE the fail-safe guards — a snapshot failure is a
    * genuine 500, not a degradable slice — so it arrives pre-read here. */
-  snapshot: UsageSnapshot;
+  snapshot: EligibilityUsageInput;
   /** Reader for the operator-only Autopilot pause flag (#988). A REJECTED
    * promise degrades to NOT paused (fails safe to running). */
   readPaused: () => Promise<boolean>;

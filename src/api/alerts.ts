@@ -39,7 +39,33 @@ export function createAlertsRouter() {
       // the legacy `|| 50` semantics without a behaviour change.
       const limit = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const raw = await readRecentAlerts(limit + 1);
-      return raw.map((s) => JSON.parse(s));
+      // Parse defensively (issue #3744): a single corrupt element — an empty
+      // string, whitespace, or truncated JSON — must cost one alert, not the
+      // whole read surface. The legacy `raw.map((s) => JSON.parse(s))` threw out
+      // of the `.map` on the first bad element, and the `aggregatorRouteNoQuery`
+      // seam converted that into a 500 for the entire list, blinding the
+      // operator to every alert (51 invisible during the incident that surfaced
+      // this). This mirrors the reader guard added to the scout consumer of the
+      // same list in #3619 (src/scout/alert-listener.ts:planAlertDispatches):
+      // skip non-string / empty / whitespace-only elements, and log+skip — never
+      // silently drop — anything `JSON.parse` rejects (fail-loud per CLAUDE.md).
+      // The write-side root cause for the specific empty entry seen in the
+      // incident is tracked separately in #3743; this is the reader-side
+      // defence-in-depth, so any legacy corrupt entry already in the list can
+      // no longer poison the route.
+      const parsed: unknown[] = [];
+      for (const s of raw) {
+        if (typeof s !== "string" || s.trim().length === 0) continue;
+        try {
+          parsed.push(JSON.parse(s));
+        } catch (err) {
+          logger.error(
+            { routeLabel: "api/alerts", rawLen: s.length, err },
+            "[api/alerts] skipping unparseable alert entry",
+          );
+        }
+      }
+      return parsed;
     }),
   );
 

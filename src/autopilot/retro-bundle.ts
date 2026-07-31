@@ -296,26 +296,32 @@ export async function assembleRetroBundle(
   // flagDispatchesForDrill returns members of `dispatches` (filter, not map),
   // so mutating them here is mutating the served objects in place.
   for (const d of flagged) d.flagged = true;
-  // Materialise the undrillable signal onto the served dispatches (issue
-  // #1184). A dispatch with a failure/abort signal but an EMPTY cycleId has no
-  // transcript handle to drill — the metrics/transcript enrichment loop above
-  // skips it (`if (!d.cycleId) continue;`). The #1168 `run-interrupted`
-  // backfill stamps such empty-cycleId slots-snapshot-fallback dispatches, but
-  // they cannot be drilled. So we EXCLUDE them from the flagged subset (the
-  // selector's `cycleId !== ""` clause already does this — they stay
-  // flagged:false) and record them undrillable:true so the JSON consumer can
-  // honestly count "recorded N undrillable, flagged-for-drill 0" rather than
-  // reading zero transcripts on N flags. This is the same in-place mutation of
-  // the served objects as the flagged write-back above, keeping the served
-  // bundle and the pure selector in agreement. Invariant: a flagged dispatch
-  // always has cycleId !== "" (a transcript handle), and an undrillable
-  // dispatch is never flagged.
-  const hasFailureSignal = (d: RetroDispatch): boolean =>
-    d.bucket === "failed" ||
-    d.regressionIntroduced === true ||
-    (typeof d.abandonReason === "string" && d.abandonReason.length > 0);
+  // Materialise the undrillable signal onto the served dispatches (issues
+  // #1184 / #3738). A dispatch with NO terminal record attributable to the run
+  // — neither a resolved `status` NOR a non-empty `cycleId` transcript handle —
+  // has nothing to drill and its outcome was never recorded on the run. After
+  // the #1352 confirm-or-drop pass a non-empty cycleId IS a confirmed terminal
+  // record, so "no terminal record" reduces to `status === null && cycleId === ""`.
+  // This is the population a handoff / crashed / budget-exhausted run's in-flight
+  // dispatch falls into: the run ended before its terminal cycle status was
+  // written, and no consumer re-reads a closed run, so its outcome is lost to
+  // the learning loop. #1184 introduced the flag for the empty-cycleId FAILURE
+  // case (counted only when a failure/abort signal was present); #3738
+  // broadened it to count ANY unresolved row — a still-in-flight handoff
+  // dispatch has no failure signal either, yet its outcome is just as lost, and
+  // excluding it let the bundle report a false clean (`undrillable: 0`) on
+  // exactly the runs it exists to learn from. These rows are EXCLUDED from the
+  // flagged subset (the selector's `cycleId !== ""` clause already does this —
+  // they stay flagged:false) and recorded undrillable:true so the JSON consumer
+  // can honestly say "0 drilled because N unresolved" instead of reading a
+  // blind run as clean. Same in-place mutation of the served objects as the
+  // flagged write-back above. Invariant: a flagged dispatch always has
+  // cycleId !== "" (a transcript handle), and an undrillable dispatch is never
+  // flagged.
+  const hasTerminalRecord = (d: RetroDispatch): boolean =>
+    d.status !== null || d.cycleId !== "";
   for (const d of dispatches) {
-    d.undrillable = d.cycleId === "" && hasFailureSignal(d);
+    d.undrillable = !hasTerminalRecord(d);
   }
   const reflections: RetroReflection[] = [];
   const seenAnchors = new Set<string>();

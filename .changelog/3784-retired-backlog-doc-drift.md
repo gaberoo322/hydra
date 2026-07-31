@@ -1,0 +1,1 @@
+- docs: remove five stale docs/config references to the retired /api/backlog HTTP surface, including a Tier-1 discover collector that 404'd onto stdout (#3784)

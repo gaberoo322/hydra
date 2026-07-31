@@ -62,7 +62,7 @@ import {
 } from "./retro-projections.ts";
 
 /**
- * `term_reason` values that mark a non-clean run termination — the run died
+ * `term_reason` values that mark a non-clean run termination — the run DIED
  * before its dispatches' terminal cycle status could be written. For a
  * dispatch left status-less on such a run, the join derives a failure-leaning
  * `abandonReason` (`run-<reason>`) so a stalled dispatch is still flagged for
@@ -74,8 +74,13 @@ import {
  * dispatches must be drilled too rather than silently dropped (issue #1168 —
  * an interrupted run was producing a structurally-empty retro that flagged 0
  * dispatches and deep-read nothing). Genuinely-clean stops (`budget` /
- * `wall_clock` / `idle` / `handoff`) are NOT here — a status-less dispatch on a
- * clean stop is genuinely still pending and must stay unflagged.
+ * `wall_clock` / `idle`) are NOT here — a status-less dispatch there is
+ * genuinely still pending and nothing abandoned it. `handoff` is ALSO not here
+ * (it is a clean baton-pass, not a killed-mid-turn crash) but is handled by the
+ * sibling {@link HANDOFF_TERM_REASONS} set (issue #3738): its in-flight
+ * dispatches are lost to the learning loop all the same, so they get a
+ * non-claiming `run-handoff` tag for visibility — a DIFFERENT thing from a
+ * crash, distinguishable by the tag.
  */
 export const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
   "crash",
@@ -83,6 +88,22 @@ export const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
   "failure_backstop",
   "interrupted",
 ]);
+
+/**
+ * `term_reason` values that mark a CLEAN baton-pass whose in-flight dispatches
+ * are nonetheless lost to the retro learning loop (issue #3738). A `handoff`
+ * run ended (its pace-gate window closed) while dispatches were still in
+ * flight; their terminal cycle status was never written to THIS run, and no
+ * consumer re-reads a closed run, so the dispatch's outcome is permanently
+ * unattributed — `hydra-retro` reported `flagged: 0, undrillable: 0` on exactly
+ * the runs it exists to learn from. Unlike a {@link CRASH_TERM_REASONS}
+ * termination the dispatch did NOT die mid-turn, so this is a SEPARATE set: a
+ * handoff-pending row is tagged non-claiming `run-handoff` (status stays null,
+ * never a positive outcome) for VISIBILITY only, keeping it distinguishable
+ * from a crashed row's `run-<reason>`. It is counted `undrillable` downstream,
+ * never flagged (no transcript handle to drill).
+ */
+export const HANDOFF_TERM_REASONS: ReadonlySet<string> = new Set(["handoff"]);
 
 /**
  * Never-throw sub-source runner, threaded in from the assembler so a failed
@@ -227,16 +248,25 @@ export async function enrichDispatchesWithCycleData(
   // failed cycle is flagged exactly once.
   const deduped = dedupByCanonicalCycleId(dispatches);
 
-  // Best-effort status derivation for a non-clean termination (issue #975 /
-  // #1168). When a run crashed / was killed / was interrupted, its dispatches'
-  // terminal cycle status was never written, so they'd stay status=null and
-  // flagDispatchesForDrill would skip them. For a still-occupied slot on such a
-  // run we tag a non-claiming failure-leaning `run-<term_reason>` abandonReason
-  // (leaving status null so we never misreport a positive outcome) so the
-  // stalled dispatch stays visible. Genuinely-clean stops (budget / wall_clock
-  // / idle / handoff) are absent from CRASH_TERM_REASONS — a status-less
-  // dispatch there is genuinely still pending and stays unflagged.
-  if (CRASH_TERM_REASONS.has(termReason)) {
+  // Best-effort visibility tag for a dispatch whose terminal cycle status was
+  // never written (issues #975 / #1168 / #3738). When a run terminated while a
+  // dispatch was still in flight, that dispatch's outcome was never recorded on
+  // the run, so it would stay status=null and `flagDispatchesForDrill` would
+  // skip it — silently absent from the bundle. For a still-occupied slot we tag
+  // a non-claiming `run-<term_reason>` abandonReason (leaving status null so we
+  // never misreport a positive outcome) so the unresolved dispatch stays
+  // VISIBLE (counted undrillable downstream). Two populations, kept
+  // distinguishable by the tag:
+  //   - CRASH_TERM_REASONS (#975/#1168): the run DIED mid-turn (crash / killed
+  //     / interrupted / failure_backstop) — a failure-leaning tag.
+  //   - HANDOFF_TERM_REASONS (#3738): the run HANDED OFF mid-flight (a clean
+  //     baton-pass, not a crash) — its in-flight dispatch is lost to the
+  //     learning loop all the same, so it gets a non-claiming visibility tag.
+  // Genuinely-clean stops (budget / wall_clock / idle) tag nothing — a
+  // status-less dispatch there is genuinely still pending and nothing abandoned
+  // it (still counted undrillable if it has no terminal record, just untagged).
+  const abandoning = CRASH_TERM_REASONS.has(termReason) || HANDOFF_TERM_REASONS.has(termReason);
+  if (abandoning) {
     for (const d of deduped) {
       // Only fill dispatches whose terminal outcome was never resolved — an
       // action/cycle that DID record a status keeps it (action-join wins).
