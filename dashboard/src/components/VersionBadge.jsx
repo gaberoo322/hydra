@@ -7,13 +7,23 @@ import {
 } from "../lib/versions-format.ts";
 
 /**
- * VersionBadge — the always-on footer strip showing each project's current
- * version (issue #3681, epic #3676 epsilon; wayfinder ticket #3660).
+ * VersionBadge — the always-on strip showing each project's current version
+ * (issue #3681, epic #3676 epsilon; wayfinder ticket #3660).
  *
- * Rendered by `Layout.jsx`, so it is visible on EVERY route, not just Today —
- * "what version is prod actually on?" is a question the operator asks while
- * looking at any page. Clicking a chip navigates to `/#versions-<scope>`, which
- * the Today-page `Versions` panel scrolls to.
+ * Rendered by `Sidebar.jsx`, in the slot below `<nav>` — the sidebar is
+ * already the app's always-on global chrome on every route, so mounting here
+ * needs no change to `Layout.jsx`'s scroll container. The approved
+ * design-concept artifact for #3681 evaluated and explicitly REJECTED the
+ * alternative (a new `<footer>` in `Layout.jsx`): that restructures `<main>`
+ * into a column, which changes the scroll container for EVERY route — a
+ * large blast radius for a version chip. `<nav>` is `flex-1`, so this
+ * component renders in the natural bottom slot it leaves below itself.
+ *
+ * The sidebar is a fixed w-56 column, so chips stack VERTICALLY — one line
+ * per project, name truncated — rather than wrapping horizontally.
+ *
+ * Clicking a chip navigates to `/#versions`, which the Today-page `Versions`
+ * panel scrolls to.
  *
  * Renders nothing at all while loading or when the read fails outright: a
  * permanently-visible chrome element must never turn into an error banner
@@ -36,31 +46,32 @@ export default function VersionBadge() {
   if (error || projects.length === 0) return null;
 
   return (
-    <footer className="sticky bottom-0 z-10 border-t border-zinc-800 bg-zinc-950/90 backdrop-blur px-6 py-2">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-600">Versions</span>
-
+    <div className="border-t border-zinc-800 px-4 py-2">
+      <span className="text-[10px] uppercase tracking-wider text-zinc-600">Versions</span>
+      <div className="mt-1 space-y-0.5">
         {projects.map((project) => {
           const ok = projectState(project) === "ok";
           return (
             <Link
-              key={project.scope || project.name}
-              to={versionAnchorHref(project.scope)}
+              key={`${project.scope}:${project.name}`}
+              to={versionAnchorHref()}
               title={
                 ok
                   ? `${project.name} — jump to release notes`
                   : `${project.name} — no readable release; jump to details`
               }
-              className="group flex items-baseline gap-1.5 text-xs hover:underline"
+              className="group flex items-baseline justify-between gap-1.5 text-xs hover:underline"
             >
-              <span className="text-zinc-500 group-hover:text-zinc-300">{project.name}</span>
-              <span className={`font-mono ${ok ? "text-emerald-400" : "text-zinc-600"}`}>
+              <span className="text-zinc-500 group-hover:text-zinc-300 truncate">
+                {project.name}
+              </span>
+              <span className={`font-mono shrink-0 ${ok ? "text-emerald-400" : "text-zinc-600"}`}>
                 {badgeVersionLabel(project)}
               </span>
             </Link>
           );
         })}
       </div>
-    </footer>
+    </div>
   );
 }

@@ -8,9 +8,19 @@
  * component captures that chrome once so the individual sections can
  * focus on their data shape.
  */
-export function Section({ title, subtitle, count, loading, error, empty, emptyMessage, children }) {
+export function Section({
+  id,
+  title,
+  subtitle,
+  count,
+  loading,
+  error,
+  empty,
+  emptyMessage,
+  children,
+}) {
   return (
-    <section className="bg-zinc-800/50 rounded-lg border border-zinc-700 p-6">
+    <section id={id} className="bg-zinc-800/50 rounded-lg border border-zinc-700 p-6">
       <header className="flex items-baseline justify-between gap-4 mb-3">
         <div>
           <h2 className="text-sm uppercase tracking-wide text-zinc-400 mb-1">

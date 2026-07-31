@@ -29,6 +29,10 @@ import {
  * — this file is deliberately a thin renderer, because the dashboard has no
  * component-test runner.
  *
+ * The whole panel carries a single `id="versions"` anchor (not one per
+ * project) — the footer badge in `Sidebar.jsx` always jumps to the panel as a
+ * whole via `/#versions`, and `Today` scrolls to it on that exact hash.
+ *
  * Polls every 5 minutes: releases are cut at deploy time, so the 30s/60s
  * cadence the operator-attention sections use would be pure waste here.
  */
@@ -139,8 +143,7 @@ function ProjectCard({ project }) {
   return (
     <details
       open
-      id={versionAnchorId(project.scope)}
-      className="bg-zinc-900/40 rounded-md border border-zinc-700/60 p-4 scroll-mt-6"
+      className="bg-zinc-900/40 rounded-md border border-zinc-700/60 p-4"
     >
       <summary className="cursor-pointer flex items-baseline justify-between gap-3">
         <span className="text-sm font-semibold text-zinc-100">{project.name}</span>
@@ -187,16 +190,17 @@ export default function Versions() {
   const { hash } = useLocation();
   const projects = data?.projects ?? [];
 
-  // The footer badge links to `/#versions-<scope>`. React Router does not
-  // scroll to a hash on its own, so the panel does it once the cards exist.
+  // The footer badge links to `/#versions`. React Router does not scroll to a
+  // hash on its own, so the panel does it once the cards exist.
   useEffect(() => {
-    if (!hash || projects.length === 0) return;
-    const el = document.getElementById(hash.slice(1));
+    if (hash !== `#${versionAnchorId()}` || projects.length === 0) return;
+    const el = document.getElementById(versionAnchorId());
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [hash, projects.length]);
 
   return (
     <Section
+      id={versionAnchorId()}
       title="Versions"
       subtitle="Current release and recent notes per repository."
       count={projects.length}
@@ -207,7 +211,7 @@ export default function Versions() {
     >
       <div className="space-y-3">
         {projects.map((project) => (
-          <ProjectCard key={project.scope || project.name} project={project} />
+          <ProjectCard key={`${project.scope}:${project.name}`} project={project} />
         ))}
       </div>
     </Section>

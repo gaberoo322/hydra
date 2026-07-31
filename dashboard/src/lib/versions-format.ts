@@ -78,6 +78,7 @@ export const NOTE_TYPE_ORDER: readonly string[] = [
   "build",
   "ci",
   "chore",
+  "revert",
   "other",
 ];
 
@@ -92,6 +93,7 @@ export const NOTE_TYPE_LABEL: Readonly<Record<string, string>> = {
   build: "Build",
   ci: "CI",
   chore: "Chores",
+  revert: "Reverts",
   other: "Other",
 };
 
@@ -279,18 +281,18 @@ export function shortSha(sha: string | null | undefined): string {
 }
 
 /**
- * The DOM id of a project's card in the Versions panel. The footer badge links
- * to `/#<this id>`, so both sides derive it from here rather than hard-coding
- * a string that could drift.
+ * The DOM id of the Versions panel itself (a single anchor for the whole
+ * panel, not one per project — the footer badge always jumps to the panel as
+ * a whole). The footer badge links to `/#<this id>`, so both sides derive it
+ * from here rather than hard-coding a string that could drift.
  */
-export function versionAnchorId(scope: string | null | undefined): string {
-  const raw = (scope || "").trim() || "unknown";
-  return `versions-${raw}`;
+export function versionAnchorId(): string {
+  return "versions";
 }
 
 /** The route + hash the footer chip navigates to (Today lives at `/`). */
-export function versionAnchorHref(scope: string | null | undefined): string {
-  return `/#${versionAnchorId(scope)}`;
+export function versionAnchorHref(): string {
+  return `/#${versionAnchorId()}`;
 }
 
 /**

@@ -129,6 +129,40 @@ describe("versions-format: note grouping", () => {
     }
     assert.equal(noteTypeLabel("feat"), "Features");
   });
+
+  test("NOTE_TYPE_ORDER mirrors the server's TYPE_ORDER, including revert", () => {
+    // src/versions/read-versions.ts's TYPE_ORDER is the canonical order notes
+    // arrive in; the dashboard groups by type but must never disagree about
+    // where a known type sorts. "other" is dashboard-only (the server's
+    // unknown-type fallback sorts last in first-seen order instead).
+    assert.deepEqual(NOTE_TYPE_ORDER, [
+      "feat",
+      "fix",
+      "perf",
+      "refactor",
+      "docs",
+      "test",
+      "build",
+      "ci",
+      "chore",
+      "revert",
+      "other",
+    ]);
+    assert.equal(noteTypeLabel("revert"), "Reverts");
+  });
+
+  test("a revert note sorts in its canonical slot, not last as unknown", () => {
+    const groups = groupNotesByType([
+      note("chore", "bump deps"),
+      note("revert", "undo the bad migration"),
+      note("feat", "panel"),
+    ]);
+
+    assert.deepEqual(
+      groups.map((g) => g.type),
+      ["feat", "chore", "revert"],
+    );
+  });
 });
 
 describe("versions-format: splitReleases (the double-render guard)", () => {
@@ -287,16 +321,13 @@ describe("versions-format: misc formatting", () => {
     assert.equal(shortSha(null), ERROR_PLACEHOLDER);
   });
 
-  test("the badge href and the panel card id agree on the anchor", () => {
-    assert.equal(versionAnchorId("orch"), "versions-orch");
-    assert.equal(versionAnchorHref("orch"), "/#versions-orch");
+  test("the badge href and the panel's anchor id agree on a single, panel-wide anchor", () => {
+    // Every project chip jumps to the SAME panel anchor — the artifact's
+    // contract is one id="versions" on the panel, not one per project.
+    assert.equal(versionAnchorId(), "versions");
+    assert.equal(versionAnchorHref(), "/#versions");
     // Today lives at "/", so the href must not name a /today path.
-    assert.ok(!versionAnchorHref("orch").includes("/today"));
-  });
-
-  test("a blank scope still yields a stable, non-empty anchor", () => {
-    assert.equal(versionAnchorId(""), "versions-unknown");
-    assert.equal(versionAnchorId(null), "versions-unknown");
+    assert.ok(!versionAnchorHref().includes("/today"));
   });
 
   test("issueUrl routes each scope at its OWN repository", () => {
