@@ -640,6 +640,10 @@ export function makeReadOAuth(opts: {
           stale: false,
           ageMs: isOAuthUsageOk(result) ? 0 : null,
           lastKnownOAuth: isOAuthUsageOk(result) ? result.data : null,
+          // The bypass path has no backoff ladder at all (issue #3821) — each
+          // call is an independent deterministic read, so there is no
+          // consecutive-failure count to carry. Always 0.
+          consecutiveFailures: 0,
         };
       }
     : () => readOAuthCached(opts.readUsage, opts.nowMs);

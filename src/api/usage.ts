@@ -131,8 +131,13 @@ export function createUsageRouter() {
       const eligibility = await getEligibilityView({
         snapshot: meter.input,
         // BLOCK when quota cannot be measured (2026-07-30 operator decision,
-        // replacing the #1124 fail-open). Only true after ~30 min with no
-        // usable meter reading — transient 429s are absorbed by last-good.
+        // replacing the #1124 fail-open). Requires a SUSTAINED outage (issue
+        // #3821): either ~35 min with no usable meter reading (TTL + maxStale
+        // — a stale-but-warm cache keeps serving through that window) or 3+
+        // consecutive failed reads against a cold cache (every process
+        // restart starts cold, so a single blip right after a deploy must not
+        // trip this). Transient 429s are absorbed by last-good / the backoff
+        // gate well before either threshold is reached.
         meterUnavailable: meter.meterUnavailable,
         readPaused: async () => (await getAutopilotPaused()).paused,
         readSessionBlockedUntil: () => getSessionBlockedUntil(),

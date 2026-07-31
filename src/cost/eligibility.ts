@@ -311,10 +311,14 @@ export interface UsageEligibility {
      */
     worklessUntil: string | null;
     /**
-     * True when the Anthropic OAuth meter could not be read at all — no fresh
-     * value and no last-good one inside the max-stale window (default 30 min).
-     * Forces `allow=false`: quota cannot be measured, so dispatch BLOCKS.
-     * (2026-07-30 operator decision; see overlayMeterUnavailableEligibility.)
+     * True when the Anthropic OAuth meter is SUSTAINED-unavailable — either no
+     * fresh value and no last-good one inside the max-stale window (default
+     * ~35 min total: TTL + max-stale), or 3+ consecutive failed reads against
+     * a cold cache with no last-good to fall back on at all (issue #3821 —
+     * every process restart starts cold, so a single transient blip right
+     * after a deploy must not trip this). Forces `allow=false`: quota cannot
+     * be measured, so dispatch BLOCKS. (2026-07-30 operator decision; see
+     * overlayMeterUnavailableEligibility.)
      */
     meterUnavailable: boolean;
   };
@@ -663,11 +667,15 @@ export function overlayWorklessEligibility(
  *
  * Why this is not as aggressive as it sounds. `readOAuthCached` already absorbs
  * transient failures — it serves the last-good meter value for up to
- * `HYDRA_OAUTH_USAGE_MAX_STALE_MS` (default 30 min) past TTL, behind an
- * exponential backoff gate. So `meterUnavailable` does NOT mean "a GET
- * returned 429" (observed 76 times in one 24h window, essentially all absorbed);
- * it means no usable reading for half an hour. That is a genuine measurement
- * outage, not flakiness.
+ * `HYDRA_OAUTH_USAGE_MAX_STALE_MS` (default 30 min) past the TTL (default 5
+ * min), i.e. ~35 min total from a warm cache, behind an exponential backoff
+ * gate. So `meterUnavailable` does NOT mean "a GET returned 429" (observed 76
+ * times in one 24h window, essentially all absorbed); it means either no
+ * usable reading for ~35 minutes, OR — for a COLD cache with no last-good to
+ * serve at all (every process restart, i.e. every deploy, starts cold) — 3+
+ * consecutive failed reads (issue #3821, so one transient blip right after a
+ * deploy doesn't trip this off the very first GET). Either way this is a
+ * genuine measurement outage, not flakiness.
  *
  * The failure mode this accepts, stated plainly: a sustained meter outage now
  * stops the autopilot instead of letting it run blind. That is the operator's

@@ -44,7 +44,7 @@
  * told — is real and is tracked separately; it is NOT this module's to invent.
  */
 
-import { readOAuthCached } from "./oauth-read-cache.ts";
+import { readOAuthCached, OAUTH_SUSTAINED_FAILURE_THRESHOLD } from "./oauth-read-cache.ts";
 import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
 import { deriveHardStop } from "./eligibility.ts";
@@ -81,8 +81,20 @@ export interface EligibilityUsageResult {
   /** Age of the served meter value in ms, or null when none was served. */
   ageMs: number | null;
   /**
-   * True when no meter value was available at all, so the verdict is running
-   * fail-open per #1124. The route surfaces this; nothing gates on it.
+   * True when the meter is SUSTAINED-unavailable, so the verdict is running
+   * fail-open per #1124 AND `overlayMeterUnavailableEligibility` forces
+   * `allow=false` for the whole autopilot (2026-07-30 operator decision, PR
+   * #3804) — this field is NOT a passive observability flag, it gates.
+   *
+   * Set true only when the consecutive-failed-read count from
+   * {@link readOAuthCached} reaches {@link OAUTH_SUSTAINED_FAILURE_THRESHOLD}
+   * (3), OR when the cached reader itself throws (a programming/IO fault, not
+   * a meter outage). A single failed read — including the very first read of a
+   * freshly-restarted process, where `oauthCache` is `null` and there is no
+   * last-good value to fall back on — does NOT set this (issue #3821): every
+   * process restart (i.e. every deploy) starts cold, and one transient GET
+   * blip against that cold cache used to halt the whole autopilot until the
+   * next successful read landed.
    */
   meterUnavailable: boolean;
 }
@@ -122,15 +134,35 @@ export async function getEligibilityUsage(
       { err },
       "[eligibility-usage] cached OAuth read threw; degrading to fail-open input",
     );
-    return unavailable(generatedAt, weeklyResetAnchor);
+    // A throw here is a programming/IO fault in the cache seam itself, not an
+    // ordinary meter-read failure — it never absorbed transient blips in the
+    // first place, so there is no sustained-vs-transient distinction to make.
+    // Report unavailable immediately.
+    return unavailable(generatedAt, weeklyResetAnchor, true);
   }
 
   if (!isOAuthUsageOk(cached.result)) {
+    // Require SUSTAINED failure before reporting the meter unavailable (issue
+    // #3821): `cached.consecutiveFailures` is 0 or unset only when the meter
+    // has never failed on this ladder; a fresh process with a cold cache (every
+    // process restart, i.e. every deploy) sees its first-ever failed read at
+    // `consecutiveFailures === 1`, which is well below the threshold, so
+    // `meterUnavailable` correctly stays false and the autopilot keeps running.
+    // The same threshold `oauth-read-cache.ts` already uses for its sustained-
+    // failure alarm (issue #3601) — reused rather than inventing a second one.
+    const sustained = cached.consecutiveFailures >= OAUTH_SUSTAINED_FAILURE_THRESHOLD;
     logger.warn(
-      { code: cached.result.code, ageMs: cached.ageMs },
-      "[eligibility-usage] OAuth meter unavailable; admission verdict runs fail-open (#1124)",
+      {
+        code: cached.result.code,
+        ageMs: cached.ageMs,
+        consecutiveFailures: cached.consecutiveFailures,
+        sustained,
+      },
+      sustained
+        ? "[eligibility-usage] OAuth meter sustained-unavailable; admission verdict blocks (#3821/#3804)"
+        : "[eligibility-usage] OAuth meter read failed (transient, below sustained-failure threshold); admission verdict unaffected (#3821)",
     );
-    return unavailable(generatedAt, weeklyResetAnchor);
+    return unavailable(generatedAt, weeklyResetAnchor, sustained);
   }
 
   const percentLast5h = cached.result.data.fiveHour.utilization;
@@ -180,10 +212,18 @@ export async function getEligibilityUsage(
  * `usageSource === "oauth"` guard — `deriveHardStop` and `fiveHourThrottleShed`
  * both short-circuit on a non-oauth source, so these zeros can never be mistaken
  * for a measured "0% used".
+ *
+ * `meterUnavailable` is a caller-supplied verdict, not hardcoded `true` (issue
+ * #3821): this shape is also returned for a single transient failed read
+ * against a cold cache, where the fail-open `usageSource: "estimate"` input is
+ * still correct (there genuinely is no meter value to report) but the
+ * `allow=false`-forcing `meterUnavailable` flag must stay `false` until the
+ * failure is sustained. See {@link OAUTH_SUSTAINED_FAILURE_THRESHOLD}.
  */
 function unavailable(
   generatedAt: string,
   weeklyResetAnchor: string | null,
+  meterUnavailable: boolean,
 ): EligibilityUsageResult {
   return {
     input: {
@@ -200,6 +240,6 @@ function unavailable(
     },
     stale: false,
     ageMs: null,
-    meterUnavailable: true,
+    meterUnavailable,
   };
 }
