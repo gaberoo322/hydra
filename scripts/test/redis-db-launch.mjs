@@ -21,6 +21,36 @@
  * invocation with the env inherited. Same worktree → same DB; different
  * worktrees → different DBs, so cross-run wipes cannot happen.
  *
+ * ## Deterministic runner slots (#3764 root-cause fix)
+ *
+ * Deriving the index by hashing the root path onto 8 slots is only
+ * PROBABILISTIC — 4 runners over 8 slots collide ~59% of the time, and PR
+ * #3781's postmortem caught exactly that: runners 2 and 4 both hashed to DB
+ * 15, so whichever's start-of-run FLUSHDB ran second wiped the other's
+ * mid-test fixtures (the flush is the weapon, which is why the failing test
+ * sets were disjoint and tracked no code change). #3781 proposed closing this
+ * with explicit per-runner `REDIS_URL` assignment in each runner's `.env` —
+ * an operator action outside this repo, not yet done as of #3764 reopening.
+ * `KNOWN_RUNNER_SLOTS` / `knownRunnerSlot()` below fix the same collision in
+ * code instead: the 4 runner checkout roots
+ * (`/home/gabe/actions-runner{,-2,-3,-4}/...`) are a small, known, stable set,
+ * so each maps to a DISTINCT index directly rather than through a hash —
+ * collision is categorically impossible for the documented topology, no
+ * `ci.yml` edit needed (a runner's checkout root isn't workflow config), and
+ * no per-runner `.env` file for an operator to create or for a reimaged
+ * runner to silently lose. A root that doesn't match a known runner (a
+ * laptop, an agent worktree, a future unrecognized runner) still falls
+ * through to the SHA-256 hash, unchanged.
+ *
+ * A key-prefix namespace (isolate within one shared DB instead of assigning
+ * distinct DBs) was considered and rejected for this same problem back in the
+ * #1231 design-concept (ADR-0014 simplicity) and is rejected again here: the
+ * repo has 87 test files (116 call sites) that open their own raw
+ * `new Redis(process.env.REDIS_URL)` probe connection rather than going
+ * through `src/redis/connection.ts`, and a prefix only isolates traffic that
+ * passes through a client configured with it — retrofitting all 87 files is
+ * disproportionate blast radius for a CI-infra fix and was not attempted.
+ *
  * # Contract (pinned by test/redis-db-helper.test.mts)
  *
  *   - A pre-set REDIS_URL is respected VERBATIM (CI or operator override):
@@ -80,8 +110,52 @@ const REDIS_PORT = 6379;
  */
 const ALLOWED_DB_INDEXES = [8, 9, 10, 11, 12, 13, 14, 15];
 
+/**
+ * Deterministic, collision-free slot assignment for the KNOWN self-hosted
+ * runner topology (issue #3764 root-cause fix).
+ *
+ * Hashing an arbitrary worktree root path onto 8 slots is only PROBABILISTIC:
+ * PR #3781's postmortem showed the 4 real runners hash to {8, 15, 9, 15} —
+ * runners 2 and 4 collide on DB 15, so whichever's start-of-run FLUSHDB lands
+ * second wipes the other's mid-run fixtures. That IS the "disjoint,
+ * code-unrelated failure sets" reported in #3764: the flush is the weapon.
+ *
+ * The 4 runner checkout roots are a small, known, stable set —
+ * `/home/gabe/actions-runner{,-2,-3,-4}/_work/...` — so map each one to a
+ * distinct index directly instead of hashing it. This makes collision
+ * categorically impossible for the documented topology, requires no
+ * `ci.yml` edit (a runner's checkout path is not workflow config — it comes
+ * from how the runner service itself was registered), and needs no operator
+ * per-runner `.env` maintenance (the prescribed-but-still-pending fix note
+ * from PR #3781): a reimaged or freshly-registered runner keeps working
+ * without anyone hand-editing a file outside this repo.
+ *
+ * Anything that doesn't match a known runner root (a developer's laptop, an
+ * agent worktree, a future unrecognized runner) falls through to the
+ * pre-existing SHA-256 hash below — unchanged behavior for every case this
+ * fix isn't targeting.
+ */
+const KNOWN_RUNNER_SLOTS = new Map([
+  ["actions-runner", ALLOWED_DB_INDEXES[0]],
+  ["actions-runner-2", ALLOWED_DB_INDEXES[1]],
+  ["actions-runner-3", ALLOWED_DB_INDEXES[2]],
+  ["actions-runner-4", ALLOWED_DB_INDEXES[3]],
+]);
+
+/**
+ * Match a `/actions-runner(-N)?/` path segment and return its deterministic
+ * slot, or null when the path isn't one of the known runner roots.
+ */
+export function knownRunnerSlot(rootPath) {
+  const match = /\/(actions-runner(?:-\d+)?)(?:\/|$)/.exec(resolve(rootPath));
+  if (!match) return null;
+  return KNOWN_RUNNER_SLOTS.get(match[1]) ?? null;
+}
+
 /** Stable per-root DB index — same path always maps to the same DB. */
 export function deriveDbIndex(rootPath) {
+  const known = knownRunnerSlot(rootPath);
+  if (known !== null) return known;
   const digest = createHash("sha256").update(resolve(rootPath)).digest();
   return ALLOWED_DB_INDEXES[digest.readUInt32BE(0) % ALLOWED_DB_INDEXES.length];
 }

@@ -251,6 +251,70 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
     assert.equal(first, second, "serial re-runs from one root must share a DB");
   });
 
+  test("known runner roots map to distinct, deterministic slots (#3764)", async () => {
+    const { knownRunnerSlot, deriveDbIndex } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+
+    // The 4 real self-hosted runner checkout roots from PR #3781's postmortem
+    // — hashing these collided (runners 2 and 4 both landed on DB 15). The
+    // deterministic slot map must give each one a DIFFERENT index.
+    const roots = [
+      "/home/gabe/actions-runner/_work/hydra/hydra",
+      "/home/gabe/actions-runner-2/_work/hydra/hydra",
+      "/home/gabe/actions-runner-3/_work/hydra/hydra",
+      "/home/gabe/actions-runner-4/_work/hydra/hydra",
+    ];
+    const slots = roots.map((root) => knownRunnerSlot(root));
+    for (const slot of slots) {
+      assert.notEqual(slot, null, "every known runner root must resolve a slot");
+    }
+    assert.equal(
+      new Set(slots).size,
+      slots.length,
+      `known runner roots must map to distinct slots, got: ${slots.join(", ")}`,
+    );
+
+    // deriveDbIndex must use the deterministic slot for these roots, not the
+    // hash fallback — pin it end-to-end, not just at the helper.
+    for (let i = 0; i < roots.length; i++) {
+      assert.equal(
+        deriveDbIndex(roots[i]),
+        slots[i],
+        `deriveDbIndex(${roots[i]}) must equal its known-runner slot`,
+      );
+    }
+
+    // Same root always derives the same slot (repeat calls, no drift).
+    for (const root of roots) {
+      assert.equal(
+        knownRunnerSlot(root),
+        knownRunnerSlot(root),
+        "a known runner root must resolve to the same slot on every call",
+      );
+    }
+  });
+
+  test("an unrecognized root still falls through to the hash (unchanged behavior)", async () => {
+    const { knownRunnerSlot } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+
+    for (const root of [
+      "/home/gabe/hydra",
+      "/home/gabe/hydra-betting",
+      "/home/gabe/hydra/.claude/worktrees/agent-abc123",
+      "/dev/shm/hydra-worktrees/foo",
+      "/tmp/some-scratch-dir",
+    ]) {
+      assert.equal(
+        knownRunnerSlot(root),
+        null,
+        `${root} does not match a known runner root and must fall through to the hash`,
+      );
+    }
+  });
+
   test("this worktree's npm test run is itself launcher-derived (env inherited)", (t) => {
     // Under `npm test` the launcher exported REDIS_URL before node:test
     // started; the helper picked it up via its `?? ` defer. Direct single-file
