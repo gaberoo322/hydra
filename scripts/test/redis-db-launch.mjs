@@ -132,8 +132,10 @@ const ALLOWED_DB_INDEXES = [8, 9, 10, 11, 12, 13, 14, 15];
  *
  * Anything that doesn't match a known runner root (a developer's laptop, an
  * agent worktree, a future unrecognized runner) falls through to the
- * pre-existing SHA-256 hash below — unchanged behavior for every case this
- * fix isn't targeting.
+ * pre-existing SHA-256 hash below. The hash's candidate pool
+ * (FALLBACK_DB_INDEXES, defined after this map) additionally excludes the
+ * indexes reserved here, so a fallback root can never collide with a live
+ * runner's DB either.
  */
 const KNOWN_RUNNER_SLOTS = new Map([
   ["actions-runner", ALLOWED_DB_INDEXES[0]],
@@ -152,12 +154,44 @@ export function knownRunnerSlot(rootPath) {
   return KNOWN_RUNNER_SLOTS.get(match[1]) ?? null;
 }
 
+/**
+ * Fallback hash candidate pool: ALLOWED_DB_INDEXES minus every index
+ * KNOWN_RUNNER_SLOTS reserves for the 4 known self-hosted runners (#3764
+ * QA follow-up). Without this exclusion, a root that doesn't match a known
+ * runner (an agent worktree, a laptop, a future unrecognized runner) could
+ * still hash onto a runner-owned DB, and the launcher's start-of-run
+ * FLUSHDB would wipe that runner's mid-test fixtures — the identical
+ * "flush is the weapon" mechanism as the original bug, just a different
+ * actor pairing (fallback-root vs. runner instead of runner vs. runner).
+ * This mirrors the shape ALLOWED_DB_INDEXES already uses to exclude the
+ * legacy {2..7} hard pins — narrow the derivable set rather than special-case
+ * the flush.
+ *
+ * Derived from KNOWN_RUNNER_SLOTS's values (not hardcoded a second time) so
+ * the reserved set can never drift out of sync with the actual runner
+ * assignments.
+ *
+ * Resulting pool for non-runner roots: {12, 13, 14, 15} (4 slots instead of
+ * 8). This roughly doubles the worktree-vs-worktree hash-collision
+ * probability for non-runner roots — an acceptable trade, since a
+ * worktree-vs-worktree collision is a worktree-local flake (this repo's
+ * standing guidance is to trust CI over worktree-local Redis flakes),
+ * whereas a fallback root landing on a runner's DB reddens the REQUIRED
+ * `test` job non-deterministically on the shared CI pool — exactly the
+ * failure mode #3764 exists to eliminate. Protecting the authoritative CI
+ * signal is worth more than a marginally higher worktree-local flake rate.
+ */
+const RUNNER_RESERVED_INDEXES = new Set(KNOWN_RUNNER_SLOTS.values());
+const FALLBACK_DB_INDEXES = ALLOWED_DB_INDEXES.filter(
+  (index) => !RUNNER_RESERVED_INDEXES.has(index),
+);
+
 /** Stable per-root DB index — same path always maps to the same DB. */
 export function deriveDbIndex(rootPath) {
   const known = knownRunnerSlot(rootPath);
   if (known !== null) return known;
   const digest = createHash("sha256").update(resolve(rootPath)).digest();
-  return ALLOWED_DB_INDEXES[digest.readUInt32BE(0) % ALLOWED_DB_INDEXES.length];
+  return FALLBACK_DB_INDEXES[digest.readUInt32BE(0) % FALLBACK_DB_INDEXES.length];
 }
 
 /**
