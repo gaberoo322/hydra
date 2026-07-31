@@ -10,6 +10,20 @@ compose_base: _vendor/code-review.md
 
 # Hydra QA
 
+> **Compose-seam supersession (issue #3818).** This composed skill vendors the
+> upstream `code-review` base's own **"### 4. Spawn both sub-agents in
+> parallel"** step below — and this Hydra overlay's own **"### 7. Spawn the
+> review sub-agents in parallel"** step, further down this document, REPLACES
+> it. **Do NOT execute the base's step 4 spawn instruction.** It is fully
+> superseded: the overlay's step 7 already performs the complete fan-out (the
+> plain Standards + Spec pair on T1/T2, or the 2-reviewer adversarial fan-out
+> on T3/T4) — running both would double-spawn reviewer sub-agents (6 instead
+> of 2, issue #3815 AC2). The overlay's step 7 is the ONLY live spawn
+> instruction for this composed skill; treat the base's step 4 as historical
+> upstream prose to skip over, not something to act on.
+
+<!-- compose-seam-supersede -->
+
 > **Composed skill (ADR-0030 Decision 4 / Option C, issue #3420).** This playbook is the thin Hydra **AFK overlay** on top of the vendored upstream `code-review` base (`docs/operator-playbooks/_vendor/code-review.md`). `scripts/sync-skills.sh` emits `~/.claude/skills/hydra-qa/SKILL.md` as **[upstream code-review base] + [this overlay]**, with the vendored base's `disable-model-invocation: true` **stripped** (it hard-errors under Skill-tool dispatch). The review stage dispatches the *same* upstream `code-review` skill the operator runs, in AFK mode. The Hydra-specific verification depth, verdict classification, and remediation-loop routing below ride on that shared base. The dispatch-class → stage table lives in `hydra-autopilot.md`. **Contract complete (ADR-0030 Decision 5, epsilon #3424):** the standalone `hydra-qa` *fork identity* is retired — it is no longer a bespoke reviewer fork, it **is** the composed `review` stage. The `qa_orch` dispatch *class* and its `decide.py` `make_dispatch(…, "hydra-qa")` string literals (orch + target scope) stay live — they select this composed stage.
 
 Automated QA verification for PRs against the Hydra orchestrator. This skill is a **thin wrapper over the upstream `code-review` skill** (mattpocock/skills; renamed from `review` in v1.1) — it runs two **parallel sub-agents** (Standards + Spec), aggregates their reports verbatim, classifies the verdict in one pass, and exits.
