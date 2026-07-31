@@ -1621,6 +1621,24 @@ describe("scripts/autopilot/reap.py", () => {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
+
+  test("issue #3806: never POSTs the retired /api/backlog/stale-claims/reap", () => {
+    // The Redis backlog subsystem (and its `inProgress` claim concept) was
+    // retired with #3455 / ADR-0031. reap.py must not attempt this call, or
+    // emit the stale_claims_reap_skipped warning it produced when the 404'd.
+    const tmp = makeTempState();
+    try {
+      writeStateWithSlot(tmp.state, { partial_tokens: 100000 });
+      const r = runReap(tmp.state);
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.stderr, /stale_claims_reap_skipped/);
+      assert.doesNotMatch(r.stdout, /stale_claims_reap_skipped/);
+      assert.doesNotMatch(r.stderr, /\/api\/backlog\//);
+      assert.doesNotMatch(r.stdout, /\/api\/backlog\//);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("scripts/autopilot/dispatch.sh log", () => {
