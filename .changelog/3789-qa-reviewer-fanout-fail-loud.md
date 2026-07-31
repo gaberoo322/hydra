@@ -1,0 +1,1 @@
+- fix: hydra-qa reviewer fan-out now blocks in the foreground and fails loud (no verdict) instead of stalling or silently aggregating a partial reviewer set (#3789)
