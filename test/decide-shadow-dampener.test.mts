@@ -29,9 +29,30 @@ import { join, resolve } from "node:path";
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 
+// Fixed decision clock shared by every runDecide() call in this file (issue
+// #3820). `NOW_EPOCH` is the value passed to decide.py via `--now`;
+// `STARTED_EPOCH` is a fixed epoch 100s before it, used as `state.started_epoch`
+// so `elapsed` (= NOW_EPOCH - STARTED_EPOCH = 100) stays comfortably under the
+// default `wall_clock_max_sec` (28_800s) and decide() exercises its normal
+// (non-terminating) decision path deterministically.
+//
+// Previously `started_epoch` was `Math.floor(Date.now() / 1000)` — a LIVE
+// clock read racing the fixed `--now`. That produced two problems: (1) the
+// resulting `elapsed` (~14.5M seconds, since NOW_EPOCH sits in 2027) exceeded
+// `wall_clock_max_sec` and silently made every run exercise decide.py's
+// wall-clock TERMINATION short-circuit instead of the real decision pipeline
+// this suite means to pin; (2) because two separate `baseState()` calls in
+// the same test each read the real clock independently, `elapsed`/`epoch` in
+// decide.py's stdout drifted by 1s whenever the two calls straddled a real
+// wall-clock second boundary under full-suite load — the exact off-by-one
+// race reported in #3820. Pinning both ends of the clock removes the race
+// and lets the byte-identical assertion actually cover the normal path.
+const NOW_EPOCH = 1_800_000_000;
+const STARTED_EPOCH = NOW_EPOCH - 100;
+
 function baseState(overrides: Record<string, unknown> = {}): any {
   return {
-    started_epoch: Math.floor(Date.now() / 1000),
+    started_epoch: STARTED_EPOCH,
     limits: {
       token_budget: 2_000_000,
       wall_clock_max_sec: 28_800,
@@ -110,7 +131,7 @@ function runDecide(
     // deterministically comparable byte-for-byte.
     const r = spawnSync(
       "python3",
-      [DECIDE, "--now=1800000000", "decide", sPath, cPath, ePath],
+      [DECIDE, `--now=${NOW_EPOCH}`, "decide", sPath, cPath, ePath],
       {
         encoding: "utf-8",
         env: { ...process.env, HYDRA_CLASS_STATS_SHADOW_LOG: shadowLog },
