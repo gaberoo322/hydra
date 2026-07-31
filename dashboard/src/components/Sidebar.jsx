@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import VersionBadge from "./VersionBadge.jsx";
 
 // Dashboard v2 atomic swap (issue #621 / PRD #615). Sidebar is four flat
 // items. /now-pixel epic (#642) slice 7 PR2 (#649) flipped Now to the
@@ -45,6 +46,7 @@ export default function Sidebar({ connected }) {
           </NavLink>
         ))}
       </nav>
+      <VersionBadge />
     </aside>
   );
 }
