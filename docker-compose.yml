@@ -73,8 +73,9 @@ services:
   # purpose-built embedding server (Rust router, batched tokenization) so it
   # is materially faster than routing embeddings through a general-purpose
   # Ollama LLM runtime, while keeping the SAME model + dimension so the
-  # cutover is drop-in (cosine-parity-gated by scripts/ov-embed-parity-check.ts;
-  # at mean cosine >= 0.99 no reindex is needed).
+  # cutover was drop-in (cosine-parity-gated pre-cutover by a one-time
+  # migration script, since removed post-cutover — issue #3708; the gate
+  # required mean cosine >= 0.99 with no reindex needed).
   #
   # KEY INVARIANTS
   #   - `--served-model-name nomic-embed-text` makes TEI answer the SAME model
