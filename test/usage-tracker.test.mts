@@ -3993,6 +3993,7 @@ describe("usage-tracker", () => {
         paused: false,
         sessionBlockedUntil: null,
         worklessUntil: null,
+        meterUnavailable: false,
       },
       paceState: "on",
       targetPercent: 0,
