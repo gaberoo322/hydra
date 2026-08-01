@@ -431,10 +431,19 @@ export function childLabels(slice: PrdSlice): string[] {
  * Render the labels the skill should apply to the parent epic. Always includes
  * `enhancement` (the existing epic label vocabulary — `epic` is intentionally
  * not introduced here per issue #514's "reuse `enhancement` if introducing a
- * new label is out of scope" guidance).
+ * new label is out of scope" guidance) plus `needs-triage` so the epic is born
+ * with a stable lifecycle label (issue #3788 Cause 2). Before this, a freshly
+ * created parent carried only a category label — no `ready-for-agent` (epics
+ * are correctly excluded, #777/#794) and nothing else — so once a later sweep
+ * cleared a stale `blocked`, the epic reverted to fully label-less and stayed
+ * an `untriaged_orphans` false-positive for its entire lifetime. `hydra-sweep`
+ * already special-cases tracking parents at the `needs-triage` lane (skip
+ * auto-triage, run the stuck-ness gate instead), so stamping `needs-triage`
+ * here is safe: a PROGRESSING epic is left alone with the label intact, and a
+ * STUCK one still routes to `ready-for-human` as before.
  */
 export function parentLabels(): string[] {
-  return ["enhancement"];
+  return ["enhancement", "needs-triage"];
 }
 
 /**
