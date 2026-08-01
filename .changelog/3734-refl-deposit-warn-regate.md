@@ -1,0 +1,1 @@
+- fix: reap.py no longer warns on the honest deposit-absent baseline for the reflection-source bucket — the WARN now fires only on deposit-empty/read-error/no-task-id, the states that actually indicate broken deposit plumbing (#3734)

@@ -1402,23 +1402,47 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # non-escalation majority) → "" → both fields omitted from the POST body.
     escalation = _read_escalation_deposit(task_id)
 
-    # Issue #2450: warn when a code-writing class completes with no deposit file
-    # at all — deposit-absent on a REFLECTION_DEPOSIT_SKILLS slot means the
-    # deposit recipe either did not run or deposited under a miskeyed path. This
-    # distinguishes broken deposit plumbing (false-none) from an honest
-    # empty-reflection case where the store had nothing to serve.
-    # deposit-empty is the HONEST variant (recipe ran, served nothing, wrote an
-    # empty deposit) — only deposit-absent is the suspicious case.
-    # hydra-grill is excluded: it writes a design-concept artifact, not a
-    # reflection-source deposit, so a deposit-absent on grill is NOT a bug.
+    # Issue #2450 originally warned on deposit-ABSENT — but issue #3734
+    # established that's backwards for this bucket: `do_reflect()` in
+    # reflection-deposit.sh only ever WRITES hydra-refl-sources-<task_id> when it
+    # has a non-empty bucket to report. When `GET /api/reflections` serves
+    # nothing — still true for the large majority of anchors while the
+    # reflection store itself is thin — the file is never created at all, so
+    # deposit-absent is the STRUCTURAL, honest common case, not a plumbing
+    # signal. Gating the WARN on ABSENT therefore fired on (almost) every
+    # code-writing reap regardless of whether the deposit recipe was healthy:
+    # zero signal value (confirmed live: 208 anchor deposits recorded, 0
+    # refl-sources deposits, fully explained by an empty reflection store rather
+    # than a broken deposit — see #3734).
+    #
+    # The genuinely suspicious presence states are the ones that mean the recipe
+    # ran (or should have) and produced something OTHER than a clean "nothing to
+    # report":
+    #   - no-task-id    — the deposit script could not derive a task_id at all
+    #                     (cwd wasn't a recognised worktree layout); it can never
+    #                     have written anything, and every other task-keyed
+    #                     deposit degrades the same way.
+    #   - deposit-empty — a deposit file exists but is blank. `do_reflect()`
+    #                     never intentionally writes an empty file (it skips the
+    #                     write entirely when there is nothing to report), so
+    #                     this shape only happens on a truncated/corrupt write.
+    #   - read-error    — the deposit file exists but reap could not read it.
+    # deposit-absent no longer warns — it is the honest majority baseline, and
+    # deposit-present obviously never warns either.
+    # hydra-grill is excluded regardless: it writes a design-concept artifact,
+    # not a reflection-source deposit, so it never runs this recipe at all.
     # Best-effort: print to stderr (operator-visible) AND append to the run log.
     if (skill in REFLECTION_DEPOSIT_SKILLS and
-            reflection_presence == REFL_PRESENCE_ABSENT):
+            reflection_presence in (
+                REFL_PRESENCE_EMPTY, REFL_PRESENCE_READ_ERROR, REFL_PRESENCE_NO_TASK_ID,
+            )):
         warn_msg = (
-            f"refl_deposit_absent skill={skill} task_id={task_id} "
-            f"anchor={anchor_ref or ''} — deposit recipe may not have run; "
-            f"check for refl-deposit-no-task-id / refl-deposit-write-failed "
-            f"in the child's stderr (cue: refl-deposit-absent-on-code-write)"
+            f"refl_deposit_broken skill={skill} task_id={task_id} "
+            f"anchor={anchor_ref or ''} presence={reflection_presence} — the "
+            f"deposit recipe ran but the reflection-source file is unkeyable, "
+            f"unreadable, or blank; check for refl-deposit-no-task-id / "
+            f"refl-deposit-write-failed in the child's stderr "
+            f"(cue: refl-deposit-broken-on-code-write)"
         )
         print(f"[autopilot] WARN {warn_msg}", file=sys.stderr)
         _append_log(f"WARN {warn_msg}")
