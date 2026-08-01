@@ -1,0 +1,1 @@
+- fix: suppress the vendored code-review base's duplicate reviewer spawn in composed hydra-qa, cutting reviewer sub-agents/PR from ~6 to the documented 2-4 (#3818)

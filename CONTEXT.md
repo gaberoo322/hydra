@@ -55,7 +55,7 @@ The headline **Builder Health** metric: the share of dispatches reaching a merge
 _Avoid_: merge rate (whole-system, not zero-intervention — distinct metric in the scorecard), success rate (overloaded), hands-off rate (informal)
 
 **Verifier Core**:
-The five self-referential files where a bad merge would disable *future* verification: `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`. Still auto-mergeable (T4), but guarded by the **Live-Gate Invariant** and the deepest **Modification Tier** verification. Defined by ADR-0015.
+The six self-referential files where a bad merge would disable *future* verification: `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `.github/workflows/deep-qa-gate.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`. Still auto-mergeable (T4), but guarded by the **Live-Gate Invariant** and the deepest **Modification Tier** verification. Defined by ADR-0015; the sixth entry (`deep-qa-gate.yml`) was added by ADR-0020.
 _Avoid_: Untouchable Core (retired by ADR-0015 — nothing is untouchable; T4 is touchable with the deepest verification), protected paths, frozen code, Tier 0
 
 **Pre-merge Gate**:

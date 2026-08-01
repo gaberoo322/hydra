@@ -6,6 +6,7 @@ import { StuckItems } from "../components/pages/today/StuckItems.jsx";
 import { RecentMerges } from "../components/pages/today/RecentMerges.jsx";
 import { NewTargetFindings } from "../components/pages/today/NewTargetFindings.jsx";
 import { LessonsOvernight } from "../components/pages/today/LessonsOvernight.jsx";
+import Versions from "../components/Versions.jsx";
 
 /**
  * Dashboard v2 — `/today` page (issues #616, #617, PRD #615).
@@ -19,6 +20,9 @@ import { LessonsOvernight } from "../components/pages/today/LessonsOvernight.jsx
  *   4. RecentMerges
  *   5. NewTargetFindings
  *   6. LessonsOvernight
+ *   7. Versions (issue #3681 — the /api/versions panel; lives one level up in
+ *      `components/` because the footer VersionBadge shares its formatting seam
+ *      and renders on every route, not just Today)
  *
  * Each section lives in `dashboard/src/components/pages/today/` and owns
  * its own poll cadence (30s for the operator-attention sections, 60s for
@@ -61,6 +65,7 @@ export default function Today() {
       <RecentMerges />
       <NewTargetFindings />
       <LessonsOvernight />
+      <Versions />
     </div>
   );
 }

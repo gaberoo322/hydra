@@ -1,0 +1,1 @@
+- feat: show a Versions panel on Today plus an always-on footer version badge, fed by /api/versions (#3681)

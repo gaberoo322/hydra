@@ -1,0 +1,1 @@
+- fix: stop autopilot Phase 2 from POSTing to the retired `/api/backlog/stale-claims/reap` endpoint on every sweep (#3806)

@@ -10,6 +10,20 @@ compose_base: _vendor/code-review.md
 
 # Hydra QA
 
+> **Compose-seam supersession (issue #3818).** This composed skill vendors the
+> upstream `code-review` base's own **"### 4. Spawn both sub-agents in
+> parallel"** step below — and this Hydra overlay's own **"### 7. Spawn the
+> review sub-agents in parallel"** step, further down this document, REPLACES
+> it. **Do NOT execute the base's step 4 spawn instruction.** It is fully
+> superseded: the overlay's step 7 already performs the complete fan-out (the
+> plain Standards + Spec pair on T1/T2, or the 2-reviewer adversarial fan-out
+> on T3/T4) — running both would double-spawn reviewer sub-agents (6 instead
+> of 2, issue #3815 AC2). The overlay's step 7 is the ONLY live spawn
+> instruction for this composed skill; treat the base's step 4 as historical
+> upstream prose to skip over, not something to act on.
+
+<!-- compose-seam-supersede -->
+
 > **Composed skill (ADR-0030 Decision 4 / Option C, issue #3420).** This playbook is the thin Hydra **AFK overlay** on top of the vendored upstream `code-review` base (`docs/operator-playbooks/_vendor/code-review.md`). `scripts/sync-skills.sh` emits `~/.claude/skills/hydra-qa/SKILL.md` as **[upstream code-review base] + [this overlay]**, with the vendored base's `disable-model-invocation: true` **stripped** (it hard-errors under Skill-tool dispatch). The review stage dispatches the *same* upstream `code-review` skill the operator runs, in AFK mode. The Hydra-specific verification depth, verdict classification, and remediation-loop routing below ride on that shared base. The dispatch-class → stage table lives in `hydra-autopilot.md`. **Contract complete (ADR-0030 Decision 5, epsilon #3424):** the standalone `hydra-qa` *fork identity* is retired — it is no longer a bespoke reviewer fork, it **is** the composed `review` stage. The `qa_orch` dispatch *class* and its `decide.py` `make_dispatch(…, "hydra-qa")` string literals (orch + target scope) stay live — they select this composed stage.
 
 Automated QA verification for PRs against the Hydra orchestrator. This skill is a **thin wrapper over the upstream `code-review` skill** (mattpocock/skills; renamed from `review` in v1.1) — it runs two **parallel sub-agents** (Standards + Spec), aggregates their reports verbatim, classifies the verdict in one pass, and exits.
@@ -24,7 +38,7 @@ QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the 
 
 - **T1 / T2** — exactly **one standard QA pass**: the single parallel Standards + Spec fan-out described below. Behaviour-preserving; nothing in this section changes the T1/T2 path.
 - **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The change PASSes only if **neither** reviewer surfaces a real blocker; a single real blocker from **either** reviewer is a FAIL.
-- **T4** (Verifier Core — `ci.yml`, `deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`) — the **Deep-QA Remediation Loop**: T4 **inherits the full T3 adversarial depth** (the same 2-reviewer refutation fan-out, unchanged) and **adds** on top (a) a **Verifier-Core checklist** the reviewers must run, and (b) the **block-and-escalate teeth** no other tier has. It never weakens or replaces the T3 gate — it is strictly additive. See step 10's T4 branch.
+- **T4** (Verifier Core — `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `.github/workflows/deep-qa-gate.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`) — the **Deep-QA Remediation Loop**: T4 **inherits the full T3 adversarial depth** (the same 2-reviewer refutation fan-out, unchanged) and **adds** on top (a) a **Verifier-Core checklist** the reviewers must run, and (b) the **block-and-escalate teeth** no other tier has. It never weakens or replaces the T3 gate — it is strictly additive. See step 10's T4 branch.
 
 This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a T3 review verdict is computed* deepens — an AND over two refutation reviewers, folded by `aggregateAdversarialReview()` in `scripts/ci/qa-verdict.ts`. T4's block-and-escalate is likewise **not** a new verdict literal — it routes through the existing `ready-for-human` pickup set (see below).
 
@@ -32,7 +46,7 @@ A T3 FAIL **bounces** the PR back to a dev agent via the universal remediation l
 
 ### T4 Verifier-Core checklist + Deep-QA Remediation Loop (issue #740)
 
-A T4 PR edits the **Verifier Core** — the 5 self-referential paths whose change alters *how every other change is verified*. The adversarial reviewers (the same A/B refutation pair as T3) MUST run this checklist in addition to the standard Standards + Spec axes; any item firing is a **hard blocker** (reviewer FAIL):
+A T4 PR edits the **Verifier Core** — the 6 self-referential paths whose change alters *how every other change is verified*. The adversarial reviewers (the same A/B refutation pair as T3) MUST run this checklist in addition to the standard Standards + Spec axes; any item firing is a **hard blocker** (reviewer FAIL):
 
 1. **Live-Gate Invariant (#738 / ADR-0015).** A Verifier-Core change is verified by the **currently-deployed** gate against the diff, **never** by the *proposed* gate. Concretely: the classifier **file LIST** = the PR diff (head-vs-base merge-base), the classifier **LOGIC** = the **BASE ref** (the import-closed `scripts/tier-classify.ts` / `src/tier-classifier.ts` / `src/untouchable.ts` as they exist on the merge base). "Is this a Verifier-Core PR?" is decided with the **BASE-ref** `isVerifierCore` so a PR cannot strip its own path on head to escape classification. A diff that re-routes Verifier-Core PRs back through the **head-tree** classifier is a hard blocker.
 2. **No self-admitting gate.** No path in the diff lets the *proposed* gate verify its own admission: e.g. a `ci.yml` job that always exits 0 / is `continue-on-error` for the verification it claims to perform, a tier-classify edit that downgrades the PR's own files, or an `isVerifierCore` change that removes a path the diff itself touches. If the proposed gate would have admitted this very diff *only because of this diff's own change*, FAIL.
@@ -82,6 +96,8 @@ The skill **never loops waiting on CI**. After the two-axis review it emits exac
 **Why single-pass exit matters:** before #405 the subagent looped on `mutation-test: QUEUED` for hours. PR #403 auto-merged before a (correct) `FAIL` verdict landed. Autopilot polls CI; this skill does not.
 
 Pure helpers backing the classifier live in `scripts/ci/qa-verdict.ts`. The regression test `test/hydra-qa-prompt-verdict.test.mts` locks in the smoking-gun case: `mutation-test: QUEUED` + everything-else-green → `PASS-pending-CI` (not a wait).
+
+**An incomplete reviewer fan-out is not a fifth verdict — it is a pre-verdict exit.** If step 7.5 finds a spawned reviewer missing (e.g. its worktree was reaped mid-review), the skill exits before reaching step 8/9 with none of the four verdicts above and `needs-qa` left in place for automatic retry — see step 7.5.
 
 ## Process
 
@@ -277,6 +293,8 @@ fi
 
 **This is the critical step — all `Agent` tool calls MUST be in the same assistant message** so they execute in parallel and do not pollute each other's context. The upstream `code-review` skill (`~/.claude/skills/code-review/SKILL.md`) is the contract; do not re-implement its logic — invoke its process pattern.
 
+**Every `Agent` call in this step MUST pass `run_in_background: false` (issue #3789).** The `Agent` tool defaults to background dispatch — the tool call returns immediately, and a print-mode/subagent turn ends the moment the model has nothing left to say, even while every spawned reviewer is still running. Telling the model to "wait in the foreground for every reviewer before aggregating" does not change that: it is prose, not a mechanism, and it has already been observed to fail (a `qa_orch` dispatch stated exactly that intention and exited anyway, four times in one autopilot run — #3789). `run_in_background: false` makes each spawn itself a **blocking** tool call, so the assistant message containing all N spawns cannot return control to the model — and therefore the turn cannot end — until every reviewer has produced a result. Do not substitute `run_in_background: true` plus a prose promise to wait; that is the exact pattern that stalled.
+
 #### 7a. T1/T2 — single standard pass (`ADVERSARIAL=0`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.
@@ -329,6 +347,29 @@ Each reviewer (A and B) independently yields a per-reviewer verdict via the step
   - `interfaceImpact: 'breaking'` claims have a corresponding interface-migration commit.
 
 Both sub-agents use the `general-purpose` subagent type. Neither is told the other exists — context separation is the whole point.
+
+### 7.5 Verify every spawned reviewer returned a real result — fail loud on an incomplete fan-out (issue #3789)
+
+Foreground dispatch (step 7's `run_in_background: false`) guarantees each `Agent` tool call blocks until that reviewer finishes — but the underlying sub-agent can still come back empty: its worktree can be reaped mid-review (the hourly worktree-orphan-prune has done this to reviewer sub-agents and to the parent QA agent itself in the same run that filed #3789), it can error out, or it can return a truncated/non-substantive report. Before touching step 8 (aggregate) or step 9 (classify), confirm you actually hold a **real** result for every reviewer you spawned:
+
+- T1/T2 (2 spawns): a Standards report and a Spec report (or an explicit Spec-skip already accounted for in step 4/6 — that is a clean skip, not a missing result).
+- T3/T4 (4 spawns): all of `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`.
+
+A "real result" is the reviewer's actual finding text — not a tool error, not an empty/truncated response, not silence. If **any** expected reviewer is missing or non-substantive:
+
+- **Do not** proceed to step 8 or step 9. Never compute a PASS/FAIL from a partial reviewer set, never treat a missing reviewer as an implicit PASS, and never drop it silently from the T3/T4 AND-fold (`aggregateAdversarialReview()`) — a verdict built on partial coverage must never come out looking identical to one built on full coverage. This is stricter than "uncertain, lean FAIL": it means **no verdict at all** is emitted.
+- Post a PR comment naming exactly which reviewer(s)/axis are missing, e.g.:
+  ```
+  > *Automated QA — incomplete review fan-out*
+
+  This review spawned 4 reviewer(s) but only 2 returned a result.
+
+  **Missing:** reviewer-B-standards, reviewer-B-spec
+
+  No verdict is being emitted — a verdict computed from a partial reviewer set would silently claim coverage it does not have (issue #3789).
+  ```
+- Leave `needs-qa` on the source issue **untouched** — do not strip it, do not add `ready-for-agent`, do not run the FAIL lesson-capture in step 11. A lost reviewer is a review-infrastructure failure, not a code defect; bouncing it to a dev agent would dispatch a fix-nothing task. Leaving `needs-qa` in place means the next `hydra-qa` dispatch picks the issue back up and re-runs the **full** fan-out from scratch in a fresh worktree.
+- Exit the skill here — do not retry the missing reviewer(s) inline in this same run.
 
 ### 8. Aggregate
 
