@@ -71,7 +71,7 @@ Tier names verification *depth*, not merge authority (ADR-0015, #742). Every PR 
 | T1 — Prompt-shaped | Lesson files, prompt-only tweaks (`config/agents/`, `config/feedback/`) | QA PASS → auto-merge |
 | T2 — Skill / verification | Skills under `~/.claude/skills/`, dashboard, `src/anchor-selection/` | QA PASS + **Outcome Holdback** → auto-merge |
 | T3 — Core `src/` + demoted infra | Everything else in `src/`, plus `src/grounding.ts`, `src/cost/`, watchdog scripts, `scripts/deploy.sh` | QA PASS → auto-merge |
-| T4 — Verifier Core | `ci.yml`, `deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts` | Deep-QA pass (#740); operator only via exhausted remediation loop |
+| T4 — Verifier Core | `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `.github/workflows/deep-qa-gate.yml` (ADR-0020), `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts` | Deep-QA pass (#740); operator only via exhausted remediation loop |
 
 ## Common Pitfalls
 

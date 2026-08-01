@@ -251,6 +251,112 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
     assert.equal(first, second, "serial re-runs from one root must share a DB");
   });
 
+  test("known runner roots map to distinct, deterministic slots (#3764)", async () => {
+    const { knownRunnerSlot, deriveDbIndex } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+
+    // The 4 real self-hosted runner checkout roots from PR #3781's postmortem
+    // — hashing these collided (runners 2 and 4 both landed on DB 15). The
+    // deterministic slot map must give each one a DIFFERENT index.
+    const roots = [
+      "/home/gabe/actions-runner/_work/hydra/hydra",
+      "/home/gabe/actions-runner-2/_work/hydra/hydra",
+      "/home/gabe/actions-runner-3/_work/hydra/hydra",
+      "/home/gabe/actions-runner-4/_work/hydra/hydra",
+    ];
+    const slots = roots.map((root) => knownRunnerSlot(root));
+    for (const slot of slots) {
+      assert.notEqual(slot, null, "every known runner root must resolve a slot");
+    }
+    assert.equal(
+      new Set(slots).size,
+      slots.length,
+      `known runner roots must map to distinct slots, got: ${slots.join(", ")}`,
+    );
+
+    // deriveDbIndex must use the deterministic slot for these roots, not the
+    // hash fallback — pin it end-to-end, not just at the helper.
+    for (let i = 0; i < roots.length; i++) {
+      assert.equal(
+        deriveDbIndex(roots[i]),
+        slots[i],
+        `deriveDbIndex(${roots[i]}) must equal its known-runner slot`,
+      );
+    }
+
+    // Same root always derives the same slot (repeat calls, no drift).
+    for (const root of roots) {
+      assert.equal(
+        knownRunnerSlot(root),
+        knownRunnerSlot(root),
+        "a known runner root must resolve to the same slot on every call",
+      );
+    }
+  });
+
+  test("the hash fallback pool never overlaps a runner-reserved index (#3764 follow-up)", async () => {
+    const { knownRunnerSlot, deriveDbIndex } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+
+    const runnerRoots = [
+      "/home/gabe/actions-runner/_work/hydra/hydra",
+      "/home/gabe/actions-runner-2/_work/hydra/hydra",
+      "/home/gabe/actions-runner-3/_work/hydra/hydra",
+      "/home/gabe/actions-runner-4/_work/hydra/hydra",
+    ];
+    const reservedIndexes = new Set(
+      runnerRoots.map((root) => knownRunnerSlot(root)),
+    );
+    assert.equal(
+      reservedIndexes.size,
+      4,
+      "sanity: the 4 known runners must reserve 4 distinct indexes",
+    );
+
+    // A large, varied sample of non-runner roots must NEVER derive an index
+    // a runner has reserved — that is exactly the collision #3764 exists to
+    // eliminate (the flush-is-the-weapon mechanism, fallback-root vs. runner
+    // instead of runner vs. runner).
+    const sampleRoots = Array.from(
+      { length: 200 },
+      (_, i) => `/home/gabe/hydra/.claude/worktrees/agent-sample-${i}`,
+    );
+    for (const root of sampleRoots) {
+      assert.equal(
+        knownRunnerSlot(root),
+        null,
+        `sanity: ${root} must not itself match a known runner root`,
+      );
+      const derived = deriveDbIndex(root);
+      assert.ok(
+        !reservedIndexes.has(derived),
+        `fallback-derived DB ${derived} for ${root} must not be a runner-reserved index (${[...reservedIndexes].join(", ")})`,
+      );
+    }
+  });
+
+  test("an unrecognized root still falls through to the hash (unchanged behavior)", async () => {
+    const { knownRunnerSlot } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+
+    for (const root of [
+      "/home/gabe/hydra",
+      "/home/gabe/hydra-betting",
+      "/home/gabe/hydra/.claude/worktrees/agent-abc123",
+      "/dev/shm/hydra-worktrees/foo",
+      "/tmp/some-scratch-dir",
+    ]) {
+      assert.equal(
+        knownRunnerSlot(root),
+        null,
+        `${root} does not match a known runner root and must fall through to the hash`,
+      );
+    }
+  });
+
   test("this worktree's npm test run is itself launcher-derived (env inherited)", (t) => {
     // Under `npm test` the launcher exported REDIS_URL before node:test
     // started; the helper picked it up via its `?? ` defer. Direct single-file
