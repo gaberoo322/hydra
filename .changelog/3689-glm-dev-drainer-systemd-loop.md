@@ -1,0 +1,1 @@
+- feat: add the GLM dev-drainer systemd service/timer + loop that authors glm-eligible issues on z.ai quota, gated by the operator pause flag, a daily PR cap, and a pre-PR Verifier-Core/secret-scan preflight (#3689)

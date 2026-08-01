@@ -1,0 +1,26 @@
+[Unit]
+Description=Hydra GLM dev-drainer — fenced dev_orch worker draining glm-eligible issues on z.ai quota (ADR-0032, issue #3689)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/adr/0032-glm-dev-drainer-worker-lane.md
+After=hydra-orchestrator.service
+
+[Service]
+Type=oneshot
+Environment=HYDRA_ROOT=%h/hydra
+WorkingDirectory=%h/hydra
+
+# Credential + endpoint material lives off-git at ~/.config/hydra-glm/env
+# (mode 0600) — never in this unit file, never in .env.local (ADR-0032
+# invariant 7 / Decision 2). The leading "-" makes systemd tolerant of a
+# missing file: rather than hard-failing the unit (which would arm
+# Restart=on-failure into a storm), a missing/blank ANTHROPIC_AUTH_TOKEN is
+# instead caught by drainer-loop.sh's own fail-closed check, which exits 0
+# (clean skip) so Restart= never fires.
+EnvironmentFile=-%h/.config/hydra-glm/env
+
+ExecStart=%h/hydra/scripts/glm/drainer-loop.sh
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

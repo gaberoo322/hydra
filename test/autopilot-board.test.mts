@@ -33,6 +33,8 @@ import {
   getGlmDrainerLiveness,
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
+  setGlmDrainerHeartbeat,
+  GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
 } from "../src/redis/autopilot.ts";
 import {
   ORCH_BOARD_LABELS,
@@ -940,6 +942,81 @@ describe("src/redis/autopilot.ts — GLM drainer heartbeat liveness (#3754)", ()
 
   test("the staleness threshold is 45 minutes (three 15-min ticks)", () => {
     assert.equal(GLM_DRAINER_HEARTBEAT_STALE_MS, 45 * 60 * 1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// src/redis/autopilot.ts — setGlmDrainerHeartbeat write accessor (#3689)
+//
+// New top-level describe with its OWN before/after lifecycle (not nested
+// inside the liveness-read describe above) per the repo's shared-Redis-
+// teardown-ordering rule: a nested case piggybacking on a sibling's teardown
+// timing flakes once node:test runs the next top-level suite.
+//
+// scope-justification: test/autopilot-board.test.mts — this file already
+// covers every other export of src/redis/autopilot.ts (the read-side
+// liveness accessor); adding the write-side accessor's coverage alongside it
+// keeps the whole GLM-heartbeat contract (write -> read) in one file rather
+// than splitting it across two, and issue #3689's Files-in-scope names
+// src/redis/autopilot.ts itself as the file gaining the new export.
+// ---------------------------------------------------------------------------
+
+describe("src/redis/autopilot.ts — setGlmDrainerHeartbeat write accessor (#3689)", () => {
+  let redis: any;
+  before(() => {
+    redis = new Redis(REDIS_URL);
+  });
+  after(async () => {
+    if (redis) {
+      await redis.del(GLM_DRAINER_ACTIVE_KEY);
+      redis.disconnect();
+    }
+  });
+  beforeEach(async () => {
+    await redis.del(GLM_DRAINER_ACTIVE_KEY);
+  });
+
+  test("writes the current epoch-ms so a subsequent read is live+fresh", async () => {
+    const now = Date.now();
+    const result = await setGlmDrainerHeartbeat(now);
+    assert.deepEqual(result, { ok: true });
+
+    const raw = await redis.get(GLM_DRAINER_ACTIVE_KEY);
+    assert.equal(raw, String(now));
+
+    const liveness = await getGlmDrainerLiveness(now);
+    assert.equal(liveness.live, true);
+    assert.equal(liveness.reason, "fresh");
+    assert.equal(liveness.heartbeatMs, now);
+  });
+
+  test("applies a TTL comfortably above the staleness window (self-cleaning, not the staleness signal)", async () => {
+    await setGlmDrainerHeartbeat(Date.now());
+    const ttl = await redis.ttl(GLM_DRAINER_ACTIVE_KEY);
+    assert.ok(ttl > 0, "TTL should be set");
+    assert.equal(GLM_DRAINER_HEARTBEAT_TTL_SECONDS, 60 * 60);
+    assert.ok(
+      GLM_DRAINER_HEARTBEAT_TTL_SECONDS * 1000 > GLM_DRAINER_HEARTBEAT_STALE_MS,
+      "TTL must outlive the staleness window so Redis never expires the key before the age check would",
+    );
+  });
+
+  test("defaults nowMs to Date.now() when called with no argument", async () => {
+    const before_ = Date.now();
+    const result = await setGlmDrainerHeartbeat();
+    const after_ = Date.now();
+    assert.deepEqual(result, { ok: true });
+    const raw = Number(await redis.get(GLM_DRAINER_ACTIVE_KEY));
+    assert.ok(raw >= before_ && raw <= after_);
+  });
+
+  test("a second write overwrites the first (idempotent per-tick refresh)", async () => {
+    const first = Date.now() - 60_000;
+    const second = Date.now();
+    await setGlmDrainerHeartbeat(first);
+    await setGlmDrainerHeartbeat(second);
+    const raw = await redis.get(GLM_DRAINER_ACTIVE_KEY);
+    assert.equal(raw, String(second));
   });
 });
 

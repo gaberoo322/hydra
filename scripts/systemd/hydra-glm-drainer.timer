@@ -1,0 +1,22 @@
+[Unit]
+Description=Hydra GLM dev-drainer — periodic tick (~15 min) for the dev_orch worker lane (ADR-0032, issue #3689)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/adr/0032-glm-dev-drainer-worker-lane.md
+
+[Timer]
+# Mirrors hydra-pace-gate.timer's cadence. Each tick is cheap when there is
+# nothing to do (kill-switch / daily-cap / no-candidate checks all exit fast),
+# and a live authoring run (API_TIMEOUT_MS up to 50 min) simply holds the
+# flock across several ticks — later ticks see the lock held, refresh the
+# heartbeat, and exit (see drainer-loop.sh).
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+# Small jitter so this timer doesn't fire in lockstep with the pace-gate /
+# watchdog / branch-prune timers.
+RandomizedDelaySec=60
+
+Unit=hydra-glm-drainer.service
+
+[Install]
+WantedBy=timers.target
