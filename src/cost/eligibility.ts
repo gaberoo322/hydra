@@ -310,6 +310,17 @@ export interface UsageEligibility {
      * `projectEligibility`), mirroring the pause + session-block flags.
      */
     worklessUntil: string | null;
+    /**
+     * True when the Anthropic OAuth meter is SUSTAINED-unavailable — either no
+     * fresh value and no last-good one inside the max-stale window (default
+     * ~35 min total: TTL + max-stale), or 3+ consecutive failed reads against
+     * a cold cache with no last-good to fall back on at all (issue #3821 —
+     * every process restart starts cold, so a single transient blip right
+     * after a deploy must not trip this). Forces `allow=false`: quota cannot
+     * be measured, so dispatch BLOCKS. (2026-07-30 operator decision; see
+     * overlayMeterUnavailableEligibility.)
+     */
+    meterUnavailable: boolean;
   };
   /**
    * Position of total burn relative to the **Pacing Curve** for this instant
@@ -465,6 +476,10 @@ export function projectEligibility(snapshot: EligibilityUsageInput): UsageEligib
       // route/collector seam via overlayWorklessEligibility() — not inside this
       // pure projection, mirroring the pause + session-block flags.
       worklessUntil: null,
+      // Default meter-available. Like the flags above, the meter-read outcome is
+      // overlaid at the route seam — projectEligibility is pure over its input
+      // and cannot observe whether that input came from a live meter.
+      meterUnavailable: false,
     },
     paceState,
     targetPercent,
@@ -634,5 +649,50 @@ export function overlayWorklessEligibility(
       ...eligibility.reasons,
       worklessUntil: new Date(worklessUntilMs).toISOString(),
     },
+  };
+}
+
+/**
+ * Overlay the meter-unavailable BLOCK onto an eligibility projection, at the
+ * caller/route seam (2026-07-30).
+ *
+ * POLICY CHANGE, made deliberately by the operator. Issue #1124 made the hard
+ * stop FAIL OPEN: `deriveHardStop` gates on `usageSource === "oauth"`, so when
+ * the meter could not be read the weekly/5h stops silently did not engage and
+ * dispatch continued unbraked. That is how the system ran at `percentLast7d`
+ * 95.7% with `weeklyEmergencyStop: false` — the brake was not holding, it was
+ * disabled, and nothing said so.
+ *
+ * The replacement rule is: if quota cannot be measured, do not spend it.
+ *
+ * Why this is not as aggressive as it sounds. `readOAuthCached` already absorbs
+ * transient failures — it serves the last-good meter value for up to
+ * `HYDRA_OAUTH_USAGE_MAX_STALE_MS` (default 30 min) past the TTL (default 5
+ * min), i.e. ~35 min total from a warm cache, behind an exponential backoff
+ * gate. So `meterUnavailable` does NOT mean "a GET returned 429" (observed 76
+ * times in one 24h window, essentially all absorbed); it means either no
+ * usable reading for ~35 minutes, OR — for a COLD cache with no last-good to
+ * serve at all (every process restart, i.e. every deploy, starts cold) — 3+
+ * consecutive failed reads (issue #3821, so one transient blip right after a
+ * deploy doesn't trip this off the very first GET). Either way this is a
+ * genuine measurement outage, not flakiness.
+ *
+ * The failure mode this accepts, stated plainly: a sustained meter outage now
+ * stops the autopilot instead of letting it run blind. That is the operator's
+ * chosen trade. `reasons.meterUnavailable` makes the cause explicit in the
+ * verdict the pace gate already logs, so this can never present as the silent
+ * "healthy but idle" state that motivated the change.
+ *
+ * Pure: no IO, no mutation. `false` returns the input UNCHANGED.
+ */
+export function overlayMeterUnavailableEligibility(
+  eligibility: UsageEligibility,
+  meterUnavailable: boolean,
+): UsageEligibility {
+  if (!meterUnavailable) return eligibility;
+  return {
+    ...eligibility,
+    allow: false,
+    reasons: { ...eligibility.reasons, meterUnavailable: true },
   };
 }

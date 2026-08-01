@@ -289,3 +289,68 @@ describe("getEligibilityView — fail-safe overlay-input reads (issue #3182)", (
     );
   });
 });
+
+describe("meter-unavailable blocks dispatch (2026-07-30, replaces #1124 fail-open)", () => {
+  // An unreadable OAuth meter used to DISABLE the hard stop (deriveHardStop
+  // gates on usageSource === "oauth"), so the autopilot ran unbraked at 95.7%
+  // weekly with weeklyEmergencyStop:false. The rule is now: if quota cannot be
+  // measured, do not spend it.
+  const healthy = {
+    percentLast5h: 10,
+    percentLast7d: 20,
+    percentSinceReset: 20,
+    usageSource: "oauth" as const,
+    emergencyStop: false,
+    weeklyEmergencyStop: false,
+    pacingState: "under" as const,
+    calibrated: true,
+    weeklyResetAnchor: null,
+    generatedAt: new Date(1_700_000_000_000).toISOString(),
+  };
+  const deps = {
+    readPaused: async () => false,
+    readSessionBlockedUntil: async () => null,
+    readWorklessUntil: async () => null,
+    now: () => 1_700_000_000_000,
+  };
+
+  test("meterUnavailable forces allow=false even when every other signal is green", async () => {
+    const view = await getEligibilityView({
+      ...deps,
+      snapshot: healthy,
+      meterUnavailable: true,
+    });
+    assert.equal(view.allow, false, "unmeasurable quota must block dispatch");
+    assert.equal(view.reasons.meterUnavailable, true, "the cause must be explicit in the verdict");
+  });
+
+  test("a readable meter is unaffected — no accidental block", async () => {
+    const view = await getEligibilityView({
+      ...deps,
+      snapshot: healthy,
+      meterUnavailable: false,
+    });
+    assert.equal(view.allow, true);
+    assert.equal(view.reasons.meterUnavailable, false);
+  });
+
+  test("omitting meterUnavailable defaults to not-blocking (back-compat)", async () => {
+    const view = await getEligibilityView({ ...deps, snapshot: healthy });
+    assert.equal(view.allow, true, "existing callers must keep prior behaviour");
+    assert.equal(view.reasons.meterUnavailable, false);
+  });
+
+  test("the block is applied LAST so an earlier overlay cannot mask it", async () => {
+    // paused already forces allow=false; meterUnavailable must still be visible
+    // as an independent cause rather than being swallowed by the earlier one.
+    const view = await getEligibilityView({
+      ...deps,
+      snapshot: healthy,
+      readPaused: async () => true,
+      meterUnavailable: true,
+    });
+    assert.equal(view.allow, false);
+    assert.equal(view.reasons.paused, true);
+    assert.equal(view.reasons.meterUnavailable, true, "both causes must survive onto the verdict");
+  });
+});
