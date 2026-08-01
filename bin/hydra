@@ -26,14 +26,11 @@
 #     This CLI is the ONLY write path — the autopilot can never set/clear it.
 #   hydra cycle status
 #   hydra cycle start
-#   hydra backlog ls | counts | move <id> <lane>
-#     move semantics (issue #537): PATCHes `/backlog/:id/move` with
-#     `{"lane": "<lane>"}`. Pre-fix, the CLI PATCHed `/backlog/:id` which
-#     routes to `updateItem` — and `updateItem`'s ALLOWED list does not
-#     include `lane`, so every move silently no-op'd while returning
-#     `ok:true`. Always use this command (or `hydra raw PATCH
-#     /backlog/<id>/move --json '{"lane":"<lane>"}'`) — never PATCH the
-#     bare `/backlog/<id>` to change a lane.
+#   hydra backlog
+#     RETIRED (issue #3745, ADR-0031 / PR #3455): the Redis backlog subsystem
+#     (`/api/backlog`) was replaced by GitHub Issues on gaberoo322/hydra.
+#     Prints a pointer to the replacement commands and exits 2 — it no
+#     longer calls the API (there is nothing left to 404 against).
 #   hydra queue ls | add <reference>
 #   hydra metrics [--count N]
 #   hydra alerts ls [--limit N]
@@ -148,31 +145,22 @@ cmd_cycle() {
 }
 
 cmd_backlog() {
-  case "${1:-}" in
-    ls|""  ) _get "/backlog" ;;
-    counts ) _get "/backlog/counts" ;;
-    move   )
-      shift
-      [ "$#" -ge 2 ] || { echo "hydra backlog move: need <id> <lane>" >&2; exit 2; }
-      # Issue #1140: LANES (src/backlog/internal.ts) is camelCase
-      # (triage|backlog|queued|blocked|inProgress|done). Agents/operators
-      # keep typing lowercase `inprogress` / `in-progress`, which the server
-      # rejects with `Invalid lane`. Alias-normalize the common variants to
-      # the canonical camelCase before sending so muscle-memory casing works;
-      # any other value is forwarded verbatim and the server validates it.
-      local lane="$2"
-      local lane_lc
-      lane_lc="$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')"
-      if [ "$lane_lc" = "inprogress" ] || [ "$lane_lc" = "in-progress" ] || [ "$lane_lc" = "in_progress" ]; then
-        lane="inProgress"
-      fi
-      # Issue #537: the move sub-route is `/backlog/:id/move`. Hitting
-      # `/backlog/:id` (updateItem) silently drops `lane` because it's not
-      # on updateItem's ALLOWED list — every move returned ok:true while
-      # the backlog state was unchanged. Always use the /move suffix.
-      _patch "/backlog/$1/move" "{\"lane\":\"$lane\"}" ;;
-    *      ) echo "hydra backlog: need ls|counts|move" >&2; exit 2 ;;
-  esac
+  # RETIRED (issue #3745): the Redis backlog subsystem (`/api/backlog`,
+  # lanes ls|counts|move) was removed by the ADR-0031 Target-tracking
+  # migration (#3439, PR #3455) — the route 404s. Rather than let that 404
+  # surface as an opaque HTML error page (or worse, a JSONDecodeError in a
+  # caller piping stdout through `python3 -c json.load`), fail loud with the
+  # replacement pointer and a nonzero exit. There is no repointing to do:
+  # Orchestrator work tracking is GitHub Issues on gaberoo322/hydra, read
+  # directly via `gh`, not through this CLI.
+  cat >&2 <<'EOF'
+hydra backlog: retired (issue #3745, ADR-0031 / PR #3455) — the Redis
+backlog subsystem was replaced by GitHub Issues on gaberoo322/hydra. Use:
+  gh issue list --repo gaberoo322/hydra --label ready-for-agent --state open
+  gh issue list --repo gaberoo322/hydra --state open --json number,title,labels
+There is no CLI/API replacement for `hydra backlog ls|counts|move`.
+EOF
+  exit 2
 }
 
 cmd_queue() {
