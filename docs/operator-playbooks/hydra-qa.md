@@ -293,7 +293,7 @@ fi
 
 **This is the critical step — all `Agent` tool calls MUST be in the same assistant message** so they execute in parallel and do not pollute each other's context. The upstream `code-review` skill (`~/.claude/skills/code-review/SKILL.md`) is the contract; do not re-implement its logic — invoke its process pattern.
 
-**Every `Agent` call in this step MUST pass `run_in_background: false` (issue #3789).** The `Agent` tool defaults to background dispatch — the tool call returns immediately, and a print-mode/subagent turn ends the moment the model has nothing left to say, even while every spawned reviewer is still running. Telling the model to "wait in the foreground for every reviewer before aggregating" does not change that: it is prose, not a mechanism, and it has already been observed to fail (a `qa_orch` dispatch stated exactly that intention and exited anyway, four times in one autopilot run — #3789). `run_in_background: false` makes each spawn itself a **blocking** tool call, so the assistant message containing all N spawns cannot return control to the model — and therefore the turn cannot end — until every reviewer has produced a result. Do not substitute `run_in_background: true` plus a prose promise to wait; that is the exact pattern that stalled.
+**Every `Agent` call in this step MUST pass `run_in_background: false` (issue #3789).** The `Agent` tool defaults to background dispatch, so the spawning call returns immediately and the turn can end while reviewers are still running — a prose instruction to "wait for every reviewer" does not prevent this (a `qa_orch` dispatch said exactly that and exited anyway, four times in one autopilot run — #3789). `run_in_background: false` makes each spawn itself a **blocking** call, so the message containing all N spawns cannot return control — and the turn cannot end — until every reviewer has produced a result. Never substitute `run_in_background: true` plus a promise to wait; that is the pattern that stalled.
 
 #### 7a. T1/T2 — single standard pass (`ADVERSARIAL=0`)
 
@@ -350,14 +350,14 @@ Both sub-agents use the `general-purpose` subagent type. Neither is told the oth
 
 ### 7.5 Verify every spawned reviewer returned a real result — fail loud on an incomplete fan-out (issue #3789)
 
-Foreground dispatch (step 7's `run_in_background: false`) guarantees each `Agent` tool call blocks until that reviewer finishes — but the underlying sub-agent can still come back empty: its worktree can be reaped mid-review (the hourly worktree-orphan-prune has done this to reviewer sub-agents and to the parent QA agent itself in the same run that filed #3789), it can error out, or it can return a truncated/non-substantive report. Before touching step 8 (aggregate) or step 9 (classify), confirm you actually hold a **real** result for every reviewer you spawned:
+Foreground dispatch (step 7's `run_in_background: false`) guarantees each `Agent` call blocks until that reviewer finishes — but the sub-agent can still come back empty: its worktree can be reaped mid-review (this has happened to reviewer sub-agents and to the parent QA agent itself, in the run that filed #3789), it can error out, or return a truncated report. Before step 8 (aggregate) or step 9 (classify), confirm you hold a **real** result for every reviewer you spawned:
 
 - T1/T2 (2 spawns): a Standards report and a Spec report (or an explicit Spec-skip already accounted for in step 4/6 — that is a clean skip, not a missing result).
 - T3/T4 (4 spawns): all of `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`.
 
 A "real result" is the reviewer's actual finding text — not a tool error, not an empty/truncated response, not silence. If **any** expected reviewer is missing or non-substantive:
 
-- **Do not** proceed to step 8 or step 9. Never compute a PASS/FAIL from a partial reviewer set, never treat a missing reviewer as an implicit PASS, and never drop it silently from the T3/T4 AND-fold (`aggregateAdversarialReview()`) — a verdict built on partial coverage must never come out looking identical to one built on full coverage. This is stricter than "uncertain, lean FAIL": it means **no verdict at all** is emitted.
+- **Do not** proceed to step 8 or step 9, and never fold a missing reviewer silently into the T3/T4 AND (`aggregateAdversarialReview()`) as an implicit PASS — a verdict built on partial coverage must never look identical to one built on full coverage. This is stricter than "uncertain, lean FAIL": **no verdict at all** is emitted.
 - Post a PR comment naming exactly which reviewer(s)/axis are missing, e.g.:
   ```
   > *Automated QA — incomplete review fan-out*
@@ -368,7 +368,7 @@ A "real result" is the reviewer's actual finding text — not a tool error, not 
 
   No verdict is being emitted — a verdict computed from a partial reviewer set would silently claim coverage it does not have (issue #3789).
   ```
-- Leave `needs-qa` on the source issue **untouched** — do not strip it, do not add `ready-for-agent`, do not run the FAIL lesson-capture in step 11. A lost reviewer is a review-infrastructure failure, not a code defect; bouncing it to a dev agent would dispatch a fix-nothing task. Leaving `needs-qa` in place means the next `hydra-qa` dispatch picks the issue back up and re-runs the **full** fan-out from scratch in a fresh worktree.
+- Leave `needs-qa` on the source issue **untouched** — do not strip it, add `ready-for-agent`, or run the FAIL lesson-capture in step 11. A lost reviewer is a review-infrastructure failure, not a code defect, so the next `hydra-qa` dispatch should pick the issue back up and re-run the **full** fan-out from scratch in a fresh worktree.
 - Exit the skill here — do not retry the missing reviewer(s) inline in this same run.
 
 ### 8. Aggregate
