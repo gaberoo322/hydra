@@ -24,7 +24,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -230,13 +230,19 @@ describe("reap.py completion → reflection-record live fire (issue #1820)", () 
   });
 });
 
-describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () => {
+describe("reap.py completion → deposit healthcheck (issue #2450, regated by #3734)", () => {
   /**
-   * When a code-writing skill (CYCLE_RECORD_SKILLS: hydra-dev, hydra-target-build,
-   * hydra-grill) completes with no deposit file at all (deposit-absent), reap must
-   * emit a WARN so operators can distinguish broken deposit plumbing from an honest
-   * empty-reflection case. deposit-absent means the recipe did not write ANY deposit
-   * file — the #1912/#2450 regression signature.
+   * #2450 originally warned on deposit-ABSENT. #3734 established that's
+   * backwards: `do_reflect()` only ever writes hydra-refl-sources-<task_id> when
+   * it has something non-empty to report, so on the (large) majority of
+   * anchors — where the reflection store served nothing — the file is never
+   * created at all. Warning on ABSENT therefore fired on almost every
+   * code-writing reap regardless of deposit health: zero signal value.
+   *
+   * The regated invariant: deposit-absent is the HONEST common baseline and
+   * must NOT warn. Only presence states that mean the recipe ran but produced
+   * something other than a clean "nothing to report" — deposit-empty,
+   * read-error, no-task-id — are suspicious enough to warn on.
    */
 
   /**
@@ -266,7 +272,7 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 
-  test("a code-writing skill completion with no deposit file emits WARN to stderr and run log", () => {
+  test("a code-writing skill completion with no deposit file does NOT emit a WARN (deposit-absent is the honest baseline)", () => {
     const tmp = makeTmp();
     try {
       writeState(tmp.state, {
@@ -289,23 +295,28 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
       );
       assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
 
-      assert.match(
+      assert.doesNotMatch(
         r.stderr,
-        /WARN refl_deposit_absent skill=hydra-dev task_id=tABS/,
-        "deposit-absent on a code-writing skill must emit WARN to stderr",
+        /WARN refl_deposit_broken/,
+        "deposit-absent is the honest common case (do_reflect never writes when it has nothing to report) — must NOT warn",
       );
       const log = runLog(tmp);
+      assert.doesNotMatch(
+        log,
+        /WARN refl_deposit_broken/,
+        "deposit-absent must not warn in the run log either",
+      );
       assert.match(
         log,
-        /WARN refl_deposit_absent skill=hydra-dev task_id=tABS/,
-        "deposit-absent WARN must also appear in the run log",
+        /refl_presence=deposit-absent/,
+        "the slot_complete line still truthfully reports deposit-absent",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
 
-  test("hydra-target-build with no deposit also emits the WARN (it is in REFLECTION_DEPOSIT_SKILLS)", () => {
+  test("hydra-target-build with no deposit also does NOT emit a WARN (it is in REFLECTION_DEPOSIT_SKILLS but absent is honest)", () => {
     const tmp = makeTmp();
     try {
       writeState(tmp.state, {
@@ -327,10 +338,10 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
       );
       assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
 
-      assert.match(
+      assert.doesNotMatch(
         r.stderr,
-        /WARN refl_deposit_absent skill=hydra-target-build task_id=tTGT/,
-        "hydra-target-build with deposit-absent must emit WARN",
+        /WARN refl_deposit_broken/,
+        "hydra-target-build with deposit-absent must not warn",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -361,14 +372,14 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
 
       assert.doesNotMatch(
         r.stderr,
-        /WARN refl_deposit_absent/,
-        "non-code-writing skills must not emit deposit-absent WARN",
+        /WARN refl_deposit_broken/,
+        "non-code-writing skills must not emit the deposit-broken WARN",
       );
       const log = runLog(tmp);
       assert.doesNotMatch(
         log,
-        /WARN refl_deposit_absent/,
-        "non-code-writing skills must not emit deposit-absent WARN in run log",
+        /WARN refl_deposit_broken/,
+        "non-code-writing skills must not emit the deposit-broken WARN in run log",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -402,8 +413,8 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
 
       assert.doesNotMatch(
         r.stderr,
-        /WARN refl_deposit_absent/,
-        "a present deposit must not trigger the absent WARN",
+        /WARN refl_deposit_broken/,
+        "a present deposit must not trigger the deposit-broken WARN",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -437,8 +448,87 @@ describe("reap.py completion → deposit-absent healthcheck (issue #2450)", () =
 
       assert.doesNotMatch(
         r.stderr,
-        /WARN refl_deposit_absent/,
-        "hydra-grill must not emit deposit-absent WARN (it never writes a reflection-source deposit)",
+        /WARN refl_deposit_broken/,
+        "hydra-grill must not emit the deposit-broken WARN (it never writes a reflection-source deposit)",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a code-writing skill with a BLANK deposit file (deposit-empty) emits the deposit-broken WARN", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tEMP",
+            anchor: "issue-3734",
+          },
+        },
+        failure_log: [],
+      });
+
+      // do_reflect() never intentionally writes an empty file — a blank file
+      // means the write was truncated/corrupt, which IS suspicious.
+      writeFileSync(join(tmp.dir, "hydra-refl-sources-tEMP"), "");
+
+      const r = runCompletionWithReflDir(
+        ["dev_orch", "tEMP", "1000", "hydra-dev"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.match(
+        r.stderr,
+        /WARN refl_deposit_broken skill=hydra-dev task_id=tEMP.*presence=deposit-empty/,
+        "a blank (but present) deposit file must warn — it can never be an intentional write",
+      );
+      const log = runLog(tmp);
+      assert.match(
+        log,
+        /WARN refl_deposit_broken skill=hydra-dev task_id=tEMP.*presence=deposit-empty/,
+        "the deposit-empty WARN must also land in the run log",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a code-writing skill whose deposit path cannot be read (read-error) emits the deposit-broken WARN", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000),
+            task_id: "tERR",
+            anchor: "issue-3734",
+          },
+        },
+        failure_log: [],
+      });
+
+      // A directory at the expected deposit path is not a file: reap's
+      // `path.read_text()` raises OSError (IsADirectoryError), yielding
+      // read-error rather than a clean read.
+      mkdirSync(join(tmp.dir, "hydra-refl-sources-tERR"));
+
+      const r = runCompletionWithReflDir(
+        ["dev_orch", "tERR", "1000", "hydra-dev"],
+        tmp,
+        tmp.dir,
+      );
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      assert.match(
+        r.stderr,
+        /WARN refl_deposit_broken skill=hydra-dev task_id=tERR.*presence=read-error/,
+        "an unreadable deposit path must warn as read-error",
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
