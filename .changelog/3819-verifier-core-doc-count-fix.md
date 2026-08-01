@@ -1,0 +1,1 @@
+- docs: fix CONTEXT.md/CLAUDE.md/docs/reference.md describing the Verifier Core as five files when `VERIFIER_CORE_PATHS` holds six, and add a drift-guard test (#3819)
