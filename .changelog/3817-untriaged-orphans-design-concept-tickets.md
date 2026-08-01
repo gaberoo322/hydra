@@ -1,0 +1,1 @@
+- fix: stop `untriaged_orphans` from permanently churning `sweep_orch` on issues correctly parked in `needs-design-concept` or `needs-tickets` (#3817)
