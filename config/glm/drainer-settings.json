@@ -10,7 +10,15 @@
 
     "SINGLE-FILE TEST RUNS GO THROUGH `npm run test:file -- test/<name>.test.mts`, NOT a bare `node`. Bare `node` and `npx` stay ungranted on purpose: either one is a general interpreter (`node -e 'require(\"fs\").readFileSync(\".env\")'`) and would reinstate the exact incidental-credential-ingestion hole this allow-list closes — a targeted `Bash(node --experimental-strip-types --test:*)` prefix grant is no better, because prefix rules do not constrain what follows. The first live GLM authoring runs (2026-07-27) burned 5-7 turns each retrying blocked `node`/`npx` invocations before falling back to the full ~6-minute `npm test`, so the capability gap was real; the fix is a repo-defined script reached through the already-granted `Bash(npm run:*)`, which adds NO new capability class beyond the residual stated below. It is also strictly better than the bare `node` invocation it replaces: `test:file` routes through `scripts/test/redis-db-launch.mjs`, so a single-file run gets the same per-run Redis DB isolation as `npm test` and stops reproducing the documented cross-run flake class.",
 
-    "RESIDUAL, stated plainly: `npm test` / `npm run *` execute repo-defined scripts, so this is a scoped-capability fence, not a sandbox. It stops incidental credential ingestion — the invariant-8 threat — not a determined exfiltration. The output-side half (preflightBeforePr's secret-scan + Verifier-Core/T4 diff gate) and the unchanged qa_orch + CI merge gate stay load-bearing."
+    "RESIDUAL, stated plainly: `npm test` / `npm run *` execute repo-defined scripts, so this is a scoped-capability fence, not a sandbox. It stops incidental credential ingestion — the invariant-8 threat — not a determined exfiltration. The output-side half (preflightBeforePr's secret-scan + Verifier-Core/T4 diff gate) and the unchanged qa_orch + CI merge gate stay load-bearing.",
+
+    "WRITE-SIDE BOUNDARY (issue #3790). Until this fix, `Write`/`Edit`/`NotebookEdit` were granted bare above with NO path constraint — only the `deny` list's Read(...) rules were path-scoped, and a Read(...) deny has no effect on any other tool. On 2026-07-27 a GLM session used this gap to write to operator memory under /home/gabe/.claude/projects/-home-gabe-hydra/memory/, entirely outside the worktree and invisible to every diff-based gate (preflightBeforePr, qa_orch, CI all inspect the WORKTREE'S git diff; a write to the operator's home directory or the main checkout never appears there). This file now closes that gap with TWO independent mechanisms, chosen per verified real behavior rather than assumption:",
+
+    "MECHANISM 1 — static path-scoped `deny` rules, verified live against a headless `claude -p --settings <file>` run (2026-07-31), for sensitive paths that are the SAME regardless of which worktree is active. Three load-bearing facts, each confirmed empirically because getting any one wrong reproduces the exact 'reads as a fence but is not one' mistake already caught once in QA on PR #3701: (1) a bare `Write(<path>)` deny rule is SILENTLY IGNORED — the CLI itself prints 'Write(...) is not matched by file permission checks — only Edit(path) rules are' and does not block the write. (2) `Edit(<path>)` deny rules DO hold, and per the CLI's own message 'Edit rules cover all file-editing tools' — verified directly against both the Write tool and the NotebookEdit tool being denied by the same Edit(...) rule. So every new rule below is spelled `Edit(...)`, never `Write(...)`/`NotebookEdit(...)` — do not add those, they would be dead weight that reads as coverage it isn't. (3) an absolute path MUST use the doubled leading slash the existing Read(...) rules below already use (`Edit(//home/gabe/.claude/**)`) — a single leading slash (`Edit(/home/gabe/.claude/**)`) is NOT treated as absolute and does not fence; verified by probing both forms against the same target and observing the single-slash form let the write through. `deny` beats `allow` unconditionally (also verified: a narrower `allow` rule for a path underneath a broader `deny` rule does NOT carve out an exception) — there is no re-opening a denied subtree from the allow list.",
+
+    "MECHANISM 2 — the existing `worktree-write-fence.sh` PreToolUse hook (issue #549), reused here rather than reimplemented, for the two main checkouts (/home/gabe/hydra, /home/gabe/hydra-betting). This is deliberately NOT a static `Edit(//home/gabe/hydra/**)` deny rule, because that would break the drainer itself: the drainer's own worktree nests INSIDE that same path — its one real historical run (branch glm-3734) lived at /home/gabe/hydra/.claude/worktrees/agent-a802a6552d648d1c8 — and mechanism 1's deny-always-wins semantics (verified above) means a blanket deny on the checkout root cannot be selectively re-opened for that nested worktree from the allow list. A static rule literally cannot express 'outside MY worktree' without hardcoding a worktree id that differs per dispatch. The `worktree-write-fence.sh` hook already solves exactly this by comparing the tool call's resolved file_path against the session's actual $cwd at runtime, so it is wired in here as a `hooks.PreToolUse` block pointing at the same `scripts/claude-hooks/worktree-write-fence.sh` the operator installs globally via `setup-claude-hooks.sh` for hydra-dev/hydra-target-build — one source of truth, not a second divergent path check. Verified live: with this hook wired into a throwaway `--settings` file and cwd set to a real worktree, a `claude -p` Write to /home/gabe/hydra-betting/<file> (main checkout, outside cwd) was denied with the hook's own #549/#1861 message; the file was confirmed never created on disk.",
+
+    "RESIDUAL of mechanism 2, stated plainly: the hook only fences a session whose cwd resolves under one of its three recognised WORKTREE_ROOTS (today: /home/gabe/hydra/.claude/worktrees/, /dev/shm/hydra-worktrees/, /home/gabe/hydra-worktrees/) — true for the drainer's one real run to date, but if a future drainer loop (#3689, not yet built) ever places its worktree somewhere else, this fence silently no-ops for the main-checkout threat (mechanism 1's static rules are unaffected either way). Whoever builds #3689 should keep the worktree under a recognised root or extend WORKTREE_ROOTS. Interaction check per issue #3828 (sync-skills.sh sanctioned writes to ~/.claude/skills/, out of scope of this PR): the new Edit(//home/gabe/.claude/**) deny below only applies to THIS settings file's own `claude -p` invocation (loaded via `--settings` in drainer-runner.ts's buildDrainerArgs) — it is not loaded by hydra-dev, hydra-target-build, or any other dispatch, and this file's own Bash allow-list grants no `bash <script>` primitive and no matching `npm run` alias that could reach scripts/sync-skills.sh, so there is no collision."
   ],
 
   "permissions": {
@@ -70,9 +78,38 @@
       "Read(//home/gabe/.claude/.credentials.json)",
       "Read(//home/gabe/.ssh/**)",
       "Read(//home/gabe/.aws/**)",
-      "Read(//home/gabe/.config/gh/**)"
+      "Read(//home/gabe/.config/gh/**)",
+
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Edit(**/*.env)",
+      "Edit(**/secrets/**)",
+      "Edit(**/*credential*)",
+      "Edit(**/*.pem)",
+      "Edit(**/*.key)",
+      "Edit(**/id_rsa*)",
+      "Edit(//home/gabe/.claude/**)",
+      "Edit(//home/gabe/.config/**)",
+      "Edit(//home/gabe/.ssh/**)",
+      "Edit(//home/gabe/.aws/**)"
     ],
 
     "additionalDirectories": []
+  },
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/claude-hooks/worktree-write-fence.sh"
+          }
+        ]
+      }
+    ]
   }
 }
