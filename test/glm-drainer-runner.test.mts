@@ -449,6 +449,107 @@ describe("glm drainer settings.json — input-side secret fence", () => {
 });
 
 /**
+ * The write-side fence (issue #3790). Until this fix, `Write`/`Edit`/
+ * `NotebookEdit` were granted bare above with NO path constraint — the
+ * `deny` list only path-scoped `Read(...)`, which has zero effect on any
+ * other tool, and a GLM session used exactly that gap on 2026-07-27 to write
+ * to operator memory outside the worktree. The fix ships two independent
+ * mechanisms; these cases pin both so a future edit to this JSON can't
+ * silently drop either one without a test going red (the same "reads as a
+ * fence but is not one" failure class already caught once on PR #3701).
+ */
+describe("glm drainer settings.json — write-side fence (issue #3790)", () => {
+  const settings = JSON.parse(readFileSync(DRAINER_SETTINGS_PATH, "utf8"));
+  const deny: string[] = settings.permissions.deny;
+
+  test("permissions.deny mirrors every Read(...) credential rule with an Edit(...) rule", () => {
+    // Edit(...) is the only tool-scoped rule form verified to hold (Write(...)
+    // and NotebookEdit(...) path rules are silently ignored by the CLI) —
+    // see the file's own `_comment` block. Every credential-adjacent pattern
+    // rule below must exist as BOTH Read(...) and Edit(...).
+    for (const rule of [
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Edit(**/*.env)",
+      "Edit(**/secrets/**)",
+      "Edit(**/*credential*)",
+      "Edit(**/*.pem)",
+      "Edit(**/*.key)",
+      "Edit(**/id_rsa*)",
+    ]) {
+      assert.equal(deny.includes(rule), true, `deny must contain ${rule}`);
+    }
+  });
+
+  test("permissions.deny fences the operator home surfaces with doubled-leading-slash absolute Edit(...) rules", () => {
+    // A single leading slash is silently NOT treated as absolute and does not
+    // fence (verified live, per the `_comment` block) — pin the doubled form.
+    for (const rule of [
+      "Edit(//home/gabe/.claude/**)",
+      "Edit(//home/gabe/.config/**)",
+      "Edit(//home/gabe/.ssh/**)",
+      "Edit(//home/gabe/.aws/**)",
+    ]) {
+      assert.equal(deny.includes(rule), true, `deny must contain ${rule}`);
+      assert.equal(rule.startsWith("Edit(//"), true, `${rule} must use the doubled leading slash`);
+    }
+  });
+
+  test("no Edit(...) deny rule uses an unfenced single leading slash for an absolute home path", () => {
+    // A single-leading-slash absolute form (`Edit(/home/gabe/...)`) reads as a
+    // fence but silently is not one — guard against it creeping back in.
+    for (const rule of deny) {
+      if (!rule.startsWith("Edit(")) continue;
+      const inner = rule.slice("Edit(".length, -1);
+      if (inner.startsWith("/home/")) {
+        assert.fail(`${rule} uses a single leading slash, which does not fence an absolute path`);
+      }
+    }
+  });
+
+  test("settings.hooks.PreToolUse wires the worktree-write-fence.sh hook for the main-checkout boundary", () => {
+    // Mechanism 2 (issue #549 reuse): a static deny can't express "outside MY
+    // worktree" without hardcoding a per-dispatch worktree id, so the main
+    // checkouts (/home/gabe/hydra, /home/gabe/hydra-betting) are fenced by
+    // this cwd-relative hook instead. Pin its presence, matcher, and target
+    // script so a future edit can't silently drop the whole mechanism.
+    assert.equal(typeof settings.hooks, "object", "settings.hooks must be present");
+    const preToolUse = settings.hooks.PreToolUse;
+    assert.equal(Array.isArray(preToolUse), true, "hooks.PreToolUse must be an array");
+    assert.equal(preToolUse.length > 0, true, "hooks.PreToolUse must not be empty");
+
+    const fenceBlock = preToolUse.find((block: any) =>
+      Array.isArray(block?.hooks) &&
+      block.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("worktree-write-fence.sh")),
+    );
+    assert.ok(fenceBlock, "no hooks.PreToolUse block references worktree-write-fence.sh");
+
+    // Matcher covers every file-editing tool the write-side gap could exploit
+    // — same tool set the settings file's own Edit(...) rules assume covers
+    // Write/NotebookEdit, plus Read for parity with the setup script's own
+    // canonical registration (scripts/setup-claude-hooks.sh).
+    assert.equal(fenceBlock.matcher, "Edit|Write|MultiEdit|Read");
+
+    const command = fenceBlock.hooks.find((h: any) => typeof h?.command === "string").command;
+    assert.match(command, /scripts\/claude-hooks\/worktree-write-fence\.sh$/);
+  });
+
+  test("the _comment block documents the write-side boundary and its residual", () => {
+    const comment = Array.isArray(settings._comment)
+      ? settings._comment.join(" ")
+      : String(settings._comment ?? "");
+    assert.match(comment, /WRITE-SIDE BOUNDARY/i);
+    assert.match(comment, /#3790/);
+    // The residual must be stated, not just the happy path — a hook that
+    // silently no-ops outside its recognised worktree roots is a real limit,
+    // not an implementation detail to omit.
+    assert.match(comment, /RESIDUAL/i);
+  });
+});
+
+/**
  * The Bash surface, pinned separately.
  *
  * The first draft of `drainer-settings.json` granted a bare, unscoped `Bash`
