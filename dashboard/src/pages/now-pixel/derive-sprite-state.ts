@@ -14,8 +14,13 @@
  */
 
 // ---------------------------------------------------------------------------
-// API payload shapes (mirrored from src/api/now-page.ts; we deliberately
-// duplicate the types so the dashboard does not import from src/.)
+// API payload shapes (mirrored from src/schemas/now-page.ts; we deliberately
+// duplicate the types so the dashboard does not import from src/.) A
+// compile-time drift guard — test/dashboard-response-contract.test.mts
+// (issue #3707) — assigns a real `AutopilotTickResponse`/
+// `ActiveDispatchesResponse` value into these mirrored types, so `tsc` fails
+// loud if a future API change removes/renames/retypes a field these still
+// declare. Keep the mirrored shape here in sync when that guard reddens.
 // ---------------------------------------------------------------------------
 
 interface AutopilotTickRun {
@@ -38,7 +43,7 @@ export interface AutopilotTickPayload {
 export interface ActiveDispatch {
   id: string;
   classLabel: string;
-  source: "autopilot" | "operator";
+  source: "autopilot" | "operator" | "subagent";
   startedAt: string;
   currentStep?: string;
   issueRef?: string;
@@ -126,7 +131,7 @@ export function derivePavilionState(payload: AutopilotTickPayload | null | undef
 interface DispatchSpriteRow {
   id: string;
   classLabel: string;
-  source: "autopilot" | "operator";
+  source: "autopilot" | "operator" | "subagent";
   /**
    * Slice 2 ships a placeholder mapping — every dispatch renders as
    * 025-pikachu.png. Slice 3 swaps this for a real class-to-sprite map.

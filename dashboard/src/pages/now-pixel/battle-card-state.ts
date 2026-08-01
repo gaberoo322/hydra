@@ -297,7 +297,7 @@ interface BattleCardRow {
   classLabel: string;
   /** sprite path under /sprites/pokemon/ — falls back to the placeholder when class has no mapping */
   spriteFile: string;
-  source: "autopilot" | "operator";
+  source: "autopilot" | "operator" | "subagent";
   counters: ToolCallCounters;
   currentActivity: string;
   permissionWaitOpen: boolean;
