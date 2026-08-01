@@ -149,6 +149,7 @@ export {
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
+  overlayMeterUnavailableEligibility,
 } from "./eligibility.ts";
 // The narrowed pacing-dashboard read-model — the canonical view type the
 // autopilot-status seam + idle-diagnostics route both consume (issue #3108).
