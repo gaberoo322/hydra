@@ -297,6 +297,42 @@ fi
 # genuinely NO labels matches neither the exclusion set NOR the prefix, so it
 # is still counted — the orphan detector's actual target stays intact.
 #
+# `needs-design-concept` and `needs-tickets` (issue #3817) are BOTH
+# deliberate, stable HITL parking lanes — same shape as `ready-for-human` /
+# `needs-info` above, not the "wrong label" blind spot this backstop exists
+# to catch:
+#   - `needs-design-concept` parks an issue awaiting `hydra-grill` /
+#     `design_concept_orch` (issue #628 gate). `sweep_orch`'s only correct
+#     action on one is to confirm it is already routed and change nothing
+#     (observed live on issue #3815) — so counting it as an orphan re-fires
+#     `sweep_orch` every cooldown to re-confirm the same no-op, forever.
+#   - `needs-tickets` parks a published spec awaiting `/to-tickets`
+#     decomposition in the operator's `hydra-review` cockpit (§0.8) — an
+#     autopilot-invisible, operator-driven lane by the same design as
+#     `needs-design-concept`. `sweep_orch` has no rule to act on it either.
+# Both are ADDED to the exclusion array (not given a prefix rule like
+# `wayfinder:*`, since each is a single fixed label, not a family).
+#
+# Audited against the full repo label list and NOT added, with reasons:
+#   - `meta-friction`: explicitly the MOTIVATING example above ("an issue
+#     landed with the wrong label") — `src/pattern-memory/escalation.ts`
+#     creates these issues with ONLY this label and no lifecycle label, so
+#     this backstop counting it as an orphan is exactly the intended catch,
+#     not a gap to suppress.
+#   - `design-qa`, `cleanup-scan`, `architecture-scan`, `tool-scout`: producer
+#     category labels always applied alongside `needs-triage` or
+#     `ready-for-agent` at creation time (see `hydra-design-qa.md`,
+#     `hydra-cleanup.md`, `hydra-architecture-scan.md`,
+#     `hydra-tool-scout.md`) — never the sole label on an open issue.
+#   - `operator-approved`, `glm-authored`, `merge-ready`, `ready-for-merge`,
+#     `no-rebase`: applied via `gh pr edit`, not `gh issue edit` — PR labels,
+#     invisible to this issue-scoped `gh issue list` read regardless.
+#   - `keep-open`, `design-concept-exempt`, `glm-eligible`, `glm-withhold`,
+#     `ubiquitous-language`, `refactor-batch-2026-05`, `backlog`, `sentry`:
+#     modifier/category tags always applied alongside an existing lifecycle
+#     label (e.g. `keep-open` rides on `wayfinder:map`, already prefix-
+#     excluded), never a standalone parking state.
+#
 # This emits `untriaged_orphans` = the count of open issues carrying NONE of
 # that label set AND no `wayfinder:`-prefixed label. The autopilot turn maps
 # `untriaged_orphans > 0` → the boolean `untriaged_orphans_orch` signal
@@ -314,7 +350,8 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
         (.labels | map(.name)) as $n
         | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
              "needs-triage", "needs-research", "target-backlog",
-             "ready-for-human", "needs-info" ]
+             "ready-for-human", "needs-info", "needs-design-concept",
+             "needs-tickets" ]
            | any(. as $lbl | $n | index($lbl))) | not
       )
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)

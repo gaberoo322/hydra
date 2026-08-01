@@ -1754,6 +1754,8 @@ describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () =
       "target-backlog",
       "ready-for-human",
       "needs-info",
+      "needs-design-concept",
+      "needs-tickets",
     ];
     // Isolate the untriaged_orphans jq filter block so a label mentioned only
     // in a comment elsewhere can't satisfy the assertion.
@@ -1923,6 +1925,97 @@ describe("collect-state.sh untriaged_orphans wayfinder prefix exclusion (#3728)"
       filter,
       /index\("wayfinder:[a-z]+"\)/,
       "enumerating wayfinder:map/grilling/... would reintroduce the churn on the next wayfinder type",
+    );
+  });
+});
+
+/**
+ * Regression test for issue #3817 — `collect-state.sh`'s `untriaged_orphans`
+ * backstop must NOT count `needs-design-concept`-only or `needs-tickets`-only
+ * issues.
+ *
+ * Both are deliberate, stable HITL parking lanes — same shape as the already
+ * -excluded `ready-for-human` (#2828) / `needs-info` (#2958) — not the
+ * "wrong label" blind spot this backstop exists to catch:
+ *   - `needs-design-concept` parks an issue awaiting `hydra-grill` /
+ *     `design_concept_orch` (the #628 gate). Observed live on issue #3815:
+ *     `sweep_orch`'s only correct action is to confirm the issue is already
+ *     routed and change nothing — so counting it as an orphan re-fires
+ *     `sweep_orch` on its cooldown forever to re-confirm the same no-op.
+ *   - `needs-tickets` parks a published spec awaiting `/to-tickets`
+ *     decomposition in the operator's `hydra-review` cockpit (§0.8) — an
+ *     autopilot-invisible, operator-driven lane by the same design.
+ *
+ * These cases run the COMMITTED jq filter through real `jq`, mirroring the
+ * #3728 wayfinder-prefix precedent above so the shipped logic cannot drift.
+ * Both directions matter: these two labels are NOT orphans, but a genuinely
+ * label-less issue — and a `meta-friction`-only issue, the backstop's actual
+ * motivating example — STILL is.
+ */
+describe("collect-state.sh untriaged_orphans needs-design-concept / needs-tickets exclusion (#3817)", () => {
+  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+
+  /** Extract the committed untriaged_orphans jq filter verbatim from the script. */
+  function extractFilter(): string {
+    const start = src.indexOf('echo -n "untriaged_orphans="');
+    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
+    const jqOpen = src.indexOf("--jq '", start);
+    assert.ok(jqOpen >= 0, "untriaged_orphans gh read missing its --jq filter");
+    const filterStart = jqOpen + "--jq '".length;
+    const filterEnd = src.indexOf("'", filterStart);
+    assert.ok(filterEnd >= 0, "untriaged_orphans --jq filter is never closed");
+    return src.slice(filterStart, filterEnd);
+  }
+
+  /** Run the committed filter against synthetic issues through real jq. */
+  function count(issues: readonly { labels: string[] }[]): string {
+    const input = JSON.stringify(
+      issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
+    );
+    const r = spawnSync("jq", [extractFilter()], { input, encoding: "utf-8" });
+    assert.equal(r.status, 0, `untriaged_orphans jq failed: ${r.stderr}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  test("an issue with only [enhancement, needs-design-concept] is NOT an untriaged orphan", () => {
+    assert.equal(
+      count([{ labels: ["enhancement", "needs-design-concept"] }]),
+      "0",
+      "needs-design-concept is a deliberate parking lane awaiting hydra-grill — sweep_orch's correct action is no action",
+    );
+  });
+
+  test("an issue labelled only needs-tickets is NOT an untriaged orphan", () => {
+    assert.equal(
+      count([{ labels: ["needs-tickets"] }]),
+      "0",
+      "needs-tickets parks a spec awaiting /to-tickets in the operator's hydra-review cockpit — an autopilot-invisible lane",
+    );
+  });
+
+  test("a meta-friction-only issue IS still an untriaged orphan (backstop's motivating example intact)", () => {
+    assert.equal(
+      count([{ labels: ["meta-friction"] }]),
+      "1",
+      "meta-friction is the backstop's own motivating example of the wrong-label blind spot — must not be swept under the same exclusion",
+    );
+  });
+
+  test("an issue with genuinely no labels IS still an untriaged orphan (backstop intact)", () => {
+    assert.equal(count([{ labels: [] }]), "1");
+  });
+
+  test("a mixed board counts exactly the non-excluded orphans", () => {
+    assert.equal(
+      count([
+        { labels: ["needs-design-concept"] },
+        { labels: ["needs-tickets"] },
+        { labels: ["wayfinder:grilling"] },
+        { labels: ["meta-friction"] }, // genuine orphan
+        { labels: [] }, // genuine orphan
+        { labels: ["ready-for-agent"] }, // excluded (lifecycle label)
+      ]),
+      "2",
     );
   });
 });
