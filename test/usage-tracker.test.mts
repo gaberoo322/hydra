@@ -3993,6 +3993,7 @@ describe("usage-tracker", () => {
         paused: false,
         sessionBlockedUntil: null,
         worklessUntil: null,
+        meterUnavailable: false,
       },
       paceState: "on",
       targetPercent: 0,
@@ -4415,6 +4416,7 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
       fiveHour: { utilization: fiveHourPct, resetsAt: "2026-06-19T12:00:00.000Z" },
       sevenDay: { utilization: sevenDayPct, resetsAt: "2026-06-25T12:00:00.000Z" },
     },
+    consecutiveFailures: 0,
   });
 
   test("a FRESH OAuth read rebases the headline onto real utilization", () => {
@@ -4444,6 +4446,7 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
         fiveHour: { utilization: 30, resetsAt: null },
         sevenDay: { utilization: 55, resetsAt: null },
       },
+      consecutiveFailures: 1,
     };
     const r = rebaseOnOAuth(stale, 9, 9);
     assert.equal(r.usageSource, "oauth"); // stale-but-real still backs the headline
@@ -4460,6 +4463,7 @@ describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
       stale: false,
       ageMs: null,
       lastKnownOAuth: null,
+      consecutiveFailures: 1,
     };
     const r = rebaseOnOAuth(failed, 17, 23);
     assert.equal(r.usageSource, "estimate");

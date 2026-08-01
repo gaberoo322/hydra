@@ -38,6 +38,7 @@ import {
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
+  overlayMeterUnavailableEligibility,
   type UsageEligibility,
   type UsageSnapshot,
 } from "../cost/index.ts";
@@ -57,6 +58,11 @@ export interface EligibilityViewDeps {
    * `getUsage({ force })` OUTSIDE the fail-safe guards — a snapshot failure is a
    * genuine 500, not a degradable slice — so it arrives pre-read here. */
   snapshot: EligibilityUsageInput;
+  /** True when the OAuth meter could not be read at all (no fresh value and no
+   * last-good one inside the max-stale window). Forces `allow=false` — quota
+   * cannot be measured, so dispatch blocks (2026-07-30 operator decision).
+   * Defaults to `false` so existing callers keep the prior behaviour. */
+  meterUnavailable?: boolean;
   /** Reader for the operator-only Autopilot pause flag (#988). A REJECTED
    * promise degrades to NOT paused (fails safe to running). */
   readPaused: () => Promise<boolean>;
@@ -115,6 +121,7 @@ export async function getEligibilityView(
 ): Promise<UsageEligibility> {
   const {
     snapshot,
+    meterUnavailable = false,
     readPaused,
     readSessionBlockedUntil,
     readWorklessUntil,
@@ -138,13 +145,19 @@ export async function getEligibilityView(
   );
 
   const nowMs = now();
-  return overlayWorklessEligibility(
-    overlaySessionBlockEligibility(
-      overlayPauseEligibility(projectEligibility(snapshot), paused),
-      sessionBlockedUntilMs,
+  // Meter-unavailable is overlaid LAST so its allow=false cannot be masked by an
+  // earlier overlay, and so `reasons.meterUnavailable` survives onto the final
+  // verdict the pace gate logs.
+  return overlayMeterUnavailableEligibility(
+    overlayWorklessEligibility(
+      overlaySessionBlockEligibility(
+        overlayPauseEligibility(projectEligibility(snapshot), paused),
+        sessionBlockedUntilMs,
+        nowMs,
+      ),
+      worklessUntilMs,
       nowMs,
     ),
-    worklessUntilMs,
-    nowMs,
+    meterUnavailable,
   );
 }

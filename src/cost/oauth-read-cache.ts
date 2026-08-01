@@ -103,8 +103,18 @@ let oauthBackoff: OAuthBackoffState | null = null;
  * (expired token, hard account limit) does. Purely observability: nothing gates
  * on it, and the backoff ladder / gate math / #1124 fail-open invariant are all
  * untouched (design concept issue-3601, scope: additive off `oauthBackoff.failures`).
+ *
+ * Reused by `eligibility-usage.ts` (issue #3821) as the gate for
+ * `meterUnavailable`: a SINGLE failed read against a cold (`null`) cache used
+ * to set `meterUnavailable: true` immediately — there is no last-good value to
+ * serve, so `attemptOAuthRead` falls straight to the failure branch on the very
+ * first GET of a freshly-restarted process (i.e. after every deploy). That
+ * forced `allow=false` for the whole autopilot off one transient blip. Exported
+ * so `getEligibilityUsage` can require the SAME sustained-failure count (3) the
+ * alarm above already uses before it reports the meter as unavailable, rather
+ * than inventing a second threshold.
  */
-const OAUTH_SUSTAINED_FAILURE_THRESHOLD = 3;
+export const OAUTH_SUSTAINED_FAILURE_THRESHOLD = 3;
 
 /**
  * Backoff-state persistence side-channel (issue #2840). The exponential-backoff
@@ -337,6 +347,18 @@ export interface CachedOAuthRead {
    * 7d utilization. A pure observability channel — nothing gates on it.
    */
   lastKnownOAuth: OAuthUsageData | null;
+  /**
+   * The current consecutive-failed-GET count backing {@link oauthBackoff}, or
+   * `0` when the meter is healthy (no active backoff — either it has never
+   * failed, or the most recent read succeeded and cleared the ladder). Mirrors
+   * `oauthBackoff?.failures ?? 0` at the moment this result is produced,
+   * including on the backoff-suppressed synthetic-failure branch (no GET made,
+   * but the count carries forward from the last real attempt). Issue #3821:
+   * this is what lets a caller (`eligibility-usage.ts`) distinguish "one
+   * transient blip" from "a genuinely sustained outage" instead of treating
+   * every `result.ok === false` as equally severe.
+   */
+  consecutiveFailures: number;
 }
 
 /**
@@ -391,6 +413,7 @@ export async function readOAuthCached(
       stale: false,
       ageMs: nowMs - oauthCache.storedAt,
       lastKnownOAuth: oauthCache.data,
+      consecutiveFailures: oauthBackoff?.failures ?? 0,
     };
   }
 
@@ -409,19 +432,28 @@ export async function readOAuthCached(
     if (oauthCache !== null) {
       const ageMs = nowMs - oauthCache.storedAt;
       if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
-        return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs, lastKnownOAuth };
+        return {
+          result: { ok: true, data: oauthCache.data },
+          stale: true,
+          ageMs,
+          lastKnownOAuth,
+          consecutiveFailures: oauthBackoff.failures,
+        };
       }
     }
     // No trustworthy last-good to serve as the HEADLINE: report the
     // backoff-suppressed state as a failure so the caller falls to the estimate
     // (never a silent 0). No GET was made — the whole point of the gate. The
     // last-known value (if any) still rides out on `lastKnownOAuth` for the
-    // divergence detector even though it no longer backs the headline.
+    // divergence detector even though it no longer backs the headline. The
+    // consecutive-failure count carries forward from the last real GET attempt
+    // (issue #3821) — this is a SUPPRESSED re-probe, not a fresh failure.
     return {
       result: { ok: false, code: "oauth-usage-non-2xx" },
       stale: false,
       ageMs: null,
       lastKnownOAuth,
+      consecutiveFailures: oauthBackoff.failures,
     };
   }
 
@@ -471,7 +503,7 @@ async function attemptOAuthRead(
       void oauthBackoffPersistence.clear();
     }
     // A fresh success IS the last-known value.
-    return { result, stale: false, ageMs: 0, lastKnownOAuth: result.data };
+    return { result, stale: false, ageMs: 0, lastKnownOAuth: result.data, consecutiveFailures: 0 };
   }
 
   // Read failed. Arm/advance the exponential-backoff gate so subsequent scans
@@ -543,7 +575,13 @@ async function attemptOAuthRead(
   if (oauthCache !== null) {
     const ageMs = nowMs - oauthCache.storedAt;
     if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
-      return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs, lastKnownOAuth };
+      return {
+        result: { ok: true, data: oauthCache.data },
+        stale: true,
+        ageMs,
+        lastKnownOAuth,
+        consecutiveFailures: failures,
+      };
     }
     // Too stale: evict so a future success starts a clean age clock, and fall
     // through to the failure (estimate). Logged so a sustained outage is visible.
@@ -553,5 +591,5 @@ async function attemptOAuthRead(
     );
     oauthCache = null;
   }
-  return { result, stale: false, ageMs: null, lastKnownOAuth };
+  return { result, stale: false, ageMs: null, lastKnownOAuth, consecutiveFailures: failures };
 }

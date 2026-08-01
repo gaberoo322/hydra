@@ -79,6 +79,7 @@ function makeScan(overrides: Partial<ScanResult> = {}): ScanResult {
       stale: false,
       ageMs: null,
       lastKnownOAuth: null,
+      consecutiveFailures: 1,
     },
     mostRecentObservedResetMs: null,
     sinceResetEntries: [],
