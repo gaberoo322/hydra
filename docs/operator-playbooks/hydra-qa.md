@@ -438,7 +438,18 @@ CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
 # #974 busy-loop (QA-side twin of #846). Use the PR-event-safe `gh issue edit`
 # path (NOT the broken `gh pr edit` — feedback_gh_rerun_label_quirk), tolerant
 # of an already-cleared label via `|| true`.
-gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
+#
+# Apply `in-progress` as a bridging label in the SAME call (issue #3788 Cause
+# 1): a PR is confirmed open at this point (located in step 2), so leaving the
+# issue fully label-less between the needs-qa strip and the eventual merge is
+# never correct — under CI queue backpressure (single self-hosted runner
+# serializing PR CI + deploys) a green, auto-mergeable PR can sit
+# `mergeStateStatus: BLOCKED` for the entire queue-wait window, during which
+# the source issue was an untriaged-orphan false positive. `in-progress` does
+# not key into the #974 redispatch loop (that loop is keyed specifically on a
+# lingering `needs-qa` label), so this closes the gap without reintroducing
+# #974.
+gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "in-progress" 2>/dev/null \
   || true  # already cleared (e.g. by a prior auto-close) — expected and non-fatal
 
 # Record the PASS as a COMMENT, not an approval: the shared gaberoo322 identity
@@ -521,7 +532,14 @@ Verdict: \`PASS-pending-CI\`. Autopilot will re-evaluate once required checks co
 # issue. If CI later FAILS, the autopilot poll loop (which reads
 # statusCheckRollup directly, not labels) re-labels the issue
 # `ready-for-agent` for retry — the same path as a fresh FAIL verdict.
-gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
+#
+# Apply `in-progress` as a bridging label in the SAME call (issue #3788 Cause
+# 1) — same rationale as the PASS branch above: a confirmed-open PR is still
+# awaiting CI/merge, so the issue must never sit fully label-less in the
+# meantime. `in-progress` is inert with respect to both the #974 redispatch
+# loop (keyed on `needs-qa`) and the autopilot's CI-poll re-label-on-FAIL path
+# (which sets `ready-for-agent` directly, superseding `in-progress`).
+gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" --add-label "in-progress" 2>/dev/null \
   || echo "WARN: failed to clear needs-qa from issue #${issue_number} (non-fatal)"
 ```
 
