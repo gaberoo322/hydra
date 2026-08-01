@@ -91,21 +91,35 @@ for m in trend[:5]:
 "
 ```
 
-### Backlog
+### Backlog (GitHub Issues board — issue #3745)
 ```bash
-hydra backlog ls | python3 -c "
-import json,sys,subprocess
-d=json.load(sys.stdin)
-for lane in ['queued','inProgress','blocked','triage']:
-    items=d.get(lane,[])
-    if items:
-        print(f'{lane}: {len(items)} items')
-        for i in items[:3]: print(f'  [P{i.get(\"priority\",0)}] {i[\"id\"]} — {i[\"title\"][:60]}')
-r=subprocess.run(['docker','exec','hydra-redis-1','redis-cli','LLEN','hydra:anchors:work-queue'],capture_output=True,text=True)
-if r.returncode==0:
-    n=int(r.stdout.strip() or 0)
-    if n: print(f'work-queue (Redis): {n} items')
-"
+# The Redis backlog subsystem (lanes queued/inProgress/blocked/triage) was
+# retired by the ADR-0031 Target-tracking migration (#3439, PR #3455) —
+# `/api/backlog` 404s and `hydra backlog` is a retired stub (issue #3745).
+# Orchestrator work tracking is GitHub Issues on gaberoo322/hydra; read the
+# board the way collect-state.sh's Target-board signals do, via `gh issue
+# list` (REST, not GraphQL — cheap enough for an on-demand doctor run).
+gh issue list --repo gaberoo322/hydra --state open --limit 200 \
+  --json number,title,labels 2>/dev/null | python3 -c "
+import json,sys
+from collections import defaultdict
+items=json.load(sys.stdin)
+lanes=['ready-for-agent','needs-triage','blocked','needs-qa','in-progress','ready-for-human']
+by_lane=defaultdict(list)
+for it in items:
+    names={l['name'] for l in it.get('labels',[])}
+    for lane in lanes:
+        if lane in names:
+            by_lane[lane].append(it)
+            break
+for lane in lanes:
+    its=by_lane.get(lane,[])
+    if its:
+        print(f'{lane}: {len(its)} items')
+        for i in its[:3]: print(f'  #{i[\"number\"]} — {i[\"title\"][:60]}')
+" 2>/dev/null || echo "board read unavailable (gh unreachable/rate-limited)"
+docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null | \
+  awk '$1!="0"{print "work-queue (Redis): "$1" items"}'
 ```
 
 ### Alerts
@@ -191,33 +205,32 @@ docker exec hydra-redis-1 redis-cli INFO memory 2>/dev/null | grep "used_memory_
 docker exec hydra-redis-1 redis-cli DBSIZE 2>/dev/null
 ```
 
-### OpenViking embedding backend reachability (issue #1781)
+### OpenViking embedding backend reachability (issue #1781, retargeted to tei-embed — issue #3745)
 ```bash
-# The dense-embedding backend (post-#1795: local CPU Ollama, compose service
-# ollama-embed) is on OpenViking's HOT search path — a query must be embedded
-# before the vector lookup. The VLM backend (gabes-desktop-1 over Tailnet) is a
-# SOFT dependency used only for indexing. Both hostnames resolve ONLY inside the
-# OV container (compose network + extra_hosts), so probe from INSIDE the
-# container with docker exec — a host-side connect cannot reach them.
+# The dense-embedding backend is `tei-embed` (HF Text Embeddings Inference),
+# the TEI-cutover replacement for the retired `ollama-embed` (issue #3543,
+# teardown #3544, epic #3541) — see docker/ov.conf embedding.dense.api_base
+# (http://tei-embed:80/v1). It is on OpenViking's HOT search path — a query
+# must be embedded before the vector lookup runs. The hostname resolves ONLY
+# inside the OV container (compose network), so probe from INSIDE the
+# container with docker exec — a host-side connect cannot reach it.
 #
-# FIRST distinguish "backend down" from "container never created" (issue #1812):
-# a missing ollama-embed container (vs a running-but-unhealthy one) means the
-# stack was brought up targeting a subset of services and the depends_on chain
-# never pulled ollama-embed in. The fix differs — re-create it (Phase 3), don't
-# chase a model-pull / network fault. `docker compose ps` lists only created
-# services; an empty match == the #1812 missing-service failure mode.
-echo -n "ollama-embed container present: "
-if [ -n "$(cd ~/hydra && docker compose ps -q ollama-embed 2>/dev/null)" ]; then
-  cd ~/hydra && docker compose ps ollama-embed --format '{{.Name}} {{.Status}}' 2>/dev/null
+# FIRST distinguish "backend down" from "container never created" (bring-up
+# contract mirrors the old #1812 ollama-embed failure mode): a missing
+# tei-embed container means the stack was brought up targeting a subset of
+# services and the depends_on chain never pulled it in. The fix differs —
+# re-create it (Phase 3), don't chase a model-pull / network fault.
+# `docker compose ps` lists only created services; an empty match == the
+# missing-service failure mode.
+echo -n "tei-embed container present: "
+if [ -n "$(cd ~/hydra && docker compose ps -q tei-embed 2>/dev/null)" ]; then
+  cd ~/hydra && docker compose ps tei-embed --format '{{.Name}} {{.Status}}' 2>/dev/null
 else
-  echo "MISSING (not created — issue #1812; re-create with 'docker compose up -d', see Phase 3)"
+  echo "MISSING (not created; re-create with 'docker compose up -d', see Phase 3)"
 fi
-echo -n "ollama-embed (dense, HOT path): "
+echo -n "tei-embed (dense, HOT path): "
 docker exec hydra-openviking-1 curl -m5 -s -o /dev/null -w "%{http_code}\n" \
-  http://ollama-embed:11434/api/tags 2>/dev/null || echo "UNREACHABLE"
-echo -n "gabes-desktop-1 (VLM, indexing only): "
-docker exec hydra-openviking-1 curl -m5 -s -o /dev/null -w "%{http_code}\n" \
-  http://gabes-desktop-1:11434/api/tags 2>/dev/null || echo "UNREACHABLE (soft — indexing degrades, search still works)"
+  http://tei-embed:80/v1 2>/dev/null || echo "UNREACHABLE"
 # Cross-check the orchestrator's own classification of this hop:
 curl -s http://localhost:4000/api/health/deep 2>/dev/null \
   | python3 -c "import json,sys; d=json.load(sys.stdin); print('  ovSearch.status =', d.get('intelligence',{}).get('ovSearch',{}).get('status'))" 2>/dev/null \
@@ -230,15 +243,16 @@ empty results (never throws), so this is a quality-degradation warning, not a
 cycle-blocking fault — see the OpenViking embedding/VLM backend split section in
 docs/reference.md.
 
-If the `ollama-embed container present` line reports **MISSING** (issue #1812),
-the dense backend is unreachable because the service was never created — not
-because the model pull or the network failed. Re-create it with a full stack
+If the `tei-embed container present` line reports **MISSING**, the dense
+backend is unreachable because the service was never created — not because
+the model pull or the network failed. Re-create it with a full stack
 bring-up: `cd ~/hydra && docker compose up -d` (no service arg pulls the whole
-depends_on chain, including ollama-embed). It reports healthy once the model
-pull lands (~120s start-period grace; first boot downloads nomic-embed-text,
-~270MB). The persistent guard against re-recurrence is the bring-up contract
-comment in docker-compose.yml — always bring the stack up with a bare
-`docker compose up -d`, never targeting a single non-openviking service.
+depends_on chain, including tei-embed). It reports healthy once the model
+pull lands (~120s start-period grace; first boot downloads the
+nomic-embed-text-v1.5 checkpoint). The persistent guard against re-recurrence
+is the bring-up contract comment in docker-compose.yml — always bring the
+stack up with a bare `docker compose up -d`, never targeting a single
+non-openviking service.
 
 ### Database Health (deep)
 ```bash
@@ -375,10 +389,11 @@ Quick wins to apply automatically:
 - Commit dirty working tree files (if they're Hydra executor changes)
 - Restart failed services (after diagnosing root cause)
 - Start postgres if missing: `cd ~/hydra && docker compose up -d postgres`
-- Re-create ollama-embed if missing (issue #1812 — OpenViking's dense-embedding
-  HOT path; a MISSING container means the depends_on chain was never pulled in):
+- Re-create tei-embed if missing (bring-up contract mirrors the old #1812
+  ollama-embed failure mode — OpenViking's dense-embedding HOT path; a
+  MISSING container means the depends_on chain was never pulled in):
   `cd ~/hydra && docker compose up -d` (bare bring-up pulls the whole chain;
-  ollama-embed goes healthy after the ~270MB nomic-embed-text pull lands)
+  tei-embed goes healthy once the nomic-embed-text-v1.5 checkpoint pull lands)
 - Kill stale test containers: `docker ps --format '{{.Names}}' | grep test | xargs -r docker kill`
 - Converge a `drift` verdict (prod stale): run `scripts/deploy.sh` from the
   `~/hydra` master checkout (rebuilds `dashboard/dist/` + restarts the
@@ -388,7 +403,9 @@ Quick wins to apply automatically:
   (`settling` needs no action — re-check next run; `unknown` is a service
   reachability issue, not stale code.)
 - Deduplicate agent memory rules
-- Delete duplicate backlog items: `hydra backlog rm <id>`
+- Close duplicate board issues: `gh issue close <N> --repo gaberoo322/hydra --comment "Duplicate of #<other>" --reason "not planned"`
+  (issue #3745 — `hydra backlog rm <id>` was never a real subcommand; the
+  board is GitHub Issues, not the retired Redis backlog)
 - Dismiss stale alerts: `hydra alerts dismiss-all`
 
 **Tool currency is NEVER auto-fixed.** The doctor reports drift and the operator decides whether/when to upgrade. CLI upgrades touch the operator's PATH, package manager, and shell environment — categorically outside Hydra's blast radius.
