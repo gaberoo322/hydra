@@ -1,0 +1,1 @@
+- fix: sweep's PASS/PASS-pending-CI verdicts now leave `in-progress` on the source issue instead of stripping `needs-qa` label-less, and hydra-prd epics are stamped `needs-triage` at creation, closing the two label-lifecycle gaps that kept regenerating the untriaged-orphan count (#3788)

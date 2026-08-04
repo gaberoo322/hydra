@@ -444,7 +444,11 @@ describe("label helpers", () => {
   });
 
   test("parentLabels reuses the existing enhancement vocabulary", () => {
-    assert.deepEqual(parentLabels(), ["enhancement"]);
+    assert.deepEqual(parentLabels(), ["enhancement", "needs-triage"]);
+  });
+
+  test("parentLabels stamps needs-triage so a fresh epic is never born label-less (issue #3788)", () => {
+    assert.ok(parentLabels().includes("needs-triage"));
   });
 });
 
