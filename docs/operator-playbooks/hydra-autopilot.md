@@ -124,7 +124,9 @@ this playbook, not in `decide()`.
 Right-sized by **stakes × frequency** — drop the high-frequency non-authoring
 classes off the frontier model; keep behaviour-reshaping and money-critical
 authoring classes on Fable 5 (the frontier model, replacing Opus as of
-2026-06-10).
+2026-06-10) **when Fable is actually entitled**. As of 2026-08-04 it isn't, and
+the static map below reflects that — see the cost-emergency note before the
+table.
 
 **`dev_orch` demoted to Sonnet 2026-07-29 — on evidence, not a cost guess.** The
 GLM dev-drainer beachhead (ADR-0032) authored 9 CI-green PRs here on GLM-5.2, a
@@ -133,12 +135,30 @@ model *below* Sonnet on SWE-bench. A sub-Sonnet model clearing this repo's
 this: the beachhead is fenced off the Target board, so money-critical authoring
 was never measured. Frontier is retained where the evidence does not reach.
 
+**`dev_target`/`retro_orch`/`design_concept_orch` demoted to Sonnet 2026-08-04 —
+cost emergency, not evidence.** `fable` has been unentitled on this account since
+before these classes were routed to it, which per the fallback rule below means
+they were never actually running on Fable — every dispatch was silently paying
+**Opus** prices as the permanent steady state, not the rare fallback the rule was
+designed for. Live proof: `dev_target` alone burned 907M tokens over 7 days,
+100% Opus, ~18% of the entire weekly token budget, while the account sat at 97%
+of its weekly cap with the weekly emergency stop engaged. `retro_orch` and
+`design_concept_orch` are low-volume and orchestrator-side (not money-critical)
+— demoting them mirrors the already-evidenced `dev_orch` demotion above and
+carries the same low risk. `dev_target` is the operator-accepted exception: this
+is an **explicit trial**, unmeasured the same way the pre-2026-08-04 Fable
+routing was unmeasured — watch QA/CI pass rate on Target PRs closely and revert
+this row to Fable/Opus if quality regresses. Restoring `fable` entitlement
+obsoletes this whole note; re-promote all three once it's live and re-verified
+(don't just flip the table back on faith — dispatch one `Agent(model="fable", …)`
+smoke test first, per the fallback rule below).
+
 | Class (`slot`) | Model | Rationale |
 |---|---|---|
 | `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. `qa_orch` + CI unchanged. |
-| `dev_target` | Fable 5 (keep) | Money-critical betting code |
-| `retro_orch` | Fable 5 (keep) | Reshapes future behaviour; per-run low volume |
-| `design_concept_orch` | Fable 5 (keep) | A weak design concept wastes a full dev+QA cycle |
+| `dev_target` | Sonnet (trial, 2026-08-04) | Money-critical betting code — was silently paying Opus (Fable unentitled); demoted under cost emergency, unmeasured at this tier. Watch Target PR QA/CI closely; revert to Fable/Opus on quality regression. |
+| `retro_orch` | Sonnet (2026-08-04) | Reshapes future behaviour; per-run low volume; orchestrator-side, not money-critical — same evidence class as `dev_orch`'s demotion |
+| `design_concept_orch` | Sonnet (2026-08-04) | A weak design concept wastes a full dev+QA cycle, but orchestrator-side and not money-critical — same evidence class as `dev_orch`'s demotion |
 | `qa_orch` | Sonnet | Highest ROI; structured review against an artifact, ~every PR |
 | `qa_target` | Sonnet | Floor — money-critical review, do NOT drop below Sonnet |
 | `sweep_orch` / `sweep_target` | Sonnet | Board-routing decisions, not authorship |
@@ -307,17 +327,18 @@ every environment — a background `Agent(model="fable", …)` dispatch can die 
 not exist or you may not have access to it"* (0 tokens, 0 tool uses). When a
 `fable`-routed dispatch terminates immediately this way (no tool uses + a
 model-access error), **re-dispatch the identical action with `model: "opus"`
-(Opus 4.8) — do not leave the class unrun.** Opus 4.8 is the frontier-capable
-fallback for the remaining frontier-routed classes (`dev_target`, `retro_orch`,
-`design_concept_orch`). Fable 5 stays the primary; the fallback fires only on the
-model-access failure, so each class auto-upgrades back to Fable once the alias is
-entitled again — no manual revert. The Sonnet/Haiku-routed classes resolve
-independently and are unaffected.
-
-While `fable` stays unentitled — the standing state today — every class above
-runs on Opus on *every* dispatch, not just exceptionally. So frontier routing
-costs Opus in practice. Weigh that before adding a class back to the list.
-`dev_orch`'s `escalate_model` hint is `fable` and takes this same fallback.
+(Opus 4.8) — do not leave the class unrun.** This still applies to the
+`inherit-parent` classes (`wire_or_retire_target`, `design_qa_target`,
+`wayfinder_orch`) when the parent session's saved default is Fable, and to
+`dev_orch`'s `escalate_model` hint (still `fable`). As of 2026-08-04 no class in
+the static map above routes to Fable — `dev_target`, `retro_orch`, and
+`design_concept_orch` were demoted to Sonnet (see the cost-emergency note above)
+specifically *because* this fallback had become the permanent steady state
+rather than an exceptional path, silently costing Opus on every single
+dispatch. **Before re-promoting any class back to Fable, verify entitlement
+actually returned** — dispatch a throwaway `Agent(model="fable", …)` smoke test
+and confirm it doesn't die in <1s with the model-access error above; don't flip
+the table back on the assumption that time alone fixed it.
 
 ## Phases (one-line each — full prose lives in code)
 
