@@ -1,0 +1,22 @@
+[Unit]
+Description=Hydra GLM dev-drainer — periodic drain tick (~15 min, ADR-0032, issue #3689)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/adr/0032-glm-dev-drainer-worker-lane.md
+
+[Timer]
+# ~15 min mirrors the pace-gate cadence. `API_TIMEOUT_MS` for an authoring run
+# is 50 minutes (src/glm/drainer-runner.ts GLM_API_TIMEOUT_MS), so a single
+# authoring tick outlasts several of these — the flock in drainer-loop.sh
+# makes the overlapping ticks no-ops (still refreshing the heartbeat; see
+# that script's header comment).
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+# Small jitter so the drainer doesn't fight other timers for resources /
+# API rate-limits (mirrors the pace-gate/watchdog/branch-prune timers).
+RandomizedDelaySec=60
+
+Unit=hydra-glm-drainer.service
+
+[Install]
+WantedBy=timers.target
