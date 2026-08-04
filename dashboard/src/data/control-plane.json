@@ -39,7 +39,7 @@
       "skill": "hydra-target-build",
       "scope": "target",
       "cooldownSeconds": null,
-      "model": "fable",
+      "model": "sonnet",
       "sourcePath": "scripts/autopilot/classes.json"
     },
     {
@@ -66,7 +66,7 @@
       "skill": "hydra-grill",
       "scope": "orch",
       "cooldownSeconds": null,
-      "model": "fable",
+      "model": "sonnet",
       "sourcePath": "scripts/autopilot/classes.json"
     },
     {
@@ -138,7 +138,7 @@
       "skill": "hydra-retro",
       "scope": "orch",
       "cooldownSeconds": 86400,
-      "model": "fable",
+      "model": "sonnet",
       "sourcePath": "scripts/autopilot/classes.json"
     },
     {
