@@ -51,12 +51,52 @@ jobs:
         run: npx tsx scripts/ci/redis-seam-check.ts
       - name: Skill <-> playbook drift check (#666)
         run: bash scripts/ci/check-skill-playbook-drift.sh
+      # Issue #3741: this step's pipeline used to swallow a red suite. The
+      # Actions DEFAULT shell for a `run:` block without a `shell:` key is
+      # `bash -e {0}` — `-e` but NOT `-o pipefail`. A pipeline's exit status is
+      # its LAST command, so `npm test 2>&1 | tee …` reported tee's success and
+      # a failing suite concluded this REQUIRED job GREEN (empirically: runs
+      # 30218225198 and 30227202092 both concluded `success` carrying
+      # `# fail 1`). Consequence: every drift guard deliberately written as a
+      # `test/*.test.mts` rather than a sibling workflow — precisely so it would
+      # reach a blocking check — was in fact unenforceable.
+      #
+      # `set -o pipefail` restores the suite's exit code as the step's exit
+      # code. It is the complete semantic delta: `-e` is already supplied by
+      # the default shell. `| tee test-output.txt` is deliberately KEPT so the
+      # suite still streams to the live job log AND is captured for the
+      # count-ratchet grep below — only the pipeline's exit semantics change.
+      # `shell: bash` reaches the same place, but by swapping in
+      # `bash --noprofile --norc -eo pipefail {0}`, which hides the fix behind
+      # an Actions implementation detail and alters profile/rc loading as a
+      # side effect. Keep the pipefail visible at its point of use.
       - name: Run tests and verify count
         run: |
+          set -o pipefail
           npm test 2>&1 | tee test-output.txt
+          # Belt-and-braces against the neighbouring failure family: a runner
+          # that reports failures in its TAP footer yet still exits 0. This
+          # deliberately fails on `# fail N` where N > 0 rather than requiring
+          # a literal `# fail 0` line to be PRESENT — requiring presence would
+          # turn any future TAP-footer format change into a repo-wide hard red,
+          # whereas failing on a positive count degrades gracefully to the
+          # pipefail path above.
+          if grep -qE '^# fail [1-9]' test-output.txt; then
+            echo "::error::Test suite reported failures in its TAP footer"
+            grep -E '^# (tests|pass|fail|skipped) ' test-output.txt || true
+            exit 1
+          fi
           PASS_COUNT=$(grep -oP '^# pass \K[0-9]+' test-output.txt)
           echo "Tests passed: $PASS_COUNT"
-          MIN_TESTS=450
+          # Partial-collapse detector, raised 450 -> 6000 (issue #3741). Now
+          # that a red suite actually reddens this job, the count floor's only
+          # remaining job is catching a suite that ran FEWER tests and still
+          # exited 0 — a glob or runner-config change that silently drops test
+          # files. At 450 against a live ~6900 it was ~15x too low to catch any
+          # such collapse. 6000 keeps ~900 tests of headroom so it can never
+          # become an ambient poison pill that reddens the merge queue with no
+          # code change. This floor may only ever move UP.
+          MIN_TESTS=6000
           if [ "$PASS_COUNT" -lt "$MIN_TESTS" ]; then
             echo "::error::Test count regression: $PASS_COUNT < $MIN_TESTS minimum"
             exit 1
