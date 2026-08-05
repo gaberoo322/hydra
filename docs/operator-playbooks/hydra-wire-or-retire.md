@@ -55,9 +55,17 @@ judgment work, and the documented Haiku-premature-exit failure mode (a low-tier 
 
 ## The resolution loop
 
-Read the board (`gh api repos/gaberoo322/hydra-betting/issues?state=open&labels=wire-or-retire`
-— REST, never `gh --json`/GraphQL, ADR-0031 Decision 6), pick the up-to-2 oldest open
-`wire-or-retire` issues, and for **each** (`$ANCHOR_NUM` = its issue number):
+Read the board (`gh api repos/gaberoo322/hydra-betting/issues?state=open&labels=wire-or-retire,needs-triage`
+— REST comma is AND, so this requires **co-presence** of both labels, never `gh --json`/GraphQL,
+ADR-0031 Decision 6), pick the up-to-2 oldest open matching issues, and for **each**
+(`$ANCHOR_NUM` = its issue number):
+
+Co-presence is required, not optional: the resolver's own UNCLEAR verdict (step 4c below) and
+risk carve-out (step 2 below) both *remove* `needs-triage` while *deliberately keeping*
+`wire-or-retire` so the operator can see the decision class. Filtering on the `wire-or-retire`
+label in isolation would re-match that already-adjudicated output forever, re-picking items this
+skill has already resolved. Requiring `needs-triage` too makes this skill the sole legitimate
+retirer of the pairing and stops it from re-selecting its own prior output.
 
 ### 1. Verify first (the ledger / triage snapshot may be a regeneration behind)
 
