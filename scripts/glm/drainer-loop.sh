@@ -659,7 +659,9 @@ create_worktree() {
   fi
 
   git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
-  if ! git -C "$REPO_ROOT" worktree add -b "$branch" "$wt" origin/master 2>&1; then
+  # This function's stdout IS its return contract ("branch|wt", captured by the
+  # caller) — git's porcelain output must never reach it (issue #3863).
+  if ! git -C "$REPO_ROOT" worktree add -b "$branch" "$wt" origin/master >/dev/null 2>&1; then
     log "ERROR failed to create worktree for issue #$issue"
     return 1
   fi
