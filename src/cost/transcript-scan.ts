@@ -297,6 +297,21 @@ export interface ScanResult {
   /** Per-skill × per-family 7d cross-tab (the `bySkillByModel` snapshot field). */
   bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
   /**
+   * Per-skill × per-family token breakdown over the 24h window — a mirror of
+   * {@link bySkillByModel} gated on the SAME scan's 24h cutoff and accumulated
+   * in lockstep (issue #3752). Reconciliation invariant: for each family `f`,
+   * `Σ_skill bySkillByModel24h[skill][f].total === byModel24h[f].total`, and so
+   * `Σ_skill Σ_family bySkillByModel24h[skill][f].total === tokens24h` by
+   * construction — the per-class cost rollup re-projects this through
+   * `skillToCostClass` so the comprehensive cost-by-class arm sums to the same
+   * `tokensLast24h` the snapshot reports, closing the coverage gap the
+   * dispatch-observed surrogate could not (host activity the autopilot never
+   * reaped has no counter row but has a transcript line). Only skills that
+   * produced tokens in the 24h window appear. Accumulated during the SAME walk
+   * as the 7d path — no additional filesystem scan. (issue #3752)
+   */
+  bySkillByModel24h: Record<string, Record<ModelFamily, TokenBreakdown>>;
+  /**
    * Per-dispatch-kind × per-family 7d cross-tab (the `byDispatchKind` snapshot
    * field, issue #2403). A SECOND partition over the SAME per-file tokens as
    * `bySkillByModel`, keyed by {@link DispatchKind} instead of skill. Always
@@ -379,6 +394,12 @@ export async function transcriptScan(
   // Per-skill × per-family 7d accumulator (the `bySkillByModel` snapshot
   // field). Skills are added lazily as transcripts resolve to them.
   const bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
+  // Per-skill × per-family 24h accumulator (issue #3752). A mirror of
+  // `bySkillByModel` gated on the 24h cutoff, accumulated during the SAME walk
+  // so `Σ_skill Σ_family === tokens24h` by construction — the comprehensive
+  // cost-by-class arm re-projects this through `skillToCostClass` for a
+  // per-class breakdown that sums to the snapshot's `tokensLast24h`.
+  const bySkillByModel24h: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
   // Per-dispatch-kind × per-family 7d accumulator (issue #2403). A parallel
   // partition over the SAME per-file tokens as `bySkillByModel`, pre-seeded
   // with all three kind buckets so the snapshot always carries the full split.
@@ -452,6 +473,10 @@ export async function transcriptScan(
     // Resolving the skill per FILE (not per line) keeps attribution O(files).
     const fileByFamily7d = emptyByModel();
     let fileHadInWindow7d = false;
+    // Same-file 24h per-family accumulator (issue #3752), folded into the
+    // per-skill 24h cross-tab at the SAME skill-resolution seam below.
+    const fileByFamily24h = emptyByModel();
+    let fileHadInWindow24h = false;
 
     const lines = content.split("\n");
     for (const line of lines) {
@@ -507,6 +532,8 @@ export async function transcriptScan(
       if (tsMs >= cutoff24h) {
         tokens24h += parsed.tokens.total;
         addBreakdown(byModel24h[family], parsed.tokens);
+        addBreakdown(fileByFamily24h[family], parsed.tokens);
+        fileHadInWindow24h = true;
       }
       if (tsMs >= cutoff5h) {
         addBreakdown(acc5h, parsed.tokens);
@@ -541,6 +568,16 @@ export async function transcriptScan(
       for (const f of MODEL_FAMILIES) {
         addBreakdown(row[f], fileByFamily7d[f]);
         addBreakdown(kindRow[f], fileByFamily7d[f]);
+      }
+      // 24h cross-tab (issue #3752). 24h ⊆ 7d, so `fileHadInWindow24h` can only
+      // be true when `fileHadInWindow7d` is — the skill is already resolved
+      // above. Fold the SAME per-file 24h tokens into the per-skill 24h table so
+      // it reconciles against `tokens24h` by construction.
+      if (fileHadInWindow24h) {
+        const row24 = (bySkillByModel24h[skill] ??= emptyByModel());
+        for (const f of MODEL_FAMILIES) {
+          addBreakdown(row24[f], fileByFamily24h[f]);
+        }
       }
     }
   }
@@ -579,6 +616,7 @@ export async function transcriptScan(
     byModel7d,
     byModel24h,
     bySkillByModel,
+    bySkillByModel24h,
     byDispatchKind,
     tokens24h,
     foreign7d,

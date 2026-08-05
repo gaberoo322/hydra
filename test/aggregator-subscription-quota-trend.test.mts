@@ -51,6 +51,7 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
       unknown: { ...zero },
     },
     bySkillByModel: {},
+    bySkillByModel24h: {},
     bySkillWoW: {},
     byDispatchKind: emptyByDispatchKind(),
     attributedPercent: 0,
