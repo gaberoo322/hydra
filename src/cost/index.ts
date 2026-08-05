@@ -167,17 +167,23 @@ export type { OAuthUsageResult } from "./oauth-usage.ts";
 // Cost attribution — per-class token rollup (issue #1439, relocated #2219)
 // ---------------------------------------------------------------------------
 // The dispatch-class → cost-bucket mapping (`skillToCostClass`) and per-class
-// token rollup (`projectCostByClass` / `getCostByClass`), relocated out of
-// `src/metrics/aggregate.ts` into `./cost-attribution.ts` (issue #2219) so the
-// Cost domain's knowledge lives in one module. Re-exported here so the public
-// Interface contract stays single-surface.
+// token rollup, relocated out of `src/metrics/aggregate.ts` into
+// `./cost-attribution.ts` (issue #2219) so the Cost domain's knowledge lives in
+// one module. `projectCostByClass` / `getCostByClass` fold the dispatch-observed
+// surrogate (historical `?date=` arm); `projectCostByClassFromTranscript` /
+// `getRollingCostByClass` fold the transcript-scan snapshot (comprehensive
+// rolling arm, issue #3752 — per-class tokens sum to `tokensLast24h`). Each
+// result carries a `source` discriminator so the two arms are never mistaken.
+// Re-exported here so the public Interface contract stays single-surface.
 export {
   COST_CLASS_ORDER,
   skillToCostClass,
   projectCostByClass,
+  projectCostByClassFromTranscript,
   getCostByClass,
   getRollingCostByClass,
 } from "./cost-attribution.ts";
+export type { CostByClassSource } from "./cost-attribution.ts";
 
 // ---------------------------------------------------------------------------
 // Cost per merged PR — pure derived ratio over recorded totals (issue #2807)

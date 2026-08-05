@@ -1453,6 +1453,7 @@ describe("usage-tracker", () => {
           unknown: { ...empty },
         },
         bySkillByModel: {},
+        bySkillByModel24h: {},
         bySkillWoW: {},
         byDispatchKind: {
           "autopilot-dispatched": {

@@ -198,6 +198,23 @@ export interface UsageSnapshot {
    */
   bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
   /**
+   * Per-skill × per-model-family token breakdown over the 24h window — a mirror
+   * of {@link bySkillByModel} gated on the 24h cutoff (issue #3752). The
+   * comprehensive cost-by-class rollup (`src/cost/cost-attribution.ts`) re-
+   * projects this through `skillToCostClass` so the rolling cost-by-class arm's
+   * per-class tokens sum to THIS snapshot's {@link tokensLast24h} — the headline
+   * coverage invariant: the per-class `fraction` becomes a share of real burn,
+   * not a share of the (partial) dispatch-observed surrogate.
+   *
+   * Reconciliation invariant: `Σ_skill Σ_family bySkillByModel24h[skill][f].total
+   * === tokensLast24h`. Only skills that produced tokens in the 24h window
+   * appear; each present skill carries all four family keys (zero-valued where
+   * the skill produced none). Accumulated during the SAME transcript walk as the
+   * 7d cross-tab — no additional filesystem scan. Pure read-side projection.
+   * (issue #3752)
+   */
+  bySkillByModel24h: Record<string, Record<ModelFamily, TokenBreakdown>>;
+  /**
    * Per-skill WEEK-OVER-WEEK trend (issue #2404). For each skill present in
    * `bySkillByModel`, `{current, prior, deltaPct}` of its RAW total tokens this
    * week vs the SAME skill in the immediately-prior stored **Weekly Usage
