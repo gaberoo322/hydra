@@ -70,12 +70,44 @@ export const TARGET_SATURATION_CAP = 10;
 /** The Target CLAUDE.md wiring grace period: younger files are never swept. */
 export const WIRING_GRACE_DAYS = 45;
 
+/**
+ * Introduction-anchored deferral ceiling (issue #3727) — two full grace
+ * windows. The last-touch scalar alone is non-monotonic: any commit
+ * (relocation, docs, cleanup) resets it, so a condemned module can be
+ * shielded forever by its own migration commits. A file only defers on
+ * grace when it is BOTH recently touched AND young by introduction; once a
+ * file's introduction crosses this ceiling, no later commit of any intent
+ * can push the deferral back — see the gate predicate in
+ * planTargetCleanupEmit(). Deliberately NOT equal to WIRING_GRACE_DAYS: an
+ * equal ceiling would collapse to "any relocation removes grace entirely."
+ */
+export const WIRING_GRACE_CEILING_DAYS = 90;
+
 /** Label stamped on every emitted item — the saturation/dedup count seam. */
 export const CLEANUP_SCAN_LABEL = "cleanup-scan";
 
 export const TARGET_ROOT = "/home/gabe/hydra-betting";
 export const TARGET_WEB = `${TARGET_ROOT}/web`;
 export const TARGET_REPO = "gaberoo322/hydra-betting";
+
+/**
+ * The widened age probe for one file (issue #3727) — replaces the old
+ * `(path) => number | null` last-touch scalar. One `git log --follow`
+ * invocation yields all three fields: `lastTouchDays` (first line — same
+ * value the old scalar returned, --follow is a no-op on the newest commit),
+ * `introDays` (last line — the file's TRUE introduction date, resolved
+ * across renames), and `resetCommit` (the last-touch commit's short SHA +
+ * subject, i.e. what most recently reset the last-touch clock — for the
+ * grace-drop audit trail). Any field is null when unknown (fail-closed).
+ */
+export interface FileAgeProbe {
+  /** Days since the most recent commit touching the current path, or null. */
+  lastTouchDays: number | null;
+  /** Days since the file's earliest commit under --follow (introduction), or null. */
+  introDays: number | null;
+  /** The last-touch commit — what reset the clock. Null iff lastTouchDays is null. */
+  resetCommit: { shortSha: string; subject: string } | null;
+}
 
 /** One planned backlog item: every demote-class symbol in one target file. */
 export interface PlannedTargetCleanupItem {
@@ -220,18 +252,20 @@ export function renderTargetBody(
 /**
  * The PURE emit planner: parse → validate/filter → classify (demote-only) →
  * wiring-grace gate → group per file → dedup vs open items → cap → render.
- * Performs NO I/O — `readSource` (file text) and `fileAgeDays` (days since the
- * last commit touching the file, or null when unknown) are injected.
+ * Performs NO I/O — `readSource` (file text) and `fileAge` (the widened
+ * {@link FileAgeProbe}, or a probe with all-null fields when unknown) are
+ * injected.
  *
  * Fail-closed posture (Target CLAUDE.md rule 6): a finding whose source can't
- * be read (`classifyExportFix` → "unknown") or whose file age can't be
- * established (fileAgeDays → null) is DROPPED, never emitted on a guess.
+ * be read (`classifyExportFix` → "unknown") or whose last-touch age can't be
+ * established (`fileAge().lastTouchDays` → null) is DROPPED, never emitted on
+ * a guess.
  */
 export function planTargetCleanupEmit(
   report: KnipReport,
   openItemTitles: string[],
   readSource: (path: string) => string,
-  fileAgeDays: (path: string) => number | null,
+  fileAge: (path: string) => FileAgeProbe,
   isoDate: string,
   cap: number = TARGET_EMIT_CAP,
 ): TargetCleanupEmitPlan {
@@ -273,19 +307,32 @@ export function planTargetCleanupEmit(
   }
 
   // Wiring-grace gate, evaluated once per file (age is a file property).
-  const ageByPath = new Map<string, number | null>();
+  // Introduction-anchored deferral ceiling (issue #3727): defer only when
+  // the file is BOTH recently touched AND young by introduction. Unknown
+  // last-touch age fails closed (unchanged); unknown introduction age is
+  // treated as WITHIN the ceiling (still defers) — same fail-closed
+  // direction as the last-touch measure. This makes the gate monotonic: no
+  // commit of any intent (relocation, docs, cleanup) can push the ceiling
+  // back, only the true introduction date matters.
+  const ageByPath = new Map<string, FileAgeProbe>();
   const aged: CleanupFinding[] = [];
   for (const finding of demotable) {
-    if (!ageByPath.has(finding.path)) ageByPath.set(finding.path, fileAgeDays(finding.path));
-    const age = ageByPath.get(finding.path)!;
-    if (age === null) {
+    if (!ageByPath.has(finding.path)) ageByPath.set(finding.path, fileAge(finding.path));
+    const probe = ageByPath.get(finding.path)!;
+    if (probe.lastTouchDays === null) {
       dropped.push({ finding, reason: "file age unknown — fail closed, not emitted" });
       continue;
     }
-    if (age < WIRING_GRACE_DAYS) {
+    const withinCeiling = probe.introDays === null || probe.introDays < WIRING_GRACE_CEILING_DAYS;
+    if (probe.lastTouchDays < WIRING_GRACE_DAYS && withinCeiling) {
+      const introPart =
+        probe.introDays !== null ? `introduced ${probe.introDays}d ago` : "introduction unknown";
+      const resetPart = probe.resetCommit
+        ? `; reset by ${probe.resetCommit.shortSha} "${probe.resetCommit.subject}"`
+        : "";
       dropped.push({
         finding,
-        reason: `within the ${WIRING_GRACE_DAYS}-day wiring grace period (${age}d old)`,
+        reason: `within the ${WIRING_GRACE_DAYS}-day wiring grace period (${probe.lastTouchDays}d old) — ${introPart}${resetPart}`,
       });
       continue;
     }
@@ -335,13 +382,16 @@ export function planTargetCleanupEmit(
   }
 
   // Render title + body from the SAME group in ONE pass (the drift guard).
-  const items: PlannedTargetCleanupItem[] = toEmit.map((group) => ({
-    path: group.path,
-    symbols: group.symbols,
-    ageDays: ageByPath.get(group.path)!,
-    title: renderTargetTitle(group.path, group.symbols),
-    body: renderTargetBody(group.path, group.symbols, ageByPath.get(group.path)!, isoDate),
-  }));
+  const items: PlannedTargetCleanupItem[] = toEmit.map((group) => {
+    const lastTouchDays = ageByPath.get(group.path)!.lastTouchDays!;
+    return {
+      path: group.path,
+      symbols: group.symbols,
+      ageDays: lastTouchDays,
+      title: renderTargetTitle(group.path, group.symbols),
+      body: renderTargetBody(group.path, group.symbols, lastTouchDays, isoDate),
+    };
+  });
 
   return { items, dropped, rawCount: raw.length };
 }
@@ -417,19 +467,43 @@ function createTargetIssue(title: string, body: string): string {
   }
 }
 
-/** Days since the last commit touching web/<path> in the Target repo, or null. */
-function gitFileAgeDays(path: string): number | null {
+/**
+ * The widened age probe (issue #3727) for web/<path> in the Target repo.
+ * ONE `git log --follow` invocation yields last-touch (first line, same
+ * value the old non-`--follow` scalar returned — `--follow` never changes
+ * the newest commit) AND introduction (last line, the file's true
+ * introduction resolved across renames). `--follow` relies on git's rename
+ * detection: an independent COPY (not a rename) is not linked, so its
+ * introduction dates from the copy itself — the honest answer, since by
+ * path identity it IS a new module.
+ */
+function gitFileAgeProbe(path: string): FileAgeProbe {
+  const unknown: FileAgeProbe = { lastTouchDays: null, introDays: null, resetCommit: null };
   try {
     const out = execFileSync(
       "git",
-      ["-C", TARGET_ROOT, "log", "-1", "--format=%ct", "--", `web/${path}`],
+      ["-C", TARGET_ROOT, "log", "--follow", "--format=%ct%x1f%h%x1f%s", "--", `web/${path}`],
       { encoding: "utf-8" },
     ).trim();
-    if (!/^\d+$/.test(out)) return null;
-    const ageSec = Date.now() / 1000 - Number(out);
-    return Math.floor(ageSec / 86400);
+    if (!out) return unknown;
+    const lines = out.split("\n").filter(Boolean);
+    const parse = (line: string): { ct: string; sha: string; subject: string } => {
+      const [ct = "", sha = "", ...rest] = line.split("\x1f");
+      return { ct, sha, subject: rest.join("\x1f") };
+    };
+    const newest = parse(lines[0]);
+    const oldest = parse(lines[lines.length - 1]);
+    if (!/^\d+$/.test(newest.ct)) return unknown;
+    const nowSec = Date.now() / 1000;
+    const lastTouchDays = Math.floor((nowSec - Number(newest.ct)) / 86400);
+    const introDays = /^\d+$/.test(oldest.ct) ? Math.floor((nowSec - Number(oldest.ct)) / 86400) : null;
+    return {
+      lastTouchDays,
+      introDays,
+      resetCommit: { shortSha: newest.sha, subject: newest.subject },
+    };
   } catch {
-    return null; /* intentional: unknown age fails closed in the planner */
+    return unknown; /* intentional: unknown age fails closed in the planner */
   }
 }
 
@@ -484,7 +558,7 @@ function main(argv: string[]): void {
     }
   };
 
-  const plan = planTargetCleanupEmit(report, openTitles, readSource, gitFileAgeDays, isoDate);
+  const plan = planTargetCleanupEmit(report, openTitles, readSource, gitFileAgeProbe, isoDate);
 
   console.log(
     `hydra-target-cleanup-emit — Target (~/hydra-betting/web) — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`,

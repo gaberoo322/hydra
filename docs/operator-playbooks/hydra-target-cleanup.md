@@ -20,7 +20,7 @@ It is **step 2 of the Target dead-code cleanup plan** (step 1 — the deadcode r
 | Surface | `~/hydra` | `~/hydra-betting/web` |
 | Findings sink | GitHub issues (`gaberoo322/hydra`) | GitHub issues (`gaberoo322/hydra-betting`) via `gh issue create` (labels `cleanup-scan` + `ready-for-agent`) — ADR-0031 |
 | Fix classes emitted | demote AND delete (classified per finding) | **demote ONLY** — delete-class and whole-file findings are dropped and deferred to the wire-or-retire phase |
-| Grace period | none | **45-day wiring grace** (Target CLAUDE.md rule 3): findings in files touched within 45 days are dropped — young dead exports are usually wiring-in-flight |
+| Grace period | none | **45-day wiring grace, 90-day introduction ceiling** (Target CLAUDE.md rule 3): a finding defers only when its file is BOTH touched within 45 days AND introduced within 90 days (issue #3727 — the ceiling makes the gate monotonic, since a relocation/docs/cleanup commit can reset the touch clock but never the introduction date) |
 | Item granularity | one issue per finding | **one backlog item per FILE** (all demote-class symbols batched) — `addToBacklog()` fuzzy-title dedup rejects near-identical per-symbol titles, and the picker ships one small PR per file anyway |
 | Picked up by | `hydra-dev` | `hydra-target-build` (a normal `dev_target` pickup) |
 
@@ -87,7 +87,7 @@ The runner (`planTargetCleanupEmit()`, pure + tested) owns the whole pipeline:
 
 1. **Validate** (blank-title guard, shared `validateFinding()`).
 2. **Demote-only filter**: whole-file findings, test/`.d.ts` paths, delete-class exports (no in-file reference), and unknown-source findings are all dropped. Only `classifyExportFix() === "demote"` survives.
-3. **Wiring-grace gate**: file age from `git log -1 --format=%ct` in the Target; `< 45` days → dropped; unknown age → dropped (fail closed).
+3. **Wiring-grace gate (introduction-anchored, issue #3727)**: a widened `git log --follow --format=%ct%x1f%h%x1f%s` probe in the Target yields last-touch days, introduction days, and the last-touch commit's short SHA + subject. Unknown last-touch age → dropped (fail closed, unchanged). Otherwise, dropped as grace ONLY when `lastTouchDays < 45` **AND** (`introDays` unknown **or** `introDays < 90`) — the drop reason names the intro age and the resetting commit for audit. Because introduction only ever grows, no later commit of any intent (relocation, docs, cleanup) can push the deferral back.
 4. **Group per file**, dedup per file against the open `cleanup-scan` board (identity = the path parsed from the canonical title; the board read is a lexical `gh issue list --search` on `gaberoo322/hydra-betting`, ADR-0031 Decision 5/6 — REST-first, never `gh --json`/GraphQL), cap at 8 files per run, largest demote batch first.
 5. **Render** title + body from the same group in one pass (the #1449/#1005 drift guard) and file via `gh issue create --repo gaberoo322/hydra-betting --label cleanup-scan --label ready-for-agent`.
 
@@ -128,7 +128,7 @@ dropped 180: within the 45-day wiring grace period (...)
 
 - **Zero `AskUserQuestion`.**
 - **Demote-only.** This skill never emits a deletion of any kind. `src/lib/providers/` is demote-only by Target rule 1; this sweep treats the whole Target that way.
-- **45-day wiring grace, fail closed.** Young files and unknown-age files are never swept.
+- **45-day wiring grace with a 90-day introduction ceiling, fail closed (issue #3727).** Unknown last-touch age is never swept. A file only defers on grace when BOTH recently touched AND young by introduction (unknown introduction still defers) — this makes the gate monotonic against relocation/docs/cleanup commits that reset only the last-touch date.
 - **Deterministic detection + emit.** knip's report through the tested runner — never a hand-rolled loop, never a model guess.
 - **GitHub Issues, not Redis (ADR-0031).** The Target's tracker is the GitHub-Issues board on `gaberoo322/hydra-betting`; items are filed with `gh issue create` and dedup/saturation reads use lexical `gh issue list --search` (REST-first, never `gh --json`/GraphQL).
 - **Saturation back-stop**: emit nothing above 10 open `cleanup-scan` items. **Dedup per file** against the open board.

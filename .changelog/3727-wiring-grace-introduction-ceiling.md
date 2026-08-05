@@ -1,0 +1,1 @@
+- fix: make the Target cleanup 45-day wiring-grace gate monotonic with an introduction-anchored deferral ceiling, so relocation/docs/cleanup commits can no longer indefinitely shield a condemned module by resetting its last-touch clock (#3727)

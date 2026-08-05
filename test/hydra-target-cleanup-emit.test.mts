@@ -27,6 +27,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   planTargetCleanupEmit,
   renderTargetTitle,
@@ -34,6 +36,8 @@ import {
   identityFromOpenItemTitle,
   TARGET_EMIT_CAP,
   WIRING_GRACE_DAYS,
+  WIRING_GRACE_CEILING_DAYS,
+  type FileAgeProbe,
 } from "../scripts/ci/hydra-target-cleanup-emit.ts";
 import type { KnipReport } from "../scripts/ci/hydra-cleanup-render.ts";
 
@@ -67,12 +71,26 @@ const SOURCES: Record<string, string> = {
 };
 
 const readSource = (p: string): string => SOURCES[p] ?? "";
-const oldFile = (_p: string): number | null => 120;
+
+/**
+ * Build a {@link FileAgeProbe}. `introDays` defaults to `lastTouchDays` (i.e.
+ * "old on both measures, no reset") so every pre-existing scalar-shaped test
+ * case ports over unchanged in meaning.
+ */
+function probe(
+  lastTouchDays: number | null,
+  introDays: number | null = lastTouchDays,
+  resetCommit: FileAgeProbe["resetCommit"] = null,
+): FileAgeProbe {
+  return { lastTouchDays, introDays, resetCommit };
+}
+
+const oldFile = (_p: string): FileAgeProbe => probe(120);
 
 function plan(
   r: KnipReport,
   openTitles: string[] = [],
-  ages: (p: string) => number | null = oldFile,
+  ages: (p: string) => FileAgeProbe = oldFile,
   cap?: number,
 ) {
   return planTargetCleanupEmit(r, openTitles, readSource, ages, "2026-06-10", cap);
@@ -126,21 +144,70 @@ describe("hydra-target-cleanup-emit — demote-only filter", () => {
 
 describe("hydra-target-cleanup-emit — wiring grace period", () => {
   test(`drops findings in files younger than ${WIRING_GRACE_DAYS} days`, () => {
-    const p = plan(report([{ file: "src/lib/young.ts", exports: ["alphaDefault"] }]), [], () => 10);
+    const p = plan(report([{ file: "src/lib/young.ts", exports: ["alphaDefault"] }]), [], () => probe(10));
     assert.equal(p.items.length, 0);
     assert.match(p.dropped[0].reason, /wiring grace period \(10d old\)/);
   });
 
   test("a file exactly at the grace boundary is emitted", () => {
-    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], () => WIRING_GRACE_DAYS);
+    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], () => probe(WIRING_GRACE_DAYS));
     assert.equal(p.items.length, 1);
     assert.equal(p.items[0].ageDays, WIRING_GRACE_DAYS);
   });
 
-  test("unknown file age fails closed", () => {
-    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], () => null);
+  test("unknown last-touch age fails closed", () => {
+    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], () => probe(null));
     assert.equal(p.items.length, 0);
     assert.match(p.dropped[0].reason, /age unknown — fail closed/);
+  });
+});
+
+describe("hydra-target-cleanup-emit — introduction-anchored deferral ceiling (issue #3727)", () => {
+  test(`WIRING_GRACE_CEILING_DAYS (${WIRING_GRACE_CEILING_DAYS}) is strictly greater than WIRING_GRACE_DAYS (${WIRING_GRACE_DAYS})`, () => {
+    assert.ok(WIRING_GRACE_CEILING_DAYS > WIRING_GRACE_DAYS);
+  });
+
+  test("old-by-introduction but freshly touched by a cleanup/docs/relocation commit is EMITTED", () => {
+    // last-touch 9d (a relocation commit reset the clock), intro 100d (old by
+    // introduction, past the ceiling) — the exact observed failure this issue
+    // reports: a condemned module shielded forever by its own migration commits.
+    const p = plan(
+      report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]),
+      [],
+      () => probe(9, 100, { shortSha: "abc1234", subject: "refactor: relocate module" }),
+    );
+    assert.equal(p.items.length, 1);
+    assert.equal(p.items[0].ageDays, 9);
+  });
+
+  test("genuinely young with a real wiring commit in the window is STILL DEFERRED", () => {
+    // last-touch 9d, intro 20d (young by BOTH measures) — proves the grace
+    // period was not simply deleted by the ceiling.
+    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], () => probe(9, 20));
+    assert.equal(p.items.length, 0);
+    assert.match(p.dropped[0].reason, /wiring grace period \(9d old\)/);
+    assert.match(p.dropped[0].reason, /introduced 20d ago/);
+  });
+
+  test("old on both measures is emitted exactly as today (no regression on the working path)", () => {
+    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], () => probe(100, 200));
+    assert.equal(p.items.length, 1);
+    assert.equal(p.items[0].ageDays, 100);
+  });
+
+  test("unknown introduction age is treated as WITHIN the ceiling (still defers)", () => {
+    const p = plan(report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]), [], () => probe(9, null));
+    assert.equal(p.items.length, 0);
+    assert.match(p.dropped[0].reason, /introduction unknown/);
+  });
+
+  test("grace-drop reason attributes the resetting commit (short SHA + subject) for audit", () => {
+    const p = plan(
+      report([{ file: "src/lib/alpha.ts", exports: ["alphaDefault"] }]),
+      [],
+      () => probe(9, 20, { shortSha: "d8fc713e", subject: "docs: correct header comment" }),
+    );
+    assert.match(p.dropped[0].reason, /reset by d8fc713e "docs: correct header comment"/);
   });
 });
 
@@ -219,5 +286,35 @@ describe("hydra-target-cleanup-emit — rendering (title/body coherence)", () =>
     assert.throws(() => renderTargetTitle("", ["x"]));
     assert.throws(() => renderTargetTitle("src/lib/a.ts", []));
     assert.throws(() => renderTargetBody("src/lib/a.ts", [], 90, "2026-06-10"));
+  });
+});
+
+describe("hydra-target-cleanup-emit — grace-ceiling playbook drift guard (issue #3727)", () => {
+  // A sibling advisory workflow cannot block a merge (reference_seam_checks_
+  // advisory_only) — the invariant worth pinning lives in a test. Reads the
+  // in-repo playbook, NEVER the generated ~/.claude/skills/*/SKILL.md (only
+  // one SKILL.md is git-tracked — a generated-artifact assertion reproduces
+  // the known worktree-local doc-drift flake class), and never shells into
+  // /home/gabe/hydra-betting (the Target checkout is absent on CI runners).
+
+  test("WIRING_GRACE_CEILING_DAYS is strictly greater than WIRING_GRACE_DAYS", () => {
+    assert.ok(
+      WIRING_GRACE_CEILING_DAYS > WIRING_GRACE_DAYS,
+      `ceiling (${WIRING_GRACE_CEILING_DAYS}) must exceed the grace period (${WIRING_GRACE_DAYS}) or the ceiling collapses grace entirely`,
+    );
+  });
+
+  test("the in-repo playbook names both the grace period and the ceiling", () => {
+    const repoRoot = resolve(import.meta.dirname, "..");
+    const playbookPath = join(repoRoot, "docs", "operator-playbooks", "hydra-target-cleanup.md");
+    const text = readFileSync(playbookPath, "utf-8");
+    assert.ok(
+      text.includes(String(WIRING_GRACE_DAYS)),
+      `playbook must name the ${WIRING_GRACE_DAYS}-day grace period`,
+    );
+    assert.ok(
+      text.includes(String(WIRING_GRACE_CEILING_DAYS)),
+      `playbook must name the ${WIRING_GRACE_CEILING_DAYS}-day introduction ceiling`,
+    );
   });
 });
