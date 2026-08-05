@@ -867,17 +867,35 @@ print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
 # BOTH in the suppressing direction (fail closed: never dispatch a scan that
 # cannot read its own board).
 #
-# `wire_or_retire_target_available` — (issue #2722, epic #2720) true when >=1
-# open item carrying the stable `wire-or-retire` label sits in the Target
-# `triage` lane. These are the JUDGMENT items /hydra-target-cleanup files for
-# modules past the 45-day wiring grace (the decision queue). decide.py's
-# `wire_or_retire_target` signal class reads this and dispatches the headless
-# /hydra-wire-or-retire resolver (24h class cooldown, at most 2 items/run) to
-# turn each into a WIRE / RETIRE / UNCLEAR verdict. Only the `triage` lane is
-# read (the #2721 lane guard keeps unresolved wire-or-retire items IN triage;
-# a resolved item leaves as a queued WIRE/RETIRE task or a ready-for-human
-# backlog item). Orchestrator-API-down degrades to false — the suppressing
-# direction (never dispatch a resolver that cannot read its own queue).
+# `wire_or_retire_target_available` — (issue #2722, epic #2720; count-scope
+# revised by #3747) true when >=1 open item carries the stable `wire-or-retire`
+# label AND is not already parked as an UNCLEAR verdict. These are the
+# JUDGMENT items /hydra-target-cleanup files for modules past the 45-day wiring
+# grace (the decision queue). decide.py's `wire_or_retire_target` signal class
+# reads this and dispatches the headless /hydra-wire-or-retire resolver (24h
+# class cooldown, at most 2 items/run) to turn each into a WIRE / RETIRE /
+# UNCLEAR verdict.
+#
+# #3747 retired the earlier `AND needs-triage` co-presence requirement
+# (#2721/#3726): that predicate went invisible the moment a triaged item left
+# the `needs-triage` lane by any path OTHER than the resolver's own verdict
+# (e.g. hydra-betting#626, which sits at `wire-or-retire` + `ready-for-agent`
+# with no `needs-triage` — the exact "flag-without-label dead-end handoff"
+# pattern), so the signal under-reported real work while claiming a healthy
+# read.
+#
+# "Unresolved" is now defined as the complete enumeration of the resolver's
+# three documented exits (`docs/operator-playbooks/hydra-wire-or-retire.md`):
+# WIRE and RETIRE both `--remove-label wire-or-retire` entirely (so an item
+# holding the label was, by construction, never fully verdicted by either);
+# UNCLEAR keeps `wire-or-retire` on purpose (operator visibility) but adds
+# `ready-for-human` — the ONE state that DOES need an explicit exclusion here,
+# since the label alone can't distinguish it from never-triaged; and a stale
+# item is CLOSED, which needs no explicit check because the enclosing
+# `gh issue list --state open` read already excludes closed issues from `rows`
+# upstream. Concretely: `wire-or-retire in labels AND 'ready-for-human' not in
+# labels`. Orchestrator-API-down degrades to false — the suppressing direction
+# (never dispatch a resolver that cannot read its own queue).
 #
 # `design_qa_target_due` / `design_qa_target_saturated` — (issue #2739, parent
 # #2732, the Target UI-quality loop) drive the periodic visual-QA pass. This is
@@ -968,13 +986,20 @@ try:
       open_scan += 1
     if dqa_label in labels:
       open_design_qa += 1
-    # Co-presence is intentional and load-bearing (issue #3726): needs-triage
-    # is what keeps a wire-or-retire item in an operator-visible lane, and
-    # hydra-target-sweep's triage step now exempts any wire-or-retire-carrying
-    # item from its auto-promote path instead of stripping needs-triage off
-    # it (docs/operator-playbooks/hydra-target-sweep.md Step 2), so this
-    # predicate is safe to rely on as an AND, not a footgun to relax to an OR.
-    if wor_label in labels and in_triage:
+    # #3747: count every OPEN wire-or-retire item that is NOT already parked
+    # as an UNCLEAR verdict (no more `and in_triage`). The prior AND-needs-
+    # triage co-presence (issue #3726) went blind the moment a triaged item
+    # left the `needs-triage` lane by any path OTHER than the resolver's own
+    # verdict (hydra-betting#626: `wire-or-retire` + `ready-for-agent`, no
+    # `needs-triage` — never touched by the resolver, permanently invisible to
+    # this signal). WIRE/RETIRE already remove `wire-or-retire` entirely, so
+    # they self-terminate without any extra check here; UNCLEAR deliberately
+    # KEEPS `wire-or-retire` (for operator visibility) while adding
+    # `ready-for-human`, so that one state needs an explicit exclusion or it
+    # would re-arm the resolver on an item already adjudicated. A stale item
+    # is CLOSED, which `rows` never contains — the enclosing open-state gh
+    # read upstream already excludes it.
+    if wor_label in labels and 'ready-for-human' not in labels:
       wor_triage += 1
   idle = (triage_count == 0 and queued_count == 0 and wq == 0)
   dqa_saturated = (open_design_qa > dqa_cap)

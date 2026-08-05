@@ -82,7 +82,9 @@ if not os.path.exists(ledger_path):
     print(f"soft-SLO(>{SLO_DAYS}d wire-or-retire past grace, no verdict): n/a")
     sys.exit(0)
 
-# Same strict row parse as scripts/ci/hydra-target-wire-or-retire-emit.ts::parseLedger.
+# Same strict row parse as the canonical wiring-status table format
+# (rendered by hydra-betting's renderWiringLedger; issue #3747 retired the
+# orch-side parseLedger this comment used to cross-reference).
 rows = []
 for line in open(ledger_path):
     m = re.match(r'^\|\s*`([^`]+)`\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*$', line)

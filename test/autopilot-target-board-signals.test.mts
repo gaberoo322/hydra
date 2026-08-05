@@ -573,3 +573,94 @@ describe("collect-state.sh — Target board truncation signal (issue #3710)", ()
     );
   });
 });
+
+/**
+ * `wire_or_retire_target_triage` / `wire_or_retire_target_available` — the
+ * "unresolved" redefinition (issue #3747 AC#1/AC#2).
+ *
+ * Before this fix the count required BOTH `wire-or-retire` AND
+ * `needs-triage` (issue #3726's co-presence predicate), which went blind the
+ * moment a triaged item left the `needs-triage` lane by any path OTHER than
+ * the resolver's own verdict — exactly hydra-betting#626's shape
+ * (`wire-or-retire` + `ready-for-agent`, never touched by the resolver): an
+ * unresolved item sat on the board while `wire_or_retire_target_available`
+ * reported false every cycle.
+ *
+ * #3747 redefines "unresolved" as the complete enumeration of the resolver's
+ * three documented exits (docs/operator-playbooks/hydra-wire-or-retire.md):
+ * WIRE/RETIRE both strip `wire-or-retire` entirely (self-terminating, no
+ * extra check needed); UNCLEAR deliberately KEEPS `wire-or-retire` while
+ * adding `ready-for-human`, so that one state needs an explicit exclusion;
+ * and a stale item CLOSES, which the enclosing `gh issue list --state open`
+ * read already excludes from `rows` upstream. Concretely:
+ * `wire-or-retire in labels AND 'ready-for-human' not in labels`.
+ *
+ * New top-level `describe` (not grafted onto the truncation suite above) per
+ * this repo's sibling-teardown / shared-state flake authoring rule — this
+ * suite owns its own `rows`/`runLaneEmitter` helpers independently.
+ */
+describe("collect-state.sh — wire-or-retire 'unresolved' redefinition (issue #3747)", () => {
+  /** The Target lane-signal emitter (same block the truncation suite above exercises). */
+  function extractLaneEmitter(): string {
+    const match = src.match(/python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/);
+    assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
+    return match[1];
+  }
+
+  function runLaneEmitter(rows: readonly { labels: string[] }[]): Record<string, string> {
+    const r = spawnSync("python3", ["-c", extractLaneEmitter()], {
+      input: JSON.stringify(rows.map((row) => ({ labels: row.labels }))),
+      encoding: "utf-8",
+      env: { ...process.env, GH_ISSUE_LIST_LIMIT: "100" },
+    });
+    assert.equal(r.status, 0, `lane emitter exited non-zero: ${r.stderr}`);
+    const out: Record<string, string> = {};
+    for (const line of (r.stdout ?? "").trim().split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return out;
+  }
+
+  test("an open issue labelled wire-or-retire + ready-for-agent IS counted (the hydra-betting#626 case)", () => {
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-agent"] }]);
+    assert.equal(
+      out.wire_or_retire_target_triage,
+      "1",
+      "a wire-or-retire item outside the needs-triage lane must still count — this is exactly what the old AND-needs-triage predicate missed",
+    );
+    assert.equal(out.wire_or_retire_target_available, "true");
+  });
+
+  test("a closed wire-or-retire issue is not counted — it never reaches the emitter at all", () => {
+    // `gh issue list --state open` (asserted in the wiring describe block
+    // above) is what excludes closed issues — there is no "closed" row shape
+    // to feed this predicate, because a closed issue is never present in
+    // `rows`. Simulating "closed" here means simulating its ABSENCE: an empty
+    // board must report zero, not a phantom count.
+    const out = runLaneEmitter([]);
+    assert.equal(out.wire_or_retire_target_triage, "0");
+    assert.equal(out.wire_or_retire_target_available, "false");
+  });
+
+  test("a non-wire-or-retire open issue never contributes to the count", () => {
+    const out = runLaneEmitter([
+      { labels: ["wire-or-retire", "ready-for-agent"] },
+      { labels: ["needs-triage"] },
+      { labels: ["ready-for-agent"] },
+    ]);
+    assert.equal(out.wire_or_retire_target_triage, "1");
+    assert.equal(out.wire_or_retire_target_available, "true");
+  });
+
+  test("an UNCLEAR-adjudicated item (wire-or-retire + ready-for-human) is the one state that stays excluded", () => {
+    // The single carve-out INV-1 requires: WIRE/RETIRE self-terminate by
+    // stripping wire-or-retire entirely, but UNCLEAR deliberately keeps the
+    // label for operator visibility while adding ready-for-human — so this is
+    // the one shape that must NOT re-arm the resolver on an item it already
+    // adjudicated.
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-human"] }]);
+    assert.equal(out.wire_or_retire_target_triage, "0");
+    assert.equal(out.wire_or_retire_target_available, "false");
+  });
+});
