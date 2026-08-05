@@ -21,14 +21,29 @@
  * the pace gate independently decides whether the autopilot run starts at
  * all, so this only stops hiding work from a run already authorised.
  *
- * Redis appears here ONLY as a non-enforcing, read-only heartbeat (ADR-0032
- * invariant 5). Concurrency stays a flock lock owned by the drainer; this key
- * enforces nothing.
+ * Redis appears here ONLY as a non-enforcing heartbeat (ADR-0032 invariant 5).
+ * Concurrency stays a flock lock owned by the drainer; this key enforces
+ * nothing.
  *
  * The key string is intentionally inlined here rather than added to
  * `redis/keys.ts`: the ADR-0009 seam is satisfied by a builder that lives
  * anywhere under `src/redis/` (see the `hydra:dispatches:*` precedent inlined
  * in `src/redis/dispatches.ts`), and issue #3754 scopes edits to this file.
+ *
+ * **Write side (issue #3689).** `setGlmDrainerHeartbeat` below is the ONLY
+ * writer the drainer loop (`scripts/glm/drainer-loop.sh`) is permitted to use
+ * for this key, per the CLAUDE.md Redis-seam rule ("Redis access through
+ * `src/redis/<domain>.ts` typed accessors — never a raw client"). The loop is
+ * bash, so it reaches this function through a small generated Node driver
+ * (`node --experimental-strip-types` importing this module directly) rather
+ * than a raw `redis-cli SET` — see the loop script's header comment for the
+ * exact invocation. Per the issue's 2026-07-27 AMENDMENTS, the CALLER decides
+ * *whether* to write on a given tick (only when neither operator-paused nor
+ * daily-cap-exhausted — heartbeat means "able to author", not "the process
+ * ran"; a flock-blocked tick must still refresh it because a run already in
+ * progress is positive liveness evidence). This function itself performs no
+ * such gating — it is a pure typed write, mirroring the read side's
+ * separation of concerns.
  */
 
 import { getRedisConnection } from "./connection.ts";
@@ -46,6 +61,20 @@ export const GLM_DRAINER_ACTIVE_KEY = "hydra:glm:drainer:active";
  * service-liveness TTL is a small multiple of the tick interval it watches.
  */
 export const GLM_DRAINER_HEARTBEAT_STALE_MS = 45 * 60 * 1000;
+
+/**
+ * TTL applied to the heartbeat key on write. Comfortably longer than
+ * {@link GLM_DRAINER_HEARTBEAT_STALE_MS} (2x) so a drainer that stops forever
+ * eventually lets its last heartbeat expire out of Redis, rather than an
+ * ever-staler value sitting there indefinitely. This is memory hygiene only —
+ * the staleness DECISION itself (`getGlmDrainerLiveness`) never depends on
+ * Redis's own expiry, it computes age from the stored epoch-ms value, so a key
+ * that has not yet hit this TTL but IS past the staleness window still reads
+ * as `live: false`.
+ */
+export const GLM_DRAINER_HEARTBEAT_TTL_SECONDS = Math.ceil(
+  (GLM_DRAINER_HEARTBEAT_STALE_MS * 2) / 1000,
+);
 
 /** Why a liveness read resolved the way it did — machine-readable. */
 export type GlmDrainerLivenessReason =
@@ -110,4 +139,48 @@ export async function getGlmDrainerLiveness(
   }
 
   return { live: true, heartbeatMs: ms, reason: "fresh" };
+}
+
+/** Machine-readable failure code for a heartbeat write fault. */
+export type SetGlmDrainerHeartbeatResult =
+  | { ok: true }
+  | { ok: false; code: "glm-heartbeat-write-failed"; message: string };
+
+/**
+ * Write the GLM dev-drainer "able to author" heartbeat (issue #3689).
+ *
+ * Stores the epoch-ms of this write as a plain string — the exact shape
+ * {@link getGlmDrainerLiveness} parses via `Number(raw)`. Sets a TTL
+ * ({@link GLM_DRAINER_HEARTBEAT_TTL_SECONDS}) as hygiene only; see that
+ * constant's docstring for why the staleness decision does not depend on it.
+ *
+ * Never throws (never-throw-from-verification convention, CLAUDE.md): a Redis
+ * failure returns a result object so the caller (the drainer loop, via its
+ * generated Node driver) can log and continue the tick rather than crash it.
+ * Fails loud — every failure is logged with context before the result is
+ * returned.
+ */
+export async function setGlmDrainerHeartbeat(
+  nowMs: number = Date.now(),
+): Promise<SetGlmDrainerHeartbeatResult> {
+  try {
+    const r = getRedisConnection();
+    await r.set(
+      GLM_DRAINER_ACTIVE_KEY,
+      String(nowMs),
+      "EX",
+      GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
+    );
+    return { ok: true };
+  } catch (err: any) {
+    logger.error(
+      { err },
+      "[autopilot/glm-drainer] heartbeat write failed (#3689)",
+    );
+    return {
+      ok: false,
+      code: "glm-heartbeat-write-failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
 }

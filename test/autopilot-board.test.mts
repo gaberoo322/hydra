@@ -31,8 +31,10 @@ import {
 import { deriveBoardState } from "../src/autopilot/board-state.ts";
 import {
   getGlmDrainerLiveness,
+  setGlmDrainerHeartbeat,
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
+  GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
 } from "../src/redis/autopilot.ts";
 import {
   ORCH_BOARD_LABELS,
@@ -940,6 +942,60 @@ describe("src/redis/autopilot.ts — GLM drainer heartbeat liveness (#3754)", ()
 
   test("the staleness threshold is 45 minutes (three 15-min ticks)", () => {
     assert.equal(GLM_DRAINER_HEARTBEAT_STALE_MS, 45 * 60 * 1000);
+  });
+
+  // -------------------------------------------------------------------------
+  // setGlmDrainerHeartbeat — the write side (issue #3689). Reuses this
+  // describe's before/after/beforeEach lifecycle rather than nesting a new
+  // suite: both halves hit the same GLM_DRAINER_ACTIVE_KEY, so sharing the
+  // teardown is the documented "reuse the suite that already owns it" option
+  // (CLAUDE.md's shared-Redis-teardown pitfall), not a risky piggyback.
+  // -------------------------------------------------------------------------
+
+  test("setGlmDrainerHeartbeat writes a value getGlmDrainerLiveness reads back as fresh", async () => {
+    const now = Date.now();
+    const r = await setGlmDrainerHeartbeat(now);
+    assert.equal(r.ok, true);
+    const stored = await redis.get(GLM_DRAINER_ACTIVE_KEY);
+    assert.equal(stored, String(now));
+    const l = await getGlmDrainerLiveness(now);
+    assert.equal(l.live, true);
+    assert.equal(l.reason, "fresh");
+    assert.equal(l.heartbeatMs, now);
+  });
+
+  test("setGlmDrainerHeartbeat defaults nowMs to Date.now() when omitted", async () => {
+    const before = Date.now();
+    const r = await setGlmDrainerHeartbeat();
+    const after = Date.now();
+    assert.equal(r.ok, true);
+    const stored = Number(await redis.get(GLM_DRAINER_ACTIVE_KEY));
+    assert.ok(stored >= before && stored <= after, `${stored} not within [${before}, ${after}]`);
+  });
+
+  test("setGlmDrainerHeartbeat sets a TTL (hygiene only — staleness itself is age-based)", async () => {
+    await setGlmDrainerHeartbeat(Date.now());
+    const ttl = await redis.ttl(GLM_DRAINER_ACTIVE_KEY);
+    assert.ok(ttl > 0, `expected a positive TTL, got ${ttl}`);
+    assert.ok(
+      ttl <= GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
+      `TTL ${ttl} should not exceed the configured ${GLM_DRAINER_HEARTBEAT_TTL_SECONDS}`,
+    );
+  });
+
+  test("the heartbeat TTL is 2x the staleness window (90 min)", () => {
+    assert.equal(
+      GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
+      Math.ceil((GLM_DRAINER_HEARTBEAT_STALE_MS * 2) / 1000),
+    );
+    assert.equal(GLM_DRAINER_HEARTBEAT_TTL_SECONDS, 90 * 60);
+  });
+
+  test("repeated writes overwrite the previous value (not accumulate)", async () => {
+    await setGlmDrainerHeartbeat(1000);
+    await setGlmDrainerHeartbeat(2000);
+    const stored = await redis.get(GLM_DRAINER_ACTIVE_KEY);
+    assert.equal(stored, "2000");
   });
 });
 

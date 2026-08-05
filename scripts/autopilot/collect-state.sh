@@ -968,6 +968,12 @@ try:
       open_scan += 1
     if dqa_label in labels:
       open_design_qa += 1
+    # Co-presence is intentional and load-bearing (issue #3726): needs-triage
+    # is what keeps a wire-or-retire item in an operator-visible lane, and
+    # hydra-target-sweep's triage step now exempts any wire-or-retire-carrying
+    # item from its auto-promote path instead of stripping needs-triage off
+    # it (docs/operator-playbooks/hydra-target-sweep.md Step 2), so this
+    # predicate is safe to rely on as an AND, not a footgun to relax to an OR.
     if wor_label in labels and in_triage:
       wor_triage += 1
   idle = (triage_count == 0 and queued_count == 0 and wq == 0)

@@ -1,0 +1,24 @@
+[Unit]
+Description=Hydra GLM dev-drainer — flock/kill-switch/daily-cap authoring loop on z.ai's independent quota (ADR-0032, issue #3689)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/adr/0032-glm-dev-drainer-worker-lane.md
+After=hydra-orchestrator.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/hydra
+ExecStart=%h/hydra/scripts/glm/drainer-loop.sh
+
+# z.ai credential (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), off-git,
+# mode 0600 (ADR-0032 Decision 2 / invariant 7 — never `.env.local`, never
+# ANTHROPIC_API_KEY). Optional (`-` prefix): the unit must still start and
+# tick its kill-switch / daily-cap / heartbeat logic when the file is not
+# yet provisioned on this machine, and fail CLOSED at the authoring step
+# (buildGlmEnv's fail-closed credential check in src/glm/drainer-runner.ts)
+# rather than refusing to start at all.
+EnvironmentFile=-%h/.config/hydra-glm/env
+
+Environment=HOME=%h
+Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+StandardOutput=journal
+StandardError=journal

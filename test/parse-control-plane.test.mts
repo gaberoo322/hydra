@@ -125,15 +125,18 @@ test("spot-checked classes carry the expected kind/skill/model", () => {
   };
   // The exact classes the acceptance criteria names.
   // dev_orch demoted fable -> sonnet 2026-07-29 (playbook per-class routing
-  // table). This assertion is what makes the census a real mirror of the
-  // playbook rather than a snapshot: the generator parses the routing table, so
+  // table). retro_orch / design_concept_orch demoted fable -> sonnet
+  // 2026-08-04 (cost-emergency demotion alongside dev_target; see the
+  // hydra-autopilot playbook's "Fallback when Fable 5 is unavailable" note).
+  // This assertion is what makes the census a real mirror of the playbook
+  // rather than a snapshot: the generator parses the routing table, so
   // changing the table MUST move this expectation.
   check("dev_orch", "pipeline", "hydra-dev", "sonnet");
   check("qa_orch", "pipeline", "hydra-qa", "sonnet");
-  check("retro_orch", "signal", "hydra-retro", "fable");
+  check("retro_orch", "signal", "hydra-retro", "sonnet");
   check("cleanup_orch", "signal", "hydra-cleanup", "haiku");
   check("cleanup_target", "signal", "hydra-target-cleanup", "haiku");
-  check("design_concept_orch", "pipeline", "hydra-grill", "fable");
+  check("design_concept_orch", "pipeline", "hydra-grill", "sonnet");
 });
 
 test("signal classes carry a numeric cooldown; pipeline slots carry null", () => {

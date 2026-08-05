@@ -107,6 +107,24 @@ install -D -m 0644 scripts/systemd/hydra-test-proc-reaper.timer "$HOME/.config/s
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-test-proc-reaper.timer
 
+echo "==> Installing GLM dev-drainer timer (ADR-0032, issue #3689)..."
+# The GLM dev-drainer (scripts/glm/drainer-loop.sh) drains dev_orch-shaped
+# authoring work onto the operator's independent z.ai quota instead of
+# Anthropic's subscription quota. Its unit was first installed by hand
+# (2026-08-04, same day as this fix) with no deploy step — meaning a future
+# deploy, or a reinstall on another host, would silently drop the lane with
+# nothing to bring it back. Install AND enable it here so a deploy always
+# converges on "drainer running", exactly like the watchdog and reaper blocks
+# above. Blind enable-on-deploy is safe: the unit's own kill-switch (honors
+# ONLY operator `paused`) and fail-closed credential check (buildGlmEnv in
+# src/glm/drainer-runner.ts) mean an absent/blank z.ai credential or an
+# operator pause makes each tick a cheap no-op, never an accidental spend of
+# Anthropic quota. `enable --now` is idempotent on an already-running timer.
+install -D -m 0644 scripts/systemd/hydra-glm-drainer.service "$HOME/.config/systemd/user/hydra-glm-drainer.service"
+install -D -m 0644 scripts/systemd/hydra-glm-drainer.timer "$HOME/.config/systemd/user/hydra-glm-drainer.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-glm-drainer.timer
+
 echo "==> Installing Pace Gate (ADR-0021, issue #858)..."
 # The Pace Gate (scripts/autopilot/pace-gate.sh) is the usage-paced admission
 # controller and the SOLE launcher of hydra-autopilot.service. It replaces the
