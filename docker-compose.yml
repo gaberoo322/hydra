@@ -90,6 +90,16 @@ services:
   #     and silently degrade retrieval — do NOT add one (issue #3543).
   #   - `--auto-truncate` (TEI's default, made explicit) clamps over-long docs
   #     instead of refusing the request, matching the prior Ollama behaviour.
+  #   - `--revision e9b6763023c676ca8431644204f50c2b100d9aab` pins the
+  #     HuggingFace MODEL REPO to the exact checkpoint the cutover was validated
+  #     against — a DIFFERENT axis from the image digest pin below. The digest
+  #     pin locks the TEI binary; this revision pin locks the model
+  #     weights/config, so an upstream `main` change to nomic-embed-text-v1.5
+  #     cannot silently re-break the service. This SHA IS the repo's current
+  #     `main` (HF API), so pinning it is a no-op re-download — the
+  #     tei-embed-data volume's snapshot dir already resolves here (verified
+  #     in-volume). Note `--revision v1.5` does NOT exist (404); only a full
+  #     commit id resolves.
   #
   # BRING-UP CONTRACT (mirrors ollama-embed, issue #1812): a full
   # `docker compose up -d` (NO service argument) always pulls this in because
@@ -116,11 +126,26 @@ services:
   # bring-up reproducible instead of silently tracking whatever `latest` becomes,
   # the same discipline as the pinned comby / osv-scanner binaries (ADR-0005).
   # Digest below == `cpu-latest` as of 2026-07-28 (revision 4150561d).
+  #
+  # STARTUP LOG NOTE — A BENIGN ORT/ONNX ERROR (issue #3749). The newer image
+  # did NOT "fix" the nomic config parser; it gained a FALLBACK. At startup TEI
+  # first tries the ONNX/ORT backend, which still hard-fails on the duplicate
+  # config fields:
+  #   ERROR Could not start ORT backend: Failed to parse `config.json`: duplicate field `hidden_size` at line 38
+  # …and then falls back to the Candle safetensors backend, which parses fine
+  # and reaches `Ready`. That ERROR line is EXPECTED AND BENIGN — the exact
+  # Candle/safetensors path the 0.9999996 embed-parity gate validated. An
+  # operator grepping tei-embed logs for `ERROR` will otherwise misdiagnose a
+  # healthy service; do not treat it as a regression. (Also: /data must stay
+  # WRITABLE — TEI re-fetches the small config files at every startup even on a
+  # warm cache, so a read-only mount dies with `Read-only file system`.)
   tei-embed:
     image: ghcr.io/huggingface/text-embeddings-inference@sha256:cb570aabbfa016b86684f576b5bd72d1ee96cc0b7a00b0ad221b298762b32157
     command:
       - "--model-id"
       - "nomic-ai/nomic-embed-text-v1.5"
+      - "--revision"
+      - "e9b6763023c676ca8431644204f50c2b100d9aab"
       - "--served-model-name"
       - "nomic-embed-text"
       - "--port"

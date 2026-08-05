@@ -1,0 +1,1 @@
+- fix: pin tei-embed model to `--revision e9b6763` so an upstream nomic-embed-text-v1.5 change cannot silently re-break the embedding backend (#3749)
