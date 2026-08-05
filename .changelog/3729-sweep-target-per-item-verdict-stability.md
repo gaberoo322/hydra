@@ -1,0 +1,1 @@
+- fix: sweep_target carries a per-item verdict-stability guard so successive sweeps can't thrash contradictory verdicts on the same Target needs-triage items every 900s (#3729)
