@@ -1,0 +1,1 @@
+- ci: the required `test` check now actually fails on a red suite — `| tee` no longer masks `npm test`'s exit code, so every drift guard written as a test finally blocks merge; the test-count floor also rises from 450 to 6000 (#3741)
