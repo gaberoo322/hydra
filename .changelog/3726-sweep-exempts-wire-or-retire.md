@@ -1,0 +1,1 @@
+- fix: hydra-target-sweep no longer strips needs-triage off wire-or-retire decision items, keeping the wire_or_retire_target handoff signal live (#3726)

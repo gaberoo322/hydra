@@ -51,10 +51,11 @@ gh api --paginate "repos/$REPO/pulls?state=closed&per_page=50" \
 For each open `needs-triage` issue:
 1. **Already completed?** → compare title to recent merged titles. If done: close it —
    `gh issue close $NUM --repo $REPO --reason completed --comment "Already shipped (merged-title overlap) — closing."`
-2. **Well-described?** = specific title (names file/function/behavior) + a body with context.
-3. **Auto-promote** well-described → relabel to `ready-for-agent`:
+2. **Wire-or-retire exemption** — carries the `wire-or-retire` label? → **not sweep-promotable, skip this item entirely.** `wire-or-retire` is a *qualifier on* the `needs-triage` lane, never a lane of its own, and `hydra-wire-or-retire` (armed by the `wire_or_retire_target` signal) is the **only** writer permitted to retire the `needs-triage` + `wire-or-retire` pairing. These items name a specific module file and carry ledger context, so they legitimately pass the well-described test below on their merits — do NOT let step 3 promote them. Leave both labels untouched, log the skip, and move to the next item.
+3. **Well-described?** = specific title (names file/function/behavior) + a body with context.
+4. **Auto-promote** well-described → relabel to `ready-for-agent`:
    `gh issue edit $NUM --repo $REPO --remove-label needs-triage --add-label ready-for-agent`
-4. **Flag vague** items — log for operator (leave `needs-triage`), don't block sweep.
+5. **Flag vague** items — log for operator (leave `needs-triage`), don't block sweep.
 
 ### 3. Process blocked lane (`blocked` issues)
 
