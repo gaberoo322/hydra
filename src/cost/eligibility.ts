@@ -372,8 +372,11 @@ export interface UsageEligibility {
  *
  * When the Anchor is unset (`weeklyResetAnchor === null`) — or its ISO is
  * unparseable — there is no curve: `targetPercent` is 0 and `paceState` is the
- * neutral "on". Otherwise paceState compares `percentSinceReset` to the target
- * within ±{@link PACE_STATE_TOLERANCE_PERCENT} percentage points. (issue #857)
+ * neutral "on". A non-oauth `usageSource` is ALSO neutral (issue #3751, INV-4):
+ * its `percentSinceReset` is the fail-open zero, not a measured reading, so it
+ * must not yield a verdict. Otherwise paceState compares `percentSinceReset` to
+ * the target within ±{@link PACE_STATE_TOLERANCE_PERCENT} percentage points.
+ * (issue #857)
  */
 function projectPacingCurve(
   snapshot: EligibilityUsageInput,
@@ -381,6 +384,20 @@ function projectPacingCurve(
 ): { paceState: PaceState; targetPercent: number; sinceResetPercent: number } {
   const sinceResetPercent = snapshot.percentSinceReset;
   const anchorIso = snapshot.weeklyResetAnchor;
+
+  // INV-4 (issue #3751): a non-oauth input carries the meter-unavailable
+  // fail-open zeros (eligibility-usage.ts `unavailable()`), NOT a measured
+  // "0% used". Without this guard, `percentSinceReset: 0` yields `paceState:
+  // "behind"` (0 < target), falsifying the `unavailable()` docstring's promise
+  // that the zeros can never be mistaken for a real reading. Only a genuine
+  // OAuth meter reading participates in the curve — the same `usageSource ===
+  // "oauth"` gate `deriveHardStop` and `fiveHourThrottleShed` already enforce.
+  // (For a SUSTAINED outage `overlayMeterUnavailableEligibility` already forces
+  // `allow=false` (#3804), so the launcher exits before the pace arm; this guard
+  // covers the TRANSIENT case and keeps the served verdict honest.)
+  if (snapshot.usageSource !== "oauth") {
+    return { paceState: "on", targetPercent: 0, sinceResetPercent };
+  }
 
   if (anchorIso === null) {
     // No Weekly Reset Anchor → no curve to be ahead/behind of. Neutral.

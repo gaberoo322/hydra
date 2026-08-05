@@ -159,16 +159,18 @@ export interface UsageSnapshot {
    */
   emergencyStop: boolean;
   /**
-   * Weekly analogue of {@link emergencyStop}: true only when calibrated AND
-   * `percentSinceReset >= 90` — i.e. ≥90% of the weekly quota has been burned
-   * since the current **Weekly Reset Anchor** boundary. Gates `allow=false`
-   * in `projectEligibility` exactly like `emergencyStop`, blocking ALL
-   * dispatch classes (not just the sheddable ones) until the weekly window
-   * resets. Uses the reset-aligned `percentSinceReset` (NOT the rolling
-   * `percentLast7d`) because that is what "90% of the weekly limit" means
-   * against the interactive `/usage` view. Stays false whenever the Weekly
-   * Reset Anchor is unset (percentSinceReset is then 0) or the quota is
-   * uncalibrated — mirroring the all-or-nothing calibration discipline.
+   * Weekly analogue of {@link emergencyStop}: true only when the OAuth meter is
+   * the source AND `percentLast7d >= 90` — i.e. ≥90% of the rolling 7-day
+   * window has been burned. Gates `allow=false` in `projectEligibility` exactly
+   * like `emergencyStop`, blocking ALL dispatch classes (not just the
+   * sheddable ones) until the weekly window resets. Uses the rolling
+   * `percentLast7d` — the meter's own 7-day utilization, which post-#3799
+   * doubles as `percentSinceReset` on the admission path — NOT a local
+   * `tokens ÷ configured-quota` division (the calibration constant this issue
+   * was filed against). Stays false whenever the meter is unavailable
+   * (`usageSource !== "oauth"`, the #1124 fail-open guard) — though a SUSTAINED
+   * outage is now blocked separately by `overlayMeterUnavailableEligibility`
+   * (#3804). See `deriveHardStop` in `eligibility.ts` for the exact fold.
    */
   weeklyEmergencyStop: boolean;
   /** True only when both quota env vars are set to positive values. */

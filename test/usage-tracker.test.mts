@@ -1761,7 +1761,10 @@ describe("usage-tracker", () => {
       const anchorMs = Date.parse("2026-05-25T00:00:00.000Z");
 
       // Build a snapshot with an Anchor boundary and a `now` (generatedAt)
-      // some fraction into the 7-day window, plus a percentSinceReset.
+      // some fraction into the 7-day window, plus a percentSinceReset. The curve
+      // math only participates for a real OAuth meter reading (issue #3751,
+      // INV-4: a non-oauth source is neutral), so these math fixtures carry the
+      // oauth source — separate cases below pin the estimate-neutral invariant.
       function curveSnap(opts: {
         nowMs: number;
         sinceResetPercent: number;
@@ -1769,6 +1772,7 @@ describe("usage-tracker", () => {
       }): UsageSnapshot {
         return snapshotWith({
           calibrated: true,
+          usageSource: "oauth",
           generatedAt: isoOf(opts.nowMs),
           weeklyResetAnchor: opts.anchorIso === undefined ? isoOf(anchorMs) : opts.anchorIso,
           percentSinceReset: opts.sinceResetPercent,
@@ -1897,6 +1901,26 @@ describe("usage-tracker", () => {
         assert.equal(v.paceState, "ahead");
         assert.equal(v.allow, true);
         assert.deepEqual([...v.shed], []);
+      });
+
+      test("non-oauth source → neutral curve even with an anchor and burn (INV-4, #3751)", () => {
+        // The meter-unavailable fail-open zeros are NOT a measured 0%: an
+        // estimate snapshot must never read "behind" off a zeroed
+        // percentSinceReset, regardless of anchor/position. (Mirrors how
+        // deriveHardStop / fiveHourThrottleShed already treat non-oauth.)
+        const v = projectEligibility(
+          snapshotWith({
+            calibrated: true,
+            usageSource: "estimate",
+            generatedAt: isoOf(anchorMs + 3.5 * DAY), // target would be 46 for oauth
+            weeklyResetAnchor: isoOf(anchorMs),
+            percentSinceReset: 0,
+          }),
+        );
+        assert.equal(v.paceState, "on", "estimate zeros must not yield a false 'behind'");
+        assert.equal(v.targetPercent, 0);
+        // sinceResetPercent is still surfaced verbatim even when neutral.
+        assert.equal(v.sinceResetPercent, 0);
       });
     });
 

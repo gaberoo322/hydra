@@ -49,6 +49,7 @@ import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
 import { deriveHardStop } from "./eligibility.ts";
 import { getWeeklyResetAnchorMs } from "./config.ts";
+import { projectResetWindow } from "./token-math.ts";
 import { logger } from "../logger.ts";
 
 /**
@@ -119,7 +120,18 @@ export async function getEligibilityUsage(
 ): Promise<EligibilityUsageResult> {
   const nowMs = (deps.now ?? Date.now)();
   const generatedAt = new Date(nowMs).toISOString();
-  const anchorMs = getWeeklyResetAnchorMs();
+  // CONTEXT.md:217 defines the Weekly Reset Anchor as "projected forward in
+  // 7-day multiples". The admission path MUST serve the effective current-window
+  // boundary, NOT the raw seed instant from the env var: projectPacingCurve
+  // (eligibility.ts) takes `fraction = clamp01((now - anchor) / 7d)`, so a stale
+  // seed clamps fraction to 1.0, pins `targetPercent` at the full Pacing Ceiling,
+  // and makes `paceState` permanently "behind" — the inert-Pacing-Curve bug this
+  // issue exists to fix (issue #3751). The snapshot path already projects the
+  // seed via `deriveSinceReset` (snapshot-assembly.ts); this brings the admission
+  // path onto the same definition of "the Anchor" so the two stop disagreeing.
+  const seedMs = getWeeklyResetAnchorMs();
+  const anchorMs =
+    seedMs === null ? null : projectResetWindow(seedMs, nowMs).currentMs;
   const weeklyResetAnchor = anchorMs === null ? null : new Date(anchorMs).toISOString();
 
   let cached: Awaited<ReturnType<typeof readOAuthCached>>;
@@ -209,9 +221,10 @@ export async function getEligibilityUsage(
  * The fail-open input served when no meter value is available (#1124).
  *
  * Zeroed percentages are safe ONLY because every consumer reads them behind the
- * `usageSource === "oauth"` guard — `deriveHardStop` and `fiveHourThrottleShed`
- * both short-circuit on a non-oauth source, so these zeros can never be mistaken
- * for a measured "0% used".
+ * `usageSource === "oauth"` guard — `deriveHardStop`, `fiveHourThrottleShed`,
+ * AND `projectPacingCurve` (via `projectEligibility`) all short-circuit on a
+ * non-oauth source (issue #3751, INV-4), so these zeros can never be mistaken
+ * for a measured "0% used" and can never yield a false "behind".
  *
  * `meterUnavailable` is a caller-supplied verdict, not hardcoded `true` (issue
  * #3821): this shape is also returned for a single transient failed read

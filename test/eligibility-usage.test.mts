@@ -31,6 +31,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 const { getEligibilityUsage } = await import("../src/cost/eligibility-usage.ts");
+const { projectEligibility } = await import("../src/cost/eligibility.ts");
 const { clearOAuthCache, OAUTH_SUSTAINED_FAILURE_THRESHOLD } = await import(
   "../src/cost/oauth-read-cache.ts"
 );
@@ -154,5 +155,91 @@ describe("getEligibilityUsage meterUnavailable gating (issue #3821)", () => {
         "had the sustained-vs-transient distinction to make",
     );
     assert.equal(r.input.usageSource, "estimate");
+  });
+});
+
+// Separate top-level describe (CLAUDE.md authoring rule: never nest under a
+// sibling describe's shared teardown). This pins issue #3751's headline fix:
+// the admission path's `weeklyResetAnchor` is projected forward in 7-day
+// multiples (CONTEXT.md:217), so the Pacing Curve is a ramp — not a step
+// permanently pinned at the Pacing Ceiling.
+describe("Pacing Curve anchor rollover on the admission path (issue #3751)", () => {
+  // projectEligibility (top-level import above) turns the meter input into the
+  // pacing verdict; the admission path (getEligibilityUsage) must feed it a
+  // ROLLED anchor.
+  const ANCHOR_KEY = "HYDRA_USAGE_WEEKLY_RESET_ANCHOR";
+  const CEILING_KEY = "HYDRA_USAGE_WEEKLY_PACE_CEILING";
+  let saved: Map<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = new Map();
+    for (const k of [ANCHOR_KEY, CEILING_KEY, ...ENV_KEYS]) saved.set(k, process.env[k]);
+    // The LIVE stale seed that inerts the curve when served raw (8+ weeks old
+    // at filing). `getWeeklyResetAnchorMs` reads this at call time.
+    process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-06-03T17:00:00.000Z";
+    delete process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING; // default ceiling 0.92
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = String(TTL_MS);
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = String(MAX_STALE_MS);
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = String(BACKOFF_BASE_MS);
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = String(BACKOFF_MAX_MS);
+    clearOAuthCache();
+  });
+
+  afterEach(() => {
+    clearOAuthCache();
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  // 50% rolling-7d utilization — well above any early-window ramp target, well
+  // below the 90% hard stop, so it is the burn level that MUST be able to read
+  // "ahead" once the anchor rolls (it could not when targetPercent was pinned 92).
+  const OK_50: OAuthUsageResult = {
+    ok: true,
+    data: {
+      fiveHour: { utilization: 30, resetsAt: null },
+      sevenDay: { utilization: 50, resetsAt: null },
+    },
+  };
+
+  test("INV-1: the served weeklyResetAnchor is rolled forward to the current window, not the raw seed", async () => {
+    // Exactly 8 weeks after the 2026-06-03 seed → the current-window boundary is
+    // 2026-07-29T17:00:00Z. Serving the raw 2026-06-03 seed is the bug.
+    const now = Date.parse("2026-07-29T17:00:00.000Z");
+    const r = await getEligibilityUsage({ readUsage: fixedReader(OK_50), now: () => now });
+    assert.equal(r.input.weeklyResetAnchor, "2026-07-29T17:00:00.000Z");
+    assert.notEqual(r.input.weeklyResetAnchor, "2026-06-03T17:00:00.000Z");
+  });
+
+  test("INV-2/3: targetPercent is a ramp (not pinned at 92) and 'ahead' is reachable below the hard stop", async () => {
+    // 3h into a fresh rolled window → fraction ~0.018 → targetPercent ~1.6.
+    const now = Date.parse("2026-07-29T20:00:00.000Z");
+    const r = await getEligibilityUsage({ readUsage: fixedReader(OK_50), now: () => now });
+    const elig = projectEligibility(r.input);
+    assert.ok(
+      elig.targetPercent > 0 && elig.targetPercent < 10,
+      `early-window target should be a low ramp value, got ${elig.targetPercent}`,
+    );
+    // 50% burn >> ~1.6 target + 2 tolerance → "ahead", and 50 < 90 so the weekly
+    // hard stop has NOT fired — the previously-unreachable paceState.
+    assert.equal(elig.paceState, "ahead");
+    assert.equal(elig.reasons.weeklyEmergencyStop, false);
+    assert.equal(elig.allow, true);
+  });
+
+  test("the ramp approaches the ceiling near the window end (varies, not a constant 92)", async () => {
+    // ~1h before the next boundary (6d 23h into the window): fraction ~0.994 →
+    // targetPercent ~91.4, so a 50% burn now reads "behind". This is the
+    // correct ramp; pre-fix, target was 92 at EVERY instant.
+    const now = Date.parse("2026-07-29T16:00:00.000Z");
+    const r = await getEligibilityUsage({ readUsage: fixedReader(OK_50), now: () => now });
+    const elig = projectEligibility(r.input);
+    assert.ok(
+      elig.targetPercent > 85 && elig.targetPercent < 92,
+      `late-window target should approach (but track) the ceiling, got ${elig.targetPercent}`,
+    );
+    assert.equal(elig.paceState, "behind");
   });
 });

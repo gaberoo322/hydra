@@ -1,0 +1,1 @@
+- fix: project the Weekly Reset Anchor forward on the admission path so the Pacing Curve ramps (paceState can reach "ahead") instead of staying pinned at the ceiling (#3751)
