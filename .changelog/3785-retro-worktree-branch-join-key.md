@@ -1,0 +1,1 @@
+- fix: join the dispatch↔outcome retro record on the deterministic worktree branch instead of the unparseable harness task_id, restoring retro attribution for code-writing dispatches (#3785)
