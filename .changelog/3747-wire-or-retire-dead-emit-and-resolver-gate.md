@@ -1,0 +1,1 @@
+- fix(autopilot): wire-or-retire resolver-class gate no longer requires `needs-triage`, so the lone open wire-or-retire item (hydra-betting#626, carrying `ready-for-agent`) is now visible to its resolver instead of hidden by the sweep; the dead `hydra-target-wire-or-retire-emit.ts` `/api/backlog` caller (retired in #3455) and its test are removed (#3747)

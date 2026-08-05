@@ -868,15 +868,22 @@ print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
 # cannot read its own board).
 #
 # `wire_or_retire_target_available` — (issue #2722, epic #2720) true when >=1
-# open item carrying the stable `wire-or-retire` label sits in the Target
-# `triage` lane. These are the JUDGMENT items /hydra-target-cleanup files for
+# UNRESOLVED open item carrying the stable `wire-or-retire` label sits on the
+# Target board. These are the JUDGMENT items /hydra-target-cleanup files for
 # modules past the 45-day wiring grace (the decision queue). decide.py's
 # `wire_or_retire_target` signal class reads this and dispatches the headless
 # /hydra-wire-or-retire resolver (24h class cooldown, at most 2 items/run) to
-# turn each into a WIRE / RETIRE / UNCLEAR verdict. Only the `triage` lane is
-# read (the #2721 lane guard keeps unresolved wire-or-retire items IN triage;
-# a resolved item leaves as a queued WIRE/RETIRE task or a ready-for-human
-# backlog item). Orchestrator-API-down degrades to false — the suppressing
+# turn each into a WIRE / RETIRE / UNCLEAR verdict. The count is LANE-
+# INDEPENDENT (issue #3747): an open item is unresolved iff it still carries
+# `wire-or-retire` and has NOT been parked for the operator via
+# `ready-for-human` — a complete enumeration of the resolver's three exits.
+# WIRE/RETIRE drop `wire-or-retire` itself; UNCLEAR (and the risk/live-execution
+# carve-out) add `ready-for-human` and keep `wire-or-retire`; a stale verdict
+# CLOSES the issue (already excluded by the `--state open` read below).
+# Requiring `needs-triage` here (the old read) hid every item the moment
+# sweep_target triaged it off `needs-triage`, so the resolver class never fired
+# on the very items it exists to resolve (hydra-betting#626: `wire-or-retire` +
+# `ready-for-agent`). Orchestrator-API-down degrades to false — the suppressing
 # direction (never dispatch a resolver that cannot read its own queue).
 #
 # `design_qa_target_due` / `design_qa_target_saturated` — (issue #2739, parent
@@ -954,7 +961,7 @@ try:
   queued_count = 0
   open_scan = 0
   open_design_qa = 0
-  wor_triage = 0
+  wor_unresolved = 0
   for row in rows:
     labels = row.get('labels') if isinstance(row, dict) else None
     if not isinstance(labels, list):
@@ -968,8 +975,17 @@ try:
       open_scan += 1
     if dqa_label in labels:
       open_design_qa += 1
-    if wor_label in labels and in_triage:
-      wor_triage += 1
+    # An open wire-or-retire item is UNRESOLVED (and so gates the resolver) iff
+    # it still carries `wire-or-retire` and has NOT been parked for the operator
+    # via `ready-for-human` — lane-independent (issue #3747). The resolver's
+    # three exits all terminate the count: WIRE/RETIRE drop `wire-or-retire`
+    # itself (docs/operator-playbooks/hydra-wire-or-retire.md); UNCLEAR and the
+    # risk/live-execution carve-out add `ready-for-human` (keeping
+    # `wire-or-retire`); a stale verdict closes the issue (excluded by the
+    # `--state open` read above). The old `and in_triage` read hid every item
+    # the moment sweep_target triaged it off `needs-triage`.
+    if wor_label in labels and 'ready-for-human' not in labels:
+      wor_unresolved += 1
   idle = (triage_count == 0 and queued_count == 0 and wq == 0)
   dqa_saturated = (open_design_qa > dqa_cap)
   # Advisory truncation flag (issue #3710): the read succeeded, but a row count
@@ -980,8 +996,11 @@ try:
   print('target_backfill_idle=' + ('true' if idle else 'false'))
   print('target_cleanup_board_open_scan=' + str(open_scan))
   print('target_cleanup_board_saturated=' + ('true' if open_scan > cap else 'false'))
-  print('wire_or_retire_target_triage=' + str(wor_triage))
-  print('wire_or_retire_target_available=' + ('true' if wor_triage > 0 else 'false'))
+  # Key name retained for decide.py compatibility (it reads only
+  # `wire_or_retire_target_available`); the count is now lane-independent, so
+  # the `_triage` suffix is a historical misnomer, not a lane description.
+  print('wire_or_retire_target_triage=' + str(wor_unresolved))
+  print('wire_or_retire_target_available=' + ('true' if wor_unresolved > 0 else 'false'))
   print('design_qa_target_open=' + str(open_design_qa))
   print('design_qa_target_saturated=' + ('true' if dqa_saturated else 'false'))
   print('design_qa_target_due=' + ('false' if dqa_saturated else 'true'))

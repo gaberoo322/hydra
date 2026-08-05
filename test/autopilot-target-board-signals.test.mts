@@ -72,6 +72,38 @@ function runEmitter(board: Record<string, unknown>): Record<string, string> {
   return out;
 }
 
+// The Target lane-signal emitter (distinct from the board-state emitter above):
+// the python block piped the `gh issue list --state open` JSON through to derive
+// the per-lane counts AND the truncation/wire-or-retire signals. Hoisted to
+// module scope so both the #3710 truncation suite and the #3747 wire-or-retire
+// suite exercise the exact shipped logic (a sibling describe has no access to a
+// helper declared inside another describe's callback).
+function extractLaneEmitter(): string {
+  const match = src.match(
+    /python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/,
+  );
+  assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
+  return match[1];
+}
+
+function runLaneEmitter(
+  rows: readonly { labels: string[] }[],
+  env: Record<string, string> = {},
+): Record<string, string> {
+  const r = spawnSync("python3", ["-c", extractLaneEmitter()], {
+    input: JSON.stringify(rows.map((row) => ({ labels: row.labels }))),
+    encoding: "utf-8",
+    env: { ...process.env, GH_ISSUE_LIST_LIMIT: "100", ...env },
+  });
+  assert.equal(r.status, 0, `lane emitter exited non-zero: ${r.stderr}`);
+  const out: Record<string, string> = {};
+  for (const line of (r.stdout ?? "").trim().split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return out;
+}
+
 describe("collect-state.sh — Target board-state emission (issue #3435, ADR-0031)", () => {
   test("emits the four target_-prefixed counts decide.py's Target branch reads", () => {
     const out = runEmitter({
@@ -479,31 +511,6 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
  * merely-large board, which is a worse outcome than the under-count it fixes.
  */
 describe("collect-state.sh — Target board truncation signal (issue #3710)", () => {
-  /** The Target lane-signal emitter (distinct from the board-state emitter above). */
-  function extractLaneEmitter(): string {
-    const match = src.match(/python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/);
-    assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
-    return match[1];
-  }
-
-  function runLaneEmitter(
-    rows: readonly { labels: string[] }[],
-    env: Record<string, string> = {},
-  ): Record<string, string> {
-    const r = spawnSync("python3", ["-c", extractLaneEmitter()], {
-      input: JSON.stringify(rows.map((row) => ({ labels: row.labels }))),
-      encoding: "utf-8",
-      env: { ...process.env, GH_ISSUE_LIST_LIMIT: "100", ...env },
-    });
-    assert.equal(r.status, 0, `lane emitter exited non-zero: ${r.stderr}`);
-    const out: Record<string, string> = {};
-    for (const line of (r.stdout ?? "").trim().split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
-    }
-    return out;
-  }
-
   const rows = (n: number, labels: string[] = ["needs-triage"]) =>
     Array.from({ length: n }, () => ({ labels }));
 
@@ -571,5 +578,112 @@ describe("collect-state.sh — Target board truncation signal (issue #3710)", ()
       4,
       "expected 4 emission sites: healthy, python-except, python-invocation-failure, and degraded",
     );
+  });
+});
+
+/**
+ * `wire_or_retire_target_available` — the resolver-class gate (issue #3747).
+ *
+ * The count that gates the `wire_or_retire_target` resolver class used to
+ * require `wire-or-retire` AND `needs-triage`. But `sweep_target` promotes a
+ * triaged item OFF `needs-triage`, so the moment an item was triaged it became
+ * invisible to the class whose entire job is resolving it — the resolver never
+ * fired on the very items it exists to resolve. The live instance: hydra-betting
+ * #626, the only open `wire-or-retire` item, carried `ready-for-agent` (not
+ * `needs-triage`), so `wire_or_retire_target_available` was false every turn.
+ *
+ * The fix (INV-1 of the #3747 design concept): an OPEN item is unresolved iff it
+ * carries `wire-or-retire` AND NOT `ready-for-human` — a complete enumeration of
+ * the resolver's three exits (WIRE/RETIRE drop `wire-or-retire`; UNCLEAR and the
+ * risk/live-execution carve-out add `ready-for-human`; a stale verdict closes the
+ * issue, already excluded by the `--state open` source read). The count is now
+ * lane-independent; `sweep_target` is NOT modified to re-add `needs-triage`
+ * (issue AC#3 — that fights the sweep's own semantics).
+ *
+ * Note on the issue's "flip the existing cases first" instruction: the design
+ * concept's grill established it is unsatisfiable here — no existing test pinned
+ * the AND-`needs-triage` count (the lone wire-or-retire assertion above uses rows
+ * carrying BOTH labels, green under the old AND and the new rule alike). So this
+ * is pure ADDED coverage, not a flip.
+ */
+describe("collect-state.sh — wire-or-retire resolver-class gate (issue #3747)", () => {
+  test("#626 case (wire-or-retire + ready-for-agent) IS counted — invisible under the old AND-needs-triage gate", () => {
+    // The exact case that was hidden: triaged off needs-triage by sweep_target,
+    // so the old `wor_label in labels and in_triage` read counted 0 and the
+    // resolver class never dispatched on the only open item it exists to resolve.
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-agent"] }]);
+    assert.equal(out.wire_or_retire_target_triage, "1");
+    assert.equal(
+      out.wire_or_retire_target_available,
+      "true",
+      "an unresolved wire-or-retire item in the queued lane must still gate the resolver",
+    );
+  });
+
+  test("lane-independent: needs-triage is NOT required to be counted (issue #3747 AC#1)", () => {
+    // Each of these was invisible pre-fix because none carries needs-triage; all
+    // are open, unresolved, and not parked for the operator.
+    for (const labels of [
+      ["wire-or-retire"],
+      ["wire-or-retire", "ready-for-agent"],
+      ["wire-or-retire", "target-backlog"],
+    ]) {
+      const out = runLaneEmitter([{ labels }]);
+      assert.equal(
+        out.wire_or_retire_target_available,
+        "true",
+        `expected an open wire-or-retire item to be counted regardless of lane label: ${labels.join(",")}`,
+      );
+    }
+  });
+
+  test("an item parked for the operator (wire-or-retire + ready-for-human) is NOT counted — the UNCLEAR/risk terminal exit", () => {
+    // The re-arm-forever guard: the UNCLEAR verdict (and the risk/live-execution
+    // carve-out) KEEP `wire-or-retire` but ADD `ready-for-human`. Counting those
+    // would re-dispatch the resolver on an item already handed to the operator.
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-human"] }]);
+    assert.equal(out.wire_or_retire_target_triage, "0");
+    assert.equal(out.wire_or_retire_target_available, "false");
+  });
+
+  test("a mixed board counts exactly the unresolved wire-or-retire items", () => {
+    const out = runLaneEmitter([
+      { labels: ["wire-or-retire", "ready-for-agent"] }, // unresolved (#626) — counted
+      { labels: ["wire-or-retire", "needs-triage"] }, // unresolved, triage lane — counted
+      { labels: ["wire-or-retire"] }, // unresolved, bare — counted
+      { labels: ["wire-or-retire", "ready-for-human"] }, // UNCLEAR/parked — NOT counted
+      { labels: ["ready-for-agent"] }, // not wire-or-retire — NOT counted
+      { labels: ["cleanup-scan", "ready-for-agent"] }, // unrelated — NOT counted
+    ]);
+    assert.equal(out.wire_or_retire_target_triage, "3");
+    assert.equal(out.wire_or_retire_target_available, "true");
+  });
+
+  test("a closed item is not counted — this emitter's input is the --state open board (INV-1 closure exit)", () => {
+    // The emitter runs over $TARGET_BOARD_ISSUES_JSON, materialised one read
+    // above by `gh issue list --state open`. A closed wire-or-retire item (the
+    // stale-verdict exit) is excluded at that source, so closure needs no
+    // in-emitter check. Pin the open-state source read; the label-based exits
+    // (the ready-for-human exclusion; the WIRE/RETIRE label drop) are exercised
+    // in the cases above.
+    assert.match(
+      src,
+      /TARGET_BOARD_ISSUES_JSON=\$\(gh issue list[^\n]*--state open/,
+      "the Target board read feeding the wire-or-retire count must be --state open so closed items are excluded upstream",
+    );
+  });
+
+  test("both wire_or_retire keys are emitted on all four paths so decide.py never sees a missing key (INV-3)", () => {
+    // Four emission sites: healthy python, python `except`, the python-invocation
+    // `||` fallback, and the unreachable-board `else`. decide.py reads
+    // `wire_or_retire_target_available`; the `_triage` count key is retained (a
+    // misnomer now, but it has zero consumers and renaming widens the diff).
+    for (const key of ["wire_or_retire_target_available=", "wire_or_retire_target_triage="]) {
+      assert.equal(
+        src.split(key).length - 1,
+        4,
+        `${key} must appear on all 4 emission paths (healthy / except / || fallback / else)`,
+      );
+    }
   });
 });
