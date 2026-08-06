@@ -37,6 +37,31 @@
  *
  * This module is leaf-level infrastructure: it imports only the single-source
  * orch vocabulary and defines constants — no I/O, no decisions.
+ *
+ * # Authoritative manifest + drift guard (issue #3720)
+ *
+ * This vocabulary is the SINGLE checked-in manifest of every label Hydra
+ * writes to `gaberoo322/hydra-betting` (the Target repo), enforced by the
+ * network-free drift guard `test/target-board-labels.test.mts`. That guard
+ * exists because the bug #3720 fixed was a "contract asserted in prose but
+ * never checked at runtime": the wire-or-retire producer filed through a
+ * retired surface for weeks with no test catching it, and a category-error
+ * label (`queued` — a retired Redis LANE name, not a label) silently
+ * succeeded because nothing cross-checked the label literals Target-directed
+ * code writes against a manifest. The guard checks CODE-vs-MANIFEST offline
+ * (deterministic, no `gh api` — a live-labels check would flake red whenever
+ * the running autopilot exhausts gh rate limits, the ambient-poison-pill
+ * class). The MANIFEST-vs-LIVE-REPO direction is left to each producer's own
+ * runtime failure path (which now reports degradation loudly, not exits 1 in
+ * silence) — a deliberate, documented residual, not an oversight.
+ *
+ * Deliberately EXCLUDED (and pinned excluded by the drift guard):
+ *   - `queued` — a retired Redis LANE name, NOT a label. Its only historic
+ *     use was a category error in `hydra-target-sweep`'s remove-label loop
+ *     (deleted in #3720); adding it here would whitewash that error.
+ *   - `architecture-scan` — every reference is orch-scoped (the orch-only
+ *     `hydra-architecture-scan` class); zero Target-directed writes.
+ *   - `target-backlog` — an ORCH-side routing label (see below).
  */
 
 import { ORCH_BOARD_LABELS } from "./board-labels.ts";
@@ -83,4 +108,19 @@ export const TARGET_BOARD_LABELS = {
   ready_for_human: "ready-for-human",
   needs_info: "needs-info",
   ...TARGET_SPECIFIC_LABELS,
+  // Producer-stamped labels: written by the Target emit runners / skills to
+  // the Target repo's ISSUES (the saturation/dedup count seams collect-state
+  // reads). Kept here so the drift guard can cross-check the emit scripts'
+  // `gh issue create --label <X>` literals against the manifest (#3720).
+  /** Stamped by the demote emitter (scripts/ci/hydra-target-cleanup-emit.ts). */
+  cleanup_scan: "cleanup-scan",
+  /** Stamped by the Target design-QA emit runner (collect-state.sh:889). */
+  design_qa: "design-qa",
+  // PR-labels written to the Target repo (pull-request process labels, not
+  // issue/board-state buckets — included for manifest completeness so a
+  // future label write is caught by the guard either way).
+  /** Marks a Target glossary/ADR-delta PR (docs/agents/domain.md WRITE contract). */
+  ubiquitous_language: "ubiquitous-language",
+  /** Opts a Target PR out of the changelog-fragment requirement. */
+  skip_changelog: "skip-changelog",
 } as const;

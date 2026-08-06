@@ -1,0 +1,1 @@
+- fix: migrate the Target wire-or-retire emit runner off the retired /api/backlog surface to `gh issue create`, so the `wire_or_retire_target` signal can fire again (#3720)

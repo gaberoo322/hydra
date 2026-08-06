@@ -118,11 +118,11 @@ For each row printed (number, age, title):
      ```bash
      gh issue close $NUM --repo $REPO --reason completed \
        --comment "Shipped by merged PR #<n> — closing (stall-recovery reconciler)."
-     for L in ready-for-agent in-progress queued; do
+     for L in ready-for-agent in-progress; do
        gh api -X DELETE "repos/$REPO/issues/$NUM/labels/$L" --silent 2>/dev/null || true
      done
      ```
-     (DELETE-per-label is idempotent — a 404 on an absent label is swallowed — unlike `gh issue edit --remove-label`, which errors.)
+     (`ready-for-agent` / `in-progress` are the only live board labels this branch can have stripped — the lane↔label table maps the retired Redis `queued` lane *to* `ready-for-agent`, so `queued` is not a label and is intentionally absent here. DELETE-per-label is idempotent — a 404 on an absent label is swallowed — unlike `gh issue edit --remove-label`, which errors.)
    - **Else a linked PR still `open` → PROGRESSING: skip.**
    - **Else no linked PR at all → genuinely stalled: recover.**
      `gh issue edit $NUM --repo $REPO --remove-label in-progress --add-label ready-for-agent`

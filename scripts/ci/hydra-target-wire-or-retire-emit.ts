@@ -32,7 +32,8 @@
  * the item body's "verify first" step plus dedup against open items.
  *
  * The PURE core is {@link planWireOrRetireEmit}; only the thin CLI wrapper
- * touches fs and the orchestrator API. Same shape as the demote emitter.
+ * touches fs and `gh` (GitHub Issues on the Target repo — ADR-0031). Same
+ * shape as the demote emitter (scripts/ci/hydra-target-cleanup-emit.ts).
  *
  * Usage (invoked by the /hydra-target-cleanup playbook after the demote emit):
  *
@@ -44,6 +45,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 /** Max decision items a single run files — judgment work must not flood triage. */
 export const WIRE_OR_RETIRE_EMIT_CAP = 3;
@@ -56,7 +58,9 @@ export const WIRE_OR_RETIRE_LABEL = "wire-or-retire";
 
 export const TARGET_ROOT = "/home/gabe/hydra-betting";
 export const LEDGER_FILE = `${TARGET_ROOT}/docs/agents/wiring-status.md`;
-const API_BASE = "http://localhost:4000/api";
+
+/** The Target repo whose GitHub-Issues board is the tracker (ADR-0031). */
+export const TARGET_REPO = "gaberoo322/hydra-betting";
 
 /** One parsed ledger row. */
 export interface LedgerRow {
@@ -211,61 +215,94 @@ export function planWireOrRetireEmit(
 }
 
 // ---------------------------------------------------------------------------
-// Thin CLI wrapper (the only part that touches fs / the orchestrator API).
+// Thin CLI wrapper (the only part that touches fs / gh).
 // ---------------------------------------------------------------------------
+// ADR-0031: the Target's tracker is the GitHub-Issues board on
+// gaberoo322/hydra-betting, NOT the retired `/api/backlog` Redis surface
+// (deleted by #3439 / PR #3455 — it now returns 404). Items are filed via
+// `gh issue create --label needs-triage --label wire-or-retire` and
+// deduped/saturation-checked via `gh issue list --label wire-or-retire` — the
+// exact shape the already-migrated demote sibling
+// (scripts/ci/hydra-target-cleanup-emit.ts) uses. This is the fix for the
+// class being permanently inert: the old HTTP call to the retired /api/backlog
+// surface threw on the first call (404), main() caught it into process.exit(1),
+// and the runner never reached its file step at all — with or without the
+// labels present.
 
-interface BacklogItemRow {
-  id?: string | number;
+interface IssueTitle {
   title?: string;
-  labels?: string[];
 }
 
-async function readOpenWireOrRetireItems(): Promise<BacklogItemRow[]> {
-  const res = await fetch(`${API_BASE}/backlog`);
-  if (!res.ok) {
-    throw new Error(`GET /backlog returned ${res.status}`);
+/**
+ * Read the titles of every OPEN GitHub Issue on the Target repo carrying the
+ * wire-or-retire label (the dedup + saturation input). Throws on a `gh`
+ * failure so the caller can fail closed. `--state open` (the `gh` default for
+ * `issue list`) is the "not done" filter — a closed issue is the `done`
+ * transition under ADR-0031.
+ */
+function readOpenWireOrRetireItemTitles(): string[] {
+  try {
+    const out = execFileSync(
+      "gh",
+      [
+        "issue",
+        "list",
+        "--repo",
+        TARGET_REPO,
+        "--label",
+        WIRE_OR_RETIRE_LABEL,
+        "--json",
+        "title",
+      ],
+      { encoding: "utf-8" },
+    );
+    const issues = JSON.parse(out) as IssueTitle[];
+    return issues.map((i) => i.title ?? "").filter(Boolean);
+  } catch (err) {
+    throw new Error(
+      `gh issue list --label ${WIRE_OR_RETIRE_LABEL} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  const lanes = (await res.json()) as Record<string, unknown>;
-  const open: BacklogItemRow[] = [];
-  for (const [lane, rows] of Object.entries(lanes)) {
-    if (lane === "done" || lane === "counts" || !Array.isArray(rows)) continue;
-    for (const row of rows as BacklogItemRow[]) {
-      const labels = Array.isArray(row?.labels) ? row.labels : [];
-      if (labels.includes(WIRE_OR_RETIRE_LABEL)) open.push(row);
-    }
-  }
-  return open;
 }
 
-/** File one item: POST /backlog, then move it to the triage lane (needs-triage). */
-async function createTriageItem(title: string, body: string): Promise<string> {
-  const res = await fetch(`${API_BASE}/backlog`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      title,
-      description: body,
-      category: "cleanup",
-      labels: [WIRE_OR_RETIRE_LABEL, "needs-triage"],
-    }),
-  });
-  if (!res.ok) throw new Error(`POST /backlog returned ${res.status}`);
-  const out = (await res.json()) as { added?: boolean; id?: string | number; reason?: string };
-  if (!out.added || out.id === undefined) {
-    return `skipped (${out.reason ?? "not added"})`;
+/**
+ * File one decision item on the Target repo carrying BOTH `wire-or-retire`
+ * AND `needs-triage`. Co-presence is the invariant: collect-state.sh counts a
+ * wire-or-retire item only when BOTH labels are present, so filing either
+ * label alone leaves the `wire_or_retire_target` signal dark (issue #3720).
+ */
+function createTriageIssue(title: string, body: string): string {
+  try {
+    const out = execFileSync(
+      "gh",
+      [
+        "issue",
+        "create",
+        "--repo",
+        TARGET_REPO,
+        "--title",
+        title,
+        "--body",
+        body,
+        "--label",
+        WIRE_OR_RETIRE_LABEL,
+        "--label",
+        "needs-triage",
+      ],
+      { encoding: "utf-8" },
+    );
+    // gh issue create prints the issue URL on success.
+    const urlMatch = out.trim().match(/github\.com\/.*\/issues\/(\d+)/);
+    const issueNum = urlMatch?.[1] ?? "?";
+    return `filed as #${issueNum} → needs-triage`;
+  } catch (err) {
+    throw new Error(
+      `gh issue create failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  const move = await fetch(`${API_BASE}/backlog/${out.id}/move`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ lane: "triage" }),
-  });
-  if (!move.ok) {
-    return `filed as ${out.id} but move-to-triage failed (${move.status})`;
-  }
-  return `filed as ${out.id} → triage`;
 }
 
-async function main(argv: string[]): Promise<void> {
+function main(argv: string[]): void {
   const args = argv.slice(2);
   const apply = args.includes("--apply");
   const ledgerPath = args.find((a) => !a.startsWith("--")) ?? LEDGER_FILE;
@@ -278,29 +315,30 @@ async function main(argv: string[]): Promise<void> {
   }
   const ledgerMarkdown = readFileSync(ledgerPath, "utf-8");
 
-  let openItems: BacklogItemRow[];
+  // Dedup + saturation read. A failed read MUST NOT hard-abort the run into a
+  // process.exit(1) that reads as "filed nothing because nothing was eligible"
+  // (the old /api/backlog-404 failure mode that hid this bug for weeks). It
+  // fails CLOSED — emit nothing, because filing without dedup risks
+  // duplicates — but reports the degradation on stdout as a distinguishable
+  // reason first, never as the silence that reads as "nothing was eligible".
+  let openTitles: string[];
   try {
-    openItems = await readOpenWireOrRetireItems();
+    openTitles = readOpenWireOrRetireItemTitles();
   } catch (err) {
-    console.error(
-      "hydra-target-wire-or-retire-emit: failed to read the target backlog — aborting (cannot dedup or check saturation safely):",
-      err instanceof Error ? err.message : String(err),
+    console.log(
+      `hydra-target-wire-or-retire-emit: DEGRADED — could not read open wire-or-retire issues for dedup/saturation (${err instanceof Error ? err.message : String(err)}); emitting nothing this run (fail closed — filing without dedup would risk duplicates).`,
     );
-    process.exit(1);
+    return;
   }
 
-  if (openItems.length > WIRE_OR_RETIRE_SATURATION_CAP) {
+  if (openTitles.length > WIRE_OR_RETIRE_SATURATION_CAP) {
     console.log(
-      `hydra-target-wire-or-retire-emit: board saturated (${openItems.length} open wire-or-retire items > ${WIRE_OR_RETIRE_SATURATION_CAP} cap) — emitting nothing.`,
+      `hydra-target-wire-or-retire-emit: board saturated (${openTitles.length} open wire-or-retire items > ${WIRE_OR_RETIRE_SATURATION_CAP} cap) — emitting nothing.`,
     );
     return;
   }
 
   const isoDate = new Date().toISOString().slice(0, 10);
-  const openTitles = openItems
-    .map((i) => (typeof i.title === "string" ? i.title : ""))
-    .filter(Boolean);
-
   const plan = planWireOrRetireEmit(ledgerMarkdown, openTitles, isoDate);
 
   console.log(
@@ -319,8 +357,14 @@ async function main(argv: string[]): Promise<void> {
       console.log(item.body.replace(/^/gm, "  "));
       console.log("");
     } else {
-      const outcome = await createTriageItem(item.title, item.body);
-      console.log(`  ✓ ${outcome}`);
+      try {
+        const outcome = createTriageIssue(item.title, item.body);
+        console.log(`  ✓ ${outcome}`);
+      } catch (err) {
+        console.error(
+          `  ✗ filing failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
@@ -330,11 +374,11 @@ async function main(argv: string[]): Promise<void> {
 
   if (!apply) {
     console.log("");
-    console.log("(dry-run; no backlog items created — pass --apply to file them)");
+    console.log("(dry-run; no issues created — pass --apply to file them on GitHub)");
   }
 }
 
 // Only run when executed directly (not when imported by the test).
 if (import.meta.url === `file://${process.argv[1]}`) {
-  void main(process.argv);
+  main(process.argv);
 }
