@@ -145,8 +145,13 @@ If still no PR → comment on issue and stop.
 The fixed point for the diff is **the PR's base ref at the time QA runs** — typically `origin/master`. Pin it explicitly so both sub-agents diff against the same commit:
 
 ```bash
-FIXED_POINT=$(gh pr view $pr_number --repo gaberoo322/hydra \
-  --json baseRefName --jq '.baseRefName')
+PR_VIEW_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
+  --json baseRefName,mergeStateStatus)
+FIXED_POINT=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.baseRefName')
+# mergeStateStatus (DIRTY ⇒ defer) is read by the reviewer admission gate at
+# step 6.6 — fetched here in the SAME gh pr view call, so the gate adds no new
+# state surface (INV-G: no new Redis key / label / CI check / API endpoint).
+MERGE_STATE_STATUS=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.mergeStateStatus // ""')
 # Resolve to a SHA so a concurrent push to master doesn't shift the diff under us.
 git fetch origin "$FIXED_POINT"
 FIXED_SHA=$(git rev-parse "origin/${FIXED_POINT}")
@@ -304,6 +309,101 @@ fi
 
 - `ADVERSARIAL=0` → T1/T2: one standard pass (the single Standards + Spec fan-out, step 7 as written).
 - `ADVERSARIAL=1` → T3/T4: the two-reviewer refutation fan-out (step 7's T3 branch).
+
+### 6.6 Reviewer admission gate — skip the fan-out when no reviewer can change the verdict (issue #3815)
+
+Before spawning any reviewer, ask the one question that justifies the fan-out's
+cost: **can a reviewer's output still change the emitted verdict on this pass?**
+If not, the entire 2-4-agent fan-out (the second-largest token consumer in the
+system) is dead work. The gate is a **derivation of the verdict fold in
+`scripts/ci/qa-verdict.ts`, never an independent policy** (INV-A): it skips
+reviewers ONLY where `classifyVerdict` / `aggregateAdversarialReview` provably
+make their output moot. It changes no verdict literal, no merge semantic, and
+`decide.py`'s `should_auto_merge()` (INV-D); it never reduces T4 depth (INV-B);
+it fail-closes to full depth on every unknown (INV-E).
+
+The gate reads only data already in hand — `CHECKS_JSON` (step 5), the tier
+(step 6.5), and `MERGE_STATE_STATUS` (the one field added to step 3's existing
+`gh pr view` call — no new Redis key, label, CI check, or API endpoint, INV-G) —
+and returns one of three actions:
+
+- **`admit`** → run the full fan-out at step 7 (the common path: every clean,
+  green PR).
+- **`defer`** → a non-reviewable blocker makes the verdict moot this pass:
+  `mergeStateStatus == DIRTY` (a merge conflict — the diff under review is not
+  the diff that will merge), OR a T4 PR with a required check already failed
+  (T4 may only be deferred, never depth-reduced — INV-B). **No verdict emitted.**
+- **`skip-required-failed`** → a required CI check has already concluded failure
+  on a T1/T2/T3 PR; `classifyVerdict` returns `FAIL` regardless of the review, so
+  the review is moot. The gate carries the `FAIL` verdict the fold already
+  determined (a skipped review never yields PASS — INV-D).
+
+```bash
+# PR_TIER is the string from step 6.5 ("" when the classifier was unreachable).
+# The predicate fail-closes to admit on a null tier / unknown mergeState (INV-E).
+PR_TIER_NUM=$(printf '%s' "$PR_TIER" | jq -r 'tonumber? // empty' 2>/dev/null || true)
+GATE_JSON=$(CHECKS_JSON="$CHECKS_JSON" MERGE_STATE_STATUS="$MERGE_STATE_STATUS" \
+  PR_TIER_NUM="$PR_TIER_NUM" node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({decideReviewAdmission}) => {
+    const tier = process.env.PR_TIER_NUM === '' ? null : Number(process.env.PR_TIER_NUM);
+    const d = decideReviewAdmission({
+      checks: JSON.parse(process.env.CHECKS_JSON),
+      mergeStateStatus: process.env.MERGE_STATE_STATUS,
+      tier,
+    });
+    process.stdout.write(JSON.stringify(d));
+  });
+")
+GATE_ACTION=$(printf '%s' "$GATE_JSON" | jq -r '.action')
+GATE_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.reason')
+```
+
+**Route on `GATE_ACTION`:**
+
+- **`admit`** — proceed to step 7 (the full fan-out). Nothing is skipped.
+
+- **`defer`** — the PR cannot merge on this pass. Post a comment and bounce to a
+  dev agent via the universal remediation loop. **Do NOT leave `needs-qa` in
+  place** — that busy-loops `hydra-qa` every autopilot tick, 30-65k tokens each
+  (issue #974); `ready-for-agent` is the bridging label that also avoids the
+  label-less orphan gap (issue #3788). A deferred PR is, by construction, one
+  that cannot merge on this pass, so INV-C holds: every PR that reaches
+  auto-merge has been reviewed at full depth.
+  ```bash
+  gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — review deferred*
+
+  ${GATE_REASON}
+
+  No verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready."
+  gh issue edit $issue_number --repo gaberoo322/hydra \
+    --remove-label "needs-qa" --add-label "ready-for-agent" 2>/dev/null \
+    || echo "WARN: failed to re-label issue #${issue_number} on defer (non-fatal)"
+  exit 0
+  ```
+
+- **`skip-required-failed`** (T1/T2/T3 only — T4 routes to `defer`) — the review
+  is moot because a required check already failed. Compute the FAIL verdict the
+  fold already determines and follow the normal step-10 FAIL routing, spawning
+  **zero** reviewers. Set a nominal review verdict (the classifier ignores it
+  when `requiredFailed > 0`) and compute `VERDICT` / `VERDICT_REASON` /
+  `CHECKS_BLOCK` here, then jump to step 10's FAIL routing for T1/T2/T3 — skip
+  step 7 (no spawn), 7.5, 8, and 9 entirely:
+  ```bash
+  REVIEW_VERDICT="PASS"   # nominal — classifyVerdict ignores it when requiredFailed > 0
+  REVIEW_REPORT="_Review skipped by the admission gate (issue #3815): a required CI check already failed, so the review verdict cannot change the FAIL \`classifyVerdict\` returns regardless of the reviewers' finding._"
+  node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderChecksBlock}) => {
+    const r = classifyVerdict(process.env.REVIEW_VERDICT, JSON.parse(process.env.CHECKS_JSON));
+    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderChecksBlock(r)}));
+  });
+  " > /tmp/qa-verdict.json
+  VERDICT=$(jq -r '.verdict' /tmp/qa-verdict.json)
+  VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
+  CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
+  # VERDICT is FAIL. Skip to step 10's FAIL routing for T1/T2/T3 — do not spawn reviewers.
+  ```
+  This reuses the existing classifier and FAIL routing unchanged — the gate only
+  declines to spawn the reviewers whose output is provably moot (INV-A/INV-D).
 
 ### 7. Spawn the review sub-agents in parallel (single message, all Agent calls)
 

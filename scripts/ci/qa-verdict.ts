@@ -312,6 +312,153 @@ export function aggregateAdversarialReview(
 }
 
 /**
+ * Reviewer Admission Gate (issue #3815 — reduce the cost of the adversarial
+ * fan-out). Pure, no fs/network — co-located with the fold it derives from so
+ * the two cannot silently desync (INV-A: the gate is a derivation of the
+ * verdict fold, never an independent policy).
+ *
+ * The T3/T4 fan-out (step 7 of the playbook) spawns 2-4 reviewer sub-agents and
+ * is the second-largest token consumer in the system. In two situations a
+ * reviewer's output PROVABLY cannot change the emitted verdict, so the entire
+ * fan-out is dead work paid for in tokens:
+ *
+ *   A2 — `mergeStateStatus == DIRTY` (a merge conflict): the diff under review
+ *        is not the diff that will merge, so any verdict computed over it is
+ *        about a commit that cannot land. Defer (route to rebase); spawn zero
+ *        reviewers.
+ *   A1 — a required CI check has already concluded failure: `classifyVerdict`'s
+ *        second branch returns `FAIL` on `requiredFailed > 0` for BOTH
+ *        `reviewVerdict` values, so no reviewer output can alter it. For T1/T2/T3
+ *        emit that FAIL and skip the fan-out; for T4 defer (INV-B — the gate may
+ *        only DEFER a T4 review, never reduce its depth, because the T4 deep-QA
+ *        routing needs a real review verdict the skip would not produce).
+ *
+ * `BLOCKED` is deliberately NOT a trigger (a reviewer's verdict IS load-bearing
+ * there — `BLOCKED` covers "required checks still pending", where
+ * `classifyVerdict` returns `PASS-pending-CI`, a verdict that still requires a
+ * real review input). Only `DIRTY` and `requiredFailed > 0` are verdict-invariant
+ * under the current fold.
+ *
+ * INV-E (fail-closed on every unknown): an unreachable tier classifier
+ * (`tier === null`), or an unknown/absent `mergeStateStatus`, always ADMITS —
+ * ambiguity buys MORE review, never less, mirroring the playbook's existing
+ * `ADVERSARIAL=1`-on-empty-`PR_TIER` default.
+ *
+ * The caller (the playbook) is responsible for the routing: `admit` runs the
+ * full fan-out; `defer` and `skip-required-failed` both strip `needs-qa` and
+ * bounce to `ready-for-agent` (so the universal remediation loop re-queues QA
+ * once the PR is rebased / CI is green — leaving `needs-qa` in place would
+ * busy-loop hydra-qa every autopilot tick, issue #974). A deferred/skipped PR
+ * is one that cannot merge on this pass, so INV-C holds by construction: every
+ * PR that reaches auto-merge has been reviewed at full depth.
+ *
+ * This helper changes neither the verdict literal `decide.py` consumes nor the
+ * `aggregateAdversarialReview` / `classifyVerdict` folds — it only declines to
+ * spawn reviewers whose output is provably moot (INV-D).
+ */
+export type ReviewAdmissionAction = "admit" | "defer" | "skip-required-failed";
+
+export interface ReviewAdmissionInput {
+  checks: CheckState[];
+  /**
+   * Raw `gh pr view --json mergeStateStatus` value. GitHub returns one of
+   * BEHIND / BLOCKED / CLEAN / DIRTY / HAS_HOOKS / UNSTABLE / UNKNOWN. Matched
+   * case-insensitively; "" / "UNKNOWN" / nullish ⇒ fail-closed admit (INV-E).
+   */
+  mergeStateStatus: string;
+  /**
+   * PR Modification Tier (1-4) from `GET /api/tier` — the single tier authority.
+   * `null` ⇒ the classifier was unreachable; fail-closed admit (INV-E).
+   */
+  tier: number | null;
+}
+
+export interface ReviewAdmissionDecision {
+  action: ReviewAdmissionAction;
+  /** Human-readable reason for the QA report / PR comment. */
+  reason: string;
+  /**
+   * Present only for `skip-required-failed`: the single `FAIL` verdict the fold
+   * already determined. The admission gate NEVER carries `PASS` — a skipped
+   * review never yields PASS (INV-D).
+   */
+  verdict?: "FAIL";
+}
+
+/**
+ * Decide whether the reviewer fan-out should launch at all. A derivation of the
+ * verdict fold in this file, not an independent policy (INV-A): `requiredFailed`
+ * is read from `classifyVerdict`'s own summary so the gate and the fold cannot
+ * disagree about when a review is moot.
+ *
+ * @param input checks (the step-5 `statusCheckRollup`), the PR's
+ *   `mergeStateStatus`, and its Modification Tier.
+ */
+export function decideReviewAdmission(
+  input: ReviewAdmissionInput,
+): ReviewAdmissionDecision {
+  const { checks, mergeStateStatus, tier } = input;
+
+  // INV-E — fail-closed on every unknown: full depth (admit) when we cannot
+  // confirm the tier or the merge state. Never skip on missing data.
+  const tierKnown = typeof tier === "number" && !Number.isNaN(tier);
+  const ms =
+    typeof mergeStateStatus === "string" ? mergeStateStatus.trim().toUpperCase() : "";
+  const mergeStateKnown = ms !== "" && ms !== "UNKNOWN";
+  if (!tierKnown || !mergeStateKnown) {
+    return {
+      action: "admit",
+      reason:
+        "Admission gate fail-closed: tier or mergeStateStatus unknown — running the full fan-out (ambiguity buys more review, never less).",
+    };
+  }
+
+  // A2 — merge conflict (DIRTY). The diff under review is not the diff that
+  // will merge, so a verdict over it is moot. Defer to a rebase. All tiers; for
+  // T4 this is a DEFER (never a depth reduction), satisfying INV-B.
+  if (ms === "DIRTY") {
+    return {
+      action: "defer",
+      reason:
+        "PR has a merge conflict (mergeStateStatus DIRTY) — the diff under review is not the diff that will merge. Deferring until the PR is rebased; the full review runs once it is clean.",
+    };
+  }
+
+  // A1 — a required check has already concluded failure. Read the count from
+  // classifyVerdict's own summary: when requiredFailed > 0, classifyVerdict
+  // returns FAIL for BOTH review verdicts, so the fan-out is provably dead work
+  // (INV-A). The executable property is pinned in the regression test.
+  const requiredFailed = classifyVerdict("PASS", checks).summary.requiredFailed;
+  if (requiredFailed > 0) {
+    if (tier === 4) {
+      // INV-B — the gate can only DEFER a T4 review. decideDeepQaAction needs a
+      // real review verdict; skipping the fan-out would leave none, so defer
+      // until CI concludes and the full Verifier-Core fan-out can run.
+      return {
+        action: "defer",
+        reason:
+          "T4 PR with a required CI check already failed — deferring until CI concludes, then the full Verifier-Core fan-out runs (INV-B: a T4 review is only ever deferred, never depth-reduced).",
+      };
+    }
+    return {
+      action: "skip-required-failed",
+      reason:
+        "A required CI check already failed — the review verdict cannot change the FAIL classifyVerdict returns regardless of the reviewers' finding (INV-A), so the fan-out is skipped.",
+      verdict: "FAIL",
+    };
+  }
+
+  // Every other state (CLEAN / BLOCKED / BEHIND / UNSTABLE / HAS_HOOKS with no
+  // required failure): a reviewer's verdict can still change the outcome
+  // (BLOCKED covers pending required checks → PASS-pending-CI, which requires a
+  // real review). Run the full fan-out.
+  return {
+    action: "admit",
+    reason: "Reviewer output may change the verdict — running the full fan-out.",
+  };
+}
+
+/**
  * T4 Deep-QA Remediation Loop (issue #740, ADR-0015).
  *
  * T4 inherits the full T3 adversarial depth (the two-reviewer refutation
