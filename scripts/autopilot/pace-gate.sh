@@ -102,6 +102,24 @@
 #       Override the eligibility endpoint URL (default
 #       http://localhost:4000/api/usage/eligibility) so the test can point
 #       at a local fixture server.
+#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT
+#       Same contract as scripts/autopilot/hooks/on-subagent-stop.sh:
+#       HYDRA_REDIS_HOST defaults to "docker" (shell into hydra-redis-1 via
+#       `docker exec`); any other value calls `redis-cli -h $HOST -p $PORT`
+#       directly, letting the test inject an unreachable host to verify the
+#       best-effort record write never blocks a launch.
+#
+# Per-tick durable record (issue #3845, epic #3844)
+# --------------------------------------------------
+# Every tick — timer or exec mode, launch or skip — writes a best-effort
+# snapshot of its own outcome to `hydra:autopilot:pace-gate:last-tick`
+# (HSET reason/class/at/latency_ms; owned in TypeScript by
+# src/redis/launch-flow.ts, cross-checked against the literal below by
+# test/launch-flow-key-contract.test.mts). This is a DURABLE record — no
+# TTL, always reflecting the most recent tick — that a later reader
+# (a chore, a dashboard) can join against instead of tailing the journal.
+# See `record_tick()` below for why this write, uniquely among every other
+# dependency in this file, is allowed to fail silently.
 #
 # Source of truth: this file in the repo at scripts/autopilot/pace-gate.sh.
 # Deployed to ~/.local/bin/ by scripts/deploy.sh.
@@ -111,6 +129,12 @@ set -euo pipefail
 SERVICE="hydra-autopilot.service"
 STATE_PATH="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
 ELIGIBILITY_URL="${HYDRA_PACE_GATE_ELIGIBILITY_URL:-http://localhost:4000/api/usage/eligibility}"
+REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+# Single source of truth for this literal is cross-checked against the
+# exported PACE_GATE_LAST_TICK_KEY constant in src/redis/launch-flow.ts by
+# test/launch-flow-key-contract.test.mts — keep the two in lockstep.
+LAST_TICK_KEY="hydra:autopilot:pace-gate:last-tick"
 
 # Mode: "timer" (default — the ~15-min admission timer; launches the unit) or
 # "exec" (--exec-autopilot — the unit's ExecStart wrapper; execs the CLI).
@@ -121,6 +145,54 @@ fi
 
 log() {
   echo "hydra-pace-gate: $*"
+}
+
+# record_tick REASON CLASS [LATENCY_MS] — best-effort durable per-tick record
+# (issue #3845). Writes hydra:autopilot:pace-gate:last-tick via the SAME
+# docker-exec redis-cli pattern scripts/autopilot/hooks/on-subagent-stop.sh
+# uses (HYDRA_REDIS_HOST defaulting to "docker"; any other value calls
+# `redis-cli -h $HOST -p $PORT`).
+#
+# WHY THIS IS THE ONE DEPENDENCY IN THIS FILE ALLOWED TO FAIL SILENTLY:
+# every other check above and below (curl, jq, the eligibility HTTP call,
+# a parseable response) intentionally fails SAFE by skipping the launch —
+# because the launcher is the ONE thing standing between the operator and
+# burning quota while blind to usage. This record write is the opposite
+# shape of risk: it is pure OBSERVABILITY, downstream of a verdict that has
+# ALREADY been decided by the time this function runs. If docker/Redis is
+# down, the correct behavior is "launch (or skip) exactly as if this
+# function didn't exist" — NOT "fail safe by skipping the launch", which
+# would let a Redis hiccup silently stop autopilot dispatch. Hence `|| true`
+# on the call site below: a write failure is swallowed (not even logged to
+# stdout, to keep the common-path log quiet — mirrors on-subagent-stop.sh's
+# own best-effort stance) and the caller's exit code is never touched.
+# DO NOT "fix" this by making it fail-safe like its neighbours.
+record_tick() {
+  local reason="$1" class="$2" latency_ms="${3:-}"
+  local now_ms
+  now_ms="$(date +%s%3N 2>/dev/null || echo "")"
+  [[ -n "$now_ms" ]] || return 0
+  # `|| true` on BOTH branches (belt-and-braces alongside the `|| true` every
+  # call site appends): this is the deliberate INVERSE of every other
+  # dependency check in this file — see the block comment above. A
+  # docker/Redis failure here must NEVER propagate as a non-zero return,
+  # which under `set -euo pipefail` would otherwise abort the tick.
+  if [[ "$REDIS_HOST" == "docker" ]]; then
+    docker exec hydra-redis-1 redis-cli \
+      HSET "$LAST_TICK_KEY" \
+      reason "$reason" \
+      class "$class" \
+      at "$now_ms" \
+      latency_ms "$latency_ms" >/dev/null 2>&1 || true
+  else
+    redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" \
+      HSET "$LAST_TICK_KEY" \
+      reason "$reason" \
+      class "$class" \
+      at "$now_ms" \
+      latency_ms "$latency_ms" >/dev/null 2>&1 || true
+  fi
+  return 0
 }
 
 if [[ "$MODE" == "exec" ]]; then
@@ -141,6 +213,7 @@ fi
 if [[ "$MODE" != "exec" && "${HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE:-0}" != "1" ]] \
   && systemctl --user is-active --quiet "$SERVICE"; then
   log "already running ($SERVICE active); skipping"
+  record_tick "already-running-service" "already-running" || true
   exit 0
 fi
 
@@ -148,6 +221,7 @@ if [[ -f "$STATE_PATH" ]] && command -v jq >/dev/null 2>&1; then
   PID=$(jq -r '.pid // 0' "$STATE_PATH" 2>/dev/null || echo "0")
   if [[ -n "$PID" && "$PID" != "0" && "$PID" != "null" ]] && kill -0 "$PID" 2>/dev/null; then
     log "already running (state PID $PID alive); skipping"
+    record_tick "already-running-pid" "already-running" || true
     exit 0
   fi
 fi
@@ -158,18 +232,38 @@ fi
 # the governor and we will not burn quota while blind to usage.
 if ! command -v curl >/dev/null 2>&1; then
   log "WARN curl not found; cannot consult eligibility — failing safe (not launching)"
+  record_tick "curl-missing" "fail-safe" || true
   exit 0
 fi
 if ! command -v jq >/dev/null 2>&1; then
   log "WARN jq not found; cannot parse eligibility — failing safe (not launching)"
+  record_tick "jq-missing" "fail-safe" || true
   exit 0
 fi
 
+# Issue #3845: capture the probe's round-trip time as latency_ms WITHOUT any
+# extra HTTP request. `-w '%{time_total}'` writes ONLY the timing metric to
+# stdout (captured below); `-o "$CURL_BODY_FILE"` routes the JSON body to a
+# temp file instead of stdout, so the two never collide in one $(...)
+# capture. LATENCY_MS stays empty for every exit above this line (the tick
+# never reached the probe) and every exit below it if the probe itself
+# fails (no completed round-trip to time).
+LATENCY_MS=""
+CURL_BODY_FILE="$(mktemp)"
 ELIGIBILITY_JSON=""
-if ! ELIGIBILITY_JSON=$(curl -fsS --max-time 10 "$ELIGIBILITY_URL" 2>/dev/null); then
+if ! PROBE_TIME_TOTAL=$(curl -fsS --max-time 10 -w '%{time_total}' -o "$CURL_BODY_FILE" "$ELIGIBILITY_URL" 2>/dev/null); then
+  rm -f "$CURL_BODY_FILE"
   log "WARN eligibility endpoint unreachable ($ELIGIBILITY_URL) — failing safe (not launching)"
+  record_tick "eligibility-unreachable" "fail-safe" || true
   exit 0
 fi
+ELIGIBILITY_JSON="$(cat "$CURL_BODY_FILE" 2>/dev/null || echo "")"
+rm -f "$CURL_BODY_FILE"
+# %{time_total} is seconds with fractional precision (e.g. "0.045123");
+# awk converts to an integer millisecond count. A malformed metric (should
+# never happen — curl always emits it on a completed request) leaves
+# LATENCY_MS empty rather than recording garbage.
+LATENCY_MS="$(awk -v t="$PROBE_TIME_TOTAL" 'BEGIN { printf "%d", (t + 0) * 1000 }' 2>/dev/null || echo "")"
 
 EMERGENCY_STOP=$(jq -r '.reasons.emergencyStop // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 PACE_STATE=$(jq -r '.paceState // "unknown"' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
@@ -177,6 +271,18 @@ PACE_STATE=$(jq -r '.paceState // "unknown"' <<<"$ELIGIBILITY_JSON" 2>/dev/null 
 # overlays `.reasons.paused` from the Redis pause flag. When set, skip the
 # launch entirely (no throwaway run spawned) — the operator paused autopilot.
 PAUSED=$(jq -r '.reasons.paused // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #3845 (epic #3844, decided in #3809's resolution addendum): the route
+# overlays `.reasons.meterUnavailable` (true once #3821's sustained-failure
+# gate trips — 3+ consecutive OAuth-meter read failures) when the usage
+# meter itself cannot be read. Before this the script never parsed this
+# field, so a meter-dark block fell through to the generic `.allow == false`
+# backstop below and was recorded (in the pre-#3845 world, only as a log
+# line) as an indistinguishable "deliberate skip" — the exact
+# green-everything-no-alarm shape #3844 exists to close. Parsed as its own
+# field, sibling to PAUSED above, so it gets its own reason-specific arm
+# (and therefore its own distinct `reason` in the last-tick record) instead
+# of being folded into the generic `allow-false` reason.
+METER_UNAVAILABLE=$(jq -r '.reasons.meterUnavailable // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 # Issue #1089: session-limit hard block. The route overlays
 # `.reasons.sessionBlockedUntil` (ISO-8601) when the autopilot last exited with
 # `You've hit your session limit · resets <t>` and that reset is still in the
@@ -212,8 +318,9 @@ WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/
 # field => "null", garbage, parse failure) fails safe.
 ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
+  record_tick "eligibility-unparseable" "fail-safe" "$LATENCY_MS" || true
   exit 0
 fi
 
@@ -222,6 +329,7 @@ fi
 # so there is no version-skew window — extend the parse-error stance.
 if [[ "$ALLOW" != "true" && "$ALLOW" != "false" ]]; then
   log "WARN eligibility .allow missing or non-boolean (got '$ALLOW') — failing safe (not launching)"
+  record_tick "allow-invalid" "fail-safe" "$LATENCY_MS" || true
   exit 0
 fi
 
@@ -229,6 +337,7 @@ fi
 # Issue #988: operator pause is the most authoritative skip — check it first.
 if [[ "$PAUSED" == "true" ]]; then
   log "autopilot paused (operator) — skip"
+  record_tick "paused" "deliberate-skip" "$LATENCY_MS" || true
   exit 0
 fi
 
@@ -241,12 +350,14 @@ if [[ -n "$SESSION_BLOCKED_UNTIL" ]]; then
   NOW_EPOCH=$(date -u +%s)
   if [[ -n "$BLOCK_EPOCH" && "$BLOCK_EPOCH" -gt "$NOW_EPOCH" ]]; then
     log "session-limit block until $SESSION_BLOCKED_UNTIL — skip (exhausted session quota)"
+    record_tick "session-blocked" "deliberate-skip" "$LATENCY_MS" || true
     exit 0
   fi
 fi
 
 if [[ "$EMERGENCY_STOP" == "true" ]]; then
   log "5h emergencyStop — pausing (skip)"
+  record_tick "emergency-stop" "deliberate-skip" "$LATENCY_MS" || true
   exit 0
 fi
 
@@ -254,6 +365,24 @@ fi
 # in front of the authoritative catch-all below.
 if [[ "$WEEKLY_EMERGENCY_STOP" == "true" ]]; then
   log "weekly emergencyStop (7-day window exhausted) — skip until weekly reset"
+  record_tick "weekly-emergency-stop" "deliberate-skip" "$LATENCY_MS" || true
+  exit 0
+fi
+
+# Issue #3845 (epic #3844): meter-dark block. Reason-specific arm — SAME
+# position in the ordering as the other reason-specific arms above (ahead of
+# the generic allow-false catch-all) so a meter-dark tick records its own
+# `meter-unavailable` reason instead of being swallowed by the catch-all's
+# generic `allow-false`. Classified `fail-safe` (not `deliberate-skip`): per
+# #3809's resolution addendum this signal's CHARACTER is "defective" like
+# the true fail-safe exits above — "I read the verdict and the brake is on
+# because it [the usage meter] cannot see" — even though the verdict itself
+# WAS readable (so it does not belong in the literal fail-safe exit list
+# either). The downstream detector (out of scope here; see #3844's other
+# child tickets) is the consumer that turns this reason into an alarm.
+if [[ "$METER_UNAVAILABLE" == "true" ]]; then
+  log "usage meter unavailable (reasons.meterUnavailable) — skip (brake cannot see; #3845)"
+  record_tick "meter-unavailable" "fail-safe" "$LATENCY_MS" || true
   exit 0
 fi
 
@@ -265,6 +394,7 @@ fi
 if [[ "$ALLOW" == "false" ]]; then
   REASONS_JSON=$(jq -c '.reasons // {}' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "{}")
   log "eligibility allow=false — skip (reasons: $REASONS_JSON)"
+  record_tick "allow-false" "deliberate-skip" "$LATENCY_MS" || true
   exit 0
 fi
 
@@ -273,6 +403,7 @@ fi
 # CANNOT be folded into the .allow check above.
 if [[ "$PACE_STATE" == "ahead" ]]; then
   log "ahead of pacing curve — pausing (skip)"
+  record_tick "pace-ahead" "deliberate-skip" "$LATENCY_MS" || true
   exit 0
 fi
 
@@ -290,6 +421,7 @@ if [[ -n "$WORKLESS_UNTIL" ]]; then
   NOW_EPOCH=$(date -u +%s)
   if [[ -n "$WORKLESS_EPOCH" && "$WORKLESS_EPOCH" -gt "$NOW_EPOCH" ]]; then
     log "workless-board backoff until $WORKLESS_UNTIL — skip (last run idle with zero dispatches, #2956)"
+    record_tick "workless-backoff" "deliberate-skip" "$LATENCY_MS" || true
     exit 0
   fi
 fi
@@ -310,8 +442,13 @@ if [[ "$MODE" == "exec" ]]; then
 
   if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then
     log "would-exec autopilot session (DRY_RUN=1, test mode)"
+    record_tick "eligible-exec" "launch" "$LATENCY_MS" || true
     exit 0
   fi
+
+  # Issue #3845: record BEFORE exec — exec replaces this shell's process
+  # image, so any statement after either exec call below would never run.
+  record_tick "eligible-exec" "launch" "$LATENCY_MS" || true
 
   if [[ -n "${HYDRA_PACE_GATE_EXEC_CMD:-}" ]]; then
     # Test-only hook: intentional word-split so the test can pass a full
@@ -331,10 +468,12 @@ log "eligible (paceState=$PACE_STATE, emergencyStop=$EMERGENCY_STOP) — launchi
 
 if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then
   log "would-start $SERVICE (DRY_RUN=1, test mode)"
+  record_tick "eligible-launch" "launch" "$LATENCY_MS" || true
   exit 0
 fi
 
 systemctl --user start "$SERVICE"
 log "launched $SERVICE"
+record_tick "eligible-launch" "launch" "$LATENCY_MS" || true
 
 exit 0
