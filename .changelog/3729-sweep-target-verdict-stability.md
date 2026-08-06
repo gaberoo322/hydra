@@ -1,0 +1,1 @@
+- fix: per-item verdict-stability guard on sweep_target stops re-dispatching freshly-triaged Target items every 900s (#3729)

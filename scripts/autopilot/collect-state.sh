@@ -927,7 +927,7 @@ TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
 # silent failure at 100 instead of 30: breaching the page size becomes loud.
 TARGET_BOARD_ISSUES_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open \
   --limit "$GH_ISSUE_LIST_LIMIT" \
-  --json number,labels --jq '[ .[] | { labels: (.labels | map(.name)) } ]' 2>/dev/null || echo '')
+  --json number,labels --jq '[ .[] | { number: .number, labels: (.labels | map(.name)) } ]' 2>/dev/null || echo '')
 if [ -n "$TARGET_BOARD_ISSUES_JSON" ]; then
   echo "target_board_signals_degraded=false"
   printf '%s' "$TARGET_BOARD_ISSUES_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
@@ -951,6 +951,7 @@ try:
   # Lane->label mapping (ADR-0031): triage lane == needs-triage,
   # queued lane == ready-for-agent (all rows here are already open == not-done).
   triage_count = 0
+  triage_item_numbers = []
   queued_count = 0
   open_scan = 0
   open_design_qa = 0
@@ -962,6 +963,15 @@ try:
     in_triage = 'needs-triage' in labels
     if in_triage:
       triage_count += 1
+      # Issue #3729 — emit the needs-triage item NUMBER set as a fresh per-turn
+      # fact so decide.py's per-item verdict-stability guard can stamp each item
+      # independently. collect-state.sh stays stateless (no state.json read); it
+      # only enumerates the current set, mirroring its existing role for the
+      # target_needs_triage COUNT. Numbers are sorted ascending for a deterministic
+      # emit (decide.py parses them into a set, so order is not load-bearing).
+      num = row.get('number')
+      if isinstance(num, int):
+        triage_item_numbers.append(num)
     if 'ready-for-agent' in labels:
       queued_count += 1
     if scan_label in labels:
@@ -983,6 +993,12 @@ try:
   # every count below is a floor, not a total. Never gates dispatch.
   limit = int(os.environ.get('GH_ISSUE_LIST_LIMIT', '100') or 100)
   print('target_board_signals_truncated=' + ('true' if len(rows) >= limit else 'false'))
+  # Issue #3729 — the per-item needs-triage set. Empty when the lane is empty.
+  # The playbook merges this verbatim into state.signals.target_needs_triage_items
+  # (the same verbatim-string seam as wayfinder_orch_frontier); decide.py parses
+  # it into a set of ints. A degraded read (the else branch below) emits an empty
+  # value, which decide.py treats as absent → fail-open on the coarse count.
+  print('target_needs_triage_items=' + ' '.join(str(n) for n in sorted(set(triage_item_numbers))))
   print('target_backfill_idle=' + ('true' if idle else 'false'))
   print('target_cleanup_board_open_scan=' + str(open_scan))
   print('target_cleanup_board_saturated=' + ('true' if open_scan > cap else 'false'))
@@ -993,6 +1009,7 @@ try:
   print('design_qa_target_due=' + ('false' if dqa_saturated else 'true'))
 except Exception:
   print('target_board_signals_truncated=false')
+  print('target_needs_triage_items=')
   print('target_backfill_idle=false')
   print('target_cleanup_board_open_scan=0')
   print('target_cleanup_board_saturated=true')
@@ -1001,7 +1018,7 @@ except Exception:
   print('design_qa_target_open=0')
   print('design_qa_target_saturated=true')
   print('design_qa_target_due=false')
-" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
+" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_needs_triage_items="; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
 else
   # Fail closed AND observable: the board read was unreachable/empty, so emit
   # the suppressing defaults (never dispatch a scan/resolver that cannot read
@@ -1010,6 +1027,7 @@ else
   # Emitted in BOTH branches so decide.py never sees a missing key. A read that
   # never happened is not a truncated read — it is a degraded one.
   echo "target_board_signals_truncated=false"
+  echo "target_needs_triage_items="
   echo "target_backfill_idle=false"
   echo "target_cleanup_board_open_scan=0"
   echo "target_cleanup_board_saturated=true"
