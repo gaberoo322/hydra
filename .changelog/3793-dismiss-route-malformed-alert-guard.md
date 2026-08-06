@@ -1,0 +1,1 @@
+- fix: guard `POST /alerts/:id/dismiss` against a single malformed alert-list entry so it skips-and-logs instead of 500ing the whole dismiss request (#3793)
