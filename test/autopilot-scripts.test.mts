@@ -1536,6 +1536,159 @@ describe("scripts/autopilot/term-check.py", () => {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
+
+  // Issue #3787 — periodic session-restart cadence. Mirrors decide.py's
+  // `_check_termination` context_compaction branch (same default of 8,
+  // same `state.limits.context_compaction_turns` key, same "checked last /
+  // not gated on slots_occupied" semantics) — this is term-check.py's
+  // Phase-3 fast pre-check duplicate of that same comparison.
+  test("prints TERM:context_compaction when turn reaches the configured cadence", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, {
+        turn: 8,
+        limits: {
+          token_budget: 2000000,
+          wall_clock_max_sec: 28800,
+          idle_drain_turns: 5,
+          context_compaction_turns: 8,
+          scope: "all",
+          subagent_max_tokens: 400000,
+          subagent_hard_max_tokens: 800000,
+        },
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^TERM:context_compaction turn=8 cadence=8/);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does NOT trip context_compaction before the cadence is reached", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, {
+        turn: 7,
+        limits: {
+          token_budget: 2000000,
+          wall_clock_max_sec: 28800,
+          idle_drain_turns: 5,
+          context_compaction_turns: 8,
+          scope: "all",
+          subagent_max_tokens: 400000,
+          subagent_hard_max_tokens: 800000,
+        },
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^OK /);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("defaults context_compaction_turns to 8 when the limits omit it", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, { turn: 8 }); // base writeState() limits carry no override
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^TERM:context_compaction turn=8 cadence=8/);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fires context_compaction even when a slot is occupied (unlike idle)", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, {
+        turn: 8,
+        slots: {
+          dev_orch: { skill: "hydra-dev", started: "now", partial_tokens: 0 },
+          qa_orch: null, research_orch: null,
+          dev_target: null, qa_target: null, research_target: null,
+        },
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^TERM:context_compaction /,
+        "context_compaction must fire regardless of occupied slots");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("budget still outranks context_compaction on the same turn", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, {
+        turn: 8,
+        cumulative_tokens: 2000001,
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^TERM:budget /,
+        "budget must win over context_compaction — checked first in the if/elif chain");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Parity: decide.py and term-check.py must agree on the SAME state.json —
+  // both read `turn` + `limits.context_compaction_turns` identically.
+  test("agrees with decide.py's context_compaction verdict on the same state (parity)", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, {
+        turn: 8,
+        limits: {
+          token_budget: 2000000,
+          wall_clock_max_sec: 28800,
+          idle_drain_turns: 5,
+          context_compaction_turns: 8,
+          scope: "all",
+          subagent_max_tokens: 400000,
+          subagent_hard_max_tokens: 800000,
+        },
+      });
+      const termCheckResult = runTermCheck(tmp.state);
+      assert.match(termCheckResult.stdout, /^TERM:context_compaction /);
+
+      // decide.py's CLI bumps `turn` by 1 before deciding (#1769), so feed it
+      // turn=7 to land on the same turn=8 term-check.py just observed.
+      const decideState = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      decideState.turn = 7;
+      decideState.dispatches = 0;
+      decideState.idle_turns = 0;
+      decideState.burned_classes = [];
+      decideState.reaped_task_ids = [];
+      decideState.signals = {};
+      decideState.research_force_counter = {};
+      decideState.signal_last_fired = {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0, scout_orch: 0,
+      };
+      writeFileSync(tmp.state, JSON.stringify(decideState));
+      const cands = join(tmp.dir, "candidates.json");
+      const events = join(tmp.dir, "events.json");
+      writeFileSync(cands, JSON.stringify(null));
+      writeFileSync(events, JSON.stringify([]));
+      const decideResult = spawnSync(
+        "python3",
+        [join(SCRIPTS, "decide.py"), "decide", tmp.state, cands, events],
+        { encoding: "utf-8", env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" } },
+      );
+      assert.equal(decideResult.status, 0);
+      const plan = JSON.parse(decideResult.stdout);
+      const term = plan.actions.find((a: Record<string, unknown>) => a.type === "terminate");
+      assert.ok(term, "decide.py must also terminate on this state");
+      assert.equal(term.cause, "context_compaction");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("scripts/autopilot/reap.py", () => {

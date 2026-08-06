@@ -74,6 +74,7 @@ Environment=PATH=/home/gabe/.npm-global/bin:/home/gabe/.local/bin:/usr/local/bin
 # Environment=HYDRA_AUTOPILOT_TOKEN_BUDGET=2000000
 # Environment=HYDRA_AUTOPILOT_MAX_SEC=28800
 # Environment=HYDRA_AUTOPILOT_IDLE_TURNS=5
+# Environment=HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS=8
 
 # The skill itself enforces all phase logic; the CLI just stays alive while the
 # model produces tool calls and exits when the session terminates.
@@ -122,6 +123,14 @@ StandardError=journal
 # (non-zero exit) get a single 3-min-delayed retry, which absorbs transient
 # Anthropic API 5xx errors. Sustained failure hits the burst cap and surfaces
 # to the operator via OnFailure=.
+#
+# Issue #3787: `decide.py` also self-terminates cleanly every N Autopilot
+# Turns (default 8, tunable via `state.limits.context_compaction_turns` /
+# HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS above) to reset the parent
+# session's own prompt-cache re-read growth — same `terminate` -> exit-0 ->
+# no-retry path as budget/clock/idle above. The ~15-min Pace Gate timer
+# (hydra-pace-gate.timer) picks the next eligible run back up; this unit
+# does not relaunch itself.
 #
 # Issue #1089: the retry start runs the ExecStart wrapper above, so a relaunch
 # into a blocked window (session-limit, operator pause, ahead-of-curve,
