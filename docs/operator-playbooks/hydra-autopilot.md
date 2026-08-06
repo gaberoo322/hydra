@@ -353,7 +353,7 @@ the table back on the assumption that time alone fixed it.
 
 > **CONTEXT POINTER:** full Phase 6 implementation contracts (cycle-record write, register handoff on auto-merge, token-surrogate write) live in `hydra-autopilot-phase6-ops.md` (sibling of this SKILL.md).
 
-- **Phase 7** — `drain.sh <merged_prs>` (always) + final `hydra-digest` dispatch (end-of-run summary; the morning timer's digest lands around 19:00, the evening timer's around 05:00). **Skip the `hydra-digest` dispatch when the terminate cause was `context_compaction`** (issue #3787) — `drain.sh` still runs unconditionally (free, deterministic FINAL line), but the digest is a real costed `Agent()` call, and at the periodic-restart cadence (default every 8 turns) dispatching it on every restart would multiply that cost several-fold over the natural budget/wall_clock/idle run boundary and fragment the operator-facing summary into many partial per-restart digests. Dispatch it for cause in `{budget, wall_clock, idle, failure_backstop}` as before.
+- **Phase 7** — `drain.sh <merged_prs>` (always) + `hydra-digest` dispatch for cause in `{budget, wall_clock, idle, failure_backstop}`. SKIPPED when cause is `context_compaction` (issue #3787, periodic restart not a run boundary) — dispatching a costed digest every ~8-turn restart would multiply that cost and fragment the summary.
 
 ## Phase 0 schema-version handshake (issue #434)
 
