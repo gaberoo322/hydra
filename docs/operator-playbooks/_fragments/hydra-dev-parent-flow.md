@@ -291,8 +291,15 @@ The skill-side canary is belt-and-braces:
 PRE_GHOST_SNAPSHOT=$(git -C ~/hydra diff --name-only HEAD 2>/dev/null || true)
 # ... dispatch the BG agent ...
 POST_GHOST_SNAPSHOT=$(git -C ~/hydra diff --name-only HEAD 2>/dev/null || true)
-NEW_DIRTY=$(comm -13 <(printf '%s\n' "$PRE_GHOST_SNAPSHOT" | sort -u) \
-                     <(printf '%s\n' "$POST_GHOST_SNAPSHOT" | sort -u))
+# Guard-compatible form (issue #3837): the worktree-isolation Bash guard refuses
+# the original process-substitution form of this diff. Write each snapshot to a
+# temp file and `comm` the two files instead -- identical detection semantics
+# (files in POST not in PRE = newly dirtied in ~/hydra during the dispatch).
+# See "Guard-compatible shell forms" below.
+printf '%s\n' "$PRE_GHOST_SNAPSHOT" | sort -u > /tmp/hydra-ghost-pre.$$
+printf '%s\n' "$POST_GHOST_SNAPSHOT" | sort -u > /tmp/hydra-ghost-post.$$
+NEW_DIRTY=$(comm -13 /tmp/hydra-ghost-pre.$$ /tmp/hydra-ghost-post.$$)
+rm -f /tmp/hydra-ghost-pre.$$ /tmp/hydra-ghost-post.$$
 if [ -n "$NEW_DIRTY" ]; then
   echo "WARN: main tree gained dirty files during this dispatch — likely an issue #549 ghost-write:"
   printf '%s\n' "$NEW_DIRTY"
@@ -339,3 +346,33 @@ curl -fsS -X POST http://localhost:4000/api/memory/subagent-friction \
 ```
 Idempotent on `(skill, cue)`; crossing 3 hits auto-opens a `meta-friction`
 issue. Best-effort — a failed POST does not fail the build.
+
+## Guard-compatible shell forms (issue #3837)
+
+The harness's worktree-isolation Bash guard refuses Bash commands it judges too
+complex to verify stay inside the worktree. Confirmed triggers (refused
+categorically -- one-line OR multi-line, and a bare loop is refused even with no
+substitution at all):
+
+- **Process substitution** -- `comm -13 <(...) <(...)`, `mapfile -t X < <(...)`.
+- **Nested command substitution** -- `$( ... $(...) ... )`.
+- **`for` / `while` / `until` loops** -- refused regardless of formatting.
+
+This is about our snippets meeting the guard halfway. Two workarounds:
+
+1. **Split compound commands into plain sequential ones.** Write intermediate
+   results to temp files or plain variables, then operate on those -- never nest
+   `$( $( ) )` and never use `<(...)`. The Step 7a canary above is the canonical
+   rewrite: two `printf ... > file` lines, then `comm -13 fileA fileB`.
+2. **Poll CI with a foreground command sequence, not `Monitor`.** `Monitor`'s own
+   documented CI-poll example uses `comm -13 <(...) <(...)`, so it is refused;
+   run separate sequential commands instead. If a loop seems unavoidable, note
+   `for`/`while`/`until` are refused categorically -- re-check the exact form
+   from inside the worktree dispatch first (guard behavior can differ by harness
+   config), and mind the zsh `$status` hazard in any loop variable (use
+   `st` / `run_state`).
+
+Do NOT disable or work around the guard itself -- it is the isolation fence
+(AC #4 of #3837). This issue rewrites only our own snippets to meet it halfway;
+the wider sweep of the same forms across other playbooks is left to a fast-follow
+enumerated in #3837's PR body.
