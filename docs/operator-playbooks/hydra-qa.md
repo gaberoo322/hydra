@@ -295,6 +295,73 @@ fi
 
 **Every `Agent` call in this step MUST pass `run_in_background: false` (issue #3789).** The `Agent` tool defaults to background dispatch, so the spawning call returns immediately and the turn can end while reviewers are still running — a prose instruction to "wait for every reviewer" does not prevent this (a `qa_orch` dispatch said exactly that and exited anyway, four times in one autopilot run — #3789). `run_in_background: false` makes each spawn itself a **blocking** call, so the message containing all N spawns cannot return control — and the turn cannot end — until every reviewer has produced a result. Never substitute `run_in_background: true` plus a promise to wait; that is the pattern that stalled.
 
+#### 7.0 Build the shared review packet once (issue #3815, root cause 3)
+
+Before spawning any reviewer, assemble the **review packet** once and pass it
+inline to every sub-agent. Root cause 3 (the issue's headline recommendation):
+each reviewer was independently re-running `git diff`, `git show`-ing every
+changed file, and re-reading the standards docs — the same exploration 4–6
+times per PR. The 5h scan found ~86% of reviewer tokens were `cacheRead` from
+this duplicated loop (~1.46M tokens / ~21 API calls per reviewer, ~5.9 reviewer
+sessions per PR). The parent already holds the diff and the changed-file list;
+building the packet once and forbidding the exploratory tool loop converts each
+reviewer from a multi-turn explorer into a single-shot reviewer.
+
+**This changes only HOW reviewers acquire context — never WHAT they judge, how
+many run, or the verdict fold.** The emitted verdict literals, the per-reviewer
+axis fold (step 9), `aggregateAdversarialReview()`, and the full T3/T4 fan-out
+count (2 reviewers / 4 sub-agents) are byte-untouched (issue #3815 AC4/AC5;
+design-concept INV-D). It is sequenced as its own PR, distinct from the
+admission-gate lever (Lever A, PR #3874) which gates *whether* the fan-out runs
+at all; this lever assumes the fan-out runs and makes each reviewer cheaper.
+
+```bash
+# The diff the parent already pinned in step 3, captured ONCE (not re-run by
+# every reviewer).
+DIFF_TEXT=$(git diff "${FIXED_SHA}...HEAD")
+# Full contents of every changed file at HEAD, captured ONCE. Each reviewer was
+# git-show'ing these individually; inlining them removes that per-reviewer loop.
+CHANGED_FILES_PACKET=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  body=$(git show "HEAD:${f}" 2>/dev/null) || body="(file deleted or absent at HEAD — see the diff above)"
+  CHANGED_FILES_PACKET+="===== ${f} @ HEAD =====
+${body}
+
+"
+done <<< "$(git diff --name-only "${FIXED_SHA}...HEAD")"
+REVIEW_PACKET="Diff (${FIXED_SHA:0:12}…HEAD):
+
+${DIFF_TEXT}
+
+Full contents of every changed file at HEAD:
+
+${CHANGED_FILES_PACKET}"
+# The resolved design-concept artifact ($SPEC_INPUT_JSON from step 4) rides in
+# the same packet for the Spec axis rather than being re-fetched per reviewer.
+```
+
+**Shared packet discipline (applies to EVERY reviewer sub-agent — both axes,
+both tiers, T1 through T4).** Embed `$REVIEW_PACKET` inline at the top of each
+reviewer's prompt, then instruct the reviewer:
+
+> *The diff and the full contents of every changed file are in the packet above
+> — do NOT reconstruct them. Do NOT run an exploratory tool loop: no `git diff`,
+> no `git show`, no repo-wide `grep`/`glob` to "understand the change", and do
+> not read `CLAUDE.md` / `CONTEXT.md` / `docs/adr/` end-to-end. Judge straight
+> off the packet. You MAY (a) open ONE specific standards doc or ADR by name to
+> check a rule you intend to cite, and (b) do at most ONE targeted `read`/`grep`
+> to resolve a single named question the packet leaves ambiguous — in each case
+> state exactly what you are looking for and why the packet did not answer it.
+> If the packet is sufficient, do ZERO tool calls and report directly.*
+
+The packet is the same factual material (diff, file contents, artifact) handed
+to every reviewer — it is NOT the other reviewer's findings, so the "neither
+reviewer is told the other exists" independence rule (step 7b) is preserved.
+The refutation framing (step 7b), the twelve-smell battery, the Hydra-specific
+checks, and the T4 Verifier-Core checklist all still apply unchanged — they are
+judged against the packet instead of against a self-assembled view of the repo.
+
 #### 7a. T1/T2 — single standard pass (`ADVERSARIAL=0`)
 
 Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.
@@ -311,9 +378,9 @@ Each reviewer (A and B) independently yields a per-reviewer verdict via the step
 
 **Standards sub-agent prompt** — include:
 
-- `FIXED_SHA`, `DIFF_CMD`, `LOG_CMD`.
-- The list of standards-source files to read: `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`, any `STYLE.md` / `STANDARDS.md`.
-- Brief: *"Read the standards docs, then read the diff. Report — per file/hunk where relevant — every place the diff violates a documented standard. Distinguish hard violations from judgement calls. Cite the standard (file + the rule). Skip anything tooling enforces (typecheck, lint — CI already runs these). Under 400 words."*
+- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
+- The standards-source files the reviewer MAY open by name (one, to cite a specific rule — not read end-to-end): `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`, any `STYLE.md` / `STANDARDS.md`.
+- Brief: *"The diff and changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report — per file/hunk where relevant — every place the diff violates a documented standard. Distinguish hard violations from judgement calls. Cite the standard (file + the rule). Skip anything tooling enforces (typecheck, lint — CI already runs these). Under 400 words."*
 - **Attributing a failing test (issue #1076):** QA reads CI results via `statusCheckRollup` and must not `gh pr checkout`. If you do need to reproduce a test failure locally inside an isolated worktree, run `npm run test:debug` rather than `npm test` + a re-run-and-grep: it runs the identical flags (including `--test-force-exit`) but writes a TAP stream to `test-debug.tap`, so the per-test `not ok <n> - <name>` lines (which the default reporter drops under force-exit) and the `# pass/# fail` footer are both captured in a single run. The failing suite name is then greppable from the file without a second full-suite invocation.
 - **Refactoring-smell battery (Martin Fowler, via upstream `code-review` v1.1).** In addition to the documented standards, scan the diff for these twelve smells and **name each one you find** so the finding is actionable — apply them universally **unless a repo-documented standard explicitly overrides**. Report a smell only where you can point at the specific hunk; do not invent speculative concerns.
   - **Mysterious Name** — function/variable/type names that obscure intent. Fix: rename clearly; if no honest name fits, the design needs rethinking.
@@ -336,10 +403,10 @@ Each reviewer (A and B) independently yields a per-reviewer verdict via the step
 
 **Spec sub-agent prompt** — include:
 
-- `FIXED_SHA`, `DIFF_CMD`, `LOG_CMD`.
+- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
 - The artifact JSON (`SPEC_INPUT_JSON`) embedded verbatim, OR the skip reason (`SPEC_SKIPPED_REASON`) — if skipped, this sub-agent reports `"no spec available"` per the upstream `code-review` skill's contract and exits early.
 - The PR body (so requirements stated only in the PR description are still visible).
-- Brief: *"Read the design-concept artifact. Then read the diff. Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Quote the artifact line for each finding. Under 400 words."*
+- Brief: *"The artifact and the diff / changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Quote the artifact line for each finding. Under 400 words."*
 - Hydra-specific checks the sub-agent must apply:
   - Every `modulesTouched[i].path` is touched in the diff (or noted in the report if absent).
   - No file outside `modulesTouched` is meaningfully changed (test fixtures and trivial type-only imports are not "meaningful").
