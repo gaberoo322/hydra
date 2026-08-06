@@ -1762,6 +1762,10 @@ describe("usage-tracker", () => {
 
       // Build a snapshot with an Anchor boundary and a `now` (generatedAt)
       // some fraction into the 7-day window, plus a percentSinceReset.
+      // `usageSource: "oauth"` is REQUIRED (issue #3751, INV-4): the Pacing Curve
+      // verdict is only computed for the authoritative OAuth source — a non-oauth
+      // source is the neutral "on" — so the ahead/behind/on assertions below must
+      // drive the oauth path. (`snapshotWith` defaults to "estimate".)
       function curveSnap(opts: {
         nowMs: number;
         sinceResetPercent: number;
@@ -1769,6 +1773,7 @@ describe("usage-tracker", () => {
       }): UsageSnapshot {
         return snapshotWith({
           calibrated: true,
+          usageSource: "oauth",
           generatedAt: isoOf(opts.nowMs),
           weeklyResetAnchor: opts.anchorIso === undefined ? isoOf(anchorMs) : opts.anchorIso,
           percentSinceReset: opts.sinceResetPercent,
@@ -1897,6 +1902,27 @@ describe("usage-tracker", () => {
         assert.equal(v.paceState, "ahead");
         assert.equal(v.allow, true);
         assert.deepEqual([...v.shed], []);
+      });
+
+      test("INV-4 (#3751): non-oauth source is neutral 'on' even with a set anchor + zeros", () => {
+        // The admission outage path serves percentSinceReset: 0 with a SET
+        // (rolled) anchor. Before the INV-4 guard, 0 < target − tol produced a
+        // false "behind" — which, with allow=true, launched the Pace Gate on
+        // absent evidence. The guard makes a non-oauth source neutral "on";
+        // targetPercent (time-based) is still reported.
+        const nowMs = anchorMs + 3.5 * DAY; // target 46
+        const v = projectEligibility(
+          snapshotWith({
+            calibrated: true,
+            usageSource: "estimate",
+            generatedAt: isoOf(nowMs),
+            weeklyResetAnchor: isoOf(anchorMs),
+            percentSinceReset: 0,
+          }),
+        );
+        assert.equal(v.paceState, "on");
+        assert.equal(v.targetPercent, 46);
+        assert.equal(v.sinceResetPercent, 0);
       });
     });
 
