@@ -1,0 +1,1 @@
+- fix: sweep_target carries a per-item verdict-stability guard (6h, AND-composed with the 900s cooldown) so successive sweeps can't thrash contradictory verdicts on the same Target needs-triage items every cooldown (#3729)

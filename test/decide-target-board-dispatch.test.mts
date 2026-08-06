@@ -213,7 +213,14 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
   });
 
   test("needs_triage_target (board target_needs_triage>0) → sweep_target dispatches hydra-target-sweep", () => {
-    const state = baseState({ signals: { needs_triage_target: true } });
+    // Issue #3729 added a per-item verdict-stability guard AND-composed on top
+    // of this #3709 wiring, so the dispatch now also requires an enumerable,
+    // eligible item in target_needs_triage_items (a brand-new, unstamped item
+    // is immediately eligible). The exhaustive guard coverage — including the
+    // fail-closed degraded case — lives in test/autopilot-sweep-target-signal.test.mts.
+    const state = baseState({
+      signals: { needs_triage_target: true, target_needs_triage_items: "626" },
+    });
     const plan = runDecide(state, feedNoResearch);
     const a = findAction(plan, sweepTarget);
     assert.ok(
@@ -234,13 +241,32 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
     );
   });
 
+  test("needs_triage_target true but item list absent → sweep_target SUPPRESSED (fail-closed, issue #3729)", () => {
+    // The count read (target_needs_triage) and the item-list read
+    // (target_needs_triage_items) are two independent board reads in
+    // collect-state.sh. A true count with no enumerable item list is a
+    // DEGRADED read — fail CLOSED (suppress), matching every sibling signal in
+    // the item-list read's block. This is the QA fix for the #3872 fail-open
+    // defect that silently reverted sweep_target to guard-free.
+    const state = baseState({ signals: { needs_triage_target: true } });
+    const plan = runDecide(state, feedNoResearch);
+    assert.equal(
+      findAction(plan, sweepTarget),
+      undefined,
+      "a true count with no enumerable item list must fail closed (suppress), not fire",
+    );
+  });
+
   test("sweep_target fires even when the Target board is otherwise busy (no saturation cap)", () => {
     // sweep_target DRAINS the lane it is gated on, so — unlike the producer
     // classes that carry a *_board_saturated cap — a full board is exactly
     // when it must run. Its sibling sweep_orch has run capless since inception.
+    // (Issue #3729: an eligible unstamped item is supplied so the per-item guard
+    // does not suppress — the capless-drain property is what this test pins.)
     const state = baseState({
       signals: {
         needs_triage_target: true,
+        target_needs_triage_items: "626",
         target_board_work_available: true,
         needs_qa_target: true,
       },

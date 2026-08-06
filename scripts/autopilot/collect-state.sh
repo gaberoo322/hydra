@@ -927,7 +927,7 @@ TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
 # silent failure at 100 instead of 30: breaching the page size becomes loud.
 TARGET_BOARD_ISSUES_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open \
   --limit "$GH_ISSUE_LIST_LIMIT" \
-  --json number,labels --jq '[ .[] | { labels: (.labels | map(.name)) } ]' 2>/dev/null || echo '')
+  --json number,labels --jq '[ .[] | { number, labels: (.labels | map(.name)) } ]' 2>/dev/null || echo '')
 if [ -n "$TARGET_BOARD_ISSUES_JSON" ]; then
   echo "target_board_signals_degraded=false"
   printf '%s' "$TARGET_BOARD_ISSUES_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
@@ -955,6 +955,19 @@ try:
   open_scan = 0
   open_design_qa = 0
   wor_triage = 0
+  # needs-triage item NUMBERS (issue #3729). Emitted as a fresh per-turn fact
+  # (target_needs_triage_items) alongside the counts; the playbook stitches it
+  # verbatim into state.signals and decide.py's sweep_target guard reads it to
+  # run a PER-ITEM verdict-stability backoff (suppress a sweep that would
+  # re-examine items already checked this window). Kept stateless here —
+  # decide.py owns the cross-turn stamp history; this collector only enumerates
+  # the current lane, mirroring its role for the counts above. NOTE this list
+  # derives from THIS read (the wire-or-retire/cleanup scan), which is a
+  # SEPARATE board read from the target_needs_triage COUNT (the scope=target
+  # board-state endpoint above); decide.py couples the two FAIL-CLOSED so a
+  # transient failure of this read cannot silently revert the guard to
+  # guard-free (issue #3872 QA fix).
+  triage_items = []
   for row in rows:
     labels = row.get('labels') if isinstance(row, dict) else None
     if not isinstance(labels, list):
@@ -962,6 +975,9 @@ try:
     in_triage = 'needs-triage' in labels
     if in_triage:
       triage_count += 1
+      num = row.get('number') if isinstance(row, dict) else None
+      if isinstance(num, int):
+        triage_items.append(num)
     if 'ready-for-agent' in labels:
       queued_count += 1
     if scan_label in labels:
@@ -991,6 +1007,14 @@ try:
   print('design_qa_target_open=' + str(open_design_qa))
   print('design_qa_target_saturated=' + ('true' if dqa_saturated else 'false'))
   print('design_qa_target_due=' + ('false' if dqa_saturated else 'true'))
+  # Sorted ascending so the emitted list is stable across turns (issue #3729);
+  # decide.py treats it as a set, but a stable render keeps diffs/state readable.
+  # Empty here means this read SUCCEEDED and found zero needs-triage items — a
+  # state where the count read above also returns 0, so decide.py never reaches
+  # the guard (needs_triage_target is false). The fail-CLOSED coupling lives in
+  # decide.py: a true count + this empty list is the degraded case.
+  triage_items.sort()
+  print('target_needs_triage_items=' + ','.join(str(n) for n in triage_items))
 except Exception:
   print('target_board_signals_truncated=false')
   print('target_backfill_idle=false')
@@ -1001,7 +1025,13 @@ except Exception:
   print('design_qa_target_open=0')
   print('design_qa_target_saturated=true')
   print('design_qa_target_due=false')
-" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
+  # Empty list on a parse failure. decide.py's guard parses None and, with a
+  # true needs_triage_target count, treats count>0 + no items as the DEGRADED
+  # case -> fail closed (suppress), matching every sibling signal emitted by
+  # this same except arm. A degraded read must not silently revert sweep_target
+  # to guard-free (issue #3872 QA fix).
+  print('target_needs_triage_items=')
+" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; echo "target_needs_triage_items="; }
 else
   # Fail closed AND observable: the board read was unreachable/empty, so emit
   # the suppressing defaults (never dispatch a scan/resolver that cannot read
@@ -1018,6 +1048,10 @@ else
   echo "design_qa_target_open=0"
   echo "design_qa_target_saturated=true"
   echo "design_qa_target_due=false"
+  # No board read -> no item list. Empty -> decide.py fail closed (suppress) on
+  # a true count, mirroring the python except arm above: a degraded read must
+  # never silently revert sweep_target to guard-free (issue #3872 QA fix).
+  echo "target_needs_triage_items="
 fi
 
 # Per-run retrospective — daily trigger (issue #920, epic #917).

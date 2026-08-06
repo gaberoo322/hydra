@@ -97,6 +97,17 @@ state.json {
   "failure_log": [
     { ts, pattern, retry_count, slot, action, note }
   ]
+
+  # NEW IN #3729 — per-item verdict-stability stamps for sweep_target. Maps a
+  # Target needs-triage issue NUMBER (string key) to the unix epoch decide.py
+  # last dispatched a sweep that examined it. decide.py-owned, written back via
+  # _persist_state_writeback on every sweep_target fire (mirrors
+  # research_force_counter's plan-time-stamp + main()-writeback pattern).
+  # Pruned to exactly the current turn's item set on every write, so it never
+  # grows unbounded. Absent = cold start = every item immediately eligible.
+  "target_triage_item_stamps": {
+    "<issue-number>": unix-epoch
+  }
 }
 
 ==================================================================
@@ -352,6 +363,37 @@ BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 # bootstrap forces any still-dark backfill class through rather than letting the
 # stagger starve it for another full window.
 BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
+
+# Per-item verdict-stability backoff for sweep_target (issue #3729).
+#
+# The Target `needs-triage` lane re-fires `sweep_target` on its 900s class
+# cooldown as long as ANY item carries the label, but successive sweeps reached
+# MUTUALLY CONTRADICTORY verdicts on the same items — #631 took 10 label events
+# in 28h, #626 took 12 in 36h (one firing *during* the design-concept grill).
+# That verdict thrash is the real defect; the original "items park forever"
+# premise was falsified (both items left the lane within ~28h, well inside their
+# grace windows). The grill also rejected a third shape — an operator-decision
+# item (betting#758) that re-fires a complete no-op verdict every cooldown with
+# no future self-clear date. All three are the same stability signal: successive
+# sweeps return an identical verdict on an unchanged item.
+#
+# The fix is a PER-ITEM backoff, AND-composed with the 900s class cooldown (the
+# ceiling still caps raw dispatch rate; this guard adds per-item stability on
+# top). When sweep_target commits to a dispatch, decide.py stamps `now` for
+# every needs-triage item in the current turn's set; a subsequent turn suppresses
+# the dispatch while EVERY current item's stamp is younger than this window.
+# Fixed-per-item (not exponential, not class-wide): the rejected literal Option B
+# — a single class-level timer — could not tell "item X was just checked" from
+# "item Y was just checked", so a fresh actionable item arriving during another
+# item's backoff would be starved. The per-item map gives each item an
+# independent clock, so a brand-new (unstamped) item is immediately eligible.
+#
+# 6h is long enough to suppress the observed ~one-verdict-every-2.8h thrash
+# cadence, short enough that a grace-window boundary still gets same-day
+# re-examination. A plain fixed module constant (mirrors SIGNAL_COOLDOWNS) —
+# tuning is a code change, deliberately not env-driven so decide() stays a pure
+# function of (state, events, now) with no env reads on the decision path.
+TARGET_TRIAGE_BACKOFF_SEC = 6 * 60 * 60
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
@@ -2974,6 +3016,114 @@ def _select_for_slot(
     return None
 
 
+def _target_triage_items_value(state: dict, events: list[dict]):
+    """Return the per-turn Target needs-triage item-number list value, or None.
+
+    Issue #3729 — collect-state.sh emits `target_needs_triage_items=626,631`
+    (a comma-separated issue-number list) as a fresh per-turn fact; the
+    playbook stitches it verbatim into `state.signals` (same verbatim-string
+    contract as `orch_dev_ready_anchor` / `wayfinder_orch_frontier`). Events
+    take precedence over state.signals, mirroring `_signal_present`.
+
+    Returns the RAW value (string / list / None) — parsing lives in
+    `_parse_target_triage_items`.
+    """
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "target_needs_triage_items":
+            return ev.get("value")
+    signals = state.get("signals") if isinstance(state, dict) else None
+    if isinstance(signals, dict):
+        return signals.get("target_needs_triage_items")
+    return None
+
+
+def _parse_target_triage_items(raw) -> set | None:
+    """Parse the item-number list value into a set of ints, or None if absent.
+
+    None (absent / empty / wholly unparseable) is the degraded sentinel consumed
+    by the sweep_target guard. NOTE the fail-closed contract (issue #3729, QA
+    fix for #3872): `needs_triage_target` (the count, from collect-state.sh's
+    scope=target board-state read) and `target_needs_triage_items` (the list,
+    from the separate wire-or-retire/cleanup `gh issue list` scan) are TWO
+    INDEPENDENT board reads. The count read can succeed while the item-list read
+    transiently fails, so a true count with an absent/empty list is a DEGRADED
+    read, not "zero items" — the guard must SUPPRESS in that state (fail closed,
+    symmetric with every sibling signal in the item-list read's block), never
+    silently revert to guard-free (the #3872 fail-open defect).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        nums: set = set()
+        for x in raw:
+            try:
+                nums.add(int(x))
+            except (TypeError, ValueError):
+                continue
+        return nums or None
+    if not isinstance(raw, str):
+        return None
+    tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    nums = set()
+    for tok in tokens:
+        try:
+            nums.add(int(tok))
+        except ValueError:
+            continue
+    return nums or None
+
+
+def _target_triage_any_eligible(state: dict, items: set, now: int) -> bool:
+    """True iff >=1 item has no stamp or a stamp older than the backoff window.
+
+    Issue #3729 — the read half of the per-item verdict-stability gate. An item
+    is ELIGIBLE when decide.py has no record of examining it this window (no
+    stamp — the brand-new-item case, INV-2) OR its last-examined stamp is older
+    than TARGET_TRIAGE_BACKOFF_SEC. A cold-start state (no stamp map at all)
+    makes every item eligible. Pure read of `state.target_triage_item_stamps`;
+    never mutates.
+    """
+    stamps = state.get("target_triage_item_stamps")
+    if not isinstance(stamps, dict):
+        return True  # no stamp history yet -> cold start -> all eligible
+    for item in items:
+        # JSON round-trips make stamp keys strings; accept int or str lookup so
+        # an in-memory (same-turn) mutation and a reloaded state agree.
+        last = stamps.get(item)
+        if last is None:
+            last = stamps.get(str(item))
+        if last is None:
+            return True  # never examined this window -> immediately eligible
+        try:
+            last_i = int(last)
+        except (TypeError, ValueError):
+            return True  # malformed stamp -> fail-open toward eligible
+        if (now - last_i) >= TARGET_TRIAGE_BACKOFF_SEC:
+            return True  # stamp older than the backoff window -> eligible
+    return False  # every item examined within the window -> suppress thrash
+
+
+def _stamp_target_triage_items(state: dict, items: set, now: int) -> None:
+    """Mutate state: stamp `now` for every current item, prune the rest.
+
+    Issue #3729 — the write half of the per-item verdict-stability guard, called
+    at plan time when sweep_target commits to a dispatch (mirrors
+    `_research_force_stamp`). Stamping every CURRENT item — not just the one
+    that made the turn eligible — resets the clock uniformly: a sweep that
+    examines the whole lane should suppress re-examination of every item it
+    touched (INV-4). Replacing the whole map with only the current set also
+    PRUNES items that left the lane, so `target_triage_item_stamps` never grows
+    unbounded across a long-running session (INV-5) — the same structural guard
+    `_research_force_stamp`'s prior-day pruning gives `research_force_counter`.
+
+    Persistence: decide() mutates the loaded dict in place; the CLI `decide`
+    subcommand in main() detects the change and writes the state file back
+    atomically via `_persist_state_writeback`. In-process callers (tests
+    importing decide()) see the mutation directly on the dict they passed.
+    """
+    state["target_triage_item_stamps"] = {str(item): now for item in items}
+
+
 def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> dict | None:
     if not signal_is_cooled(state, sig, now):
         return None
@@ -3001,9 +3151,45 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
         return None
     if sig == "sweep_target":
-        if _signal_present(state, events, "needs_triage_target"):
-            return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
-        return None
+        if not _signal_present(state, events, "needs_triage_target"):
+            return None
+        # Per-item verdict-stability guard (issue #3729). AND-composed with the
+        # 900s class cooldown (signal_is_cooled, checked at the top of this
+        # function) — that ceiling still caps the raw dispatch rate; this gate
+        # adds per-item stability so successive sweeps can't thrash
+        # contradictory verdicts on the same needs-triage items every 900s.
+        #
+        # collect-state.sh emits the per-turn item-number list
+        # (target_needs_triage_items) from a SEPARATE board read than the
+        # needs_triage_target count above (the count comes from the
+        # scope=target board-state endpoint; the item numbers come from the
+        # wire-or-retire/cleanup `gh issue list` scan — the only in-scope read
+        # that projects issue numbers, since deriveBoardState returns counts
+        # only). When that second read degrades, the list is absent/empty while
+        # the count stays true. The prior attempt (#3872) fail-OPENED on that
+        # state (silently reverting sweep_target to guard-free, thrash-prone) —
+        # asymmetric with every sibling signal in the item-list read's block
+        # (target_cleanup_board_saturated / wire_or_retire_target_available /
+        # design_qa_target_due all SUPPRESS on the identical degraded read).
+        # The QA fix is fail-CLOSED: suppress, like its siblings. It is not a
+        # deadlock — the lane resumes the moment the read recovers (a transient
+        # gh flake), and `target_board_signals_degraded=true` makes the outage
+        # observable rather than silent.
+        items = _parse_target_triage_items(_target_triage_items_value(state, events))
+        if not items:
+            # count>0 (needs_triage_target true) but no enumerable items ->
+            # degraded item-list read -> fail closed, matching the siblings.
+            return None
+        if not _target_triage_any_eligible(state, items, now):
+            return None  # every item examined within the window -> suppress thrash
+        # Committing to dispatch: stamp every item in the CURRENT set (not only
+        # the eligible ones) so a sweep examining the whole lane resets the
+        # clock uniformly, and prune stamps for items no longer in the lane.
+        # sweep_target is not a BACKFILL_SIGNAL_CLASSES member, so the
+        # one-per-turn stagger in _rule_signals cannot drop this dispatch after
+        # this stamp — every stamp corresponds to an emitted dispatch action.
+        _stamp_target_triage_items(state, items, now)
+        return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
     if sig == "discover_orch":
         # Issue #959 (epic #958): revived. discover_orch keyed off `orch_idle`,
         # a signal collect-state.sh never emitted, so the arm was DEAD. It now
@@ -4177,6 +4363,13 @@ def main(argv: list[str]) -> int:
         force_counter_before = json.dumps(
             state.get("research_force_counter"), sort_keys=True,
         )
+        # Issue #3729: snapshot the per-item triage stamp map the same way, so a
+        # plan-time stamp (_stamp_target_triage_items on a sweep_target fire) is
+        # detected and persisted. Serialised compare — the helper replaces the
+        # whole map in place (pruning + re-stamping on every fire).
+        triage_stamps_before = json.dumps(
+            state.get("target_triage_item_stamps"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -4195,6 +4388,20 @@ def main(argv: list[str]) -> int:
             # reboot (which wipes the /tmp state file) can reseed it. Same
             # force-counter-changed gate → fires once per stamping turn.
             _mirror_research_force_counter_to_redis(state)
+        # Issue #3729: persist the per-item triage stamp map when a sweep_target
+        # fire mutated it. Independent of the force-counter gate above — either
+        # or both may fire on a given turn; both write the same `state` dict, so
+        # a double-write on a both-fire turn is a harmless idempotent atomic
+        # replace. No Redis mirror: this is purely decide.py-internal
+        # bookkeeping never read outside decide.py (unlike the force counter,
+        # which a host reboot must reseed).
+        triage_stamps_after = json.dumps(
+            state.get("target_triage_item_stamps"), sort_keys=True,
+        )
+        if triage_stamps_after != triage_stamps_before:
+            _persist_state_writeback(
+                argv[2], state, what="target triage item stamps (#3729)",
+            )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
         # per-class cadence multiplier decide.py WOULD apply in a future live
