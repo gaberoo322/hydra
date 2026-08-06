@@ -22,6 +22,22 @@ compose_base: _vendor/code-review.md
 > instruction for this composed skill; treat the base's step 4 as historical
 > upstream prose to skip over, not something to act on.
 
+> **Blocking-dispatch mandate, restated here (issue #3880 — a #3789/#3827
+> recurrence).** When step 7's fan-out runs, **every** `Agent` call that spawns
+> a reviewer sub-agent MUST pass `run_in_background: false`. The `Agent` tool
+> defaults to background dispatch — a spawn without this flag returns
+> immediately, and the parent turn (and this session) can end with no verdict
+> posted while reviewers are still running. This is not a new rule; it already
+> lives at step 7 below. It failed to hold on 2026-08-05 (issue #3880) even
+> though step 7 carried it — the mandate was true but sat ~250 lines past this
+> preface, after the base's entire unconstrained "spawn in parallel" body, so a
+> dispatch could reach and act on a spawn instruction well before ever reading
+> it. Restating it beside the "skip the base's step 4" note puts it where a
+> top-down read hits it before any spawn happens. Step 7.5's
+> reviewer-completeness check is equally mandatory: never aggregate or emit a
+> verdict for a fan-out where any spawned reviewer did not return a real
+> result — see step 7.5 below.
+
 <!-- compose-seam-supersede -->
 
 > **Composed skill (ADR-0030 Decision 4 / Option C, issue #3420).** This playbook is the thin Hydra **AFK overlay** on top of the vendored upstream `code-review` base (`docs/operator-playbooks/_vendor/code-review.md`). `scripts/sync-skills.sh` emits `~/.claude/skills/hydra-qa/SKILL.md` as **[upstream code-review base] + [this overlay]**, with the vendored base's `disable-model-invocation: true` **stripped** (it hard-errors under Skill-tool dispatch). The review stage dispatches the *same* upstream `code-review` skill the operator runs, in AFK mode. The Hydra-specific verification depth, verdict classification, and remediation-loop routing below ride on that shared base. The dispatch-class → stage table lives in `hydra-autopilot.md`. **Contract complete (ADR-0030 Decision 5, epsilon #3424):** the standalone `hydra-qa` *fork identity* is retired — it is no longer a bespoke reviewer fork, it **is** the composed `review` stage. The `qa_orch` dispatch *class* and its `decide.py` `make_dispatch(…, "hydra-qa")` string literals (orch + target scope) stay live — they select this composed stage.
