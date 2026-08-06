@@ -189,7 +189,7 @@ export function validatePrdInput(input: PrdInput): PrdValidationError[] {
  * any of its conventional forms: a `hydra-betting/…` relative path, the
  * `gaberoo322/hydra-betting` org-qualified form, or the absolute Target root
  * `/home/gabe/hydra-betting/…` (the canonical root, see
- * scripts/ci/hydra-target-wire-or-retire-emit.ts `TARGET_ROOT`). Matching the
+ * scripts/ci/hydra-target-cleanup-emit.ts `TARGET_ROOT`). Matching the
  * marker as a path segment (boundary-anchored) avoids mis-flagging an
  * orchestrator file that merely mentions the Target in its name.
  */

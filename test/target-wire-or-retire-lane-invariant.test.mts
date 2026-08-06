@@ -23,17 +23,28 @@
  * This suite pins three things that were previously UNPINNED:
  *   (a) the sweep PLAYBOOK's triage step contains the wire-or-retire
  *       exemption instruction, ordered before the well-described test;
- *   (b) the co-presence predicate's NEGATIVE case — a row carrying
- *       `wire-or-retire` WITHOUT `needs-triage` yields
- *       `wire_or_retire_target_available=false` (the positive case already
- *       has incidental coverage in test/autopilot-target-board-signals.test.mts
- *       as a #3710 truncation fixture, but the negative case — the exact
- *       contract this issue is about — had zero coverage);
+ *   (b) [REVISED by issue #3747 — see the last `describe` block below] the
+ *       `collect-state.sh` count-side predicate no longer requires
+ *       `needs-triage` co-presence: #3726's AND-needs-triage fix went blind
+ *       the moment a triaged item left the `needs-triage` lane by ANY path
+ *       other than the resolver's own verdict (hydra-betting#626:
+ *       `wire-or-retire` + `ready-for-agent`, never touched by the resolver,
+ *       permanently invisible to the old predicate) — the exact
+ *       "flag-without-label dead-end handoff" pattern. #3747 redefines
+ *       "unresolved" as the resolver's complete three-exit enumeration
+ *       instead: WIRE/RETIRE self-terminate by stripping `wire-or-retire`
+ *       entirely, a stale item CLOSES (excluded upstream by the enclosing
+ *       `--state open` read), and UNCLEAR is the one state that needs an
+ *       EXPLICIT exclusion since it deliberately keeps `wire-or-retire` while
+ *       adding `ready-for-human` — so #3726's own negative-case assertion
+ *       (UNCLEAR must not re-arm the signal) is PRESERVED, just re-derived
+ *       from a `ready-for-human` check instead of a `needs-triage` one;
  *   (c) the resolver PLAYBOOK's WIRE/RETIRE transitions remove BOTH labels,
  *       while its UNCLEAR transition removes only `needs-triage` (keeping
  *       `wire-or-retire` so the operator can see the decision class) — and
- *       the resolver's own work-finding query requires co-presence so it
- *       never re-matches its own adjudicated UNCLEAR output.
+ *       the resolver's own work-finding query (a SEPARATE `gh` read from the
+ *       collect-state.sh dispatch-gate signal above) still requires
+ *       co-presence, unaffected by #3747.
  *
  * Two hard constraints (per the approved design-concept artifact):
  *   - reads the in-repo PLAYBOOK (`docs/operator-playbooks/*.md`), NEVER the
@@ -199,7 +210,30 @@ describe("hydra-wire-or-retire playbook — WIRE/RETIRE vs UNCLEAR label transit
   });
 });
 
-describe("collect-state.sh — wire-or-retire co-presence predicate, negative case (issue #3726)", () => {
+describe("collect-state.sh — wire-or-retire 'unresolved' redefinition (issue #3747)", () => {
+  /**
+   * scope-justification: this describe block previously pinned #3726's
+   * AND-needs-triage co-presence predicate as a NEGATIVE-case regression
+   * (`wire-or-retire` WITHOUT `needs-triage` must NOT arm the signal). Issue
+   * #3747 Part 2 (Files in scope: `scripts/autopilot/collect-state.sh`)
+   * retires the `needs-triage` requirement specifically — it is precisely
+   * what made hydra-betting#626 (`wire-or-retire` + `ready-for-agent`, no
+   * `needs-triage`) permanently invisible to `wire_or_retire_target_available`
+   * despite sitting on the board unresolved — but PRESERVES the underlying
+   * intent: an item the resolver already adjudicated must not re-arm the
+   * signal. The new predicate re-derives that guarantee from a
+   * `ready-for-human` exclusion instead of a `needs-triage` requirement (the
+   * complete enumeration of the resolver's three exits: WIRE/RETIRE strip
+   * `wire-or-retire` entirely and self-terminate; UNCLEAR keeps
+   * `wire-or-retire` but adds `ready-for-human`, so THAT is the one state
+   * needing an explicit exclusion; a stale item closes, excluded upstream by
+   * the enclosing `--state open` read). Per this repo's rule on removing
+   * behavior (CLAUDE.md), the assertions below are updated to match while
+   * preserving the original UNCLEAR-must-not-re-arm case; block 2 above (the
+   * resolver playbook's OWN co-presence work-finding query) is a different,
+   * unaffected seam and keeps its original assertions.
+   */
+
   /** The Target lane-signal emitter (same block test/autopilot-target-board-signals.test.mts exercises). */
   function extractLaneEmitter(): string {
     const match = collectStateSrc.match(
@@ -227,34 +261,60 @@ describe("collect-state.sh — wire-or-retire co-presence predicate, negative ca
     return out;
   }
 
-  test("a row carrying wire-or-retire WITHOUT needs-triage does NOT arm the signal", () => {
-    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-human"] }]);
+  test("a row carrying wire-or-retire WITHOUT needs-triage DOES now arm the signal (the #626 case)", () => {
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-agent"] }]);
     assert.equal(
       out.wire_or_retire_target_available,
-      "false",
-      "an item the resolver already adjudicated (UNCLEAR: wire-or-retire kept, needs-triage removed) must not re-arm wire_or_retire_target",
+      "true",
+      "hydra-betting#626-shaped row (wire-or-retire + ready-for-agent, no needs-triage) must arm the signal — this was the exact invisibility #3747 fixed",
     );
-    assert.equal(out.wire_or_retire_target_triage, "0");
+    assert.equal(out.wire_or_retire_target_triage, "1");
   });
 
-  test("a row carrying BOTH labels DOES arm the signal (positive control)", () => {
+  test("a row carrying BOTH wire-or-retire and needs-triage still arms the signal (positive control)", () => {
     const out = runLaneEmitter([{ labels: ["wire-or-retire", "needs-triage"] }]);
     assert.equal(out.wire_or_retire_target_available, "true");
     assert.equal(out.wire_or_retire_target_triage, "1");
   });
 
-  test("mixed board: only co-present rows count toward the triage total", () => {
+  test("an UNCLEAR-adjudicated row (wire-or-retire + ready-for-human) still does NOT arm the signal", () => {
+    // PRESERVED from #3726: an item the resolver already adjudicated UNCLEAR
+    // (wire-or-retire kept for operator visibility, ready-for-human added)
+    // must not re-arm wire_or_retire_target — only the CONDITION changed
+    // (ready-for-human exclusion instead of a needs-triage requirement), not
+    // the guarantee.
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-human"] }]);
+    assert.equal(out.wire_or_retire_target_available, "false");
+    assert.equal(out.wire_or_retire_target_triage, "0");
+  });
+
+  test("mixed board: every open wire-or-retire row counts EXCEPT the UNCLEAR (ready-for-human) one", () => {
     const out = runLaneEmitter([
-      { labels: ["wire-or-retire", "needs-triage"] },
-      { labels: ["wire-or-retire"] },
-      { labels: ["wire-or-retire", "ready-for-human"] },
-      { labels: ["needs-triage"] },
+      { labels: ["wire-or-retire", "needs-triage"] }, // counts
+      { labels: ["wire-or-retire"] }, // counts
+      { labels: ["wire-or-retire", "ready-for-human"] }, // excluded — UNCLEAR
+      { labels: ["wire-or-retire", "ready-for-agent"] }, // counts — the #626 shape
+      { labels: ["needs-triage"] }, // excluded — no wire-or-retire label at all
     ]);
     assert.equal(
       out.wire_or_retire_target_triage,
-      "1",
-      "only the single co-present row should count — the two label-stripped wire-or-retire rows and the bare needs-triage row must not",
+      "3",
+      "every wire-or-retire row counts except the ready-for-human (UNCLEAR) one and the bare needs-triage row",
     );
     assert.equal(out.wire_or_retire_target_available, "true");
+  });
+
+  test("closed items never reach this predicate — enforced upstream by the open-only gh read, not by a filter here", () => {
+    // `rows` is fed straight from `gh issue list --state open`, so a closed
+    // wire-or-retire item is never present in the input at all — there is no
+    // "closed" row shape to construct here. This test documents that the
+    // stale/close exit is satisfied by the enclosing read, not by any extra
+    // condition in this predicate (see the sibling `--state open` wiring
+    // assertion in test/autopilot-target-board-signals.test.mts).
+    assert.match(
+      collectStateSrc,
+      /gh issue list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json/,
+      "the Target board read that feeds this predicate must stay open-only",
+    );
   });
 });
