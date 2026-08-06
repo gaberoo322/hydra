@@ -98,7 +98,7 @@ INV-008.
 
 | Action type | Tool the model invokes |
 |---|---|
-| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. |
+| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. If the action carries `prompt_args.escalate_model` (cascade-routing re-dispatch) or `prompt_args.route_model` (per-anchor frontier routing, issue #3798), that HINT **overrides** the static map for this one dispatch — pass `model=<that hint>` instead (see the two override sections below). `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. |
 | `auto-merge` | `Bash` → `gh pr merge --auto --squash`, then a SINGLE `POST /api/holdback/pending {prNumber, tier, cycleId}` register call (see Phase 6). **No self-approve prefix** — every agent shares the `gaberoo322` identity and GitHub 422s a self-approval, so chaining an approval before the merge (`… && gh pr merge …`) short-circuits and silently skips the merge-enable, leaving green PRs to pile up for admin-merge (reference_qa_cannot_self_approve / #848; hydra-qa removed the same trap via #974). There is no approving-review branch-protection gate — CI required-status-checks are the merge gate — so approval is a no-op regardless. Guarded by `test/autopilot-auto-merge-no-self-approve.test.mts`. The handler does NOT itself enroll the holdback or write the merged cycle-record — it only ARMS the PR; the in-process merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue #2623) fires both merge-coupled follow-ups once the merge lands. |
 | `route-prs-to-review` | `Bash` → emitted only while the operator-only **emergency brake** (issue #744) is engaged, IN PLACE OF every `auto-merge` action. The model routes the current open PRs to the `/hydra-review` pickup set: `gh pr list --repo gaberoo322/hydra --state open --json number` to enumerate them, then for each apply the review label (`gh api .../labels` — `gh pr edit` is broken, per operator memory) so `/hydra-review` surfaces them. The action carries no per-PR list — `decide()` is pure and cannot enumerate PRs. Because the brake suppresses all `auto-merge`, no PR auto-merges this turn; the operator clears the brake via `hydra brake off` once the incident is resolved. The autopilot NEVER engages or disengages the brake — there is no such action type. |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
@@ -155,7 +155,7 @@ smoke test first, per the fallback rule below).
 
 | Class (`slot`) | Model | Rationale |
 |---|---|---|
-| `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. `qa_orch` + CI unchanged. |
+| `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. A **per-anchor `route_model` HINT** (issue #3798) overrides this row to frontier for the one dispatch whose anchor carries a fresh, APPROVED design-concept artifact — see the override section below. `qa_orch` + CI unchanged. |
 | `dev_target` | Sonnet (trial, 2026-08-04) | Money-critical betting code — was silently paying Opus (Fable unentitled); demoted under cost emergency, unmeasured at this tier. Watch Target PR QA/CI closely; revert to Fable/Opus on quality regression. |
 | `retro_orch` | Sonnet (2026-08-04) | Reshapes future behaviour; per-run low volume; orchestrator-side, not money-critical — same evidence class as `dev_orch`'s demotion |
 | `design_concept_orch` | Sonnet (2026-08-04) | A weak design concept wastes a full dev+QA cycle, but orchestrator-side and not money-critical — same evidence class as `dev_orch`'s demotion |
@@ -198,6 +198,28 @@ uses the static routing map unchanged (zero behavior change for non-escalated
 work). The escalation policy + reducer live in `scripts/autopilot/decide.py`
 (`ESCALATION_POLICY`, `decide_escalation`); a class absent from that dict never
 escalates.
+
+**Per-anchor frontier-routing override (issue #3798).** When a `dispatch`
+action carries `prompt_args.route_model` (a string model alias, today always
+`"fable"` — the frontier alias the fallback rule below resolves to Opus while
+`fable` stays unentitled), that value **overrides** the static per-class model
+resolved from the map above for that ONE dispatch — pass
+`model=action.prompt_args.route_model` to the `Agent` call instead of the
+class's default. This is the anchor-shape lever: `decide.py`'s `dev_orch`
+selector routes a dispatch to the frontier tier when its anchor carries a
+**fresh, APPROVED** design-concept artifact (the population where quality
+compounds — multi-file, tier-gated self-modification — known at dispatch time,
+before any code is written), and keeps Sonnet otherwise (PR #3795's measured
+demotion). decide.py stays PURE — it emits only the `route_model` HINT (never a
+concrete `model` field; the model lever stays here in the playbook per #1093),
+reusing the existing `_candidate_design_concept` / `_design_concept_is_fresh`
+helpers plus a `_design_concept_is_approved` approval dimension
+(`_design_concept_routes_frontier`). A dispatch with no `route_model` key uses
+the static routing map unchanged. This routing is INDEPENDENT of the
+`subagent_failure` escalation above: a frontier-routed dispatch that then fails
+still escalates per `ESCALATION_POLICY["dev_orch"]`, and a Sonnet-routed
+dispatch that fails escalates just as before — the two levers attach to
+different dispatches (initial vs. re-dispatch) and never collide on one action.
 
 **MANDATORY — deposit the escalation provenance (issue #3284).** The moment you
 execute a `dispatch` action carrying `prompt_args.escalate_model`, deposit the
