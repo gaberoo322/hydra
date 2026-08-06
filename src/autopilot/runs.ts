@@ -142,6 +142,14 @@ import { setWorklessUntil, worklessBackoffSec } from "../redis/workless-hint.ts"
  * launched run re-seeds via #1352. It is an honest baton-pass, NOT the crash-
  * adjacent `interrupted` — which now stays reserved for a clean ZERO-slot exit
  * that bypassed term-check (a genuine print-mode end with nothing in flight).
+ *
+ * `context_compaction` (issue #3787) is ALSO a clean, deliberate self-stop:
+ * `decide.py._check_termination` fires it every N turns (default 100) to cut
+ * the parent session's own prompt-cache re-read growth, reusing the exact
+ * same terminate path as `budget`/`wall_clock`/`idle`. In-flight worktree
+ * agents are unaffected — the next pace-gate-launched run re-seeds occupied
+ * slots via the same #1352 ledger read regardless of which cause ended the
+ * prior run.
  */
 const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "budget",
@@ -151,6 +159,7 @@ const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "interrupted",
   "failure_backstop",
   "crash",
+  "context_compaction",
 ]);
 
 /**

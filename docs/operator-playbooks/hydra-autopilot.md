@@ -105,7 +105,7 @@ INV-008.
 | `update-branch` | `Bash` → `gh pr update-branch` |
 | `queue-decision` | `Bash` → `./scripts/autopilot/queue-decision.sh ...` |
 | `reap` | `Bash` → `./scripts/autopilot/reap.py completion ...` (also fires `dispatch.sh cycle-record` for `hydra-dev` / `hydra-target-build`; see Phase 6) |
-| `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7. The decide CLI has already POSTed the clean run-end for this cause (issue #1352) — drain + digest are all that remain. |
+| `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7. The decide CLI has already POSTed the clean run-end for this cause (issue #1352) — drain (always) + digest (skipped for cause `context_compaction`, see Phase 7 below, issue #3787) are all that remain. |
 | `wait` | sleep N; re-enter loop. Only emitted while slots are in flight (busy-wait nap / `wait_or_reap`) or after a non-dispatch housekeeping turn — a wait-only turn with zero occupied slots emits `terminate` (cause `idle`) instead, because a print-mode session exits on its final message and the wait would never be honoured (issue #1352). **Handoff baton-pass (issue #1903):** a `wait` while slots ARE occupied may be the LAST message of this print-mode turn — print mode physically exits when the model goes quiet across the nap, with subagents still mid-flight. When you end such a turn (slots in flight, no further dispatchable work this turn), POST `/api/autopilot/run-end` with `cause=handoff` BEFORE your final message — an honest baton-pass to the successor run, which re-seeds the slots from the surviving dispatch ledger (#1352). This is idempotent on `run_id` (same as the `terminate` path), and the ExecStopPost reap backstop derives `handoff` from `state.json.slots_occupied > 0` even if you miss the POST, so the baton-pass is never mis-stamped `interrupted`. |
 | `wait-for-api` | `curl --retry`; re-enter loop |
 
@@ -353,7 +353,7 @@ the table back on the assumption that time alone fixed it.
 
 > **CONTEXT POINTER:** full Phase 6 implementation contracts (cycle-record write, register handoff on auto-merge, token-surrogate write) live in `hydra-autopilot-phase6-ops.md` (sibling of this SKILL.md).
 
-- **Phase 7** — `drain.sh <merged_prs>` + final `hydra-digest` dispatch (end-of-run summary; the morning timer's digest lands around 19:00, the evening timer's around 05:00)
+- **Phase 7** — `drain.sh <merged_prs>` (always) + final `hydra-digest` dispatch (end-of-run summary; the morning timer's digest lands around 19:00, the evening timer's around 05:00). **Skip the `hydra-digest` dispatch when the terminate cause was `context_compaction`** (issue #3787) — `drain.sh` still runs unconditionally (free, deterministic FINAL line), but the digest is a real costed `Agent()` call, and at the periodic-restart cadence (default every 8 turns) dispatching it on every restart would multiply that cost several-fold over the natural budget/wall_clock/idle run boundary and fragment the operator-facing summary into many partial per-restart digests. Dispatch it for cause in `{budget, wall_clock, idle, failure_backstop}` as before.
 
 ## Phase 0 schema-version handshake (issue #434)
 
@@ -393,7 +393,7 @@ no in-place upgrader: bootstrap is the single writer for state.json.
 
 ## Termination
 
-`decide.py` emits a `terminate` action when the token budget, wall-clock limit, idle-drain turns, or failure backstop trips, or when the turn is wait-only with zero occupied slots (handoff baton-pass). Full termination conditions and the handoff baton-pass contract (issue #1903) are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
+`decide.py` emits a `terminate` action when the token budget, wall-clock limit, idle-drain turns, or failure backstop trips, when the turn count reaches the periodic session-restart cadence (`context_compaction`, issue #3787 — default every 8 Autopilot Turns via `state.limits.context_compaction_turns`, cuts the parent session's own prompt-cache re-read cost), or when the turn is wait-only with zero occupied slots (handoff baton-pass). Full termination conditions and the handoff baton-pass contract (issue #1903) are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
 
 ## Worktree-guard preamble (REQUIRED for code-writing dispatches)
 
