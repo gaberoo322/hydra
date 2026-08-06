@@ -1,0 +1,1 @@
+- fix: rewrite the hydra-dev ghost-write canary snippet to a worktree-guard-compatible shell form so it stops being refused by the isolation Bash guard (#3837)
