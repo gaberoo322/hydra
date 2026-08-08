@@ -352,15 +352,39 @@ GATE_JSON=$(CHECKS_JSON="$CHECKS_JSON" MERGE_STATE_STATUS="$MERGE_STATE_STATUS" 
       tier,
     });
     process.stdout.write(JSON.stringify(d));
+  }).catch((e) => {
+    // Fail-closed on the gate SCRIPT's own runtime error (malformed
+    // CHECKS_JSON with no upstream fallback, a throw inside
+    // decideReviewAdmission, a dynamic-import failure) — distinct from bad
+    // *inputs* to decideReviewAdmission, which the 13-case regression suite
+    // already covers as fail-closed-to-admit. Without this .catch(), Node's
+    // unhandled-rejection default crashes the process before GATE_JSON is
+    // ever written, leaving nothing for the bash fallback below to read
+    // (issue #3815, PR #3874 adversarial-QA FAIL finding).
+    process.stdout.write(JSON.stringify({ action: 'admit', reason: 'gate script runtime error, fail-closed to full review: ' + (e && e.message ? e.message : String(e)) }));
   });
-")
-GATE_ACTION=$(printf '%s' "$GATE_JSON" | jq -r '.action')
-GATE_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.reason')
+" 2>/dev/null || echo "")
+GATE_ACTION=$(printf '%s' "$GATE_JSON" | jq -r '.action // empty' 2>/dev/null)
+GATE_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.reason // empty' 2>/dev/null)
+# Belt-and-braces else-branch (previously undocumented — same FAIL finding):
+# an empty/malformed GATE_JSON (the node process itself failed to start, the
+# subshell failed, or jq couldn't parse the output) still fails closed to the
+# full fan-out, mirroring step 6.5's "unreachable classifier -> deeper path"
+# default (INV-E).
+if [ -z "$GATE_ACTION" ]; then
+  echo "WARN: reviewer admission gate produced no action — fail-closed to admit (full fan-out)."
+  GATE_ACTION="admit"
+  GATE_REASON="gate script produced no output; fail-closed to full review"
+fi
 ```
 
 **Route on `GATE_ACTION`:**
 
-- **`admit`** — proceed to step 7 (the full fan-out). Nothing is skipped.
+- **`admit`** — proceed to step 7 (the full fan-out). Nothing is skipped. This
+  is also the fail-closed default when the gate script itself errors or
+  produces no output (see the `.catch()` and the empty-`GATE_ACTION` fallback
+  above) — an unrecognized/empty action is never treated as `defer` or
+  `skip-required-failed`.
 
 - **`defer`** — the PR cannot merge on this pass. Post a comment and bounce to a
   dev agent via the universal remediation loop. **Do NOT leave `needs-qa` in
@@ -395,15 +419,56 @@ GATE_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.reason')
   import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderChecksBlock}) => {
     const r = classifyVerdict(process.env.REVIEW_VERDICT, JSON.parse(process.env.CHECKS_JSON));
     process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderChecksBlock(r)}));
+  }).catch((e) => {
+    // Same fail-closed rationale as step 6.6's decideReviewAdmission call
+    // above: this branch is only reached because GATE_ACTION already told us
+    // a required check failed, so the safe default on the script's OWN
+    // runtime error is the FAIL this path was always going to emit — never a
+    // crash, never a silent PASS (issue #3815, PR #3874 finding).
+    process.stdout.write(JSON.stringify({ verdict: 'FAIL', reason: 'gate re-derivation script runtime error, fail-closed to FAIL: ' + (e && e.message ? e.message : String(e)), checks: '_(checks block unavailable — gate script error)_' }));
   });
-  " > /tmp/qa-verdict.json
+  " > /tmp/qa-verdict.json 2>/dev/null || echo '{"verdict":"FAIL","reason":"gate re-derivation script failed to run, fail-closed to FAIL","checks":"_(checks block unavailable — gate script error)_"}' > /tmp/qa-verdict.json
   VERDICT=$(jq -r '.verdict' /tmp/qa-verdict.json)
   VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
   CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
-  # VERDICT is FAIL. Skip to step 10's FAIL routing for T1/T2/T3 — do not spawn reviewers.
+  # VERDICT is FAIL (by classifyVerdict on the happy path, or by the fail-closed
+  # fallback above on a script error). Skip to step 10's FAIL routing for
+  # T1/T2/T3 — do not spawn reviewers.
   ```
   This reuses the existing classifier and FAIL routing unchanged — the gate only
   declines to spawn the reviewers whose output is provably moot (INV-A/INV-D).
+
+**Invariants referenced above, formally defined (issue #3815).** Step 6.6's
+prose above cites INV-A through INV-G by tag, but until now those tags were
+defined only in the issue's (uncommitted, expiring) design-concept artifact —
+a dangling reference from any reviewer or future editor's point of view who
+has only this file. This closes that gap, called out as a Standards finding on
+PR #3874's adversarial-QA FAIL round and carried forward unresolved through
+PR #3881:
+
+- **INV-A** — any admission/short-circuit lever added under issue #3815 is a
+  derivation of `aggregateAdversarialReview()` / `classifyVerdict()` in
+  `scripts/ci/qa-verdict.ts`, never an independent policy.
+- **INV-B** — T3/T4 reviews may only be **deferred**, never depth-reduced, by
+  any such lever — Verifier-Core verification depth is never cut.
+- **INV-C** — every PR that reaches auto-merge has been reviewed at the full
+  depth its tier requires: a deferred or pre-spawn-skipped PR never merges
+  without a real review having run on a later pass.
+- **INV-D** — the emitted verdict literals (`PASS` / `FAIL` / `PASS-pending-CI`
+  / `FAIL-pending-CI`), `aggregateAdversarialReview()`, `classifyVerdict()`,
+  and `decide.py`'s `should_auto_merge()` (`INV-007`) stay byte-unchanged by
+  any lever addressed under issue #3815.
+- **INV-E** — every unknown input (an unreachable tier classifier, an
+  unknown/absent `mergeStateStatus`, or the gate script's own runtime error,
+  per the `.catch()` fallbacks above) fails closed to FULL review depth, never
+  to a skip.
+- **INV-F** — the Target's Risk-Critical Surface classification
+  (`classifyTargetQaPath`, `hydra-target-qa`'s sibling gate) is untouched by
+  any orchestrator-side QA-cost lever under issue #3815 — these levers edit
+  only orchestrator files, zero Target files.
+- **INV-G** — no new Redis key, label, CI check, or API endpoint is introduced
+  by any lever under issue #3815 (`mergeStateStatus` rides the existing step-3
+  `gh pr view` call).
 
 ### 7. Spawn the review sub-agents in parallel (single message, all Agent calls)
 
