@@ -26,8 +26,20 @@
  * from the barrel.
  *
  * One-way import: this module imports FROM `./token-math.ts`, `./config.ts`,
- * `./oauth-usage.ts`, and `../transcript-store.ts`; `usage-tracker.ts` imports
- * the scan + OAuth-cache primitives FROM here.
+ * `./oauth-usage.ts`, `../transcript-store.ts`, and
+ * `../redis/transcript-parse-memo.ts`; `usage-tracker.ts` imports the scan +
+ * OAuth-cache primitives FROM here.
+ *
+ * Per-file parse memo (issue #3805): transcripts are append-only and
+ * immutable once a session ends, so a file whose `(size, mtimeMs)` is
+ * unchanged since the last scan cannot have gained usage lines. `transcriptScan()`
+ * loads the durable `path -> parsed contribution` memo ONCE at the top of the
+ * walk, replays a cache HIT through the SAME cutoff/bucketing logic a fresh
+ * parse uses (never a second, independently-maintained copy — see
+ * `foldParsedLine` below), and writes back changed/evicted entries in ONE
+ * pipelined batch at the end. A memo miss, a structurally-corrupt entry, or a
+ * Redis outage all degrade to a full parse of that one file — the memo is
+ * never load-bearing for correctness, only for cost.
  */
 
 import { readFile, stat } from "node:fs/promises";
@@ -78,6 +90,15 @@ import {
   wireOAuthBackoffPersistence,
 } from "./oauth-read-cache.ts";
 import type { CachedOAuthRead } from "./oauth-read-cache.ts";
+// Per-file parse memo seam (issue #3805): the durable `path -> parsed
+// contribution` Redis Hash. A focused sibling leaf, NOT folded into
+// `../redis/usage-snapshots.ts` (see that file's header / the design-concept
+// artifact for `issue-3805` for why — different access pattern/cardinality).
+import {
+  loadTranscriptParseMemo,
+  writeTranscriptParseMemoBatch,
+} from "../redis/transcript-parse-memo.ts";
+import type { FileParseMemoEntry, MemoLineEntry } from "../redis/transcript-parse-memo.ts";
 
 const MS_PER_HOUR = 3_600_000;
 const MS_PER_DAY = 86_400_000;
@@ -328,6 +349,28 @@ export interface ScanResult {
   linesParsed: number;
   linesWithUsage: number;
   parseErrors: number;
+  /**
+   * Count of in-window files whose `(size, mtimeMs)` matched a persisted
+   * parse-memo entry this scan, so their content was replayed from the memo
+   * instead of being read + JSON-parsed off disk (issue #3805). A `filesScanned`
+   * file is EITHER served from memo OR freshly parsed, never both — so
+   * `filesServedFromMemo <= filesScanned`.
+   */
+  filesServedFromMemo: number;
+}
+
+/**
+ * Injectable persistence for the per-file parse memo (issue #3805). Defaults
+ * to the real `../redis/transcript-parse-memo.ts` accessors; tests inject a
+ * rejecting/pre-seeded stand-in to drive the miss/corrupt/outage degrade
+ * paths deterministically without hand-writing raw Redis fields.
+ */
+export interface TranscriptParseMemoIo {
+  load?: () => Promise<Map<string, FileParseMemoEntry>>;
+  write?: (
+    upserts: ReadonlyMap<string, FileParseMemoEntry>,
+    deletes: readonly string[],
+  ) => Promise<void>;
 }
 
 /**
@@ -345,17 +388,25 @@ export interface ScanResult {
  * OAuth concurrency (issue #1090): `readOAuth()` is fired at the top and only
  * AWAITED after the file walk completes, so the external GET (when one is made)
  * adds no serial latency to the JSONL scan. Never throws.
+ *
+ *   - `memoIo`       injectable per-file parse-memo persistence (issue #3805).
+ *                    Defaults to the real Redis-backed accessors; tests inject
+ *                    a rejecting/pre-seeded stand-in to drive the miss/corrupt/
+ *                    outage degrade paths deterministically.
  */
 export async function transcriptScan(
   root: string,
   now: Date,
   resolveSkill: SkillResolver,
   readOAuth: () => Promise<CachedOAuthRead>,
+  memoIo: TranscriptParseMemoIo = {},
 ): Promise<ScanResult> {
   const nowMs = now.getTime();
   const cutoff7d = nowMs - WINDOW_7D_MS;
   const cutoff24h = nowMs - WINDOW_24H_MS;
   const cutoff5h = nowMs - WINDOW_5H_MS;
+  const loadMemo = memoIo.load ?? loadTranscriptParseMemo;
+  const writeMemo = memoIo.write ?? writeTranscriptParseMemoBatch;
 
   // Authoritative OAuth meter read (issue #1083), through the independent-TTL +
   // last-good cache layer (issue #1090). Fired CONCURRENTLY with the transcript
@@ -421,6 +472,81 @@ export async function transcriptScan(
   let linesParsed = 0;
   let linesWithUsage = 0;
   let parseErrors = 0;
+  let filesServedFromMemo = 0;
+
+  // Per-file parse memo (issue #3805). Loaded ONCE, up front, in a single
+  // round trip — never throws: a load failure degrades to an empty map, which
+  // is indistinguishable from "nothing memoized yet" to every file below.
+  let memoMap: Map<string, FileParseMemoEntry>;
+  try {
+    memoMap = await loadMemo();
+  } catch (err: any) {
+    logger.error({ err }, "[usage-tracker] transcript-parse-memo load failed; scanning cold");
+    memoMap = new Map();
+  }
+  const memoUpserts = new Map<string, FileParseMemoEntry>();
+  const memoDeletes: string[] = [];
+
+  const isKnownFamily = (f: string): f is ModelFamily =>
+    (MODEL_FAMILIES as readonly string[]).includes(f);
+  const isKnownDispatchKind = (k: string): k is DispatchKind =>
+    (DISPATCH_KINDS as readonly string[]).includes(k);
+  /**
+   * Deep, domain-vocabulary validation of a cached memo entry (issue #3805).
+   * `loadTranscriptParseMemo()` already checked the JSON SHAPE; this checks
+   * every `family`/`dispatchKind` string is one this build's vocabulary
+   * actually recognises. A entry written by a future/older build with a
+   * vocabulary this build doesn't recognise degrades to a clean miss — the
+   * file is re-parsed and the entry is overwritten, self-healing the memo.
+   */
+  const isMemoEntryUsable = (entry: FileParseMemoEntry): boolean => {
+    if (entry.dispatchKind !== null && !isKnownDispatchKind(entry.dispatchKind)) return false;
+    for (const e of entry.entries) {
+      if (!e.foreign && !isKnownFamily(e.family)) return false;
+    }
+    return true;
+  };
+
+  /**
+   * The ONE shared bucketing function both the fresh-parse path and the
+   * memo-replay path call (issue #3805 design invariant: never two
+   * independently-maintained copies of the cutoff/window logic, or the two
+   * paths could silently drift apart). Mutates the scan-wide accumulators
+   * declared above via closure. `cutoff7d`/`cutoff24h`/`cutoff5h` are always
+   * evaluated against the CURRENT `now` — a memoized entry's `tsMs` is fixed,
+   * but which windows it falls in is re-derived every call, so a line that
+   * has aged out of `acc5h` since it was memoized correctly stops counting
+   * there without the entry ever being invalidated.
+   */
+  function foldParsedLine(
+    tsMs: number,
+    tokens: TokenBreakdown,
+    foreign: boolean,
+    family: ModelFamily,
+    fileByFamily7d: Record<ModelFamily, TokenBreakdown>,
+  ): void {
+    if (tsMs < cutoff7d) return;
+    if (foreign) {
+      addBreakdown(foreign7d, tokens);
+      return;
+    }
+    addBreakdown(acc7d, tokens);
+    addBreakdown(byModel7d[family], tokens);
+    addBreakdown(fileByFamily7d[family], tokens);
+    if (tsMs >= cutoff24h) {
+      tokens24h += tokens.total;
+      addBreakdown(byModel24h[family], tokens);
+    }
+    if (tsMs >= cutoff5h) {
+      addBreakdown(acc5h, tokens);
+      addBreakdown(byModel5h[family], tokens);
+    }
+    // Buffer for the fixed since-reset window (issue #856). Only when an env
+    // Anchor is set — keeps the unset path zero-overhead.
+    if (anchorEnvMs !== null) {
+      sinceResetEntries.push({ tsMs, tokens, family });
+    }
+  }
 
   const files = await listTranscriptFiles(root);
   for (const file of files) {
@@ -432,12 +558,70 @@ export async function transcriptScan(
       continue;
     }
     // mtime is the last append; if the file hasn't been touched in 7
-    // days, none of its lines can fall inside the window.
+    // days, none of its lines can fall inside the window. Piggyback the
+    // memo eviction here (issue #3805): the walk already stat()s every file
+    // including aged-out ones, so this is the natural place to drop its
+    // memo entry (if any) — no separate sweep job needed. Bounds the memo to
+    // the corpus's active in-window footprint.
     if (st.mtimeMs < cutoff7d) {
       filesSkippedByMtime++;
+      if (memoMap.has(file)) {
+        memoMap.delete(file);
+        memoDeletes.push(file);
+      }
       continue;
     }
     filesScanned++;
+
+    // Memo hit (issue #3805): unchanged (size, mtimeMs) means the file cannot
+    // have gained usage lines since it was last parsed — replay its cached
+    // per-line contribution through the SAME `foldParsedLine` the fresh path
+    // uses, with NO read + NO JSON.parse of this file's bytes.
+    const cached = memoMap.get(file);
+    if (
+      cached !== undefined &&
+      cached.size === st.size &&
+      cached.mtimeMs === st.mtimeMs &&
+      isMemoEntryUsable(cached)
+    ) {
+      filesServedFromMemo++;
+      const fileByFamily7d = emptyByModel();
+      for (const e of cached.entries) {
+        if (e.foreign) {
+          foreignModelsSeen.add("<memoized-foreign>");
+          foldParsedLine(e.tsMs, e.tokens, true, "unknown", fileByFamily7d);
+        } else {
+          const family = e.family as ModelFamily; // validated by isMemoEntryUsable above
+          if (family === "unknown") unknownModelsSeen.add("<memoized-unknown>");
+          foldParsedLine(e.tsMs, e.tokens, false, family, fileByFamily7d);
+        }
+      }
+      linesParsed += cached.linesParsed;
+      linesWithUsage += cached.linesWithUsage;
+      parseErrors += cached.parseErrors;
+      if (
+        anchorEnvMs !== null &&
+        cached.observedResetMs !== null &&
+        (mostRecentObservedResetMs === null || cached.observedResetMs > mostRecentObservedResetMs)
+      ) {
+        mostRecentObservedResetMs = cached.observedResetMs;
+      }
+      // Per-file skill/dispatchKind attribution stays keyed by whatever the
+      // session-level resolution assigned AT WRITE TIME (design invariant,
+      // issue #3805) — never affects acc5h/acc7d/byModel*/tokens24h, only the
+      // bySkillByModel/byDispatchKind cross-tabs.
+      const cachedSkill = cached.skill;
+      const cachedKind = cached.dispatchKind;
+      if (cachedSkill !== null && cachedKind !== null && isKnownDispatchKind(cachedKind)) {
+        const row = (bySkillByModel[cachedSkill] ??= emptyByModel());
+        const kindRow = byDispatchKind[cachedKind];
+        for (const f of MODEL_FAMILIES) {
+          addBreakdown(row[f], fileByFamily7d[f]);
+          addBreakdown(kindRow[f], fileByFamily7d[f]);
+        }
+      }
+      continue;
+    }
 
     let content: string;
     try {
@@ -452,21 +636,35 @@ export async function transcriptScan(
     // Resolving the skill per FILE (not per line) keeps attribution O(files).
     const fileByFamily7d = emptyByModel();
     let fileHadInWindow7d = false;
+    // Per-line contribution this file will persist to the parse memo (issue
+    // #3805) — only usage-bearing, in-7d-window lines are kept (a window can
+    // only narrow toward "now" on a later read, so an excluded line stays
+    // permanently irrelevant).
+    const memoEntries: MemoLineEntry[] = [];
+    let fileLinesParsed = 0;
+    let fileLinesWithUsage = 0;
+    let fileParseErrors = 0;
+    let fileObservedResetMs: number | null = null;
 
     const lines = content.split("\n");
     for (const line of lines) {
       // Fast reject: most lines are JSON objects; skip blanks instantly.
       if (!line || line[0] !== "{") continue;
       linesParsed++;
+      fileLinesParsed++;
 
-      // Observed rate-limit reset (issue #856). A reset notice has no usage
-      // block (so parseUsageLine would "skip" it), so probe it FIRST and only
-      // when an env Anchor exists — that's the only mode that consumes the
-      // observed reset. Track the most recent one; the effective boundary is
-      // resolved post-scan.
-      if (anchorEnvMs !== null) {
-        const observed = parseObservedResetMs(line);
-        if (observed !== null && (mostRecentObservedResetMs === null || observed > mostRecentObservedResetMs)) {
+      // Observed rate-limit reset (issue #856). Probed on EVERY line —
+      // deliberately NOT gated on `anchorEnvMs` (issue #3805): this file's
+      // memo entry must carry an accurate `observedResetMs` regardless of
+      // whether the Anchor env happens to be set on THIS scan, since a LATER
+      // scan that DOES set it may replay this file from the memo instead of
+      // re-parsing it. The extra probe is on an already-read line — no new I/O.
+      const observed = parseObservedResetMs(line);
+      if (observed !== null) {
+        if (fileObservedResetMs === null || observed > fileObservedResetMs) {
+          fileObservedResetMs = observed;
+        }
+        if (anchorEnvMs !== null && (mostRecentObservedResetMs === null || observed > mostRecentObservedResetMs)) {
           mostRecentObservedResetMs = observed;
         }
       }
@@ -474,10 +672,12 @@ export async function transcriptScan(
       const parsed = parseUsageLine(line);
       if (parsed === null) {
         parseErrors++;
+        fileParseErrors++;
         continue;
       }
       if (parsed === "skip") continue;
       linesWithUsage++;
+      fileLinesWithUsage++;
 
       const tsMs = parsed.tsMs;
       if (tsMs < cutoff7d) continue;
@@ -491,7 +691,8 @@ export async function transcriptScan(
       // bucket, whose implicit 1.0 Quota-Weight is what inverted the meter.
       if (isForeignProviderModel(parsed.model)) {
         foreignModelsSeen.add(parsed.model);
-        addBreakdown(foreign7d, parsed.tokens);
+        foldParsedLine(tsMs, parsed.tokens, true, "unknown", fileByFamily7d);
+        memoEntries.push({ tsMs, tokens: parsed.tokens, foreign: true, family: "unknown" });
         continue;
       }
 
@@ -501,22 +702,8 @@ export async function transcriptScan(
       }
 
       fileHadInWindow7d = true;
-      addBreakdown(acc7d, parsed.tokens);
-      addBreakdown(byModel7d[family], parsed.tokens);
-      addBreakdown(fileByFamily7d[family], parsed.tokens);
-      if (tsMs >= cutoff24h) {
-        tokens24h += parsed.tokens.total;
-        addBreakdown(byModel24h[family], parsed.tokens);
-      }
-      if (tsMs >= cutoff5h) {
-        addBreakdown(acc5h, parsed.tokens);
-        addBreakdown(byModel5h[family], parsed.tokens);
-      }
-      // Buffer for the fixed since-reset window (issue #856). Only when an env
-      // Anchor is set — keeps the unset path zero-overhead.
-      if (anchorEnvMs !== null) {
-        sinceResetEntries.push({ tsMs, tokens: parsed.tokens, family });
-      }
+      foldParsedLine(tsMs, parsed.tokens, false, family, fileByFamily7d);
+      memoEntries.push({ tsMs, tokens: parsed.tokens, foreign: false, family });
     }
 
     // Bucket this file's 7d tokens into the per-skill cross-tab. Skip files
@@ -524,6 +711,8 @@ export async function transcriptScan(
     // one skill resolution per contributing SESSION (memoised by sessionId) —
     // the resolver derives the skill from the first user message text the walk
     // already read (issue #2402), so attribution stays O(files) and Redis-free.
+    let fileSkill: string | null = null;
+    let fileDispatchKind: DispatchKind | null = null;
     if (fileHadInWindow7d) {
       const sessionId = sessionIdFromPath(file);
       let skill = skillCache.get(sessionId);
@@ -536,6 +725,8 @@ export async function transcriptScan(
         skillCache.set(sessionId, skill);
         kindCache.set(sessionId, kind);
       }
+      fileSkill = skill;
+      fileDispatchKind = kind;
       const row = (bySkillByModel[skill] ??= emptyByModel());
       const kindRow = byDispatchKind[kind];
       for (const f of MODEL_FAMILIES) {
@@ -543,6 +734,31 @@ export async function transcriptScan(
         addBreakdown(kindRow[f], fileByFamily7d[f]);
       }
     }
+
+    memoUpserts.set(file, {
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      entries: memoEntries,
+      skill: fileSkill,
+      dispatchKind: fileDispatchKind,
+      observedResetMs: fileObservedResetMs,
+      linesParsed: fileLinesParsed,
+      linesWithUsage: fileLinesWithUsage,
+      parseErrors: fileParseErrors,
+    });
+  }
+
+  // Persist changed/evicted memo entries in ONE pipelined batch (issue
+  // #3805). Best-effort: a write failure only costs the NEXT scan a redundant
+  // re-parse of whatever didn't persist — the `ScanResult` already computed
+  // above is correct regardless and is returned either way.
+  try {
+    await writeMemo(memoUpserts, memoDeletes);
+  } catch (err: any) {
+    logger.error(
+      { upserts: memoUpserts.size, deletes: memoDeletes.length, err },
+      "[usage-tracker] transcript-parse-memo write failed",
+    );
   }
 
   if (foreignModelsSeen.size > 0) {
@@ -590,6 +806,7 @@ export async function transcriptScan(
     linesParsed,
     linesWithUsage,
     parseErrors,
+    filesServedFromMemo,
   };
 }
 
