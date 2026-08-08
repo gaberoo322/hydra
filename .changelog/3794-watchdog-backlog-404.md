@@ -1,0 +1,1 @@
+- fix: watchdog scheduler-recovery now reads real pending-work signals (GitHub board + Redis work-queue) instead of the retired /api/backlog, which 404'd and silently zeroed the "is there work waiting?" check — disarming scheduler auto-restart (#3794)
