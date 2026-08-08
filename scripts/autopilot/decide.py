@@ -2665,6 +2665,40 @@ def _design_concept_is_fresh(dc: dict | None) -> bool:
     return bool(dc.get("present")) and bool(dc.get("isFresh"))
 
 
+def _design_concept_is_approved(dc: dict | None) -> bool:
+    """Approval check — true iff the artifact's `status` is 'approved'.
+
+    The APPROVAL dimension of issue #3798's anchor-shape discriminator,
+    orthogonal to freshness (`_design_concept_is_fresh`): a draft / warn-only
+    artifact (status='draft', gateOk=false) is fresh-but-NOT-approved, so it
+    does NOT trigger frontier routing. This is deliberately NOT a second
+    staleness rule — staleness is `_design_concept_is_fresh` alone (the issue's
+    "do not invent a second staleness rule" constraint); this predicate reads
+    only the artifact's lifecycle `status` field, the same field
+    `src/design-concept.ts` `markApproved` stamps.
+    """
+    if not dc:
+        return False
+    return dc.get("status") == "approved"
+
+
+def _design_concept_routes_frontier(dc: dict | None) -> bool:
+    """Issue #3798 anchor-shape discriminator — true iff fresh AND approved.
+
+    A `dev_orch` dispatch whose anchor carries a fresh, APPROVED design-concept
+    artifact routes to the frontier tier; every other combination (stale /
+    absent / unapproved) keeps Sonnet. Reuses the existing freshness predicate
+    (`_design_concept_is_fresh`) per the issue's "do not invent a second
+    staleness rule" constraint, combined with the approval predicate above.
+
+    decide.py stays pure (#1093): the caller turns a True verdict into a
+    `prompt_args.route_model` HINT (never a concrete `model` field) that the
+    playbook maps to the Agent model kwarg — the same shape as the
+    `ESCALATION_POLICY` -> `prompt_args.escalate_model` path.
+    """
+    return _design_concept_is_fresh(dc) and _design_concept_is_approved(dc)
+
+
 def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     """Read a collect-state anchor-ref signal, normalising "absent" spellings.
 
@@ -2785,6 +2819,31 @@ def _select_for_slot(
         # grill-clear anchor, or (b) the only grill-clear anchor IS the one
         # pending grill. An un-grilled anchor still gets its design concept; it
         # just no longer blocks unrelated work.
+        # ISSUE #3798 — anchor-shape frontier routing. A dev_orch dispatch
+        # whose anchor carries a fresh, APPROVED design-concept artifact routes
+        # to the frontier tier for that one dispatch; every other shape (no
+        # artifact / stale / unapproved) keeps Sonnet (PR #3795's measured
+        # demotion). This is a LEADING discriminator — known at dispatch time,
+        # before any code is written — exactly the population where quality
+        # compounds (multi-file, tier-gated self-modification).
+        #
+        # The discriminator reuses the two existing helpers the loop already
+        # resolves design-concept presence through — `_candidate_design_concept`
+        # (the `designConcept` block on the top candidate) and
+        # `_design_concept_is_fresh` — plus a new `_design_concept_is_approved`
+        # for the approval dimension. No new signal, no new collection: the
+        # block is state the loop already has in hand (#628 grill gate).
+        #
+        # #1093 PURITY: a frontier verdict emits a `prompt_args.route_model`
+        # HINT (the `fable` alias the playbook's fallback resolves to Opus while
+        # `fable` stays unentitled), NEVER a concrete `model` field on the
+        # action. The playbook maps this HINT to the Agent model kwarg for this
+        # one dispatch — the same contract as `escalate_model` below, applied to
+        # the initial dispatch instead of a failure re-dispatch. The existing
+        # `subagent_failure` escalation path (`ESCALATION_POLICY["dev_orch"]`)
+        # is unchanged and still fires independently on top of this routing.
+        dc = _candidate_design_concept(candidates, best)
+        route_model = "fable" if _design_concept_routes_frontier(dc) else None
         signals = state.get("signals") if isinstance(state, dict) else None
         orch_anchor = _orch_anchor_signal(signals, "orch_pending_grill_anchor")
         dev_ready_anchor = _orch_anchor_signal(signals, "orch_dev_ready_anchor")
@@ -2797,17 +2856,23 @@ def _select_for_slot(
                 # today's behaviour rather than dispatching onto an un-grilled
                 # anchor.
                 return None
+            prompt_args: dict = {"anchor": dev_ready_anchor}
+            if route_model:
+                prompt_args["route_model"] = route_model
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args={"anchor": dev_ready_anchor},
+                prompt_args=prompt_args,
                 reason=(
                     f"orch board has a grill-clear ready-for-agent anchor "
                     f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
                     f"concept (per-anchor gate, #3711)"
                 ),
             )
-        return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
+        prompt_args = {}
+        if route_model:
+            prompt_args["route_model"] = route_model
+        return make_dispatch(cls, "hydra-dev", prompt_args=prompt_args, reason="orch board has ready-for-agent issues")
     if cls == "dev_target":
         # Use board signal (work_queue / target backlog) — dev_target dispatches
         # are driven by the target-side queue. AFTER #458 it ALSO surfaces the

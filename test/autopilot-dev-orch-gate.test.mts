@@ -27,7 +27,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -291,5 +292,242 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
       /gh pr list --repo gaberoo322\/hydra --state open --json [^\n]*\blabels\b/,
       "active_dev_orch collector must request `labels` from gh",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dev_orch anchor-shape frontier routing (issue #3798)
+// ---------------------------------------------------------------------------
+//
+// PR #3795 demoted dev_orch to Sonnet on evidence. Issue #3798 adds a LEADING
+// discriminator: a dev_orch dispatch whose anchor carries a fresh, APPROVED
+// design-concept artifact routes to the frontier tier for that one dispatch;
+// stale / absent / unapproved keep Sonnet. decide.py emits the routing as a
+// `prompt_args.route_model` HINT — never a concrete `model` field (#1093) —
+// that the playbook maps to the Agent model kwarg, parallel to the
+// `escalate_model` cascade-routing override. Exercised at the decision-core
+// level by invoking `decide.py decide` with constructed (state, candidates,
+// events) triples, pinning the four artifact-shape combinations the issue's AC
+// names plus the purity invariant and the pinned-dispatch path.
+
+const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+
+function devOrchBaseState(signals: Record<string, unknown> = {}): any {
+  return {
+    started_epoch: Math.floor(Date.now() / 1000),
+    limits: {
+      token_budget: 2_000_000,
+      wall_clock_max_sec: 28_800,
+      idle_drain_turns: 5,
+      scope: "all",
+      subagent_max_tokens: 400_000,
+      subagent_hard_max_tokens: 800_000,
+    },
+    cumulative_tokens: 0,
+    dispatches: 0,
+    idle_turns: 0,
+    turn: 0,
+    burned_classes: [],
+    reaped_task_ids: [],
+    failure_log: [],
+    slots: {
+      dev_orch: null, qa_orch: null, research_orch: null,
+      dev_target: null, qa_target: null, research_target: null,
+      design_concept_orch: null,
+    },
+    signal_last_fired: {
+      health: 0, sweep_orch: 0, sweep_target: 0,
+      discover_orch: 0, discover_target: 0,
+    },
+    signals: { orch_work_available: true, ...signals },
+    research_force_counter: {},
+  };
+}
+
+function runDecidePy(state: any, candidates: any, events: any[] = []): any {
+  const dir = mkdtempSync(join(tmpdir(), "dev-orch-gate-3798-"));
+  const statePath = join(dir, "state.json");
+  const candsPath = join(dir, "candidates.json");
+  const eventsPath = join(dir, "events.json");
+  writeFileSync(statePath, JSON.stringify(state));
+  writeFileSync(candsPath, JSON.stringify(candidates));
+  writeFileSync(eventsPath, JSON.stringify(events));
+  const r = spawnSync("python3", [DECIDE_PY, "decide", statePath, candsPath, eventsPath], {
+    encoding: "utf-8",
+    // Keep the CLI's run-end POST (#1352) off so a test can never reach a live
+    // orchestrator from the suite.
+    env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
+  });
+  // Always read output before tearing down so a failure leaves a usable message.
+  const out = r.stdout ?? "";
+  const err = r.stderr ?? "";
+  rmSync(dir, { recursive: true, force: true });
+  if (r.status !== 0) {
+    throw new Error(`decide.py decide exited ${r.status}\nstdout: ${out}\nstderr: ${err}`);
+  }
+  return JSON.parse(out);
+}
+
+function devOrchDispatch(plan: any): any | undefined {
+  return (plan.actions ?? []).find((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+}
+
+// A candidate feed whose top entry carries a `designConcept` block of the given
+// shape. `best_candidate` returns candidates[0], so this block is the one
+// `_candidate_design_concept` reads. The block mirrors the shape the
+// `_candidate_design_concept` docstring documents and the golden candidates
+// fixtures carry: { present, isFresh, status, gateOk }.
+function candWith(designConcept: Record<string, unknown>): any {
+  return {
+    candidates: [
+      { issue: 3798, anchorRef: "issue-3798", score: 0.9, designConcept },
+    ],
+    research_recommended: false,
+  };
+}
+
+describe("decide.py — dev_orch anchor-shape frontier routing (issue #3798)", () => {
+  const FRESH_APPROVED = { present: true, isFresh: true, status: "approved", gateOk: true };
+  const STALE = { present: true, isFresh: false, status: "approved", gateOk: true };
+  const ABSENT = { present: false, isFresh: false, status: null, gateOk: false };
+  const UNAPPROVED = { present: true, isFresh: true, status: "draft", gateOk: false };
+
+  test("fresh + approved artifact -> route_model HINT set to the frontier alias", () => {
+    const plan = runDecidePy(devOrchBaseState(), candWith(FRESH_APPROVED));
+    const d = devOrchDispatch(plan);
+    assert.ok(d, "expected a dev_orch dispatch on orch_work_available");
+    assert.equal(
+      d.prompt_args.route_model,
+      "fable",
+      "a fresh+approved artifact routes dev_orch to the frontier tier (route_model HINT, resolved to Opus by the playbook fallback while fable is unentitled)",
+    );
+  });
+
+  test("stale artifact -> NO route_model (stays Sonnet)", () => {
+    // Staleness reuses the existing `_design_concept_is_fresh` predicate — the
+    // issue's "do not invent a second staleness rule" constraint. A stale
+    // artifact is grill-clear enough to build, but not the population this
+    // routing escalates.
+    const plan = runDecidePy(devOrchBaseState(), candWith(STALE));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(
+      d.prompt_args.route_model,
+      undefined,
+      "a stale artifact reuses the existing freshness predicate and stays Sonnet",
+    );
+  });
+
+  test("absent artifact -> NO route_model (stays Sonnet)", () => {
+    const plan = runDecidePy(devOrchBaseState(), candWith(ABSENT));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(
+      d.prompt_args.route_model,
+      undefined,
+      "an anchor with no artifact stays Sonnet",
+    );
+  });
+
+  test("unapproved (draft) artifact -> NO route_model (stays Sonnet)", () => {
+    // Approval is its own dimension, orthogonal to freshness. A fresh-but-draft
+    // (warn-only) artifact proceeds (Phase B) but does NOT trigger frontier
+    // routing — only an APPROVED artifact does.
+    const plan = runDecidePy(devOrchBaseState(), candWith(UNAPPROVED));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(
+      d.prompt_args.route_model,
+      undefined,
+      "a fresh-but-unapproved (draft) artifact stays Sonnet",
+    );
+  });
+
+  test("no candidate feed -> NO route_model (conservative Sonnet default)", () => {
+    // The candidate feed is the discriminator's carrier. An absent/empty feed
+    // carries no artifact information, so dev_orch stays on the measured Sonnet
+    // tier (today's behaviour) rather than speculatively routing frontier.
+    const plan = runDecidePy(
+      devOrchBaseState(),
+      { candidates: [], research_recommended: false },
+    );
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args.route_model, undefined);
+  });
+
+  test("#1093 purity: route_model is a HINT in prompt_args, never a concrete model field", () => {
+    const plan = runDecidePy(devOrchBaseState(), candWith(FRESH_APPROVED));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args.route_model, "fable");
+    assert.equal(
+      d.model,
+      undefined,
+      "decide.py must NOT stamp a concrete `model` field — only the route_model HINT (the lever lives in the playbook)",
+    );
+  });
+
+  test("route_model HINT rides the PINNED dispatch too (grill-clear anchor while another awaits grill, #3711)", () => {
+    // Per-anchor gate: a grill pending on one anchor pins dev_orch to a
+    // different grill-clear anchor. The frontier routing must apply on this
+    // pinned dispatch path as well, not only the unpinned one.
+    const state = devOrchBaseState({
+      orch_pending_grill_anchor: "issue-9999",
+      orch_dev_ready_anchor: "issue-3798",
+    });
+    const plan = runDecidePy(state, candWith(FRESH_APPROVED));
+    const d = devOrchDispatch(plan);
+    assert.ok(d, "expected a pinned dev_orch dispatch");
+    assert.equal(
+      d.prompt_args.anchor,
+      "issue-3798",
+      "pinned dispatch names the grill-clear anchor",
+    );
+    assert.equal(
+      d.prompt_args.route_model,
+      "fable",
+      "the frontier routing HINT rides the pinned dispatch path too",
+    );
+  });
+
+  test("route_model is a distinct channel from the subagent_failure escalation HINT", () => {
+    // The two frontier levers attach to DIFFERENT dispatches and never collide
+    // on one action: route_model rides the INITIAL dispatch (anchor shape);
+    // escalate_model/attempt/prior_attempt_status ride the cascade re-dispatch
+    // (capability failure, pinned independently by decide-cascade-escalation).
+    const plan = runDecidePy(devOrchBaseState(), candWith(FRESH_APPROVED));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args.route_model, "fable");
+    assert.equal(
+      d.prompt_args.escalate_model,
+      undefined,
+      "the initial-dispatch frontier HINT is not the escalation HINT",
+    );
+    assert.equal(
+      d.prompt_args.attempt,
+      undefined,
+      "attempt / prior_attempt_status belong to the subagent_failure re-dispatch, not the initial routing",
+    );
+  });
+
+  test("decide.py wires the discriminator via the existing design-concept helpers", () => {
+    // Belt-and-braces: the issue directs reuse of `_candidate_design_concept`
+    // and `_design_concept_is_fresh` (no second staleness rule). Pin that the
+    // routing predicate and both helpers are present and named as documented,
+    // so a future edit can't silently invent a parallel staleness path.
+    const src = readFileSync(DECIDE_PY, "utf-8");
+    assert.match(src, /def _candidate_design_concept\(/);
+    assert.match(src, /def _design_concept_is_fresh\(/);
+    assert.match(src, /def _design_concept_is_approved\(/);
+    assert.match(src, /def _design_concept_routes_frontier\(/);
+    assert.match(
+      src,
+      /return _design_concept_is_fresh\(dc\) and _design_concept_is_approved\(dc\)/,
+      "the frontier discriminator must compose the existing freshness predicate with approval",
+    );
+    // The dev_orch selector turns the verdict into a route_model HINT.
+    assert.match(src, /route_model = "fable" if _design_concept_routes_frontier\(dc\) else None/);
   });
 });
