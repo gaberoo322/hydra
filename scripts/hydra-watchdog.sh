@@ -54,6 +54,89 @@ set -euo pipefail
 # Only restarts when the service is meant to be active (respects a deliberate
 # `systemctl --user stop`).
 
+# read_pending_work OUT_COUNT OUT_FAILED
+# -----------------------------------------------------------------------------
+# Issue #3794: the watchdog's "is there work waiting?" signal for the
+# scheduler-recovery decision. Reads REAL sources — the orchestrator GitHub
+# board (gaberoo322/hydra) plus the Redis anchor work-queue — replacing the
+# retired /api/backlog HTTP surface, which was deleted by #3439 / PR #3455
+# (ADR-0031) and now 404s. The previous `curl .../api/backlog || echo "0"`
+# guard degraded SILENTLY to 0 on that 404, so the signal was permanently 0
+# and the scheduler-recovery path stayed disarmed in exactly the state it
+# exists to recover from (a self-stopped scheduler with an empty work-queue).
+#
+# Board signal: open issues carrying an actionable label — ready-for-agent,
+# needs-research, needs-triage — mirroring the orch_backfill_idle signal in
+# scripts/autopilot/collect-state.sh (the lanes the scheduler actively drains;
+# ready_for_agent is the dev_orch dispatch source signal per its line ~99).
+# Read directly via REST `gh issue list` — never GraphQL (ADR-0031 Decision 6,
+# and the GraphQL rate-limit hazard, operator memory
+# reference_gh_graphql_vs_rest_ratelimit).
+#
+# HARD RULE (issue #3794 acceptance criterion 2): a monitoring script must
+# NEVER treat "I could not read it" as "there is none". On ANY read failure
+# (non-zero exit OR non-integer output from gh or redis-cli) this function
+# sets OUT_FAILED=1, logs a WARN naming the failed signal, and leaves
+# OUT_COUNT=0; the caller then forces the restart branch because "could not
+# prove there is no work" must not disarm recovery.
+#
+# Args (bash namerefs): OUT_COUNT receives the summed pending-work count (0 on
+# any failure); OUT_FAILED receives 1 if any signal read failed, else 0.
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-pending-work.test.mts), mirroring the HYDRA_*_BIN overrides in
+# test/host-probe.test.mts:
+#   HYDRA_GH_BIN      Override the `gh` binary used for the board read.
+#   HYDRA_DOCKER_BIN  Override the `docker` binary used for the work-queue read.
+# -----------------------------------------------------------------------------
+read_pending_work() {
+  local -n _rpw_count="$1"
+  local -n _rpw_failed="$2"
+  # All internal locals are _rpw_-prefixed so they can never share a name with
+  # a caller's nameref target (bash resolves a nameref to the nearest-scope
+  # variable of that name, so an unprefixed `local count` here would shadow the
+  # caller's `count` and the final assignment would never reach the caller).
+  local _rpw_gh_bin="${HYDRA_GH_BIN:-gh}"
+  local _rpw_docker_bin="${HYDRA_DOCKER_BIN:-docker}"
+  local _rpw_limit=100  # GitHub API max single page; mirrors collect-state.sh GH_ISSUE_LIST_LIMIT.
+  local _rpw_board_total=0 _rpw_work_queue=0
+  _rpw_failed=0
+  _rpw_count=0
+
+  # --- Board: sum actionable open issues across the three drain lanes. ---
+  local _rpw_label _rpw_n
+  for _rpw_label in ready-for-agent needs-research needs-triage; do
+    _rpw_n=$("$_rpw_gh_bin" issue list --repo gaberoo322/hydra --state open \
+      --label "$_rpw_label" --limit "$_rpw_limit" \
+      --json number --jq 'length' 2>/dev/null) || {
+      echo "hydra-orchestrator-watchdog: WARN board read FAILED for label '$_rpw_label' ($_rpw_gh_bin issue list exited non-zero) — cannot prove no work pending"
+      _rpw_failed=1
+      return 0
+    }
+    if ! [[ "$_rpw_n" =~ ^[0-9]+$ ]]; then
+      echo "hydra-orchestrator-watchdog: WARN board read for label '$_rpw_label' returned non-integer '$_rpw_n' — cannot prove no work pending"
+      _rpw_failed=1
+      return 0
+    fi
+    _rpw_board_total=$((_rpw_board_total + _rpw_n))
+  done
+
+  # --- Work-queue: hydra:anchors:work-queue length, via the same Redis
+  # container the script pings for the Check 0 liveness probe. ---
+  _rpw_work_queue=$("$_rpw_docker_bin" exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null) || {
+    echo "hydra-orchestrator-watchdog: WARN work-queue read FAILED ($_rpw_docker_bin exec redis-cli LLEN exited non-zero) — cannot prove no work pending"
+    _rpw_failed=1
+    return 0
+  }
+  if ! [[ "$_rpw_work_queue" =~ ^[0-9]+$ ]]; then
+    echo "hydra-orchestrator-watchdog: WARN work-queue read returned non-integer '$_rpw_work_queue' — cannot prove no work pending"
+    _rpw_failed=1
+    return 0
+  fi
+
+  _rpw_count=$((_rpw_board_total + _rpw_work_queue))
+}
+
 run_service_liveness() {
   local STALE_THRESHOLD_SECONDS=900  # 15 minutes
   local SERVICE="hydra-orchestrator.service"
@@ -143,23 +226,27 @@ run_service_liveness() {
     local uptime_s
     uptime_s=$(echo "$health" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(int(d.get("uptime",0)))' 2>/dev/null || echo "0")
     if (( uptime_s > 300 )); then
-      # Check if there's work waiting
-      local queue_depth work_queue total_work
-      queue_depth=$(curl -sS --max-time 5 "http://localhost:4000/api/backlog" 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-total=sum(len(d.get(l,[])) for l in ['queued','inProgress','triage','backlog'])
-print(total)
-" 2>/dev/null || echo "0")
-      work_queue=$(docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo "0")
-      total_work=$((queue_depth + work_queue))
+      # Check if there's work waiting (issue #3794). Real signals: the
+      # orchestrator GitHub board (gaberoo322/hydra) + hydra:anchors:work-queue.
+      # The old read hit /api/backlog, which 404s (deleted by #3455 / ADR-0031),
+      # and its `|| echo "0"` guard silently zeroed queue_depth — disarming this
+      # recovery path in exactly the state it exists to recover from. A read
+      # failure now logs loudly and forces a restart: a monitoring script must
+      # never treat "I could not read it" as "there is none". See
+      # read_pending_work for the per-signal failure handling.
+      local total_work work_read_failed
+      read_pending_work total_work work_read_failed
 
-      if (( total_work > 0 )); then
-        echo "hydra-orchestrator-watchdog: scheduler stopped but ${total_work} items waiting (uptime ${uptime_s}s, stopReason=${stop_reason:-none}) — restarting scheduler via API"
+      if (( work_read_failed == 0 && total_work == 0 )); then
+        echo "hydra-orchestrator-watchdog: scheduler stopped, no work pending (board+queue=0); leaving alone"
+      else
+        if (( work_read_failed )); then
+          echo "hydra-orchestrator-watchdog: scheduler stopped and a work-signal read FAILED — cannot prove no work pending (uptime ${uptime_s}s, stopReason=${stop_reason:-none}); restarting scheduler via API (fail-safe)"
+        else
+          echo "hydra-orchestrator-watchdog: scheduler stopped but ${total_work} items waiting (uptime ${uptime_s}s, stopReason=${stop_reason:-none}) — restarting scheduler via API"
+        fi
         curl -sS --max-time 5 -X POST "http://localhost:4000/api/scheduler/start" \
           -H "content-type: application/json" -d '{}' >/dev/null 2>&1 || true
-      else
-        echo "hydra-orchestrator-watchdog: scheduler stopped, no work pending; leaving alone"
       fi
     else
       echo "hydra-orchestrator-watchdog: scheduler not yet running (startup window, uptime ${uptime_s}s); leaving alone"
@@ -727,13 +814,17 @@ run_skill_mirror_drift() {
 }
 
 # =============================================================================
-# Entry point — run all blocks on every tick. Each block is independent and
-# self-contained; a short-circuit in one MUST NOT skip the others.
+# Entry point — run all blocks on every tick ONLY when the script is executed
+# directly, not when it is sourced. test/watchdog-pending-work.test.mts sources
+# this file to exercise read_pending_work in isolation (without faking the
+# service-liveness block's docker/HTTP/systemd upstream checks); the guard keeps
+# that sourcing side-effect-free. Each block is independent and self-contained;
+# a short-circuit in one MUST NOT skip the others.
 # =============================================================================
-
-run_service_liveness
-run_autopilot_wedge
-run_deploy_drift
-run_skill_mirror_drift
-
-exit 0
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  run_service_liveness
+  run_autopilot_wedge
+  run_deploy_drift
+  run_skill_mirror_drift
+  exit 0
+fi
