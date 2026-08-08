@@ -64,6 +64,7 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     linesParsed: 1,
     linesWithUsage: 1,
     parseErrors: 0,
+    filesServedFromMemo: 0,
     generatedAt: NOW.toISOString(),
     cacheHitRatioLast5h: 0,
     cacheHitRatioLast7d: 0,

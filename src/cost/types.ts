@@ -257,6 +257,14 @@ export interface UsageSnapshot {
   linesParsed: number;
   linesWithUsage: number;
   parseErrors: number;
+  /**
+   * Count of `filesScanned` files served from the per-file parse memo instead
+   * of a fresh read + JSON.parse (issue #3805) — the direct evidence that the
+   * cold-scan cost regression the memo fixes is actually being avoided.
+   * `filesServedFromMemo <= filesScanned`; 0 on every scan's first-ever cold
+   * pass over a given file (nothing to replay yet).
+   */
+  filesServedFromMemo: number;
   /** ISO timestamp anchor used to compute the rolling windows. */
   generatedAt: string;
   /**
