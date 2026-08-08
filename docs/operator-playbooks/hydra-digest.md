@@ -22,6 +22,15 @@ Concise summary of recent Hydra system activity. Aggregates cycle metrics, test 
 CYCLE_COUNT=50  # tune to period
 
 hydra metrics --count $CYCLE_COUNT
+# Per-class token attribution (24h) — transcript-sourced rollup. Re-sourced in
+# #3752 off the ~13%-coverage dispatch surrogate onto the transcript-scan 24h
+# cross-tab, so per-class fractions are a true share of REAL burn across ALL
+# sessions (interactive operator sessions + the autopilot parent loop + reaped
+# subagents) — NOT the reaped-subagent-only slice the prior read used. The
+# `source` field discriminates the arms; the default (no-date) read returns
+# `transcript-24h`. Never rank classes on a `dispatch-surrogate` (historical
+# ?date=) result — its coverage is ~13%.
+hydra raw GET '/api/metrics/cost/by-class' 2>/dev/null
 hydra scheduler status
 # `hydra backlog ls` (Redis kanban) was retired by ADR-0031 (#3439, PR
 # #3455) — `hydra backlog` is now a retired stub (issue #3745). Board flow
@@ -184,6 +193,25 @@ Aggregate: total_cycles, merged_count, failed_count, empty_count, rollback_count
 | Rolled back | N |
 | Total cost | $X.XX |
 | Cost per merge | $X.XX |
+
+### Per-class cost (24h)
+| Class | Tokens | Share | Quota weight |
+|--------|--------|-------|--------------|
+| dev-orch | N | X% | N |
+| qa | N | X% | N |
+| interactive | N | X% | N |
+| research | N | X% | N |
+| cleanup | N | X% | N |
+<Render from /api/metrics/cost/by-class `byClass`, sorted by tokens desc. Include
+the `interactive` row only when non-zero (operator sessions the autopilot never
+reaped). **Coverage caveat:** the 24h transcript cross-tab sums to the snapshot's
+`tokensLast24h`, so `Share` is a TRUE fraction of real burn across all sessions —
+interactive operator sessions + the autopilot parent loop + reaped subagents.
+This replaced the prior ~13%-coverage dispatch-surrogate read (#3752). If
+`source` reads `dispatch-surrogate` (a historical `?date=` read), coverage drops
+to ~13% — do NOT rank classes on it; re-fetch the default (no-date)
+`transcript-24h` arm. `Quota weight` is 0 when the per-family weight env is
+uncalibrated — read it as a raw-token ranking then, not a quota ranking.>
 
 ### By Source
 | Source | Cycles | Merged | Rate |

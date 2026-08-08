@@ -87,20 +87,22 @@ export function createMetricsCostRouter() {
     }),
   );
 
-  // GET /metrics/cost-by-class — Per-class token attribution (issue #1439).
+  // GET /metrics/cost-by-class — Per-class token attribution (issue #1439, #3752).
   //
-  // Folds the per-skill daily token surrogate into the autopilot dispatch
-  // classes (research / dev-orch / dev-target / qa / cleanup / retro / other)
-  // so the operator can see "QA is now 25% of daily spend" or "research
-  // spiked today". The per-skill data already carries the class signal via
-  // the skill name — no new Redis write path.
-  //
-  // Window semantics (issue #2427): with NO `?date=`, the default operator
-  // "today" view is a rolling ~24h UTC window (yesterday + today's buckets) so
-  // a read taken just after UTC midnight cannot show a false 0% for a class
-  // that demonstrably ran earlier in the operator's local day — the false
-  // "decide.py isn't dispatching" alarm this issue was filed for. An explicit
-  // `?date=YYYY-MM-DD` still reads exactly that single UTC calendar day.
+  // Two arms, distinguished by the result's `source` field:
+  //  - Default (NO `?date=`) → `getRollingCostByClass()`: folds the
+  //    transcript-scan 24h cross-tab (bySkillByModel24h) into the dispatch
+  //    classes (research / dev-orch / dev-target / qa / cleanup / retro /
+  //    interactive / other), `source: "transcript-24h"`. Per-class fractions are
+  //    a TRUE share of REAL burn across ALL sessions — interactive operator
+  //    sessions + the autopilot parent loop + reaped subagents — so they sum to
+  //    the snapshot's `tokensLast24h`. This replaced the prior read, which folded
+  //    the dispatch-observed surrogate (~13% coverage — reaped subagents only)
+  //    and so attributed only a fraction of real token usage (#3752).
+  //  - Explicit `?date=YYYY-MM-DD` → `getCostByClass(date)`: folds the
+  //    per-skill daily token surrogate for that single UTC calendar day,
+  //    `source: "dispatch-surrogate"` (the ~13%-coverage historical arm — never
+  //    rank classes on it; use the default arm for a per-class share).
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   router.get(

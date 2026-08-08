@@ -635,6 +635,7 @@ export function assembleSnapshot(
     byModel7d,
     byModel24h,
     bySkillByModel,
+    bySkillByModel24h,
     byDispatchKind,
     tokens24h,
     foreign7d,
@@ -831,6 +832,11 @@ export function assembleSnapshot(
     calibrated,
     byModel: byModel7d,
     bySkillByModel,
+    // Per-skill × per-family 24h cross-tab (issue #3752). Surfaced verbatim from
+    // the scan so the comprehensive cost-by-class arm can re-project it through
+    // skillToCostClass without a second walk. Pure read-side projection; no
+    // weighting applied here (the cost fold owns the Quota-Weight axis).
+    bySkillByModel24h,
     // Per-skill week-over-week trend (issue #2404). Pure fold over the current
     // cross-tab + the injected prior-week per-skill totals — no Redis here.
     bySkillWoW: deriveBySkillWoW(bySkillByModel, priorBySkill),
