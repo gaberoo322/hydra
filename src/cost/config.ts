@@ -21,6 +21,12 @@
  */
 
 import { logger } from "../logger.ts";
+// Type-only (compile-erased) downward reference to the pure math leaf for the
+// `CategoryWeights` shape the #3825 burn-weight readers return. No runtime edge:
+// `./token-math.ts` imports nothing from this leaf, so the import graph stays
+// acyclic. A VALUE import would be fine too, but type-only keeps the env-reader
+// leaf pure-leaf-shaped.
+import type { CategoryWeights } from "./token-math.ts";
 
 /**
  * Default OAuth-meter cache TTL (issue #1090): how long a successful OAuth
@@ -443,4 +449,123 @@ export function getFiveHourThrottleT2(): number {
     "HYDRA_USAGE_5H_THROTTLE_T2",
     DEFAULT_FIVE_HOUR_THROTTLE_T2,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Ranked-report burn weights (issue #3825) — DISTINCT from the live-fold
+// readers above. The live estimate/pacing fold (`getCacheReadWeight` +
+// `getQuotaWeightOpus/Sonnet/Haiku`) is deliberately identity-by-default so a
+// deploy changes no gating behaviour until the operator calibrates. The ranked
+// culprit report, by contrast, ships with LIST-PRICE defaults so it answers
+// "what is burning the weekly quota?" correctly out of the box — cache writes
+// are 57–68% of real burn and were invisible while every weight was 1.0. These
+// knobs give the report its own recalibratable weight set under a separate
+// `HYDRA_USAGE_BURN_WEIGHT_*` / `HYDRA_USAGE_BURN_FAMILY_*` namespace so the
+// report's list-price calibration NEVER leaks into the live gate. The ratios
+// (cache read 0.1x, cache write 1.25x 5m-TTL, output 5.0x, input 1.0x; family
+// opus 5 / sonnet 3 / haiku 1 by per-MTok input price) are a LIST-PRICE PROXY
+// for an OAuth meter whose unit is opaque — a hypothesis the report validates,
+// never an assumption it ships.
+// ---------------------------------------------------------------------------
+
+/** Default burn weight for a fresh input token (the 1.0x baseline). */
+export const DEFAULT_BURN_WEIGHT_INPUT = 1.0;
+/** Default burn weight for an output token (~5.0x a fresh input token). */
+export const DEFAULT_BURN_WEIGHT_OUTPUT = 5.0;
+/** Default burn weight for a cache-read token (~0.1x a fresh input token). */
+export const DEFAULT_BURN_WEIGHT_CACHE_READ = 0.1;
+/** Default burn weight for a cache-write / cacheCreation token (~1.25x at 5m TTL). */
+export const DEFAULT_BURN_WEIGHT_CACHE_CREATION = 1.25;
+
+/** Default burn family weight for opus (5x haiku by per-MTok input price). */
+export const DEFAULT_BURN_FAMILY_OPUS = 5;
+/** Default burn family weight for sonnet (3x haiku by per-MTok input price). */
+export const DEFAULT_BURN_FAMILY_SONNET = 3;
+/** Default burn family weight for haiku (the 1x baseline). */
+export const DEFAULT_BURN_FAMILY_HAIKU = 1;
+
+/**
+ * Read a ranked-report burn weight env var as a POSITIVE finite number.
+ * Unset/empty → `fallback`; a non-empty-but-non-positive/non-finite value is
+ * logged (fail-loud, mirroring {@link getCacheReadWeight}'s discipline) and also
+ * falls back, since it signals a mis-configured env var the operator should fix
+ * rather than a weight that silently drops a category. Pure + env-only.
+ */
+function readBurnWeight(envVar: string, fallback: number): number {
+  const raw = process.env[envVar];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.error(
+      { envVar, raw, fallback },
+      "[usage-tracker] burn-weight env var is set but not a positive finite number; falling back to default",
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
+/** Ranked-report burn weight for fresh input tokens (default {@link DEFAULT_BURN_WEIGHT_INPUT}). (issue #3825) */
+export function getBurnWeightInput(): number {
+  return readBurnWeight("HYDRA_USAGE_BURN_WEIGHT_INPUT", DEFAULT_BURN_WEIGHT_INPUT);
+}
+
+/** Ranked-report burn weight for output tokens (default {@link DEFAULT_BURN_WEIGHT_OUTPUT}). (issue #3825) */
+export function getBurnWeightOutput(): number {
+  return readBurnWeight("HYDRA_USAGE_BURN_WEIGHT_OUTPUT", DEFAULT_BURN_WEIGHT_OUTPUT);
+}
+
+/** Ranked-report burn weight for cache-read tokens (default {@link DEFAULT_BURN_WEIGHT_CACHE_READ}). (issue #3825) */
+export function getBurnWeightCacheRead(): number {
+  return readBurnWeight("HYDRA_USAGE_BURN_WEIGHT_CACHE_READ", DEFAULT_BURN_WEIGHT_CACHE_READ);
+}
+
+/** Ranked-report burn weight for cache-write / cacheCreation tokens (default {@link DEFAULT_BURN_WEIGHT_CACHE_CREATION}). (issue #3825) */
+export function getBurnWeightCacheCreation(): number {
+  return readBurnWeight("HYDRA_USAGE_BURN_WEIGHT_CACHE_CREATION", DEFAULT_BURN_WEIGHT_CACHE_CREATION);
+}
+
+/**
+ * The ranked report's four per-category burn weights, resolved together as a
+ * {@link CategoryWeights} object — the shape {@link weightedTokens} (in
+ * `./token-math.ts`) consumes. Composes the four `getBurnWeight*` readers; pure
+ * over `process.env` only. (issue #3825)
+ */
+export function getBurnCategoryWeights(): CategoryWeights {
+  return {
+    input: getBurnWeightInput(),
+    output: getBurnWeightOutput(),
+    cacheRead: getBurnWeightCacheRead(),
+    cacheCreation: getBurnWeightCacheCreation(),
+  };
+}
+
+/** Ranked-report burn family weight for opus (default {@link DEFAULT_BURN_FAMILY_OPUS}). (issue #3825) */
+export function getBurnFamilyWeightOpus(): number {
+  return readBurnWeight("HYDRA_USAGE_BURN_FAMILY_OPUS", DEFAULT_BURN_FAMILY_OPUS);
+}
+
+/** Ranked-report burn family weight for sonnet (default {@link DEFAULT_BURN_FAMILY_SONNET}). (issue #3825) */
+export function getBurnFamilyWeightSonnet(): number {
+  return readBurnWeight("HYDRA_USAGE_BURN_FAMILY_SONNET", DEFAULT_BURN_FAMILY_SONNET);
+}
+
+/** Ranked-report burn family weight for haiku (default {@link DEFAULT_BURN_FAMILY_HAIKU}). (issue #3825) */
+export function getBurnFamilyWeightHaiku(): number {
+  return readBurnWeight("HYDRA_USAGE_BURN_FAMILY_HAIKU", DEFAULT_BURN_FAMILY_HAIKU);
+}
+
+/**
+ * The ranked report's per-model-family burn weights, resolved together — the
+ * `{opus, sonnet, haiku}` shape `familyWeight` (in `./token-math.ts`) consumes.
+ * The `unknown` family is deliberately absent (it carries the implicit 1.0
+ * weight `familyWeight` assigns when no knob exists, mirroring the live fold).
+ * Pure over `process.env` only. (issue #3825)
+ */
+export function getBurnFamilyWeights(): { opus: number; sonnet: number; haiku: number } {
+  return {
+    opus: getBurnFamilyWeightOpus(),
+    sonnet: getBurnFamilyWeightSonnet(),
+    haiku: getBurnFamilyWeightHaiku(),
+  };
 }
