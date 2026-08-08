@@ -27,11 +27,16 @@
  * The runner itself stays threshold-agnostic and repo-agnostic.
  *
  * Inputs (env):
- *   CHANGED_FILES                 — newline-separated list of files in the PR
- *                                   diff, repo-relative to the Target repo
- *                                   (computed upstream by the workflow as
+ *   CHANGED_FILES                 — whitespace-separated (newline- and/or
+ *                                   space-separated) list of files in the PR
+ *                                   diff, repo-relative to the Target repo.
+ *                                   The CI path supplies newline-separated
  *                                   `git diff --name-only $(git merge-base
- *                                   origin/main HEAD)...HEAD`).
+ *                                   origin/main HEAD)...HEAD` output, but an
+ *                                   agent / manual invocation that builds the
+ *                                   value by hand naturally writes it
+ *                                   space-separated — BOTH are accepted
+ *                                   (issue #3803; see `parseChangedFiles`).
  *   TARGET_MUTATION_KILL_FLOOR    — single kill-rate floor as integer percent
  *                                   for changed money-critical files
  *                                   (default 60 — money handling warrants a
@@ -314,12 +319,65 @@ export function classifyTimedOut(
   return { status: "warn", reason, timedOut: true, killRate: partialKillRate };
 }
 
-function readChangedFiles(): string[] {
-  const env = process.env.CHANGED_FILES ?? "";
-  return env
-    .split(/\r?\n/)
+/**
+ * Parse the `CHANGED_FILES` env value into one entry per real file path
+ * (issue #3803).
+ *
+ * Splits on ANY run of whitespace — newlines, spaces, tabs, or a mix — then
+ * trims each token and drops empties. The CI path feeds this newline-separated
+ * `git diff --name-only` output, but an agent or manual invocation that builds
+ * the value by hand naturally writes it space-separated:
+ *
+ *     CHANGED_FILES="web/src/a.ts web/src/b.ts" npx tsx scripts/target/mutation-check.ts
+ *
+ * The pre-#3803 parser split on `/\r?\n/` only, so that single-line value
+ * collapsed into ONE array element — the whole concatenated string. The harm is
+ * NOT limited to the obvious "skipped" case; it is path-shape-dependent and
+ * silently corrupts BOTH downstream branches (reproduced against the real
+ * `classifyRisk()` with hydra-betting's manifest surface):
+ *
+ *   - safe-path-first blob ("src/components/X.tsx src/lib/providers/Y.ts") matches
+ *     no risk-surface prefix → the gate emits `status:"skipped"` with `changed:1`
+ *     (silently misreporting N files as 1) — indistinguishable from a real,
+ *     correct skip at a glance.
+ *   - risk-critical-first blob ("src/lib/providers/X.ts src/lib/execution/Y.ts")
+ *     DOES match a trailing-slash surface entry, because `classifyRisk`'s
+ *     directory-prefix check is a raw `startsWith` (not a path-segment check), so
+ *     the WHOLE blob is "matched" as one path → handed to `runMutationTests` as a
+ *     single bogus, space-containing string that does not exist on disk → ENOENT
+ *     (silently caught) → zero mutants → a false no-signal `warn` on a real
+ *     risk-critical diff, while the OTHER risk-critical files bundled in that blob
+ *     are never separately classified or mutated. (This is the mechanism behind
+ *     the "ran ~903s, warn, 47/72 mutants" report on hydra-betting PR #775 —
+ *     issue #3803's open question, now resolved.)
+ *
+ * Splitting on whitespace removes the trap entirely: every parsed entry is a
+ * single real, individually-addressable path (no embedded whitespace), so a
+ * directory-prefix match can never silently swallow a concatenated string or an
+ * unrelated bundled file. No real Target source path contains a literal space
+ * (`find web/src -name '* *'` → 0 hits), so whitespace-tokenizing introduces no
+ * realistic path-collision risk.
+ *
+ * Additive and non-breaking: a newline-only input has no non-newline whitespace
+ * runs to change the split, so the CI path parses byte-identically before and
+ * after this change. Mirrors the module's other exported pure helpers
+ * (`filterMoneyCriticalCandidates`, `buildScopedTestCommand`).
+ *
+ * Pure — no filesystem, no git, no env. Test it by passing arbitrary strings.
+ */
+export function parseChangedFiles(raw: string): string[] {
+  if (typeof raw !== "string") return [];
+  return raw
+    .split(/[\s\r\n]+/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
+}
+
+function readChangedFiles(): string[] {
+  // Issue #3803: delegate to the pure, exported parser so the env-reading seam
+  // is a one-line wrapper and the separator policy is unit-testable in
+  // isolation (see parseChangedFiles above).
+  return parseChangedFiles(process.env.CHANGED_FILES ?? "");
 }
 
 function isQuickFix(body: string): boolean {
