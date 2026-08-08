@@ -173,10 +173,15 @@ describe("sustained-OAuth-failure alarm (issue #3601)", () => {
       "oauth-usage-non-2xx",
       "alarm carries the last failure code as a structured field",
     );
+    assert.doesNotMatch(
+      alarmLines[0].context,
+      /last-good\/estimate fallback/,
+      "alarm must NOT claim the system is running on the last-good/estimate fallback (#1124 was reversed by #3804)",
+    );
     assert.match(
       alarmLines[0].context,
-      /#1124|fail-open/,
-      "alarm names the fail-open gating context, not a hard-stop",
+      /block/i,
+      "alarm states that dispatch blocks while the meter is unreadable (PR #3804 reversed the #1124 fail-open)",
     );
   });
 
