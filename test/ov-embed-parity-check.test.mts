@@ -12,20 +12,30 @@
  *     plus meanCosine / minCosine / pairedCount reporting.
  *   - exitCodeFor: the verdict -> exit-code contract (0 / 1 / 2).
  *   - DEFAULT_PARITY_THRESHOLD is the 0.99 cutover gate.
+ *   - checkWorkspace / notRunnableForMissingWorkspace (issue #3854): a
+ *     missing/misconfigured OV_PARITY_WORKSPACE must report a `not-runnable`
+ *     verdict distinguishable — via the `reason` field — from a genuine
+ *     "sampled but nothing paired" not-runnable result.
  *
- * The driver (workspace sampling + the two /v1/embeddings HTTP calls) is
- * intentionally NOT exercised here — it does filesystem + network I/O and
- * fails soft to `not-runnable` (exit 2), which the pure branches below already
- * cover. Mirrors the test/deploy-drift.test.mts convention (test the pure
- * classifier, trust the wiring).
+ * The network half of the driver (the two /v1/embeddings HTTP calls) is
+ * intentionally NOT exercised here — it fails soft to `not-runnable` (exit 2),
+ * which the pure branches below already cover. checkWorkspace IS exercised
+ * against real temp-dir fixtures since it is a deterministic sync fs check
+ * with no network dependency. Mirrors the test/deploy-drift.test.mts
+ * convention (test the pure classifier, trust the wiring).
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   cosineSimilarity,
   summarizeParity,
   exitCodeFor,
+  checkWorkspace,
+  notRunnableForMissingWorkspace,
   DEFAULT_PARITY_THRESHOLD,
 } from "../scripts/ov-embed-parity-check.ts";
 
@@ -132,10 +142,72 @@ describe("summarizeParity — not-runnable (no paired cosines)", () => {
     assert.match(s.message, /NOT RUNNABLE/);
   });
 
+  test("tags the reason as no-paired-cosines, distinct from a missing workspace (#3854)", () => {
+    const s = summarizeParity([], 0.99);
+    assert.equal(s.reason, "no-paired-cosines");
+  });
+
   test("uses the default threshold when none is given", () => {
     const s = summarizeParity([0.999, 0.999]);
     assert.equal(s.threshold, DEFAULT_PARITY_THRESHOLD);
     assert.equal(s.verdict, "parity");
+  });
+});
+
+describe("checkWorkspace (issue #3854)", () => {
+  test("a real, existing directory -> true", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ov-parity-check-"));
+    try {
+      assert.equal(checkWorkspace(dir), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a nonexistent path -> false", () => {
+    assert.equal(
+      checkWorkspace("/tmp/definitely-does-not-exist-ov-parity-3854"),
+      false,
+    );
+  });
+
+  test("a path that is a file, not a directory -> false", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ov-parity-check-"));
+    const file = join(dir, "not-a-dir.txt");
+    writeFileSync(file, "hello");
+    try {
+      assert.equal(checkWorkspace(file), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("notRunnableForMissingWorkspace (issue #3854)", () => {
+  test("reports not-runnable with a workspace-missing reason, naming the path", () => {
+    const s = notRunnableForMissingWorkspace("/nonexistent/ov/workspace", 0.99);
+    assert.equal(s.verdict, "not-runnable");
+    assert.equal(s.reason, "workspace-missing");
+    assert.equal(s.pairedCount, 0);
+    assert.equal(s.threshold, 0.99);
+    assert.match(s.message, /\/nonexistent\/ov\/workspace/);
+  });
+
+  test("is distinguishable from the generic empty-sample not-runnable result", () => {
+    const missing = notRunnableForMissingWorkspace("/nope", 0.99);
+    const emptySample = summarizeParity([], 0.99);
+    assert.equal(missing.verdict, emptySample.verdict); // same verdict...
+    assert.notEqual(missing.reason, emptySample.reason); // ...but discriminable reason
+  });
+
+  test("defaults to DEFAULT_PARITY_THRESHOLD when none is given", () => {
+    const s = notRunnableForMissingWorkspace("/nope");
+    assert.equal(s.threshold, DEFAULT_PARITY_THRESHOLD);
+  });
+
+  test("still exits 2 (not-runnable is not a green light)", () => {
+    const s = notRunnableForMissingWorkspace("/nope");
+    assert.equal(exitCodeFor(s.verdict), 2);
   });
 });
 

@@ -41,16 +41,40 @@
  *   OV_PARITY_MODEL         model name both serve  (default nomic-embed-text)
  *   OV_PARITY_SAMPLE_SIZE   docs to sample         (default 200)
  *   OV_PARITY_THRESHOLD     cutover gate           (default 0.99)
- *   OV_PARITY_WORKSPACE     dir to sample docs from (default OpenViking mount)
+ *   OV_PARITY_WORKSPACE     dir to sample docs from (default OpenViking mount,
+ *                           which does NOT exist on a fresh checkout — see
+ *                           "Getting a real corpus sample" below)
+ *
+ * Getting a real corpus sample:
+ *   The OpenViking corpus lives inside the `hydra_openviking-data` docker
+ *   volume, which the host cannot read directly (root-owned bind path under
+ *   /var/lib/docker/volumes/... -> Permission denied). To sample real docs,
+ *   stage a copy out via a throwaway container and point OV_PARITY_WORKSPACE
+ *   at the staged copy, e.g.:
+ *
+ *     STAGE=$(mktemp -d)
+ *     docker run --rm -v hydra_openviking-data:/src -v "$STAGE":/dst \
+ *       alpine cp -r /src/. /dst/
+ *     OV_PARITY_WORKSPACE="$STAGE" npx tsx scripts/ov-embed-parity-check.ts
+ *
+ *   Without this, a default-args run has no workspace to sample from — see
+ *   the `workspace-missing` verdict reason below, which is NOT itself a
+ *   parity result and must not be read as one.
  *
  * Exit code:
  *   0  → parity met (mean cosine >= threshold) — safe to cut over, no reindex.
  *   1  → parity NOT met (mean cosine < threshold) — reindex required.
  *   2  → could not run the check (no sample, an endpoint unreachable, a
  *        dimension mismatch). A non-runnable check is NOT a green light.
+ *        The JSON output's `reason` field discriminates *why*:
+ *          - "workspace-missing"   the configured OV_PARITY_WORKSPACE does not
+ *            exist / is not a directory — a configuration problem, not a
+ *            measured parity failure.
+ *          - "no-paired-cosines"   the workspace existed but no doc embedded
+ *            successfully on both backends (empty sample or an endpoint down).
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /** Cutover gate: at or above this mean per-doc cosine we cut over with no reindex. */
@@ -60,6 +84,15 @@ export const DEFAULT_PARITY_THRESHOLD = 0.99;
 export const DEFAULT_SAMPLE_SIZE = 200;
 
 export type ParityVerdict = "parity" | "drift" | "not-runnable";
+
+/**
+ * Discriminates *why* a `not-runnable` verdict was produced. Only set when
+ * `verdict === "not-runnable"`. A missing/misconfigured workspace is a
+ * configuration problem, not a measured parity result, and must never be
+ * indistinguishable from a genuine "sampled but nothing paired" outcome
+ * (issue #3854).
+ */
+export type NotRunnableReason = "workspace-missing" | "no-paired-cosines";
 
 export interface ParitySummary {
   verdict: ParityVerdict;
@@ -73,6 +106,8 @@ export interface ParitySummary {
   threshold: number;
   /** One-line human summary. */
   message: string;
+  /** Only present when verdict is "not-runnable" — see NotRunnableReason. */
+  reason?: NotRunnableReason;
 }
 
 /**
@@ -137,6 +172,7 @@ export function summarizeParity(
       minCosine: 0,
       pairedCount: 0,
       threshold,
+      reason: "no-paired-cosines",
       message:
         "embed parity: NOT RUNNABLE — no doc embedded on both backends " +
         "(empty sample or an endpoint unreachable); cannot green-light a cutover",
@@ -173,6 +209,52 @@ export function summarizeParity(
     message:
       `embed parity: DRIFT — mean cosine ${mean.toFixed(5)} < ${threshold} ` +
       `over ${cosines.length} docs (min ${min.toFixed(5)}); a drop+recreate full reindex is required`,
+  };
+}
+
+/**
+ * Does `workspace` exist and resolve to a readable directory? Pure(ish) sync
+ * fs check — deterministic and unit-testable against real temp paths without
+ * any network or container dependency.
+ *
+ * Returns false for a missing path, a non-directory (e.g. a stray file at
+ * that path), or a path that throws on stat (permission denied) — all three
+ * are "cannot sample from here", which the caller reports as `workspace-missing`
+ * rather than silently falling through to an empty-sample `not-runnable`.
+ */
+export function checkWorkspace(workspace: string): boolean {
+  try {
+    return existsSync(workspace) && statSync(workspace).isDirectory();
+  } catch {
+    /* intentional: unreadable path (e.g. permission denied) -> not usable */
+    return false;
+  }
+}
+
+/**
+ * Build the `not-runnable` verdict for a missing/misconfigured workspace.
+ * Distinct from the generic empty-cosines `not-runnable` in `summarizeParity`
+ * (issue #3854): the message names the exact path so the next operator does
+ * not have to rediscover that `OV_PARITY_WORKSPACE` needs pointing at a real
+ * corpus sample (see the file header for how to stage one).
+ */
+export function notRunnableForMissingWorkspace(
+  workspace: string,
+  threshold: number = DEFAULT_PARITY_THRESHOLD,
+): ParitySummary {
+  return {
+    verdict: "not-runnable",
+    meanCosine: 0,
+    minCosine: 0,
+    pairedCount: 0,
+    threshold,
+    reason: "workspace-missing",
+    message:
+      `embed parity: NOT RUNNABLE — workspace not found or not a directory: ` +
+      `${workspace}; this is a configuration problem, not a measured parity ` +
+      `result. Set OV_PARITY_WORKSPACE to a real corpus sample (see this ` +
+      `script's header comment for how to stage one from the ` +
+      `hydra_openviking-data docker volume).`,
   };
 }
 
@@ -281,6 +363,15 @@ function sampleDocs(workspace: string, limit: number): string[] {
 }
 
 async function main(): Promise<number> {
+  if (!checkWorkspace(WORKSPACE)) {
+    // Distinct from the generic empty-sample not-runnable below: this is a
+    // configuration problem (missing/misconfigured OV_PARITY_WORKSPACE), not
+    // a measured parity result, and the JSON's `reason` field says so.
+    const summary = notRunnableForMissingWorkspace(WORKSPACE, THRESHOLD);
+    process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
+    return exitCodeFor(summary.verdict);
+  }
+
   const docs = sampleDocs(WORKSPACE, SAMPLE_SIZE);
   if (docs.length === 0) {
     const summary = summarizeParity([], THRESHOLD);
