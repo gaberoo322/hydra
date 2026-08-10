@@ -1,0 +1,1 @@
+- fix: recover-stale routes stale in-progress issues with an open referencing PR to needs-qa instead of ready-for-agent, preventing duplicate dev work on already-open PRs (#3852)
