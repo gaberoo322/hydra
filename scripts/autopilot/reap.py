@@ -47,6 +47,19 @@ State writes happen in place to /tmp/hydra-autopilot-state.json (override
 via HYDRA_AUTOPILOT_STATE). Run-log writes go to
 /tmp/hydra-autopilot-nightly.log (override via HYDRA_AUTOPILOT_LOG).
 
+WARNING (issue #3895): the default state path is a SHARED, unlocked file —
+every process on the box, including a dispatched agent correctly isolated
+in its own git worktree, writes the SAME /tmp/hydra-autopilot-state.json
+unless it exports HYDRA_AUTOPILOT_STATE. Never invoke `reap.py` ad-hoc
+(manual exploration/testing of the autopilot's own mechanics) against the
+default path — a live control-loop run may be depending on it right now.
+Always pass an explicit `HYDRA_AUTOPILOT_STATE=/tmp/some-scratch-path.json`
+when experimenting. `run_completion`'s `task_id` cross-check (below) is a
+backstop against a mismatched completion corrupting an occupied slot, but
+it cannot protect fields a stray call is allowed to touch legitimately
+(e.g. a genuinely-matching task_id) — isolation via the env override is
+the real fix.
+
 Exit code is always 0 — failure to file a GitHub issue is logged but
 not fatal.
 """
@@ -1359,6 +1372,17 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     pipeline-specific step. Regression-tested in
     `test/autopilot-decide.test.mts` (signal-completion suite) and
     `test/autopilot-dedup-reap.test.mts` (signal-class burn case).
+
+    Issue #3895: BEFORE any of the above mutation happens, a pipeline
+    class's OCCUPIED slot is cross-checked against the passed `task_id`. If
+    the slot's stamped `task_id` disagrees, the entire completion is
+    refused (zero state mutation, zero downstream fires) and a
+    `task_id_mismatch_refused` line is logged — see the guard immediately
+    after the dup-check below. This closes the corruption path a stray/
+    manual invocation against the shared default state path exploited: an
+    unrelated fabricated task_id previously cleared the REAL occupant's
+    slot, inflated `cumulative_tokens`, and could falsely burn the class.
+    Regression-tested in `test/autopilot-reap-task-id-mismatch.test.mts`.
     """
     s = _load_state()
     if s is None:
@@ -1373,6 +1397,46 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         _append_log(msg)
         # No state mutation on dup.
         return 0
+
+    # Issue #3895: refuse the ENTIRE completion — before any state mutation —
+    # when the passed task_id disagrees with an OCCUPIED pipeline slot's
+    # stamped occupant. `state.slots[<cls>]` is the single source of truth
+    # for "which dispatch owns this class right now" (task_id/skill/
+    # started_epoch/branch, stamped by the dispatch harness at dispatch
+    # time). Before this guard, a stray/manual/mistyped `reap.py completion`
+    # invocation against the SHARED default state path (no isolation, no
+    # locking) was trusted at face value: it cleared a genuinely in-flight
+    # dev_orch slot, inflated cumulative_tokens by a fabricated tokens
+    # figure, and could falsely soft-cap-burn the class for the rest of the
+    # run — all from a task_id that never corresponded to a real dispatch
+    # (the incident this issue documents: run 8f86ef9b, 2026-08-06).
+    #
+    # Only pipeline classes have a slot to protect — `slots.get(cls)` is
+    # always None/absent for signal classes (health/sweep_orch/discover_*/
+    # ...), so this check is a no-op for them, matching the existing
+    # "no slot to clear" design. An EMPTY slot (None — already cleared, or
+    # never occupied) has no occupant to protect either: that is the
+    # legitimate "hard-cap already fired" / late-arriving-completion case
+    # the docstring above already documents, so it is NOT refused here.
+    # Only an OCCUPIED slot (a dict) whose stamped `task_id` DISAGREES with
+    # the passed task_id is refused. A slot with no stamped task_id (older/
+    # partial state) fails OPEN — a missing field can't prove a mismatch, so
+    # we never block a legitimate completion on absent metadata.
+    slots_probe = s.get("slots") or {}
+    slot_probe = slots_probe.get(cls)
+    if isinstance(slot_probe, dict):
+        occupant_task_id = slot_probe.get("task_id")
+        if occupant_task_id and occupant_task_id != task_id:
+            msg = (
+                f"task_id_mismatch_refused class={cls} skill={skill or '?'} "
+                f"passed_task_id={task_id} slot_task_id={occupant_task_id} "
+                f"tokens={total_tokens} — refusing to mutate state; the "
+                f"slot's real occupant does not match the passed task_id "
+                f"(cue: reap-task-id-mismatch)"
+            )
+            print(f"[autopilot] WARN {msg}", file=sys.stderr)
+            _append_log(msg)
+            return 0
 
     # First reap for this task_id. Append BEFORE token accounting so a
     # crash mid-update doesn't leave us double-counting on retry.

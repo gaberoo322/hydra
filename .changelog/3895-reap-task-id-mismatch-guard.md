@@ -1,0 +1,1 @@
+- fix: reap.py refuses a completion whose task_id doesn't match the occupied slot, preventing a stray invocation from corrupting a live autopilot run's pipeline slot (#3895)

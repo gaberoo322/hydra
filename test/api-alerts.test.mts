@@ -194,3 +194,157 @@ describe("GET /alerts — unparseable-entry guard (issue #3744)", () => {
     );
   });
 });
+
+/**
+ * Regression tests for the `POST /alerts/:id/dismiss` reader guard
+ * (`src/api/alerts.ts`, issue #3793).
+ *
+ * # The defect
+ *
+ * The dismiss route did a bare `JSON.parse(all[i])` while scanning the full
+ * list for the target id. One unparseable neighbour anywhere in the list
+ * threw out of the loop, was caught by the route's outer try/catch, and
+ * turned into a 500 for the entire dismiss attempt — even when the target
+ * alert itself was perfectly valid. This mirrors the `GET /alerts` defect
+ * fixed in #3744/#3773; that fix only covered the read route, not this one.
+ *
+ * # The fix under test
+ *
+ * The scan now skips non-string / empty / whitespace-only elements silently
+ * and log+skips (never silently drops) anything `JSON.parse` rejects, then
+ * continues the scan at the same original index — so `setAlertAt(i, ...)`
+ * for a later valid match still targets the correct list position.
+ *
+ * # Why this is its own top-level suite
+ *
+ * Same authoring rule as the GET suite above: a new top-level `describe`
+ * with its own `before`/`after` (server lifecycle) and `beforeEach` (Redis
+ * keyspace clean) — never nested inside a sibling suite's shared teardown.
+ * This suite deliberately does NOT reuse the module-level `server`/
+ * `testRedis`/`startServer`/`getTestRedis`/`cleanAlertsKey` from the GET
+ * suite above — those are torn down by that suite's own `after()`, and
+ * `node:test` runs sibling top-level suites in sequence, so reusing them here
+ * would hand this suite a disconnected Redis client (the exact shared-Redis
+ * flake class the CLAUDE.md authoring rule warns against). Independent
+ * server + Redis connection, scoped to this suite only.
+ */
+describe("POST /alerts/:id/dismiss — unparseable-entry guard (issue #3793)", () => {
+  let dismissServer: any;
+  let dismissBaseUrl: string;
+  let dismissRedis: any = null;
+
+  function getDismissRedis(): any {
+    if (!dismissRedis) dismissRedis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
+    return dismissRedis;
+  }
+
+  before(async () => {
+    const app = express();
+    app.use(createAlertsRouter());
+    await new Promise<void>((resolve) => {
+      dismissServer = app.listen(0, () => {
+        const addr = dismissServer.address() as AddressInfo;
+        dismissBaseUrl = `http://127.0.0.1:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    if (dismissServer) dismissServer.close();
+    if (dismissRedis) dismissRedis.disconnect();
+  });
+
+  beforeEach(async () => {
+    await getDismissRedis().del(ALERTS_KEY);
+  });
+
+  test("a malformed neighbour entry no longer 500s the dismiss scan — the target alert is still found and dismissed", async () => {
+    const r = getDismissRedis();
+    // LPUSH order: last push is index 0. Put the corrupt entry ahead of the
+    // target so the scan must skip over it to reach the valid alert.
+    await r.lpush(ALERTS_KEY, JSON.stringify({ id: "target", dismissed: false }));
+    await r.lpush(ALERTS_KEY, "{truncated");
+
+    const res = await fetch(`${dismissBaseUrl}/alerts/target/dismiss`, { method: "POST" });
+    // Against the old bare `JSON.parse(all[i])` this was a 500; the guard
+    // must let the scan continue past the corrupt entry to the real match.
+    assert.equal(res.status, 200, "dismiss must return 200, not 500, despite a corrupt neighbour");
+    const body = await res.json();
+    assert.deepEqual(body, { ok: true });
+
+    const all = await r.lrange(ALERTS_KEY, 0, -1);
+    const stored = all.map((s: string) => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return null;
+      }
+    });
+    const dismissed = stored.find((a: any) => a && a.id === "target");
+    assert.ok(dismissed, "the target alert is still present in the list");
+    assert.equal(dismissed.dismissed, true, "the target alert was actually dismissed");
+  });
+
+  test("skips empty and whitespace-only entries too, without a 500", async () => {
+    const r = getDismissRedis();
+    await r.lpush(ALERTS_KEY, JSON.stringify({ id: "target2", dismissed: false }));
+    await r.lpush(ALERTS_KEY, "   ");
+    await r.lpush(ALERTS_KEY, "");
+
+    const res = await fetch(`${dismissBaseUrl}/alerts/target2/dismiss`, { method: "POST" });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, { ok: true });
+  });
+
+  test("a malformed entry that does not match the target id still allows a correct 404", async () => {
+    const r = getDismissRedis();
+    await r.lpush(ALERTS_KEY, JSON.stringify({ id: "other", dismissed: false }));
+    await r.lpush(ALERTS_KEY, "{not json");
+
+    const res = await fetch(`${dismissBaseUrl}/alerts/does-not-exist/dismiss`, { method: "POST" });
+    // Against the old code this was a 500 (thrown by the corrupt entry) before
+    // the scan ever reached the "not found" fallthrough. The guard must let
+    // the scan finish and report 404 for a genuinely absent id.
+    assert.equal(res.status, 404, "dismiss must return 404, not 500, when the id is genuinely absent");
+    const body = await res.json();
+    assert.equal(body.error, "Alert not found");
+  });
+
+  test("each skipped malformed entry is logged with context — fail-loud, not a silent drop", async () => {
+    const realError = logger.error;
+    const captured: Array<{ ctx: any; msg: string }> = [];
+    let monkeypatchOk = true;
+    try {
+      (logger as any).error = function (ctx: any, msg: string) {
+        captured.push({ ctx, msg });
+      };
+    } catch {
+      monkeypatchOk = false;
+    }
+
+    try {
+      const r = getDismissRedis();
+      await r.lpush(ALERTS_KEY, JSON.stringify({ id: "target3", dismissed: false }));
+      await r.lpush(ALERTS_KEY, "{truncated");
+
+      const res = await fetch(`${dismissBaseUrl}/alerts/target3/dismiss`, { method: "POST" });
+      assert.equal(res.status, 200);
+    } finally {
+      if (monkeypatchOk) (logger as any).error = realError;
+    }
+
+    if (!monkeypatchOk) return;
+    const parseFailures = captured.filter((c) =>
+      typeof c.msg === "string" && c.msg.includes("skipping unparseable"),
+    );
+    assert.ok(parseFailures.length >= 1, "at least one skip must be logged with context (fail-loud)");
+    const logged = parseFailures[0].ctx ?? {};
+    assert.ok(logged.routeLabel === "api/alerts/dismiss", "log carries the dismiss routeLabel for context");
+    assert.ok(typeof logged.index === "number", "log carries the list index of the skipped entry");
+    assert.ok(typeof logged.rawLen === "number", "log carries the raw element length");
+    assert.ok(logged.err, "log carries the thrown err field");
+    assert.equal(logged.alertId, "target3", "log carries the dismiss attempt's target alertId for context");
+  });
+});

@@ -1,0 +1,1 @@
+- fix: target mutation gate accepts whitespace-separated CHANGED_FILES (newline or space), so a manual/agent space-separated value no longer collapses into one bogus path that silently skips or false-warns the money-critical gate (#3803)

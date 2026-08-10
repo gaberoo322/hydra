@@ -22,6 +22,22 @@ compose_base: _vendor/code-review.md
 > instruction for this composed skill; treat the base's step 4 as historical
 > upstream prose to skip over, not something to act on.
 
+> **Blocking-dispatch mandate, restated here (issue #3880 — a #3789/#3827
+> recurrence).** When step 7's fan-out runs, **every** `Agent` call that spawns
+> a reviewer sub-agent MUST pass `run_in_background: false`. The `Agent` tool
+> defaults to background dispatch — a spawn without this flag returns
+> immediately, and the parent turn (and this session) can end with no verdict
+> posted while reviewers are still running. This is not a new rule; it already
+> lives at step 7 below. It failed to hold on 2026-08-05 (issue #3880) even
+> though step 7 carried it — the mandate was true but sat ~250 lines past this
+> preface, after the base's entire unconstrained "spawn in parallel" body, so a
+> dispatch could reach and act on a spawn instruction well before ever reading
+> it. Restating it beside the "skip the base's step 4" note puts it where a
+> top-down read hits it before any spawn happens. Step 7.5's
+> reviewer-completeness check is equally mandatory: never aggregate or emit a
+> verdict for a fan-out where any spawned reviewer did not return a real
+> result — see step 7.5 below.
+
 <!-- compose-seam-supersede -->
 
 > **Composed skill (ADR-0030 Decision 4 / Option C, issue #3420).** This playbook is the thin Hydra **AFK overlay** on top of the vendored upstream `code-review` base (`docs/operator-playbooks/_vendor/code-review.md`). `scripts/sync-skills.sh` emits `~/.claude/skills/hydra-qa/SKILL.md` as **[upstream code-review base] + [this overlay]**, with the vendored base's `disable-model-invocation: true` **stripped** (it hard-errors under Skill-tool dispatch). The review stage dispatches the *same* upstream `code-review` skill the operator runs, in AFK mode. The Hydra-specific verification depth, verdict classification, and remediation-loop routing below ride on that shared base. The dispatch-class → stage table lives in `hydra-autopilot.md`. **Contract complete (ADR-0030 Decision 5, epsilon #3424):** the standalone `hydra-qa` *fork identity* is retired — it is no longer a bespoke reviewer fork, it **is** the composed `review` stage. The `qa_orch` dispatch *class* and its `decide.py` `make_dispatch(…, "hydra-qa")` string literals (orch + target scope) stay live — they select this composed stage.
@@ -129,8 +145,13 @@ If still no PR → comment on issue and stop.
 The fixed point for the diff is **the PR's base ref at the time QA runs** — typically `origin/master`. Pin it explicitly so both sub-agents diff against the same commit:
 
 ```bash
-FIXED_POINT=$(gh pr view $pr_number --repo gaberoo322/hydra \
-  --json baseRefName --jq '.baseRefName')
+PR_VIEW_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
+  --json baseRefName,mergeStateStatus)
+FIXED_POINT=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.baseRefName')
+# mergeStateStatus (DIRTY ⇒ defer) is read by the reviewer admission gate at
+# step 6.6 — fetched here in the SAME gh pr view call, so the gate adds no new
+# state surface (INV-G: no new Redis key / label / CI check / API endpoint).
+MERGE_STATE_STATUS=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.mergeStateStatus // ""')
 # Resolve to a SHA so a concurrent push to master doesn't shift the diff under us.
 git fetch origin "$FIXED_POINT"
 FIXED_SHA=$(git rev-parse "origin/${FIXED_POINT}")
@@ -289,11 +310,238 @@ fi
 - `ADVERSARIAL=0` → T1/T2: one standard pass (the single Standards + Spec fan-out, step 7 as written).
 - `ADVERSARIAL=1` → T3/T4: the two-reviewer refutation fan-out (step 7's T3 branch).
 
+### 6.6 Reviewer admission gate — skip the fan-out when no reviewer can change the verdict (issue #3815)
+
+Before spawning any reviewer, ask the one question that justifies the fan-out's
+cost: **can a reviewer's output still change the emitted verdict on this pass?**
+If not, the entire 2-4-agent fan-out (the second-largest token consumer in the
+system) is dead work. The gate is a **derivation of the verdict fold in
+`scripts/ci/qa-verdict.ts`, never an independent policy** (INV-A): it skips
+reviewers ONLY where `classifyVerdict` / `aggregateAdversarialReview` provably
+make their output moot. It changes no verdict literal, no merge semantic, and
+`decide.py`'s `should_auto_merge()` (INV-D); it never reduces T4 depth (INV-B);
+it fail-closes to full depth on every unknown (INV-E).
+
+The gate reads only data already in hand — `CHECKS_JSON` (step 5), the tier
+(step 6.5), and `MERGE_STATE_STATUS` (the one field added to step 3's existing
+`gh pr view` call — no new Redis key, label, CI check, or API endpoint, INV-G) —
+and returns one of three actions:
+
+- **`admit`** → run the full fan-out at step 7 (the common path: every clean,
+  green PR).
+- **`defer`** → a non-reviewable blocker makes the verdict moot this pass:
+  `mergeStateStatus == DIRTY` (a merge conflict — the diff under review is not
+  the diff that will merge), OR a T4 PR with a required check already failed
+  (T4 may only be deferred, never depth-reduced — INV-B). **No verdict emitted.**
+- **`skip-required-failed`** → a required CI check has already concluded failure
+  on a T1/T2/T3 PR; `classifyVerdict` returns `FAIL` regardless of the review, so
+  the review is moot. The gate carries the `FAIL` verdict the fold already
+  determined (a skipped review never yields PASS — INV-D).
+
+```bash
+# PR_TIER is the string from step 6.5 ("" when the classifier was unreachable).
+# The predicate fail-closes to admit on a null tier / unknown mergeState (INV-E).
+PR_TIER_NUM=$(printf '%s' "$PR_TIER" | jq -r 'tonumber? // empty' 2>/dev/null || true)
+GATE_JSON=$(CHECKS_JSON="$CHECKS_JSON" MERGE_STATE_STATUS="$MERGE_STATE_STATUS" \
+  PR_TIER_NUM="$PR_TIER_NUM" node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({decideReviewAdmission}) => {
+    const tier = process.env.PR_TIER_NUM === '' ? null : Number(process.env.PR_TIER_NUM);
+    const d = decideReviewAdmission({
+      checks: JSON.parse(process.env.CHECKS_JSON),
+      mergeStateStatus: process.env.MERGE_STATE_STATUS,
+      tier,
+    });
+    process.stdout.write(JSON.stringify(d));
+  }).catch((e) => {
+    // Fail-closed on the gate SCRIPT's own runtime error (malformed
+    // CHECKS_JSON with no upstream fallback, a throw inside
+    // decideReviewAdmission, a dynamic-import failure) — distinct from bad
+    // *inputs* to decideReviewAdmission, which the 13-case regression suite
+    // already covers as fail-closed-to-admit. Without this .catch(), Node's
+    // unhandled-rejection default crashes the process before GATE_JSON is
+    // ever written, leaving nothing for the bash fallback below to read
+    // (issue #3815, PR #3874 adversarial-QA FAIL finding).
+    process.stdout.write(JSON.stringify({ action: 'admit', reason: 'gate script runtime error, fail-closed to full review: ' + (e && e.message ? e.message : String(e)) }));
+  });
+" 2>/dev/null || echo "")
+GATE_ACTION=$(printf '%s' "$GATE_JSON" | jq -r '.action // empty' 2>/dev/null)
+GATE_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.reason // empty' 2>/dev/null)
+# Belt-and-braces else-branch (previously undocumented — same FAIL finding):
+# an empty/malformed GATE_JSON (the node process itself failed to start, the
+# subshell failed, or jq couldn't parse the output) still fails closed to the
+# full fan-out, mirroring step 6.5's "unreachable classifier -> deeper path"
+# default (INV-E).
+if [ -z "$GATE_ACTION" ]; then
+  echo "WARN: reviewer admission gate produced no action — fail-closed to admit (full fan-out)."
+  GATE_ACTION="admit"
+  GATE_REASON="gate script produced no output; fail-closed to full review"
+fi
+```
+
+**Route on `GATE_ACTION`:**
+
+- **`admit`** — proceed to step 7 (the full fan-out). Nothing is skipped. This
+  is also the fail-closed default when the gate script itself errors or
+  produces no output (see the `.catch()` and the empty-`GATE_ACTION` fallback
+  above) — an unrecognized/empty action is never treated as `defer` or
+  `skip-required-failed`.
+
+- **`defer`** — the PR cannot merge on this pass. Post a comment and bounce to a
+  dev agent via the universal remediation loop. **Do NOT leave `needs-qa` in
+  place** — that busy-loops `hydra-qa` every autopilot tick, 30-65k tokens each
+  (issue #974); `ready-for-agent` is the bridging label that also avoids the
+  label-less orphan gap (issue #3788). A deferred PR is, by construction, one
+  that cannot merge on this pass, so INV-C holds: every PR that reaches
+  auto-merge has been reviewed at full depth.
+  ```bash
+  gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — review deferred*
+
+  ${GATE_REASON}
+
+  No verdict is being emitted — the PR cannot merge on this pass. The full review (including the Verifier-Core fan-out for a T4 PR) runs once the PR is rebased / CI is green. QA has exited; the autopilot re-queues it when the PR is ready."
+  gh issue edit $issue_number --repo gaberoo322/hydra \
+    --remove-label "needs-qa" --add-label "ready-for-agent" 2>/dev/null \
+    || echo "WARN: failed to re-label issue #${issue_number} on defer (non-fatal)"
+  exit 0
+  ```
+
+- **`skip-required-failed`** (T1/T2/T3 only — T4 routes to `defer`) — the review
+  is moot because a required check already failed. Compute the FAIL verdict the
+  fold already determines and follow the normal step-10 FAIL routing, spawning
+  **zero** reviewers. Set a nominal review verdict (the classifier ignores it
+  when `requiredFailed > 0`) and compute `VERDICT` / `VERDICT_REASON` /
+  `CHECKS_BLOCK` here, then jump to step 10's FAIL routing for T1/T2/T3 — skip
+  step 7 (no spawn), 7.5, 8, and 9 entirely:
+  ```bash
+  REVIEW_VERDICT="PASS"   # nominal — classifyVerdict ignores it when requiredFailed > 0
+  REVIEW_REPORT="_Review skipped by the admission gate (issue #3815): a required CI check already failed, so the review verdict cannot change the FAIL \`classifyVerdict\` returns regardless of the reviewers' finding._"
+  node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({classifyVerdict, renderChecksBlock}) => {
+    const r = classifyVerdict(process.env.REVIEW_VERDICT, JSON.parse(process.env.CHECKS_JSON));
+    process.stdout.write(JSON.stringify({verdict: r.verdict, reason: r.reason, checks: renderChecksBlock(r)}));
+  }).catch((e) => {
+    // Same fail-closed rationale as step 6.6's decideReviewAdmission call
+    // above: this branch is only reached because GATE_ACTION already told us
+    // a required check failed, so the safe default on the script's OWN
+    // runtime error is the FAIL this path was always going to emit — never a
+    // crash, never a silent PASS (issue #3815, PR #3874 finding).
+    process.stdout.write(JSON.stringify({ verdict: 'FAIL', reason: 'gate re-derivation script runtime error, fail-closed to FAIL: ' + (e && e.message ? e.message : String(e)), checks: '_(checks block unavailable — gate script error)_' }));
+  });
+  " > /tmp/qa-verdict.json 2>/dev/null || echo '{"verdict":"FAIL","reason":"gate re-derivation script failed to run, fail-closed to FAIL","checks":"_(checks block unavailable — gate script error)_"}' > /tmp/qa-verdict.json
+  VERDICT=$(jq -r '.verdict' /tmp/qa-verdict.json)
+  VERDICT_REASON=$(jq -r '.reason' /tmp/qa-verdict.json)
+  CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
+  # VERDICT is FAIL (by classifyVerdict on the happy path, or by the fail-closed
+  # fallback above on a script error). Skip to step 10's FAIL routing for
+  # T1/T2/T3 — do not spawn reviewers.
+  ```
+  This reuses the existing classifier and FAIL routing unchanged — the gate only
+  declines to spawn the reviewers whose output is provably moot (INV-A/INV-D).
+
+**Invariants referenced above, formally defined (issue #3815).** Step 6.6's
+prose above cites INV-A through INV-G by tag, but until now those tags were
+defined only in the issue's (uncommitted, expiring) design-concept artifact —
+a dangling reference from any reviewer or future editor's point of view who
+has only this file. This closes that gap, called out as a Standards finding on
+PR #3874's adversarial-QA FAIL round and carried forward unresolved through
+PR #3881:
+
+- **INV-A** — any admission/short-circuit lever added under issue #3815 is a
+  derivation of `aggregateAdversarialReview()` / `classifyVerdict()` in
+  `scripts/ci/qa-verdict.ts`, never an independent policy.
+- **INV-B** — T3/T4 reviews may only be **deferred**, never depth-reduced, by
+  any such lever — Verifier-Core verification depth is never cut.
+- **INV-C** — every PR that reaches auto-merge has been reviewed at the full
+  depth its tier requires: a deferred or pre-spawn-skipped PR never merges
+  without a real review having run on a later pass.
+- **INV-D** — the emitted verdict literals (`PASS` / `FAIL` / `PASS-pending-CI`
+  / `FAIL-pending-CI`), `aggregateAdversarialReview()`, `classifyVerdict()`,
+  and `decide.py`'s `should_auto_merge()` (`INV-007`) stay byte-unchanged by
+  any lever addressed under issue #3815.
+- **INV-E** — every unknown input (an unreachable tier classifier, an
+  unknown/absent `mergeStateStatus`, or the gate script's own runtime error,
+  per the `.catch()` fallbacks above) fails closed to FULL review depth, never
+  to a skip.
+- **INV-F** — the Target's Risk-Critical Surface classification
+  (`classifyTargetQaPath`, `hydra-target-qa`'s sibling gate) is untouched by
+  any orchestrator-side QA-cost lever under issue #3815 — these levers edit
+  only orchestrator files, zero Target files.
+- **INV-G** — no new Redis key, label, CI check, or API endpoint is introduced
+  by any lever under issue #3815 (`mergeStateStatus` rides the existing step-3
+  `gh pr view` call).
+
 ### 7. Spawn the review sub-agents in parallel (single message, all Agent calls)
 
 **This is the critical step — all `Agent` tool calls MUST be in the same assistant message** so they execute in parallel and do not pollute each other's context. The upstream `code-review` skill (`~/.claude/skills/code-review/SKILL.md`) is the contract; do not re-implement its logic — invoke its process pattern.
 
 **Every `Agent` call in this step MUST pass `run_in_background: false` (issue #3789).** The `Agent` tool defaults to background dispatch, so the spawning call returns immediately and the turn can end while reviewers are still running — a prose instruction to "wait for every reviewer" does not prevent this (a `qa_orch` dispatch said exactly that and exited anyway, four times in one autopilot run — #3789). `run_in_background: false` makes each spawn itself a **blocking** call, so the message containing all N spawns cannot return control — and the turn cannot end — until every reviewer has produced a result. Never substitute `run_in_background: true` plus a promise to wait; that is the pattern that stalled.
+
+#### 7.0 Build the shared review packet once (issue #3815, root cause 3)
+
+Before spawning any reviewer, assemble the **review packet** once and pass it
+inline to every sub-agent. Root cause 3 (the issue's headline recommendation):
+each reviewer was independently re-running `git diff`, `git show`-ing every
+changed file, and re-reading the standards docs — the same exploration 4–6
+times per PR. The 5h scan found ~86% of reviewer tokens were `cacheRead` from
+this duplicated loop (~1.46M tokens / ~21 API calls per reviewer, ~5.9 reviewer
+sessions per PR). The parent already holds the diff and the changed-file list;
+building the packet once and forbidding the exploratory tool loop converts each
+reviewer from a multi-turn explorer into a single-shot reviewer.
+
+**This changes only HOW reviewers acquire context — never WHAT they judge, how
+many run, or the verdict fold.** The emitted verdict literals, the per-reviewer
+axis fold (step 9), `aggregateAdversarialReview()`, and the full T3/T4 fan-out
+count (2 reviewers / 4 sub-agents) are byte-untouched (issue #3815 AC4/AC5;
+design-concept INV-D). It is sequenced as its own PR, distinct from the
+admission-gate lever (Lever A, PR #3874) which gates *whether* the fan-out runs
+at all; this lever assumes the fan-out runs and makes each reviewer cheaper.
+
+```bash
+# The diff the parent already pinned in step 3, captured ONCE (not re-run by
+# every reviewer).
+DIFF_TEXT=$(git diff "${FIXED_SHA}...HEAD")
+# Full contents of every changed file at HEAD, captured ONCE. Each reviewer was
+# git-show'ing these individually; inlining them removes that per-reviewer loop.
+CHANGED_FILES_PACKET=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  body=$(git show "HEAD:${f}" 2>/dev/null) || body="(file deleted or absent at HEAD — see the diff above)"
+  CHANGED_FILES_PACKET+="===== ${f} @ HEAD =====
+${body}
+
+"
+done <<< "$(git diff --name-only "${FIXED_SHA}...HEAD")"
+REVIEW_PACKET="Diff (${FIXED_SHA:0:12}…HEAD):
+
+${DIFF_TEXT}
+
+Full contents of every changed file at HEAD:
+
+${CHANGED_FILES_PACKET}"
+# The resolved design-concept artifact ($SPEC_INPUT_JSON from step 4) rides in
+# the same packet for the Spec axis rather than being re-fetched per reviewer.
+```
+
+**Shared packet discipline (applies to EVERY reviewer sub-agent — both axes,
+both tiers, T1 through T4).** Embed `$REVIEW_PACKET` inline at the top of each
+reviewer's prompt, then instruct the reviewer:
+
+> *The diff and the full contents of every changed file are in the packet above
+> — do NOT reconstruct them. Do NOT run an exploratory tool loop: no `git diff`,
+> no `git show`, no repo-wide `grep`/`glob` to "understand the change", and do
+> not read `CLAUDE.md` / `CONTEXT.md` / `docs/adr/` end-to-end. Judge straight
+> off the packet. You MAY (a) open ONE specific standards doc or ADR by name to
+> check a rule you intend to cite, and (b) do at most ONE targeted `read`/`grep`
+> to resolve a single named question the packet leaves ambiguous — in each case
+> state exactly what you are looking for and why the packet did not answer it.
+> If the packet is sufficient, do ZERO tool calls and report directly.*
+
+The packet is the same factual material (diff, file contents, artifact) handed
+to every reviewer — it is NOT the other reviewer's findings, so the "neither
+reviewer is told the other exists" independence rule (step 7b) is preserved.
+The refutation framing (step 7b), the twelve-smell battery, the Hydra-specific
+checks, and the T4 Verifier-Core checklist all still apply unchanged — they are
+judged against the packet instead of against a self-assembled view of the repo.
 
 #### 7a. T1/T2 — single standard pass (`ADVERSARIAL=0`)
 
@@ -311,9 +559,9 @@ Each reviewer (A and B) independently yields a per-reviewer verdict via the step
 
 **Standards sub-agent prompt** — include:
 
-- `FIXED_SHA`, `DIFF_CMD`, `LOG_CMD`.
-- The list of standards-source files to read: `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`, any `STYLE.md` / `STANDARDS.md`.
-- Brief: *"Read the standards docs, then read the diff. Report — per file/hunk where relevant — every place the diff violates a documented standard. Distinguish hard violations from judgement calls. Cite the standard (file + the rule). Skip anything tooling enforces (typecheck, lint — CI already runs these). Under 400 words."*
+- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
+- The standards-source files the reviewer MAY open by name (one, to cite a specific rule — not read end-to-end): `CLAUDE.md`, `CONTEXT.md`, `docs/adr/*.md`, `docs/agents/*.md`, `.editorconfig` (machine-enforced — note but don't re-check), `tsconfig.json`, any `STYLE.md` / `STANDARDS.md`.
+- Brief: *"The diff and changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report — per file/hunk where relevant — every place the diff violates a documented standard. Distinguish hard violations from judgement calls. Cite the standard (file + the rule). Skip anything tooling enforces (typecheck, lint — CI already runs these). Under 400 words."*
 - **Attributing a failing test (issue #1076):** QA reads CI results via `statusCheckRollup` and must not `gh pr checkout`. If you do need to reproduce a test failure locally inside an isolated worktree, run `npm run test:debug` rather than `npm test` + a re-run-and-grep: it runs the identical flags (including `--test-force-exit`) but writes a TAP stream to `test-debug.tap`, so the per-test `not ok <n> - <name>` lines (which the default reporter drops under force-exit) and the `# pass/# fail` footer are both captured in a single run. The failing suite name is then greppable from the file without a second full-suite invocation.
 - **Refactoring-smell battery (Martin Fowler, via upstream `code-review` v1.1).** In addition to the documented standards, scan the diff for these twelve smells and **name each one you find** so the finding is actionable — apply them universally **unless a repo-documented standard explicitly overrides**. Report a smell only where you can point at the specific hunk; do not invent speculative concerns.
   - **Mysterious Name** — function/variable/type names that obscure intent. Fix: rename clearly; if no honest name fits, the design needs rethinking.
@@ -336,10 +584,10 @@ Each reviewer (A and B) independently yields a per-reviewer verdict via the step
 
 **Spec sub-agent prompt** — include:
 
-- `FIXED_SHA`, `DIFF_CMD`, `LOG_CMD`.
+- `$REVIEW_PACKET` inline (the diff + full changed-file contents), per the shared packet discipline in step 7.0. `FIXED_SHA` is for reference only — the reviewer does NOT run `git diff` / `git show` or an exploratory tool loop.
 - The artifact JSON (`SPEC_INPUT_JSON`) embedded verbatim, OR the skip reason (`SPEC_SKIPPED_REASON`) — if skipped, this sub-agent reports `"no spec available"` per the upstream `code-review` skill's contract and exits early.
 - The PR body (so requirements stated only in the PR description are still visible).
-- Brief: *"Read the design-concept artifact. Then read the diff. Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Quote the artifact line for each finding. Under 400 words."*
+- Brief: *"The artifact and the diff / changed-file contents are in the packet — judge off it, with no exploratory tool loop (step 7.0 packet discipline). Report: (a) requirements the artifact asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for — scope creep (diff touches modules not in `modulesTouched`); (c) invariants the artifact promised to preserve that the diff violates (no corresponding test, or test missing assertion); (d) `interfaceImpact: 'breaking'` claims that lack a corresponding interface-migration commit. Quote the artifact line for each finding. Under 400 words."*
 - Hydra-specific checks the sub-agent must apply:
   - Every `modulesTouched[i].path` is touched in the diff (or noted in the report if absent).
   - No file outside `modulesTouched` is meaningfully changed (test fixtures and trivial type-only imports are not "meaningful").

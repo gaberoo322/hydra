@@ -996,6 +996,74 @@ describe("scripts/sync-skills.sh — compose-seam supersede marker (issue #3818)
   });
 });
 
+describe("scripts/sync-skills.sh — composed hydra-qa carries the blocking-dispatch mandate ahead of the base spawn (issue #3880)", () => {
+  /**
+   * #3789 was fixed once by #3827 (the `run_in_background: false` mandate at
+   * the overlay's own step 7). #3818/#3823 fixed the base's step 4 from being
+   * double-executed. Both fixes were live in the composed SKILL.md before
+   * issue #3880's 2026-08-05 recurrence — yet the recurrence still happened,
+   * because the step-7 mandate sat ~250 lines past the compose-seam-supersede
+   * preface, after the ENTIRE unconstrained vendored base body. A dispatch
+   * reading top-down could act on a spawn well before it ever reached the
+   * mandate.
+   *
+   * The fix restates the mandate INSIDE the hoisted preface itself (still
+   * before the marker), so it is textually adjacent to the "skip the base's
+   * step 4" note and precedes the base's own spawn instruction — not just the
+   * step-7 mandate somewhere after it. This test golden-checks the REAL repo
+   * composed output so a future edit that drops or displaces the restated
+   * mandate fails CI, not just an advisory workflow (investigation for #3880
+   * found there was previously NO regression test — composed or otherwise —
+   * for this exact failure mode).
+   */
+  test("the LIVE composed hydra-qa skill restates run_in_background:false in the preface, before the base's spawn step", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-blocking-mandate-"));
+    try {
+      const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+        env: {
+          ...process.env,
+          CLAUDE_SKILLS_DIR: join(dir, "claude"),
+          CODEX_SKILLS_DIR: join(dir, "codex"),
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+      const out = readFileSync(join(dir, "claude", "hydra-qa", "SKILL.md"), "utf-8");
+
+      const supersedeIdx = out.indexOf("Compose-seam supersession");
+      const mandateIdx = out.indexOf("Blocking-dispatch mandate, restated here");
+      const baseSpawnIdx = out.indexOf("### 4. Spawn both sub-agents in parallel");
+      const step7Idx = out.indexOf("### 7. Spawn the review sub-agents in parallel");
+
+      assert.ok(supersedeIdx >= 0, "the compose-seam-supersede preface must still be present");
+      assert.ok(
+        mandateIdx >= 0,
+        "the composed skill must restate the run_in_background:false blocking-dispatch mandate inside the hoisted preface (issue #3880)",
+      );
+      assert.ok(baseSpawnIdx >= 0, "the vendored base's own spawn step must still be present, untouched");
+      assert.ok(step7Idx >= 0, "the overlay's own step 7 spawn instruction must still be present, unchanged");
+
+      assert.ok(
+        supersedeIdx < mandateIdx && mandateIdx < baseSpawnIdx,
+        "the restated mandate must sit BETWEEN the supersession note and the base's spawn step — a top-down read must hit the blocking-dispatch requirement before any spawn instruction, not ~250 lines later at step 7",
+      );
+      assert.match(
+        out.slice(mandateIdx, baseSpawnIdx),
+        /run_in_background: false/,
+        "the restated preface paragraph must literally name the run_in_background: false flag, not just gesture at 'blocking dispatch'",
+      );
+      assert.match(
+        out.slice(mandateIdx, baseSpawnIdx),
+        /step 7\.5/,
+        "the restated preface must also point at step 7.5's reviewer-completeness check, not just the spawn flag",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)", () => {
   /**
    * sync-skills.sh only ever WROTE generated skills; a playbook deleted from
@@ -1339,6 +1407,220 @@ describe("scripts/setup-git-hooks.sh (issue #433)", () => {
       );
     } finally {
       rmSync(fake.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)", () => {
+  /**
+   * The guard only activates on the UNOVERRIDDEN default write path
+   * ($HOME/.claude/skills, $HOME/.codex/skills). To exercise that real code
+   * path without ever touching the developer/CI machine's actual $HOME, every
+   * test here overrides the spawned process's HOME env var to a scratch dir —
+   * CLAUDE_SKILLS_DIR / CODEX_SKILLS_DIR stay UNSET so the script's own
+   * `${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}` default resolution kicks in
+   * against the fake HOME instead.
+   */
+  function makeGuardRepo(): { dir: string; playbooks: string } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-guard-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(playbooks, { recursive: true });
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), join(scripts, "sync-skills.sh"));
+    writeFileSync(
+      playbooks + "/demo.md",
+      "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nbody v1\n",
+    );
+    const init = spawnSync("git", ["init", "-q", dir], { encoding: "utf-8" });
+    assert.equal(init.status, 0, `git init failed: ${init.stderr}`);
+    spawnSync("git", ["-C", dir, "config", "user.email", "test@example.com"]);
+    spawnSync("git", ["-C", dir, "config", "user.name", "Test"]);
+    spawnSync("git", ["-C", dir, "add", "."]);
+    const commit = spawnSync("git", ["-C", dir, "commit", "-q", "-m", "init"], { encoding: "utf-8" });
+    assert.equal(commit.status, 0, `commit failed: ${commit.stderr}`);
+    return { dir, playbooks };
+  }
+
+  /** Fake an `origin/master` remote-tracking ref without a real remote/fetch. */
+  function pinOriginMaster(dir: string): void {
+    const rev = spawnSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf-8" });
+    assert.equal(rev.status, 0, `rev-parse HEAD failed: ${rev.stderr}`);
+    const sha = rev.stdout.trim();
+    const upd = spawnSync("git", ["-C", dir, "update-ref", "refs/remotes/origin/master", sha], {
+      encoding: "utf-8",
+    });
+    assert.equal(upd.status, 0, `update-ref origin/master failed: ${upd.stderr}`);
+  }
+
+  function runDefaultPath(
+    repoDir: string,
+    args: string[] = [],
+    extraEnv: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string; fakeHome: string } {
+    const fakeHome = mkdtempSync(join(tmpdir(), "sync-skills-guard-home-"));
+    const env: NodeJS.ProcessEnv = { ...process.env, PATH: process.env.PATH ?? "", HOME: fakeHome, ...extraEnv };
+    delete env.CLAUDE_SKILLS_DIR;
+    delete env.CODEX_SKILLS_DIR;
+    const r = spawnSync("bash", [join(repoDir, "scripts", "sync-skills.sh"), ...args], {
+      env,
+      encoding: "utf-8",
+    });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, fakeHome };
+  }
+
+  test("refuses the default-path write when docs/operator-playbooks has an uncommitted tracked diff from origin/master", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      // Uncommitted edit — an unmerged/unreviewed change relative to origin/master.
+      writeFileSync(repo.playbooks + "/demo.md", "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nbody v2 UNMERGED\n");
+      const r = runDefaultPath(repo.dir);
+      try {
+        assert.notEqual(r.status, 0, `expected non-zero exit, got 0; stdout=${r.stdout}`);
+        assert.match(r.stderr, /differs from origin\/master/, `expected guard-refusal message, got: ${r.stderr}`);
+        assert.ok(
+          !existsSync(join(r.fakeHome, ".claude", "skills", "demo", "SKILL.md")),
+          "guard must refuse BEFORE any write to the default mirror",
+        );
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses the default-path write when docs/operator-playbooks has an untracked new playbook file", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      // A brand-new, never-committed playbook — `git diff` alone would miss
+      // this; the guard also checks `git status --porcelain --untracked-files=all`.
+      writeFileSync(repo.playbooks + "/extra.md", "---\nname: extra\ndescription: extra\n---\n\n# Extra\n");
+      const r = runDefaultPath(repo.dir);
+      try {
+        assert.notEqual(r.status, 0, `expected non-zero exit, got 0; stdout=${r.stdout}`);
+        assert.match(r.stderr, /differs from origin\/master/, `expected guard-refusal message, got: ${r.stderr}`);
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("writes the default path when docs/operator-playbooks exactly matches origin/master (clean checkout)", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      // No modifications — a clean checkout, exactly deploy.sh's post-pull state.
+      const r = runDefaultPath(repo.dir);
+      try {
+        assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+        assert.ok(
+          existsSync(join(r.fakeHome, ".claude", "skills", "demo", "SKILL.md")),
+          "expected the default mirror to be written when content matches origin/master",
+        );
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--force bypasses the guard even when content differs from origin/master", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      writeFileSync(repo.playbooks + "/demo.md", "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nUNMERGED\n");
+      const r = runDefaultPath(repo.dir, ["--force"]);
+      try {
+        assert.equal(r.status, 0, `expected exit 0 with --force, got ${r.status}; stderr=${r.stderr}`);
+        assert.ok(
+          existsSync(join(r.fakeHome, ".claude", "skills", "demo", "SKILL.md")),
+          "expected --force to write the default mirror despite the diff",
+        );
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("HYDRA_SYNC_SKILLS_FORCE=1 bypasses the guard identically to --force", () => {
+    const repo = makeGuardRepo();
+    try {
+      pinOriginMaster(repo.dir);
+      writeFileSync(repo.playbooks + "/demo.md", "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nUNMERGED\n");
+      const r = runDefaultPath(repo.dir, [], { HYDRA_SYNC_SKILLS_FORCE: "1" });
+      try {
+        assert.equal(r.status, 0, `expected exit 0 with the env override, got ${r.status}; stderr=${r.stderr}`);
+        assert.ok(existsSync(join(r.fakeHome, ".claude", "skills", "demo", "SKILL.md")));
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fails closed when origin/master cannot be resolved locally (no such ref)", () => {
+    const repo = makeGuardRepo();
+    try {
+      // Deliberately do NOT call pinOriginMaster — no origin/master ref exists.
+      const r = runDefaultPath(repo.dir);
+      try {
+        assert.notEqual(r.status, 0, `expected non-zero exit, got 0; stdout=${r.stdout}`);
+        assert.match(r.stderr, /origin\/master could not be resolved/, `expected fail-closed message, got: ${r.stderr}`);
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fails closed when REPO_ROOT is not a git repo at all", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-guard-nogit-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(playbooks, { recursive: true });
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), join(scripts, "sync-skills.sh"));
+    writeFileSync(join(playbooks, "demo.md"), "---\nname: demo\ndescription: demo\n---\n\n# Demo\n");
+    try {
+      const r = runDefaultPath(dir);
+      try {
+        assert.notEqual(r.status, 0, `expected non-zero exit, got 0; stdout=${r.stdout}`);
+        assert.match(r.stderr, /not a git repo/, `expected fail-closed message, got: ${r.stderr}`);
+      } finally {
+        rmSync(r.fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the guard is skipped entirely when CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR are overridden, even with a dirty diff from origin/master", () => {
+    const repo = makeGuardRepo();
+    const claudeDir = mkdtempSync(join(tmpdir(), "sync-skills-guard-override-claude-"));
+    const codexDir = mkdtempSync(join(tmpdir(), "sync-skills-guard-override-codex-"));
+    try {
+      pinOriginMaster(repo.dir);
+      writeFileSync(repo.playbooks + "/demo.md", "---\nname: demo\ndescription: a demo skill\n---\n\n# Demo\n\nUNMERGED\n");
+      const r = spawnSync("bash", [join(repo.dir, "scripts", "sync-skills.sh")], {
+        env: { ...process.env, CLAUDE_SKILLS_DIR: claudeDir, CODEX_SKILLS_DIR: codexDir, PATH: process.env.PATH ?? "" },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `expected override path to bypass the guard, got ${r.status}; stderr=${r.stderr}`);
+      assert.ok(existsSync(join(claudeDir, "demo", "SKILL.md")), "expected the override dir to be written");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+      rmSync(claudeDir, { recursive: true, force: true });
+      rmSync(codexDir, { recursive: true, force: true });
     }
   });
 });
