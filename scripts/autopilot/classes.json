@@ -21,7 +21,7 @@
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Reviews orchestrator PRs (Standards + Spec sub-agents). QA failures train the planner pattern memory (the missed criterion)."
+      "notes": "Reviews orchestrator PRs (Standards + Spec sub-agents). QA failures train the planner pattern memory (the missed criterion). Attempt cap / backoff (issue #3829): deliberately NOT an ESCALATION_POLICY row (decide.py) — a permanently-failing needs-qa issue is suppressed via the label-state-derived needs_qa_orch_stale_only signal (collect-state.sh), not subagent stop status, because a no-verdict fan-out failure can still self-report success."
     },
     {
       "name": "research_orch",

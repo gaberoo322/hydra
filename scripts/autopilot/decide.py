@@ -656,6 +656,15 @@ ESCALATION_POLICY: dict[str, dict] = {
         "model": "fable",
         "max_attempts": 2,
     },
+    # qa_orch is DELIBERATELY absent (invariant 5) and stays absent — this is
+    # not an oversight. Its attempt cap (issue #3829) is a SEPARATE mechanism
+    # (the `needs_qa_orch_stale_only` signal check in the pipeline-priority
+    # loop, just before `_select_for_slot`), driven by GitHub issue-label
+    # state rather than subagent stop status. The motivating failure was a
+    # qa_orch dispatch that self-reported `success` after posting zero
+    # verdicts (a fan-out that lost its worktree) — an ESCALATION_POLICY row
+    # here would key on that same unreliable stop-status signal and never
+    # trip on exactly the failure mode it exists to catch.
 }
 
 # Default attempt cap when a policy row omits `max_attempts` (invariant 4).
@@ -1943,6 +1952,50 @@ def _rule_pipeline_dispatch(
                 make_dispatch_decision_event(
                     state, now, cls=cls, outcome="idle",
                     reason=f"scope excluded ({scope})",
+                )
+            )
+            out.skipped += 1
+            continue
+        # qa_orch attempt cap / backoff (issue #3829) — checked BEFORE the
+        # selector so a permanently-failing needs-qa issue stops being
+        # re-dispatched instead of busy-looping at 30-65k tokens/turn.
+        #
+        # DELIBERATELY NOT keyed on subagent stop status / ESCALATION_POLICY
+        # (invariant 5 keeps qa_orch absent from that dict): the motivating
+        # failure for this issue was a qa_orch dispatch that fanned out 9
+        # background children, had its worktree reaped, posted ZERO verdicts
+        # — and still self-reported `success`. A cap driven by stop status
+        # would have reset on that exact turn and never tripped. Instead this
+        # reads `needs_qa_orch_stale_only`, a signal collect-state.sh derives
+        # from GitHub issue-label STATE (how long an issue has continuously
+        # carried `needs-qa`), not from what the dispatch claims. hydra-qa's
+        # contract is to clear `needs-qa` the moment it posts a verdict
+        # (issue #638) — so the label surviving across the staleness window
+        # is itself the verdict-absence signal, immune to a dispatch's own
+        # success/failure self-report.
+        #
+        # Signal is a boolean the model derives per the playbook's Signal
+        # wiring table: true iff needs-qa issues exist AND every one of them
+        # has been stale (no fresh, i.e. recently-labeled, needs-qa issue)
+        # beyond collect-state.sh's staleness threshold. Absent/false is the
+        # fail-open default (older autopilot state without the new mapping
+        # never suppresses — matches every other optional signal in this
+        # loop). Suppression does not block a different pipeline class, and
+        # does not touch the `needs-qa` label itself — the stuck issue stays
+        # visible on the board via that label plus this dispatch_decision
+        # event, for an operator (or a future recover-stale.sh style sweep)
+        # to act on.
+        if (
+            cls == "qa_orch"
+            and _signal_present(state, events, "needs_qa_orch")
+            and _signal_present(state, events, "needs_qa_orch_stale_only")
+        ):
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason="needs-qa attempt cap reached — every needs-qa issue is stale "
+                    "(no verdict posted within the staleness window); suppressed pending "
+                    "operator attention (issue #3829)",
                 )
             )
             out.skipped += 1

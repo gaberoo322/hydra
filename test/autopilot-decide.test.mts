@@ -198,6 +198,20 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     assert.equal(dispatch.skill, "hydra-qa");
   });
 
+  test("qa_orch attempt cap: needs_qa_orch_stale_only suppresses re-dispatch (issue #3829)", () => {
+    // A needs-qa issue that has survived the collect-state.sh staleness
+    // window without hydra-qa clearing the label (its #638 contract) stops
+    // being re-dispatched — see test/decide-cascade-escalation.test.mts for
+    // the full suite covering why this is a label-state signal, not an
+    // ESCALATION_POLICY / subagent-stop-status cap.
+    const state = baseState({
+      signals: { needs_qa_orch: true, needs_qa_orch_stale_only: true },
+    });
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "qa_orch");
+    assert.equal(dispatch, undefined, "stale-only cohort must suppress the qa_orch dispatch");
+  });
+
   test("dispatches qa_target when needs_qa_target signal present", () => {
     const state = baseState({ signals: { needs_qa_target: true } });
     const plan = runDecide(state, null);

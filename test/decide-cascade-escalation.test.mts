@@ -623,3 +623,105 @@ describe("decide.py — dev_orch Sonnet demotion safety net (2026-07-29)", () =>
     assert.equal(escalationFor(plan, "dev_orch"), undefined);
   });
 });
+
+/** Find the dispatch_decision event for a given class (there is one per pipeline class per turn). */
+function dispatchDecisionFor(plan: any, cls: string): any | undefined {
+  return (plan.events ?? []).find(
+    (e: any) => e && e.event === "dispatch_decision" && e.class === cls,
+  );
+}
+
+function qaDispatch(plan: any): any | undefined {
+  return (plan.actions ?? []).find(
+    (a: any) => a.type === "dispatch" && a.slot === "qa_orch",
+  );
+}
+
+describe("decide.py — qa_orch attempt cap / backoff (issue #3829)", () => {
+  // qa_orch is deliberately absent from ESCALATION_POLICY (invariant 5,
+  // pinned above) because its attempt cap cannot be keyed on subagent stop
+  // status: the motivating failure fanned out 9 background children, lost
+  // its worktree, posted ZERO verdicts, and still self-reported `success`.
+  // The cap instead reads `needs_qa_orch_stale_only`, a GitHub label-STATE
+  // signal collect-state.sh derives (how long an issue has continuously
+  // carried `needs-qa` without hydra-qa clearing it per its #638 contract),
+  // completely independent of what any one dispatch claimed.
+
+  test("needs_qa_orch_stale_only suppresses the qa_orch dispatch", () => {
+    const state = baseState({
+      signals: { needs_qa_orch: true, needs_qa_orch_stale_only: true },
+    });
+    const plan = runDecide(state);
+    assert.equal(
+      qaDispatch(plan),
+      undefined,
+      "every needs-qa issue stale — qa_orch must not be re-dispatched",
+    );
+  });
+
+  test("suppression is VISIBLE via a dispatch_decision idle event naming the attempt cap", () => {
+    const state = baseState({
+      signals: { needs_qa_orch: true, needs_qa_orch_stale_only: true },
+    });
+    const plan = runDecide(state);
+    const ev = dispatchDecisionFor(plan, "qa_orch");
+    assert.ok(ev, "a dispatch_decision event for qa_orch must be emitted");
+    assert.equal(ev.outcome, "idle");
+    assert.match(
+      ev.reason,
+      /attempt cap|stale|3829/i,
+      "the suppression reason must be distinguishable from an ordinary idle turn",
+    );
+  });
+
+  test("needs_qa_orch_stale_only=false does NOT suppress (explicit false is a regular turn)", () => {
+    const state = baseState({
+      signals: { needs_qa_orch: true, needs_qa_orch_stale_only: false },
+    });
+    const plan = runDecide(state);
+    const dispatch = qaDispatch(plan);
+    assert.ok(dispatch, "an explicit false must behave exactly like the signal being absent");
+    assert.equal(dispatch.skill, "hydra-qa");
+  });
+
+  test("needs_qa_orch_stale_only absent is fail-open (older autopilot state never suppresses)", () => {
+    const state = baseState({ signals: { needs_qa_orch: true } });
+    const plan = runDecide(state);
+    const dispatch = qaDispatch(plan);
+    assert.ok(
+      dispatch,
+      "a state.json from before this signal existed must keep dispatching qa_orch normally",
+    );
+  });
+
+  test("needs_qa_orch_stale_only=true with no needs-qa work at all is a no-op, not a false suppression claim", () => {
+    // Defensive case: the playbook only ever sets stale_only=true alongside
+    // needs_qa_orch=true, but the guard requires BOTH signals so a
+    // malformed/partial state never emits a misleading "stale" reason when
+    // there was nothing to suppress in the first place.
+    const state = baseState({
+      signals: { needs_qa_orch_stale_only: true },
+    });
+    const plan = runDecide(state);
+    assert.equal(qaDispatch(plan), undefined, "no needs-qa signal — nothing to dispatch either way");
+    const ev = dispatchDecisionFor(plan, "qa_orch");
+    assert.ok(ev, "qa_orch is still evaluated every turn");
+    assert.doesNotMatch(
+      ev.reason,
+      /attempt cap|3829/i,
+      "without needs_qa_orch present this must fall through to the ordinary 'no eligible work' idle reason",
+    );
+  });
+
+  test("a genuinely FRESH needs-qa issue still dispatches even while other issues are stale (per-cohort, not global)", () => {
+    // The playbook derives needs_qa_orch_stale_only as needs_qa>0 &&
+    // fresh_needs_qa==0 — i.e. it only goes true once EVERY needs-qa issue
+    // is stale. A mixed cohort (one stuck issue, one fresh one) must keep
+    // dispatching so the fresh issue is not starved by the stuck one.
+    const state = baseState({
+      signals: { needs_qa_orch: true, needs_qa_orch_stale_only: false },
+    });
+    const plan = runDecide(state);
+    assert.ok(qaDispatch(plan), "a mixed fresh/stale cohort must still dispatch qa_orch");
+  });
+});

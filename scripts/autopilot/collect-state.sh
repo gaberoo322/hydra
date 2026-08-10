@@ -168,6 +168,73 @@ else
   }'
 fi
 
+# qa_orch attempt cap / backoff (issue #3829) — a `needs-qa` issue that
+# hydra-qa cannot post a verdict against busy-loops decide.py's qa_orch
+# selector forever (cooldownSeconds: null, no ESCALATION_POLICY row — see
+# decide.py's ESCALATION_POLICY comment for why an escalation-style cap is
+# the WRONG mechanism here). The motivating failure self-reported `success`
+# after fanning out 9 background children, losing its worktree, and posting
+# ZERO verdicts — so any cap keyed on subagent stop status resets on exactly
+# the turn it needs to trip. This block instead derives staleness from
+# GitHub LABEL STATE: hydra-qa's contract is to clear `needs-qa` the instant
+# it posts a verdict (issue #638), so an issue that has held the label
+# beyond STALE_NEEDS_QA_SECONDS has survived that many busy-loop turns
+# without one — independent of what any single dispatch claimed.
+#
+# Mirrors the stale_in_progress / stale_blocked idiom above (same
+# `now - updatedAt` staleness test against the GH REST `updatedAt` field).
+# `updatedAt` also moves on a plain comment (e.g. the #3827 no-verdict
+# comment), so a rapidly-retried issue that only ever gets commented on can
+# in principle keep re-arming this clock — the same caveat already accepted
+# for stale_in_progress/stale_blocked. It is intentionally NOT computed via
+# the `/api/autopilot/board-state` endpoint (deriveBoardState) — that seam
+# is out of this issue's scope, so this stays a small, independent,
+# read-only `gh` read, same shape as the Target fallback block below.
+#
+# `fresh_needs_qa` is the count of needs-qa issues NOT yet stale — the
+# model derives `needs_qa_orch_stale_only = (needs_qa > 0 && fresh_needs_qa
+# == 0)` per the playbook's Signal wiring table, so a single old stuck issue
+# never suppresses qa_orch while a genuinely new needs-qa issue is waiting.
+STALE_NEEDS_QA_SECONDS="${HYDRA_STALE_NEEDS_QA_SECONDS:-10800}"  # 3h default
+STALE_NEEDS_QA_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label needs-qa \
+  --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt 2>/dev/null || echo '[]')
+printf '%s' "$STALE_NEEDS_QA_JSON" | python3 -c "
+import json, sys, datetime
+
+threshold = $STALE_NEEDS_QA_SECONDS
+now = datetime.datetime.now(datetime.timezone.utc)
+try:
+    issues = json.load(sys.stdin)
+    if not isinstance(issues, list):
+        issues = []
+except Exception:
+    issues = []
+
+stale = []
+fresh = 0
+for it in issues:
+    updated_at = it.get('updatedAt') if isinstance(it, dict) else None
+    number = it.get('number') if isinstance(it, dict) else None
+    if number is None:
+        continue
+    if not updated_at:
+        fresh += 1
+        continue
+    try:
+        dt = datetime.datetime.fromisoformat(str(updated_at).replace('Z', '+00:00'))
+        age = (now - dt).total_seconds()
+    except Exception:
+        fresh += 1
+        continue
+    if age > threshold:
+        stale.append(number)
+    else:
+        fresh += 1
+
+print('stale_needs_qa=' + ','.join(str(n) for n in stale))
+print('fresh_needs_qa=' + str(fresh))
+"
+
 # Target-side issue board — GitHub-derived Target dispatch signals (issue #3435,
 # spec #3432, ADR-0031).
 #
