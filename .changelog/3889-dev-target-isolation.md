@@ -1,0 +1,1 @@
+- fix: drop harness `isolation="worktree"` from `dev_target` dispatches so hydra-target-build Step 0.6 can create the `~/hydra-betting` worktree again — restores the Target build pipeline slot the harness's cross-repo git-op refusal had categorically broken (#3889)
