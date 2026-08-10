@@ -374,9 +374,18 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
 # ABSENT (no per-item fact this turn) -> fails open on the coarse
 # `needs_qa_orch` boolean alone, preserving pre-#3829 behaviour.
 echo -n "needs_qa_orch_items="
+# NOTE: the jq flag's argument deliberately opens on its OWN line, one line
+# below the flag itself, rather than the opening bracket sitting on the same
+# line as the flag. Reason: test/autopilot-dev-orch-gate.test.mts extracts the
+# UNRELATED active_dev_orch collector's filter via a regex keyed on that
+# flag immediately followed by an opening bracket (no line break between
+# them) being the FIRST such occurrence anywhere in this script. Keeping the
+# bracket on the flag's own line here — same shape as the untriaged_orphans
+# call above and the wayfinder calls below — avoids shadowing that match.
 gh issue list --repo gaberoo322/hydra --state open --label needs-qa \
-  --limit "$GH_ISSUE_LIST_LIMIT" --json number \
-  --jq '[.[] | .number] | sort | join(" ")' 2>/dev/null || true
+  --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq '
+    [.[] | .number] | sort | join(" ")
+  ' 2>/dev/null || true
 echo
 
 # design-concept gate (issue #628): pick the first orch-board
