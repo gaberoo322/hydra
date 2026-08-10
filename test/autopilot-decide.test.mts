@@ -224,164 +224,86 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
 });
 
 // ---------------------------------------------------------------------------
-// 2. Confidence threshold + research force-dispatch (grilled decision 6)
+// 2. Retired candidate-feed no longer forces research_target (#3832)
 // ---------------------------------------------------------------------------
 
-describe("decide.py — research force-dispatch when no candidate >= 0.5", () => {
-  // ISSUE #458: the candidate-driven force-research moved from
-  // research_orch to research_target. /api/anchor/candidates is a
-  // target-product backlog in this deployment, so a weak top score means
-  // the TARGET needs research direction — not the orchestrator-self.
-  test("no candidate -> research_target forced (#458)", () => {
+describe("decide.py — retired candidate-feed no longer forces research_target (#3832)", () => {
+  // ISSUE #3832: /api/anchor/candidates was RETIRED in #3455, so
+  // collect-state.sh now produces no candidate payload at all.
+  // research_recommended()'s fail-open default (None payload → True) then
+  // forced research_target on EVERY turn until the INV-010 daily cap tripped
+  // — self-refuting churn (~181k tokens/cycle) that immediately re-fired on
+  // completion and masked the live target_board_research_due signal. The
+  // candidate-feed forced-research branch was removed from the research_target
+  // selector; only the two board-derived triggers remain (target_research_due,
+  // target_board_research_due — pinned in test/decide-target-board-dispatch
+  // .test.mts and the "target_research_due" case above respectively).
+  //
+  // REMOVAL-ORDERING (CLAUDE.md): every case below previously asserted a
+  // candidate-feed FORCED dispatch and was rewritten to assert its absence,
+  // then watched go red against unchanged code before the branch was removed.
+  //
+  // The INV-010 machinery (_research_force_allowed / _research_force_stamp /
+  // RESEARCH_FORCE_DAILY_CAP) is intentionally RETAINED in decide.py even
+  // though it is now caller-less from this selector — its removal is
+  // Verifier-Core-adjacent and out of scope for #3832.
+  test("empty candidates no longer forces research_target (#3832)", () => {
     const state = baseState();
     const cands = { candidates: [], research_recommended: true };
-    const plan = runDecide(state, cands);
-    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-    assert.ok(dispatch, "empty candidates must force research_target (post-#458)");
-    assert.equal(dispatch.prompt_args.forced, true);
-    assert.equal(dispatch.skill, "hydra-target-research");
-  });
-
-  test("best score below 0.5 -> research_target forced (#458)", () => {
-    const state = baseState();
-    const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.4 }], research_recommended: true };
-    const plan = runDecide(state, cands);
-    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-    assert.ok(dispatch);
-  });
-
-  // ISSUE #1129 (finished): the research_target trigger consumes the
-  // candidate feed's precomputed `research_recommended` flag — NOT a
-  // re-derivation of any private score threshold. These tests pin that the
-  // flag is authoritative independent of best_score. decide.py no longer
-  // holds a second threshold constant, so the boundary has one home and
-  // cannot silently diverge from the feed's RESEARCH_THRESHOLD.
-  test("research_recommended=true forces research_target even when best_score >= threshold (#1129)", () => {
-    const state = baseState();
-    // Strong top score (0.9 >= 0.5) but the feed still recommends research.
-    const cands = { candidates: [{ issue: 7, anchorRef: "x", score: 0.9 }], research_recommended: true };
-    const plan = runDecide(state, cands);
-    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-    assert.ok(dispatch, "flag=true must force research regardless of best_score");
-    assert.equal(dispatch.prompt_args.forced, true);
-    assert.equal(dispatch.skill, "hydra-target-research");
-  });
-
-  test("research_recommended=false suppresses research_target even when best_score < threshold (#1129)", () => {
-    const state = baseState();
-    // Weak top score (0.4 < 0.5) but the feed does NOT recommend research.
-    const cands = { candidates: [{ issue: 8, anchorRef: "x", score: 0.4 }], research_recommended: false };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
     assert.equal(dispatch, undefined,
-      "flag=false must suppress forced research regardless of best_score");
+      "an empty candidate feed must NOT force research_target — the retired-feed branch was removed (#3832)");
   });
 
-  test("daily cap still gates a flag-driven forced research_target (#1129)", () => {
-    // AC: RESEARCH_FORCE_DAILY_CAP / _research_force_allowed gating unchanged
-    // even though the trigger now reads the flag instead of best_score.
-    const today = new Date().toISOString().slice(0, 10);
-    const state = baseState({
-      research_force_counter: { [today]: { research_target: 4 } },
-    });
-    const cands = { candidates: [{ issue: 9, anchorRef: "x", score: 0.9 }], research_recommended: true };
+  test("research_recommended=true no longer forces research_target even with a strong candidate (#3832)", () => {
+    const state = baseState();
+    // Strong top score (0.9) AND the feed recommends research. Under the old
+    // code this forced research_target; the feed is retired, so the flag no
+    // longer drives the research_target selector at all.
+    const cands = { candidates: [{ issue: 7, anchorRef: "x", score: 0.9 }], research_recommended: true };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-    assert.equal(dispatch, undefined, "force cap must suppress even a flag-driven forced dispatch");
+    assert.equal(dispatch, undefined,
+      "the retired candidate feed must not force research_target regardless of score or the research_recommended flag");
   });
 
-  test("daily research-force cap (4/day) — 4th forced research_target dispatch suppressed (#458)", () => {
-    const today = new Date().toISOString().slice(0, 10);
-    const state = baseState({
-      research_force_counter: { [today]: { research_target: 4 } },
-    });
+  test("empty candidate-payload object ({}) no longer fails open to forced research_target (#3832)", () => {
+    // THE ROOT-CAUSE REPRO: post-#3455 the retired /api/anchor/candidates feed
+    // yields a falsy non-None payload (`{}`), which hit research_recommended()'s
+    // `if not candidates_payload: return True` fail-open every turn (None is
+    // already caught by the selector's `candidates is not None` guard, so the
+    // bug is the empty-object shape, not absence). With the branch gone the
+    // empty payload is simply not a research trigger.
+    const state = baseState();
+    const plan = runDecide(state, {});
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.equal(dispatch, undefined,
+      "an empty candidate-payload object must not fail open to forced research_target (#3832)");
+  });
+
+  test("retired-feed trigger stays silent regardless of the daily force counter (#3832)", () => {
+    // The INV-010 cap used to gate the forced dispatch; with the trigger gone
+    // the counter is moot. An UNDER-cap counter (baseState defaults to {})
+    // must not resurrect the removed branch.
+    const state = baseState();
     const cands = { candidates: [], research_recommended: true };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-    assert.equal(dispatch, undefined, "force cap must suppress further research_target dispatches");
+    assert.equal(dispatch, undefined,
+      "an under-cap force counter must not force research_target once the candidate-feed branch is removed");
   });
 
-  // ISSUE #1666: before this fix nothing ever WROTE research_force_counter —
-  // the read at _research_force_allowed always saw 0 < 4 and one production
-  // run force-dispatched research_target 46 times in 52 turns. These tests
-  // pin the write half: the stamp at plan time, the CLI's atomic state-file
-  // write-back, the 4-allowed/5th-suppressed cap, and the UTC-day reset.
-  test("forced dispatch increments research_force_counter and persists — 4 allowed, 5th suppressed (#1666)", () => {
-    const t = makeTmp();
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-      writeFileSync(t.state, JSON.stringify(baseState()));
-      writeFileSync(t.cands, JSON.stringify({ candidates: [], research_recommended: true }));
-      writeFileSync(t.events, JSON.stringify([]));
-      // Turns 1-4: forced dispatch allowed, counter accumulates in the
-      // state FILE across separate CLI processes (the actual #1666 bug was
-      // the increment never surviving the process exit).
-      for (let i = 1; i <= 4; i += 1) {
-        const plan = runDecideOnFiles(t);
-        const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-        assert.ok(dispatch, `forced dispatch ${i} of 4 must be allowed`);
-        assert.equal(dispatch.prompt_args.forced, true);
-        const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
-        assert.deepEqual(
-          persisted.research_force_counter,
-          { [today]: { research_target: i } },
-          `state file must carry counter=${i} after turn ${i}`,
-        );
-      }
-      // Turn 5: cap reached — suppressed. The #1769 turn bump still
-      // persists (the CLI is the single writer of state.turn), but the
-      // force counter must NOT move past the cap.
-      const beforeJson = JSON.parse(readFileSync(t.state, "utf-8"));
-      const plan5 = runDecideOnFiles(t);
-      const dispatch5 = findAction(plan5, (a) => a.type === "dispatch" && a.slot === "research_target");
-      assert.equal(dispatch5, undefined, "5th forced dispatch within one UTC day must be suppressed");
-      const afterJson = JSON.parse(readFileSync(t.state, "utf-8"));
-      assert.deepEqual(afterJson.research_force_counter, beforeJson.research_force_counter,
-        "a suppressed turn must not advance the force counter");
-      assert.equal(afterJson.turn, beforeJson.turn + 1,
-        "the #1769 turn bump is the ONLY state mutation on a suppressed turn");
-    } finally {
-      rmSync(t.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("counter resets across UTC days and prior-day keys are pruned (#1666)", () => {
-    const t = makeTmp();
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-      // Yesterday exhausted the cap — must NOT gate today, and the stale
-      // bucket must be pruned on today's first stamp.
-      writeFileSync(t.state, JSON.stringify(baseState({
-        research_force_counter: { "2000-01-01": { research_target: 4 } },
-      })));
-      writeFileSync(t.cands, JSON.stringify({ candidates: [], research_recommended: true }));
-      writeFileSync(t.events, JSON.stringify([]));
-      const plan = runDecideOnFiles(t);
-      const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-      assert.ok(dispatch, "a prior-day exhausted cap must not suppress today's forced dispatch");
-      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
-      assert.deepEqual(
-        persisted.research_force_counter,
-        { [today]: { research_target: 1 } },
-        "stamp must start today's bucket at 1 AND drop the prior-day key",
-      );
-    } finally {
-      rmSync(t.dir, { recursive: true, force: true });
-    }
-  });
-
-  test("no forced dispatch -> decide CLI persists only the #1769 turn bump (#1666)", () => {
+  test("would-have-forced input now persists only the #1769 turn bump (#1666, #3832)", () => {
+    // The feed recommends research (would-have-forced + stamped the counter
+    // under the old code). The research_target selector now stays silent, so
+    // the ONLY state-file mutation is the #1769 single-writer turn bump — in
+    // particular research_force_counter is NOT stamped and the in-memory
+    // mutations decide() makes (slot_history, failure_log) do NOT ride along.
     const t = makeTmp();
     try {
       writeFileSync(t.state, JSON.stringify(baseState()));
-      // Feed does NOT recommend research — no force, no stamp. The only
-      // state-file mutation is the #1769 single-writer turn bump; in
-      // particular the in-memory mutations decide() makes (slot_history,
-      // failure_log) must NOT ride along.
-      writeFileSync(t.cands, JSON.stringify({
-        candidates: [{ issue: 8, anchorRef: "x", score: 0.4 }],
-        research_recommended: false,
-      }));
+      writeFileSync(t.cands, JSON.stringify({ candidates: [], research_recommended: true }));
       writeFileSync(t.events, JSON.stringify([]));
       const before = JSON.parse(readFileSync(t.state, "utf-8"));
       const plan = runDecideOnFiles(t);
@@ -391,7 +313,7 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
       assert.deepEqual(
         after,
         { ...before, turn: before.turn + 1 },
-        "the persisted state must differ from the input by EXACTLY the turn bump",
+        "the persisted state must differ from the input by EXACTLY the turn bump (no force-counter stamp)",
       );
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
@@ -399,13 +321,15 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
   });
 
   test("low-score candidate does NOT force research_orch (#458)", () => {
-    // Inverse of the test above — verifies the trigger moved off research_orch.
+    // Inverse guard retained: the candidate-driven force always lived on
+    // research_target (post-#458), never research_orch. research_orch fires
+    // only on the explicit needs_research signal (next case).
     const state = baseState();
     const cands = { candidates: [], research_recommended: true };
     const plan = runDecide(state, cands);
     const research_orch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
     assert.equal(research_orch, undefined,
-      "candidate-driven force must NOT fire research_orch post-#458 — the trigger moved to research_target");
+      "candidate-driven force must NOT fire research_orch — research_orch is needs_research-gated only");
   });
 
   test("needs_research signal triggers research_orch with hydra-issue-research", () => {
@@ -2535,8 +2459,10 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
   test("ISSUE-458/#1129: dev_target with a research-recommended board fires WITHOUT an anchor hint", () => {
     // The feed's `research_recommended` flag — not a private score threshold
     // — gates the anchor hint. When the feed judges the board too weak to
-    // steer (research_recommended=true), dev_target fires bare; the same flag
-    // also forces research_target, so the boundary fires exactly once.
+    // steer (research_recommended=true), dev_target fires bare. The flag still
+    // gates this dev-steer hint even though #3832 retired the research_target
+    // force it used to pair with (the candidate feed no longer drives the
+    // research_target selector — see the "#3832" suite above).
     const state = baseState({ signals: { target_work_available: true } });
     const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.3 }], research_recommended: true };
     const plan = runDecide(state, cands);
@@ -2589,22 +2515,23 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     assert.equal(dispatch.prompt_args.anchor, undefined);
   });
 
-  test("ISSUE-458: empty candidates force research_target, NOT research_orch", () => {
-    // The candidate-driven force-research trigger moved off research_orch.
-    // /api/anchor/candidates is target-product work in this deployment, so
-    // a weak top score signals that the TARGET needs research direction.
+  test("ISSUE-458/#3832: empty candidates force NEITHER research_target nor research_orch", () => {
+    // Post-#458 the candidate-driven force lived on research_target (never
+    // research_orch). Post-#3832 the retired candidate feed drives NEITHER:
+    // /api/anchor/candidates was retired in #3455, so an empty feed is no
+    // longer a research trigger at all (the fail-open forced-research branch
+    // was removed). Only the board-derived signals fire research_target now.
     const state = baseState();
     const cands = { candidates: [], research_recommended: true };
     const plan = runDecide(state, cands);
 
     const researchTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
-    assert.ok(researchTarget, "empty candidates must force research_target (#458)");
-    assert.equal(researchTarget.skill, "hydra-target-research");
-    assert.equal(researchTarget.prompt_args.forced, true);
+    assert.equal(researchTarget, undefined,
+      "empty candidates must NOT force research_target — the retired-feed branch was removed (#3832)");
 
     const researchOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
     assert.equal(researchOrch, undefined,
-      "candidate-driven force must NOT fire research_orch (it moved to research_target in #458)");
+      "candidate-driven force must NOT fire research_orch (it is needs_research-gated only, #458)");
   });
 
   test("ISSUE-458: research_orch still fires on explicit needs_research signal", () => {
@@ -2643,10 +2570,12 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
       "dev_target picks up the target-product candidate");
   });
 
-  test("ISSUE-458: research_target daily cap independent of research_orch cap", () => {
-    // The two slots have separate counters under research_force_counter.
-    // Exhausting the research_target cap must not affect research_orch
-    // (and vice versa).
+  test("ISSUE-458/#3832: empty candidates drive neither slot regardless of the force counters", () => {
+    // Post-#3832 the candidate feed is retired, so an empty feed is not a
+    // research trigger regardless of research_force_counter — the removed
+    // forced-research branch was the only reader of that counter from the
+    // research_target selector. research_orch stays needs_research-gated, so
+    // the two slots' counters are independent and both stay unused here.
     const today = new Date().toISOString().slice(0, 10);
     const state = baseState({
       research_force_counter: { [today]: { research_target: 4, research_orch: 0 } },
@@ -2656,7 +2585,7 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
 
     const researchTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
     assert.equal(researchTarget, undefined,
-      "research_target cap exhausted -> no force dispatch");
+      "an empty retired feed must not force research_target regardless of the force counter (#3832)");
 
     // No needs_research signal -> research_orch also idle, but for an
     // unrelated reason. That's expected.

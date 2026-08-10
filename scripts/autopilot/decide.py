@@ -2895,51 +2895,42 @@ def _select_for_slot(
             return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
         return None
     if cls == "research_target":
-        # Two triggers: (a) explicit target_research_due signal, or
-        # (b) the candidate feed's precomputed `research_recommended` flag —
-        # the candidates feed IS the target backlog, so a feed that flags
-        # "board empty / top score too weak" means the target product needs
-        # more research direction (post-#458, this trigger moved here from
-        # research_orch). Both this slot AND the dev_target steer slot now
-        # consume the one flag the feed computes (anchor-candidates.ts applies
-        # RESEARCH_THRESHOLD). The boundary has a single home: there is no
-        # second threshold constant in decide.py to silently diverge from
-        # (issue #1129 finished — the private dev-side threshold was deleted).
+        # Two triggers, both board-derived: (a) explicit target_research_due
+        # signal, or (b) target_board_research_due — the ADR-0031 board-empty
+        # signal collect-state.sh sets when target_ready_for_agent == 0.
+        #
+        # ISSUE #3832: the retired candidate-feed forced-research branch that
+        # used to live here (`candidates is not None and
+        # research_recommended(candidates)`) was REMOVED.
+        # /api/anchor/candidates was RETIRED in #3455, so the feed is
+        # permanently empty and research_recommended()'s fail-open default
+        # (`if not candidates_payload: return True` fires for a `{}` payload)
+        # forced research_target on every turn until the INV-010 daily cap
+        # tripped — self-refuting churn (~181k tokens/cycle) that re-fired on
+        # completion and masked this very board signal. research_recommended()
+        # and best_candidate() are RETAINED (still read by the dev_target steer
+        # slot above), and the INV-010 daily-force-cap machinery
+        # (_research_force_allowed / _research_force_stamp /
+        # RESEARCH_FORCE_DAILY_CAP) is intentionally left in place even though
+        # it is now caller-less from this selector — its removal is
+        # Verifier-Core-adjacent and out of scope for #3832.
         if _signal_present(state, events, "target_research_due"):
             return make_dispatch(cls, "hydra-target-research", reason="target research due")
         # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
         # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
         # unblocked issues) means the Target product needs more research
-        # direction — the GitHub-board mirror of the candidate-feed
-        # `research_recommended` trigger below. collect-state.sh sets
-        # `target_board_research_due` when `target_ready_for_agent == 0`. Placed
-        # AFTER the explicit `target_research_due` and BEFORE the Redis
-        # candidate-feed trigger so the two substrates coexist during the expand
-        # phase (ADR-0030). Unlike the forced candidate-feed path below this is a
-        # plain board-empty signal, so it is NOT subject to the daily force cap —
-        # it fires no more often than the pace-gated turn cadence and its class
-        # cooldown allow, mirroring how `dev_target`/`qa_target` read their board
-        # signals directly.
+        # direction. collect-state.sh sets `target_board_research_due` when
+        # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
+        # it is NOT subject to the daily force cap — it fires no more often
+        # than the pace-gated turn cadence and its class cooldown allow,
+        # mirroring how `dev_target`/`qa_target` read their board signals
+        # directly.
         if _signal_present(state, events, "target_board_research_due"):
             return make_dispatch(
                 cls,
                 "hydra-target-research",
                 reason="target GitHub board empty of ready-for-agent work",
             )
-        if candidates is not None and research_recommended(candidates):
-            if _research_force_allowed(state, "research_target", now):
-                # Issue #1666: stamp the daily force counter at the commit
-                # point — every drop-gate (burned/scope/busy/shed) has already
-                # passed in _rule_pipeline_dispatch, so this dispatch WILL be
-                # emitted. Without the stamp the 4/day cap was dead code and
-                # one run forced 46 research_target dispatches.
-                _research_force_stamp(state, "research_target", now)
-                return make_dispatch(
-                    cls,
-                    "hydra-target-research",
-                    prompt_args={"forced": True},
-                    reason="best target-candidate below threshold; forced",
-                )
         return None
     if cls == "design_concept_orch":
         # ISSUE #466 (Phase B of #437): fire `hydra-grill` for the top
