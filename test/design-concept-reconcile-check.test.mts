@@ -59,6 +59,43 @@ function fakeReader(files: Record<string, string>): FileReader {
   return (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null);
 }
 
+/**
+ * Verdict from the live adapter's fail-OPEN skip ladder for a RESOLVED artifact
+ * (HTTP 200, body parsed). `enforce: false` + a bare `reason` for every skip;
+ * only a structurally-complete, APPROVED artifact returns `enforce: true` (with
+ * an empty `reason`), at which point the adapter fails CLOSED via
+ * {@link checkReconciliation}.
+ *
+ * Extracted from the adapter's inline ladder so the skip rungs are unit-testable
+ * without GITHUB_EVENT_PATH or a live orchestrator (issue #3849). The live
+ * adapter composes this bare `reason` into its `issue #N`-prefixed skip line, so
+ * the structural-skip messages are byte-identical to the pre-extraction form.
+ */
+type ArtifactEnforceDecision = { enforce: boolean; reason: string };
+function resolveEnforceDecision(artifact: any): ArtifactEnforceDecision {
+  const invariants: string[] = Array.isArray(artifact?.invariants) ? artifact.invariants : [];
+  if (invariants.length === 0) return { enforce: false, reason: "declares no invariants" };
+  const artifactHash: string = typeof artifact?.artifactHash === "string" ? artifact.artifactHash : "";
+  if (artifactHash.length === 0) return { enforce: false, reason: "has no artifactHash" };
+  // Approval guard (issue #3849): only an APPROVED artifact may bind a PR. A
+  // draft or stale artifact skips green, exactly like a missing one — without
+  // this rung, a stale/abandoned DRAFT carrying real invariants + a hash became
+  // a binding reconciliation requirement on any later PR closing the same issue,
+  // on a REQUIRED merge-gate job (the npm-audit ambient-poison-pill class, where
+  // a check reddens the merge queue from state outside the PR's own diff). A
+  // missing or unrecognised status is treated as not-approved (fail OPEN — never
+  // bind on a shape we cannot confirm is approved). This is an ADDITIONAL rung:
+  // the four pre-existing skip conditions above are unchanged.
+  const status = typeof artifact?.status === "string" ? artifact.status : "";
+  if (status !== "approved") {
+    return {
+      enforce: false,
+      reason: `is not approved (status: ${status ? `'${status}'` : "unknown"}) — only an approved artifact binds a PR`,
+    };
+  }
+  return { enforce: true, reason: "" };
+}
+
 // ---------------------------------------------------------------------------
 // Suite 1 — pure decision core
 // ---------------------------------------------------------------------------
@@ -483,13 +520,120 @@ describe("design-concept reconciliation gate (CI adapter)", () => {
       return skip(`artifact fetch failed for issue #${anchorRef}: ${err?.message ?? err}`);
     }
 
-    const invariants: string[] = Array.isArray(artifact?.invariants) ? artifact.invariants : [];
-    const artifactHash: string = typeof artifact?.artifactHash === "string" ? artifact.artifactHash : "";
-    if (invariants.length === 0) return skip(`artifact for issue #${anchorRef} declares no invariants`);
-    if (artifactHash.length === 0) return skip(`artifact for issue #${anchorRef} has no artifactHash`);
+    const decision = resolveEnforceDecision(artifact);
+    if (!decision.enforce) {
+      return skip(`artifact for issue #${anchorRef} ${decision.reason}`);
+    }
+    // `enforce: true` ⇒ invariants is a non-empty array and artifactHash a
+    // non-empty string (validated above); read them straight off the artifact.
+    const invariants: string[] = artifact.invariants;
+    const artifactHash: string = artifact.artifactHash;
 
     // --- 3. Fail CLOSED from here on. ---------------------------------------
     const violations = checkReconciliation({ prBody, invariants, artifactHash, readFile: readRepoFile });
     assert.deepEqual(violations, [], formatViolations(violations, anchorRef));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 3 — the adapter approval guard (issue #3849)
+// ---------------------------------------------------------------------------
+//
+// Pure unit tests over the adapter's fail-OPEN skip ladder
+// (`resolveEnforceDecision`). The live adapter (Suite 2) used to bind a PR to a
+// resolved artifact's invariants WITHOUT checking that the artifact was
+// approved, so a stale or abandoned DRAFT carrying real invariants + a hash
+// became a binding reconciliation requirement on any later, unrelated PR that
+// closed the same issue — on a REQUIRED merge-gate job (the npm-audit
+// ambient-poison-pill class). Only an APPROVED artifact may bind.
+
+describe("design-concept reconcile adapter approval guard (issue #3849)", () => {
+  // The same invariants + hash the poison-pill draft and the approved artifact
+  // both carry; only `status` differs between cases.
+  const INVARIANTS = ["INV-1 The reconciliation gate MUST only bind an approved artifact to a PR."];
+  const HASH = "826e0adbf7dab6b1cbe8403a16ecdceaf19cbf6c";
+  // A PR body that closes the anchor and OMITS the reconciliation section.
+  const PR_BODY_NO_SECTION = "Closes #3849\n\n## Summary\nno reconciliation section here";
+
+  /** Run the pure decision core the adapter would run once it decides to bind. */
+  const enforce = (artifact: any) => {
+    const d = resolveEnforceDecision(artifact);
+    if (!d.enforce) return { decision: d, violations: [] as Violation[] };
+    return {
+      decision: d,
+      violations: checkReconciliation({
+        prBody: PR_BODY_NO_SECTION,
+        invariants: artifact.invariants,
+        artifactHash: artifact.artifactHash,
+        readFile: fakeReader({}),
+      }),
+    };
+  };
+
+  test("a DRAFT artifact carrying invariants + a hash does NOT bind (skips green)", () => {
+    const { decision, violations } = enforce({ status: "draft", invariants: INVARIANTS, artifactHash: HASH });
+    assert.equal(decision.enforce, false);
+    assert.deepEqual(violations, [], "a non-binding adapter decision never reaches checkReconciliation");
+    if (!decision.enforce) {
+      assert.match(decision.reason, /not approved/i);
+      assert.match(decision.reason, /draft/);
+    }
+    // Same inputs, HAD they been enforced, WOULD have failed (missing-section) —
+    // proving the approval guard is what keeps this PR green, not a vacuous pass.
+    const wouldViolate = checkReconciliation({
+      prBody: PR_BODY_NO_SECTION,
+      invariants: INVARIANTS,
+      artifactHash: HASH,
+      readFile: fakeReader({}),
+    });
+    assert.ok(wouldViolate.some((v) => v.code === "missing-section"));
+  });
+
+  test("an APPROVED artifact with the same invariants + hash DOES still bind", () => {
+    const { decision, violations } = enforce({ status: "approved", invariants: INVARIANTS, artifactHash: HASH });
+    assert.equal(decision.enforce, true);
+    // Because it binds, the adapter runs checkReconciliation, which flags the
+    // missing section — the guard cannot silently disable the whole check.
+    assert.ok(violations.some((v) => v.code === "missing-section"));
+  });
+
+  test("a STALE artifact does NOT bind either — only 'approved' binds", () => {
+    const decision = resolveEnforceDecision({ status: "stale", invariants: INVARIANTS, artifactHash: HASH });
+    assert.equal(decision.enforce, false);
+    if (!decision.enforce) assert.match(decision.reason, /stale/);
+  });
+
+  test("a missing or unrecognised status is treated as not-approved (fail open)", () => {
+    for (const artifact of [
+      { invariants: INVARIANTS, artifactHash: HASH }, // no status field at all
+      { status: undefined, invariants: INVARIANTS, artifactHash: HASH },
+      { status: "bogus", invariants: INVARIANTS, artifactHash: HASH },
+    ]) {
+      const decision = resolveEnforceDecision(artifact);
+      assert.equal(decision.enforce, false);
+      if (!decision.enforce) assert.match(decision.reason, /not approved/i);
+    }
+  });
+
+  test("the four pre-existing structural rungs are unchanged for an approved artifact", () => {
+    const noInv = resolveEnforceDecision({ status: "approved", invariants: [], artifactHash: HASH });
+    assert.equal(noInv.enforce, false);
+    if (!noInv.enforce) assert.match(noInv.reason, /no invariants/);
+
+    const noHash = resolveEnforceDecision({ status: "approved", invariants: INVARIANTS, artifactHash: "" });
+    assert.equal(noHash.enforce, false);
+    if (!noHash.enforce) assert.match(noHash.reason, /artifactHash/);
+  });
+
+  test("the not-approved skip reason is distinguishable from the no-artifact (404) skip", () => {
+    // Suite 2's 404 rung skips with "no design-concept artifact for issue #N".
+    // The not-approved rung must carry text an operator can tell apart.
+    const decision = resolveEnforceDecision({ status: "draft", invariants: INVARIANTS, artifactHash: HASH });
+    if (!decision.enforce) {
+      assert.ok(!/no design-concept artifact/i.test(decision.reason));
+      assert.match(decision.reason, /approved/i);
+    } else {
+      assert.fail("expected a draft artifact to skip, not bind");
+    }
   });
 });

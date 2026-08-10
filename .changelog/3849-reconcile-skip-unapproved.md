@@ -1,0 +1,1 @@
+- fix: design-concept reconcile gate skips unapproved draft/stale artifacts instead of binding them to a PR (#3849)
