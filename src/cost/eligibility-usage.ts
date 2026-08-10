@@ -49,6 +49,11 @@ import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
 import { deriveHardStop } from "./eligibility.ts";
 import { getWeeklyResetAnchorMs } from "./config.ts";
+// Pure leaf (issue #1909): `projectResetWindow` rolls the seeded Weekly Reset
+// Anchor forward in 7-day multiples to the current-window boundary. Imported
+// one-way FROM this pure math leaf (it pulls in no eligibility/scan machinery),
+// mirroring the snapshot path's `deriveSinceReset` use of the same helper.
+import { projectResetWindow } from "./token-math.ts";
 import { logger } from "../logger.ts";
 
 /**
@@ -119,8 +124,23 @@ export async function getEligibilityUsage(
 ): Promise<EligibilityUsageResult> {
   const nowMs = (deps.now ?? Date.now)();
   const generatedAt = new Date(nowMs).toISOString();
-  const anchorMs = getWeeklyResetAnchorMs();
-  const weeklyResetAnchor = anchorMs === null ? null : new Date(anchorMs).toISOString();
+  const anchorEnvMs = getWeeklyResetAnchorMs();
+  // INV-1 (issue #3751, design-concept issue-3751): the admission path's Weekly
+  // Reset Anchor MUST be the effective CURRENT-WINDOW boundary —
+  // `projectResetWindow(anchorEnvMs, nowMs).currentMs` — projected forward in
+  // 7-day multiples per CONTEXT.md ("projected forward in 7-day multiples"), NOT
+  // the raw seed instant from the env var. The snapshot path already rolls the
+  // anchor via `deriveSinceReset` (snapshot-assembly.ts); this path used the raw
+  // seed, so a stale anchor (e.g. 8 weeks old) clamped `projectPacingCurve`'s
+  // `fraction = clamp01((now-anchor)/7d)` to 1.000, pinning `targetPercent` at
+  // the full Pacing Ceiling and making `paceState === "ahead"` unreachable — the
+  // Pacing Curve ran inert. The meter-only path has no observed-reset signal to
+  // auto-correct with (it opens no transcript), so it projects the env anchor
+  // directly, identical to the snapshot path's `envWindow.currentMs`.
+  const weeklyResetAnchor =
+    anchorEnvMs === null
+      ? null
+      : new Date(projectResetWindow(anchorEnvMs, nowMs).currentMs).toISOString();
 
   let cached: Awaited<ReturnType<typeof readOAuthCached>>;
   try {
