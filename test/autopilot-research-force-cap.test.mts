@@ -186,12 +186,17 @@ describe("bootstrap.sh — research_force_counter seeding (issue #1666 / PR #167
     }
   });
 
-  test("cap holds ACROSS a bootstrap restart within one UTC day — 2 + 2 forced runs, 5th suppressed (#1666 Invariant 4)", () => {
-    // The exact QA-FAIL scenario on PR #1678: the pace-gate relaunches the
-    // autopilot mid-day, bootstrap rewrites state.json, and before this fix
-    // the counter reset — turning "4/day" into "4/run". Simulate run 1
-    // (two forced dispatches), a bootstrap relaunch, then run 2 (two more
-    // allowed, the fifth suppressed).
+  test("post-#3832: decide() no longer forces research_target, yet bootstrap still preserves a pre-seeded counter across a restart (#1666 / #3832)", () => {
+    // ISSUE #3832 removed the candidate-feed forced-research branch — the
+    // ONLY decide() writer of research_force_counter — so the counter can no
+    // longer be ACCUMULATED through decide() to reconstruct the original
+    // PR-#1678 QA scenario (drive the counter to 4 across a bootstrap
+    // restart via forced dispatches, 5th suppressed). Pin the new reality
+    // end-to-end: (a) decide() stays silent on an empty retired feed (no
+    // forced dispatch, no counter stamp), and (b) bootstrap still preserves a
+    // pre-existing counter across a restart — the actual #1666 fix location,
+    // retained so a future forced-research producer would see a per-DAY (not
+    // per-run) cap.
     const tmp = makeTmp();
     try {
       const today = todayUtc();
@@ -199,33 +204,27 @@ describe("bootstrap.sh — research_force_counter seeding (issue #1666 / PR #167
       writeFileSync(tmp.cands, JSON.stringify({ candidates: [], research_recommended: true }));
       writeFileSync(tmp.events, JSON.stringify([]));
 
-      // Run 1: two forced dispatches accumulate in the state file.
-      for (let i = 1; i <= 2; i += 1) {
-        const d = forcedResearchDispatch(runDecide(tmp));
-        assert.ok(d, `run 1 forced dispatch ${i} must be allowed`);
-        assert.equal(d.prompt_args.forced, true);
-      }
+      // (a) decide() no longer forces research_target from the retired feed.
+      const d = forcedResearchDispatch(runDecide(tmp));
+      assert.equal(d, undefined,
+        "the retired candidate feed must not force research_target (#3832)");
+      const afterDecide = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.deepEqual(afterDecide.research_force_counter, {},
+        "with the trigger gone, decide() must not stamp the counter");
 
-      // Pace-gate relaunch: bootstrap rewrites state.json wholesale.
+      // (b) Bootstrap still preserves a pre-seeded counter across a restart.
+      writeFileSync(tmp.state, JSON.stringify({
+        pid: 0,
+        research_force_counter: { [today]: { research_target: 2 } },
+      }));
       const r = runBootstrap(tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const reborn = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.deepEqual(
         reborn.research_force_counter,
         { [today]: { research_target: 2 } },
-        "the relaunch must seed run 1's count into the fresh state file",
+        "a pre-seeded counter must survive the bootstrap heredoc rewrite (#1666 per-DAY, not per-run)",
       );
-
-      // Run 2: dispatches 3 and 4 allowed, 5 suppressed — the per-DAY cap.
-      for (let i = 3; i <= 4; i += 1) {
-        const d = forcedResearchDispatch(runDecide(tmp));
-        assert.ok(d, `run 2 forced dispatch ${i} of the day must still be allowed`);
-      }
-      const fifth = forcedResearchDispatch(runDecide(tmp));
-      assert.equal(fifth, undefined,
-        "5th forced dispatch of the UTC day must be suppressed even though it is only the 3rd of this run");
-      const persisted = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.deepEqual(persisted.research_force_counter, { [today]: { research_target: 4 } });
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
