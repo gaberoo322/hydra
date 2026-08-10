@@ -41,13 +41,44 @@
  *   OV_PARITY_MODEL         model name both serve  (default nomic-embed-text)
  *   OV_PARITY_SAMPLE_SIZE   docs to sample         (default 200)
  *   OV_PARITY_THRESHOLD     cutover gate           (default 0.99)
- *   OV_PARITY_WORKSPACE     dir to sample docs from (default OpenViking mount)
+ *   OV_PARITY_WORKSPACE     dir to sample docs from (default OpenViking mount,
+ *                           which does NOT exist on a fresh checkout — see
+ *                           "Getting a real corpus sample" below)
+ *
+ * Getting a real corpus sample:
+ *   The OpenViking corpus lives inside the `hydra_openviking-data` docker
+ *   volume, which the host cannot read directly (root-owned bind path under
+ *   /var/lib/docker/volumes/... -> Permission denied). To sample real docs,
+ *   stage a copy out via a throwaway container and point OV_PARITY_WORKSPACE
+ *   at the staged copy, e.g.:
+ *
+ *     STAGE=$(mktemp -d)
+ *     docker run --rm -v hydra_openviking-data:/src -v "$STAGE":/dst \
+ *       alpine cp -r /src/. /dst/
+ *     OV_PARITY_WORKSPACE="$STAGE" npx tsx scripts/ov-embed-parity-check.ts
+ *
+ *   Without this, a default-args run has no workspace to sample from — see
+ *   the `workspace-missing` verdict reason below, which is NOT itself a
+ *   parity result and must not be read as one.
  *
  * Exit code:
  *   0  → parity met (mean cosine >= threshold) — safe to cut over, no reindex.
  *   1  → parity NOT met (mean cosine < threshold) — reindex required.
  *   2  → could not run the check (no sample, an endpoint unreachable, a
  *        dimension mismatch). A non-runnable check is NOT a green light.
+ *        The JSON output's `reason` field discriminates *why* (issue #3854),
+ *        distinct from the underlying not-runnable verdict/exit-code, which
+ *        never changes:
+ *          - "workspace-missing"    OV_PARITY_WORKSPACE does not exist.
+ *          - "workspace-unreadable" it exists but isn't a readable directory
+ *            (permission denied, or a file rather than a directory).
+ *          - "workspace-empty"      it is a readable directory, but sampling
+ *            found zero documents to embed.
+ *          - (no `reason` field)    a genuine sampling run found documents but
+ *            no doc embedded successfully on both backends (e.g. an endpoint
+ *            unreachable) — the original, unmodified `summarizeParity`
+ *            not-runnable case, so it is never confused with a workspace
+ *            configuration problem above.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -176,6 +207,44 @@ export function summarizeParity(
   };
 }
 
+/**
+ * Discriminates whether `workspace` can be sampled from at all — the
+ * missing-vs-permission-denied-vs-usable classification that lets the driver
+ * report a distinct `reason` for a not-runnable verdict caused by a bad
+ * `OV_PARITY_WORKSPACE`, instead of silently reusing the generic "no doc
+ * embedded on both backends" not-runnable a genuinely dead backend produces
+ * (issue #3854).
+ *
+ * Pure, deterministic sync fs check — no network/container dependency, so
+ * it is directly unit-testable against real temp-dir fixtures.
+ *
+ * Never throws: an ENOENT stat failure classifies as `"missing"`; any other
+ * stat failure (EACCES/EPERM), a non-directory path, or a directory whose
+ * listing itself fails (permission denied on the dir's contents) classifies
+ * as `"unreadable"`. This mirrors the file's existing "fails soft, never a
+ * crash" contract — the caller always gets back a status string, never an
+ * exception.
+ */
+export type WorkspaceStatus = "missing" | "unreadable" | "ok";
+
+export function classifyWorkspace(workspace: string): WorkspaceStatus {
+  let st;
+  try {
+    st = statSync(workspace);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return "missing";
+    return "unreadable"; // e.g. EACCES/EPERM on an ancestor directory
+  }
+  if (!st.isDirectory()) return "unreadable";
+  try {
+    readdirSync(workspace);
+  } catch {
+    /* intentional: dir exists per stat but its listing is unreadable */
+    return "unreadable";
+  }
+  return "ok";
+}
+
 /** Map a verdict to the process exit code (see file header). */
 export function exitCodeFor(verdict: ParityVerdict): number {
   switch (verdict) {
@@ -281,12 +350,36 @@ function sampleDocs(workspace: string, limit: number): string[] {
 }
 
 async function main(): Promise<number> {
+  // Config-problem short-circuit (issue #3854): a missing/unreadable
+  // OV_PARITY_WORKSPACE is a configuration problem, not a measured parity
+  // result. summarizeParity itself is untouched — the `reason` discriminant
+  // is layered on by spreading, the same pattern this driver already used for
+  // the ad-hoc `note` field below, so the pure decision surface stays
+  // byte-for-byte unchanged.
+  const wsStatus = classifyWorkspace(WORKSPACE);
+  if (wsStatus !== "ok") {
+    const reason = wsStatus === "missing" ? "workspace-missing" : "workspace-unreadable";
+    const summary = summarizeParity([], THRESHOLD);
+    process.stdout.write(
+      JSON.stringify(
+        { ...summary, reason, note: `workspace ${wsStatus}: ${WORKSPACE}` },
+        null,
+        2,
+      ) + "\n",
+    );
+    return exitCodeFor(summary.verdict);
+  }
+
   const docs = sampleDocs(WORKSPACE, SAMPLE_SIZE);
   if (docs.length === 0) {
     const summary = summarizeParity([], THRESHOLD);
     process.stdout.write(
       JSON.stringify(
-        { ...summary, note: `no documents sampled from ${WORKSPACE}` },
+        {
+          ...summary,
+          reason: "workspace-empty",
+          note: `no documents sampled from ${WORKSPACE}`,
+        },
         null,
         2,
       ) + "\n",
@@ -305,6 +398,11 @@ async function main(): Promise<number> {
     if (cos !== null) cosines.push(cos);
   }
 
+  // A genuine sampling run (docs existed) that still produced zero paired
+  // cosines — e.g. both embedding endpoints unreachable. This is
+  // summarizeParity's own unmodified not-runnable branch: deliberately no
+  // synthetic `reason` field here, so it is never confused with the
+  // workspace-configuration cases above.
   const summary = summarizeParity(cosines, THRESHOLD);
   process.stdout.write(
     JSON.stringify(
