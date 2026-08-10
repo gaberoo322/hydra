@@ -1,0 +1,1 @@
+- fix: migrate the wire-or-retire emit runner off the retired `/api/backlog` surface onto `gh issue create`/`gh issue list`, and revive the Target board-label manifest with a drift guard (#3720)

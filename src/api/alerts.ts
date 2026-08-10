@@ -78,7 +78,27 @@ export function createAlertsRouter() {
     try {
       const all = await readAllAlerts();
       for (let i = 0; i < all.length; i++) {
-        const alert = JSON.parse(all[i]);
+        // Issue #3793: a single malformed neighbour must cost at most this one
+        // scan slot, never the whole dismiss request — matching the GET
+        // /alerts per-entry guard shipped in #3744/#3773. Skip non-string /
+        // empty / whitespace-only elements silently (they can't have come from
+        // a JSON.stringify write and can't throw), and log+skip anything
+        // JSON.parse rejects — never silently drop (fail-loud per CLAUDE.md).
+        // The loop keeps its original index i, so setAlertAt(i, ...) below
+        // still targets the correct LSET position for a later valid match —
+        // skipping never renumbers the array.
+        const raw = all[i];
+        if (typeof raw !== "string" || raw.trim().length === 0) continue;
+        let alert: any;
+        try {
+          alert = JSON.parse(raw);
+        } catch (err) {
+          logger.error(
+            { routeLabel: "api/alerts/dismiss", index: i, rawLen: raw.length, err, alertId: req.params.id },
+            "[api/alerts] skipping unparseable alert entry during dismiss scan",
+          );
+          continue;
+        }
         if (alert.id === req.params.id) {
           alert.dismissed = true;
           await setAlertAt(i, JSON.stringify(alert));

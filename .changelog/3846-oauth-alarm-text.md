@@ -1,0 +1,1 @@
+- fix: sustained-OAuth-failure alarm now states dispatch blocks while the meter is unreadable (it previously described the reversed #1124 fail-open fallback) and carries the read-failure code so the cause is visible (#3846)

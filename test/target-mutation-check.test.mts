@@ -24,6 +24,7 @@ import {
   classifyNoSignal,
   buildScopedTestCommand,
   classifyTimedOut,
+  parseChangedFiles,
 } from "../scripts/target/mutation-check.ts";
 import { runMutationTests, type MutationTestReport } from "../src/mutation.ts";
 import {
@@ -626,5 +627,127 @@ describe("web/-prefix integration — gate generates mutants, not a silent warn 
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("parseChangedFiles — whitespace-separated CHANGED_FILES (issue #3803)", () => {
+  // The CI path feeds `git diff --name-only` output to CHANGED_FILES, which is
+  // already newline-separated and parsed correctly. The trap is agent / manual
+  // invocation: a value built by hand is naturally written space-separated, and
+  // the pre-#3803 `/\r?\n/` split collapsed that single line into ONE array
+  // entry (the whole concatenated string). See parseChangedFiles' doc comment
+  // for the two silent-corruption branches that produced.
+
+  test("newline-separated value parses identically to the CI path (byte-identical baseline)", () => {
+    // Unchanged baseline: the fix is additive and must NOT alter parsing for the
+    // already-correct call shape. A newline-only input has no non-newline
+    // whitespace runs, so `/[\s\r\n]+/` splits it exactly as `/\r?\n/` did.
+    const raw = [
+      "src/lib/providers/draftkings.ts",
+      "src/lib/execution/place-bet.ts",
+      "README.md",
+    ].join("\n");
+    assert.deepEqual(parseChangedFiles(raw), [
+      "src/lib/providers/draftkings.ts",
+      "src/lib/execution/place-bet.ts",
+      "README.md",
+    ]);
+  });
+
+  test("space-separated value splits into one entry per file (the #3803 bug)", () => {
+    // Pre-#3803 this single-line value became ONE entry — a money-critical diff
+    // that then silently skipped the gate (safe-path-first blob) or, worse,
+    // matched a surface prefix as one bogus path and produced a false no-signal
+    // warn (risk-critical-first blob).
+    const raw = "src/lib/providers/draftkings.ts src/lib/execution/place-bet.ts";
+    assert.deepEqual(parseChangedFiles(raw), [
+      "src/lib/providers/draftkings.ts",
+      "src/lib/execution/place-bet.ts",
+    ]);
+  });
+
+  test("mixed newline- and space-separated value splits on any whitespace run", () => {
+    // An agent hand-building the value may interleave separators; any run of
+    // whitespace (spaces, tabs, newlines) is a single delimiter.
+    const raw =
+      "src/lib/providers/draftkings.ts\n src/lib/staking/kelly.ts\tsrc/lib/bet-math/edge.ts";
+    assert.deepEqual(parseChangedFiles(raw), [
+      "src/lib/providers/draftkings.ts",
+      "src/lib/staking/kelly.ts",
+      "src/lib/bet-math/edge.ts",
+    ]);
+  });
+
+  test("CRLF line endings split into per-file entries", () => {
+    // git on Windows (or a CI runner with core.autocrlf) emits CRLF; each
+    // `\r\n` is a whitespace run, not a half-delimiter that leaves a stray
+    // carriage return on a path.
+    const raw =
+      "src/lib/providers/draftkings.ts\r\nsrc/lib/execution/place-bet.ts\r\n";
+    assert.deepEqual(parseChangedFiles(raw), [
+      "src/lib/providers/draftkings.ts",
+      "src/lib/execution/place-bet.ts",
+    ]);
+  });
+
+  test("trims per-entry whitespace and drops empty tokens", () => {
+    assert.deepEqual(
+      parseChangedFiles("  src/lib/providers/a.ts   \n\n  src/lib/execution/b.ts  "),
+      ["src/lib/providers/a.ts", "src/lib/execution/b.ts"],
+    );
+  });
+
+  test("empty / all-whitespace input → empty array", () => {
+    assert.deepEqual(parseChangedFiles(""), []);
+    assert.deepEqual(parseChangedFiles("   \n\t  "), []);
+  });
+
+  test("non-string input → empty array (defensive; env-seam guard)", () => {
+    assert.deepEqual(parseChangedFiles(undefined as unknown as string), []);
+  });
+});
+
+describe("parseChangedFiles → filterMoneyCriticalCandidates — space-separated risk-critical diff is mutated, not silently skipped (issue #3803)", () => {
+  // End-to-end proof that parsing feeds the classifier correctly. These pin
+  // BOTH halves of the open question the issue asked us to resolve:
+  //   - risk-critical-first blob → pre-fix the WHOLE blob matched a surface
+  //     prefix via startsWith and ran as one bogus path (the PR #775 mechanism);
+  //   - safe-first blob → pre-fix the whole blob matched nothing and the
+  //     embedded risk-critical file was silently lost to a skip.
+  // After #3803 each file is matched on its own.
+
+  test("risk-critical-first list yields 2 separately-matched files (closes the #775 mechanism)", () => {
+    const raw = "src/lib/providers/draftkings.ts src/lib/execution/place-bet.ts";
+    const parsed = parseChangedFiles(raw);
+    assert.equal(parsed.length, 2, "two files parsed, not one concatenated blob");
+    assert.deepEqual(
+      filterMoneyCriticalCandidates(parsed),
+      ["src/lib/providers/draftkings.ts", "src/lib/execution/place-bet.ts"],
+      "a space-separated risk-critical diff must yield 2 separately-matched files",
+    );
+  });
+
+  test("safe-first list still surfaces the embedded risk-critical file (no silent loss)", () => {
+    // Pre-fix this whole blob started with a safe path, so classifyRisk returned
+    // no matches and draftkings.ts was dropped entirely behind a bogus skip.
+    const raw = "src/components/Button.tsx src/lib/providers/draftkings.ts";
+    const parsed = parseChangedFiles(raw);
+    assert.equal(parsed.length, 2);
+    assert.deepEqual(
+      filterMoneyCriticalCandidates(parsed),
+      ["src/lib/providers/draftkings.ts"],
+      "only the one real risk-critical file matches; the UI file does not",
+    );
+  });
+
+  test("a web/-prefixed space-separated value strips web/ per matched file (issue #3803 × #1649)", () => {
+    // The two fixes compose: a space-separated, web/-prefixed value must parse
+    // to per-file entries AND have web/ stripped so the runner gets
+    // projectDir-relative paths.
+    const raw = "web/src/lib/providers/draftkings.ts web/src/lib/bet-math/edge.ts";
+    assert.deepEqual(filterMoneyCriticalCandidates(parseChangedFiles(raw)), [
+      "src/lib/providers/draftkings.ts",
+      "src/lib/bet-math/edge.ts",
+    ]);
   });
 });
