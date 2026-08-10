@@ -574,6 +574,159 @@ run_deploy_drift() {
 }
 
 # =============================================================================
+# ## SKILL MIRROR DRIFT
+# =============================================================================
+#
+# Skill-mirror-drift backstop (issue #3828). The default (unoverridden)
+# CLAUDE_SKILLS_DIR mirror at $HOME/.claude/skills is the LIVE, host-shared
+# surface every subsequent agent dispatch loads its skill prompts from.
+# `scripts/sync-skills.sh` now refuses to WRITE that default path when
+# `docs/operator-playbooks/` at $HYDRA_ROOT differs from the local
+# `origin/master` ref (its own default-mirror content guard) — but that guard
+# only protects sync-skills.sh's OWN invocations. It cannot detect a mirror
+# that is ALREADY diverged (a hand-edit, a pre-guard write, an operator
+# --force, or simple drift between deploys). This block is that read-only
+# detector, mirroring the ## DEPLOY DRIFT block's contract above exactly:
+#
+#   - Regenerates every hydra-* skill into a SCRATCH CLAUDE_SKILLS_DIR/
+#     CODEX_SKILLS_DIR (sync-skills.sh's own override mechanism — a pure,
+#     side-effect-free read of $HYDRA_ROOT's checked-out docs/operator-
+#     playbooks/) and diffs the result against the live default mirror.
+#   - Advisory by default: any diverged skill logs a WARNING only.
+#   - Auto-fix is an explicit, separately-gated, grace-windowed opt-in
+#     (HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX=1) that re-runs sync-skills.sh
+#     against the DEFAULT path to reconcile — which itself passes back through
+#     sync-skills.sh's own content guard, so an auto-fix attempt against a
+#     dirty $HYDRA_ROOT fails loud rather than propagating dirty content.
+#   - Respects a deliberate operator scheduler-stop (issue #388), exactly like
+#     ## DEPLOY DRIFT.
+#   - Fail-safe: any git/scratch-regen error logs a WARN and returns 0.
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-skill-mirror-drift.test.mts):
+#   HYDRA_WATCHDOG_SKILL_MIRROR_LIVE_DIR         Override the "live" mirror dir
+#                                                 checked against (default
+#                                                 CLAUDE_SKILLS_DIR or
+#                                                 $HOME/.claude/skills).
+#   HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_DRY_RUN=1 In the auto-fix branch, log
+#                                                 "would-resync" instead of
+#                                                 actually running sync-skills.sh.
+#   HYDRA_WATCHDOG_DRIFT_STATE_DIR                Shared with ## DEPLOY DRIFT —
+#                                                 same per-test marker dir
+#                                                 override.
+
+run_skill_mirror_drift() {
+  local HYDRA_ROOT="${HYDRA_ROOT:-/home/gabe/hydra}"
+  local LIVE_DIR="${HYDRA_WATCHDOG_SKILL_MIRROR_LIVE_DIR:-${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}}"
+  local STATE_DIR="${HYDRA_WATCHDOG_DRIFT_STATE_DIR:-/tmp}"
+  local DRIFT_MARKER="${STATE_DIR}/hydra-watchdog-skill-mirror-drift-since"
+  local GRACE_SECONDS="${HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_GRACE_SECONDS:-600}"
+
+  log() {
+    echo "hydra-skill-mirror-drift-watchdog: $*"
+  }
+
+  if [[ ! -f "$HYDRA_ROOT/scripts/sync-skills.sh" ]]; then
+    log "WARN sync-skills.sh not found at $HYDRA_ROOT; skipping skill-mirror drift check"
+    return 0
+  fi
+
+  local scratch=""
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/hydra-skill-mirror-drift.XXXXXX" 2>/dev/null || echo "")
+  if [[ -z "$scratch" ]]; then
+    log "WARN could not create a scratch dir; skipping skill-mirror drift check"
+    return 0
+  fi
+
+  local scratch_claude="$scratch/claude"
+  local regen_rc=0
+  CLAUDE_SKILLS_DIR="$scratch_claude" CODEX_SKILLS_DIR="$scratch/codex" \
+    bash "$HYDRA_ROOT/scripts/sync-skills.sh" >/dev/null 2>"$scratch/stderr" || regen_rc=$?
+  if [[ "$regen_rc" -ne 0 ]]; then
+    log "WARN scratch regeneration of $HYDRA_ROOT's skills failed (exit $regen_rc): $(tail -n1 "$scratch/stderr" 2>/dev/null); skipping skill-mirror drift check"
+    rm -rf "$scratch"
+    return 0
+  fi
+
+  local diverged=()
+  local d name scratch_file live_file
+  if [[ -d "$scratch_claude" ]]; then
+    for d in "$scratch_claude"/*/; do
+      [[ -d "$d" ]] || continue
+      name=$(basename "$d")
+      scratch_file="$d/SKILL.md"
+      live_file="$LIVE_DIR/$name/SKILL.md"
+      [[ -f "$scratch_file" ]] || continue
+      if [[ ! -f "$live_file" ]]; then
+        diverged+=("$name(missing-live)")
+      elif ! diff -q "$scratch_file" "$live_file" >/dev/null 2>&1; then
+        diverged+=("$name")
+      fi
+    done
+  fi
+  rm -rf "$scratch"
+
+  if [[ ${#diverged[@]} -eq 0 ]]; then
+    rm -f "$DRIFT_MARKER" 2>/dev/null || true
+    log "in sync (live mirror matches $HYDRA_ROOT's checked-out docs/operator-playbooks/)"
+    return 0
+  fi
+
+  local now first_seen drift_age
+  now=$(date +%s)
+  if [[ -f "$DRIFT_MARKER" ]]; then
+    first_seen=$(cat "$DRIFT_MARKER" 2>/dev/null || echo "$now")
+    [[ "$first_seen" =~ ^[0-9]+$ ]] || first_seen="$now"
+  else
+    first_seen="$now"
+    echo "$now" > "$DRIFT_MARKER" 2>/dev/null || true
+  fi
+  drift_age=$((now - first_seen))
+  (( drift_age < 0 )) && drift_age=0
+
+  log "WARNING DRIFT — ${#diverged[@]} skill(s) diverge from $HYDRA_ROOT: ${diverged[*]} (drift first seen ${drift_age}s ago). The live mirror may carry unmerged/uncommitted playbook content — regenerate from a throwaway origin/master worktree to converge."
+
+  if [[ "${HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX:-0}" != "1" ]]; then
+    log "auto-fix disabled (HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX != 1); advisory only — run scripts/sync-skills.sh to converge"
+    return 0
+  fi
+
+  if (( drift_age < GRACE_SECONDS )); then
+    log "auto-fix armed but within grace window (drift ${drift_age}s < ${GRACE_SECONDS}s); waiting for next tick"
+    return 0
+  fi
+
+  local sched stop_reason
+  sched=$(curl -sS --max-time 5 "http://localhost:4000/api/scheduler/status" 2>/dev/null || echo "")
+  if [[ -n "$sched" ]]; then
+    stop_reason=$(echo "$sched" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("stopReason","") or "")' 2>/dev/null || echo "")
+    if [[ "$stop_reason" == "deliberate" ]]; then
+      log "drift sustained but scheduler stopped deliberately (stopReason=deliberate); NOT auto-fixing — operator paused the system on purpose"
+      return 0
+    fi
+  fi
+
+  if [[ "${HYDRA_WATCHDOG_SKILL_MIRROR_AUTOFIX_DRY_RUN:-0}" == "1" ]]; then
+    log "would-resync (DRY_RUN=1): drift sustained ${drift_age}s >= ${GRACE_SECONDS}s — would run scripts/sync-skills.sh against the default path"
+    return 0
+  fi
+
+  log "AUTO-FIX — drift sustained ${drift_age}s >= grace ${GRACE_SECONDS}s; running scripts/sync-skills.sh to converge the live mirror to $HYDRA_ROOT"
+  rm -f "$DRIFT_MARKER" 2>/dev/null || true
+  # Deliberately the DEFAULT path (no CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR
+  # override) — this is the one caller allowed to reconcile the live mirror.
+  # sync-skills.sh's own default-mirror content guard still applies: if
+  # $HYDRA_ROOT itself carries unmerged/uncommitted playbook content, this
+  # fails loud instead of propagating it.
+  if (cd "$HYDRA_ROOT" && bash scripts/sync-skills.sh); then
+    log "auto-fix completed"
+  else
+    log "WARN auto-fix (scripts/sync-skills.sh) returned non-zero; operator intervention may be needed"
+  fi
+  return 0
+}
+
+# =============================================================================
 # Entry point — run all blocks on every tick. Each block is independent and
 # self-contained; a short-circuit in one MUST NOT skip the others.
 # =============================================================================
@@ -581,5 +734,6 @@ run_deploy_drift() {
 run_service_liveness
 run_autopilot_wedge
 run_deploy_drift
+run_skill_mirror_drift
 
 exit 0

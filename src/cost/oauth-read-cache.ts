@@ -546,18 +546,29 @@ async function attemptOAuthRead(
   // the next success, so `=== threshold` is the single crossing instant of each
   // sustained-failure episode — it fires ONCE per episode, never per scan, and a
   // transient 429 blip that recovers before the third consecutive failure never
-  // trips it. Purely observability: this emits a signal and returns nothing; the
-  // backoff/recovery bookkeeping and the #1124 fail-open gate are untouched.
+  // trips it. Purely observability: this emits a signal and returns nothing and
+  // changes no gating in this file — the dispatch BLOCK it now reports is applied
+  // in eligibility-usage.ts (`meterUnavailable` overlay, PR #3804, which keys off
+  // this SAME threshold), not here. The message states that block (PR #3804
+  // reversed the #1124 fail-open: quota that cannot be measured is no longer spent
+  // on a fallback) WITHOUT claiming it is synchronous with this crossing — a
+  // still-fresh last-good can still be served at failures === 3 — and carries
+  // result.code so the operator can tell rate-limited from credentials-expired
+  // from endpoint-changed.
   if (failures === OAUTH_SUSTAINED_FAILURE_THRESHOLD) {
     logger.error(
       {
         failures,
         code: result.code,
         context:
-          "the subscription meter may be genuinely stuck (expired OAuth token or a hard " +
-          "account rate-limit) rather than riding out a transient 429 wave; usage gating is " +
-          "running on the last-good/estimate fallback until a read succeeds " +
-          "(fail-open #1124; auto-clears on recovery — issue #3601)",
+          "the subscription meter may be genuinely stuck (expired OAuth token, a hard " +
+          "account rate-limit, or a changed endpoint) rather than riding out a transient 429 " +
+          "wave; the #1124 fail-open was reversed by #3804, so usage gating now BLOCKS dispatch " +
+          "once the meter stays unreadable past the last-good staleness window — quota that " +
+          "cannot be measured is not spent; a still-fresh last-good may still be served at this " +
+          "crossing, so the block is not asserted to be synchronous with this alarm; the " +
+          "structured code field carries the failure cause (rate-limited vs credentials-expired " +
+          "vs endpoint-changed); auto-clears on recovery (issue #3601)",
       },
       `[usage-tracker] ALARM: OAuth meter has failed ${failures} consecutive reads`,
     );

@@ -43,6 +43,11 @@ const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 const REAP = join(SCRIPTS, "reap.py");
 const BOOTSTRAP = join(SCRIPTS, "bootstrap.sh");
 
+// A closed port — reap.py defaults HYDRA_API_BASE to the live orchestrator on
+// :4000, and without an override this test's completion calls POST fabricated
+// hydra-discover token records straight into production Redis (issue #3915).
+const DEAD_API_BASE = "http://127.0.0.1:1";
+
 function makeTempState(): { dir: string; state: string; heartbeat: string; log: string } {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-dedup-test-"));
   return {
@@ -97,6 +102,11 @@ function runReap(
   const r = spawnSync(REAP, args, {
     env: {
       ...process.env,
+      HYDRA_API_BASE: DEAD_API_BASE,
+      // The cycle-record POST rides dispatch.sh's `hydra` CLI / curl fallback,
+      // which read HYDRA_BASE_URL / HYDRA_API — pin them to the dead port too
+      // so nothing leaks to the live orchestrator on :4000.
+      HYDRA_BASE_URL: DEAD_API_BASE,
       HYDRA_AUTOPILOT_STATE: paths.state,
       HYDRA_AUTOPILOT_LOG: paths.log,
       HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",

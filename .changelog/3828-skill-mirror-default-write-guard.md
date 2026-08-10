@@ -1,0 +1,1 @@
+- fix: `sync-skills.sh` refuses to write the live skill mirror when `docs/operator-playbooks/` has unmerged/uncommitted content, and `hydra-watchdog.sh` gains an advisory drift detector for an already-diverged mirror (#3828)
