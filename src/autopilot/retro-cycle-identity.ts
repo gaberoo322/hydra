@@ -43,13 +43,22 @@ import type { RetroDispatch } from "./retro-dispatch-types.ts";
  * Contract (mirrors the projection-time merge):
  *   - Keyed on the non-empty `cycleId` (the durable transcript handle). An
  *     EMPTY-cycleId row carries no durable CYCLE identity, so it dedups on its
- *     SLOT key instead (issue #3738): the slots-snapshot fallback can emit one
- *     row per turn a slot stays occupied when the dispatch's task_id was never
- *     confirmed (the #1352 confirm-or-drop blanked it back to ""), and those
- *     duplicates all share the slot — collapsing on it keeps bundle
- *     `dispatches[]` from exceeding the run's recorded dispatch count. A row
- *     with neither a cycleId NOR a recoverable slot is left untouched
- *     (conservative — two distinct empty-cycleId slots are never merged).
+ *     per-occupancy identity instead: `occupancyId` (the pre-formatted
+ *     `id:<task_id>` / `epoch:<slot>@<epoch>` identity key the projection
+ *     already keys its cross-turn map on — issue #3834), falling back to the
+ *     bare `slot` only when that key is null (the #3738 identity-less-snapshot
+ *     population). This is the crux of #3834: by the time this pass runs,
+ *     `confirmDrillableCycleIds` has blanked the candidate `cycleId` (itself
+ *     recovered from the slot's `task_id`) on every in-flight dispatch of a
+ *     `handoff` run, so the bare-slot fallback #3738 introduced would collapse
+ *     N genuinely-distinct sequential dispatches into one slot into a single
+ *     row. Keying on the `task_id`-derived `occupancyId` — which the confirm
+ *     pass does NOT touch — keeps distinct occupancies distinct (different
+ *     `task_id` → different key) while one dispatch occupying a slot for N
+ *     turns (same `task_id` across turns → same key) still collapses to one.
+ *     A row with neither a cycleId, an occupancyId, NOR a recoverable slot is
+ *     left untouched (conservative — two distinct empty-cycleId slots are
+ *     never merged).
  *   - EARLIEST-turn row is canonical (a `null` turn_n sorts last, so a
  *     turn-bearing row wins over an unknown-turn duplicate). Later same-cycleId
  *     rows are dropped after UNIONING their non-null fields onto the canonical
@@ -70,36 +79,60 @@ export function dedupByCanonicalCycleId(dispatches: RetroDispatch[]): RetroDispa
   // handle) — the #1823 post-enrichment identity collapse. Empty-cycleId rows
   // carry no durable CYCLE identity, but the slots-snapshot fallback can still
   // emit one row PER TURN a slot stays occupied (the dispatch's task_id was
-  // never confirmed, so the #1352 confirm-or-drop blanked it back to ""). Those
-  // duplicates all share the SLOT key (the snapshot's own identity), so a
-  // SECOND map keys empty-cycleId rows on the slot instead of the blank key,
-  // collapsing same-slot occupancy across turns to one row (issue #3738 —
-  // bundle `dispatches[]` no longer exceeds the run's recorded dispatch count).
-  // A row with neither a cycleId NOR a recoverable slot has no surrogate to
-  // match on and is left untouched (conservative — never silently merge two
-  // possibly-distinct dispatches).
+  // never confirmed, so the #1352 confirm-or-drop blanked it back to ""). A
+  // SECOND map keys those rows on their per-occupancy identity — occupancyId
+  // (the pre-formatted `id:<task_id>` / `epoch:<slot>@<epoch>` identity key),
+  // carried separately from cycleId precisely so it survives the confirm-or-
+  // drop (issue #3834). Keying on the task_id keeps N genuinely-distinct sequential
+  // dispatches into one slot from collapsing into a single row (the #3738
+  // bare-slot fallback overshot into that under-count), while one dispatch
+  // occupying a slot for N turns (same task_id across turns) still collapses.
+  // An identity-less snapshot (occupancyId null) falls back to the bare slot
+  // (#3738). A row with neither a cycleId, an occupancyId, NOR a recoverable
+  // slot has no surrogate to match on and is left untouched (conservative —
+  // never silently merge two possibly-distinct dispatches).
   const byCycleId = new Map<string, RetroDispatch>();
-  const bySlot = new Map<string, RetroDispatch>();
+  const byOccupancy = new Map<string, RetroDispatch>();
   const survivors: RetroDispatch[] = [];
-  /** Adopt the earlier turn_n onto `canonical` and union `dropped`'s non-null
-   *  fields onto it. `canonical` is always the first-seen survivor. */
+  /** Adopt the earlier turn_n onto `canonical` (the first-seen survivor) and
+   *  union `dropped`'s fields onto it.
+   *
+   *  Field sourcing is split by shape (issue #3834, reconciled against the
+   *  design concept):
+   *   - IDENTITY-shaped (skill, anchorReference, prNumber): sourced as
+   *     `earlier.<field> ?? later.<field>`, where earlier/later are determined
+   *     by `turn_n` — NOT by array order. The caller's input may be newest-
+   *     first, so the first-seen `canonical` is not necessarily the earliest
+   *     turn; sourcing from the earlier turn keeps these fields consistent with
+   *     `turn_n` itself (already corrected to the earliest), and a later turn
+   *     still fills a field the earlier turn left null (`??`).
+   *   - OUTCOME-shaped (status/bucket, abandonReason, regressionIntroduced) and
+   *     the occupancyId merge-fill keep their direction-independent fill-null /
+   *     OR semantics: a later turn may still be the one that resolves a status,
+   *     an abandon reason, or a regression flag. */
   const unionInto = (canonical: RetroDispatch, dropped: RetroDispatch): void => {
     const cTurn = canonical.turn_n ?? Number.POSITIVE_INFINITY;
     const dTurn = dropped.turn_n ?? Number.POSITIVE_INFINITY;
+    const droppedIsEarlier = dTurn < cTurn;
     // The canonical row is always the one already in `survivors` (first-seen);
     // we only adopt the earlier turn_n onto it so it reports the dispatching
     // turn, never a later occupancy turn.
-    if (dTurn < cTurn) canonical.turn_n = dropped.turn_n;
-    if (!canonical.skill && dropped.skill) canonical.skill = dropped.skill;
-    if (!canonical.anchorReference && dropped.anchorReference)
-      canonical.anchorReference = dropped.anchorReference;
-    if (!canonical.prNumber && dropped.prNumber) canonical.prNumber = dropped.prNumber;
+    if (droppedIsEarlier) canonical.turn_n = dropped.turn_n;
+    const earlier = droppedIsEarlier ? dropped : canonical;
+    const later = droppedIsEarlier ? canonical : dropped;
+    // Identity-shaped fields: earlier turn wins, later fills a null.
+    canonical.skill = earlier.skill ?? later.skill;
+    canonical.anchorReference = earlier.anchorReference ?? later.anchorReference;
+    canonical.prNumber = earlier.prNumber ?? later.prNumber;
+    // Outcome-shaped fields: direction-independent fill-null / OR.
     if (canonical.status === null && dropped.status !== null) {
       canonical.status = dropped.status;
       canonical.bucket = dropped.bucket;
     }
     if (!canonical.abandonReason && dropped.abandonReason)
       canonical.abandonReason = dropped.abandonReason;
+    if (!canonical.occupancyId && dropped.occupancyId)
+      canonical.occupancyId = dropped.occupancyId;
     if (dropped.regressionIntroduced) canonical.regressionIntroduced = true;
   };
   for (const d of dispatches) {
@@ -113,12 +146,19 @@ export function dedupByCanonicalCycleId(dispatches: RetroDispatch[]): RetroDispa
       }
       continue;
     }
-    // Empty-cycleId row: dedup on the slot key (#3738) so a slot occupied for N
-    // turns collapses to one row. No slot surrogate → leave untouched.
-    if (d.slot) {
-      const prior = bySlot.get(d.slot);
+    // Empty-cycleId row: dedup on the per-occupancy identity (#3834) when
+    // present — `${slot}::${occupancyId}` (occupancyId is the pre-formatted
+    // `id:<task_id>` / `epoch:<slot>@<epoch>` key), which confirmDrillableCycleIds
+    // leaves intact even as it blanks the candidate cycleId. Distinct same-slot
+    // occupancies (different task_id → different key) survive as distinct rows;
+    // one occupancy across N turns (same task_id → same key) still collapses.
+    // Fall back to the bare slot (#3738) only when no per-occupancy identity was
+    // recoverable (occupancyId null); no slot at all → leave untouched.
+    const occKey = d.occupancyId !== null ? `${d.slot}::${d.occupancyId}` : d.slot;
+    if (occKey) {
+      const prior = byOccupancy.get(occKey);
       if (!prior) {
-        bySlot.set(d.slot, d);
+        byOccupancy.set(occKey, d);
         survivors.push(d);
       } else {
         unionInto(prior, d);
