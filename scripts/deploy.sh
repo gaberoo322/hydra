@@ -51,6 +51,12 @@ echo "==> Syncing operator skills from playbooks..."
 # autopilot playbook but the operator's mirror stayed at the stale version).
 # `set -euo pipefail` at the top of this script means a non-zero exit here will
 # abort the deploy before the service is restarted.
+#
+# sync-skills.sh's default-mirror content guard (issue #3828) is a documented
+# NO-OP here: by this point we've already run `git checkout master && git pull
+# --ff-only origin master` above, so docs/operator-playbooks/ is guaranteed
+# identical to origin/master's — the guard's content-diff check always passes
+# on this path. No --force / HYDRA_SYNC_SKILLS_FORCE needed.
 bash scripts/sync-skills.sh
 
 echo "==> Building dashboard..."
