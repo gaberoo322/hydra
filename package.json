@@ -27,6 +27,7 @@
     "dep-boundary-check": "npx tsx scripts/ci/dep-boundary-check.ts",
     "stryker:scan": "npx tsx scripts/ci/stryker-scan.ts",
     "biome-check": "npx tsx scripts/ci/biome-check.ts",
+    "qa:catch-rate": "npx tsx scripts/ci/qa-catch-rate.ts",
     "ast-search": "npx tsx scripts/ast-search.ts",
     "probe-search": "npx tsx scripts/probe-search.ts",
     "ast-grep-scan": "npx --yes -p @ast-grep/cli@0.43.0 ast-grep scan",

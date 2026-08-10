@@ -1,0 +1,1 @@
+- feat: add `npm run qa:catch-rate` to reproduce the true QA catch rate on demand (AC1 for #3815), counting FAILs across PR review state, verdict comments, and the ready-for-agent bounce path (#3815)
