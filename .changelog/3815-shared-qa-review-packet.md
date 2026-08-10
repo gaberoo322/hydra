@@ -1,0 +1,1 @@
+- perf: inline the hydra-qa review packet once per PR instead of each reviewer sub-agent re-exploring the repo (#3815)

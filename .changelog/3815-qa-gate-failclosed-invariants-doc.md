@@ -1,0 +1,1 @@
+- fix: hydra-qa's reviewer admission gate now fails closed to full review (never crashes) on its own script errors, and INV-C/INV-F are now formally defined in the playbook itself instead of only the design-concept artifact (#3815)

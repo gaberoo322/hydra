@@ -56,6 +56,28 @@ The queue issue is drained first because each row is already paired with a recom
 
 ## Procedure
 
+### GLM dev-drainer beachhead report (informational — read once, no draining)
+
+Before touching any bucket, print the GLM dev-drainer's beachhead readout
+(issue #3690, ADR-0032 Decision 6's ~2-week/~25-PR keep-or-kill window):
+
+```bash
+bash scripts/glm-beachhead-report.sh
+```
+
+This is context, not a queue entry: it carries no operator-decision options
+and nothing here drains it — it is a single informational line placed ahead
+of the operator-decision buckets below because it colors how the operator
+reads everything else this session (e.g. a KILL-signal readout is a cue to
+look harder at any `glm-authored` PR encountered later in the session). The
+script computes window progress, first-pass QA PASS-rate, the live
+`percentLast7d` delta against a bootstrapped day-0 baseline, and churn vs a
+non-GLM baseline, folding them into a `recommendation:` string. **That
+recommendation is advisory prose only** — no code path anywhere auto-flips
+keep/kill/expand (ADR-0032 #3671 explicitly rejected an auto-flip
+circuit-breaker); acting on it (disabling the timer, changing labels) is
+always the operator's own decision, made by hand outside this script.
+
 ### 0. Drain today's operator-decision queue (if present)
 
 ```bash

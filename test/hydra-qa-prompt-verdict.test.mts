@@ -24,6 +24,7 @@ import {
   classifyVerdict,
   renderChecksBlock,
   aggregateAdversarialReview,
+  decideReviewAdmission,
   decideDeepQaAction,
   DEEP_QA_FAIL_MARKER,
   DEEP_QA_PASS_MARKER,
@@ -309,6 +310,173 @@ describe("aggregateAdversarialReview — T3 two-reviewer refutation fan-out (iss
     const r = aggregateAdversarialReview("PASS", "FAIL");
     assert.equal(typeof r, "object");
     assert.equal((r as { then?: unknown }).then, undefined);
+  });
+});
+
+describe("decideReviewAdmission — reviewer admission gate (issue #3815)", () => {
+  // The T3/T4 fan-out is the second-largest token consumer in the system. The
+  // admission gate skips it ONLY when a reviewer's output provably cannot change
+  // the emitted verdict under the CURRENT fold (INV-A — the gate is a derivation
+  // of the fold, not an independent policy). Two conditions are verdict-invariant
+  // today: a merge conflict (DIRTY — the diff won't merge) and a required check
+  // already failed (classifyVerdict returns FAIL regardless of reviewVerdict).
+  // T4 is only ever DEFERRED, never depth-reduced (INV-B). Unknown tier/merge
+  // state fail-closed to full depth (INV-E). These tests pin each invariant as an
+  // executable property so a future fold change that breaks the derivation fails
+  // loudly here, in the same PR (INV-A's "re-derived in the same PR" clause).
+
+  const green: CheckState[] = [
+    { name: "typecheck", status: "completed", conclusion: "success", required: true },
+    { name: "tests", status: "completed", conclusion: "success", required: true },
+  ];
+  const reqFailed: CheckState[] = [
+    { name: "typecheck", status: "completed", conclusion: "success", required: true },
+    { name: "tests", status: "completed", conclusion: "failure", required: true },
+  ];
+  const reqPending: CheckState[] = [
+    { name: "typecheck", status: "completed", conclusion: "success", required: true },
+    { name: "mutation-test", status: "queued", required: true },
+  ];
+
+  test("INV-A: skip-required-failed fires ONLY where classifyVerdict is FAIL for BOTH review verdicts", () => {
+    // The defining property: wherever the gate declines to spawn reviewers on a
+    // failed required check, the classifier must return the same verdict whether
+    // the (un-run) review would have passed or failed — otherwise the gate would
+    // be skipping a load-bearing review. Enumerate representative check sets.
+    const cases: CheckState[][] = [
+      green,
+      reqFailed,
+      reqPending,
+      [{ name: "tests", status: "completed", conclusion: "failure", required: true }],
+      [{ name: "tests", status: "completed", conclusion: "timed_out", required: true }],
+      [],
+    ];
+    for (const checks of cases) {
+      const d = decideReviewAdmission({ checks, mergeStateStatus: "CLEAN", tier: 3 });
+      const ifReviewPass = classifyVerdict("PASS", checks).verdict;
+      const ifReviewFail = classifyVerdict("FAIL", checks).verdict;
+      if (d.action === "skip-required-failed") {
+        // Skipped ⇒ review is moot ⇒ both review verdicts yield the same result.
+        assert.equal(ifReviewPass, "FAIL", "gate skipped but PASS-review was not a forced FAIL");
+        assert.equal(ifReviewFail, "FAIL");
+        assert.equal(d.verdict, "FAIL");
+      } else {
+        // Not skipped ⇒ the review CAN matter ⇒ it is NOT the case that both
+        // review verdicts are forced to FAIL. (Equivalently: the gate skips in
+        // exactly the cases this property says it may.)
+        assert.ok(
+          !(ifReviewPass === "FAIL" && ifReviewFail === "FAIL"),
+          "gate failed to skip a verdict that is FAIL regardless of the review",
+        );
+      }
+    }
+  });
+
+  test("clean green T3 PR is admitted (the common path — full fan-out runs)", () => {
+    const d = decideReviewAdmission({ checks: green, mergeStateStatus: "CLEAN", tier: 3 });
+    assert.equal(d.action, "admit");
+    assert.equal(d.verdict, undefined);
+  });
+
+  test("pending required check with NO failure is admitted (review may still change PASS-pending-CI)", () => {
+    // BLOCKED with a pending required check → classifyVerdict returns
+    // PASS-pending-CI, which still needs a real review input. Skipping here
+    // would fabricate a verdict. (The issue's rejected BLOCKED trigger.)
+    const d = decideReviewAdmission({ checks: reqPending, mergeStateStatus: "BLOCKED", tier: 3 });
+    assert.equal(d.action, "admit");
+  });
+
+  test("required check failed, T3 → skip-required-failed carrying FAIL (no PASS)", () => {
+    const d = decideReviewAdmission({ checks: reqFailed, mergeStateStatus: "CLEAN", tier: 3 });
+    assert.equal(d.action, "skip-required-failed");
+    assert.equal(d.verdict, "FAIL"); // a skipped review never yields PASS (INV-D)
+  });
+
+  test("INV-B: required check failed, T4 → DEFER (T4 is only ever deferred, never FAIL-skipped)", () => {
+    // The deep-QA routing needs a real review verdict; skipping the fan-out would
+    // leave none. So a T4 PR with a failed required check is deferred until CI
+    // concludes, then the full Verifier-Core fan-out runs — depth is unchanged.
+    const d = decideReviewAdmission({ checks: reqFailed, mergeStateStatus: "CLEAN", tier: 4 });
+    assert.equal(d.action, "defer");
+    assert.equal(d.verdict, undefined); // never a verdict for T4 — never depth-reduced
+  });
+
+  test("INV-B: DIRTY merge conflict is a DEFER for every tier, including T4", () => {
+    for (const tier of [1, 2, 3, 4]) {
+      const d = decideReviewAdmission({ checks: green, mergeStateStatus: "DIRTY", tier });
+      assert.equal(d.action, "defer", `tier ${tier}`);
+      assert.equal(d.verdict, undefined, `tier ${tier} must not carry a verdict`);
+    }
+  });
+
+  test("DIRTY takes precedence over a failed required check (the diff won't merge either way)", () => {
+    // A FAIL verdict over a conflicting diff is moot — the diff changes on
+    // rebase — so defer to the rebase rather than emit FAIL.
+    const d = decideReviewAdmission({ checks: reqFailed, mergeStateStatus: "DIRTY", tier: 3 });
+    assert.equal(d.action, "defer");
+  });
+
+  test("BLOCKED and BEHIND are NOT defer triggers (only DIRTY is verdict-invariant)", () => {
+    // BLOCKED covers pending required checks (review matters); BEHIND auto-rebases.
+    for (const ms of ["BLOCKED", "BEHIND", "UNSTABLE", "HAS_HOOKS"]) {
+      const d = decideReviewAdmission({ checks: green, mergeStateStatus: ms, tier: 3 });
+      assert.equal(d.action, "admit", `${ms} should admit a clean PR`);
+    }
+  });
+
+  test("INV-E: unreachable tier classifier (null) → admit (fail-closed to full depth)", () => {
+    // Even with a failed required check — unknown tier means we cannot confirm
+    // it isn't T4, so fail-closed runs the full fan-out. Mirrors the playbook's
+    // existing ADVERSARIAL=1-on-empty-PR_TIER default.
+    const d = decideReviewAdmission({ checks: reqFailed, mergeStateStatus: "CLEAN", tier: null });
+    assert.equal(d.action, "admit");
+  });
+
+  test("INV-E: unknown / empty mergeStateStatus → admit (fail-closed to full depth)", () => {
+    for (const ms of ["", "UNKNOWN", "   "]) {
+      const d = decideReviewAdmission({ checks: reqFailed, mergeStateStatus: ms, tier: 3 });
+      assert.equal(d.action, "admit", `mergeStateStatus ${JSON.stringify(ms)} should fail-closed to admit`);
+    }
+  });
+
+  test("UPPERCASE / lowercase mergeStateStatus fold identically (defense in depth)", () => {
+    assert.equal(
+      decideReviewAdmission({ checks: green, mergeStateStatus: "dirty", tier: 3 }).action,
+      "defer",
+    );
+    assert.equal(
+      decideReviewAdmission({ checks: green, mergeStateStatus: "Dirty", tier: 3 }).action,
+      "defer",
+    );
+  });
+
+  test("zero checks reported → admit (a PR with no CI signal is reviewed, not skipped)", () => {
+    const d = decideReviewAdmission({ checks: [], mergeStateStatus: "CLEAN", tier: 3 });
+    assert.equal(d.action, "admit");
+  });
+
+  test("decision is a pure synchronous return — never blocks", () => {
+    const r = decideReviewAdmission({ checks: green, mergeStateStatus: "CLEAN", tier: 3 });
+    assert.equal(typeof r, "object");
+    assert.equal((r as { then?: unknown }).then, undefined);
+  });
+
+  test("the admission gate introduces no new FinalVerdict literal (INV-D)", () => {
+    // A skipped review never yields PASS; the only verdict the gate ever carries
+    // is the FAIL the fold already determined. classifyVerdict / aggregate /
+    // decideDeepQaAction semantics are untouched — the gate only declines to
+    // spawn moot reviewers.
+    for (const tier of [1, 2, 3, 4]) {
+      for (const checks of [green, reqFailed, reqPending]) {
+        for (const ms of ["CLEAN", "DIRTY", "BLOCKED"]) {
+          const d = decideReviewAdmission({ checks, mergeStateStatus: ms, tier });
+          assert.ok(
+            d.verdict === undefined || d.verdict === "FAIL",
+            `gate must never carry a non-FAIL verdict (got ${d.verdict} for tier ${tier} ${ms})`,
+          );
+        }
+      }
+    }
   });
 });
 

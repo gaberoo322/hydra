@@ -996,6 +996,74 @@ describe("scripts/sync-skills.sh — compose-seam supersede marker (issue #3818)
   });
 });
 
+describe("scripts/sync-skills.sh — composed hydra-qa carries the blocking-dispatch mandate ahead of the base spawn (issue #3880)", () => {
+  /**
+   * #3789 was fixed once by #3827 (the `run_in_background: false` mandate at
+   * the overlay's own step 7). #3818/#3823 fixed the base's step 4 from being
+   * double-executed. Both fixes were live in the composed SKILL.md before
+   * issue #3880's 2026-08-05 recurrence — yet the recurrence still happened,
+   * because the step-7 mandate sat ~250 lines past the compose-seam-supersede
+   * preface, after the ENTIRE unconstrained vendored base body. A dispatch
+   * reading top-down could act on a spawn well before it ever reached the
+   * mandate.
+   *
+   * The fix restates the mandate INSIDE the hoisted preface itself (still
+   * before the marker), so it is textually adjacent to the "skip the base's
+   * step 4" note and precedes the base's own spawn instruction — not just the
+   * step-7 mandate somewhere after it. This test golden-checks the REAL repo
+   * composed output so a future edit that drops or displaces the restated
+   * mandate fails CI, not just an advisory workflow (investigation for #3880
+   * found there was previously NO regression test — composed or otherwise —
+   * for this exact failure mode).
+   */
+  test("the LIVE composed hydra-qa skill restates run_in_background:false in the preface, before the base's spawn step", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-blocking-mandate-"));
+    try {
+      const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+        env: {
+          ...process.env,
+          CLAUDE_SKILLS_DIR: join(dir, "claude"),
+          CODEX_SKILLS_DIR: join(dir, "codex"),
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+      const out = readFileSync(join(dir, "claude", "hydra-qa", "SKILL.md"), "utf-8");
+
+      const supersedeIdx = out.indexOf("Compose-seam supersession");
+      const mandateIdx = out.indexOf("Blocking-dispatch mandate, restated here");
+      const baseSpawnIdx = out.indexOf("### 4. Spawn both sub-agents in parallel");
+      const step7Idx = out.indexOf("### 7. Spawn the review sub-agents in parallel");
+
+      assert.ok(supersedeIdx >= 0, "the compose-seam-supersede preface must still be present");
+      assert.ok(
+        mandateIdx >= 0,
+        "the composed skill must restate the run_in_background:false blocking-dispatch mandate inside the hoisted preface (issue #3880)",
+      );
+      assert.ok(baseSpawnIdx >= 0, "the vendored base's own spawn step must still be present, untouched");
+      assert.ok(step7Idx >= 0, "the overlay's own step 7 spawn instruction must still be present, unchanged");
+
+      assert.ok(
+        supersedeIdx < mandateIdx && mandateIdx < baseSpawnIdx,
+        "the restated mandate must sit BETWEEN the supersession note and the base's spawn step — a top-down read must hit the blocking-dispatch requirement before any spawn instruction, not ~250 lines later at step 7",
+      );
+      assert.match(
+        out.slice(mandateIdx, baseSpawnIdx),
+        /run_in_background: false/,
+        "the restated preface paragraph must literally name the run_in_background: false flag, not just gesture at 'blocking dispatch'",
+      );
+      assert.match(
+        out.slice(mandateIdx, baseSpawnIdx),
+        /step 7\.5/,
+        "the restated preface must also point at step 7.5's reviewer-completeness check, not just the spawn flag",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/sync-skills.sh — banner-guarded orphan prune (issue #3693)", () => {
   /**
    * sync-skills.sh only ever WROTE generated skills; a playbook deleted from

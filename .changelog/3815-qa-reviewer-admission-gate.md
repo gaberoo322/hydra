@@ -1,0 +1,1 @@
+- perf: skip the hydra-qa adversarial fan-out when no reviewer can change the verdict (admission gate) (#3815)
