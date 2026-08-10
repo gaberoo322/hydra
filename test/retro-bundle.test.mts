@@ -48,6 +48,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     anchorReference: "issue-918",
     prNumber: null,
     slot: null,
+    occupancyId: null,
     status: "merged",
     bucket: "merged",
     abandonReason: null,
@@ -564,6 +565,71 @@ describe("dedupByCanonicalCycleId", () => {
     const out = dedupByCanonicalCycleId([x, y, yDup]);
     assert.deepEqual(out.map((d) => d.cycleId), ["x", "y"]);
   });
+
+  test("two same-slot rows with distinct occupancyIds never merge (#3834)", () => {
+    // The #3834 under-count: distinct same-slot occupancies (different task_ids
+    // -> distinct occupancyIds) must survive the empty-cycleId dedup as
+    // distinct rows. Before the fix, confirmDrillableCycleIds blanked both
+    // cycleIds and the bare-slot fallback collapsed them into one row,
+    // silently dropping a dispatch. Keying the empty-cycleId branch on
+    // `${slot}::${occupancyId}` keeps them apart: N distinct dispatches ->
+    // exactly N rows, never fewer (the #3834 under-count) and never more (the
+    // #3738 over-count).
+    const a = dispatch({
+      cycleId: "",
+      slot: "qa_orch",
+      occupancyId: "id:taskA",
+      turn_n: 2,
+      anchorReference: "PR#1",
+    });
+    const b = dispatch({
+      cycleId: "",
+      slot: "qa_orch",
+      occupancyId: "id:taskB",
+      turn_n: 6,
+      anchorReference: "PR#2",
+    });
+    const out = dedupByCanonicalCycleId([a, b]);
+    assert.equal(out.length, 2, "two same-slot rows with distinct occupancyIds -> two rows (#3834 under-count)");
+    assert.deepEqual(
+      out.map((d) => d.anchorReference).sort(),
+      ["PR#1", "PR#2"],
+      "each occupancy keeps its own anchor (no Frankenstein merge)",
+    );
+  });
+
+  test("two same-slot rows sharing an occupancyId collapse; earliest turn canonical (#3738 stays green under #3834)", () => {
+    // The #3738 collapse this fix must not regress: the SAME occupancy (same
+    // task_id -> same occupancyId) across N turns is one row, not N. The
+    // `${slot}::${occupancyId}` key is identical across the turns, so they
+    // merge; the earliest turn becomes canonical. (The identity-less case —
+    // both occupancyId null — is pinned by the bare-slot #3738 test above.)
+    const turn2 = dispatch({
+      cycleId: "",
+      slot: "dev_target",
+      occupancyId: "id:sameTask",
+      turn_n: 2,
+    });
+    const turn6 = dispatch({
+      cycleId: "",
+      slot: "dev_target",
+      occupancyId: "id:sameTask",
+      turn_n: 6,
+    });
+    const out = dedupByCanonicalCycleId([turn2, turn6]);
+    assert.equal(out.length, 1, "same occupancyId -> one row (#3738 collapse preserved)");
+    assert.equal(out[0].turn_n, 2, "earliest turn_n is canonical");
+  });
+
+  test("a keyed same-slot row is not swallowed by a key-less one (#3834)", () => {
+    // An identity-bearing occupancy must not merge with an identity-less
+    // same-slot row: the keyed row dedups on `${slot}::${occupancyId}`, the
+    // key-less row on the bare slot, and the two keys never collide.
+    const keyed = dispatch({ cycleId: "", slot: "qa_orch", occupancyId: "id:taskA", turn_n: 2 });
+    const keyless = dispatch({ cycleId: "", slot: "qa_orch", occupancyId: null, turn_n: 6 });
+    const out = dedupByCanonicalCycleId([keyed, keyless]);
+    assert.equal(out.length, 2, "keyed vs key-less same-slot rows do not merge");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -630,6 +696,23 @@ describe("confirmDrillableCycleIds (#1352/#2547)", () => {
     const out = confirmDrillableCycleIds([emptyHandle], new Set(), new Set());
     assert.equal(emptyHandle.cycleId, "", "empty handle stays empty");
     assert.equal(out.length, 1, "returns the same array for chaining");
+  });
+
+  test("blanks the candidate cycleId but leaves occupancyId intact (#3834)", () => {
+    // THE #3834 invariant: the confirm pass blanks the unconfirmed candidate
+    // cycleId (so the dispatch stays undrillable) but must NOT touch the
+    // per-occupancy identity — occupancyId is what lets the post-confirm dedup
+    // still tell distinct same-slot occupancies apart once their cycleIds are
+    // both blank. confirmDrillableCycleIds reads/writes only cycleId.
+    const inFlight = dispatch({
+      cycleId: "cand",
+      status: null,
+      bucket: null,
+      occupancyId: "id:taskA",
+    });
+    confirmDrillableCycleIds([inFlight], new Set(["cand"]), new Set()); // nothing confirmed
+    assert.equal(inFlight.cycleId, "", "unconfirmed candidate cycleId blanked");
+    assert.equal(inFlight.occupancyId, "id:taskA", "occupancyId survives the confirm blank");
   });
 });
 
