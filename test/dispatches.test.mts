@@ -317,6 +317,16 @@ describe("decide.py stamps dispatchSentinel onto dispatch actions", () => {
   }
 
   test("every dispatch action carries a dispatchSentinel matching its skill + worktreeBranch", () => {
+    // ISSUE #3832: this assertion previously rode the retired candidate-feed
+    // forced-research branch. The `{dev_orch:...}` candidate payload is the
+    // wrong shape for both dev_orch's reader and best_candidate()'s `score`
+    // scan, so dev_orch never dispatched and research_recommended() FAILED
+    // OPEN — the forced research_target dispatch was the ONLY thing making
+    // `dispatches.length > 0` true. #3832 removes that branch, so trigger a
+    // dispatch through a LIVE path instead: the retained
+    // target_board_research_due board-empty signal (ADR-0031), which dispatches
+    // research_target through the same make_dispatch() and thus carries the
+    // same sentinel the assertion is actually verifying.
     const plan = runDecide(
       {
         scope: "both",
@@ -324,10 +334,9 @@ describe("decide.py stamps dispatchSentinel onto dispatch actions", () => {
         turn: 2,
         slots: {},
         cumulative_tokens: 0,
+        signals: { target_board_research_due: true },
       },
-      {
-        dev_orch: { reference: "#692", confidence: 0.9, title: "build it" },
-      },
+      { candidates: [], research_recommended: false },
       [],
     );
     const dispatches = (plan.actions || []).filter((a: any) => a.type === "dispatch");
