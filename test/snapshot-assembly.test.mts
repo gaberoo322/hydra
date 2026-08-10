@@ -88,6 +88,7 @@ function makeScan(overrides: Partial<ScanResult> = {}): ScanResult {
     linesParsed: 42,
     linesWithUsage: 40,
     parseErrors: 0,
+    filesServedFromMemo: 0,
     ...overrides,
   };
 }

@@ -1,0 +1,109 @@
+name: stryker-check
+
+# Advisory Stryker mutation scan (tool-scout #3835).
+#
+# Runs `npm run stryker:scan` (scripts/ci/stryker-scan.ts) — a COMPARISON-ONLY
+# sibling of the required homegrown mutation gate (src/mutation.ts +
+# scripts/ci/mutation-check.ts). It invokes Stryker (@stryker-mutator/core)
+# through a PINNED `npx --yes -p @stryker-mutator/core@9.6.1` on the PR's
+# diff-changed src/**/*.ts files and emits a comparison: which surviving
+# mutants Stryker surfaces that the homegrown gate does not attempt at all,
+# grouped by Stryker mutator category. That grouped number is what the
+# keep/replace/drop recommendation (filed as a follow-up after ≥10 PRs) cites.
+#
+# WHY A SECOND MUTATION SIGNAL (operator decision, issue #3835): the homegrown
+# gate mutates per-line by regex with an essentially four-entry mutator list;
+# Stryker mutates at AST level across a far broader catalog. The value of this
+# workflow is the COMPARISON and the keep-or-replace call it enables — the
+# workflow is only the instrument for getting there. If the broader catalog
+# surfaces no survivors the homegrown gate misses, the correct recommendation is
+# DROP, and that is a success outcome for the experiment.
+#
+# WHY OUTSIDE ci.yml: ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015).
+# This is a NEW advisory scan — not a change to the merge gate — so it lives in
+# a Tier-3 sibling (operator memory feedback_ci_gate_separate_workflow_avoids_tier0).
+#
+# NOT A REQUIRED CHECK: never added to branch protection. The run step always
+# exits 0 (`|| true`, plus stryker-scan.ts itself never exits non-zero) so a red
+# Stryker run or a low mutation score surfaces via the uploaded artifact + step
+# summary WITHOUT wedging the merge queue — advisory, not blocking. Promotion to
+# a required gate is a separate, operator-gated follow-up (issue out-of-scope).
+#
+# TOOL LANE (ADR-0005): @stryker-mutator/core is invoked through a pinned `npx`
+# — no package.json dependency entry (runtime or dev), no package-lock entry, no
+# install scripts, no lavamoat allow-scripts gate impact. Same no-dependency lane
+# as ast-grep / comby / promptfoo / taze / osv-scanner.
+#
+# DIFF SCOPING (issue #653 — a full-tree run is a regression): Stryker's
+# `mutate` is scoped to the PR's diff-changed src/**/*.ts files only, computed
+# the same way scripts/ci/mutation-check.ts::filterMutationCandidates() does
+# (the wrapper REUSES that filter). A full-tree Stryker run is not acceptable.
+#
+# BUDGET: a commandRunner run executes the full `npm test` suite once per
+# mutant, so the job carries a hard `timeout-minutes` ceiling AND the wrapper
+# caps the mutated file count (STRYKER_MAX_FILES, default 3) — the run is
+# best-effort within budget; a timeout still uploads whatever artifact exists
+# and never blocks.
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: stryker-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stryker-check:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Compute changed files (diff vs merge-base on master)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Same merge-base scoping the required mutation-test job uses
+          # (issue #653): stable across rebases, tracks master as it advances.
+          # Event-agnostic — works for both pull_request and workflow_dispatch.
+          git fetch origin master --depth=0 || git fetch origin master
+          MERGE_BASE="$(git merge-base origin/master HEAD)"
+          echo "Live-gate base ref (merge-base origin/master HEAD): $MERGE_BASE"
+          git diff --name-only "$MERGE_BASE"...HEAD > changed-files.txt
+          echo "Changed files:"
+          cat changed-files.txt
+
+      - name: Run advisory Stryker scan (comparison vs homegrown gate)
+        run: |
+          # Pass the diff-changed file list through the same CHANGED_FILES env
+          # contract the required mutation gate uses (scripts/ci/mutation-check.ts).
+          export CHANGED_FILES="$(cat changed-files.txt)"
+          # Advisory: ALWAYS exit 0. stryker-scan.ts already never exits
+          # non-zero; `|| true` is defense-in-depth so a Stryker crash or a low
+          # mutation score can never wedge the merge queue. The comparison JSON
+          # is the artifact that carries the signal.
+          npm run stryker:scan || true
+          echo "::group::stryker-check comparison"
+          cat stryker-comparison.json 2>/dev/null || echo "(no comparison emitted)"
+          echo "::endgroup::"
+
+      - name: Upload Stryker comparison + raw report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stryker-comparison-${{ github.run_id }}
+          path: |
+            stryker-comparison.json
+            reports/stryker-scan/mutation.json
+          if-no-files-found: ignore
+          retention-days: 14

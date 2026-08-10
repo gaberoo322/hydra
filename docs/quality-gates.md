@@ -146,6 +146,69 @@ the gate with a `neutral` status. Matches the existing in-cycle exemption for
 quick-fix anchors and the `scope-check` gate's `[quick-fix]` semantics
 (symmetric — issue #653 acceptance criterion 4).
 
+### stryker-check (advisory — comparison-only, tool-scout #3835)
+
+**What it does.** Runs Stryker (`@stryker-mutator/core`) *alongside* the
+required `mutation-test` gate and emits a **comparison**: which surviving
+mutants Stryker surfaces that the homegrown gate does not attempt at all,
+grouped by Stryker mutator category. The homegrown gate mutates per-line by
+regex with an essentially four-entry mutator list (`negate-boolean-return`,
+`swap-comparison`, `negate-condition`, `remove-early-return` in
+`src/mutation.ts`); Stryker mutates at AST level across a far broader catalog
+(`ArithmeticOperator`, `StringLiteral`, `LogicalOperator`, …). Only
+`EqualityOperator` and `BooleanLiteral` have a homegrown counterpart (and only
+as a subset); every other Stryker category is one the homegrown gate does not
+attempt — survivors there are the signal this scan exists to surface.
+
+**Advisory — never gates a merge.** This runs in its own workflow
+(`.github/workflows/stryker-check.yml`), a Tier-3 sibling that is **not** a
+required branch-protection context and is never referenced from `ci.yml`. The
+run step always exits 0 — the wrapper `scripts/ci/stryker-scan.ts` never exits
+non-zero and the workflow `|| true`s — so a red Stryker run, a crash, or a low
+mutation score surfaces only via the uploaded artifact and step summary, never
+by blocking. Promotion to a required gate is a separate, operator-gated
+follow-up (the issue's out-of-scope list).
+
+**Tool lane (ADR-0005).** Stryker is invoked through a pinned
+`npx --yes -p @stryker-mutator/core@9.6.1` with **no `package.json` dependency
+entry** (runtime or dev) — the same no-dependency lane as ast-grep / comby /
+promptfoo / taze / osv-scanner. The pin lives in `scripts/ci/stryker-scan.ts`,
+not in `package.json`.
+
+**Diff scoping (issue #653 — same as the required gate).** Stryker mutates
+only the PR's diff-changed `src/**/*.ts` files, computed the same way
+`scripts/ci/mutation-check.ts::filterMutationCandidates()` does — the wrapper
+REUSES that filter. A full-tree Stryker run is a regression against #653 and is
+not acceptable. Asset / doc / test-only PRs skip cleanly (the wrapper emits a
+`status: "skipped"` row with a reason).
+
+**Comparison output.** `scripts/ci/stryker-scan.ts` writes
+`stryker-comparison.json` (uploaded as the `stryker-comparison-*` artifact),
+carrying:
+
+- `comparison.survivorsNotAttemptedByHomegrown` — surviving mutants grouped by
+  Stryker category with **no** homegrown counterpart (`totalSurvivors` +
+  `distinctCategories` is the headline number).
+- `comparison.survivorsInAttemptedCategories` — survivors in categories the
+  homegrown gate does cover (`EqualityOperator`, `BooleanLiteral`).
+- `recommendationSignal` — a one-line conclusion, e.g. *"Stryker surfaced N
+  surviving mutant(s) across M category/categories the homegrown gate does not
+  attempt (ArithmeticOperator, StringLiteral)"*. When that number is 0 it states
+  the run supports a **drop** recommendation.
+
+**Budget.** A Stryker `commandRunner` run executes the full `npm test` suite
+once per mutant, so the job carries a hard `timeout-minutes: 20` ceiling and the
+wrapper caps the mutated file count (`STRYKER_MAX_FILES`, default 3, mirroring
+the homegrown gate's `MUTATION_MAX_MUTANTS`). The run is best-effort within
+budget; a timeout uploads whatever artifact exists and never blocks.
+
+**Keep / replace / drop.** This workflow is the instrument for a decision, not
+a permanent ratchet. A written keep / replace / drop recommendation — citing
+the measured comparison — is filed as a follow-up issue after the workflow has
+run on at least 10 PRs. If the broader Stryker catalog surfaces no survivors the
+homegrown gate misses, the correct recommendation is **drop**, and that is a
+success outcome for the experiment, not a failure.
+
 ### `scope-check`
 
 **What it does.** Reads the PR body and (when linked) the issue body, extracts

@@ -9,23 +9,36 @@
  *       * parity (mean >= threshold, incl. exact-boundary)
  *       * drift  (mean <  threshold)
  *       * not-runnable (no paired cosines — never a green light)
- *     plus meanCosine / minCosine / pairedCount reporting.
+ *     plus meanCosine / minCosine / pairedCount reporting. UNCHANGED by
+ *     issue #3854 — see the classifyWorkspace tests below for the new
+ *     missing-workspace coverage; this function's own not-runnable branch is
+ *     byte-for-byte identical to before.
  *   - exitCodeFor: the verdict -> exit-code contract (0 / 1 / 2).
  *   - DEFAULT_PARITY_THRESHOLD is the 0.99 cutover gate.
+ *   - classifyWorkspace (issue #3854): distinguishes "missing" / "unreadable"
+ *     / "ok" so a misconfigured OV_PARITY_WORKSPACE can be reported as a
+ *     `not-runnable` verdict with a `reason` field distinct from a genuine
+ *     "sampled but nothing paired" not-runnable result (main()'s driver
+ *     layers that `reason` on by spreading, never inside summarizeParity).
  *
- * The driver (workspace sampling + the two /v1/embeddings HTTP calls) is
- * intentionally NOT exercised here — it does filesystem + network I/O and
- * fails soft to `not-runnable` (exit 2), which the pure branches below already
- * cover. Mirrors the test/deploy-drift.test.mts convention (test the pure
- * classifier, trust the wiring).
+ * The network half of the driver (the two /v1/embeddings HTTP calls) is
+ * intentionally NOT exercised here — it fails soft to `not-runnable` (exit 2),
+ * which the pure branches below already cover. classifyWorkspace IS exercised
+ * against real temp-dir fixtures since it is a deterministic sync fs check
+ * with no network dependency. Mirrors the test/deploy-drift.test.mts
+ * convention (test the pure classifier, trust the wiring).
  */
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   cosineSimilarity,
   summarizeParity,
   exitCodeFor,
+  classifyWorkspace,
   DEFAULT_PARITY_THRESHOLD,
 } from "../scripts/ov-embed-parity-check.ts";
 
@@ -132,10 +145,67 @@ describe("summarizeParity — not-runnable (no paired cosines)", () => {
     assert.match(s.message, /NOT RUNNABLE/);
   });
 
+  test("does not carry a reason field itself — unchanged by #3854, verbatim message preserved", () => {
+    // The `reason` discriminant is layered on by main()'s driver via object
+    // spread (see classifyWorkspace tests below); summarizeParity's own
+    // return object is byte-for-byte the same shape it always was.
+    const s = summarizeParity([], 0.99);
+    assert.equal((s as any).reason, undefined);
+    assert.equal(
+      s.message,
+      "embed parity: NOT RUNNABLE — no doc embedded on both backends " +
+        "(empty sample or an endpoint unreachable); cannot green-light a cutover",
+    );
+  });
+
   test("uses the default threshold when none is given", () => {
     const s = summarizeParity([0.999, 0.999]);
     assert.equal(s.threshold, DEFAULT_PARITY_THRESHOLD);
     assert.equal(s.verdict, "parity");
+  });
+});
+
+describe("classifyWorkspace (issue #3854)", () => {
+  test("a real, existing, readable directory -> ok", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ov-parity-check-"));
+    try {
+      assert.equal(classifyWorkspace(dir), "ok");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a nonexistent path -> missing", () => {
+    assert.equal(
+      classifyWorkspace("/tmp/definitely-does-not-exist-ov-parity-3854"),
+      "missing",
+    );
+  });
+
+  test("a path that is a file, not a directory -> unreadable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ov-parity-check-"));
+    const file = join(dir, "not-a-dir.txt");
+    writeFileSync(file, "hello");
+    try {
+      assert.equal(classifyWorkspace(file), "unreadable");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("never throws on a missing or unreadable path — fails soft to a status string", () => {
+    assert.doesNotThrow(() => classifyWorkspace("/nonexistent/ov/workspace"));
+    assert.doesNotThrow(() => classifyWorkspace(""));
+  });
+
+  test("a directory nested under a nonexistent parent -> missing, not unreadable", () => {
+    // ENOENT (missing) and EACCES/EPERM (unreadable) must classify
+    // differently — a caller discriminates workspace-missing from
+    // workspace-unreadable on this distinction.
+    assert.equal(
+      classifyWorkspace("/tmp/ov-parity-3854-does-not-exist/nested/deeper"),
+      "missing",
+    );
   });
 });
 

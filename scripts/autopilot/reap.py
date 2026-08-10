@@ -1246,7 +1246,7 @@ def run_hardcap() -> int:
     return 0
 
 
-def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None) -> int:
+def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None, last_segment_tokens: int | None = None) -> int:
     """`completion` mode: idempotent token accounting keyed by task_id.
 
     Applies uniformly to BOTH kinds of dispatched class (issue #432):
@@ -1265,9 +1265,16 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     First call for a given task_id (either kind):
       - Appends task_id to state.reaped_task_ids (FIFO, bounded to 1000).
       - Adds total_tokens to state.cumulative_tokens.
-      - If total_tokens >= limits.subagent_max_tokens, appends <cls> to
-        state.burned_classes (soft-cap, suppresses re-dispatch this
-        session) — for both pipeline AND signal classes.
+      - If the soft-cap comparison value >= limits.subagent_max_tokens,
+        appends <cls> to state.burned_classes (soft-cap, suppresses
+        re-dispatch this session) — for both pipeline AND signal classes.
+        The comparison value is last_segment_tokens when supplied (issue
+        #3839 — a resumed dispatch sums its segments into one call, but the
+        cap bounds ONE subagent, so it is measured against the LATEST
+        segment, not the summed cumulative total), else total_tokens (the
+        legacy single-segment path — byte-for-byte for every call site that
+        omits the new argument). Cost accounting always uses the true sum
+        total_tokens; only the CAP COMPARISON honours last_segment_tokens.
       - For pipeline classes: records slots[<cls>].tokens = total_tokens,
         then clears slots[<cls>] = null.
       - For signal classes: no slot mutation. The signal cooldown lives
@@ -1387,7 +1394,35 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # written before subagent_max_tokens existed don't crash the reap.
     limits = s.get("limits") or {}
     soft = int(limits.get("subagent_max_tokens", 0)) or None
-    if soft is not None and total_tokens >= soft and cls not in s.get("burned_classes", []):
+    # Issue #3839: the soft cap bounds ONE subagent — "a single misbehaving
+    # subagent", per this function's own framing. A RESUMED dispatch (the
+    # prescribed recovery for the documented stall-on-backgrounded-tests mode)
+    # sums its per-segment counts into this one call, so capping the SUM would
+    # punish the correct recovery and invert the incentive: resuming preserves
+    # committed work but risks burning the class, while re-dispatching
+    # duplicates work yet starts a fresh token budget. When the caller supplies
+    # the LATEST segment's token count (last_segment_tokens), cap against THAT
+    # segment (the faithful "one subagent" bound — the most recent unit of
+    # work); otherwise cap against total_tokens as before, so a genuine
+    # single-segment runaway still burns exactly as today.
+    #
+    # The `is not None` check is load-bearing (design-concept #3839 INV-4): a
+    # legitimately zero-token final segment (0) is a real value that must
+    # compare as 0 >= soft (False), NOT silently fall back to the cumulative
+    # sum — a bare truthiness check (`if last_segment_tokens:`) would treat 0
+    # as falsy and wrongly compare the full total instead.
+    #
+    # `soft_cap_hit` is computed ONCE here and threaded into the burn append,
+    # the cycle-record status, and `_fire_reflection_for_completion` below — so
+    # correcting this single comparison fixes class-burn, cycle status, and
+    # reflection classification together (design-concept #3839 INV-6). Cost
+    # accounting — cumulative_tokens above, slot.tokens below, and the
+    # cycle/token records downstream — ALWAYS uses the true sum total_tokens;
+    # this is the CAP COMPARISON only, never spend under-reporting (criterion 4).
+    cap_check_value = last_segment_tokens if last_segment_tokens is not None else total_tokens
+    soft_cap_hit = soft is not None and cap_check_value >= soft
+    status = "failed" if soft_cap_hit else "completed"
+    if soft_cap_hit and cls not in s.get("burned_classes", []):
         s.setdefault("burned_classes", []).append(cls)
 
     # Pipeline-only slot bookkeeping. The slot may already be cleared
@@ -1511,11 +1546,19 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         print(f"[autopilot] WARN {warn_msg}", file=sys.stderr)
         _append_log(f"WARN {warn_msg}")
 
+    # Issue #3839: stamp the classified outcome onto the run-log line, and —
+    # when the caller supplied a latest-segment count — that value, so an
+    # operator reading the log can distinguish a per-segment cap applied to a
+    # (healthy) resumed dispatch from a genuine single-segment runaway. Both
+    # fields are appended (the line grew additively over prior issues);
+    # existing key=value parsers tolerate the trailing fields.
+    last_seg_field = f" last_seg={last_segment_tokens}" if last_segment_tokens is not None else ""
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "
         f"tokens={total_tokens} cumulative={s['cumulative_tokens']} "
         f"duration_ms={duration_ms} task_title={anchor_ref or ''} "
-        f"refl_sources={reflection_sources or ''} refl_presence={reflection_presence}"
+        f"refl_sources={reflection_sources or ''} "
+        f"refl_presence={reflection_presence} status={status}{last_seg_field}"
     )
     print(f"[autopilot] {line}")
     _append_log(line)
@@ -1526,8 +1569,9 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # abandon until later (the auto-merge action handler bumps it via the
     # idempotent endpoint with status=merged). For runaway/burned reaps
     # we tag the cycle as "failed" so the cycles-failed counter ticks.
-    soft_cap_hit = soft is not None and total_tokens >= soft
-    status = "failed" if soft_cap_hit else "completed"
+    # `soft_cap_hit` / `status` are computed once, above, from cap_check_value
+    # (last_segment_tokens when supplied, else total_tokens) so the burn
+    # decision and this cycle-record status stay in lock-step (issue #3839).
     # Issue #2012: forward the anchor reference recovered from the slot (e.g.
     # "issue-2012") as the cycle's task_title + anchor_ref. Before this, reap
     # hardcoded both to "" on every merge, so successful named-issue cycles
@@ -1626,21 +1670,47 @@ def main(argv: list[str]) -> int:
     sub = argv[1]
     if sub == "completion":
         # Usage: reap.py completion <class> <task_id> <total_tokens> [skill]
-        if len(argv) < 5:
+        #                            [last_segment_tokens]
+        # Issue #3839: last_segment_tokens is an OPTIONAL trailing positional
+        # carrying the LATEST segment's token count for a RESUMED dispatch
+        # (whose per-segment counts are summed into total_tokens for this one
+        # call). When supplied, the soft cap is applied to that single latest
+        # segment rather than the summed cumulative total — the cap bounds ONE
+        # subagent (the most recent unit of work), not one dispatch's recovery
+        # history. Omitted → the legacy cap-against-total path, byte-for-byte.
+        # Trailing after [skill], so every existing ≤5-arg invocation parses
+        # and behaves identically (a pure additive extend — design-concept #3839).
+        args = argv[2:]
+        if len(args) < 3:
             print(
-                "[autopilot] reap completion usage: completion <class> <task_id> <total_tokens> [skill]",
+                "[autopilot] reap completion usage: completion <class> <task_id> "
+                "<total_tokens> [skill] [last_segment_tokens]",
                 file=sys.stderr,
             )
             return 0
-        cls = argv[2]
-        task_id = argv[3]
+        cls = args[0]
+        task_id = args[1]
         try:
-            total_tokens = int(argv[4])
+            total_tokens = int(args[2])
         except ValueError:
-            print(f"[autopilot] reap completion: invalid total_tokens={argv[4]!r}", file=sys.stderr)
+            print(f"[autopilot] reap completion: invalid total_tokens={args[2]!r}", file=sys.stderr)
             return 0
-        skill = argv[5] if len(argv) > 5 else None
-        return run_completion(cls, task_id, total_tokens, skill)
+        skill = args[3] if len(args) > 3 else None
+        last_segment_tokens: int | None = None
+        if len(args) > 4:
+            try:
+                last_segment_tokens = int(args[4])
+            except ValueError:
+                # FAIL-SAFE: a non-numeric latest-segment value cannot be
+                # trusted, so treat it as omitted (cap falls back to the
+                # cumulative total) rather than risking a silent under-cap.
+                print(
+                    f"[autopilot] reap completion: invalid "
+                    f"last_segment_tokens={args[4]!r}; capping against total_tokens",
+                    file=sys.stderr,
+                )
+                last_segment_tokens = None
+        return run_completion(cls, task_id, total_tokens, skill, last_segment_tokens=last_segment_tokens)
 
     if sub == "grill-crash":
         # Usage: reap.py grill-crash <task_id>
