@@ -234,19 +234,21 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
     );
   });
 
-  // Issue #3829 diagnosed WHY qa_orch staying out of ESCALATION_POLICY is not
-  // itself a bug: ESCALATION_POLICY governs a one-time stronger-tier retry
-  // immediately after a subagent STOP, never a standing cap on the ORDINARY
-  // per-turn pipeline dispatch (`_select_for_slot`, step 4) — so even a
-  // qa_orch policy row would not have bounded the busy loop. The real fix is
-  // the separate per-issue attempt-cap guard (full coverage in the dedicated
-  // test/autopilot-qa-orch-attempt-cap.test.mts). This test pins that the two
-  // mechanisms are independent: an exhausted per-issue cap suppresses the
-  // ordinary pipeline dispatch on its own, with no ESCALATION_POLICY row and
-  // no dependence on any subagent_stop event having occurred this turn.
-  test("issue #3829: the qa_orch per-issue attempt-cap guard is independent of ESCALATION_POLICY", () => {
+  // Issue #3829 (design-concept issue-3829) diagnosed WHY qa_orch staying
+  // out of ESCALATION_POLICY is not itself a bug: ESCALATION_POLICY governs
+  // a one-time stronger-tier retry immediately after a subagent STOP, never
+  // a standing cap on the ORDINARY per-turn pipeline dispatch
+  // (`_select_for_slot`, step 4) — so even a qa_orch policy row would not
+  // have bounded the busy loop. The real fix is the separate per-issue STALL
+  // CAP guard, tracking only the HEAD of the needs-qa set (full coverage in
+  // the dedicated test/decide-qa-stall-cap.test.mts). This test pins that
+  // the two mechanisms are independent: an exhausted head-issue cap
+  // suppresses the ordinary pipeline dispatch on its own, with no
+  // ESCALATION_POLICY row and no dependence on any subagent_stop event
+  // having occurred this turn.
+  test("issue #3829: the qa_orch per-issue stall-cap guard is independent of ESCALATION_POLICY", () => {
     const state = baseState({
-      signals: { needs_qa_orch: true, needs_qa_orch_items: "3841" },
+      signals: { needs_qa_orch: true, needs_qa_numbers: "3841" },
     });
     (state as any).qa_orch_item_attempts = { "3841": 3 };
     const plan = runDecide(state);
@@ -256,7 +258,7 @@ describe("decide.py — cascade-routing escalation (issue #3274)", () => {
     assert.equal(
       ordinaryDispatch,
       undefined,
-      "an exhausted needs-qa issue suppresses the ordinary pipeline dispatch even with zero slot_events this turn — the guard does not ride on ESCALATION_POLICY's stop-event trigger",
+      "an exhausted head needs-qa issue suppresses the ordinary pipeline dispatch even with zero slot_events this turn — the guard does not ride on ESCALATION_POLICY's stop-event trigger",
     );
     assert.equal(
       escalationFor(plan, "qa_orch"),

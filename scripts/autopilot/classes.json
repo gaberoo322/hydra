@@ -21,7 +21,7 @@
       "cooldownSeconds": null,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "Reviews orchestrator PRs (Standards + Spec sub-agents). QA failures train the planner pattern memory (the missed criterion). cooldownSeconds stays null (unlimited rate) — the busy-loop backstop is a decide.py-side per-issue attempt cap (QA_ORCH_ITEM_MAX_ATTEMPTS, issue #3829), NOT a class-level cooldown here: a needs-qa issue that cannot reach a QA verdict stops being eligible after 3 qa_orch dispatches, surfaced via the plan's dispatch_decision event + debug.stale_needs_qa_orch_items, while every OTHER needs-qa issue keeps dispatching at full rate. A cooldown here would throttle the whole class uniformly and still never terminate the loop (see the issue's rejected direction 4)."
+      "notes": "Reviews orchestrator PRs (Standards + Spec sub-agents). QA failures train the planner pattern memory (the missed criterion)."
     },
     {
       "name": "research_orch",

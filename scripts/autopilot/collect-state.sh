@@ -357,23 +357,33 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
   ] | length' 2>/dev/null || echo 0
 
-# needs-qa item enumeration for the qa_orch per-issue attempt-cap guard
-# (issue #3829). `needs_qa` above is a bare COUNT; decide.py's attempt-cap
-# guard needs the actual issue NUMBERS so it can track a per-item retry
-# counter across turns and stop re-dispatching qa_orch against an issue that
-# has exhausted its cap — an issue that structurally cannot reach a QA
-# verdict (the motivating case: the hourly worktree-orphan-prune reaping the
-# parent QA agent's worktree AND every reviewer worktree mid-review, which
-# reproduces identically on every retry) otherwise keeps `needs_qa` > 0
-# forever and busy-loops qa_orch at 30-65k tokens/turn with no bound. Mirrors
-# the #3729 sweep_target per-item verdict-stability guard's
-# `target_needs_triage_items` signal — same verbatim-string seam, decide.py
-# parses it into a set of ints. STANDALONE `gh` read (not derived from the
-# board-state seam), same shape as the untriaged_orphans backstop above.
-# Best-effort: any failure emits an empty list, which decide.py treats as
-# ABSENT (no per-item fact this turn) -> fails open on the coarse
-# `needs_qa_orch` boolean alone, preserving pre-#3829 behaviour.
-echo -n "needs_qa_orch_items="
+# needs-qa issue enumeration for the qa_orch per-issue STALL CAP guard
+# (issue #3829, design-concept issue-3829). `needs_qa` above is a bare COUNT;
+# decide.py's stall-cap guard needs the actual issue NUMBERS, in the SAME
+# order hydra-qa's own self-selection query returns them, so it can track an
+# attempt counter for the HEAD issue only (the one hydra-qa will actually
+# review next) and stop re-dispatching qa_orch once that head has exhausted
+# its cap — an issue that structurally cannot reach a QA verdict (the
+# motivating case: the hourly worktree-orphan-prune reaping the parent QA
+# agent's worktree AND every reviewer worktree mid-review, which reproduces
+# identically on every retry) otherwise keeps `needs_qa` > 0 forever and
+# busy-loops qa_orch at 30-65k tokens/turn with no bound.
+#
+# ORDER IS LOAD-BEARING (design-concept invariant 4): this is deliberately
+# the SAME unsorted-default query hydra-qa's own step 1 self-selection uses
+# (docs/operator-playbooks/hydra-qa.md: `gh issue list --repo gaberoo322/hydra
+# --label "needs-qa" --state open --json number,title --jq '.[0]'`) — no
+# `sort`, so `needs_qa_numbers[0]` here is defined to match the issue hydra-qa
+# will actually pick. A numeric sort would silently break that parity and let
+# the guard track a different issue than the one being reviewed. Mirrors the
+# #3729 sweep_target per-item verdict-stability guard's
+# `target_needs_triage_items` signal shape — same verbatim-string seam,
+# decide.py parses it into an ordered list of ints. STANDALONE `gh` read (not
+# derived from the board-state seam), same shape as the untriaged_orphans
+# backstop above. Best-effort: any failure emits an empty list, which
+# decide.py treats as ABSENT (no head known this turn) -> fails open on the
+# coarse `needs_qa_orch` boolean alone, preserving pre-#3829 behaviour.
+echo -n "needs_qa_numbers="
 # NOTE: the jq flag's argument deliberately opens on its OWN line, one line
 # below the flag itself, rather than the opening bracket sitting on the same
 # line as the flag. Reason: test/autopilot-dev-orch-gate.test.mts extracts the
@@ -384,7 +394,7 @@ echo -n "needs_qa_orch_items="
 # call above and the wayfinder calls below — avoids shadowing that match.
 gh issue list --repo gaberoo322/hydra --state open --label needs-qa \
   --limit "$GH_ISSUE_LIST_LIMIT" --json number --jq '
-    [.[] | .number] | sort | join(" ")
+    [.[] | .number] | join(" ")
   ' 2>/dev/null || true
 echo
 

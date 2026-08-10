@@ -1,1 +1,1 @@
-- fix: cap qa_orch at 3 attempts per needs-qa issue, stopping the unbounded busy-loop retry on an issue that can never reach a QA verdict (#3829)
+- fix: cap qa_orch at 3 attempts against the head of the needs-qa queue, stopping the unbounded busy-loop retry on an issue that can never reach a QA verdict (#3829)
