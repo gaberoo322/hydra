@@ -357,6 +357,28 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
   ] | length' 2>/dev/null || echo 0
 
+# needs-qa item enumeration for the qa_orch per-issue attempt-cap guard
+# (issue #3829). `needs_qa` above is a bare COUNT; decide.py's attempt-cap
+# guard needs the actual issue NUMBERS so it can track a per-item retry
+# counter across turns and stop re-dispatching qa_orch against an issue that
+# has exhausted its cap — an issue that structurally cannot reach a QA
+# verdict (the motivating case: the hourly worktree-orphan-prune reaping the
+# parent QA agent's worktree AND every reviewer worktree mid-review, which
+# reproduces identically on every retry) otherwise keeps `needs_qa` > 0
+# forever and busy-loops qa_orch at 30-65k tokens/turn with no bound. Mirrors
+# the #3729 sweep_target per-item verdict-stability guard's
+# `target_needs_triage_items` signal — same verbatim-string seam, decide.py
+# parses it into a set of ints. STANDALONE `gh` read (not derived from the
+# board-state seam), same shape as the untriaged_orphans backstop above.
+# Best-effort: any failure emits an empty list, which decide.py treats as
+# ABSENT (no per-item fact this turn) -> fails open on the coarse
+# `needs_qa_orch` boolean alone, preserving pre-#3829 behaviour.
+echo -n "needs_qa_orch_items="
+gh issue list --repo gaberoo322/hydra --state open --label needs-qa \
+  --limit "$GH_ISSUE_LIST_LIMIT" --json number \
+  --jq '[.[] | .number] | sort | join(" ")' 2>/dev/null || true
+echo
+
 # design-concept gate (issue #628): pick the first orch-board
 # `ready-for-agent` issue whose design-concept artifact is missing or
 # stale. The autopilot promotes this to `state.signals.orch_pending_grill_anchor`

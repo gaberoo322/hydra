@@ -198,6 +198,29 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
     assert.equal(dispatch.skill, "hydra-qa");
   });
 
+  // Issue #3829: qa_orch has no attempt cap or backoff, so an issue that
+  // repeatably cannot reach a QA verdict busy-loops the class forever. The
+  // fix is a per-issue attempt-cap guard (full coverage in the dedicated
+  // test/autopilot-qa-orch-attempt-cap.test.mts, mirroring the #3729
+  // sweep_target per-item guard's own dedicated file); this single
+  // integration check pins that the guard is wired into the SAME pipeline
+  // dispatch path this describe block exercises, and that it fails open when
+  // collect-state.sh hasn't been updated to emit the per-item signal yet.
+  test("qa_orch per-issue attempt cap (#3829): an exhausted issue suppresses dispatch even though needs_qa_orch stays true", () => {
+    const state = baseState({
+      signals: { needs_qa_orch: true, needs_qa_orch_items: "3841" },
+      // qa_orch_item_attempts is not part of StateOverrides — merge directly.
+    });
+    (state as any).qa_orch_item_attempts = { "3841": 3 };
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "qa_orch");
+    assert.equal(
+      dispatch,
+      undefined,
+      "an issue that exhausted its attempt cap must not be re-dispatched, even though the coarse needs_qa_orch boolean is still true",
+    );
+  });
+
   test("dispatches qa_target when needs_qa_target signal present", () => {
     const state = baseState({ signals: { needs_qa_target: true } });
     const plan = runDecide(state, null);

@@ -103,6 +103,21 @@ state.json {
     "<target_issue_number>": unix-epoch
   }
 
+  # NEW IN #3829 — per-issue attempt counter for the qa_orch busy-loop guard.
+  # Keyed by the STRING orch issue number, valued by the count of qa_orch
+  # dispatches that fired while the issue carried `needs-qa`. Bumped for every
+  # item in the CURRENT needs-qa set on each qa_orch fire (mirrors
+  # target_triage_item_stamps' prune contract: an item that drops off
+  # needs-qa is pruned, so a later re-open of the same issue number starts
+  # fresh at 0). An issue whose count reaches QA_ORCH_ITEM_MAX_ATTEMPTS is no
+  # longer eligible for qa_orch dispatch — the busy-loop backstop that issue
+  # #3829 diagnosed as missing. Persisted via _persist_state_writeback (same
+  # pattern as target_triage_item_stamps); an absent/empty map means every
+  # item is fresh (0 prior attempts).
+  "qa_orch_item_attempts": {
+    "<orch_issue_number>": int
+  }
+
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
   "failure_log": [
     { ts, pattern, retry_count, slot, action, note }
@@ -627,6 +642,22 @@ MAX_FAILURE_RETRIES = 5
 # Default failure-log path consumed by self_heal.py when called from outside
 # decide.py (e.g. the Bash hook around dispatch).
 DEFAULT_FAILURE_LOG = "/tmp/hydra-autopilot-failures.jsonl"
+
+# qa_orch per-issue attempt cap (issue #3829). qa_orch has `cooldownSeconds:
+# null` and is ABSENT from ESCALATION_POLICY (invariant 5, pinned by
+# test/decide-cascade-escalation.test.mts) — deliberately: ESCALATION_POLICY
+# governs a ONE-TIME stronger-tier retry immediately after a subagent stop, not
+# a standing cap on ordinary pipeline dispatch, and it never triggers on the
+# `success` stop status a QA no-verdict decline reports (docs/operator-
+# playbooks/hydra-qa.md step 7.5). Without a SEPARATE, persistent per-issue
+# counter, an issue that repeatably cannot reach a QA verdict (the motivating
+# case: the hourly worktree-orphan-prune reaping the parent + reviewer
+# worktrees mid-review) keeps `needs_qa_orch` true forever and qa_orch
+# re-dispatches every turn at 30-65k tokens/turn (issue #3829 mechanism
+# section). 3 mirrors the "cap at 2-3" guidance in the issue's possible
+# directions — one baseline attempt plus two retries before the guard gives up
+# on that issue and surfaces it instead of silently burning budget.
+QA_ORCH_ITEM_MAX_ATTEMPTS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -2004,12 +2035,39 @@ def _rule_pipeline_dispatch(
             continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="idle",
-                    reason="selector found no eligible work",
+            # Issue #3829: qa_orch's selector stamps a transient
+            # `qa_orch_stale_notice` on `state` when it suppresses dispatch
+            # because every current needs-qa issue exhausted its attempt cap
+            # (as opposed to "no needs-qa issue at all", the ordinary idle
+            # case). Surface the distinct reason + the exhausted issue numbers
+            # here instead of the generic "idle" one, then consume the
+            # transient marker so it never leaks into the persisted state.
+            stale_items = state.pop("qa_orch_stale_notice", None) if cls == "qa_orch" else None
+            if stale_items:
+                # outcome stays "idle" (DISPATCH_DECISION_OUTCOMES is a closed
+                # set, deliberately not extended here — no dispatch DID
+                # happen, so "idle" is accurate) but the reason text + the
+                # plan-level debug field name the exhausted issues, giving
+                # this suppression the "visible signal" the #3829 acceptance
+                # criterion requires without adding a new outcome literal.
+                out.debug["stale_needs_qa_orch_items"] = stale_items
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=cls, outcome="idle",
+                        reason=(
+                            f"needs-qa issue(s) {stale_items} exhausted the "
+                            f"{QA_ORCH_ITEM_MAX_ATTEMPTS}-attempt cap — "
+                            "suppressed (issue #3829)"
+                        ),
+                    )
                 )
-            )
+            else:
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=cls, outcome="idle",
+                        reason="selector found no eligible work",
+                    )
+                )
             out.skipped += 1
             continue
         out.emit(action, reason=f"dispatch:{cls}")
@@ -2739,9 +2797,40 @@ def _select_for_slot(
 ) -> dict | None:
     """Return a dispatch action for `cls` or None if the slot should idle."""
     if cls == "qa_orch":
-        if _signal_present(state, events, "needs_qa_orch"):
-            return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
-        return None
+        if not _signal_present(state, events, "needs_qa_orch"):
+            return None
+        # Per-issue attempt-cap guard (issue #3829). The coarse `needs_qa_orch`
+        # boolean above stays TRUE for as long as ANY needs-qa issue sits on
+        # the board — including one that structurally cannot reach a verdict
+        # (repeatable worktree loss, an infra failure that reproduces every
+        # retry, etc.), which busy-loops qa_orch at 30-65k tokens/turn with no
+        # bound. This is an ADDITIONAL, independent, AND-composed condition —
+        # exactly the #3729 sweep_target per-item guard's shape. qa_orch fires
+        # iff >=1 issue in the current turn's needs-qa set is still under its
+        # attempt cap; on fire, every issue in the CURRENT set is bumped so
+        # the whole lane's counters advance uniformly, and counters for
+        # issues no longer in the set are pruned.
+        items = _qa_orch_needs_qa_item_set(state, events)
+        if items:
+            attempts = _qa_orch_item_attempts(state)
+            if not any(_qa_orch_item_eligible(attempts.get(n, 0)) for n in items):
+                # Every current needs-qa issue has exhausted its attempt cap
+                # -> suppress this turn. `needs_qa_orch` stays true (the raw
+                # label count did not change); the pipeline rule surfaces
+                # this specific reason instead of the generic "idle" one, and
+                # the exhausted issue numbers ride the dispatch_decision
+                # event + plan debug for visibility (issue #3829 acceptance
+                # criterion: "becomes visible ... rather than silently
+                # consuming budget").
+                state["qa_orch_stale_notice"] = sorted(items)
+                return None
+            state.pop("qa_orch_stale_notice", None)
+            _bump_qa_orch_item_attempts(state, items)
+        # `items` absent/empty (no per-item fact this turn — a degraded board
+        # read or a pre-#3829 playbook) -> fail OPEN on the coarse boolean
+        # alone, preserving pre-#3829 behaviour so a transient wiring gap
+        # never dead-arms qa_orch (the #3709 defect class).
+        return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
     if cls == "qa_target":
         # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
         # ADR-0031 the autopilot sets it from the scope=target GitHub board's
@@ -3091,6 +3180,98 @@ def _stamp_target_triage_items(state: dict, items: set[int], now: int) -> bool:
     # optimization (INV-5). Key on the STRING number (JSON object keys).
     state["target_triage_item_stamps"] = {str(n): int(now) for n in items}
     return before != state["target_triage_item_stamps"]
+
+
+# ---------------------------------------------------------------------------
+# qa_orch per-issue attempt-cap guard (issue #3829)
+# ---------------------------------------------------------------------------
+#
+# Same shape as the #3729 sweep_target per-item guard directly above, adapted
+# from a TIME backoff (an item is eligible once its stamp ages past a window)
+# to an ATTEMPT COUNT cap (an item stops being eligible once qa_orch has fired
+# against its needs-qa set QA_ORCH_ITEM_MAX_ATTEMPTS times) — #3729 throttles a
+# noisy-but-eventually-correct verdict; #3829 needs to actually STOP dispatching
+# against an issue that structurally cannot reach a verdict (see the
+# QA_ORCH_ITEM_MAX_ATTEMPTS docstring for why a time backoff alone would not
+# terminate the loop).
+
+def _qa_orch_needs_qa_item_set(state: dict, events: list[dict]) -> set[int] | None:
+    """Read the current turn's orch needs-qa item-number set (issue #3829).
+
+    Mirrors `_target_triage_item_set` exactly: collect-state.sh emits
+    `needs_qa_orch_items` as a fresh per-turn fact (a space-separated list of
+    orch issue numbers), which the playbook merges verbatim into
+    `state.signals.needs_qa_orch_items`. Returns `None` when the signal is
+    ABSENT (a degraded board read, or a pre-#3829 playbook) — the fail-open
+    sentinel the caller uses to fall back to the coarse `needs_qa_orch`
+    boolean alone, exactly like the sweep_target precedent. An EMPTY emitted
+    list is returned as an empty set, distinct from absence, but the caller
+    treats both the same (no per-item granularity -> fail open).
+
+    Pure: no side effects.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "needs_qa_orch_items":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("needs_qa_orch_items")
+    if raw is None:
+        return None
+    out: set[int] = set()
+    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
+    for token in candidates:
+        try:
+            out.add(int(str(token).strip()))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _qa_orch_item_attempts(state: dict) -> dict[int, int]:
+    """Read the persisted per-issue attempt map as `{issue_number: count}`.
+
+    `state.qa_orch_item_attempts` is keyed by the STRING issue number (JSON
+    object keys are strings). Returns a fresh `{int: int}` dict; an
+    absent/malformed map yields `{}` (every issue at 0 prior attempts).
+
+    Pure: no side effects.
+    """
+    raw = state.get("qa_orch_item_attempts")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[int, int] = {}
+    for k, v in raw.items():
+        try:
+            out[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _qa_orch_item_eligible(attempts: int) -> bool:
+    """True iff a single issue's attempt count is under the cap. Pure."""
+    return attempts < QA_ORCH_ITEM_MAX_ATTEMPTS
+
+
+def _bump_qa_orch_item_attempts(state: dict, items: set[int]) -> bool:
+    """Mutate state: increment the attempt count for every item in the
+    CURRENT needs-qa set (a qa_orch dispatch just fired against this set),
+    pruning any entry whose issue is no longer present.
+
+    Issue #3829, mirrors `_stamp_target_triage_items`'s prune contract: an
+    issue that drops off needs-qa (resolved, or a fresh PR revision) is
+    forgotten so a later re-open of the same issue number starts back at 0
+    rather than inheriting a stale count. Returns True iff the map changed
+    (so `main()` can persist it via `_persist_state_writeback`, the same
+    change-detection pattern as `target_triage_item_stamps`).
+    """
+    before = state.get("qa_orch_item_attempts")
+    prior = _qa_orch_item_attempts(state)
+    updated = {str(n): prior.get(n, 0) + 1 for n in items}
+    state["qa_orch_item_attempts"] = updated
+    return before != updated
 
 
 def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> dict | None:
@@ -4332,6 +4513,15 @@ def main(argv: list[str]) -> int:
         triage_stamps_before = json.dumps(
             state.get("target_triage_item_stamps"), sort_keys=True,
         )
+        # Issue #3829: same change-detection for the qa_orch per-issue
+        # attempt-cap counter. `_bump_qa_orch_item_attempts` rebuilds
+        # `qa_orch_item_attempts` in place (pruning absent issues) when
+        # qa_orch fires against a present needs-qa item set; snapshot-before/
+        # compare-after persists it via the SAME _persist_state_writeback
+        # helper, no new persistence mechanism.
+        qa_attempts_before = json.dumps(
+            state.get("qa_orch_item_attempts"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -4356,6 +4546,13 @@ def main(argv: list[str]) -> int:
         if triage_stamps_after != triage_stamps_before:
             _persist_state_writeback(
                 argv[2], state, what="target_triage_item_stamps stamp (#3729)",
+            )
+        qa_attempts_after = json.dumps(
+            state.get("qa_orch_item_attempts"), sort_keys=True,
+        )
+        if qa_attempts_after != qa_attempts_before:
+            _persist_state_writeback(
+                argv[2], state, what="qa_orch_item_attempts stamp (#3829)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
