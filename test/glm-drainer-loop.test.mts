@@ -12,15 +12,24 @@
  * with no gh/git/claude/Redis dependency.
  *
  * What this suite does NOT attempt to cover end-to-end (deliberately, same
- * boundary `pace-gate-allow.test.mts` draws around its own script): issue
- * selection, worktree creation, the claude authoring spawn, and PR creation
- * all shell out to `gh`/`git`/the generated Node driver in production and are
- * exercised structurally via code review + the manual DRY_RUN smoke test this
- * PR's author ran against the live repo (see the PR description) rather than
- * mocked line-by-line here — `hydra-dev-parent-flow.md`'s own worktree-spawn
- * logic (the closest analogue) carries no automated test either, for the same
- * reason: it is orchestration glue over already-covered primitives
- * (`src/glm/drainer-runner.ts`, `src/redis/autopilot.ts`, `recover-stale.sh`).
+ * boundary `pace-gate-allow.test.mts` draws around its own script): worktree
+ * creation and the claude authoring spawn shell out to `git`/the generated
+ * Node driver in production and are exercised structurally via code review +
+ * the manual DRY_RUN smoke test this PR's author ran against the live repo
+ * (see the PR description) rather than mocked line-by-line here —
+ * `hydra-dev-parent-flow.md`'s own worktree-spawn logic (the closest
+ * analogue) carries no automated test either, for the same reason: it is
+ * orchestration glue over already-covered primitives (`src/glm/drainer-runner.ts`,
+ * `src/redis/autopilot.ts`, `recover-stale.sh`).
+ *
+ * Issue selection (`pick_eligible_issue()`) and PR creation (`open_pr()`) are
+ * the exception (issue #3900): `runShellSnippet()` below sources the script
+ * and calls one function directly against a fake `gh` on `PATH`, narrower
+ * unit coverage of just those two functions' `gh`-response-branching logic
+ * — not a full DRY_RUN process spawn like the rest of this suite — because
+ * #3900's regression (an "already exists" `gh pr create` collision silently
+ * discarding a real PR) lives entirely inside that branching and would not
+ * be caught by DRY_RUN's no-op gh calls.
  */
 
 import { test, describe } from "node:test";
@@ -29,7 +38,7 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const DRAINER_LOOP = join(
@@ -86,6 +95,51 @@ function runDrainerLoop(
     child.on("close", (code) => {
       rmSync(tmp, { recursive: true, force: true });
       resolve({ status: code ?? -1, combined });
+    });
+  });
+}
+
+/**
+ * Sources drainer-loop.sh (never runs main() — see the script's own
+ * `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` guard) and then runs `snippet`
+ * (typically a single function call) in the SAME bash process, so the
+ * snippet can call the script's functions directly. Used below to unit-test
+ * `open_pr()` and `pick_eligible_issue()` against a fake `gh` on PATH,
+ * without spawning the full DRY_RUN control-flow tested above (open_pr and
+ * pick_eligible_issue are exactly the two functions that suite's own header
+ * comment documents as NOT covered end-to-end — issue #3900 adds this
+ * narrower, function-level coverage instead of mocking the whole tick).
+ */
+function runShellSnippet(
+  extraEnv: Record<string, string>,
+  snippet: string,
+): Promise<{ status: number; combined: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "bash",
+      ["-c", `set -uo pipefail; source "$DRAINER_LOOP_PATH"; ${snippet}`],
+      { env: { ...process.env, DRAINER_LOOP_PATH: DRAINER_LOOP, ...extraEnv } },
+    );
+    let combined = "";
+    child.stdout.on("data", (d) => { combined += d.toString(); });
+    child.stderr.on("data", (d) => { combined += d.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ status: code ?? -1, combined }));
+  });
+}
+
+/** Serve `{"status": "approved"}` (or a given map by issue) for design-concept lookups. */
+function designConceptServer(approvedIssues: Set<number>): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      const m = /\/issue-(\d+)$/.exec(req.url ?? "");
+      const n = m ? Number(m[1]) : NaN;
+      res.end(JSON.stringify({ status: approvedIssues.has(n) ? "approved" : "pending" }));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as any;
+      resolve({ url: `http://127.0.0.1:${addr.port}`, close: () => server.close() });
     });
   });
 }
@@ -254,6 +308,201 @@ describe("scripts/glm/drainer-loop.sh — flock concurrency=1 (ADR-0032 invarian
       assert.doesNotMatch(r.combined, /flock blocked/);
     } finally {
       srv.close();
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — open_pr() adopts an already-exists collision instead of discarding it (issue #3900)", () => {
+  // The bug: a single `gh pr create` call `||`'d straight into `return 1` on
+  // ANY failure, including "a pull request for branch X already exists" — a
+  // real GitHub answer meaning a PR already exists, not a genuine failure.
+  // The caller then release_issue'd the claim, discarding the PR reference
+  // and letting pick_eligible_issue re-dispatch the same issue.
+
+  function fakeGhForOpenPr(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "view" ]]; then
+  echo "Fake Issue Title"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "create" ]]; then
+  echo 'GraphQL: a pull request for branch "glm-test-branch" into branch "master" already exists:' >&2
+  echo "https://github.com/gaberoo322/hydra/pull/999" >&2
+  exit 1
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "edit" ]]; then
+  echo "$*" >> "$FAKE_GH_EDIT_CALLS_FILE"
+  exit 0
+fi
+echo "fake gh (open_pr test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  function setupFakeGh(
+    tmp: string,
+    prListContents: string,
+  ): { binDir: string; wtDir: string; prListFile: string; editCallsFile: string } {
+    const binDir = join(tmp, "bin");
+    mkdirSync(binDir);
+    writeFileSync(join(binDir, "gh"), fakeGhForOpenPr(), { mode: 0o755 });
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir);
+    writeFileSync(join(wtDir, ".glm-drainer-pr-body.md"), "test pr body\n");
+    const prListFile = join(tmp, "pr-list.json");
+    writeFileSync(prListFile, prListContents);
+    const editCallsFile = join(tmp, "edit-calls.txt");
+    writeFileSync(editCallsFile, "");
+    return { binDir, wtDir, prListFile, editCallsFile };
+  }
+
+  test("gh pr create fails with 'already exists' AND gh pr list finds a matching PR => adopts it (exit 0, ANOMALY logged, PR number surfaced, glm-authored re-applied)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-openpr-adopt-"));
+    try {
+      const { binDir, wtDir, prListFile, editCallsFile } = setupFakeGh(
+        tmp,
+        JSON.stringify([{ number: 999, url: "https://github.com/gaberoo322/hydra/pull/999" }]),
+      );
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          WT_DIR: wtDir,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+          FAKE_GH_EDIT_CALLS_FILE: editCallsFile,
+        },
+        `open_pr 42 glm-test-branch "$WT_DIR"; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/, `expected adoption to return success:\n${r.combined}`);
+      assert.match(r.combined, /ANOMALY/i);
+      assert.match(r.combined, /#999/);
+      assert.doesNotMatch(r.combined, /^ERROR gh pr create failed.*genuine failure/m);
+      // The most likely origin of an adopted PR (see the script's own
+      // investigation note) is a prior gh pr create succeeding at PR
+      // creation but failing non-zero on its separate --label mutation — so
+      // the adopted PR is exactly the one most likely to be missing
+      // glm-authored, the sole discriminator from Opus dev_orch PRs
+      // (ADR-0032 Decision 5). Confirm open_pr() re-applies it.
+      const editCalls = readFileSync(editCallsFile, "utf8");
+      assert.match(editCalls, /pr edit 999 .*--add-label glm-authored/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("gh pr create fails AND gh pr list finds NO matching PR => genuine failure preserved (non-zero exit, ERROR logged)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-openpr-fail-"));
+    try {
+      const { binDir, wtDir, prListFile } = setupFakeGh(tmp, "[]");
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          WT_DIR: wtDir,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+        },
+        `open_pr 42 glm-test-branch "$WT_DIR"; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:1/, `expected genuine failure to return non-zero:\n${r.combined}`);
+      assert.match(r.combined, /ERROR gh pr create failed.*genuine failure/);
+      assert.doesNotMatch(r.combined, /ANOMALY/i);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — pick_eligible_issue() skips a candidate with an existing open PR (issue #3900)", () => {
+  function fakeGhForPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  test("a candidate already referenced by an open PR's 'Closes #N' is skipped; the next eligible candidate is picked", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-picker-skip-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForPicker(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const prListFile = join(tmp, "prs.json");
+      writeFileSync(
+        prListFile,
+        JSON.stringify([{ number: 500, body: "Implements the thing.\n\nCloses #10" }]),
+      );
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #10 — an open PR already references it/);
+      assert.match(r.combined, /^20$/m, `expected #20 to be picked instead:\n${r.combined}`);
+      assert.doesNotMatch(r.combined, /^10$/m);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("no open PR references any candidate => the oldest-updated candidate is picked unchanged (no false-positive skip)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-picker-nomatch-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForPicker(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const prListFile = join(tmp, "prs.json");
+      // An open PR exists but references an unrelated issue (#999) — must
+      // not be mistaken for a match on #10 or #20.
+      writeFileSync(prListFile, JSON.stringify([{ number: 501, body: "Closes #999" }]));
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+          FAKE_GH_PR_LIST_FILE: prListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.doesNotMatch(r.combined, /skipping issue/);
+      assert.match(r.combined, /^10$/m, `expected #10 (oldest updatedAt) to be picked:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
     }
   });
 });
