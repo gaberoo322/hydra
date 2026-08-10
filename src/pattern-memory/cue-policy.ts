@@ -206,3 +206,202 @@ export function shouldEscalateAtHitCount(
   if (hitCount > promotionThreshold && (hitCount - promotionThreshold) % 10 === 0) return true;
   return false;
 }
+
+// ===========================================================================
+// Issue #3850 — rate-vs-baseline escalation gate for steady-rate cues
+// ===========================================================================
+//
+// The count-based `shouldEscalateAtHitCount` above (threshold-cross plus every
+// multiple of 10) compares a cue's MONOTONIC lifetime hit count against a fixed
+// threshold. For a cue that fires at a steady background rate, that comparison
+// can never go quiet again: it crosses the threshold once, then re-bumps its
+// escalation issue every 10 hits forever — because the count only ever rises
+// while the underlying rate is roughly constant. Raising the threshold (the
+// 150/20 bars already on the two cues below) buys time, not silence.
+//
+// The signal an operator actually wants from a steady-rate cue is "this cue is
+// firing MORE than it used to", not "this cue has fired a lot in total". The
+// rate gate below delivers exactly that, and ONLY for the two cues that were
+// given raised finite thresholds for the same "fires on nearly every PR"
+// reason — the `acceptance-criterion-unmet` (150) and `-deferred` (20) pair.
+//
+// IMPORTANT — the gate lives DOWNSTREAM of decideRecordActions, inside
+// escalation.ts's OPEN-issue comment-bump branch (see the design-concept for
+// issue-3850). decideRecordActions / recordPattern keep deciding
+// escalate=true at the existing count cadence for EVERY cue; the gate only
+// decides whether an already-fired OPEN-issue comment-bump actually POSTs.
+// Issue CREATION (findExistingIssue → null) and the CLOSED→reopen path are
+// NEVER gated: a first occurrence and any post-close recurrence are always
+// informative. Every non-rate-gated cue's behaviour is byte-identical because
+// the gate is never reached for them.
+
+/**
+ * The cues whose OPEN-issue comment-bumps are rate-gated. Seeded with exactly
+ * the two cues that carry raised finite thresholds for the "fires on nearly
+ * every PR" reason — both have the steady-rate-nags-forever defect. Every
+ * other cue (the PROMOTION_THRESHOLD=3 default path AND the
+ * Number.POSITIVE_INFINITY never-escalate sentinel) is unaffected.
+ */
+const RATE_GATED_CUES: ReadonlySet<string> = new Set([
+  ACCEPTANCE_CRITERION_UNMET_CUE,
+  ACCEPTANCE_CRITERION_DEFERRED_CUE,
+]);
+
+/**
+ * True when a cue's OPEN-issue comment-bumps are rate-gated (issue #3850).
+ * Exported for escalation.ts's gate branch and for tests.
+ */
+export function isRateGatedCue(cue: string): boolean {
+  return typeof cue === "string" && RATE_GATED_CUES.has(cue);
+}
+
+// RATE_ESCALATION_WINDOW_DAYS / RATE_ESCALATION_MULTIPLIER — fitted against the
+// ACTUAL recorded bump history of acceptance-criterion-unmet on issue #2528
+// (pulled via `gh issue view 2528 --json createdAt,body,comments`), not
+// asserted. The issue body and the bump comments carry machine-parseable hit
+// counts in escalation.ts's own output format:
+//
+//   created @  83 hits   2026-06-28T11:33Z   (body: "after 83 hits on cue …")
+//   bump    @ 150 hits   2026-07-24T23:16Z   ("Pattern still firing — now 150 hits …")
+//   bump    @ 160 hits   2026-07-30T04:45Z
+//   bump    @ 170 hits   2026-07-31T01:32Z
+//   bump    @ 180 hits   2026-08-01T12:36Z
+//   bump    @ 190 hits   2026-08-06T10:48Z
+//   bump    @ 200 hits   2026-08-08T11:41Z
+//
+// Across that span the cue ran at a noisy-but-roughly-steady ~2-3 hits/day
+// (day-to-day swings of ~1.7 to ~11 hits/day from burstiness), yet the
+// cumulative-count gate re-bumped on every +10 hits (6 bumps over six weeks).
+// A self-relative rate check (recent rate vs the cue's OWN creation-anchored
+// baseline rate) needs only a minimum WINDOW so a single bursty day cannot
+// trip it, and a MULTIPLIER so a steady rate (recent ≈ baseline) never
+// re-trips. Replaying the 83→200 series through `shouldRateEscalate` with
+// WINDOW=7, MULTIPLIER=1.5 posts TWO bumps over the eight-day 150→200 span
+// (150 — the first post-creation windowed bump; and 180 — a genuine burst,
+// 160→170→180 in ~2.5 days ≈ 4/day vs the ~2.5/day baseline), suppressing the
+// steady background, while a sustained doubling of the rate still reaches the
+// operator once the higher rate dominates the window average. (The old count
+// gate bumped on all six: 150→160→170→180→190→200.)
+// The 1.5x multiplier mirrors the existing `RATE_RATIO_MULTIPLIER` precedent
+// in rule-effectiveness.ts for an analogous rate-vs-rate comparison. One
+// shared pair serves BOTH cues because the check is a self-relative ratio —
+// scale-invariant by construction, unlike the old absolute hit-count bars.
+export const RATE_ESCALATION_WINDOW_DAYS = 7;
+export const RATE_ESCALATION_MULTIPLIER = 1.5;
+
+/**
+ * One parsed point in a cue's historical escalation-bump series: the hit
+ * count an escalation reported, and the ISO 8601 timestamp it was posted.
+ * Produced by `parseEscalationBumpSeries` from the GitHub issue's own body +
+ * comment trail (escalation.ts owns the fetch; this module owns the parse).
+ */
+export type BumpPoint = { readonly hitCount: number; readonly at: string };
+
+/**
+ * Parse a cue's historical (hitCount, timestamp) bump series from the GitHub
+ * issue body + comment trail that escalation.ts fetches. Pure: text in,
+ * structured series out (issue #3850).
+ *
+ * The escalation adapter writes two machine-parseable hit-count phrases:
+ *  - the issue body at creation (buildBody): "Auto-escalated … after N hits
+ *    on cue …" — this is the CREATION point (baseline origin).
+ *  - each comment-bump (buildCommentBody): "Pattern still firing — now N
+ *    hits on …" — these are the BUMP points.
+ *
+ * Non-escalation comments (operator reviews, sweep reconciliations, QA
+ * verdicts, label-validation bots) match neither phrase, so they are ignored
+ * — only the cue's own escalation history is reconstructed. Returns the
+ * creation point FIRST (when the body parses), then each bump in
+ * chronological order; an empty array means nothing parsed (the caller fails
+ * open). The `createdAt` timestamps come straight from GitHub.
+ */
+export function parseEscalationBumpSeries(
+  body: string,
+  createdAt: string,
+  comments: ReadonlyArray<{ body: string; createdAt: string }>,
+): BumpPoint[] {
+  const points: BumpPoint[] = [];
+  const bodyHits =
+    firstHitMatch(body, /after (\d+) hits on cue/) ??
+    firstHitMatch(body, /\*\*Hit count:\*\*\s*(\d+)/);
+  if (bodyHits !== undefined && typeof createdAt === "string" && createdAt.length > 0) {
+    points.push({ hitCount: bodyHits, at: createdAt });
+  }
+  for (const c of comments) {
+    if (!c || typeof c.body !== "string" || typeof c.createdAt !== "string") continue;
+    const h = firstHitMatch(c.body, /Pattern still firing — now (\d+) hits/);
+    if (h !== undefined) points.push({ hitCount: h, at: c.createdAt });
+  }
+  // Sort chronologically by timestamp. GitHub returns comments in order, but
+  // sort defensively so the anchor is genuinely the latest bump and the
+  // creation point (issue createdAt <= every comment createdAt) stays first.
+  points.sort((a, b) => {
+    const d = Date.parse(a.at) - Date.parse(b.at);
+    return Number.isNaN(d) ? 0 : d;
+  });
+  return points;
+}
+
+/** Pull the first integer capture group out of `text`, or undefined. */
+function firstHitMatch(text: string, re: RegExp): number | undefined {
+  const m = text.match(re);
+  if (!m) return undefined;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Fractional days from ISO timestamp `a` to `b` (b − a). Returns +Infinity
+ * when either timestamp is unparseable, so a bad timestamp degrades to
+ * "long ago" and the caller fails OPEN (posts) rather than silently
+ * suppressing — consistent with the gate's fail-open contract.
+ */
+function elapsedDays(a: string, b: string): number {
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return Number.POSITIVE_INFINITY;
+  return (tb - ta) / MS_PER_DAY;
+}
+
+/**
+ * Issue #3850 — pure rate-vs-baseline gate for the OPEN-issue comment-bump
+ * path. Given a cue's parsed historical bump series (creation point first,
+ * then each past successful bump chronologically), the current hit count, and
+ * the wall-clock `now` (ISO 8601), decide whether a fresh comment-bump should
+ * POST (true) or be SUPPRESSED (false).
+ *
+ *  - Fewer than RATE_ESCALATION_WINDOW_DAYS since the anchor (the most recent
+ *    successful bump, or creation when none has posted) → SUPPRESS: a single
+ *    bursty day must not trip the gate.
+ *  - No baseline yet (only the creation point exists — this would be the
+ *    first post-creation bump) → POST once the window clears. There is no
+ *    historical rate to compare against, so the first windowed bump is always
+ *    informative and becomes the baseline anchor for later calls.
+ *  - Otherwise POST iff the recent rate (hits since the anchor ÷ days since
+ *    the anchor) is at least RATE_ESCALATION_MULTIPLIER × the baseline rate
+ *    (hits from creation to the anchor ÷ days from creation to the anchor).
+ *
+ * Self-relative by construction: a cue whose recent rate matches its own
+ * history never re-trips (steady-rate silence), while a cue whose rate has
+ * genuinely risen above its own past does. Pure: no I/O, no clock — `now` is
+ * a parameter so tests are deterministic.
+ */
+export function shouldRateEscalate(
+  series: ReadonlyArray<BumpPoint>,
+  currentHitCount: number,
+  now: string,
+): boolean {
+  if (series.length === 0) return true; // nothing parsed → fail-open (post)
+  const creation = series[0];
+  const anchor = series[series.length - 1];
+  const daysSinceAnchor = elapsedDays(anchor.at, now);
+  if (daysSinceAnchor < RATE_ESCALATION_WINDOW_DAYS) return false;
+  if (series.length < 2) return true; // only creation → first post-creation bump
+  const baselineSpan = elapsedDays(creation.at, anchor.at);
+  if (baselineSpan <= 0) return true; // degenerate timestamps → fail-open
+  const baselineRate = (anchor.hitCount - creation.hitCount) / baselineSpan;
+  const recentRate = (currentHitCount - anchor.hitCount) / daysSinceAnchor;
+  return recentRate >= baselineRate * RATE_ESCALATION_MULTIPLIER;
+}
