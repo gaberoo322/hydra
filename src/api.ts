@@ -20,7 +20,6 @@ import { createArchitectureRouter } from "./api/architecture.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
 import { createAttributionRouter } from "./api/attribution.ts";
 import { createHoldbackRouter } from "./api/holdback.ts";
-import { createOpenVikingRouter } from "./api/openviking.ts";
 import { createGoalsRouter } from "./api/goals.ts";
 import { createEventsRouter } from "./api/events.ts";
 import { createConfigRouter } from "./api/config.ts";
@@ -108,7 +107,6 @@ function createApi(eventBus: EventBus) {
   api.use(createMetricsTokensRouter());
   api.use(createArchitectureRouter(eventBus));
   // Routes split out of misc.ts per issue #268 — each owns one domain.
-  api.use(createOpenVikingRouter());
   api.use(createGoalsRouter());
   api.use(createEventsRouter(eventBus));
   api.use(createConfigRouter());
@@ -118,11 +116,11 @@ function createApi(eventBus: EventBus) {
   api.use(createCapacityRouter());
   api.use(createObservabilityRouter());
   api.use(createLearningRouter());
-  // Issue #3006: the plan-time knowledge fetch (GET /api/learning/knowledge)
-  // moved out of the learning router into createOpenVikingRouter (its
-  // Knowledge-Base domain home); the read-side pattern-memory diagnostics moved
-  // into createPatternMemoryRouter. Route paths unchanged; src/api.ts stays a
-  // thin mount point with the same three zero-arg factory calls.
+  // Issue #3006 split the learning router by concern: the read-side
+  // pattern-memory diagnostics moved into createPatternMemoryRouter. The
+  // plan-time knowledge fetch (GET /api/learning/knowledge) went to the
+  // Knowledge-Base router, which was removed with OpenViking — src/api.ts
+  // stays a thin mount point.
   api.use(createPatternMemoryRouter());
   // Autopilot HTTP surface — split by domain concern (#2034) into four focused
   // sub-routers, each a thin adapter over its own domain Module: lifecycle

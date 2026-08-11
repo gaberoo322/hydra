@@ -3,10 +3,8 @@ import { Sentry } from "./instrument.ts";
 
 import { EventBus } from "./event-bus.ts";
 import { createApi } from "./api.ts";
-import { stopKnowledgeIndexer } from "./knowledge-base/indexer.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest } from "./digest.ts";
-import { initLearning } from "./learning-lifecycle.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { gitExec } from "./github/git.ts";
 import { isGhFailure, isGhOk } from "./github/exec.ts";
@@ -152,9 +150,6 @@ async function main() {
   await eventBus.init();
   console.log("[Hydra] Event bus initialized (Redis Streams ready)");
 
-  // Initialize learning system (migrates rules, registers OV skills, starts indexer)
-  await initLearning();
-
   // Start background consumers (notifications, meta, DLQ)
   startConsumers(eventBus);
 
@@ -245,10 +240,6 @@ async function main() {
       await eventBus.delConsumer(stream, group, consumer);
     }
     clearInterval(heartbeat);
-    // Issue #866: clear the leaked 30s knowledge-indexer Redis poll so it does
-    // not survive shutdown. (The 24h cleanup-prune interval was removed in
-    // #1876 — its work runs as housekeeping chores now, no in-process timer.)
-    stopKnowledgeIndexer();
     for (const ws of wss.clients) ws.close(1001, "server shutting down");
     wss.close();
     server.close();
