@@ -92,22 +92,12 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal(probes.sysdWatchdog, "active");
     assert.equal(probes.sysdTargetWeb, "inactive");
 
-    // index 14 — OV-search classifier folds 200 + bodies to running w/ count.
-    assert.equal((probes.ovSearch as any)?.status, "running");
-    assert.equal((probes.ovSearch as any)?.resultCount, 4);
-
-    // index 15 — redis INFO snapshot parse.
+    // redis INFO snapshot parse.
     assert.equal((probes.redisInfo as any)?.memoryHuman, "512M");
     assert.equal((probes.redisInfo as any)?.connectedClients, 3);
 
-    // Issue #2386 — the in-process skill-catalog read (not an async settle-array
-    // probe) is merged onto the named record by collectProbeInputs.
-    assert.equal((probes.skillCatalog as any)?.registered, 4);
-    assert.equal((probes.skillCatalog as any)?.total, 4);
-    assert.equal((probes.skillCatalog as any)?.completed, true);
-
-    // Issue #2805 — the dark-outcome verdicts (a direct never-throw read, like the
-    // skill-catalog state) are merged onto the named record by collectProbeInputs.
+    // Issue #2805 — the dark-outcome verdicts (a direct never-throw read) are
+    // merged onto the named record by collectProbeInputs.
     assert.equal((probes.darkOutcomes as any)?.length, 1);
     assert.equal((probes.darkOutcomes as any)?.[0]?.status, "dark");
     assert.equal((probes.darkOutcomes as any)?.[0]?.name, "forecast-calibration-brier");
@@ -115,28 +105,6 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     // Issue #3270 — the attribution ledger LLEN (an async settle-array probe).
     assert.equal(probes.attributionLedgerCount, 7);
   });
-
-  test("the injected skill-catalog state flows into ProbeInputs.skillCatalog (issue #2386)", async () => {
-    // An empty, completed catalog (every skill lost) must flow through verbatim so
-    // the downstream skill-catalog rules see it on the snapshot. This is the live
-    // read collectProbeInputs owns — previously rules.ts read the singleton
-    // out-of-band, so the fan-out had no skill-catalog coverage.
-    const probes = await collectProbeInputs(happyDeps({
-      skillCatalogState: (() => ({
-        skills: [],
-        registered: 0,
-        total: 4,
-        completed: true,
-        lastAttemptAt: 9999,
-        vlmDeferred: false,
-      })) as any,
-    }));
-    assert.equal((probes.skillCatalog as any)?.registered, 0);
-    assert.equal((probes.skillCatalog as any)?.total, 4);
-    assert.equal((probes.skillCatalog as any)?.completed, true);
-    assert.equal((probes.skillCatalog as any)?.lastAttemptAt, 9999);
-  });
-
 
   test("empty attribution ledger (count 0) flows into attributionLedgerCount (issue #3270)", async () => {
     const probes = await collectProbeInputs(happyDeps({
@@ -187,15 +155,8 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal((probes.emergencyBrake as any)?.engaged, true);
   });
 
-  test("OV-search transport failure folds to backend-unreachable (the classifier path)", async () => {
-    const probes = await collectProbeInputs(happyDeps({
-      }));
-    assert.equal((probes.ovSearch as any)?.status, "backend-unreachable");
-    assert.equal((probes.ovSearch as any)?.latencyMs, null);
-  });
-
   // Issue #3372: the unified registry's `inline` descriptor variant. Each of the
-  // in-process reads (skillCatalog sync #2386, darkOutcomes async #2805) runs
+  // in-process read (darkOutcomes async #2805) runs
   // inside a per-descriptor try/catch that yields its SEMANTIC honest-none
   // `fallback` on error — NOT raw null, never propagating, and never blocking the
   // async settle-array fan-out. This is the invariant the descriptor-union
@@ -203,23 +164,10 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
   // this suite.
   test("a throwing inline read folds to its semantic honest-none fallback without blocking the async fan-out (issue #3372)", async () => {
     const probes = await collectProbeInputs(happyDeps({
-      // The genuinely-synchronous read throws.
-      skillCatalogState: (() => { throw new Error("registry not built"); }) as any,
       // The async inline read rejects.
       darkOutcomesEval: (async () => { throw new Error("outcomes.yaml unreadable"); }) as any,
     }));
 
-    // skillCatalog folds to the un-run empty catalog (completed:false → both
-    // skill-catalog rules no-op), NOT null.
-    assert.deepEqual(probes.skillCatalog, {
-      skills: [],
-      registered: 0,
-      total: 0,
-      completed: false,
-      lastAttemptAt: null,
-      vlmDeferred: false,
-      skillsDeferred: false,
-    });
     // darkOutcomes folds to [] (the dark-outcome rule no-ops), NOT null.
     assert.deepEqual(probes.darkOutcomes, []);
 
@@ -231,32 +179,6 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
   });
 });
 
-// Issue #3626: the fan-out is a PURE enumerator — its `serviceProbes` descriptor
-// returns the RAW embed-backend probe result with NO Wake-on-LAN side-effect. The
-// injectable-WakeGate seam that used to live here (the #2498 suite) was migrated to
-// test/health-wol.test.mts, re-pointed at the post-assembly `applyEmbedBackendRecovery`
-// step that the GET /health/deep caller now composes explicitly. These regressions
-// pin the pure-enumerator invariant: `collectProbeInputs` needs ZERO WoL mocking (no
-// HYDRA_WOL_ENABLED flag, no injected gate, no wol.ts import in this file), and a
-// `failed` embed read is carried through verbatim — the fan-out fires no wake.
-describe("collectProbeInputs — serviceProbes is a pure enumerator, no WoL side-effect (issue #3626)", () => {
-  test("a failed embed probe is carried through RAW — no wake fires in the fan-out", async () => {
-    // No HYDRA_WOL_ENABLED, no injected gate, no wol.ts import: if the fan-out
-    // still fired a wake this test would need to stub the WakeGate budget. It does
-    // not — the recovery moved out to the /health/deep caller (#3626).
-    const failed = { status: "failed", latencyMs: null };
-    const probes = await collectProbeInputs(happyDeps({
-      probeEmbedBackendImpl: (async () => failed) as any,
-    }));
-    // The assembled record carries the embed-backend probe result verbatim.
-    assert.deepEqual((probes.serviceProbes as any)?.["embed-backend"], failed);
-  });
-
-  test("a healthy embed probe is carried through RAW as well", async () => {
-    const running = { status: "running", latencyMs: 7 };
-    const probes = await collectProbeInputs(happyDeps({
-      probeEmbedBackendImpl: (async () => running) as any,
-    }));
-    assert.deepEqual((probes.serviceProbes as any)?.["embed-backend"], running);
-  });
-});
+// Issue #3626's `serviceProbes` pure-enumerator suite was removed with
+// OpenViking: the descriptor it pinned (and the Wake-on-LAN recovery step whose
+// absence it asserted) both went with the OV stack.
