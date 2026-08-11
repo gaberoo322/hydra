@@ -70,12 +70,12 @@ The starter set is 10 categories. The operator may add, retire, or split categor
 
 ## 4. code-search-infra
 
-**What it buys the AI:** Agents spend disproportionate time hunting for "the function that does X" or "the file that owns Y." `grep` works but doesn't understand the AST; `ripgrep` is faster but still text. Tools like `ast-grep`, `comby`, `srgn`, treesitter-based queries, and embedding-based code search (OpenViking itself) give agents structured access to code — they can ask "find all callers of `safeKanban`" or "find every async function that doesn't await its `redis.set` call" and get a clean answer.
+**What it buys the AI:** Agents spend disproportionate time hunting for "the function that does X" or "the file that owns Y." `grep` works but doesn't understand the AST; `ripgrep` is faster but still text. Tools like `ast-grep`, `comby`, `srgn`, treesitter-based queries, and embedding-based code search give agents structured access to code — they can ask "find all callers of `safeKanban`" or "find every async function that doesn't await its `redis.set` call" and get a clean answer.
 
 **Maps to:**
 - `ast-grep`, `comby`, `srgn`, `tree-sitter` CLIs.
 - `git grep -P` advanced patterns wrapped as repeatable queries.
-- Local code-embedding search (OpenViking peers: Aider's repo-map, sourcegraph-CLI, cody-CLI).
+- Local code-embedding search (Aider's repo-map, sourcegraph-CLI, cody-CLI). Hydra ran one of these — OpenViking — and **retired it** (ADR-0033) after measured usage collapsed to ~4 queries per 7 hours; `probe-search` covers the niche with no standing infrastructure.
 
 **Does NOT map to:**
 - ChatGPT-style "explain this code" UIs — that's an agent, not infra.

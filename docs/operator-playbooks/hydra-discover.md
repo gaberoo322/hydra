@@ -69,15 +69,12 @@ was healthy the whole time (#1755). Before filing ANY container-health finding:
    Health JSON captured at observation time, any *real* flap is
    self-evidencing (`FailingStreak` > 0, failing probe log entries).
 
-3. **Liveness ≠ functional health.** The OV container healthcheck is a cheap
-   self-contained probe (curl 127.0.0.1:1933/health *inside* the container,
-   inherited from the ghcr.io/volcengine/openviking:main image — compose
-   defines no healthcheck stanza for openviking). Do not propose round-trip
-   probes through external dependencies (Ollama/Tailnet) as healthcheck
-   replacements: dependency degradation belongs to the Health Diagnostic
-   rules at /api/health/deep, not container liveness. Do not propose
-   docker-compose.yml healthcheck edits without a reproduced,
-   evidence-captured defect.
+3. **Liveness ≠ functional health.** A container healthcheck is a cheap
+   self-contained liveness probe. Do not propose round-trip probes through
+   external dependencies as healthcheck replacements: dependency degradation
+   belongs to the Health Diagnostic rules at /api/health/deep, not container
+   liveness. Do not propose docker-compose.yml healthcheck edits without a
+   reproduced, evidence-captured defect.
 
 ## Tier 2: Behavioral (every iteration)
 

@@ -29,15 +29,13 @@
 // /health/deep wire envelope keeps its own explicit named projection (#1869) —
 // this enumeration does not change it.
 //
-// This leaf is a PURE downward edge: it imports only the ServiceProbe Adapter
-// Seam types/producers (src/health/probe.ts) it needs to describe the probes —
-// no Redis, no WoL, no fan-out. The fan-out imports nothing from here; the strip
-// imports the enumeration from here (directly or via the ../health barrel).
+// This leaf is a PURE downward edge: it imports only the zero-IO display-status
+// classification types (src/health/probe-classify.ts) it needs to describe the
+// probes — no Redis, no WoL, no fan-out. The fan-out imports nothing from here;
+// the strip imports the enumeration from here (directly or via the ../health
+// barrel).
 
-import {
-  type ServiceProbeResult,
-  type ProbeOutcome,
-} from "./probe.ts";
+import { type ProbeOutcome } from "./probe-classify.ts";
 
 /**
  * The generic HTTP probe the strip injects: receives a URL + timeout, returns a
@@ -89,20 +87,6 @@ export type StripProbeDescriptor =
       kind: "probe";
       run: (deps: StripProbeDeps) => Promise<ProbeOutcome>;
     };
-
-/**
- * Adapt a fan-out {@link ServiceProbeResult} (`{status:"running"|"failed",
- * latencyMs:number|null}`) into the strip's {@link ProbeOutcome} (`{ok,
- * latencyMs, error?}`) shape the display classifier consumes. `failed` →
- * `ok:false` (latency null → 0 so the numeric field is uniform); `running` → ok
- * with its measured latency. Pure; the source producers never throw.
- */
-function serviceProbeToOutcome(r: ServiceProbeResult, downError: string): ProbeOutcome {
-  if (r.status === "running") {
-    return { ok: true, latencyMs: r.latencyMs ?? 0 };
-  }
-  return { ok: false, latencyMs: r.latencyMs ?? 0, error: downError };
-}
 
 /**
  * The ordered, shared enumeration of external-service liveness probes the

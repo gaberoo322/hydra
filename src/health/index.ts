@@ -16,7 +16,6 @@
 export * from "./deployed-sha.ts";
 export * from "./diagnostics.ts";
 export * from "./fan-out.ts";
-export * from "./probe.ts";
 export * from "./rules.ts";
 // Issue #3482: the Now-page strip-probe enumeration leaf (STRIP_PROBE_DESCRIPTORS,
 // StripProbeDescriptor, StripProbeDeps) — extracted from fan-out.ts so consumers

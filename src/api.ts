@@ -48,7 +48,6 @@ import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
 import { createExplorePageRouter } from "./api/explore-page.ts";
 import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
-import { createVlmRouter } from "./api/vlm.ts";
 import { createVersionsRouter } from "./api/versions.ts";
 import type { EventBus } from "./event-bus.ts";
 
@@ -192,13 +191,6 @@ function createApi(eventBus: EventBus) {
   // per-repository release notes for the #3681 dashboard panel. Pure read, no
   // eventBus, no query schema.
   api.use(createVersionsRouter());
-
-  // VLM claude-cli shim (issue #3542, epic #3541) — MOUNTS AT APP-ROOT /vlm,
-  // NOT under the /api Router. OpenViking's ov.conf vlm.api_base is
-  // http://host.docker.internal:4000/vlm/v1, so /vlm/v1/chat/completions must
-  // resolve at the app level (like express.static/CORS). Mounting under /api
-  // would land it at /api/vlm and silently 404 every OpenViking VLM call.
-  app.use("/vlm", createVlmRouter());
 
   // Sentry error handler — must be after all routes, before other error handlers
   Sentry.setupExpressErrorHandler(app);
