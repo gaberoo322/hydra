@@ -1,0 +1,1 @@
+- fix: roll the admission path's Weekly Reset Anchor forward to the current-window boundary so the Pacing Curve ramps (targetPercent varies) instead of pinning at the ceiling and rendering `paceState === "ahead"` unreachable (#3751)

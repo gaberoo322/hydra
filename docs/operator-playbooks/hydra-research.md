@@ -71,7 +71,7 @@ Files: `control-loop.ts`, `pipeline-steps.ts`, `anchor-selection.ts`, `planner-p
 Output: ≥5 opportunities as `[{"title","category":"efficiency","priority","description","acceptance_criteria":[...],"files":[...]}]`. When a finding naturally decomposes into multiple vertical slices, surface them as a `slices: [...]` array on the opportunity object (see **Epic vs. flat decision rule** below) so Phase 4 can route the finding through `hydra-prd`.
 
 ### Agent 2: Learning & Knowledge
-Investigate: agent memory recording / promotion / consolidation, OpenViking search quality and indexer health, episodic reflection injection, feedback file staleness, pattern detection accuracy, knowledge gaps.
+Investigate: agent memory recording / promotion / consolidation, episodic reflection injection, feedback file staleness, pattern detection accuracy, knowledge gaps.
 
 Files: `learning.ts`, `redis-adapter.ts`, `context-builder.ts`, `pattern-detector.ts`, `prompt-evolution.ts`.
 

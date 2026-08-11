@@ -13,8 +13,6 @@ import { useApi } from "../../hooks/useApi.js";
 const SERVICE_ICONS = {
   orchestrator: "🏛️",
   redis: "💾",
-  vikingdb: "📚",
-  openviking: "🔎",
 };
 
 const STATUS_TO_HP = {

@@ -40,6 +40,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     anchorReference: "issue-3055",
     prNumber: null,
     slot: null,
+    occupancyId: null,
     status: "merged",
     bucket: "merged",
     abandonReason: null,

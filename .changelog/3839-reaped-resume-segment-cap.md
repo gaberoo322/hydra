@@ -1,0 +1,1 @@
+- fix: a resumed autopilot dispatch is capped against its LATEST segment, not the summed cumulative total, so a healthy multi-segment resume no longer burns its class over limits.subagent_max_tokens (#3839)

@@ -1,0 +1,1 @@
+- fix: bump brace-expansion override to ^5.0.9, clearing GHSA-rgw5-rvv9-x895 (#3855)

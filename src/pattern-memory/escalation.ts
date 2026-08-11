@@ -51,6 +51,18 @@
 import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
 import { logger } from "../logger.ts";
+// Issue #3850 — the rate-vs-baseline gate for steady-rate cues is composed of
+// a pure parser/decision pair in the zero-IO cue-policy leaf
+// (parseEscalationBumpSeries / shouldRateEscalate) plus the rate-gated-cue
+// predicate. escalation.ts owns the GitHub-IO fetch that feeds them; cue-policy
+// owns the math. Import direction is one-way, as for the existing policy helpers.
+import {
+  isRateGatedCue,
+  parseEscalationBumpSeries,
+  shouldRateEscalate,
+  RATE_ESCALATION_WINDOW_DAYS,
+  RATE_ESCALATION_MULTIPLIER,
+} from "./cue-policy.ts";
 
 const REPO = process.env.HYDRA_GH_REPO || "gaberoo322/hydra";
 const META_FRICTION_LABEL = "meta-friction";
@@ -225,6 +237,54 @@ export async function findExistingIssue(cue: string): Promise<ExistingIssue | nu
  * label-create call is harmless when the label already exists (gh returns
  * a non-zero exit which we swallow).
  */
+/**
+ * Issue #3850 — the slice of an issue's history the rate-vs-baseline gate
+ * reads: the creation body (its "after N hits" line is the baseline origin)
+ * and the comment trail (each "Pattern still firing — now N hits" comment is
+ * a past successful bump). `createdAt` is the issue's own creation timestamp.
+ */
+type IssueHistory = {
+  createdAt: string;
+  body: string;
+  comments: Array<{ body: string; createdAt: string }>;
+};
+
+/**
+ * Issue #3850 — fetch a cue's escalation-issue body + comment trail for the
+ * rate-vs-baseline gate. Best-effort: returns null on ANY gh failure (auth,
+ * network, rate-limit, malformed/empty JSON) or on a missing/malformed shape,
+ * so the caller fails OPEN (posts the bump unconditionally) rather than
+ * silently suppressing a possibly-genuine rising-rate signal. Rides the
+ * existing ghJson seam; never throws.
+ */
+async function fetchIssueHistory(issueNumber: number): Promise<IssueHistory | null> {
+  const result = await ghJson<any>([
+    "issue",
+    "view",
+    String(issueNumber),
+    "--repo",
+    REPO,
+    "--json",
+    "createdAt,body,comments",
+  ]);
+  if (isGhFailure(result)) {
+    logger.warn(
+      { issueNumber, code: result.code, stderr: result.stderr.slice(0, 200) },
+      "rate-gate: issue-history fetch failed — failing open to unconditional bump",
+    );
+    return null;
+  }
+  const data = result.data;
+  if (!data || typeof data.body !== "string" || typeof data.createdAt !== "string") return null;
+  const rawComments = Array.isArray(data.comments) ? data.comments : [];
+  const comments = rawComments
+    .filter(
+      (c: any) => c && typeof c.body === "string" && typeof c.createdAt === "string",
+    )
+    .map((c: any) => ({ body: c.body, createdAt: c.createdAt }));
+  return { createdAt: data.createdAt, body: data.body, comments };
+}
+
 async function ensureLabel(): Promise<void> {
   const result = await ghExec([
     "label",
@@ -309,6 +369,36 @@ export async function escalatePatternToIssue(
   try {
     const existing = await findExistingIssue(input.cue);
     if (existing && existing.state === "OPEN") {
+      // Issue #3850 — rate-gate the OPEN-issue comment-bump path for the two
+      // steady-rate cues (acceptance-criterion-unmet / -deferred). Their
+      // cumulative-count threshold (150 / 20) re-bumps every +10 hits forever
+      // because the count only rises while the rate is ~constant; this gate
+      // suppresses a bump whose recent rate has not risen above the cue's own
+      // creation-anchored baseline. Only the comment-bump path is gated:
+      // issue CREATION (handled below, findExistingIssue → null) and the
+      // CLOSED→reopen path are NEVER gated — a first occurrence and any
+      // post-close recurrence are always informative. Non-rate-gated cues
+      // never reach this branch.
+      if (isRateGatedCue(input.cue)) {
+        const history = await fetchIssueHistory(existing.number);
+        // history === null → gh fetch failed → fail OPEN: post unconditionally
+        // rather than suppress a possibly-genuine rising-rate signal.
+        if (history !== null) {
+          const series = parseEscalationBumpSeries(
+            history.body,
+            history.createdAt,
+            history.comments,
+          );
+          if (!shouldRateEscalate(series, input.hitCount, new Date().toISOString())) {
+            return {
+              status: "skipped",
+              reason:
+                `rate-gated: recent rate not above baseline ` +
+                `(window=${RATE_ESCALATION_WINDOW_DAYS}d, multiplier=${RATE_ESCALATION_MULTIPLIER})`,
+            };
+          }
+        }
+      }
       await commentOnIssue(existing.number, input);
       return { status: "commented", issueNumber: existing.number };
     }

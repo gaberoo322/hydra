@@ -38,15 +38,14 @@ Hydra is a **swappable single-target builder** ([ADR-0013](./docs/adr/0013-swapp
               ▼
    Orchestrator service (port 4000) — the data plane
      Dashboard + REST API · Redis state + event bus ·
-     observability heartbeat · knowledge plane (OpenViking) ·
-     tier classifier
+     observability heartbeat · tier classifier
 ```
 
 Three layers:
 
 1. **The brain — [`hydra-autopilot`](./docs/operator-playbooks/hydra-autopilot.md).** A long-running Claude Code session and the single decision loop ([ADR-0012](./docs/adr/0012-autopilot-is-the-single-brain.md)). Each tick, `decide.py` turns system state (the [Candidate Feed](./docs/reference.md), board labels, budgets, cooldowns) into typed dispatch actions — one background subagent per work class, routed to a right-sized model per class.
 2. **The hands — Claude Code subagents.** Code-writing classes (`hydra-dev` for orchestrator work, `hydra-target-build` for target work) each run in a fresh `git worktree` and open a PR. **CI is the merge gate** — verification is deterministic command execution (tests, typecheck, build, mutation kill-rate, scope enforcement; see [quality gates](./docs/quality-gates.md)), never an agent claim. Read-only classes (QA, research, discovery, sweeps, health, cleanup, retro) emit issues, Redis updates, and lessons.
-3. **The data plane — the orchestrator HTTP service (port 4000).** Express + Redis: state, the `hydra:*` event streams, the dashboard and [REST API](./docs/reference.md), the tier classifier, and the OpenViking knowledge plane. Every task transition stores evidence in Redis, so state is proof-backed, not self-reported.
+3. **The data plane — the orchestrator HTTP service (port 4000).** Express + Redis: state, the `hydra:*` event streams, the dashboard and [REST API](./docs/reference.md), and the tier classifier. Every task transition stores evidence in Redis, so state is proof-backed, not self-reported.
 
 ## Key Concepts
 
@@ -88,7 +87,7 @@ The dashboard (React + Vite, served by Express from `dashboard/dist/`) is organi
 ### Prerequisites
 
 - **Node.js** ≥ 22
-- **Docker** + **Docker Compose** (Redis, VikingDB, OpenViking)
+- **Docker** + **Docker Compose** (Postgres, Redis)
 - **Claude Code** — installed and authenticated (the harness that runs `hydra-autopilot` and its subagents)
 - A target project with a `main` branch, a remote, and working `npm test` / `npm run typecheck` / `npm run build`
 

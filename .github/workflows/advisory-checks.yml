@@ -262,10 +262,6 @@ jobs:
         if: always()
         run: npx tsx scripts/ci/claude-cli-seam-check.ts
 
-      - name: OpenViking-seam check (OpenViking Request Adapter closure ratchet, #954)
-        if: always()
-        run: npx tsx scripts/ci/openviking-seam-check.ts
-
       - name: Anthropic-seam check (Anthropic Request Adapter closure ratchet, #1959)
         if: always()
         run: npx tsx scripts/ci/anthropic-seam-check.ts

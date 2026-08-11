@@ -180,20 +180,8 @@ export function derivePipelineMetrics(
 
 export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const health = probes.basicHealth || { status: "failed", redis: false, cycle: "unknown", uptime: 0 };
-  // Issue #1869: svcProbes is now a ServiceProbeMap. On a rejected probe settle
-  // (probes.serviceProbes === null) fall back to a map carrying the two wire
-  // services as "failed" — byte-for-byte the prior default, so the /health/deep
-  // `services.vikingdb`/`.openviking` envelope and the vikingdb/openviking
-  // diagnostic rules see the identical values. New services added to the fan-out
-  // need no entry here: the rules guard absent keys with optional chaining.
-  const svcProbes: ServiceProbeMap = probes.serviceProbes || {
-    vikingdb: { status: "failed" },
-    openviking: { status: "failed" },
-    // Issue #2013: the embed-backend probe is part of the index-1 fan-out, so a
-    // rejected settle defaults it to "failed" alongside the two wire services —
-    // honest-none (the whole fan-out failed), not a phantom "running".
-    "embed-backend": { status: "failed" },
-  };
+  // The `svcProbes` service-probe map was removed with OpenViking — every
+  // service it carried (vikingdb / openviking / embed-backend) was OV-stack.
   const sched = probes.scheduler || {
     running: false,
     cyclesRun: 0,
@@ -212,26 +200,10 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   // probe not yet running) to 0 so the rule sees "empty", never a phantom populated
   // ledger. Honest-zero: the probe itself already returns 0 on Redis error.
   const attributionLedgerCount = probes.attributionLedgerCount ?? 0;
-  // Issue #2386: a null skillCatalog (the fan-out could not resolve the live
-  // read) defaults to an un-run, empty catalog — `completed:false` so both
-  // skill-catalog rules (assessSkillCatalog / assessRegistrationFailureRate)
-  // no-op, exactly the "registration still in flight / no pass yet" framing
-  // they already treat as a non-alarm. This is honest-none, never a phantom
-  // populated catalog.
-  const skillCatalog: HealthSnapshot["skillCatalog"] = probes.skillCatalog || {
-    skills: [],
-    registered: 0,
-    total: 0,
-    completed: false,
-    lastAttemptAt: null,
-    vlmDeferred: false,
-    skillsDeferred: false,
-  };
   // Issue #2805: a null darkOutcomes (the fan-out could not run the dark-outcome
   // check) defaults to an empty array — honest-none, the dark-outcome rule
   // no-ops. Never a phantom populated verdict.
   const darkOutcomes = probes.darkOutcomes || [];
-  const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
   const redisInfo = probes.redisInfo ?? null;
   // Issue #744: emergency-brake state. Fail-safe to disengaged if the read
   // rejected (probes.emergencyBrake === null) so a Redis blip never reports a phantom brake.
@@ -261,15 +233,12 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   return {
     health,
     sched,
-    svcProbes,
     // Issue #3459: queueDepth + blCounts removed (see above).
     patterns,
     reflCount,
     attributionLedgerCount,
     reflectionHealth,
-    skillCatalog,
     darkOutcomes,
-    ovSearch,
     redisInfo,
     emergencyBrake,
     disk,

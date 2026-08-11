@@ -1,0 +1,1 @@
+- feat: pace-gate.sh records every launch-admission outcome (reason, class, latency_ms) to a durable, best-effort Redis hash, and parses `reasons.meterUnavailable` as its own distinct reason instead of a generic allow=false skip (#3845)

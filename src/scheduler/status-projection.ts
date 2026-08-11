@@ -17,7 +17,6 @@
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getReconcilerHealth } from "../redis/reconciler.ts";
 import type { ReconcilerHealthRecord } from "../redis/reconciler.ts";
-import { getIndexerErrorStats } from "../knowledge-base/indexer-stats.ts";
 import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -83,9 +82,8 @@ export interface SchedulerStatus {
   // --- Lifetime ratio (audit/debug only — do not drive alerts) ---
   mergeRateLifetime: number;
 
-  // --- Indexer observability (issue #2658) ---
-  indexerErrors: number;
-  indexerRetries: number;
+  // The indexer observability fields (#2658) were removed with OpenViking —
+  // they counted OV upload errors/retries.
 
   // --- Heartbeat liveness (issue #397) ---
   lastTickAt: string | null;
@@ -188,7 +186,6 @@ export async function buildSchedulerStatus(
     logger.error({ err }, "getStatus reconciler-health read failed");
   }
 
-  const { indexerErrors, indexerRetries } = getIndexerErrorStats();
 
   return {
     reconciler,
@@ -209,8 +206,6 @@ export async function buildSchedulerStatus(
     emptyRateWindow: rates.emptyRateWindow,
     emptyRateCyclesInWindow: rates.emptyRolling.cyclesInWindow,
     mergeRateLifetime: lifetimeMergeRate,
-    indexerErrors,
-    indexerRetries,
     lastTickAt: state.lastTickAt,
     lastError: state.lastError,
     startedAt: state.startedAt,
