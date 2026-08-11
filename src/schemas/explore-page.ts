@@ -9,8 +9,9 @@
  *   GET /v2/explore/lessons        — lessons-explorer (promoted lessons)
  *   GET /v2/explore/anomalies      — anomaly-detector (z-score deviations)
  *
- * The Architecture and Search tabs reuse the existing `/api/architecture`
- * and `/api/openviking/search` endpoints — no new schemas needed for those.
+ * The Architecture tab reuses the existing `/api/architecture` endpoint — no
+ * new schema needed for it. (The Search tab's `/api/openviking/search` was
+ * deleted with the knowledge plane, ADR-0033.)
  *
  * Conventions follow slice-1/2 (today.ts): `.strict()` objects, trimmed
  * coerce-from-string number queries, structured `schema-validation-failed`

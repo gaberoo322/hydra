@@ -11,7 +11,7 @@ tags: [hydra, hydra/direction]
 
 - **Frontend:** Next.js, React, TypeScript, Tailwind CSS, shadcn/ui, TanStack Query
 - **Backend:** Node.js, TypeScript, PostgreSQL
-- **Infrastructure:** Docker, Redis Streams, OpenViking
+- **Infrastructure:** Docker, Redis Streams
 - **AI:** OpenAI Codex CLI (GPT-5.4 frontier, GPT-5.3-Codex, GPT-5.4-mini)
 - **Quality:** Promptfoo for evals and red teaming
 

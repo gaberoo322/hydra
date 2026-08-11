@@ -205,55 +205,6 @@ docker exec hydra-redis-1 redis-cli INFO memory 2>/dev/null | grep "used_memory_
 docker exec hydra-redis-1 redis-cli DBSIZE 2>/dev/null
 ```
 
-### OpenViking embedding backend reachability (issue #1781, retargeted to tei-embed — issue #3745)
-```bash
-# The dense-embedding backend is `tei-embed` (HF Text Embeddings Inference),
-# the TEI-cutover replacement for the retired `ollama-embed` (issue #3543,
-# teardown #3544, epic #3541) — see docker/ov.conf embedding.dense.api_base
-# (http://tei-embed:80/v1). It is on OpenViking's HOT search path — a query
-# must be embedded before the vector lookup runs. The hostname resolves ONLY
-# inside the OV container (compose network), so probe from INSIDE the
-# container with docker exec — a host-side connect cannot reach it.
-#
-# FIRST distinguish "backend down" from "container never created" (bring-up
-# contract mirrors the old #1812 ollama-embed failure mode): a missing
-# tei-embed container means the stack was brought up targeting a subset of
-# services and the depends_on chain never pulled it in. The fix differs —
-# re-create it (Phase 3), don't chase a model-pull / network fault.
-# `docker compose ps` lists only created services; an empty match == the
-# missing-service failure mode.
-echo -n "tei-embed container present: "
-if [ -n "$(cd ~/hydra && docker compose ps -q tei-embed 2>/dev/null)" ]; then
-  cd ~/hydra && docker compose ps tei-embed --format '{{.Name}} {{.Status}}' 2>/dev/null
-else
-  echo "MISSING (not created; re-create with 'docker compose up -d', see Phase 3)"
-fi
-echo -n "tei-embed (dense, HOT path): "
-docker exec hydra-openviking-1 curl -m5 -s -o /dev/null -w "%{http_code}\n" \
-  http://tei-embed:80/v1 2>/dev/null || echo "UNREACHABLE"
-# Cross-check the orchestrator's own classification of this hop:
-curl -s http://localhost:4000/api/health/deep 2>/dev/null \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); print('  ovSearch.status =', d.get('intelligence',{}).get('ovSearch',{}).get('status'))" 2>/dev/null \
-  || echo "  (deep-health unreachable)"
-```
-An `ovSearch.status` of `backend-unreachable` (vs `failed`=OV-5xx, `timeout`=slow,
-`running`=ok) is the #1781 signal that the dense-embedding backend, not
-OpenViking itself, is the broken hop. `searchKnowledge()` degrades gracefully to
-empty results (never throws), so this is a quality-degradation warning, not a
-cycle-blocking fault — see the OpenViking embedding/VLM backend split section in
-docs/reference.md.
-
-If the `tei-embed container present` line reports **MISSING**, the dense
-backend is unreachable because the service was never created — not because
-the model pull or the network failed. Re-create it with a full stack
-bring-up: `cd ~/hydra && docker compose up -d` (no service arg pulls the whole
-depends_on chain, including tei-embed). It reports healthy once the model
-pull lands (~120s start-period grace; first boot downloads the
-nomic-embed-text-v1.5 checkpoint). The persistent guard against re-recurrence
-is the bring-up contract comment in docker-compose.yml — always bring the
-stack up with a bare `docker compose up -d`, never targeting a single
-non-openviking service.
-
 ### Database Health (deep)
 ```bash
 cd ~/hydra && docker compose ps postgres --format '{{.Name}} {{.Status}}' 2>/dev/null
@@ -389,11 +340,6 @@ Quick wins to apply automatically:
 - Commit dirty working tree files (if they're Hydra executor changes)
 - Restart failed services (after diagnosing root cause)
 - Start postgres if missing: `cd ~/hydra && docker compose up -d postgres`
-- Re-create tei-embed if missing (bring-up contract mirrors the old #1812
-  ollama-embed failure mode — OpenViking's dense-embedding HOT path; a
-  MISSING container means the depends_on chain was never pulled in):
-  `cd ~/hydra && docker compose up -d` (bare bring-up pulls the whole chain;
-  tei-embed goes healthy once the nomic-embed-text-v1.5 checkpoint pull lands)
 - Kill stale test containers: `docker ps --format '{{.Names}}' | grep test | xargs -r docker kill`
 - Converge a `drift` verdict (prod stale): run `scripts/deploy.sh` from the
   `~/hydra` master checkout (rebuilds `dashboard/dist/` + restarts the

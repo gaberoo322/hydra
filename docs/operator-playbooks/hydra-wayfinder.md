@@ -215,7 +215,7 @@ grills itself has broken this; see the facts-vs-decisions rule in `hydra-grill` 
 upstream `grilling`).
 
 - **`wayfinder:research`** (AFK) — read primary sources (docs, third-party APIs,
-  the codebase, OpenViking) and link a cited markdown summary. Invoke the upstream
+  the codebase) and link a cited markdown summary. Invoke the upstream
   **`/research`** skill. Use when knowledge outside the working tree is needed.
 - **`wayfinder:prototype`** (HITL) — raise discussion fidelity with a cheap
   concrete artifact via the **`/prototype`** skill (logic or UI branch). Link the

@@ -45,8 +45,10 @@ import { aggregatorRouteNoQuery, isolateAggregator } from "./route-helpers.ts";
 //     src/api/pattern-memory.ts, beside the write-side /memory/* routes for the
 //     same domain;
 //   - the plan-time knowledge fetch + its #2647/#2717 telemetry side effects
-//     (`/learning/knowledge`) moved to src/api/openviking.ts, which already owns
-//     the Knowledge-Base HTTP surface (/openviking/search, /learning/coverage).
+//     (`/learning/knowledge`) moved to src/api/openviking.ts — since DELETED
+//     with the knowledge plane (ADR-0033), along with `/openviking/search`,
+//     `/learning/coverage`, the #2717 retrieval ledger and the #1440
+//     `cyclesWithContext` metric. None of those routes exist today.
 // What remains here are the two routes that are genuinely about the LEARNING
 // COMPOSITION domain — `/context-trace` (a diagnostic view of `getContext()`'s
 // composition) and `/reflection-health` (a pure projection over the metrics

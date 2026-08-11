@@ -68,7 +68,7 @@ The system runs on a dedicated Intel NUC (always-on home server). All agents, se
 - LLM inference: local Ollama on the Tailnet gaming PC (RTX 5080 16GB)
 
 **Deployment architecture:**
-- Hydra orchestrator, Redis, OpenViking — all run locally as systemd user services (the dashboard is served by the orchestrator's Express process from `dashboard/dist`)
+- Hydra orchestrator and Redis — run locally as systemd user services (the dashboard is served by the orchestrator's Express process from `dashboard/dist`)
 - hydra-betting web app — Next.js production server locally (port 3333), served via Cloudflare tunnel
 - Checkpoint refresh, ingestion, scanner, alerts, prediction-market-cron — systemd timers
 

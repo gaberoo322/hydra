@@ -20,7 +20,6 @@
     "host-probe-seam-check": "npx tsx scripts/ci/host-probe-seam-check.ts",
     "journal-seam-check": "npx tsx scripts/ci/journal-seam-check.ts",
     "claude-cli-seam-check": "npx tsx scripts/ci/claude-cli-seam-check.ts",
-    "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
     "anthropic-seam-check": "npx tsx scripts/ci/anthropic-seam-check.ts",
     "telegram-seam-check": "npx tsx scripts/ci/telegram-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
