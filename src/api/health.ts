@@ -36,11 +36,6 @@ import {
   // post-assembly step this route composes after collectProbeInputs — no longer a
   // side-effect buried in the fan-out. It is fire-and-return (returns the probe
   // record byte-for-byte unchanged) and never throws.
-  applyEmbedBackendRecovery,
-  probeService,
-  probeOv,
-  probeEmbedBackend,
-  assessSkillCatalog,
   // Issue #2605: the advisory deployed-SHA probe (the #734 deploy-drift backstop
   // read) + its 60s TTL cache were the last module-level mutable state in this
   // route file. They were extracted to the focused src/health/deployed-sha.ts
@@ -49,17 +44,6 @@ import {
   // change — /health produces `deployedSha` exactly as before.
   getDeployedSha,
 } from "../health/index.ts";
-// Issue #1968: the in-process OV skill-catalog state, so /api/health/skills can
-// surface the silent empty-catalog failure (startup skill registration losing
-// all four skills to OpenViking timeouts) that no health surface reflected.
-import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
-// Issue #2267: read-only source-index freshness diagnostic. countSourceHashes()
-// reads the durable dedup-cache size; probeOvSourceResourcesPresent() runs a
-// search probe to see whether OpenViking still holds indexed source resources.
-// Both are best-effort/never-throw. This route MUTATES NOTHING — the auto-clear
-// repair lives in the lifecycle path (learning-lifecycle.ts), not the probe.
-import { countSourceHashes } from "../redis/source-index.ts";
-import { probeOvSourceResourcesPresent } from "../knowledge-base/indexer.ts";
 import type { PingableBus } from "../event-bus-seams.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -140,86 +124,11 @@ export function createHealthRouter(eventBus: PingableBus) {
     });
   });
 
-  // GET /health/services — Probe VikingDB and OpenViking
-  // The openai-proxy and ollama probes were retired in PR-3 (issue #383) —
-  // both only existed to serve the in-process codex CLI agents.
-  router.get("/health/services", async (req, res) => {
-    // Issue #1324: the probe/probeOv closures that used to live here are now the
-    // module-level probeService()/probeOv() helpers (one classification site,
-    // unit-tested in test/health-probe.test.mts). vikingdb stays a plain inline
-    // probe (not an OpenViking boundary); openviking routes through the OV
-    // Request Adapter inside probeOv().
-    // Issue #2013: the embed-backend probe samples OV's dense-embedding backend
-    // specifically (the surface that was stale-but-invisible during #1921) —
-    // distinct from the openviking app-liveness key above. Routes through the
-    // same OV Request Adapter (no new URL/auth).
-    const [vikingdb, openviking, embedBackend] = await Promise.all([
-      probeService("http://localhost:5000/health"),
-      probeOv(),
-      probeEmbedBackend(),
-    ]);
-
-    res.json({ vikingdb, openviking, "embed-backend": embedBackend });
-  });
-
-  // GET /health/skills — OV skill-catalog registration state (issue #1968)
-  //
-  // Surfaces the previously-silent failure mode where startup skill
-  // registration loses all four skills to OpenViking timeouts/5xx under load,
-  // leaving the catalog empty while the service reports a clean startup. Reads
-  // the in-process state (no Redis/OV round-trip) and folds it through the pure
-  // `assessSkillCatalog` gate so the operator can tell `ok` from `degraded`
-  // (some missing) from `empty` (the silent knowledge-plane failure).
-  router.get("/health/skills", (_req, res) => {
-    const state = getSkillCatalogState();
-    const assessment = assessSkillCatalog(state);
-    res.json({
-      status: assessment.status,
-      registered: state.registered,
-      total: state.total,
-      completed: state.completed,
-      lastAttemptAt: state.lastAttemptAt,
-      // Issue #2277: surface the deferred (VLM-down) state so the operator can
-      // tell a deliberate graceful degradation from the #1968 under-load empty.
-      vlmDeferred: state.vlmDeferred,
-      // Issue #3402: surface the second deferred mode — VLM up but OV's skills
-      // handler load-gated — as a sibling flag so the operator can distinguish the
-      // two deliberate degradations from each other and from the under-load empty.
-      skillsDeferred: state.skillsDeferred,
-      skills: state.skills,
-      diagnostic: assessment.diagnostic,
-    });
-  });
-
-  // GET /health/source-index — source-index freshness diagnostic (issue #2267)
-  //
-  // Surfaces the stale-cache failure where the durable source-hash dedup cache
-  // (`hydra:knowledge:source-hashes`) claims full coverage but OpenViking was
-  // reset out from under it, so agents search an empty knowledge base. READ-ONLY:
-  // reports the cache size and an OV-truth probe (is any indexed source resource
-  // present?), and folds them into a `stale` boolean — it performs ZERO mutation
-  // (the auto-clear repair lives in the lifecycle path, not this probe). Operators
-  // and watchdogs read this to confirm freshness after a deploy/OV bounce.
-  //
-  // stale := cachedSourceHashes > 0 AND ovSourceResourcesPresent == false.
-  // Note the probe fails SAFE (errors report present), so `stale` is only ever
-  // true on a conclusive empty-OV probe — never on a transient OV hiccup.
-  router.get("/health/source-index", async (_req, res) => {
-    const cachedSourceHashes = await countSourceHashes();
-    const ovSourceResourcesPresent = await probeOvSourceResourcesPresent();
-    const stale = cachedSourceHashes > 0 && !ovSourceResourcesPresent;
-    res.json({
-      status: stale ? "stale" : "ok",
-      cachedSourceHashes,
-      ovSourceResourcesPresent,
-      stale,
-      diagnostic: stale
-        ? "Source-hash cache is populated but OpenViking holds no indexed source resources — OV was likely reset out from under the cache. The lifecycle detector clears the cache on the next restart to force a re-index (issue #2267)."
-        : cachedSourceHashes === 0
-          ? "Source-hash cache is empty (cold start); the indexer will populate it on the initial pass."
-          : "Source index is fresh: cache claims coverage and OpenViking holds indexed source resources.",
-    });
-  });
+  // The /health/services, /health/skills and /health/source-index routes were
+  // removed with OpenViking: services probed only the OV stack (vikingdb /
+  // openviking / embed-backend), skills surfaced the OV skill-catalog
+  // registration state (#1968), and source-index compared the dedup cache
+  // against OV's indexed source resources (#2267).
 
   // GET /health/deep — Comprehensive health with diagnostic reasoning
   router.get("/health/deep", async (req, res) => {
@@ -244,7 +153,6 @@ export function createHealthRouter(eventBus: PingableBus) {
     // sees is byte-for-byte identical, so the #2131 down-alert still fires this
     // tick and recovery is observed on the next scheduled tick — exactly as before.
     // NEVER throws; never blocks the response waiting for the box to POST.
-    await applyEmbedBackendRecovery(probeInputs);
 
     // Issue #840: parse the named probe record into the normalized Health
     // Snapshot, then run the pure Health Assessment ruleset. The handler owns
@@ -266,10 +174,11 @@ export function createHealthRouter(eventBus: PingableBus) {
     // src/health/wire.ts (issue #2039: split out of health/diagnostics.ts as the
     // data-OUT leg) — the third leg of the Snapshot pipeline alongside
     // parseProbes/assessHealth (#840). Issue #2089: the handler no longer owns
-    // the fan-out (moved to src/health/fan-out.ts); it forwards the named
-    // probeInputs record, from which the projection reads ovSearchWindow/
-    // knowledgeContext (indices 17/18) that parseProbes does not consume.
-    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt, probeInputs));
+    // the fan-out (moved to src/health/fan-out.ts). The projection took a
+    // `probeInputs` argument only to read the two OV-quality rollups
+    // (ovSearchWindow/knowledgeContext) that parseProbes did not consume; both
+    // were removed with OpenViking, so it now projects from the snapshot alone.
+    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt));
   });
 
   // GET /recommendations (operator action items) was extracted to

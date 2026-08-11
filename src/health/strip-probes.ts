@@ -35,7 +35,6 @@
 // imports the enumeration from here (directly or via the ../health barrel).
 
 import {
-  probeEmbedBackend,
   type ServiceProbeResult,
   type ProbeOutcome,
 } from "./probe.ts";
@@ -46,7 +45,6 @@ import {
  * the strip to a real `fetch`-based probe; injectable for tests. The 3s cap the
  * strip contract guarantees is applied by the caller passing `timeoutMs`.
  */
-type StripHttpProbe = (url: string, timeoutMs: number) => Promise<ProbeOutcome>;
 
 /**
  * The minimal dependency bag a strip probe descriptor's `run` closure consumes.
@@ -59,16 +57,10 @@ type StripHttpProbe = (url: string, timeoutMs: number) => Promise<ProbeOutcome>;
  * `run`), so a descriptor never has to defend against an absent dep.
  */
 export interface StripProbeDeps {
-  /** Generic HTTP liveness probe (vikingdb/openviking). */
-  probe: StripHttpProbe;
   /** Redis ping — true on success, never throws (the redis/utility accessor swallows). */
   pingRedis: () => Promise<boolean>;
   /** Orchestrator self-check — true when the host process is healthy (no kill-switch). */
   checkOrchestrator: () => Promise<boolean>;
-  /** OpenViking base URL (resolves OPENVIKING_URL via the OV Request Adapter, #954). */
-  ovBaseUrl: () => string;
-  /** Embed-backend liveness (issue #2013) — the OV dense-embedding backend probe. */
-  probeEmbedBackend: typeof probeEmbedBackend;
 }
 
 /**
@@ -136,23 +128,6 @@ export const STRIP_PROBE_DESCRIPTORS: readonly StripProbeDescriptor[] = [
     kind: "boolean",
     run: (deps) => deps.pingRedis(),
   },
-  {
-    service: "vikingdb",
-    kind: "probe",
-    run: (deps) => deps.probe("http://localhost:5000/health", 3000),
-  },
-  {
-    service: "openviking",
-    kind: "probe",
-    run: (deps) => deps.probe(`${deps.ovBaseUrl()}/health`, 3000),
-  },
-  {
-    // Issue #2013: the OV dense-embedding backend, previously omitted from the
-    // strip. probeEmbedBackend is never-throwing and self-times (via the OV
-    // Request Adapter); a transport failure folds to `failed` → a down row.
-    service: "embed-backend",
-    kind: "probe",
-    run: async (deps) =>
-      serviceProbeToOutcome(await deps.probeEmbedBackend(), "embed backend unreachable"),
-  },
+  // The vikingdb / openviking / embed-backend strip rows were removed with
+  // OpenViking — the strip now reports orchestrator + redis only.
 ];
