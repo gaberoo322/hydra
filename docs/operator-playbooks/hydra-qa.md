@@ -115,6 +115,29 @@ Pure helpers backing the classifier live in `scripts/ci/qa-verdict.ts`. The regr
 
 **An incomplete reviewer fan-out is not a fifth verdict — it is a pre-verdict exit.** If step 7.5 finds a spawned reviewer missing (e.g. its worktree was reaped mid-review), the skill exits before reaching step 8/9 with none of the four verdicts above and `needs-qa` left in place for automatic retry — see step 7.5.
 
+## Measuring the QA catch rate (AC1, issue #3815)
+
+Issue #3815's own acceptance criterion 1 gates every further fan-out-reducing
+lever (in particular the RC2 mid-fan-out short-circuit) on measuring the
+**true** QA catch rate — counting a FAIL wherever it is recorded (PR review
+state, a verdict comment, or the `ready-for-agent` bounce path), not just
+`CHANGES_REQUESTED` on closed PRs, which is the issue's own flawed original
+0/36 methodology (a FAILed-then-fixed-then-PASSed PR shows no lasting
+`CHANGES_REQUESTED`, and the `skip-required-failed` admission-gate branch at
+step 6.6 computes a FAIL without ever spawning a reviewer, so it leaves no
+review-state trace either).
+
+`npm run qa:catch-rate -- --repo gaberoo322/hydra --limit 60` (implemented in
+`scripts/ci/qa-catch-rate.ts`, pure classifier tested in
+`test/qa-catch-rate.test.mts`) reproduces this number on demand: it fetches a
+window of PRs, resolves each PR's linked issue for the bounce-path signal,
+classifies every PR as `caught` / `clean-pass` / `not-reviewed` against the
+three signals above, and prints the aggregate catch rate as JSON. This is the
+*instrument*, not the *lever* — it imports nothing from `qa-verdict.ts` and
+ships no change to `aggregateAdversarialReview()`, `classifyVerdict()`, or any
+verdict literal (INV-A/INV-D); running it neither ships nor gates RC2, it only
+produces the number RC2's own sequencing gate is waiting on.
+
 ## Process
 
 ### 1. Select issue

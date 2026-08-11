@@ -2,11 +2,13 @@
  * anthropic/request.ts — the single private request primitive behind the
  * **Anthropic Request Adapter** seam (issue #1959).
  *
- * The SIXTH boundary Seam, sibling to the **OpenViking Request Adapter**
- * (`src/knowledge-base/ov-request.ts`) and the **OAuth Usage Adapter**
+ * The SIXTH boundary Seam, sibling to the **OAuth Usage Adapter**
  * (`src/cost/oauth-usage.ts`) — also over `fetch()`, not `node:child_process`.
+ * (The FOURTH Seam, the OpenViking Request Adapter, was the fetch()-Seam
+ * precedent both were built on; it was deleted with the knowledge plane,
+ * ADR-0033. The ordinals are historical and are NOT renumbered.)
  * Each boundary Seam owns its OWN transport primitive; this one is deliberately
- * NOT collapsed onto the OV/OAuth fetch Seams (different host, different auth
+ * NOT collapsed onto the OAuth fetch Seam (different host, different auth
  * header, different error-mode prose — CONTEXT.md, Anthropic Request Adapter).
  *
  * Why one primitive
@@ -83,7 +85,7 @@ export type AnthropicResult =
  * `strictNullChecks`), so TypeScript cannot discriminate a union on a boolean
  * `ok` field via plain `if (!result.ok)` control-flow narrowing. These guards
  * give callers reliable narrowing regardless of the strictness setting —
- * mirroring `isOvFailure`/`isOvOk` (OpenViking Request Adapter).
+ * the same shape every boundary Seam exposes (see `src/host-probe/exec.ts`).
  */
 export function isAnthropicFailure(
   result: AnthropicResult,

@@ -65,27 +65,3 @@ export const ReflectionHealthQuerySchema = z.object({
   count: countQuerySchema(20, 200).shape.count,
 });
 
-/**
- * `GET /learning/knowledge?agent=` (issue #2647).
- *
- * The dispatch-served, plan-time knowledge fetch. `agent` is a REQUIRED
- * non-empty string (the skill name, e.g. `hydra-dev`) — it scopes the
- * OpenViking search (`loadKnowledgeBaseForPrompt`) to that agent's learned
- * patterns. An absent/whitespace-only value can never address a real knowledge
- * search, so the route rejects it at the boundary (bespoke 400) — mirroring the
- * `ContextTraceQuerySchema` required-string idiom. Non-strict so any other
- * query param is ignored.
- *
- * `anchor` (issue #2717) is an OPTIONAL anchor/cycle identifier (e.g.
- * `issue-2717`) the dispatch may send so the per-fetch knowledge-retrieval
- * ledger can record the join key between the retrieval and the eventual cycle
- * outcome. It is optional so an anchor-less fetch (or a caller that predates the
- * ledger) still succeeds — the ledger row records a `null` anchor in that case.
- */
-export const KnowledgeQuerySchema = z.object({
-  agent: z.string().trim().min(1),
-  anchor: z.preprocess(
-    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
-    z.string().trim().min(1).optional(),
-  ),
-});

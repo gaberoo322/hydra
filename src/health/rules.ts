@@ -15,41 +15,18 @@
 // order. Thresholds stay inline in each rule — co-located = locality.
 
 import type { HealthSnapshot, HealthDiagnostic } from "./types.ts";
-import { assessSkillCatalog, assessRegistrationFailureRate } from "./skill-catalog.ts";
-// Issue #3634: the four complex multi-policy rule bodies (embed-backend bespoke,
-// reflection-health, dark-leading-outcomes, attribution-ledger-empty) were
-// extracted into named, individually-testable assessor functions in the sibling
-// assessors.ts (mirroring the skill-catalog.ts precedent). Each stays a thin
-// same-slot pass-through below — `(s) => assessX(s.slice)` — so the load-bearing
-// RULES ordering (diagnostics.ts quotes diagnostics[0].what) is preserved and the
-// emitted diagnostics array is byte-identical. The genuinely-shallow one-liner
-// rules stay inline; the SVC_PROBES_WITH_BESPOKE_RULES registration policy below
-// stays here (assessEmbedBackendProbe covers only the bespoke diagnostic).
+// Issue #3634: the complex multi-policy rule bodies (reflection-health,
+// dark-leading-outcomes, attribution-ledger-empty) were extracted into named,
+// individually-testable assessor functions in the sibling assessors.ts. Each
+// stays a thin same-slot pass-through below — `(s) => assessX(s.slice)` — so the
+// load-bearing RULES ordering (diagnostics.ts quotes diagnostics[0].what) is
+// preserved. The genuinely-shallow one-liner rules stay inline. (The
+// embed-backend bespoke assessor went with the OpenViking retirement.)
 import {
-  assessEmbedBackendProbe,
   assessReflectionHealth,
   assessDarkLeadingOutcomes,
   assessAttributionLedger,
 } from "./assessors.ts";
-// Issue #2386: the OV skill-catalog state is now carried ON the HealthSnapshot
-// (`s.skillCatalog`), read live once at fan-out time in collectProbeInputs — the
-// module that already owns every other in-process probe read. The two
-// skill-catalog rules below read it from the snapshot like every other rule,
-// making rule purity (a rule is a function of HealthSnapshot → diagnostic|null)
-// literally true for ALL rules, not approximately true with two exceptions.
-// rules.ts no longer value-imports getSkillCatalogState from the knowledge-base
-// cluster (issue #1968's direct read), so the rule-authoring module's dependency
-// graph is exactly its documented seam: it reads only diagnostics.ts types and
-// the pure assessors in skill-catalog.ts.
-
-// Issue #2013: service-probe keys that already have a bespoke diagnostic rule
-// (with a tailored why/impact/action) earlier in RULES. The generic
-// "external service not running" iterator rule skips these so a degraded service
-// is reported exactly once — by its bespoke rule — never doubled. Any monitored
-// service NOT listed here (e.g. the #2013 "embed-backend" key) is covered by the
-// generic rule with zero per-service code.
-const SVC_PROBES_WITH_BESPOKE_RULES = new Set(["openviking", "vikingdb", "embed-backend"]);
-
 export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   (s) =>
     s.health.status === "killed"
@@ -177,77 +154,9 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: false,
         }
       : null,
-  (s) =>
-    s.svcProbes["openviking"]?.status === "failed"
-      ? {
-          severity: "warning",
-          component: "openviking",
-          what: "OpenViking unreachable",
-          why: "Agents run without knowledge context, reducing quality.",
-          impact: "Degraded quality.",
-          action: "curl http://localhost:1933/health",
-          autoRecovery: true,
-        }
-      : null,
-  (s) =>
-    s.svcProbes["vikingdb"]?.status === "failed"
-      ? {
-          severity: "warning",
-          component: "vikingdb",
-          what: "VikingDB unreachable",
-          why: "Embeddings storage down. Indexing and search fail.",
-          impact: "Knowledge inoperative.",
-          action: "docker ps | grep viking",
-          autoRecovery: true,
-        }
-      : null,
-  // Issue #2131: a BESPOKE rule for the OpenViking dense-embedding + VLM backend
-  // (the gaming-PC Ollama endpoint reached over Tailscale, #980/#1795). The
-  // #2013 `embed-backend` probe (probeEmbedBackend → folds an ov-service-down /
-  // ov-timeout on the embedding-exercising `search/find` transport to "failed")
-  // already lands a keyed svcProbes["embed-backend"] entry. The generic
-  // "external service not running" iterator below WOULD cover it, but with a
-  // generic message that neither names the offline backend nor points at the
-  // recovery path. The 2026-06-18 outage (#2104/#2064/#1831) showed the cost: a
-  // fully-offline backend surfaced only as the benign `info` "OV search slow"
-  // (the ovSearch ov-timeout → "timeout" rule below), so nothing operator-facing
-  // escalated. This bespoke `warning` is the loud, actionable signal that gap
-  // needs — it names the offline embedding/VLM backend and points at the
-  // Wake-on-LAN recovery path (#1794). It is excluded from the generic iterator
-  // (SVC_PROBES_WITH_BESPOKE_RULES) so the degraded backend is reported exactly
-  // once. The slow-but-reachable case is untouched: a slow OV search still folds
-  // the ovSearch probe to "timeout" → `info` "OV search slow" (the embed-backend
-  // probe only fails on a transport-level ov-service-down / ov-timeout — OV
-  // answering at all, even slowly, reads "running"), so no false alert fires.
-  // Issue #3634: body extracted to assessEmbedBackendProbe in assessors.ts.
-  (s) => assessEmbedBackendProbe(s.svcProbes),
-  // Issue #2013: a SINGLE generic "external service not running" rule that
-  // iterates the keyed ServiceProbeMap (#1869) and fires for any monitored
-  // service in a non-running state that does NOT already have a bespoke rule
-  // above. This is the point of the #1869 map iterator: adding a new monitored
-  // service (e.g. the #2013 "embed-backend" entry) needs ZERO new rule code —
-  // it is covered automatically here, with no per-service duplication. The two
-  // services with tailored action strings (openviking, vikingdb) keep their
-  // bespoke rules and are excluded here so a service is never double-reported.
-  // A status of "running" (or a missing key, which optional chaining leaves
-  // undefined) does not fire.
-  (s) => {
-    for (const [name, probe] of Object.entries(s.svcProbes)) {
-      if (SVC_PROBES_WITH_BESPOKE_RULES.has(name)) continue;
-      if (probe?.status && probe.status !== "running") {
-        return {
-          severity: "warning",
-          component: name,
-          what: `External service "${name}" not running`,
-          why: `The ${name} probe reported status "${probe.status}" instead of "running".`,
-          impact: "A dependency the orchestrator monitors is degraded or unreachable.",
-          action: `Check the ${name} service and its backing host/container.`,
-          autoRecovery: true,
-        };
-      }
-    }
-    return null;
-  },
+  // The OpenViking / VikingDB / embed-backend service rules (#2131 bespoke
+  // embed-backend included) were removed with OpenViking: `svcProbes` held
+  // only OV-stack services, so the whole map and its rules went with it.
   // Issue #3459: "Pipeline empty" rule removed — it gated on queueDepth === 0
   // && blCounts.total === 0, which were always 0 after ADR-0031 (the rule
   // fired on every tick once the honest-zero stubs replaced the real readers,
@@ -323,65 +232,9 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: true,
         }
       : null,
-  (s) =>
-    s.ovSearch.status === "running" && s.ovSearch.resultCount === 0
-      ? {
-          severity: "info",
-          component: "intelligence",
-          what: "OV search empty",
-          why: "Service up but index may be empty.",
-          impact: "No knowledge context.",
-          action: "Check indexer",
-          autoRecovery: false,
-        }
-      : null,
-  (s) =>
-    s.ovSearch.status === "failed"
-      ? {
-          severity: "warning",
-          component: "intelligence",
-          what: "OV search failing",
-          why: "Knowledge-plane search probe returned an error (OpenViking up but search 500ing — usually its LLM/embedding backend is down).",
-          impact: "Agents run cycles with empty knowledge context.",
-          action: "Check OpenViking + its LLM/embedding backend (#980).",
-          autoRecovery: false,
-        }
-      : null,
-  // Issue #1781: the search transport never reached OpenViking — distinct from a
-  // 5xx (`failed`) and from a slow plane (`timeout`). The `search/find` path is
-  // what exercises the embedding backend, so a transport failure here points at
-  // the dense-embedding service (post-#1795 the local `ollama-embed` container)
-  // or, for indexing, the Tailnet VLM host — NOT at OpenViking itself. Surface a
-  // distinct, actionable warning so the operator checks the right hop. searchKnowledge
-  // still returns empty (never throws), so this degrades quality, it does not crash cycles.
-  (s) =>
-    s.ovSearch.status === "backend-unreachable"
-      ? {
-          severity: "warning",
-          component: "intelligence",
-          what: "OV embedding backend unreachable",
-          why: "Knowledge-plane search transport never reached OpenViking (DNS/connection-refused/timeout on the embedding-exercising search path). OpenViking may be up while its embedding backend is unreachable.",
-          impact: "Search returns empty — agents run cycles with no knowledge context until the backend recovers.",
-          action: "Check the dense-embedding service: docker exec hydra-openviking-1 curl -m5 http://ollama-embed:11434/api/tags (and the Tailnet VLM host gabes-desktop-1:11434 if indexing). See OpenViking embedding/VLM backend split in docs/reference.md.",
-          autoRecovery: true,
-        }
-      : null,
-  // Issue #1032: a probe TIMEOUT is NOT a fault — the Ollama-backed embedding
-  // path is just slow, and real agent searches (no 3s cap) succeed. Surface it
-  // as info so a slow-but-working plane is visible without folding the top-level
-  // status to `degraded` the way the `failed` warning above does.
-  (s) =>
-    s.ovSearch.status === "timeout"
-      ? {
-          severity: "info",
-          component: "intelligence",
-          what: "OV search slow",
-          why: "Search probe exceeded its deep-health timeout but did not error — the Ollama-backed embedding path (nomic-embed over Tailscale, #980) is slow, not down. Real agent searches have no such cap and succeed.",
-          impact: "None on agents; the deep-health probe latency is just high.",
-          action: "Monitor; raise OV_SEARCH_PROBE_TIMEOUT_MS if it persists.",
-          autoRecovery: true,
-        }
-      : null,
+  // The five OV-search rules (empty #—, failing, backend-unreachable #1781,
+  // slow #1032) were removed with OpenViking: they all read
+  // `HealthSnapshot.ovSearch`, which the retired search probe populated.
   // Issue #2492: surface the reflection-deposit-health verdict through the
   // deep-health fold so an operator checking /api/health/deep sees it where they
   // look — closing the discoverability gap that kept re-filing a NON-bug
@@ -423,27 +276,10 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // itself fails (honest-none, never a phantom alarm).
   // Issue #3634: body extracted to assessAttributionLedger in assessors.ts.
   (s) => assessAttributionLedger(s.attributionLedgerCount),
-    // Issue #1968: surface the silent empty/partial OV skill catalog through the
-  // deep-health Health Assessment fold so an operator watching /api/health/deep
-  // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a
-  // supplementary detail view, but only this rule folds the failure into the
-  // top-level `status` and `diagnostics` array. Issue #2386: the catalog state
-  // now arrives ON the snapshot (`s.skillCatalog`, assembled at fan-out time),
-  // so this rule is pure over its `s` argument like every other rule — no more
-  // out-of-band getSkillCatalogState() read. assessSkillCatalog already maps
-  // empty → severity:"error", partial → severity:"warning", and ok/in-flight →
-  // diagnostic:null, so this rule is a thin pass-through of that gate's diagnostic.
-  (s) => assessSkillCatalog(s.skillCatalog).diagnostic,
-  // Issue #2277: the registration-FAILURE-RATE alert. Distinct from the
-  // population gate above (empty/partial): this reads the last completed pass's
-  // failure rate from `s.skillCatalog` (issue #2386 — sourced from the snapshot,
-  // not a live getSkillCatalogState() read). It fires a `warning` when the failure
-  // rate exceeds 10% and points at OpenViking load + the ollama-recovery playbook.
-  // `warning` (not `error`) so it ANNOTATES the population verdict without
-  // escalating the deep-health fold above it. Read-only: it adds no export to
-  // skill-registration and never mutates state. (Issue #3544: the Ollama VLM
-  // liveness correlation was retired at the VLM cutover — see the rule body.)
-  (s) => assessRegistrationFailureRate(s.skillCatalog),
+  // The two OV skill-catalog rules — the #1968 empty/partial population gate and
+  // the #2277 registration-failure-rate alert — were removed with OpenViking.
+  // Both read `HealthSnapshot.skillCatalog`, the in-process state of skill
+  // registration against OV's resource catalog.
 ];
 
 // ---- fmtUp — uptime humanizer shared by assessHealth + the wire projection -

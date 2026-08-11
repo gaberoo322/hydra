@@ -1,0 +1,1 @@
+- fix: rate-gate escalation comment-bumps for steady-rate cues (acceptance-criterion-unmet / -deferred) so a constant background rate stops re-nagging every 10 hits; a bump now posts only when recent rate rises above the cue's own baseline (#3850)

@@ -1,0 +1,1 @@
+- fix: discover_orch's 1h cooldown now survives pace-gate relaunches and host reboots (was silently always-eligible — misclassified in the always-on seed group) (#3920)

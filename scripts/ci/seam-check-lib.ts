@@ -52,7 +52,7 @@ const REGEX_START_PREDECESSORS = "(,=:[!&|?{};+-*%<>~^";
  * template literals (issue #3703).
  *
  * Token-keyed Seam checks (journal's `journalctl`, and the same shape in the
- * openviking / anthropic / telegram ratchets) ask "does this file name binary X
+ * anthropic / telegram ratchets) ask "does this file name binary X
  * AND hold a spawn capability?". Matching the token against RAW source conflates
  * two very different facts: *spawning* `journalctl` and merely *writing the word*
  * in a doc comment. The journal ratchet's own docstring already drew that line —
