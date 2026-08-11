@@ -22,5 +22,4 @@ export * from "./rules.ts";
 // StripProbeDescriptor, StripProbeDeps) — extracted from fan-out.ts so consumers
 // import the pure leaf without the deep-health fan-out's heavy closure.
 export * from "./strip-probes.ts";
-export * from "./skill-catalog.ts";
 export * from "./wire.ts";
