@@ -93,7 +93,6 @@ Goals are defined in `~/hydra/config/direction/goals.md` or editable via the das
 
 | User says | Action | Endpoint |
 |---|---|---|
-| "Search for X" | Search OpenViking | `GET /openviking/search?q=X` |
 
 ### Debug
 

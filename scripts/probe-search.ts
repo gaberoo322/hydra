@@ -17,10 +17,14 @@
  *                   "every caller of moveItemToLane($$$)"). Zero false positives,
  *                   results sorted positionally.
  *   - probe-search — FUZZY relevance-ranked block search across any language in
- *                   the tree ("where is the embedding backend configured?").
+ *                   the tree ("where is the tier classifier wired?").
  *                   Results sorted by BM25 score, most-relevant first.
- *   - OpenViking  — SEMANTIC similarity over accumulated knowledge ("what concept
- *                   relates to X?"); requires an embedding index + Ollama backend.
+ *
+ * Search is TWO lanes, not three. A former third lane — OpenViking, SEMANTIC
+ * similarity over accumulated knowledge — is RETIRED (ADR-0033): the knowledge
+ * plane is gone, so "what concept relates to X?" now routes here, or to
+ * `gh search` over issues. Do not re-add a semantic lane without re-justifying
+ * the capability from scratch.
  *
  * Provenance / design choice (issue #1799): probe is invoked via
  * `npx -p @probelabs/probe@<pinned>` rather than added to package.json

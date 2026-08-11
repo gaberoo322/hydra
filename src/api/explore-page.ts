@@ -8,9 +8,9 @@
  * factory parameter so tests can stub without subprocesses, Redis, or
  * the network.
  *
- * The Architecture and Search tabs reuse the existing routers
- * (`/api/architecture` and `/api/openviking/search`) — no new endpoint
- * needed here.
+ * The Architecture tab reuses the existing `/api/architecture` router — no new
+ * endpoint needed here. (The Search tab's `/api/openviking/search` was deleted
+ * with the knowledge plane, ADR-0033.)
  */
 
 import { Router } from "express";

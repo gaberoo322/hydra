@@ -11,8 +11,8 @@ claude_only: true
 
 Produce a **design-concept artifact** for a Hydra anchor before any code-writing
 dispatch. Adapts Matt Pocock's upstream `grill-with-docs` to operate against
-Hydra's own vocabulary — `CONTEXT.md`, ADRs under `docs/adr/`, OpenViking
-knowledge, and Redis-backed research reports.
+Hydra's own vocabulary — `CONTEXT.md`, ADRs under `docs/adr/`, and
+Redis-backed research reports.
 
 This skill is Phase A of the design-concept gate (#437). The artifact lands in
 Redis via `POST /api/design-concepts` and is consumed in later phases by:
@@ -131,8 +131,10 @@ The READ scope depends on `$scope`:
    gh issue view "$ANCHOR" --repo gaberoo322/hydra --json title,body,labels
    ```
 
-5. **OpenViking semantic search** for related past work — optional, only
-   when the Q&A loop surfaces a "have we done this before?" question.
+5. **Prior-work search** — optional, only when the Q&A loop surfaces a
+   "have we done this before?" question. Use `gh issue list --search` over the
+   board and `npm run probe-search` over the tree. (Semantic search via
+   OpenViking was retired — ADR-0033.)
 
 #### Step 2.target — Multi-context target glossaries (scope=target only)
 

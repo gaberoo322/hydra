@@ -9,8 +9,8 @@
  * wrong and swung week-to-week with the cache-hit mix (issue #1083). This
  * Adapter reads the real number instead.
  *
- * It is a boundary Seam, sibling to the **OpenViking Request Adapter**
- * (`src/knowledge-base/ov-request.ts`) — also over `fetch()`, also
+ * It is the FIFTH boundary Seam, sibling to the **Anthropic Request Adapter**
+ * (`src/anthropic/request.ts`) — also over `fetch()`, also
  * never-throwing, also returning a discriminated `{ok:true;data}|{ok:false;code}`
  * result whose `oauth-usage-*` codes join the `HydraErrorCode` union as
  * RESULT-OBJECT literals (no thrown subclass; the seam returns, never raises).
@@ -118,8 +118,8 @@ export const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const OAUTH_USAGE_BETA = "oauth-2025-04-20";
 
 /**
- * Default request timeout — matches the OpenViking Request Adapter's seam-level
- * discipline so a hung endpoint can't wedge the 60s usage scan. A timeout
+ * Default request timeout — the seam-level discipline every boundary Seam
+ * follows, so a hung endpoint can't wedge the 60s usage scan. A timeout
  * degrades to the transcript estimate exactly like any other failure.
  */
 const OAUTH_USAGE_TIMEOUT_MS = 5_000;
@@ -267,8 +267,8 @@ export function parseRetryAfterMs(
 }
 
 /**
- * Map a thrown fetch error onto an `oauth-usage-*` failure code, mirroring the
- * OpenViking Request Adapter's `classifyThrown`. `AbortSignal.timeout` rejects
+ * Map a thrown fetch error onto an `oauth-usage-*` failure code, following the
+ * boundary-Seam `classifyThrown` shape. `AbortSignal.timeout` rejects
  * with a `TimeoutError`/`AbortError` name (=> `oauth-usage-timeout`); anything
  * else at the transport layer (DNS, ECONNREFUSED, offline) is
  * `oauth-usage-network`.

@@ -30,9 +30,9 @@
  *   only. `GET /api/architecture` behaviour is unaffected.
  * - **No new runtime dependency** (ADR-0005): node stdlib only. The coupling
  *   derivation is O(nodes + edges) in-memory arithmetic.
- * - **No Redis / OpenViking seam** — this module opens no connection and
- *   imports neither `redis/*` nor an OV request path; the coupling report is
- *   deterministic and emitted directly as a prompt block.
+ * - **No Redis / network seam** — this module opens no connection and imports
+ *   no `redis/*` path; the coupling report is deterministic and emitted
+ *   directly as a prompt block.
  * - **Deterministic output.** Given the same graph, the markdown is
  *   byte-identical: every ranking has an explicit stable tiebreak (module id
  *   / pair key ascending), so ties never reorder between runs.
