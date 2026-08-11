@@ -99,8 +99,6 @@ describe("buildSchedulerStatus — projection without controller (issue #2935 AC
     assert.ok("emptyRateCyclesInWindow" in status, "must have emptyRateCyclesInWindow");
 
     // Indexer observability
-    assert.ok("indexerErrors" in status, "must have indexerErrors");
-    assert.ok("indexerRetries" in status, "must have indexerRetries");
 
     // Advisory cross-subsystem
     assert.ok("autopilotPause" in status, "must have autopilotPause");

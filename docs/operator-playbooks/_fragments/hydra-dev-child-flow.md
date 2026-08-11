@@ -25,8 +25,7 @@ Run these numbered steps.
    can fire the per-anchor reflection PRODUCER on a non-merged failure. NOT
    optional and NOT conditional on reflections being served — ALWAYS run it. The
    deposit is best-effort on I/O error but the step is mandatory.
-5. **Fetch the knowledge context** (see "Knowledge context" below) and weave it in.
-6. Grep/read the source for context, then implement — touching out-of-scope
+5. Grep/read the source for context, then implement — touching out-of-scope
    files only with a `scope-justification:` block in the PR body. Follow the
    upstream `implement` cadence (Pocock v1.1): use **TDD at pre-agreed seams**
    where practical — **red before green, one slice at a time** (the `tdd` skill
@@ -34,11 +33,11 @@ Run these numbered steps.
    review) — and run `npm run typecheck` plus **single test files**
    (`node --test --test-force-exit test/<name>.test.mts`) **regularly as you go**,
    reserving the full `npm test` sweep for step 8.
-7. **Declare glossary/ADR impact** — per `docs/agents/domain.md`, add a
+6. **Declare glossary/ADR impact** — per `docs/agents/domain.md`, add a
    `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved
    or decision made. Do NOT edit `CONTEXT.md` in the code PR — that delta lands
    in a separate `ubiquitous-language`-labelled PR.
-8. Run `npm test` + `npm run typecheck` + `npm run build`.
+7. Run `npm test` + `npm run typecheck` + `npm run build`.
 8a. **MANDATORY — deposit the grounding test-count telemetry file** (issue
    #2754). Immediately after `npm test` passes, run the grounding-deposit recipe
    in "Reflection injection" below. Best-effort on I/O error but mandatory.
@@ -61,7 +60,7 @@ Run these numbered steps.
     `.changelog/README.md`. The advisory `changelog-check.yml` workflow posts a
     non-blocking sticky comment when a PR adds no fragment and lacks the label — it
     never blocks merge.
-9. **Classify the change via the live tier API** (see "Tier classification"
+8. **Classify the change via the live tier API** (see "Tier classification"
    below). Never self-classify by path patterns.
 9a. **Reconcile the diff against the design-concept artifact BEFORE opening the
    PR** (issues #2537, #2528). If an artifact was fetched at planning time, run
@@ -71,7 +70,7 @@ Run these numbered steps.
    blocks auto-merge. If ANY invariant cannot be satisfied, do NOT open the
    PR — emit a `## Friction Report` naming the unmet invariant and stop. A 404
    at planning time makes this a clean no-op.
-10. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
+9. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
     issue's section, and a `Tier: <0|1|2|3>` line from the API. Acceptance
     criteria MUST be checkboxes with a mechanical "verified by:" assertion —
     each names the exact command or observable output a reviewer can check:
@@ -81,7 +80,7 @@ Run these numbered steps.
     - [ ] Criterion C — verified by: `git diff --name-only origin/master...HEAD` includes path/to/file.ts
     ```
     Prose-only criteria are rejected by QA.
-11. Return: PR URL + summary table, then emit the `## Friction Report` (see below).
+10. Return: PR URL + summary table, then emit the `## Friction Report` (see below).
 
 ## Reflection injection — live API (issue #841)
 
@@ -134,23 +133,6 @@ bash "$REPO_ROOT/scripts/reflection-deposit.sh" grounding "hydra-dev"
 #1945-shaped plumbing failure). Verify reflections-reach-retry with
 `/api/reflections`, NOT `/api/learning/context-trace` (the latter reports
 composition, not delivery).
-
-## Knowledge context — live API (issue #2647)
-
-At the same planning-time seam, fetch the agent-scoped learned patterns and weave
-them in. **Endpoint:** `GET /api/learning/knowledge?agent=hydra-dev&anchor=<ref>`.
-Response `{ agent, content, itemCount }`; `content` is prompt-ready markdown,
-`itemCount: 0` is a no-op. Use THIS route, NOT `/api/learning/context-trace`
-(counts-only, omits `.content`). This route serves the content, records the
-per-cycle availability metric server-side, and appends a knowledge-retrieval
-ledger row (issue #2717) on its success path.
-```bash
-KB_JSON=$(curl -sf --max-time 5 \
-  "http://localhost:4000/api/learning/knowledge?agent=hydra-dev&anchor=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)")
-KB_CONTENT=$(printf '%s' "$KB_JSON" | jq -r '.content // ""')
-[ -n "$KB_CONTENT" ] && printf '%s\n' "$KB_CONTENT"  # prepend learned patterns to plan
-# Empty / unreachable → graceful no-op.
-```
 
 ## Design-concept artifact — live API (cue: design-concept-endpoint-path-plural)
 
