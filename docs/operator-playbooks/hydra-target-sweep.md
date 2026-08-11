@@ -118,7 +118,7 @@ For each row printed (number, age, title):
      ```bash
      gh issue close $NUM --repo $REPO --reason completed \
        --comment "Shipped by merged PR #<n> — closing (stall-recovery reconciler)."
-     for L in ready-for-agent in-progress queued; do
+     for L in ready-for-agent in-progress; do
        gh api -X DELETE "repos/$REPO/issues/$NUM/labels/$L" --silent 2>/dev/null || true
      done
      ```

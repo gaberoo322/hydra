@@ -35,7 +35,11 @@
 #      also has an APPROVED design-concept artifact
 #      (`GET /api/design-concepts/issue-<N>`, `.status == "approved"`) —
 #      `design_concept_orch` designs every glm-eligible issue before the
-#      drainer may touch it (ADR-0032 Decision 1).
+#      drainer may touch it (ADR-0032 Decision 1). Also skips any candidate
+#      that already has an open PR referencing it (`Closes #<n>` or
+#      equivalent in an open PR body) — the open-PR pre-dispatch gate other
+#      classes already apply, closing the duplicate-dispatch hole from issue
+#      #3900.
 #   7. Claim it: `ready-for-agent` → `in-progress` (the same label swap
 #      hydra-dev's PARENT flow does before spawning a worktree agent —
 #      docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md step 4).
@@ -54,7 +58,32 @@
 #  10. `gh pr create --label glm-authored` (ADR-0032 Decision 5 — provenance
 #      by label, since the drainer's worktree branch shares the
 #      `worktree-agent-*` prefix Opus `dev_orch` PRs also use, so a
-#      branch-name carve-out cannot discriminate them).
+#      branch-name carve-out cannot discriminate them). If `gh pr create`
+#      fails because a PR for this exact branch already exists (issue #3900 —
+#      "already exists" is a real GitHub answer, not a generic failure),
+#      `open_pr()` ADOPTS that PR (logs the anomaly, returns success) instead
+#      of discarding it via `release_issue`.
+#
+# Investigation note (issue #3900's open question): does the authoring
+# session itself reach `gh pr create` despite step 8's `--settings` fence
+# withholding it? Verified live, same methodology as PR #3701/#3790 (a
+# throwaway `--settings` file + a headless `claude -p` run, observed
+# directly, not inferred) — `claude -p --settings config/glm/drainer-settings.json
+# --output-format json` asked to run `gh pr create` returned
+# `permission_denials: [{tool_name: "Bash", tool_input: {command: "gh pr
+# create ..."}}]` and `result: "The command requires user approval and
+# wasn't executed — no PR was created."` The fence holds — CONFIRMED NO GAP,
+# not the mechanism behind the "already exists" collisions this file's
+# `open_pr()` now adopts instead of discarding. The more likely explanation
+# (not independently verified here, and not load-bearing for this fix either
+# way): `gh pr create` server-side PR creation and its separate
+# `--label glm-authored` mutation are not atomic, so a prior tick's LOOP-side
+# `gh pr create` call can create the PR and then fail non-zero on the label
+# step, or `gh` can time out after the server has already committed the
+# create. Either way `open_pr()` treating "already exists" as adoption
+# rather than a genuine failure, and `pick_eligible_issue()` skipping issues
+# with an existing open PR, both hold regardless of which of these produced
+# the original PR.
 #
 # The z.ai credential (`ANTHROPIC_AUTH_TOKEN`) arrives via a systemd
 # `EnvironmentFile` this script never reads directly — `buildGlmEnv` in
@@ -411,6 +440,18 @@ has_approved_design_concept() {
   fi
 }
 
+issue_has_open_pr() {
+  local issue="$1"
+  local open_prs_json="$2"
+  # Same closing-keyword family scripts/ci/design-concept-reconcile-check.ts's
+  # extractAnchorRefFromPrBody() and scripts/ci/epic-close.ts's
+  # parseEpicReferences() already use ("close[sd]?|fix(e[sd])?|resolve[sd]?"),
+  # so every "does PR body X reference issue N" parser in this repo agrees.
+  jq -e --argjson n "$issue" \
+    '[.[] | select((.body // "") | test("(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s*#" + ($n | tostring) + "\\b"; "i"))] | length > 0' \
+    <<<"$open_prs_json" >/dev/null 2>&1
+}
+
 pick_eligible_issue() {
   # DRY_RUN gates this too — not just the mutating actions further down the
   # pipeline. Picking is a real network round-trip (gh + the design-concepts
@@ -436,9 +477,27 @@ pick_eligible_issue() {
   candidates=$(jq -r --arg withhold "$GLM_LABEL_WITHHOLD" \
     '[.[] | select((.labels | map(.name) | index($withhold)) | not)] | sort_by(.updatedAt) | .[].number' \
     <<<"$rows" 2>/dev/null)
+
+  # Open-PR pre-dispatch gate (issue #3900): fetch every open PR's body ONCE
+  # (mirrors the single-gh-call-then-client-side-filter shape the
+  # glm-withhold defense-in-depth check above already uses) so each candidate
+  # can be checked against it without an extra gh round-trip per candidate.
+  # A WARN (not a silent fallback, unlike the sibling gh calls above) because
+  # a swallowed failure here degrades straight back into the exact
+  # duplicate-dispatch hole this gate exists to close.
+  local open_prs_json
+  if ! open_prs_json=$(gh pr list --repo "$REPO" --state open --json number,body --limit 100 2>/dev/null); then
+    log "WARN gh pr list failed while building the open-PR skip list — proceeding without it this tick (duplicate-dispatch protection degraded, not blocked)"
+    open_prs_json="[]"
+  fi
+
   local n
   while IFS= read -r n; do
     [[ -z "$n" ]] && continue
+    if issue_has_open_pr "$n" "$open_prs_json"; then
+      log "skipping issue #$n — an open PR already references it (Closes #$n or equivalent) — not re-dispatching"
+      continue
+    fi
     if [[ "$(has_approved_design_concept "$n")" == "true" ]]; then
       echo "$n"
       return 0
@@ -630,15 +689,54 @@ open_pr() {
     return 0
   fi
 
-  gh pr create --repo "$REPO" \
+  local create_output
+  if create_output=$(gh pr create --repo "$REPO" \
     --base master --head "$branch" \
     --title "$title" \
     --body-file "$body_file" \
-    --label "$GLM_LABEL_AUTHORED" \
-    || {
-      log "ERROR gh pr create failed for issue #$issue branch=$branch"
-      return 1
-    }
+    --label "$GLM_LABEL_AUTHORED" 2>&1); then
+    log "issue #$issue: gh pr create succeeded: $(echo "$create_output" | tail -1)"
+    return 0
+  fi
+
+  # gh pr create failed — but "for ANY reason" was exactly issue #3900's bug:
+  # a "pull request for branch X already exists" response IS a real GitHub
+  # API answer meaning a PR already exists, not a genuine creation failure.
+  # (Open question the issue leaves partly unresolved: something can create a
+  # PR against this exact per-tick unique branch before this call ever runs —
+  # see the investigation note near the top of this file / the PR body for
+  # what was found.) Rather than pattern-match the error text (fragile across
+  # gh versions), ask GitHub directly whether a PR already exists for this
+  # exact branch.
+  log "WARN gh pr create failed for issue #$issue branch=$branch: $(echo "$create_output" | tail -1) — checking gh pr list before treating this as a genuine failure"
+
+  local existing_prs existing_number existing_url
+  if ! existing_prs=$(gh pr list --repo "$REPO" --head "$branch" --json number,url 2>/dev/null); then
+    log "WARN gh pr list failed while checking for an already-exists collision for issue #$issue branch=$branch — cannot distinguish adoption from genuine failure this tick"
+    existing_prs="[]"
+  fi
+  existing_number=$(jq -r '.[0].number // empty' <<<"$existing_prs" 2>/dev/null)
+  existing_url=$(jq -r '.[0].url // empty' <<<"$existing_prs" 2>/dev/null)
+
+  if [[ -n "$existing_number" ]]; then
+    # ADOPT: treat this exactly like a fresh gh pr create success so the
+    # caller's advance_to_needs_qa + cap_increment path fires (issue #3900
+    # acceptance criteria) instead of release_issue discarding a real PR.
+    log "ANOMALY issue #$issue: gh pr create failed but PR #$existing_number ($existing_url) already exists for branch=$branch — adopting it instead of releasing the claim (see issue #3900)"
+    # The most likely origin of an adopted PR (see the investigation note
+    # near the top of this file) is a PRIOR tick's gh pr create succeeding at
+    # PR-creation but failing non-zero on its separate --label mutation — the
+    # exact scenario where the adopted PR is most likely to be MISSING
+    # glm-authored. That label is ADR-0032 Decision 5's only discriminator
+    # from Opus dev_orch PRs (same worktree-agent-* branch prefix), so
+    # re-apply it here, best-effort — a failure is logged, never fatal.
+    gh pr edit "$existing_number" --repo "$REPO" --add-label "$GLM_LABEL_AUTHORED" >/dev/null 2>&1 \
+      || log "WARN failed to (re-)apply $GLM_LABEL_AUTHORED label to adopted PR #$existing_number (non-fatal)"
+    return 0
+  fi
+
+  log "ERROR gh pr create failed for issue #$issue branch=$branch and no existing PR found for that branch — genuine failure"
+  return 1
 }
 
 # ---------------------------------------------------------------------------

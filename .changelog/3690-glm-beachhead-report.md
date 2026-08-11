@@ -1,0 +1,1 @@
+- feat: add GLM dev-drainer beachhead report (window progress, first-pass QA PASS-rate, quota-relief delta, churn-vs-baseline) surfaced as an informational line in hydra-review (#3690)

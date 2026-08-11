@@ -215,7 +215,7 @@ grills itself has broken this; see the facts-vs-decisions rule in `hydra-grill` 
 upstream `grilling`).
 
 - **`wayfinder:research`** (AFK) — read primary sources (docs, third-party APIs,
-  the codebase, OpenViking) and link a cited markdown summary. Invoke the upstream
+  the codebase) and link a cited markdown summary. Invoke the upstream
   **`/research`** skill. Use when knowledge outside the working tree is needed.
 - **`wayfinder:prototype`** (HITL) — raise discussion fidelity with a cheap
   concrete artifact via the **`/prototype`** skill (logic or UI branch). Link the
@@ -372,6 +372,14 @@ handoff. Add `keep-open` if the map should persist as a reference after handoff.
    #N`, one per ticket. Breaking the shape orphans the map from GC.
 6. **Single-quoted heredoc bodies** — inline resolved values; never rely on
    `$var` expansion inside a `<<'EOF'` body.
+7. **Verify quantitative premises, and don't let a stale one survive elsewhere
+   on the map.** Before accepting a metric, count, or headline number a ticket
+   investigates, trace it to its origin — flag explicitly if it comes from a
+   test fixture, mock, or seeded data rather than real behavior. If a
+   resolution invalidates a premise another open ticket or fog item depends
+   on, don't let that sibling resolve against the stale version — re-open the
+   question in its own resolution, or update/delete it per the Fog-of-war
+   invalidation clause (Work through the map, Step 5).
 
 ## Skill files
 

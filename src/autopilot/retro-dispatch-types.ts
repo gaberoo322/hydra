@@ -53,12 +53,40 @@ export interface RetroDispatch {
    * recovered. Carried through the projection so the post-enrichment identity
    * dedup can collapse snapshot-derived rows that share NO durable `cycleId`
    * but DO share a slot — a dispatch occupying one slot for N turns whose
-   * per-turn snapshot rows all land `cycleId: ""` (the #3738 double-count case):
-   * deduping on the slot key instead of the blank cycleId collapses them to one
-   * row. Identity-bearing rows (non-empty cycleId) still dedup on the cycleId;
-   * the slot is only the surrogate for the empty-cycleId population.
+   * per-turn snapshot rows all land `cycleId: ""` (the #3738 double-count case).
+   * The dedup keys empty-cycleId rows on {@link occupancyId} first (the slot's
+   * `task_id`, which distinguishes distinct same-slot occupancies — issue
+   * #3834), and falls back to this bare slot only for identity-less snapshots
+   * (the #3738 population). Identity-bearing rows (non-empty cycleId) dedup on
+   * the cycleId; the slot is only the last-resort surrogate for the
+   * empty-cycleId, empty-occupancyId population.
    */
   slot: string | null;
+  /**
+   * Per-occupancy identity for empty-cycleId rows — the pre-formatted identity
+   * string `projectDispatches` keys its cross-turn `byIdentity` map on:
+   * `id:<task_id>` (the harness agent hash, globally unique per dispatch) when
+   * the slot carries a `task_id`, else `epoch:<slot>@<started_epoch>` when only
+   * a start instant is recoverable; `null` when neither was recoverable (an
+   * identity-less snapshot — the #3738 fallback population). Reusing the SAME
+   * string the projection's cross-turn collapse uses means the two dedup passes
+   * — `projectDispatches`'s `byIdentity` map and `dedupByCanonicalCycleId`'s
+   * post-confirm pass — key on one identity space and can never disagree about
+   * "the same occupancy". **Distinct from {@link cycleId}**: this is an
+   * occupancy identity, NOT a transcript handle, so
+   * {@link confirmDrillableCycleIds} MUST NOT touch it (it blanks only
+   * `cycleId`). Carried through the projection precisely because step 2 of the
+   * bundle pipeline blanks the candidate `cycleId` (recovered from the same
+   * `task_id`) on every in-flight dispatch of a `handoff` run — without a
+   * separate survivor, the post-confirm dedup would lose the only thing
+   * distinguishing N genuinely-distinct sequential dispatches into one slot
+   * (issue #3834). {@link dedupByCanonicalCycleId} composes the empty-cycleId
+   * key as `${slot}::${occupancyId}`, falling back to the bare {@link slot}
+   * when this is `null`, so distinct same-slot occupancies survive as distinct
+   * rows while one dispatch occupying a slot for N turns (same `task_id`
+   * across turns) still collapses to one (#3738).
+   */
+  occupancyId: string | null;
   /** Cycle status (`merged`, `failed`, `abandoned`, ...) or `null` if pending. */
   status: string | null;
   /** Coarse bucket derived from `status`. `null` == still pending. */

@@ -1,0 +1,1 @@
+- fix: retro bundle no longer under-counts re-dispatched slots — distinct same-slot occupancies now survive the empty-cycleId dedup instead of collapsing into one row (#3834)

@@ -93,6 +93,16 @@ state.json {
     # dark for >24h — an absent/0 entry counts as never-fired → force-eligible.
   }
 
+  # NEW IN #3729 — per-item verdict-stability stamps for sweep_target. Keyed by
+  # the STRING Target issue number, valued by the unix epoch of the last
+  # sweep_target dispatch that examined it. decide.py stamps every item in the
+  # CURRENT needs-triage set on fire and prunes the rest, so this never grows
+  # unbounded. Persisted via _persist_state_writeback (same pattern as
+  # research_force_counter); an absent/empty map means every item is fresh.
+  "target_triage_item_stamps": {
+    "<target_issue_number>": unix-epoch
+  }
+
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
   "failure_log": [
     { ts, pattern, retry_count, slot, action, note }
@@ -352,6 +362,31 @@ BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 # bootstrap forces any still-dark backfill class through rather than letting the
 # stagger starve it for another full window.
 BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
+
+# Per-item verdict-stability backoff for sweep_target (issue #3729). A FIXED
+# (not exponential, not class-wide) window: each Target needs-triage item carries
+# its OWN independent clock in `state.target_triage_item_stamps`. An item is
+# eligible for a sweep_target dispatch iff it has no stamp OR its stamp is older
+# than this window; on fire, every item in the CURRENT needs-triage set is
+# stamped (resetting the whole lane's clock uniformly) and stamps for items no
+# longer in the set are pruned.
+#
+# The literal distinction from the rejected Option B (class-level exponential
+# backoff): a class-wide timer cannot tell "item X was just checked" from "item Y
+# was just checked", so a fresh actionable item arriving during another item's
+# backoff would be starved until the whole class cooled. The per-item map gives
+# each item an independent clock, so a genuinely new item is always eligible
+# immediately (issue #3729 INV-2) regardless of any sibling's staleness.
+#
+# Default 6h — long enough to suppress the observed verdict-thrash cadence in the
+# issue's evidence (#631: 10 label events/28h ≈ one every 2.8h; #626: 12/36h ≈
+# one every 3h) yet short enough that a grace-window boundary (2026-08-02 /
+# 2026-08-10) still gets same-day re-examination. Env-overridable for tuning
+# without a code change (mirrors HYDRA_WAYFINDER_STALENESS_SEC); resolved once at
+# import so decide() stays a pure function of (state, events, now).
+TARGET_TRIAGE_BACKOFF_SEC = int(
+    os.environ.get("HYDRA_TARGET_TRIAGE_BACKOFF_SEC") or (6 * 60 * 60)
+)
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
@@ -2905,51 +2940,42 @@ def _select_for_slot(
             return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
         return None
     if cls == "research_target":
-        # Two triggers: (a) explicit target_research_due signal, or
-        # (b) the candidate feed's precomputed `research_recommended` flag —
-        # the candidates feed IS the target backlog, so a feed that flags
-        # "board empty / top score too weak" means the target product needs
-        # more research direction (post-#458, this trigger moved here from
-        # research_orch). Both this slot AND the dev_target steer slot now
-        # consume the one flag the feed computes (anchor-candidates.ts applies
-        # RESEARCH_THRESHOLD). The boundary has a single home: there is no
-        # second threshold constant in decide.py to silently diverge from
-        # (issue #1129 finished — the private dev-side threshold was deleted).
+        # Two triggers, both board-derived: (a) explicit target_research_due
+        # signal, or (b) target_board_research_due — the ADR-0031 board-empty
+        # signal collect-state.sh sets when target_ready_for_agent == 0.
+        #
+        # ISSUE #3832: the retired candidate-feed forced-research branch that
+        # used to live here (`candidates is not None and
+        # research_recommended(candidates)`) was REMOVED.
+        # /api/anchor/candidates was RETIRED in #3455, so the feed is
+        # permanently empty and research_recommended()'s fail-open default
+        # (`if not candidates_payload: return True` fires for a `{}` payload)
+        # forced research_target on every turn until the INV-010 daily cap
+        # tripped — self-refuting churn (~181k tokens/cycle) that re-fired on
+        # completion and masked this very board signal. research_recommended()
+        # and best_candidate() are RETAINED (still read by the dev_target steer
+        # slot above), and the INV-010 daily-force-cap machinery
+        # (_research_force_allowed / _research_force_stamp /
+        # RESEARCH_FORCE_DAILY_CAP) is intentionally left in place even though
+        # it is now caller-less from this selector — its removal is
+        # Verifier-Core-adjacent and out of scope for #3832.
         if _signal_present(state, events, "target_research_due"):
             return make_dispatch(cls, "hydra-target-research", reason="target research due")
         # GITHUB-BOARD BRANCH (issue #3435, spec #3432, ADR-0031). Orch-style
         # Target dispatch: an EMPTY scope=target board (no ready-for-agent,
         # unblocked issues) means the Target product needs more research
-        # direction — the GitHub-board mirror of the candidate-feed
-        # `research_recommended` trigger below. collect-state.sh sets
-        # `target_board_research_due` when `target_ready_for_agent == 0`. Placed
-        # AFTER the explicit `target_research_due` and BEFORE the Redis
-        # candidate-feed trigger so the two substrates coexist during the expand
-        # phase (ADR-0030). Unlike the forced candidate-feed path below this is a
-        # plain board-empty signal, so it is NOT subject to the daily force cap —
-        # it fires no more often than the pace-gated turn cadence and its class
-        # cooldown allow, mirroring how `dev_target`/`qa_target` read their board
-        # signals directly.
+        # direction. collect-state.sh sets `target_board_research_due` when
+        # `target_ready_for_agent == 0`. This is a plain board-empty signal, so
+        # it is NOT subject to the daily force cap — it fires no more often
+        # than the pace-gated turn cadence and its class cooldown allow,
+        # mirroring how `dev_target`/`qa_target` read their board signals
+        # directly.
         if _signal_present(state, events, "target_board_research_due"):
             return make_dispatch(
                 cls,
                 "hydra-target-research",
                 reason="target GitHub board empty of ready-for-agent work",
             )
-        if candidates is not None and research_recommended(candidates):
-            if _research_force_allowed(state, "research_target", now):
-                # Issue #1666: stamp the daily force counter at the commit
-                # point — every drop-gate (burned/scope/busy/shed) has already
-                # passed in _rule_pipeline_dispatch, so this dispatch WILL be
-                # emitted. Without the stamp the 4/day cap was dead code and
-                # one run forced 46 research_target dispatches.
-                _research_force_stamp(state, "research_target", now)
-                return make_dispatch(
-                    cls,
-                    "hydra-target-research",
-                    prompt_args={"forced": True},
-                    reason="best target-candidate below threshold; forced",
-                )
         return None
     if cls == "design_concept_orch":
         # ISSUE #466 (Phase B of #437): fire `hydra-grill` for the top
@@ -3019,6 +3045,99 @@ def _select_for_slot(
     return None
 
 
+def _target_triage_item_set(state: dict, events: list[dict]) -> set[int] | None:
+    """Read the current turn's Target needs-triage item-number set (issue #3729).
+
+    collect-state.sh emits `target_needs_triage_items` as a fresh per-turn fact
+    (a space-separated list of Target issue numbers, e.g. ``626 631``), which the
+    playbook merges verbatim into ``state.signals.target_needs_triage_items`` —
+    exactly the same verbatim-string seam as ``wayfinder_orch_frontier``. This
+    parses it into a set of ints.
+
+    Returns ``None`` when the signal is ABSENT (collect-state did not emit it —
+    e.g. a degraded board read, or a pre-#3729 playbook). An absent list is the
+    fail-open sentinel: the caller fires on the coarse ``needs_triage_target``
+    boolean alone rather than dead-arming sweep_target (the #3709 defect class).
+    An EMPTY emitted list (``""``) is returned as an empty set, distinct from
+    absence — but the caller treats both the same (no per-item granularity →
+    fail open).
+
+    Pure: no side effects.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "target_needs_triage_items":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("target_needs_triage_items")
+    if raw is None:
+        return None
+    out: set[int] = set()
+    if isinstance(raw, (list, tuple)):
+        candidates = raw
+    else:
+        candidates = str(raw).split()
+    for token in candidates:
+        try:
+            out.add(int(str(token).strip()))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _target_triage_stamps(state: dict) -> dict[int, int]:
+    """Read the persisted per-item stamp map as ``{item_number: epoch}``.
+
+    ``state.target_triage_item_stamps`` is keyed by the STRING item number (JSON
+    object keys are strings) and valued by a unix epoch. Returns a fresh
+    ``{int: int}`` dict; an absent/malformed map yields ``{}``.
+
+    Pure: no side effects.
+    """
+    raw = state.get("target_triage_item_stamps")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[int, int] = {}
+    for k, v in raw.items():
+        try:
+            out[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _triage_item_eligible(stamp: int, now: int) -> bool:
+    """True iff a single item's stamp makes it eligible for a sweep this turn.
+
+    An item is eligible iff it has NO prior stamp (``stamp <= 0`` — new to the
+    lane, issue #3729 INV-2) OR its stamp is older than the per-item backoff
+    window (INV-3/INV-6). Pure.
+    """
+    if stamp <= 0:
+        return True
+    return (now - stamp) >= TARGET_TRIAGE_BACKOFF_SEC
+
+
+def _stamp_target_triage_items(state: dict, items: set[int], now: int) -> bool:
+    """Mutate state: stamp every item in the CURRENT set, pruning the rest.
+
+    Issue #3729 INV-4/INV-5. On a sweep_target fire, every item in the current
+    turn's needs-triage set is stamped to ``now`` (not only the previously-
+    eligible ones — a dispatch that examines the whole lane resets the clock
+    uniformly), and any stamp whose item is NO LONGER in the set is dropped, so
+    ``target_triage_item_stamps`` never grows unbounded across a long-running
+    session. Returns True iff the map changed (so ``main()`` can persist it via
+    ``_persist_state_writeback``, the same change-detection pattern as
+    ``research_force_counter``).
+    """
+    before = state.get("target_triage_item_stamps")
+    # Rebuild from the current set only — pruning is structural, not an
+    # optimization (INV-5). Key on the STRING number (JSON object keys).
+    state["target_triage_item_stamps"] = {str(n): int(now) for n in items}
+    return before != state["target_triage_item_stamps"]
+
+
 def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> dict | None:
     if not signal_is_cooled(state, sig, now):
         return None
@@ -3046,9 +3165,37 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
         return None
     if sig == "sweep_target":
-        if _signal_present(state, events, "needs_triage_target"):
-            return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
-        return None
+        # Coarse presence gate (issue #3709): the Target board has needs-triage
+        # items at all. This boolean stays TRUE even when every item is inside
+        # its per-item backoff window below (INV-3) — the raw label count does
+        # not change, only the per-item eligibility does.
+        if not _signal_present(state, events, "needs_triage_target"):
+            return None
+        # Per-item verdict-stability guard (issue #3729). Successive sweeps at
+        # the 900s class cooldown reached mutually contradictory verdicts on the
+        # same date-gated items (the evidence: #631 took 10 label events in 28h,
+        # #626 took 12 in 36h). The class-level cooldown (checked above) stays a
+        # necessary condition (INV-1); this is an ADDITIONAL, independent,
+        # AND-composed condition. sweep_target fires iff >=1 item in the current
+        # turn's needs-triage set is eligible (no stamp, or a stamp older than
+        # the per-item backoff window). On fire, every item in the CURRENT set is
+        # stamped so the whole lane's clock resets uniformly, and stamps for
+        # items no longer in the set are pruned (INV-4/INV-5).
+        items = _target_triage_item_set(state, events)
+        if items:
+            stamps = _target_triage_stamps(state)
+            if not any(_triage_item_eligible(stamps.get(n, 0), now) for n in items):
+                # Every current item was checked inside its backoff window →
+                # suppress this turn. needs_triage_target stays true (INV-3);
+                # the lane re-opens for re-examination as each item's window
+                # elapses.
+                return None
+            _stamp_target_triage_items(state, items, now)
+        # `items` absent/empty (no per-item fact this turn — a degraded board
+        # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean alone,
+        # preserving the pre-#3729 behaviour so a transient wiring gap never
+        # dead-arms sweep_target (the #3709 defect class).
+        return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
     if sig == "discover_orch":
         # Issue #959 (epic #958): revived. discover_orch keyed off `orch_idle`,
         # a signal collect-state.sh never emitted, so the arm was DEAD. It now
@@ -4250,6 +4397,14 @@ def main(argv: list[str]) -> int:
         force_counter_before = json.dumps(
             state.get("research_force_counter"), sort_keys=True,
         )
+        # Issue #3729: same change-detection for the per-item sweep_target stamp
+        # map. `_stamp_target_triage_items` rebuilds `target_triage_item_stamps`
+        # in place (pruning absent items) when sweep_target fires with a present
+        # item set; snapshot-before/compare-after persists it via the SAME
+        # _persist_state_writeback helper, no new persistence mechanism.
+        triage_stamps_before = json.dumps(
+            state.get("target_triage_item_stamps"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -4268,6 +4423,13 @@ def main(argv: list[str]) -> int:
             # reboot (which wipes the /tmp state file) can reseed it. Same
             # force-counter-changed gate → fires once per stamping turn.
             _mirror_research_force_counter_to_redis(state)
+        triage_stamps_after = json.dumps(
+            state.get("target_triage_item_stamps"), sort_keys=True,
+        )
+        if triage_stamps_after != triage_stamps_before:
+            _persist_state_writeback(
+                argv[2], state, what="target_triage_item_stamps stamp (#3729)",
+            )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
         # per-class cadence multiplier decide.py WOULD apply in a future live

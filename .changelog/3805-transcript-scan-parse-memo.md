@@ -1,0 +1,1 @@
+- perf: cache per-file transcript parses across scans so the usage tracker stops re-reading unchanged 7-day-window files on every cold call (#3805)

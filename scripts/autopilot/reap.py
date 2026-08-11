@@ -47,6 +47,19 @@ State writes happen in place to /tmp/hydra-autopilot-state.json (override
 via HYDRA_AUTOPILOT_STATE). Run-log writes go to
 /tmp/hydra-autopilot-nightly.log (override via HYDRA_AUTOPILOT_LOG).
 
+WARNING (issue #3895): the default state path is a SHARED, unlocked file —
+every process on the box, including a dispatched agent correctly isolated
+in its own git worktree, writes the SAME /tmp/hydra-autopilot-state.json
+unless it exports HYDRA_AUTOPILOT_STATE. Never invoke `reap.py` ad-hoc
+(manual exploration/testing of the autopilot's own mechanics) against the
+default path — a live control-loop run may be depending on it right now.
+Always pass an explicit `HYDRA_AUTOPILOT_STATE=/tmp/some-scratch-path.json`
+when experimenting. `run_completion`'s `task_id` cross-check (below) is a
+backstop against a mismatched completion corrupting an occupied slot, but
+it cannot protect fields a stray call is allowed to touch legitimately
+(e.g. a genuinely-matching task_id) — isolation via the env override is
+the real fix.
+
 Exit code is always 0 — failure to file a GitHub issue is logged but
 not fatal.
 """
@@ -1233,7 +1246,7 @@ def run_hardcap() -> int:
     return 0
 
 
-def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None) -> int:
+def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None, last_segment_tokens: int | None = None) -> int:
     """`completion` mode: idempotent token accounting keyed by task_id.
 
     Applies uniformly to BOTH kinds of dispatched class (issue #432):
@@ -1252,9 +1265,16 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     First call for a given task_id (either kind):
       - Appends task_id to state.reaped_task_ids (FIFO, bounded to 1000).
       - Adds total_tokens to state.cumulative_tokens.
-      - If total_tokens >= limits.subagent_max_tokens, appends <cls> to
-        state.burned_classes (soft-cap, suppresses re-dispatch this
-        session) — for both pipeline AND signal classes.
+      - If the soft-cap comparison value >= limits.subagent_max_tokens,
+        appends <cls> to state.burned_classes (soft-cap, suppresses
+        re-dispatch this session) — for both pipeline AND signal classes.
+        The comparison value is last_segment_tokens when supplied (issue
+        #3839 — a resumed dispatch sums its segments into one call, but the
+        cap bounds ONE subagent, so it is measured against the LATEST
+        segment, not the summed cumulative total), else total_tokens (the
+        legacy single-segment path — byte-for-byte for every call site that
+        omits the new argument). Cost accounting always uses the true sum
+        total_tokens; only the CAP COMPARISON honours last_segment_tokens.
       - For pipeline classes: records slots[<cls>].tokens = total_tokens,
         then clears slots[<cls>] = null.
       - For signal classes: no slot mutation. The signal cooldown lives
@@ -1274,6 +1294,17 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     pipeline-specific step. Regression-tested in
     `test/autopilot-decide.test.mts` (signal-completion suite) and
     `test/autopilot-dedup-reap.test.mts` (signal-class burn case).
+
+    Issue #3895: BEFORE any of the above mutation happens, a pipeline
+    class's OCCUPIED slot is cross-checked against the passed `task_id`. If
+    the slot's stamped `task_id` disagrees, the entire completion is
+    refused (zero state mutation, zero downstream fires) and a
+    `task_id_mismatch_refused` line is logged — see the guard immediately
+    after the dup-check below. This closes the corruption path a stray/
+    manual invocation against the shared default state path exploited: an
+    unrelated fabricated task_id previously cleared the REAL occupant's
+    slot, inflated `cumulative_tokens`, and could falsely burn the class.
+    Regression-tested in `test/autopilot-reap-task-id-mismatch.test.mts`.
     """
     s = _load_state()
     if s is None:
@@ -1288,6 +1319,46 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         _append_log(msg)
         # No state mutation on dup.
         return 0
+
+    # Issue #3895: refuse the ENTIRE completion — before any state mutation —
+    # when the passed task_id disagrees with an OCCUPIED pipeline slot's
+    # stamped occupant. `state.slots[<cls>]` is the single source of truth
+    # for "which dispatch owns this class right now" (task_id/skill/
+    # started_epoch/branch, stamped by the dispatch harness at dispatch
+    # time). Before this guard, a stray/manual/mistyped `reap.py completion`
+    # invocation against the SHARED default state path (no isolation, no
+    # locking) was trusted at face value: it cleared a genuinely in-flight
+    # dev_orch slot, inflated cumulative_tokens by a fabricated tokens
+    # figure, and could falsely soft-cap-burn the class for the rest of the
+    # run — all from a task_id that never corresponded to a real dispatch
+    # (the incident this issue documents: run 8f86ef9b, 2026-08-06).
+    #
+    # Only pipeline classes have a slot to protect — `slots.get(cls)` is
+    # always None/absent for signal classes (health/sweep_orch/discover_*/
+    # ...), so this check is a no-op for them, matching the existing
+    # "no slot to clear" design. An EMPTY slot (None — already cleared, or
+    # never occupied) has no occupant to protect either: that is the
+    # legitimate "hard-cap already fired" / late-arriving-completion case
+    # the docstring above already documents, so it is NOT refused here.
+    # Only an OCCUPIED slot (a dict) whose stamped `task_id` DISAGREES with
+    # the passed task_id is refused. A slot with no stamped task_id (older/
+    # partial state) fails OPEN — a missing field can't prove a mismatch, so
+    # we never block a legitimate completion on absent metadata.
+    slots_probe = s.get("slots") or {}
+    slot_probe = slots_probe.get(cls)
+    if isinstance(slot_probe, dict):
+        occupant_task_id = slot_probe.get("task_id")
+        if occupant_task_id and occupant_task_id != task_id:
+            msg = (
+                f"task_id_mismatch_refused class={cls} skill={skill or '?'} "
+                f"passed_task_id={task_id} slot_task_id={occupant_task_id} "
+                f"tokens={total_tokens} — refusing to mutate state; the "
+                f"slot's real occupant does not match the passed task_id "
+                f"(cue: reap-task-id-mismatch)"
+            )
+            print(f"[autopilot] WARN {msg}", file=sys.stderr)
+            _append_log(msg)
+            return 0
 
     # First reap for this task_id. Append BEFORE token accounting so a
     # crash mid-update doesn't leave us double-counting on retry.
@@ -1323,7 +1394,35 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # written before subagent_max_tokens existed don't crash the reap.
     limits = s.get("limits") or {}
     soft = int(limits.get("subagent_max_tokens", 0)) or None
-    if soft is not None and total_tokens >= soft and cls not in s.get("burned_classes", []):
+    # Issue #3839: the soft cap bounds ONE subagent — "a single misbehaving
+    # subagent", per this function's own framing. A RESUMED dispatch (the
+    # prescribed recovery for the documented stall-on-backgrounded-tests mode)
+    # sums its per-segment counts into this one call, so capping the SUM would
+    # punish the correct recovery and invert the incentive: resuming preserves
+    # committed work but risks burning the class, while re-dispatching
+    # duplicates work yet starts a fresh token budget. When the caller supplies
+    # the LATEST segment's token count (last_segment_tokens), cap against THAT
+    # segment (the faithful "one subagent" bound — the most recent unit of
+    # work); otherwise cap against total_tokens as before, so a genuine
+    # single-segment runaway still burns exactly as today.
+    #
+    # The `is not None` check is load-bearing (design-concept #3839 INV-4): a
+    # legitimately zero-token final segment (0) is a real value that must
+    # compare as 0 >= soft (False), NOT silently fall back to the cumulative
+    # sum — a bare truthiness check (`if last_segment_tokens:`) would treat 0
+    # as falsy and wrongly compare the full total instead.
+    #
+    # `soft_cap_hit` is computed ONCE here and threaded into the burn append,
+    # the cycle-record status, and `_fire_reflection_for_completion` below — so
+    # correcting this single comparison fixes class-burn, cycle status, and
+    # reflection classification together (design-concept #3839 INV-6). Cost
+    # accounting — cumulative_tokens above, slot.tokens below, and the
+    # cycle/token records downstream — ALWAYS uses the true sum total_tokens;
+    # this is the CAP COMPARISON only, never spend under-reporting (criterion 4).
+    cap_check_value = last_segment_tokens if last_segment_tokens is not None else total_tokens
+    soft_cap_hit = soft is not None and cap_check_value >= soft
+    status = "failed" if soft_cap_hit else "completed"
+    if soft_cap_hit and cls not in s.get("burned_classes", []):
         s.setdefault("burned_classes", []).append(cls)
 
     # Pipeline-only slot bookkeeping. The slot may already be cleared
@@ -1447,11 +1546,19 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
         print(f"[autopilot] WARN {warn_msg}", file=sys.stderr)
         _append_log(f"WARN {warn_msg}")
 
+    # Issue #3839: stamp the classified outcome onto the run-log line, and —
+    # when the caller supplied a latest-segment count — that value, so an
+    # operator reading the log can distinguish a per-segment cap applied to a
+    # (healthy) resumed dispatch from a genuine single-segment runaway. Both
+    # fields are appended (the line grew additively over prior issues);
+    # existing key=value parsers tolerate the trailing fields.
+    last_seg_field = f" last_seg={last_segment_tokens}" if last_segment_tokens is not None else ""
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "
         f"tokens={total_tokens} cumulative={s['cumulative_tokens']} "
         f"duration_ms={duration_ms} task_title={anchor_ref or ''} "
-        f"refl_sources={reflection_sources or ''} refl_presence={reflection_presence}"
+        f"refl_sources={reflection_sources or ''} "
+        f"refl_presence={reflection_presence} status={status}{last_seg_field}"
     )
     print(f"[autopilot] {line}")
     _append_log(line)
@@ -1462,8 +1569,9 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # abandon until later (the auto-merge action handler bumps it via the
     # idempotent endpoint with status=merged). For runaway/burned reaps
     # we tag the cycle as "failed" so the cycles-failed counter ticks.
-    soft_cap_hit = soft is not None and total_tokens >= soft
-    status = "failed" if soft_cap_hit else "completed"
+    # `soft_cap_hit` / `status` are computed once, above, from cap_check_value
+    # (last_segment_tokens when supplied, else total_tokens) so the burn
+    # decision and this cycle-record status stay in lock-step (issue #3839).
     # Issue #2012: forward the anchor reference recovered from the slot (e.g.
     # "issue-2012") as the cycle's task_title + anchor_ref. Before this, reap
     # hardcoded both to "" on every merge, so successful named-issue cycles
@@ -1562,21 +1670,47 @@ def main(argv: list[str]) -> int:
     sub = argv[1]
     if sub == "completion":
         # Usage: reap.py completion <class> <task_id> <total_tokens> [skill]
-        if len(argv) < 5:
+        #                            [last_segment_tokens]
+        # Issue #3839: last_segment_tokens is an OPTIONAL trailing positional
+        # carrying the LATEST segment's token count for a RESUMED dispatch
+        # (whose per-segment counts are summed into total_tokens for this one
+        # call). When supplied, the soft cap is applied to that single latest
+        # segment rather than the summed cumulative total — the cap bounds ONE
+        # subagent (the most recent unit of work), not one dispatch's recovery
+        # history. Omitted → the legacy cap-against-total path, byte-for-byte.
+        # Trailing after [skill], so every existing ≤5-arg invocation parses
+        # and behaves identically (a pure additive extend — design-concept #3839).
+        args = argv[2:]
+        if len(args) < 3:
             print(
-                "[autopilot] reap completion usage: completion <class> <task_id> <total_tokens> [skill]",
+                "[autopilot] reap completion usage: completion <class> <task_id> "
+                "<total_tokens> [skill] [last_segment_tokens]",
                 file=sys.stderr,
             )
             return 0
-        cls = argv[2]
-        task_id = argv[3]
+        cls = args[0]
+        task_id = args[1]
         try:
-            total_tokens = int(argv[4])
+            total_tokens = int(args[2])
         except ValueError:
-            print(f"[autopilot] reap completion: invalid total_tokens={argv[4]!r}", file=sys.stderr)
+            print(f"[autopilot] reap completion: invalid total_tokens={args[2]!r}", file=sys.stderr)
             return 0
-        skill = argv[5] if len(argv) > 5 else None
-        return run_completion(cls, task_id, total_tokens, skill)
+        skill = args[3] if len(args) > 3 else None
+        last_segment_tokens: int | None = None
+        if len(args) > 4:
+            try:
+                last_segment_tokens = int(args[4])
+            except ValueError:
+                # FAIL-SAFE: a non-numeric latest-segment value cannot be
+                # trusted, so treat it as omitted (cap falls back to the
+                # cumulative total) rather than risking a silent under-cap.
+                print(
+                    f"[autopilot] reap completion: invalid "
+                    f"last_segment_tokens={args[4]!r}; capping against total_tokens",
+                    file=sys.stderr,
+                )
+                last_segment_tokens = None
+        return run_completion(cls, task_id, total_tokens, skill, last_segment_tokens=last_segment_tokens)
 
     if sub == "grill-crash":
         # Usage: reap.py grill-crash <task_id>
