@@ -514,6 +514,51 @@ DAILY_SPEND_CAP_USD_DEFAULT = 50.0
 # a clean no-op, so legacy state shapes keep today's behaviour.
 PER_CYCLE_COST_CAP_USD_DEFAULT = 25.0
 
+# Periodic session-restart cadence (issue #3787, filed from research #3750):
+# `hydra-autopilot` runs as one long-lived Claude Code session per run, and
+# prompt caching re-reads the ENTIRE prior transcript on every turn — so
+# `cache_read_input_tokens` grows roughly linearly with turn count within a
+# run even though none of that growth is load-bearing: every turn's
+# genuinely-new content (the small collect-state.sh / decide.py JSON outputs)
+# is already externalized to state.json/Redis every turn (the cycle-record
+# write), so the model is re-paying to re-read content it already acted on.
+# A sampled run (245 API calls, ~85min) went 56,739 -> 214,414 cache-read
+# tokens/call, ~3.8x growth, ~33M cache-read tokens total.
+#
+# `_check_termination` fires a NEW terminate cause (`context_compaction`)
+# every N **Autopilot Turns** (one `decide.py decide` invocation = one
+# `state.turn` increment, issue #1769), reusing the exact same terminate ->
+# drain.sh -> Phase 7 -> pace-gate-relaunch path the `budget` / `wall_clock` /
+# `idle` / `failure_backstop` causes already use — no new relaunch machinery,
+# no new in-flight-dispatch bookkeeping: the next pace-gate-launched run
+# already re-seeds occupied pipeline slots from the live
+# `/api/autopilot/inflight-slots` ledger (issue #1352) regardless of which
+# cause ended the prior run, so a periodic restart is exactly as safe for
+# in-flight worktree agents (separately dispatched processes, not
+# conversational turns) as every other terminate cause already is.
+#
+# UNIT CORRECTION vs the issue's literal figure (design-concept artifact for
+# #3787): the issue's modeled-savings table ("restart every 30/50/80/120
+# turns") was computed directly over the sampled transcript's 245 RAW
+# Anthropic API calls, not over `state.turn` — no raw-API-call counter exists
+# anywhere in state.json/decide.py's inputs, and that same sampled transcript
+# shows only ~20 `decide.py decide` invocations across those 245 calls
+# (~12.25 raw calls per Autopilot Turn). Copying "80-120" verbatim onto
+# `state.turn` would almost never fire (~20 turns is the sampled run's ENTIRE
+# 85-minute life). Rescaling the issue's own "toward the conservative
+# (80-120) end" instruction by that ~12.25x ratio lands at ~6.5-10 Autopilot
+# Turns; the shipped default is 8.
+#
+# Operators tune the cadence via `state.limits.context_compaction_turns`
+# (mirrored by `HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS` at bootstrap); 0 (or
+# any non-positive / unparseable value) disables the periodic restart
+# entirely — budget/wall_clock/idle/failure_backstop still apply. Deliberately
+# NOT gated on `slots_occupied == 0` (unlike `idle`): a busy, dispatch-heavy
+# run is exactly the scenario accumulating the most cache-read growth, so
+# gating on idle slots would make this cause fire only where `idle` already
+# does.
+CONTEXT_COMPACTION_TURNS_DEFAULT = 8
+
 # Per-run cap on how many wire-or-retire items the resolver may advance
 # (design concept for #2722, epic #2720): "At most 2 items resolved per run,
 # oldest-first." Threaded into `prompt_args.max_items` on every
@@ -3865,6 +3910,34 @@ def _check_termination(state: dict, now: int) -> dict | None:
                 merged_prs=merged_prs,
                 reason=f"5x consecutive {last_pattern}",
             )
+
+    # Periodic session-restart (issue #3787) — checked LAST among the
+    # terminate causes so a genuinely urgent condition above (budget /
+    # wall_clock / idle / failure_backstop) is always reported under its own,
+    # more diagnostic cause first; this is a soft, proactive cadence, not a
+    # backstop. See CONTEXT_COMPACTION_TURNS_DEFAULT for the full rationale
+    # (including the raw-API-call vs Autopilot-Turn unit correction). `turn`
+    # is the CLI's #1769 single-writer counter (bumped before decide() runs),
+    # so `turn=N` means this is exactly the Nth decide invocation of the
+    # current run. Deliberately NOT gated on `occupied == 0` — see the
+    # constant's docstring.
+    try:
+        compaction_turns = int(
+            limits.get(
+                "context_compaction_turns",
+                CONTEXT_COMPACTION_TURNS_DEFAULT,
+            )
+        )
+    except (TypeError, ValueError):
+        compaction_turns = CONTEXT_COMPACTION_TURNS_DEFAULT
+    turn = int(state.get("turn", 0) or 0)
+    if compaction_turns > 0 and turn > 0 and turn % compaction_turns == 0:
+        return make_terminate(
+            "context_compaction",
+            merged_prs=merged_prs,
+            reason=f"turn={turn} (cadence={compaction_turns})",
+        )
+
     return None
 
 
