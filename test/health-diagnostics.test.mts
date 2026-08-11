@@ -822,7 +822,6 @@ describe("parseProbes", () => {
     // Issue #3459: queueDepth + backlogCounts removed from SettledByKey.
     const settled = {
       basicHealth: fv({ status: "ok", redis: true, cycle: "idle", uptime: 42 }),
-      serviceProbes: fv({ vikingdb: { status: "running" }, openviking: { status: "running" } }),
       scheduler: fv({ running: true, consecutiveErrors: 2 }),
       metrics: fv({ trend: [], stats: {} }),
       disk: fv(disk),
@@ -832,11 +831,8 @@ describe("parseProbes", () => {
       sysdTargetWeb: fv("inactive"),
       patterns: fv({ planner: 5, executor: 3, skeptic: 1 }),
       reflections: fv(12),
-      ovSearch: fv({ status: "running", latencyMs: 100, resultCount: 4 }),
       redisInfo: fv({ memoryHuman: "512M", connectedClients: 3, uptimeSeconds: 900 }),
       emergencyBrake: fv({ engaged: true, since: 1234 }),
-      ovSearchWindow: fv([{ hour: 0, count: 5 }]),
-      knowledgeContext: fv({ available: 0.95 }),
     };
 
     const probeInputs = assembleProbeInputs(settled);
