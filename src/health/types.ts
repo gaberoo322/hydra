@@ -36,15 +36,6 @@
 // stays imported in diagnostics.ts (it is logic); only its report TYPE lives
 // on the snapshot vocabulary here.
 import type { ReflectionHealthReport } from "../metrics/reflection-health.ts";
-// Issue #2023: HealthSnapshot.ovSearch.status names the OV-search probe's result
-// vocabulary, owned by the ServiceProbe Adapter Seam. (The Tailnet Ollama VLM
-// host probe result that HealthSnapshot once carried was retired at the VLM
-// cutover, #3544.)
-import type { OvSearchProbeStatus } from "./probe.ts";
-// Issue #2386: HealthSnapshot.skillCatalog carries the in-process OV
-// skill-registration state so the two skill-catalog rules read it FROM the
-// snapshot rather than calling getSkillCatalogState() out-of-band.
-import type { SkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // Issue #2805: HealthSnapshot.darkOutcomes carries the dark leading-outcome
 // verdicts (name + producerHint + metric file path) the wiring-liveness
 // dark-outcome check produces, so the deep-health dark-outcome rule is a pure
@@ -125,12 +116,6 @@ export interface HealthSnapshot {
   // operators look — closing the discoverability gap that kept re-filing this as
   // a phantom bug (#1912→#2450→#2467→#2492).
   reflectionHealth: ReflectionHealthReport;
-  // Issue #2386: the in-process OV skill-registration state (registered/total/
-  // completed/skills/vlmDeferred), read live at fan-out time and carried here so
-  // the two skill-catalog rules are pure over the snapshot — "what state did the
-  // rules read?" is answerable from HealthSnapshot alone. Joins patterns/reflCount
-  // as the other in-process (non-deep-probe) reads that flow through the pipeline.
-  skillCatalog: SkillCatalogState;
   // Issue #2805: the dark leading-outcome verdicts from the wiring-liveness
   // dark-outcome check, read live at fan-out time and carried here so the
   // deep-health dark-outcome rule is pure over the snapshot. A `dark` verdict
@@ -138,7 +123,6 @@ export interface HealthSnapshot {
   // (success-criterion 2). An empty array is honest-none (no dark outcome, or the
   // check could not run) — the rule no-ops, never a phantom alarm.
   darkOutcomes: OutcomeVerdict[];
-  ovSearch: { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number };
   redisInfo: {
     memoryHuman: string;
     connectedClients: number;
@@ -254,28 +238,14 @@ export interface ProbeInputs {
   // coalesces to 0 (honest-none: the rule sees "empty", never a phantom populated
   // ledger). Pairs with the deep-health attribution-ledger-dark rule in rules.ts.
   attributionLedgerCount: number | null;
-  // Issue #2386: the in-process OV skill-catalog state, read synchronously at
-  // fan-out time (NOT a Promise.allSettled probe — it is a pure in-memory copy,
-  // never I/O). `| null` so a fan-out that cannot resolve it degrades to the
-  // parseProbes safe default (an un-run, empty catalog → the two skill-catalog
-  // rules no-op) exactly as a rejected async probe would.
-  skillCatalog: HealthSnapshot["skillCatalog"] | null;
   // Issue #2805: the dark leading-outcome verdicts, read at fan-out time (NOT a
   // Promise.allSettled probe — it is a direct never-throwing chore read like the
   // skill-catalog state). `| null` so a fan-out that cannot resolve it degrades
   // to the parseProbes empty-array default (the dark-outcome rule no-ops),
   // honest-none exactly as a rejected async probe would.
   darkOutcomes: HealthSnapshot["darkOutcomes"] | null;
-  ovSearch: HealthSnapshot["ovSearch"] | null;
   redisInfo: HealthSnapshot["redisInfo"];
   emergencyBrake: HealthSnapshot["emergencyBrake"] | null;
-  // Indices 17/18: consumed by projectHealthDeepResponse for OV quality trends.
-  // projectHealthDeepResponse passes both straight onto the wire as `unknown`
-  // (ovSearchTrend/knowledgeContext) — the persisted-rollup shapes live in the
-  // I/O-layer ov-search-metrics module, so they stay `unknown` here to avoid
-  // importing that producer type into the pure seam.
-  ovSearchWindow: unknown;
-  knowledgeContext: unknown;
 }
 
 // ---- assembleProbeInputs — the pure settled-record → ProbeInputs mapping ----
@@ -306,13 +276,13 @@ export type AsyncProbeKey = Exclude<keyof ProbeInputs, InlineProbeKey>;
 
 /**
  * The `ProbeInputs` fields fed by a direct in-process read (issue #3372):
- * skillCatalog (#2386, sync in-memory copy), darkOutcomes (#2805, async chore read
- * that plucks `.outcomeVerdicts`). Each carries a SEMANTIC honest-none `fallback`
- * (empty catalog / []) — which is why they are inline descriptors rather than
- * async settle-array probes: a rejected async settle coalesces to `null`, losing
- * the meaningful default these reads must preserve.
+ * darkOutcomes (#2805, async chore read that plucks `.outcomeVerdicts`). It
+ * carries a SEMANTIC honest-none `fallback` ([]) — which is why it is an inline
+ * descriptor rather than an async settle-array probe: a rejected async settle
+ * coalesces to `null`, losing the meaningful default this read must preserve.
+ * (The sibling `skillCatalog` inline read, #2386, was removed with OpenViking.)
  */
-export type InlineProbeKey = "skillCatalog" | "darkOutcomes";
+export type InlineProbeKey = "darkOutcomes";
 
 /** A key→settled-result record — the keyed successor to the positional array. */
 export type SettledByKey = Partial<
@@ -337,16 +307,6 @@ export type SettledByKey = Partial<
 // former `null`: both drive the two skill-catalog rules / the dark-outcome rule /
 // the reflection-outcomes rule to their honest-none no-op.
 export const INLINE_FALLBACKS: { [K in InlineProbeKey]: ProbeInputs[K] } = {
-  // Un-run, empty catalog — `completed:false` so both skill-catalog rules no-op.
-  skillCatalog: {
-    skills: [],
-    registered: 0,
-    total: 0,
-    completed: false,
-    lastAttemptAt: null,
-    vlmDeferred: false,
-    skillsDeferred: false,
-  },
   // Empty verdict list — the dark-outcome rule no-ops.
   darkOutcomes: [],
 };
@@ -403,13 +363,9 @@ export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
     reflections: val<ProbeInputs["reflections"]>("reflections"),
     // Issue #3270: attribution ledger LLEN.
     attributionLedgerCount: val<ProbeInputs["attributionLedgerCount"]>("attributionLedgerCount"),
-    ovSearch: val<ProbeInputs["ovSearch"]>("ovSearch"),
     redisInfo: val<ProbeInputs["redisInfo"]>("redisInfo"),
     emergencyBrake: val<ProbeInputs["emergencyBrake"]>("emergencyBrake"),
-    ovSearchWindow: val<ProbeInputs["ovSearchWindow"]>("ovSearchWindow"),
-    knowledgeContext: val<ProbeInputs["knowledgeContext"]>("knowledgeContext"),
-    // Issue #3372: the inline in-process reads (skillCatalog #2386,
-    // darkOutcomes #2805) are seeded from their
+    // Issue #3372: the inline in-process read (darkOutcomes #2805) is seeded from its
     // shared honest-none fallbacks — NOT hardcoded `null` placeholders — and are
     // OVERRIDDEN by collectProbeInputs with the live read. A direct caller of
     // assembleProbeInputs (e.g. the round-trip test) therefore gets the honest-none

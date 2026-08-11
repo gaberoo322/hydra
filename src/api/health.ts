@@ -266,10 +266,11 @@ export function createHealthRouter(eventBus: PingableBus) {
     // src/health/wire.ts (issue #2039: split out of health/diagnostics.ts as the
     // data-OUT leg) — the third leg of the Snapshot pipeline alongside
     // parseProbes/assessHealth (#840). Issue #2089: the handler no longer owns
-    // the fan-out (moved to src/health/fan-out.ts); it forwards the named
-    // probeInputs record, from which the projection reads ovSearchWindow/
-    // knowledgeContext (indices 17/18) that parseProbes does not consume.
-    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt, probeInputs));
+    // the fan-out (moved to src/health/fan-out.ts). The projection took a
+    // `probeInputs` argument only to read the two OV-quality rollups
+    // (ovSearchWindow/knowledgeContext) that parseProbes did not consume; both
+    // were removed with OpenViking, so it now projects from the snapshot alone.
+    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt));
   });
 
   // GET /recommendations (operator action items) was extracted to

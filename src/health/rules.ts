@@ -15,7 +15,6 @@
 // order. Thresholds stay inline in each rule — co-located = locality.
 
 import type { HealthSnapshot, HealthDiagnostic } from "./types.ts";
-import { assessSkillCatalog, assessRegistrationFailureRate } from "./skill-catalog.ts";
 // Issue #3634: the four complex multi-policy rule bodies (embed-backend bespoke,
 // reflection-health, dark-leading-outcomes, attribution-ledger-empty) were
 // extracted into named, individually-testable assessor functions in the sibling
@@ -323,65 +322,9 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: true,
         }
       : null,
-  (s) =>
-    s.ovSearch.status === "running" && s.ovSearch.resultCount === 0
-      ? {
-          severity: "info",
-          component: "intelligence",
-          what: "OV search empty",
-          why: "Service up but index may be empty.",
-          impact: "No knowledge context.",
-          action: "Check indexer",
-          autoRecovery: false,
-        }
-      : null,
-  (s) =>
-    s.ovSearch.status === "failed"
-      ? {
-          severity: "warning",
-          component: "intelligence",
-          what: "OV search failing",
-          why: "Knowledge-plane search probe returned an error (OpenViking up but search 500ing — usually its LLM/embedding backend is down).",
-          impact: "Agents run cycles with empty knowledge context.",
-          action: "Check OpenViking + its LLM/embedding backend (#980).",
-          autoRecovery: false,
-        }
-      : null,
-  // Issue #1781: the search transport never reached OpenViking — distinct from a
-  // 5xx (`failed`) and from a slow plane (`timeout`). The `search/find` path is
-  // what exercises the embedding backend, so a transport failure here points at
-  // the dense-embedding service (post-#1795 the local `ollama-embed` container)
-  // or, for indexing, the Tailnet VLM host — NOT at OpenViking itself. Surface a
-  // distinct, actionable warning so the operator checks the right hop. searchKnowledge
-  // still returns empty (never throws), so this degrades quality, it does not crash cycles.
-  (s) =>
-    s.ovSearch.status === "backend-unreachable"
-      ? {
-          severity: "warning",
-          component: "intelligence",
-          what: "OV embedding backend unreachable",
-          why: "Knowledge-plane search transport never reached OpenViking (DNS/connection-refused/timeout on the embedding-exercising search path). OpenViking may be up while its embedding backend is unreachable.",
-          impact: "Search returns empty — agents run cycles with no knowledge context until the backend recovers.",
-          action: "Check the dense-embedding service: docker exec hydra-openviking-1 curl -m5 http://ollama-embed:11434/api/tags (and the Tailnet VLM host gabes-desktop-1:11434 if indexing). See OpenViking embedding/VLM backend split in docs/reference.md.",
-          autoRecovery: true,
-        }
-      : null,
-  // Issue #1032: a probe TIMEOUT is NOT a fault — the Ollama-backed embedding
-  // path is just slow, and real agent searches (no 3s cap) succeed. Surface it
-  // as info so a slow-but-working plane is visible without folding the top-level
-  // status to `degraded` the way the `failed` warning above does.
-  (s) =>
-    s.ovSearch.status === "timeout"
-      ? {
-          severity: "info",
-          component: "intelligence",
-          what: "OV search slow",
-          why: "Search probe exceeded its deep-health timeout but did not error — the Ollama-backed embedding path (nomic-embed over Tailscale, #980) is slow, not down. Real agent searches have no such cap and succeed.",
-          impact: "None on agents; the deep-health probe latency is just high.",
-          action: "Monitor; raise OV_SEARCH_PROBE_TIMEOUT_MS if it persists.",
-          autoRecovery: true,
-        }
-      : null,
+  // The five OV-search rules (empty #—, failing, backend-unreachable #1781,
+  // slow #1032) were removed with OpenViking: they all read
+  // `HealthSnapshot.ovSearch`, which the retired search probe populated.
   // Issue #2492: surface the reflection-deposit-health verdict through the
   // deep-health fold so an operator checking /api/health/deep sees it where they
   // look — closing the discoverability gap that kept re-filing a NON-bug
@@ -423,27 +366,10 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // itself fails (honest-none, never a phantom alarm).
   // Issue #3634: body extracted to assessAttributionLedger in assessors.ts.
   (s) => assessAttributionLedger(s.attributionLedgerCount),
-    // Issue #1968: surface the silent empty/partial OV skill catalog through the
-  // deep-health Health Assessment fold so an operator watching /api/health/deep
-  // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a
-  // supplementary detail view, but only this rule folds the failure into the
-  // top-level `status` and `diagnostics` array. Issue #2386: the catalog state
-  // now arrives ON the snapshot (`s.skillCatalog`, assembled at fan-out time),
-  // so this rule is pure over its `s` argument like every other rule — no more
-  // out-of-band getSkillCatalogState() read. assessSkillCatalog already maps
-  // empty → severity:"error", partial → severity:"warning", and ok/in-flight →
-  // diagnostic:null, so this rule is a thin pass-through of that gate's diagnostic.
-  (s) => assessSkillCatalog(s.skillCatalog).diagnostic,
-  // Issue #2277: the registration-FAILURE-RATE alert. Distinct from the
-  // population gate above (empty/partial): this reads the last completed pass's
-  // failure rate from `s.skillCatalog` (issue #2386 — sourced from the snapshot,
-  // not a live getSkillCatalogState() read). It fires a `warning` when the failure
-  // rate exceeds 10% and points at OpenViking load + the ollama-recovery playbook.
-  // `warning` (not `error`) so it ANNOTATES the population verdict without
-  // escalating the deep-health fold above it. Read-only: it adds no export to
-  // skill-registration and never mutates state. (Issue #3544: the Ollama VLM
-  // liveness correlation was retired at the VLM cutover — see the rule body.)
-  (s) => assessRegistrationFailureRate(s.skillCatalog),
+  // The two OV skill-catalog rules — the #1968 empty/partial population gate and
+  // the #2277 registration-failure-rate alert — were removed with OpenViking.
+  // Both read `HealthSnapshot.skillCatalog`, the in-process state of skill
+  // registration against OV's resource catalog.
 ];
 
 // ---- fmtUp — uptime humanizer shared by assessHealth + the wire projection -

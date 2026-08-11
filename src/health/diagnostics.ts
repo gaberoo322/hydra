@@ -212,26 +212,10 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   // probe not yet running) to 0 so the rule sees "empty", never a phantom populated
   // ledger. Honest-zero: the probe itself already returns 0 on Redis error.
   const attributionLedgerCount = probes.attributionLedgerCount ?? 0;
-  // Issue #2386: a null skillCatalog (the fan-out could not resolve the live
-  // read) defaults to an un-run, empty catalog — `completed:false` so both
-  // skill-catalog rules (assessSkillCatalog / assessRegistrationFailureRate)
-  // no-op, exactly the "registration still in flight / no pass yet" framing
-  // they already treat as a non-alarm. This is honest-none, never a phantom
-  // populated catalog.
-  const skillCatalog: HealthSnapshot["skillCatalog"] = probes.skillCatalog || {
-    skills: [],
-    registered: 0,
-    total: 0,
-    completed: false,
-    lastAttemptAt: null,
-    vlmDeferred: false,
-    skillsDeferred: false,
-  };
   // Issue #2805: a null darkOutcomes (the fan-out could not run the dark-outcome
   // check) defaults to an empty array — honest-none, the dark-outcome rule
   // no-ops. Never a phantom populated verdict.
   const darkOutcomes = probes.darkOutcomes || [];
-  const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
   const redisInfo = probes.redisInfo ?? null;
   // Issue #744: emergency-brake state. Fail-safe to disengaged if the read
   // rejected (probes.emergencyBrake === null) so a Redis blip never reports a phantom brake.
@@ -267,9 +251,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     reflCount,
     attributionLedgerCount,
     reflectionHealth,
-    skillCatalog,
     darkOutcomes,
-    ovSearch,
     redisInfo,
     emergencyBrake,
     disk,

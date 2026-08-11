@@ -52,21 +52,13 @@ import { countReflectionKeys } from "../redis/reflections.ts";
 // surfaces ledger-dark state to the deep-health rule without fetching all rows.
 import { getLedgerLen } from "../redis/attribution-ledger.ts";
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
-import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
-import { ovPostJson } from "../knowledge-base/ov-request.ts";
-// Issue #2386: the live in-process skill-catalog read. The fan-out is the I/O
-// owner that resolves every probe input, so this synchronous in-memory read now
-// happens HERE (next to the other probe reads) and is carried onto the snapshot
-// via ProbeInputs.skillCatalog — rules.ts no longer reads it out-of-band.
-import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
-// Issue #2805: the live dark leading-outcome check. Like the skill-catalog read
-// above, this is a direct never-throwing read (not a Promise.allSettled probe),
+// Issue #2805: the live dark leading-outcome check. This is a direct
+// never-throwing read (not a Promise.allSettled probe),
 // so it runs in the fan-out I/O owner and is carried onto the snapshot via
 // ProbeInputs.darkOutcomes — the deep-health dark-outcome rule then reads it from
 // the snapshot, staying pure. `evaluateDarkOutcomes` is contractually never-throw.
 import { evaluateDarkOutcomes } from "../scheduler/chores/wiring-liveness-outcomes.ts";
-import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
 import { parseRedisInfoSnapshot } from "./diagnostics.ts";
 // Issue #3230: the ProbeInputs named-record type comes from the zero-logic leaf.
 // Issue #3393: the pure settled-record → ProbeInputs mapping (assembleProbeInputs)
@@ -230,21 +222,7 @@ export interface CollectProbeDeps {
   /** Issue #3270: ledger LLEN probe (default: getLedgerLen). Best-effort — returns 0 on error. */
   attributionLedgerLen?: typeof getLedgerLen;
   emergencyBrake?: typeof getEmergencyBrake;
-  ovSearchWindow?: typeof getOvSearchWindow;
-  knowledgeContextAvailability?: typeof getKnowledgeContextAvailability;
   redisInfoImpl?: typeof getRedisInfo;
-  ovPostJsonImpl?: typeof ovPostJson;
-  probeServiceImpl?: typeof probeService;
-  probeOvImpl?: typeof probeOv;
-  probeEmbedBackendImpl?: typeof probeEmbedBackend;
-  /**
-   * Issue #2386: the in-process OV skill-catalog read (default: the real
-   * getSkillCatalogState). A synchronous, never-throwing in-memory copy — NOT a
-   * Promise.allSettled probe — so the full fan-out pipeline (and therefore the
-   * two skill-catalog rules downstream) is testable with an injected catalog
-   * state, no module-singleton reset and no registerSkills lifecycle dependency.
-   */
-  skillCatalogState?: typeof getSkillCatalogState;
   /**
    * Issue #2805: the live dark leading-outcome check (default: the real
    * evaluateDarkOutcomes). A never-throwing read — NOT a Promise.allSettled probe
@@ -276,19 +254,9 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     reflectionKeys = countReflectionKeys,
     attributionLedgerLen = getLedgerLen,
     emergencyBrake = getEmergencyBrake,
-    ovSearchWindow = getOvSearchWindow,
-    knowledgeContextAvailability = getKnowledgeContextAvailability,
     redisInfoImpl = getRedisInfo,
-    ovPostJsonImpl = ovPostJson,
-    probeServiceImpl = probeService,
-    probeOvImpl = probeOv,
-    probeEmbedBackendImpl = probeEmbedBackend,
-    skillCatalogState = getSkillCatalogState,
     darkOutcomesEval = evaluateDarkOutcomes,
     targetServiceName = getTargetServiceName,
-    // Issue #3626: the embed-backend WakeGate no longer flows through here — the
-    // WoL recovery moved out of the fan-out to an explicit post-assembly step in
-    // the GET /health/deep caller (applyEmbedBackendRecovery, src/health/wol.ts).
   } = deps;
 
   // Issue #3263/#3372: the unified probe registry — the SINGLE source of the
@@ -315,35 +283,10 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
         return { status: killed ? "killed" : "ok", redis: redisOk, cycle: "idle", uptime: process.uptime() };
       },
     },
-    {
-      kind: "async",
-      key: "serviceProbes",
-      run: async () => {
-        // Issue #1324: probe/probeOv are the shared module-level helpers
-        // probeService()/probeOv() (see /health/services) — same classification,
-        // one place, unit-tested. vikingdb stays an inline probe (not an OpenViking
-        // boundary); openviking routes through the OV Request Adapter (#954,
-        // resolves OPENVIKING_URL — no hardcoded localhost:1933). openai-proxy
-        // diagnostic removed in PR-3 (issue #383).
-        // Issue #2013: a DISTINCT embed-backend key samples OV's dense-embedding
-        // backend (ollama-embed) via the embedding-exercising search/find transport
-        // through the OV Request Adapter. The svcProbes map is keyed (post-#1869),
-        // so this is an ADDED key — vikingdb/openviking unchanged.
-        const [vikingdb, ov, embedBackend] = await Promise.all([
-          probeServiceImpl("http://localhost:5000/health"),
-          probeOvImpl(),
-          probeEmbedBackendImpl(),
-        ]);
-        // Issue #3626: this descriptor is a PURE enumerator — it returns the RAW
-        // embed-backend probe result. The best-effort Wake-on-LAN recovery (#2228)
-        // that used to fire HERE now runs as an explicit post-assembly step
-        // (applyEmbedBackendRecovery, src/health/wol.ts) invoked by the ONE caller,
-        // GET /health/deep. maybeWakeEmbedBackend returns the probe result unchanged
-        // (fire-and-return), so /health/deep output is byte-for-byte identical: the
-        // #2131 down-alert still fires this tick, recovery is observed next tick.
-        return { vikingdb, openviking: ov, "embed-backend": embedBackend };
-      },
-    },
+    // The `serviceProbes` descriptor was removed with OpenViking: every service
+    // it probed (vikingdb, openviking, embed-backend) was part of the OV stack,
+    // so the descriptor had no remaining members. The dashboard service strip
+    // keeps its own orchestrator/redis probes (src/health/strip-probes.ts).
     { kind: "async", key: "scheduler", run: () => schedulerStatus() },
     // Issue #3459: queueDepth + backlogCounts descriptors removed.
     { kind: "async", key: "metrics", run: async () => ({ trend: await metricsTrend(20), stats: await aggregateStats(20) }) },
@@ -375,21 +318,6 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     { kind: "async", key: "attributionLedgerCount", run: () => attributionLedgerLen() },
     {
       kind: "async",
-      key: "ovSearch",
-      run: async () => {
-        // Issue #954: OV search probe via the adapter (resolves OPENVIKING_URL +
-        // auth headers + timeout + JSON unwrap) — no hardcoded localhost:1933, no
-        // inline X-Api-Key. Never throws.
-        // Issue #1032: timeout raised to OV_SEARCH_PROBE_TIMEOUT_MS and the
-        // result→snapshot mapping lives in the pure, unit-tested
-        // classifyOvSearchProbe so timeout vs real-failure is testable.
-        const start = Date.now();
-        const result = await ovPostJsonImpl<any>("/api/v1/search/find", { query: "system health", limit: 3 }, { timeout: OV_SEARCH_PROBE_TIMEOUT_MS });
-        return classifyOvSearchProbe(result, Date.now() - start);
-      },
-    },
-    {
-      kind: "async",
       // I/O only — the raw INFO regex parse lives in the pure
       // parseRedisInfoSnapshot in diagnostics.ts (issue #1856).
       key: "redisInfo",
@@ -401,13 +329,9 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       },
     },
     { kind: "async", key: "emergencyBrake", run: () => emergencyBrake() /* issue #744 */ },
-    // Issue #1440: persisted OV search-quality trend (24h hour-buckets) and
-    // per-day knowledge-context availability (7d). Both degrade to null on a
-    // Redis error so the probe never blocks /health/deep — the projection
-    // coalesces a rejected settle to null. Consumed only by
-    // projectHealthDeepResponse (not parseProbes).
-    { kind: "async", key: "ovSearchWindow", run: () => ovSearchWindow(24) },
-    { kind: "async", key: "knowledgeContext", run: () => knowledgeContextAvailability(7) },
+    // Issue #1440's persisted OV search-quality trend (24h hour-buckets) and
+    // per-day knowledge-context availability (7d) descriptors were removed with
+    // OpenViking — both read rollups written only by the retired OV search path.
     // Issue #3544: the Tailnet Ollama VLM-host liveness probe (`ollamaVlm`, #2278)
     // + its VLM-host Wake-on-LAN wire-up (#2335) were retired at the VLM cutover —
     // OpenViking's VLM backend moved off the gaming-PC Ollama host onto the in-repo
@@ -423,17 +347,8 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     // fan-out. Before #3372 these lived OUTSIDE the registry (an Exclude carve-out
     // + null placeholders in assembleProbeInputs + three bespoke post-fan-out
     // try/catch blocks); now they are ordinary registry entries of `kind:"inline"`.
-    {
-      // Issue #2386: the in-process OV skill-catalog state — a synchronous,
-      // never-throw in-memory copy (the ONLY genuinely-sync read of the three).
-      // parseProbes copies it onto HealthSnapshot.skillCatalog; the two
-      // skill-catalog rules read it from the snapshot, so this fan-out is the
-      // single place the live read happens. `fallback` is the un-run empty catalog.
-      kind: "inline",
-      key: "skillCatalog",
-      run: () => skillCatalogState(),
-      fallback: INLINE_FALLBACKS.skillCatalog,
-    },
+    // Issue #2386's in-process OV skill-catalog descriptor was removed with
+    // OpenViking — the catalog it read was the OV resource registration state.
     {
       // Issue #2805: the dark leading-outcome verdicts — a never-throwing chore
       // read (async) that plucks `.outcomeVerdicts` (the dark verdicts with

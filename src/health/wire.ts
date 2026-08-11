@@ -32,7 +32,6 @@ import type {
   HealthAssessment,
   HealthDiagnostic,
   ServiceProbe,
-  ProbeInputs,
 } from "./types.ts";
 
 // ---- projectHealthDeepResponse — the pure wire-projection ----------------
@@ -146,9 +145,6 @@ export interface HealthDeepResponse {
     // fires only when at least one outcome is dark; this always rides the envelope
     // (empty array when nothing was evaluated).
     darkOutcomes: HealthSnapshot["darkOutcomes"];
-    ovSearch: HealthSnapshot["ovSearch"];
-    ovSearchTrend: unknown;
-    knowledgeContext: unknown;
   };
   diagnostics: HealthDiagnostic[];
 }
@@ -160,18 +156,10 @@ export function projectHealthDeepResponse(
   summary: string,
   activeCycle: unknown,
   checkedAt: string,
-  probes: ProbeInputs,
 ): HealthDeepResponse {
   // Issue #3459: queueDepth + blCounts removed from destructure (no longer on snapshot).
-  const { health, svcProbes, sched, patterns, reflCount, reflectionHealth, darkOutcomes, ovSearch, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  const { health, svcProbes, sched, patterns, reflCount, reflectionHealth, darkOutcomes, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
-
-  // Issue #1440: coalesce the two persisted OV-quality reads.
-  // A rejected settle (Redis error) becomes null — surfaced as absent trend
-  // data, never a 500. parseProbes stops at emergencyBrake, so these arrive
-  // via the ProbeInputs named fields ovSearchWindow/knowledgeContext.
-  const ovSearchWindow = probes.ovSearchWindow ?? null;
-  const ovContextAvailability = probes.knowledgeContext ?? null;
 
   return {
     status, summary, checkedAt,
@@ -200,11 +188,10 @@ export function projectHealthDeepResponse(
     // snapshot's `recent` are for rule guards, not the HTTP envelope.
     pipeline: { recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, killSwitch: health.status === "killed", emergencyBrake },
     infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
-    // Issue #1440: `ovSearch` is the live in-memory snapshot + liveness probe
-    // (resets on restart). `ovSearchTrend` is the restart-surviving 24h
-    // hour-bucketed rollup (zeroResultRate/fallbackSuccessRate trends) and
-    // `knowledgeContext` the 7d per-day context-availability rate.
-    intelligence: { patterns, reflections: reflCount, reflectionHealth, darkOutcomes, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
+    // Issue #1440's three OV-quality fields (`ovSearch` live probe,
+    // `ovSearchTrend` 24h rollup, `knowledgeContext` 7d availability) were
+    // removed from the envelope with OpenViking.
+    intelligence: { patterns, reflections: reflCount, reflectionHealth, darkOutcomes },
     diagnostics,
   };
 }
