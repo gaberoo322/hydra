@@ -21,7 +21,7 @@ import "./OrchestratorMap.css";
  *   - labels             (every label's meaning + who applies it)
  *   - skill edges        (which skill each class invokes)
  * plus an off-by-default "other pieces" annotation layer for the pieces that
- * don't sit on the spine (Redis state, event bus, OpenViking, tiers /
+ * don't sit on the spine (Redis state, event bus, tiers /
  * Verifier-Core, holdback, CI gate).
  *
  * Rendered as hand-rolled SVG + CSS — no new dashboard dependency (ADR-0005 /
@@ -126,7 +126,6 @@ function deriveBranches(spine, edges) {
 const OTHER_PIECES = [
   { name: "Redis state", sourcePath: "src/redis/", note: "typed accessors; state lives here" },
   { name: "Event bus", sourcePath: "src/scheduler/heartbeat.ts", note: "hydra:* streams" },
-  { name: "OpenViking", sourcePath: "docs/reference.md", note: "semantic knowledge plane" },
   { name: "Tiers / Verifier-Core", sourcePath: "src/untouchable.ts", note: "T1→T4 blast radius" },
   { name: "Outcome Holdback", sourcePath: "src/anchor-selection/", note: "T2 post-merge gate" },
   { name: "CI merge gate", sourcePath: ".github/workflows/ci.yml", note: "the merge gate" },

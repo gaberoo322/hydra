@@ -41,7 +41,6 @@ const AGENTS = ["planner", "executor", "skeptic"];
 
 let redis: any;
 let consolidate: () => Promise<void>;
-let initLearning: () => Promise<void>;
 let stopKnowledgeIndexer: () => void;
 
 describe("learning-lifecycle.consolidate (#3238)", () => {
@@ -119,25 +118,3 @@ describe("learning-lifecycle.consolidate (#3238)", () => {
   });
 });
 
-describe("learning-lifecycle.initLearning (#3238)", () => {
-  before(async () => {
-    ({ initLearning } = await import("../src/learning-lifecycle.ts"));
-    ({ stopKnowledgeIndexer } = await import("../src/knowledge-base/indexer.ts"));
-  });
-
-  after(() => {
-    // Tear down the fs watchers + poll interval the boot wrapper starts, so no
-    // handle leaks into a sibling suite. Idempotent (issue #866).
-    stopKnowledgeIndexer();
-  });
-
-  test("resolves without throwing and leaves the indexer in a stoppable state", async () => {
-    // initLearning() fires registerSkills() fire-and-forget (best-effort,
-    // .catch'd), awaits the staleness detector (best-effort), and starts the
-    // background indexer. All three legs degrade gracefully when OpenViking is
-    // unreachable, so the wrapper must resolve without throwing.
-    await assert.doesNotReject(() => initLearning());
-    // Stopping the indexer it started must not throw (idempotent teardown).
-    assert.doesNotThrow(() => stopKnowledgeIndexer());
-  });
-});
