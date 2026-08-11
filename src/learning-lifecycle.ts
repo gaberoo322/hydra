@@ -25,10 +25,6 @@ import {
   consolidateAgentPatterns,
   consolidatePromotedRuleEffectiveness,
 } from "./pattern-memory/index.ts";
-import {
-  countSourceHashes,
-  clearSourceHashes,
-} from "./redis/source-index.ts";
 
 // ===========================================================================
 // Public API — consolidate
