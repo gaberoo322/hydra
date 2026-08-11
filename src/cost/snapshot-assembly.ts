@@ -665,6 +665,7 @@ export function assembleSnapshot(
     linesParsed,
     linesWithUsage,
     parseErrors,
+    filesServedFromMemo,
   } = scan;
 
   const weeklyQuota = getWeeklyQuotaTokens();
@@ -868,6 +869,7 @@ export function assembleSnapshot(
     linesParsed,
     linesWithUsage,
     parseErrors,
+    filesServedFromMemo,
     generatedAt: now.toISOString(),
     cacheHitRatioLast5h: cacheHitRatio(acc5h),
     cacheHitRatioLast7d: cacheHitRatio(acc7d),

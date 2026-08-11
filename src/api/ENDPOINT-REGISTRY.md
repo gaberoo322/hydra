@@ -4,8 +4,14 @@
 > [ADR-0024](../../docs/adr/0024-api-versioning.md)); it introduces no runtime
 > code and changes no behavior.
 
-**As of:** commit `cdb04ab` (origin/master, 2026-06-22)
-**Endpoint count:** 154 routes across 45 router modules
+**As of:** commit `a5cb096` (origin/master, 2026-08-11)
+**Endpoint count:** 138 routes across 47 router modules
+
+> The count fell from 154 (2026-06-22) partly through the OpenViking
+> retirement — ADR-0033 deleted `src/api/openviking.ts` (4 routes) and the
+> three OV-backed `/api/health/*` probe routes — and partly through unrelated
+> churn since. The number above was **measured** with the recipe below, not
+> derived by subtraction.
 
 ## What this is
 
@@ -84,7 +90,7 @@ broad consumers are:
 
 - **Dashboard** (`dashboard/src`): `now/*`, `today/*`, `outcomes/*`,
   `explore/*` (the v2 page routers), `autopilot/runs*`, `usage*`,
-  `recommendations`, `openviking/search`, `health*`.
+  `recommendations`, `health*`.
 - **Skill subagents** (`hydra-dev`, `hydra-qa`, `hydra-autopilot`, …):
   `reflections`, `design-concepts/*`, `tier`, `holdback/*`, `memory/*`,
   `cycle/*`, `metrics/*`, `merge/*`.
@@ -265,9 +271,6 @@ broad consumers are:
 |---|---|---|
 | GET | `/api/health` | stable |
 | GET | `/api/health/deep` | stable |
-| GET | `/api/health/services` | stable |
-| GET | `/api/health/skills` | stable |
-| GET | `/api/health/source-index` | stable |
 
 ### `src/api/holdback.ts`
 
@@ -338,15 +341,6 @@ broad consumers are:
 |---|---|---|
 | GET | `/api/observability/config` | stable |
 | GET | `/api/observability/trace-url` | stable |
-
-### `src/api/openviking.ts`
-
-| Method | Path | Stability |
-|---|---|---|
-| GET | `/api/learning/coverage` | stable |
-| GET | `/api/learning/knowledge` | stable |
-| GET | `/api/openviking-stats` | stable |
-| GET | `/api/openviking/search` | stable |
 
 ### `src/api/operational.ts`
 

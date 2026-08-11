@@ -104,6 +104,7 @@ function snapshotWith(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     linesParsed: 0,
     linesWithUsage: 0,
     parseErrors: 0,
+    filesServedFromMemo: 0,
     generatedAt: "2026-06-02T00:00:00.000Z",
     cacheHitRatioLast5h: 0,
     cacheHitRatioLast7d: 0,

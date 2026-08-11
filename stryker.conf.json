@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-js/master/packages/core/schema/stryker-schema.json",
+  "_comment": "Advisory Stryker mutation scan (tool-scout #3835). COMPARISON-ONLY against the required homegrown gate (src/mutation.ts + scripts/ci/mutation-check.ts) — this file lives in the no-dependency npx lane (ADR-0005): @stryker-mutator/core is invoked through a PINNED `npx --yes -p @stryker-mutator/core@9.6.1` from scripts/ci/stryker-scan.ts, with NO package.json dependency entry (runtime or dev), matching the ast-grep / comby / promptfoo / taze / osv-scanner lane. `mutate` is left EMPTY here on purpose and overridden at runtime via `stryker run --mutate <diff-changed files>` so Stryker only ever mutates the PR's diff-changed src/**/*.ts files (mirroring scripts/ci/mutation-check.ts::filterMutationCandidates, issue #653) — a full-tree run is a regression against #653 and is never acceptable. This config is exercised by the advisory Tier-3 sibling .github/workflows/stryker-check.yml, NEVER by ci.yml, and is NOT a required branch-protection context — a red Stryker run can never block a merge.",
+  "testRunner": "command",
+  "commandRunner": { "command": "npm test" },
+  "coverageAnalysis": "off",
+  "disableTypeChecks": true,
+  "mutate": [],
+  "reporters": ["json"],
+  "reportsDirectory": "reports/stryker-scan",
+  "cleanTempDir": true,
+  "timeoutMS": 120000,
+  "concurrency": 2,
+  "ignoreStatic": true,
+  "allowConsoleColors": false
+}

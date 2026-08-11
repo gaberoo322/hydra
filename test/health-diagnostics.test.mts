@@ -29,9 +29,6 @@ import { projectHealthDeepResponse } from "../src/health/wire.ts";
 // (src/health/fan-out.ts, its #2089 home) so the pure mapping is unit-testable from
 // a SettledByKey fixture without touching the async fan-out.
 import { assembleProbeInputs } from "../src/health/types.ts";
-// Issue #2131: the ServiceProbe Adapter Seam — drive the embed-backend probe
-// end-to-end (probe → rule fold) via its injected `ovPostJsonImpl` seam, no network.
-import { probeEmbedBackend } from "../src/health/probe.ts";
 
 // ---------------------------------------------------------------------------
 // A baseline all-healthy snapshot. Each test clones it and perturbs ONE field
@@ -50,10 +47,6 @@ function healthySnapshot(): HealthSnapshot {
       consecutiveErrors: 0,
       lastError: null,
       lastCycleAt: new Date().toISOString(),
-    },
-    svcProbes: {
-      vikingdb: { status: "running" },
-      openviking: { status: "running" },
     },
     // Issue #3459: queueDepth + blCounts removed from HealthSnapshot.
     patterns: { planner: 4, executor: 6, skeptic: 2 },
@@ -75,20 +68,10 @@ function healthySnapshot(): HealthSnapshot {
     // Issue #2386: a fully-registered skill catalog — both skill-catalog rules
     // (assessSkillCatalog / assessRegistrationFailureRate) no-op, so the baseline
     // "fully-healthy snapshot fires zero diagnostics" assertion holds.
-    skillCatalog: {
-      skills: [],
-      registered: 4,
-      total: 4,
-      completed: true,
-      lastAttemptAt: Date.now(),
-      vlmDeferred: false,
-      skillsDeferred: false,
-    },
     // Issue #2805: no dark leading outcomes by default — the dark-outcome rule
     // fires ONLY when at least one verdict has status "dark", so an empty array
     // keeps the baseline "fires zero diagnostics" assertion holding.
     darkOutcomes: [],
-    ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },
     emergencyBrake: { engaged: false },
     disk: { availableGb: 120, totalGb: 500, usedPercent: 60 },
@@ -289,138 +272,16 @@ describe("assessHealth — per-rule firing", () => {
     assert.match(d!.what, /3 consecutive error\(s\)/);
     assert.equal(d!.autoRecovery, true);
   });
-
-  test("openviking failed → warning openviking", () => {
-    const d = find(
-      clone((s) => (s.svcProbes.openviking = { status: "failed" })),
-      "openviking",
-      "warning",
-    );
-    assert.ok(d);
-    assert.equal(d!.what, "OpenViking unreachable");
-  });
-
-  test("vikingdb failed → warning vikingdb", () => {
-    const d = find(
-      clone((s) => (s.svcProbes.vikingdb = { status: "failed" })),
-      "vikingdb",
-      "warning",
-    );
-    assert.ok(d);
-    assert.equal(d!.what, "VikingDB unreachable");
-  });
-
   // Issue #2131: the embed-backend failed state now fires a BESPOKE warning that
   // names the offline embedding/VLM backend and points at the Wake-on-LAN
   // recovery path (#1794) — promoted from the generic #2013 "external service
   // not running" message so the 2026-06-18 silent-info gap escalates loudly.
-  test("embed-backend failed → bespoke 'Embedding/VLM backend unreachable' warning naming the backend + recovery path", () => {
-    const d = find(
-      clone((s) => (s.svcProbes["embed-backend"] = { status: "failed" })),
-      "embed-backend",
-      "warning",
-    );
-    assert.ok(d);
-    assert.equal(d!.what, "Embedding/VLM backend unreachable");
-    // Names the offline backend (gaming-PC Ollama over Tailscale) …
-    assert.match(d!.why, /gaming-PC Ollama|gabes-desktop-1/);
-    // … and points at the #1794 Wake-on-LAN recovery path.
-    assert.match(d!.action, /1794|Wake-on-LAN/);
-  });
-
-  test("embed-backend running → bespoke rule does NOT fire (slow-but-reachable stays quiet)", () => {
-    const d = find(
-      clone((s) => (s.svcProbes["embed-backend"] = { status: "running" })),
-      "embed-backend",
-    );
-    assert.equal(d, undefined);
-  });
-
-  test("embed-backend failed is reported by its bespoke rule only — the generic iterator does not double-report it", () => {
-    const diags = assessHealth(
-      clone((s) => (s.svcProbes["embed-backend"] = { status: "failed" })),
-    ).diagnostics.filter((x) => x.component === "embed-backend");
-    assert.equal(diags.length, 1);
-    assert.equal(diags[0].what, "Embedding/VLM backend unreachable");
-  });
-
   // Issue #2131 acceptance: drive the embed-backend probe end-to-end via the
   // injected `probeEmbedBackend({ ovPostJsonImpl })` seam (no real network) and
   // assert the rule fold — proving an UNREACHABLE backend escalates to an
   // operator-visible warning while a SLOW-but-reachable plane stays the benign
   // `info` "OV search slow". This closes the 2026-06-18 silent-info gap: the
   // same root condition (offline gaming-PC Ollama) must not read as informational.
-  describe("embed-backend probe → rule, driven via the injected ovPostJson seam (#2131)", () => {
-    // The two branches: ov-service-down/ov-timeout on the embedding-exercising
-    // search transport fold the probe to "failed"; OV answering (2xx) → "running".
-    async function snapshotFromProbe(
-      ovPostJsonImpl: (...a: any[]) => Promise<any>,
-      ovSearch?: HealthSnapshot["ovSearch"],
-    ): Promise<HealthSnapshot> {
-      const embedBackend = await probeEmbedBackend({ ovPostJsonImpl: ovPostJsonImpl as any });
-      return clone((s) => {
-        s.svcProbes["embed-backend"] = embedBackend;
-        if (ovSearch) s.ovSearch = ovSearch;
-      });
-    }
-
-    test("UNREACHABLE backend (ov-service-down) → operator-visible warning, NOT info", async () => {
-      const snap = await snapshotFromProbe(
-        async () => ({ ok: false, code: "ov-service-down" }),
-        // The offline backend also drives the through-OV search to timeout →
-        // "timeout" (the historical false-info path). The bespoke warning must
-        // still escalate despite that info rule also firing.
-        { status: "timeout", latencyMs: 14200, resultCount: 0 },
-      );
-      const a = assessHealth(snap);
-      const alert = a.diagnostics.find((d) => d.component === "embed-backend");
-      assert.ok(alert, "embed-backend must fire a diagnostic when unreachable");
-      assert.equal(alert!.severity, "warning");
-      assert.equal(alert!.what, "Embedding/VLM backend unreachable");
-      // It is a NON-info, operator-visible signal — the top-level fold is at
-      // least `degraded` (a warning is never `healthy`/info-only).
-      assert.notEqual(a.status, "healthy");
-      // The probe folded to failed (the seam, exercised without a network).
-      assert.equal(snap.svcProbes["embed-backend"].status, "failed");
-    });
-
-    test("UNREACHABLE backend (ov-timeout on the embed transport) → warning", async () => {
-      const snap = await snapshotFromProbe(async () => ({ ok: false, code: "ov-timeout" }));
-      const alert = assessHealth(snap).diagnostics.find((d) => d.component === "embed-backend");
-      assert.ok(alert);
-      assert.equal(alert!.severity, "warning");
-    });
-
-    test("REACHABLE-but-slow plane (OV answers 2xx) → embed-backend stays quiet; only the existing info 'OV search slow' fires", async () => {
-      const snap = await snapshotFromProbe(
-        // OV answered (2xx) → probe reads "running"; the embedding path is slow,
-        // which the SEPARATE ovSearch probe reports as "timeout" → info.
-        async () => ({ ok: true, data: { result: { memories: [], resources: [], skills: [] } } }),
-        { status: "timeout", latencyMs: 14200, resultCount: 0 },
-      );
-      const a = assessHealth(snap);
-      // No embed-backend alert — a slow-but-reachable backend is not down.
-      assert.equal(
-        a.diagnostics.some((d) => d.component === "embed-backend"),
-        false,
-        "a reachable (slow) backend must NOT raise the embed-backend alert",
-      );
-      assert.equal(snap.svcProbes["embed-backend"].status, "running");
-      // The benign slow-plane info signal is unchanged.
-      const slow = a.diagnostics.find((d) => d.what === "OV search slow");
-      assert.ok(slow, "the slow plane still surfaces the existing info signal");
-      assert.equal(slow!.severity, "info");
-    });
-  });
-
-  test("openviking failed is reported by its bespoke rule only — the generic rule does not double-report it", () => {
-    const diags = assessHealth(
-      clone((s) => (s.svcProbes.openviking = { status: "failed" })),
-    ).diagnostics.filter((x) => x.component === "openviking");
-    assert.equal(diags.length, 1);
-    assert.equal(diags[0].what, "OpenViking unreachable");
-  });
-
   // Issue #3459: "Pipeline empty" rule removed — gated on queueDepth/blCounts,
   // always 0 after ADR-0031. Flipped to assert the rule no longer fires.
   test("pipeline empty no longer fires a diagnostic (issue #3459)", () => {
@@ -508,101 +369,15 @@ describe("assessHealth — per-rule firing", () => {
     assert.ok(d);
     assert.equal(d!.severity, "info");
   });
-
-  test("OV search empty → info intelligence", () => {
-    const d = assessHealth(
-      clone((s) => (s.ovSearch = { status: "running", latencyMs: 10, resultCount: 0 })),
-    ).diagnostics.find((x) => x.what === "OV search empty");
-    assert.ok(d);
-    assert.equal(d!.severity, "info");
-  });
-
-  test("OV search failed → warning intelligence (and not the empty info rule)", () => {
-    const a = assessHealth(
-      clone((s) => (s.ovSearch = { status: "failed", latencyMs: 1471, resultCount: 0 })),
-    );
-    const failing = a.diagnostics.filter((x) => x.what === "OV search failing");
-    assert.equal(failing.length, 1, "exactly one OV-search-failing diagnostic");
-    const d = failing[0]!;
-    assert.equal(d.severity, "warning");
-    assert.equal(d.component, "intelligence");
-    assert.equal(d.autoRecovery, false);
-    // The failed probe must NOT also fire the empty-index info rule (mutually exclusive).
-    assert.ok(
-      !a.diagnostics.some((x) => x.what === "OV search empty"),
-      "must not fire the empty-index info rule on a failed probe",
-    );
-    // A warning with no higher-severity diagnostic folds top-level status to degraded.
-    assert.equal(a.status, "degraded");
-  });
-
   // Issue #1032: a probe TIMEOUT is the Ollama-backed embedding path being slow,
   // NOT a fault. It must surface as info ("OV search slow"), must NOT fire the
   // hard-failure warning, and (being info, not warning) must not drive the
   // top-level status to a WARNING-grade degradation the way `failed` does.
-  test("OV search timeout → info intelligence, NOT the failing warning", () => {
-    const a = assessHealth(
-      clone((s) => (s.ovSearch = { status: "timeout", latencyMs: 14200, resultCount: 0 })),
-    );
-    const slow = a.diagnostics.filter((x) => x.what === "OV search slow");
-    assert.equal(slow.length, 1, "exactly one OV-search-slow diagnostic");
-    assert.equal(slow[0]!.severity, "info");
-    assert.equal(slow[0]!.component, "intelligence");
-    assert.equal(slow[0]!.autoRecovery, true);
-    // A timeout must NOT fire the hard-failure warning rule…
-    assert.ok(
-      !a.diagnostics.some((x) => x.what === "OV search failing"),
-      "timeout must not fire the OV-search-failing warning",
-    );
-    // …nor the empty-index info rule (that one keys off status === 'running').
-    assert.ok(
-      !a.diagnostics.some((x) => x.what === "OV search empty"),
-      "timeout must not fire the empty-index info rule",
-    );
-    // The timeout firing is info-only — there is no WARNING-or-worse diagnostic
-    // attributable to the slow probe (the `failed` path produces a warning).
-    assert.ok(
-      !a.diagnostics.some(
-        (x) => x.component === "intelligence" && x.severity !== "info",
-      ),
-      "a slow probe must not contribute any warning/error intelligence diagnostic",
-    );
-  });
-
   // Issue #1781: a transport failure on the search path surfaces as a DISTINCT
   // "OV embedding backend unreachable" warning — not the generic "OV search
   // failing" 5xx warning — so the operator is pointed at the embedding backend
   // host rather than at OpenViking itself. This is the indistinguishability the
   // issue exists to fix.
-  test("OV search backend-unreachable → distinct warning, NOT the 5xx failing warning", () => {
-    const a = assessHealth(
-      clone((s) => (s.ovSearch = { status: "backend-unreachable", latencyMs: null, resultCount: 0 })),
-    );
-    const unreachable = a.diagnostics.filter((x) => x.what === "OV embedding backend unreachable");
-    assert.equal(unreachable.length, 1, "exactly one backend-unreachable diagnostic");
-    const d = unreachable[0]!;
-    assert.equal(d.severity, "warning");
-    assert.equal(d.component, "intelligence");
-    // It must NOT collapse into the OV-5xx warning — distinguishing the two is the point of #1781.
-    assert.ok(
-      !a.diagnostics.some((x) => x.what === "OV search failing"),
-      "backend-unreachable must not fire the generic OV-search-failing 5xx warning",
-    );
-    // …nor the empty-index info rule (that keys off status === 'running')…
-    assert.ok(
-      !a.diagnostics.some((x) => x.what === "OV search empty"),
-      "backend-unreachable must not fire the empty-index info rule",
-    );
-    // …nor the slow/timeout info rule.
-    assert.ok(
-      !a.diagnostics.some((x) => x.what === "OV search slow"),
-      "backend-unreachable must not fire the timeout info rule",
-    );
-    // The action names a concrete reachability probe so the operator can check the right hop.
-    assert.ok(/ollama-embed|gabes-desktop-1/.test(d.action), "action names the backend host to probe");
-    // A lone warning folds the top-level status to degraded (not unhealthy/critical).
-    assert.equal(a.status, "degraded");
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -899,7 +674,7 @@ describe("assessHealth — summary", () => {
         s.disk = { availableGb: 3, totalGb: 500, usedPercent: 99 }; // error
         s.mem = { totalGb: 32, availableGb: 1, usedPercent: 97 }; // error
         s.sysd.watchdog = "inactive"; // warning
-        s.svcProbes.openviking = { status: "failed" }; // warning
+        s.sched.consecutiveErrors = 3; // warning
       }),
     );
     assert.match(a.summary, /2 errors, 2 warnings\./);
@@ -917,17 +692,12 @@ describe("parseProbes", () => {
   // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
   function emptyProbes(): ProbeInputs {
     return {
-      basicHealth: null, serviceProbes: null, scheduler: null,
+      basicHealth: null, scheduler: null,
       metrics: null,
       disk: null, mem: null,
       sysdOrchestrator: null, sysdWatchdog: null, sysdTargetWeb: null,
-      patterns: null, reflections: null, ovSearch: null,
+      patterns: null, reflections: null,
       redisInfo: null, emergencyBrake: null,
-      ovSearchWindow: null, knowledgeContext: null,
-      // Issue #2386: null = the fan-out could not resolve the live skill-catalog
-      // read; parseProbes defaults it to an un-run empty catalog so both
-      // skill-catalog rules no-op (honest-none, never a phantom populated catalog).
-      skillCatalog: null,
       // Issue #2805: null = the fan-out could not run the dark-outcome check;
       // parseProbes defaults it to [] so the dark-outcome rule no-ops (honest-none).
       darkOutcomes: null,
@@ -1004,11 +774,10 @@ describe("parseProbes", () => {
   });
 
   test("end-to-end: parseProbes -> assessHealth on a degraded fan-out", () => {
-    // A realistic partial-failure: OV down, watchdog inactive, disk low.
+    // A realistic partial-failure: watchdog inactive, disk low.
     // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
     const snap = parseProbes({
       basicHealth: { status: "ok", redis: true, cycle: "idle", uptime: 1000 },
-      serviceProbes: { vikingdb: { status: "running" }, openviking: { status: "failed" } },
       scheduler: { running: true, consecutiveErrors: 0, lastCycleAt: new Date().toISOString() },
       metrics: { trend: [], stats: {} },
       disk: { availableGb: 12, totalGb: 500, usedPercent: 90 }, // low (issue #939: already-parsed)
@@ -1018,22 +787,8 @@ describe("parseProbes", () => {
       sysdTargetWeb: "active",
       patterns: { planner: 1, executor: 1, skeptic: 1 },
       reflections: 3,
-      ovSearch: { status: "running", latencyMs: 10, resultCount: 2 },
       redisInfo: null,
       emergencyBrake: { engaged: false },
-      ovSearchWindow: null,
-      knowledgeContext: null,
-      // Issue #2386: a fully-registered catalog so the skill-catalog rules don't
-      // add a diagnostic to this degraded-fan-out assertion.
-      skillCatalog: {
-        skills: [],
-        registered: 4,
-        total: 4,
-        completed: true,
-        lastAttemptAt: Date.now(),
-        vlmDeferred: false,
-        skillsDeferred: false,
-      },
       // Issue #2805: no dark outcomes in this fan-out — the dark-outcome rule
       // must not add a diagnostic to the degraded-fan-out assertion below.
       darkOutcomes: [],
@@ -1044,7 +799,6 @@ describe("parseProbes", () => {
     const a = assessHealth(snap);
     assert.equal(a.status, "degraded"); // only warnings
     const components = a.diagnostics.map((d) => d.component);
-    assert.ok(components.includes("openviking"));
     assert.ok(components.includes("disk"));
     assert.ok(components.includes("infrastructure"));
   });
@@ -1065,7 +819,6 @@ describe("parseProbes", () => {
     // Issue #3459: queueDepth + backlogCounts removed from SettledByKey.
     const settled = {
       basicHealth: fv({ status: "ok", redis: true, cycle: "idle", uptime: 42 }),
-      serviceProbes: fv({ vikingdb: { status: "running" }, openviking: { status: "running" } }),
       scheduler: fv({ running: true, consecutiveErrors: 2 }),
       metrics: fv({ trend: [], stats: {} }),
       disk: fv(disk),
@@ -1075,11 +828,8 @@ describe("parseProbes", () => {
       sysdTargetWeb: fv("inactive"),
       patterns: fv({ planner: 5, executor: 3, skeptic: 1 }),
       reflections: fv(12),
-      ovSearch: fv({ status: "running", latencyMs: 100, resultCount: 4 }),
       redisInfo: fv({ memoryHuman: "512M", connectedClients: 3, uptimeSeconds: 900 }),
       emergencyBrake: fv({ engaged: true, since: 1234 }),
-      ovSearchWindow: fv([{ hour: 0, count: 5 }]),
-      knowledgeContext: fv({ available: 0.95 }),
     };
 
     const probeInputs = assembleProbeInputs(settled);
@@ -1096,7 +846,6 @@ describe("parseProbes", () => {
     assert.equal(snap.sysd.targetWeb, "inactive");
     assert.deepEqual(snap.patterns, { planner: 5, executor: 3, skeptic: 1 });
     assert.equal(snap.reflCount, 12);
-    assert.equal(snap.ovSearch.resultCount, 4);
     assert.equal(snap.redisInfo?.memoryHuman, "512M");
     assert.equal(snap.emergencyBrake.engaged, true);
   });
@@ -1225,7 +974,6 @@ describe("projectHealthDeepResponse", () => {
       summary,
       opts.activeCycle ?? null,
       CHECKED_AT,
-      makeProbes(opts.settledValues),
     );
   }
 
@@ -1271,17 +1019,15 @@ describe("projectHealthDeepResponse", () => {
     assert.equal(project(healthySnapshot()).status, "healthy");
   });
 
-  test("intelligence carries the EXACT field names (ovSearchTrend, knowledgeContext — typo regression guard)", () => {
+  test("intelligence carries the EXACT field names (typo regression guard)", () => {
     const r = project(healthySnapshot());
-    // The #1513 friction: a `ovSeachTrend` typo or a 17/18 swap silently nulls a
-    // field. Pin the exact key set so a rename/typo fails the test, not the UI.
+    // The #1513 friction: a typo'd key silently nulls a field. Pin the exact key
+    // set so a rename/typo fails the test, not the UI. (The three OV-quality keys
+    // — ovSearch / ovSearchTrend / knowledgeContext — went with OpenViking.)
     assert.deepEqual(Object.keys(r.intelligence).sort(), [
       // Issue #2805: the dark leading-outcome verdicts ride the intelligence
       // block so /api/health/deep surfaces the producer identity + metric path.
       "darkOutcomes",
-      "knowledgeContext",
-      "ovSearch",
-      "ovSearchTrend",
       "patterns",
       // Issue #2492: the reflection-deposit-health verdict now rides the
       // intelligence block so /api/health/deep surfaces it where operators look.
@@ -1313,23 +1059,6 @@ describe("projectHealthDeepResponse", () => {
     // envelope so an operator reading /api/health/deep gets the producer identity.
     assert.deepEqual(r.intelligence.darkOutcomes, verdicts);
   });
-
-  test("ovSearchTrend/knowledgeContext coalesce to null when their keys are absent (issue #3263)", () => {
-    const r = project(healthySnapshot()); // makeProbes leaves ovSearchWindow/knowledgeContext absent by default
-    assert.equal(r.intelligence.ovSearchTrend, null);
-    assert.equal(r.intelligence.knowledgeContext, null);
-  });
-
-  test("ovSearchTrend ← ovSearchWindow key, knowledgeContext ← knowledgeContext key (issue #3263)", () => {
-    const trend = { window: "24h", buckets: [{ hour: 0, zeroResultRate: 0.1 }] };
-    const ctx = { window: "7d", days: [{ day: "2026-06-09", availability: 0.9 }] };
-    const r = project(healthySnapshot(), { settledValues: { ovSearchWindow: trend, knowledgeContext: ctx } });
-    assert.deepEqual(r.intelligence.ovSearchTrend, trend);
-    assert.deepEqual(r.intelligence.knowledgeContext, ctx);
-    // ovSearch (the live probe) still flows straight from the snapshot.
-    assert.deepEqual(r.intelligence.ovSearch, { status: "running", latencyMs: 40, resultCount: 3 });
-  });
-
   test("services block maps health/redis/scheduler/probes; uptimeHuman uses fmtUp", () => {
     const r = project(healthySnapshot());
     // uptime 3600 → "1h 0m" (the local fmtUp the projection now owns).
@@ -1352,8 +1081,6 @@ describe("projectHealthDeepResponse", () => {
       !("research" in r.services.scheduler),
       "scheduler wire object must not carry the removed `research` field",
     );
-    assert.deepEqual(r.services.vikingdb, { status: "running" });
-    assert.deepEqual(r.services.openviking, { status: "running" });
   });
 
   test("orchestrator.status reflects a non-ok health status; redis.status flips to failed", () => {
@@ -1425,7 +1152,7 @@ describe("projectHealthDeepResponse", () => {
   });
 
   test("diagnostics array is the assessment's, passed straight through", () => {
-    const snap = clone((s) => (s.svcProbes.openviking = { status: "failed" }));
+    const snap = clone((s) => (s.sysd.watchdog = "inactive"));
     const { diagnostics } = assessHealth(snap);
     const r = project(snap);
     assert.deepEqual(r.diagnostics, diagnostics);

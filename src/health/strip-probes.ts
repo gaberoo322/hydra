@@ -29,16 +29,13 @@
 // /health/deep wire envelope keeps its own explicit named projection (#1869) —
 // this enumeration does not change it.
 //
-// This leaf is a PURE downward edge: it imports only the ServiceProbe Adapter
-// Seam types/producers (src/health/probe.ts) it needs to describe the probes —
-// no Redis, no WoL, no fan-out. The fan-out imports nothing from here; the strip
-// imports the enumeration from here (directly or via the ../health barrel).
+// This leaf is a PURE downward edge: it imports only the zero-IO display-status
+// classification types (src/health/probe-classify.ts) it needs to describe the
+// probes — no Redis, no WoL, no fan-out. The fan-out imports nothing from here;
+// the strip imports the enumeration from here (directly or via the ../health
+// barrel).
 
-import {
-  probeEmbedBackend,
-  type ServiceProbeResult,
-  type ProbeOutcome,
-} from "./probe.ts";
+import { type ProbeOutcome } from "./probe-classify.ts";
 
 /**
  * The generic HTTP probe the strip injects: receives a URL + timeout, returns a
@@ -46,7 +43,6 @@ import {
  * the strip to a real `fetch`-based probe; injectable for tests. The 3s cap the
  * strip contract guarantees is applied by the caller passing `timeoutMs`.
  */
-type StripHttpProbe = (url: string, timeoutMs: number) => Promise<ProbeOutcome>;
 
 /**
  * The minimal dependency bag a strip probe descriptor's `run` closure consumes.
@@ -59,16 +55,10 @@ type StripHttpProbe = (url: string, timeoutMs: number) => Promise<ProbeOutcome>;
  * `run`), so a descriptor never has to defend against an absent dep.
  */
 export interface StripProbeDeps {
-  /** Generic HTTP liveness probe (vikingdb/openviking). */
-  probe: StripHttpProbe;
   /** Redis ping — true on success, never throws (the redis/utility accessor swallows). */
   pingRedis: () => Promise<boolean>;
   /** Orchestrator self-check — true when the host process is healthy (no kill-switch). */
   checkOrchestrator: () => Promise<boolean>;
-  /** OpenViking base URL (resolves OPENVIKING_URL via the OV Request Adapter, #954). */
-  ovBaseUrl: () => string;
-  /** Embed-backend liveness (issue #2013) — the OV dense-embedding backend probe. */
-  probeEmbedBackend: typeof probeEmbedBackend;
 }
 
 /**
@@ -99,20 +89,6 @@ export type StripProbeDescriptor =
     };
 
 /**
- * Adapt a fan-out {@link ServiceProbeResult} (`{status:"running"|"failed",
- * latencyMs:number|null}`) into the strip's {@link ProbeOutcome} (`{ok,
- * latencyMs, error?}`) shape the display classifier consumes. `failed` →
- * `ok:false` (latency null → 0 so the numeric field is uniform); `running` → ok
- * with its measured latency. Pure; the source producers never throw.
- */
-function serviceProbeToOutcome(r: ServiceProbeResult, downError: string): ProbeOutcome {
-  if (r.status === "running") {
-    return { ok: true, latencyMs: r.latencyMs ?? 0 };
-  }
-  return { ok: false, latencyMs: r.latencyMs ?? 0, error: downError };
-}
-
-/**
  * The ordered, shared enumeration of external-service liveness probes the
  * Now-page strip renders (issue #2597). ONE source of "which probes appear on
  * the strip and in what order". The strip maps this list to `ServiceRow[]` via
@@ -136,23 +112,6 @@ export const STRIP_PROBE_DESCRIPTORS: readonly StripProbeDescriptor[] = [
     kind: "boolean",
     run: (deps) => deps.pingRedis(),
   },
-  {
-    service: "vikingdb",
-    kind: "probe",
-    run: (deps) => deps.probe("http://localhost:5000/health", 3000),
-  },
-  {
-    service: "openviking",
-    kind: "probe",
-    run: (deps) => deps.probe(`${deps.ovBaseUrl()}/health`, 3000),
-  },
-  {
-    // Issue #2013: the OV dense-embedding backend, previously omitted from the
-    // strip. probeEmbedBackend is never-throwing and self-times (via the OV
-    // Request Adapter); a transport failure folds to `failed` → a down row.
-    service: "embed-backend",
-    kind: "probe",
-    run: async (deps) =>
-      serviceProbeToOutcome(await deps.probeEmbedBackend(), "embed backend unreachable"),
-  },
+  // The vikingdb / openviking / embed-backend strip rows were removed with
+  // OpenViking — the strip now reports orchestrator + redis only.
 ];

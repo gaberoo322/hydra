@@ -28,7 +28,7 @@ import {
   renderCouplingReport,
   rankModulesByFanIn,
   crossGroupPairs,
-} from "../src/knowledge-base/repo-graph.ts";
+} from "../src/aggregators/repo-graph.ts";
 
 const SRC = "/synthetic/src";
 

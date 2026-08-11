@@ -276,15 +276,6 @@ CI's `scope-check` gate (`.github/workflows/ci.yml` in the orchestrator repo, mi
 
 @include _fragments/reflection-telemetry-deposit.md
 
-**Knowledge context (issue #2647):** same planning-time step. `GET /api/learning/knowledge?agent=hydra-target-build&anchor=$ANCHOR_REF`. Fold `.content` into the executor plan; empty → no-op. Use this route, NOT `/api/learning/context-trace` (counts-only, no content).
-
-```bash
-KB_JSON=$(curl -sf --max-time 5 \
-  "http://localhost:4000/api/learning/knowledge?agent=hydra-target-build&anchor=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)")
-KB_CONTENT=$(printf '%s' "$KB_JSON" | jq -r '.content // ""')
-[ -n "$KB_CONTENT" ] && printf '%s\n' "$KB_CONTENT"
-```
-
 ### 4. Skeptic (skip for quick-fix)
 
 Read `~/hydra/config/agents/skeptic.md`. Challenge:

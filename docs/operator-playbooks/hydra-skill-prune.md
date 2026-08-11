@@ -128,8 +128,18 @@ EVAL_RC=$?
 When Step 3 passed AND `--apply` is set, in a fresh worktree:
 
 1. Apply the pruned playbook diff to `docs/operator-playbooks/hydra-<skill>.md`.
-2. Regenerate the skill: `bash scripts/sync-skills.sh` (rewrites the
-   `~/.claude/skills/hydra-<skill>/SKILL.md` artifact from the playbook).
+2. Regenerate the skill **into a scratch dir to verify it, never the default
+   path** (issue #3828: `~/.claude/skills` is the live, host-shared mirror
+   every agent dispatch loads its prompts from, and this step runs from an
+   unmerged, PR-authoring worktree — writing the default path here is exactly
+   the class of gate-bypass issue #3828 closed off; `sync-skills.sh`'s
+   default-mirror content guard now refuses it anyway):
+   ```bash
+   CLAUDE_SKILLS_DIR=$(mktemp -d) CODEX_SKILLS_DIR=$(mktemp -d) bash scripts/sync-skills.sh
+   ```
+   then inspect the regenerated `hydra-<skill>/SKILL.md` under `$CLAUDE_SKILLS_DIR`
+   to confirm the prune compiled cleanly and the size dropped. The live mirror
+   updates automatically on merge, via `scripts/deploy.sh`.
 3. **Auto-tighten the ratchet, shrink-only.** Lower ONLY the pruned file's
    `body` count in `scripts/ci/skill-size-baseline.json` to its new (smaller)
    value: `npx tsx scripts/ci/skill-size-ratchet.ts --write-baseline` regenerates

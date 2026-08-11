@@ -1,6 +1,6 @@
 import { test, describe, afterEach, beforeEach } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -44,9 +44,21 @@ import {
   makeReadOAuth,
   DISPATCH_KINDS,
   setOAuthBackoffPersistence,
+  transcriptScan,
 } from "../src/cost/transcript-scan.ts";
 import type { OAuthBackoffPersistence } from "../src/cost/transcript-scan.ts";
 import type { PersistedOAuthBackoff } from "../src/redis/oauth-backoff.ts";
+// Per-file parse memo seam (issue #3805): imported directly for the
+// low-level load/write-round-trip + corrupt-entry unit tests, and
+// `getRedisConnection` for the ONE test that hand-writes a structurally-corrupt
+// field to prove the load path degrades to a clean miss rather than throwing.
+import {
+  loadTranscriptParseMemo,
+  writeTranscriptParseMemoBatch,
+  countTranscriptParseMemoEntries,
+} from "../src/redis/transcript-parse-memo.ts";
+import type { FileParseMemoEntry } from "../src/redis/transcript-parse-memo.ts";
+import { getRedisConnection } from "../src/redis/connection.ts";
 // Attribution coverage % pure fold (issue #2403) lives on the snapshot-assembly
 // leaf; imported directly for unit test without the JSONL-scan machinery.
 import { deriveAttributedPercent } from "../src/cost/snapshot-assembly.ts";
@@ -1473,6 +1485,7 @@ describe("usage-tracker", () => {
         linesParsed: 0,
         linesWithUsage: 0,
         parseErrors: 0,
+        filesServedFromMemo: 0,
         generatedAt: "2026-05-26T00:00:00.000Z",
         cacheHitRatioLast5h: 0,
         cacheHitRatioLast7d: 0,
@@ -1762,6 +1775,10 @@ describe("usage-tracker", () => {
 
       // Build a snapshot with an Anchor boundary and a `now` (generatedAt)
       // some fraction into the 7-day window, plus a percentSinceReset.
+      // `usageSource: "oauth"` is REQUIRED (issue #3751, INV-4): the Pacing Curve
+      // verdict is only computed for the authoritative OAuth source — a non-oauth
+      // source is the neutral "on" — so the ahead/behind/on assertions below must
+      // drive the oauth path. (`snapshotWith` defaults to "estimate".)
       function curveSnap(opts: {
         nowMs: number;
         sinceResetPercent: number;
@@ -1769,6 +1786,7 @@ describe("usage-tracker", () => {
       }): UsageSnapshot {
         return snapshotWith({
           calibrated: true,
+          usageSource: "oauth",
           generatedAt: isoOf(opts.nowMs),
           weeklyResetAnchor: opts.anchorIso === undefined ? isoOf(anchorMs) : opts.anchorIso,
           percentSinceReset: opts.sinceResetPercent,
@@ -1897,6 +1915,27 @@ describe("usage-tracker", () => {
         assert.equal(v.paceState, "ahead");
         assert.equal(v.allow, true);
         assert.deepEqual([...v.shed], []);
+      });
+
+      test("INV-4 (#3751): non-oauth source is neutral 'on' even with a set anchor + zeros", () => {
+        // The admission outage path serves percentSinceReset: 0 with a SET
+        // (rolled) anchor. Before the INV-4 guard, 0 < target − tol produced a
+        // false "behind" — which, with allow=true, launched the Pace Gate on
+        // absent evidence. The guard makes a non-oauth source neutral "on";
+        // targetPercent (time-based) is still reported.
+        const nowMs = anchorMs + 3.5 * DAY; // target 46
+        const v = projectEligibility(
+          snapshotWith({
+            calibrated: true,
+            usageSource: "estimate",
+            generatedAt: isoOf(nowMs),
+            weeklyResetAnchor: isoOf(anchorMs),
+            percentSinceReset: 0,
+          }),
+        );
+        assert.equal(v.paceState, "on");
+        assert.equal(v.targetPercent, 46);
+        assert.equal(v.sinceResetPercent, 0);
       });
     });
 
@@ -4969,5 +5008,277 @@ describe("foreign-provider tokens are excluded from Anthropic quota (issue #3769
     assert.equal(isForeignProviderModel(""), false);
     assert.equal(isForeignProviderModel(null), false);
     assert.equal(isForeignProviderModel(undefined), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-file transcript parse memo (issue #3805)
+// ---------------------------------------------------------------------------
+//
+// `transcriptScan` re-derived the rolling 7d aggregate from raw transcripts on
+// EVERY cold call, reading + JSON-parsing every in-window file's bytes even
+// though transcripts are append-only and immutable once a session ends
+// (measured 2026-07-30: 1,875 MB re-read per call, which blew the Pace Gate's
+// 10s probe budget). This suite covers the durable per-file memo that fixes
+// it: the low-level Redis seam round-trip (`src/redis/transcript-parse-memo.ts`)
+// AND the end-to-end behaviour through `getUsage()`/`transcriptScan()` — a
+// memo hit skips the read entirely, an appended file is never served stale,
+// and a miss/corrupt/unreachable memo degrades to a full parse rather than a
+// wrong total or a throw.
+//
+// This suite touches the shared parse-memo Redis hash directly (to seed a
+// corrupt entry, and to count/clear it), so — per the CLAUDE.md authoring rule
+// about not piggybacking on a sibling suite's teardown timing — it lives in
+// its OWN top-level `describe` with its own `beforeEach` lifecycle, distinct
+// from the `getUsage()`-only suites above it.
+describe("transcript parse memo (issue #3805)", () => {
+  const MEMO_KEY = "hydra:metrics:transcript-parse-memo";
+
+  beforeEach(async () => {
+    clearUsageCache();
+    await getRedisConnection().del(MEMO_KEY);
+  });
+
+  /** A `CachedOAuthRead` that always reports "no credentials" — the same
+   * estimate-forcing stub `getUsage()` defaults to for a fixture root, reused
+   * here for the tests that call `transcriptScan()` directly. */
+  async function stubReadOAuth(): Promise<ScanResultOAuth> {
+    return {
+      result: { ok: false, code: "oauth-usage-no-credentials" },
+      stale: false,
+      ageMs: null,
+      lastKnownOAuth: null,
+      consecutiveFailures: 0,
+    };
+  }
+
+  describe("src/redis/transcript-parse-memo.ts — seam round-trip", () => {
+    test("write → load round-trips a per-file entry", async () => {
+      const entry: FileParseMemoEntry = {
+        size: 123,
+        mtimeMs: 456,
+        entries: [
+          { tsMs: 1000, tokens: breakdown({ total: 10 }), foreign: false, family: "opus" },
+        ],
+        skill: "hydra-dev",
+        dispatchKind: "autopilot-dispatched",
+        observedResetMs: null,
+        linesParsed: 1,
+        linesWithUsage: 1,
+        parseErrors: 0,
+      };
+      await writeTranscriptParseMemoBatch(new Map([["/tmp/fixture-a.jsonl", entry]]), []);
+      const loaded = await loadTranscriptParseMemo();
+      assert.deepEqual(loaded.get("/tmp/fixture-a.jsonl"), entry);
+    });
+
+    test("a structurally-corrupt hash field is dropped, not thrown", async () => {
+      await getRedisConnection().hset(MEMO_KEY, "/tmp/bad.jsonl", "{not json");
+      const loaded = await loadTranscriptParseMemo();
+      assert.equal(loaded.has("/tmp/bad.jsonl"), false);
+      assert.equal(loaded.size, 0);
+    });
+
+    test("writeTranscriptParseMemoBatch evicts a path via the deletes list", async () => {
+      const entry: FileParseMemoEntry = {
+        size: 1,
+        mtimeMs: 1,
+        entries: [],
+        skill: null,
+        dispatchKind: null,
+        observedResetMs: null,
+        linesParsed: 0,
+        linesWithUsage: 0,
+        parseErrors: 0,
+      };
+      await writeTranscriptParseMemoBatch(new Map([["/tmp/evict-me.jsonl", entry]]), []);
+      assert.equal(await countTranscriptParseMemoEntries(), 1);
+      await writeTranscriptParseMemoBatch(new Map(), ["/tmp/evict-me.jsonl"]);
+      assert.equal(await countTranscriptParseMemoEntries(), 0);
+    });
+  });
+
+  describe("end-to-end via getUsage()", () => {
+    test("an unchanged file is served from the memo on the second call, with identical totals", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-memo-hit-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 500, out: 100 }),
+        ]);
+
+        const first = await getUsage({ now, projectsRoot: root, force: true });
+        assert.equal(first.filesServedFromMemo, 0, "nothing memoized yet on the cold call");
+        assert.equal(first.tokensLast7d.total, 600);
+
+        const second = await getUsage({ now, projectsRoot: root, force: true });
+        assert.equal(second.filesServedFromMemo, 1, "the unchanged file was replayed from the memo");
+        // The load-bearing assertion (design-concept invariant #1): a memo hit
+        // reproduces byte-identical totals to the fresh parse.
+        assert.deepEqual(second.tokensLast7d, first.tokensLast7d);
+        assert.deepEqual(second.byModel, first.byModel);
+        assert.deepEqual(second.bySkillByModel, first.bySkillByModel);
+        assert.equal(second.filesScanned, first.filesScanned);
+        assert.equal(second.linesParsed, first.linesParsed);
+        assert.equal(second.linesWithUsage, first.linesWithUsage);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a shrinking 5h window drops a memoized line exactly like a fresh parse would (never a stale flat total)", async () => {
+      // Design-concept invariant #2: the memo stores per-line events, not a
+      // pre-aggregated window total, because the 5h/24h/7d windows move
+      // against a shifting `now` on every call while a memoized file's
+      // content is fixed. Prove it: a line 4h before t0 is inside the 5h
+      // window at t0, but 3h later (t0+3h) it has aged past 5h — the SECOND
+      // call (served from memo) must reflect that, not keep reporting it.
+      const root = await mkdtemp(join(tmpdir(), "usage-memo-window-"));
+      try {
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T08:00:00Z", { in: 1000 }), // t0 - 4h
+        ]);
+
+        const atT0 = await getUsage({ now: t0, projectsRoot: root, force: true });
+        assert.equal(atT0.tokensLast5h.total, 1000, "inside the 5h window at t0");
+
+        const t1 = new Date(t0.getTime() + 3 * 60 * 60 * 1000); // t0 + 3h => line is 7h old
+        const atT1 = await getUsage({ now: t1, projectsRoot: root, force: true });
+        assert.equal(atT1.filesServedFromMemo, 1, "unchanged file replayed from the memo");
+        assert.equal(atT1.tokensLast5h.total, 0, "aged out of the 5h window on replay");
+        assert.equal(atT1.tokensLast7d.total, 1000, "still inside the 7d window");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("an appended file is re-parsed (not served stale) and its totals include the appended line", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-memo-append-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 500 }),
+        ]);
+        const first = await getUsage({ now, projectsRoot: root, force: true });
+        assert.equal(first.tokensLast7d.total, 500);
+
+        // Append a second line — changes the file's size, so the (size,
+        // mtimeMs) validity pair can never match the stale memo entry.
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 500 }),
+          assistantLine("2026-05-25T11:30:00Z", { in: 250 }),
+        ]);
+        const second = await getUsage({ now, projectsRoot: root, force: true });
+        assert.equal(second.filesServedFromMemo, 0, "an appended file cannot be served from memo");
+        assert.equal(second.tokensLast7d.total, 750, "totals include the newly-appended line");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a file that ages out of the 7d window has its memo entry evicted", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-memo-evict-"));
+      try {
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
+        // Pin the file's REAL on-disk mtime to `t0` — otherwise it carries the
+        // actual wall-clock write time, which (being the real "now") is always
+        // newer than any fictional `now` these fixtures use, so it could never
+        // actually go stale relative to a fictional `t1` below.
+        const filePath = join(root, "p/s.jsonl");
+        await utimes(filePath, t0, t0);
+
+        await getUsage({ now: t0, projectsRoot: root, force: true });
+        assert.equal(await countTranscriptParseMemoEntries(), 1);
+
+        // 8 days later the file's mtime (pinned, unchanged) is outside the 7d
+        // window — the walk's existing filesSkippedByMtime branch fires, which
+        // now also evicts the stale memo entry (no separate sweep job).
+        const t1 = new Date(t0.getTime() + 8 * 24 * 60 * 60 * 1000);
+        const snap = await getUsage({ now: t1, projectsRoot: root, force: true });
+        assert.equal(snap.filesSkippedByMtime, 1);
+        assert.equal(await countTranscriptParseMemoEntries(), 0, "the aged-out file's memo entry was evicted");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("degrade paths via transcriptScan() (injected memoIo)", () => {
+    test("a rejecting memo load degrades to a full parse — never throws, totals still correct", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-memo-loadfail-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
+
+        const scan = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
+          load: async () => {
+            throw new Error("redis unreachable");
+          },
+        });
+        assert.equal(scan.filesServedFromMemo, 0);
+        assert.equal(scan.acc7d.total, 500);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a rejecting memo write is swallowed — the already-computed scan is still returned correctly", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-memo-writefail-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
+
+        const scan = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
+          write: async () => {
+            throw new Error("redis unreachable");
+          },
+        });
+        assert.equal(scan.acc7d.total, 500);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a cached entry with an unrecognised family degrades to a full parse of that file", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-memo-badvocab-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 500 })]);
+        const filePath = join(root, "p/s.jsonl");
+        const st = await stat(filePath);
+
+        const badEntry: FileParseMemoEntry = {
+          size: st.size,
+          mtimeMs: st.mtimeMs,
+          entries: [
+            {
+              tsMs: new Date("2026-05-25T11:00:00Z").getTime(),
+              tokens: breakdown({ total: 999_999 }), // would be wrong if replayed
+              foreign: false,
+              family: "not-a-real-family",
+            },
+          ],
+          skill: "hydra-dev",
+          dispatchKind: "autopilot-dispatched",
+          observedResetMs: null,
+          linesParsed: 1,
+          linesWithUsage: 1,
+          parseErrors: 0,
+        };
+
+        const scan = await transcriptScan(root, now, deriveSkill, stubReadOAuth, {
+          load: async () => new Map([[filePath, badEntry]]),
+          write: async () => {},
+        });
+        // Fell through to a full parse of the real file content, not the
+        // poisoned cached total.
+        assert.equal(scan.filesServedFromMemo, 0);
+        assert.equal(scan.acc7d.total, 500);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 });

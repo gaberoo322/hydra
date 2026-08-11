@@ -118,6 +118,35 @@ function slotEpoch(slotObj: unknown): string | null {
 }
 
 /**
+ * Compute the per-occupancy identity (issue #3834) for a slot snapshot, reusing
+ * the EXACT pre-formatted identity strings `projectDispatches` already keys its
+ * cross-turn `byIdentity` map on — so the projection-time cross-turn collapse
+ * and `dedupByCanonicalCycleId`'s post-confirm empty-cycleId pass key on the
+ * literal same identity space and can never disagree about what counts as "the
+ * same occupancy" (the grilled design concept's binding rationale):
+ *   - `id:<task_id>`        when the slot carries a `task_id` (globally unique
+ *                           per dispatch) — the durable dispatch identity;
+ *   - `epoch:<slot>@<epoch>` the `epochKey` fallback when no `task_id` is
+ *                           present (same slot + same start instant is
+ *                           definitionally the same occupancy);
+ *   - `null`                 when neither is recoverable (identity-less — the
+ *                           #3738 fallback population).
+ * This value is carried on {@link RetroDispatch.occupancyId};
+ * `dedupByCanonicalCycleId` composes the full dedup key as
+ * `${slot}::${occupancyId}` (the slot prefix disambiguates the epoch facet
+ * across slots; for the globally-unique task_id facet it is redundant but
+ * harmless, and keeps both facets uniform). It is DISTINCT from the candidate
+ * `cycleId` even though both are seeded from the same `task_id`: the
+ * confirmation protocol blanks `cycleId` but must leave this identity intact,
+ * so the post-confirm dedup can still tell distinct same-slot occupancies apart.
+ */
+function occupancyIdOf(taskId: string | null, epochKey: string | null): string | null {
+  if (taskId) return `id:${taskId}`;
+  if (epochKey) return epochKey; // already `epoch:<slot>@<epoch>`
+  return null;
+}
+
+/**
  * Fill a dispatch's null fields from a slot-snapshot entry. Existing values
  * always win (action-join / earliest-turn canonical row), so this is
  * enrich-only — used both for the same-turn `(turn, slot)` merge and for the
@@ -128,6 +157,7 @@ function enrichFromSlot(
   slotSkill: string | null,
   slotAnchor: string | null,
   slotTaskId: string | null,
+  occupancyId: string | null,
 ): void {
   if (!d.skill && slotSkill) d.skill = slotSkill;
   if (!d.anchorReference && slotAnchor) d.anchorReference = slotAnchor;
@@ -138,6 +168,14 @@ function enrichFromSlot(
   // Only fill a candidate cycleId when it is still empty — an action/outcome-
   // carried cycleId always wins (clean-run identity).
   if (!d.cycleId && slotTaskId) d.cycleId = slotTaskId;
+  // Per-occupancy identity (issue #3834): carry the slot's task_id/epoch as a
+  // NON-drillable identity, distinct from cycleId, so it survives the
+  // confirmation protocol's cycleId blank. existing-values-wins keeps the
+  // first-projected identity canonical (consistent with earliest-turn-
+  // canonical; a task_id and a slot@epoch for the same occupancy collapse onto
+  // the same row at projection time via the cross-turn identity map, so the
+  // two facets never compete for distinct rows here).
+  if (!d.occupancyId && occupancyId) d.occupancyId = occupancyId;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +291,10 @@ export function projectDispatches(
         anchorReference,
         prNumber,
         slot,
+        // The action carries no slot task_id; the per-occupancy identity is
+        // filled from the same-turn slots_snapshot below (enrichFromSlot), or
+        // from a later turn's snapshot via the cross-turn identity map.
+        occupancyId: null,
         status,
         bucket: bucketOf(status),
         // abandonReason / regression are enriched from the metrics sidecar
@@ -309,6 +351,11 @@ export function projectDispatches(
       const slotTaskId = slotStr(slotObj, "task_id");
       const epoch = slotEpoch(slotObj);
       const epochKey = epoch ? `epoch:${slot}@${epoch}` : null;
+      // Per-occupancy identity (issue #3834): the pre-formatted `id:<task_id>`
+      // / `epoch:<slot>@<epoch>` identity key (same string the byIdentity map
+      // keys on), carried separately from the candidate cycleId so it survives
+      // the confirmation protocol's blank.
+      const occupancyId = occupancyIdOf(slotTaskId, epochKey);
       const existing = bySlot.get(slot);
       if (existing) {
         // Same-turn (turn, slot) merge: enrich the action-derived row's null
@@ -316,7 +363,7 @@ export function projectDispatches(
         // so later turns' snapshots of the SAME occupancy dedup onto it
         // (issue #1776), even when the action's cycleId and the slot's task_id
         // diverge (the epoch key covers that).
-        enrichFromSlot(existing, slotSkill, slotAnchor, slotTaskId);
+        enrichFromSlot(existing, slotSkill, slotAnchor, slotTaskId, occupancyId);
         registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, existing);
         registerIdentity(existing.cycleId ? `id:${existing.cycleId}` : null, existing);
         registerIdentity(epochKey, existing);
@@ -331,7 +378,7 @@ export function projectDispatches(
         (slotTaskId ? byIdentity.get(`id:${slotTaskId}`) : undefined) ??
         (epochKey ? byIdentity.get(epochKey) : undefined);
       if (crossTurnPrior) {
-        enrichFromSlot(crossTurnPrior, slotSkill, slotAnchor, slotTaskId);
+        enrichFromSlot(crossTurnPrior, slotSkill, slotAnchor, slotTaskId, occupancyId);
         // Register any identity facet this snapshot revealed that the earlier
         // turn's entry lacked (e.g. first turn had no started_epoch).
         registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, crossTurnPrior);
@@ -359,6 +406,7 @@ export function projectDispatches(
         anchorReference: slotAnchor,
         prNumber: prNumberFromAnchor(slotAnchor),
         slot,
+        occupancyId,
         status: null,
         bucket: null,
         abandonReason: null,
