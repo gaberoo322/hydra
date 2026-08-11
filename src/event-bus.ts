@@ -440,7 +440,11 @@ class EventBus {
     const raw = (await this.publisher.xrevrange(
       stream, "+", "-", "COUNT", count,
     )) as RawStreamEntry[];
-    return raw.map(([id, fields]) => ({ id, ...this._parseFields(fields) }));
+    // Spread the parsed fields FIRST so the Redis stream id (`id` from the
+    // destructure) wins over the envelope's own `id` field (publish()'s
+    // randomUUID(), persisted as a stream field). The reverse order let the
+    // envelope UUID clobber the stream id in 100% of responses (#3937).
+    return raw.map(([id, fields]) => ({ ...this._parseFields(fields), id }));
   }
 
   async getStreamInfo(stream: string): Promise<Record<string, unknown> | null> {

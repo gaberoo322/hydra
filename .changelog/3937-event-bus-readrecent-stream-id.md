@@ -1,0 +1,1 @@
+- fix: EventBus.readRecent() exposes the Redis stream id (<ms>-<seq>) instead of the envelope's UUID, restoring time-windowing for event consumers (#3937)
