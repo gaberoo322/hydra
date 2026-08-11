@@ -23,8 +23,9 @@
  * caught by them only if it imported child_process directly. This ratchet pins
  * the journalctl boundary closed specifically: it forbids the `journalctl`
  * binary token appearing alongside a process-spawn outside the family — the same
- * targeted closure mechanic `openviking-seam-check.ts` (#954) uses for the OV
- * `fetch()` boundary. With it in place, every `journalctl` spawn in `src/` is
+ * targeted closure mechanic `openviking-seam-check.ts` (#954) used for the OV
+ * `fetch()` boundary before both were retired with the knowledge plane
+ * (ADR-0033). With it in place, every `journalctl` spawn in `src/` is
  * owned by exactly one Seam.
  *
  * This is a thin Adapter over the shared baseline-ratchet engine in

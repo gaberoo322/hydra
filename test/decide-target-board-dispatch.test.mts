@@ -31,9 +31,11 @@
  * the exclusion is enforced upstream at the board read, not re-derived here.
  *
  * EXPAND PHASE (ADR-0030): the legacy Redis signals (`target_work_available`,
- * `target_research_due`, the candidate-feed `research_recommended` path) still
- * fire in parallel — nothing Redis-side is removed. These tests pin that the
- * new GitHub-board signals ALSO drive the Target branch.
+ * `target_research_due`) still fire in parallel — nothing Redis-side is
+ * removed. (The candidate-feed `research_recommended` forced-research path was
+ * retired in #3832 — `/api/anchor/candidates` is gone — so it is no longer a
+ * parallel trigger.) These tests pin that the new GitHub-board signals ALSO
+ * drive the Target branch.
  *
  * Exercised through the `decide` CLI subcommand, pinning the JSON wire
  * contract (same harness as test/decide-cleanup-target-class.test.mts).
@@ -110,11 +112,12 @@ function baseState(o: StateOverrides = {}): any {
 }
 
 /**
- * A candidate feed that explicitly does NOT recommend research, so the legacy
- * candidate-feed `research_target` trigger (research_recommended) stays silent
- * and only the GitHub-board signals under test can drive the Target branch. A
- * `null` candidates payload defaults `research_recommended` to True (degrade
- * toward research), which would confound the board-signal assertions.
+ * A candidate feed that explicitly does NOT recommend research. Post-#3832 the
+ * candidate feed no longer drives the research_target selector at all (the
+ * `/api/anchor/candidates` forced-research branch was retired), so this payload
+ * cannot confound the board-signal assertions via research_target; it is
+ * retained only as a realistic non-null feed for the dev_target steer path
+ * (which still reads `research_recommended` to decide the anchor hint).
  */
 const feedNoResearch = {
   candidates: [{ anchorRef: "item-1", score: 0.9 }],

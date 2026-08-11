@@ -38,16 +38,78 @@ PLAYBOOKS="$REPO_ROOT/docs/operator-playbooks"
 CLAUDE_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 CODEX_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
 DRY_RUN=0
+FORCE=0
+[ "${HYDRA_SYNC_SKILLS_FORCE:-0}" = "1" ] && FORCE=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run|-n) DRY_RUN=1; shift ;;
+    --force) FORCE=1; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "sync-skills: unknown arg $1" >&2; exit 2 ;;
   esac
 done
 
 command -v python3 >/dev/null || { echo "sync-skills: python3 required" >&2; exit 127; }
+
+# ---- Default-mirror content guard (issue #3828) ----------------------------
+# $HOME/.claude/skills and $HOME/.codex/skills (the UNOVERRIDDEN defaults) are
+# the LIVE, host-shared mirrors every subsequent agent dispatch loads its
+# skill prompts from. A worktree-scoped agent that edits a playbook and runs
+# this script against the default path (the documented-but-unsafe pattern
+# that produced the 2026-07-31 incident on PR #3827/#3789) makes its own
+# unmerged, unreviewed change live for every other dispatch on the host
+# *before* PR review, before CI, before merge -- a gate bypass on the
+# highest-leverage surface in the system. This guard closes that hole:
+#
+#   - Active ONLY when writing to the DEFAULT path (neither CLAUDE_SKILLS_DIR
+#     nor CODEX_SKILLS_DIR is overridden). An explicit override is always a
+#     scratch/isolated destination -- test/sync-skills.test.mts, the
+#     hydra-skill-prune.md regenerate-to-verify step, and the manual pattern
+#     in docs/skill-quality-measurement.md all already use overrides and stay
+#     completely unaffected by this guard.
+#   - Compares docs/operator-playbooks/ (the ONLY tree this script reads) at
+#     $REPO_ROOT against the LOCAL origin/master ref: any tracked diff, or any
+#     untracked new file under that path, refuses the default-path write.
+#     This is a content check, not a SHA/ancestry check (deliberately -- see
+#     the design-concept's rejectedAlternatives for issue-3828): it tolerates
+#     the ordinary origin/master-advanced-since-my-pull race and an operator's
+#     own merge commit, while still catching the actual hazard (unmerged
+#     playbook content reaching the live mirror).
+#   - Fails CLOSED: an unresolvable origin/master ref, or $REPO_ROOT not being
+#     a git repo at all, refuses the write rather than silently allowing it.
+#   - Escape hatch for the rare, EXPLICIT operator override: --force /
+#     HYDRA_SYNC_SKILLS_FORCE=1. Never the default; never used by an autopilot
+#     dispatch (the worktree-isolated dev/QA/skill-prune flows all either stay
+#     on the override-dir path or must not carry this flag).
+#
+# scripts/deploy.sh needs no change to satisfy this guard: by the time it
+# calls sync-skills.sh it has already run `git checkout master && git pull
+# --ff-only origin master`, so docs/operator-playbooks/ is guaranteed
+# identical to origin/master's -- the guard is a no-op on that path.
+GUARD_DEFAULT_PATH=1
+[ -n "${CLAUDE_SKILLS_DIR:-}" ] && GUARD_DEFAULT_PATH=0
+[ -n "${CODEX_SKILLS_DIR:-}" ] && GUARD_DEFAULT_PATH=0
+
+if [ "$GUARD_DEFAULT_PATH" = 1 ] && [ "$FORCE" != 1 ]; then
+  if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "sync-skills: REPO_ROOT ($REPO_ROOT) is not a git repo -- refusing the default-path write (guard fails closed; issue #3828). Pass --force / HYDRA_SYNC_SKILLS_FORCE=1 to override, or point CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR at a scratch dir." >&2
+    exit 4
+  fi
+  if ! git -C "$REPO_ROOT" rev-parse --verify -q origin/master >/dev/null 2>&1; then
+    echo "sync-skills: origin/master could not be resolved locally -- refusing the default-path write (guard fails closed; issue #3828). Pass --force / HYDRA_SYNC_SKILLS_FORCE=1 to override, or point CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR at a scratch dir." >&2
+    exit 4
+  fi
+  GUARD_DIRTY=0
+  git -C "$REPO_ROOT" diff --quiet origin/master -- docs/operator-playbooks || GUARD_DIRTY=1
+  if [ "$GUARD_DIRTY" = 0 ] && [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- docs/operator-playbooks)" ]; then
+    GUARD_DIRTY=1
+  fi
+  if [ "$GUARD_DIRTY" = 1 ]; then
+    echo "sync-skills: docs/operator-playbooks/ differs from origin/master (unmerged commits, uncommitted edits, or untracked files) -- refusing the default-path write. This is the exact hazard issue #3828 exists to close: the live ~/.claude/skills / ~/.codex/skills mirror every agent dispatch loads from must never carry unmerged playbook content. Regenerate from a throwaway origin/master worktree instead, or point CLAUDE_SKILLS_DIR/CODEX_SKILLS_DIR at a scratch dir for local verification, or pass --force / HYDRA_SYNC_SKILLS_FORCE=1 for a deliberate, explicit operator override (never from an autopilot dispatch)." >&2
+    exit 4
+  fi
+fi
 
 mkdir -p "$CLAUDE_DIR" "$CODEX_DIR"
 

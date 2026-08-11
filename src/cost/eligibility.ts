@@ -372,7 +372,13 @@ export interface UsageEligibility {
  *
  * When the Anchor is unset (`weeklyResetAnchor === null`) — or its ISO is
  * unparseable — there is no curve: `targetPercent` is 0 and `paceState` is the
- * neutral "on". Otherwise paceState compares `percentSinceReset` to the target
+ * neutral "on". `targetPercent` (a pure function of the Anchor + `now`) is
+ * otherwise always computed and surfaced. `paceState` is computed ONLY when
+ * `usageSource === "oauth"` (issue #3751): a non-oauth source carries the
+ * `unavailable()`/estimate zeros (or a rough transcript guess), and feeding
+ * those to the ahead/behind comparison would fabricate a verdict — so a
+ * non-oauth source is the neutral "on" while `targetPercent` still reports the
+ * ramp position. Otherwise paceState compares `percentSinceReset` to the target
  * within ±{@link PACE_STATE_TOLERANCE_PERCENT} percentage points. (issue #857)
  */
 function projectPacingCurve(
@@ -400,6 +406,23 @@ function projectPacingCurve(
 
   const fraction = Math.min(1, Math.max(0, (nowMs - currentMs) / WINDOW_7D_MS));
   const targetPercent = ceiling * 100 * fraction;
+
+  // INV-4 (issue #3751, design-concept issue-3751): `paceState` is a CONSUMER of
+  // `percentSinceReset`. During a meter outage the admission path serves
+  // `percentSinceReset: 0` (the `unavailable()` fail-open shape,
+  // eligibility-usage.ts); feeding that zero to the ahead/behind comparison
+  // yields a false "behind" with `allow: true`, which launches the Pace Gate on
+  // ABSENT evidence — falsifying the safety claim that the outage zeros "can
+  // never be mistaken for a measured 0% used" (only `deriveHardStop` and
+  // `fiveHourThrottleShed` actually guard on `usageSource`). Only the
+  // AUTHORITATIVE OAuth meter may drive an ahead/behind verdict; a non-oauth
+  // source (transcript estimate or the outage zeros) is the neutral "on".
+  // `targetPercent` is a pure function of the Anchor + `now`, so it stays valid
+  // (and is surfaced for observability) regardless of source — only the
+  // comparison that READS `percentSinceReset` is guarded.
+  if (snapshot.usageSource !== "oauth") {
+    return { paceState: "on", targetPercent, sinceResetPercent };
+  }
 
   let paceState: PaceState = "on";
   if (sinceResetPercent > targetPercent + PACE_STATE_TOLERANCE_PERCENT) {

@@ -6,7 +6,7 @@
 // `LearningContextBlock`, `GetContextDeps`, `SourceRead`) and helpers
 // (`runSource()`, `buildContext()`) — relocated here OUT of the HTTP route
 // module `src/api/learning.ts`. This module is PURE domain: it imports the
-// three learning clusters (pattern-memory, reflections, knowledge-base) and has
+// two learning clusters (pattern-memory, reflections) and has
 // ZERO imports from `src/api/`. The
 // route file re-exports these symbols for back-compat so import sites outside
 // it (and the dynamic-import path in tests) do not need to change. "How the
@@ -14,13 +14,11 @@
 // domain home rather than being trapped inside an Express route.
 //
 // Issue #2647: `getContext()` is a PURE diagnostic composer with NO metric side
-// effect. The per-cycle knowledge-context-availability record (issue #1440) was
-// MOVED OUT of the knowledge-base thunk here into the dispatch-served plan-time
-// fetch route (`GET /api/learning/knowledge`, src/api/learning.ts). Recording it
-// here polluted the real-cycle `cyclesWithContext` metric with diagnostic-trace
-// hits (context-trace is `getContext`'s only live caller, so the counter only
-// ever moved on an operator diagnostic — never on an actual dispatch). The
-// record now fires ONLY on a dispatch-served knowledge fetch.
+// effect. It composed a fourth `knowledge-base` block (OpenViking semantic
+// search) until the OpenViking retirement removed the knowledge plane along
+// with the dispatch-served `GET /api/learning/knowledge` route and its
+// `cyclesWithContext` availability metric. The three surviving sources are all
+// Redis-native.
 //
 // Issue #2333 (prior home): folded from src/learning-context.ts into
 // src/api/learning.ts (its sole live consumer at the time). The motivating
@@ -45,10 +43,9 @@
 // POLICY now lives in decide.py (ADR-0006/0012), not a TypeScript composer.
 // Re-add the drop-order machinery only when a real in-process budgeter returns.
 //
-// The three learning clusters live as sibling top-level modules:
+// The two learning clusters live as sibling top-level modules:
 //   - src/pattern-memory/  — Redis-backed pattern store, promotion, escalation
 //   - src/reflections/     — per-anchor + by-file Reflexion-style storage
-//   - src/knowledge-base/  — OpenViking search + indexers (source, knowledge)
 //
 // Issue #2035: the startup + daily-maintenance lifecycle (initLearning,
 // consolidate) lives in src/learning-lifecycle.ts, a one-way sibling that
@@ -84,19 +81,14 @@ import {
  * so they're part of the interface — renaming one is a breaking change for
  * anything reading /api/learning/context-trace.
  *
- * Issue #804: `"knowledge-base"` joins the union. OpenViking search used to
- * be folded silently into the `agent-memory` block (inside `loadAgentMemory`);
- * it now surfaces as its own honest block at this composition seam. The OV
- * cluster is still *composed* here, not *owned* here — the dynamic import that
- * reaches OV lives behind the knowledge-base thunk, keeping the cluster
- * boundary visible (see CONTEXT.md — Learning Context).
- *
  * Issue #1454: the `"global-reflections"` member was removed with the dead
- * global reflection buffer subsystem. getContext() now composes four blocks.
+ * global reflection buffer subsystem. The `"knowledge-base"` member (added by
+ * issue #804 to attribute OpenViking search honestly instead of folding it into
+ * `agent-memory`) was removed with the OpenViking retirement. getContext() now
+ * composes three blocks, all Redis-native.
  */
 export type LearningContextSource =
   | "agent-memory"
-  | "knowledge-base"
   | "per-anchor-reflections"
   | "by-file-reflections";
 
@@ -114,8 +106,8 @@ export type LearningContextSource =
  * `content` carries the raw block text for "hit"; empty otherwise.
  *
  * Issue #804: `itemCount` is the structured count of discrete items the block
- * contributed — reflections for the reflection sources, OpenViking memories
- * for `knowledge-base`, promoted-pattern groups for `agent-memory`. It is
+ * contributed — reflections for the reflection sources, promoted-pattern
+ * groups for `agent-memory`. It is
  * sourced from the underlying data, NOT regex-scanned out of the rendered
  * markdown. `0` for `miss`/`error` blocks. This is the field that lets
  * reflection-injection telemetry be exact instead of re-parsing the prompt.
@@ -212,15 +204,11 @@ async function runSource(
  *
  * Field types mirror the loaders' real signatures so a stub is type-checked:
  *   - loadAgentMemory(agent): Promise<string>            — Pattern Memory raw read
- *   - loadKnowledgeBaseForPrompt(agent): Promise<SourceRead> — KB/OpenViking read
- *     (injecting it lets a test pass a plain stub WITHOUT triggering the dynamic
- *     `import('./knowledge-base/ov-search.ts')` the default path keeps)
  *   - loadAnchorReflections(anchorRef): Promise<ReflectionBlock> — per-anchor read
  *   - loadAnchorReflectionsByFile(files, excludeAnchorRef?): Promise<ReflectionBlock>
  */
 export interface GetContextDeps {
   loadAgentMemory?: (agent: string) => Promise<string>;
-  loadKnowledgeBaseForPrompt?: (agent: string) => Promise<SourceRead>;
   loadAnchorReflections?: (anchorRef: string) => Promise<ReflectionBlock>;
   loadAnchorReflectionsByFile?: (
     files: string[],
@@ -240,27 +228,19 @@ export interface GetContextDeps {
  * `anchor.files` (optional) hints scope files for the by-file index
  * lookup. When omitted, file paths are extracted from `anchor.reference`.
  *
- * The four sources, in trace order (issue #804 added knowledge-base; issue
- * #1454 removed the dead global-reflections block):
+ * The three sources, in trace order (issue #1454 removed the dead
+ * global-reflections block; the OpenViking retirement removed knowledge-base):
  *
  *   1. agent-memory             — promoted pattern lessons for `agent`; the
  *                                 itemCount is the rendered pattern-group count
  *                                 reported by formatMemoryForPrompt (from data,
  *                                 not a regex over the markdown).
- *   2. knowledge-base           — OpenViking memory search (lifted out of the
- *                                 agent-memory block so OV is honestly
- *                                 attributed in the trace). Issue #2647: this
- *                                 thunk no longer records #1440 context
- *                                 availability — that record moved to the
- *                                 dispatch-served GET /api/learning/knowledge
- *                                 route so the metric tracks real cycles, not
- *                                 diagnostic-trace hits.
- *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`,
+ *   2. per-anchor-reflections   — legacy verbatim-key match on `reference`,
  *                                 projected from the coordinator's `perAnchor`
  *                                 sub-block (a pure read; issue #2238 deleted
  *                                 the old read-time by-file backfill side
  *                                 effect).
- *   4. by-file-reflections      — reflections from *other* anchors that touched
+ *   3. by-file-reflections      — reflections from *other* anchors that touched
  *                                 the same files (issue #326), projected from
  *                                 the coordinator's `byFile` sub-block (the
  *                                 extractFilesFromAnchor gate lives inside it).
@@ -274,20 +254,11 @@ export async function getContext(
   // bag, defaulting to the real implementation (`deps?.field ?? realImpl`). The
   // per-source thunks below call these resolved *Fn variables, so the
   // production composition logic stays intact while a test can drop in stubs
-  // that need no Redis / OpenViking connection. For the knowledge-base loader a
-  // provided stub also lets us SKIP the dynamic `import('./knowledge-base/…')`
-  // entirely — the default path keeps the lazy import so the OV cluster boundary
-  // stays visible (module header / issue #804).
+  // that need no Redis connection.
   const loadAgentMemoryFn = deps?.loadAgentMemory ?? loadAgentMemory;
   const loadAnchorReflectionsFn = deps?.loadAnchorReflections ?? loadAnchorReflections;
   const loadAnchorReflectionsByFileFn =
     deps?.loadAnchorReflectionsByFile ?? loadAnchorReflectionsByFile;
-  const loadKnowledgeBaseForPromptFn =
-    deps?.loadKnowledgeBaseForPrompt ??
-    (async (a: string): Promise<SourceRead> => {
-      const { loadKnowledgeBaseForPrompt } = await import("../knowledge-base/ov-search.ts");
-      return loadKnowledgeBaseForPrompt(a);
-    });
 
   const blocks: LearningContextBlock[] = [];
 
@@ -296,14 +267,6 @@ export async function getContext(
     // formatMemoryForPrompt reports the rendered pattern-group count from the
     // structured blocks it assembles — the count-from-data source.
     return formatMemoryForPrompt(memory, agent);
-  }));
-
-  blocks.push(await runSource("knowledge-base", async () => {
-    // Issue #2647: no per-cycle availability record here. getContext is a pure
-    // diagnostic composer; the #1440 `cyclesWithContext` record now fires only
-    // on the dispatch-served GET /api/learning/knowledge fetch, so a diagnostic
-    // context-trace hit no longer pollutes the real-cycle metric.
-    return loadKnowledgeBaseForPromptFn(agent);
   }));
 
   // Issue #2238: delegate the two reflection axes to the coordinator. It reads

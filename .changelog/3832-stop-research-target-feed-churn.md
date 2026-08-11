@@ -1,0 +1,1 @@
+- fix: stop force-dispatching research_target every turn — the retired /api/anchor/candidates feed no longer drives the slot via a permanently-true fail-open (#3832)

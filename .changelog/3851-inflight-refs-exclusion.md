@@ -1,0 +1,1 @@
+- fix: autopilot in-flight dev-work exclusion now honors a non-closing `Refs #N` PR body reference so an anchor with an open PR is not re-picked for dev_orch (#3851)

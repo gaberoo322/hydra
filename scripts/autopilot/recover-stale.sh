@@ -20,6 +20,11 @@ set -uo pipefail
 
 REPO="${HYDRA_AUTOPILOT_REPO:-gaberoo322/hydra}"
 
+# Directory of this script — pr-refs.py (the shared reference predicate) lives
+# next to it (issue #3852). Resolved to an absolute path so the predicate is
+# found regardless of how $0 was passed (relative invocation, worktree path).
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 # Calendar guard (issue #838).
 #
 # Some stale `blocked` issues are calendar-blocked, not blocker-reference
@@ -95,14 +100,65 @@ for arg in "$@"; do
   esac
 done
 
-# Stale in-progress: re-queue.
+# Space-separated membership over the pr-refs.py output (e.g. "123 456 789").
+# Empty haystack ⇒ no open PR references the issue ⇒ keep today's behaviour.
+inflight_contains() {
+  local haystack="$1" needle="$2" x
+  [ -z "$haystack" ] && return 1
+  [ -z "$needle" ] && return 1
+  for x in $haystack; do
+    [ "$x" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# Stale in-progress: re-queue — guarded by an open-PR check (issue #3852).
+#
+# A stale `in-progress` issue may be idle because it is FINISHED and waiting on
+# review, not because dev stalled — an open PR already implements it. Demoting
+# such an issue straight to `ready-for-agent` hands it back to dev_orch as fresh
+# work and manufactures a DUPLICATE implementation of an already-open PR
+# (observed: #3689 was demoted while its PR #3836 sat open and clean). So before
+# demoting, check for an open PR that references the issue; on a hit, route to
+# `needs-qa` (it is awaiting review, not stalled in dev) and comment.
+#
+# The reference predicate lives in ONE place — scripts/autopilot/pr-refs.py
+# (branch-prefix + keyword-in-body regex, INCLUDING the non-closing `Refs #N`
+# form). collect-state.sh's in-flight exclusion has the same shape but misses
+# `Refs #N`; this script is the broader of the two until collect-state.sh adopts
+# the shared file (separately-filed gap).
+#
+# Never-abort contract (mirrors the rest of this script): a failed `gh pr list`
+# or a pr-refs.py parse error yields an EMPTY referenced-issue set, so every
+# issue falls through to today's ready-for-agent relabel. A transient gh outage
+# never strands the turn.
+INFLIGHT_PR_ISSUES=""
+if [ "${#STALE_IN_PROGRESS[@]}" -gt 0 ]; then
+  PR_JSON=$(gh pr list --repo "$REPO" --state open --limit "${GH_ISSUE_LIST_LIMIT:-100}" \
+    --json headRefName,body 2>/dev/null || true)
+  if [ -n "$PR_JSON" ]; then
+    INFLIGHT_PR_ISSUES=$(printf '%s' "$PR_JSON" \
+      | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
+  fi
+fi
+
 for ISSUE in "${STALE_IN_PROGRESS[@]:-}"; do
   [ -z "$ISSUE" ] && continue
-  if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label ready-for-agent 2>/dev/null; then
-    gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Re-queued. >90 min idle in in-progress." 2>/dev/null || true
-    echo "[autopilot] recover-stale: re-queued in-progress issue=$ISSUE"
+  if inflight_contains "$INFLIGHT_PR_ISSUES" "$ISSUE"; then
+    # An open PR already references this issue → awaiting review, not stalled.
+    if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label needs-qa 2>/dev/null; then
+      gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Routed to needs-qa — an open PR already references this issue (recover-stale open-PR guard, #3852)." 2>/dev/null || true
+      echo "[autopilot] recover-stale: routed in-progress→needs-qa issue=$ISSUE (open PR references it)"
+    else
+      echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+    fi
   else
-    echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+    if gh issue edit "$ISSUE" --repo "$REPO" --remove-label in-progress --add-label ready-for-agent 2>/dev/null; then
+      gh issue comment "$ISSUE" --repo "$REPO" --body "> *Autopilot:* Re-queued. >90 min idle in in-progress." 2>/dev/null || true
+      echo "[autopilot] recover-stale: re-queued in-progress issue=$ISSUE"
+    else
+      echo "[autopilot] recover-stale: skip issue=$ISSUE (gh edit failed)"
+    fi
   fi
 done
 
