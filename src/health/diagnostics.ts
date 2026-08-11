@@ -180,20 +180,8 @@ export function derivePipelineMetrics(
 
 export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const health = probes.basicHealth || { status: "failed", redis: false, cycle: "unknown", uptime: 0 };
-  // Issue #1869: svcProbes is now a ServiceProbeMap. On a rejected probe settle
-  // (probes.serviceProbes === null) fall back to a map carrying the two wire
-  // services as "failed" — byte-for-byte the prior default, so the /health/deep
-  // `services.vikingdb`/`.openviking` envelope and the vikingdb/openviking
-  // diagnostic rules see the identical values. New services added to the fan-out
-  // need no entry here: the rules guard absent keys with optional chaining.
-  const svcProbes: ServiceProbeMap = probes.serviceProbes || {
-    vikingdb: { status: "failed" },
-    openviking: { status: "failed" },
-    // Issue #2013: the embed-backend probe is part of the index-1 fan-out, so a
-    // rejected settle defaults it to "failed" alongside the two wire services —
-    // honest-none (the whole fan-out failed), not a phantom "running".
-    "embed-backend": { status: "failed" },
-  };
+  // The `svcProbes` service-probe map was removed with OpenViking — every
+  // service it carried (vikingdb / openviking / embed-backend) was OV-stack.
   const sched = probes.scheduler || {
     running: false,
     cyclesRun: 0,
@@ -245,7 +233,6 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   return {
     health,
     sched,
-    svcProbes,
     // Issue #3459: queueDepth + blCounts removed (see above).
     patterns,
     reflCount,

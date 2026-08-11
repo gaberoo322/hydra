@@ -42,25 +42,14 @@ import type { ReflectionHealthReport } from "../metrics/reflection-health.ts";
 // function of the snapshot like every other rule.
 import type { OutcomeVerdict } from "../scheduler/chores/wiring-liveness-outcomes.ts";
 
-// ---- Service Probe Map — the extensible external-service health record ----
+// ---- Service Probe — one external service's liveness result ----------------
 //
-// Issue #1869: `HealthSnapshot["svcProbes"]` used to be a hard-coded two-field
-// struct (`{ vikingdb, openviking }`). Adding a third monitored service (e.g.
-// the local Ollama embedding backend) meant edits in four places — the type,
-// parseProbes' default, the wire projection, and the api/health.ts fan-out —
-// plus a fifth in service-strip.ts. The field name named an implementation
-// detail (a two-slot struct), not the domain concept: "the health of the
-// external services the orchestrator depends on", a SET that can grow.
-//
-// Replacing the named duet with a string-keyed map concentrates the
-// "what services exist" enumeration in the api/health.ts fan-out. The named
-// keys (`"vikingdb"`, `"openviking"`) become map entries; diagnostic rules read
-// `s.svcProbes["vikingdb"]?.status` via a keyed lookup that does NOT require a
-// struct-field edit to add a new service. The on-wire field names in
-// `/health/deep` are preserved for backward compatibility (out of scope per the
-// issue): the projection reads the map by key.
+// The keyed `svcProbes` map (issue #1869) that carried these on HealthSnapshot
+// was removed with OpenViking: every service it enumerated (vikingdb,
+// openviking, embed-backend) was part of the OV stack. `ServiceProbe` itself
+// survives — the dashboard service strip (src/health/strip-probes.ts) still
+// reports orchestrator/redis liveness in this shape.
 
-/** One external-service probe result: liveness status + optional latency. */
 export interface ServiceProbe {
   status: string;
   latencyMs?: number | null;
@@ -91,10 +80,6 @@ export interface HealthSnapshot {
     lastCycleAt?: string | null;
     intervalHuman?: string;
   };
-  // Issue #1869: extensible keyed map, not a fixed `{ vikingdb, openviking }`
-  // struct — a new monitored service is a one-entry edit to the api/health.ts
-  // fan-out, not a four-file struct-field change.
-  svcProbes: ServiceProbeMap;
   // Issue #3459: queueDepth and blCounts were Redis backlog fields retired with
   // ADR-0031. Their honest-zero stubs always returned 0/empty, and the four rules
   // that gated on them could never fire. Removed from the snapshot type so the
@@ -221,7 +206,6 @@ export interface ProbeMetricsInput {
 
 export interface ProbeInputs {
   basicHealth: HealthSnapshot["health"] | null;
-  serviceProbes: HealthSnapshot["svcProbes"] | null;
   scheduler: HealthSnapshot["sched"] | null;
   // Issue #3459: queueDepth and backlogCounts removed — their stubs always
   // returned 0/empty after ADR-0031 retired the Redis backlog subsystem.
@@ -350,7 +334,6 @@ export function assembleProbeInputs(settled: SettledByKey): ProbeInputs {
   };
   return {
     basicHealth: val<ProbeInputs["basicHealth"]>("basicHealth"),
-    serviceProbes: val<ProbeInputs["serviceProbes"]>("serviceProbes"),
     scheduler: val<ProbeInputs["scheduler"]>("scheduler"),
     // Issue #3459: queueDepth + backlogCounts removed (see ProbeInputs).
     metrics: val<ProbeInputs["metrics"]>("metrics"),

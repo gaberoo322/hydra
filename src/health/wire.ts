@@ -91,17 +91,6 @@ export interface HealthDeepResponse {
       lastError: string | null | undefined;
       lastCycleAt: string | null | undefined;
     };
-    // Issue #1869: the wire contract still names these two services explicitly
-    // (backward compatibility — out of scope to change the envelope shape). The
-    // projection reads them out of the svcProbes map by key.
-    vikingdb: ServiceProbe;
-    openviking: ServiceProbe;
-    // Issue #2013: the OpenViking dense-embedding backend, sampled distinctly
-    // from the `openviking` app-liveness key (the surface that was stale-but-
-    // invisible during #1921). An ADDED field — never a rename/removal of the
-    // two above. The probe is a normal svcProbes entry (keyed "embed-backend");
-    // a missing key coalesces to "failed" so the wire field is always present.
-    "embed-backend": ServiceProbe;
   };
   activeCycle: unknown;
   // Issue #3459: pipeline.queueDepth + pipeline.backlogCounts removed — they were
@@ -158,7 +147,7 @@ export function projectHealthDeepResponse(
   checkedAt: string,
 ): HealthDeepResponse {
   // Issue #3459: queueDepth + blCounts removed from destructure (no longer on snapshot).
-  const { health, svcProbes, sched, patterns, reflCount, reflectionHealth, darkOutcomes, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  const { health, sched, patterns, reflCount, reflectionHealth, darkOutcomes, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
 
   return {
@@ -172,13 +161,8 @@ export function projectHealthDeepResponse(
       orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
       redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
       scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt },
-      // Issue #1869: keyed reads off the ServiceProbeMap. A missing key (e.g. a
-      // probe failure that produced an empty map) coalesces to "failed" so the
-      // wire field is always present, preserving the envelope contract.
-      vikingdb: svcProbes.vikingdb ?? { status: "failed" }, openviking: svcProbes.openviking ?? { status: "failed" },
-      // Issue #2013: the distinct embed-backend entry. Same keyed-read +
-      // coalesce-to-"failed" contract as the two services above.
-      "embed-backend": svcProbes["embed-backend"] ?? { status: "failed" },
+      // The vikingdb / openviking / embed-backend wire fields were removed with
+      // OpenViking — the `svcProbes` map that fed them held only OV services.
     },
     activeCycle,
     // Issue #744: emergency-brake state alongside the kill switch.

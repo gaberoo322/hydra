@@ -34,27 +34,10 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
       JSON.stringify(role === "planner" ? [1, 2, 3, 4, 5] : role === "executor" ? [1, 2, 3] : [1])) as any,
     reflectionKeys: (async () => 12) as any,
     emergencyBrake: (async () => ({ engaged: true, since: 1234 })) as any,
-    ovSearchWindow: (async () => [{ hour: 0, count: 5 }]) as any,
-    knowledgeContextAvailability: (async () => ({ available: 0.95 })) as any,
     redisInfoImpl: (async (section: string) =>
       section === "memory" ? "used_memory_human:512M\r\n"
       : section === "clients" ? "connected_clients:3\r\n"
       : "uptime_in_seconds:900\r\n") as any,
-    ovPostJsonImpl: (async () => ({ ok: true, data: { result: { memories: [1, 2], resources: [1], skills: [1] } } })) as any,
-    probeServiceImpl: (async () => ({ status: "running", latencyMs: 5 })) as any,
-    probeOvImpl: (async () => ({ status: "running", latencyMs: 6 })) as any,
-    probeEmbedBackendImpl: (async () => ({ status: "running", latencyMs: 7 })) as any,
-    // Issue #2386: stub the in-process skill-catalog read so the assembled
-    // ProbeInputs.skillCatalog is deterministic in tests (no dependency on the
-    // process-lifetime registerSkills singleton).
-    skillCatalogState: (() => ({
-      skills: [],
-      registered: 4,
-      total: 4,
-      completed: true,
-      lastAttemptAt: 1234,
-      vlmDeferred: false,
-    })) as any,
     // Issue #2805: stub the dark-outcome check so collectProbeInputs' merged
     // darkOutcomes is deterministic (no dependency on the real outcomes.yaml or
     // metric files). One dark verdict so the merge is observable.
@@ -89,19 +72,16 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     assert.equal(probes.basicHealth?.cycle, "idle");
     assert.equal(typeof probes.basicHealth?.uptime, "number");
 
-    // index 1 — service probes folded to the keyed svcProbes map.
-    assert.equal((probes.serviceProbes as any)?.vikingdb?.status, "running");
-    assert.equal((probes.serviceProbes as any)?.openviking?.status, "running");
-    assert.equal((probes.serviceProbes as any)?.["embed-backend"]?.status, "running");
+    // The `serviceProbes` descriptor was removed with OpenViking — every
+    // service it probed (vikingdb / openviking / embed-backend) was OV.
+    assert.equal((probes as any).serviceProbes, undefined);
 
-    // indices 2,5,12,13,16,17,18 — direct probe values.
+    // Direct probe values.
     // Issue #3459: queueDepth + backlogCounts removed from ProbeInputs.
     assert.equal((probes.scheduler as any)?.consecutiveErrors, 2);
     assert.deepEqual(probes.patterns, { planner: 5, executor: 3, skeptic: 1 });
     assert.equal(probes.reflections, 12);
     assert.equal((probes.emergencyBrake as any)?.engaged, true);
-    assert.deepEqual(probes.ovSearchWindow, [{ hour: 0, count: 5 }]);
-    assert.deepEqual(probes.knowledgeContext, { available: 0.95 });
 
     // indices 7,8 — host-probe success unwraps `.data`.
     assert.deepEqual(probes.disk, { availableGb: 50, totalGb: 500, usedPercent: 10 });
@@ -209,8 +189,7 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
 
   test("OV-search transport failure folds to backend-unreachable (the classifier path)", async () => {
     const probes = await collectProbeInputs(happyDeps({
-      ovPostJsonImpl: (async () => ({ ok: false, code: "ov-service-down" })) as any,
-    }));
+      }));
     assert.equal((probes.ovSearch as any)?.status, "backend-unreachable");
     assert.equal((probes.ovSearch as any)?.latencyMs, null);
   });
