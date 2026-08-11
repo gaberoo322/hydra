@@ -131,10 +131,10 @@ describe("getContext returns a structured LearningContext", () => {
       throw err;
     }
 
-    assert.equal(ctx.blocks.length, 4);
+    assert.equal(ctx.blocks.length, 3);
   });
 
-  // Issue #2141: getContext now accepts an optional `deps` bag of the four
+  // Issue #2141: getContext now accepts an optional `deps` bag of the
   // primitive source-loaders. Injecting stubs drives a realistic HIT scenario
   // (non-empty agent-memory + non-empty per-anchor-reflections) WITHOUT a live
   // Redis connection — exercising the production composition logic (the

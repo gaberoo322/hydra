@@ -5,7 +5,6 @@ import { FlowTab } from "../components/pages/explore/FlowTab.jsx";
 import { LessonsTab } from "../components/pages/explore/LessonsTab.jsx";
 import { AnomaliesTab } from "../components/pages/explore/AnomaliesTab.jsx";
 import { ArchitectureTab } from "../components/pages/explore/ArchitectureTab.jsx";
-import { SearchTab } from "../components/pages/explore/SearchTab.jsx";
 import { OrchestratorMap } from "../components/OrchestratorMap.jsx";
 
 /**
@@ -31,7 +30,6 @@ const TABS = [
   { id: "lessons", label: "Lessons", Component: LessonsTab },
   { id: "anomalies", label: "Anomalies", Component: AnomaliesTab },
   { id: "architecture", label: "Architecture", Component: ArchitectureTab },
-  { id: "search", label: "Search", Component: SearchTab },
   { id: "orchestrator-map", label: "Orchestrator Map", Component: OrchestratorMap },
 ];
 
