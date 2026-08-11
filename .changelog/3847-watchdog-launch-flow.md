@@ -1,0 +1,1 @@
+- feat: `hydra-watchdog.sh` gains a `## LAUNCH FLOW` block that reads the pace-gate last-tick hash once per tick and detects sustained launch-flow signals (fail-safe / meter-dark / quota / pause / latency) via per-signal `{since, fired}` streak keys, firing a once-per-streak WARNING; `src/redis/launch-flow.ts` owns the key builders + typed reads (#3847)

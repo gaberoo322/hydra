@@ -103,3 +103,157 @@ export async function getPaceGateLastTick(): Promise<PaceGateLastTick> {
     latencyMs: Number.isFinite(latencyMs) ? latencyMs : null,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Launch-flow DETECTION state (issue #3847, epic #3844).
+//
+// `scripts/hydra-watchdog.sh`'s `run_launch_flow` block is the SECOND bash
+// reader of `PACE_GATE_LAST_TICK_KEY` (the first being pace-gate.sh's writer);
+// `test/watchdog-launch-flow.test.mts` drift-guards that literal against this
+// constant, sibling to `test/launch-flow-key-contract.test.mts` (which guards
+// pace-gate.sh). The block asks whether a defective / quota / pause signal —
+// or a slow eligibility probe — has been SUSTAINED past a threshold, using the
+// per-signal streak state below. It is DETECTION ONLY; the watchdog bash is the
+// SOLE writer (SET NX / DEL via redis-cli), and this module owns only the key
+// NAMES plus a typed read for a future in-process consumer — mirroring the
+// `wiring-liveness-dark-outcomes.ts` split exactly (TypeScript owns the name,
+// bash owns the mutation).
+// ---------------------------------------------------------------------------
+
+/**
+ * The five launch-flow streak signals the watchdog tracks, each with its own
+ * `{since, fired}` key pair (ten keys total). The first four are reason-keyed
+ * (`reason` ∈ that signal's member-set); `latency` is keyed on the hash's
+ * numeric `latency_ms` field instead and is independent of `reason`.
+ */
+export type WatchdogLaunchSignal =
+  | "fail-safe"
+  | "meter-dark"
+  | "quota"
+  | "pause"
+  | "latency";
+
+/** The reason-keyed signals plus `"healthy"` (any reason outside the four
+ *  alarm member-sets — endpoint was readable, not defective — which clears
+ *  every reason-keyed streak). `latency` is NOT reason-keyed, so it is not a
+ *  possible result of {@link classifyLaunchSignal}. */
+export type WatchdogLaunchReasonSignal =
+  | "fail-safe"
+  | "meter-dark"
+  | "quota"
+  | "pause"
+  | "healthy";
+
+/** Enumerable list of all five streak signals (key builders + tests iterate it). */
+export const WATCHDOG_LAUNCH_SIGNALS: readonly WatchdogLaunchSignal[] = [
+  "fail-safe",
+  "meter-dark",
+  "quota",
+  "pause",
+  "latency",
+];
+
+/**
+ * Reason → reason-keyed signal membership (INV-3). Canonical taxonomy; the
+ * watchdog's bash `case` re-implements this same map and is drift-guarded by
+ * `test/watchdog-launch-flow.test.mts`. `meter-unavailable` is split OUT of
+ * generic fail-safe into its own `meter-dark` signal (#3814); quota's three
+ * reasons are unified into ONE class so a stretch flipping between them does
+ * not spuriously reset; `paused` earns its own (forgotten-pause) signal.
+ */
+export const LAUNCH_FLOW_REASON_SIGNAL: Readonly<
+  Record<string, Exclude<WatchdogLaunchReasonSignal, "healthy">>
+> = {
+  "curl-missing": "fail-safe",
+  "jq-missing": "fail-safe",
+  "eligibility-unreachable": "fail-safe",
+  "eligibility-unparseable": "fail-safe",
+  "allow-invalid": "fail-safe",
+  "meter-unavailable": "meter-dark",
+  "session-blocked": "quota",
+  "emergency-stop": "quota",
+  "weekly-emergency-stop": "quota",
+  paused: "pause",
+};
+
+/**
+ * Classify a tick's `reason` into its reason-keyed signal, or `"healthy"` for
+ * any reason outside the four alarm member-sets (launch / already-running /
+ * deliberate skips other than quota & pause — all prove the endpoint was
+ * readable, so they clear every reason-keyed streak). A null/empty reason is
+ * `"healthy"`; the watchdog treats an unreadable last-tick as a read failure
+ * (no mutation) BEFORE ever calling this, so this function only sees a present
+ * reason string. `latency` is never returned here — it derives from
+ * `latency_ms`, not `reason`.
+ */
+export function classifyLaunchSignal(
+  reason: string | null | undefined,
+): WatchdogLaunchReasonSignal {
+  if (!reason) return "healthy";
+  return LAUNCH_FLOW_REASON_SIGNAL[reason] ?? "healthy";
+}
+
+/** Key-template prefix shared by {@link launchFlowSinceKey} and
+ *  {@link launchFlowFiredKey}. The watchdog bash holds the SAME literal in its
+ *  `LF_KEY_PREFIX` shell variable; `test/watchdog-launch-flow.test.mts`
+ *  asserts the two never drift apart. */
+export const LAUNCH_FLOW_KEY_PREFIX = "hydra:autopilot:launch-flow";
+
+/**
+ * Key for ONE signal's FIRST-SEEN epoch-ms — the moment the current streak of
+ * that signal began. Mirrors `darkSinceKey`: SET NX from bash locks it on the
+ * first qualifying tick; it is a no-op after, so `now - since` grows to reflect
+ * the true sustained duration. Value is an epoch-ms string.
+ */
+export function launchFlowSinceKey(signal: WatchdogLaunchSignal): string {
+  return `${LAUNCH_FLOW_KEY_PREFIX}:since:${signal}`;
+}
+
+/**
+ * Key for ONE signal's FIRED dedup marker — presence means "the WARNING for the
+ * CURRENT streak of this signal has already been emitted". Mirrors
+ * `filedMarkerKey`: set once per streak the instant `now - since >= threshold`,
+ * cleared on recovery so a later streak fires fresh. Value is unimportant
+ * (presence is the signal).
+ */
+export function launchFlowFiredKey(signal: WatchdogLaunchSignal): string {
+  return `${LAUNCH_FLOW_KEY_PREFIX}:fired:${signal}`;
+}
+
+/**
+ * Read the first-seen epoch-ms for `signal`'s current streak, or `null` when no
+ * streak is being tracked. A non-numeric stored value coerces to `null`
+ * (defensive — bash only ever writes a number). Never throws.
+ */
+export async function getLaunchFlowSince(
+  signal: WatchdogLaunchSignal,
+): Promise<number | null> {
+  const r = getRedisConnection();
+  const raw = await r.get(launchFlowSinceKey(signal));
+  if (raw === null) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Whether the WARNING for `signal`'s CURRENT streak has already fired.
+ * `true` means "already fired — do not re-emit this tick". Never throws.
+ */
+export async function isLaunchFlowFired(
+  signal: WatchdogLaunchSignal,
+): Promise<boolean> {
+  const r = getRedisConnection();
+  return (await r.exists(launchFlowFiredKey(signal))) === 1;
+}
+
+/**
+ * Clear BOTH the first-seen anchor and the fired marker for `signal`. Called by
+ * the watchdog the moment a signal's membership test goes false (stateless
+ * recovery). Idempotent. Never throws.
+ */
+export async function clearLaunchFlowStreak(
+  signal: WatchdogLaunchSignal,
+): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(launchFlowSinceKey(signal), launchFlowFiredKey(signal));
+}
