@@ -66,7 +66,7 @@ Read the Orchestrator's domain glossary and ADRs first so candidates are named i
 npx tsx -e "import('/home/gabe/hydra/src/aggregators/repo-graph.ts').then(m => m.getCouplingReport().then(r => { process.stdout.write(r); process.exit(0); })).catch(e => { console.error(e); process.exit(1); });"
 ```
 
-This prints a markdown block with the top ≥10 modules ranked by fan-in and the top-5 cross-group coupling pairs — the seam-hub / cross-group-tension signals worth deepening. Prioritise candidates that sit on a high-fan-in hub or straddle a heavy cross-group edge over ones surfaced purely by file size. (The report is a READ-ONLY view over the existing `scanArchitecture()` import graph — it opens no Redis or network connection and is safe to run headless.)
+This prints a markdown block with the top ≥10 modules ranked by fan-in and the top-5 cross-group coupling pairs — the seam-hub / cross-group-tension signals worth deepening. Prioritise candidates that sit on a high-fan-in hub or straddle a heavy cross-group edge over ones surfaced purely by file size. (The report is a READ-ONLY view over the existing `scanArchitecture()` import graph — it opens no Redis/network connection and is safe to run headless.)
 
 Then use the **Agent tool with `subagent_type=Explore`** to walk `~/hydra/src/`, `~/hydra/dashboard/src/`, and `~/hydra/scripts/`. Explore organically — note where you experience friction, following the upstream skill's prompts:
 

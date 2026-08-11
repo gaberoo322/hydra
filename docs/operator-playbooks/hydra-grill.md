@@ -132,9 +132,8 @@ The READ scope depends on `$scope`:
    ```
 
 5. **Prior-work search** — optional, only when the Q&A loop surfaces a
-   "have we done this before?" question. Use `gh issue list --search` over the
-   board and `npm run probe-search` over the tree. (Semantic search via
-   OpenViking was retired — ADR-0033.)
+   "have we done this before?" question. Use `gh issue list --search` or
+   probe-search.
 
 #### Step 2.target — Multi-context target glossaries (scope=target only)
 
