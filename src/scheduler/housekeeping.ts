@@ -60,7 +60,6 @@ import { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { runWorktreeOrphanPrune } from "./chores/worktree-orphan-prune.ts";
 import { runGlmEligibilitySweep } from "./chores/glm-eligibility-sweep.ts";
-import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 import { runUsageWeeklySnapshot } from "./chores/usage-weekly-snapshot.ts";
 import { runHoldbackMergeWatch } from "./chores/holdback-merge-watch.ts";
@@ -83,7 +82,6 @@ export { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 export { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
 export { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
-export { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 
 // ---------------------------------------------------------------------------
 // Cadence constants (issue #2461)
@@ -396,15 +394,6 @@ async function runHousekeeping(
       work: async () => {
         await runSweep();
       },
-    },
-
-    {
-      // Issue #2148: post-startup recovery for the OV skill catalog. No Redis
-      // time-guard — the chore's own work is intrinsically idempotent (it skips
-      // unless the catalog is genuinely short AND OpenViking is live again), so
-      // an hourly tick against a healthy catalog is a guaranteed no-op.
-      name: "skill-catalog-reregister",
-      work: () => runSkillCatalogReregister(),
     },
 
     {

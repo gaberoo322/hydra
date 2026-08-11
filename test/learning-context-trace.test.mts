@@ -6,11 +6,12 @@
  * The composition is over Pattern Memory + Reflections only (see CONTEXT.md
  * — Knowledge Base sits at a different seam queried by subagents directly).
  * Test exercises the pure shape; doesn't require Redis-resident reflections
- * to be present (the four-block layout holds even when every block misses).
+ * to be present (the three-block layout holds even when every block misses).
  *
- * Issue #1454: the dead global-reflections block was removed — getContext()
- * composes four blocks (agent-memory, knowledge-base, per-anchor-reflections,
- * by-file-reflections).
+ * Issue #1454 removed the dead global-reflections block; the OpenViking
+ * retirement removed the knowledge-base block (#804). getContext() now
+ * composes three blocks (agent-memory, per-anchor-reflections,
+ * by-file-reflections), all Redis-native.
  */
 
 import { test, describe } from "node:test";
@@ -27,7 +28,7 @@ const learning = await import("../src/learning/composition.ts");
 const { closeRedisConnections } = await import("../src/redis/connection.ts");
 
 describe("getContext returns a structured LearningContext", () => {
-  test("four blocks in canonical order, every block has a status", async (t) => {
+  test("three blocks in canonical order, every block has a status", async (t) => {
     let ctx;
     try {
       ctx = await learning.getContext("planner", {
@@ -42,15 +43,13 @@ describe("getContext returns a structured LearningContext", () => {
       throw err;
     }
 
-    // Issue #804: the Knowledge Base (OpenViking) is now its own honest block,
-    // composed between agent-memory and the reflection sources.
-    // Issue #1454: the dead global-reflections block was removed — four blocks.
-    assert.equal(ctx.blocks.length, 4, "four sources contribute one block each");
+    // Issue #1454 removed the dead global-reflections block; the OpenViking
+    // retirement removed the #804 knowledge-base block — three blocks remain.
+    assert.equal(ctx.blocks.length, 3, "three sources contribute one block each");
     assert.deepEqual(
       ctx.blocks.map((b: any) => b.source),
       [
         "agent-memory",
-        "knowledge-base",
         "per-anchor-reflections",
         "by-file-reflections",
       ],
@@ -112,11 +111,12 @@ describe("getContext returns a structured LearningContext", () => {
     }
   });
 
-  test("missing or empty agent name still returns four blocks", async (t) => {
+  test("missing or empty agent name still returns three blocks", async (t) => {
     // The function shouldn't throw on weird-but-non-crashing inputs; it
     // should return a structured trace where each source decided what
-    // to do. The contract is "four blocks, one per source" (issue #804 added
-    // the knowledge-base block; issue #1454 removed global-reflections).
+    // to do. The contract is "three blocks, one per source" (issue #1454
+    // removed global-reflections; the OpenViking retirement removed the #804
+    // knowledge-base block).
     let ctx;
     try {
       ctx = await learning.getContext("", {
@@ -131,10 +131,10 @@ describe("getContext returns a structured LearningContext", () => {
       throw err;
     }
 
-    assert.equal(ctx.blocks.length, 4);
+    assert.equal(ctx.blocks.length, 3);
   });
 
-  // Issue #2141: getContext now accepts an optional `deps` bag of the four
+  // Issue #2141: getContext now accepts an optional `deps` bag of the
   // primitive source-loaders. Injecting stubs drives a realistic HIT scenario
   // (non-empty agent-memory + non-empty per-anchor-reflections) WITHOUT a live
   // Redis connection — exercising the production composition logic (the
@@ -153,9 +153,7 @@ describe("getContext returns a structured LearningContext", () => {
         loadAgentMemory: async () => "- prefer the deps-bag idiom\n- never inject the whole thunk",
         // per-anchor HIT: non-empty content, count 1.
         loadAnchorReflections: async () => ({ content: "PRIOR ATTEMPT: stubbed reflection", count: 1 }),
-        // knowledge-base + by-file both MISS (empty content). The KB stub also
-        // proves the dynamic OV import is skipped — no Redis/OV touched.
-        loadKnowledgeBaseForPrompt: async () => ({ content: "", itemCount: 0 }),
+        // by-file MISSes (empty content).
         loadAnchorReflectionsByFile: async () => ({ content: "", count: 0 }),
       },
     );
@@ -173,7 +171,6 @@ describe("getContext returns a structured LearningContext", () => {
     assert.equal(perAnchor.content, "PRIOR ATTEMPT: stubbed reflection");
     assert.equal(perAnchor.itemCount, 1, "per-anchor itemCount carried from the read's count");
 
-    assert.equal(bySource.get("knowledge-base").status, "miss", "empty KB stub → miss");
     assert.equal(bySource.get("by-file-reflections").status, "miss", "empty by-file stub → miss");
 
     // toPrompt() joins exactly the two HIT contents with "\n\n", in block order.
@@ -205,10 +202,10 @@ describe("getContext returns a structured LearningContext", () => {
       throw err;
     }
 
-    assert.equal(ctx.blocks.length, 4, "still four blocks regardless of partial deps");
+    assert.equal(ctx.blocks.length, 3, "still three blocks regardless of partial deps");
     const agentMemory = ctx.blocks.find((b: any) => b.source === "agent-memory");
-    assert.equal(agentMemory.status, "hit", "injected loader produces a hit");
-    assert.ok(agentMemory.content.includes("only this loader is injected"));
+    assert.equal(agentMemory?.status, "hit", "injected loader produces a hit");
+    assert.ok(agentMemory?.content.includes("only this loader is injected"));
   });
 
   // Issue #2198: the hit/miss/error envelope mapping (previously exercised via

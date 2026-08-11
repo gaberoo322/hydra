@@ -520,9 +520,16 @@ echo
 #
 # Two sources, both cheap:
 #   - open-PR refs: the head branch `issue-<N>-<slug>` (hydra-dev's branch
-#     convention) PLUS GitHub closing keywords in the PR body (`Closes #<N>`),
-#     which is the only signal available for a harness-created
-#     `worktree-agent-<hash>` branch — that name carries no issue number.
+#     convention) PLUS an issue reference in the PR body. The body matcher
+#     recognises GitHub CLOSING keywords (`Closes`/`Fixes`/`Resolves #<N>`)
+#     AND the non-closing reference keyword `Refs #<N>` (issue #3851): a PR
+#     that must NOT auto-close its anchor (e.g. a draft "[BLOCKED on #N]"
+#     awaiting a sibling) correctly uses `Refs` instead of `Closes`, so the
+#     exclusion has to honour it — otherwise a harness-created
+#     `worktree-agent-<hash>` branch (whose name carries no issue number) is
+#     invisible to BOTH sources and dev_orch re-builds work already awaiting
+#     review. Bare `#N` is deliberately NOT matched: a passing mention (e.g.
+#     "blocked on #3749") would false-exclude and starve dev_orch.
 #   - the `in-progress` label, for any path that applied it (the AFK inline
 #     dispatch does not relabel, so this is belt-and-braces, not the primary).
 #
@@ -539,7 +546,7 @@ try:
     if m:
       out.add(int(m.group(1)))
     for m in re.finditer(
-        r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b',
+        r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s*:?\s+#(\d+)\b',
         pr.get('body') or '', re.IGNORECASE):
       out.add(int(m.group(1)))
   print(' '.join(str(x) for x in sorted(out)))

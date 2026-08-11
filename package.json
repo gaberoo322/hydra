@@ -20,13 +20,13 @@
     "host-probe-seam-check": "npx tsx scripts/ci/host-probe-seam-check.ts",
     "journal-seam-check": "npx tsx scripts/ci/journal-seam-check.ts",
     "claude-cli-seam-check": "npx tsx scripts/ci/claude-cli-seam-check.ts",
-    "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
     "anthropic-seam-check": "npx tsx scripts/ci/anthropic-seam-check.ts",
     "telegram-seam-check": "npx tsx scripts/ci/telegram-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
     "dep-boundary-check": "npx tsx scripts/ci/dep-boundary-check.ts",
     "stryker:scan": "npx tsx scripts/ci/stryker-scan.ts",
     "biome-check": "npx tsx scripts/ci/biome-check.ts",
+    "qa:catch-rate": "npx tsx scripts/ci/qa-catch-rate.ts",
     "ast-search": "npx tsx scripts/ast-search.ts",
     "probe-search": "npx tsx scripts/probe-search.ts",
     "ast-grep-scan": "npx --yes -p @ast-grep/cli@0.43.0 ast-grep scan",
@@ -43,7 +43,7 @@
     "allowScripts": {}
   },
   "overrides": {
-    "brace-expansion": "^5.0.8"
+    "brace-expansion": "^5.0.9"
   },
   "dependencies": {
     "@sentry/node": "^10.48.0",

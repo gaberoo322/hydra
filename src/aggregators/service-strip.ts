@@ -33,26 +33,20 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-// Issue #954: resolve the OpenViking base URL from OPENVIKING_URL (via the
-// OpenViking Request Adapter's `ovBaseUrl`) instead of hardcoding
-// `http://localhost:1933`. The URL is passed to the shared descriptor `run`
-// closures via the deps bag, not hardcoded.
-import { ovBaseUrl } from "../knowledge-base/ov-request.ts";
 import { pingRedis } from "../redis/utility.ts";
 // Issue #2281: the probe-status DISPLAY vocabulary ("ok"|"degraded"|"down"), the
 // degraded latency threshold, and the pure classify logic are owned by the
-// ServiceProbe Adapter Seam (src/health/probe.ts), next to the probe producers
-// whose results they classify. service-strip composes those canonical
-// classifiers instead of re-implementing them inline, so the status vocabulary
-// has a single definition rather than two that silently diverge. ServiceRow
-// stays a DISTINCT display record (it layers service/lastChecked/lastError onto
-// the shared status) — #2281 converged the vocabulary, NOT the record types.
+// zero-IO display-status classification leaf (src/health/probe-classify.ts).
+// service-strip composes those canonical classifiers instead of
+// re-implementing them inline, so the status vocabulary has a single
+// definition rather than two that silently diverge. ServiceRow stays a
+// DISTINCT display record (it layers service/lastChecked/lastError onto the
+// shared status) — #2281 converged the vocabulary, NOT the record types.
 import {
   classifyServiceBoolean,
   classifyServiceProbe,
-  probeEmbedBackend,
   type ProbeStatus,
-} from "../health/probe.ts";
+} from "../health/probe-classify.ts";
 // Issue #2597/#3482: the ordered, shared enumeration of which external-service
 // liveness probes the strip renders (and in what order) lives in the focused
 // strip-probes leaf — the single owner of the strip's probe set. Issue #3482
@@ -86,7 +80,6 @@ export interface ServiceStripDeps {
   /** Wall-clock anchor; defaults to `new Date()`. */
   now?: Date;
   /** HTTP probe — receives URL + timeout, returns ok / fail and latency. */
-  probe?: (url: string, timeoutMs: number) => Promise<ProbeResult>;
   /** Redis ping — returns true on success. */
   pingRedis?: () => Promise<boolean>;
   /**
@@ -95,12 +88,6 @@ export interface ServiceStripDeps {
    * kill switch — same surface `/health` consults).
    */
   checkOrchestrator?: () => Promise<boolean>;
-  /**
-   * Issue #2013/#2597: the OV dense-embedding backend liveness probe. Defaults
-   * to the shared `probeEmbedBackend` producer; injectable for tests. Never
-   * throws.
-   */
-  probeEmbedBackend?: typeof probeEmbedBackend;
 }
 
 export interface ProbeResult {
@@ -122,11 +109,8 @@ export async function getServiceStrip(deps: ServiceStripDeps = {}): Promise<Serv
   // (STRIP_PROBE_DESCRIPTORS, owned by the strip-probes leaf) decides WHICH probes appear
   // and in WHAT order — this function no longer hard-codes that (issue #2597).
   const resolved: StripProbeDeps = {
-    probe: deps.probe ?? defaultProbe,
     pingRedis: deps.pingRedis ?? defaultPingRedis,
     checkOrchestrator: deps.checkOrchestrator ?? defaultOrchestratorOk,
-    ovBaseUrl,
-    probeEmbedBackend: deps.probeEmbedBackend ?? probeEmbedBackend,
   };
 
   // Run every descriptor's probe in parallel — none depends on another, and a
@@ -220,25 +204,6 @@ export function classifyProbe(input: {
 // Default probes — production wiring
 // ---------------------------------------------------------------------------
 
-async function defaultProbe(url: string, timeoutMs: number): Promise<ProbeResult> {
-  const start = Date.now();
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const r = await fetch(url, { signal: controller.signal });
-      const latencyMs = Date.now() - start;
-      if (!r.ok) {
-        return { ok: false, latencyMs, error: `HTTP ${r.status}` };
-      }
-      return { ok: true, latencyMs };
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (err: any) {
-    return { ok: false, latencyMs: Date.now() - start, error: err?.message || String(err) };
-  }
-}
 
 // The Redis liveness probe goes through the typed `pingRedis()` accessor in
 // the redis/connection seam module (issue #1121) — no dynamic await-import of

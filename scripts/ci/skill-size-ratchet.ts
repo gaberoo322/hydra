@@ -30,9 +30,9 @@
  * load: frontmattered docs/operator-playbooks/*.md (body = everything after
  * the closing frontmatter delimiter) plus docs/operator-playbooks/_fragments/*.md
  * content fragments (whole file; inlined into generated skills via @include).
- * Exempt: README.md at both levels and frontmatter-less docs (e.g.
- * ollama-recovery.md, the hydra-target-adversarial.md stub) — sync-skills
- * never emits them as skills. "Word" = whitespace token (split on /\s+/, drop
+ * Exempt: README.md at both levels and frontmatter-less docs (e.g. the
+ * hydra-target-adversarial.md stub) — sync-skills never emits them as
+ * skills. "Word" = whitespace token (split on /\s+/, drop
  * empties): dependency-free, deterministic, and monotone with token load.
  *
  * # Why a separate workflow, not ci.yml
