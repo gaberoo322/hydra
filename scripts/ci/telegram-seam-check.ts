@@ -12,8 +12,10 @@
  * dep slot, the weekly-digest chore) inject or import that sender and know nothing
  * of the URL, the auth, or the wire shape. It is the SEVENTH boundary Seam, a
  * SIBLING to the **Anthropic Request Adapter** (`src/anthropic/request.ts`, issue
- * #1959) and the **OpenViking Request Adapter**
- * (`src/knowledge-base/ov-request.ts`, issue #954) — all over `fetch()`.
+ * #1959) and the **OAuth Usage Adapter** (`src/cost/oauth-usage.ts`, issue
+ * #1083) — all over `fetch()`. (The FOURTH Seam, the OpenViking Request
+ * Adapter, was the fetch()-Seam precedent; retired with the knowledge plane,
+ * ADR-0033. The ordinals are historical and are not renumbered.)
  *
  * This is the CI backstop that freezes the drift, exactly as
  * `anthropic-seam-check.ts` (issue #1959) / `openviking-seam-check.ts` (#954) /

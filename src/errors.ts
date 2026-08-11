@@ -76,21 +76,14 @@ export type HydraErrorCode =
   | "journal-spawn-failed" // journalctl could not be spawned (ENOENT / synchronous throw / error event)
   | "journal-timeout" // the spawn exceeded its timeout and was killed
   | "journal-truncated" // the spawn hit the 1 MB output cap and was killed
-  // OpenViking Request Adapter (src/knowledge-base/ov-request.ts) result-object
-  // codes (issue #954). The fourth boundary Seam — sibling to the GitHub CLI
-  // Adapter and Host-Probe Adapter, but over fetch() not child_process. Same
-  // never-throw discipline: these literals appear only on the failure arm of the
-  // OvResult `{ ok:false; code }`, so callers (trackedOvSearch, the upload/skill
-  // helpers, the work-queue dedup, the /health probes) discriminate on a code
-  // instead of regexing fetch error prose. No thrown subclass — the adapter
-  // returns, never raises.
-  | "ov-service-down" // the request never reached OV (DNS/ECONNREFUSED/network)
-  | "ov-non-2xx" // OV answered but with a non-2xx status (!res.ok)
-  | "ov-malformed-json" // a 2xx body failed to JSON.parse
-  | "ov-timeout" // the request exceeded its AbortSignal timeout and was aborted
+  // (The FOURTH boundary Seam — the OpenViking Request Adapter, issue #954 —
+  // was the first fetch() Seam and the precedent the two below follow. It and
+  // its four `ov-*` codes were deleted with the knowledge plane, ADR-0033. The
+  // ordinals here are HISTORICAL: the fifth and sixth Seams keep their numbers
+  // and are deliberately NOT renumbered to close the gap.)
   // OAuth Usage Adapter (src/cost/oauth-usage.ts) result-object codes (issue
-  // #1083). The fifth boundary Seam — sibling to the OpenViking Request Adapter,
-  // also over fetch(), reading the authoritative server-side subscription-usage
+  // #1083). The fifth boundary Seam — the first surviving fetch() Seam,
+  // reading the authoritative server-side subscription-usage
   // meter that rebases the Subscription Usage Tracker's headline + 5h
   // emergencyStop. Same never-throw discipline: these literals appear only on
   // the failure arm of the OAuthUsageResult `{ ok:false; code }`. CRITICAL: a
@@ -105,8 +98,8 @@ export type HydraErrorCode =
   | "oauth-usage-timeout" // the request exceeded its AbortSignal timeout and was aborted
   | "oauth-usage-network" // transport failed (DNS/ECONNREFUSED/offline)
   // Anthropic Request Adapter (src/anthropic/request.ts) result-object codes
-  // (issue #1959). The sixth boundary Seam — sibling to the OpenViking Request
-  // Adapter and the OAuth Usage Adapter, also over fetch(), owning the Anthropic
+  // (issue #1959). The sixth boundary Seam — sibling to the OAuth Usage
+  // Adapter, also over fetch(), owning the Anthropic
   // Messages API request boundary (URL, anthropic-version header, ANTHROPIC_API_KEY
   // resolution, AbortSignal timeout discipline — the gap the old inline
   // defaultLlmClient had — error classification, token-usage + USD cost
