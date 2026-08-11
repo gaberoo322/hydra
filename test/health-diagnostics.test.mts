@@ -29,9 +29,6 @@ import { projectHealthDeepResponse } from "../src/health/wire.ts";
 // (src/health/fan-out.ts, its #2089 home) so the pure mapping is unit-testable from
 // a SettledByKey fixture without touching the async fan-out.
 import { assembleProbeInputs } from "../src/health/types.ts";
-// Issue #2131: the ServiceProbe Adapter Seam — drive the embed-backend probe
-// end-to-end (probe → rule fold) via its injected `ovPostJsonImpl` seam, no network.
-import { probeEmbedBackend } from "../src/health/probe.ts";
 
 // ---------------------------------------------------------------------------
 // A baseline all-healthy snapshot. Each test clones it and perturbs ONE field

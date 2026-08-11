@@ -43,7 +43,7 @@ import {
   type ArchitectureGraph,
   type ArchitectureGraphDeps,
   type ArchitectureNode,
-} from "../aggregators/architecture-graph.ts";
+} from "./architecture-graph.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables — how many rows each section of the report surfaces.
