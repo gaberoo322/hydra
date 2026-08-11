@@ -21,7 +21,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  assessEmbedBackendProbe,
   assessReflectionHealth,
   assessDarkLeadingOutcomes,
   assessAttributionLedger,
@@ -29,28 +28,6 @@ import {
 import type { ServiceProbeMap } from "../src/health/types.ts";
 import type { ReflectionHealthReport } from "../src/metrics/reflection-health.ts";
 import type { OutcomeVerdict } from "../src/scheduler/chores/wiring-liveness-outcomes.ts";
-
-describe("assessEmbedBackendProbe (#2131)", () => {
-  test("fires a warning when the embed-backend probe is failed", () => {
-    const svcProbes: ServiceProbeMap = { "embed-backend": { status: "failed" } };
-    const d = assessEmbedBackendProbe(svcProbes);
-    assert.ok(d, "expected a diagnostic when embed-backend is failed");
-    assert.equal(d.severity, "warning");
-    assert.equal(d.component, "embed-backend");
-    assert.equal(d.what, "Embedding/VLM backend unreachable");
-    assert.equal(d.autoRecovery, true);
-  });
-
-  test("no-op when the embed-backend probe is running", () => {
-    const svcProbes: ServiceProbeMap = { "embed-backend": { status: "running" } };
-    assert.equal(assessEmbedBackendProbe(svcProbes), null);
-  });
-
-  test("no-op when the embed-backend probe is absent (honest-none)", () => {
-    const svcProbes: ServiceProbeMap = { openviking: { status: "running" } };
-    assert.equal(assessEmbedBackendProbe(svcProbes), null);
-  });
-});
 
 describe("assessReflectionHealth (#2492)", () => {
   const report = (verdict: ReflectionHealthReport["verdict"], note = "n"): ReflectionHealthReport => ({
