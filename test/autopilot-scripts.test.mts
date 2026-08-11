@@ -432,12 +432,13 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       for (const cls of expectedSlots) {
         assert.equal(s.slots[cls], null, `slot ${cls} should be null`);
       }
-      // 12 signal classes (issue #2575 + #2722 + #2739 + #2949): the 5 always-on
-      // classes seeded at 0 (re-armed each run) plus the 7 long-cooldown classes
-      // that, with no prior state file, also default to 0. The carry-forward
+      // 12 signal classes (issue #2575 + #2722 + #2739 + #2949 + #3920): the 4
+      // always-on classes seeded at 0 (re-armed each run) plus the 8 long-cooldown
+      // classes that, with no prior state file, also default to 0. The carry-forward
       // behaviour for the cooldown classes is pinned separately below. #2722 added
       // `wire_or_retire_target` (24h); #2739 added `design_qa_target` (7d); #2949
-      // added `skill_prune` (7d) — all the same #2575 bootstrap bug class.
+      // added `skill_prune` (7d); #3920 moved `discover_orch` (1h) out of the
+      // always-on group into the long-cooldown group — all the same #2575 bug class.
       const expectedSignals = [
         "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
         "retro_orch", "architecture_orch", "cleanup_orch", "scout_orch",
@@ -890,17 +891,21 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #2575 — the 4 long-cooldown signal classes must carry their prior
+  // Issue #2575 — the long-cooldown signal classes must carry their prior
   // last-fired timestamp across a pace-gate relaunch (which re-runs bootstrap
   // ~every 15 min), NOT reset to 0. Before #2575 these keys were absent from
   // the heredoc, so decide.py's `signal_is_cooled()` read a missing key as
   // epoch 0 (permanently cooled) and retro_orch fired 5–8×/day instead of the
   // designed 1×/day. With a prior state.json present, bootstrap must preserve
-  // the timestamps while still re-arming the 5 always-on classes to 0.
-  test("carries prior signal_last_fired timestamps forward for the 7 long-cooldown classes (issue #2575)", () => {
+  // the timestamps while still re-arming the 4 always-on classes to 0.
+  // discover_orch is the 8th long-cooldown class (issue #3920): it shares the
+  // 3600s cooldown + round-robin BACKFILL_SIGNAL_CLASSES pairing with
+  // architecture_orch, so it MUST carry forward too — its prior misclassification
+  // in the always-on group made its cooldown a silent no-op (always read last=0).
+  test("carries prior signal_last_fired timestamps forward for the 8 long-cooldown classes (issue #2575, #3920)", () => {
     const tmp = makeTempState();
     try {
-      // A prior run's state: the 7 cooldown classes fired recently; the
+      // A prior run's state: the 8 cooldown classes fired recently; the
       // always-on classes also carry stale values that must be re-armed to 0.
       const priorRetro = 1_700_000_000;
       writeFileSync(tmp.state, JSON.stringify({
@@ -925,12 +930,16 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
 
-      // The 7 long-cooldown classes carry their prior timestamp forward — this
+      // The 8 long-cooldown classes carry their prior timestamp forward — this
       // is the core of the fix; a reset-to-0 here is the #2575 bug.
       assert.equal(s.signal_last_fired.retro_orch, priorRetro,
         "retro_orch must carry its prior last-fired timestamp forward (NOT reset to 0)");
       assert.equal(s.signal_last_fired.architecture_orch, 1_700_000_100,
         "architecture_orch must carry its prior last-fired timestamp forward");
+      // #3920 — discover_orch is the 8th long-cooldown class (1h; same cooldown
+      // + BACKFILL_SIGNAL_CLASSES round-robin partner as architecture_orch).
+      assert.equal(s.signal_last_fired.discover_orch, 1_650_000_004,
+        "discover_orch must carry its prior last-fired timestamp forward (#3920 — was misclassified always-on)");
       assert.equal(s.signal_last_fired.cleanup_orch, 1_700_000_200,
         "cleanup_orch must carry its prior last-fired timestamp forward");
       assert.equal(s.signal_last_fired.scout_orch, 1_700_000_300,
@@ -945,8 +954,9 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal(s.signal_last_fired.skill_prune, 1_700_000_600,
         "skill_prune must carry its prior last-fired timestamp forward (#2949)");
 
-      // The 5 always-on classes are re-armed to 0 each run by design.
-      for (const sig of ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"]) {
+      // The 4 always-on classes are re-armed to 0 each run by design. discover_orch
+      // is NO LONGER in this set (issue #3920) — it carries forward above.
+      for (const sig of ["health", "sweep_orch", "sweep_target", "discover_target"]) {
         assert.equal(s.signal_last_fired[sig], 0, `always-on signal ${sig} must re-arm to 0`);
       }
     } finally {
@@ -954,15 +964,15 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #2575 (+ #2722, #2739, #2949) — first-ever run (no prior state file)
-  // defaults the 7 long-cooldown classes to 0, exactly like the 5 always-on ones.
-  test("defaults the 7 long-cooldown signal classes to 0 when there is no prior state (issue #2575, #2722, #2739, #2949)", () => {
+  // Issue #2575 (+ #2722, #2739, #2949, #3920) — first-ever run (no prior state file)
+  // defaults the 8 long-cooldown classes to 0, exactly like the 4 always-on ones.
+  test("defaults the 8 long-cooldown signal classes to 0 when there is no prior state (issue #2575, #2722, #2739, #2949, #3920)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      for (const sig of ["retro_orch", "architecture_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target", "skill_prune"]) {
+      for (const sig of ["retro_orch", "architecture_orch", "discover_orch", "cleanup_orch", "scout_orch", "wire_or_retire_target", "design_qa_target", "skill_prune"]) {
         assert.equal(s.signal_last_fired[sig], 0,
           `cooldown signal ${sig} must default to 0 on first-ever run`);
       }
@@ -974,15 +984,19 @@ describe("scripts/autopilot/bootstrap.sh", () => {
   // Issue #2715 — reboot survival. /tmp is boot-wiped, so after a host reboot
   // there is NO prior state file; the #2575 carry-forward falls to 0 and the
   // long-cooldown classes all fire in the first post-boot run. With the Redis
-  // mirror in place, bootstrap seeds the 4 long-cooldown classes from Redis
+  // mirror in place, bootstrap seeds the long-cooldown classes from Redis
   // instead of 0 — the seed order is prior-file → Redis → 0. This test
   // simulates the reboot: NO prior state file, but Redis holds the timestamps.
-  test("seeds the 4 long-cooldown classes from Redis when the prior state file is gone (issue #2715)", () => {
+  // discover_orch (issue #3920) is included alongside architecture_orch — its
+  // round-robin BACKFILL_SIGNAL_CLASSES partner — to pin that its 1h cooldown
+  // also survives a reboot via the Redis tier, not just the prior-file tier.
+  test("seeds the long-cooldown classes from Redis when the prior state file is gone (issue #2715, #3920)", () => {
     const tmp = makeTempState();
     try {
       const redisHash = {
         retro_orch: 1_780_000_000,
         architecture_orch: 1_780_000_100,
+        discover_orch: 1_780_000_150,
         cleanup_orch: 1_780_000_200,
         scout_orch: 1_780_000_300,
       };
@@ -996,12 +1010,16 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "retro_orch must seed from Redis after a reboot (NOT 0)");
       assert.equal(s.signal_last_fired.architecture_orch, redisHash.architecture_orch,
         "architecture_orch must seed from Redis after a reboot");
+      // #3920 — discover_orch seeds from Redis too (1h cooldown, same bug class).
+      assert.equal(s.signal_last_fired.discover_orch, redisHash.discover_orch,
+        "discover_orch must seed from Redis after a reboot (#3920 — now a long-cooldown class)");
       assert.equal(s.signal_last_fired.cleanup_orch, redisHash.cleanup_orch,
         "cleanup_orch must seed from Redis after a reboot");
       assert.equal(s.signal_last_fired.scout_orch, redisHash.scout_orch,
         "scout_orch must seed from Redis after a reboot");
       // Always-on classes still re-arm to 0 — Redis mirror never touches them.
-      for (const sig of ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"]) {
+      // discover_orch is NO LONGER always-on (issue #3920) — it seeds above.
+      for (const sig of ["health", "sweep_orch", "sweep_target", "discover_target"]) {
         assert.equal(s.signal_last_fired[sig], 0, `always-on signal ${sig} must re-arm to 0`);
       }
     } finally {
