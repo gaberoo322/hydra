@@ -142,20 +142,25 @@ except Exception:
 if not isinstance(events, list):
     print('reframe-saves: n/a (notifications stream unreadable)'); sys.exit(0)
 saves = []
+undateable = 0
 for e in events:
     if e.get('type') != 'target:reframe-save':
         continue
     ts = e.get('timestamp')
     if not ts:
+        undateable += 1
         continue  # missing timestamp — fail closed, excluded from the period count
     try:
         dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
     except ValueError:
+        undateable += 1
         continue  # unparseable timestamp — fail closed, excluded from the period count
     ms = int(dt.timestamp() * 1000)
     if ms >= since_ms:
         saves.append(e)
 print(f'reframe-saves (period): {len(saves)} prevented doomed build cycle(s)')
+if undateable:
+    print(f'reframe-saves undateable (excluded): {undateable}')
 for e in saves[:5]:
     p = e.get('payload', {})
     print(f\"  {p.get('anchorRef','?')} — {str(p.get('reason','?'))[:80]}\")
