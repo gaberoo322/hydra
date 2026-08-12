@@ -6,7 +6,7 @@ Routing by code area lives in [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md); this ros
 
 What an ADR *is* here — an agent-facing normative spec, not a one-paragraph memory aid — is set by [ADR-0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md). Read it before writing a new one.
 
-**Reserved numbers:** `0034` is claimed by PR #4004 (orchestrator dashboard page inventory). `0035` is now taken (below). Take `0038` or higher for anything new. `test/adr-roster.test.mts` fails on a duplicate number.
+**Reserved numbers:** none outstanding — `0034` and `0035` are both landed (below). Take `0038` or higher for anything new. `test/adr-roster.test.mts` fails on a duplicate number.
 
 **A new ADR needs two entries, not one:** a row in the table below, *and* its number in a `Relevant ADRs` cell of [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md). The roster makes it findable; the map makes it routed and gives it a weight budget. An ADR with only a roster row is invisible from every code area and escapes the per-area ratchet entirely. If it governs no code area, the "process / policy (no code area)" row is its home. Both are enforced by `test/adr-roster.test.mts`.
 
@@ -45,6 +45,7 @@ What an ADR *is* here — an agent-facing normative spec, not a one-paragraph me
 | [0031](./0031-target-tracking-migrates-to-github-issues.md) | accepted | Target work tracks as GitHub Issues on `gaberoo322/hydra-betting`, label-driven, reusing the Orchestrator's board machinery. | Any Target board or backlog work. |
 | [0032](./0032-glm-dev-drainer-worker-lane.md) | accepted (Decision 2 amended by #3758) | GLM is a fenced *worker* draining shallow `dev_orch` work on z.ai quota — never a brain, never Verifier Core, never money-critical. | Touching the GLM drainer or its fence. |
 | [0033](./0033-openviking-knowledge-plane-retired.md) | accepted | The OpenViking knowledge plane is retired outright, not ported to a successor backend. | Proposing semantic search, or finding a `knowledge-base` reference. |
+| [0034](./0034-orchestrator-dashboard-page-inventory.md) | accepted | The dashboard is five pages organised by operator journey (plus two detail views), each answering exactly one question; only `/health` is phone-grade. | Touching `dashboard/`, or proposing a new dashboard surface. |
 | [0035](./0035-spec-stage-stays-hydra-owned.md) | accepted (supersedes ADR-0030 Decision 2's spec binding) | The spec stage stays Hydra-owned; `to-spec` is not its base — the two skills contradict each other on instruction, output artifact, and consumer. | Tempted to compose `hydra-grill` on `_vendor/to-spec.md`, or wondering why the spec stage has no upstream base. |
 | [0036](./0036-anchor-selection-retired-candidate-feed.md) | accepted (renumbered from 0016) | Anchor selection is retired; the Candidate Feed is data the brain reads, not a decision the orchestrator makes. Establishes the **Locality** principle. | Touching candidate scoring, or tempted to resurrect the reframe queue. |
 | [0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md) | accepted | Hydra ADRs are agent-facing normative specs: Pocock's write gate applies, its one-paragraph size target does not. | Before writing a new ADR, or before "fixing" the corpus to be shorter. |
