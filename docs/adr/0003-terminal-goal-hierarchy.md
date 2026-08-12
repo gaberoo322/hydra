@@ -1,3 +1,7 @@
+---
+status: accepted
+---
+
 # Target outcomes are terminal; 25% capacity floor for orchestrator self-improvement
 
 The orchestrator's terminal goal is to move the **Target Outcomes** (declared in `config/direction/outcomes.yaml`). Improving the orchestrator's own architecture is instrumental — justified primarily when it compounds into better target outcomes.

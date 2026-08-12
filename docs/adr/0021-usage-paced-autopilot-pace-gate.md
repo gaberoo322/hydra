@@ -1,6 +1,6 @@
 # Usage-paced 24/7 autopilot via an admission-control Pace Gate
 
-Status: Proposed
+Status: Accepted (live doctrine — the Pace Gate runs in production as `pace-gate.service`; corrected from "Proposed" 2026-08-12)
 Date: 2026-06-01
 Deciders: Operator + Hydra (via `/grill-with-docs` session on continuous usage-paced operation)
 Issue: TBD (usage-paced-autopilot epic)
