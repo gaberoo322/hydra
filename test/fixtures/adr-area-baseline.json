@@ -21,6 +21,6 @@
   ".github/workflows/ (Verifier Core)": 23639,
   "scripts/autopilot/ (decide.py, classes.json)": 67016,
   "config/direction/, config/orchestrator/": 4406,
-  "docs/adr/ itself": 4984,
+  "docs/adr/ itself": 5249,
   "process / policy (no code area)": 25255
 }

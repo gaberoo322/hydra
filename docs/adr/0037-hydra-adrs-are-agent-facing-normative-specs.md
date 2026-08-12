@@ -62,16 +62,19 @@ on records whose declared status contradicted reality. Enforced by `test/adr-ros
 The corpus is never compacted, merged, or garbage-collected on a count or byte threshold:
 compaction destroys the *why*, which is the entire product of an ADR, and it breaks the
 citations of Decision 2. Volume is managed instead by **routing** — [`README.md`](./README.md)
-is a ~6 KB roster read in full, and `CONTEXT-MAP.md` maps code areas to the ADRs that govern
-them, so a task loads 2–4 ADRs rather than 34. Per-area routed weight is held flat by a
-non-growth ratchet in `test/adr-roster.test.mts`: an area may not grow without a deliberate
-baseline bump in the same PR.
+is a ~10 KB roster read in full, and `CONTEXT-MAP.md` maps code areas to the ADRs that govern
+them, so a task loads 2–4 ADRs rather than the whole corpus. Per-area routed weight is held
+flat by a non-growth ratchet in `test/adr-roster.test.mts`: an area may not grow without a
+deliberate baseline bump in the same PR.
 
 ## Consequences
 
-- Adding an ADR to an already-heavy area (`src/autopilot/` at ~88 KB, `.claude/skills/` at
-  ~55 KB) fails CI until the author either trims that area or raises its baseline on purpose.
-  That friction is the point — it is the trim conversation, held at the moment it is cheapest.
+- Adding an ADR to an already-heavy area fails CI until the author either re-routes, trims
+  that area, or raises its baseline on purpose. That friction is the point — it is the trim
+  conversation, held at the moment it is cheapest. **`test/fixtures/adr-area-baseline.json`
+  is the authoritative per-area weight**; do not restate those numbers in prose, here or
+  elsewhere, or they drift. At the time of writing the heaviest areas were
+  `scripts/autopilot/` (~67 KB) and `.claude/skills/ + docs/operator-playbooks/` (~42 KB).
 - Retired-subsystem tombstones (0006, 0010, 0023, 0033, 0036) are kept, not deleted. They are
   the standing answer to "why don't we just build X?" and deleting them re-opens settled work.
 
