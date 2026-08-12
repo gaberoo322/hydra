@@ -1,0 +1,1 @@
+- perf: stop sweep_orch re-firing every 15 min on permanently-parked needs-triage items via a per-item verdict-stability guard (mirror of sweep_target #3729) (#3939)
