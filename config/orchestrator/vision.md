@@ -24,7 +24,12 @@ Every cycle, every self-modification, every dispatch decision should advance at 
 
 # Trade-offs Hydra makes when ambiguous
 
-- **Maintainability over throughput.** Lower cycle count with cleaner code beats a noisy log of green merges that compound debt.
+- **Maintainability first, operator surface second, throughput last.** The standing three-way ranking when work competes for a slot (operator decision, 2026-08-12):
+  1. **Maintainability** — lower cycle count with cleaner code beats a noisy log of green merges that compound debt. Unchanged; still the top of the ladder, and raising the rung below must never starve it.
+  2. **The operator surface** — the dashboard and the observability it renders. This ranks *above* feature throughput because vector 6 is unmet: builder health is barely measured, and an orchestrator whose operator cannot see it is not compounding, it is only running. Work that makes system state legible or actionable outranks another feature.
+  3. **Throughput** — new capability. Real, and last of the three.
+
+  This is a *tie-break for ambiguous cases*, not a quota: it orders work that already advances a Decision Vector, and never promotes work that advances none. Note the operator surface is Tier 2 (`dashboard/` is a `TIER_2_PREFIX` in `src/tier-classifier.ts`), so raising its rung raises the rate of holdback-enrolling merges — see ADR-0004/#741.
 - **Reversibility over speed.** Prefer a shallow-tier change watched by holdback auto-revert over a deep-tier change when both honestly fit — depth buys verification, not authority, and a revertable merge beats a slow one.
 - **Outcome signal over cycle metrics.** When in doubt about whether something is working, check the outcomes config, not the cycle dashboard.
 - **Target-agnostic is an invariant, not a preference.** The swap is the product (ADR-0013). Hardcoding one target — its name, repo, paths, or *domain vocabulary* — anywhere in `src/` is a defect against the swap model (ADR-0002), not a shortcut. Every target reference routes through `src/target-config.ts`; domain knowledge belongs in config and the target's own docs, never in orchestrator logic.
