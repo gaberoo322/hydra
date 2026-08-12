@@ -81,6 +81,28 @@ worktree-fence violations are safety failures.
    reporter (`tap → test-debug.tap`); read the `not ok` lines out of
    `test-debug.tap`. The artifact is git-ignored. Do **not** edit the `test`
    script — CI greps its footer for the `MIN_TESTS` ratchet.
+7. **NEVER end your session waiting on CI, a monitor, or a background
+   process — poll to a terminal state or report a terminal outcome (issue
+   #3866).** In an unattended (autopilot) dispatch nothing resumes you after
+   you stop talking: `reap.py` records your session's end as a completion the
+   moment it happens, whatever state you left the anchor in. Ending a turn
+   with "I'll wait for the monitor notification" / "I'll stop here and wait
+   for the test run to finish" is therefore not a pause — it is the END of
+   your only chance to open the PR. The observed failure (#3726): dev_orch did
+   ~9.5 min of real implementation, backgrounded `npm test`, then stopped
+   talking instead of finishing — no PR existed at reap time, and the ~165k
+   tokens already spent were silently re-paid by a from-scratch redispatch.
+   The fix is procedural, not a tool you're missing: run verification
+   **in the foreground** (rule 5 above already requires this) and don't emit a
+   final message until you have reached one of exactly two terminal states —
+   **a PR is open** (`gh pr view` confirms it exists) **or you are reporting a
+   hard blocker** (`## Friction Report` + an honest failure). "Verification is
+   still running, standing by" is never a valid final message. (Reap-side
+   backstop: a `dev_orch` completion with no open PR referencing its anchor is
+   now detected and relabelled `needs-dev-resume` instead of being silently
+   redispatched from zero — see `scripts/autopilot/reap.py`'s
+   `_handle_dev_orch_stall` — but that backstop exists to catch what this rule
+   should prevent, not to make ending early acceptable.)
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 

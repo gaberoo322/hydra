@@ -2799,6 +2799,45 @@ def _select_for_slot(
             return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
         return None
     if cls == "dev_orch":
+        # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
+        # gate below. reap.py appends a resume record here when a PRIOR
+        # dev_orch completion opened no PR (a stall, not a finished cycle) —
+        # it also relabels that anchor's issue away from `ready-for-agent`
+        # (to `needs-dev-resume`), so `orch_work_available` may well be False
+        # even though there is real, already-started work waiting to resume.
+        # Checking this queue first — independent of `orch_work_available` —
+        # is what stops the stalled anchor from being starved by an otherwise
+        # empty board. `prompt_args.anchor` reuses the SAME pinned-anchor
+        # contract `orch_dev_ready_anchor` already established below (the
+        # dispatch preamble names the anchor verbatim); `resume`/
+        # `resume_branch` are additive hints so the dispatch prompt can tell
+        # the fresh subagent to check for and continue the stalled branch
+        # instead of reimplementing from zero. Pop (not peek) so this exact
+        # anchor is only pinned once per queued stall — decide() mutates
+        # `state` in place here, the same sanctioned pattern `main()` already
+        # persists via change-detection for `research_force_counter` /
+        # `target_triage_item_stamps`.
+        resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
+        if isinstance(resume_pending, list) and resume_pending:
+            entry = resume_pending[0]
+            if isinstance(entry, dict) and entry.get("anchor"):
+                resume_pending.pop(0)
+                prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
+                if entry.get("branch"):
+                    prompt_args["resume_branch"] = entry["branch"]
+                return make_dispatch(
+                    cls,
+                    "hydra-dev",
+                    prompt_args=prompt_args,
+                    reason=(
+                        f"resuming stalled dev_orch anchor {entry['anchor']} "
+                        f"— prior completion opened no PR (issue #3866)"
+                    ),
+                )
+            # Malformed entry (no anchor) — drop it rather than looping on it
+            # forever; still counts as a state mutation main() will persist.
+            resume_pending.pop(0)
+
         # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
         # board, NOT /api/anchor/candidates. The unified candidates feed is
         # dominated by target-product work in this deployment (item-26x are all
@@ -4405,6 +4444,16 @@ def main(argv: list[str]) -> int:
         triage_stamps_before = json.dumps(
             state.get("target_triage_item_stamps"), sort_keys=True,
         )
+        # Issue #3866: same change-detection for state.dev_resume_pending.
+        # reap.py appends to this queue on a no-PR dev_orch stall; the
+        # dev_orch selector in `_select_for_slot` pops its head in place when
+        # it pins a resume dispatch. Snapshot-before/compare-after persists
+        # the pop via the SAME `_persist_state_writeback` helper — no new
+        # persistence mechanism, mirrors `triage_stamps_before` immediately
+        # above.
+        dev_resume_pending_before = json.dumps(
+            state.get("dev_resume_pending"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -4429,6 +4478,13 @@ def main(argv: list[str]) -> int:
         if triage_stamps_after != triage_stamps_before:
             _persist_state_writeback(
                 argv[2], state, what="target_triage_item_stamps stamp (#3729)",
+            )
+        dev_resume_pending_after = json.dumps(
+            state.get("dev_resume_pending"), sort_keys=True,
+        )
+        if dev_resume_pending_after != dev_resume_pending_before:
+            _persist_state_writeback(
+                argv[2], state, what="dev_resume_pending drain (#3866)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the

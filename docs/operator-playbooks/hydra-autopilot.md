@@ -248,6 +248,39 @@ with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
 
+**A second, independent source of a pinned anchor: draining
+`state.dev_resume_pending` (issue #3866).** `reap.py` appends a resume record
+here when a PRIOR `dev_orch` completion opened no PR for its anchor (the
+no-PR-stall backstop — see "Reap-side backstop" below); the `dev_orch`
+selector in `decide.py` drains this queue BEFORE the grill-gate/self-select
+logic above, so it can pin a dispatch even when the anchor's issue is no
+longer labelled `ready-for-agent` (it was relabelled `needs-dev-resume`) and
+`orch_work_available` is otherwise false. Such an action carries
+`prompt_args.resume: true` and, when the stalled worktree branch is known,
+`prompt_args.resume_branch = "<branch-name>"`. **When `prompt_args.resume` is
+true, say so in the dispatch prompt** — e.g. *"This anchor previously stalled
+without a PR (branch `<resume_branch>`, if given). Before implementing from
+scratch, check whether that branch still exists (`git ls-remote origin
+<resume_branch>`) and continue from it if so — do not silently redo already-
+committed work."* This is a fresh subagent, not a literal resumed session (a
+completed dispatch's live agent handle is not something `decide.py` can act
+on), but reusing the branch avoids re-paying the tokens already spent on the
+committed portion of the prior attempt.
+
+**Reap-side backstop (issue #3866).** `scripts/autopilot/reap.py`'s
+`_handle_dev_orch_stall` (called from every `dev_orch` completion reap) checks
+whether an open PR references the completion's anchor, via the same
+`pr-refs.py` predicate `recover-stale.sh` uses (issue #3852). No open PR found
+→ the source issue is relabelled away from `ready-for-agent`/`in-progress` to
+`needs-dev-resume` (a label pre-created for this issue), an explanatory
+comment is posted, and a resume record is queued onto
+`state.dev_resume_pending` for the drain above. This is the backstop for the
+forbidden-ending rule (see the Worktree-guard preamble section) — it exists to
+limit the blast radius of a dispatch that ends without a PR, not to make
+ending early acceptable. The check fails OPEN (no mutation) on any `gh`
+hiccup, so a transient network blip never mislabels a healthy in-flight
+anchor.
+
 ### `wayfinder_orch` dispatch — ticket-type → skill (issue #3351, epic #3350, ADR-0029)
 
 `wayfinder_orch` is the single AFK working class for **wayfinder maps** (open
@@ -417,6 +450,34 @@ agent must self-correct. `scripts/audit-ghost-writes.py` walks the
 JSONL transcript history to quantify ghost-write incidents across past
 dispatches (useful as a before/after measurement when the hook is rolled
 out).
+
+**`dev_orch` / `qa_orch` dispatches carry a SECOND required preamble block — the
+forbidden-ending rule (issue #3866).** Append verbatim, immediately after the
+worktree-guard preamble above, for every `dev_orch` and `qa_orch` dispatch:
+
+```
+## NEVER END WAITING — deliverable or terminal state, always (issue #3866)
+This is an UNATTENDED dispatch. Nothing resumes you after your final message —
+reap.py records your session's end as a completion the instant it happens,
+whatever you did or didn't finish. NEVER end your turn waiting on CI, a
+monitor, or a background process ("I'll wait for the test run to finish",
+"standing by for the re-check"). Either poll to a terminal state in the
+FOREGROUND, or your final message reports one of: a PR is open (dev_orch) / a
+verdict was posted (qa_orch), OR a hard blocker via ## Friction Report. There
+is no third option.
+```
+
+Motivating incidents (autopilot run 2bcba309, 2026-08-05): a `dev_orch`
+dispatch on #3726 did ~9.5 min of real implementation, backgrounded `npm
+test`, then ended its session waiting on the test run — no PR existed at reap
+time, and the ~165k tokens already spent were silently re-paid by a
+from-scratch redispatch on the next turn (see the `dev_orch` no-PR-stall
+backstop below, which now catches this case at reap time — but the backstop
+exists to limit the blast radius of this failure mode, not to make it
+acceptable). A `qa_orch` T4 re-check on PR #3853 posted the Deep-QA PASS
+marker and then ended its turn waiting for the `deep-qa-gate` re-check to
+complete, even though `hydra-qa.md`'s own verdict-tier design already never
+loops waiting on CI — the design was correct, the dispatch didn't follow it.
 
 **`dev_target` dispatches need a SECOND check (issue #542).** The harness `isolation: "worktree"` only worktree-isolates the orchestrator repo (`~/hydra`). When `hydra-target-build` then writes to `~/hydra-betting`, those edits land on the main hydra-betting checkout unless the skill explicitly creates a hydra-betting worktree. The `hydra-target-build` playbook now does this in Step 0.6 — every `dev_target` dispatch MUST go through Step 0.6 before any Edit/Write against the target.
 

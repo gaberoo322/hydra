@@ -88,6 +88,15 @@ function runCompletion(
       HYDRA_AUTOPILOT_LOG: paths.log,
       // Keep the worktree-GC side-effect out of the test.
       HYDRA_REAP_WORKTREE_GC: "0",
+      // Issue #3866: reap.py's dev_orch no-PR-stall check shells out to a REAL
+      // `gh pr list`/`gh issue edit`/`gh issue comment` against
+      // HYDRA_AUTOPILOT_REPO whenever a dev_orch completion carries an anchor
+      // with no open PR — which this suite's fixtures do. Point it at a
+      // nonexistent fixture repo with an invalid token (same pattern as
+      // test/autopilot-reap-task-id-mismatch.test.mts) so it can never touch
+      // the real gaberoo322/hydra repo.
+      HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+      GH_TOKEN: "invalid-test-token",
     },
     encoding: "utf-8",
   });
@@ -266,6 +275,11 @@ describe("reap.py completion → deposit healthcheck (issue #2450, regated by #3
         HYDRA_AUTOPILOT_LOG: paths.log,
         HYDRA_AUTOPILOT_REFL_DIR: reflDir,
         HYDRA_REAP_WORKTREE_GC: "0",
+        // Issue #3866: see the rationale comment on the sibling runCompletion
+        // helper above — never let the dev_orch no-PR-stall check touch the
+        // real gaberoo322/hydra repo from a test fixture.
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        GH_TOKEN: "invalid-test-token",
       },
       encoding: "utf-8",
     });
