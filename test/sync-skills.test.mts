@@ -1624,3 +1624,249 @@ describe("scripts/sync-skills.sh — default-mirror content guard (issue #3828)"
     }
   });
 });
+
+describe("scripts/sync-skills.sh — structural supersession excises base sections (issue #3990)", () => {
+  /**
+   * The #3818 marker mechanism (suite above) HOISTS an overlay's preface ahead
+   * of the vendored base. Hoisting reorders; it does not remove — both the
+   * override and the instruction it overrides still ship, and a model reading
+   * top-down can still act on the base's copy. #3880 is what that looks like in
+   * production: hydra-qa's reviewers fanned out non-blocking despite the
+   * hoisted `run_in_background: false` mandate, and PR #3861 passed review with
+   * no verdict ever posted.
+   *
+   * `supersedes:` is the structural answer — sync-skills EXCISES the named
+   * section from the base body at compose time, so exactly ONE live instruction
+   * exists in the emitted bytes. The vendored base file is never modified; the
+   * excision leaves an auditable marker naming the overlay that removed it.
+   *
+   * The fail-loud cases are what make the #3994 automated base refresh safe: a
+   * refreshed upstream base that renames a heading must break the sync rather
+   * than silently un-suppress the instruction the overlay meant to kill.
+   */
+  function makeRepo(): { dir: string; script: string; playbooks: string; vendor: string } {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-supersedes-"));
+    const scripts = join(dir, "scripts");
+    const playbooks = join(dir, "docs", "operator-playbooks");
+    const vendor = join(playbooks, "_vendor");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(vendor, { recursive: true });
+    const script = join(scripts, "sync-skills.sh");
+    copyFileSync(join(SCRIPTS, "sync-skills.sh"), script);
+    return { dir, script, playbooks, vendor };
+  }
+
+  function runSync(repo: { dir: string; script: string }): {
+    status: number | null;
+    stderr: string;
+    claudeDir: string;
+  } {
+    const claudeDir = join(repo.dir, "out-claude");
+    const r = spawnSync("bash", [repo.script], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: join(repo.dir, "out-codex"),
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status, stderr: r.stderr, claudeDir };
+  }
+
+  const BASE =
+    "---\nname: code-review\ndescription: upstream two-axis review\n---\n\n" +
+    "BASE-INTRO keep me\n\n" +
+    "### 4. Spawn both sub-agents in parallel\n\n" +
+    "BASE-SPAWN-INSTRUCTION spawn two reviewers\n\n" +
+    "#### 4a. A nested detail\n\n" +
+    "BASE-NESTED-DETAIL also inside the superseded section\n\n" +
+    "### 5. Report the findings\n\n" +
+    "BASE-REPORT keep me too\n";
+
+  test("a superseded section is excised from the composed output, down to its nested subsections, leaving an auditable marker", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo.vendor, "code-review.md"), BASE);
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\n" +
+          "supersedes:\n  - \"### 4. Spawn both sub-agents in parallel\"\n---\n\n" +
+          "OVERLAY-SPAWN the overlay owns the fan-out\n",
+      );
+      const r = runSync(repo);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      const out = readFileSync(join(r.claudeDir, "hydra-qa", "SKILL.md"), "utf-8");
+
+      assert.doesNotMatch(
+        out,
+        /BASE-SPAWN-INSTRUCTION/,
+        "the superseded section's body must be GONE from the emitted bytes — hoisting was not enough (#3880)",
+      );
+      assert.doesNotMatch(
+        out,
+        /BASE-NESTED-DETAIL/,
+        "excision must span nested subsections, not stop at the next heading of any depth",
+      );
+      assert.match(out, /BASE-INTRO/, "content before the superseded section must survive");
+      assert.match(
+        out,
+        /BASE-REPORT/,
+        "the next sibling section must survive — excision stops at the next heading of equal-or-shallower depth",
+      );
+      assert.match(out, /OVERLAY-SPAWN/, "the overlay's own instruction must be present");
+      assert.match(
+        out,
+        /superseded by the hydra-qa overlay/,
+        "the excision must leave an auditable marker naming the overlay that removed it",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a supersedes heading that does not resolve FAILS LOUD and lists the base's actual headings", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo.vendor, "code-review.md"), BASE);
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\n" +
+          "supersedes:\n  - \"### 4. Spawn the sub-agents\"\n---\n\noverlay body\n",
+      );
+      const r = runSync(repo);
+      assert.notEqual(r.status, 0, "an unresolved supersedes heading must abort the sync");
+      assert.match(r.stderr, /unresolved `supersedes:` heading/i, "the failure must name the mechanism");
+      assert.match(
+        r.stderr,
+        /Spawn both sub-agents in parallel/,
+        "the failure must list the base's actual headings so the author can fix the declaration",
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a supersedes heading matching more than one base heading FAILS LOUD as ambiguous", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(
+        join(repo.vendor, "code-review.md"),
+        "---\nname: code-review\ndescription: upstream\n---\n\n" +
+          "### Spawn\n\nFIRST\n\n### Spawn\n\nSECOND\n",
+      );
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\n" +
+          "supersedes:\n  - \"### Spawn\"\n---\n\noverlay body\n",
+      );
+      const r = runSync(repo);
+      assert.notEqual(r.status, 0, "an ambiguous supersedes heading must abort the sync");
+      assert.match(r.stderr, /ambiguous `supersedes:` heading/i, "the failure must say it is ambiguous");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("`supersedes:` without `compose_base:` FAILS LOUD instead of silently doing nothing", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(
+        join(repo.playbooks, "hydra-qa.md"),
+        "---\nname: hydra-qa\ndescription: overlay\n" +
+          "supersedes:\n  - \"### 4. Spawn both sub-agents in parallel\"\n---\n\noverlay body\n",
+      );
+      const r = runSync(repo);
+      assert.notEqual(r.status, 0, "supersedes without a base must abort — silently ignoring it would let an author believe an instruction was excised when nothing was");
+      assert.match(r.stderr, /without `compose_base:`/i, "the failure must name the missing key");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a composed playbook that declares NO supersedes is byte-identical to the pre-#3990 compose (purely additive)", () => {
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo.vendor, "code-review.md"), BASE);
+      const overlay =
+        "---\nname: hydra-qa\ndescription: overlay\ncompose_base: _vendor/code-review.md\n---\n\noverlay body\n";
+      writeFileSync(join(repo.playbooks, "hydra-qa.md"), overlay);
+      const first = runSync(repo);
+      assert.equal(first.status, 0, `sync failed: ${first.stderr}`);
+      const out = readFileSync(join(first.claudeDir, "hydra-qa", "SKILL.md"), "utf-8");
+
+      assert.match(out, /BASE-SPAWN-INSTRUCTION/, "without supersedes, every base section must survive untouched");
+      assert.doesNotMatch(out, /superseded by the/, "no excision marker may appear when nothing was superseded");
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("scripts/autopilot/classes.json — every dispatched skill resolves to a generated playbook (issue #3990)", () => {
+  /**
+   * `tickets_orch` was wired to the bare upstream skill name `to-tickets`.
+   * That name resolves to the raw Pocock skill, which ships
+   * `disable-model-invocation: true` — and the harness HARD-ERRORS on a
+   * Skill-tool dispatch of a flagged skill ("Skill <name> cannot be used with
+   * Skill tool due to disable-model-invocation"). So every tickets_orch
+   * dispatch since #3421 has errored, and nobody noticed for weeks, because an
+   * erroring signal class is indistinguishable from an idle one: both simply
+   * produce no work.
+   *
+   * This test is the tripwire for that failure mode. A dispatched skill must be
+   * a Hydra playbook under docs/operator-playbooks/ — generated, or composed on
+   * a vendored base with the flag stripped. Never a bare upstream skill.
+   *
+   * The allowlist below is NOT a general escape hatch. It carries exactly one
+   * entry, for the known-broken class this epic exists to fix, and issue #3992
+   * deletes it when it repoints tickets_orch at the composed overlay.
+   */
+  const KNOWN_BROKEN: ReadonlyArray<{ cls: string; skill: string; issue: string }> = [
+    { cls: "tickets_orch", skill: "to-tickets", issue: "#3992" },
+  ];
+
+  test("no dispatched skill is a bare upstream skill (the tickets_orch hard-error class)", () => {
+    const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { classes: Array<{ name: string; skill?: string }> };
+    const playbookDir = join(REPO_ROOT, "docs", "operator-playbooks");
+
+    const unresolved: string[] = [];
+    for (const row of parsed.classes) {
+      const skill = row.skill;
+      if (!skill) continue;
+      if (existsSync(join(playbookDir, `${skill}.md`))) continue;
+      if (KNOWN_BROKEN.some(k => k.cls === row.name && k.skill === skill)) continue;
+      unresolved.push(`${row.name} -> ${skill}`);
+    }
+
+    assert.deepEqual(
+      unresolved,
+      [],
+      `every classes.json skill must resolve to docs/operator-playbooks/<skill>.md. ` +
+        `A bare upstream skill name hard-errors on every dispatch and looks identical ` +
+        `to an idle class. Unresolved: ${unresolved.join(", ")}`,
+    );
+  });
+
+  test("every allowlist entry is still genuinely broken — a fixed one must be deleted, not left to rot", () => {
+    const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { classes: Array<{ name: string; skill?: string }> };
+    const playbookDir = join(REPO_ROOT, "docs", "operator-playbooks");
+
+    for (const entry of KNOWN_BROKEN) {
+      const row = parsed.classes.find(c => c.name === entry.cls);
+      assert.ok(row, `allowlist entry ${entry.cls} names a class that no longer exists — delete the entry`);
+      assert.equal(
+        row?.skill,
+        entry.skill,
+        `allowlist entry ${entry.cls} is stale: it expects skill '${entry.skill}'. If ${entry.issue} repointed it, delete the entry.`,
+      );
+      assert.equal(
+        existsSync(join(playbookDir, `${entry.skill}.md`)),
+        false,
+        `allowlist entry ${entry.cls} -> ${entry.skill} now RESOLVES to a playbook — ${entry.issue} is done, so delete this allowlist entry and let the tripwire cover it.`,
+      );
+    }
+  });
+});
