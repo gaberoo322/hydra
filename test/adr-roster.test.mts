@@ -362,3 +362,36 @@ describe("per-area ADR weight ratchet (assertion 4 — ADR-0037 Decision 6)", ()
     );
   });
 });
+
+/**
+ * Assertion 5 — routing coverage, the mirror of assertion 1's roster coverage.
+ *
+ * Assertion 1 makes an ADR *listed*. This one makes it *routed*. Without it an
+ * ADR can land with a correct roster row and no CONTEXT-MAP area, which means
+ * (a) no code area points a reader at it, and (b) it belongs to no area, so
+ * assertion 4's ratchet never weighs it — an unrouted ADR could grow without
+ * limit. ADR-0035 landed in exactly that state, which is why this exists.
+ *
+ * There is deliberately NO exemption list. CONTEXT-MAP.md carries a
+ * "process / policy (no code area)" row precisely so a decision with no `src/`
+ * home still has somewhere to be routed; an escape hatch here would just become
+ * the default.
+ */
+describe("every ADR is routed by CONTEXT-MAP (assertion 5 — ADR-0037 Decision 6)", () => {
+  test("no ADR is absent from every routing table", () => {
+    const routed = new Set(contextMap.rows.flatMap((r) => r.adrs));
+    const unrouted = adrFiles
+      .filter((f) => !routed.has(f.number))
+      .map((f) => `ADR-${f.number} (${f.filename})`);
+    assert.deepEqual(
+      unrouted,
+      [],
+      `These ADRs have a roster row but no CONTEXT-MAP.md area:\n  ${unrouted.join("\n  ")}\n` +
+        `An unrouted ADR is invisible to readers (nothing points at it from a code area) and ` +
+        `weightless to assertion 4's ratchet, so it can grow without limit.\n` +
+        `Fix: add its number to the "Relevant ADRs" cell of whichever area it governs. If it ` +
+        `governs no code area, the "process / policy (no code area)" row is its home. Adding a ` +
+        `NEW area also needs a baseline entry — see the key-sync test above.`,
+    );
+  });
+});
