@@ -70,14 +70,48 @@ prose ahead of the base — it reorders, it does not remove, and both instructio
 still ship. Use it for framing that must be read first; use `supersedes:` for
 anything the overlay genuinely replaces.
 
-## Refreshing a vendored base
+## Provenance (issue #3994)
 
-Refresh from upstream with:
+Each base's origin is recorded in **`provenance.json`**, a sidecar manifest —
+deliberately not an in-file header. A comment above a vendored file's frontmatter
+makes `sync-skills.sh` fail loud (`compose_base … has no frontmatter`), and
+keeping the captures **byte-faithful** to upstream is what makes a content diff
+against the installed skill exact.
+
+Each entry carries `skill`, `capturedAt`, `upstreamSha`, and `shaStatus`:
+
+- **`verified`** — the SHA was recorded from the installed plugin's
+  `gitCommitSha`, so a comparison against the registry is meaningful.
+- **`unverified`** — captured before provenance stamping existed (or from a
+  pre-plugin `npx skills add --copy` install). The upstream commit is genuinely
+  unknown; the drift checker reports these as needing a baseline re-vendor rather
+  than pretending they are current. Every base starts here.
+
+## Checking for drift
 
 ```bash
-npx skills add mattpocock/skills --copy   # installs the upstream skills
-# then copy the refreshed SKILL.md body into this dir's <name>.md
+npm run vendor:drift          # human-readable
+npm run vendor:drift -- --json
 ```
+
+It reports stale bases, bases missing a provenance entry, manifest entries whose
+file is gone, and — most importantly — any `supersedes:` heading that no longer
+resolves in its base. That last check is what stops a refresh from silently
+un-suppressing an instruction the overlay meant to excise (the #3818 defect).
+
+**Advisory only.** It exits 0 on drift; it exits non-zero only when it cannot do
+its job. The weekly `vendor-drift` workflow uploads the report; it is never a
+required check, because upstream moving is ambient activity no PR controls.
+
+## Refreshing a vendored base
+
+1. Copy the refreshed upstream `SKILL.md` over this dir's `<name>.md`, verbatim.
+2. Record the source commit in `provenance.json` — set `upstreamSha` to the
+   plugin's `gitCommitSha` and `shaStatus` to `verified`, and update `capturedAt`.
+3. Run `scripts/sync-skills.sh`. **If a `supersedes:` heading was renamed
+   upstream, this fails loud** — resolve the entry against the new heading rather
+   than deleting it, or the excision silently stops happening.
+4. Re-run `npm run vendor:drift` to confirm the base is clean.
 
 The vendored file here is **not** banner-stamped and **not** an operator-editable
 source — it is a captured upstream artifact. Edit the Hydra behaviour in the
