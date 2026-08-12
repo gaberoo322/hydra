@@ -1841,9 +1841,11 @@ describe("scripts/autopilot/classes.json — every dispatched skill resolves to 
    * entry, for the known-broken class this epic exists to fix, and issue #3992
    * deletes it when it repoints tickets_orch at the composed overlay.
    */
-  const KNOWN_BROKEN: ReadonlyArray<{ cls: string; skill: string; issue: string }> = [
-    { cls: "tickets_orch", skill: "to-tickets", issue: "#3992" },
-  ];
+  // Emptied by #3992, which repointed tickets_orch at the composed
+  // `hydra-tickets` skill. Keep the array (and the staleness test below) so a
+  // future known-broken class has a documented, self-expiring home rather than
+  // a permanent escape hatch.
+  const KNOWN_BROKEN: ReadonlyArray<{ cls: string; skill: string; issue: string }> = [];
 
   test("no dispatched skill is a bare upstream skill (the tickets_orch hard-error class)", () => {
     const raw = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "classes.json"), "utf-8");
