@@ -395,7 +395,7 @@ export interface AnchorDistributionResult {
  *
  * Counts cycles only (no cost; the USD attribution plane was retired in #1651).
  * The reframe / prior-failure lanes and their starvation gauges were retired in
- * ADR-0016 (no live writer), so this covers only the live priority lanes.
+ * ADR-0036 (no live writer), so this covers only the live priority lanes.
  */
 export function projectAnchorDistribution(
   trend: Array<Record<string, any>>,

@@ -136,7 +136,7 @@ export function createMetricsRouter() {
   // GET /metrics/anchor-distribution — Per-priority view of who served what
   // over the recent window (issue #377). Aggregates cycle metrics for `served`
   // by anchorType. The reframe / prior-failure lanes and their starvation
-  // gauges were retired in ADR-0016 (no live writer), so this surface now
+  // gauges were retired in ADR-0036 (no live writer), so this surface now
   // covers only the live priority lanes. Read-only and best-effort.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
@@ -170,7 +170,7 @@ export function createMetricsRouter() {
   // >10%-unclassified architectural-review trigger needs the offending cycleIds
   // to root-cause the gap, so this endpoint exposes them.
   //
-  // A thin delegate to the src/metrics/aggregate.ts aggregator (ADR-0016
+  // A thin delegate to the src/metrics/aggregate.ts aggregator (ADR-0036
   // Locality) — the anchorType-filter + rate math is NOT re-implemented here,
   // mirroring the /metrics/anchor-distribution → projectAnchorDistribution split.
   // Payload is the aggregator's body RAW: `{ windowCycles, unclassified:
