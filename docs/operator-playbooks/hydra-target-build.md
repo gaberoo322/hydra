@@ -396,6 +396,8 @@ Rules:
 
 ### 6. Verify (NOT an agent)
 
+**Commit before you verify (issue #3953):** `git commit` the structurally-complete change on the feature branch *before* this long verification, so a stall degrades to an unmerged PR the autopilot resumes next tick rather than work destroyed by the worktree-orphan-prune (which reaps uncommitted state).
+
 Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.appSubdir`; epic #3014, ADR-0026, issue #3019) — never hardcoded. For hydra-betting `verify.test` is `npm run test:raw` (the real vitest suite), so verify runs `test:raw`, NOT the bare `npm test` count-gate.
 
 ```bash
@@ -548,6 +550,65 @@ Before opening the code PR (or, for direct-to-main merges, before merging), auth
 `<type>` is a Conventional-Commits type (`feat`/`fix`/`perf`/`refactor`/`docs`/`test`/`build`/`ci`/`chore`/`revert`); the dashboard groups by type at render time and links the note to the issue. Commit the fragment with your change. For a genuinely user-invisible change (pure chore, test-only, internal refactor with no observable effect), apply the **`skip-changelog`** label to the PR instead of adding an empty fragment. There is no committed `CHANGELOG.md`; per-PR fragment files are conflict-free across parallel builds.
 
 **Graceful no-op until the Target adopts the convention:** if `~/hydra-betting/.changelog/README.md` is absent, the Target board has not yet mirrored this convention — skip this step entirely (the Target's Versions card degrades to "no releases yet"). Do NOT create the directory or the `skip-changelog` label yourself; that is the follow-on Target adoption ticket's job. QA gets no changelog role.
+
+### Foreground-wait contract — read before the merge phase (issue #3953)
+
+A backgrounded wait is **structurally unrecoverable**: end the turn while CI (or
+any other result) is still pending and the result is delivered to a session
+that has already exited — the only path back is an external `SendMessage`
+resume. In autopilot run `028f420d` (2026-08-11) a `dev_target` dispatch said
+*"I've set up a background monitor that will notify me when the checks reach a
+terminal state"* and stopped; **PR #870 was built and green locally but never
+merged** until an operator resumed it.
+
+**The rule: a turn ends only when the result you were waiting for is in hand
+and acted on.** For the merge phase that means: block on CI in the FOREGROUND
+(bounded poll below) and merge — or fix — when it settles. Do NOT background a
+monitor and stop. This is the same discipline as `hydra-qa`'s blocking-dispatch
+mandate (`run_in_background: false` on every spawn), applied to this build's
+own CI wait.
+
+**Commit before you verify** (Step 6): `git commit` the moment the change is
+structurally complete, before the long `test:raw` / typecheck run — so a stall
+degrades to "unmerged PR" (resumed next tick) instead of work destroyed by the
+worktree-orphan-prune.
+
+**Foreground bounded poll** — block on CI in THIS turn instead of backgrounding
+a monitor and stopping:
+
+```bash
+# BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
+# the foreground alternative to backgrounding a monitor/wait and ending the turn.
+#
+# zsh $status pitfall: name the state variable `run_state` (or `st`), never
+# `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
+# named `status` silently fails and the loop exits 1. `status` is the natural
+# spelling of this variable; that is exactly why the loop breaks. (Documented
+# CLAUDE.md pitfall.)
+deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
+while [ "$SECONDS" -lt "$deadline" ]; do
+  run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
+    --jq 'if ([.statusCheckRollup[]?.status]
+           | any(IN("QUEUED","IN_PROGRESS","PENDING","WAITING")))
+          then "pending" else "settled" end' 2>/dev/null)
+  [ "$run_state" = "settled" ] && break
+  sleep 15
+done
+# run_state == "settled"  => every check is terminal: read conclusions and act
+#                            (merge on success, fix on failure).
+# still "pending" past the deadline => budget expired: fall through to the
+#                            partial-but-posted branch below — post what you can
+#                            stand behind now, with CI state as of the last poll.
+#                            NEVER re-arm the loop; one bounded budget per wait.
+```
+
+**Prefer a partial-but-posted result over a pending one.** If the budget
+expires, do not leave the build unshipped: make sure the PR is open with the
+verification state recorded as of the last poll and a one-line note on what is
+pending. A built-and-green-locally PR that is **open** is a valid end state the
+autopilot resumes next tick; a built-and-green-locally PR that is still local
+(or unmerged with no PR) because you backgrounded a monitor and stopped is the
+failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
 
