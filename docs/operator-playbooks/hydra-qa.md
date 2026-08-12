@@ -138,6 +138,72 @@ ships no change to `aggregateAdversarialReview()`, `classifyVerdict()`, or any
 verdict literal (INV-A/INV-D); running it neither ships nor gates RC2, it only
 produces the number RC2's own sequencing gate is waiting on.
 
+## Never end a turn on a pending wait (issue #3953)
+
+A backgrounded wait is **structurally unrecoverable**: end the turn while a
+result is still pending and the result is delivered to a session that has
+already exited — the only path back is an external `SendMessage` resume. In
+autopilot run `028f420d` (2026-08-11) a `qa_orch` dispatch said *"I'll wait for
+the monitor to report settlement, then post final verdicts"* and stopped;
+**7 completed PR reviews were never posted as verdicts** until an operator
+resumed it.
+
+This skill's single-pass-exit design already obeys this rule for CI: it checks
+CI state **once**, emits `PASS-pending-CI` / `FAIL-pending-CI`, and **exits**
+(issue #405 — it deliberately does NOT loop on CI; an earlier version looped on
+`mutation-test: QUEUED` for hours and let PR #403 auto-merge before a correct
+`FAIL` landed). That design is **unchanged**. The contract below generalises the
+existing **Blocking-dispatch mandate** (`run_in_background: false` on every
+reviewer `Agent` spawn, issue #3880) to *every* backgrounding mechanism a QA
+dispatch can reach — a `Monitor`, a backgrounded bash, a reviewer spawn missing
+the flag.
+
+**The rule: a turn ends only when every spawned reviewer has returned a real
+result (step 7.5) and the verdict is posted.** If something you need is not
+ready, either block on it in the FOREGROUND (bounded poll below) or post the
+verdict you can stand behind now. Do not background a wait and stop.
+
+**Foreground bounded poll.** For pending CI specifically, do NOT poll — check
+once, emit `PASS-pending-CI`, and exit; the autopilot re-polls CI on its tick
+(the single-pass-exit design above). Reach for the bounded loop below only when
+the dispatch must observe some other process to completion in-turn and cannot
+exit partial. It is a BOUNDED poll (one fixed budget, expiry → post the
+verdict below) — NOT the unbounded CI re-poll that issue #405 retired; do not
+confuse the two:
+
+```bash
+# BOUNDED FOREGROUND POLL — block in THIS turn until the observed $PR settles.
+# This is the foreground alternative to backgrounding a Monitor/wait and ending
+# the turn.
+#
+# zsh $status pitfall: name the state variable `run_state` (or `st`), never
+# `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
+# named `status` silently fails and the loop exits 1. `status` is the natural
+# spelling of this variable; that is exactly why the loop breaks. (Documented
+# CLAUDE.md pitfall.)
+deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
+while [ "$SECONDS" -lt "$deadline" ]; do
+  run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
+    --jq 'if ([.statusCheckRollup[]?.status]
+           | any(IN("QUEUED","IN_PROGRESS","PENDING","WAITING")))
+          then "pending" else "settled" end' 2>/dev/null)
+  [ "$run_state" = "settled" ] && break
+  sleep 15
+done
+# run_state == "settled"  => every check is terminal: read conclusions and post
+#                            the final verdict.
+# still "pending" past the deadline => budget expired: fall through to the
+#                            partial-but-posted branch below — post the verdict
+#                            you can stand behind now, with state as of the last
+#                            poll. NEVER re-arm the loop; one bounded budget.
+```
+
+**Prefer a partial-but-posted verdict over a pending one.** If the budget
+expires, post the verdict the review supports now — `PASS-pending-CI` for a
+review-PASS awaiting CI, or the review report with the un-settled state
+recorded as of the last poll — never a prose *"I'll wait and post later"*. A
+verdict the autopilot can act on beats one only an external resume can finish.
+
 ## Process
 
 ### 1. Select issue
