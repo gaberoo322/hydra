@@ -49,19 +49,17 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 > **Retired prompt artifact (issue #2556).** A standalone single-agent "Reality Checker" prompt (`AGENT-PROMPT.md`) used to be bundled alongside this skill. It predates the current parallel Standards/Spec fan-out and is **no longer injected by any flow** — the live reviewer prompts are embedded in this playbook (the `code-review`-skill sub-agents above). The stale artifact has been removed; it is not referenced anywhere. Do not re-introduce a separate prompt file: the reviewer prompts live here, in the playbook that `scripts/sync-skills.sh` regenerates the skill from.
 
 > **NEVER end your session waiting on CI, a monitor, or a background process
-> (issue #3866).** This skill already never loops waiting on CI by design (the
-> four-verdict system below exists exactly to avoid that) — but the rule is
-> stated explicitly here because the design was violated in practice: a
-> `qa_orch` T4 re-check on PR #3853 posted the Deep-QA PASS marker (step 10's
-> T4 branch) and then ended its turn with "I'll wait for the deep-qa-gate
-> re-check run to complete" instead of returning. In an unattended dispatch
-> nothing resumes you after you stop talking — `reap.py` records the session's
-> end as a completion the instant it happens, whatever you did or didn't
-> finish. Once you have computed a verdict and executed its step-10 routing
-> (comment posted, label transitioned, auto-merge armed or FAIL bounced), you
-> are DONE — return immediately. Never emit a final message that describes
-> waiting for a check, a gate, or a re-run to finish; the autopilot's own CI
-> poll loop (not this skill) is what re-evaluates a `PASS-pending-CI` verdict.
+> (issue #3866).** The full rule lives ONCE, canonically, in
+> `hydra-autopilot.md`'s "Worktree-guard preamble" section — it is prepended
+> verbatim to every `qa_orch` dispatch prompt, so you receive it at dispatch
+> time regardless of this pointer. Restated here only as a cross-reference
+> (not duplicated, to avoid drift): this skill already never loops waiting on
+> CI by design (the four-verdict system below exists exactly to avoid that),
+> but the design was violated in practice — a `qa_orch` T4 re-check on PR
+> #3853 posted the Deep-QA PASS marker and then ended its turn waiting for the
+> `deep-qa-gate` re-check to complete instead of returning. Once you have
+> computed a verdict and executed its step-10 routing, you are DONE — return
+> immediately.
 
 ## Tier-aware verification depth (issue #739, ADR-0015)
 
