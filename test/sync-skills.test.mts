@@ -930,10 +930,15 @@ describe("scripts/sync-skills.sh — compose-seam supersede marker (issue #3818)
     }
   });
 
-  test("the LIVE hydra-qa playbook's supersession note precedes the base's spawn step, and review depth (fan-out counts/roles) is unchanged", () => {
-    // Golden check against the REAL repo (issue #3818 acceptance criteria):
-    // regressing the marker placement, or accidentally deleting it, must fail
-    // this REQUIRED test — not just an advisory workflow.
+  test("the LIVE hydra-qa base spawn step is EXCISED (not merely preceded by a note), and review depth (fan-out counts/roles) is unchanged", () => {
+    // Golden check against the REAL repo. Originally (#3818) this asserted the
+    // supersession NOTE preceded the base's still-present spawn step. #3991
+    // superseded that invariant: the base's step 4 is now excised outright via
+    // `supersedes:`, so "the note precedes it" is no longer expressible — there
+    // is nothing to precede. Hoisting was never sufficient (it reorders, it does
+    // not remove), which is why #3880 recurred after #3818 shipped. The
+    // assertions below are flipped to the stronger invariant: the base's spawn
+    // step is ABSENT, and the overlay's is the only one left.
     const dir = mkdtempSync(join(tmpdir(), "sync-skills-supersede-live-"));
     try {
       const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
@@ -948,21 +953,32 @@ describe("scripts/sync-skills.sh — compose-seam supersede marker (issue #3818)
       assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
       const out = readFileSync(join(dir, "claude", "hydra-qa", "SKILL.md"), "utf-8");
 
-      const supersedeIdx = out.indexOf("Compose-seam supersession");
-      const baseSpawnIdx = out.indexOf("### 4. Spawn both sub-agents in parallel");
+      const supersedeIdx = out.indexOf("Structural supersession");
       const overlaySpawnIdx = out.indexOf("### 7. Spawn the review sub-agents in parallel");
 
-      assert.ok(supersedeIdx >= 0, "the composed skill must carry the compose-seam supersession note");
-      assert.ok(baseSpawnIdx >= 0, "the vendored base's own spawn step must still be present (untouched upstream text)");
+      assert.ok(supersedeIdx >= 0, "the composed skill must carry the structural-supersession note");
       assert.ok(overlaySpawnIdx >= 0, "the overlay's own spawn step must still be present, unchanged");
+      // Line-anchored: the overlay's supersession table names the excised
+      // headings verbatim inside table cells, so a bare substring search finds
+      // that documentation. Only a real heading (line-start) counts.
+      assert.doesNotMatch(
+        out,
+        /^### 4\. Spawn both sub-agents in parallel\s*$/m,
+        "the vendored base's own spawn step must be EXCISED — #3818's hoisted note left it live and #3880 recurred anyway",
+      );
+      assert.doesNotMatch(
+        out,
+        /Send a single message with two `Agent` tool calls/,
+        "the base's spawn instruction body must be excised along with its heading",
+      );
       assert.ok(
-        supersedeIdx < baseSpawnIdx,
-        "the supersession note must appear AT OR BEFORE the base's spawn instruction — a model reading top-down must hit the override before the instruction it overrides (#3818 acceptance criterion)",
+        supersedeIdx < overlaySpawnIdx,
+        "the supersession note must precede the surviving fan-out step so a top-down read learns which sections were removed before it starts executing",
       );
       assert.match(
-        out.slice(supersedeIdx, baseSpawnIdx),
-        /Do NOT execute the base's step 4 spawn instruction/,
-        "the note between the supersession heading and the base's spawn step must contain an explicit imperative not to execute the base step",
+        out,
+        /superseded by the hydra-qa overlay: '### 4\. Spawn both sub-agents in parallel'/,
+        "the excision must leave its auditable marker naming the removed base section",
       );
 
       // Review depth (fan-out count, reviewer roles, Target risk-critical fold)
@@ -1031,30 +1047,33 @@ describe("scripts/sync-skills.sh — composed hydra-qa carries the blocking-disp
       assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
       const out = readFileSync(join(dir, "claude", "hydra-qa", "SKILL.md"), "utf-8");
 
-      const supersedeIdx = out.indexOf("Compose-seam supersession");
-      const mandateIdx = out.indexOf("Blocking-dispatch mandate, restated here");
-      const baseSpawnIdx = out.indexOf("### 4. Spawn both sub-agents in parallel");
+      const supersedeIdx = out.indexOf("Structural supersession");
+      const mandateIdx = out.indexOf("Blocking-dispatch mandate");
       const step7Idx = out.indexOf("### 7. Spawn the review sub-agents in parallel");
 
-      assert.ok(supersedeIdx >= 0, "the compose-seam-supersede preface must still be present");
+      assert.ok(supersedeIdx >= 0, "the structural-supersession preface must still be present");
       assert.ok(
         mandateIdx >= 0,
         "the composed skill must restate the run_in_background:false blocking-dispatch mandate inside the hoisted preface (issue #3880)",
       );
-      assert.ok(baseSpawnIdx >= 0, "the vendored base's own spawn step must still be present, untouched");
+      assert.doesNotMatch(
+        out,
+        /^### 4\. Spawn both sub-agents in parallel\s*$/m,
+        "the vendored base's own spawn step is now excised (#3991) — the mandate no longer needs to outrun it, but must still precede the overlay's",
+      );
       assert.ok(step7Idx >= 0, "the overlay's own step 7 spawn instruction must still be present, unchanged");
 
       assert.ok(
-        supersedeIdx < mandateIdx && mandateIdx < baseSpawnIdx,
-        "the restated mandate must sit BETWEEN the supersession note and the base's spawn step — a top-down read must hit the blocking-dispatch requirement before any spawn instruction, not ~250 lines later at step 7",
+        supersedeIdx < mandateIdx && mandateIdx < step7Idx,
+        "the restated mandate must sit between the supersession note and the ONLY surviving spawn step — a top-down read must hit the blocking-dispatch requirement before any spawn instruction, not ~250 lines later",
       );
       assert.match(
-        out.slice(mandateIdx, baseSpawnIdx),
+        out.slice(mandateIdx, step7Idx),
         /run_in_background: false/,
         "the restated preface paragraph must literally name the run_in_background: false flag, not just gesture at 'blocking dispatch'",
       );
       assert.match(
-        out.slice(mandateIdx, baseSpawnIdx),
+        out.slice(mandateIdx, step7Idx),
         /step 7\.5/,
         "the restated preface must also point at step 7.5's reviewer-completeness check, not just the spawn flag",
       );
@@ -1866,6 +1885,128 @@ describe("scripts/autopilot/classes.json — every dispatched skill resolves to 
         existsSync(join(playbookDir, `${entry.skill}.md`)),
         false,
         `allowlist entry ${entry.cls} -> ${entry.skill} now RESOLVES to a playbook — ${entry.issue} is done, so delete this allowlist entry and let the tripwire cover it.`,
+      );
+    }
+  });
+});
+
+describe("live hydra-qa — exactly one live instruction survives the compose seam (issue #3991)", () => {
+  /**
+   * Golden checks against the REAL playbooks and the REAL vendored base, so a
+   * future edit to either — or a #3994 base refresh — cannot silently
+   * reintroduce the defects this retrofit closed.
+   *
+   * #3818: the base's own "Spawn both sub-agents in parallel" step shipped
+   * alongside the overlay's step 7 fan-out, so a top-down read could execute
+   * both (~6 reviewer sub-agents per PR against a documented 2). The #3818 fix
+   * HOISTED a prose note ahead of it; hoisting reorders, it does not remove.
+   *
+   * #3880: the overlay's `run_in_background: false` mandate then failed to hold
+   * anyway — PR #3861 passed both reviewers with no verdict posted, because the
+   * mandate sat ~250 lines past the preface, after the base's unconstrained
+   * spawn body.
+   *
+   * Both base sections are now excised outright via `supersedes:`.
+   */
+  function syncLive(): string {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-3991-"));
+    const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: join(dir, "claude"),
+        CODEX_SKILLS_DIR: join(dir, "codex"),
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    const out = readFileSync(join(dir, "claude", "hydra-qa", "SKILL.md"), "utf-8");
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  }
+
+  test("the base's own reviewer-spawn instruction is GONE — only the overlay's step 7 fan-out survives (#3818)", () => {
+    const out = syncLive();
+    assert.doesNotMatch(
+      out,
+      /Send a single message with two `Agent` tool calls/,
+      "the vendored base's spawn instruction must be excised, not merely preceded by a note — hoisting left both live and produced ~6 reviewers/PR",
+    );
+    assert.doesNotMatch(
+      out,
+      /^### 4\. Spawn both sub-agents in parallel$/m,
+      "the base's spawn heading must not survive composition",
+    );
+    assert.match(
+      out,
+      /### 7\. Spawn the review sub-agents in parallel/,
+      "the overlay's own fan-out must still be present — this retrofit removes duplication, never review depth",
+    );
+  });
+
+  test("the blocking-dispatch mandate survives composition and precedes every spawn instruction (#3880)", () => {
+    const out = syncLive();
+    const mandateIdx = out.indexOf("run_in_background: false");
+    const spawnIdx = out.indexOf("### 7. Spawn the review sub-agents in parallel");
+    assert.ok(mandateIdx >= 0, "the run_in_background: false mandate must survive composition");
+    assert.ok(spawnIdx >= 0, "the overlay fan-out step must survive composition");
+    assert.ok(
+      mandateIdx < spawnIdx,
+      "the mandate must appear BEFORE the fan-out step — a dispatch reading top-down must hit it before it can act on any spawn instruction (#3880 is what happens when it does not)",
+    );
+  });
+
+  test("the base's two ask-the-user gates are excised — an AFK dispatch has no user to ask (ADR-0030 Decision 3)", () => {
+    const out = syncLive();
+    assert.doesNotMatch(
+      out,
+      /If they didn't specify one, ask for it/,
+      "the base's 'ask for the fixed point' gate must be excised — qa_orch resolves it from the merge-base",
+    );
+    assert.doesNotMatch(
+      out,
+      /ask the user where the spec is/,
+      "the base's 'ask where the spec is' gate must be excised — qa_orch resolves it from the issue's Closes #N",
+    );
+  });
+
+  test("the base's smell baseline is KEPT — supersession removes conflicts, not content the overlay depends on", () => {
+    const out = syncLive();
+    assert.match(
+      out,
+      /### 3\. Identify the standards sources/,
+      "base step 3 must survive: step 7.0's Standards brief imports its Fowler smell baseline by name",
+    );
+    assert.match(out, /Refused Bequest/, "the smell baseline itself must survive composition");
+  });
+
+  test("every supersedes entry in the live hydra-qa playbook still resolves in the live vendored base", () => {
+    // The fail-loud guard in sync-skills.sh already enforces this (syncLive
+    // asserts exit 0), but pin it explicitly so the intent is legible: a #3994
+    // base refresh that renames one of these headings must fail here, loudly,
+    // rather than silently un-suppressing the instruction.
+    const playbook = readFileSync(
+      join(REPO_ROOT, "docs", "operator-playbooks", "hydra-qa.md"),
+      "utf-8",
+    );
+    const base = readFileSync(
+      join(REPO_ROOT, "docs", "operator-playbooks", "_vendor", "code-review.md"),
+      "utf-8",
+    );
+    const fm = playbook.match(/^---\n([\s\S]*?)\n---\n/);
+    assert.ok(fm, "hydra-qa.md must have frontmatter");
+    const entries = [...fm![1].matchAll(/^\s*-\s*"(.+)"\s*$/gm)].map(m => m[1]);
+    assert.ok(entries.length > 0, "hydra-qa must declare supersedes entries");
+    for (const entry of entries) {
+      const wanted = entry.replace(/^#+\s*/, "").trim();
+      const found = base
+        .split("\n")
+        .filter(l => /^#{1,6}\s+/.test(l))
+        .filter(l => l.replace(/^#+\s*/, "").trim() === wanted);
+      assert.equal(
+        found.length,
+        1,
+        `supersedes entry ${JSON.stringify(entry)} must match exactly one heading in the vendored base (found ${found.length})`,
       );
     }
   });
