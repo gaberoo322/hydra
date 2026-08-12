@@ -10,7 +10,7 @@ Start here; load the rest on demand.
 
 - [`CONTEXT-MAP.md`](./CONTEXT-MAP.md) — **where domain language lives**: the cross-cutting glossary ([`CONTEXT.md`](./CONTEXT.md)) plus co-located `src/<domain>/CONTEXT.md` files, mapped by code area. Read before naming a concept or touching a subsystem.
 - [`README.md`](./README.md) — system overview, dashboard/API surface, design principles
-- [`docs/adr/`](./docs/adr/) — architectural decision records (the "why"); read the ones touching your area
+- [`docs/adr/README.md`](./docs/adr/README.md) — **ADR roster**: every architectural decision in one line (status, decision, when to read it). Read the roster, then open only the ADRs your work touches. Writing a new one: [ADR-0037](./docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md) sets the format and `test/adr-roster.test.mts` enforces it.
 - [`docs/operator-playbooks/hydra-autopilot.md`](./docs/operator-playbooks/hydra-autopilot.md) — autopilot class taxonomy + dispatch contract
 - [`docs/agents/domain.md`](./docs/agents/domain.md) — the READ + WRITE doc contract subagents follow
 - [`docs/reference.md`](./docs/reference.md) — on-demand reference: Redis keys, event streams, API endpoints, model tiers, learning-system internals, config, deploy recipe

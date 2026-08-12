@@ -1,6 +1,6 @@
 # ADR-0012: Autopilot is the single decisional brain; state is continuous via Redis + hooks
 
-Status: Proposed
+Status: Accepted (live doctrine — the single-brain model is what `hydra-autopilot` runs today; corrected from "Proposed" 2026-08-12)
 Date: 2026-05-28
 Deciders: Operator + Hydra (via `/grill-with-docs` session on autopilot brittleness)
 Issue: TBD (autopilot-restructure epic)

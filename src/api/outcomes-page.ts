@@ -10,7 +10,7 @@
  *
  * NB: `GET /api/v2/outcomes/calibration` + its `calibration-trend`
  * aggregator were DECOMMISSIONED (issue #2876). The lane it read
- * (`hydra:anchors:calibration:*`) has had no writer since ADR-0016
+ * (`hydra:anchors:calibration:*`) has had no writer since ADR-0036
  * retired `anchor-scorer.ts`, so the endpoint always returned empty
  * sparklines — a live-looking-but-empty dead lane. Removed rather than
  * rerouted onto the attribution ledger (`hydra:attribution:*`), which is
