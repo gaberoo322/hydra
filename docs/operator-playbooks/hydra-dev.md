@@ -13,20 +13,6 @@ reference_files: [_fragments/hydra-dev-parent-flow.md, _fragments/hydra-dev-chil
 
 > **Composed skill (ADR-0030 Decision 2 / Option C, issue #3422).** This playbook is the thin Hydra **AFK overlay** on top of the vendored upstream `implement` base (`docs/operator-playbooks/_vendor/implement.md`). `scripts/sync-skills.sh` emits `~/.claude/skills/hydra-dev/SKILL.md` as **[upstream implement base] + [this overlay]**, with the vendored base's `disable-model-invocation: true` **stripped** (it hard-errors under Skill-tool dispatch). The **implement** stage of the one-lineage spine dispatches the *same* upstream skill the operator runs, in AFK mode: the upstream base sets the spirit (implement against the spec/tickets, use `/tdd` at pre-agreed seams, typecheck + single-file tests as you go, the full suite once at the end, then `/code-review`), and the worktree-isolation, verification-depth, and PR contract below are the Hydra-specific overlay that rides on it. **Contract complete (ADR-0030 Decision 5, epsilon #3424):** the standalone `hydra-dev` *fork identity* is retired as a documented concept — this is no longer a bespoke fork that re-implements `implement` inline, it **is** the composed `implement` stage. The `dev_orch` dispatch *class* and its `decide.py` `make_dispatch(…, "hydra-dev")` string literal stay live (they select this composed stage; the delta slice #3423 already migrated the learning-loop seams), but "hydra-dev the fork" no longer names a second inline copy of the pattern — a change to `implement` behaviour is made once, in the composed upstream base + this overlay.
 
-> **No `supersedes:` entries here, deliberately (issue #3991).** The structural
-> supersession mechanism (#3990) targets base sections *by heading*, and the
-> vendored `implement` base has **no headings at all** — its whole body is nine
-> lines of prose. There is nothing a `supersedes:` entry could name. That is not
-> a gap: the base's two concrete instructions are **compatible** with this
-> overlay rather than superseded by it. "Commit your work to the current branch"
-> is what the worktree flow below already does (the current branch *is* the
-> per-dispatch worktree branch), and "use `/code-review`" is a self-review pass
-> that runs *before* the PR opens — it does not collide with the independent
-> `qa_orch` review stage that runs *after*, and `code-review` carries no
-> `disable-model-invocation` in the installed skill, so invoking it is safe.
-> If a future base refresh introduces a genuinely conflicting instruction, it
-> will need headings before `supersedes:` can reach it.
-
 Autonomous implementation of GitHub issues against the Hydra orchestrator
 (`~/hydra`). Delegates to a worktree subagent for isolation.
 

@@ -15,27 +15,16 @@ supersedes:
 
 # Hydra QA
 
-> **Structural supersession (issue #3990, replacing the #3818 prose note).**
-> Four sections of the vendored `code-review` base are **excised at compose
-> time** by the `supersedes:` entries in this playbook's frontmatter — they are
-> not present in the generated skill at all, so there is nothing to "skip over":
->
-> | Base section (excised) | Overlay section that owns it |
-> |---|---|
-> | `### 1. Pin the fixed point` | step 3 — the PR's base ref, resolved to a SHA |
-> | `### 2. Identify the spec source` | step 4 — the design-concept artifact via `Closes #N` |
-> | `### 4. Spawn both sub-agents in parallel` | step 7 — the tier-aware fan-out |
-> | `### 5. Aggregate` | step 8 — aggregate, then step 9's verdict classification |
->
-> The base's `### 3. Identify the standards sources` is deliberately **kept**:
-> its Fowler smell baseline is imported by name in step 7.0's Standards brief.
+> **Structural supersession (#3990, replacing the #3818 prose note).** The base
+> sections named in `supersedes:` are **excised at compose time** — absent from
+> the generated skill, so there is nothing to "skip over". Base steps 1, 2, 4, 5
+> are owned here by steps 3, 4, 7, 8. Base step 3 is **kept**: step 7.0 imports
+> its Fowler smell baseline by name.
 >
 > Base steps 1 and 2 each end by telling the reviewer to **ask the user** — for
-> the fixed point, and for the spec location. In an AFK `qa_orch` dispatch there
-> is no user to ask, and ADR-0030 Decision 3 binds both gates to artifacts
-> instead (fixed-point ← the merge-base, spec ← the issue's `Closes #N`). Their
-> excision is what makes this composed skill safe to dispatch unattended, not
-> merely cheaper.
+> the fixed point, and for the spec. An AFK `qa_orch` dispatch has no user to
+> ask; ADR-0030 Decision 3 binds both to artifacts. That excision is what makes
+> this skill safe to dispatch unattended.
 
 > **Blocking-dispatch mandate (issue #3880 — a #3789/#3827 recurrence).** When
 > step 7's fan-out runs, **every** `Agent` call that spawns a reviewer sub-agent
