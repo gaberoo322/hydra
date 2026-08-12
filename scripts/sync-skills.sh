@@ -150,8 +150,11 @@ if not m:
     sys.exit(0)
 fm_raw, body = m.group(1), m.group(2)
 fm = {}
-for line in fm_raw.splitlines():
-    line = line.rstrip()
+fm_lines = fm_raw.splitlines()
+fm_i = 0
+while fm_i < len(fm_lines):
+    line = fm_lines[fm_i].rstrip()
+    fm_i += 1
     if not line or line.startswith("#"):
         continue
     if ":" not in line:
@@ -159,6 +162,27 @@ for line in fm_raw.splitlines():
     k, _, v = line.partition(":")
     k = k.strip()
     v = v.strip()
+    if v == "":
+        # YAML block sequence — `key:` followed by indented `- item` lines
+        # (issue #3990). Needed for `supersedes:`, whose entries are markdown
+        # headings that routinely contain a colon or a comma; the inline
+        # `[a, b]` form splits on commas and would corrupt them. Only consumed
+        # when at least one `- ` item actually follows, so an empty-valued key
+        # with no items still falls through to the scalar path below and stays
+        # byte-identical to the pre-#3990 behaviour.
+        items = []
+        while fm_i < len(fm_lines):
+            item = fm_lines[fm_i].strip()
+            if not item.startswith("- "):
+                break
+            item = item[2:].strip()
+            if (item.startswith('"') and item.endswith('"')) or (item.startswith("'") and item.endswith("'")):
+                item = item[1:-1]
+            items.append(item)
+            fm_i += 1
+        if items:
+            fm[k] = items
+            continue
     if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
         v = v[1:-1]
     if v.startswith("[") and v.endswith("]"):
@@ -232,6 +256,19 @@ resolved = "\n".join(resolve_line(l) for l in body.split("\n"))
 # strip regardless of what the OVERLAY playbook's own frontmatter declares.
 compose_base = fm.get("compose_base")
 compose = False
+
+# `supersedes:` is meaningless without a base to supersede — a playbook that
+# declares it alone has almost certainly lost its compose_base in an edit, and
+# silently ignoring the key would leave the author believing an instruction was
+# excised when nothing was. FAIL LOUD (issue #3990).
+_supersedes_declared = fm.get("supersedes")
+if _supersedes_declared and not compose_base:
+    raise SystemExit(
+        "sync-skills: `supersedes:` without `compose_base:` in "
+        + os.path.basename(path)
+        + " — there is no vendored base to excise sections from."
+    )
+
 if compose_base:
     compose = True
     base_path = os.path.normpath(os.path.join(playbooks_dir, compose_base))
@@ -260,6 +297,89 @@ if compose_base:
             + "well-formed upstream SKILL.md"
         )
     base_body = bm.group(2)
+
+    # ---- Structural supersession (issue #3990) -------------------------------
+    # An overlay may declare, alongside its compose_base:
+    #
+    #   supersedes:
+    #     - "## Heading in the vendored base"
+    #
+    # and this pass EXCISES each named section from the base body before the
+    # compose — from the heading line through to the next heading of equal or
+    # shallower depth. The vendored base FILE is never modified; the excision is
+    # visible as a reviewable diff in the generated mirror, and leaves an
+    # auditable marker naming the overlay that removed it.
+    #
+    # Why excision rather than ordering. The `<!-- compose-seam-supersede -->`
+    # marker below (issue #3818) only HOISTS overlay prose ahead of the base.
+    # Hoisting reorders; it does not remove — both instructions still ship, and a
+    # model reading top-down can still act on the base's copy after reading the
+    # override. #3880 is what that looks like in production: the overlay's
+    # blocking-dispatch mandate was hoisted and the reviewers still fanned out
+    # non-blocking, so a PR passed review with no verdict posted. Excision is the
+    # only mechanism that guarantees exactly ONE live instruction exists in the
+    # emitted bytes.
+    #
+    # Matching is on the heading TEXT, normalised for leading #'s and surrounding
+    # whitespace, so a declaration may include the hashes or omit them. Zero
+    # matches and multiple matches are both hard errors — see the FAIL LOUD note
+    # on the refresh path in _vendor/README.md: an automated base refresh that
+    # renames a heading MUST break the sync loudly rather than silently
+    # un-suppress the instruction the overlay meant to kill.
+    supersedes = fm.get("supersedes")
+    if isinstance(supersedes, str):
+        supersedes = [supersedes] if supersedes.strip() else []
+    elif not isinstance(supersedes, list):
+        supersedes = []
+
+    if supersedes:
+        heading_re = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
+        base_lines = base_body.split("\n")
+
+        def norm(s):
+            return s.lstrip("#").strip()
+
+        for target in supersedes:
+            want = norm(target)
+            headings = []
+            for idx, ln in enumerate(base_lines):
+                hm2 = heading_re.match(ln)
+                if hm2:
+                    headings.append((idx, len(hm2.group(1)), ln.strip()))
+            matches = [h for h in headings if norm(h[2]) == want]
+
+            if not matches:
+                raise SystemExit(
+                    "sync-skills: unresolved `supersedes:` heading "
+                    + repr(target) + " (in " + os.path.basename(path) + "): the "
+                    + "vendored base " + compose_base + " has no such heading. "
+                    + "Its headings are: "
+                    + ("; ".join(h[2] for h in headings) if headings else "(none)")
+                )
+            if len(matches) > 1:
+                raise SystemExit(
+                    "sync-skills: ambiguous `supersedes:` heading "
+                    + repr(target) + " (in " + os.path.basename(path) + "): it "
+                    + "matches " + str(len(matches)) + " headings in "
+                    + compose_base + " at lines "
+                    + ", ".join(str(h[0] + 1) for h in matches)
+                    + " — a supersedes entry must identify exactly one section."
+                )
+
+            start, depth, _hdr = matches[0]
+            end = len(base_lines)
+            for idx2 in range(start + 1, len(base_lines)):
+                hm3 = heading_re.match(base_lines[idx2])
+                if hm3 and len(hm3.group(1)) <= depth:
+                    end = idx2
+                    break
+            base_lines[start:end] = [
+                "<!-- superseded by the " + skill_name + " overlay: "
+                + repr(target) + " excised at compose time (issue #3990) -->",
+                "",
+            ]
+
+        base_body = "\n".join(base_lines)
 
     # Compose-seam supersession marker (issue #3818, from the #3815 design
     # concept: "an explicit supersede marker emitted by sync-skills.sh"). An
