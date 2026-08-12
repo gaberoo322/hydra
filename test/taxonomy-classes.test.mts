@@ -86,7 +86,8 @@ const EXPECTED_SIGNAL = [
   // (orch, 1h; works the next unblocked frontier ticket).
   "wayfinder_orch",
   // issue #3421, epic #3419, ADR-0030 Decision 2 — the tickets-stage producer
-  // class (orch, 1h; dispatches the upstream to-tickets skill + Hydra overlay;
+  // class (orch, 1h; dispatches the composed hydra-tickets skill = vendored
+  // to-tickets base + Hydra overlay;
   // hydra-prd is demoted to the called renderer library).
   "tickets_orch",
 ];
@@ -157,7 +158,7 @@ describe("taxonomy: TS view agrees with classes.json", () => {
 
   // Regression for issue #3421 (epic #3419, ADR-0030 Decision 2): the
   // tickets-stage class row. The row binds the Pocock `tickets` stage to the
-  // vendored upstream `to-tickets` skill (+ Hydra AFK overlay); hydra-prd is
+  // composed `hydra-tickets` skill (vendored to-tickets base + AFK overlay); hydra-prd is
   // demoted to the called PrdInput→issue renderer library and deliberately
   // has NO class row of its own. Expand step only — decide.py's hardcoded
   // pipeline_priority / signal iteration tuples do not dispatch this class
@@ -166,14 +167,14 @@ describe("taxonomy: TS view agrees with classes.json", () => {
     const row = classByName("tickets_orch");
     assert.ok(row, "tickets_orch row must exist");
     assert.equal(row.kind, "signal");
-    assert.equal(row.skill, "to-tickets");
+    assert.equal(row.skill, "hydra-tickets");
     assert.equal(row.costClass, "other");
     assert.equal(row.learningAgent, null);
     assert.equal(row.cooldownSeconds, 3600);
     assert.equal(row.scope, "orch");
     assert.equal(row.provenanceLabel, null);
     // classBySkill resolves the upstream skill name to the same row.
-    assert.equal(classBySkill("to-tickets")?.name, "tickets_orch");
+    assert.equal(classBySkill("hydra-tickets")?.name, "tickets_orch");
     // hydra-prd itself must NOT (re)gain a dispatch-class row — it is the
     // callee renderer library, not a dispatch identity.
     assert.equal(classBySkill("hydra-prd"), undefined);
@@ -444,21 +445,21 @@ describe("TS projections read the taxonomy (slice #1671)", () => {
   // (which learningAgent rows train pattern-memory) and demotion.ts's
   // DEFAULT_FRICTION_SKILLS (which skills' resolved cues get demoted) — are the
   // "break silently on a rename" surfaces Decision 5 flags. The tickets-stage
-  // producer (`tickets_orch` → `to-tickets`) is a NON-learning producer
+  // producer (`tickets_orch` → `hydra-tickets`) is a NON-learning producer
   // (learningAgent null; it renders issues, POSTs no /memory/subagent-friction),
   // so it is CORRECTLY excluded from BOTH seams — the learning-capture pathway is
   // untouched for the classes that DO learn.
-  test("ADR-0030: to-tickets is a non-learning producer, absent from both learning seams (#3423)", async () => {
+  test("ADR-0030: hydra-tickets is a non-learning producer, absent from both learning seams (#3423)", async () => {
     const cap = await import("../src/pattern-memory/subagent-capture.ts");
-    // Learning seam #1 — subagent-capture.ts: to-tickets is NOT a valid
+    // Learning seam #1 — subagent-capture.ts: hydra-tickets is NOT a valid
     // lesson-producing skill (learningAgent null → isValidSkill false).
     assert.equal(
-      cap.isValidSkill("to-tickets"),
+      cap.isValidSkill("hydra-tickets"),
       false,
-      "to-tickets renders issues (learningAgent null) — it must not be a lesson skill",
+      "hydra-tickets renders issues (learningAgent null) — it must not be a lesson skill",
     );
-    const ticketsRow = classBySkill("to-tickets");
-    assert.ok(ticketsRow, "tickets_orch row must resolve by its to-tickets skill");
+    const ticketsRow = classBySkill("hydra-tickets");
+    assert.ok(ticketsRow, "tickets_orch row must resolve by its hydra-tickets skill");
     assert.equal(
       ticketsRow.learningAgent,
       null,
@@ -466,7 +467,7 @@ describe("TS projections read the taxonomy (slice #1671)", () => {
     );
     // Learning seam #2 — demotion.ts DEFAULT_FRICTION_SKILLS mirrors the friction
     // producers (the skills that POST /memory/subagent-friction). Read the source
-    // list and confirm to-tickets is absent (renders issues, emits no friction)
+    // list and confirm hydra-tickets is absent (renders issues, emits no friction)
     // and every learning-class fork skill is still present (not silently dropped).
     const demotionSrc = readFileSync(
       join(REPO_ROOT, "src", "pattern-memory", "demotion.ts"),
@@ -478,9 +479,9 @@ describe("TS projections read the taxonomy (slice #1671)", () => {
     assert.ok(listMatch, "DEFAULT_FRICTION_SKILLS array literal must be present");
     const frictionSkills = listMatch[1];
     assert.equal(
-      /["']to-tickets["']/.test(frictionSkills),
+      /["']hydra-tickets["']/.test(frictionSkills),
       false,
-      "to-tickets emits no friction — it must not be in DEFAULT_FRICTION_SKILLS",
+      "hydra-tickets emits no friction — it must not be in DEFAULT_FRICTION_SKILLS",
     );
     for (const forkSkill of ["hydra-dev", "hydra-qa", "hydra-target-build"]) {
       assert.ok(

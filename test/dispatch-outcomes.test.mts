@@ -37,6 +37,7 @@ import {
   dispatchOutcomeKey,
   dispatchOutcomesIndexKey,
   DISPATCH_OUTCOME_TTL_SECONDS,
+  DISPATCH_OUTCOMES_INDEX_MAX,
   type DispatchOutcomeRecord,
 } from "../src/redis/dispatch-outcomes.ts";
 // Issue #3739 defect (b): the run-attribution parser that getDispatchOutcomesForRun
@@ -78,7 +79,7 @@ describe("dispatch-outcomes Redis seam (issue #2942)", () => {
     await redis.quit();
   });
 
-  test("put writes the hash + index member with 14d TTLs on both (AC2)", async () => {
+  test("put writes the hash + index member with the configured TTL on both (AC2)", async () => {
     const rec = record();
     const res = await putDispatchOutcome(rec);
     assert.equal(res.ok, true);
@@ -256,6 +257,36 @@ describe("dispatch-outcomes Redis seam (issue #2942)", () => {
     assert.equal(res.ok, true);
     if (res.ok !== true) return;
     assert.equal(res.records.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #3962 — pin the raised retention literals.
+//
+// The symbolic assertions above (`ttl > 0 && ttl <=
+// DISPATCH_OUTCOME_TTL_SECONDS`) reference the exported constant, so they
+// absorb a silent value change without failing. These pin the exact 90d / 8000
+// literals — independent of the source expression — so a future silent edit is
+// CAUGHT, not absorbed. This matters because the raise is deadline-bound and
+// prospective-only (no backfill): a silent revert is permanently-unrecoverable
+// data loss, not mere config drift. Pure (no Redis).
+// ---------------------------------------------------------------------------
+
+describe("dispatch-outcome retention constants are pinned (issue #3962)", () => {
+  test("DISPATCH_OUTCOME_TTL_SECONDS is exactly 90 days", () => {
+    assert.equal(
+      DISPATCH_OUTCOME_TTL_SECONDS,
+      90 * 24 * 3600,
+      "retention raised 14d→90d in #3962; a silent revert loses history permanently (no backfill)",
+    );
+  });
+
+  test("DISPATCH_OUTCOMES_INDEX_MAX is exactly 8000", () => {
+    assert.equal(
+      DISPATCH_OUTCOMES_INDEX_MAX,
+      8000,
+      "index cap raised 2000→8000 in #3962; must stay non-binding at the 90d / ~1291-record projection",
+    );
   });
 });
 

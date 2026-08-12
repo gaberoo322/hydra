@@ -11,7 +11,7 @@
  * nested mappings are supported are passed in by the caller. Each config-specific
  * loader (`parseOutcomesYaml`, `parseLivenessYaml`) is a thin typed wrapper that
  * supplies its own key name and returns its own result shape — the domain schemas
- * and their zod validators stay separate (ADR-0016 deepening: concentrate the
+ * and their zod validators stay separate (ADR-0036 deepening: concentrate the
  * grammar, not the schemas).
  *
  * Intentionally small. Supports only what the two config files document:

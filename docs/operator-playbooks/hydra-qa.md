@@ -6,34 +6,38 @@ allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 arguments: [issue_number]
 claude_only: true
 compose_base: _vendor/code-review.md
+supersedes:
+  - "### 1. Pin the fixed point"
+  - "### 2. Identify the spec source"
+  - "### 4. Spawn both sub-agents in parallel"
+  - "### 5. Aggregate"
 ---
 
 # Hydra QA
 
-> **Compose-seam supersession (issue #3818).** This composed skill vendors the
-> upstream `code-review` base's own **"### 4. Spawn both sub-agents in
-> parallel"** step below — and this Hydra overlay's own **"### 7. Spawn the
-> review sub-agents in parallel"** step, further down this document, REPLACES
-> it. **Do NOT execute the base's step 4 spawn instruction.** It is fully
-> superseded: the overlay's step 7 already performs the complete fan-out (the
-> plain Standards + Spec pair on T1/T2, or the 2-reviewer adversarial fan-out
-> on T3/T4) — running both would double-spawn reviewer sub-agents (6 instead
-> of 2, issue #3815 AC2). The overlay's step 7 is the ONLY live spawn
-> instruction for this composed skill; treat the base's step 4 as historical
-> upstream prose to skip over, not something to act on.
+> **Structural supersession (#3990, replacing the #3818 prose note).** The base
+> sections named in `supersedes:` are **excised at compose time** — absent from
+> the generated skill, so there is nothing to "skip over". Base steps 1, 2, 4, 5
+> are owned here by steps 3, 4, 7, 8. Base step 3 is **kept**: step 7.0 imports
+> its Fowler smell baseline by name.
+>
+> Base steps 1 and 2 each end by telling the reviewer to **ask the user** — for
+> the fixed point, and for the spec. An AFK `qa_orch` dispatch has no user to
+> ask; ADR-0030 Decision 3 binds both to artifacts. That excision is what makes
+> this skill safe to dispatch unattended.
 
-> **Blocking-dispatch mandate, restated here (issue #3880 — a #3789/#3827
-> recurrence).** When step 7's fan-out runs, **every** `Agent` call that spawns
-> a reviewer sub-agent MUST pass `run_in_background: false`. The `Agent` tool
-> defaults to background dispatch — a spawn without this flag returns
-> immediately, and the parent turn (and this session) can end with no verdict
-> posted while reviewers are still running. This is not a new rule; it already
-> lives at step 7 below. It failed to hold on 2026-08-05 (issue #3880) even
-> though step 7 carried it — the mandate was true but sat ~250 lines past this
-> preface, after the base's entire unconstrained "spawn in parallel" body, so a
-> dispatch could reach and act on a spawn instruction well before ever reading
-> it. Restating it beside the "skip the base's step 4" note puts it where a
-> top-down read hits it before any spawn happens. Step 7.5's
+> **Blocking-dispatch mandate (issue #3880 — a #3789/#3827 recurrence).** When
+> step 7's fan-out runs, **every** `Agent` call that spawns a reviewer sub-agent
+> MUST pass `run_in_background: false`. The `Agent` tool defaults to background
+> dispatch — a spawn without this flag returns immediately, and the parent turn
+> (and this session) can end with no verdict posted while reviewers are still
+> running. This is not a new rule; it already lives at step 7 below. It failed to
+> hold on 2026-08-05 even though step 7 carried it: the mandate was true but sat
+> ~250 lines past this preface, *after the base's entire unconstrained "spawn in
+> parallel" body*, so a dispatch could reach and act on a spawn instruction well
+> before ever reading it. That body is now excised outright (#3990), so the only
+> spawn instruction in this skill is step 7's — but the mandate stays hoisted
+> here, because a top-down read must hit it before any spawn happens. Step 7.5's
 > reviewer-completeness check is equally mandatory: never aggregate or emit a
 > verdict for a fan-out where any spawned reviewer did not return a real
 > result — see step 7.5 below.

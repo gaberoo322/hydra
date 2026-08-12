@@ -1,0 +1,52 @@
+# ADR Roster
+
+Every architectural decision record, one line each. **Read this file first, then open only the ADRs your work touches** — the corpus is ~280 KB and no task needs all of it.
+
+Routing by code area lives in [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md); this roster is the complete list, including the process and policy decisions that have no `src/` home.
+
+What an ADR *is* here — an agent-facing normative spec, not a one-paragraph memory aid — is set by [ADR-0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md). Read it before writing a new one.
+
+**Reserved numbers:** `0034` is claimed by PR #4004 (orchestrator dashboard page inventory). `0035` is now taken (below). Take `0038` or higher for anything new. `test/adr-roster.test.mts` fails on a duplicate number.
+
+| ADR | Status | Decision | Read when |
+|---|---|---|---|
+| [0001](./0001-untouchable-core-and-gate-extraction.md) | superseded-in-part by 0015 | The verification gate is extracted from the code it verifies; the "operator-modifiable only" premise is retired. | Touching `src/untouchable.ts` or the gate/verifier boundary. |
+| [0002](./0002-single-target-per-orchestrator-instance.md) | accepted | One Target per orchestrator instance; multi-target inside one orchestrator is rejected — run a second instance. | Adding per-target config, or tempted to namespace Redis per target. |
+| [0003](./0003-terminal-goal-hierarchy.md) | accepted | Target Outcomes are the terminal goal; orchestrator self-improvement is instrumental but holds a 25% capacity floor. | Prioritising work, or arguing self-improvement vs Target work. |
+| [0004](./0004-self-modification-tiers.md) | superseded by 0015 | The original tier ladder as *merge authority* — retired; read 0015 instead. | Historical only — reading old tier-authority references. |
+| [0005](./0005-operator-escalation-is-narrow.md) | accepted (list amended by 0020) | Escalate to the operator only for a closed list; everything else Hydra researches and tries autonomously. | Deciding whether something needs the operator. |
+| [0006](./0006-codex-cli-removed-autopilot-only.md) | accepted | Codex CLI and the in-process planner/executor/skeptic agents are deleted; autopilot is the only execution path. | Finding an orphaned reference to the old control loop. |
+| [0007](./0007-decision-brain-orchestration.md) | accepted | Autopilot decisions are a pure Python function — `scripts/autopilot/decide.py` returns a typed action Plan the model executes verbatim. | Changing dispatch logic or `decide.py`. |
+| [0008](./0008-design-concept-gate.md) | accepted | A design-concept artifact is required before any `dev_orch` / `dev_target` dispatch. | Working on the dispatch gate or `src/design-concept.ts`. |
+| [0009](./0009-redis-seam-typed-accessors.md) | accepted (sharpened by 0017) | Redis access goes through typed domain accessors in `src/redis/*`; key generators never escape the seam. | Any Redis read or write. **Read 0017 with it.** |
+| [0010](./0010-stuckness-detector-retired.md) | accepted | The automated Stuckness detector is deleted; the self-improvement floor is operator-curated via `priorities.md`. | Finding a `stuckness` reference, or proposing an automated trip wire. |
+| [0011](./0011-schemas-seam-for-http-request-bodies.md) | accepted | HTTP `req.body` validates through a `src/schemas/*` zod schema; the schema is the source of truth for parser and type. | Adding or changing a POST/PUT/PATCH route. |
+| [0012](./0012-autopilot-is-the-single-brain.md) | accepted | Autopilot is the single decisional brain; state is continuous in Redis; subagent blockers are handled autonomously under a per-task budget. | Any autopilot, scheduler, or dispatch-state work. |
+| [0013](./0013-swappable-single-target-builder.md) | accepted | Hydra is a swappable single-target builder — generality lives in the *swap*, never in the *session*. | Proposing multi-target or "make it general" work. |
+| [0014](./0014-simplicity-discipline.md) | accepted | Optimise for measured low change-cost, not for felt simplicity; five operating rules including "prune docs like code". | Architecture review, or justifying a new subsystem. |
+| [0015](./0015-verification-depth-replaces-merge-authority.md) | accepted (supersedes 0001, 0004) | A Modification Tier is verification *depth*, not merge *authority*; every tier has an autonomous merge path. | Any tier question. **This is the live tier doctrine.** |
+| [0016](./0016-cycle-task-tracking-is-autopilot-recorded.md) | accepted | Cycle/task state is recorded post-hoc by autopilot via `cycle-tracking.ts`; `src/task-tracker.ts` is deleted, and cost is a token plane with no USD column. | Touching cycle metrics, `recordCycle`, or cost attribution. |
+| [0017](./0017-redis-seam-sharpened-three-categories.md) | accepted (amends 0009) | Three Redis access categories: typed accessors, the Event Bus as sanctioned raw owner, and local-only state. | Any Redis work — pairs with 0009. |
+| [0018](./0018-design-concept-canonical-ref-at-the-seam.md) | accepted | The design-concept `anchorRef` is canonicalised at the accessor seam, not by every caller. | Touching `src/redis/design-concept.ts`. |
+| [0019](./0019-tier-policy-predicates.md) | accepted | `src/tier-policy.ts` owns the tier→policy predicates; the merge-policy boundary is defined once. | Changing auto-merge eligibility or breaking-change rules. |
+| [0020](./0020-deep-qa-pass-marker-gates-t4-auto-merge.md) | accepted (extends 0015; amends 0005) | A positive `Verifier-Core deep-QA: PASS @ <sha>` PR comment is the proof that gates T4 auto-merge. | Working on T4 changes or the deep-QA gate. |
+| [0021](./0021-usage-paced-autopilot-pace-gate.md) | accepted | The Pace Gate is an admission-control supervisor pacing total burn along a linear curve to a sub-100% weekly ceiling. | Anything touching quota, pacing, or `pace-gate.service`. |
+| [0022](./0022-query-validation-schemas-seam-for-read-routes.md) | accepted | `req.query` on GET read routes validates through `src/schemas/*` on ADR-0011's mechanic. | Adding or changing a GET route with query params. |
+| [0023](./0023-global-reflection-buffer-retired.md) | accepted | The global reflection buffer is deleted; Reflections has exactly two surfaces — per-anchor and by-file. | Touching `src/reflections/` or the learning context. |
+| [0024](./0024-api-versioning.md) | accepted | Registry-first: `src/api/ENDPOINT-REGISTRY.md` catalogs the surface; pick the versioning mechanism when first needed, migrate nothing now. | Adding an endpoint, or proposing `/v2`. |
+| [0025](./0025-target-operate-layer-single-realm-incident-skill.md) | accepted | Incident skills are single-realm: `hydra-incident` never leaves `~/hydra`, `hydra-target-incident` never leaves `~/hydra-betting`. | Editing either incident skill. |
+| [0026](./0026-target-manifest.md) | accepted | The Target Manifest (`.hydra/manifest.json`) declares per-target build/gate facts in the target repo, not orchestrator `src/`. | Hardcoding a target fact in `src/`, or touching `src/target-config.ts`. |
+| [0027](./0027-pino-structured-logger.md) | accepted | pino behind the `src/logger.ts` deep-module seam is the canonical logger; migrate `console.*` incrementally, one module per PR. | Adding any log line. |
+| [0028](./0028-builder-health-measurement-subsystem.md) | accepted | Builder health is a panel of four per-realm signals — never a single blended index or weighted score. | Touching builder-health metrics, or proposing a composite score. |
+| [0029](./0029-autopilot-charts-and-works-wayfinder-maps.md) | accepted | Autopilot charts and works wayfinder maps, but never synthesises the operator's side of a decision; HITL tickets stay off the AFK board. | Working on wayfinder maps, `wayfinder_orch`, or HITL routing. |
+| [0030](./0030-one-pocock-skill-lineage-replaces-forks.md) | accepted | One autonomy-capable skill lineage in two modes (interactive / AFK) replaces the `hydra-prd`/`dev`/`qa` fork triplet. | Editing any spine skill or dispatch class. |
+| [0031](./0031-target-tracking-migrates-to-github-issues.md) | accepted | Target work tracks as GitHub Issues on `gaberoo322/hydra-betting`, label-driven, reusing the Orchestrator's board machinery. | Any Target board or backlog work. |
+| [0032](./0032-glm-dev-drainer-worker-lane.md) | accepted (Decision 2 amended by #3758) | GLM is a fenced *worker* draining shallow `dev_orch` work on z.ai quota — never a brain, never Verifier Core, never money-critical. | Touching the GLM drainer or its fence. |
+| [0033](./0033-openviking-knowledge-plane-retired.md) | accepted | The OpenViking knowledge plane is retired outright, not ported to a successor backend. | Proposing semantic search, or finding a `knowledge-base` reference. |
+| [0035](./0035-spec-stage-stays-hydra-owned.md) | accepted (supersedes ADR-0030 Decision 2's spec binding) | The spec stage stays Hydra-owned; `to-spec` is not its base — the two skills contradict each other on instruction, output artifact, and consumer. | Tempted to compose `hydra-grill` on `_vendor/to-spec.md`, or wondering why the spec stage has no upstream base. |
+| [0036](./0036-anchor-selection-retired-candidate-feed.md) | accepted (renumbered from 0016) | Anchor selection is retired; the Candidate Feed is data the brain reads, not a decision the orchestrator makes. Establishes the **Locality** principle. | Touching candidate scoring, or tempted to resurrect the reframe queue. |
+| [0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md) | accepted | Hydra ADRs are agent-facing normative specs: Pocock's write gate applies, its one-paragraph size target does not. | Before writing a new ADR, or before "fixing" the corpus to be shorter. |
+
+## Numbering
+
+`0036` was renumbered from a duplicate `0016` (two unrelated ADRs shared that number; the ~20 cycle/token-plane citations kept `0016`, the ~12 anchor/Locality citations moved to `0036`). Take the next free number **above the reserved ones listed at the top**, and add your row here — `npm test` fails otherwise.

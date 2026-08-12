@@ -123,15 +123,15 @@ const ticketsDispatch = (a: any) =>
   a.type === "dispatch" && a.slot === "tickets_orch";
 
 describe("decide.py — tickets_orch signal class (ADR-0030 delta, #3423)", () => {
-  test("fires on tickets_available and invokes the upstream to-tickets skill", () => {
+  test("fires on tickets_available and invokes the composed hydra-tickets skill", () => {
     const state = baseState({ signals: { tickets_available: true } });
     const plan = runDecide(state, null);
     const a = findAction(plan, ticketsDispatch);
     assert.ok(a, "tickets_orch must dispatch on tickets_available");
     assert.equal(
       a.skill,
-      "to-tickets",
-      "the tickets stage dispatches the vendored upstream to-tickets skill, not hydra-prd",
+      "hydra-tickets",
+      "the tickets stage dispatches the COMPOSED hydra-tickets skill (vendored to-tickets base + Hydra AFK overlay), never the bare upstream skill (which carries disable-model-invocation and would hard-error) and never hydra-prd",
     );
   });
 

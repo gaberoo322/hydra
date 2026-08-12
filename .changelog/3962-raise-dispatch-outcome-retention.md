@@ -1,0 +1,1 @@
+- feat: raise dispatch-outcome retention 14d→90d (index cap 2000→8000) to seed the cross-run trend layer (#3962)
