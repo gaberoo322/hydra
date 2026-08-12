@@ -23,13 +23,6 @@
       "upstreamSha": null,
       "shaStatus": "unverified"
     },
-    "to-spec.md": {
-      "skill": "to-spec",
-      "capturedAt": "2026-07-18",
-      "upstreamSha": null,
-      "shaStatus": "unverified",
-      "note": "Wired to no composing playbook. ADR-0034 (#3989) removes it from the AFK path; delete this entry with the file."
-    },
     "to-tickets.md": {
       "skill": "to-tickets",
       "capturedAt": "2026-08-12",
