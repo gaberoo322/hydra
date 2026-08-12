@@ -1,6 +1,6 @@
 # ADR Roster
 
-Every architectural decision record, one line each. **Read this file first, then open only the ADRs your work touches** — the corpus is ~275 KB and no task needs all of it.
+Every architectural decision record, one line each. **Read this file first, then open only the ADRs your work touches** — the corpus is ~280 KB and no task needs all of it.
 
 Routing by code area lives in [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md); this roster is the complete list, including the process and policy decisions that have no `src/` home.
 
