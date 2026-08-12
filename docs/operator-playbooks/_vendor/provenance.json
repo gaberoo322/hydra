@@ -1,0 +1,41 @@
+{
+  "doc": "Provenance for the vendored upstream Pocock skill bases (issue #3994, ADR-0030 Decision 4 / Option C). A SIDECAR manifest, not an in-file header: a comment above a vendored file's frontmatter makes scripts/sync-skills.sh FAIL LOUD ('compose_base ... has no frontmatter'), and keeping the captures byte-faithful to upstream is what makes a content diff against the installed skill exact. Read by scripts/ci/vendor-drift-check.ts.",
+  "source": {
+    "repo": "mattpocock/skills",
+    "plugin": "mattpocock-skills",
+    "marketplace": "claude-code official"
+  },
+  "shaStatus": {
+    "verified": "upstreamSha was recorded at capture time from the installed plugin's gitCommitSha — a SHA comparison against the registry is meaningful.",
+    "unverified": "captured before provenance stamping existed (or from a pre-plugin `npx skills add --copy` install). The upstream commit is NOT known, so no SHA comparison is possible until the next re-vendor establishes one. The drift checker reports these as needing a baseline re-vendor rather than silently treating them as current."
+  },
+  "bases": {
+    "code-review.md": {
+      "skill": "code-review",
+      "capturedAt": "2026-07-17",
+      "upstreamSha": null,
+      "shaStatus": "unverified",
+      "note": "Body is byte-identical to the installed copy apart from the disable-model-invocation frontmatter line."
+    },
+    "implement.md": {
+      "skill": "implement",
+      "capturedAt": "2026-07-18",
+      "upstreamSha": null,
+      "shaStatus": "unverified"
+    },
+    "to-spec.md": {
+      "skill": "to-spec",
+      "capturedAt": "2026-07-18",
+      "upstreamSha": null,
+      "shaStatus": "unverified",
+      "note": "Wired to no composing playbook. ADR-0034 (#3989) removes it from the AFK path; delete this entry with the file."
+    },
+    "to-tickets.md": {
+      "skill": "to-tickets",
+      "capturedAt": "2026-08-12",
+      "upstreamSha": null,
+      "shaStatus": "unverified",
+      "note": "Vendored by #3992 from the local installed copy — the plugin was not installed at capture time."
+    }
+  }
+}
