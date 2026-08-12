@@ -1,3 +1,7 @@
+---
+status: accepted (closed escalation list amended by ADR-0020)
+---
+
 # Operator escalation only when no autonomous remedy exists
 
 When a **Target Outcome** stops moving — whether leading or terminal — autopilot's default response is autonomous: research into *why* the outcome isn't moving, then a corresponding dev cycle or orchestrator self-modification. A regressing terminal metric raises priority but does not change the response policy.

@@ -9,7 +9,7 @@
  *
  * NB: the `GET /api/v2/outcomes/calibration` schema (tier + cost accuracy
  * time series) was removed with the endpoint in issue #2876 — its backing
- * lane (`hydra:anchors:calibration:*`) has had no writer since ADR-0016.
+ * lane (`hydra:anchors:calibration:*`) has had no writer since ADR-0036.
  *
  * Schema discipline follows the queue.ts seed (see ADR-0011): `.strict()`
  * objects, trimmed validators, `z.infer<>` for canonical TypeScript types,

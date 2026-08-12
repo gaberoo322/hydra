@@ -2,6 +2,9 @@
   "name": "hydra-orchestrator",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.18.0 <23.0.0"
+  },
   "description": "Hydra autonomous multi-agent development framework — data plane orchestrator",
   "main": "dist/index.js",
   "scripts": {
@@ -35,7 +38,8 @@
     "lockfile-lint": "lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity",
     "allow-scripts": "allow-scripts",
     "deps:check": "npx --yes taze@19 --json --include dependencies",
-    "deps:check:all": "npx --yes taze@19 --json"
+    "deps:check:all": "npx --yes taze@19 --json",
+    "vendor:drift": "npx tsx scripts/ci/vendor-drift-check.ts"
   },
   "author": "Gabe",
   "license": "AGPL-3.0-only",
