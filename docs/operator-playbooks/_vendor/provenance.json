@@ -29,6 +29,13 @@
       "upstreamSha": null,
       "shaStatus": "unverified",
       "note": "Vendored by #3992 from the local installed copy — the plugin was not installed at capture time."
+    },
+    "improve-codebase-architecture.md": {
+      "skill": "improve-codebase-architecture",
+      "capturedAt": "2026-08-12",
+      "upstreamSha": null,
+      "shaStatus": "unverified",
+      "note": "Vendored by #3993 from the local installed copy — the plugin was not installed at capture time. This base is the FIRST vendored outside the ADR-0030 spine: hydra-architecture-scan had hand-copied its steps 1-2 as prose since #788 and had already rotted (it cited LANGUAGE.md / INTERFACE-DESIGN.md siblings that do not exist under this skill — upstream moved that vocabulary into the separate codebase-design skill)."
     }
   }
 }
