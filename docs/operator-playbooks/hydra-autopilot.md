@@ -248,6 +248,31 @@ with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
 
+**Ordering the unpinned pick — the standing work ranking (issue #3981).** Today's
+unpinned self-selection is `gh issue list --label ready-for-agent … | .[0]` — it
+takes whatever the API returns first, which is **not** a priority order. There is
+no numeric priority dial anywhere in the loop to consult: `classes.json` carries
+only `cooldownSeconds` (a cadence dial, no priority field), `collect-state.sh`
+*counts* `ready_for_agent` without ordering it, and `config/orchestrator/vision.md`
+is read by no loop code. So the ranking is applied **here, in the prompt**, the
+same way `hydra-sweep` already carries "pick highest unblock count first, NOT
+oldest".
+
+When more than one `ready-for-agent` issue is eligible and none is pinned, break
+the tie in this order (from `config/orchestrator/vision.md` § Trade-offs):
+
+1. **Maintainability** — refactors, test coverage, dead-code removal, silent-catch
+   audits, module splits.
+2. **Operator surface** — the dashboard and the observability it renders
+   (`dashboard/`, the read APIs that feed it, digest/alerting legibility).
+3. **Throughput** — new capability.
+
+This is a **tie-break, not a quota**: it orders work that already advances a
+Decision Vector and never promotes work that advances none. It does not override a
+pinned anchor, an unblock-count ordering where one applies, or an explicit
+operator steer. If the top-ranked eligible issue is blocked or lacks a
+`## Files in scope` section, fall through to the next — do not relabel to force it.
+
 ### `wayfinder_orch` dispatch — ticket-type → skill (issue #3351, epic #3350, ADR-0029)
 
 `wayfinder_orch` is the single AFK working class for **wayfinder maps** (open
