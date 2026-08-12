@@ -8,6 +8,8 @@ What an ADR *is* here — an agent-facing normative spec, not a one-paragraph me
 
 **Reserved numbers:** `0034` is claimed by PR #4004 (orchestrator dashboard page inventory). `0035` is now taken (below). Take `0038` or higher for anything new. `test/adr-roster.test.mts` fails on a duplicate number.
 
+**A new ADR needs two entries, not one:** a row in the table below, *and* its number in a `Relevant ADRs` cell of [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md). The roster makes it findable; the map makes it routed and gives it a weight budget. An ADR with only a roster row is invisible from every code area and escapes the per-area ratchet entirely. If it governs no code area, the "process / policy (no code area)" row is its home. Both are enforced by `test/adr-roster.test.mts`.
+
 | ADR | Status | Decision | Read when |
 |---|---|---|---|
 | [0001](./0001-untouchable-core-and-gate-extraction.md) | superseded-in-part by 0015 | The verification gate is extracted from the code it verifies; the "operator-modifiable only" premise is retired. | Touching `src/untouchable.ts` or the gate/verifier boundary. |
