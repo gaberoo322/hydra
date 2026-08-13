@@ -1,0 +1,1 @@
+- fix: stop the watchdog test suite from nondeterministically red-lining every PR's required `test` check (#4032)

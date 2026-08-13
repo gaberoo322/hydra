@@ -61,22 +61,33 @@ function makeTemp(): { dir: string; state: string; heartbeat: string } {
   };
 }
 
+// Strips any bare top-level `run_<name>` dispatch line (anchored `^…$`, so it
+// only ever matches a bare top-level call — function bodies are indented) plus
+// the trailing `exit 0`, so sourcing scripts/hydra-watchdog.sh defines
+// functions without running any block. Generic and anchored on purpose
+// (issue #4032): an earlier version enumerated the three dispatch names by
+// hand, which silently stopped covering a 4th (`run_skill_mirror_drift`) when
+// it was added — that block then executed on every source, burning ~12s of
+// the 15s spawnSync timeout on every subtest. A future 5th block is covered
+// automatically here, and is guarded against ever going uncovered again by
+// the "stripped source defines functions without executing any block"
+// regression test below.
+const STRIP_TOP_LEVEL_DISPATCHES = "-e '/^run_[a-z_]*$/d' -e '/^exit 0$/d'";
+
 /**
  * Run ONLY the AUTOPILOT WEDGE block of the consolidated watchdog.
  *
- * We strip the three top-level dispatch invocations and the trailing
- * `exit 0` from scripts/hydra-watchdog.sh, source the remaining function
- * definitions, then call run_autopilot_wedge in isolation. This prevents
- * run_service_liveness (real `systemctl restart`) and run_deploy_drift
- * (can exec deploy.sh) from firing during the test.
+ * We strip every top-level dispatch invocation and the trailing `exit 0`
+ * from scripts/hydra-watchdog.sh, source the remaining function definitions,
+ * then call run_autopilot_wedge in isolation. This prevents
+ * run_service_liveness (real `systemctl restart`), run_deploy_drift (can exec
+ * deploy.sh), and run_skill_mirror_drift (an unrelated ~12s scan) from firing
+ * during the test.
  */
 function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const driver = [
     "set -euo pipefail",
-    // Source only the function definitions: strip the three top-level
-    // dispatch lines and the final `exit 0` so sourcing defines functions
-    // without running any block.
-    `source <(sed -e '/^run_service_liveness$/d' -e '/^run_autopilot_wedge$/d' -e '/^run_deploy_drift$/d' -e '/^exit 0$/d' ${JSON.stringify(WATCHDOG)})`,
+    `source <(sed ${STRIP_TOP_LEVEL_DISPATCHES} ${JSON.stringify(WATCHDOG)})`,
     "run_autopilot_wedge",
   ].join("\n");
   const r = spawnSync("bash", ["-c", driver], {
@@ -113,6 +124,36 @@ describe("scripts/hydra-watchdog.sh — AUTOPILOT WEDGE block", () => {
     // this test can source-and-isolate it without firing the other blocks.
     const grep = spawnSync("grep", ["-q", "run_autopilot_wedge()", WATCHDOG]);
     assert.equal(grep.status, 0, "run_autopilot_wedge() not found in hydra-watchdog.sh");
+  });
+
+  test("stripped source defines functions without executing any block (regression: issue #4032)", () => {
+    // Pins the invariant the strip is FOR: sourcing the sed-stripped script
+    // must define functions only, with zero side effects — no block's log
+    // output should appear. Before #4032 the strip list enumerated three
+    // dispatch names by hand and silently stopped covering a 4th
+    // (run_skill_mirror_drift) added later, which then ran unstripped on
+    // every source and burned ~12s of the 15s spawnSync timeout in every
+    // subtest above. If a future 5th top-level `run_*` block is ever added
+    // without the generic anchored strip catching it, this test fails fast
+    // and loud (5s budget) instead of the failure hiding as an intermittent
+    // CI timeout in an unrelated subtest.
+    const driver = [
+      "set -euo pipefail",
+      `source <(sed ${STRIP_TOP_LEVEL_DISPATCHES} ${JSON.stringify(WATCHDOG)})`,
+      "echo SOURCE_ONLY_OK",
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", driver], {
+      env: { ...process.env, PATH: process.env.PATH ?? "" },
+      encoding: "utf-8",
+      timeout: 5_000,
+    });
+    assert.equal(r.status, 0, `sourcing failed: ${r.stderr}`);
+    assert.equal(
+      r.stdout.trim(),
+      "SOURCE_ONLY_OK",
+      `sourcing the stripped script produced output beyond the sentinel echo — a top-level ` +
+        `run_* dispatch line executed a block instead of only being stripped. stdout: ${JSON.stringify(r.stdout)}`,
+    );
   });
 
   test("service inactive (hand-launched / deliberate stop): exits 0, takes no action", () => {
