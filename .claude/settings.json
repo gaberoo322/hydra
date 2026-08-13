@@ -1,5 +1,6 @@
 {
   "_comment": "Project-scoped Claude Code settings for the Hydra orchestrator repo (issue #692). The SessionStart hook captures every autopilot-/operator-dispatched subagent session into the subagent-dispatch registry (hydra:dispatches:subagent:*) by reading the hidden `<!-- hydra-dispatch v1 ... -->` sentinel from the session transcript's first user message and POSTing it to /api/dispatches/subagent. Sessions WITHOUT a sentinel (a human running `claude` directly) silently no-op, so registering this hook globally is safe. The hook path is absolute so the harness finds it regardless of the subagent's cwd. This is intentionally PROJECT-scoped (not ~/.claude/settings.json) per the issue contract.",
+  "_comment_enabledPlugins": "ADR-0030 / epic #3988: the mattpocock-skills plugin is the source of truth for refreshing the vendored upstream bases under docs/operator-playbooks/_vendor/ — see that dir's README 'Refreshing a vendored base' and scripts/ci/vendor-drift-check.ts, which resolves the plugin's gitCommitSha from ~/.claude/plugins/installed_plugins.json to stamp provenance. Declared project-scoped so the dependency travels with the repo. NOTE: enabling a plugin here writes to this tracked file, which trips scripts/deploy.sh's dirty-tree guard on the deploy host — that is how this entry came to be committed (see the PR).",
   "hooks": {
     "SessionStart": [
       {
@@ -12,5 +13,8 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "mattpocock-skills@claude-plugins-official": true
   }
 }
