@@ -47,6 +47,7 @@ import { parseDispatchCycleId } from "../src/taxonomy/classes.ts";
 function record(over: Partial<DispatchOutcomeRecord> = {}): DispatchOutcomeRecord {
   return {
     cycleId: "worktree-agent-277e4476-t4-dev_orch",
+    anchorReference: null,
     runIdPrefix: "277e4476",
     turn: 4,
     className: "dev_orch",
@@ -118,6 +119,9 @@ describe("dispatch-outcomes Redis seam (issue #2942)", () => {
     const hash = await redis.hgetall(dispatchOutcomeKey(rec.cycleId));
     assert.equal("runIdPrefix" in hash, false);
     assert.equal("tokens" in hash, false);
+    // Issue #3971: a null anchor is omitted (never stored as "null"/""), like
+    // every other nullable field — a bare-UUID qa relay id carries no anchor.
+    assert.equal("anchorReference" in hash, false);
     // Issue #3284: a non-escalation dispatch omits both escalation fields.
     assert.equal("escalationAttempt" in hash, false);
     assert.equal("escalatedModel" in hash, false);
@@ -134,9 +138,34 @@ describe("dispatch-outcomes Redis seam (issue #2942)", () => {
     assert.equal(got.skill, null);
     assert.equal(got.tokens, null);
     assert.equal(got.durationMs, null);
+    assert.equal(got.anchorReference, null);
     assert.equal(got.outcome, "completed");
     assert.equal(got.escalationAttempt, null);
     assert.equal(got.escalatedModel, null);
+  });
+
+  test("anchorReference round-trips a non-null anchor through both read paths (issue #3971)", async () => {
+    const rec = record({ anchorReference: "issue-3971" });
+    assert.equal((await putDispatchOutcome(rec)).ok, true);
+
+    const hash = await redis.hgetall(dispatchOutcomeKey(rec.cycleId));
+    assert.equal(hash.anchorReference, "issue-3971");
+
+    // listDispatchOutcomes (cross-run rolling window).
+    const listed = await listDispatchOutcomes({ sinceMs: 0 });
+    assert.equal(listed.ok, true);
+    if (listed.ok !== true) return;
+    const listedGot = listed.records.find((r) => r.cycleId === rec.cycleId);
+    assert.ok(listedGot);
+    assert.equal(listedGot!.anchorReference, "issue-3971");
+
+    // getDispatchOutcomesForRun (per-run index) round-trips it identically,
+    // without altering the runIdPrefix-prefix matching semantics.
+    const forRun = await getDispatchOutcomesForRun("277e4476-1234-5678-9abc-def012345678");
+    assert.equal(forRun.ok, true);
+    if (forRun.ok !== true) return;
+    assert.equal(forRun.records.length, 1);
+    assert.equal(forRun.records[0].anchorReference, "issue-3971");
   });
 
   test("escalation provenance round-trips (issue #3284, invariant 7 marker)", async () => {
