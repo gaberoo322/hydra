@@ -105,13 +105,35 @@ required check, because upstream moving is ambient activity no PR controls.
 
 ## Refreshing a vendored base
 
-1. Copy the refreshed upstream `SKILL.md` over this dir's `<name>.md`, verbatim.
+**The source of truth is the installed `mattpocock-skills` plugin, not
+`~/.claude/skills/`.** Epic #3988 step 2 deleted the 22 hand-installed
+`~/.claude/skills/` copies that earlier captures were taken from (the #3992 and
+#3993 notes in `provenance.json` record that lineage), so a refresh that reads
+from there now finds nothing. Resolve the plugin's install path from the same
+registry the drift checker reads:
+
+```bash
+PLUGIN_DIR=$(python3 -c "
+import json
+p=json.load(open('$HOME/.claude/plugins/installed_plugins.json'))
+print(next(v[0]['installPath'] for k,v in p['plugins'].items() if k.startswith('mattpocock-skills@')))
+")
+# skills are grouped by category, so resolve the leaf by name:
+find "$PLUGIN_DIR/skills" -maxdepth 2 -type d -name '<name>'
+```
+
+1. Copy the refreshed `SKILL.md` from that path over this dir's `<name>.md`,
+   verbatim.
 2. Record the source commit in `provenance.json` — set `upstreamSha` to the
    plugin's `gitCommitSha` and `shaStatus` to `verified`, and update `capturedAt`.
 3. Run `scripts/sync-skills.sh`. **If a `supersedes:` heading was renamed
    upstream, this fails loud** — resolve the entry against the new heading rather
    than deleting it, or the excision silently stops happening.
 4. Re-run `npm run vendor:drift` to confirm the base is clean.
+
+If the plugin is not installed, the drift checker reports `plugin-not-installed`
+and no refresh is possible — install it with `/plugin install mattpocock-skills`
+first. That install is an operator host action; no dispatch can perform it.
 
 The vendored file here is **not** banner-stamped and **not** an operator-editable
 source — it is a captured upstream artifact. Edit the Hydra behaviour in the

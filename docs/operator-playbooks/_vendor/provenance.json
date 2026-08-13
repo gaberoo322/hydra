@@ -3,7 +3,8 @@
   "source": {
     "repo": "mattpocock/skills",
     "plugin": "mattpocock-skills",
-    "marketplace": "claude-code official"
+    "marketplace": "claude-code official",
+    "pluginVersion": "1.2.3"
   },
   "shaStatus": {
     "verified": "upstreamSha was recorded at capture time from the installed plugin's gitCommitSha — a SHA comparison against the registry is meaningful.",
@@ -12,30 +13,31 @@
   "bases": {
     "code-review.md": {
       "skill": "code-review",
-      "capturedAt": "2026-07-17",
-      "upstreamSha": null,
-      "shaStatus": "unverified",
-      "note": "Body is byte-identical to the installed copy apart from the disable-model-invocation frontmatter line."
+      "capturedAt": "2026-08-13",
+      "upstreamSha": "8b78b531ab965735c5dc74f6f7a219e1e37326df",
+      "shaStatus": "verified",
+      "note": "Re-vendored 2026-08-13 from the installed mattpocock-skills plugin v1.2.3 (operator review, epic #3988 step 3) — the first VERIFIED baseline for this base."
     },
     "implement.md": {
       "skill": "implement",
-      "capturedAt": "2026-07-18",
-      "upstreamSha": null,
-      "shaStatus": "unverified"
+      "capturedAt": "2026-08-13",
+      "upstreamSha": "8b78b531ab965735c5dc74f6f7a219e1e37326df",
+      "shaStatus": "verified",
+      "note": "Re-vendored 2026-08-13 from the installed mattpocock-skills plugin v1.2.3 (operator review, epic #3988 step 3). The previously vendored capture was already byte-identical to the plugin copy; only provenance changed."
     },
     "to-tickets.md": {
       "skill": "to-tickets",
-      "capturedAt": "2026-08-12",
-      "upstreamSha": null,
-      "shaStatus": "unverified",
-      "note": "Vendored by #3992 from the local installed copy — the plugin was not installed at capture time."
+      "capturedAt": "2026-08-13",
+      "upstreamSha": "8b78b531ab965735c5dc74f6f7a219e1e37326df",
+      "shaStatus": "verified",
+      "note": "Re-vendored 2026-08-13 from the installed mattpocock-skills plugin v1.2.3 (operator review, epic #3988 step 3), superseding the #3992 capture taken from the local installed copy before the plugin existed."
     },
     "improve-codebase-architecture.md": {
       "skill": "improve-codebase-architecture",
-      "capturedAt": "2026-08-12",
-      "upstreamSha": null,
-      "shaStatus": "unverified",
-      "note": "Vendored by #3993 from the local installed copy — the plugin was not installed at capture time. This base is the FIRST vendored outside the ADR-0030 spine: hydra-architecture-scan had hand-copied its steps 1-2 as prose since #788 and had already rotted (it cited LANGUAGE.md / INTERFACE-DESIGN.md siblings that do not exist under this skill — upstream moved that vocabulary into the separate codebase-design skill)."
+      "capturedAt": "2026-08-13",
+      "upstreamSha": "8b78b531ab965735c5dc74f6f7a219e1e37326df",
+      "shaStatus": "verified",
+      "note": "Re-vendored 2026-08-13 from the installed mattpocock-skills plugin v1.2.3 (operator review, epic #3988 step 3), superseding the #3993 capture taken from the local installed copy before the plugin existed. Picks up upstream's new 'Scope before you scan — YAGNI' section."
     }
   }
 }
