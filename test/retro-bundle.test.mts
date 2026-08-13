@@ -101,6 +101,9 @@ function baseDeps(over: Partial<RetroBundleDeps> = {}): RetroBundleDeps {
     readAnchorReflections: async () => ({ content: "", count: 0 }),
     readFrictionPatterns: async () => [],
     readStuckSignals: async () => [],
+    // Issue #3972: default to an empty window so pre-existing cases stay
+    // Redis-free and exercise the empty-trend path unchanged.
+    readCrossRunTrend: async () => ({ ok: true as const, records: [] }),
     frictionSkills: ["hydra-dev"],
     ...over,
   };
@@ -1663,6 +1666,75 @@ describe("assembleRetroBundle — durable dispatch-outcome records (#2942)", () 
     assert.ok(
       bundle.errors.some((e) => e.source === "dispatch-outcomes" && /redis sad/.test(e.detail)),
     );
+  });
+
+  // Issue #3972 — crossRunTrend is an AMBIENT member assembled through safeSource.
+  test("crossRunTrend: a rejecting reader lands in errors[], bundle still assembles with an empty trend", async () => {
+    const deps = baseDeps({
+      readCrossRunTrend: async () => {
+        throw new Error("trend boom");
+      },
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.ok(
+      bundle.errors.some((e) => e.source === "cross-run-trend" && /trend boom/.test(e.detail)),
+    );
+    // never-throw: the trend is still present as a valid empty shape
+    assert.ok(bundle.crossRunTrend);
+    assert.deepEqual(bundle.crossRunTrend.byClass, []);
+    assert.equal(bundle.crossRunTrend.coverage.rankingSound, false);
+  });
+
+  test("crossRunTrend: a structured ok:false read lands in errors[] (never doubled)", async () => {
+    const deps = baseDeps({
+      readCrossRunTrend: async () => ({ ok: false as const, error: "trend sad" }),
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.equal(
+      bundle.errors.filter((e) => e.source === "cross-run-trend").length,
+      1,
+    );
+    assert.ok(/trend sad/.test(bundle.errors.find((e) => e.source === "cross-run-trend")!.detail));
+  });
+
+  test("crossRunTrend: folds the window records by class (ambient, present even when runFound is false)", async () => {
+    let calledWithSinceMs: number | null = null;
+    const deps = baseDeps({
+      readRun: async () => ({ ok: false, code: "not-found", detail: "unknown" }) as any,
+      readCrossRunTrend: async (opts: { sinceMs: number }) => {
+        calledWithSinceMs = opts.sinceMs;
+        return {
+          ok: true as const,
+          records: [
+            {
+              cycleId: "c1", runIdPrefix: "abc12345", turn: 1,
+              className: "dev_orch", skill: "hydra-dev",
+              outcome: "completed", tokens: 300, durationMs: 1000,
+              escalationAttempt: null, escalatedModel: null, recordedAt: 5000,
+            },
+            {
+              cycleId: "c2", runIdPrefix: "abc12345", turn: 2,
+              className: "dev_orch", skill: "hydra-dev",
+              outcome: "failed", tokens: 900, durationMs: 2000,
+              escalationAttempt: null, escalatedModel: null, recordedAt: 6000,
+            },
+          ],
+        };
+      },
+    });
+    const bundle = await assembleRetroBundle("nope", deps);
+    // AMBIENT: runFound is false but the trend still populates
+    assert.equal(bundle.runFound, false);
+    assert.ok(calledWithSinceMs !== null, "reader called with a sinceMs window start");
+    const dev = bundle.crossRunTrend.byClass.find((r) => r.className === "dev_orch");
+    assert.ok(dev);
+    assert.equal(dev!.dispatches, 2);
+    assert.equal(dev!.outcomes.merged, 1); // completed → merged
+    assert.equal(dev!.outcomes.failed, 1);
+    // tokensPerMerged averages only the merged dispatch's tokens (300/1)
+    assert.equal(dev!.tokensPerMerged, 300);
+    // window bounds are [now - TTL, now]
+    assert.ok(bundle.crossRunTrend.windowEndMs > bundle.crossRunTrend.windowStartMs);
   });
 
   test("an unknown run skips the run-scoped record read entirely", async () => {
