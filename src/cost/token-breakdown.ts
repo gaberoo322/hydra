@@ -24,7 +24,8 @@
  *   - the dispatch-kind vocabulary: {@link DISPATCH_KINDS}, {@link DispatchKind},
  *     {@link deriveDispatchKind}, {@link emptyByDispatchKind}
  *   - the pure skill classifier: {@link deriveSkill}, {@link SkillResolver},
- *     {@link INTERACTIVE_SKILL}
+ *     {@link INTERACTIVE_SKILL}, and the {@link parseSentinel} /
+ *     {@link SentinelParse} dispatch-sentinel parser (issue #3969)
  */
 
 import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
@@ -62,14 +63,83 @@ export const INTERACTIVE_SKILL = "interactive";
 export type SkillResolver = (firstUserText: string | null) => string;
 
 /**
- * The `hydra-dispatch` sentinel (issue #692): the hidden
- * `<!-- hydra-dispatch v1 ... skill={skill} ... -->` HTML comment prepended to
- * the FIRST user message of every Agent-tool dispatch. `skill=` is the
- * highest-precedence attribution signal. Anchored on the bare token, not the
- * full comment, so it matches whether the comment is the whole message or
- * embedded in a longer prompt body. (issue #2402)
+ * The `hydra-dispatch` sentinel (issue #692): the hidden HTML comment
+ * `<!-- hydra-dispatch v1 skill={skill} dispatchId={id} runId={runId} -->`
+ * prepended to the FIRST user message of every Agent-tool dispatch. This is
+ * the OPENER anchor: it detects the sentinel's presence and captures the
+ * comment BODY (group 1) so per-field extraction can be scoped to the
+ * comment — never the surrounding prompt prose. Anchored on the bare token,
+ * not the full comment, so it matches whether the comment is the whole
+ * message or embedded in a longer prompt body. (issue #2402; widened in
+ * #3969 to carry `dispatchId`/`runId` through the attribution path. The
+ * former inline `\bskill=([^\s>]+)` capture moved to {@link SENTINEL_SKILL_RE}
+ * — `deriveSkill`/`deriveDispatchKind` keep their exact prior behaviour via
+ * {@link parseSentinel}.)
  */
-const SENTINEL_RE = /<!--\s*hydra-dispatch\s+v1\b[^>]*\bskill=([^\s>]+)/;
+const SENTINEL_RE = /<!--\s*hydra-dispatch\s+v1\b([^>]*)/;
+
+/**
+ * Per-field extractors over the {@link SENTINEL_RE} comment body (issue
+ * #3969). The emitter (`make_dispatch_sentinel` in scripts/autopilot/decide.py)
+ * documents field ORDER as non-load-bearing — it keeps the canonical
+ * skill/dispatchId/runId order only for readability — so each field is matched
+ * by its OWN anchored regex rather than a fixed-position capture group. The
+ * `([^\s>]+)` value class matches the emitter's verbatim clean tokens and
+ * yields no match (→ `null`) for an absent or empty field, so an older
+ * skill-only sentinel resolves `dispatchId`/`runId` to `null` without
+ * throwing.
+ */
+const SENTINEL_SKILL_RE = /\bskill=([^\s>]+)/;
+const SENTINEL_DISPATCH_ID_RE = /\bdispatchId=([^\s>]+)/;
+const SENTINEL_RUN_ID_RE = /\brunId=([^\s>]+)/;
+
+/**
+ * The three join keys a `hydra-dispatch v1` sentinel carries (issue #3969) —
+ * enough to join a transcript's tokens back to the dispatch that produced
+ * them. Each field is `null` when its `field=value` token is absent from the
+ * comment body. `skill` drives attribution (see {@link deriveSkill}); it is
+ * `null` only for a malformed sentinel that omits `skill=` entirely, in which
+ * case attribution falls through the precedence chain exactly as before.
+ */
+export interface SentinelParse {
+  /** The dispatching skill — the highest-precedence attribution signal. */
+  skill: string | null;
+  /** The dispatch id emitted by decide.py; `null` when the field is absent. */
+  dispatchId: string | null;
+  /** The autopilot run id; `null` when absent (operator / legacy dispatch). */
+  runId: string | null;
+}
+
+/**
+ * Read the first capture group of `re` against `body`, or `null` when `re`
+ * does not match. Keeps {@link parseSentinel} terse and guarantees an absent
+ * field resolves to `null` — never `undefined`, never a coerced empty string.
+ */
+function fieldOrNull(re: RegExp, body: string): string | null {
+  const m = re.exec(body);
+  return m ? (m[1] ?? null) : null;
+}
+
+/**
+ * Parse the `hydra-dispatch v1` sentinel in a transcript's first user message
+ * (issue #3969). Returns the three join keys, or `null` when the sentinel
+ * opener is absent. Field extraction is scoped to the comment body and is
+ * order-independent (see {@link SENTINEL_SKILL_RE}). Pure, Redis-free. A
+ * malformed or older-form sentinel never throws: absent fields are `null`.
+ * Exported so the token-breakdown attribution path (and its callers) can join
+ * a transcript's tokens to the dispatch that produced them.
+ */
+export function parseSentinel(firstUserText: string | null): SentinelParse | null {
+  if (!firstUserText) return null;
+  const open = SENTINEL_RE.exec(firstUserText);
+  if (!open) return null;
+  const body = open[1] ?? "";
+  return {
+    skill: fieldOrNull(SENTINEL_SKILL_RE, body),
+    dispatchId: fieldOrNull(SENTINEL_DISPATCH_ID_RE, body),
+    runId: fieldOrNull(SENTINEL_RUN_ID_RE, body),
+  };
+}
 
 /**
  * The slash-command marker (issue #2402). Slash-command dispatches (the
@@ -87,12 +157,16 @@ const LEADING_SLASH_RE = /^\s*\/([a-z0-9][a-z0-9:_-]*)/i;
 /**
  * Derive the dispatching skill from a transcript's first user message text
  * (issue #2402). Total, deterministic, Redis-free — see {@link SkillResolver}
- * for the precedence contract. Exported for direct unit test.
+ * for the precedence contract. The sentinel branch now reads the parsed
+ * {@link SentinelParse} but its behaviour is byte-for-byte unchanged: a
+ * sentinel contributes its skill iff it carries a non-empty `skill=`,
+ * otherwise attribution falls through the chain exactly as before (#3969).
+ * Exported for direct unit test.
  */
 export function deriveSkill(firstUserText: string | null): string {
+  const sentinel = parseSentinel(firstUserText);
+  if (sentinel?.skill) return sentinel.skill; // (1) hydra-dispatch sentinel skill=
   if (firstUserText) {
-    const sentinel = SENTINEL_RE.exec(firstUserText);
-    if (sentinel) return sentinel[1]; // (1) hydra-dispatch sentinel skill=
     const cmd = COMMAND_NAME_RE.exec(firstUserText);
     if (cmd) return cmd[1]; // (2a) <command-name>/skill</command-name> marker
     const slash = LEADING_SLASH_RE.exec(firstUserText);
@@ -136,8 +210,9 @@ export type DispatchKind = (typeof DISPATCH_KINDS)[number];
  * branch already IS the kind. Exported for direct unit test.
  */
 export function deriveDispatchKind(firstUserText: string | null): DispatchKind {
+  const sentinel = parseSentinel(firstUserText);
+  if (sentinel?.skill) return "autopilot-dispatched"; // (1) sentinel carrying skill=
   if (firstUserText) {
-    if (SENTINEL_RE.test(firstUserText)) return "autopilot-dispatched"; // (1) sentinel
     if (COMMAND_NAME_RE.test(firstUserText)) return "operator-invoked"; // (2a) <command-name>
     if (LEADING_SLASH_RE.test(firstUserText)) return "operator-invoked"; // (2b) leading /slash
   }

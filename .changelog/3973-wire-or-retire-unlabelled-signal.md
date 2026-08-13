@@ -1,0 +1,1 @@
+- feat: surface an advisory count of wire-or-retire Target items that carry no lifecycle label, so the resolver's invisible backlog items are detectable (#3973)

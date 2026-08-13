@@ -133,6 +133,43 @@ describe("writeDispatchOutcomeRecord (issue #3323 leaf)", () => {
     assert.equal(rec.recordedAt, FIXED_NOW_MS);
     assert.equal(rec.escalationAttempt, null);
     assert.equal(rec.escalatedModel, null);
+    // Issue #3971: a body with no anchor stamps a truthful null — never a
+    // fabricated or guessed value.
+    assert.equal(rec.anchorReference, null);
+  });
+
+  test("stamps body.anchorReference onto the record (issue #3971)", async () => {
+    const store = newStore();
+    await writeDispatchOutcomeRecord(
+      { tokens: 123456, anchorReference: "issue-3971" } as any,
+      HARNESS_CYCLE_ID,
+      "completed",
+      makeDeps(store),
+    );
+    const rec = store.records.get(HARNESS_CYCLE_ID)!;
+    assert.equal(rec.anchorReference, "issue-3971");
+  });
+
+  test("an absent or empty anchor records null, never a guessed value (issue #3971 dark tolerance)", async () => {
+    // Absent body field → null.
+    const storeAbsent = newStore();
+    await writeDispatchOutcomeRecord(
+      { tokens: 1 } as any,
+      HARNESS_CYCLE_ID,
+      "completed",
+      makeDeps(storeAbsent),
+    );
+    assert.equal(storeAbsent.records.get(HARNESS_CYCLE_ID)!.anchorReference, null);
+
+    // Empty-string anchor (reap forwards `anchor_ref or ""`) → null, never "".
+    const storeEmpty = newStore();
+    await writeDispatchOutcomeRecord(
+      { tokens: 1, anchorReference: "" } as any,
+      HARNESS_CYCLE_ID,
+      "completed",
+      makeDeps(storeEmpty),
+    );
+    assert.equal(storeEmpty.records.get(HARNESS_CYCLE_ID)!.anchorReference, null);
   });
 
   test("an unparseable cycleId records null attribution, never drops (dark tolerance)", async () => {
