@@ -69,7 +69,7 @@ Each tick:
 | pipeline | `research_target` | hydra-target-research |
 | pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only — the **spec** stage of the one-lineage refit; ADR-0030 Decision 2 folds grill-before-build in as this stage's interactive mode over the vendored upstream `to-spec` base, #3422) |
 
-> **One-lineage stage bindings (ADR-0030 Decision 2 — #3422; contract complete, epsilon #3424).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (the lineage home is `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) folds the design-concept gate in as `_vendor/to-spec.md`'s interactive mode. The expand-contract sequence (ADR-0030 Decision 5) has **landed end-to-end**: gamma (#3422) added the composed bindings, delta (#3423/#3448) migrated the learning-loop seams and wired the `tickets_orch` selector, and epsilon (#3424) **retired the fork identities** as documented concepts. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern; retiring the fork *identity* is a framing/lineage change, not a seam edit. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — see the Signal wiring table) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
+> **One-lineage stage bindings (ADR-0030 Decision 2 — #3422; contract complete, epsilon #3424).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (the lineage home is `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) composes on NO upstream base (ADR-0035 supersedes that binding). The expand-contract sequence (ADR-0030 Decision 5) has **landed end-to-end**: gamma (#3422) added the composed bindings, delta (#3423/#3448) migrated the learning-loop seams and wired the `tickets_orch` selector, and epsilon (#3424) **retired the fork identities** as documented concepts. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern; retiring the fork *identity* is a framing/lineage change, not a seam edit. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — see the Signal wiring table) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
 | signal | `health` | hydra-doctor (scope-agnostic) |
 | signal | `sweep_orch` | hydra-sweep |
 | signal | `sweep_target` | hydra-target-sweep |
@@ -247,6 +247,31 @@ self-selects via an unguarded `gh issue list --label ready-for-agent … | .[0]`
 with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
+
+**Ordering the unpinned pick — the standing work ranking (issue #3981).** Today's
+unpinned self-selection is `gh issue list --label ready-for-agent … | .[0]` — it
+takes whatever the API returns first, which is **not** a priority order. There is
+no numeric priority dial anywhere in the loop to consult: `classes.json` carries
+only `cooldownSeconds` (a cadence dial, no priority field), `collect-state.sh`
+*counts* `ready_for_agent` without ordering it, and `config/orchestrator/vision.md`
+is read by no loop code. So the ranking is applied **here, in the prompt**, the
+same way `hydra-sweep` already carries "pick highest unblock count first, NOT
+oldest".
+
+When more than one `ready-for-agent` issue is eligible and none is pinned, break
+the tie in this order (from `config/orchestrator/vision.md` § Trade-offs):
+
+1. **Maintainability** — refactors, test coverage, dead-code removal, silent-catch
+   audits, module splits.
+2. **Operator surface** — the dashboard and the observability it renders
+   (`dashboard/`, the read APIs that feed it, digest/alerting legibility).
+3. **Throughput** — new capability.
+
+This is a **tie-break, not a quota**: it orders work that already advances a
+Decision Vector and never promotes work that advances none. It does not override a
+pinned anchor, an unblock-count ordering where one applies, or an explicit
+operator steer. If the top-ranked eligible issue is blocked or lacks a
+`## Files in scope` section, fall through to the next — do not relabel to force it.
 
 ### `wayfinder_orch` dispatch — ticket-type → skill (issue #3351, epic #3350, ADR-0029)
 

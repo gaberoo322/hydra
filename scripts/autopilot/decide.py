@@ -3655,8 +3655,10 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # board. `hydra-prd` is DEMOTED to the called PrdInput->issue renderer
         # library invoked BY that overlay (scripts/ci/hydra-prd-render.ts) — it is
         # no longer a standalone dispatch identity and has NO class row, so the
-        # selector dispatches `to-tickets` (the taxonomy `skill` column of the
-        # tickets_orch row), NEVER `hydra-prd`.
+        # selector dispatches `hydra-tickets` — the COMPOSED skill (vendored
+        # to-tickets base + AFK overlay, #3992). NEVER the bare upstream
+        # `to-tickets` (it ships disable-model-invocation and hard-errors under
+        # Skill-tool dispatch) and NEVER `hydra-prd`.
         #
         # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
         # here. collect-state.sh owns the board enumeration ("does a resolved plan
@@ -3677,7 +3679,7 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         if _signal_present(state, events, "tickets_available"):
             return make_dispatch(
                 sig,
-                "to-tickets",
+                "hydra-tickets",
                 reason="resolved plan awaits ticketing — render epic + tracer children",
             )
         return None
