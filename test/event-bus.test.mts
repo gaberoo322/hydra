@@ -273,6 +273,74 @@ test("_parseFields: round-trips a publish() envelope back to a typed event", asy
 });
 
 // ---------------------------------------------------------------------------
+// readRecent — surface the Redis stream id, not the envelope's own UUID (#3937)
+// ---------------------------------------------------------------------------
+
+test("readRecent: returns the Redis stream id as id, not the envelope UUID (#3937)", async () => {
+  // The enveloped wire format persists publish()'s randomUUID() as an `id`
+  // FIELD alongside the real Redis stream id. readRecent() must surface the
+  // Redis stream id, not the envelope's own id field — consumers time-window
+  // off the stream id (<ms>-<seq>); the UUID breaks that (the "1970" artifact).
+  const streamId = "1700000000000-7";
+  const envelopeUuid = "550e8400-e29b-41d4-a716-446655440000";
+  const entries: [string, string[]][] = [
+    [
+      streamId,
+      [
+        "id", envelopeUuid,
+        "type", "x:y",
+        "source", "svc",
+        "timestamp", "2026-08-10T00:00:00.000Z",
+        "correlationId", "null",
+        "payload", JSON.stringify({ ok: true }),
+      ],
+    ],
+  ];
+  const bus = makeBus({
+    publisher: {
+      async xrevrange(
+        _stream: string, _end: string, _start: string,
+        _countKw: string, _count: number,
+      ) { return entries; },
+    },
+  }.publisher);
+
+  const events = await bus.readRecent("hydra:notifications", 10);
+
+  assert.equal(events.length, 1);
+  // The Redis stream id wins over the envelope's own UUID field.
+  assert.equal(events[0].id, streamId);
+  assert.notEqual(events[0].id, envelopeUuid);
+  // Redis stream ids are <ms>-<seq>; the envelope UUID is not that shape.
+  assert.match(events[0].id, /^\d+-\d+$/);
+  // The rest of the envelope still parses.
+  assert.equal(events[0].type, "x:y");
+  assert.deepEqual(events[0].payload, { ok: true });
+});
+
+test("readRecent: exposes each entry's distinct stream id in newest-first order", async () => {
+  // xrevrange replies newest-first; a windowing consumer orders by stream id.
+  const entries: [string, string[]][] = [
+    ["1723000000000-3", ["id", "aaaa1111-0000-0000-0000-000000000001", "type", "new"]],
+    ["1722000000000-0", ["id", "bbbb2222-0000-0000-0000-000000000002", "type", "old"]],
+  ];
+  const bus = makeBus({
+    publisher: {
+      async xrevrange(_s: string, _e: string, _st: string, _kw: string, _n: number) {
+        return entries;
+      },
+    },
+  }.publisher);
+
+  const events = await bus.readRecent("hydra:notifications", 10);
+
+  assert.equal(events.length, 2);
+  // Every id is the entry's Redis stream id, in xrevrange (newest-first) order.
+  assert.deepEqual(events.map((e) => e.id), ["1723000000000-3", "1722000000000-0"]);
+  for (const e of events) assert.match(e.id, /^\d+-\d+$/);
+});
+
+// ---------------------------------------------------------------------------
 // reapStaleConsumers — zombie sweep on the $-anchored slot-events groups (#1221)
 // ---------------------------------------------------------------------------
 
