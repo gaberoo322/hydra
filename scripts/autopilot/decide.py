@@ -2875,6 +2875,67 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     return raw
 
 
+def _design_concept_status_signal(signals: dict | None) -> str | None:
+    """Read the pre-resolved design-concept status for `orch_dev_ready_anchor`
+    (issue #3798).
+
+    `collect-state.sh` emits `orch_dev_ready_anchor_design_concept_status` as
+    one of three literal strings, computed in the SAME loop pass that resolves
+    `orch_dev_ready_anchor` itself:
+
+      - `"approved"` — the pick was won by a fresh artifact whose lifecycle
+        `status` field is `"approved"`.
+      - `"draft"`    — the pick was won by a fresh artifact that is NOT yet
+        approved (`status` is `"draft"`/`"stale"`/missing).
+      - `"none"`     — the pick was won by the mechanical (#1230) or trivial
+        (#1088) exemption branch (no artifact at all), OR the signal is
+        absent/malformed (e.g. an older autopilot turn, a degraded read).
+
+    Only `"approved"` is meaningful to `design_concept_permits_frontier`
+    below; `"draft"` and `"none"` both mean "don't route frontier", so this
+    reader does not need to collapse them the way `_orch_anchor_signal` does
+    for the "no anchor" triple — it returns the raw string (or None) and lets
+    the predicate do the single equality check.
+
+    Pure: reads the passed-in dict only. No I/O (same no-I/O contract as
+    `_orch_anchor_signal` — decide.py stays a pure function of
+    (state, events, now), issue #3711 / #3798).
+    """
+    if not isinstance(signals, dict):
+        return None
+    raw = signals.get("orch_dev_ready_anchor_design_concept_status")
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    return raw or None
+
+
+def design_concept_permits_frontier(status_signal: str | None) -> bool:
+    """Issue #3798 discriminator: should THIS `dev_orch` pinned dispatch route
+    to the frontier tier?
+
+    True iff `status_signal == "approved"` — i.e. the `orch_dev_ready_anchor`
+    pin was earned by a genuine, APPROVED design-concept artifact. An anchor
+    reaches `orch_dev_ready_anchor` for one of three disjoint reasons (a fresh
+    artifact, approved or not; or the mechanical #1230 / trivial #1088
+    exemption), and only the approved-artifact case is "architecturally
+    consequential enough to have been grilled and signed off" — exactly the
+    population PR #3795's Sonnet demotion should NOT cover. The mechanical and
+    trivial exemptions are the opposite: cheap, provably-simple anchors that
+    stay on Sonnet by construction.
+
+    Deliberately does NOT read `_candidate_design_concept` / the
+    `/api/anchor/candidates` feed — that path is dead code for `dev_orch`
+    (issue #751) and its feed is retired (#3455); PR #3882's first attempt
+    wired it in and failed adversarial QA twice for exactly that reason.
+
+    Conservative default: any non-"approved" value (`"draft"`, `"none"`, an
+    absent/malformed signal) returns False — decide.py never fails OPEN to
+    frontier on a degraded read; it stays on Sonnet.
+    """
+    return status_signal == "approved"
+
+
 def _select_for_slot(
     cls: str,
     state: dict,
@@ -3066,10 +3127,30 @@ def _select_for_slot(
                 # today's behaviour rather than dispatching onto an un-grilled
                 # anchor.
                 return None
+            # ISSUE #3798: this pinned dispatch is the ONLY place a `dev_orch`
+            # anchor is knowable at decide-time, so it is the only place the
+            # frontier-routing HINT can attach — the far more common unpinned
+            # path below (hydra-dev self-selects post-dispatch) has no anchor
+            # to evaluate. `route_model` is a DISTINCT prompt_args key from
+            # `escalate_model`: the latter is coupled to cascade-routing retry
+            # telemetry (reap.py, /metrics/cascade-routing) that assumes an
+            # `attempt`/`prior_attempt_status` pair accompanies it, and this is
+            # a first-attempt, dispatch-time hint with neither field — reusing
+            # the key would corrupt that telemetry with a phantom escalation.
+            # Sourced LIVE from ESCALATION_POLICY so the playbook's existing
+            # "Fallback when Fable is unavailable → degrade to Opus" rule
+            # covers this hint automatically, with no duplicated literal.
+            # decide.py still emits NO concrete `model` field anywhere (#1093
+            # purity) — only this HINT, which the playbook maps to the Agent
+            # model kwarg for this one dispatch.
+            prompt_args: dict = {"anchor": dev_ready_anchor}
+            dc_status = _design_concept_status_signal(signals)
+            if design_concept_permits_frontier(dc_status):
+                prompt_args["route_model"] = ESCALATION_POLICY["dev_orch"]["model"]
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args={"anchor": dev_ready_anchor},
+                prompt_args=prompt_args,
                 reason=(
                     f"orch board has a grill-clear ready-for-agent anchor "
                     f"({dev_ready_anchor}) while {orch_anchor} awaits a design "

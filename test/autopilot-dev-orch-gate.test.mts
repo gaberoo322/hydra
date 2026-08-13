@@ -27,8 +27,9 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { tmpdir } from "node:os";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
@@ -291,5 +292,255 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
       /gh pr list --repo gaberoo322\/hydra --state open --json [^\n]*\blabels\b/,
       "active_dev_orch collector must request `labels` from gh",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dev_orch per-anchor frontier-routing override (issue #3798)
+// ---------------------------------------------------------------------------
+//
+// PR #3795 demoted dev_orch to Sonnet. The subagent_failure escalation net
+// (ESCALATION_POLICY["dev_orch"]) rescues a CAPABILITY failure only — a
+// dispatch that succeeds and produces green CI but is architecturally weak
+// triggers nothing (QA is advisory-only and cannot block merge). #3798 adds
+// a second, independent, LEADING lever: a dev_orch dispatch PINNED to a
+// grill-clear anchor (issue #3711) routes to the frontier tier when that
+// anchor's grill-clear status was earned by a genuine, APPROVED
+// design-concept artifact — never a merely-fresh draft, and never the
+// mechanical (#1230) / trivial (#1088) exemption (the opposite of
+// "architecturally consequential").
+//
+// collect-state.sh pre-resolves the discriminator as
+// `orch_dev_ready_anchor_design_concept_status` (one of "approved" / "draft"
+// / "none") in the SAME loop pass that resolves `orch_dev_ready_anchor`
+// itself — decide.py stays pure (no I/O) and reads the pre-qualified string
+// verbatim, exactly like `orch_dev_ready_anchor`. A prior attempt (PR #3882)
+// wired the WRONG source (`_candidate_design_concept` / the retired
+// `/api/anchor/candidates` feed — dead code for dev_orch since issue #751)
+// and failed adversarial QA twice for it; these tests pin both the correct
+// wiring and the absence of the wrong one.
+
+describe("decide.py — dev_orch per-anchor frontier-routing override (issue #3798)", () => {
+  const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+
+  function makeDecideTmp() {
+    const dir = mkdtempSync(join(tmpdir(), "decide-dev-orch-frontier-test-"));
+    return { dir, state: join(dir, "state.json"), cands: join(dir, "cands.json"), events: join(dir, "events.json") };
+  }
+
+  function baseState(signals: Record<string, unknown>): any {
+    return {
+      started_epoch: Math.floor(Date.now() / 1000),
+      limits: {
+        token_budget: 2_000_000,
+        wall_clock_max_sec: 28_800,
+        idle_drain_turns: 5,
+        scope: "all",
+      },
+      cumulative_tokens: 0,
+      dispatches: 0,
+      idle_turns: 0,
+      turn: 0,
+      burned_classes: [],
+      reaped_task_ids: [],
+      failure_log: [],
+      slots: {
+        dev_orch: null,
+        qa_orch: null,
+        research_orch: null,
+        dev_target: null,
+        qa_target: null,
+        research_target: null,
+        design_concept_orch: null,
+      },
+      signal_last_fired: {
+        health: 0,
+        sweep_orch: 0,
+        sweep_target: 0,
+        discover_orch: 0,
+        discover_target: 0,
+      },
+      signals,
+      research_force_counter: {},
+    };
+  }
+
+  // Both the pending-grill anchor and the dev-ready anchor must be set (and
+  // DIFFERENT) for decide.py to take the PINNED dispatch branch this feature
+  // lives in — see the #3711 gate in `_select_for_slot`. `orch_work_available`
+  // is the outer gate the dev_orch branch checks first.
+  function pinnedSignals(dcStatus?: string): Record<string, unknown> {
+    const s: Record<string, unknown> = {
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-100",
+      orch_dev_ready_anchor: "issue-200",
+    };
+    if (dcStatus !== undefined) {
+      s.orch_dev_ready_anchor_design_concept_status = dcStatus;
+    }
+    return s;
+  }
+
+  function runDecide(state: any): any {
+    const t = makeDecideTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], { encoding: "utf-8" });
+      if (r.status !== 0) {
+        throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+      }
+      return JSON.parse(r.stdout);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  }
+
+  function findDevOrch(plan: any): any | undefined {
+    return (plan.actions ?? []).find((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+  }
+
+  test("approved artifact -> pinned dev_orch dispatch carries prompt_args.route_model", () => {
+    const plan = runDecide(baseState(pinnedSignals("approved")));
+    const a = findDevOrch(plan);
+    assert.ok(a, "expected a pinned dev_orch dispatch");
+    assert.equal(a.prompt_args.anchor, "issue-200");
+    assert.equal(
+      a.prompt_args.route_model,
+      "fable",
+      "an approved artifact must route to ESCALATION_POLICY['dev_orch']['model'] (fable), read live not duplicated",
+    );
+  });
+
+  test("fresh but unapproved (draft) artifact -> no route_model (stays Sonnet)", () => {
+    const plan = runDecide(baseState(pinnedSignals("draft")));
+    const a = findDevOrch(plan);
+    assert.ok(a, "expected a pinned dev_orch dispatch");
+    assert.equal(a.prompt_args.anchor, "issue-200");
+    assert.equal(
+      a.prompt_args.route_model,
+      undefined,
+      "a fresh-but-unapproved draft must NOT route to frontier",
+    );
+  });
+
+  test("mechanical/trivial exemption (status=none) -> no route_model (stays Sonnet)", () => {
+    // orch_dev_ready_anchor was won by the #1230/#1088 exemption branch in
+    // collect-state.sh, which never sets an artifact status — "none" is the
+    // opposite of "architecturally consequential" and must not spend Opus.
+    const plan = runDecide(baseState(pinnedSignals("none")));
+    const a = findDevOrch(plan);
+    assert.ok(a, "expected a pinned dev_orch dispatch");
+    assert.equal(
+      a.prompt_args.route_model,
+      undefined,
+      "the mechanical/trivial exemption must NOT route to frontier",
+    );
+  });
+
+  test("signal key entirely absent -> conservative default, no route_model", () => {
+    // An older autopilot turn (collect-state.sh not yet redeployed) simply
+    // omits the key. decide.py must never fail OPEN to frontier on absence.
+    const plan = runDecide(baseState(pinnedSignals(undefined)));
+    const a = findDevOrch(plan);
+    assert.ok(a, "expected a pinned dev_orch dispatch");
+    assert.equal(
+      a.prompt_args.route_model,
+      undefined,
+      "an absent status signal must default to NOT routing frontier",
+    );
+  });
+
+  test("malformed signal (non-string / unexpected value) -> conservative default, no route_model", () => {
+    const s = pinnedSignals();
+    (s as any).orch_dev_ready_anchor_design_concept_status = 42; // malformed: not a string
+    const plan = runDecide(baseState(s));
+    const a = findDevOrch(plan);
+    assert.ok(a, "expected a pinned dev_orch dispatch");
+    assert.equal(
+      a.prompt_args.route_model,
+      undefined,
+      "a malformed (non-string) status signal must default to NOT routing frontier",
+    );
+  });
+
+  test("purity (#1093): decide.py never emits a concrete top-level `model` field on the dispatch action", () => {
+    const plan = runDecide(baseState(pinnedSignals("approved")));
+    const a = findDevOrch(plan);
+    assert.ok(a);
+    assert.equal(
+      a.model,
+      undefined,
+      "decide.py must emit only the prompt_args.route_model HINT, never a concrete `model` field (#1093)",
+    );
+  });
+
+  test("channel independence: route_model never appears alongside escalate_model on the same action", () => {
+    const plan = runDecide(baseState(pinnedSignals("approved")));
+    const a = findDevOrch(plan);
+    assert.ok(a);
+    assert.equal(a.prompt_args.route_model, "fable");
+    assert.equal(
+      a.prompt_args.escalate_model,
+      undefined,
+      "route_model (first-attempt, dispatch-time) must never be conflated with escalate_model (retry telemetry)",
+    );
+  });
+
+  test("unpinned dev_orch dispatch (no grill pending) never carries route_model", () => {
+    // The common case: hydra-dev self-selects, no anchor is knowable at
+    // dispatch time, so there is nothing for the predicate to evaluate —
+    // even if a design-concept status signal happens to be present (it
+    // shouldn't be, but the dispatch must not key off it either way).
+    const state = baseState({
+      orch_work_available: true,
+      orch_dev_ready_anchor_design_concept_status: "approved",
+    } as Record<string, unknown>);
+    const plan = runDecide(state);
+    const a = findDevOrch(plan);
+    assert.ok(a, "expected an unpinned dev_orch dispatch");
+    assert.equal(a.prompt_args.anchor, undefined, "unpinned dispatch carries no anchor");
+    assert.equal(
+      a.prompt_args.route_model,
+      undefined,
+      "the unpinned self-select path must never carry route_model — no anchor is knowable at dispatch time",
+    );
+  });
+
+  test("structural: decide.py never CALLS _candidate_design_concept — only its (dead-code) definition may reference the name", () => {
+    // Issue #751 removed the only call sites; PR #3882's first attempt
+    // re-introduced a call and failed adversarial QA twice for it. Pin the
+    // absence structurally so a future edit can't silently regress it.
+    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    const callSites = decide.match(/_candidate_design_concept\(/g) ?? [];
+    assert.equal(
+      callSites.length,
+      1,
+      "_candidate_design_concept( must appear exactly once in decide.py — its own `def` line — and never be called",
+    );
+    assert.match(
+      decide,
+      /^def _candidate_design_concept\(/m,
+      "the sole occurrence must be the function definition",
+    );
+  });
+
+  test("structural: the #3798 discriminator reads orch_dev_ready_anchor_design_concept_status, not the candidate feed", () => {
+    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    assert.match(decide, /design_concept_permits_frontier/);
+    assert.match(decide, /orch_dev_ready_anchor_design_concept_status/);
+  });
+
+  test("structural: ESCALATION_POLICY['dev_orch'] subagent_failure trigger is untouched by this routing", () => {
+    // Zero-edit guarantee: the capability-escalation net's trigger set and
+    // max_attempts cap must still read exactly as before this feature.
+    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    const m = decide.match(/"dev_orch":\s*\{\s*"triggers":\s*\(([^)]*)\),\s*"model":\s*"([^"]+)",\s*"max_attempts":\s*(\d+),/);
+    assert.ok(m, "could not locate ESCALATION_POLICY['dev_orch'] row");
+    assert.match(m![1], /"subagent_failure"/);
+    assert.doesNotMatch(m![1], /"subagent_noop"/, "dev_orch must still trigger on subagent_failure ONLY");
+    assert.equal(m![2], "fable", "escalate_model / route_model share the same live-sourced literal");
+    assert.equal(m![3], "2", "max_attempts cap (invariant 4) unchanged");
   });
 });

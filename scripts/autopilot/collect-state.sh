@@ -481,13 +481,23 @@ echo
 #     complex unstamped issue goes straight to dev_orch without a design
 #     concept — so absence of a signal NEVER suppresses.
 #
-# PER-ANCHOR GATE (issue #3711) — this ONE loop pass now emits TWO signals:
+# PER-ANCHOR GATE (issue #3711) — this ONE loop pass now emits THREE signals:
 #
 #   - `orch_pending_grill_anchor` — the first candidate that still needs a
 #     grill (unchanged semantics).
-#   - `orch_dev_ready_anchor` — NEW: the first candidate that is already
+#   - `orch_dev_ready_anchor` — the first candidate that is already
 #     GRILL-CLEAR, i.e. it has a fresh artifact, or it qualifies for the
 #     mechanical (#1230) / trivial (#1088) exemption.
+#   - `orch_dev_ready_anchor_design_concept_status` (issue #3798) — one of
+#     `approved` / `draft` / `none`, describing WHY `orch_dev_ready_anchor`
+#     was set: `approved` means a fresh artifact with lifecycle
+#     `status == "approved"` won the pick; `draft` means a fresh but
+#     unapproved artifact won it; `none` means the mechanical/trivial
+#     exemption won it (no artifact at all), or the pick itself is `none`.
+#     decide.py's `dev_orch` pinned-dispatch branch reads this to decide
+#     whether THIS dispatch routes to the frontier tier — an anchor that is
+#     merely grill-clear is not automatically "architecturally consequential
+#     enough for Opus"; only a genuinely approved artifact is.
 #
 # WHY: decide.py's `dev_orch` selector used to yield whenever
 # `orch_pending_grill_anchor` was set to anything — a GLOBAL stop, not a
@@ -619,6 +629,12 @@ except Exception:
 " 2>/dev/null || true)
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
+# Issue #3798: WHY orch_dev_ready_anchor was set — "approved" / "draft" /
+# "none". Set only in lockstep with ORCH_DEV_READY_PICK's first assignment
+# (each assignment site below is guarded the same way), so it always
+# describes the actual branch that won the pick, never a stale leftover from
+# an earlier or later anchor in the walk.
+ORCH_DEV_READY_DC_STATUS="none"
 if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
   for n in $ORCH_GRILL_CANDIDATES; do
     # Both picks resolved — stop paying for design-concept round-trips.
@@ -646,6 +662,20 @@ except Exception:
         # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711).
         if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
           ORCH_DEV_READY_PICK="issue-${n}"
+          # Issue #3798: capture WHY this pick is grill-clear — a genuine
+          # approved artifact vs. a merely-fresh draft — so decide.py can
+          # discriminate the frontier-routing case without any I/O of its
+          # own. Any parse failure (should not happen; DC_JSON already
+          # parsed successfully for FRESH_OK above) conservatively falls to
+          # "none", never "approved" — decide.py must never fail OPEN to
+          # frontier on a degraded read.
+          ORCH_DEV_READY_DC_STATUS=$(printf '%s' "$DC_JSON" | python3 -c "
+import json, sys
+try:
+  d = json.load(sys.stdin)
+  print('approved' if d.get('status') == 'approved' else 'draft')
+except Exception:
+  print('none')" 2>/dev/null || echo "none")
         fi
         continue
       fi
@@ -740,6 +770,7 @@ except Exception:
 fi
 echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
 echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
+echo "orch_dev_ready_anchor_design_concept_status=$ORCH_DEV_READY_DC_STATUS"
 
 # active dev_orch detector (issue #412): an open PR on a hydra-dev head
 # branch updated within the last 90 minutes is the only reliable gate

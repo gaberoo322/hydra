@@ -306,6 +306,63 @@ pinned anchor, an unblock-count ordering where one applies, or an explicit
 operator steer. If the top-ranked eligible issue is blocked or lacks a
 `## Files in scope` section, fall through to the next — do not relabel to force it.
 
+### `dev_orch` per-anchor frontier-routing override (issue #3798)
+
+The `subagent_failure → ESCALATION_POLICY["dev_orch"]` cascade-routing net
+(above) rescues a **capability** failure — a `dev_orch` dispatch that
+errored out. It does nothing for a dispatch that **succeeds** and produces
+green CI but is architecturally weak: QA is advisory-only and cannot block
+merge, so a silent quality regression can ship with no trigger firing at
+all (the PR #3797 dashboard-state incident is the motivating case — two
+adversarial QA reviewers caught it after the fact; nothing in the
+capability-escalation net would have). #3798 adds a second, independent,
+**leading** routing lever that fires at dispatch time, before any code is
+written, for exactly the population where quality compounds: an anchor
+consequential enough to have been grilled AND signed off.
+
+When a `dev_orch` dispatch is the **pinned** kind (issue #3711 — a grill is
+pending on some *other* anchor, so `decide.py` pins this dispatch to the
+pre-resolved `orch_dev_ready_anchor`), the action's `prompt_args` may also
+carry `route_model` (a string model alias, today `fable`). When present,
+**it overrides the static per-class model for that ONE dispatch** — pass
+`model=action.prompt_args.route_model` to the `Agent` call, exactly like
+`escalate_model` overrides the static map for a cascade-routing re-dispatch.
+
+`route_model` is present iff `orch_dev_ready_anchor_design_concept_status ==
+"approved"` — i.e. the pinned anchor's grill-clear status was earned by a
+genuine, **approved** design-concept artifact, not merely a fresh-but-draft
+one and not the mechanical (#1230) / trivial (#1088) exemption (both of
+which are the *opposite* of "architecturally consequential" and must stay
+on Sonnet). `decide.py`'s `design_concept_permits_frontier` predicate is the
+single source of truth for this check; `collect-state.sh` pre-resolves the
+`orch_dev_ready_anchor_design_concept_status` signal in the SAME loop pass
+as `orch_dev_ready_anchor` (`decide.py` performs no I/O and cannot look up
+artifact approval itself). Value is sourced live from
+`ESCALATION_POLICY["dev_orch"]["model"]`, never a duplicated literal, so the
+"Fallback when Fable 5 is unavailable" degrade-to-Opus rule above covers it
+automatically.
+
+**`route_model` is a DISTINCT key from `escalate_model` — never conflate
+them.** `escalate_model` is coupled to the cascade-routing **retry**
+telemetry (`reap.py`, `/metrics/cascade-routing`), which assumes every
+dispatch carrying it is a re-dispatch stamped with `attempt` /
+`prior_attempt_status`. `route_model` fires on a **first-attempt**,
+dispatch-time routing decision with neither field — do NOT run the
+escalation-provenance deposit (`scripts/reflection-deposit.sh escalation
+…`) for a `route_model`-only dispatch; that deposit is for `escalate_model`
+only. The `subagent_failure` capability-escalation net is structurally
+unchanged and still applies on top: a `route_model`-routed dispatch that
+then fails can still cascade-escalate via `escalate_model` on retry.
+
+**Scope boundary — the far more common UNPINNED `dev_orch` dispatch (the
+`hydra-dev` self-select path, no `orch_pending_grill_anchor` is set) never
+carries `route_model`.** The unpinned path has no anchor known to
+`decide.py` at dispatch time — `hydra-dev` picks its own issue after the
+fact — so there is nothing for the predicate to evaluate. Widening the pin
+to cover that case is a separate, larger #3711-scoped decision. Real
+hit-rate on live dispatches therefore runs below any board-wide
+artifact-presence estimate that doesn't account for this scope boundary.
+
 ### `wayfinder_orch` dispatch — ticket-type → skill (issue #3351, epic #3350, ADR-0029)
 
 `wayfinder_orch` is the single AFK working class for **wayfinder maps** (open
@@ -703,6 +760,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. **The `dev_orch` yield it triggers is PER-ANCHOR, not global, post-#3711** — see the row below. |
 | `orch_dev_ready_anchor=issue-N` (or `none`) | `state.signals.orch_dev_ready_anchor` (string, or omit — verbatim, no rename) | `dev_orch` (issue #3711) — the first orch-board `ready-for-agent` anchor already **grill-clear**: fresh design-concept artifact, or the mechanical (#1230) / trivial (#1088) exemption. Resolved by the SAME `collect-state.sh` loop pass as `orch_pending_grill_anchor` because `decide.py` must stay pure and cannot look up artifact freshness — same division of labour as `wayfinder_orch_frontier`. When a grill is pending AND this names a **different** anchor, `dev_orch` dispatches **pinned to it** (`prompt_args.anchor`) instead of yielding board-wide; when it is `none` or equals the pending-grill anchor, `dev_orch` yields as it did pre-#3711. gh/API-down degrades to `none` (fail closed). |
+| `orch_dev_ready_anchor_design_concept_status=approved\|draft\|none` | `state.signals.orch_dev_ready_anchor_design_concept_status` (string, or omit — verbatim, no rename) | `dev_orch` **per-anchor frontier-routing override** (issue #3798, see below) — WHY `orch_dev_ready_anchor` was set: `approved` = a fresh artifact with lifecycle `status=="approved"` won the pick; `draft` = a fresh-but-unapproved artifact won it; `none` = the mechanical/trivial exemption won it, or the pick itself is `none`, or the read degraded. Resolved by the SAME loop pass as `orch_dev_ready_anchor`. Only `approved` permits `dev_orch`'s pinned dispatch to carry `prompt_args.route_model`. |
 | `wayfinder_orch_frontier=issue-N` (or `none`) | `state.signals.wayfinder_orch_frontier` (string, or omit — verbatim, no rename) | `wayfinder_orch` (issue #3351, epic #3350, ADR-0029) — the pre-resolved next AFK-typed, unblocked, unclaimed frontier ticket across all open **approved** (`wayfinder:map` minus `wayfinder:destination-pending`) maps. collect-state.sh owns the native GraphQL sub-issue/blocked-by enumeration so decide.py stays pure; gh/GraphQL-down degrades to `none` (fail closed). |
 | `wayfinder_orch_ticket_type=research\|task` | `state.signals.wayfinder_orch_ticket_type` (string) | the frontier ticket's type, threaded into the dispatch `prompt_args.ticket_type` so the dispatch step below resolves ticket-type → skill (`research` → hydra-issue-research, `task` → hydra-dev). |
 | `wayfinder_orch_inflight_global=N` | `state.signals.wayfinder_orch_inflight_global` (string integer) | the count of live `wayfinder_orch` workers — open, self-assigned, AFK-typed (`wayfinder:research`\|`wayfinder:task`) sub-issues across all open **approved** maps (issue #3354, ADR-0029 Decision 2). `decide.py` reads it verbatim and suppresses a new dispatch at ≥2 (global cap of ≤2 concurrent workers). collect-state.sh owns the count so decide.py stays pure; absent/malformed → treated as 0 (fail-open on absence — the structural per-map single-flight guard still holds). |
