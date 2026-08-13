@@ -1,0 +1,1 @@
+- fix: hydra-digest reframe-save count now windows on the event's ISO timestamp and fails closed on an unparseable timestamp, instead of fail-open counting whatever the API page happened to return (#3940)

@@ -1,15 +1,31 @@
 ---
 name: hydra-architecture-scan
-description: Non-interactive architecture-scan wrapper. Runs the improve-codebase-architecture skill's Explore + Present-candidates phases (steps 1–2 only) against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — never entering the interactive operator grilling loop.
+description: Non-interactive architecture-scan wrapper. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — never entering the interactive operator grilling loop.
 when_to_use: "When the Orchestrator runs out of eligible work and wants to surface architecture-deepening candidates as tracked issues, or the operator says 'architecture scan' or 'find architecture work'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Task(*)
 arguments: [apply]
 claude_only: true
+compose_base: _vendor/improve-codebase-architecture.md
+supersedes:
+  - "### 2. Present candidates as an HTML report"
+  - "### 3. Grilling loop"
 ---
 
 # Hydra Architecture Scan (headless deepening wrapper)
 
-`hydra-architecture-scan` is the **non-interactive** twin of the upstream `improve-codebase-architecture` skill. It runs that skill's first two phases — **Explore** and **Present candidates** — against the **Orchestrator** (`~/hydra`), then emits the surfaced deepening candidates as GitHub issues on `gaberoo322/hydra` instead of dropping into the interactive grilling loop. The interactive skill is left **completely untouched**: it cannot be dispatched unattended (its step 3 grilling loop and its inline `CONTEXT.md`/ADR side-effects both require an operator), so this wrapper exists to give the autopilot a headless entry point that produces tracked work rather than asking questions.
+> **Zero `AskUserQuestion`. Ever.** `architecture_orch` dispatches this
+> unattended — there is no operator to answer. Both of the base's interactive
+> endings (its report step's closing question, its whole grilling loop) are
+> **excised at compose time** by the `supersedes:` entries above (#3990), so
+> they are absent from the generated skill rather than contradicted by prose
+> further down. That distinction is the #3818 lesson: a prose "this wrapper does
+> neither" sits *after* the base's own instruction in a top-down read, and loses.
+
+<!-- compose-seam-supersede -->
+
+`hydra-architecture-scan` is the **non-interactive** twin of the upstream `improve-codebase-architecture` skill. It **composes on** that skill's Explore phase — inherited above from the vendored base, not re-described — scopes it to the **Orchestrator** (`~/hydra`), and emits the surfaced deepening candidates as GitHub issues on `gaberoo322/hydra` instead of dropping into the interactive grilling loop. The installed interactive skill is left **completely untouched**: it cannot be dispatched unattended (its grilling loop and its inline `CONTEXT.md`/ADR side-effects both require an operator), so this wrapper exists to give the autopilot a headless entry point that produces tracked work rather than asking questions.
+
+Until #3993 it **hand-copied** those steps as prose, with no compose link and no refresh path — and had already rotted, citing `LANGUAGE.md` / `INTERFACE-DESIGN.md` siblings that do not exist under `improve-codebase-architecture` (upstream moved that vocabulary into the separate `codebase-design` skill). Composition is what makes such rot detectable: `sync-skills.sh` fails loud when a `supersedes:` heading stops resolving, and `npm run vendor:drift` reports a capture that has fallen behind.
 
 This is the gating build artifact (issue #788) for the `architecture_orch` epic (#787): an issue-producing idle fallback that turns wasted autopilot idle capacity (post-#762, the per-run budget is 10M tokens) into self-improvement, in line with the 25% self-improvement floor (ADR-0003) and the operator's stated preference for maintainability over throughput.
 
@@ -30,9 +46,9 @@ This skill is the **judgment** half of that gate: every deepening candidate it s
 
 ## What this skill is NOT
 
-- **NOT a modification of `improve-codebase-architecture`.** That skill stays interactive and operator-facing. This wrapper re-uses its **Explore** and **Present candidates** phases (steps 1–2) by following the same process, then diverts to issue emission instead of running its step-3 grilling loop. Do not edit the upstream skill, its `LANGUAGE.md`, `INTERFACE-DESIGN.md`, or `DEEPENING.md`.
+- **NOT a modification of `improve-codebase-architecture`.** It **composes** on a vendored capture (`_vendor/improve-codebase-architecture.md`), inheriting the Explore phase and excising the interactive ones. Edit neither the installed skill nor the capture — Hydra behaviour belongs in this overlay; the capture is refreshed only by re-vendoring (`_vendor/README.md`).
 - **NOT a code-writer.** It never opens a PR, never edits `src/`, never runs the deepening refactor. It surfaces candidates and files issues. Implementation is a later `hydra-dev` dispatch against a triaged issue.
-- **NOT an interactive skill.** **Zero `AskUserQuestion` calls.** The upstream skill's step 2 ends with *"Which of these would you like to explore?"* and step 3 is a grilling conversation — this wrapper does neither. It presents the candidates into issue bodies and stops.
+- **NOT an interactive skill.** **Zero `AskUserQuestion` calls** — see the hoisted rule at the top. Both of the base's interactive endings are excised at compose time, not merely declined here.
 - **NOT the autopilot wiring.** The `architecture_orch` signal class, the `arch_fallback_due` / `arch_board_saturated` state signals, `decide.py`, and the autopilot taxonomy table are out of scope here — they land in #789 / #790 / #791. This playbook is the wrapper skill only.
 
 ## When NOT to run this
@@ -51,14 +67,11 @@ This skill is the **judgment** half of that gate: every deepening candidate it s
 
 ## Process
 
-The first two steps **are** `improve-codebase-architecture` steps 1–2, run verbatim against the Orchestrator. Steps 3–5 are the headless divergence: filter, emit, report — replacing the upstream skill's interactive step 3.
+**Step 1 is supplied by the base above** — its Explore phase (the friction prompts, the shallow-module questions, the deletion test) is the upstream procedure, inherited rather than restated. What follows is the Hydra divergence: how that exploration is scoped and seeded here, then filter, emit, report in place of the base's excised interactive tail.
 
-### 1. Explore (= improve-codebase-architecture step 1)
+### 1 (continued). Explore — Orchestrator scoping and seed
 
-Read the Orchestrator's domain glossary and ADRs first so candidates are named in the project's vocabulary:
-
-- `~/hydra/CONTEXT.md` — the canonical glossary (Target, Orchestrator, Untouchable Core, Pre-merge Gate, Modification Tier, Outcome Holdback, Operator-Required Intervention). Use these terms exactly.
-- `~/hydra/docs/adr/` — architectural decision records. **Do not re-litigate a decided ADR.** A candidate may only contradict an ADR when the friction is real enough to warrant reopening it, and then it must say so explicitly (`contradicts ADR-NNNN — but worth reopening because …`).
+Apply the base's step 1 **to the Orchestrator** (`~/hydra`). Its glossary is `~/hydra/CONTEXT.md` (Target, Orchestrator, Untouchable Core, Pre-merge Gate, Modification Tier, Outcome Holdback, Operator-Required Intervention) and its ADRs are `~/hydra/docs/adr/`.
 
 **Seed the exploration from the import graph, not from file size (issue #2939).** Before walking the tree, generate the deterministic coupling summary and let it target your search at the real seam hubs and cross-group tension:
 
@@ -66,32 +79,23 @@ Read the Orchestrator's domain glossary and ADRs first so candidates are named i
 npx tsx -e "import('/home/gabe/hydra/src/aggregators/repo-graph.ts').then(m => m.getCouplingReport().then(r => { process.stdout.write(r); process.exit(0); })).catch(e => { console.error(e); process.exit(1); });"
 ```
 
-This prints a markdown block with the top ≥10 modules ranked by fan-in and the top-5 cross-group coupling pairs — the seam-hub / cross-group-tension signals worth deepening. Prioritise candidates that sit on a high-fan-in hub or straddle a heavy cross-group edge over ones surfaced purely by file size. (The report is a READ-ONLY view over the existing `scanArchitecture()` import graph — it opens no Redis/network connection and is safe to run headless.)
+This prints the top ≥10 modules by fan-in and the top-5 cross-group coupling pairs — the seam-hub / cross-group-tension signals worth deepening. Prioritise a high-fan-in hub or a heavy cross-group edge over anything surfaced purely by file size. (READ-ONLY over the existing `scanArchitecture()` import graph: no Redis/network connection, safe headless.)
 
-Then use the **Agent tool with `subagent_type=Explore`** to walk `~/hydra/src/`, `~/hydra/dashboard/src/`, and `~/hydra/scripts/`. Explore organically — note where you experience friction, following the upstream skill's prompts:
-
-- Where does understanding one concept require bouncing between many small modules?
-- Where are modules **shallow** — interface nearly as complex as the implementation?
-- Where have pure functions been extracted just for testability, but the real bugs hide in how they're called (no **locality**)?
-- Where do tightly-coupled modules leak across their seams?
-- Which parts of the codebase are untested, or hard to test through their current interface?
-
-Apply the **deletion test** to anything you suspect is shallow: would deleting the module concentrate complexity, or just move it? A "yes, concentrates" is the signal worth filing.
+The base's `subagent_type=Explore` walk is scoped **here** to `~/hydra/src/`, `~/hydra/dashboard/src/`, and `~/hydra/scripts/`. Its friction prompts and its deletion test apply as written above — do not restate them, run them.
 
 > **Quota:** like the scout's 5-candidate discovery quota, aim for **3–6** strong candidates. If the codebase is genuinely clean in the area explored, file fewer (or none) and say so — do not pad with theoretical refactors.
 
-### 2. Present candidates (= improve-codebase-architecture step 2)
+### 2. Present candidates as issue input (replaces the base's HTML-report step)
 
-Assemble a numbered list of deepening opportunities. For each candidate, capture exactly the upstream fields:
+The base wrote a Tailwind/Mermaid HTML report and `xdg-open`ed it for a human; **that step is excised** — nothing reads it unattended, and its closing question is fatal here. Its per-candidate *fields* are what survives, as the step-4 issue schema. Assemble a numbered list of deepening opportunities capturing:
 
 - **Files** — which files/modules are involved (concrete paths under `~/hydra`).
 - **Problem** — why the current architecture is causing friction.
-- **Solution** — plain-English description of what would change. **Do NOT propose interfaces or write code** — the upstream skill defers interface design to its step 3, and this wrapper never runs step 3.
+- **Solution** — plain-English description of what would change. **Do NOT propose interfaces or write code**: the base defers interface design to its grilling loop, which this wrapper never runs.
 - **Benefits** — explained in terms of **locality** and **leverage**, and in how tests would improve (the interface is the test surface).
+- **ADR conflicts** — per the base, surface a candidate that contradicts an ADR only when the friction warrants reopening it, and mark it explicitly in the body.
 
-Use **`CONTEXT.md` vocabulary for the domain** and **`improve-codebase-architecture/LANGUAGE.md` vocabulary for the architecture** (Module, Interface, Implementation, Depth, Seam, Adapter, Leverage, Locality). Name the deepened module after a real domain concept, not a coined `FooHandler`.
-
-This is where the upstream skill would ask *"Which of these would you like to explore?"*. **This wrapper does not ask.** Every surviving candidate becomes issue input in step 4.
+Name the deepened module after a real domain concept from `CONTEXT.md`, not a coined `FooHandler`. Every surviving candidate becomes issue input in step 4.
 
 ### 3. Filter (keep the issue count honest)
 
@@ -195,7 +199,7 @@ Issue body schema (one per candidate):
 # architecture-scan: <deepening candidate title>
 
 > Surfaced by `/hydra-architecture-scan` on <ISO date> against the Orchestrator (~/hydra).
-> Explore + Present-candidates phases of `improve-codebase-architecture` (steps 1–2), headless.
+> Composed on the upstream `improve-codebase-architecture` Explore phase, headless.
 
 ## Files in scope
 
@@ -203,12 +207,12 @@ Issue body schema (one per candidate):
 
 ## Problem
 
-<why the current architecture is causing friction — in CONTEXT.md + LANGUAGE.md vocabulary>
+<why the current architecture is causing friction — in CONTEXT.md + codebase-design vocabulary>
 
 ## Solution (plain English — no interface design yet)
 
 <what would change. Deliberately NOT an interface proposal: the upstream skill
-defers interface design to its step-3 grilling loop, which a triaged pickup
+defers interface design to its grilling loop, which a triaged pickup
 (operator running /improve-codebase-architecture, or a hydra-grill design-concept)
 will run.>
 
@@ -271,12 +275,11 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the e
 
 ## Rules
 
-- **Zero `AskUserQuestion`.** This is the decisive constraint the research (#776) found — the interactive skill cannot run unattended. This wrapper presents candidates into issue bodies and stops; it never asks the operator to pick one.
-- **Do NOT modify `improve-codebase-architecture`.** Re-use its Explore + Present-candidates process; never edit the upstream skill or its bundled docs.
+- **Zero `AskUserQuestion`** (#776) and **never edit the upstream skill or its vendored capture** — both stated in full above.
 - **Deepening candidates land in `needs-triage`, never `ready-for-agent`.** The operator/triage is the accept point. No self-dispatch of self-invented refactors. The single exception is a **dead-code deletion candidate** (a deletion-test failure that is *genuinely unreferenced*, not a pass-through): it re-routes to the `hydra-cleanup` convention (`cleanup-scan` + `ready-for-agent`) per step 4b, because its acceptance check is deterministic — that is mechanically-verifiable cleanup, not a judgment-call deepening.
 - **Deletion-test failure is a fork, not a discard.** A *pass-through* (live callers, complexity would move not concentrate) is dropped; a *genuinely-unreferenced* finding (no live callers at all, test-only consumers excluded) is re-routed to a deletion candidate, never thrown away (#961). When unsure, drop.
 - **Orchestrator-scoped.** Always `~/hydra`. Not parameterised to the Target.
-- **Steps 1–2 only.** Never run the upstream skill's step-3 grilling loop, and never propose concrete interfaces or write code. Solution descriptions stay plain-English.
+- **Explore phase only.** Never propose concrete interfaces or write code; Solution descriptions stay plain-English.
 - **Don't steer at the Untouchable Core.** A candidate whose primary change is a protected path (ADR-0001/0004) is reported as friction but not filed as an actionable issue.
 - **Board-saturation back-stop.** Emit nothing when the board is already saturated with `architecture-scan` issues — belt-and-braces ahead of the autopilot's `arch_board_saturated` signal (#789).
 - **Dry-run default.** Only `--apply` creates issues. A dry-run on `gaberoo322/hydra` is always safe.
@@ -293,17 +296,17 @@ Phase A acceptance flow — the operator runs this before #790 wires the autopil
 
 Expected:
 
-- The Explore phase surfaces 3–6 deepening candidates in `CONTEXT.md` + `LANGUAGE.md` vocabulary.
-- The filter drops candidates that touch the Untouchable Core, duplicate an open `architecture-scan` issue, or fail the deletion test **as a pass-through**.
-- A deletion-test failure that is **genuinely unreferenced** (no live callers at all) is re-routed to a dead-code deletion candidate following the `hydra-cleanup` convention — `cleanup-scan` + `ready-for-agent`, deterministic "remove X AND test/tsc green" acceptance — not dropped (#961).
-- `--apply` files deepening issues labelled `enhancement`, `needs-triage`, `architecture-scan` — and **never** `ready-for-agent`; re-routed dead-code deletion candidates instead carry `cleanup-scan`, `ready-for-agent`.
-- Re-running `--apply` against an already-saturated board emits nothing and prints the board-saturation skip.
-- The interactive `improve-codebase-architecture` skill is unchanged (`git status` shows no edits under `~/.claude/skills/improve-codebase-architecture/`).
+- 3–6 deepening candidates in `CONTEXT.md` + `codebase-design` vocabulary; the step-3 filter drops Untouchable-Core, duplicate, and pass-through ones.
+- A **genuinely-unreferenced** deletion-test failure is re-routed as a dead-code candidate (`cleanup-scan` + `ready-for-agent`), not dropped (#961).
+- `--apply` files deepening issues labelled `enhancement`, `needs-triage`, `architecture-scan` — **never** `ready-for-agent`.
+- Re-running `--apply` against a saturated board emits nothing and prints the skip.
+- Both the installed skill and the vendored capture are unchanged (`git status` is clean under each).
 
 ## Files
 
 - `docs/operator-playbooks/hydra-architecture-scan.md` — this playbook (source of truth; the skill is generated by `scripts/sync-skills.sh`).
-- `~/.claude/skills/improve-codebase-architecture/` — the upstream interactive skill this wrapper re-uses (Explore + Present-candidates, steps 1–2). **Read-only — never edited by this skill.**
+- `docs/operator-playbooks/_vendor/improve-codebase-architecture.md` — the vendored upstream base this overlay composes on (capture convention + refresh recipe: `_vendor/README.md`). **Never edited here.**
+- `~/.claude/skills/improve-codebase-architecture/` — the installed interactive skill the capture came from. **Read-only — never edited by this skill.**
 - `docs/operator-playbooks/hydra-prd.md` — the `≥3`-candidate emission path (parent epic + children).
 - `~/.claude/skills/to-tickets/` (upstream) — the `1–2`-candidate emission path.
 - `docs/operator-playbooks/hydra-cleanup.md` — the dead-code deletion convention (`cleanup-scan` + `ready-for-agent`, deterministic "remove X AND test/tsc green" acceptance) that step 4b re-uses for genuinely-unreferenced findings (#961).
