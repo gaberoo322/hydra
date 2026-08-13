@@ -141,7 +141,11 @@ For each slice, hit the live tier classifier:
 
 ```bash
 FILES=$(printf '%s,' "${slice.filesInScope[@]}" | sed 's/,$//')
-TIER_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/tier?files=$(printf '%s' "$FILES" | jq -sRr @uri)")
+# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
+# nested command substitution `$( ... $(...) ...)`. URL-encode FILES into a plain
+# variable first, then interpolate it into the curl URL.
+FILES_ENC=$(printf '%s' "$FILES" | jq -sRr @uri)
+TIER_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/tier?files=${FILES_ENC}")
 EXPECTED_TIER=$(printf '%s' "$TIER_JSON" | jq -r '.tier')
 ```
 
