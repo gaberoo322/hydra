@@ -573,3 +573,163 @@ describe("collect-state.sh — Target board truncation signal (issue #3710)", ()
     );
   });
 });
+
+/**
+ * `wire_or_retire_target_unlabelled` — advisory visibility signal for
+ * wire-or-retire items carrying no lifecycle label (issue #3973).
+ *
+ * A Target issue carrying `wire-or-retire` but NONE of the recognised lifecycle
+ * labels (`needs-triage`, `ready-for-agent`, `ready-for-human`, `blocked`) is
+ * invisible to the /hydra-wire-or-retire resolver: collect-state.sh gates that
+ * resolver on `wire-or-retire` AND `needs-triage` (the load-bearing AND from
+ * #3726), so an item with `wire-or-retire` + a non-lifecycle label like `bug`
+ * reads wire_or_retire_target_available=false while sitting in plain sight —
+ * the live gaberoo322/hydra-betting#760 case, undetected since a 2026-08-03
+ * hand-reframe. This signal is the advisory count of those invisible items.
+ *
+ * It does NOT relax the AND predicate (that would regress #3726, the reason
+ * #3747 was closed) and does NOT gate dispatch, mirroring
+ * `target_board_signals_truncated`'s advisory contract. Both already-resolved
+ * shapes are correctly excluded: `ready-for-human` is the resolver's own
+ * UNCLEAR verdict output, and `ready-for-agent` is a WIRE/RETIRE verdict
+ * output — counting either would re-arm the resolver forever, the exact hazard
+ * the AND predicate exists to prevent.
+ */
+describe("collect-state.sh — wire-or-retire unlabelled advisory count (issue #3973)", () => {
+  /** The Target lane-signal emitter (same block the truncation tests exercise). */
+  function extractLaneEmitter(): string {
+    const match = src.match(
+      /python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/,
+    );
+    assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
+    return match[1];
+  }
+
+  function runLaneEmitter(
+    rows: readonly { number?: number; labels: string[] }[],
+    env: Record<string, string> = {},
+  ): Record<string, string> {
+    const r = spawnSync("python3", ["-c", extractLaneEmitter()], {
+      input: JSON.stringify(rows.map((row) => ({ number: row.number, labels: row.labels }))),
+      encoding: "utf-8",
+      env: { ...process.env, GH_ISSUE_LIST_LIMIT: "100", ...env },
+    });
+    assert.equal(r.status, 0, `lane emitter exited non-zero: ${r.stderr}`);
+    const out: Record<string, string> = {};
+    for (const line of (r.stdout ?? "").trim().split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return out;
+  }
+
+  test("wire-or-retire + bug only is counted (the live #760 case)", () => {
+    // The exact shape that sat invisible on the Target board: a hand-reframe
+    // stamped wire-or-retire + bug and no lifecycle label, so the AND-gated
+    // resolver read available=false while the board's only unresolved item was
+    // in plain sight.
+    const out = runLaneEmitter([{ number: 760, labels: ["wire-or-retire", "bug"] }]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "1");
+    // It is genuinely invisible to the resolver — the gap this signal surfaces.
+    assert.equal(out.wire_or_retire_target_available, "false");
+    assert.equal(out.wire_or_retire_target_triage, "0");
+  });
+
+  test("a bare wire-or-retire label (no other label) is counted", () => {
+    const out = runLaneEmitter([{ labels: ["wire-or-retire"] }]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "1");
+  });
+
+  test("wire-or-retire + needs-triage is NOT counted (already resolver-visible)", () => {
+    // needs-triage is the lane that makes the AND predicate fire — this item is
+    // seen by the resolver and must not be double-counted as invisible.
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "needs-triage"] }]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "0");
+    assert.equal(out.wire_or_retire_target_triage, "1");
+    assert.equal(out.wire_or_retire_target_available, "true");
+  });
+
+  test("wire-or-retire + ready-for-human is NOT counted (resolver's UNCLEAR verdict)", () => {
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-human"] }]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "0");
+  });
+
+  test("wire-or-retire + ready-for-agent is NOT counted (WIRE/RETIRE verdict)", () => {
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-agent"] }]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "0");
+  });
+
+  test("wire-or-retire + blocked is NOT counted (blocked is a lifecycle label)", () => {
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "blocked"] }]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "0");
+  });
+
+  test("a non-wire-or-retire issue is never counted", () => {
+    const out = runLaneEmitter([{ labels: ["bug", "enhancement"] }]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "0");
+  });
+
+  test("the AND predicate is unchanged: wire-or-retire + ready-for-agent stays out of wire_or_retire_target_triage", () => {
+    // Issue #3973 explicitly forbids relaxing the AND predicate (#3726 is the
+    // reason #3747 was closed). A ready-for-agent wire-or-retire item is a
+    // resolved WIRE/RETIRE verdict and must not inflate the resolver's triage
+    // count or arm the resolver.
+    const out = runLaneEmitter([{ labels: ["wire-or-retire", "ready-for-agent"] }]);
+    assert.equal(out.wire_or_retire_target_triage, "0");
+    assert.equal(out.wire_or_retire_target_available, "false");
+  });
+
+  test("a mixed board counts only the lifecycle-less wire-or-retire items", () => {
+    const out = runLaneEmitter([
+      { number: 760, labels: ["wire-or-retire", "bug"] }, // counted (#760)
+      { labels: ["wire-or-retire", "needs-triage"] }, // resolver-visible
+      { labels: ["wire-or-retire", "ready-for-agent"] }, // resolved WIRE/RETIRE
+      { labels: ["wire-or-retire", "ready-for-human"] }, // resolved UNCLEAR
+      { labels: ["wire-or-retire", "blocked"] }, // lifecycle: blocked
+      { labels: ["wire-or-retire"] }, // counted (bare)
+      { labels: ["bug"] }, // not wire-or-retire
+    ]);
+    assert.equal(out.wire_or_retire_target_unlabelled, "2");
+    // The AND predicate still counts only the single needs-triage co-present item.
+    assert.equal(out.wire_or_retire_target_triage, "1");
+    assert.equal(out.wire_or_retire_target_available, "true");
+  });
+
+  test("the count is advisory: nothing in decide.py reads or gates on it", () => {
+    // Mirrors the precedent set by target_board_signals_truncated /
+    // target_board_signals_degraded: both are emitted here and referenced
+    // NOWHERE in decide.py. The new advisory signal must clear the same bar — a
+    // dispatch gate reading it would re-arm the resolver on the resolved shapes
+    // the AND predicate exists to suppress (#3726). decide.py is the sole gate.
+    const decide = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    assert.doesNotMatch(
+      decide,
+      /wire_or_retire_target_unlabelled/,
+      "wire_or_retire_target_unlabelled is advisory only — decide.py must never read or gate a dispatch on it",
+    );
+  });
+
+  test("the key is emitted on every branch so decide.py never sees it missing", () => {
+    // The four emission sites: healthy try:, python except:, shell
+    // invocation-failure (|| { ... }), and the outer degraded else. A missing
+    // key on any branch is an invisible zero-set — the exact defect this signal
+    // exists to surface, so it must not itself fall victim to it.
+    assert.equal(
+      src.match(/wire_or_retire_target_unlabelled=/g)?.length,
+      4,
+      "expected 4 emission sites: healthy, python-except, python-invocation-failure, and degraded",
+    );
+  });
+
+  test("a degraded/unreachable board read emits 0, never a spurious non-zero", () => {
+    // The outer else branch (TARGET_BOARD_ISSUES_JSON empty/unreachable) fails
+    // closed to 0 — the suppressing direction, so a transient gh outage never
+    // raises a false alarm. Mirrors every sibling target_* count in that branch.
+    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    assert.match(
+      degradedBranch.slice(0, 700),
+      /echo "wire_or_retire_target_unlabelled=0"/,
+      "the unreachable-read branch must emit wire_or_retire_target_unlabelled=0, not omit it or emit non-zero",
+    );
+  });
+});
