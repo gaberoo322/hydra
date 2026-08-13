@@ -57,6 +57,7 @@ function outcome(
 ) {
   return {
     cycleId: overrides.cycleId ?? "c",
+    anchorReference: null,
     runIdPrefix: null,
     turn: null,
     className: "cleanup_orch",
@@ -361,6 +362,7 @@ describe("cascade-telemetry — record/read round-trip (Redis)", () => {
     // + a merged terminal outcome (the #2942 token plane, invariant 7 + 8).
     const put = await putDispatchOutcome({
       cycleId: OUTCOME_CID,
+      anchorReference: null,
       runIdPrefix: "deadbeef",
       turn: 3,
       className: "cleanup_orch",

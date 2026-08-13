@@ -71,6 +71,7 @@ function familyBreakdown(family: ModelFamily, total: number): Record<ModelFamily
 function rec(over: Partial<DispatchOutcomeRecord> = {}): DispatchOutcomeRecord {
   return {
     cycleId: "worktree-agent-277e4476-t4-dev_orch",
+    anchorReference: null,
     runIdPrefix: "277e4476",
     turn: 4,
     className: "dev_orch",
