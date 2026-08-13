@@ -814,6 +814,247 @@ run_skill_mirror_drift() {
 }
 
 # =============================================================================
+# ## LAUNCH FLOW
+# =============================================================================
+#
+# Launch-flow DETECTION block (issue #3847, epic #3844; decided on maps
+# #3807/#3809/#3812/#3813/#3814). The watchdog owns this — NOT an in-
+# orchestrator chore — for two reasons established on map #3807: a chore
+# structurally CANNOT observe "the launcher is unreachable or hanging"
+# (housekeeping.sh exits 0 by design with no OnFailure=, so a 30s curl
+# timeout produced a green systemd unit and a skipped pass), and the hourly
+# chore reads once per four 15-minute launcher ticks so it cannot implement
+# the reset semantics at all. The watchdog's 2-minute tick reads ~7x per
+# pace-gate write.
+#
+# What it watches
+# ---------------
+# scripts/autopilot/pace-gate.sh writes ONE Redis hash per ~15-min tick —
+# hydra:autopilot:pace-gate:last-tick (owned in TypeScript by src/redis/
+# launch-flow.ts's PACE_GATE_LAST_TICK_KEY, written by pace-gate.sh's
+# record_tick(), landed in #3845) — carrying the tick's reason, coarse class,
+# at (epoch-ms), and latency_ms. This block reads EXACTLY that one hash per
+# tick (no new HTTP probe, no second /api/usage/eligibility consumer — #3813
+# Decision 3) and asks: has a defective / quota / pause signal, or a slow
+# probe, been SUSTAINED past its threshold?
+#
+# Signals (reason → signal membership; canonical taxonomy owned in TS by
+# classifyLaunchSignal / LAUNCH_FLOW_REASON_SIGNAL, drift-guarded by
+# test/watchdog-launch-flow.test.mts):
+#   fail-safe   — curl-missing, jq-missing, eligibility-unreachable,
+#                 eligibility-unparseable, allow-invalid (5 exits). 2h.
+#   meter-dark  — meter-unavailable. 2h (defective character like fail-safe,
+#                 but a DISTINCT signal — #3814 split it out of generic
+#                 fail-safe — so a flip between meter-dark and a fail-safe
+#                 exit resets, different root cause).
+#   quota       — session-blocked, emergency-stop, weekly-emergency-stop
+#                 (unified into ONE class so a stretch flipping between them
+#                 does not spuriously reset). 4h.
+#   pause       — paused (forgotten operator pause). 24h.
+#   latency     — the eligibility probe's latency_ms > 1s budget, INDEPENDENT
+#                 of reason (a slow-but-successful eligible-launch tick still
+#                 has a latency worth checking). Breach 1h, STRICTLY before
+#                 the 2h fail-safe streak so it stays the LEADING indicator
+#                 (#3813: if either number ever changes, re-check this
+#                 ordering — latency leads, fail-safe lags).
+#   (healthy)   — every other reason (launch, already-running, deliberate
+#                 skips other than quota/pause) = endpoint readable, not
+#                 defective. Clears every reason-keyed streak (recovery).
+#
+# Thresholds are fitted to a measured bimodal gap over 764 ticks (fail-safe
+# noise tops out at 1.5h, real outage 6.5–9.75h; routine quota cycling tops
+# out at 3.5h, real blocks start at 8.25h) and are DURATION-based (epoch-ms
+# delta, NOT tick-count) so a timer-cadence change cannot silently re-time
+# them (#3809 Decision 4).
+#
+# State — ten Redis keys (5 signals × {since, fired}; key templates owned in
+# TS by launchFlowSinceKey / launchFlowFiredKey, drift-guarded by the test):
+#   hydra:autopilot:launch-flow:since:<signal>  epoch-ms the streak began
+#       (SET NX: locked on the first qualifying tick, a no-op after).
+#   hydra:autopilot:launch-flow:fired:<signal>  set ONCE per streak, the
+#       instant now-since >= threshold; cleared on recovery so a later streak
+#       fires fresh. Idempotent (mirrors wiring-liveness-dark-outcomes.ts).
+#
+# Reset rule is UNIFORM across all five signals: for signal S, membership true
+# → extend (SET NX since; fire the WARNING exactly once when now-since >=
+# threshold AND no fired marker yet); membership false → DEL both since+fired
+# (stateless recovery). This block is the SOLE writer (SET NX / DEL via
+# redis-cli); TypeScript owns only the key NAMES.
+#
+# DETECTION ONLY. This block does NOT call Telegram, POST a dashboard alert,
+# or touch src/api/alerts.ts (out of scope on #3847). Its only externally-
+# observable effect beyond the ten keys is a per-signal WARNING log at the
+# exact tick a fired marker transitions absent→present — the hook #3848
+# (gamma, blocked on this issue) extends with a real delivery call.
+#
+# Fail-safe (HARD): this block NEVER throws and NEVER returns non-zero (matches
+# the watchdog's per-block contract, set -euo pipefail notwithstanding). Any
+# redis-cli/docker failure or an empty/absent last-tick hash logs a
+# distinguishable WARN and returns WITHOUT mutating any anchor or fired marker
+# — it must NEVER clear on a read failure (clearing on failure would falsely
+# erase an in-progress streak, a worse outcome than leaving stale state one
+# extra tick).
+#
+# Testability hooks (off-by-default; pinned by test/watchdog-launch-flow.test.mts):
+#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT  redis-cli target (default: docker exec
+#                                        hydra-redis-1). Any non-"docker" host
+#                                        calls redis-cli -h/-p directly, so the
+#                                        test points at a known-clean DB.
+#   HYDRA_WATCHDOG_LAUNCH_NOW_MS         Inject `now` (epoch-ms) so threshold
+#                                        crossings are deterministic with zero
+#                                        real-time waits.
+#   HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS       (default 7200  = 2h)
+#   HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS     (default 7200  = 2h)
+#   HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS          (default 14400 = 4h)
+#   HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS          (default 86400 = 24h)
+#   HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS      (default 1000  = 1s)
+#   HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS (default 3600  = 1h)
+
+run_launch_flow() {
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  # Single source of truth for this literal is src/redis/launch-flow.ts's
+  # PACE_GATE_LAST_TICK_KEY, cross-checked by test/watchdog-launch-flow.test.mts
+  # (the watchdog is the SECOND bash reader of this key after pace-gate.sh).
+  local LAST_TICK_KEY="hydra:autopilot:pace-gate:last-tick"
+  # Key-template prefix — owned by src/redis/launch-flow.ts's
+  # LAUNCH_FLOW_KEY_PREFIX / launchFlowSinceKey / launchFlowFiredKey; the test
+  # asserts the bash template and the TS builder emit identical strings.
+  local LF_KEY_PREFIX="hydra:autopilot:launch-flow"
+
+  # Thresholds (env in SECONDS, the AUTODEPLOY_GRACE_SECONDS precedent; the
+  # delta math is epoch-MS, so multiply by 1000). Sanitize each to its
+  # documented default on a non-numeric injection.
+  local FAILSAFE_S="${HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS:-7200}"
+  local METER_DARK_S="${HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS:-7200}"
+  local QUOTA_S="${HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS:-14400}"
+  local PAUSE_S="${HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS:-86400}"
+  local LATENCY_BUDGET_MS="${HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS:-1000}"
+  local LATENCY_BREACH_S="${HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS:-3600}"
+  [[ "$FAILSAFE_S" =~ ^[0-9]+$ ]] || FAILSAFE_S=7200
+  [[ "$METER_DARK_S" =~ ^[0-9]+$ ]] || METER_DARK_S=7200
+  [[ "$QUOTA_S" =~ ^[0-9]+$ ]] || QUOTA_S=14400
+  [[ "$PAUSE_S" =~ ^[0-9]+$ ]] || PAUSE_S=86400
+  [[ "$LATENCY_BUDGET_MS" =~ ^[0-9]+$ ]] || LATENCY_BUDGET_MS=1000
+  [[ "$LATENCY_BREACH_S" =~ ^[0-9]+$ ]] || LATENCY_BREACH_S=3600
+  local FAILSAFE_MS=$((FAILSAFE_S * 1000))
+  local METER_DARK_MS=$((METER_DARK_S * 1000))
+  local QUOTA_MS=$((QUOTA_S * 1000))
+  local PAUSE_MS=$((PAUSE_S * 1000))
+  local LATENCY_BREACH_MS=$((LATENCY_BREACH_S * 1000))
+
+  log() {
+    echo "hydra-launch-flow-watchdog: $*"
+  }
+
+  # rc_write — fire-and-forget redis mutation; never fails the block.
+  rc_write() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw "$@" >/dev/null 2>&1 || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" >/dev/null 2>&1 || true
+    fi
+  }
+  # rc_read — capture redis output ("" on any failure).
+  rc_read() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw "$@" 2>/dev/null || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" 2>/dev/null || true
+    fi
+  }
+
+  lf_since_key() { printf '%s:since:%s\n' "$LF_KEY_PREFIX" "$1"; }
+  lf_fired_key() { printf '%s:fired:%s\n' "$LF_KEY_PREFIX" "$1"; }
+
+  # track_signal SIGNAL THRESHOLD_MS IS_MEMBER — the UNIFORM streak rule. The
+  # caller's locals `now_ms` and `reason` are visible via bash dynamic scoping.
+  # IS_MEMBER=1 extends: SET NX since (locked on the first qualifying tick,
+  # no-op after), then fire the WARNING exactly once when now-since >=
+  # threshold AND no fired marker yet. IS_MEMBER=0 clears: DEL both since+fired
+  # (stateless recovery, idempotent). Always returns 0.
+  track_signal() {
+    local sig="$1" thr_ms="$2" is_member="$3"
+    local since_key fired_key
+    since_key="$(lf_since_key "$sig")"
+    fired_key="$(lf_fired_key "$sig")"
+    if [[ "$is_member" == "1" ]]; then
+      rc_write SET "$since_key" "$now_ms" NX
+      local since dur
+      since="$(rc_read GET "$since_key" | tr -dc '0-9')"
+      [[ "$since" =~ ^[0-9]+$ ]] || since="$now_ms"
+      dur=$((now_ms - since))
+      if (( dur < 0 )); then dur=0; fi
+      if (( dur >= thr_ms )); then
+        if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" != "1" ]]; then
+          log "WARNING LAUNCH FLOW — signal '$sig' sustained ${dur}ms >= ${thr_ms}ms threshold (reason=${reason:-n/a}); see epic #3844"
+          rc_write SET "$fired_key" 1
+        fi
+      else
+        log "launch-flow signal '$sig' streak ${dur}ms (< ${thr_ms}ms threshold); not firing"
+      fi
+    else
+      # Membership false — stateless recovery: DEL both (idempotent).
+      rc_write DEL "$since_key" "$fired_key"
+    fi
+    return 0
+  }
+
+  # --- Read the ONE upstream fact: the last-tick hash (INV-1) ---
+  local tick_raw reason latency_ms
+  tick_raw="$(rc_read HGETALL "$LAST_TICK_KEY")"
+  reason="$(printf '%s\n' "$tick_raw" | awk 'prev=="reason"{print; exit} {prev=$0}')"
+  latency_ms="$(printf '%s\n' "$tick_raw" | awk 'prev=="latency_ms"{print; exit} {prev=$0}')"
+
+  if [[ -z "$reason" ]]; then
+    # Empty/absent last-tick OR redis unreadable. Distinguishable WARN, and
+    # MUST NOT mutate any anchor/fired — clearing on a read failure would
+    # falsely erase an in-progress streak.
+    log "WARN no pace-gate last-tick record (redis unreadable or key absent) — leaving all launch-flow anchors untouched, no alarm"
+    return 0
+  fi
+
+  # --- Resolve `now` (epoch-ms; injectable for deterministic tests) ---
+  local now_ms
+  if [[ -n "${HYDRA_WATCHDOG_LAUNCH_NOW_MS+x}" ]]; then
+    now_ms="$HYDRA_WATCHDOG_LAUNCH_NOW_MS"
+  else
+    now_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+  fi
+  [[ "$now_ms" =~ ^[0-9]+$ ]] || now_ms=0
+
+  # --- Reason → signal membership (INV-3; mirrors TS classifyLaunchSignal) ---
+  local is_failsafe=0 is_meterdark=0 is_quota=0 is_pause=0
+  case "$reason" in
+    curl-missing|jq-missing|eligibility-unreachable|eligibility-unparseable|allow-invalid)
+      is_failsafe=1 ;;
+    meter-unavailable)
+      is_meterdark=1 ;;
+    session-blocked|emergency-stop|weekly-emergency-stop)
+      is_quota=1 ;;
+    paused)
+      is_pause=1 ;;
+  esac
+
+  # --- Latency membership (INDEPENDENT of reason; INV-5) ---
+  # Over-budget (present AND > budget) extends; absent OR <= budget clears.
+  local is_lat_over=0
+  if [[ "$latency_ms" =~ ^[0-9]+$ ]] && (( latency_ms > LATENCY_BUDGET_MS )); then
+    is_lat_over=1
+  fi
+
+  # --- Apply the uniform streak rule to all five signals ---
+  track_signal fail-safe  "$FAILSAFE_MS"       "$is_failsafe"
+  track_signal meter-dark "$METER_DARK_MS"     "$is_meterdark"
+  track_signal quota      "$QUOTA_MS"          "$is_quota"
+  track_signal pause      "$PAUSE_MS"          "$is_pause"
+  track_signal latency    "$LATENCY_BREACH_MS" "$is_lat_over"
+
+  log "launch-flow tick processed (reason=$reason, latency_ms=${latency_ms:-none}, now_ms=$now_ms)"
+  return 0
+}
+
+# =============================================================================
 # Entry point — run all blocks on every tick ONLY when the script is executed
 # directly, not when it is sourced. test/watchdog-pending-work.test.mts sources
 # this file to exercise read_pending_work in isolation (without faking the
@@ -826,5 +1067,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_autopilot_wedge
   run_deploy_drift
   run_skill_mirror_drift
+  run_launch_flow
   exit 0
 fi
