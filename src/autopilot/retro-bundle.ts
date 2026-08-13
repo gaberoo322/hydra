@@ -64,6 +64,8 @@ import { getCycleMetrics } from "../redis/cycle-metrics.ts";
 // through the per-dispatch getCycleHash join wherever a record exists.
 import {
   getDispatchOutcomesForRun,
+  listDispatchOutcomes,
+  DISPATCH_OUTCOME_TTL_SECONDS,
   type DispatchOutcomeRecord,
   type DispatchOutcomeListResult,
 } from "../redis/dispatch-outcomes.ts";
@@ -71,6 +73,16 @@ import { getAllRecommendations } from "../redis/recommendations.ts";
 import { loadAnchorReflections } from "../reflections/per-anchor.ts";
 import { listFrictionPatterns } from "../pattern-memory/index.ts";
 import { getAutopilotHealth } from "../aggregators/autopilot-health.ts";
+// Issue #3972: the pure cross-run trend fold — the "which class burns tokens
+// without shipping" leaf. Pure (no Redis runtime import); the rolling-window
+// read stays in the `dispatch-outcomes.ts` seam, exactly the split the issue
+// names (mirroring cascade-routing.ts / cascade-telemetry.ts).
+import {
+  rollupCrossRunTrend,
+  emptyCrossRunTrend,
+  type CrossRunTrend,
+  type CrossRunWindow,
+} from "../aggregators/cross-run-trend.ts";
 import type { StuckSignal } from "./run-health.ts";
 import type { MemoryPattern } from "../pattern-memory/index.ts";
 // Issue #3628: the never-throw-with-error-provenance sub-source wrapper +
@@ -149,6 +161,17 @@ export interface RetroBundle {
   recommendations: unknown[];
   /** Friction-pattern store snapshot across the known dispatch skills. */
   frictionPatterns: MemoryPattern[];
+  /**
+   * The cross-run trend (issue #3972) — an AMBIENT member, assembled regardless
+   * of `runFound` exactly like `stuckSignals`/`frictionPatterns`. Folds the
+   * rolling window of dispatch-outcome records by class to answer "which class
+   * burns tokens without shipping". A failed read yields a valid empty trend
+   * (never-throw) plus an entry in `errors[]`; an empty window is the normal
+   * zero-record trend. `hydra-retro` keeps sole ownership of the emit path,
+   * caps, and recurrence gate — this is an INPUT the bundle carries, never an
+   * actor that dispatches or writes.
+   */
+  crossRunTrend: CrossRunTrend;
   /** Sub-sources that failed to load. Empty on a fully-clean assembly. */
   errors: SafeSourceError[];
 }
@@ -169,6 +192,15 @@ export interface RetroBundleDeps {
   readAnchorReflections?: typeof loadAnchorReflections;
   readFrictionPatterns?: typeof listFrictionPatterns;
   readStuckSignals?: typeof getAutopilotHealth;
+  /**
+   * Issue #3972: the cross-run rolling-window reader that feeds the
+   * `crossRunTrend` fold. Defaults to `listDispatchOutcomes` (the cross-run
+   * seam in `redis/dispatch-outcomes.ts`, already consumed by
+   * `redis/cascade-telemetry.ts`). Override to inject fixture records in tests.
+   * The assembler calls it with `sinceMs = now - DISPATCH_OUTCOME_TTL_SECONDS`
+   * so the fold never asks for TTL-reaped records.
+   */
+  readCrossRunTrend?: typeof listDispatchOutcomes;
   /**
    * Skills whose friction stores are folded into the bundle. Defaults to the
    * code-writing + verification dispatch skills the autopilot runs.
@@ -380,6 +412,40 @@ export async function assembleRetroBundle(
     for (const p of patterns) frictionPatterns.push(p);
   }
 
+  // 8. Cross-run trend (issue #3972) — AMBIENT, assembled regardless of runFound
+  //    exactly like stuckSignals (5) and frictionPatterns (7): a cross-run trend
+  //    has no dependency on any single run's existence, so it still populates
+  //    when runFound is false. The window is `[now - TTL, now]` so the fold
+  //    never asks listDispatchOutcomes for TTL-reaped records. The read stays in
+  //    the seam; the numeric fold is the pure `rollupCrossRunTrend` leaf. A
+  //    thrown read is caught by safeSource (→ errors[] + empty trend); a
+  //    structured ok:false is handled here (→ errors[] + empty trend). Either
+  //    way never-throw and an empty window is the normal zero-record trend.
+  const nowMs = (deps.now ?? new Date()).getTime();
+  const crossRunWindow: CrossRunWindow = {
+    windowEndMs: nowMs,
+    windowStartMs: nowMs - DISPATCH_OUTCOME_TTL_SECONDS * 1000,
+  };
+  const readCrossRunTrend = deps.readCrossRunTrend ?? listDispatchOutcomes;
+  const trendResult = await safeSource<DispatchOutcomeListResult>(
+    "cross-run-trend",
+    errors,
+    { ok: true as const, records: [] },
+    () => readCrossRunTrend({ sinceMs: crossRunWindow.windowStartMs }),
+  );
+  let crossRunRecords: DispatchOutcomeRecord[] = [];
+  if (trendResult.ok === true) {
+    crossRunRecords = trendResult.records;
+  } else {
+    // A structured ok:false (the seam surfaced a Redis failure) — record it
+    // like any other failed sub-source; the empty-window trend still ships.
+    errors.push({ source: "cross-run-trend", detail: trendResult.error });
+  }
+  const crossRunTrend =
+    crossRunRecords.length > 0
+      ? rollupCrossRunTrend(crossRunRecords, crossRunWindow)
+      : emptyCrossRunTrend(crossRunWindow);
+
   return {
     run_id: runId,
     generatedAt,
@@ -392,6 +458,7 @@ export async function assembleRetroBundle(
     stuckSignals,
     recommendations,
     frictionPatterns,
+    crossRunTrend,
     errors,
   };
 }
