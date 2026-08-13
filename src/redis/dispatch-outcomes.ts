@@ -68,6 +68,19 @@ export interface DispatchOutcomeRecord {
   /** The cycle id the record is keyed on (the autopilot dispatch task_id). */
   cycleId: string;
   /**
+   * The dispatch's anchor reference (e.g. "issue-3971") — the final rung of the
+   * attribution ladder that lets a token be attributed to a GitHub issue. Stamped
+   * once at first write from CycleRecordBody.anchorReference, which reap.py
+   * already forwards as the positional anchor_ref (issue #2012, the per-cycle
+   * anchor it resolves before its FIRST cycle-record POST). Null when the
+   * dispatch had no resolvable anchor — dark-tolerant: never a fabricated or
+   * guessed value, mirroring the #2822 never-guess convention already governing
+   * runIdPrefix. Write-once and identity-adjacent: like runIdPrefix/turn/
+   * className it is NOT part of DispatchOutcomePatch (no completed→merged
+   * enrichment fills it in later). Issue #3971.
+   */
+  anchorReference: string | null;
+  /**
    * First 8 hex chars of the DISPATCHING run's run_id, parsed from the
    * cycleId (`worktree-agent-<prefix>-t<N>-<class>`). Null when unparseable.
    * The cycleId-embedded prefix — not the currently-active run — attributes
@@ -186,6 +199,10 @@ function encodeRecord(record: DispatchOutcomeRecord): Record<string, string> {
     outcome: record.outcome,
     recordedAt: String(record.recordedAt),
   };
+  // Issue #3971: anchorReference is omitted when null — the same dark-tolerant
+  // null-omission idiom every other nullable field below follows, so a null
+  // anchor round-trips as an absent hash field (never the literal "null"/"").
+  if (record.anchorReference !== null) fields.anchorReference = record.anchorReference;
   if (record.runIdPrefix !== null) fields.runIdPrefix = record.runIdPrefix;
   if (record.turn !== null) fields.turn = String(record.turn);
   if (record.className !== null) fields.class = record.className;
@@ -217,6 +234,7 @@ function decodeRecord(
   if (!hash || Object.keys(hash).length === 0) return null;
   return {
     cycleId,
+    anchorReference: hash.anchorReference ?? null,
     runIdPrefix: hash.runIdPrefix ?? null,
     turn: intOrNull(hash.turn),
     className: hash.class ?? null,
