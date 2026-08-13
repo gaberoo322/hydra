@@ -168,6 +168,45 @@ else
   }'
 fi
 
+# Orch needs-triage item-number set (issue #3939 — the orchestrator mirror of
+# the Target-side `target_needs_triage_items` seam from #3729).
+#
+# `needs_triage` above (and the `needs_triage_orch` boolean the playbook derives
+# from `needs_triage > 0`) is a COARSE presence gate with no per-item eligibility.
+# A needs-triage issue that is a STANDING re-check trigger — one whose own
+# acceptance criteria say "re-triage forward when condition X is met" (e.g. #3921,
+# "re-run hydra-discover Tier-3 cost characterization") — parks in the lane
+# indefinitely: sweep correctly declines to route it, the lane stays non-empty,
+# and sweep_orch re-fired every 900s (its class cooldown) to re-make the
+# identical no-op decision. Observed in autopilot run 3ce9e61a (2026-08-10):
+# sweep_orch fired 4× in ~55 min, ~50-75K tokens per no-op fire = ~200-300K
+# tokens/hour of pure churn (16-24% of the default 10M budget over an 8h run).
+#
+# This emits the CURRENT needs-triage item-number set as a fresh per-turn fact so
+# decide.py's per-item verdict-stability guard can stamp each item independently
+# and dead-arm only the items sweep just examined — not the whole lane. It is an
+# INDEPENDENT, minimal orch-only block, NOT shared with the target_needs_triage_
+# items block below (that block bundles unrelated target-only computations —
+# cleanup-scan open count, wire-or-retire triage count, design-qa saturation — in
+# the same python heredoc; forking a shared shell helper across the two repos
+# would tangle them, INV-11).
+#
+# collect-state.sh stays STATELESS (no state.json read — INV-8): it only
+# enumerates the current set, the same role it already plays for the
+# `needs_triage` COUNT above. The enumeration is a direct `gh issue list` scoped
+# to the needs-triage label — NOT an extension of /api/autopilot/board-state
+# (which returns aggregate COUNTS only, no item numbers, on both its healthy and
+# degraded orch-board-read paths), so the item set is available regardless of
+# which board-state branch above served the count. Numbers are space-separated,
+# sorted ascending for a deterministic emit (decide.py parses them into a set, so
+# order is not load-bearing). Best-effort: any failure emits an EMPTY value,
+# which decide.py treats as absent → fail-open on the coarse count alone (never
+# re-dead-arm the sweep — the #3709 defect class, INV-9).
+echo -n "orch_needs_triage_items="
+gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
+  --limit "$GH_ISSUE_LIST_LIMIT" --json number \
+  --jq 'map(.number) | sort | map(tostring) | join(" ")' 2>/dev/null || echo ""
+
 # Target-side issue board — GitHub-derived Target dispatch signals (issue #3435,
 # spec #3432, ADR-0031).
 #
