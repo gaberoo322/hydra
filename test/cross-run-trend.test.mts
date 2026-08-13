@@ -30,6 +30,7 @@ function rec(over: Partial<DispatchOutcomeRecord>): DispatchOutcomeRecord {
     escalationAttempt: null,
     escalatedModel: null,
     recordedAt: 5_000,
+    anchorReference: null,
     ...over,
   };
 }

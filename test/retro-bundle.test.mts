@@ -1711,12 +1711,14 @@ describe("assembleRetroBundle — durable dispatch-outcome records (#2942)", () 
               className: "dev_orch", skill: "hydra-dev",
               outcome: "completed", tokens: 300, durationMs: 1000,
               escalationAttempt: null, escalatedModel: null, recordedAt: 5000,
+              anchorReference: null,
             },
             {
               cycleId: "c2", runIdPrefix: "abc12345", turn: 2,
               className: "dev_orch", skill: "hydra-dev",
               outcome: "failed", tokens: 900, durationMs: 2000,
               escalationAttempt: null, escalatedModel: null, recordedAt: 6000,
+              anchorReference: null,
             },
           ],
         };
