@@ -1271,12 +1271,20 @@ def run_hardcap() -> int:
         return 0
     hard = s["limits"]["subagent_hard_max_tokens"]
     soft = s["limits"]["subagent_max_tokens"]
-    # (class, skill, partial_tokens, task_id, anchor) — capture task_id AND the
-    # anchor before we null the slot so the cycle-record post can dedup on the
-    # task_id (issue #430) and the failure reflection-record can key on the
-    # anchor (issue #1820). The anchor is the only per-cycle reference that
+    # (class, skill, partial_tokens, task_id, anchor, branch) — capture task_id
+    # AND the anchor before we null the slot so the cycle-record post can dedup
+    # on the task_id (issue #430) and the failure reflection-record can key on
+    # the anchor (issue #1820). The anchor is the only per-cycle reference that
     # survives to reap, and the slot is about to be cleared.
-    runaways: list[tuple[str, str, int, str, str | None]] = []
+    # Issue #3970 (INV-2): also capture the slot's synthesised worktree branch
+    # before nulling — extending run_completion's #3391 branch-capture-before-
+    # null pattern to this terminal-failure site. A hard-cap trip NEVER opens a
+    # PR, so it never reaches the merge-watch enrichment; keying its failed
+    # cycle-record on the branch (when the slot carried one) is therefore
+    # twin-safe (INV-3) and lands it on the same worktree-branch cycleId form
+    # the happy path uses, instead of unconditionally defaulting to the bare
+    # task_id.
+    runaways: list[tuple[str, str, int, str, str | None, str | None]] = []
     for cls, slot in list(s["slots"].items()):
         if slot is None:
             continue
@@ -1288,12 +1296,13 @@ def run_hardcap() -> int:
             # the planning-time deposit (keyed on task_id) so the hard-cap
             # reflection fire below is not a guaranteed no-op.
             anchor_ref = slot.get("anchor") or _read_anchor_deposit(task_id)
-            runaways.append((cls, slot.get("skill", "?"), partial, task_id, anchor_ref))
+            branch = slot.get("branch")
+            runaways.append((cls, slot.get("skill", "?"), partial, task_id, anchor_ref, branch))
             s["slots"][cls] = None
             if cls not in s.get("burned_classes", []):
                 s.setdefault("burned_classes", []).append(cls)
     _save_state(s)
-    for cls, skill, tokens, task_id, anchor_ref in runaways:
+    for cls, skill, tokens, task_id, anchor_ref, branch in runaways:
         title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
         body = (
             f"Autopilot abandoned a `{cls}` slot running `{skill}` at "
@@ -1314,7 +1323,15 @@ def run_hardcap() -> int:
         # cycles-failed counter advances and discover/digest see the signal.
         # task_id was captured before the slot was cleared so dedup holds
         # across re-runs of the hard-cap pass.
-        _fire_cycle_record(task_id, skill, "failed", tokens)
+        # Issue #3970: forward the captured slot branch so the failed
+        # cycle-record keys on the worktree-branch cycleId form when the slot
+        # carried one (the happy-path form), not the bare task_id. Empty (a
+        # branch-less slot, or one whose branch was never written at occupy
+        # time — the documented dominant gap, deferred to a fast-follow) →
+        # `_fire_cycle_record`'s `effective_cycle_id = worktree_branch or
+        # task_id` keeps keying on task_id byte-for-byte with prior behaviour
+        # (INV-4).
+        _fire_cycle_record(task_id, skill, "failed", tokens, worktree_branch=branch or "")
         # Issue #1820: a hard-cap trip is an unambiguous non-merged failure —
         # fire a reflection so the next attempt on this anchor reads why the
         # prior one was abandoned. Best-effort, keyed on the anchor captured
@@ -1742,6 +1759,17 @@ def run_grill_crash(task_id: str) -> int:
     on cycleId).
     """
     s = _load_state()
+    # Issue #3970 (INV-2): a grill crash is always for the design_concept_orch
+    # slot (see docstring). Capture that slot's synthesised worktree branch so
+    # the failed cycle-record keys on the same worktree-branch cycleId form the
+    # happy path uses — extending run_completion's #3391 branch-capture pattern
+    # to this terminal-failure site. A grill crash NEVER opens a PR, so it
+    # never reaches the merge-watch enrichment; twin-safe (INV-3). An
+    # absent/branch-less slot → empty → `_fire_cycle_record`'s
+    # `worktree_branch or task_id` keeps keying on the bare task_id byte-for-
+    # byte with the prior behaviour (INV-4).
+    grill_slot = (s.get("slots") or {}).get("design_concept_orch") if s else None
+    branch = grill_slot.get("branch") if isinstance(grill_slot, dict) else None
     if s is not None:
         reaped = _ensure_reaped_list(s)
         if task_id in reaped:
@@ -1752,7 +1780,7 @@ def run_grill_crash(task_id: str) -> int:
         reaped.append(task_id)
         s["reaped_task_ids"] = _bound_reaped(reaped)
         _save_state(s)
-    _fire_cycle_record(task_id, "hydra-grill", "failed", 0)
+    _fire_cycle_record(task_id, "hydra-grill", "failed", 0, worktree_branch=branch or "")
     line = f"grill_crash task_id={task_id}"
     print(f"[autopilot] {line}")
     _append_log(line)

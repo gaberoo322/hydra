@@ -148,6 +148,51 @@ describe("writeDispatchOutcomeRecord (issue #3323 leaf)", () => {
     assert.equal(rec.outcome, "completed");
   });
 
+  test("issue #3970 — a FAILED terminal-failure record under a worktree-branch cycleId is joinable (criterion 1)", async () => {
+    // The two terminal-failure reap sites (run_hardcap runaway-abandon,
+    // run_grill_crash) now thread the slot's worktree branch into
+    // _fire_cycle_record, so their failed cycle-record keys on the SAME
+    // worktree-branch cycleId form the happy path uses. Pin the read side:
+    // such a cycleId — even with status 'failed' — parses to a full
+    // attribution join, so the failed dispatch lands in its run's outcome
+    // index instead of an un-joinable bare-task_id record.
+    const store = newStore();
+    const failedBranchCycleId = "worktree-agent-a1b2c3d4-t7-design_concept_orch";
+    await writeDispatchOutcomeRecord(
+      { tokens: 0 } as any,
+      failedBranchCycleId,
+      "failed",
+      makeDeps(store),
+    );
+    const rec = store.records.get(failedBranchCycleId)!;
+    assert.ok(rec, "the record keyed on the branch cycleId, not the task_id");
+    assert.equal(rec.runIdPrefix, "a1b2c3d4");
+    assert.equal(rec.turn, 7);
+    assert.equal(rec.className, "design_concept_orch");
+    assert.equal(rec.skill, "hydra-grill"); // taxonomy join — the class that crashed
+    assert.equal(rec.outcome, "failed");
+  });
+
+  test("issue #3970 — a bare-hex task_id fallback records null attribution, never drops (criterion 2)", async () => {
+    // INV-4: when a slot carries no worktree branch, _fire_cycle_record's
+    // `effective_cycle_id = worktree_branch or task_id` keeps keying on the
+    // bare task_id. A bare-hex task_id (the actual .task.id form, e.g.
+    // "a8c23198bca2f0d59" — NOT a UUID) carries no `-t<N>-<class>` fence, so it
+    // must record truthful null attribution without being dropped. This
+    // complements the UUID case above with the bare-hex form the fallback
+    // actually produces on the worktree paths this slice touches.
+    const store = newStore();
+    const bareHexTaskId = "a8c23198bca2f0d59";
+    await writeDispatchOutcomeRecord({} as any, bareHexTaskId, "failed", makeDeps(store));
+    const rec = store.records.get(bareHexTaskId)!;
+    assert.ok(rec, "the fallback record was written, not dropped");
+    assert.equal(rec.runIdPrefix, null);
+    assert.equal(rec.turn, null);
+    assert.equal(rec.className, null);
+    assert.equal(rec.skill, null);
+    assert.equal(rec.outcome, "failed");
+  });
+
   test("threads cascade-escalation provenance (issue #3284)", async () => {
     const store = newStore();
     await writeDispatchOutcomeRecord(
