@@ -16,8 +16,9 @@
  * the redis/cycle-tracking.ts accessors read:
  *   - active pointer: hydra:cycle:active
  *   - per-cycle hash: hydra:cycle:{id}
- * listCycleIds only enumerates ids under the `hydra:cycle:cycle-*` pattern, so
- * history fixtures use `cycle-`-prefixed ids.
+ *   - cycle index: hydra:cycle:index (ZSET, member = cycleId, score = epoch)
+ * listCycleIds enumerates ids from the hydra:cycle:index ZSET (issue #3997), so
+ * history fixtures ZADD each cycle into the index alongside its hash.
  *
  * NEW top-level describe with its own before/after Redis lifecycle (CLAUDE.md
  * authoring rule); per-case reset lives in beforeEach so no case leaks state
@@ -33,6 +34,7 @@ const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
 
 const ACTIVE_KEY = "hydra:cycle:active";
+const INDEX_KEY = "hydra:cycle:index";
 const cycleKey = (id: string) => `hydra:cycle:${id}`;
 
 let redis: any;
@@ -155,16 +157,20 @@ describe("cycle.getCycleHistory (#3238)", () => {
 
   test("skips a cycle hash that has no status field", async () => {
     await redis.hset(cycleKey("cycle-0001"), "total", "2"); // no status → skipped
+    await redis.zadd(INDEX_KEY, 1, "cycle-0001"); // enumerated, then skipped by the !status guard
     const history = await getCycleHistory();
     assert.deepEqual(history, []);
   });
 
   test("returns cycle records newest-first with parsed numeric fields", async () => {
-    // listCycleIds sorts ids lexically-reverse (ISO-shaped ids ⇒ chronological
-    // reverse). cycle-0003 > cycle-0002 > cycle-0001, so newest-first is 0003.
+    // listCycleIds returns ids newest-first by index SCORE (completion epoch),
+    // not a lexical id sort (issue #3997). Seed scores so 0003 > 0002 > 0001.
     await redis.hset(cycleKey("cycle-0001"), { status: "completed", total: "4", completed: "4" });
     await redis.hset(cycleKey("cycle-0002"), { status: "failed", total: "2", failed: "2" });
     await redis.hset(cycleKey("cycle-0003"), { status: "merged", total: "1", completed: "1" });
+    await redis.zadd(INDEX_KEY, 1, "cycle-0001");
+    await redis.zadd(INDEX_KEY, 2, "cycle-0002");
+    await redis.zadd(INDEX_KEY, 3, "cycle-0003");
 
     const history = await getCycleHistory();
     assert.equal(history.length, 3);
@@ -180,16 +186,19 @@ describe("cycle.getCycleHistory (#3238)", () => {
     for (let i = 1; i <= 5; i++) {
       const id = `cycle-${String(i).padStart(4, "0")}`;
       await redis.hset(cycleKey(id), { status: "completed", total: String(i) });
+      await redis.zadd(INDEX_KEY, i, id); // score = i so ZREVRANGE is newest-first
     }
     const history = await getCycleHistory(2);
     assert.equal(history.length, 2, "must break after `limit` records");
-    // The two newest (lexical-reverse) ids.
+    // The two newest (highest-score) ids.
     assert.deepEqual(history.map((c) => c.id), ["cycle-0005", "cycle-0004"]);
   });
 
   test("excludes per-cycle sub-keys (:agents/:costs/:tasks) from the id enumeration", async () => {
     await redis.hset(cycleKey("cycle-0007"), { status: "completed", total: "1" });
-    // Sub-keys under the same id must not be enumerated as separate cycles.
+    // Only the bare cycle id is a ZSET member; sub-keys are never indexed by
+    // addCycleToIndex, so they cannot be enumerated as separate cycles.
+    await redis.zadd(INDEX_KEY, 7, "cycle-0007");
     await redis.hset(cycleKey("cycle-0007:agents"), { some: "agent" });
     await redis.hset(cycleKey("cycle-0007:costs"), { usd: "0" });
     await redis.hset(cycleKey("cycle-0007:tasks"), { t: "x" });

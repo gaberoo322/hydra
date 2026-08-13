@@ -1,0 +1,1 @@
+- fix: GET /api/cycle/history returns real cycle records again — listCycleIds now reads the hydra:cycle:index ZSET instead of a key-scan pattern that matched no live key (#3997)
