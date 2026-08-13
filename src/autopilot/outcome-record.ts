@@ -143,8 +143,20 @@ export async function writeDispatchOutcomeRecord(
       typeof body.escalatedModel === "string" && body.escalatedModel.length > 0
         ? body.escalatedModel
         : null;
+    // Issue #3971: the dispatch's anchor reference — the final rung of the
+    // attribution ladder (a token → a GitHub issue). reap.py already resolves
+    // and forwards the per-cycle anchor as the positional anchor_ref (issue
+    // #2012), which lands on CycleRecordBody.anchorReference, so the value is
+    // in hand at the write site. Same empty-string-as-null coercion as
+    // escalatedModel above: an absent/empty anchor records a truthful null,
+    // never a fabricated or guessed value (the #2822 never-guess convention).
+    const anchorReference =
+      typeof body.anchorReference === "string" && body.anchorReference.length > 0
+        ? body.anchorReference
+        : null;
     const result = await deps.dispatchOutcomes.put({
       cycleId,
+      anchorReference,
       runIdPrefix: parsed?.runIdPrefix ?? null,
       turn: parsed?.turn ?? null,
       className: parsed?.className ?? null,

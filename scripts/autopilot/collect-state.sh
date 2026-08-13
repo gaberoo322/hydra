@@ -1004,6 +1004,19 @@ try:
   open_scan = 0
   open_design_qa = 0
   wor_triage = 0
+  # wire_or_retire_target_unlabelled (issue #3973) — ADVISORY count of open
+  # `wire-or-retire` Target issues carrying NONE of the lifecycle labels
+  # (needs-triage / ready-for-agent / ready-for-human / blocked). Such an item
+  # is invisible to the resolver, which gates on `wire-or-retire` AND
+  # needs-triage (#3726): `wire-or-retire` + a non-lifecycle label like `bug`
+  # reads wire_or_retire_target_available=false while sitting in plain sight
+  # (the live gaberoo322/hydra-betting#760 case). Advisory only — mirrors
+  # target_board_signals_truncated: never gates dispatch and never relaxes the
+  # AND (would regress #3726, the reason #3747 was closed). ready-for-human and
+  # ready-for-agent are the resolver's own verdict outputs and are correctly
+  # excluded — counting either would re-arm the resolver forever, the exact
+  # hazard the AND predicate exists to prevent.
+  wor_unlabelled = 0
   for row in rows:
     labels = row.get('labels') if isinstance(row, dict) else None
     if not isinstance(labels, list):
@@ -1034,6 +1047,17 @@ try:
     # predicate is safe to rely on as an AND, not a footgun to relax to an OR.
     if wor_label in labels and in_triage:
       wor_triage += 1
+    # Independent accumulator (issue #3973): the same wire-or-retire item, but
+    # counted toward the advisory unlabelled total only when it carries NONE of
+    # the lifecycle labels. in_triage is needs-triage. Never relaxes the AND
+    # predicate above — this is a separate count, computed in the same loop.
+    if wor_label in labels and not (
+      in_triage
+      or 'ready-for-agent' in labels
+      or 'ready-for-human' in labels
+      or 'blocked' in labels
+    ):
+      wor_unlabelled += 1
   idle = (triage_count == 0 and queued_count == 0 and wq == 0)
   dqa_saturated = (open_design_qa > dqa_cap)
   # Advisory truncation flag (issue #3710): the read succeeded, but a row count
@@ -1052,6 +1076,8 @@ try:
   print('target_cleanup_board_saturated=' + ('true' if open_scan > cap else 'false'))
   print('wire_or_retire_target_triage=' + str(wor_triage))
   print('wire_or_retire_target_available=' + ('true' if wor_triage > 0 else 'false'))
+  # Advisory only — nothing in decide.py gates on it (issue #3973).
+  print('wire_or_retire_target_unlabelled=' + str(wor_unlabelled))
   print('design_qa_target_open=' + str(open_design_qa))
   print('design_qa_target_saturated=' + ('true' if dqa_saturated else 'false'))
   print('design_qa_target_due=' + ('false' if dqa_saturated else 'true'))
@@ -1063,10 +1089,11 @@ except Exception:
   print('target_cleanup_board_saturated=true')
   print('wire_or_retire_target_triage=0')
   print('wire_or_retire_target_available=false')
+  print('wire_or_retire_target_unlabelled=0')
   print('design_qa_target_open=0')
   print('design_qa_target_saturated=true')
   print('design_qa_target_due=false')
-" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_needs_triage_items="; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
+" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_needs_triage_items="; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "wire_or_retire_target_unlabelled=0"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
 else
   # Fail closed AND observable: the board read was unreachable/empty, so emit
   # the suppressing defaults (never dispatch a scan/resolver that cannot read
@@ -1081,6 +1108,7 @@ else
   echo "target_cleanup_board_saturated=true"
   echo "wire_or_retire_target_triage=0"
   echo "wire_or_retire_target_available=false"
+  echo "wire_or_retire_target_unlabelled=0"
   echo "design_qa_target_open=0"
   echo "design_qa_target_saturated=true"
   echo "design_qa_target_due=false"

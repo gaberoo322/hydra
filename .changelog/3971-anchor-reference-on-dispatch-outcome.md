@@ -1,0 +1,1 @@
+- feat: dispatch-outcome records carry the dispatch's anchor (issue) reference, completing the run/turn/class → issue attribution ladder (#3971)
