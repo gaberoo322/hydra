@@ -142,6 +142,16 @@ ships no change to `aggregateAdversarialReview()`, `classifyVerdict()`, or any
 verdict literal (INV-A/INV-D); running it neither ships nor gates RC2, it only
 produces the number RC2's own sequencing gate is waiting on.
 
+**Measured baseline (2026-08-10, 60-PR window): 41% catch rate — 16 caught / 39
+reviewed (21 not-reviewed, excluded from the denominator).** This is the number
+the AC1 sequencing gate was waiting on; it is materially different from the
+issue's original 0/36 figure and is direct evidence the
+`CHANGES_REQUESTED`-only method undercounted, since several of the 16 catches
+are FAILs recorded only as an `Automated QA failed` bounce comment on the linked
+issue — structurally invisible to that method. Re-run `npm run qa:catch-rate
+-- --limit 60` after any further fan-out change to refresh this baseline; AC6's
+post-lever 5h share scan is the complementary measurement.
+
 ## Never end a turn on a pending wait (issue #3953)
 
 A backgrounded wait is **structurally unrecoverable**: end the turn while a

@@ -1,0 +1,1 @@
+- docs(qa): record the measured AC1 catch-rate baseline — 41% over the 60-PR window (16 caught / 39 reviewed), the corrected-methodology number that lifts the issue's sequencing gate on further fan-out levers (#3815)
