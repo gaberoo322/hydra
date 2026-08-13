@@ -238,12 +238,18 @@ double-file the same finding (issue #2554):
 # `architecture-scan`); cleanup_orch (label `cleanup-scan`) co-fires too. All
 # three plus generic `enhancement` belong in the baseline so discover sees what
 # architecture-scan / cleanup just filed THIS idle window.
-mapfile -t BASELINE_TITLES < <(
-  { gh issue list --state open --json number,title \
-      --jq '.[] | .title'
-    gh issue list --state closed --json number,title,closedAt \
-      --jq '[.[] | select(.closedAt > (now - 7*24*3600 | todate))] | .[] | .title'
-  } )
+# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
+# the original process-substitution form `mapfile -t X < <(...)`. Write each
+# `gh issue list` call to the temp file (sequential `>` then `>>`), then
+# `mapfile` from the file path — identical BASELINE_TITLES contents. See
+# "Guard-compatible shell forms" in _fragments/hydra-dev-parent-flow.md.
+BASELINE_TMP=$(mktemp)
+gh issue list --state open --json number,title \
+  --jq '.[] | .title' > "$BASELINE_TMP"
+gh issue list --state closed --json number,title,closedAt \
+  --jq '[.[] | select(.closedAt > (now - 7*24*3600 | todate))] | .[] | .title' >> "$BASELINE_TMP"
+mapfile -t BASELINE_TITLES < "$BASELINE_TMP"
+rm -f "$BASELINE_TMP"
 
 # Per candidate finding title $CANDIDATE:
 node --experimental-strip-types scripts/ci/issue-dedup.ts \

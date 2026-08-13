@@ -61,9 +61,9 @@ If either fails, stop. Do not delegate.
 <child-prompt>
 Full autonomy: pick the task, plan, challenge your own plan, execute, verify, merge, sync state, report. Don't ask the user. If you hit a blocker, solve it.
 
-## CRITICAL SAFETY RULE — READ FIRST (issue #542)
+## CRITICAL SAFETY RULE — READ FIRST (issues #542, #3889)
 
-Two repos are in play: `~/hydra` (orchestrator) and `~/hydra-betting` (target). The harness `isolation: "worktree"` ONLY creates a worktree of the orchestrator repo (`~/hydra`). Writes to `~/hydra-betting` paths bypass that isolation and land on the main hydra-betting checkout — that is the bug fixed by this preamble.
+Two repos are in play: `~/hydra` (orchestrator) and `~/hydra-betting` (target). `dev_target` is dispatched WITHOUT harness `isolation: "worktree"` (issue #3889): the harness's worktree isolation only covers `~/hydra`, and because `~/hydra-betting` is a sibling repo not nested under it, a pinned session is refused ALL git ops against the target — which made Step 0.6's `git -C ~/hydra-betting worktree add …` categorically fail (2/2 dispatches). So this skill isolates the target ITSELF via Step 0.6 below (`/dev/shm/hydra-worktrees/`), and the installed `worktree-write-fence.sh` PreToolUse hook fences ghost-writes back into that worktree. Step 0.6 is therefore the SOLE isolation for the target repo — never skip it.
 
 Before running ANY `git`, `npm`, `Edit`, or `Write` against the target repo:
 
@@ -380,7 +380,7 @@ git status --short    # must be clean — we just branched off origin/main
 
 **Path discipline for Read/Edit/Write tools (issues #542, #1861):** every `file_path` argument MUST be either repo-relative (e.g. `web/src/foo.ts`) when cwd is `$TARGET_WT`, OR an absolute path anchored to `$TARGET_WT/...`. Do NOT construct paths like `/home/gabe/hydra-betting/web/...` — those bypass the worktree and write to the main checkout (the exact bug behind #542, which kept recurring under six friction cues until #1861). This applies to **Read** too: reading the main-checkout copy of a file anchors you on the path your later Edit/Write would ghost-write into the main tree. The `worktree-write-fence.sh` PreToolUse hook now fences Read/Edit/Write/MultiEdit and, on a deny, names the corrected `$TARGET_WT/...` path — re-issue against that path rather than recomputing it or `cd`-ing out of the worktree.
 
-**EnterWorktree anchor discipline (issue #2371):** if the harness exposes `EnterWorktree`/`ExitWorktree`, you are already LAUNCH-PINNED to `$TARGET_WT` by the `Agent(isolation="worktree")` dispatch — the harness tracks ONE writable-worktree-root anchor per agent. NEVER call `EnterWorktree` when your launch-time `pwd` already satisfies the worktree predicate (`git rev-parse --git-dir` under `.git/worktrees/`); a redundant or sibling switch desyncs that anchor from cwd and makes a perfectly-valid in-cwd Edit/Write get DENIED. If `EnterWorktree` *was* genuinely required (a non-pinned dispatch whose initial `pwd` failed the predicate), re-run `pwd` immediately after and re-derive every subsequent `file_path` from that fresh root. If an in-`$TARGET_WT` Edit/Write is STILL denied even though the file resolves inside your cwd, the anchor has desynced — recover by `ExitWorktree` then `EnterWorktree` by `path` (the documented re-anchor path), NOT by writing the file via `python3`/`Bash`. The shell-out workaround is reactive, bypasses the harness diff tracking, and is the exact friction #2371 exists to eliminate. (Orthogonal — NOT this fix: the `worktree-write-fence.sh` hook itself is currently uninstalled on the orch host per #1861; installing it via `scripts/setup-claude-hooks.sh` closes the separate ghost-write-to-main gap but does not resolve this anchor-desync symptom.)
+**EnterWorktree / cwd discipline (issues #2371, #3889):** `dev_target` is dispatched WITHOUT `isolation="worktree"` (#3889), so you reach `$TARGET_WT` via Step 0.6 (`git worktree add` + `cd`) — there is normally NO harness `EnterWorktree` anchor engaged, and the installed `worktree-write-fence.sh` PreToolUse hook is what fences stray Edit/Write back into `$TARGET_WT`. If a harness anchor IS engaged (a session that genuinely called `EnterWorktree`), the harness tracks ONE writable-worktree-root anchor per agent: NEVER call `EnterWorktree` when your `pwd` already satisfies the worktree predicate (`git rev-parse --git-dir` under `.git/worktrees/`); a redundant or sibling switch desyncs that anchor from cwd and makes a perfectly-valid in-cwd Edit/Write get DENIED. After ANY `EnterWorktree`, re-run `pwd` immediately and re-derive every subsequent `file_path` from that fresh root. If an in-`$TARGET_WT` Edit/Write is STILL denied even though the file resolves inside your cwd, the anchor has desynced — recover by `ExitWorktree` then `EnterWorktree` by `path` (the documented re-anchor path), NOT by writing the file via `python3`/`Bash`. The shell-out workaround is reactive, bypasses the harness diff tracking, and is the exact friction #2371 exists to eliminate.
 
 Rules:
 - Smallest change wins (20 lines > 200 lines).
@@ -395,6 +395,8 @@ Rules:
 - **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The risk-critical design-concept artifact (if present at `hydra:target:design-concept:$ANCHOR_REF` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
 
 ### 6. Verify (NOT an agent)
+
+**Commit before you verify (issue #3953):** `git commit` the structurally-complete change on the feature branch *before* this long verification, so a stall degrades to an unmerged PR the autopilot resumes next tick rather than work destroyed by the worktree-orphan-prune (which reaps uncommitted state).
 
 Verify commands come from the Target Manifest (`verify.typecheck` / `verify.test` / `verify.appSubdir`; epic #3014, ADR-0026, issue #3019) — never hardcoded. For hydra-betting `verify.test` is `npm run test:raw` (the real vitest suite), so verify runs `test:raw`, NOT the bare `npm test` count-gate.
 
@@ -501,7 +503,11 @@ Handle it as follows:
 cd "$TARGET_WT"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
 # in raw web/-rooted form — the gate normalizes web/ itself, do NOT strip it.
-CHANGED_FILES=$(git diff --name-only "$(git merge-base origin/main HEAD)"...HEAD)
+# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
+# nested command substitution `$( ... $(...) ...)`. Resolve the merge base into a
+# plain variable first, then pass it to `git diff`.
+MERGE_BASE=$(git merge-base origin/main HEAD)
+CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
 CHANGED_FILES="$CHANGED_FILES" \
 TARGET_PROJECT_DIR="$TARGET_WT/web" \
   npx tsx "$TARGET_WT/.hydra-gate/scripts/target/mutation-check.ts"
@@ -549,6 +555,65 @@ Before opening the code PR (or, for direct-to-main merges, before merging), auth
 
 **Graceful no-op until the Target adopts the convention:** if `~/hydra-betting/.changelog/README.md` is absent, the Target board has not yet mirrored this convention — skip this step entirely (the Target's Versions card degrades to "no releases yet"). Do NOT create the directory or the `skip-changelog` label yourself; that is the follow-on Target adoption ticket's job. QA gets no changelog role.
 
+### Foreground-wait contract — read before the merge phase (issue #3953)
+
+A backgrounded wait is **structurally unrecoverable**: end the turn while CI (or
+any other result) is still pending and the result is delivered to a session
+that has already exited — the only path back is an external `SendMessage`
+resume. In autopilot run `028f420d` (2026-08-11) a `dev_target` dispatch said
+*"I've set up a background monitor that will notify me when the checks reach a
+terminal state"* and stopped; **PR #870 was built and green locally but never
+merged** until an operator resumed it.
+
+**The rule: a turn ends only when the result you were waiting for is in hand
+and acted on.** For the merge phase that means: block on CI in the FOREGROUND
+(bounded poll below) and merge — or fix — when it settles. Do NOT background a
+monitor and stop. This is the same discipline as `hydra-qa`'s blocking-dispatch
+mandate (`run_in_background: false` on every spawn), applied to this build's
+own CI wait.
+
+**Commit before you verify** (Step 6): `git commit` the moment the change is
+structurally complete, before the long `test:raw` / typecheck run — so a stall
+degrades to "unmerged PR" (resumed next tick) instead of work destroyed by the
+worktree-orphan-prune.
+
+**Foreground bounded poll** — block on CI in THIS turn instead of backgrounding
+a monitor and stopping:
+
+```bash
+# BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
+# the foreground alternative to backgrounding a monitor/wait and ending the turn.
+#
+# zsh $status pitfall: name the state variable `run_state` (or `st`), never
+# `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
+# named `status` silently fails and the loop exits 1. `status` is the natural
+# spelling of this variable; that is exactly why the loop breaks. (Documented
+# CLAUDE.md pitfall.)
+deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
+while [ "$SECONDS" -lt "$deadline" ]; do
+  run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
+    --jq 'if ([.statusCheckRollup[]?.status]
+           | any(IN("QUEUED","IN_PROGRESS","PENDING","WAITING")))
+          then "pending" else "settled" end' 2>/dev/null)
+  [ "$run_state" = "settled" ] && break
+  sleep 15
+done
+# run_state == "settled"  => every check is terminal: read conclusions and act
+#                            (merge on success, fix on failure).
+# still "pending" past the deadline => budget expired: fall through to the
+#                            partial-but-posted branch below — post what you can
+#                            stand behind now, with CI state as of the last poll.
+#                            NEVER re-arm the loop; one bounded budget per wait.
+```
+
+**Prefer a partial-but-posted result over a pending one.** If the budget
+expires, do not leave the build unshipped: make sure the PR is open with the
+verification state recorded as of the last poll and a one-line note on what is
+pending. A built-and-green-locally PR that is **open** is a valid end state the
+autopilot resumes next tick; a built-and-green-locally PR that is still local
+(or unmerged with no PR) because you backgrounded a monitor and stopped is the
+failure mode.
+
 ### 7–10. Merge, deploy, verify, state sync, and report
 
 > **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY on both direct-to-main AND auto-merge/PR paths), merge lock, direct-to-main git merge, auto-merge/PR path (already-merged-post-green is SUCCESS not friction), deploy + post-deploy health, post-merge verify (auto-rollback on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
@@ -579,6 +644,31 @@ git -C ~/hydra-betting worktree prune 2>&1 || true
 - **Stack**: Next.js 16, React 19, Tailwind 4, Zod 4, Drizzle, vitest
 
 Read `web/AGENTS.md` before assuming Next.js conventions — APIs may differ from training data. Use atomic backlog claims, merge locks, metrics, and events for parallel execution with Codex cycles.
+
+## Guard-compatible shell forms (issue #3837 AC #3, swept in #3896)
+
+The harness's worktree-isolation Bash guard — the same fence `hydra-dev` meets on
+the Orchestrator side — refuses Bash commands it judges too complex to verify
+stay inside `$TARGET_WT`. Confirmed triggers (refused categorically — one-line OR
+multi-line, and a bare loop is refused even with no substitution at all):
+
+- **Process substitution** — `comm -12 <(...) <(...)`, `mapfile -t X < <(...)`.
+- **Nested command substitution** — `$( ... $(...) ... )`.
+- **`for` / `while` / `until` loops** — refused regardless of formatting.
+
+This is about our snippets meeting the guard halfway. Split compound commands
+into plain sequential ones: write intermediate results to temp files or plain
+variables, then operate on those — never nest `$( $( ) )` and never use `<(...)`.
+The Step 6 mutation-gate recipe above is the canonical rewrite for THIS playbook:
+`MERGE_BASE=$(git merge-base ...)` first, then
+`CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)` — instead of the
+nested one-liner `$(git diff ... "$(git merge-base ...)"...)`. The shipped-anchor
+preflight (`_fragments/hydra-target-build-anchor-preflight.md`) makes the same
+substitution for its `comm -12` subject-coverage matcher.
+
+Do NOT disable or work around the guard itself — it is the isolation fence. The
+full note (with the `Monitor` CI-poll corollary) lives in
+`_fragments/hydra-dev-parent-flow.md` under the same heading.
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 

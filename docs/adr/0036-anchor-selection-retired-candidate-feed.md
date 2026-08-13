@@ -1,6 +1,6 @@
-# ADR-0016: Anchor selection retired; the Candidate Feed is data, not decisions
+# ADR-0036: Anchor selection retired; the Candidate Feed is data, not decisions
 
-Status: Proposed
+Status: Accepted (live doctrine — `selectAnchor()` and `src/anchor-selection/` are deleted; corrected from "Proposed" 2026-08-12)
 Date: 2026-05-30
 Deciders: Operator + Hydra (via `/improve-codebase-architecture` deepening session)
 Issue: TBD (anchor-selection retirement)

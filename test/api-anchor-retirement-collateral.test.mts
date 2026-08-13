@@ -1,5 +1,5 @@
 /**
- * ADR-0016 collateral regression — the metrics + health surfaces that read the
+ * ADR-0036 collateral regression — the metrics + health surfaces that read the
  * retired reframe / prior-failure / abandonment lanes had their vacuous reads
  * removed (the lanes are empty; the accessors are deleted). These tests pin the
  * dropped fields + retired endpoints so they don't silently reappear.
@@ -41,7 +41,7 @@ function findHandler(router: any, method: string, path: string): Function | null
   return null;
 }
 
-describe("metrics router — ADR-0016 vacuous-read removal", () => {
+describe("metrics router — ADR-0036 vacuous-read removal", () => {
   let createMetricsRouter: any;
 
   before(async () => {
@@ -89,7 +89,7 @@ describe("metrics router — ADR-0016 vacuous-read removal", () => {
   });
 });
 
-describe("health router — ADR-0016 vacuous-read removal", () => {
+describe("health router — ADR-0036 vacuous-read removal", () => {
   let createHealthRouter: any;
   const fakeEventBus = { publisher: { ping: async () => "PONG" } };
 

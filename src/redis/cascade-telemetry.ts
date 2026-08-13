@@ -81,10 +81,13 @@ const CASCADE_TELEMETRY_MAX = (() => {
 
 /**
  * Rolling window (ms) over which escalated dispatch OUTCOMES are read for the
- * cost-delta + post-escalation merge-rate fold. 14 days matches the
- * dispatch-outcome record TTL (`DISPATCH_OUTCOME_TTL_SECONDS`), so the window
- * never asks for records the plane has already reaped. Env-overridable via
- * `HYDRA_CASCADE_OUTCOME_WINDOW_MS`.
+ * cost-delta + post-escalation merge-rate fold. 14 days. This MUST stay `<=`
+ * the dispatch-outcome record TTL (`DISPATCH_OUTCOME_TTL_SECONDS`, now 90d per
+ * issue #3962), so the window never asks for records the plane has already
+ * reaped — the invariant is window ≤ TTL, NOT equality: the TTL was widened to
+ * 90d in #3962 while this window deliberately stayed at 14d (widening it would
+ * change cascade's cost-delta/merge-rate fold semantics and is out of scope).
+ * Env-overridable via `HYDRA_CASCADE_OUTCOME_WINDOW_MS`.
  */
 const CASCADE_OUTCOME_WINDOW_MS = (() => {
   const raw = Number(process.env.HYDRA_CASCADE_OUTCOME_WINDOW_MS);

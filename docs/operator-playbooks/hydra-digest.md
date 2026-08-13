@@ -126,11 +126,14 @@ PY
 
 # (3) Reframe-save count over the period — each is a prevented doomed build cycle.
 # target:reframe-save events land on the hydra:notifications stream (POST /events/publish,
-# src/api/events.ts). readRecent returns newest-first with a Redis stream id ("ms-seq");
-# count only those inside the digest window.
+# src/api/events.ts). readRecent's `id` field is NOT a Redis stream ms-seq id — it is a
+# randomUUID() (see #3937), so it can never be used to window by age. Window on the
+# envelope's ISO `timestamp` field instead; an event with a missing/unparseable timestamp
+# is EXCLUDED from the period count (fail closed), never counted by default (#3940).
 SINCE_MS=$(( $(date -u -d '24 hours ago' +%s) * 1000 ))   # tune to $period
 hydra raw GET '/events/notifications?count=500' 2>/dev/null | python3 -c "
 import json, sys
+from datetime import datetime
 since_ms = int('$SINCE_MS')
 try:
     events = json.load(sys.stdin)
@@ -139,14 +142,25 @@ except Exception:
 if not isinstance(events, list):
     print('reframe-saves: n/a (notifications stream unreadable)'); sys.exit(0)
 saves = []
+undateable = 0
 for e in events:
     if e.get('type') != 'target:reframe-save':
         continue
-    sid = str(e.get('id') or e.get('_id') or '')
-    ms = int(sid.split('-')[0]) if ('-' in sid and sid.split('-')[0].isdigit()) else None
-    if ms is None or ms >= since_ms:
+    ts = e.get('timestamp')
+    if not ts:
+        undateable += 1
+        continue  # missing timestamp — fail closed, excluded from the period count
+    try:
+        dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+    except ValueError:
+        undateable += 1
+        continue  # unparseable timestamp — fail closed, excluded from the period count
+    ms = int(dt.timestamp() * 1000)
+    if ms >= since_ms:
         saves.append(e)
 print(f'reframe-saves (period): {len(saves)} prevented doomed build cycle(s)')
+if undateable:
+    print(f'reframe-saves undateable (excluded): {undateable}')
 for e in saves[:5]:
     p = e.get('payload', {})
     print(f\"  {p.get('anchorRef','?')} — {str(p.get('reason','?'))[:80]}\")

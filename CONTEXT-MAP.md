@@ -13,25 +13,54 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | Code area | Glossary terms (in `CONTEXT.md`) | Co-located `CONTEXT.md` | Relevant ADRs |
 |---|---|---|---|
 | `src/host-probe/` | Host-Probe Adapter | _lazy_ | — |
-| `src/redis/` | Redis Adapters | _lazy_ | ADR-0009 |
+| `src/redis/` | Redis Adapters | _lazy_ | ADR-0009, ADR-0017 |
 | `src/schemas/` | Schemas | _lazy_ | ADR-0011, ADR-0022 |
-| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | _lazy_ | — |
-| `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012 |
-| `src/taxonomy/` | Dispatch-Class Taxonomy | _lazy_ | ADR-0012 |
+| `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | _lazy_ | ADR-0021 |
+| `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | [`src/autopilot/CONTEXT.md`](./src/autopilot/CONTEXT.md) | ADR-0006, ADR-0007, ADR-0012, ADR-0016 |
+| `src/taxonomy/` | Dispatch-Class Taxonomy | _lazy_ | ADR-0012, ADR-0030 |
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping, Research Floor | _lazy_ | ADR-0012 |
 | `src/pattern-memory/` | Pattern Memory | _lazy_ | — |
-| `src/reflections/` | Reflections | _lazy_ | — |
+| `src/reflections/` | Reflections | _lazy_ | ADR-0023 |
+| `src/metrics/`, `src/aggregators/` | Cost, Quota Weight | _lazy_ | ADR-0016, ADR-0028 |
+| `src/api/`, `src/api.ts` | — (see `src/api/ENDPOINT-REGISTRY.md`) | n/a | ADR-0011, ADR-0022, ADR-0024 |
+| `src/logger.ts` | — | n/a | ADR-0027 |
+| `src/target-config.ts` | Target Manifest | n/a | ADR-0002, ADR-0026 |
 | ~~`src/knowledge-base/`~~ | ~~Knowledge Base, OpenViking Request Adapter~~ — **RETIRED**, directory deleted | n/a | ADR-0033 |
-| `src/anchor-selection/` | Reframe Queue | _lazy_ | ADR-0010 |
-| `src/design-concept.ts` | Design Concept | n/a | ADR-0008 |
-| backlog / GitHub issues | Epic, Roadmap Milestone, Focus Label | n/a | ADR-0003 |
-| self-modification | Modification Tier, Untouchable Core, Outcome Holdback | n/a | ADR-0001, ADR-0004, ADR-0005 |
+| ~~`src/anchor-selection/`~~ | ~~Reframe Queue~~ — **RETIRED**, directory deleted; Candidate Feed is the live concept | n/a | ADR-0010, ADR-0036 |
+| `src/design-concept.ts`, `src/redis/design-concept.ts` | Design Concept | n/a | ADR-0008, ADR-0018 |
+| backlog / GitHub issues | Epic, Roadmap Milestone, Focus Label | n/a | ADR-0003, ADR-0031 |
+| self-modification | Modification Tier, Verifier Core, Outcome Holdback | n/a | ADR-0001, ADR-0004, ADR-0005, ADR-0015, ADR-0019, ADR-0020 |
+
+### Non-`src/` areas
+
+ADRs also govern skills, CI, and scripts. These have no `src/` directory to hang off, so they
+get their own rows:
+
+| Area | Relevant ADRs |
+|---|---|
+| `.claude/skills/` + `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035 |
+| `.github/workflows/` (Verifier Core) | ADR-0015, ADR-0019, ADR-0020 |
+| `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032 |
+| `dashboard/` | ADR-0034 |
+| `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 |
+| `docs/adr/` itself | ADR-0037 |
+| **process / policy** (no code area) | ADR-0002, ADR-0013, ADR-0014, ADR-0024 |
 
 The deep-module discipline is the load-bearing simplicity strategy here: each Seam (Redis Adapters, Schemas, Cost) hides its complexity behind a narrow typed interface so a subagent can use it correctly by reading only the glossary entry — not the implementation. Keep new subsystems to that shape.
 
 ## ADRs (system-wide)
 
-[`docs/adr/`](./docs/adr/). Read the ones the map flags for your area; flag contradictions explicitly rather than silently overriding (see [`docs/agents/domain.md`](./docs/agents/domain.md)).
+[`docs/adr/README.md`](./docs/adr/README.md) is the **complete roster** — every ADR with its
+status, its decision in one sentence, and the trigger for reading it. It is ~6 KB; read it in
+full, then open only what you need. The tables above are the code-area shortcut into it.
+
+Read the ones the map flags for your area; flag contradictions explicitly rather than silently
+overriding (see [`docs/agents/domain.md`](./docs/agents/domain.md)).
+
+**Before writing a new ADR**, read [ADR-0037](./docs/adr/0037-hydra-adrs-are-agent-facing-normative-specs.md):
+Hydra ADRs are agent-facing normative specs, so the upstream one-paragraph size target does not
+apply — but the three-part write gate does, `Status` is mandatory, and a new row in the roster is
+enforced by `test/adr-roster.test.mts`.
 
 ## When a term is missing
 

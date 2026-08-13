@@ -1,0 +1,83 @@
+name: vendor-drift
+
+# Advisory staleness check for the vendored upstream Pocock skill bases
+# (issue #3994, epic #3988, ADR-0030 Decision 4 / Option C).
+#
+# WHAT IT WATCHES: docs/operator-playbooks/_vendor/*.md are captured copies of
+# upstream skills that composing playbooks ride on. Upstream moves; the captures
+# do not, and the drift is SILENT — the composed skill keeps generating cleanly
+# from a stale base. Upstream already renamed `diagnose` -> `diagnosing-bugs` and
+# `writing-great-skills` -> `writing-for-agents` with nobody noticing for weeks.
+#
+# THE SHARPER HAZARD: a composing playbook declares `supersedes:` entries naming
+# base headings to EXCISE (#3990). If a refreshed base renames one, the entry
+# stops resolving and the excision silently stops happening — reintroducing the
+# #3818 duplicate-instruction defect. sync-skills.sh fails loud on that, but only
+# when someone runs it; this surfaces it on a schedule instead.
+#
+# NOT A REQUIRED CHECK, deliberately. It never blocks a merge. Upstream moving is
+# ambient activity outside any PR's control, and a required check that reddens on
+# ambient activity trains everyone to ignore it (the poison-pill class in operator
+# memory reference_npm_audit_required_check_ambient_poison_pill). The checker
+# exits 0 on drift by design; it exits non-zero only when it cannot do its job.
+#
+# WHY OUTSIDE ci.yml: ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015).
+# This is a new advisory scan, not a change to the merge gate, so it lives in a
+# Tier-3 sibling (operator memory feedback_ci_gate_separate_workflow_avoids_tier0).
+#
+# HOST DEPENDENCY: the SHA comparison reads ~/.claude/plugins/installed_plugins.json,
+# which exists only on the self-hosted runner where the operator installed the
+# plugin. The checker degrades to a skip-with-warning when the registry is absent
+# rather than failing — so this stays useful (manifest/supersedes checks still
+# run) before the plugin is ever installed.
+
+on:
+  schedule:
+    # Weekly, Mondays 09:00 UTC. Upstream skill churn is measured in weeks, not
+    # hours — a tighter cadence would just cost runner time on a shared runner.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendor-drift
+  cancel-in-progress: false
+
+jobs:
+  vendor-drift:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check vendored bases for drift
+        id: drift
+        run: |
+          npx tsx scripts/ci/vendor-drift-check.ts | tee vendor-drift.txt
+          npx tsx scripts/ci/vendor-drift-check.ts --json > vendor-drift.json
+
+      - name: Upload drift report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-drift-report
+          path: |
+            vendor-drift.txt
+            vendor-drift.json
+          if-no-files-found: warn
+
+      - name: Summarise
+        run: |
+          {
+            echo "## Vendored base drift"
+            echo
+            echo '```'
+            cat vendor-drift.txt
+            echo '```'
+            echo
+            echo "Advisory only — this workflow never blocks a merge."
+            echo "To refresh a base: re-vendor it, record its upstreamSha in"
+            echo "docs/operator-playbooks/_vendor/provenance.json, re-run"
+            echo "scripts/sync-skills.sh, and resolve any supersedes entry that"
+            echo "stopped matching (sync-skills.sh will fail loud on those)."
+          } >> "$GITHUB_STEP_SUMMARY"

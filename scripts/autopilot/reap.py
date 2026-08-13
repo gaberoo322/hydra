@@ -119,6 +119,14 @@ DEV_RESUME_LABEL = "needs-dev-resume"
 REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
 REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
 
+# Issue #3785: key PREFIX (not a single key) for the subagent-dispatch registry
+# `src/redis/dispatches.ts` owns — `hydra:dispatches:subagent:<sessionId>` HASH,
+# `dispatchId` field. Read-only from here via `_redis_cli(..., capture=True)`
+# (the same docker-exec redis-cli seam as the #2715 mirror above, per the
+# design-concept's rejected-alternatives: no new HTTP route, no typed-accessor
+# import across the Python/TS process boundary) — see `_recover_worktree_branch`.
+REDIS_SUBAGENT_DISPATCH_KEY_PREFIX = "hydra:dispatches:subagent:"
+
 # Issue #1136 (Slice 2 of #1119): directory the code-writing dispatch deposits
 # its planning-time reflection-bucket string into, keyed by task_id, so reap can
 # forward it on the SINGLE authoritative cycle-record write. Overridable via
@@ -193,7 +201,7 @@ def _save_state(s: dict) -> None:
     STATE_PATH.write_text(json.dumps(s))
 
 
-def _redis_cli(*args: str) -> None:
+def _redis_cli(*args: str, capture: bool = False) -> str | None:
     """Run one redis-cli command best-effort (issue #2715). Never raises.
 
     Mirrors the docker-exec redis-cli seam collect-state.sh uses. The argv prefix
@@ -203,6 +211,18 @@ def _redis_cli(*args: str) -> None:
     down, docker absent, timeout) is logged to stderr and swallowed: the state
     file is already the source of truth, so a missed mirror only costs one extra
     post-reboot fire, never a crash.
+
+    `capture` (issue #3785): the fire-and-forget WRITE call sites (the #2715
+    HSET/SET mirrors below) all use the default `capture=False` — unchanged
+    DEVNULL stdout, `None` return, byte-identical behavior. Passing
+    `capture=True` (the ONE read call site, `_recover_worktree_branch` below)
+    instead pipes stdout and returns it decoded + stripped — redis-cli in a
+    non-tty/piped invocation (this is a `subprocess.run`, never a tty) prints a
+    successful reply's raw value with no surrounding quotes, and prints nothing
+    (an empty stdout) for a nil/missing key or field. A failure — non-2xx exit,
+    timeout, docker/redis absent — returns `None` under `capture=True` too,
+    exactly like the fire-and-forget write path: never raises, never
+    distinguishes "empty" from "erred" for the caller (both mean "no value").
     """
     override = os.environ.get("HYDRA_AUTOPILOT_REDIS_CLI", "").strip()
     if override:
@@ -210,10 +230,10 @@ def _redis_cli(*args: str) -> None:
     else:
         cmd = ["docker", "exec", "hydra-redis-1", "redis-cli", *args]
     try:
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             check=False,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=3,
         )
@@ -223,6 +243,12 @@ def _redis_cli(*args: str) -> None:
             "state.json remains source of truth",
             file=sys.stderr,
         )
+        return None
+    if not capture:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace").strip()
 
 
 def _mirror_cross_run_state_to_redis(s: dict) -> None:
@@ -1239,6 +1265,65 @@ def _recover_tokens_from_transcript(task_id: str) -> int:
     return 0
 
 
+def _recover_worktree_branch(task_id: str) -> str | None:
+    """Best-effort recovery of a completing dispatch's worktree branch (issue #3785).
+
+    Root cause: `effective_cycle_id = worktree_branch or task_id` (below) was
+    designed (issue #3391) to key the cycle-record on the deterministic,
+    `parseDispatchCycleId`-clean `worktreeBranch` decide.py stamps on every
+    dispatch action — via `worktree_branch = slot.get("branch")`. But the live
+    autopilot slot snapshot this reaper reads at completion time (`state.
+    slots.<class>`) never actually carries a `branch` field — it is written by
+    the (LLM-driven, session-side) harness at dispatch time as an ad hoc
+    targeted field edit that in practice only ever stamps
+    `{task_id, skill, dispatched_at/started_epoch, tokens, attempt}` — so
+    `slot.get("branch")` was always None and every pipeline dispatch's
+    cycle-record silently fell back to keying on the unparseable bare
+    `task_id`, the root cause #3785 traces (both the `fetchTurnsWithJoins`
+    read-side join and this write-side key skipped the one identifier that IS
+    deterministic and joinable).
+
+    A playbook-prose fix to that session-side slot-occupy edit would have no
+    automated regression coverage and would recur exactly like the original
+    bug (the design-concept artifact for this issue rejects that path).
+    Instead, recover the SAME `worktreeBranch` value from the subagent-
+    dispatch registry `hydra:dispatches:subagent:<sessionId>` (HASH, field
+    `dispatchId`; `src/redis/dispatches.ts`) via `HGET` through the existing
+    `_redis_cli` docker-exec seam (issue #2715) — NOT a new HTTP route or a
+    cross-process typed-accessor import, both rejected alternatives in the
+    same artifact (a new route would touch `src/api/dispatches.ts`, outside
+    this issue's declared `## Files in scope`). That registry is populated
+    deterministically by the SessionStart hook
+    (scripts/hooks/session-start-capture.sh) off the hidden dispatch sentinel
+    `decide.py:make_dispatch_sentinel` prepends to every subagent prompt, the
+    instant the subagent session starts — independent of the fragile
+    session-side slot-occupy edit above, and keyed on `sessionId`, which IS
+    `task_id` on the hook path (see `_recover_tokens_from_transcript`'s
+    docstring).
+
+    Best-effort and total (design invariants 3 + 4, same contract as
+    `_recover_tokens_from_transcript` / the #2715 mirror): an empty task_id,
+    an unknown sessionId (empty HGET reply), a non-zero redis-cli exit, an
+    unreachable docker/redis, or any subprocess error all return None — never
+    raises into the reap path — so `effective_cycle_id` degrades to the
+    honest task_id fallback, exactly the pre-#3785 behaviour.
+    """
+    if not task_id:
+        return None
+    branch = _redis_cli(
+        "HGET",
+        f"{REDIS_SUBAGENT_DISPATCH_KEY_PREFIX}{task_id}",
+        "dispatchId",
+        capture=True,
+    )
+    if not branch:
+        msg = f"worktree_branch_recover_skipped task_id={task_id}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+        return None
+    return branch
+
+
 def _post_token_record(cycle_id: str, skill: str, total_tokens: int) -> None:
     """POST a single per-cycle token record for `cycle_id`. Best-effort; swallows all errors.
 
@@ -1709,6 +1794,19 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # 0 on the sampled record. None when the slot is absent (signal class /
     # cleared): those keep keying on task_id (their cycleId IS the task_id).
     worktree_branch = slot.get("branch") if isinstance(slot, dict) else None
+    # Issue #3785: `slot.get("branch")` above is a permanent no-op — the live
+    # slot dict the harness writes at dispatch time never actually carries a
+    # `branch` field (same gap #2112 already documented for `slot["anchor"]`
+    # just above), so EVERY pipeline dispatch fell through to the unparseable
+    # bare task_id, defeating the #3391 fix it was meant to feed. Recover the
+    # branch from the subagent-dispatch registry instead (see
+    # `_recover_worktree_branch`'s docstring) — but ONLY for an occupied
+    # pipeline slot (`slot is not None`); a signal-class completion
+    # (grill/sweep/discover/...) has no slot by design and must keep keying on
+    # its task_id unchanged (`test/autopilot-cycle-record-branch-cycleid.test.mts`
+    # pins that invariant).
+    if slot is not None and not worktree_branch:
+        worktree_branch = _recover_worktree_branch(task_id)
     if slot is not None:
         slot["tokens"] = total_tokens
         s["slots"][cls] = None  # release the pipeline slot
