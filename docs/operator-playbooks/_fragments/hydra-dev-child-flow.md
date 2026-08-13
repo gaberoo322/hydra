@@ -174,6 +174,10 @@ Rules: one `INV-<n>` bullet per invariant (count must match); the quote must be
 a verbatim whitespace-normalised **prefix** of that invariant (paraphrase
 fails); the cited hash must prefix the live `artifactHash`; and an invariant
 containing **MUST NOT / MUST NEVER cannot be discharged with `manual:` prose**.
+The `INV-<n>` label may optionally be wrapped in Markdown emphasis matching on
+both sides — `- **INV-1** — …` and `- *INV-2*: …` parse identically to the
+plain `- INV-1: …` form (issue #4037) — but an unmatched opener/closer pair is
+not tolerated.
 
 Assertion grammar (Node-stdlib only, evaluated against the tree at HEAD — never
 `git diff`; the `test` job checks out at depth 1): `file-exists: <path>` ·

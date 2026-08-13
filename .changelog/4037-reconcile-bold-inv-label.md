@@ -1,0 +1,1 @@
+- fix: design-concept reconciliation gate now parses `INV-<n>` labels wrapped in Markdown emphasis (bold/italic/underscore) instead of failing closed with a zero-entry count (#4037)

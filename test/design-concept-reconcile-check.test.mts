@@ -156,6 +156,45 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(parsed.entries[2].assertion, "file-absent: b.yml");
   });
 
+  test("ENTRY_RE tolerates Markdown emphasis wrapping the INV-<n> label (issue #4037)", () => {
+    // Mirrors the four bullet forms measured in issue #4037's evidence table:
+    // plain forms already parsed; the bold/italic/underscore forms parsed to
+    // ZERO entries before this fix, which is exactly what reddened PR #4034.
+    const body = [
+      RECONCILIATION_HEADING,
+      "Artifact: `abcdef1234`",
+      '- **INV-1** — "bold invariant text here" — verified by: `manual: bold form`',
+      '- *INV-2*: "italic invariant text here" — verified by: `manual: italic form`',
+      '- __INV-3__ — "double underscore invariant" — verified by: `manual: dunder form`',
+      '- _INV-4_: "single underscore invariant" — verified by: `manual: underscore form`',
+    ].join("\n");
+    const parsed = parseReconciliationSection(body);
+    assert.equal(parsed.entries.length, 4);
+    assert.deepEqual(
+      parsed.entries.map((e) => e.index),
+      [1, 2, 3, 4],
+    );
+    assert.equal(parsed.entries[0].quoted, "bold invariant text here");
+    assert.equal(parsed.entries[0].assertion, "manual: bold form");
+    assert.equal(parsed.entries[1].quoted, "italic invariant text here");
+    assert.equal(parsed.entries[1].assertion, "manual: italic form");
+    assert.equal(parsed.entries[2].quoted, "double underscore invariant");
+    assert.equal(parsed.entries[3].quoted, "single underscore invariant");
+    assert.equal(parsed.entries[3].assertion, "manual: underscore form");
+  });
+
+  test("a bullet with no INV-<n> label still parses to zero entries, even when emphasis or a decoy substring is present (guards against vacuous widening)", () => {
+    const body = [
+      RECONCILIATION_HEADING,
+      "Artifact: `abcdef1234`",
+      "- **not an invariant bullet** — just prose",
+      "- **ALSO-NOT-INV-1** — decoy substring, not a real label",
+      "plain line with no bullet marker at all mentioning INV-1",
+    ].join("\n");
+    const parsed = parseReconciliationSection(body);
+    assert.equal(parsed.entries.length, 0);
+  });
+
   test("a wrapped entry absorbs its indented continuation lines", () => {
     const body = [
       RECONCILIATION_HEADING,

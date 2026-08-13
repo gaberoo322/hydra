@@ -222,7 +222,23 @@ function stripBackticks(s: string): string {
   return (s ?? "").trim().replace(/^`+/, "").replace(/`+$/, "").trim();
 }
 
-const ENTRY_RE = /^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?INV[\s-]?(\d+)\b\s*[:.–—-]?\s*(.*)$/;
+/**
+ * Group 1 is an optional Markdown-emphasis opener wrapping the `INV-<n>`
+ * label (`**`, `__`, `*`, or `_` — tried longest-first so `**` isn't split
+ * into two single-`*` matches); group 2 is the digit; the `\1?` right after
+ * requires the SAME marker as the closer (a backreference to an unmatched
+ * optional group matches empty, so the plain unemphasised form is untouched
+ * — issue #4037). Group 3 is the remainder of the line.
+ *
+ * The digit is followed by `(?![A-Za-z0-9])`, NOT `\b`: `_` is a `\w`
+ * character in JS regex, so `\b` asserts no boundary between a digit and an
+ * underscore closer and silently rejects `__INV-3__` / `_INV-4_` — measured
+ * directly (`\bINV…(\d+)\b` gives NO MATCH on `- _INV-4_: text`). The
+ * negative lookahead keeps the original intent (reject a letter/digit run-on
+ * like `INV-1x`) while allowing the underscore closer through.
+ */
+const ENTRY_RE =
+  /^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?(\*\*|__|\*|_)?INV[\s-]?(\d+)(?![A-Za-z0-9])\1?\s*[:.–—-]?\s*(.*)$/;
 
 /**
  * Parse the reconciliation section into a cited artifact hash plus one entry
@@ -248,7 +264,7 @@ export function parseReconciliationSection(body: string): ParsedSection {
     const m = ENTRY_RE.exec(line);
     if (!m) continue;
 
-    let text = m[2];
+    let text = m[3];
     // Absorb wrapped continuation lines.
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j];
@@ -261,7 +277,7 @@ export function parseReconciliationSection(body: string): ParsedSection {
     }
 
     entries.push({
-      index: parseInt(m[1], 10),
+      index: parseInt(m[2], 10),
       quoted: extractQuotedText(text),
       assertion: extractAssertionText(text),
       raw: text.trim(),
