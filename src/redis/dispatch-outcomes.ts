@@ -23,12 +23,15 @@
  *     epoch-ms, capped to the newest {@link DISPATCH_OUTCOMES_INDEX_MAX}
  *     members via ZREMRANGEBYRANK at write time.
  *
- * Bounded growth (issue AC2): both keys carry a 14-day TTL (the top of the
- * issue's 7–14d band, so a record comfortably outlives the 7d run/cycle TTLs
- * it joins against and gives the #2943 scoreboard a two-week scoring window).
- * TTL is the primary reaper; the index cap is a runaway safety valve
- * (~10–40 dispatches/day observed, so ~2 weeks of records is well under the
- * cap in normal operation).
+ * Bounded growth (issue AC2): both keys carry a 90-day TTL
+ * ({@link DISPATCH_OUTCOME_TTL_SECONDS}), so a record comfortably outlives the
+ * 7d run/cycle TTLs it joins against and gives the cross-run trend layer on
+ * wayfinder map #3925 a ~90-day scoring window. Issue #3962 raised this
+ * prospectively from the original 14-day band (the top of #2942's 7–14d
+ * band) — there is no backfill, so the 90-day clock starts the day #3962
+ * merges. TTL is the primary reaper; the index cap is a runaway safety valve
+ * (~14.3 dispatches/day observed, ~1291 records projected at 90d, well under
+ * the cap in normal operation).
  *
  * Dark-tolerant fields: an unparseable cycleId, absent tokens, or unknown
  * class record as `null` — a record is never dropped and never fabricated
@@ -154,11 +157,23 @@ export function dispatchOutcomesIndexKey(): string {
   return "hydra:autopilot:dispatch-outcomes:index";
 }
 
-/** 14-day TTL on both the per-record hash and the index (issue AC2). */
-export const DISPATCH_OUTCOME_TTL_SECONDS = 14 * 24 * 3600;
+/**
+ * TTL on both the per-record hash and the index. TTL is the primary reaper;
+ * {@link DISPATCH_OUTCOMES_INDEX_MAX} is a non-binding runaway valve. (Originally
+ * 14d per issue #2942 AC2; raised prospectively to 90d in #3962 to seed the
+ * cross-run trend layer on wayfinder map #3925 — no backfill, so the 90-day
+ * clock starts the day #3962 merges.)
+ */
+export const DISPATCH_OUTCOME_TTL_SECONDS = 90 * 24 * 3600;
 
-/** Index hard cap — newest N members survive the write-time trim. */
-const DISPATCH_OUTCOMES_INDEX_MAX = 2000;
+/**
+ * Index hard cap — newest N members survive the write-time trim. A non-binding
+ * runaway safety valve: ~1291 records projected at the 90d TTL / 14.3 records
+ * per day measured in #3962, so the cap stays non-binding past a year at the
+ * current rate while remaining a real valve. Exported so the regression test
+ * can pin the literal (issue #3962).
+ */
+export const DISPATCH_OUTCOMES_INDEX_MAX = 8000;
 
 // ---------------------------------------------------------------------------
 // Encode / decode
@@ -225,7 +240,8 @@ function decodeRecord(
  * concern (`recordCycle` only puts on its first-write path, so duplicate
  * cycle-record posts never create a second record).
  *
- * `indexMax` is injectable so tests can exercise the trim without 2000 rows.
+ * `indexMax` is injectable so tests can exercise the trim without writing the
+ * full {@link DISPATCH_OUTCOMES_INDEX_MAX} rows.
  * Best-effort — returns a structured result, never throws.
  */
 export async function putDispatchOutcome(

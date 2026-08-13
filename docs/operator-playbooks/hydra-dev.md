@@ -82,6 +82,70 @@ worktree-fence violations are safety failures.
    `test-debug.tap`. The artifact is git-ignored. Do **not** edit the `test`
    script — CI greps its footer for the `MIN_TESTS` ratchet.
 
+## Never end a turn on a pending wait (issue #3953)
+
+A backgrounded wait is **structurally unrecoverable**. End the turn while a
+verification is still pending — a backgrounded `npm test`, a `Monitor`, an
+`Agent`/reviewer spawned with `run_in_background: true`, a backgrounded CI
+poll — and the result is delivered to a session that has already exited. The
+only path back to it is an external `SendMessage` resume. In autopilot run
+`028f420d` (2026-08-11) **3 of 3** code-writing/QA dispatches ended exactly
+this way and each needed an operator resume; the `dev_orch` one had its changes
+**staged but uncommitted**, minutes from the hourly worktree-orphan-prune that
+would have destroyed them.
+
+**The rule: a turn ends only when the result you were waiting for is in hand
+and acted on.** If a result is not ready, either (a) keep waiting in the
+FOREGROUND — let the Bash call block, or poll in a bounded `while` loop in THIS
+turn — or (b) post the partial result you can stand behind now. Do not pick a
+third option of "background it and stop". This generalises `hydra-qa`'s
+blocking-dispatch mandate (`run_in_background: false` on every spawn) to every
+backgrounding mechanism a dev dispatch can reach.
+
+**Commit before you verify.** The moment the implementation is structurally
+complete — it compiles, the change is whole — `git commit` and `git push`
+BEFORE any long verification (`npm test`, CI, a monitor). Then a stall degrades
+to "unmerged PR" (the autopilot resumes it next tick) instead of
+"staged-but-uncommitted work destroyed by the worktree-orphan-prune".
+Verification gates whether the PR merges, not whether the work survives.
+
+**Foreground bounded poll.** When you have pushed and are waiting on CI — or
+running any long verification — block in THIS turn; never background it and
+stop. A test run via the Bash tool already blocks, so just let it; for a CI
+wait, poll foreground with a bounded loop:
+
+```bash
+# BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
+# the foreground alternative to backgrounding the wait and ending the turn.
+#
+# zsh $status pitfall: name the state variable `run_state` (or `st`), never
+# `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
+# named `status` silently fails and the loop exits 1. `status` is the natural
+# spelling of this variable; that is exactly why the loop breaks. (Documented
+# CLAUDE.md pitfall.)
+deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
+while [ "$SECONDS" -lt "$deadline" ]; do
+  run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
+    --jq 'if ([.statusCheckRollup[]?.status]
+           | any(IN("QUEUED","IN_PROGRESS","PENDING","WAITING")))
+          then "pending" else "settled" end' 2>/dev/null)
+  [ "$run_state" = "settled" ] && break
+  sleep 15
+done
+# run_state == "settled"  => every check is terminal: read conclusions and act
+#                            (merge on success, fix on failure).
+# still "pending" past the deadline => budget expired: fall through to the
+#                            partial-but-posted branch below — post what you can
+#                            stand behind now, with CI state as of the last poll.
+#                            NEVER re-arm the loop; one bounded budget per wait.
+```
+
+**Prefer a partial-but-posted result over a pending one.** If the budget
+expires, do not leave the work unshipped: push the branch / open the PR with
+the verification state recorded as of the last poll and a one-line note on what
+is still pending. A partial result the autopilot can resume beats a pending one
+only an external resume can finish.
+
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 
 Every tool call inside this skill emits a `subagent_tool_call` event onto the

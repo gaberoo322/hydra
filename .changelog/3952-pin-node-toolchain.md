@@ -1,0 +1,1 @@
+- build: pin Node to v22.23.1 via `.nvmrc` + `engines.node`, enforced by a test (#3952)

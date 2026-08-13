@@ -97,6 +97,10 @@ describe("scripts/autopilot/args-parse.sh — slash-arg parsing", () => {
         token_budget: 10000000,
         wall_clock_max_sec: 28800,
         idle_drain_turns: 5,
+        // issue #3787 — periodic session-restart cadence, in Autopilot
+        // Turns (not raw API calls; see decide.py's
+        // CONTEXT_COMPACTION_TURNS_DEFAULT docstring for the unit rationale).
+        context_compaction_turns: 8,
         scope: "all",
         subagent_max_tokens: 400000,
         subagent_hard_max_tokens: 800000,

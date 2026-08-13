@@ -110,10 +110,10 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 
 **Dependency chain:** Foundational for ADR-0004 work-order — #244 (Tier-2 outcome holdback) imports `loadOutcomes` and `getOutcomeValue`.
 
-## Candidate Feed (ADR-0016)
+## Candidate Feed (ADR-0036)
 
 The `selectAnchor()` priority waterfall (a 13-tier chain in the retired
-`src/anchor-selection/` family) was **deleted by ADR-0016**: it was orphaned at
+`src/anchor-selection/` family) was **deleted by ADR-0036**: it was orphaned at
 both ends when ADR-0006 removed the in-process control loop, and ADR-0012 made
 `decide.py` the single decisional brain. Retry / escalation / abandonment
 policy — the product intent behind the Reframe Queue — belongs to `decide.py`,

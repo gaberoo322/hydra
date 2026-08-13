@@ -1,0 +1,1 @@
+- perf: periodic session-restart cuts hydra-autopilot's own prompt-cache re-read cost (#3787)

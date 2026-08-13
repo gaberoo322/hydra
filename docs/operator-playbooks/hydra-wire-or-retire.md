@@ -88,6 +88,7 @@ which point this skill switches to calling it):
 
 - anything under `web/src/lib/risk/`
 - anything under `web/src/lib/execution/` (order placement, venue order proofs, fills)
+- anything under `web/src/lib/providers/` (protected venue adapters — Target `CLAUDE.md` rule 1: demote-only, never delete)
 - `web/src/lib/wagers/` record-* modules (money-movement records)
 
 Rationale: retiring or rewiring a money-critical module is an operator-escalation-class
@@ -141,8 +142,9 @@ template forecloses.
 
 The template also encodes the two hard preconditions from this playbook: a RETIRE task is only
 ever written for a module that **passed the carve-out** (step 2 — nothing under
-`web/src/lib/risk/`, `web/src/lib/execution/`, or the money-movement record modules ever
-receives a RETIRE task; those route `ready-for-human`), and only after the module was
+`web/src/lib/risk/`, `web/src/lib/execution/`, `web/src/lib/providers/`, or the
+money-movement record modules ever receives a RETIRE task; those route
+`ready-for-human`), and only after the module was
 **verified still dead** (step 1 — exists on `main`, no runtime importer). Do not emit this
 template for a module that failed either check.
 
