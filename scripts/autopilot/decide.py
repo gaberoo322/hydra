@@ -103,6 +103,28 @@ state.json {
     "<target_issue_number>": unix-epoch
   }
 
+  # NEW IN #3829 — per-issue attempt counter for the qa_orch busy-loop guard
+  # (design-concept issue-3829). Keyed by the STRING orch issue number, valued
+  # by the count of qa_orch dispatches that fired while that issue was the
+  # HEAD of the needs-qa set (needs_qa_numbers[0] — the issue hydra-qa will
+  # actually self-select via its own unsorted-default `gh issue list --label
+  # needs-qa --jq '.[0]'` query). At most ONE entry exists at any time by
+  # construction: on every qa_orch fire the map is rebuilt to hold only the
+  # current head's (bumped) count, so a non-head issue merely present in the
+  # needs-qa set is NEVER incremented (design-concept invariant 4 — a
+  # multi-issue backlog must not falsely accumulate attempts against issues
+  # that were never actually reviewed), and a former head that leaves the set
+  # (verdict reached, or a new head takes over) is pruned, so a later re-open
+  # under the same number starts fresh at 0 (invariant 5). An issue whose
+  # count reaches QA_STALL_MAX_ATTEMPTS is no longer eligible for qa_orch
+  # dispatch while it remains head — the busy-loop backstop issue #3829
+  # diagnosed as missing. Persisted via _persist_state_writeback (invariant
+  # 6, same pattern as research_force_counter / target_triage_item_stamps);
+  # an absent/empty map means the current head is fresh (0 prior attempts).
+  "qa_orch_item_attempts": {
+    "<orch_issue_number>": int
+  }
+
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
   "failure_log": [
     { ts, pattern, retry_count, slot, action, note }
@@ -672,6 +694,40 @@ MAX_FAILURE_RETRIES = 5
 # Default failure-log path consumed by self_heal.py when called from outside
 # decide.py (e.g. the Bash hook around dispatch).
 DEFAULT_FAILURE_LOG = "/tmp/hydra-autopilot-failures.jsonl"
+
+# qa_orch per-issue stall cap (issue #3829, design-concept issue-3829,
+# artifact d11fbcf45ed0...). This is a decide.py POLICY CONSTANT, not a
+# classes.json field (design-concept invariant 2) — mirrors how
+# ESCALATION_POLICY / ESCALATION_DEFAULT_MAX_ATTEMPTS already keep cap values
+# out of classes.json, which stays the alphabet only (its own doc-field
+# contract: "POLICY stays in decide.py").
+#
+# qa_orch has `cooldownSeconds: null` and is deliberately ABSENT from
+# ESCALATION_POLICY (invariant 3, pinned by
+# test/decide-cascade-escalation.test.mts's invariant 5) — this stall cap is a
+# STRUCTURALLY SEPARATE mechanism (a cross-turn, per-issue counter) from the
+# single-dispatch model-tier escalation cascade and must never be conflated
+# with it: ESCALATION_POLICY governs a one-time stronger-tier retry
+# immediately after a subagent STOP within one cascade, keyed on that
+# dispatch's own `attempt` field — it has no concept of "this GitHub issue has
+# been reviewed N times across many separate autopilot turns", and the
+# motivating failure (a lost-reviewer race, docs/operator-playbooks/
+# hydra-qa.md step 7.5) may not even set a `subagent_failure` stop status,
+# since hydra-qa completes cleanly and just declines to emit a verdict.
+# Without this SEPARATE, persistent per-issue counter, an issue that
+# repeatably cannot reach a QA verdict (the motivating case: the hourly
+# worktree-orphan-prune reaping the parent + reviewer worktrees mid-review)
+# keeps `needs_qa_orch` true forever and qa_orch re-dispatches every turn at
+# 30-65k tokens/turn (issue #3829 mechanism section).
+#
+# 3 bounds worst-case spend for one stuck issue to roughly 3 x 30-65k =~
+# 90-195k tokens (versus unbounded today) while still tolerating one truly
+# transient failure (#3789 is intended to make the motivating race rarer) that
+# self-heals on a plain retry — the upper end of the issue's own suggested 2-3
+# range, since unlike the escalation cascade a capped qa_orch retry has no
+# stronger model to try, so slightly more slack before giving up is
+# reasonable.
+QA_STALL_MAX_ATTEMPTS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -2049,12 +2105,43 @@ def _rule_pipeline_dispatch(
             continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
-            out.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="idle",
-                    reason="selector found no eligible work",
+            # Issue #3829 (design-concept qaTrace: "How is the cap surfaced ...
+            # satisfying the acceptance criterion's 'a label or signal'
+            # wording?"): qa_orch's selector stamps a transient
+            # `qa_orch_stalled_issue` on `state` when it suppresses dispatch
+            # because the HEAD of the current needs-qa set exhausted its
+            # attempt cap (as opposed to "no needs-qa issue at all", the
+            # ordinary idle case). Surface the distinct reason + the stalled
+            # issue number here instead of the generic "idle" one, then
+            # consume the transient marker so it never leaks into the
+            # persisted state.
+            stalled_issue = state.pop("qa_orch_stalled_issue", None) if cls == "qa_orch" else None
+            if stalled_issue is not None:
+                # outcome stays "idle" (DISPATCH_DECISION_OUTCOMES is a closed
+                # set, deliberately not extended here — no dispatch DID
+                # happen, so "idle" is accurate) but the reason text + the
+                # plan-level debug field name the stalled issue, giving this
+                # suppression the "visible signal" the #3829 acceptance
+                # criterion requires without adding a new outcome literal or a
+                # GH-mutation side effect (design-concept invariant 1).
+                out.debug["qa_orch_stalled_issue"] = stalled_issue
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=cls, outcome="idle",
+                        reason=(
+                            f"needs-qa issue #{stalled_issue} exhausted the "
+                            f"{QA_STALL_MAX_ATTEMPTS}-attempt cap — "
+                            "suppressed (issue #3829)"
+                        ),
+                    )
                 )
-            )
+            else:
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=cls, outcome="idle",
+                        reason="selector found no eligible work",
+                    )
+                )
             out.skipped += 1
             continue
         out.emit(action, reason=f"dispatch:{cls}")
@@ -2784,9 +2871,57 @@ def _select_for_slot(
 ) -> dict | None:
     """Return a dispatch action for `cls` or None if the slot should idle."""
     if cls == "qa_orch":
-        if _signal_present(state, events, "needs_qa_orch"):
-            return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
-        return None
+        if not _signal_present(state, events, "needs_qa_orch"):
+            return None
+        # Per-issue STALL CAP guard (issue #3829, design-concept issue-3829).
+        # The coarse `needs_qa_orch` boolean above stays TRUE for as long as
+        # ANY needs-qa issue sits on the board — including one that
+        # structurally cannot reach a verdict (repeatable worktree loss, an
+        # infra failure that reproduces every retry, etc.), which busy-loops
+        # qa_orch at 30-65k tokens/turn with no bound. This is an ADDITIONAL,
+        # independent, AND-composed condition (invariant 7: a healthy,
+        # non-stalled backlog's dispatch path is unchanged until the cap is
+        # actually hit).
+        #
+        # UNLIKE the #3729 sweep_target per-item guard (which tracks EVERY
+        # current item), this tracks ONLY the HEAD of the needs-qa set —
+        # `needs_qa_numbers[0]` — because hydra-qa self-selects via its own
+        # unsorted-default `gh issue list --label needs-qa --jq '.[0]'` query,
+        # so the head is deterministically the ONLY issue any given qa_orch
+        # dispatch will actually review (invariant 4). Bumping every item in
+        # the set (as a naive #3729-style port would) was considered and
+        # rejected at design time: it would falsely accumulate attempts
+        # against issues sitting further back in the queue that were never
+        # actually reviewed, risking a false "stalled" verdict on a
+        # healthy-but-queued issue the moment it becomes the new head.
+        numbers = _qa_orch_needs_qa_numbers(state, events)
+        if numbers:
+            head = numbers[0]
+            attempts = _qa_orch_item_attempts(state)
+            if not _qa_orch_item_eligible(attempts.get(head, 0)):
+                # The head issue has exhausted its attempt cap -> suppress
+                # this turn. `needs_qa_orch` stays true (the raw label count
+                # did not change); the pipeline rule surfaces this specific
+                # reason instead of the generic "idle" one, and the stalled
+                # issue number rides the dispatch_decision event + plan debug
+                # for visibility (issue #3829 acceptance criterion: "becomes
+                # visible ... rather than silently consuming budget";
+                # design-concept invariant 1: a structured signal, never a GH
+                # label mutation from this pure decision engine).
+                state["qa_orch_stalled_issue"] = head
+                return None
+            state.pop("qa_orch_stalled_issue", None)
+            # Bump ONLY the head's count. Rebuilding the tracker to hold just
+            # this one (bumped) entry is what implements the prune contract
+            # (invariant 5): a former head that is no longer the head this
+            # turn (verdict reached, or superseded by a new head) is dropped,
+            # so a later re-open under the same number starts fresh at 0.
+            _bump_qa_orch_stall_tracker(state, head)
+        # `numbers` absent/empty (no per-item fact this turn — a degraded
+        # board read or a pre-#3829 playbook) -> fail OPEN on the coarse
+        # boolean alone, preserving pre-#3829 behaviour so a transient wiring
+        # gap never dead-arms qa_orch (the #3709 defect class).
+        return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "orch"}, reason="needs-qa")
     if cls == "qa_target":
         # `needs_qa_target` is the orch-style Target QA trigger. Post-#3435 /
         # ADR-0031 the autopilot sets it from the scope=target GitHub board's
@@ -3136,6 +3271,112 @@ def _stamp_target_triage_items(state: dict, items: set[int], now: int) -> bool:
     # optimization (INV-5). Key on the STRING number (JSON object keys).
     state["target_triage_item_stamps"] = {str(n): int(now) for n in items}
     return before != state["target_triage_item_stamps"]
+
+
+# ---------------------------------------------------------------------------
+# qa_orch per-issue stall-cap guard (issue #3829, design-concept issue-3829)
+# ---------------------------------------------------------------------------
+#
+# Loosely mirrors the #3729 sweep_target per-item guard directly above's
+# collect-state-emits-a-fresh-per-turn-list shape, but the eligibility rule is
+# different in kind: #3729 tracks EVERY current item on a TIME backoff (an
+# item is eligible once its stamp ages past a window — a throttle on a
+# noisy-but-eventually-correct verdict). #3829 tracks ONLY the HEAD of the
+# needs-qa set on an ATTEMPT COUNT cap (the head stops being eligible once
+# qa_orch has fired against it QA_STALL_MAX_ATTEMPTS times) because it needs
+# to actually STOP dispatching against an issue that structurally cannot reach
+# a verdict — a time backoff alone would not terminate the loop, only slow it
+# (see QA_STALL_MAX_ATTEMPTS's docstring), and tracking every item (not just
+# the head) would falsely accumulate attempts against queued issues hydra-qa
+# never actually reviewed (design-concept invariant 4 — see the rejected
+# alternative in the design-concept artifact for the full reasoning).
+
+def _qa_orch_needs_qa_numbers(state: dict, events: list[dict]) -> list[int] | None:
+    """Read the current turn's orch needs-qa issue-number list (issue #3829).
+
+    collect-state.sh emits `needs_qa_numbers` as a fresh per-turn fact (a
+    space-separated list of orch issue numbers, in the SAME unsorted-default
+    `gh issue list --label needs-qa` order hydra-qa's own self-selection query
+    uses — order is load-bearing here, unlike the #3729 item SET, because
+    `numbers[0]` is defined to be the issue hydra-qa will actually review
+    next), which the playbook merges verbatim into
+    `state.signals.needs_qa_numbers`. Returns `None` when the signal is
+    ABSENT (a degraded board read, or a pre-#3829 playbook) — the fail-open
+    sentinel the caller uses to fall back to the coarse `needs_qa_orch`
+    boolean alone, exactly like the sweep_target precedent. An EMPTY emitted
+    list is returned as an empty list, distinct from absence, but the caller
+    treats both the same (no head known -> fail open).
+
+    Pure: no side effects.
+    """
+    raw = None
+    for ev in events:
+        if ev.get("type") == "signal" and ev.get("name") == "needs_qa_numbers":
+            raw = ev.get("value")
+            break
+    if raw is None:
+        raw = (state.get("signals") or {}).get("needs_qa_numbers")
+    if raw is None:
+        return None
+    out: list[int] = []
+    candidates = raw if isinstance(raw, (list, tuple)) else str(raw).split()
+    for token in candidates:
+        try:
+            out.append(int(str(token).strip()))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _qa_orch_item_attempts(state: dict) -> dict[int, int]:
+    """Read the persisted per-issue attempt tracker as `{issue_number: count}`.
+
+    `state.qa_orch_item_attempts` is keyed by the STRING issue number (JSON
+    object keys are strings). By construction (see `_bump_qa_orch_stall_
+    tracker`) this map holds AT MOST ONE entry — the current needs-qa head —
+    at any time. Returns a fresh `{int: int}` dict; an absent/malformed map
+    yields `{}` (the current head, if any, is fresh at 0 prior attempts).
+
+    Pure: no side effects.
+    """
+    raw = state.get("qa_orch_item_attempts")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[int, int] = {}
+    for k, v in raw.items():
+        try:
+            out[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _qa_orch_item_eligible(attempts: int) -> bool:
+    """True iff a single issue's attempt count is under the cap. Pure."""
+    return attempts < QA_STALL_MAX_ATTEMPTS
+
+
+def _bump_qa_orch_stall_tracker(state: dict, head: int) -> bool:
+    """Mutate state: increment the attempt count for the CURRENT needs-qa
+    HEAD issue only (a qa_orch dispatch just fired against it), replacing
+    whatever the tracker held before.
+
+    Issue #3829, design-concept invariant 4 (never increment a non-head
+    issue) + invariant 5 (prune once an issue leaves the needs-qa set):
+    rebuilding the map to hold ONLY the current head's bumped count is what
+    implements both — a former head that is no longer head this turn
+    (verdict reached, or a new head took over) is dropped, so a later
+    re-open under the same number starts back at 0 rather than inheriting a
+    stale count, and a non-head issue merely present in the set is never
+    touched. Returns True iff the map changed (so `main()` can persist it via
+    `_persist_state_writeback`, the same change-detection pattern as
+    `target_triage_item_stamps` / `research_force_counter` — invariant 6).
+    """
+    before = state.get("qa_orch_item_attempts")
+    prior = _qa_orch_item_attempts(state)
+    updated = {str(head): prior.get(head, 0) + 1}
+    state["qa_orch_item_attempts"] = updated
+    return before != updated
 
 
 def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> dict | None:
@@ -4407,6 +4648,15 @@ def main(argv: list[str]) -> int:
         triage_stamps_before = json.dumps(
             state.get("target_triage_item_stamps"), sort_keys=True,
         )
+        # Issue #3829: same change-detection for the qa_orch per-issue stall
+        # tracker. `_bump_qa_orch_stall_tracker` rebuilds `qa_orch_item_
+        # attempts` to hold only the current needs-qa head's bumped count
+        # when qa_orch fires against a present needs-qa list; snapshot-before/
+        # compare-after persists it via the SAME _persist_state_writeback
+        # helper, no new persistence mechanism (design-concept invariant 6).
+        qa_attempts_before = json.dumps(
+            state.get("qa_orch_item_attempts"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -4431,6 +4681,13 @@ def main(argv: list[str]) -> int:
         if triage_stamps_after != triage_stamps_before:
             _persist_state_writeback(
                 argv[2], state, what="target_triage_item_stamps stamp (#3729)",
+            )
+        qa_attempts_after = json.dumps(
+            state.get("qa_orch_item_attempts"), sort_keys=True,
+        )
+        if qa_attempts_after != qa_attempts_before:
+            _persist_state_writeback(
+                argv[2], state, what="qa_orch_item_attempts stamp (#3829)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the
