@@ -41,6 +41,7 @@ get their own rows:
 | `.claude/skills/` + `docs/operator-playbooks/` | ADR-0025, ADR-0029, ADR-0030, ADR-0031, ADR-0035 |
 | `.github/workflows/` (Verifier Core) | ADR-0015, ADR-0019, ADR-0020 |
 | `scripts/autopilot/` (`decide.py`, `classes.json`) | ADR-0007, ADR-0012, ADR-0029, ADR-0032 |
+| `dashboard/` | ADR-0034 |
 | `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 |
 | `docs/adr/` itself | ADR-0037 |
 | **process / policy** (no code area) | ADR-0002, ADR-0013, ADR-0014, ADR-0024 |
