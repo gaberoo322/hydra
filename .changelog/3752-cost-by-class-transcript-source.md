@@ -1,0 +1,1 @@
+- fix: per-class cost ranking now sums to real token burn (transcript-sourced 24h cross-tab), not the ~13%-coverage dispatch surrogate (#3752)

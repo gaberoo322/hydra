@@ -66,10 +66,13 @@ not fatal.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -81,6 +84,22 @@ REPO = os.environ.get("HYDRA_AUTOPILOT_REPO", "gaberoo322/hydra")
 HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 
 REAPED_TASK_IDS_CAP = 1000
+
+# Issue #3866: argv prefix for `gh` calls made by the dev_orch no-PR-stall
+# check below. Mirrors the HYDRA_AUTOPILOT_REDIS_CLI override pattern for
+# _redis_cli — tests inject a stub `gh` recorder here instead of shelling out
+# to the real CLI / network. Whitespace-split so a multi-word override works.
+GH_CLI_OVERRIDE = os.environ.get("HYDRA_AUTOPILOT_GH_CLI", "").strip()
+
+# Issue #3866: cap on state.dev_resume_pending so a run with many distinct
+# stalling anchors can't grow the list unboundedly across a long session —
+# mirrors REAPED_TASK_IDS_CAP's FIFO-bound rationale, just a much smaller
+# ceiling since this list drains via dispatch, not just accumulates.
+DEV_RESUME_PENDING_CAP = 20
+
+# The `needs-dev-resume` label already exists on gaberoo322/hydra (created
+# for this issue) — reap never attempts to create it, only to apply it.
+DEV_RESUME_LABEL = "needs-dev-resume"
 
 # Issue #2715 — Redis mirror of the cross-run cooldown subset.
 #
@@ -278,6 +297,234 @@ def _mirror_cross_run_state_to_redis(s: dict) -> None:
             "state.json remains source of truth",
             file=sys.stderr,
         )
+
+
+def _gh_argv(*args: str) -> list[str]:
+    """Build a `gh` CLI argv, honouring HYDRA_AUTOPILOT_GH_CLI (issue #3866).
+
+    Mirrors `_redis_cli`'s override pattern: default prefix is the single
+    token `gh`; a test/operator override is whitespace-split so a stub
+    recorder script (or a `gh --hostname ...` prefix) can stand in.
+    """
+    prefix = GH_CLI_OVERRIDE.split() if GH_CLI_OVERRIDE else ["gh"]
+    return [*prefix, *args]
+
+
+def _pr_refs_referenced_issues(pr_list_json: str) -> set[int]:
+    """Load pr-refs.py's shared reference predicate and apply it (issue #3866).
+
+    `pr-refs.py` (issue #3852) is THE reference-detection predicate for "does
+    an open PR reference issue N" — recover-stale.sh already shells out to it
+    for the analogous stale_in_progress/stale_blocked recovery. reap.py is
+    pure Python already, so it loads the sibling module directly via
+    importlib (the file is not import-friendly by name — it lives next to
+    this script, not on sys.path, and its hyphenated filename isn't a valid
+    module name) rather than round-tripping through a second subprocess.
+    Mirrors the lazy-import-for-standalone-usability pattern
+    `_classify_failure_pattern` already uses for `self_heal`.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "hydra_autopilot_pr_refs", Path(__file__).parent / "pr-refs.py"
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load pr-refs.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.referenced_issues(pr_list_json)
+
+
+def _dev_orch_pr_exists_for_anchor(anchor_ref: str) -> bool | None:
+    """Does an OPEN PR on REPO reference `anchor_ref`? (issue #3866)
+
+    `anchor_ref` is the "issue-<N>" shape `_read_anchor_deposit` returns.
+    Returns:
+      True  — `gh pr list` succeeded and at least one open PR's head branch
+              or body references the issue (pr-refs.py's predicate).
+      False — `gh pr list` succeeded and NO open PR references it. This is
+              the "dev_orch completed with no PR" stall signal the issue is
+              about.
+      None  — the check could not be completed (malformed anchor, `gh`
+              failure/timeout, unparseable output). Callers MUST treat this
+              as "unknown" and take no action — never as a false `False`.
+              Fail-open, matching every other best-effort `gh`/network call
+              in this module (e.g. `_recover_tokens_from_transcript`).
+    """
+    m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
+    if not m:
+        return None
+    issue_num = int(m.group(1))
+    try:
+        proc = subprocess.run(
+            _gh_argv(
+                "pr", "list", "--repo", REPO, "--state", "open",
+                "--json", "headRefName,body", "--limit", "200",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: gh pr list failed for anchor={anchor_ref} "
+            f"({exc}); PR-existence unknown, no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    if proc.returncode != 0:
+        print(
+            f"[autopilot] reap: gh pr list exited {proc.returncode} for "
+            f"anchor={anchor_ref}; PR-existence unknown, no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        referenced = _pr_refs_referenced_issues(proc.stdout)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never abort the reap
+        print(
+            f"[autopilot] reap: pr-refs parse failed for anchor={anchor_ref} "
+            f"({exc}); PR-existence unknown, no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    return issue_num in referenced
+
+
+def _handle_dev_orch_stall(
+    s: dict,
+    cls: str,
+    skill: str | None,
+    anchor_ref: str | None,
+    task_id: str,
+    worktree_branch: str | None,
+) -> None:
+    """Detect + relabel a dev_orch completion that opened no PR (issue #3866).
+
+    Motivating incident: dev_orch on #3726 did ~9.5 min of implementation,
+    backgrounded `npm test`, then ended its turn waiting on the test run
+    instead of finishing the PR. reap.py's completion accounting treated
+    that as a normal `completed` cycle, the source issue stayed labelled
+    `ready-for-agent` (or whatever the child left it as), and the NEXT
+    autopilot turn re-dispatched the same anchor from a brand-new worktree —
+    silently re-paying the ~165k tokens already spent, because nothing in
+    the reap/decide path ever checked "did a PR actually get opened?"
+
+    Only applies to `dev_orch` completions carrying a resolved anchor — a
+    signal-class completion, a pinned-anchor miss, or a genuine no_op (no
+    anchor deposit) all skip this by construction (the `not anchor_ref`
+    guard). The PR-existence check fails OPEN (returns None) on any `gh`
+    hiccup, so a transient network/auth failure never mislabels a healthy
+    in-flight/merged anchor — see `_dev_orch_pr_exists_for_anchor`.
+
+    On a confirmed stall (PR-existence == False):
+      - relabel the issue away from ready-for-agent/in-progress to
+        `needs-dev-resume` (label pre-created for this issue) so hydra-dev's
+        own `gh issue list --label ready-for-agent | .[0]` self-selection can
+        never re-pick it for a from-scratch redo.
+      - post an explanatory comment (best-effort).
+      - append a resume record to `state.dev_resume_pending` — the queue
+        `decide.py`'s dev_orch selector drains ahead of a fresh
+        ready-for-agent pick, pinning the NEXT dev_orch dispatch back to
+        this anchor (with the stalled branch name, when known) instead of
+        leaving it to rot under a label nothing else consumes.
+
+    Every step here is best-effort and non-fatal — a relabel/comment/gh
+    failure logs to stderr and the reap still returns normally, exactly like
+    the other post-accounting side effects in `run_completion` (reflection
+    fire, worktree GC).
+    """
+    if cls != "dev_orch" or not anchor_ref:
+        return
+    pr_exists = _dev_orch_pr_exists_for_anchor(anchor_ref)
+    if pr_exists is not False:
+        # True (PR found) or None (unknown/gh unreachable) — no action. A
+        # found PR means the anchor is legitimately progressing (needs-qa
+        # transition, if any, is the child/QA path's job, not reap's); an
+        # unknown result fails open rather than risking a false stall label.
+        return
+
+    m = re.match(r"^issue-(\d+)$", anchor_ref)
+    issue_num = m.group(1) if m else None
+    if issue_num is None:
+        return
+
+    relabelled = False
+    try:
+        edit = subprocess.run(
+            _gh_argv(
+                "issue", "edit", issue_num, "--repo", REPO,
+                "--remove-label", "ready-for-agent",
+                "--remove-label", "in-progress",
+                "--add-label", DEV_RESUME_LABEL,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        relabelled = edit.returncode == 0
+        if not relabelled:
+            print(
+                f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
+                f"to {DEV_RESUME_LABEL} (non-fatal): {edit.stderr.strip()}",
+                file=sys.stderr,
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: WARN gh issue edit failed for #{issue_num} "
+            f"(non-fatal): {exc}",
+            file=sys.stderr,
+        )
+
+    try:
+        branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
+        subprocess.run(
+            _gh_argv(
+                "issue", "comment", issue_num, "--repo", REPO, "--body",
+                "> *Automated reap — dev_orch stalled with no PR (issue #3866)*\n\n"
+                "The `dev_orch` dispatch for this anchor ended its session "
+                "without opening a PR (no open PR currently references this "
+                f"issue).{branch_note}\n\n"
+                f"Relabelled `{DEV_RESUME_LABEL}` so the next autopilot turn "
+                "resumes this anchor instead of re-dispatching a fresh "
+                "implementation from scratch.",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: WARN gh issue comment failed for #{issue_num} "
+            f"(non-fatal): {exc}",
+            file=sys.stderr,
+        )
+
+    # Append/replace the resume record — dedup by anchor so a repeated stall
+    # on the SAME anchor keeps only its latest attempt, then FIFO-bound the
+    # whole queue (issue #3866).
+    pending = s.get("dev_resume_pending")
+    if not isinstance(pending, list):
+        pending = []
+    pending = [e for e in pending if not (isinstance(e, dict) and e.get("anchor") == anchor_ref)]
+    pending.append({
+        "anchor": anchor_ref,
+        "task_id": task_id,
+        "branch": worktree_branch or "",
+        "stalled_epoch": int(time.time()),
+    })
+    if len(pending) > DEV_RESUME_PENDING_CAP:
+        pending = pending[-DEV_RESUME_PENDING_CAP:]
+    s["dev_resume_pending"] = pending
+    _save_state(s)
+
+    line = (
+        f"dev_stall_no_pr anchor={anchor_ref} task_id={task_id} "
+        f"branch={worktree_branch or ''} relabelled={relabelled}"
+    )
+    print(f"[autopilot] {line}")
+    _append_log(line)
 
 
 def _ensure_reaped_list(s: dict) -> list[str]:
@@ -1717,6 +1964,14 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     _fire_reflection_for_completion(
         s, anchor_ref, task_id, soft_cap_hit, task_title=skill
     )
+
+    # Issue #3866: a dev_orch completion that opened no PR is a STALL, not a
+    # finished cycle — relabel the anchor away from ready-for-agent (so it
+    # can never re-surface for a from-scratch redo) and queue it for a
+    # pinned resume dispatch. Fully best-effort/non-fatal; runs after the
+    # reflection fire above so a `gh` hiccup here can never affect the
+    # accounting/reflection writes that already landed.
+    _handle_dev_orch_stall(s, cls, skill, anchor_ref, task_id, worktree_branch)
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
     # reap time rather than waiting for the daily timer. Best-effort, fully

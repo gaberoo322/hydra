@@ -3684,3 +3684,326 @@ describe("collect-state.sh — wayfinder saturation guards: in-flight count + pe
     assert.equal(runPerMap([]), "0", "a map with no AFK tickets contributes 0 in-flight and no pick");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #3939 — sweep_orch per-item verdict-stability guard (orch mirror of
+// the sweep_target #3729 guard). `needs_triage_orch` is a coarse presence
+// boolean (`needs_triage > 0`); a needs-triage issue that is a STANDING
+// re-check trigger parks in the lane indefinitely, so sweep_orch re-fired every
+// 900s to re-make the identical no-op decision (~200-300K tokens/hour of churn).
+// The fix AND-composes a per-item eligibility gate — SHARED with sweep_target
+// via the lane-parameterized helpers — so a re-fire happens only when an item
+// is new or its ORCH_TRIAGE_BACKOFF_SEC window has elapsed. Two orch-specific
+// nuances vs sweep_target: (INV-6) suppression FALLS THROUGH to the
+// untriaged_orphans_orch trigger (never drops a live orphan opportunity), and
+// (INV-7) the orphan trigger itself gets NO per-item guard.
+//
+// Exercised through the `decide` CLI with a frozen `--now` clock and a short
+// HYDRA_ORCH_TRIAGE_BACKOFF_SEC (same harness shape as the dedicated
+// test/autopilot-sweep-target-signal.test.mts suite).
+// ---------------------------------------------------------------------------
+
+const ORCH_BACKOFF_SEC = 60;
+const ORCH_NOW = 10_000_000;
+
+interface OrchGuardTmp { dir: string; state: string; cands: string; events: string }
+
+function makeOrchGuardTmp(): OrchGuardTmp {
+  const dir = mkdtempSync(join(tmpdir(), "decide-sweep-orch-guard-"));
+  return { dir, state: join(dir, "state.json"), cands: join(dir, "cands.json"), events: join(dir, "events.json") };
+}
+
+interface OrchGuardStateOverrides {
+  scope?: string;
+  signal_last_fired?: Record<string, number>;
+  signals?: Record<string, unknown>;
+  orch_triage_item_stamps?: Record<string, number>;
+}
+
+function orchGuardBaseState(o: OrchGuardStateOverrides = {}): any {
+  return {
+    // started_epoch near the frozen NOW so the wall-clock termination check
+    // never trips.
+    started_epoch: ORCH_NOW - 1000,
+    limits: {
+      token_budget: 2_000_000,
+      wall_clock_max_sec: 28_800,
+      idle_drain_turns: 5,
+      context_compaction_turns: 0,
+      scope: o.scope ?? "all",
+      subagent_max_tokens: 400_000,
+      subagent_hard_max_tokens: 800_000,
+    },
+    cumulative_tokens: 0,
+    dispatches: 0,
+    idle_turns: 0,
+    turn: 0,
+    burned_classes: [],
+    reaped_task_ids: [],
+    failure_log: [],
+    slots: {
+      dev_orch: null, qa_orch: null, research_orch: null,
+      dev_target: null, qa_target: null, research_target: null,
+      design_concept_orch: null,
+    },
+    signal_last_fired: o.signal_last_fired ?? {
+      health: 0, sweep_orch: 0, sweep_target: 0,
+      discover_orch: 0, discover_target: 0,
+    },
+    signals: o.signals ?? {},
+    research_force_counter: {},
+    ...(o.orch_triage_item_stamps
+      ? { orch_triage_item_stamps: o.orch_triage_item_stamps }
+      : {}),
+  };
+}
+
+interface OrchGuardRunResult { plan: any; stateAfter: any }
+
+function runOrchGuard(state: any, events: any[] = []): OrchGuardRunResult {
+  const t = makeOrchGuardTmp();
+  try {
+    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.cands, JSON.stringify(null));
+    writeFileSync(t.events, JSON.stringify(events));
+    const r = spawnSync(
+      "python3",
+      [DECIDE, "decide", t.state, t.cands, t.events, `--now=${ORCH_NOW}`],
+      {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HYDRA_AUTOPILOT_RUN_END_POST: "off",
+          HYDRA_ORCH_TRIAGE_BACKOFF_SEC: String(ORCH_BACKOFF_SEC),
+        },
+      },
+    );
+    if (r.status !== 0) {
+      throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+    }
+    return { plan: JSON.parse(r.stdout), stateAfter: JSON.parse(readFileSync(t.state, "utf-8")) };
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+}
+
+const sweepOrchDispatch = (a: any) => a.type === "dispatch" && a.slot === "sweep_orch";
+function findSweepOrch(plan: any): any | undefined {
+  return (plan.actions ?? []).find(sweepOrchDispatch);
+}
+
+describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939)", () => {
+  test("AC1 (direction a): all current items freshly stamped → no sweep_orch dispatch", () => {
+    // Both items were examined within the backoff window, so re-dispatching
+    // would re-confirm the same verdict (the churn the guard stops). The coarse
+    // needs_triage_orch boolean stays TRUE (INV-3) — only per-item eligibility
+    // suppresses the dispatch.
+    const state = orchGuardBaseState({
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "3921 3953" },
+      orch_triage_item_stamps: { "3921": ORCH_NOW - 10, "3953": ORCH_NOW - 5 },
+    });
+    const { plan, stateAfter } = runOrchGuard(state);
+    assert.equal(
+      findSweepOrch(plan),
+      undefined,
+      "a lane whose every item was checked inside the backoff window must not re-dispatch",
+    );
+    // No fire → no write-back of the stamp map (stays exactly as seeded).
+    assert.deepEqual(
+      stateAfter.orch_triage_item_stamps,
+      { "3921": ORCH_NOW - 10, "3953": ORCH_NOW - 5 },
+      "a suppressed turn must not mutate the stamp map",
+    );
+  });
+
+  test("AC2 (direction b): an unstamped item in the set → sweep_orch dispatches", () => {
+    // 3953 is new to the lane (no stamp) → immediately eligible (INV-2), even
+    // though 3921 was checked moments ago. A per-item clock (not class-wide) is
+    // the whole point: a fresh item is never starved by a sibling.
+    const state = orchGuardBaseState({
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "3921 3953" },
+      orch_triage_item_stamps: { "3921": ORCH_NOW - 10 },
+    });
+    const { plan, stateAfter } = runOrchGuard(state);
+    const a = findSweepOrch(plan);
+    assert.ok(a, "an unstamped item in the set must dispatch sweep_orch");
+    assert.equal(a.skill, "hydra-sweep");
+    // On fire, EVERY item in the current set is stamped (uniform clock reset).
+    assert.deepEqual(
+      stateAfter.orch_triage_item_stamps,
+      { "3921": ORCH_NOW, "3953": ORCH_NOW },
+      "on fire, every current item is stamped to now (INV-5)",
+    );
+  });
+
+  test("direction b: an item with a stamp older than the backoff window → dispatches", () => {
+    const state = orchGuardBaseState({
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "3921" },
+      orch_triage_item_stamps: { "3921": ORCH_NOW - (ORCH_BACKOFF_SEC + 60) },
+    });
+    const { plan } = runOrchGuard(state);
+    assert.ok(
+      findSweepOrch(plan),
+      "an item whose stamp aged past the backoff window is eligible again",
+    );
+  });
+
+  test("pruning: stamps for items absent from the current set are dropped on fire (INV-5)", () => {
+    // 999 left the needs-triage lane; 3921 aged out and is eligible. On fire the
+    // stamp map is rebuilt from the CURRENT set only, so 999 is pruned.
+    const state = orchGuardBaseState({
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "3921" },
+      orch_triage_item_stamps: { "3921": ORCH_NOW - (ORCH_BACKOFF_SEC + 60), "999": ORCH_NOW - 10 },
+    });
+    const { stateAfter } = runOrchGuard(state);
+    assert.deepEqual(
+      stateAfter.orch_triage_item_stamps,
+      { "3921": ORCH_NOW },
+      "a fire rebuilds the stamp map from the current set, pruning departed items",
+    );
+  });
+
+  test("the 900s class cooldown remains a necessary condition (INV-1)", () => {
+    // An eligible (unstamped) item, but sweep_orch fired 100s ago — inside its
+    // 900s class cooldown. The per-item guard is AND-composed with the cooldown,
+    // never a replacement, so the dispatch is suppressed by the cooldown.
+    const state = orchGuardBaseState({
+      signal_last_fired: {
+        health: 0,
+        sweep_orch: ORCH_NOW - 100, // inside the 900s class cooldown
+        sweep_target: 0,
+        discover_orch: 0,
+        discover_target: 0,
+      },
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "3921" },
+      // 3921 has no stamp → eligible by the per-item guard.
+    });
+    const { plan } = runOrchGuard(state);
+    assert.equal(
+      findSweepOrch(plan),
+      undefined,
+      "the class-level 900s cooldown must still suppress even an eligible item",
+    );
+  });
+
+  test("fail-open on absence: items absent + needs_triage_orch true → dispatches (no dead-arm)", () => {
+    // A degraded board read (or a pre-#3939 playbook) emits the coarse count but
+    // not the per-item list. Suppressing here would re-dead-arm sweep_orch, so
+    // the guard fails OPEN on absence (INV-9).
+    const state = orchGuardBaseState({ signals: { needs_triage_orch: true } });
+    const { plan, stateAfter } = runOrchGuard(state);
+    assert.ok(
+      findSweepOrch(plan),
+      "with no per-item list, sweep_orch must fire on the coarse boolean alone",
+    );
+    assert.equal(
+      stateAfter.orch_triage_item_stamps,
+      undefined,
+      "firing on the coarse boolean alone stamps nothing (no item set known)",
+    );
+  });
+
+  test("no needs_triage_orch signal → no sweep_orch dispatch", () => {
+    const state = orchGuardBaseState({ signals: { orch_needs_triage_items: "3921" } });
+    const { plan } = runOrchGuard(state);
+    assert.equal(
+      findSweepOrch(plan),
+      undefined,
+      "an empty orch triage lane must not dispatch sweep_orch",
+    );
+  });
+
+  test("an item list emitted but empty → fail-open dispatch (consistent with absence)", () => {
+    // collect-state emits `orch_needs_triage_items=` (empty) on a degraded read.
+    // decide.py treats an empty set the same as absence: no per-item granularity,
+    // so fall back to the coarse boolean (fail open).
+    const state = orchGuardBaseState({
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "" },
+    });
+    const { plan } = runOrchGuard(state);
+    assert.ok(
+      findSweepOrch(plan),
+      "an empty emitted item list must fail open, not dead-arm the sweep",
+    );
+  });
+
+  test("events override state.signals for the item set (precedence, like every signal)", () => {
+    // state.signals says all-fresh, but the live event stream carries a new
+    // unstamped item 3954. Events take precedence (the _signal_present contract).
+    const state = orchGuardBaseState({
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "3921" },
+      orch_triage_item_stamps: { "3921": ORCH_NOW - 5 }, // 3921 fresh
+    });
+    const events = [
+      { type: "signal", name: "orch_needs_triage_items", value: "3921 3954" },
+    ];
+    const { plan, stateAfter } = runOrchGuard(state, events);
+    assert.ok(findSweepOrch(plan), "the event-supplied new item 3954 makes the set eligible");
+    assert.deepEqual(
+      stateAfter.orch_triage_item_stamps,
+      { "3921": ORCH_NOW, "3954": ORCH_NOW },
+      "the event-overridden current set is what gets stamped on fire",
+    );
+  });
+
+  test("per-item suppression falls through to the untriaged_orphans_orch trigger (INV-6)", () => {
+    // The orch-specific nuance: sweep_orch has TWO OR-composed triggers. Here
+    // needs_triage_orch is present but every item is inside its backoff window
+    // (suppressed), AND untriaged_orphans_orch is also present. The needs_triage
+    // branch must NOT short-circuit return None — control FALLS THROUGH to the
+    // orphan check, which dispatches. The orphan dispatch proves the fall-through
+    // happened; the unchanged stamp map proves the needs_triage branch was
+    // suppressed (it would have stamped on fire).
+    const state = orchGuardBaseState({
+      signals: {
+        needs_triage_orch: true,
+        orch_needs_triage_items: "3921",
+        untriaged_orphans_orch: true,
+      },
+      orch_triage_item_stamps: { "3921": ORCH_NOW - 5 }, // 3921 fresh → suppress
+    });
+    const { plan, stateAfter } = runOrchGuard(state);
+    const a = findSweepOrch(plan);
+    assert.ok(a, "a live orphan-routing opportunity must still dispatch when the triage lane is parked");
+    assert.equal(
+      a.reason,
+      "untriaged orphans on orch board (no actionable label)",
+      "the dispatch came from the FALL-THROUGH orphan branch, not the suppressed triage branch",
+    );
+    assert.deepEqual(
+      stateAfter.orch_triage_item_stamps,
+      { "3921": ORCH_NOW - 5 },
+      "the suppressed triage branch stamped nothing; the orphan branch never stamps",
+    );
+  });
+
+  test("untriaged_orphans_orch bypasses the per-item guard entirely (INV-7)", () => {
+    // The orphan trigger receives NO per-item stamp/backoff guard. With no
+    // needs_triage_orch signal at all and no item set, the orphan branch still
+    // dispatches unconditionally (orphans are structurally self-resolving).
+    const state = orchGuardBaseState({
+      signals: { untriaged_orphans_orch: true },
+    });
+    const { plan, stateAfter } = runOrchGuard(state);
+    const a = findSweepOrch(plan);
+    assert.ok(a, "untriaged_orphans_orch must dispatch with no per-item guard in the path");
+    assert.equal(
+      stateAfter.orch_triage_item_stamps,
+      undefined,
+      "the orphan path never touches the per-item stamp map",
+    );
+  });
+
+  test("sweep_orch excluded under target-only scope (the guard never bypasses scope)", () => {
+    const state = orchGuardBaseState({
+      scope: "target-only",
+      signals: { needs_triage_orch: true, orch_needs_triage_items: "3921" },
+    });
+    const { plan } = runOrchGuard(state);
+    assert.equal(
+      findSweepOrch(plan),
+      undefined,
+      "target-only scope must exclude the orch sweep class regardless of eligibility",
+    );
+  });
+});

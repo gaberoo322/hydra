@@ -72,6 +72,7 @@ function snapshotWith(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
       unknown: { ...emptyBreakdown },
     },
     bySkillByModel: {},
+    bySkillByModel24h: {},
     bySkillWoW: {},
     byDispatchKind: {
       "autopilot-dispatched": {

@@ -55,9 +55,16 @@ if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
     if [ -n "$COMMIT_WORDS" ]; then
       # Asymmetric containment: fraction of the anchor's significant words present
       # in the commit blob. score = |anchorWords ∩ commitWords| / |anchorWords|.
-      OVERLAP=$(comm -12 \
-        <(printf '%s\n' "$SIG_WORDS") \
-        <(printf '%s\n' "$COMMIT_WORDS") | wc -l | tr -d ' ')
+      # Guard-compatible form (issue #3896): the worktree-isolation Bash guard
+      # refuses the original process-substitution `comm -12 <(...) <(...)`. Both
+      # inputs are already `sort -u`'d above, so write each to a temp file and
+      # `comm` the two file paths — identical overlap count.
+      OVERLAP_TMP_A=$(mktemp)
+      OVERLAP_TMP_B=$(mktemp)
+      printf '%s\n' "$SIG_WORDS" > "$OVERLAP_TMP_A"
+      printf '%s\n' "$COMMIT_WORDS" > "$OVERLAP_TMP_B"
+      OVERLAP=$(comm -12 "$OVERLAP_TMP_A" "$OVERLAP_TMP_B" | wc -l | tr -d ' ')
+      rm -f "$OVERLAP_TMP_A" "$OVERLAP_TMP_B"
       # ≥ 0.70 coverage → positive shipped-on-main evidence (integer math: 100*overlap >= 70*count).
       if [ $((100 * OVERLAP)) -ge $((70 * SIG_COUNT)) ]; then
         SHIPPED_ON_MAIN=1
@@ -213,10 +220,14 @@ if [ -n "$HIT_WOR" ]; then
   fi
 
   # Emit reframe-save event — this is the token-value receipt for the epic.
+  # Guard-compatible form (issue #3896): the worktree-isolation Bash guard
+  # refuses the nested `$(jq ... --arg hits "$(printf|tr)")`. Collapse HIT_WOR
+  # into a plain variable first, then interpolate — identical jq payload.
+  REFRAME_HITS=$(printf '%b' "$HIT_WOR" | tr '\n' ';')
   REFRAME_PAYLOAD=$(jq -n \
     --arg anchorRef "${ANCHOR_REF:-unknown}" \
     --arg reason "wire-or-retire ledger hit — grounding preflight stopped the build" \
-    --arg hits "$(printf '%b' "$HIT_WOR" | tr '\n' ';')" \
+    --arg hits "$REFRAME_HITS" \
     '{type: "target:reframe-save", payload: {anchorRef: $anchorRef, reason: $reason, hits: $hits}}')
   hydra raw POST /events/publish "$REFRAME_PAYLOAD" 2>/dev/null || \
     echo "warn: event publish failed (non-fatal)"
@@ -239,10 +250,13 @@ elif [ -n "$HIT_AW" ]; then
       --remove-label in-progress --remove-label ready-for-agent --add-label reframe 2>/dev/null || true
   fi
 
+  # Guard-compatible form (issue #3896): split HIT_AW into a plain variable
+  # first (same nested-`$( $( ) )` avoidance as the wire-or-retire branch above).
+  REFRAME_HITS=$(printf '%b' "$HIT_AW" | tr '\n' ';')
   REFRAME_PAYLOAD=$(jq -n \
     --arg anchorRef "${ANCHOR_REF:-unknown}" \
     --arg reason "awaiting-wiring ledger hit — grounding preflight stopped rebuild, steering toward wiring" \
-    --arg hits "$(printf '%b' "$HIT_AW" | tr '\n' ';')" \
+    --arg hits "$REFRAME_HITS" \
     '{type: "target:reframe-save", payload: {anchorRef: $anchorRef, reason: $reason, hits: $hits}}')
   hydra raw POST /events/publish "$REFRAME_PAYLOAD" 2>/dev/null || \
     echo "warn: event publish failed (non-fatal)"
@@ -342,10 +356,13 @@ if [ -n "$HIT_DOCS" ]; then
   fi
 
   # Emit reframe-save event — same token-value receipt as the ledger gate.
+  # Guard-compatible form (issue #3896): split HIT_DOCS into a plain variable
+  # first (same nested-`$( $( ) )` avoidance as the ledger branches above).
+  REFRAME_HITS=$(printf '%b' "$HIT_DOCS" | tr '\n' ';')
   REFRAME_PAYLOAD=$(jq -n \
     --arg anchorRef "${ANCHOR_REF:-unknown}" \
     --arg reason "superseded-doc banner hit — grounding preflight stopped the build" \
-    --arg hits "$(printf '%b' "$HIT_DOCS" | tr '\n' ';')" \
+    --arg hits "$REFRAME_HITS" \
     '{type: "target:reframe-save", payload: {anchorRef: $anchorRef, reason: $reason, hits: $hits}}')
   hydra raw POST /events/publish "$REFRAME_PAYLOAD" 2>/dev/null || \
     echo "warn: event publish failed (non-fatal)"

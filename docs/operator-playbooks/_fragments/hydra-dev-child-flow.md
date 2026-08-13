@@ -97,8 +97,13 @@ is prompt-ready markdown; `count: 0` / `formatted: ""` is a clean no-op.
 ```bash
 # ANCHOR_REF is anchor.reference, e.g. "issue-841". FILES_CSV is the
 # `## Files in scope` list, comma-separated.
+# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
+# nested command substitution `$( ... $(...) ...)`. URL-encode each query value
+# into a plain variable first, then interpolate into the curl URL.
+ANCHOR_ENC=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)
+FILES_ENC=$(printf '%s' "$FILES_CSV" | jq -sRr @uri)
 REFL_JSON=$(curl -sf --max-time 5 \
-  "http://localhost:4000/api/reflections?anchor=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)&files=$(printf '%s' "$FILES_CSV" | jq -sRr @uri)")
+  "http://localhost:4000/api/reflections?anchor=${ANCHOR_ENC}&files=${FILES_ENC}")
 REFL_FORMATTED=$(printf '%s' "$REFL_JSON" | jq -r '.formatted // ""')
 [ -n "$REFL_FORMATTED" ] && printf '%s\n' "$REFL_FORMATTED"  # prepend to plan; do NOT repeat prior approach
 # Empty / unreachable → graceful no-op. Never fail the dispatch over a miss.
@@ -199,8 +204,11 @@ Never infer tier from path patterns. Response (200):
 # as sibling PRs merge; cue: stale-local-master-ref).
 git fetch origin --quiet
 CHANGED=$(git diff --name-only origin/master...HEAD | paste -sd, -)
+# Guard-compatible form (issue #3896): encode CHANGED into a plain variable first
+# to avoid nested `$( ... $(...) ...)` in the curl URL.
+CHANGED_ENC=$(printf '%s' "$CHANGED" | jq -sRr @uri)
 TIER_JSON=$(curl -sf --max-time 5 \
-  "http://localhost:4000/api/tier?files=$(printf '%s' "$CHANGED" | jq -sRr @uri)")
+  "http://localhost:4000/api/tier?files=${CHANGED_ENC}")
 if [ -z "$TIER_JSON" ]; then
   TIER_LINE="Tier: unknown (live classifier unreachable; needs operator triage)"
   TIER_LABEL_FLAG="--label needs-triage"

@@ -410,6 +410,21 @@ TARGET_TRIAGE_BACKOFF_SEC = int(
     os.environ.get("HYDRA_TARGET_TRIAGE_BACKOFF_SEC") or (6 * 60 * 60)
 )
 
+# Issue #3939 — the orchestrator-side mirror of TARGET_TRIAGE_BACKOFF_SEC. Same
+# 6h default, same env-override shape, same rationale: long enough to suppress
+# the observed re-fire churn (sweep_orch re-fired every 900s against a
+# permanently-parked standing-trigger item, ~200-300K tokens/hour of pure churn;
+# autopilot run 3ce9e61a 2026-08-10) yet short enough that a genuinely-changed
+# item still gets same-day re-examination. Kept as a SEPARATE constant + env var
+# (HYDRA_ORCH_TRIAGE_BACKOFF_SEC, NOT HYDRA_TARGET_TRIAGE_BACKOFF_SEC) so the two
+# sweep lanes can be tuned independently — they have different verdict-thrash
+# economics (target = time-gated wire-or-retire items; orch = standing re-check
+# triggers). Resolved once at import so decide() stays a pure function of
+# (state, events, now) (INV-3/INV-13).
+ORCH_TRIAGE_BACKOFF_SEC = int(
+    os.environ.get("HYDRA_ORCH_TRIAGE_BACKOFF_SEC") or (6 * 60 * 60)
+)
+
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
 
@@ -2934,6 +2949,45 @@ def _select_for_slot(
             return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
         return None
     if cls == "dev_orch":
+        # ISSUE #3866: drain state.dev_resume_pending BEFORE the fresh-pick
+        # gate below. reap.py appends a resume record here when a PRIOR
+        # dev_orch completion opened no PR (a stall, not a finished cycle) —
+        # it also relabels that anchor's issue away from `ready-for-agent`
+        # (to `needs-dev-resume`), so `orch_work_available` may well be False
+        # even though there is real, already-started work waiting to resume.
+        # Checking this queue first — independent of `orch_work_available` —
+        # is what stops the stalled anchor from being starved by an otherwise
+        # empty board. `prompt_args.anchor` reuses the SAME pinned-anchor
+        # contract `orch_dev_ready_anchor` already established below (the
+        # dispatch preamble names the anchor verbatim); `resume`/
+        # `resume_branch` are additive hints so the dispatch prompt can tell
+        # the fresh subagent to check for and continue the stalled branch
+        # instead of reimplementing from zero. Pop (not peek) so this exact
+        # anchor is only pinned once per queued stall — decide() mutates
+        # `state` in place here, the same sanctioned pattern `main()` already
+        # persists via change-detection for `research_force_counter` /
+        # `target_triage_item_stamps`.
+        resume_pending = state.get("dev_resume_pending") if isinstance(state, dict) else None
+        if isinstance(resume_pending, list) and resume_pending:
+            entry = resume_pending[0]
+            if isinstance(entry, dict) and entry.get("anchor"):
+                resume_pending.pop(0)
+                prompt_args: dict = {"anchor": entry["anchor"], "resume": True}
+                if entry.get("branch"):
+                    prompt_args["resume_branch"] = entry["branch"]
+                return make_dispatch(
+                    cls,
+                    "hydra-dev",
+                    prompt_args=prompt_args,
+                    reason=(
+                        f"resuming stalled dev_orch anchor {entry['anchor']} "
+                        f"— prior completion opened no PR (issue #3866)"
+                    ),
+                )
+            # Malformed entry (no anchor) — drop it rather than looping on it
+            # forever; still counts as a state mutation main() will persist.
+            resume_pending.pop(0)
+
         # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
         # board, NOT /api/anchor/candidates. The unified candidates feed is
         # dominated by target-product work in this deployment (item-26x are all
@@ -3180,32 +3234,35 @@ def _select_for_slot(
     return None
 
 
-def _target_triage_item_set(state: dict, events: list[dict]) -> set[int] | None:
-    """Read the current turn's Target needs-triage item-number set (issue #3729).
+def _triage_item_set(
+    state: dict, events: list[dict], signal_name: str
+) -> set[int] | None:
+    """Read the current turn's needs-triage item-number set (issues #3729/#3939).
 
-    collect-state.sh emits `target_needs_triage_items` as a fresh per-turn fact
-    (a space-separated list of Target issue numbers, e.g. ``626 631``), which the
-    playbook merges verbatim into ``state.signals.target_needs_triage_items`` —
-    exactly the same verbatim-string seam as ``wayfinder_orch_frontier``. This
-    parses it into a set of ints.
+    collect-state.sh emits ``target_needs_triage_items`` / ``orch_needs_triage_items``
+    as a fresh per-turn fact (a space-separated list of issue numbers, e.g.
+    ``626 631``), which the playbook merges verbatim into
+    ``state.signals.<signal_name>`` — exactly the same verbatim-string seam as
+    ``wayfinder_orch_frontier``. This parses it into a set of ints. SHARED by the
+    target (#3729) and orch (#3939) sweep lanes, parameterized by signal name —
+    the guard is shared, not forked (INV-10).
 
     Returns ``None`` when the signal is ABSENT (collect-state did not emit it —
-    e.g. a degraded board read, or a pre-#3729 playbook). An absent list is the
-    fail-open sentinel: the caller fires on the coarse ``needs_triage_target``
-    boolean alone rather than dead-arming sweep_target (the #3709 defect class).
-    An EMPTY emitted list (``""``) is returned as an empty set, distinct from
-    absence — but the caller treats both the same (no per-item granularity →
-    fail open).
+    e.g. a degraded board read, or a pre-#3729/#3939 playbook). An absent list is
+    the fail-open sentinel: the caller fires on the coarse boolean alone rather
+    than dead-arming the sweep (the #3709/#3939 defect class). An EMPTY emitted
+    list (``""``) is returned as an empty set, distinct from absence — but the
+    caller treats both the same (no per-item granularity → fail open, INV-9).
 
-    Pure: no side effects.
+    Pure: no side effects (INV-13).
     """
     raw = None
     for ev in events:
-        if ev.get("type") == "signal" and ev.get("name") == "target_needs_triage_items":
+        if ev.get("type") == "signal" and ev.get("name") == signal_name:
             raw = ev.get("value")
             break
     if raw is None:
-        raw = (state.get("signals") or {}).get("target_needs_triage_items")
+        raw = (state.get("signals") or {}).get(signal_name)
     if raw is None:
         return None
     out: set[int] = set()
@@ -3221,16 +3278,16 @@ def _target_triage_item_set(state: dict, events: list[dict]) -> set[int] | None:
     return out
 
 
-def _target_triage_stamps(state: dict) -> dict[int, int]:
-    """Read the persisted per-item stamp map as ``{item_number: epoch}``.
+def _triage_stamps(state: dict, key: str) -> dict[int, int]:
+    """Read a persisted per-item stamp map as ``{item_number: epoch}``.
 
-    ``state.target_triage_item_stamps`` is keyed by the STRING item number (JSON
-    object keys are strings) and valued by a unix epoch. Returns a fresh
-    ``{int: int}`` dict; an absent/malformed map yields ``{}``.
-
-    Pure: no side effects.
+    ``state.<key>`` is keyed by the STRING item number (JSON object keys are
+    strings) and valued by a unix epoch. Returns a fresh ``{int: int}`` dict; an
+    absent/malformed map yields ``{}``. SHARED by the target
+    (``target_triage_item_stamps``, #3729) and orch (``orch_triage_item_stamps``,
+    #3939) stamp maps, parameterized by state key (INV-10). Pure (INV-13).
     """
-    raw = state.get("target_triage_item_stamps")
+    raw = state.get(key)
     if not isinstance(raw, dict):
         return {}
     out: dict[int, int] = {}
@@ -3242,35 +3299,40 @@ def _target_triage_stamps(state: dict) -> dict[int, int]:
     return out
 
 
-def _triage_item_eligible(stamp: int, now: int) -> bool:
+def _triage_item_eligible(stamp: int, now: int, backoff_sec: int) -> bool:
     """True iff a single item's stamp makes it eligible for a sweep this turn.
 
     An item is eligible iff it has NO prior stamp (``stamp <= 0`` — new to the
-    lane, issue #3729 INV-2) OR its stamp is older than the per-item backoff
-    window (INV-3/INV-6). Pure.
+    lane, #3729 INV-2) OR its stamp is older than the per-item backoff window
+    (INV-3/INV-6). The backoff is passed in (``TARGET_TRIAGE_BACKOFF_SEC`` /
+    ``ORCH_TRIAGE_BACKOFF_SEC``) so the orch and target sweep lanes share ONE
+    eligibility rule — and the exact ``>=`` boundary math that has duplication-
+    drift risk if forked — while tuning independently (issue #3939 INV-10: the
+    guard is shared, not forked). Pure (INV-13).
     """
     if stamp <= 0:
         return True
-    return (now - stamp) >= TARGET_TRIAGE_BACKOFF_SEC
+    return (now - stamp) >= backoff_sec
 
 
-def _stamp_target_triage_items(state: dict, items: set[int], now: int) -> bool:
+def _stamp_triage_items(state: dict, items: set[int], now: int, key: str) -> bool:
     """Mutate state: stamp every item in the CURRENT set, pruning the rest.
 
-    Issue #3729 INV-4/INV-5. On a sweep_target fire, every item in the current
-    turn's needs-triage set is stamped to ``now`` (not only the previously-
-    eligible ones — a dispatch that examines the whole lane resets the clock
-    uniformly), and any stamp whose item is NO LONGER in the set is dropped, so
-    ``target_triage_item_stamps`` never grows unbounded across a long-running
-    session. Returns True iff the map changed (so ``main()`` can persist it via
-    ``_persist_state_writeback``, the same change-detection pattern as
-    ``research_force_counter``).
+    Issue #3729 INV-4/INV-5 (target) / #3939 INV-5 (orch mirror). On a sweep
+    fire, every item in the current turn's needs-triage set is stamped to
+    ``now`` (not only the previously-eligible ones — a dispatch that examines
+    the whole lane resets the clock uniformly), and any stamp whose item is NO
+    LONGER in the set is dropped, so the stamp map never grows unbounded across
+    a long-running session. SHARED by both sweep lanes, parameterized by state
+    key (INV-10). Returns True iff the map changed (so ``main()`` can persist it
+    via ``_persist_state_writeback``, the same change-detection pattern as
+    ``research_force_counter``, INV-12).
     """
-    before = state.get("target_triage_item_stamps")
+    before = state.get(key)
     # Rebuild from the current set only — pruning is structural, not an
     # optimization (INV-5). Key on the STRING number (JSON object keys).
-    state["target_triage_item_stamps"] = {str(n): int(now) for n in items}
-    return before != state["target_triage_item_stamps"]
+    state[key] = {str(n): int(now) for n in items}
+    return before != state[key]
 
 
 # ---------------------------------------------------------------------------
@@ -3388,7 +3450,51 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         return None
     if sig == "sweep_orch":
         if _signal_present(state, events, "needs_triage_orch"):
-            return make_dispatch(sig, "hydra-sweep", reason="needs-triage on orch board")
+            # Per-item verdict-stability guard (issue #3939 — the orchestrator
+            # mirror of the sweep_target #3729 guard). `needs_triage_orch` is a
+            # COARSE presence boolean (`needs_triage > 0`) with no per-item gate;
+            # a needs-triage issue that is a STANDING re-check trigger (one whose
+            # own ACs say "re-triage forward when condition X is met") parks in
+            # the lane indefinitely — sweep correctly declines to route it, the
+            # lane stays non-empty, and sweep_orch re-fired every 900s to re-make
+            # the identical no-op decision (~200-300K tokens/hour of pure churn;
+            # autopilot run 3ce9e61a 2026-08-10). This AND-composes a per-item
+            # eligibility gate — SHARED with sweep_target via the lane-
+            # parameterized helpers (_triage_item_set / _triage_stamps /
+            # _triage_item_eligible / _stamp_triage_items, INV-10) — so a re-fire
+            # happens only when an item is new (INV-2) or its
+            # ORCH_TRIAGE_BACKOFF_SEC window has elapsed (INV-3). On fire, every
+            # item in the CURRENT set is stamped and departed items are pruned
+            # (INV-5). The 900s class cooldown checked above stays a necessary,
+            # independent condition (INV-1).
+            items = _triage_item_set(state, events, "orch_needs_triage_items")
+            if items:
+                stamps = _triage_stamps(state, "orch_triage_item_stamps")
+                if any(
+                    _triage_item_eligible(
+                        stamps.get(n, 0), now, ORCH_TRIAGE_BACKOFF_SEC
+                    )
+                    for n in items
+                ):
+                    _stamp_triage_items(state, items, now, "orch_triage_item_stamps")
+                    return make_dispatch(
+                        sig, "hydra-sweep", reason="needs-triage on orch board"
+                    )
+                # Every current item was checked inside its backoff window → the
+                # needs_triage_orch branch is suppressed this turn. FALL THROUGH
+                # to the untriaged_orphans_orch check below (INV-6): a parked
+                # standing-trigger must never cause a live orphan-routing
+                # opportunity to be silently dropped. needs_triage_orch stays
+                # true (presence gate, INV-3); the lane re-opens for re-examination
+                # as each item's window elapses.
+            else:
+                # items absent/empty (no per-item fact — a degraded board read
+                # or a pre-#3939 playbook) → fail OPEN on the coarse boolean
+                # alone (INV-9), never dead-arming the sweep (the #3709 defect
+                # class). Nothing is stamped (no item set is known).
+                return make_dispatch(
+                    sig, "hydra-sweep", reason="needs-triage on orch board"
+                )
         # Untriaged-orphans triage backstop (issue #2426). An open issue that
         # carries NONE of the actionable/lifecycle labels {ready-for-agent,
         # in-progress, blocked, needs-qa, needs-triage, needs-research,
@@ -3402,6 +3508,16 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # mislabeled/orphaned issue lands in an actionable lane instead of
         # silently falling off the board. Subject to the same sweep_orch
         # cooldown (already enforced above) so it cannot busy-loop.
+        #
+        # Reached in THREE cases: needs_triage_orch absent; needs_triage_orch
+        # present with NO per-item fact (fail-open already returned above); or
+        # needs_triage_orch present with every item inside its per-item backoff
+        # window (the #3939 fall-through, INV-6). This orphan branch receives NO
+        # per-item stamp/backoff guard (INV-7): orphans are structurally self-
+        # resolving — sweep assigning ANY lifecycle label removes an item from
+        # the orphan set permanently, so a persistently-recurring orphan is a
+        # classifier exclusion-set gap (fixed by widening the exclusion, as
+        # #2828/#2958/#3728/#3817 did), never a standing-recheck state to throttle.
         if _signal_present(state, events, "untriaged_orphans_orch"):
             return make_dispatch(sig, "hydra-sweep", reason="untriaged orphans on orch board (no actionable label)")
         return None
@@ -3422,16 +3538,19 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # the per-item backoff window). On fire, every item in the CURRENT set is
         # stamped so the whole lane's clock resets uniformly, and stamps for
         # items no longer in the set are pruned (INV-4/INV-5).
-        items = _target_triage_item_set(state, events)
+        items = _triage_item_set(state, events, "target_needs_triage_items")
         if items:
-            stamps = _target_triage_stamps(state)
-            if not any(_triage_item_eligible(stamps.get(n, 0), now) for n in items):
+            stamps = _triage_stamps(state, "target_triage_item_stamps")
+            if not any(
+                _triage_item_eligible(stamps.get(n, 0), now, TARGET_TRIAGE_BACKOFF_SEC)
+                for n in items
+            ):
                 # Every current item was checked inside its backoff window →
                 # suppress this turn. needs_triage_target stays true (INV-3);
                 # the lane re-opens for re-examination as each item's window
                 # elapses.
                 return None
-            _stamp_target_triage_items(state, items, now)
+            _stamp_triage_items(state, items, now, "target_triage_item_stamps")
         # `items` absent/empty (no per-item fact this turn — a degraded board
         # read or a pre-#3729 playbook) → fail OPEN on the coarse boolean alone,
         # preserving the pre-#3729 behaviour so a transient wiring gap never
@@ -4640,13 +4759,29 @@ def main(argv: list[str]) -> int:
         force_counter_before = json.dumps(
             state.get("research_force_counter"), sort_keys=True,
         )
-        # Issue #3729: same change-detection for the per-item sweep_target stamp
-        # map. `_stamp_target_triage_items` rebuilds `target_triage_item_stamps`
-        # in place (pruning absent items) when sweep_target fires with a present
-        # item set; snapshot-before/compare-after persists it via the SAME
-        # _persist_state_writeback helper, no new persistence mechanism.
+        # Issues #3729/#3939: change-detection for the per-item sweep stamp maps.
+        # `_stamp_triage_items` rebuilds the stamp map in place (pruning absent
+        # items) when a sweep fires with a present item set — for sweep_target
+        # (`target_triage_item_stamps`, #3729) and sweep_orch
+        # (`orch_triage_item_stamps`, #3939). snapshot-before/compare-after on BOTH
+        # maps persists either via the SAME _persist_state_writeback helper, no new
+        # persistence mechanism (INV-12).
         triage_stamps_before = json.dumps(
-            state.get("target_triage_item_stamps"), sort_keys=True,
+            {
+                "target": state.get("target_triage_item_stamps"),
+                "orch": state.get("orch_triage_item_stamps"),
+            },
+            sort_keys=True,
+        )
+        # Issue #3866: same change-detection for state.dev_resume_pending.
+        # reap.py appends to this queue on a no-PR dev_orch stall; the
+        # dev_orch selector in `_select_for_slot` pops its head in place when
+        # it pins a resume dispatch. Snapshot-before/compare-after persists
+        # the pop via the SAME `_persist_state_writeback` helper — no new
+        # persistence mechanism, mirrors `triage_stamps_before` immediately
+        # above.
+        dev_resume_pending_before = json.dumps(
+            state.get("dev_resume_pending"), sort_keys=True,
         )
         # Issue #3829: same change-detection for the qa_orch per-issue stall
         # tracker. `_bump_qa_orch_stall_tracker` rebuilds `qa_orch_item_
@@ -4676,11 +4811,22 @@ def main(argv: list[str]) -> int:
             # force-counter-changed gate → fires once per stamping turn.
             _mirror_research_force_counter_to_redis(state)
         triage_stamps_after = json.dumps(
-            state.get("target_triage_item_stamps"), sort_keys=True,
+            {
+                "target": state.get("target_triage_item_stamps"),
+                "orch": state.get("orch_triage_item_stamps"),
+            },
+            sort_keys=True,
         )
         if triage_stamps_after != triage_stamps_before:
             _persist_state_writeback(
-                argv[2], state, what="target_triage_item_stamps stamp (#3729)",
+                argv[2], state, what="triage_item_stamps stamp (#3729/#3939)",
+            )
+        dev_resume_pending_after = json.dumps(
+            state.get("dev_resume_pending"), sort_keys=True,
+        )
+        if dev_resume_pending_after != dev_resume_pending_before:
+            _persist_state_writeback(
+                argv[2], state, what="dev_resume_pending drain (#3866)",
             )
         qa_attempts_after = json.dumps(
             state.get("qa_orch_item_attempts"), sort_keys=True,

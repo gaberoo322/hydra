@@ -248,6 +248,39 @@ with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
 
+**A second, independent source of a pinned anchor: draining
+`state.dev_resume_pending` (issue #3866).** `reap.py` appends a resume record
+here when a PRIOR `dev_orch` completion opened no PR for its anchor (the
+no-PR-stall backstop — see "Reap-side backstop" below); the `dev_orch`
+selector in `decide.py` drains this queue BEFORE the grill-gate/self-select
+logic above, so it can pin a dispatch even when the anchor's issue is no
+longer labelled `ready-for-agent` (it was relabelled `needs-dev-resume`) and
+`orch_work_available` is otherwise false. Such an action carries
+`prompt_args.resume: true` and, when the stalled worktree branch is known,
+`prompt_args.resume_branch = "<branch-name>"`. **When `prompt_args.resume` is
+true, say so in the dispatch prompt** — e.g. *"This anchor previously stalled
+without a PR (branch `<resume_branch>`, if given). Before implementing from
+scratch, check whether that branch still exists (`git ls-remote origin
+<resume_branch>`) and continue from it if so — do not silently redo already-
+committed work."* This is a fresh subagent, not a literal resumed session (a
+completed dispatch's live agent handle is not something `decide.py` can act
+on), but reusing the branch avoids re-paying the tokens already spent on the
+committed portion of the prior attempt.
+
+**Reap-side backstop (issue #3866).** `scripts/autopilot/reap.py`'s
+`_handle_dev_orch_stall` (called from every `dev_orch` completion reap) checks
+whether an open PR references the completion's anchor, via the same
+`pr-refs.py` predicate `recover-stale.sh` uses (issue #3852). No open PR found
+→ the source issue is relabelled away from `ready-for-agent`/`in-progress` to
+`needs-dev-resume` (a label pre-created for this issue), an explanatory
+comment is posted, and a resume record is queued onto
+`state.dev_resume_pending` for the drain above. This is the backstop for the
+forbidden-ending rule (see the Worktree-guard preamble section) — it exists to
+limit the blast radius of a dispatch that ends without a PR, not to make
+ending early acceptable. The check fails OPEN (no mutation) on any `gh`
+hiccup, so a transient network blip never mislabels a healthy in-flight
+anchor.
+
 **Ordering the unpinned pick — the standing work ranking (issue #3981).** Today's
 unpinned self-selection is `gh issue list --label ready-for-agent … | .[0]` — it
 takes whatever the API returns first, which is **not** a priority order. There is
@@ -443,6 +476,34 @@ JSONL transcript history to quantify ghost-write incidents across past
 dispatches (useful as a before/after measurement when the hook is rolled
 out).
 
+**`dev_orch` / `qa_orch` dispatches carry a SECOND required preamble block — the
+forbidden-ending rule (issue #3866).** Append verbatim, immediately after the
+worktree-guard preamble above, for every `dev_orch` and `qa_orch` dispatch:
+
+```
+## NEVER END WAITING — deliverable or terminal state, always (issue #3866)
+This is an UNATTENDED dispatch. Nothing resumes you after your final message —
+reap.py records your session's end as a completion the instant it happens,
+whatever you did or didn't finish. NEVER end your turn waiting on CI, a
+monitor, or a background process ("I'll wait for the test run to finish",
+"standing by for the re-check"). Either poll to a terminal state in the
+FOREGROUND, or your final message reports one of: a PR is open (dev_orch) / a
+verdict was posted (qa_orch), OR a hard blocker via ## Friction Report. There
+is no third option.
+```
+
+Motivating incidents (autopilot run 2bcba309, 2026-08-05): a `dev_orch`
+dispatch on #3726 did ~9.5 min of real implementation, backgrounded `npm
+test`, then ended its session waiting on the test run — no PR existed at reap
+time, and the ~165k tokens already spent were silently re-paid by a
+from-scratch redispatch on the next turn (see the `dev_orch` no-PR-stall
+backstop below, which now catches this case at reap time — but the backstop
+exists to limit the blast radius of this failure mode, not to make it
+acceptable). A `qa_orch` T4 re-check on PR #3853 posted the Deep-QA PASS
+marker and then ended its turn waiting for the `deep-qa-gate` re-check to
+complete, even though `hydra-qa.md`'s own verdict-tier design already never
+loops waiting on CI — the design was correct, the dispatch didn't follow it.
+
 **`dev_target` dispatches are NOT harness-worktree-isolated (issue #3889, superseding the #542 framing).** Unlike every other dispatch class, `dev_target` is launched **without** `isolation="worktree"` (see the `dispatch` action-to-tool entry above). The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, the harness refuses ALL git ops against it from a pinned session — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches, issue #3889). `dev_target` therefore relies **solely** on Step 0.6's `/dev/shm/hydra-worktrees/` worktree for isolation, and on the installed `worktree-write-fence.sh` PreToolUse hook for ghost-write protection (the role `isolation="worktree"` plays for the orchestrator-only classes). Every `dev_target` dispatch MUST still go through Step 0.6 before any Edit/Write against the target.
 
 ```
@@ -619,7 +680,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` — the coarse PRESENCE gate; a necessary but not sufficient condition post-#3829 (see the row below) |
 | `needs_qa_numbers` (orch GH board — space-separated `needs-qa` issue NUMBERS in the SAME unsorted-default order hydra-qa's own self-selection query returns, e.g. `3841 3850`; empty when the lane is empty or the read degraded) | `needs_qa_numbers` (string, merged verbatim — the same seam as `target_needs_triage_items` / `wayfinder_orch_frontier`) | the per-issue STALL CAP guard on `qa_orch` (issue #3829, design-concept issue-3829). Unlike #3729's per-item guard, this tracks ONLY the HEAD (`needs_qa_numbers[0]`) — the issue hydra-qa's own `gh issue list --label needs-qa --jq '.[0]'` will actually review next — never a non-head issue merely present in the lane. `qa_orch` fires iff the head has attempted fewer than `QA_STALL_MAX_ATTEMPTS` (3) qa_orch dispatches; on fire the tracker is rebuilt to hold only the head's bumped count, so a former head that is superseded or resolved is pruned and restarts at 0 on a later re-open. A head that repeatably cannot reach a QA verdict (e.g. the worktree-orphan-prune race that motivated #3829) stops being dispatched once exhausted — the plan's `dispatch_decision` reason + `debug.qa_orch_stalled_issue` name it instead of a silent re-fire. Absent/empty → fail-open on the coarse `needs_qa_orch` boolean alone (never dead-arm the class the #3709/#3729 way). |
 | `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |
-| `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch` |
+| `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch`. This coarse boolean stays TRUE even when every item is inside its per-item backoff window (issue #3939 INV-3) — it is the presence gate, not the eligibility gate. |
+| `orch_needs_triage_items` (orch GH board — space-separated `needs-triage` item NUMBERS, e.g. `3921 3844`; empty when the lane is empty or the read degraded) | `orch_needs_triage_items` (string, merged verbatim — the same seam as `wayfinder_orch_frontier`) | the per-item verdict-stability guard on `sweep_orch` (issue #3939 — the orchestrator mirror of the `sweep_target` #3729 guard; the four guard functions are SHARED, lane-parameterized, not forked). `sweep_orch`'s `needs_triage_orch` branch fires iff the 900s class cooldown has elapsed AND ≥1 item in this set has no stamp OR a stamp older than `ORCH_TRIAGE_BACKOFF_SEC` (default 6h, env `HYDRA_ORCH_TRIAGE_BACKOFF_SEC` — a SEPARATE env from the target lane's `HYDRA_TARGET_TRIAGE_BACKOFF_SEC`); on fire every item in the CURRENT set is stamped and departed items are pruned. If every current item is inside its backoff window the `needs_triage_orch` branch is suppressed but control FALLS THROUGH to the `untriaged_orphans_orch` trigger (INV-6) — a parked standing-trigger never drops a live orphan-routing opportunity. Absent/empty → fail-open on the coarse `needs_triage_orch` boolean alone (never re-dead-arm the sweep). |
 | `target_needs_triage > 0` (**target GH board**, scope=target — raw `needs-triage` label count; the #3059 blocker filter applies to `ready_for_agent` only) | `needs_triage_target` | `sweep_target` (issue #3709 — Target mirror of `needs_triage_orch`; no saturation cap, it drains the lane it gates on). This coarse boolean stays TRUE even when every item is inside its per-item backoff window (issue #3729 INV-3) — it is the presence gate, not the eligibility gate. |
 | `target_needs_triage_items` (**target GH board** — space-separated `needs-triage` item NUMBERS, e.g. `626 631`; empty when the lane is empty or the read degraded) | `target_needs_triage_items` (string, merged verbatim — the same seam as `wayfinder_orch_frontier`) | the per-item verdict-stability guard on `sweep_target` (issue #3729). `sweep_target` fires iff ≥1 item in this set has no stamp OR a stamp older than `TARGET_TRIAGE_BACKOFF_SEC` (default 6h); on fire every item in the CURRENT set is stamped and departed items are pruned. Absent/empty → fail-open on the coarse `needs_triage_target` boolean alone (never re-dead-arm the sweep). |
 | `target_board_signals_truncated` (**target GH board** read returned exactly `--limit` rows — succeeded but incomplete) | (advisory only) | nothing — never gates dispatch (issue #3710). Opposite of `_degraded`: that one suppresses, this one keeps dispatching on a floor-valued count |

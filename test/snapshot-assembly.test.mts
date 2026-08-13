@@ -66,6 +66,7 @@ function makeScan(overrides: Partial<ScanResult> = {}): ScanResult {
     byModel7d: familyOnly("opus", opus7d),
     byModel24h: familyOnly("opus", opus24h),
     bySkillByModel: { "hydra-dev": familyOnly("opus", opus7d) },
+    bySkillByModel24h: { "hydra-dev": familyOnly("opus", opus24h) },
     byDispatchKind: emptyDispatchKinds(),
     tokens24h: opus24h,
     // Foreign-provider (non-Anthropic-quota) 7d spend, issue #3769. Zero here:
@@ -164,6 +165,16 @@ describe("assembleSnapshot (direct, no-IO)", () => {
       0,
     );
     assert.equal(skillOpus, snap.byModel.opus.total);
+
+    // bySkillByModel24h (issue #3752) is surfaced verbatim from the scan and
+    // reconciles against tokensLast24h: Σ_skill Σ_family .total === tokens24h.
+    // The fixture puts all 24h tokens under hydra-dev/opus (opus24h=100).
+    const skill24hTotal = Object.values(snap.bySkillByModel24h).reduce(
+      (sum, fam) => sum + fam.opus.total,
+      0,
+    );
+    assert.equal(skill24hTotal, snap.tokensLast24h);
+    assert.equal(snap.bySkillByModel24h["hydra-dev"].opus.total, 100);
 
     // No Weekly Reset Anchor env => since-reset window is neutral.
     assert.equal(snap.weeklyResetAnchor, null);

@@ -199,7 +199,20 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW structure (issue #3847)",
     const entryIdx = src.indexOf("# Entry point");
     assert.ok(entryIdx > defIdx, "entry-point comment must follow the block definition");
     const entry = src.slice(entryIdx);
-    assert.match(entry, /^run_launch_flow$/m, "run_launch_flow must be called in the entry list");
+    // Indentation-tolerant: #3906 wrapped the entry list in a
+    // `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` sourcing guard, so every call in it
+    // is now indented. The invariant here is that run_launch_flow is CALLED in
+    // the entry list (not merely defined) — not the guard's indentation.
+    assert.match(entry, /^\s*run_launch_flow$/m, "run_launch_flow must be called in the entry list");
+    // …and that the call sits INSIDE the sourcing guard, so sourcing the script
+    // (test/watchdog-pending-work.test.mts does) stays side-effect-free.
+    const guardIdx = entry.indexOf('if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then');
+    assert.ok(guardIdx >= 0, "entry list must be wrapped in the sourcing guard");
+    assert.match(
+      entry.slice(guardIdx),
+      /^\s*run_launch_flow$/m,
+      "run_launch_flow must be called inside the sourcing guard, not before it",
+    );
   });
 
   test("INV-1: reads exactly ONE HGETALL of PACE_GATE_LAST_TICK_KEY; no new probe / no second eligibility consumer", () => {
