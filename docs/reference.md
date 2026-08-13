@@ -110,10 +110,10 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 
 **Dependency chain:** Foundational for ADR-0004 work-order — #244 (Tier-2 outcome holdback) imports `loadOutcomes` and `getOutcomeValue`.
 
-## Candidate Feed (ADR-0016)
+## Candidate Feed (ADR-0036)
 
 The `selectAnchor()` priority waterfall (a 13-tier chain in the retired
-`src/anchor-selection/` family) was **deleted by ADR-0016**: it was orphaned at
+`src/anchor-selection/` family) was **deleted by ADR-0036**: it was orphaned at
 both ends when ADR-0006 removed the in-process control loop, and ADR-0012 made
 `decide.py` the single decisional brain. Retry / escalation / abandonment
 policy — the product intent behind the Reframe Queue — belongs to `decide.py`,
@@ -508,91 +508,23 @@ Quota accounting flows through the **Cost** module and **Subscription Usage Trac
 
 ## Learning System (operational)
 
-Conceptual definitions live in `CONTEXT.md` (**Pattern Memory**, **Reflections**, **Knowledge Base**). This is the operational detail.
+Conceptual definitions live in `CONTEXT.md` (**Pattern Memory**, **Reflections**). This is the operational detail.
 
-**OpenViking-primary, Redis-fallback. Three tiers:**
+**Redis-native. Two tiers:**
 
-1. **OpenViking (primary):** each autopilot tick / subagent dispatch creates an OV session (`ov-session.ts`); interactions are logged as session messages. At close, `ovSession.commit()` triggers memory extraction — OV stores learned patterns as searchable embeddings. Subagents query `getAgentContext()` / `searchKnowledge()`.
-2. **Redis patterns (fallback):** consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. At `PROMOTION_THRESHOLD` (3, exported from `src/pattern-memory/agent-memory.ts`) a pattern auto-promotes to a durable lesson file (`~/.claude/skills/<skill>/lessons.md`) AND opens a `meta-friction` GitHub issue (issue #512). Stale one-offs pruned after 14 days.
-3. **Episodic reflections:** on subagent failure, a structured reflection is stored in `hydra:reflections:{ref}` (7-day TTL); re-injected when the same anchor/file is retried.
+> The former primary tier — an OpenViking session per dispatch, committed at
+> close to extract patterns as searchable embeddings — is **RETIRED**
+> (ADR-0033). Its module (`ov-session.ts`) and every `.commit()` caller were
+> already gone before the retirement, so this section described a capability
+> that no longer existed; the learning system is Redis-native with no fallback
+> relationship to anything.
+
+1. **Redis patterns:** consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. At `PROMOTION_THRESHOLD` (3, exported from `src/pattern-memory/agent-memory.ts`) a pattern auto-promotes to a durable lesson file (`~/.claude/skills/<skill>/lessons.md`) AND opens a `meta-friction` GitHub issue (issue #512). Stale one-offs pruned after 14 days.
+2. **Episodic reflections:** on subagent failure, a structured reflection is stored in `hydra:reflections:{ref}` (7-day TTL); re-injected when the same anchor/file is retried.
 
 **Cue taxonomy (issue #524)** — two QA cues, split because they describe different things. The per-cue table is `src/pattern-memory/escalation.ts::CUE_ESCALATION_THRESHOLDS`:
 - `acceptance-criterion-unmet` — true defect; threshold 3, auto-promotes to `to-planner.md` + escalates to a GitHub issue.
 - `acceptance-criterion-deferred` — only verifiable post-deploy/runtime/by-operator (metadata, not a defect); threshold 20+, does NOT write a rule to `to-planner.md`. Migrate pre-split entries with `bash scripts/cleanup/reclassify-deferred-acs.sh --apply`.
-
-## OpenViking embedding/VLM backend split (issue #1795)
-
-OpenViking has two model backends, deliberately served from **different**
-hosts so the hot search path survives a gaming-PC outage:
-
-| Backend | Model | Served by | Why |
-|---------|-------|-----------|-----|
-| `embedding.dense` | `nomic-embed-text` (768-dim) | **local CPU Ollama** on the hydra-server (compose service `ollama-embed`, addressed as `http://ollama-embed:11434/v1`) | tiny (~270MB), CPU-fine; on the *hot* search path — a query must be embedded before the vector lookup runs, so this can never depend on a remote host |
-| `vlm` | `gemma4:e4b` | gaming PC `gabes-desktop-1:11434` over Tailnet (mapped via `extra_hosts` in `docker-compose.yml`) | heavy, GPU-bound; only used for image/document understanding during indexing, **not** core text search |
-
-Before #1795 both backends pointed at `gabes-desktop-1`, so when the gaming PC
-was offline (~2 days, #1781) the **whole** search path broke. Now the gaming PC
-is a *soft* dependency: with it offline, `searchKnowledge()` / `trackedOvSearch`
-still embed + search locally; only VLM-dependent indexing degrades.
-
-The `ollama-embed` service pulls the model on first boot via
-`docker/ollama-embed-entrypoint.sh` and only reports healthy once
-`ollama list` shows `nomic-embed-text`; `openviking` `depends_on` it with
-`condition: service_healthy`, so OV never starts embedding against a
-not-yet-pulled model.
-
-> **Dimension is pinned at 768.** Changing the embedding model or its
-> `dimension` invalidates the existing vikingdb collection — a dim change
-> requires a collection **drop + OV restart** (see the
-> `reference_openviking_local_ollama` memory note). Keep `nomic-embed-text` /
-> `768` unless you intend to reindex from scratch.
-
-**Graceful degradation when the embedding backend is unreachable (issue #1781).**
-The dense-embedding backend (`ollama-embed`) is **critical infra for the hot
-search path** — a query cannot be embedded without it, so when it is down
-`searchKnowledge()` / `trackedOvSearch` return **empty** `{resources:[],memories:[]}`
-and **never throw** (the never-throw-from-grounding rule). Agents simply run with
-no knowledge context until it recovers; cycles do not crash. The deep-health
-OV-search probe classifies this hop into four distinct `ovSearch.status` values
-so an operator gets an actionable signal rather than a generic failure:
-
-| `ovSearch.status` | Meaning | What to check |
-|-------------------|---------|---------------|
-| `running` | search 2xx'd | healthy (an `info` "OV search empty" fires only if the index is empty) |
-| `failed` | OV reachable, search 5xx'd (`ov-non-2xx`) / malformed body | OpenViking itself / its internal search handler |
-| `timeout` | search exceeded the deep-health window (`ov-timeout`) | slow-but-working; raise `OV_SEARCH_PROBE_TIMEOUT_MS` if persistent (`info`, not a fault) |
-| `backend-unreachable` | search transport never reached OV (`ov-service-down`) | the embedding backend host — `docker exec hydra-openviking-1 curl -m5 http://ollama-embed:11434/api/tags`; `/hydra-doctor` probes this automatically |
-
-The classifier (`classifyOvSearchProbe` in `src/health/diagnostics.ts`) is a pure,
-unit-tested function; the `backend-unreachable` warning is additive — no existing
-status was renamed or removed.
-
-**Automatic Wake-on-LAN recovery of the gaming PC (issue #2228).** #1794 verified
-that a Wake-on-LAN magic packet from the orchestrator host wakes the gaming PC
-(`gabes-desktop-1`, Intel I225-V NIC, MAC `d8:bb:c1:70:62:76`) from a full
-power-off, and the Ollama embedding/VLM backend self-recovers in ~40s. The
-deep-health embed-backend probe (`probeEmbedBackend`, #2013) already folds an
-unreachable backend to `status:"failed"`; when it does, the IO/heartbeat fan-out
-(`maybeWakeEmbedBackend` in `src/health/fan-out.ts`) now broadcasts a magic
-packet (`src/health/wol.ts`) and **returns immediately** — the current health tick
-completes normally; recovery is observed on the next scheduled health tick, at
-which point the #2131 alert clears automatically if the backend came back up.
-
-The send is a best-effort recovery side-effect: it **never throws** (a bad MAC,
-a cross-subnet deployment where the L2 broadcast can't reach the NIC, or any
-socket error is a fail-loud `console.error` + no-op; the heartbeat keeps
-running). A cooldown caps the send rate (no packet-per-heartbeat spam) and a
-max-attempt cap stops trying after K wakes so a genuinely-dead box still pages
-the operator via the existing #2131 warning. It is **opt-in** and only works when
-the orchestrator runs on the gaming PC's LAN (`10.0.0.0/24`).
-
-| Env var | Default | Meaning |
-|---------|---------|---------|
-| `HYDRA_WOL_ENABLED` | `false` (off) | Master switch — auto-wake only fires when set to `true`/`1`. Conservative default so a cross-subnet host never broadcasts. |
-| `HYDRA_WOL_MAC` | `d8:bb:c1:70:62:76` | Target NIC MAC (the #1794-verified gaming-PC I225-V). Accepts `:` or `-` separators, case-insensitive. |
-| `HYDRA_WOL_BROADCAST` | `10.0.0.255` | LAN broadcast address the magic packet is sent to (UDP ports 9 and 7). |
-| `HYDRA_WOL_COOLDOWN_MS` | `300000` (5 min) | Minimum interval between wake sends. |
-| `HYDRA_WOL_MAX_ATTEMPTS` | `3` | Consecutive wake attempts before giving up and letting the #2131 alert surface. The attempt budget resets the moment the embed-backend probe reads `running` again. |
 
 ## Config (`~/hydra/config/`) — git-tracked
 

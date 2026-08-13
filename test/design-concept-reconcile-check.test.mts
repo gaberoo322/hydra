@@ -176,6 +176,21 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(extractAssertionText('"q" — no assertion at all'), "");
   });
 
+  test("extractQuotedText keeps an embedded quote inside the verbatim prefix (issue #3975)", () => {
+    // The contract format is `- INV-<n>: "<quote>" — verified by: <assertion>`,
+    // so the quote is the OUTERMOST quoted span in the text before `verified
+    // by:`. An invariant whose verbatim prefix itself contains a `"` must encode
+    // that `"` — the matcher may not stop at the first embedded quote. Both real
+    // #3963 shapes are exercised: a `"` landing inside the first 16 chars, and an
+    // invariant that STARTS with a `"`.
+    const embedded = '"mergeable == "UNKNOWN" is treated as no-verdict" — verified by: `file-contains: a.ts :: x`';
+    assert.equal(extractQuotedText(embedded), 'mergeable == "UNKNOWN" is treated as no-verdict');
+    const leading = '""Required" checks means exactly the 7 contexts" — verified by: `file-contains: a.ts :: x`';
+    assert.equal(extractQuotedText(leading), '"Required" checks means exactly the 7 contexts');
+    // The no-embedded-quote majority is unchanged: a single "foo" still yields foo.
+    assert.equal(extractQuotedText('"plain old invariant text" — verified by: `manual: ok`'), "plain old invariant text");
+  });
+
   test("normaliseInvariantText strips an INV-n label and collapses whitespace", () => {
     assert.equal(normaliseInvariantText("INV-4  MUST NOT   modify\n  foo"), "MUST NOT modify foo");
     assert.equal(normaliseInvariantText("plain text"), "plain text");
@@ -449,6 +464,33 @@ describe("design-concept reconcile check (pure)", () => {
         `option ${a} should reconcile cleanly`,
       );
     }
+  });
+
+  test("an invariant whose verbatim prefix embeds a quote reconciles end-to-end (issue #3975)", () => {
+    // Real #3963 shapes that were structurally unencodable under the old
+    // first-`"`-to-next-`"` matcher: a `"` inside the first 16 chars (INV-1) and
+    // an invariant that STARTS with a `"` (INV-2). The dev quotes a verbatim
+    // ≥16-char prefix of each; the gate must accept both, not truncate them to a
+    // sub-MIN_QUOTE_CHARS span and emit a bogus quote-mismatch.
+    const invariants = [
+      'mergeable == "UNKNOWN" is treated as no-verdict (never conflicted); re-poll once after a short delay or skip the row for this pass.',
+      '"Required" checks means exactly the 7 branch-protection contexts — no more, no fewer.',
+    ];
+    const body = [
+      "Closes #3963",
+      "",
+      RECONCILIATION_HEADING,
+      "",
+      "Artifact: `8c0dfe60287a`",
+      '- INV-1: "mergeable == "UNKNOWN" is treated as no-verdict" — verified by: `file-contains: src/poll.ts :: mergeable`',
+      '- INV-2: ""Required" checks means exactly the 7 branch-protection contexts" — verified by: `file-contains: src/poll.ts :: Required`',
+    ].join("\n");
+    const read = fakeReader({ "src/poll.ts": "const mergeable = row.Required;" });
+    assert.deepEqual(
+      checkReconciliation({ prBody: body, invariants, artifactHash: HASH, readFile: read }),
+      [],
+      "an invariant embedding a quote in its first 16 chars must be encodable end-to-end",
+    );
   });
 
   test("formatViolations names every violation and the push-a-commit remedy", () => {

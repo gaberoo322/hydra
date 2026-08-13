@@ -1,0 +1,1 @@
+- feat: `/hydra-review` adds a Stalled PRs bucket that surfaces green-but-conflicted and green-but-unshepherded PRs across the Orchestrator and every Target repo — finished work that was invisible to every issue bucket (#3963)

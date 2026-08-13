@@ -22,7 +22,6 @@ Once proposals are consistently high-quality, these categories can be upgraded t
 | Category | Auto-approve? | Rationale |
 |---|---|---|
 | Agent personality tweaks | Not yet | Low risk, but want to observe patterns first |
-| OpenViking context tuning | Not yet | Doesn't change code |
 | Event routing changes | No | Review first few |
 | Orchestrator code changes | Never auto | Always review |
 | Eval config changes | Never auto | Quality gate itself |

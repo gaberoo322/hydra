@@ -277,11 +277,30 @@ function verifiedByIndex(text: string): number {
   return m ? m.index : -1;
 }
 
-/** First straight- or smart-quoted span in the text before `verified by:`. */
+/**
+ * Outermost straight-quoted span, or first smart-quoted span, in the text
+ * before `verified by:`.
+ *
+ * The contract format is `- INV-<n>: "<quote>" — verified by: <assertion>`, so
+ * the straight quote is always the OUTERMOST `"…"` span in `head` (the text
+ * before `verified by:`). A greedy first-`"`-to-last-`"` capture grabs it whole
+ * — the ONLY way to encode an invariant whose verbatim prefix itself contains
+ * an embedded `"` (e.g. `mergeable == "UNKNOWN" …`) or one that STARTS with a
+ * `"`. The previous `[^"]+` stopped at the first embedded quote, truncating
+ * those invariants below the {@link MIN_QUOTE_CHARS} verbatim-prefix floor with
+ * an unavoidable `quote-mismatch` (issue #3975, blocking #3963). For the
+ * no-embedded-quote majority a single `"foo"` still yields `foo`: greedy
+ * first-to-last reduces to first-and-only when there is one pair.
+ *
+ * The smart-quote (curly `“…”`) fallback is deliberately LEFT on its original
+ * first-span matcher: its open/close characters differ, so an embedded STRAIGHT
+ * `"` never truncates it, and the approved design-concept for #3975 (INV-5)
+ * requires that path untouched by this fix.
+ */
 export function extractQuotedText(entryText: string): string {
   const vb = verifiedByIndex(entryText);
   const head = vb === -1 ? entryText : entryText.slice(0, vb);
-  const straight = /"([^"]+)"/.exec(head);
+  const straight = /"(.*)"/.exec(head);
   if (straight) return straight[1];
   const smart = /“([^”]+)”/.exec(head);
   if (smart) return smart[1];

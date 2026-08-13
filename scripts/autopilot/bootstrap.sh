@@ -12,6 +12,9 @@
 #   HYDRA_AUTOPILOT_TOKEN_BUDGET                (default 10000000)
 #   HYDRA_AUTOPILOT_MAX_SEC                     (default 28800  — 8h)
 #   HYDRA_AUTOPILOT_IDLE_TURNS                  (default 5)
+#   HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS    (default 8 — issue #3787,
+#                                                periodic session-restart
+#                                                cadence in Autopilot Turns)
 #   HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS         (default 400000 — soft cap)
 #   HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS    (default 800000 — hard cap)
 #   HYDRA_AUTOPILOT_SCOPE                       (default all | orch-only | target-only)
@@ -745,6 +748,12 @@ fi
 TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-10000000}"
 WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
 IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
+# Periodic session-restart cadence (issue #3787) — cuts the parent session's
+# own prompt-cache re-read cost. Measured in Autopilot Turns (one
+# decide.py-decide invocation), NOT raw Anthropic API calls — see
+# decide.py's CONTEXT_COMPACTION_TURNS_DEFAULT docstring for the unit
+# rationale behind the 8-turn default.
+CONTEXT_COMPACTION_TURNS="${HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS:-8}"
 
 # Per-subagent token caps (issue #395). Soft cap = stop re-dispatching that
 # class; hard cap = abandon the in-flight slot and open a runaway issue.
@@ -917,31 +926,43 @@ fi
 # too, otherwise its weekly cadence would silently degrade to fire-every-turn
 # across the pace-gate relaunch (the same #2575 bug class).
 #
+# `discover_orch` (issue #3920) is the 8th long-cooldown class — a 3600s
+# cooldown, the SAME cadence as its round-robin BACKFILL_SIGNAL_CLASSES partner
+# `architecture_orch` (decide.py runs the two as a staggered one-per-turn
+# backfill set). It was historically seeded in the always-on-seeded-at-0 group
+# below — a classification that predates the 2026-06-03 change (#963) that raised
+# its cooldown from 30m to 3600s; the #2575 carry-forward group added for exactly
+# this failure mode omitted it. Left in the always-on group, every relaunch reset
+# it to 0, so `signal_is_cooled()` in decide.py always read last=0 and its 3600s
+# cooldown was a silent no-op (permanently eligible) — a tracking/observability
+# bug, not a dispatch-gap cause (#3916 confirms the selector is otherwise sound).
+#
 # Seed = the prior state file's timestamp for each class (carried forward so the
 # cooldown survives the relaunch), defaulting to 0 only when there is no prior
 # value (first-ever run). Missing prior file, missing jq, unparseable JSON, or a
 # non-object shape all degrade to all-0 — fail-open (at worst one extra fire),
 # and a seed failure must never block bootstrap. Read happens BEFORE the heredoc
 # clobbers the file, mirroring RESEARCH_FORCE_SEED.
-COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0}'
+COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"discover_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0}'
 if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
   COOLDOWN_SIGNAL_SEED="$(jq -c '
     (.signal_last_fired // {}) as $s
     | {
         retro_orch:           (($s.retro_orch           // 0) | if type == "number" then . else 0 end),
         architecture_orch:    (($s.architecture_orch    // 0) | if type == "number" then . else 0 end),
+        discover_orch:        (($s.discover_orch        // 0) | if type == "number" then . else 0 end),
         cleanup_orch:         (($s.cleanup_orch         // 0) | if type == "number" then . else 0 end),
         scout_orch:           (($s.scout_orch           // 0) | if type == "number" then . else 0 end),
         wire_or_retire_target: (($s.wire_or_retire_target // 0) | if type == "number" then . else 0 end),
         design_qa_target:     (($s.design_qa_target     // 0) | if type == "number" then . else 0 end),
         skill_prune:          (($s.skill_prune          // 0) | if type == "number" then . else 0 end)
       }
-  ' "${STATE_PATH}" 2>/dev/null || echo '{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0}')"
+  ' "${STATE_PATH}" 2>/dev/null || echo '{"retro_orch":0,"architecture_orch":0,"discover_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0}')"
   # Belt-and-braces: anything that does not look like a JSON object would
   # corrupt the heredoc below into invalid JSON — degrade to all-0.
   case "${COOLDOWN_SIGNAL_SEED}" in
     "{"*) ;;
-    *) COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0}' ;;
+    *) COOLDOWN_SIGNAL_SEED='{"retro_orch":0,"architecture_orch":0,"discover_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0}' ;;
   esac
 fi
 
@@ -959,7 +980,7 @@ fi
 # bootstrap never blocks (design-concept #2715 Invariants 2 + 5).
 if { [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; } \
   && command -v jq >/dev/null 2>&1; then
-  for _cd_cls in retro_orch architecture_orch cleanup_orch scout_orch wire_or_retire_target design_qa_target skill_prune; do
+  for _cd_cls in retro_orch architecture_orch discover_orch cleanup_orch scout_orch wire_or_retire_target design_qa_target skill_prune; do
     # Only reach for Redis when the prior-file tier gave us 0 for this class.
     _cd_prior="$(printf '%s' "${COOLDOWN_SIGNAL_SEED}" | jq -r --arg c "${_cd_cls}" '(.[$c] // 0)' 2>/dev/null || echo 0)"
     case "${_cd_prior}" in
@@ -984,16 +1005,19 @@ if { [ "${ISOLATED_RUN}" != "1" ] || [ -n "${HYDRA_AUTOPILOT_REDIS_CLI:-}" ]; } 
   unset _cd_cls _cd_prior _cd_redis _cd_merged
 fi
 
-# Compose the full 12-key signal_last_fired object: the 5 always-on classes seeded
-# at 0 (re-armed each run by design) plus the 7 long-cooldown classes carried
+# Compose the full 12-key signal_last_fired object: the 4 always-on classes seeded
+# at 0 (re-armed each run by design) plus the 8 long-cooldown classes carried
 # forward from the prior state (COOLDOWN_SIGNAL_SEED — retro_orch /
-# architecture_orch / cleanup_orch / scout_orch / wire_or_retire_target /
-# design_qa_target / skill_prune). Prefer jq for the merge; fall back to a manual
-# splice if jq is unavailable so bootstrap never blocks.
+# architecture_orch / discover_orch / cleanup_orch / scout_orch /
+# wire_or_retire_target / design_qa_target / skill_prune). Prefer jq for the
+# merge; fall back to a manual splice if jq is unavailable so bootstrap never
+# blocks. (#3920 moved discover_orch out of the always-on group and into the
+# carried-forward COOLDOWN_SIGNAL_SEED group — it carries the same 3600s cooldown
+# as architecture_orch, its round-robin BACKFILL_SIGNAL_CLASSES partner.)
 SIGNAL_LAST_FIRED_JSON='{"health":0,"sweep_orch":0,"sweep_target":0,"discover_orch":0,"discover_target":0,"retro_orch":0,"architecture_orch":0,"cleanup_orch":0,"scout_orch":0,"wire_or_retire_target":0,"design_qa_target":0,"skill_prune":0}'
 if command -v jq >/dev/null 2>&1; then
   SIGNAL_LAST_FIRED_MERGED="$(jq -cn --argjson cooled "${COOLDOWN_SIGNAL_SEED}" '
-    {health:0, sweep_orch:0, sweep_target:0, discover_orch:0, discover_target:0} + $cooled
+    {health:0, sweep_orch:0, sweep_target:0, discover_target:0} + $cooled
   ' 2>/dev/null || echo "")"
   case "${SIGNAL_LAST_FIRED_MERGED}" in
     "{"*) SIGNAL_LAST_FIRED_JSON="${SIGNAL_LAST_FIRED_MERGED}" ;;
@@ -1056,14 +1080,15 @@ fi
 #     test/autopilot-invariants.test.mts enforce both shapes.
 #   - The signal-driven classes no longer occupy slots; they track only
 #     their last-fired timestamp under `signal_last_fired`, replacing the
-#     legacy `/tmp/hydra-last-*.txt` files. ALL ELEVEN KEYS MUST BE PRESENT
-#     for the same reason: the 5 always-on classes
-#     (health / sweep_* / discover_*) seeded at `0` (re-armed each run),
-#     plus the 7 long-cooldown classes (retro_orch / architecture_orch /
-#     cleanup_orch / scout_orch / wire_or_retire_target / design_qa_target /
-#     skill_prune, the last three added by issues #2722, #2739 and #2949) which
+#     legacy `/tmp/hydra-last-*.txt` files. ALL TWELVE KEYS MUST BE PRESENT
+#     for the same reason: the 4 always-on classes
+#     (health / sweep_* / discover_target) seeded at `0` (re-armed each run),
+#     plus the 8 long-cooldown classes (retro_orch / architecture_orch /
+#     discover_orch / cleanup_orch / scout_orch / wire_or_retire_target /
+#     design_qa_target / skill_prune; #2722/#2739/#2949 added the wire/design/skill
+#     entries and #3920 moved discover_orch here from the always-on group) which
 #     are SEEDED FROM THE PRIOR STATE FILE (issue #2575 — COOLDOWN_SIGNAL_SEED
-#     above) so their 24h/7d cooldown survives the pace-gate's ~15-min relaunch
+#     above) so their 1h/24h/7d cooldown survives the pace-gate's ~15-min relaunch
 #     cadence.
 #     Before #2575 these were omitted entirely, so decide.py's
 #     `signal_is_cooled()` read a missing key as epoch 0 (permanently cooled)
@@ -1100,6 +1125,7 @@ cat > "${STATE_PATH}" <<EOF
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
+    "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
@@ -1122,7 +1148,7 @@ cat > "${STATE_PATH}" <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
 echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"
 
 # Issue #435 — overwrite the Phase 0 heartbeat with the structured
@@ -1172,6 +1198,7 @@ else
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
+    "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},

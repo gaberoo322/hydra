@@ -1,3 +1,7 @@
+---
+status: accepted
+---
+
 # One target per orchestrator instance; fleet later via systemd
 
 The orchestrator builds one **Target** at a time. To build another target, run a second orchestrator instance (eventually as a systemd unit per target). Multi-target inside one orchestrator — Redis namespacing per target, shared scheduler, per-target budgets — is rejected.

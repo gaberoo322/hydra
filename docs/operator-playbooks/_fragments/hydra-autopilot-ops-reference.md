@@ -79,6 +79,31 @@ reboot via AOF + the docker volume) and reads it back as a seed tier:
    leaving retro with zero drillable dispatches. Per ADR-0021 D5, continuity
    comes from the pace-gate relaunch, so the designed exit is recorded as the
    clean idle drain it is.
+6. `turn > 0` AND `turn % limits.context_compaction_turns == 0` (issue #3787;
+   default **8 Autopilot Turns**, `state.limits.context_compaction_turns` /
+   `HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS`; 0 disables it) → `terminate`
+   cause `context_compaction`. Checked LAST (a budget/wall-clock/idle/
+   failure-backstop trip on the same turn still wins) and NOT gated on
+   `slots_occupied == 0` (unlike cause 5) — a busy run is exactly what
+   accumulates the most cache-read growth. `term-check.py` mirrors the same
+   comparison (same lockstep duplication as causes 1-3).
+
+   **Unit note:** the default is 8, not the issue's literal "80-120" — that
+   figure was computed over the sampled transcript's 245 raw Anthropic API
+   calls, not `state.turn` (one `decide.py decide` invocation; no raw-call
+   counter exists in state.json). The same transcript shows only ~20 decide
+   invocations across those calls (~12.25 raw calls/turn); rescaling the
+   issue's own "conservative end" instruction by that ratio lands at ~6.5-10
+   Autopilot Turns.
+
+   Reuses the SAME terminate -> pace-gate-relaunch path as causes 1-4 (clean
+   `exit 0`, no `Restart=on-failure`, next launch at the next
+   `hydra-pace-gate.timer` tick) — no new relaunch machinery, no new
+   in-flight bookkeeping, since slot re-seeding via `/api/autopilot/inflight-
+   slots` (#1352) is already cause-agnostic. Phase 7's `hydra-digest`
+   dispatch (a costed `Agent()` call) is SKIPPED for `context_compaction`
+   specifically, to avoid multiplying that cost at the tighter cadence;
+   `drain.sh` still runs unconditionally.
 
 When the emitted plan carries a `terminate`, the decide CLI itself POSTs
 `/api/autopilot/run-end` with the plan's cause before printing the plan

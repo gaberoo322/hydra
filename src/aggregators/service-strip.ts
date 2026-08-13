@@ -36,17 +36,17 @@ import { resolve } from "node:path";
 import { pingRedis } from "../redis/utility.ts";
 // Issue #2281: the probe-status DISPLAY vocabulary ("ok"|"degraded"|"down"), the
 // degraded latency threshold, and the pure classify logic are owned by the
-// ServiceProbe Adapter Seam (src/health/probe.ts), next to the probe producers
-// whose results they classify. service-strip composes those canonical
-// classifiers instead of re-implementing them inline, so the status vocabulary
-// has a single definition rather than two that silently diverge. ServiceRow
-// stays a DISTINCT display record (it layers service/lastChecked/lastError onto
-// the shared status) — #2281 converged the vocabulary, NOT the record types.
+// zero-IO display-status classification leaf (src/health/probe-classify.ts).
+// service-strip composes those canonical classifiers instead of
+// re-implementing them inline, so the status vocabulary has a single
+// definition rather than two that silently diverge. ServiceRow stays a
+// DISTINCT display record (it layers service/lastChecked/lastError onto the
+// shared status) — #2281 converged the vocabulary, NOT the record types.
 import {
   classifyServiceBoolean,
   classifyServiceProbe,
   type ProbeStatus,
-} from "../health/probe.ts";
+} from "../health/probe-classify.ts";
 // Issue #2597/#3482: the ordered, shared enumeration of which external-service
 // liveness probes the strip renders (and in what order) lives in the focused
 // strip-probes leaf — the single owner of the strip's probe set. Issue #3482

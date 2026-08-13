@@ -12,8 +12,10 @@
  * primitive returning a discriminated never-throw `AnthropicResult`. The
  * recommendation engine's `defaultLlmClient` is its only caller and layers the
  * prompt-build + response-parse on top. It is the SIXTH boundary Seam, a SIBLING
- * to the **OpenViking Request Adapter** (`src/knowledge-base/ov-request.ts`) and
- * the **OAuth Usage Adapter** (`src/cost/oauth-usage.ts`) — all over `fetch()`.
+ * to the **OAuth Usage Adapter** (`src/cost/oauth-usage.ts`) — both over
+ * `fetch()`. (The FOURTH Seam, the OpenViking Request Adapter, was the
+ * fetch()-Seam precedent; retired with the knowledge plane, ADR-0033. The
+ * ordinals are historical and are not renumbered.)
  *
  * This is the CI backstop that freezes the drift, exactly as
  * `openviking-seam-check.ts` (issue #954) / `host-probe-seam-check.ts` (#939) /

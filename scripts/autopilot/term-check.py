@@ -4,10 +4,13 @@ term-check.py — Phase 3 of /hydra-autopilot.
 
 Reads /tmp/hydra-autopilot-state.json and prints one line:
 
-  TERM:budget     — token budget exhausted, jump to Phase 7
-  TERM:wall_clock — wall-clock cap exceeded, jump to Phase 7
-  TERM:idle       — idle-drain turns reached with no slots in flight
-  OK              — keep iterating
+  TERM:budget              — token budget exhausted, jump to Phase 7
+  TERM:wall_clock          — wall-clock cap exceeded, jump to Phase 7
+  TERM:idle                — idle-drain turns reached with no slots in flight
+  TERM:context_compaction  — periodic session-restart cadence reached
+                              (issue #3787 — cuts the parent session's own
+                              prompt-cache re-read cost; jump to Phase 7)
+  OK                       — keep iterating
 
 The playbook's Phase 3 instructs the model: "if output starts with
 TERM:, jump immediately to Phase 7; if OK, proceed to Phase 4."
@@ -33,6 +36,16 @@ from pathlib import Path
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
 HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
+
+# Periodic session-restart cadence (issue #3787). Mirrors
+# `decide.py.CONTEXT_COMPACTION_TURNS_DEFAULT` — see that constant's
+# docstring for the full rationale (including the raw-API-call vs Autopilot-
+# Turn unit correction against the issue's literal 80-120 figure). Kept as a
+# literal duplicate rather than an import: term-check.py is intentionally
+# dependency-free (stdlib only) so Phase 3 stays a cheap, side-effect-free
+# pre-check ahead of the authoritative Phase 4 `decide.py` invocation, which
+# mirrors this exact comparison via `state.limits.context_compaction_turns`.
+CONTEXT_COMPACTION_TURNS_DEFAULT = 8
 
 
 # Bounded retry for the terminal run-end POST. Three attempts with a short
@@ -179,6 +192,23 @@ def main() -> int:
         cause = "idle"
         print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
     else:
+        # Periodic session-restart (issue #3787) — checked LAST, mirroring
+        # decide.py's `_check_termination` ordering, so a genuinely urgent
+        # condition above always wins on the same turn. Deliberately NOT
+        # gated on `slots_occupied == 0` (unlike `idle` above): see
+        # decide.py's CONTEXT_COMPACTION_TURNS_DEFAULT docstring.
+        try:
+            compaction_turns = int(
+                limits.get("context_compaction_turns", CONTEXT_COMPACTION_TURNS_DEFAULT)
+            )
+        except (TypeError, ValueError):
+            compaction_turns = CONTEXT_COMPACTION_TURNS_DEFAULT
+        turn = int(s.get("turn", 0) or 0)
+        if compaction_turns > 0 and turn > 0 and turn % compaction_turns == 0:
+            cause = "context_compaction"
+            print(f"TERM:context_compaction turn={turn} cadence={compaction_turns}")
+
+    if cause is None:
         print(
             f"OK elapsed={elapsed}s tokens={tokens}/{limits['token_budget']} "
             f"idle={s['idle_turns']}/{limits['idle_drain_turns']} slots={slots_occupied}"

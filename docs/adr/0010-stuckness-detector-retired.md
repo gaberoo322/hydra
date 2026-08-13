@@ -1,3 +1,7 @@
+---
+status: accepted
+---
+
 # Stuckness detector retired; self-improvement floor is operator-curated
 
 The automated **Stuckness** detector (`src/stuckness.ts`, `hydra:outcomes:history:*` time series, `hydra:outcomes:stuckness-fired:*` edge-trigger cache, the `outcomes.stuckness.fired` event, the `/api/outcomes/stuckness` route, and the stuckness-driven capacity-floor declaration) has been deleted. The 25% self-improvement share from ADR-0003 vision vector 1 remains policy but is enforced by `config/direction/priorities.md`, not by an automated trip wire.

@@ -35,6 +35,13 @@ import {
   projectDispatches,
   type RetroDispatch,
 } from "../src/autopilot/retro-projections.ts";
+// Issue #3785: exercises the REAL read-side join (not a hand-rolled `.outcome`
+// fixture) so the worktreeBranch-preference regression is pinned at the exact
+// point a stale synthetic-fallback join would silently reappear.
+import {
+  fetchTurnsWithJoins,
+  type ProjectionDeps,
+} from "../src/autopilot/run-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -94,6 +101,9 @@ function baseDeps(over: Partial<RetroBundleDeps> = {}): RetroBundleDeps {
     readAnchorReflections: async () => ({ content: "", count: 0 }),
     readFrictionPatterns: async () => [],
     readStuckSignals: async () => [],
+    // Issue #3972: default to an empty window so pre-existing cases stay
+    // Redis-free and exercise the empty-trend path unchanged.
+    readCrossRunTrend: async () => ({ ok: true as const, records: [] }),
     frictionSkills: ["hydra-dev"],
     ...over,
   };
@@ -1658,6 +1668,75 @@ describe("assembleRetroBundle — durable dispatch-outcome records (#2942)", () 
     );
   });
 
+  // Issue #3972 — crossRunTrend is an AMBIENT member assembled through safeSource.
+  test("crossRunTrend: a rejecting reader lands in errors[], bundle still assembles with an empty trend", async () => {
+    const deps = baseDeps({
+      readCrossRunTrend: async () => {
+        throw new Error("trend boom");
+      },
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.ok(
+      bundle.errors.some((e) => e.source === "cross-run-trend" && /trend boom/.test(e.detail)),
+    );
+    // never-throw: the trend is still present as a valid empty shape
+    assert.ok(bundle.crossRunTrend);
+    assert.deepEqual(bundle.crossRunTrend.byClass, []);
+    assert.equal(bundle.crossRunTrend.coverage.rankingSound, false);
+  });
+
+  test("crossRunTrend: a structured ok:false read lands in errors[] (never doubled)", async () => {
+    const deps = baseDeps({
+      readCrossRunTrend: async () => ({ ok: false as const, error: "trend sad" }),
+    });
+    const bundle = await assembleRetroBundle("run-1", deps);
+    assert.equal(
+      bundle.errors.filter((e) => e.source === "cross-run-trend").length,
+      1,
+    );
+    assert.ok(/trend sad/.test(bundle.errors.find((e) => e.source === "cross-run-trend")!.detail));
+  });
+
+  test("crossRunTrend: folds the window records by class (ambient, present even when runFound is false)", async () => {
+    let calledWithSinceMs: number | null = null;
+    const deps = baseDeps({
+      readRun: async () => ({ ok: false, code: "not-found", detail: "unknown" }) as any,
+      readCrossRunTrend: async (opts: { sinceMs: number }) => {
+        calledWithSinceMs = opts.sinceMs;
+        return {
+          ok: true as const,
+          records: [
+            {
+              cycleId: "c1", runIdPrefix: "abc12345", turn: 1,
+              className: "dev_orch", skill: "hydra-dev",
+              outcome: "completed", tokens: 300, durationMs: 1000,
+              escalationAttempt: null, escalatedModel: null, recordedAt: 5000,
+            },
+            {
+              cycleId: "c2", runIdPrefix: "abc12345", turn: 2,
+              className: "dev_orch", skill: "hydra-dev",
+              outcome: "failed", tokens: 900, durationMs: 2000,
+              escalationAttempt: null, escalatedModel: null, recordedAt: 6000,
+            },
+          ],
+        };
+      },
+    });
+    const bundle = await assembleRetroBundle("nope", deps);
+    // AMBIENT: runFound is false but the trend still populates
+    assert.equal(bundle.runFound, false);
+    assert.ok(calledWithSinceMs !== null, "reader called with a sinceMs window start");
+    const dev = bundle.crossRunTrend.byClass.find((r) => r.className === "dev_orch");
+    assert.ok(dev);
+    assert.equal(dev!.dispatches, 2);
+    assert.equal(dev!.outcomes.merged, 1); // completed → merged
+    assert.equal(dev!.outcomes.failed, 1);
+    // tokensPerMerged averages only the merged dispatch's tokens (300/1)
+    assert.equal(dev!.tokensPerMerged, 300);
+    // window bounds are [now - TTL, now]
+    assert.ok(bundle.crossRunTrend.windowEndMs > bundle.crossRunTrend.windowStartMs);
+  });
+
   test("an unknown run skips the run-scoped record read entirely", async () => {
     let reads = 0;
     const deps = baseDeps({
@@ -1811,5 +1890,128 @@ describe("assembleRetroBundle — handoff-run outcome visibility (#3738)", () =>
       0,
       "a fully-resolved clean run still reads undrillable:0 (no false positive)",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #3785 — the dispatch↔outcome join key is read from the slot snapshot
+// (`task_id`, an unparseable harness hash) on both the write (reap.py) and
+// read (`fetchTurnsWithJoins`) side, while the dispatch ACTION right next to
+// it already carries `worktreeBranch` — a deterministic, run-scoped,
+// `parseDispatchCycleId`-clean identifier. `fetchTurnsWithJoins` now prefers
+// `action.worktreeBranch` over the synthetic `<runId>:<turn>:<idx>` fallback
+// when the action carries one (mirroring reap.py's write-side recovery, see
+// `scripts/autopilot/reap.py` `_recover_worktree_branch` and its sibling test
+// `test/autopilot-worktree-branch-recover-reap-completion.test.mts`).
+//
+// These tests drive the REAL `fetchTurnsWithJoins` (imported from
+// `run-projections.ts`, not a hand-rolled `.outcome` fixture) through a
+// `readRun` stub, so the regression is pinned at the exact join-key seam —
+// not merely at `projectDispatches`'s pre-existing `outcome.cycleId`
+// priority, which was already correct once an `outcome` exists.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire `readRun` through the REAL `fetchTurnsWithJoins`, with an injected
+ * `ProjectionDeps` standing in for Redis: `turnsJson` is what
+ * `listTurnsDesc` would have returned (pre-JSON.stringify, one object per
+ * turn), and `cycleHashes` is the `hydra:cycle:<cycleId>` hash table
+ * `getCycleHashesBatch` would have served.
+ */
+function readRunViaRealJoin(
+  turnsJson: Array<Record<string, unknown>>,
+  cycleHashes: Record<string, Record<string, string>>,
+) {
+  return async (runId: string) => {
+    const deps: ProjectionDeps = {
+      listTurnsDesc: async () => turnsJson.map((t) => JSON.stringify(t)),
+      getCycleHashesBatch: async (cycleIds: string[]) => {
+        const out: Record<string, Record<string, string>> = {};
+        for (const id of cycleIds) {
+          if (cycleHashes[id]) out[id] = cycleHashes[id];
+        }
+        return out;
+      },
+    };
+    const turns = await fetchTurnsWithJoins(runId, 100, deps);
+    return {
+      ok: true as const,
+      run: { run_id: runId, status: "ended", term_reason: "budget" },
+      turns,
+    };
+  };
+}
+
+describe("assembleRetroBundle — worktreeBranch join key (#3785)", () => {
+  test("a dispatch action carrying only worktreeBranch (no cycleId/autopilotTurnId) joins onto its cycle-record — non-empty cycleId, and a matching durable outcome record surfaces", async () => {
+    const branch = "worktree-agent-c5296ce3-t1-dev_orch";
+    const deps = baseDeps({
+      readRun: readRunViaRealJoin(
+        [
+          {
+            turn_n: 1,
+            reasons: ["dispatched dev_orch for issue-3785"],
+            actions: [
+              {
+                type: "dispatch",
+                skill: "hydra-dev",
+                anchorReference: "issue-3785",
+                worktreeBranch: branch,
+                // No cycleId, no autopilotTurnId — the live dispatch-action
+                // shape #3785 documents (both null/absent in production).
+              },
+            ],
+          },
+        ],
+        { [branch]: { status: "merged", prNumber: "742" } },
+      ),
+      readDispatchOutcomes: async () => ({
+        ok: true as const,
+        records: [outcomeRecord({ cycleId: branch, runIdPrefix: "c5296ce3" })],
+      }),
+    });
+
+    const bundle = await assembleRetroBundle("c5296ce3-2522-4428-8ecb-85e234b144cf", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    assert.equal(
+      bundle.dispatches[0].cycleId,
+      branch,
+      "the dispatch row's cycleId must be the worktreeBranch, not empty",
+    );
+    assert.notEqual(bundle.dispatches[0].cycleId, "", "cycleId must be non-empty");
+    assert.equal(bundle.dispatches[0].status, "merged");
+    assert.equal(
+      bundle.dispatchOutcomes.length,
+      1,
+      "the durable outcome record keyed on the SAME branch must surface on the bundle",
+    );
+    assert.equal(bundle.dispatchOutcomes[0].cycleId, branch);
+  });
+
+  test("without a worktreeBranch/cycleId/autopilotTurnId the join falls through to the synthetic id and reports honestly unresolved (the pre-fix symptom)", async () => {
+    const deps = baseDeps({
+      readRun: readRunViaRealJoin(
+        [
+          {
+            turn_n: 1,
+            actions: [
+              {
+                type: "dispatch",
+                skill: "hydra-dev",
+                anchorReference: "issue-3785",
+                // No identifiers at all — a hash keyed on a real cycle-record
+                // can never match the synthesised `<runId>:<turn>:<idx>` id.
+              },
+            ],
+          },
+        ],
+        { "worktree-agent-should-not-match": { status: "merged" } },
+      ),
+    });
+
+    const bundle = await assembleRetroBundle("c5296ce3-2522-4428-8ecb-85e234b144cf", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    assert.equal(bundle.dispatches[0].cycleId, "", "no action-carried id — the synthetic fallback never joins");
+    assert.equal(bundle.dispatches[0].status, null, "no cycle-hash can match a synthetic fallback id");
   });
 });

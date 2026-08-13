@@ -1,0 +1,1 @@
+- fix: design-concept reconciliation gate now encodes invariants whose verbatim prefix contains an embedded quote (#3975)

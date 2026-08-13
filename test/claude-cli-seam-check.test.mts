@@ -119,11 +119,12 @@ describe("claude-cli-seam-check: family + sibling-Seam carve-outs", () => {
 });
 
 describe("claude-cli-seam-check: the boundary is actually closed (issue #3703)", () => {
-  test("the three former claude spawn sites import node:child_process zero times", async () => {
+  test("the former claude spawn sites import node:child_process zero times", async () => {
+    // Two of the original three sites (src/vlm/claude-cli-runner.ts and
+    // src/api/vlm.ts) were removed with OpenViking — the /vlm shim existed only
+    // to serve OV's ov.conf vlm.api_base. The GLM drainer is what remains.
     for (const rel of [
-      "src/vlm/claude-cli-runner.ts",
       "src/glm/drainer-runner.ts",
-      "src/api/vlm.ts",
     ]) {
       const body = await readFile(join(REPO_ROOT, rel), "utf8");
       assert.equal(

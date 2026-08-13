@@ -1,0 +1,1 @@
+- docs: hydra-wire-or-retire step-2 carve-out now names web/src/lib/providers/ (Target CLAUDE.md rule 1), so provider modules route ready-for-human at step 2 instead of passing the carve-out and failing rule 1 later (#3957)

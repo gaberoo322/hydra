@@ -88,6 +88,7 @@ which point this skill switches to calling it):
 
 - anything under `web/src/lib/risk/`
 - anything under `web/src/lib/execution/` (order placement, venue order proofs, fills)
+- anything under `web/src/lib/providers/` (protected venue adapters — Target `CLAUDE.md` rule 1: demote-only, never delete)
 - `web/src/lib/wagers/` record-* modules (money-movement records)
 
 Rationale: retiring or rewiring a money-critical module is an operator-escalation-class
@@ -141,8 +142,9 @@ template forecloses.
 
 The template also encodes the two hard preconditions from this playbook: a RETIRE task is only
 ever written for a module that **passed the carve-out** (step 2 — nothing under
-`web/src/lib/risk/`, `web/src/lib/execution/`, or the money-movement record modules ever
-receives a RETIRE task; those route `ready-for-human`), and only after the module was
+`web/src/lib/risk/`, `web/src/lib/execution/`, `web/src/lib/providers/`, or the
+money-movement record modules ever receives a RETIRE task; those route
+`ready-for-human`), and only after the module was
 **verified still dead** (step 1 — exists on `main`, no runtime importer). Do not emit this
 template for a module that failed either check.
 
@@ -187,21 +189,6 @@ Verdict from `/hydra-wire-or-retire` ([ISO date]): the intent behind this module
    deadcode scan that justified the deletion: the module path, the original scan date from this
    item's body ([ISO date]), and this RETIRE verdict. Example:
    `chore(deadcode): retire web/src/lib/<path> — dead since <scan-date> scan, wire-or-retire RETIRE (item-<N>)`.
-6. **Purge the retired module from the OpenViking index (POST-MERGE hygiene — issue #2729).**
-   Deleting the module from the repo does NOT remove it from the OV semantic index, so a future
-   cycle grounding against OV still gets a high-confidence hit on the retired concept and can
-   re-derive the very thing this RETIRE deleted. The OV container is not recreated on
-   `deploy.sh`, so the live index survives the merge and MUST be purged explicitly. After the PR
-   **merges** (not before — the module must actually be gone from `main`), run the hygiene script
-   once, keyed on the same repo-relative module path:
-   `bash scripts/ov-retire-hygiene.sh --path web/src/lib/<path>.ts --concept "[one-line concept — e.g. cross-venue arbitrage residual risk]"`.
-   The script maps the path to its OV URI (`viking://resources/<path>`, per
-   src/knowledge-base/indexer.ts), DELETEs that entry (semantic-queue purge), then re-queries the
-   concept to confirm the index no longer surfaces the retired path as live content. It is a
-   one-shot post-merge step, NOT a poller — the merge that removed the module is the trigger. Exit
-   0 = index clean; exit 2 = an entry survived the purge (a re-index re-added it — investigate the
-   OV semantic queue and re-run). This step runs unattended: no interactive prompts, and OV
-   unreachable exits 1 without touching the repo.
 
 ### Acceptance criteria
 - [ ] `[web/src/lib/<path>.ts]` and its test file(s) are deleted — verified by:
@@ -213,9 +200,6 @@ Verdict from `/hydra-wire-or-retire` ([ISO date]): the intent behind this module
       `npm run deadcode:update-baseline`.
 - [ ] `npm run test:raw` and `npm run typecheck` pass — verified by: both commands exit 0.
 - [ ] Commit message cites the scan (module path + scan date) per Target `CLAUDE.md` rule 3.
-- [ ] OV index purged POST-MERGE — verified by:
-      `bash scripts/ov-retire-hygiene.sh --path web/src/lib/<path>.ts --concept "<concept>"` exits 0
-      (no live index entry for the retired path remains).
 ```
 
 **Why this is the only sanctioned deletion path (rule 1 restated).** Protected-provider paths
