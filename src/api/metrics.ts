@@ -75,13 +75,15 @@ export function createMetricsRouter() {
       const count = countQuerySchema(20).safeParse(req.query).data?.count ?? 20;
       const trend = await getMetricsTrend(count);
       const stats = await getAggregateStats(count);
-      // Issue #1439: per-class cost attribution. Folded from the per-skill
-      // token surrogate over a rolling trailing-24h UTC window (issue #2427 —
-      // a single-UTC-day "today" read just after midnight shows a false 0% for
-      // classes that ran earlier in the operator's local day) so operators can
-      // answer "what fraction of spend does research vs dev vs QA consume?".
-      // Best-effort — a Redis hiccup yields an empty breakdown rather than
-      // failing /metrics.
+      // Issue #1439 / #3752: per-class cost attribution. Folded from the
+      // transcript-scan 24h cross-tab (bySkillByModel24h), so per-class
+      // fractions are a true share of REAL burn across ALL sessions —
+      // interactive operator sessions + the autopilot parent loop + reaped
+      // subagents — NOT the ~13%-coverage dispatch surrogate the prior read
+      // used (#3752). `getRollingCostByClass` rides the memoized `getUsage()`
+      // snapshot (60s), and the result carries `source: "transcript-24h"`.
+      // Best-effort — a snapshot/transcript failure yields an empty breakdown
+      // rather than failing /metrics.
       let costByClass: Awaited<ReturnType<typeof getCostByClass>> | null = null;
       try {
         costByClass = await getRollingCostByClass();

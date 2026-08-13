@@ -1,0 +1,1 @@
+- docs: rewrite operator-playbook shell recipes to forms the worktree-isolation Bash guard accepts (#3896)

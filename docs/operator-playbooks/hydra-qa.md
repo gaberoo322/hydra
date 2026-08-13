@@ -52,6 +52,19 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 
 > **Retired prompt artifact (issue #2556).** A standalone single-agent "Reality Checker" prompt (`AGENT-PROMPT.md`) used to be bundled alongside this skill. It predates the current parallel Standards/Spec fan-out and is **no longer injected by any flow** — the live reviewer prompts are embedded in this playbook (the `code-review`-skill sub-agents above). The stale artifact has been removed; it is not referenced anywhere. Do not re-introduce a separate prompt file: the reviewer prompts live here, in the playbook that `scripts/sync-skills.sh` regenerates the skill from.
 
+> **NEVER end your session waiting on CI, a monitor, or a background process
+> (issue #3866).** The full rule lives ONCE, canonically, in
+> `hydra-autopilot.md`'s "Worktree-guard preamble" section — it is prepended
+> verbatim to every `qa_orch` dispatch prompt, so you receive it at dispatch
+> time regardless of this pointer. Restated here only as a cross-reference
+> (not duplicated, to avoid drift): this skill already never loops waiting on
+> CI by design (the four-verdict system below exists exactly to avoid that),
+> but the design was violated in practice — a `qa_orch` T4 re-check on PR
+> #3853 posted the Deep-QA PASS marker and then ended its turn waiting for the
+> `deep-qa-gate` re-check to complete instead of returning. Once you have
+> computed a verdict and executed its step-10 routing, you are DONE — return
+> immediately.
+
 ## Tier-aware verification depth (issue #739, ADR-0015)
 
 QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the single tier authority — never self-classified by path):
@@ -141,6 +154,16 @@ three signals above, and prints the aggregate catch rate as JSON. This is the
 ships no change to `aggregateAdversarialReview()`, `classifyVerdict()`, or any
 verdict literal (INV-A/INV-D); running it neither ships nor gates RC2, it only
 produces the number RC2's own sequencing gate is waiting on.
+
+**Measured baseline (2026-08-10, 60-PR window): 41% catch rate — 16 caught / 39
+reviewed (21 not-reviewed, excluded from the denominator).** This is the number
+the AC1 sequencing gate was waiting on; it is materially different from the
+issue's original 0/36 figure and is direct evidence the
+`CHANGES_REQUESTED`-only method undercounted, since several of the 16 catches
+are FAILs recorded only as an `Automated QA failed` bounce comment on the linked
+issue — structurally invisible to that method. Re-run `npm run qa:catch-rate
+-- --limit 60` after any further fan-out change to refresh this baseline; AC6's
+post-lever 5h share scan is the complementary measurement.
 
 ## Never end a turn on a pending wait (issue #3953)
 

@@ -1,0 +1,1 @@
+- fix: dev/QA dispatches must never end waiting on CI/monitor; reap.py now detects a dev_orch completion with no open PR and resumes it instead of redispatching from scratch (#3866)

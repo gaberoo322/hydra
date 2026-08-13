@@ -503,7 +503,11 @@ Handle it as follows:
 cd "$TARGET_WT"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
 # in raw web/-rooted form — the gate normalizes web/ itself, do NOT strip it.
-CHANGED_FILES=$(git diff --name-only "$(git merge-base origin/main HEAD)"...HEAD)
+# Guard-compatible form (issue #3896): the worktree-isolation Bash guard refuses
+# nested command substitution `$( ... $(...) ...)`. Resolve the merge base into a
+# plain variable first, then pass it to `git diff`.
+MERGE_BASE=$(git merge-base origin/main HEAD)
+CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)
 CHANGED_FILES="$CHANGED_FILES" \
 TARGET_PROJECT_DIR="$TARGET_WT/web" \
   npx tsx "$TARGET_WT/.hydra-gate/scripts/target/mutation-check.ts"
@@ -640,6 +644,31 @@ git -C ~/hydra-betting worktree prune 2>&1 || true
 - **Stack**: Next.js 16, React 19, Tailwind 4, Zod 4, Drizzle, vitest
 
 Read `web/AGENTS.md` before assuming Next.js conventions — APIs may differ from training data. Use atomic backlog claims, merge locks, metrics, and events for parallel execution with Codex cycles.
+
+## Guard-compatible shell forms (issue #3837 AC #3, swept in #3896)
+
+The harness's worktree-isolation Bash guard — the same fence `hydra-dev` meets on
+the Orchestrator side — refuses Bash commands it judges too complex to verify
+stay inside `$TARGET_WT`. Confirmed triggers (refused categorically — one-line OR
+multi-line, and a bare loop is refused even with no substitution at all):
+
+- **Process substitution** — `comm -12 <(...) <(...)`, `mapfile -t X < <(...)`.
+- **Nested command substitution** — `$( ... $(...) ... )`.
+- **`for` / `while` / `until` loops** — refused regardless of formatting.
+
+This is about our snippets meeting the guard halfway. Split compound commands
+into plain sequential ones: write intermediate results to temp files or plain
+variables, then operate on those — never nest `$( $( ) )` and never use `<(...)`.
+The Step 6 mutation-gate recipe above is the canonical rewrite for THIS playbook:
+`MERGE_BASE=$(git merge-base ...)` first, then
+`CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)` — instead of the
+nested one-liner `$(git diff ... "$(git merge-base ...)"...)`. The shipped-anchor
+preflight (`_fragments/hydra-target-build-anchor-preflight.md`) makes the same
+substitution for its `comm -12` subject-coverage matcher.
+
+Do NOT disable or work around the guard itself — it is the isolation fence. The
+full note (with the `Monitor` CI-poll corollary) lives in
+`_fragments/hydra-dev-parent-flow.md` under the same heading.
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 

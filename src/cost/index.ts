@@ -78,6 +78,28 @@ export {
   DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
+  // Ranked-report burn weights (issue #3825). DISTINCT from the live-fold
+  // readers above: these default to LIST-PRICE ratios (cache read 0.1x / cache
+  // write 1.25x / output 5.0x / input 1.0x; family opus 5 / sonnet 3 / haiku 1)
+  // under a separate `HYDRA_USAGE_BURN_WEIGHT_*` / `HYDRA_USAGE_BURN_FAMILY_*`
+  // namespace so the report's calibration never leaks into the identity-by-
+  // default live gate. Consumed by `scripts/cost/weighted-quota-report.ts`.
+  getBurnWeightInput,
+  getBurnWeightOutput,
+  getBurnWeightCacheRead,
+  getBurnWeightCacheCreation,
+  DEFAULT_BURN_WEIGHT_INPUT,
+  DEFAULT_BURN_WEIGHT_OUTPUT,
+  DEFAULT_BURN_WEIGHT_CACHE_READ,
+  DEFAULT_BURN_WEIGHT_CACHE_CREATION,
+  getBurnCategoryWeights,
+  getBurnFamilyWeightOpus,
+  getBurnFamilyWeightSonnet,
+  getBurnFamilyWeightHaiku,
+  DEFAULT_BURN_FAMILY_OPUS,
+  DEFAULT_BURN_FAMILY_SONNET,
+  DEFAULT_BURN_FAMILY_HAIKU,
+  getBurnFamilyWeights,
 } from "./config.ts";
 
 // ---------------------------------------------------------------------------
@@ -90,7 +112,17 @@ export {
 // is unchanged.
 export {
   parseSessionLimitReset,
+  // `weightedTokens` (issue #3825) — the per-token-category weighted UNIT
+  // (`w_input*input + w_output*output + w_cacheCreation*cacheCreation +
+  // w_cacheRead*cacheRead`). Re-exported on the barrel so the ranked report
+  // (`scripts/cost/weighted-quota-report.ts`) builds per-consumer weighted burn
+  // from the same leaf the live fold uses, not a re-derived formula.
+  weightedTokens,
 } from "./token-math.ts";
+// `CategoryWeights` — the four-knob weight shape `weightedTokens` consumes
+// (issue #3825). Type-only on the barrel so callers compose it without a deep
+// `./token-math.ts` import.
+export type { CategoryWeights } from "./token-math.ts";
 
 // ---------------------------------------------------------------------------
 // Transcript scan — real per-session token recovery (issue #3250)
@@ -138,6 +170,12 @@ export type {
 // module-internal (test-only exports).
 export {
   weightedQuotaBurn,
+  // `weightedQuotaBurnByCategory` (issue #3825) — the general four-category
+  // two-axis fold the ranked report uses; the legacy `weightedQuotaBurn` above
+  // now delegates to it with cache-read-only weights, keeping the live gate +
+  // Class Yield Scoreboard byte-identical. Same single-definition-of-Quota-Weight
+  // posture as its sibling.
+  weightedQuotaBurnByCategory,
 } from "./snapshot-assembly.ts";
 
 // ---------------------------------------------------------------------------
@@ -167,17 +205,23 @@ export type { OAuthUsageResult } from "./oauth-usage.ts";
 // Cost attribution — per-class token rollup (issue #1439, relocated #2219)
 // ---------------------------------------------------------------------------
 // The dispatch-class → cost-bucket mapping (`skillToCostClass`) and per-class
-// token rollup (`projectCostByClass` / `getCostByClass`), relocated out of
-// `src/metrics/aggregate.ts` into `./cost-attribution.ts` (issue #2219) so the
-// Cost domain's knowledge lives in one module. Re-exported here so the public
-// Interface contract stays single-surface.
+// token rollup, relocated out of `src/metrics/aggregate.ts` into
+// `./cost-attribution.ts` (issue #2219) so the Cost domain's knowledge lives in
+// one module. `projectCostByClass` / `getCostByClass` fold the dispatch-observed
+// surrogate (historical `?date=` arm); `projectCostByClassFromTranscript` /
+// `getRollingCostByClass` fold the transcript-scan snapshot (comprehensive
+// rolling arm, issue #3752 — per-class tokens sum to `tokensLast24h`). Each
+// result carries a `source` discriminator so the two arms are never mistaken.
+// Re-exported here so the public Interface contract stays single-surface.
 export {
   COST_CLASS_ORDER,
   skillToCostClass,
   projectCostByClass,
+  projectCostByClassFromTranscript,
   getCostByClass,
   getRollingCostByClass,
 } from "./cost-attribution.ts";
+export type { CostByClassSource } from "./cost-attribution.ts";
 
 // ---------------------------------------------------------------------------
 // Cost per merged PR — pure derived ratio over recorded totals (issue #2807)

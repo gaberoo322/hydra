@@ -46,7 +46,7 @@ import {
   MODEL_FAMILIES,
   cacheHitRatio,
 } from "./token-math.ts";
-import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
+import type { TokenBreakdown, ModelFamily, CategoryWeights } from "./token-math.ts";
 // Token-breakdown data-model leaf (issue #3513): the empty-breakdown constant +
 // per-family accumulator helpers + the dispatch-kind vocabulary tuple are PURE
 // primitives, so this pure leaf imports them from the pure `./token-breakdown.ts`
@@ -91,46 +91,66 @@ import { deriveHardStop } from "./eligibility.ts";
 import type { UsageSnapshot, SkillWoWEntry } from "./types.ts";
 
 /**
- * The composed two-axis quota-burn numerator over a per-family accumulator
- * (issue #873). Axis A (per-token-type cache weight) reshapes the token mix
- * INSIDE each family via {@link weightedTokens}; Axis B (per-model-family
- * **Quota Weight**) scales OUTSIDE via {@link familyWeight}:
+ * The composed two-axis quota-burn numerator over a per-family accumulator,
+ * generalised to a full four-category weight set (issue #3825, building on
+ * #873). Axis A (per-token-category weight) reshapes the token mix INSIDE each
+ * family via {@link weightedTokens} over a {@link CategoryWeights}; Axis B
+ * (per-model-family weight) scales OUTSIDE via {@link familyWeight}:
  *
- *   `Σ_family familyWeight(f) * weightedTokens(family[f], w_cache)`
+ *   `Σ_family familyWeight(f) * weightedTokens(family[f], category)`
  *
- * The two axes are orthogonal, so they never double-count. When all family
- * weights are 1.0 (the dormant `quotaWeightCalibrated === false` prod state)
- * this reduces EXACTLY to the single-axis cache-weighted total
- * (`Σ_family weightedTokens(family[f], w_cache)`), which in turn reduces to the
- * raw `Σ_family family[f].total` when `w_cache === 1.0`. Passing the
- * identity-weights object `{opus:1,sonnet:1,haiku:1}` (what the caller does
- * when quota weights are uncalibrated) keeps the percentage path honest
- * regardless of the #691 calibration state.
+ * The two axes are orthogonal, so they never double-count. The ranked culprit
+ * report (`scripts/cost/weighted-quota-report.ts`) passes the list-price
+ * `CategoryWeights` (cache read 0.1x / cache write 1.25x / output 5.0x / input
+ * 1.0x) so its ranking reflects real burn rather than raw cache-read volume.
+ * At the all-1.0 category weights AND all-1.0 family weights this reduces
+ * exactly to the raw `Σ_family family[f].total` — the identity the pre-#873
+ * fold expressed.
  *
- * The proof-of-pattern for the issue #2188 snapshot-assembly deepening: the
- * other inline math concerns ({@link rebaseOnOAuth}, {@link deriveSinceReset},
- * {@link detectCalibrationDrift}, {@link derivePacingState}) follow this same
- * pure-scalar-helper shape — each takes already-computed scalars/sub-accumulators
- * and returns its slice of the snapshot, never a `UsageSnapshot` (which
- * does not exist yet during assembly), mirroring eligibility.ts's
- * {@link deriveHardStop}.
+ * Exported + re-exported via the `cost/index.ts` public barrel (issue #3825):
+ * the ranked report reuses this exact fold on each per-consumer per-family
+ * breakdown so the report and the live `weightedQuotaBurn` share ONE weighting
+ * definition (the CONTEXT.md single-definition-of-Quota-Weight rule) rather
+ * than the report re-deriving a divergent formula.
+ */
+export function weightedQuotaBurnByCategory(
+  byModel: Record<ModelFamily, TokenBreakdown>,
+  category: CategoryWeights,
+  weights: { opus: number; sonnet: number; haiku: number },
+): number {
+  return MODEL_FAMILIES.reduce(
+    (sum, f) => sum + familyWeight(f, weights) * weightedTokens(byModel[f], category),
+    0,
+  );
+}
+
+/**
+ * The LEGACY single-axis cache-read-weighted quota-burn numerator (issue #873,
+ * #3548). Kept as a thin delegator to {@link weightedQuotaBurnByCategory} (issue
+ * #3825) so the live estimate/pacing path (`assembleSnapshot` below) and the
+ * Class Yield Scoreboard (`src/autopilot/class-stats-math.ts`) keep their
+ * byte-identical cache-read-only behaviour — input/output/cacheCreation stay at
+ * full weight, only `cacheRead` carries the passed `wCache`. The four-category
+ * generalisation is opted into ONLY by callers that pass a full
+ * {@link CategoryWeights} via {@link weightedQuotaBurnByCategory} (the ranked
+ * report); this signature stays stable so those consumers need no change.
  *
- * Exported + re-exported via the `cost/index.ts` public barrel (issue #3548): the
- * per-class **Weighted-Quota Cost Axis** on the Class Yield Scoreboard reuses this
- * exact fold on each `bySkillByModel[skill]` per-family breakdown, so the
- * scoreboard and `/api/usage` share ONE weighting definition (the CONTEXT.md
- * single-definition-of-Quota-Weight rule) rather than the scoreboard defining a
- * second, divergent formula. It is the ONE snapshot-assembly fold on the public
- * barrel; the rest stay module-internal (test-only exports).
+ * Exported + re-exported via the `cost/index.ts` public barrel (issue #3548):
+ * the per-class **Weighted-Quota Cost Axis** on the Class Yield Scoreboard reuses
+ * this exact fold on each `bySkillByModel[skill]` per-family breakdown. It is the
+ * ONE legacy snapshot-assembly fold on the public barrel; the generalised
+ * {@link weightedQuotaBurnByCategory} joins it (#3825), and the rest stay
+ * module-internal (test-only exports).
  */
 export function weightedQuotaBurn(
   byModel: Record<ModelFamily, TokenBreakdown>,
   wCache: number,
   weights: { opus: number; sonnet: number; haiku: number },
 ): number {
-  return MODEL_FAMILIES.reduce(
-    (sum, f) => sum + familyWeight(f, weights) * weightedTokens(byModel[f], wCache),
-    0,
+  return weightedQuotaBurnByCategory(
+    byModel,
+    { input: 1, output: 1, cacheRead: wCache, cacheCreation: 1 },
+    weights,
   );
 }
 
@@ -635,6 +655,7 @@ export function assembleSnapshot(
     byModel7d,
     byModel24h,
     bySkillByModel,
+    bySkillByModel24h,
     byDispatchKind,
     tokens24h,
     foreign7d,
@@ -832,6 +853,11 @@ export function assembleSnapshot(
     calibrated,
     byModel: byModel7d,
     bySkillByModel,
+    // Per-skill × per-family 24h cross-tab (issue #3752). Surfaced verbatim from
+    // the scan so the comprehensive cost-by-class arm can re-project it through
+    // skillToCostClass without a second walk. Pure read-side projection; no
+    // weighting applied here (the cost fold owns the Quota-Weight axis).
+    bySkillByModel24h,
     // Per-skill week-over-week trend (issue #2404). Pure fold over the current
     // cross-tab + the injected prior-week per-skill totals — no Redis here.
     bySkillWoW: deriveBySkillWoW(bySkillByModel, priorBySkill),

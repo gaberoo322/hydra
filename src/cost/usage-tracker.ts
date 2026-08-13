@@ -64,11 +64,19 @@
  *     makes the weekly-quota calibration drift with the cache mix (non-
  *     stationary). The weighted unit is `input + output + cacheCreation +
  *     w_cache*cacheRead`; the two axes COMPOSE as
- *     `Σ_family familyWeight(f) * weightedTokens(family[f], w_cache)` — the
- *     cache weight reshapes the token-type mix INSIDE each family, the family
- *     weight scales OUTSIDE, so they never double-count (when all family
- *     weights are 1.0 this reduces exactly to the single-axis cache-weighted
- *     total). Default is 1.0 (identity): unset/empty/<=0/non-finite leaves the
+ *     `Σ_family familyWeight(f) * weightedTokens(family[f], {input:1, output:1,
+ *     cacheRead:w_cache, cacheCreation:1})` — the cache weight reshapes the
+ *     token-type mix INSIDE each family, the family weight scales OUTSIDE, so
+ *     they never double-count (when all family weights are 1.0 this reduces
+ *     exactly to the single-axis cache-weighted total). The LIVE fold
+ *     (`weightedQuotaBurn` in `snapshot-assembly.ts`) weights ONLY cacheRead and
+ *     leaves the other three categories at identity (1.0), so it stays
+ *     behaviour-neutral on deploy; the general FOUR-category fold
+ *     (`weightedQuotaBurnByCategory`, issue #3825) backs the ranked culprit
+ *     report (`scripts/cost/weighted-quota-report.ts`) under a SEPARATE
+ *     `HYDRA_USAGE_BURN_WEIGHT_*` list-price namespace, so the report's
+ *     calibration never leaks into this identity-by-default gate. Default is
+ *     1.0 (identity): unset/empty/<=0/non-finite leaves the
  *     percentages byte-for-byte unchanged, so this PR is behaviour-neutral on
  *     deploy and the principled production value (~0.1) is set in host config,
  *     mirroring the all-or-nothing calibration discipline of the other quota

@@ -48,11 +48,12 @@ action; the ✓ rungs are the finish lines where autopilot takes over.
 3. **Wayfinder HITL frontier tickets** (§0.6, rung 2) — open, unblocked, unclaimed `wayfinder:grilling` / `wayfinder:prototype` sub-issues on approved maps (ADR-0029 Decision 3). The `wayfinder_orch` autopilot class never dispatches these; they need operator judgment and resolve via `/wayfinder`.
 4. **Handoff-ready wayfinder maps** (§0.7, rung 4) — open approved maps whose frontier is **empty** (every ticket closed): the way is clear and the map is waiting to be converted into an implementation epic (`hydra-prd`) or a spec (`/to-spec`). This is the rung that turns a cleared map into AFK-dispatchable work.
 5. **Specs awaiting decomposition** (§0.8, rung 5) — open issues labelled `needs-tickets`: a published spec that has not yet been sliced into tracer-bullet build issues. Run `/to-tickets` to emit the `ready-for-agent` children autopilot's `hydra-dev` picks up.
-6. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions
-7. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
-8. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
+6. **Stalled PRs** (§0.9) — green-but-conflicted and green-but-unshepherded PRs across `gaberoo322/hydra` and every Target repo. A PR is not an issue (so no bucket above walks it), its passing checks alarm nothing, and a merge conflict raises no signal — finished work that is not landing sits invisible until somebody looks.
+7. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions
+8. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
+9. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
 
-The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board. Wayfinder HITL tickets drain after that: an unresolved HITL ticket stalls its whole map's AFK frontier (the autopilot cannot advance past a blocking decision), so clearing one is high-leverage too. Handoff-ready maps and un-ticketed specs (§0.7, §0.8) drain after the wayfinder frontier: they are the far end of the pipeline — a single handoff there can emit a whole epic's worth of AFK-dispatchable children in one action. Per-Target items drain **last**: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier.
+The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Destination-pending maps drain next: approving one unblocks its whole AFK frontier for autopilot on the following tick, so it is the highest-leverage single decision on the board. Wayfinder HITL tickets drain after that: an unresolved HITL ticket stalls its whole map's AFK frontier (the autopilot cannot advance past a blocking decision), so clearing one is high-leverage too. Handoff-ready maps and un-ticketed specs (§0.7, §0.8) drain after the wayfinder frontier: they are the far end of the pipeline — a single handoff there can emit a whole epic's worth of AFK-dispatchable children in one action. Stalled PRs (§0.9) drain next: a green-but-stuck PR is finished work that is not landing — cheaper to unblock than an undecided issue, but not more urgent than a decision that gates a whole AFK frontier, so it sits after §0.8 and before `ready-for-human`. Per-Target items drain **last**: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier.
 
 ## Procedure
 
@@ -343,6 +344,76 @@ Walk them oldest-first, one at a time. For each spec:
 
 Do not yield to the later steps until every `needs-tickets` spec is sliced or explicitly skipped.
 
+### 0.9. Drain stalled PRs (green-but-stuck pull requests)
+
+A PR that is green but unmergeable — or mergeable and green but never armed for
+auto-merge — is invisible to every bucket above: it is not an issue, its passing
+checks alarm nothing, and a merge conflict raises no signal at all (four such
+PRs sat unexamined on 2026-08-11). This bucket walks every open non-draft PR on
+`gaberoo322/hydra` **and** each configured Target repo in the **same** step
+(mirroring §1.5's `TARGET_REPOS` loop — Target coverage is not deferred to the
+end-of-session phase) and surfaces the two failure modes:
+
+- **`conflicted`** — `mergeable == "CONFLICTING"`. The branch fell behind master
+  and nothing re-bases or reports it.
+- **`unshepherded`** — `mergeable == "MERGEABLE"` **AND** every *required* check
+  passes **AND** `autoMergeRequest == null`. Mergeable and green, but no
+  mechanism will ever merge it.
+
+> **`mergeable == "UNKNOWN"` is "no verdict", never conflicted.** GitHub computes
+> mergeability asynchronously; a freshly-pushed PR reports `UNKNOWN` for a few
+> seconds. Reporting that as a conflict cries wolf on every active PR and gets
+> the signal ignored — re-poll once after a short delay, or skip the row for
+> this pass.
+
+> **"Required" means the branch-protection set, not "all checks".** For
+> `gaberoo322/hydra` that is exactly seven contexts — `test`, `dashboard-build`,
+> `tier-gate`, `mutation-test`, `scope-check`, `secret-scan`, `deep-qa-gate`
+> (the live set:
+> `gh api repos/gaberoo322/hydra/branches/master/protection/required_status_checks`).
+> `advisory-checks` (the shrink-only skill-size ratchet) is **ambient red on
+> master** and is NOT in branch protection — it must NEVER count toward the
+> predicate, or every PR in the repo reports as stalled. Confirm with
+> `gh pr checks <PR> --repo <RREPO>` and read only the branch-protection rows.
+
+Gather across the Orchestrator and each Target repo:
+
+```bash
+REVIEW_REPOS=("gaberoo322/hydra" "${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}")
+
+for RREPO in "${REVIEW_REPOS[@]}"; do
+  echo "=== stalled PRs: $RREPO ==="
+  # conflicted: open, non-draft, mergeable == CONFLICTING (UNKNOWN is never conflicted — see above)
+  gh pr list --repo "$RREPO" --state open \
+    --json number,title,isDraft,mergeable \
+    --jq '[.[] | select(.isDraft | not) | select(.mergeable == "CONFLICTING")]
+          | sort_by(.number) | .[] | "CONFLICTED\t\(.number)\t\(.title)"'
+  # unshepherded candidates: open, non-draft, mergeable == MERGEABLE, autoMerge not set
+  gh pr list --repo "$RREPO" --state open \
+    --json number,title,isDraft,mergeable,autoMergeRequest \
+    --jq '[.[] | select(.isDraft | not) | select(.mergeable == "MERGEABLE")
+              | select(.autoMergeRequest == null)]
+          | sort_by(.number) | .[] | "UNSHEPHERDED?\t\(.number)\t\(.title)"'
+done
+```
+
+`UNSHEPHERDED?` is a candidate, not a verdict — confirm every **required** check
+above passes before treating the row as stalled. Walk the combined list
+oldest-first, one PR at a time, and offer:
+
+- **Update branch** — `gh pr update-branch <PR> --repo <RREPO>`; if it reports
+  conflicts, surface them and move on. **Do not auto-resolve** — a conflict on a
+  regenerated file or a modify/delete usually encodes a real design question.
+- **Enable auto-merge** — `gh pr merge <PR> --auto --squash --repo <RREPO>` (the
+  `unshepherded` case).
+- **Merge now** — when required checks already pass: `gh pr merge <PR> --squash --repo <RREPO>`.
+- **Close** — the PR is superseded or wrong.
+- **Skip** — leave for tomorrow.
+
+No path here re-bases or merges automatically; a merge fires only when the
+operator explicitly picks **Enable auto-merge** or **Merge now** for that row. Do
+not yield to the later steps until every stalled PR is resolved or skipped.
+
 ### 1. Gather (Orchestrator)
 
 ```bash
@@ -403,6 +474,11 @@ its prior-attempt history so the operator decides informed.
 ### Specs awaiting decomposition (S) — needs-tickets (§0.8)
 | # | Spec title | Age | Route |
 |---|------------|-----|-------|
+
+### Stalled PRs (C) — green-but-conflicted / green-but-unshepherded (§0.9)
+(both Orchestrator and every Target repo)
+| # | Repo | State | Title |
+|---|------|-------|-------|
 
 ### Ready-for-human (M) — Orchestrator
 | # | Title | Age | Why here |
@@ -550,7 +626,7 @@ top of the ladder. If no, end the session.
 
 ## Rules
 
-- **Drain order: overnight queue → destination-pending maps → wayfinder HITL tickets → handoff-ready maps → un-ticketed specs → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029); an unresolved HITL ticket then stalls its own map's AFK frontier; handoff-ready maps and un-ticketed specs sit at the far end of the pipeline where one action emits a whole epic's worth of AFK children. Don't reorder any of the wayfinder/spec buckets ahead of the overnight queue, or behind `ready-for-human` / stale-blocked. **Per-Target items always drain last** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
+- **Drain order: overnight queue → destination-pending maps → wayfinder HITL tickets → handoff-ready maps → un-ticketed specs → stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning); destination-pending maps are the highest-leverage single decision (approving one unblocks its whole AFK frontier — ADR-0029); an unresolved HITL ticket then stalls its own map's AFK frontier; handoff-ready maps and un-ticketed specs sit at the far end of the pipeline where one action emits a whole epic's worth of AFK children. Stalled PRs sit after the wayfinder/spec buckets (finished work not landing is cheaper to unblock than an undecided issue, but not more urgent than a decision that gates a whole AFK frontier) and before `ready-for-human`. Don't reorder any of the wayfinder/spec buckets ahead of the overnight queue, or behind `ready-for-human` / stale-blocked. **Per-Target items always drain last** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
 - **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (e.g. `~/hydra-betting/web`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
 - **The handoff flow owns a map's death, not `hydra-epic-close`.** A cleared map is closed in §0.7 as the final handoff step (or kept with `keep-open`). `hydra-epic-close` excludes `wayfinder:map` from auto-GC precisely so a map is never closed before it can be handed off. Mark a map `wayfinder:handoff-pending` when you begin its handoff; remove it when you close/keep the map.
 - **A spec is a decompose-me artifact, never a tracer bullet.** After `/to-spec`, always relabel the spec `needs-tickets` and remove `ready-for-agent`, so `hydra-dev` can't grab the whole spec as one issue. The spec becomes AFK-dispatchable only via its `/to-tickets` children (§0.8), each of which carries `ready-for-agent`.

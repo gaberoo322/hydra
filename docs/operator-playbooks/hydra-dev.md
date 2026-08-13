@@ -81,6 +81,21 @@ worktree-fence violations are safety failures.
    reporter (`tap → test-debug.tap`); read the `not ok` lines out of
    `test-debug.tap`. The artifact is git-ignored. Do **not** edit the `test`
    script — CI greps its footer for the `MIN_TESTS` ratchet.
+7. **NEVER end your session waiting on CI, a monitor, or a background
+   process (issue #3866).** The full rule lives ONCE, canonically, in
+   `hydra-autopilot.md`'s "Worktree-guard preamble" section — it is prepended
+   verbatim to every `dev_orch` dispatch prompt, so you receive it at dispatch
+   time regardless of this pointer. Restated here only as a cross-reference
+   (not duplicated, to avoid drift): run verification **in the foreground**
+   (rule 5 above) and don't emit a final message until a PR is open or you are
+   reporting a hard blocker. The observed failure (#3726): dev_orch did ~9.5
+   min of real implementation, backgrounded `npm test`, then stopped talking
+   instead of finishing — no PR existed at reap time, and the tokens already
+   spent were silently re-paid by a from-scratch redispatch. (Reap-side
+   backstop for when the rule is still violated: a `dev_orch` completion with
+   no open PR referencing its anchor is now detected and relabelled
+   `needs-dev-resume` instead of being silently redispatched from zero — see
+   `scripts/autopilot/reap.py`'s `_handle_dev_orch_stall`.)
 
 ## Never end a turn on a pending wait (issue #3953)
 
