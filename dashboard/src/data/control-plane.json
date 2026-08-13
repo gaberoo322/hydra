@@ -198,7 +198,7 @@
     {
       "name": "tickets_orch",
       "kind": "signal",
-      "skill": "to-tickets",
+      "skill": "hydra-tickets",
       "scope": "orch",
       "cooldownSeconds": 3600,
       "model": null,
@@ -430,7 +430,7 @@
     },
     {
       "class": "tickets_orch",
-      "skill": "to-tickets",
+      "skill": "hydra-tickets",
       "sourcePath": "scripts/autopilot/classes.json"
     }
   ]

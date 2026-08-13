@@ -1,0 +1,1 @@
+- fix: dev/QA/target-build skills can no longer end a turn on a backgrounded/pending wait — each carries a bounded foreground-poll recipe and commit-before-verify so completed work is never left unshipped (#3953)

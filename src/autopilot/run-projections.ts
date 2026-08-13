@@ -151,9 +151,18 @@ const defaultProjectionDeps: ProjectionDeps = {
  * actions.
  *
  * Each dispatch action may carry `cycleId` or `autopilotTurnId`. When
- * neither is present, we synthesise `<run_id>:<turn_n>:<index>` —
- * mirroring how `reap.py` / `dispatch.sh` allocate cycle IDs today.
- * Missing cycles surface as `outcome: null` (UI renders "pending").
+ * neither is present, we prefer the action's `worktreeBranch` — the
+ * deterministic, run-scoped, `parseDispatchCycleId`-clean id `decide.py`
+ * stamps on EVERY dispatch action (`_synthesize_worktree_branch`) and that
+ * `reap.py` now keys its `hydra:cycle:*` write on (issue #3785; see that
+ * issue for the root-cause writeup — live dispatch actions carry
+ * `cycleId: null` and no `autopilotTurnId`, so without this the join
+ * previously always fell through to the synthetic fallback below, which
+ * matches no Redis key). Only when NONE of the three are present do we
+ * synthesise `<run_id>:<turn_n>:<index>` — mirroring how `reap.py` /
+ * `dispatch.sh` allocate cycle IDs for a dispatch action carrying no
+ * identifier at all. Missing cycles surface as `outcome: null` (UI renders
+ * "pending").
  *
  * O(turns + dispatches) Redis round-trips via the pipelined
  * `getCycleHashesBatch`. `deps` is injectable so the join boundary can
@@ -187,6 +196,7 @@ export async function fetchTurnsWithJoins(
         const cid =
           (typeof a.cycleId === "string" && a.cycleId) ||
           (typeof a.autopilotTurnId === "string" && a.autopilotTurnId) ||
+          (typeof a.worktreeBranch === "string" && a.worktreeBranch) ||
           `${runId}:${turnN}:${idx}`;
         a._cycleId = cid;
         cycleIdsToFetch.push(cid);

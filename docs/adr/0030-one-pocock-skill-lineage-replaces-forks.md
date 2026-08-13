@@ -1,6 +1,6 @@
 # ADR-0030: One autonomous Pocock skill lineage replaces the hydra-prd/dev/qa forks
 
-Status: Accepted
+Status: Accepted (Decision 2's **spec** binding superseded by [ADR-0035](./0035-spec-stage-stays-hydra-owned.md))
 Date: 2026-07-17
 Deciders: Operator + Hydra (wayfinder map #3383, which locked the five decisions transcribed here)
 Related: #3383 (wayfinder map — the five decisions + destination), #3384 (audit — orch skill/class inventory, [gist](https://gist.github.com/gaberoo322/5007a0029000e082fb9ee34dd0db3a00)), #3385 (blast-radius trace), #3386 (generated-vs-vendored pipeline), #3387 (autonomy-conversion contract), #3388 (stage↔class mapping), ADR-0012 (autopilot is the single brain), ADR-0029 (autopilot charts and works wayfinder maps — the sibling that made the AFK share of a map autopilot-workable), ADR-0004 / ADR-0015 (self-modification tiers), #666 (the historical off-repo-skill-clobber hazard this design must not revive)
@@ -30,7 +30,7 @@ The refitted spine binds each Pocock stage to exactly one orchestrator class:
 | Pocock stage | Orchestrator class | Disposition |
 |---|---|---|
 | **plan** | `wayfinder_orch` | **Keep** (already the `wayfinder` adaptation; ADR-0029). |
-| **spec** | `design_concept_orch` → `to-spec` | Rebind to upstream `to-spec`; **grill-before-build folds in** (the `hydra-grill` design-concept gate becomes the spec stage's interactive mode). |
+| **spec** | `design_concept_orch` → `hydra-grill` | ~~Rebind to upstream `to-spec`~~ — **SUPERSEDED by [ADR-0035](./0035-spec-stage-stays-hydra-owned.md)**. The two skills contradict each other on instruction, output artifact, and consumer; the spec stage stays Hydra-owned and composes on no upstream base. |
 | **tickets** | **NEW class** → `to-tickets` + Hydra overlay | `hydra-prd` is **demoted to a called bridge library** (the `PrdInput`→GitHub-issue renderer), invoked by the overlay; it is no longer a standalone dispatch identity. |
 | **implement** | `dev_orch` → upstream `implement` | Rebind; `hydra-dev` fork retires. |
 | **review** | `qa_orch` → upstream `code-review` | Rebind; `hydra-qa` fork retires. |
@@ -84,7 +84,7 @@ Stage-map-or-die requires every surviving orchestrator skill to map to a stage *
 
 ## Consequences
 
-- **One lineage, two modes.** Autopilot dispatches the same `to-spec` / `to-tickets` / `implement` / `code-review` the operator runs interactively; the `hydra-prd` / `hydra-dev` / `hydra-qa` fork identities disappear as dispatch classes (`hydra-prd` survives only as a called renderer library).
+- **One lineage, two modes.** Autopilot dispatches the same `to-tickets` / `implement` / `code-review` the operator runs interactively (the **spec** stage is the exception — ADR-0035 keeps it Hydra-owned); the `hydra-prd` / `hydra-dev` / `hydra-qa` fork identities disappear as dispatch classes (`hydra-prd` survives only as a called renderer library).
 - **The re-implementation drift is closed at the root** — the AFK path stops carrying a second inline copy of each pattern (Option C), so a change to a stage's behavior is made once, in the composed upstream base + overlay.
 - **The learning loop must be re-keyed in lock-step** — `subagent-capture.ts`'s skill union and `demotion.ts`'s friction defaults are silent-failure seams (Decision 5); if a rename lands without them, per-class pattern capture stops with no error. The epic sequences these as blocking prerequisites.
 - **CI stays green ticket-to-ticket** via expand-contract; the ~85-test tripwire is the guardrail that a seam was missed.
