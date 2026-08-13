@@ -1,0 +1,1 @@
+- fix: reap's two terminal-failure write sites (hard-cap runaway-abandon, grill-crash) now key their failed cycle-record on the slot's worktree-branch cycleId when present, extending the #3391 branch-capture pattern so a failed code-writing dispatch lands on a joinable record instead of the bare task_id (#3970)
