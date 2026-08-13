@@ -2145,3 +2145,212 @@ describe("live hydra-architecture-scan — the hand-copied upstream steps are co
     );
   });
 });
+
+describe("live thermo-nuclear-code-quality-review + zoom-out — ungoverned skills promoted to tracked, gated playbooks (issue #3995)", () => {
+  /**
+   * Golden checks against the REAL playbooks. Both skills previously lived in
+   * the home skills directory ungoverned — generated from no playbook, tracked
+   * by no git repo, and covered by no CI gate (the ungoverned-population hazard
+   * ADR-0030 Option C exists to prevent, in the interactive lane). This PR
+   * (#3995, part of the #3988 Pocock compose-spine epic) promotes them into
+   * docs/operator-playbooks/ as normal playbook sources so sync-skills.sh
+   * generates them with the DO-NOT-EDIT banner, they become git-tracked /
+   * diffable / size-ratcheted / eval-eligible like every other Hydra skill.
+   *
+   * thermo-nuclear-code-quality-review is the load-bearing case: it carried a
+   * PROPOSAL-FORMAT.md sibling (carried through reference_files, not inlined),
+   * a disable-model-invocation flag (operator-invoked only, in no dispatched-
+   * skill column, so it qualifies under the fail-safe flag rule), and a DEAD
+   * retrieval anchor — its retrieval routed through OpenViking, which ADR-0033
+   * retired. The promotion repairs that anchor to the two lanes that actually
+   * exist: probe-search (fuzzy) and ast-search (exact). zoom-out is a straight
+   * promotion.
+   *
+   * These tests pin every acceptance criterion so a regression — a dropped
+   * flag, a re-inlined sibling, a resurrected OpenViking anchor, or non-
+   * idempotent generation — fails CI.
+   */
+  let cached:
+    | {
+        thermo: string;
+        thermoCodex: string;
+        thermoFrag: string;
+        zoom: string;
+        zoomCodex: string;
+      }
+    | undefined;
+
+  function syncLive() {
+    if (cached) return cached;
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-3995-"));
+    const r = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], {
+      env: {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: join(dir, "claude"),
+        CODEX_SKILLS_DIR: join(dir, "codex"),
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `live sync failed: ${r.stderr}`);
+    const read = (p: string) => (existsSync(p) ? readFileSync(p, "utf-8") : "");
+    cached = {
+      thermo: read(join(dir, "claude", "thermo-nuclear-code-quality-review", "SKILL.md")),
+      thermoCodex: read(join(dir, "codex", "thermo-nuclear-code-quality-review", "SKILL.md")),
+      thermoFrag: read(
+        join(dir, "claude", "thermo-nuclear-code-quality-review", "thermo-nuclear-proposal-format.md"),
+      ),
+      zoom: read(join(dir, "claude", "zoom-out", "SKILL.md")),
+      zoomCodex: read(join(dir, "codex", "zoom-out", "SKILL.md")),
+    };
+    rmSync(dir, { recursive: true, force: true });
+    return cached;
+  }
+
+  test("both skills generate with the DO-NOT-EDIT banner pointing at their playbook", () => {
+    const { thermo, zoom } = syncLive();
+    assert.match(
+      thermo,
+      /DO NOT EDIT.*Generated from docs\/operator-playbooks\/thermo-nuclear-code-quality-review\.md/,
+      "thermo-nuclear must carry the banner naming its playbook source",
+    );
+    assert.match(
+      zoom,
+      /DO NOT EDIT.*Generated from docs\/operator-playbooks\/zoom-out\.md/,
+      "zoom-out must carry the banner naming its playbook source",
+    );
+  });
+
+  test("both retain disable-model-invocation in the Claude mirror (operator-invoked only, fail-safe flag rule)", () => {
+    const { thermo, zoom } = syncLive();
+    // Verbatim kebab-case, lowercase `true` — never Python's "True".
+    assert.match(
+      thermo,
+      /^disable-model-invocation: true$/m,
+      "thermo-nuclear must keep the flag — it is operator-invoked only and appears in no dispatched-skill column",
+    );
+    assert.match(
+      zoom,
+      /^disable-model-invocation: true$/m,
+      "zoom-out must keep the flag on the same fail-safe rule",
+    );
+    assert.doesNotMatch(thermo, /disable-model-invocation:\s*True/, "lowercase true only");
+    assert.doesNotMatch(zoom, /disable-model-invocation:\s*True/, "lowercase true only");
+  });
+
+  test("neither emits disable-model-invocation into the Codex mirror (Codex has no such concept)", () => {
+    const { thermoCodex, zoomCodex } = syncLive();
+    assert.doesNotMatch(thermoCodex, /disable-model-invocation/, "the flag must never reach a Codex SKILL.md");
+    assert.doesNotMatch(zoomCodex, /disable-model-invocation/, "the flag must never reach a Codex SKILL.md");
+  });
+
+  test("thermo-nuclear carries the proposal-format sibling via reference_files, NOT inlined into SKILL.md", () => {
+    const { thermo, thermoFrag } = syncLive();
+    // The sibling exists and carries its distinctive content.
+    assert.ok(thermoFrag.length > 0, "the thermo-nuclear-proposal-format.md sibling must be emitted");
+    assert.match(
+      thermoFrag,
+      /Proposal document format/,
+      "the sibling must carry the proposal-format content",
+    );
+    // And that content must NOT be inlined into the SKILL.md body (progressive
+    // disclosure — reference_files exists precisely to keep the body small).
+    assert.doesNotMatch(
+      thermo,
+      /Proposal document format/,
+      "the proposal-format content must NOT be inlined into SKILL.md — carry it as a sibling via reference_files",
+    );
+    // The SKILL.md body points at the generated sibling by name.
+    assert.match(
+      thermo,
+      /thermo-nuclear-proposal-format\.md/,
+      "the SKILL.md body must link the proposal-format sibling by its generated basename",
+    );
+  });
+
+  test("thermo-nuclear no longer references OpenViking — the dead retrieval anchor is repaired (ADR-0033)", () => {
+    const { thermo, thermoFrag } = syncLive();
+    // The acceptance criterion is literal: the playbook no longer references
+    // OpenViking. A grep must return nothing — including inside the proposal-
+    // format sibling, which is part of the skill surface.
+    assert.doesNotMatch(
+      thermo,
+      /OpenViking/,
+      "the thermo-nuclear playbook must not reference OpenViking — ADR-0033 retired it and CLAUDE.md cut the search doctrine to two lanes",
+    );
+    assert.doesNotMatch(thermoFrag, /OpenViking/, "the proposal-format sibling must not reference OpenViking either");
+  });
+
+  test("thermo-nuclear routes retrieval to probe-search (fuzzy) + ast-search (exact) and cites ADR-0033", () => {
+    const { thermo } = syncLive();
+    assert.match(thermo, /probe-search/, "the fuzzy-relevance lane must be named");
+    assert.match(thermo, /ast-search/, "the exact-syntax lane must be named");
+    assert.match(thermo, /ADR-0033/, "the retirement must be cited so the anchor repair is traceable");
+    // The retired semantic backend's health-check / degraded-mode apparatus
+    // (a service to ping, a fallback when the index is stale) must be gone —
+    // the two lanes are local CLI invocations with no standing service.
+    assert.doesNotMatch(
+      thermo,
+      /localhost:1933/,
+      "the OpenViking service health-check endpoint must be gone",
+    );
+  });
+
+  test("regeneration is idempotent — a second sync-skills.sh run produces no diff (#3995 AC)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sync-skills-3995-idem-"));
+    try {
+      const claudeDir = join(dir, "claude");
+      const codexDir = join(dir, "codex");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        CLAUDE_SKILLS_DIR: claudeDir,
+        CODEX_SKILLS_DIR: codexDir,
+        PATH: process.env.PATH ?? "",
+      };
+      const r1 = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], { env, encoding: "utf-8" });
+      assert.equal(r1.status, 0, `first sync failed: ${r1.stderr}`);
+      const snap = {
+        thermoClaude: readFileSync(join(claudeDir, "thermo-nuclear-code-quality-review", "SKILL.md"), "utf-8"),
+        thermoFrag: readFileSync(
+          join(claudeDir, "thermo-nuclear-code-quality-review", "thermo-nuclear-proposal-format.md"),
+          "utf-8",
+        ),
+        zoomClaude: readFileSync(join(claudeDir, "zoom-out", "SKILL.md"), "utf-8"),
+        thermoCodex: readFileSync(join(codexDir, "thermo-nuclear-code-quality-review", "SKILL.md"), "utf-8"),
+        zoomCodex: readFileSync(join(codexDir, "zoom-out", "SKILL.md"), "utf-8"),
+      };
+      const r2 = spawnSync("bash", [join(SCRIPTS, "sync-skills.sh")], { env, encoding: "utf-8" });
+      assert.equal(r2.status, 0, `second sync failed: ${r2.stderr}`);
+      assert.equal(
+        readFileSync(join(claudeDir, "thermo-nuclear-code-quality-review", "SKILL.md"), "utf-8"),
+        snap.thermoClaude,
+        "thermo Claude SKILL.md must regenerate byte-identically",
+      );
+      assert.equal(
+        readFileSync(
+          join(claudeDir, "thermo-nuclear-code-quality-review", "thermo-nuclear-proposal-format.md"),
+          "utf-8",
+        ),
+        snap.thermoFrag,
+        "the proposal-format sibling must regenerate byte-identically",
+      );
+      assert.equal(
+        readFileSync(join(claudeDir, "zoom-out", "SKILL.md"), "utf-8"),
+        snap.zoomClaude,
+        "zoom-out Claude SKILL.md must regenerate byte-identically",
+      );
+      assert.equal(
+        readFileSync(join(codexDir, "thermo-nuclear-code-quality-review", "SKILL.md"), "utf-8"),
+        snap.thermoCodex,
+        "thermo Codex SKILL.md must regenerate byte-identically",
+      );
+      assert.equal(
+        readFileSync(join(codexDir, "zoom-out", "SKILL.md"), "utf-8"),
+        snap.zoomCodex,
+        "zoom-out Codex SKILL.md must regenerate byte-identically",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
