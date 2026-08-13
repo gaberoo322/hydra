@@ -209,12 +209,21 @@ export function deriveLifecycleState(
  * 130) with ZERO slots in flight before the loop reached a stop rule — a
  * genuine truncation with nothing pending, distinct from the `handoff`
  * baton-pass (slots > 0).
+ *
+ * `context_compaction` (issue #3787) is clean for the same reason `budget` /
+ * `wall_clock` / `idle` are: `decide.py`'s periodic-restart cadence is a
+ * deliberate stop rule reached by the decision loop, not a truncated
+ * print-mode session. It will become a routine, high-frequency cause once
+ * shipped (every ~100 turns by default) — excluding it here would otherwise
+ * artificially depress `cleanTerminationRate` and spuriously re-trip the
+ * #1352/#1815 starvation alarm.
  */
 const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
   "idle",
   "budget",
   "wall_clock",
   "handoff",
+  "context_compaction",
 ]);
 
 /**

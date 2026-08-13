@@ -117,6 +117,14 @@ function baseState(o: Partial<{
       token_budget: 2_000_000,
       wall_clock_max_sec: 28_800,
       idle_drain_turns: 5,
+      // Issue #3787 — this file's default `turn: 7` bumps to 8 (the CLI's
+      // #1769 single-writer counter), which collides with the periodic
+      // session-restart cause's own default 8-turn cadence. Disabled here so
+      // this file's turn_start/turn_end/dispatch_decision event-shape tests
+      // keep exercising what they always tested; context_compaction itself
+      // is covered by the dedicated
+      // test/decide-context-compaction-restart.test.mts suite.
+      context_compaction_turns: 0,
       scope: o.scope ?? "all",
       subagent_max_tokens: 400_000,
       subagent_hard_max_tokens: 800_000,

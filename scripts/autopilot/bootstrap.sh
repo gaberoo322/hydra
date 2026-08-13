@@ -12,6 +12,9 @@
 #   HYDRA_AUTOPILOT_TOKEN_BUDGET                (default 10000000)
 #   HYDRA_AUTOPILOT_MAX_SEC                     (default 28800  — 8h)
 #   HYDRA_AUTOPILOT_IDLE_TURNS                  (default 5)
+#   HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS    (default 8 — issue #3787,
+#                                                periodic session-restart
+#                                                cadence in Autopilot Turns)
 #   HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS         (default 400000 — soft cap)
 #   HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS    (default 800000 — hard cap)
 #   HYDRA_AUTOPILOT_SCOPE                       (default all | orch-only | target-only)
@@ -745,6 +748,12 @@ fi
 TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-10000000}"
 WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
 IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
+# Periodic session-restart cadence (issue #3787) — cuts the parent session's
+# own prompt-cache re-read cost. Measured in Autopilot Turns (one
+# decide.py-decide invocation), NOT raw Anthropic API calls — see
+# decide.py's CONTEXT_COMPACTION_TURNS_DEFAULT docstring for the unit
+# rationale behind the 8-turn default.
+CONTEXT_COMPACTION_TURNS="${HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS:-8}"
 
 # Per-subagent token caps (issue #395). Soft cap = stop re-dispatching that
 # class; hard cap = abandon the in-flight slot and open a runaway issue.
@@ -1116,6 +1125,7 @@ cat > "${STATE_PATH}" <<EOF
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
+    "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
@@ -1138,7 +1148,7 @@ cat > "${STATE_PATH}" <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
 echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"
 
 # Issue #435 — overwrite the Phase 0 heartbeat with the structured
@@ -1188,6 +1198,7 @@ else
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
+    "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},

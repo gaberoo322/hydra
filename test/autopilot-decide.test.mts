@@ -71,6 +71,7 @@ interface StateOverrides {
   wall_clock_max_sec?: number;
   token_budget?: number;
   idle_drain_turns?: number;
+  context_compaction_turns?: number;
 }
 
 function baseState(o: StateOverrides = {}): any {
@@ -80,6 +81,15 @@ function baseState(o: StateOverrides = {}): any {
       token_budget: o.token_budget ?? 2_000_000,
       wall_clock_max_sec: o.wall_clock_max_sec ?? 28_800,
       idle_drain_turns: o.idle_drain_turns ?? 5,
+      // Issue #3787 — this file's ~50 cases pin unrelated behaviour (dispatch
+      // selection, worktreeBranch stamping, signal classes, ...) against
+      // small hand-picked `turn` values (many tests set `turn = 7`, which
+      // bumps to 8 — the periodic-restart cause's own default cadence).
+      // Disabled here by default so those cases keep exercising what they
+      // always tested; context_compaction itself is covered by the dedicated
+      // test/decide-context-compaction-restart.test.mts suite (which
+      // explicitly opts back in via this same override).
+      context_compaction_turns: o.context_compaction_turns ?? 0,
       scope: o.scope ?? "all",
       subagent_max_tokens: 400_000,
       subagent_hard_max_tokens: 800_000,
@@ -870,6 +880,21 @@ describe("decide.py — termination paths", () => {
     const plan = runDecide(state, cands);
     assert.equal(plan.actions.length, 1, "terminate must be the only action when budget is blown");
     assert.equal(plan.actions[0].type, "terminate");
+  });
+
+  // Issue #3787 — periodic session-restart cadence. Full coverage (default
+  // value, disabling, custom cadence, budget-priority, occupied-slot
+  // behaviour, turn_end) lives in the dedicated
+  // test/decide-context-compaction-restart.test.mts; this single case just
+  // pins the cause alongside its siblings above for anyone scanning this
+  // describe block for "every terminate cause".
+  test("periodic-restart cadence reached -> terminate(cause=context_compaction)", () => {
+    const state = baseState({ context_compaction_turns: 8 });
+    (state as any).turn = 7; // CLI bump (#1769) -> 8, a multiple of the cadence.
+    const plan = runDecide(state, null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t);
+    assert.equal(t.cause, "context_compaction");
   });
 });
 
