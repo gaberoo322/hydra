@@ -2381,20 +2381,30 @@ describe("usage-tracker", () => {
   });
 
   describe("weightedTokens helper", () => {
-    test("at w_cache = 1.0 reduces exactly to .total", () => {
+    test("at all-1.0 category weights reduces exactly to .total", () => {
       const b = breakdown({ input: 100, output: 200, cacheRead: 5000, cacheCreation: 50 });
-      assert.equal(weightedTokens(b, 1.0), b.total);
+      assert.equal(
+        weightedTokens(b, { input: 1, output: 1, cacheRead: 1, cacheCreation: 1 }),
+        b.total,
+      );
     });
 
-    test("down-weights ONLY cacheRead; input/output/cacheCreation stay full weight", () => {
+    test("weights each of the four categories at its configured multiplier (issue #3825)", () => {
       const b = breakdown({ input: 100, output: 200, cacheRead: 1000, cacheCreation: 50 });
-      // 100 + 200 + 50 + 0.1*1000 = 450
-      assert.equal(weightedTokens(b, 0.1), 450);
+      // 1*100 + 5*200 + 1.25*50 + 0.1*1000 = 100 + 1000 + 62.5 + 100 = 1262.5
+      assert.equal(
+        weightedTokens(b, { input: 1, output: 5, cacheRead: 0.1, cacheCreation: 1.25 }),
+        1262.5,
+      );
     });
 
-    test("w_cache = 0 drops cacheRead entirely", () => {
+    test("a 0 cacheRead weight drops cacheRead entirely", () => {
       const b = breakdown({ input: 100, output: 200, cacheRead: 9999, cacheCreation: 50 });
-      assert.equal(weightedTokens(b, 0), 350);
+      // 1*100 + 1*200 + 1*50 + 0*9999 = 350
+      assert.equal(
+        weightedTokens(b, { input: 1, output: 1, cacheRead: 0, cacheCreation: 1 }),
+        350,
+      );
     });
   });
 

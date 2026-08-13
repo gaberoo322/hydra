@@ -43,6 +43,26 @@ export interface TokenBreakdown {
 }
 
 /**
+ * Per-token-category weights for the {@link weightedTokens} fold (issue #3825).
+ * Each of the four billed categories carries its OWN multiplier — relative to
+ * one fresh input token on the same model, Anthropic's list prices put cache
+ * reads at ~0.1x, cache writes (cacheCreation) at ~1.25x (5-minute TTL) / 2.0x
+ * (1-hour TTL), output at ~5.0x, and fresh input at 1.0x. The pre-#3825 fold
+ * hardcoded input/output/cacheCreation at 1.0 and exposed only `cacheRead`, so
+ * every ranking surface ranked consumers by raw cache-read volume (85% of
+ * volume, ~25% of cost) — the inversion this type exists to fix. The list-price
+ * DEFAULTS live in the env-reader leaf `./config.ts`
+ * (`DEFAULT_BURN_WEIGHT_*`); this pure leaf holds only the SHAPE so the math
+ * stays unit-testable without a `process.env` read.
+ */
+export interface CategoryWeights {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+}
+
+/**
  * Model families recognised by the per-model rollup. `unknown` is the
  * catch-all for any model string that doesn't match a known prefix
  * (synthetic messages, future model names, GPT carry-overs). Its
@@ -197,16 +217,26 @@ export function isForeignProviderModel(model: string | null | undefined): boolea
 }
 
 /**
- * The per-token-type weighted token count for one accumulator (issue #873):
- * `input + output + cacheCreation + w_cache*cacheRead`. This is the quota-burn
- * UNIT — it down-weights cache reads to match Anthropic's real meter (cache
- * reads bill at ~0.1x base input) while counting input/output/cacheCreation at
- * full weight. `w_cache = 1.0` (the default) reduces this exactly to `b.total`,
- * so the change is behaviour-neutral until the operator calibrates the env var.
- * Pure + total — the unit-testable core of the weighted-burn math.
+ * The per-token-category weighted token count for one accumulator (issue #3825,
+ * generalising #873): `w_input*input + w_output*output + w_cacheCreation*
+ * cacheCreation + w_cacheRead*cacheRead`. This is the quota-burn UNIT. ALL FOUR
+ * categories carry their own weight (a {@link CategoryWeights}); the pre-#3825
+ * form hardcoded input/output/cacheCreation at 1.0 and exposed only a single
+ * cache-read knob, which made the fold an identity under the default
+ * configuration and ranked every consumer by raw cache-read volume (the single
+ * cheapest category). The list-price defaults (cache read 0.1x, cache write
+ * 1.25x, output 5.0x, input 1.0x) live in `./config.ts` so they recalibrate
+ * without a deploy; callers pass whichever {@link CategoryWeights} their axis
+ * needs (the ranked report uses the full list-price set; the live estimate fold
+ * passes cache-read-only weights to preserve its byte-identical behaviour).
+ *
+ * At the all-1.0 weights this reduces exactly to `b.total` — the identity the
+ * legacy single-axis knob expressed — so a caller that wants the pre-#3825
+ * behaviour passes `{input:1, output:1, cacheRead:1, cacheCreation:1}`. Pure +
+ * total — the unit-testable core of the weighted-burn math.
  */
-export function weightedTokens(b: TokenBreakdown, wCache: number): number {
-  return b.input + b.output + b.cacheCreation + wCache * b.cacheRead;
+export function weightedTokens(b: TokenBreakdown, w: CategoryWeights): number {
+  return w.input * b.input + w.output * b.output + w.cacheCreation * b.cacheCreation + w.cacheRead * b.cacheRead;
 }
 
 /**
