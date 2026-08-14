@@ -20,6 +20,7 @@ const WIN = { windowStartMs: 1_000, windowEndMs: 9_000 };
 function rec(over: Partial<DispatchOutcomeRecord>): DispatchOutcomeRecord {
   return {
     cycleId: "c1",
+    anchorReference: null,
     runIdPrefix: "abc12345",
     turn: 1,
     className: "dev_orch",

@@ -59,6 +59,33 @@ export interface DecisionItem {
   sources: DecisionItemSource[];
 }
 
+/**
+ * The aggregator result (ADR-0034 §5.2 — asserted-emptiness trust contract).
+ *
+ * `getDecisionQueue` is documented **never to throw**: all three GitHub
+ * sub-fetches degrade to `[]` internally via `Promise.allSettled` /
+ * `settledOrEmpty`. That isolation is a feature for resilience but a hazard
+ * for trust — a total sub-fetch failure arrives as `items: []`, bit-for-bit
+ * identical to a genuine zero-item day. The two fields below carry the
+ * evidence the lookup actually ran cleanly, so the route (and the client) can
+ * tell them apart:
+ *
+ * - `scanned` — the pre-dedup raw row count from the fulfilled sub-fetches.
+ *   Non-zero proves the lookup reached the sources even when `items` is empty
+ *   after dedup (e.g. a digest issue whose body referenced no issues).
+ * - `sourcesOk` — `true` iff all three sub-fetches settled **fulfilled**. A
+ *   single rejection flips it false, demoting the client to UNKNOWN: a
+ *   partially-failed lookup can silently omit real items, so only a
+ *   fully-clean lookup may assert "this list is complete and empty".
+ */
+export interface DecisionQueueResult {
+  items: DecisionItem[];
+  /** Pre-dedup raw row count from the fulfilled sub-fetches (proof the lookup ran). */
+  scanned: number;
+  /** True iff all three GitHub sub-fetches settled fulfilled (the emptiness assertion). */
+  sourcesOk: boolean;
+}
+
 export interface DecisionQueueDeps {
   /** Wall-clock anchor — defaults to `new Date()`. Used to compute the YYYY-MM-DD digest title. */
   now?: Date;
@@ -84,10 +111,14 @@ export interface DecisionQueueDeps {
  * The three sub-sources run under `Promise.allSettled` so a single slow /
  * failing call can't blank the whole list. After fetch, items are deduped
  * by number and sorted oldest-first.
+ *
+ * The result carries the asserted-emptiness evidence (ADR-0034 §5.2):
+ * `scanned` (pre-dedup raw row count) and `sourcesOk` (all sub-fetches
+ * fulfilled). See {@link DecisionQueueResult}.
  */
 export async function getDecisionQueue(
   deps: DecisionQueueDeps = {},
-): Promise<DecisionItem[]> {
+): Promise<DecisionQueueResult> {
   const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
   const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
 
@@ -101,11 +132,26 @@ export async function getDecisionQueue(
   const ready = settledOrEmpty(readyResult, "decision-queue/ready-for-human");
   const info = settledOrEmpty(infoResult, "decision-queue/needs-info");
 
-  return mergeDecisionItems({
+  const items = mergeDecisionItems({
     "operator-decision-queue": digest,
     "ready-for-human": ready,
     "needs-info": info,
   });
+
+  // ADR-0034 §5.2: a genuine zero-item day (all fulfilled, scanned: 0) must
+  // never be bit-for-bit identical to a total sub-fetch failure (all reject,
+  // items: []). `scanned` counts the raw rows the fulfilled sub-fetches
+  // returned (rejected sub-fetches contribute [] → 0 via settledOrEmpty);
+  // `sourcesOk` requires every sub-fetch to have settled fulfilled, so any
+  // failure demotes the client to UNKNOWN rather than trusting an incomplete
+  // list. Without these the route could not tell the two cases apart.
+  const scanned = digest.length + ready.length + info.length;
+  const sourcesOk =
+    digestResult.status === "fulfilled" &&
+    readyResult.status === "fulfilled" &&
+    infoResult.status === "fulfilled";
+
+  return { items, scanned, sourcesOk };
 }
 
 // ---------------------------------------------------------------------------
