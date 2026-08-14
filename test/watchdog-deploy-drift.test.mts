@@ -73,7 +73,7 @@ function runWatchdog(env: Record<string, string>): { status: number; stdout: str
   // than letting it fall through as a misleading "-1 !== 0" assertion
   // failure (issue #4044) — that message sent a prior investigation looking
   // for a watchdog behaviour regression that did not exist.
-  if (r.error?.code === "ETIMEDOUT") {
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
     throw new Error(
       `watchdog script exceeded ${WATCHDOG_TIMEOUT_MS}ms timeout (killed with ${r.signal ?? "unknown signal"}); ` +
         `stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`,

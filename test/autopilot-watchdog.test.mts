@@ -97,7 +97,7 @@ function runWatchdog(env: Record<string, string>): { status: number; stdout: str
   // exit code) and error.code is "ETIMEDOUT". Report that explicitly rather
   // than letting it fall through as a misleading "-1 !== 0" assertion
   // failure (issue #4044).
-  if (r.error?.code === "ETIMEDOUT") {
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
     throw new Error(
       `watchdog wedge block exceeded ${WATCHDOG_TIMEOUT_MS}ms timeout (killed with ${r.signal ?? "unknown signal"}); ` +
         `stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`,
