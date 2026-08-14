@@ -52,7 +52,7 @@ function extractTargetBoardEmitter(): string {
   // Anchor on the emitter's unique first print line so we bind the emitter
   // block (not the sibling degraded-check block that also pipes the same var).
   const match = src.match(
-    /python3 -c "(\nimport json,sys\nd=json\.load\(sys\.stdin\)\n# Emit only the counts decide\.py's Target branch[\s\S]*?)"/,
+    /python3 -c "\$\(cat <<'PY'(\nimport json,sys\nd=json\.load\(sys\.stdin\)\n# Emit only the counts decide\.py's Target branch[\s\S]*?)\nPY\n\)"/,
   );
   assert.ok(match, "could not locate the target board emitter python block in collect-state.sh");
   return match[1];
@@ -481,7 +481,7 @@ describe("collect-state.sh — gh issue list page-size ratchet (issue #3710)", (
 describe("collect-state.sh — Target board truncation signal (issue #3710)", () => {
   /** The Target lane-signal emitter (distinct from the board-state emitter above). */
   function extractLaneEmitter(): string {
-    const match = src.match(/python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/);
+    const match = src.match(/python3 -c "\$\(cat <<'PY'(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/);
     assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
     return match[1];
   }
@@ -599,7 +599,7 @@ describe("collect-state.sh — wire-or-retire unlabelled advisory count (issue #
   /** The Target lane-signal emitter (same block the truncation tests exercise). */
   function extractLaneEmitter(): string {
     const match = src.match(
-      /python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/,
+      /python3 -c "\$\(cat <<'PY'(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
     );
     assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
     return match[1];
