@@ -1,0 +1,1 @@
+- fix: `npm test` now detects and gates on the silent `--test-force-exit` suite-drop race instead of reporting a false green (#4020)
