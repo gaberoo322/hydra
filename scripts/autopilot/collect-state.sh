@@ -362,6 +362,19 @@ fi
 # Both are ADDED to the exclusion array (not given a prefix rule like
 # `wayfinder:*`, since each is a single fixed label, not a family).
 #
+# `hitl-grill` (issue #4025) is a TERMINAL park state, not a "wrong label"
+# blind spot either: it marks an agent-proposed idea the operator must
+# grill-or-dismiss, and no agent may ever action it. Without this exclusion
+# an issue carrying only `hitl-grill` pins `untriaged_orphans` above zero
+# permanently, so `sweep_orch` re-triages the parked idea into an actionable
+# lane on every cooldown — draining the very inbox this label exists to
+# hold. Same shape as `needs-design-concept` / `needs-tickets` above: ADDED
+# as a single fixed label, not a prefix family. Do not conflate this with
+# `ready-for-human` (an `INTERVENTION_LABEL` in
+# `src/aggregators/autonomy-classifier.ts` — an escalation) or with the
+# attention feed (#4007, ADR-0034-scoped to threshold crossings): parking an
+# idea in `hitl-grill` is neither.
+#
 # Audited against the full repo label list and NOT added, with reasons:
 #   - `meta-friction`: explicitly the MOTIVATING example above ("an issue
 #     landed with the wrong label") — `src/pattern-memory/escalation.ts`
@@ -400,7 +413,7 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
         | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
              "needs-triage", "needs-research", "target-backlog",
              "ready-for-human", "needs-info", "needs-design-concept",
-             "needs-tickets" ]
+             "needs-tickets", "hitl-grill" ]
            | any(. as $lbl | $n | index($lbl))) | not
       )
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)

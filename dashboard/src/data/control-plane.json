@@ -283,6 +283,12 @@
       "meaning": "Classification",
       "whoApplies": "Triage",
       "sourcePath": "docs/agents/triage-labels.md"
+    },
+    {
+      "name": "hitl-grill",
+      "meaning": "Agent-proposed idea parked for operator grill-or-dismiss; agents never action this",
+      "whoApplies": "Agent proposing the idea",
+      "sourcePath": "docs/agents/triage-labels.md"
     }
   ],
   "edges": [

@@ -1927,6 +1927,7 @@ describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () =
       "needs-info",
       "needs-design-concept",
       "needs-tickets",
+      "hitl-grill",
     ];
     // Isolate the untriaged_orphans jq filter block so a label mentioned only
     // in a comment elsewhere can't satisfy the assertion.
@@ -2181,6 +2182,90 @@ describe("collect-state.sh untriaged_orphans needs-design-concept / needs-ticket
       count([
         { labels: ["needs-design-concept"] },
         { labels: ["needs-tickets"] },
+        { labels: ["wayfinder:grilling"] },
+        { labels: ["meta-friction"] }, // genuine orphan
+        { labels: [] }, // genuine orphan
+        { labels: ["ready-for-agent"] }, // excluded (lifecycle label)
+      ]),
+      "2",
+    );
+  });
+});
+
+/**
+ * Regression test for issue #4025 — `collect-state.sh`'s `untriaged_orphans`
+ * backstop must NOT count `hitl-grill`-only issues.
+ *
+ * `hitl-grill` is a TERMINAL park state for agent-proposed ideas that no
+ * agent should ever action — same shape as the already-excluded
+ * `needs-design-concept` / `needs-tickets` (#3817) above, not the
+ * "wrong label" blind spot this backstop exists to catch. Without the
+ * exclusion, an issue carrying only `hitl-grill` pins `untriaged_orphans`
+ * above zero permanently and `sweep_orch` re-triages the parked idea into
+ * an actionable lane on every cooldown, draining the inbox the label exists
+ * to hold. Excluded by exact-name match (a single fixed label, not a
+ * family) — NOT the `wayfinder:*` prefix mechanism.
+ *
+ * This case runs the COMMITTED jq filter through real `jq`, mirroring the
+ * #3817 / #3728 precedents above so the shipped logic cannot drift. Both
+ * directions matter: `hitl-grill` is NOT an orphan, but a genuinely
+ * label-less issue — and a `meta-friction`-only issue, the backstop's actual
+ * motivating example — STILL is.
+ */
+describe("collect-state.sh untriaged_orphans hitl-grill exclusion (#4025)", () => {
+  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+
+  /** Extract the committed untriaged_orphans jq filter verbatim from the script. */
+  function extractFilter(): string {
+    const start = src.indexOf('echo -n "untriaged_orphans="');
+    assert.ok(start >= 0, "untriaged_orphans emitter missing from collect-state.sh");
+    const jqOpen = src.indexOf("--jq '", start);
+    assert.ok(jqOpen >= 0, "untriaged_orphans gh read missing its --jq filter");
+    const filterStart = jqOpen + "--jq '".length;
+    const filterEnd = src.indexOf("'", filterStart);
+    assert.ok(filterEnd >= 0, "untriaged_orphans --jq filter is never closed");
+    return src.slice(filterStart, filterEnd);
+  }
+
+  /** Run the committed filter against synthetic issues through real jq. */
+  function count(issues: readonly { labels: string[] }[]): string {
+    const input = JSON.stringify(
+      issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
+    );
+    const r = spawnSync("jq", [extractFilter()], { input, encoding: "utf-8" });
+    assert.equal(r.status, 0, `untriaged_orphans jq failed: ${r.stderr}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  test("an issue labelled only hitl-grill is NOT an untriaged orphan", () => {
+    assert.equal(
+      count([{ labels: ["hitl-grill"] }]),
+      "0",
+      "hitl-grill is a terminal HITL park state — sweep_orch's correct action is no action",
+    );
+  });
+
+  test("an issue with [enhancement, hitl-grill] is NOT an untriaged orphan", () => {
+    assert.equal(count([{ labels: ["enhancement", "hitl-grill"] }]), "0");
+  });
+
+  test("a meta-friction-only issue IS still an untriaged orphan (backstop's motivating example intact)", () => {
+    assert.equal(
+      count([{ labels: ["meta-friction"] }]),
+      "1",
+      "meta-friction is the backstop's own motivating example of the wrong-label blind spot — must not be swept under the same exclusion",
+    );
+  });
+
+  test("an issue with genuinely no labels IS still an untriaged orphan (backstop intact)", () => {
+    assert.equal(count([{ labels: [] }]), "1");
+  });
+
+  test("a mixed board counts exactly the non-excluded orphans", () => {
+    assert.equal(
+      count([
+        { labels: ["hitl-grill"] },
+        { labels: ["needs-design-concept"] },
         { labels: ["wayfinder:grilling"] },
         { labels: ["meta-friction"] }, // genuine orphan
         { labels: [] }, // genuine orphan
