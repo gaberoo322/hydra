@@ -50,11 +50,33 @@ import {
  * A bare `#N` (a "see also", a "part of", an incidental mention) deliberately
  * does NOT match — it must not gate dispatch.
  */
-const STRICT_BLOCKER_PATTERNS: RegExp[] = [
-  // Reused verbatim from scripts/ci/epic-close.ts (parseEpicReferences).
-  /\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)/gi,
-  /\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)/gi,
+/**
+ * The strict-blocker regex pattern SOURCES — the **single source of truth** for
+ * "what counts as a strict blocker ref". Reused verbatim from
+ * `scripts/ci/epic-close.ts` (`parseEpicReferences`).
+ *
+ * Exported (issue #3965) because the autopilot's anchor-SELECTION path
+ * (`scripts/autopilot/collect-state.sh`) must apply the SAME predicate the
+ * anchor-COUNT path (`src/autopilot/board-state.ts::hasOpenStrictBlocker`)
+ * uses — "do not write a second parser". collect-state.sh has no TypeScript
+ * bridge, so its candidate exclusion mirrors these patterns in python; the
+ * export gives `test/board-state.test.mts` a stable, named anchor to pin the
+ * python port against (a byte-identical drift guard + a behavioural-parity
+ * check on a golden fixture). One predicate, two call sites, machine-checked
+ * for drift.
+ *
+ * Each entry is a plain regex SOURCE string (no flags); the {@link gi} flags
+ * are applied once, below, when the compiled {@link STRICT_BLOCKER_PATTERNS} is
+ * derived. Do not inline a second copy elsewhere — extend this array.
+ */
+export const STRICT_BLOCKER_PATTERN_SOURCES: readonly string[] = [
+  "\\bblock(?:ed|s)?(?:[\\s-]+by)?\\s*:?\\s*#(\\d+)",
+  "\\bdepend(?:s|ent)?(?:[\\s-]+on)?\\s*:?\\s*#(\\d+)",
 ];
+
+const STRICT_BLOCKER_PATTERNS: RegExp[] = STRICT_BLOCKER_PATTERN_SOURCES.map(
+  (src) => new RegExp(src, "gi"),
+);
 
 /**
  * Pull the STRICT blocker `#N` refs from a markdown body — the numbers this

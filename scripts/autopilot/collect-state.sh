@@ -595,21 +595,145 @@ except Exception:
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)
+# ---------------------------------------------------------------------------
+# BLOCKED-DEPENDENCY CANDIDATE EXCLUSION (issue #3965). The count path
+# (`src/autopilot/board-state.ts::hasOpenStrictBlocker` →
+# `extractStrictBlockerRefs`) already excludes a ready-for-agent issue citing
+# an OPEN strict blocker from the dispatchable `ready_for_agent` COUNT. This
+# candidate loop — which chooses WHICH anchor to actually dispatch — applied no
+# such check, so a dependency-blocked issue could be picked as the grill or
+# dev-ready anchor even though decide.py's `ready_for_agent > 0` gate had
+# already counted it as zero. This is the FIFTH candidate exclusion
+# (`blocked-dependency-exclusion`), applying the SAME predicate the count path
+# uses (issue #3965).
+#
+# It is a HARD skip applied HERE at candidate construction (alongside
+# in-flight-dev and target-backlog), NOT a soft `continue` inside the
+# per-candidate loop: a dependency-blocked issue is never safe to hand to
+# dev_orch either (its blocker has not merged), so it must not be able to
+# become the sole ORCH_DEV_READY_PICK the way the mechanical/trivial gates can.
+#
+# collect-state.sh is bash/python (no TS bridge), so the strict-blocker parse is
+# mirrored in python and pinned to the TS predicate by
+# `test/board-state.test.mts`: a byte-identical drift guard over the pattern
+# sources exported as `STRICT_BLOCKER_PATTERN_SOURCES` in
+# `src/github/blockers.ts`, plus a behavioural-parity check on a golden
+# fixture. One predicate, two call sites. Anchored keyword-only
+# (`blocked by #N` / `depends on #N`), code-span-safe, self-ref-safe — a bare
+# `#N` "see also" never matches (it would starve real work).
+#
+# Openness is resolved with ONE batched `gh issue list --state open --search`
+# over the union of refs (mirrors `fetchOpenBlockerNumbers`), and its FAIL-SAFE
+# default is load-bearing: on a gh lookup FAILURE every referenced blocker is
+# treated as still-OPEN, so the loop WAITS a tick rather than dispatching onto
+# an unmerged blocker. Best-effort — a failure never aborts the collect step
+# (same `2>/dev/null || true` degrade as every sibling collector).
+#
+# Additive to the manual `blocked` label — this NEVER toggles that label (an
+# operator escape hatch; writing it would collide with the orphan-backstop
+# tracking loop). Body-text ONLY — no native `blockedBy` query here: ADR-0029
+# Decision 5 keeps the two blocking conventions unbridged (native is for
+# wayfinder-map internals; body-text is for hydra-prd handoff epics, which is
+# what lands on this board), and this script already runs a native query for
+# `wayfinder_orch_frontier` that must stay map-scoped.
+#
+# Step 1 — the union of strict-blocker refs declared across the candidate pool
+# (self-refs excluded), mirroring `resolveOpenBlockers`' ref collection. The
+# two PATTERNS are byte-identical to STRICT_BLOCKER_PATTERN_SOURCES.
+ORCH_BLOCKER_REFS=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
+import json, re, sys
+PATTERNS = [
+  r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
+  r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
+]
+try:
+  refs = set()
+  for it in json.load(sys.stdin):
+    n = it.get('number')
+    if not isinstance(n, int):
+      continue
+    # Strip backtick code spans first -- a #N inside code is not a ref.
+    stripped = re.sub(r'\x60[^\x60]*\x60', '', it.get('body') or '')
+    for pat in PATTERNS:
+      for m in re.finditer(pat, stripped, re.IGNORECASE):
+        x = int(m.group(1))
+        if x > 0 and x != n:
+          refs.add(x)
+  print(' '.join(str(x) for x in sorted(refs)))
+except Exception:
+  pass
+" 2>/dev/null || true)
+# Step 2 — ONE batched open-state lookup over that union (mirrors
+# fetchOpenBlockerNumbers: a single `gh issue list --state open --search`).
+# FAIL-SAFE: a gh failure treats EVERY referenced blocker as still-OPEN.
+ORCH_OPEN_BLOCKERS=""
+if [ -n "$ORCH_BLOCKER_REFS" ]; then
+  if ORCH_OPEN_BLOCKERS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --search "$ORCH_BLOCKER_REFS" --limit "$GH_ISSUE_LIST_LIMIT" --json number 2>/dev/null); then
+    # gh succeeded -- intersect the open rows with the requested refs (guards
+    # against unrelated matches that merely mention a number). An empty result
+    # is CORRECT here (no referenced blocker is open) and is NOT a fail-safe
+    # trigger. A parse error despite gh success still fails toward exclusion.
+    ORCH_OPEN_BLOCKERS=$(printf '%s' "$ORCH_OPEN_BLOCKERS_JSON" | ORCH_BLOCKER_REFS="$ORCH_BLOCKER_REFS" python3 -c "
+import json, os, sys
+try:
+  req = {int(x) for x in (os.environ.get('ORCH_BLOCKER_REFS') or '').split() if x.isdigit()}
+  data = json.load(sys.stdin)
+  rows = data if isinstance(data, list) else []
+  open_nums = {int(r.get('number')) for r in rows if isinstance(r.get('number'), int)}
+  print(' '.join(str(x) for x in sorted(req & open_nums)))
+except Exception:
+  print(os.environ.get('ORCH_BLOCKER_REFS') or '')
+" 2>/dev/null || true)
+  else
+    # gh failure -> treat every referenced blocker as still open (wait a tick).
+    ORCH_OPEN_BLOCKERS="$ORCH_BLOCKER_REFS"
+  fi
+fi
+# Step 3 — the candidate numbers blocked by an OPEN strict blocker, given the
+# resolved open set. Re-parses bodies with the same byte-identical patterns.
+ORCH_BLOCKED_DEPENDENCY_ISSUES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_OPEN_BLOCKERS="$ORCH_OPEN_BLOCKERS" python3 -c "
+import json, os, re, sys
+PATTERNS = [
+  r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
+  r'\bdepend(?:s|ent)?(?:[\s-]+on)?\s*:?\s*#(\d+)',
+]
+try:
+  open_blockers = {int(x) for x in (os.environ.get('ORCH_OPEN_BLOCKERS') or '').split() if x.isdigit()}
+  blocked = []
+  for it in json.load(sys.stdin):
+    n = it.get('number')
+    if not isinstance(n, int):
+      continue
+    stripped = re.sub(r'\x60[^\x60]*\x60', '', it.get('body') or '')
+    refs = set()
+    for pat in PATTERNS:
+      for m in re.finditer(pat, stripped, re.IGNORECASE):
+        x = int(m.group(1))
+        if x > 0 and x != n:
+          refs.add(x)
+    if any(x in open_blockers for x in refs):
+      blocked.append(n)
+  print(' '.join(str(x) for x in sorted(blocked)))
+except Exception:
+  pass
+" 2>/dev/null || true)
 # Stable candidate order: issue number ASCENDING (oldest first), capped at 10,
-# minus every anchor with dev work already in flight. Both the ordering and the
-# cap live here rather than in the jq so a newly-filed issue can neither reorder
-# nor displace the pool (issue #3711, sub-defect (a)).
-ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_INFLIGHT_ISSUES="$ORCH_INFLIGHT_ISSUES" python3 -c "
+# minus every anchor with dev work already in flight OR an open strict blocker
+# (issue #3965). Both the ordering and the cap live here rather than in the jq
+# so a newly-filed issue can neither reorder nor displace the pool (issue
+# #3711, sub-defect (a)).
+ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_INFLIGHT_ISSUES="$ORCH_INFLIGHT_ISSUES" ORCH_BLOCKED_DEPENDENCY_ISSUES="$ORCH_BLOCKED_DEPENDENCY_ISSUES" python3 -c "
 import json, os, sys
 try:
   inflight = {int(x) for x in (os.environ.get('ORCH_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
+  blocked_dep = {int(x) for x in (os.environ.get('ORCH_BLOCKED_DEPENDENCY_ISSUES') or '').split() if x.isdigit()}
   nums = set()
   for it in json.load(sys.stdin):
     n = it.get('number')
     if not isinstance(n, int):
       continue
     labels = {l.get('name', '') for l in (it.get('labels') or [])}
-    if n in inflight or 'in-progress' in labels:
+    if n in inflight or 'in-progress' in labels or n in blocked_dep:
       continue
     nums.add(n)
   for n in sorted(nums)[:10]:

@@ -1,0 +1,1 @@
+- fix: autopilot anchor selection excludes ready-for-agent issues blocked by an open strict blocker, matching the count path (#3965)
