@@ -112,6 +112,12 @@ export type DecisionItemSource = z.infer<typeof DecisionItemSourceSchema>;
  * returns an array — the schema wraps it under `{ items }` so the route
  * has a place to grow other top-level fields (counts, generatedAt) later
  * without breaking clients.
+ *
+ * `scanned` + `sourcesOk` carry the ADR-0034 §5.2 asserted-emptiness evidence:
+ * the client renders "nothing waiting on a human" only on an *asserted* zero
+ * (`sourcesOk === true`), and renders `UNKNOWN` on an unasserted one
+ * (`sourcesOk === false`) — never a confident-looking empty list that might
+ * hide a total sub-fetch failure (the `/cycle/history` #3997 class).
  */
 const DecisionItemSchema = z
   .object({
@@ -125,9 +131,20 @@ const DecisionItemSchema = z
   })
   .strict();
 
-const DecisionQueueResponseSchema = z
+export const DecisionQueueResponseSchema = z
   .object({
     items: z.array(DecisionItemSchema),
+    /**
+     * Pre-dedup raw row count from the fulfilled sub-fetches — evidence the
+     * lookup actually ran and how much it examined.
+     */
+    scanned: z.number().int().nonnegative(),
+    /**
+     * `true` iff all three GitHub sub-fetches settled fulfilled. `false` means
+     * the merged `items` may be silently incomplete; the client demotes to
+     * `unknown` rather than rendering a confident (possibly-wrong) list.
+     */
+    sourcesOk: z.boolean(),
     generatedAt: z.string(),
   })
   .strict();

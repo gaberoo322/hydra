@@ -290,7 +290,7 @@ describe("addDays — pure UTC calendar primitive", () => {
 
 describe("getDecisionQueue — happy path", () => {
   test("merges digest refs, ready-for-human, and needs-info into one age-sorted list", async () => {
-    const items = await getDecisionQueue({
+    const { items, scanned, sourcesOk } = await getDecisionQueue({
       now: NOW,
       listIssuesBySearchOrEmpty: async (search) => {
         // Only "today"'s digest exists; yesterday's resolves empty.
@@ -340,6 +340,11 @@ describe("getDecisionQueue — happy path", () => {
     assert.equal(items[0].source, "needs-info");
     assert.equal(items[1].source, "operator-decision-queue");
     assert.equal(items[2].source, "ready-for-human");
+    // All three sub-fetches settled fulfilled → the merged list is asserted
+    // complete (ADR-0034 §5.2). scanned counts raw pre-dedup rows from the
+    // fulfilled sources (1 digest row + 1 ready + 1 info = 3).
+    assert.equal(sourcesOk, true);
+    assert.equal(scanned, 3);
   });
 });
 
@@ -348,13 +353,19 @@ describe("getDecisionQueue — happy path", () => {
 // ---------------------------------------------------------------------------
 
 describe("getDecisionQueue — empty state", () => {
-  test("returns [] when no source has items", async () => {
-    const items = await getDecisionQueue({
+  test("returns an ASSERTED zero (sourcesOk:true) when every source ran clean and found nothing", async () => {
+    // The whole point of ADR-0034 §5.2: a clean zero-item day must carry
+    // evidence the lookup ran, so the client can render "inbox zero" instead
+    // of UNKNOWN. This is the asserted-zero half of the regression the
+    // companion suite in test/today-page.test.mts pins end-to-end.
+    const { items, scanned, sourcesOk } = await getDecisionQueue({
       now: NOW,
       listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async () => [],
     });
     assert.deepEqual(items, []);
+    assert.equal(scanned, 0);
+    assert.equal(sourcesOk, true);
   });
 });
 
@@ -363,8 +374,8 @@ describe("getDecisionQueue — empty state", () => {
 // ---------------------------------------------------------------------------
 
 describe("getDecisionQueue — sub-source failure isolation", () => {
-  test("digest reader rejecting → labeled lists still produce the queue", async () => {
-    const items = await getDecisionQueue({
+  test("digest reader rejecting → labeled lists still produce the queue, but sourcesOk:false", async () => {
+    const { items, scanned, sourcesOk } = await getDecisionQueue({
       now: NOW,
       // The *OrEmpty readers normally degrade to []; this models a harder
       // failure (the reader rejecting) to prove allSettled isolation.
@@ -385,5 +396,12 @@ describe("getDecisionQueue — sub-source failure isolation", () => {
     });
     assert.equal(items.length, 1);
     assert.equal(items[0].number, 7);
+    // The digest sub-fetch rejected → the partial list may be silently
+    // missing items. sourcesOk:false tells the client to demote to UNKNOWN
+    // rather than render this one-item list as a confident, complete queue.
+    assert.equal(sourcesOk, false);
+    // Only the fulfilled labeled sub-fetches contribute (1 row); the rejected
+    // digest contributes 0.
+    assert.equal(scanned, 1);
   });
 });

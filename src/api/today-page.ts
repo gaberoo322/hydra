@@ -39,7 +39,7 @@ import {
 import {
   getDecisionQueue,
   type DecisionQueueDeps,
-  type DecisionItem,
+  type DecisionQueueResult,
 } from "../aggregators/decision-queue.ts";
 import {
   getStuckItems,
@@ -72,7 +72,7 @@ export interface TodayPageRouterDeps {
     windowHours: number,
     deps?: OvernightSummaryDeps,
   ) => Promise<OvernightSummaryResponse>;
-  getDecisionQueue?: (deps?: DecisionQueueDeps) => Promise<DecisionItem[]>;
+  getDecisionQueue?: (deps?: DecisionQueueDeps) => Promise<DecisionQueueResult>;
   getStuckItems?: (deps?: StuckItemsDeps) => Promise<StuckItems>;
   getRecentMerges?: (
     limit: number,
@@ -117,10 +117,18 @@ export function createTodayPageRouter(deps: TodayPageRouterDeps = {}) {
     "/today/decision-queue",
     aggregatorRouteNoQuery(
       "v2/today/decision-queue",
-      async (): Promise<DecisionQueueResponse> => ({
-        items: await aggregateDecisionQueue(),
-        generatedAt: new Date().toISOString(),
-      }),
+      async (): Promise<DecisionQueueResponse> => {
+        // Forward the aggregator's asserted-emptiness evidence (ADR-0034 §5.2)
+        // unchanged — the client's trust decision keys off sourcesOk, so the
+        // route must never synthesise a confident `sourcesOk: true` itself.
+        const { items, scanned, sourcesOk } = await aggregateDecisionQueue();
+        return {
+          items,
+          scanned,
+          sourcesOk,
+          generatedAt: new Date().toISOString(),
+        };
+      },
     ),
   );
 

@@ -1,0 +1,1 @@
+- feat: decision-queue panel renders UNKNOWN/stale trust states and an always-visible as-of age; the /today/decision-queue API now asserts its lookup ran (scanned + sourcesOk) so an unasserted empty never reads as a confident zero (#4006)

@@ -250,3 +250,131 @@ export interface LocalTimestampParts {
 export function localTimestampParts(ts: string | number | null | undefined): LocalTimestampParts {
   return { compact: formatDateTime(ts), title: formatDateTimeFull(ts) };
 }
+
+// ---------------------------------------------------------------------------
+// deriveItemStatus — the client trust-contract status (ADR-0034 §5, issue #4006)
+// ---------------------------------------------------------------------------
+
+/**
+ * The freshness budget a panel declares when it opts into the trust contract,
+ * used when a caller omits `freshnessMs`. Set to the ADR-0034 *activity* tier
+ * (~1 hour) so a caller that forgets the option does not silently render
+ * "always fresh" (an infinite budget would let stale data pass as current) yet
+ * a legitimately-recent activity-tier payload is not prematurely aged out.
+ * Attention/is-it-on-fire panels (e.g. the Operator Decision Queue) override
+ * down to minutes at the call site.
+ */
+export const DEFAULT_FRESHNESS_MS = 60 * 60 * 1000;
+
+/**
+ * The resolved status of a list panel under the ADR-0034 §5 trust contract.
+ *
+ * Extends the legacy `loading | empty | ready` ladder with two states that make
+ * an unverifiable value visually distinct from a confident one:
+ *
+ *   - `unknown` — the value cannot be asserted: the fetch failed with no
+ *     retained data, the payload carries no parseable `generatedAt`, or the
+ *     lookup did not run cleanly (`sourcesOk === false`). Renders an explicit
+ *     UNKNOWN placeholder, never a confident-looking number or empty list.
+ *   - `stale` — a payload is present but unreliable: either it is older than
+ *     the panel's declared freshness budget, or a refresh just failed while
+ *     prior data is still retained. The last known value may be shown as
+ *     context, never in the position a current value would occupy.
+ *
+ * Note `error` is deliberately NOT a status: ADR-0034 §5.1 maps a failed fetch
+ * to `unknown` (no prior data) or `stale` (prior data retained) rather than a
+ * confident red-error state. The raw error message stays available on the hook
+ * for diagnostic display inside the UNKNOWN/stale branches.
+ */
+export type ItemStatus = "loading" | "stale" | "unknown" | "empty" | "ready";
+
+/**
+ * Inputs to {@link deriveItemStatus}. Kept as one object so the React hook can
+ * assemble it from its `useApi` state without re-spelling the priority ladder.
+ */
+export interface DeriveItemStatusInput {
+  loading: boolean;
+  /** The error message from a failed fetch, or null. */
+  error: string | null;
+  /** The already-extracted (and filtered) item array for the panel. */
+  items: unknown[];
+  /** The payload's `generatedAt` timestamp (ISO string expected). */
+  generatedAt: unknown;
+  /**
+   * The endpoint's assertion that its lookup ran cleanly (`true` iff every
+   * sub-fetch settled fulfilled). `undefined` means the endpoint has not yet
+   * migrated to the asserted-emptiness contract — only the decision-queue seam
+   * asserts in this slice — and the legacy emptiness semantics are preserved so
+   * not-yet-migrated panels are not forced to UNKNOWN.
+   */
+  sourcesOk?: boolean;
+  /** The panel's declared freshness budget in ms. */
+  freshnessMs: number;
+  /** Injectable clock for deterministic tests; defaults to `Date.now()`. */
+  now?: number;
+}
+
+/**
+ * Derive the single trust-contract status for a list panel. Pure and
+ * clock-injective so the orchestrator `node:test` suite can pin the priority
+ * ladder — the dashboard ships no JSX test runner, so this load-bearing logic
+ * lives here in the pure seam rather than inline in the `usePageItems` hook.
+ *
+ * Priority (ADR-0034 §5.1–5.2), first match wins:
+ *
+ *   1. `loading`                          — fetch in flight.
+ *   2. `error` + prior data → `stale`     — refresh failed, last value retained.
+ *      `error` + no data   → `unknown`    — first load failed, nothing to show.
+ *   3. missing/unparseable `generatedAt` → `unknown` — no freshness anchor.
+ *   4. `sourcesOk === false` → `unknown`  — lookup did not run cleanly; the
+ *      merged list may be silently incomplete even if non-empty.
+ *   5. `generatedAt` older than `freshnessMs` → `stale` — payload aged out.
+ *   6. `items.length === 0` → `empty`     — an asserted (or legacy) zero.
+ *   7. otherwise → `ready`.
+ *
+ * The `sourcesOk === false` check (4) runs BEFORE the emptiness check (6): an
+ * unasserted empty array is `unknown`, never `empty` — the regression this
+ * contract exists to prevent (`/cycle/history` #3997 class).
+ */
+export function deriveItemStatus({
+  loading,
+  error,
+  items,
+  generatedAt,
+  sourcesOk,
+  freshnessMs,
+  now = Date.now(),
+}: DeriveItemStatusInput): ItemStatus {
+  if (loading) return "loading";
+
+  // A failed fetch. useApi RETAINS the last good payload on a failed refresh
+  // (it sets `error` but never clears `data`), so `items` may still hold it.
+  if (error) {
+    // First-load failure (no retained data) → nothing trustworthy to show.
+    // A later refresh failure with retained data → render it as STALE context
+    // (ADR-0034 §5.1: "The last known value may appear as context, never in the
+    // position a current value would occupy").
+    return items.length > 0 ? "stale" : "unknown";
+  }
+
+  // No error, but no payload timestamp to anchor freshness on → unverifiable.
+  if (generatedAt === undefined || generatedAt === null || generatedAt === "") {
+    return "unknown";
+  }
+  const generatedMs = Date.parse(String(generatedAt));
+  if (!Number.isFinite(generatedMs)) return "unknown";
+
+  // sourcesOk === false: at least one sub-fetch degraded, so the merged list
+  // may be silently incomplete — demote to unknown even if items is non-empty.
+  // sourcesOk === undefined: endpoint not yet migrated; preserve legacy
+  // emptiness semantics (fall through) instead of forcing unknown.
+  if (sourcesOk === false) return "unknown";
+
+  // Payload older than the caller-declared freshness budget → stale. Checked
+  // BEFORE emptiness: an empty-but-aged payload is itself unreliable (the
+  // emptiness may be a stale artifact), so the age verdict wins.
+  if (freshnessMs > 0 && now - generatedMs > freshnessMs) return "stale";
+
+  if (items.length === 0) return "empty";
+  return "ready";
+}

@@ -12,11 +12,25 @@ import { Section } from "./Section.jsx";
  * Polls /api/today/decision-queue every 30s per PRD #615. Thin renderer
  * over the page-item seam (issue #822): DecisionSourceBadge + the shared
  * coarse-age formatter (relativeAge).
+ *
+ * ADR-0034 §5 trust contract (issue #4006): this is the first panel through
+ * the seam, so it declares its own freshness budget (5 min — this is an
+ * attention/is-it-on-fire surface, the minutes tier) and forwards the
+ * resolved status into Section. The endpoint now asserts its lookup ran
+ * (`sourcesOk`), so an unasserted or failed lookup renders UNKNOWN rather
+ * than a confident-looking empty inbox.
  */
 export function OperatorDecisionQueue() {
-  const { items, status, error, loading } = usePageItems("/today/decision-queue", {
+  const { items, data, status, error, loading } = usePageItems("/today/decision-queue", {
     poll: 30_000,
+    freshnessMs: 5 * 60 * 1000,
   });
+
+  // The raw error message is only diagnostically relevant in the unknown/stale
+  // branches (deriveItemStatus folds a fetch failure into one of those, never
+  // into a confident state). Scoping it here avoids a stale error string
+  // flashing a red banner during a later foreground refresh.
+  const showErrorDetail = status === "unknown" || status === "stale";
 
   return (
     <Section
@@ -24,9 +38,12 @@ export function OperatorDecisionQueue() {
       subtitle="Items waiting on you — oldest first."
       count={items.length}
       loading={loading}
-      error={error}
+      error={showErrorDetail ? error : null}
+      unknown={status === "unknown"}
+      stale={status === "stale"}
       empty={status === "empty"}
       emptyMessage="Inbox zero. Nothing waiting on a human decision."
+      generatedAt={data?.generatedAt}
     >
       <ul className="divide-y divide-zinc-700/50">
         {items.map((item) => (
