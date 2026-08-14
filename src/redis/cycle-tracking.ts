@@ -30,34 +30,49 @@ export async function getCycleHash(cycleId: string): Promise<Record<string, stri
 /**
  * List every cycle id ever recorded, newest-first, via the recent-cycles index.
  *
- * Reads the `hydra:cycle:index` ZSET (written by `addCycleToIndex()` in the
- * autopilot cycle-close path, `src/autopilot/cycle-close.ts`, scored by the
- * completion epoch) with ZREVRANGE, so the ids come back ordered by recency.
- * Used by `getCycleHistory()` to enumerate completed cycles for the
- * /cycle/history endpoint.
+ * Reads the `hydra:cycle:index` ZSET with ZREVRANGE, so the ids come back
+ * ordered by recency. Used by `getCycleHistory()` to enumerate completed
+ * cycles for the /cycle/history endpoint.
  *
  * Why the index and not a keyspace scan (issue #3997): the previous
  * implementation matched `hydra:cycle:cycle-*`, but live cycle keys are
  * `hydra:cycle:<hex>` (e.g. `hydra:cycle:aeef970d909cccd8a`) — no `cycle-`
  * segment — so the pattern matched nothing and /cycle/history silently returned
  * `[]` while 118 real records sat in Redis. The index is the single source of
- * truth for which ids exist, because `addCycleToIndex` is the only recordCycle
- * writer; reading it can never accidentally enumerate a non-cycle sibling that
- * merely shares the `hydra:cycle:` prefix (`hydra:cycle:active`,
- * `hydra:cycle:index`, `hydra:cycle:active:<source>`), and ordering by ZSET
- * score is chronologically correct for the hex id shape, unlike a lexical
- * reverse-sort over id strings which assumed ISO-timestamp-shaped ids.
+ * truth for which ids exist; reading it can never accidentally enumerate a
+ * non-cycle sibling that merely shares the `hydra:cycle:` prefix
+ * (`hydra:cycle:active`, `hydra:cycle:index`, `hydra:cycle:active:<source>`),
+ * and ordering by ZSET score is chronologically correct for the hex id shape,
+ * unlike a lexical reverse-sort over id strings which assumed
+ * ISO-timestamp-shaped ids.
  *
- * A cycle hash written without ever going through `addCycleToIndex` is
- * intentionally not enumerated: the index is authoritative by construction of
- * the single recordCycle writer.
+ * The index is kept authoritative at the WRITE seam, not by convention (issue
+ * #3997 follow-up / PR #4058 QA): `initCycleHash()` and `updateCycleHash()` —
+ * the only two functions that ever create or touch a cycle hash — each ZADD
+ * the id into `hydra:cycle:index` themselves. There were previously TWO
+ * independent cycle-hash writers (`recordCycle()` in
+ * `src/autopilot/cycle-close.ts`, and `POST /cycle/register` /
+ * `POST /cycle/complete` in `src/api/cycles.ts`), but only `recordCycle` also
+ * called `addCycleToIndex()` explicitly — so cycles registered via
+ * `/cycle/register` were silently invisible to `/cycle/history`, the same bug
+ * the issue reports, just narrowed to one write path. Indexing inside
+ * `initCycleHash`/`updateCycleHash` instead of at each call site means ANY
+ * caller — including a future third writer — inherits correct indexing for
+ * free; a cycle hash written by some other means entirely (bypassing both
+ * functions) is the only way to end up unindexed.
  */
 export async function listCycleIds(): Promise<string[]> {
   const r = getRedisConnection();
   return r.zrevrange(redisKeys.cycleIndex(), 0, -1);
 }
 
-/** Init cycle hash fields and set TTL. */
+/**
+ * Init cycle hash fields, set TTL, and index the id (issue #3997 follow-up:
+ * this is one of the two write-seam functions that keep `hydra:cycle:index`
+ * authoritative — see `listCycleIds()`'s docstring). The index ZADD is
+ * idempotent per cycleId (a member re-add just updates its score), so a
+ * register-then-complete sequence never produces a duplicate index entry.
+ */
 export async function initCycleHash(
   cycleId: string,
   fields: Record<string, string>,
@@ -66,6 +81,7 @@ export async function initCycleHash(
   const r = getRedisConnection();
   await r.hset(redisKeys.cycle(cycleId), ...Object.entries(fields).flat());
   await r.expire(redisKeys.cycle(cycleId), ttlSeconds);
+  await r.zadd(redisKeys.cycleIndex(), Date.now(), cycleId);
 }
 
 /**
@@ -89,11 +105,23 @@ export async function initCycleHash(
  *
  * `redis` is injectable (default: the shared connection) so the TTL-preserving
  * branch is exercisable without standing up real Redis.
+ *
+ * Also indexes the id (issue #3997 follow-up: the other write-seam function
+ * that keeps `hydra:cycle:index` authoritative — see `listCycleIds()`'s
+ * docstring). This closes the complete-without-register gap too: if a caller
+ * completes a cycle whose `/cycle/register` never ran (the same scenario the
+ * TTL backstop above already guards), the id still lands in the index here.
+ * The ZADD is idempotent per cycleId, so re-indexing an already-indexed id
+ * (the common register-then-complete case) just refreshes its score to the
+ * latest touch — never a duplicate entry.
  */
 export async function updateCycleHash(
   cycleId: string,
   fields: Record<string, string>,
-  redis: Pick<ReturnType<typeof getRedisConnection>, "hset" | "ttl" | "expire"> = getRedisConnection(),
+  redis: Pick<
+    ReturnType<typeof getRedisConnection>,
+    "hset" | "ttl" | "expire" | "zadd"
+  > = getRedisConnection(),
 ): Promise<void> {
   const key = redisKeys.cycle(cycleId);
   await redis.hset(key, ...Object.entries(fields).flat());
@@ -104,6 +132,7 @@ export async function updateCycleHash(
   if (ttl === -1) {
     await redis.expire(key, CYCLE_HASH_TTL_SECONDS);
   }
+  await redis.zadd(redisKeys.cycleIndex(), Date.now(), cycleId);
 }
 
 /** Register a cycle source (codex/claude) with TTL. */
@@ -149,7 +178,20 @@ export async function releaseMergeLock(): Promise<void> {
 // Cycle index (ZSET scored by completed-at epoch)
 // ---------------------------------------------------------------------------
 
-/** Add a cycle to the recent-cycles ZSET index. */
+/**
+ * Add a cycle to the recent-cycles ZSET index, with an explicit score.
+ *
+ * `initCycleHash`/`updateCycleHash` now also index internally (issue #3997
+ * follow-up), so most callers no longer need this directly. `recordCycle()`
+ * (`src/autopilot/cycle-close.ts`) still calls it explicitly alongside
+ * `deps.cycle.initCycleHash` so the index score comes from its injectable
+ * `now()` clock rather than `Date.now()` — needed for its deterministic,
+ * no-Redis unit tests (`test/autopilot-runs-deps.test.mts`). In production
+ * this means the id gets ZADDed twice in quick succession (once via
+ * `initCycleHash`'s internal `Date.now()`, once via this explicit call); ZADD
+ * on an existing member just updates its score, so this is a harmless,
+ * intentional redundancy — not a bug to "clean up" by removing either call.
+ */
 export async function addCycleToIndex(cycleId: string, score: number): Promise<void> {
   const r = getRedisConnection();
   await r.zadd(redisKeys.cycleIndex(), score, cycleId);

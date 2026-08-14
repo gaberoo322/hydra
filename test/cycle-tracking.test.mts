@@ -21,6 +21,8 @@
 import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import express from "express";
+import type { AddressInfo } from "node:net";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
@@ -129,5 +131,106 @@ describe("cycle-tracking.getCycleHistory via the index (#3997)", () => {
     await addCycleToIndex(live, 1000);
     const history = await getCycleHistory();
     assert.deepEqual(history.map((c) => c.id), [live]);
+  });
+});
+
+/**
+ * QA on PR #4058 (issue #3997 follow-up) found a second, live cycle-hash
+ * writer that the first fix missed: `POST /cycle/register` /
+ * `POST /cycle/complete` (`src/api/cycles.ts`) never called
+ * `addCycleToIndex`, so a cycle registered through that path — Step 0 of
+ * every `hydra-target-build` dispatch, per `docs/operator-playbooks/
+ * hydra-target-build.md` — stayed permanently invisible to `/cycle/history`.
+ *
+ * The fix moves indexing into the WRITE SEAM (`initCycleHash`/
+ * `updateCycleHash` in `src/redis/cycle-tracking.ts`) rather than bolting an
+ * `addCycleToIndex` call onto these two handlers, so this suite exercises the
+ * real HTTP routes end-to-end (Express + real Redis — the repo's established
+ * pattern for route-level regressions, e.g. `test/api-alerts.test.mts`) to
+ * pin the actual observable behaviour, not the implementation detail of which
+ * function calls ZADD.
+ *
+ * These cases FAIL against the PR-#4058-at-QA-time code (register never
+ * indexed) and PASS against the fix.
+ */
+describe("cycles API — /cycle/register and /cycle/complete index the cycle (#3997 follow-up)", () => {
+  let server: any;
+  let baseUrl: string;
+
+  before(async () => {
+    redis = new Redis(REDIS_URL);
+    ({ listCycleIds } = await import("../src/redis/cycle-tracking.ts"));
+    ({ getCycleHistory } = await import("../src/cycle.ts"));
+    const { createCyclesRouter } = await import("../src/api/cycles.ts");
+    const app = express();
+    app.use(express.json());
+    app.use(createCyclesRouter());
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => {
+        const addr = server.address() as AddressInfo;
+        baseUrl = `http://127.0.0.1:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+  after(async () => {
+    server.close();
+    await cleanupCycleKeys(redis);
+    redis.disconnect();
+  });
+  beforeEach(async () => {
+    await cleanupCycleKeys(redis);
+  });
+
+  test("a cycle registered via POST /cycle/register appears in listCycleIds() and /cycle/history (the QA-found gap)", async () => {
+    const cycleId = "regcycle0001aaaa";
+    const res = await fetch(`${baseUrl}/cycle/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cycleId, source: "claude" }),
+    });
+    assert.equal(res.status, 200);
+
+    assert.deepEqual(await listCycleIds(), [cycleId]);
+
+    const history = await getCycleHistory();
+    assert.equal(history.length, 1);
+    assert.equal(history[0].id, cycleId);
+    assert.equal(history[0].status, "running");
+  });
+
+  test("register then complete on the same cycleId does not produce a duplicate index entry (idempotency)", async () => {
+    const cycleId = "regcycle0002bbbb";
+    await fetch(`${baseUrl}/cycle/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cycleId, source: "claude" }),
+    });
+    const res = await fetch(`${baseUrl}/cycle/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cycleId, source: "claude", status: "completed" }),
+    });
+    assert.equal(res.status, 200);
+
+    // Exactly one index entry, not two — ZADD upserts by member.
+    assert.deepEqual(await listCycleIds(), [cycleId]);
+
+    const history = await getCycleHistory();
+    assert.equal(history.length, 1);
+    assert.equal(history[0].status, "completed");
+  });
+
+  test("a complete-without-register cycle is still indexed (mirrors the issue #2926 TTL-backstop scenario)", async () => {
+    // registerCycleSource/initCycleHash never ran for this cycleId — /cycle/complete
+    // is the FIRST write, going straight through updateCycleHash.
+    const cycleId = "regcycle0003cccc";
+    const res = await fetch(`${baseUrl}/cycle/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cycleId, source: "claude", status: "completed" }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await listCycleIds(), [cycleId]);
   });
 });

@@ -22,12 +22,20 @@ import {
   CYCLE_HASH_TTL_SECONDS,
 } from "../src/redis/cycle-tracking.ts";
 
-/** Minimal fake Redis client recording hset/ttl/expire interactions. */
+/**
+ * Minimal fake Redis client recording hset/ttl/expire/zadd interactions.
+ *
+ * `zadd` was added alongside the issue #3997 follow-up: `updateCycleHash` now
+ * also indexes the cycle id into `hydra:cycle:index` (see
+ * `src/redis/cycle-tracking.ts`), so the injectable `redis` param's type grew
+ * a `zadd` member and every case below now exercises it too.
+ */
 function makeFakeRedis(ttlValue: number) {
   const calls = {
     hset: [] as any[][],
     ttl: [] as string[],
     expire: [] as Array<[string, number]>,
+    zadd: [] as Array<[string, number, string]>,
   };
   const client = {
     async hset(key: string, ...args: any[]) {
@@ -40,6 +48,10 @@ function makeFakeRedis(ttlValue: number) {
     },
     async expire(key: string, seconds: number) {
       calls.expire.push([key, seconds]);
+      return 1;
+    },
+    async zadd(key: string, score: number, member: string) {
+      calls.zadd.push([key, score, member]);
       return 1;
     },
   };
@@ -68,6 +80,13 @@ describe("updateCycleHash TTL backstop (issue #2926)", () => {
       CYCLE_HASH_TTL_SECONDS,
     ]);
     assert.equal(CYCLE_HASH_TTL_SECONDS, 604800);
+
+    // Issue #3997 follow-up: updateCycleHash also indexes the id, so a
+    // complete-without-register cycle (this fixture's exact scenario) still
+    // shows up in /cycle/history rather than staying permanently invisible.
+    assert.equal(calls.zadd.length, 1);
+    assert.equal(calls.zadd[0][0], "hydra:cycle:index");
+    assert.equal(calls.zadd[0][2], "orphan-cycle");
   });
 
   test("leaves a live TTL untouched (ttl >= 0) — routine updates never extend the window", async () => {
