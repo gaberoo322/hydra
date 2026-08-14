@@ -353,6 +353,25 @@ child.on("error", (err) => {
 });
 child.on("exit", (code, signal) => {
   if (signal) {
+    // Issue #4043: a signal-death here (observed as SIGKILL/137 mid-run and
+    // SIGTERM/143 immediately after a clean TAP footer) is CATEGORICALLY an
+    // infrastructural kill, never a genuine test failure — node:test's own
+    // failure path always exits via `code` (process.exit(1)), never via a
+    // signal. ci.yml's "Run tests and verify count" step runs under the
+    // Actions default `bash -e` PLUS an explicit `set -o pipefail`, so a
+    // non-zero/signal exit from this launcher aborts that step immediately,
+    // before its own `grep -qE '^# fail [1-9]'` classification line is ever
+    // reached — today a signal-death and a genuine failure are
+    // indistinguishable from the job's outside (both just "Failed"). Emitting
+    // this BEFORE re-raising means it still lands in the live job log and in
+    // `tee`'d test-output.txt (both writes happen while the process is still
+    // alive), giving a human or the autopilot PR sweep a greppable signal
+    // without requiring a ci.yml change (ci.yml is Verifier Core / T4).
+    console.error(
+      `[redis-db-launch] INFRA-KILL: test child received ${signal} — ` +
+        "this is an infrastructural kill, not a genuine test failure (a real " +
+        "test failure exits via a status code, never a signal). See issue #4043.",
+    );
     // Re-raise so the parent observes the same termination signal.
     process.kill(process.pid, signal);
     return;

@@ -372,4 +372,80 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
       "the helper must defer to the launcher-provided REDIS_URL",
     );
   });
+
+  /**
+   * Issue #4043 classifier contract: an unattributable SIGKILL/SIGTERM has
+   * twice reached the required `test` CI job (exit 137 mid-run, exit 143
+   * immediately after a clean TAP footer) with no distinguishing signal —
+   * from the merge queue's point of view a signal-death and a genuine
+   * assertion failure both just read "Failed". ci.yml's "Run tests and
+   * verify count" step runs under `bash -e` + `set -o pipefail`, so a
+   * non-zero/signal exit aborts the step immediately, before its own
+   * `grep -qE '^# fail [1-9]'` classification line ever runs — meaning the
+   * ONLY place left to emit a distinguishing signal without editing the
+   * Verifier-Core workflow file is the launcher's own child-exit handler,
+   * which already discriminates `signal` (infra kill) from `code` (a
+   * genuine node:test failure, which always exits via process.exit(), never
+   * a signal) for its own re-raise logic.
+   *
+   * These two cases pin that discrimination end-to-end via a real child
+   * process, matching the shape the issue's acceptance criteria asks for
+   * (signal-death classified as infrastructural; a code-based failure
+   * classified as genuine) without needing to fabricate a captured log.
+   */
+  test("classifies a signal-death as INFRA-KILL before re-raising (issue #4043)", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    const run = spawnSync(
+      process.execPath,
+      [
+        LAUNCHER,
+        process.execPath,
+        "-e",
+        "process.kill(process.pid, 'SIGTERM')",
+      ],
+      {
+        cwd: scratchRoot(),
+        env,
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    );
+    assert.equal(
+      run.signal,
+      "SIGTERM",
+      "the launcher must re-raise the same signal its child died from",
+    );
+    assert.match(
+      run.stderr,
+      /\[redis-db-launch\] INFRA-KILL: test child received SIGTERM/,
+      `launcher must emit a greppable infra-kill annotation before re-raising; stderr was: ${run.stderr}`,
+    );
+  });
+
+  test("does NOT annotate a genuine code-based test failure as INFRA-KILL (issue #4043)", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    const run = spawnSync(
+      process.execPath,
+      [LAUNCHER, process.execPath, "-e", "process.exit(1)"],
+      {
+        cwd: scratchRoot(),
+        env,
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    );
+    assert.equal(
+      run.signal,
+      null,
+      "a genuine (code-based) failure must propagate via exit code, not a signal",
+    );
+    assert.equal(run.status, 1, "the launcher must relay the child's exit code unchanged");
+    assert.doesNotMatch(
+      run.stderr,
+      /INFRA-KILL/,
+      `a code-based exit must never be misclassified as an infra kill; stderr was: ${run.stderr}`,
+    );
+  });
 });
