@@ -1,0 +1,1 @@
+- feat: architecture-scan parks Worth-exploring and Untouchable-Core candidates as hitl-grill issues instead of discarding them (#4027)
