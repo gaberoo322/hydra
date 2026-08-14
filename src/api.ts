@@ -59,14 +59,38 @@ const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 // so the typed mount points below need no cast. The routers that never touch
 // the bus (research, cycles, alerts, tier, digest, operational, …) take no
 // parameter.
+// Parses HYDRA_CORS_ALLOWED_ORIGINS (comma-separated, exact-match origins)
+// into a list. Empty/unset -> empty allowlist (issue #4047). Exported for
+// direct unit coverage of the parsing rule (whitespace, blank entries).
+function parseAllowedOrigins(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
 function createApi(eventBus: EventBus) {
   const app = express();
   app.use(express.json());
 
-  // CORS — allow dashboard from any origin (Vercel, local dev, etc.)
+  // CORS — exact-match allowlist (issue #4047, split from #4000). The
+  // production dashboard is served same-origin (dashboard/dist under this
+  // same Express app) and local dev proxies through Vite, so neither
+  // legitimate caller ever consults CORS — the default allowlist is
+  // therefore empty. Reflecting any Origin back (the prior behavior) is
+  // equivalent to `*` while also defeating the `*`-plus-credentials browser
+  // guard, and this API is public + unauthenticated (ADR-0005 tracks the
+  // Cloudflare Access fix separately in #4000; that fixes the tunnel, not
+  // localhost). Only an EXACT match against HYDRA_CORS_ALLOWED_ORIGINS
+  // (comma-separated) gets the header echoed back; anything else — including
+  // a subdomain/suffix near-miss — gets no Access-Control-Allow-Origin at
+  // all (never `null`, never `*`).
+  const allowedOrigins = parseAllowedOrigins(process.env.HYDRA_CORS_ALLOWED_ORIGINS);
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+    if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+    }
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
     if (req.method === "OPTIONS") return res.sendStatus(204);
@@ -215,4 +239,4 @@ function createApi(eventBus: EventBus) {
   return app;
 }
 
-export { createApi };
+export { createApi, parseAllowedOrigins };

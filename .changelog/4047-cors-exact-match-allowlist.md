@@ -1,0 +1,1 @@
+- fix: replace the reflect-any-origin CORS handler with an exact-match allowlist (#4047)

@@ -123,22 +123,26 @@ describe("createApi — HTTP mount layer (issue #3097)", () => {
 
   // --- Middleware: CORS ---------------------------------------------------
 
-  test("CORS middleware echoes the request Origin on API responses", async () => {
+  test("CORS middleware omits Access-Control-Allow-Origin for a non-allowlisted origin (default-empty allowlist, issue #4047)", async () => {
+    // This process never sets HYDRA_CORS_ALLOWED_ORIGINS, so the allowlist is
+    // empty by default — no Origin should ever be echoed back. Exact-match
+    // allowlist coverage (allowed origin, near-miss rejection) lives in the
+    // dedicated test/api-cors-allowlist.test.mts, which controls the env var.
     const res = await fetch(`${baseUrl}/api/tier?files=README.md`, {
       headers: { origin: "https://dashboard.example.dev" },
     });
     assert.equal(
       res.headers.get("access-control-allow-origin"),
-      "https://dashboard.example.dev",
-      "Access-Control-Allow-Origin should echo the incoming Origin",
+      null,
+      "Access-Control-Allow-Origin must be omitted for an origin not on the allowlist",
     );
     assert.ok(
       (res.headers.get("access-control-allow-methods") || "").includes("POST"),
-      "Access-Control-Allow-Methods should be advertised",
+      "Access-Control-Allow-Methods should still be advertised",
     );
   });
 
-  test("OPTIONS preflight short-circuits to 204 with CORS headers (before routing)", async () => {
+  test("OPTIONS preflight short-circuits to 204 without CORS origin header for a non-allowlisted origin (before routing)", async () => {
     // The CORS middleware answers OPTIONS with 204 and never reaches a route
     // handler. Ordering matters: this middleware is attached before app.use("/api").
     const res = await fetch(`${baseUrl}/api/anything`, {
@@ -148,8 +152,8 @@ describe("createApi — HTTP mount layer (issue #3097)", () => {
     assert.equal(res.status, 204, "OPTIONS preflight should return 204 No Content");
     assert.equal(
       res.headers.get("access-control-allow-origin"),
-      "https://dashboard.example.dev",
-      "preflight response should carry the CORS origin header",
+      null,
+      "preflight response must not carry a CORS origin header for a non-allowlisted origin",
     );
     // A 204 must not carry a body.
     assert.equal(await res.text(), "", "204 preflight should have an empty body");
