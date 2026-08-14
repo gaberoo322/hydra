@@ -1,6 +1,6 @@
 ---
 name: hydra-architecture-scan
-description: Non-interactive architecture-scan wrapper. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — never entering the interactive operator grilling loop.
+description: Non-interactive architecture-scan wrapper. Composes the upstream improve-codebase-architecture Explore phase against the Orchestrator and emits the surfaced deepening candidates as GitHub issues via hydra-prd / to-tickets — Strong ones as needs-triage agent work, Worth-exploring and Untouchable-Core-primary ones parked as hitl-grill for the operator (#4027) — never entering the interactive operator grilling loop.
 when_to_use: "When the Orchestrator runs out of eligible work and wants to surface architecture-deepening candidates as tracked issues, or the operator says 'architecture scan' or 'find architecture work'."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Task(*)
 arguments: [apply]
@@ -42,7 +42,7 @@ Both idle-backfill scan skills route every emitted candidate through one **confi
 
 **Deep-module reorganisation is the canonical judgment call → `needs-triage` by default.** It is the deepest, softest category: it carries policy and invariants, and its correctness is a judgment call, not a green-test check. The depth of a candidate inversely correlates with its mechanical verifiability — deeper means softer means judgment means `needs-triage`. A deep-module reorg is **never** auto-routed to `ready-for-agent`, even if a heuristic deems it "clean".
 
-This skill is the **judgment** half of that gate: every deepening candidate it surfaces is a softer judgment call, so it routes to **`needs-triage`** (steps 4 + 4b below). The single mechanical exception is a **genuinely-unreferenced dead-code re-route** (#961): a deletion-test failure with no live callers at all is not a deepening — it is provably-dead code, so it crosses into the mechanical lane (`cleanup-scan` + `ready-for-agent`, the `hydra-cleanup` convention). The mechanical half of the gate lives in `hydra-cleanup`. The two playbooks state the same gate symmetrically.
+This skill is the **judgment** half of that gate: every deepening candidate it surfaces is a softer judgment call, so it routes to **`needs-triage`** (steps 4 + 4b below) — with one exception, the **park tier** (step 4c, #4027): a `Worth exploring` candidate or one whose primary change touches the **Untouchable Core** parks as `hitl-grill` for the operator instead of becoming agent-steering work. The single mechanical exception is a **genuinely-unreferenced dead-code re-route** (#961): a deletion-test failure with no live callers at all is not a deepening — it is provably-dead code, so it crosses into the mechanical lane (`cleanup-scan` + `ready-for-agent`, the `hydra-cleanup` convention). The mechanical half of the gate lives in `hydra-cleanup`. The two playbooks state the same gate symmetrically.
 
 ## What this skill is NOT
 
@@ -94,14 +94,15 @@ The base wrote a Tailwind/Mermaid HTML report and `xdg-open`ed it for a human; *
 - **Solution** — plain-English description of what would change. **Do NOT propose interfaces or write code**: the base defers interface design to its grilling loop, which this wrapper never runs.
 - **Benefits** — explained in terms of **locality** and **leverage**, and in how tests would improve (the interface is the test surface).
 - **ADR conflicts** — per the base, surface a candidate that contradicts an ADR only when the friction warrants reopening it, and mark it explicitly in the body.
+- **Recommendation strength** — one of `Strong`, `Worth exploring`, `Speculative` (#4027). The base's badge rendering does not survive the excised report step, but the classification does: **every candidate carries exactly one of the three values**, and step 4 routes on it (`Strong` → `needs-triage` emission; `Worth exploring` → park as `hitl-grill`; `Speculative` → dropped). No new model judgment is invented here — the base already computes this field; the overlay had been discarding it.
 
 Name the deepened module after a real domain concept from `CONTEXT.md`, not a coined `FooHandler`. Every surviving candidate becomes issue input in step 4.
 
 ### 3. Filter (keep the issue count honest)
 
-Drop a candidate before it becomes an issue when ANY of:
+Drop or re-route a candidate before it becomes an issue when ANY of:
 
-- It touches the **Untouchable Core** (`src/untouchable.ts` protected paths: merge gate, rollback, watchdog, cost guardrails) as its *primary* change. Those are operator-only (ADR-0001/0004) and an architecture-scan issue should not steer an agent at them. Note the friction in the report, but do not file it as a deepening issue.
+- It touches the **Untouchable Core** (`src/untouchable.ts` protected paths: merge gate, rollback, watchdog, cost guardrails) as its *primary* change — **re-route to the park tier, do NOT drop** (#4027). Those are operator-only (ADR-0001/0004) and an architecture-scan issue must not steer an agent at them — but that is precisely an idea only the operator can action, so the candidate parks as `hitl-grill` (step 4c) instead of vanishing into a friction note nothing reads. The reasoning for not filing it as agent work is unchanged; only the disposal changed. A candidate that was **already dropped as `Speculative`** never reaches this re-route: the strength routing in step 4 evaluates the Speculative drop BEFORE the Untouchable-Core park rule, so a park never rescues an idea the model itself rated not-worth-pursuing.
 - It duplicates an already-tracked issue in the **shared backfill dedup baseline** (open issues across EVERY backfill label set + issues closed within the last 7 days — NOT just open `architecture-scan` issues). Re-filing the same deepening candidate every idle tick is the exact failure `hydra-tool-scout`'s seen-list guards against; here the lightweight equivalent is the deterministic title/scope-overlap helper below. **This is the load-bearing collision guard for issue #2554:** `hydra-discover` and `hydra-architecture-scan` BOTH fire on the unified `orch_backfill_idle` signal (both in `BACKFILL_SIGNAL_CLASSES`, decide.py:329). The one-per-turn stagger stops same-turn co-fire, but their independent 1h cooldowns + the `BACKFILL_STARVATION_FLOOR` let both dispatch within the same idle HOUR — so an architecture-scan candidate MUST dedup against discover's just-filed `needs-triage` issues (and cleanup's `cleanup-scan` issues), not only against other `architecture-scan` issues, or the same underlying gap gets double-filed.
 
   ```bash
@@ -137,9 +138,17 @@ Drop a candidate before it becomes an issue when ANY of:
 >
 > When unsure whether a finding is a pass-through or genuinely unreferenced, treat it as a pass-through and drop it: architecture-scan stays conservative, and a missed dead-code finding is recovered by the deterministic `hydra-cleanup` (`knip`) pass on the next idle tick.
 
-### 4. Emit issues (via hydra-prd or to-tickets — labelled `needs-triage`)
+### 4. Emit issues (via hydra-prd / to-tickets, or the `hitl-grill` park tier)
 
-Turn the surviving candidates into GitHub issues. The **fog-gate branch (4.0) runs FIRST** — a pure additive prefix UPSTREAM of the `≥3 → hydra-prd` / `1–2 → to-tickets` routing: a *foggy + big* candidate is charted as a **wayfinder destination-pending map**, not filed as an epic. Only when the fog-gate does **not** fire does the candidate flow UNCHANGED into the two emission paths below.
+Turn the surviving candidates into GitHub issues. The **fog-gate branch (4.0) runs FIRST** — a pure additive prefix UPSTREAM of the `≥3 → hydra-prd` / `1–2 → to-tickets` routing: a *foggy + big* candidate is charted as a **wayfinder destination-pending map**, not filed as an epic. Only when the fog-gate does **not** fire does the candidate flow into the strength routing below and then the two emission paths.
+
+**Recommendation-strength routing (#4027) — after the fog-gate, before any emission path.** Every non-fog candidate routes on the `Recommendation strength` assigned in step 2:
+
+- **`Strong`** → the 4.1 emission paths below, **UNCHANGED** (`enhancement` + `needs-triage` + `architecture-scan`, never `ready-for-agent`) — unless its primary change touches the Untouchable Core, in which case the step-3 re-route parks it via 4c.
+- **`Worth exploring`** → park as `hitl-grill` via 4c — real enough to keep, too soft to spend an agent dispatch on without the operator's judgment.
+- **`Speculative`** → dropped (note it in the report). The Speculative drop is evaluated BEFORE the Untouchable-Core park rule, so a `Speculative` candidate is dropped even when its primary change also touches the Untouchable Core.
+
+The fog-gate wins over ALL of this **regardless of the candidate's Recommendation strength** — a foggy + big candidate is charted as a map, never an issue, a park, or a drop, even a `Speculative` one.
 
 #### 4.0 Fog-gate branch — chart a destination-pending map (ADR-0029)
 
@@ -192,9 +201,9 @@ Then append the map's title to `BASELINE_TITLES` so later candidates in THIS run
 - **Off-radar rule (ADR-0029 Decision 3):** the map carries NONE of this skill's usual `enhancement` / `needs-triage` / `architecture-scan` labels — `wayfinder:*` tickets stay invisible to `hydra-sweep` and the orphan-backstop. This is the ONE architecture-scan emission that is NOT labelled `needs-triage` + `architecture-scan`; dispatchability comes from the dedicated map-frontier signal, not from a lifecycle label. The operator drains destination-pending maps via the `hydra-review` bucket.
 - The board-saturation back-stop still applies before charting: if the board is already saturated with `architecture-scan` issues, emit nothing (a map is still emission).
 
-#### 4.1 Emission paths (non-fog candidates)
+#### 4.1 Emission paths (Strong, non-fog candidates)
 
-For every candidate the fog-gate did NOT chart, pick by candidate count:
+For every candidate the fog-gate did NOT chart **and** the strength routing did not park or drop — i.e. `Strong` candidates whose primary change does NOT touch the Untouchable Core — pick by candidate count. `Worth exploring` candidates never reach here (they park via 4c); an Untouchable-Core-primary candidate never reaches here either (the step-3 re-route parks it via 4c); a `Speculative` candidate was already dropped:
 
 - **≥ 3 related candidates → `hydra-prd`.** Build a `PrdInput` JSON (see `docs/operator-playbooks/hydra-prd.md`) where each candidate is one slice: `whatToBuild` = the **Solution**, `acceptanceCriteria` from the **Benefits** (e.g. "the X module is testable through its interface", "npm test passes"), `filesInScope` = the candidate's **Files**, and `filesOutOfScope` listing the Untouchable Core. Invoke `hydra-prd --apply --input=/tmp/arch-scan-prd.json`. It produces one parent epic + N children, each stamped `Expected tier: N` from `/api/tier`, and parseable by `hydra-epic-close`. **Override the child label**: `hydra-prd` defaults children to `ready-for-agent` — for architecture-scan output the children MUST be `needs-triage` instead (see the labelling rule below). If `hydra-prd` cannot override the child label in your invocation, fall back to the `to-tickets` path so nothing is auto-routed to `ready-for-agent`, then re-label any children with `gh issue edit --add-label needs-triage --remove-label ready-for-agent`.
 - **1–2 standalone candidates → `to-tickets`** (or a direct `gh issue create`). Each candidate becomes one issue using the body schema below.
@@ -261,6 +270,71 @@ gh issue create --repo gaberoo322/hydra \
 
 This is the recovery the gamma slice (#961) adds: dead code the architecture pass previously discarded with its pass-throughs is now routed to deletion instead of thrown away, joining the high-confidence mechanical lane rather than the judgment-call deepening lane.
 
+### 4c. Park tier — Worth exploring + Untouchable-Core-primary candidates (`hitl-grill`, #4027)
+
+Not every surviving candidate should become agent-steering work. Two feeders route here — both already exist inside the skill and were previously **discarded**; neither requires new model judgment:
+
+1. **`Worth exploring` candidates** (the strength routing above) — real enough to keep, too soft to file as `needs-triage` agent work without the operator's judgment. The vendored base already computes this rating; the overlay had been throwing it away with the excised HTML report.
+2. **Untouchable-Core-primary candidates** (the step-3 re-route) — `Strong` or `Worth exploring` ideas whose *primary* change touches `src/untouchable.ts` protected paths. An architecture-scan issue must never steer an agent at the Verifier Core (ADR-0001/0004), but the idea is exactly the kind only the operator can action — so it parks instead of vanishing into a friction note. A candidate already dropped as `Speculative`, a duplicate, or a pass-through never reaches this rule (those drops are terminal and evaluated first).
+
+This is the pilot feeder for the `hitl-grill` inbox (issue #4025): **one** producer, to prove the inbox gets consumed before six other skill contracts are amended.
+
+**Cap — inbox saturation.** Before ANY park action, count open `hitl-grill` issues:
+
+```bash
+gh issue list --repo gaberoo322/hydra --state open --label hitl-grill --json number --jq 'length'
+```
+
+At **10 or more open `hitl-grill` issues, park NOTHING for the rest of the run** and state the cap as the reason in the step-5 report — a full inbox is the signal the operator is not draining it, and the scan must not push past it. This cap gates **only the park action**: `Strong` candidates continue through 4.1 to `needs-triage` unaffected. It is independent of the board-saturation back-stop (which gates the whole run against `architecture-scan` saturation) — but note a parked issue carries the `architecture-scan` label and therefore COUNTS toward that back-stop: if the board is saturated, park nothing either (a park is still emission, same as a map).
+
+**Dedup — the same shared baseline.** Check each parked candidate's title against the SAME shared backfill dedup baseline `BASELINE_TITLES` built in step 3 (which the filter and the fog-gate already use):
+
+```bash
+# $CANDIDATE = the parked candidate's issue title.
+node --experimental-strip-types scripts/ci/issue-dedup.ts \
+  "$CANDIDATE" "${BASELINE_TITLES[@]}"
+# → {"duplicate":true,...}  → an overlapping issue already exists; DO NOT park (note the friction in the report)
+# → {"duplicate":false,...} → park it
+```
+
+On success, **append the parked title to `BASELINE_TITLES`** so later candidates in THIS run dedup against it too — the same in-run append steps 3 and 4.0 use.
+
+**Labels (HARD):** a parked issue carries **exactly two labels — `hitl-grill` (the lane) and `architecture-scan` (the provenance)**. NEVER `needs-triage`, `enhancement`, or `ready-for-agent`: `hitl-grill` is a terminal park state no agent actions (`docs/agents/triage-labels.md`), and carrying a lifecycle label alongside it would put one issue in two live triage lanes at once.
+
+**Park body schema** — one issue per parked candidate via a direct `gh issue create` (the `to-tickets`-style single path, NEVER the `hydra-prd` epic path — a parked idea must not spawn children an agent could pick up):
+
+```markdown
+# hitl-grill: <candidate title>
+
+> Parked by `/hydra-architecture-scan` on <ISO date> against the Orchestrator (~/hydra).
+> Reason: <Worth exploring | primary change touches the Untouchable Core (src/untouchable.ts protected paths)>.
+> `hitl-grill` is a terminal park state: no agent actions this — the operator grills it into real work or dismisses it.
+
+## Problem
+
+<why the current architecture is causing friction — CONTEXT.md + codebase-design vocabulary>
+
+## Idea (plain English — no interface design)
+
+<what would change. As everywhere in this skill, deliberately NOT an interface proposal.>
+
+## Why parked
+
+<Worth exploring: what makes it too soft to file as agent work / Untouchable Core:
+which protected paths the primary change touches and why only the operator can action it>
+
+## Files in scope
+
+<concrete paths under ~/hydra this idea touches — promotion to ready-for-agent later requires this section>
+```
+
+```bash
+gh issue create --repo gaberoo322/hydra \
+  --title "hitl-grill: <candidate title>" \
+  --label hitl-grill --label architecture-scan \
+  --body-file /tmp/arch-scan-parked-N.md
+```
+
 ### 5. Report (deterministic summary)
 
 Print a single-pass summary — this is the operator's accept/reject surface:
@@ -270,23 +344,31 @@ hydra-architecture-scan — Orchestrator (~/hydra) — 2026-05-31T19:32:00Z — 
 
 Explored:  src/, dashboard/src/, scripts/
 Candidates surfaced:  6
-After filter (untouchable/dup/pass-through):  3
-Emitted (deepening):    1 epic (#NNN) + 3 children (#NNN, #NNN, #NNN)  [needs-triage, architecture-scan]
+After filter (dup/pass-through dropped; Untouchable-Core re-routed to the park tier):  4
+Emitted (deepening):    1 epic (#NNN) + 2 children (#NNN, #NNN)  [needs-triage, architecture-scan]
+Parked (hitl-grill):    2  (#NNN, #NNN)  [hitl-grill, architecture-scan]  (1 Worth exploring; 1 Untouchable-Core)
 Re-routed (dead code):  1 deletion candidate (#NNN)  [ready-for-agent, cleanup-scan]
-Dropped:  2  (1 touches Untouchable Core; 1 failed deletion test as a pass-through)
+Dropped:  2  (1 Speculative; 1 failed deletion test as a pass-through)
 Board saturation:  ok (4 open architecture-scan issues, under the 10 cap)
+hitl-grill inbox:   ok (2 open, under the 10 cap)
 ```
+
+When the hitl-grill cap binds, the last line reads `hitl-grill inbox: SATURATED (10 open) — parked nothing this run (the cap gates parking only; Strong candidates still emitted above)`.
 
 In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the emitted line shows the rendered bodies instead of issue numbers. This is one pass: the skill does not poll, retry, or watch.
 
 ## Rules
 
 - **Zero `AskUserQuestion`** (#776) and **never edit the upstream skill or its vendored capture** — both stated in full above.
-- **Deepening candidates land in `needs-triage`, never `ready-for-agent`.** The operator/triage is the accept point. No self-dispatch of self-invented refactors. The single exception is a **dead-code deletion candidate** (a deletion-test failure that is *genuinely unreferenced*, not a pass-through): it re-routes to the `hydra-cleanup` convention (`cleanup-scan` + `ready-for-agent`) per step 4b, because its acceptance check is deterministic — that is mechanically-verifiable cleanup, not a judgment-call deepening.
+- **Deepening candidates land in `needs-triage`, never `ready-for-agent`.** The operator/triage is the accept point. No self-dispatch of self-invented refactors. Two exceptions, both deterministic in *disposal*: a **dead-code deletion candidate** (a deletion-test failure that is *genuinely unreferenced*, not a pass-through) re-routes to the `hydra-cleanup` convention (`cleanup-scan` + `ready-for-agent`) per step 4b, because its acceptance check is deterministic; and the **park tier** (step 4c, #4027) — `Worth exploring` and Untouchable-Core-primary candidates park as `hitl-grill`, which no agent ever actions.
 - **Deletion-test failure is a fork, not a discard.** A *pass-through* (live callers, complexity would move not concentrate) is dropped; a *genuinely-unreferenced* finding (no live callers at all, test-only consumers excluded) is re-routed to a deletion candidate, never thrown away (#961). When unsure, drop.
+- **Speculative is still dropped — even Untouchable-Core-primary.** The strength routing (step 4) evaluates the Speculative drop BEFORE the park rule fires; a park never rescues an idea the model itself rated not-worth-pursuing.
+- **Parked issues carry exactly `hitl-grill` + `architecture-scan`** — lane plus provenance, never a lifecycle label. They dedup against the shared `BASELINE_TITLES` baseline and their titles join it within the run, exactly like emitted ones.
+- **The hitl-grill cap gates parking only.** At ≥10 open `hitl-grill` issues the run parks nothing and says so in the report; `Strong` → `needs-triage` emission is unaffected. Independent of the board-saturation back-stop.
+- **The fog-gate still wins over the park tier.** A foggy + big candidate is charted as a wayfinder map regardless of its Recommendation strength — never parked.
 - **Orchestrator-scoped.** Always `~/hydra`. Not parameterised to the Target.
 - **Explore phase only.** Never propose concrete interfaces or write code; Solution descriptions stay plain-English.
-- **Don't steer at the Untouchable Core.** A candidate whose primary change is a protected path (ADR-0001/0004) is reported as friction but not filed as an actionable issue.
+- **Don't steer at the Untouchable Core.** A candidate whose primary change is a protected path (ADR-0001/0004) is parked as `hitl-grill` (step 4c) — never filed as agent-steering work, and never silently dropped (#4027).
 - **Board-saturation back-stop.** Emit nothing when the board is already saturated with `architecture-scan` issues — belt-and-braces ahead of the autopilot's `arch_board_saturated` signal (#789).
 - **Dry-run default.** Only `--apply` creates issues. A dry-run on `gaberoo322/hydra` is always safe.
 - **One pass.** Explore → present → filter → emit → report, then exit.
@@ -302,10 +384,12 @@ Phase A acceptance flow — the operator runs this before #790 wires the autopil
 
 Expected:
 
-- 3–6 deepening candidates in `CONTEXT.md` + `codebase-design` vocabulary; the step-3 filter drops Untouchable-Core, duplicate, and pass-through ones.
+- 3–6 deepening candidates in `CONTEXT.md` + `codebase-design` vocabulary, each carrying a `Recommendation strength`; the step-3 filter drops duplicate and pass-through ones and re-routes Untouchable-Core-primary ones to the park tier.
 - A **genuinely-unreferenced** deletion-test failure is re-routed as a dead-code candidate (`cleanup-scan` + `ready-for-agent`), not dropped (#961).
-- `--apply` files deepening issues labelled `enhancement`, `needs-triage`, `architecture-scan` — **never** `ready-for-agent`.
-- Re-running `--apply` against a saturated board emits nothing and prints the skip.
+- `--apply` files `Strong` deepening issues labelled `enhancement`, `needs-triage`, `architecture-scan` — **never** `ready-for-agent`.
+- `--apply` parks `Worth exploring` and Untouchable-Core-primary candidates as `hitl-grill` + `architecture-scan` (exactly those two labels, one issue each, deduped against the shared baseline); `Speculative` ones are dropped.
+- With ≥10 open `hitl-grill` issues, `--apply` parks nothing and the report states the cap as the reason (Strong emission continues).
+- Re-running `--apply` against a saturated board emits nothing (parks included) and prints the skip.
 - Both the installed skill and the vendored capture are unchanged (`git status` is clean under each).
 
 ## Files
