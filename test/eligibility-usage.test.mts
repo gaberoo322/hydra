@@ -187,8 +187,10 @@ describe("getEligibilityUsage Pacing Curve anchor rollover (issue #3751)", () =>
   let saved: Map<string, string | undefined>;
 
   // A successful meter read with caller-chosen utilizations. `resetsAt: null`
-  // matches the snapshot path — the env anchor, not the meter boundary, drives
-  // the Pacing Curve window (INV-1/#1083's deliberate deferral).
+  // pins this whole suite to the ENV-SEED fallback path: the anchor is now
+  // derived from the meter's `resets_at` when it supplies one, so a null here is
+  // what keeps these #3751 rollover assertions exercising the env seed. The
+  // meter-derived path has its own suite below.
   function okRead(opts: { fiveHour?: number; sevenDay?: number }): OAuthUsageResult {
     return {
       ok: true,
@@ -295,5 +297,192 @@ describe("getEligibilityUsage Pacing Curve anchor rollover (issue #3751)", () =>
     assert.equal(r.input.percentLast7d, 42);
     assert.equal(r.input.percentSinceReset, 42);
     assert.equal(r.input.percentSinceReset, r.input.percentLast7d);
+  });
+});
+
+/**
+ * Regression suite: the Weekly Reset Anchor must FOLLOW THE LOGGED-IN ACCOUNT.
+ *
+ * `HYDRA_USAGE_WEEKLY_RESET_ANCHOR` is a single hand-maintained global constant,
+ * but the weekly reset boundary is PER ACCOUNT and not even the same weekday
+ * across accounts. `readAccessToken()` (oauth-usage.ts) deliberately re-reads
+ * the credentials file on every call so the METER auto-follows a `/login` to a
+ * different account — but the ANCHOR did not follow, so after a switch the
+ * Pacing Curve was silently phased to the previous account's week.
+ *
+ * MEASURED INCIDENT (2026-08-14, personal -> work switch), reproduced verbatim
+ * by the `MEASURED` case below: env anchor on a Wed 17:00Z boundary while the
+ * account's real boundary was Sat 09:59:59Z. Elapsed read 29% instead of 90%,
+ * so targetPercent was 26.8% against 38% actual burn -> paceState "ahead" ->
+ * the Pace Gate skipped EVERY tick. The fake target would not have crossed
+ * actual until AFTER the real reset, so the entire remaining ~60% of the week
+ * would have expired unused, with no alarm. The mis-phase is silent in both
+ * directions — the opposite phase error inflates the target and paces too hot.
+ *
+ * The fix reads the boundary the meter already returns (`seven_day.resets_at`,
+ * parsed into `sevenDay.resetsAt` and previously discarded). New top-level
+ * describe with its own beforeEach/afterEach per CLAUDE.md authoring rules.
+ */
+describe("getEligibilityUsage anchor follows the account via meter resets_at", () => {
+  const DAY = 86_400_000;
+  const RESET_ANCHOR_KEY = "HYDRA_USAGE_WEEKLY_RESET_ANCHOR";
+  const CEILING_KEY = "HYDRA_USAGE_WEEKLY_PACE_CEILING";
+  // A Wednesday 17:00Z boundary — the WRONG account's phase for every case here.
+  const WRONG_ENV_ANCHOR = "2026-06-03T17:00:00.000Z";
+  let saved: Map<string, string | undefined>;
+
+  function readWithReset(resetsAt: string | null, sevenDay: number): OAuthUsageResult {
+    return {
+      ok: true,
+      data: {
+        fiveHour: { utilization: 0, resetsAt: null },
+        sevenDay: { utilization: sevenDay, resetsAt },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    saved = new Map();
+    for (const k of ENV_KEYS) saved.set(k, process.env[k]);
+    saved.set(RESET_ANCHOR_KEY, process.env[RESET_ANCHOR_KEY]);
+    saved.set(CEILING_KEY, process.env[CEILING_KEY]);
+    process.env.HYDRA_OAUTH_USAGE_TTL_MS = String(TTL_MS);
+    process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = String(MAX_STALE_MS);
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = String(BACKOFF_BASE_MS);
+    process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = String(BACKOFF_MAX_MS);
+    process.env[RESET_ANCHOR_KEY] = WRONG_ENV_ANCHOR;
+    process.env[CEILING_KEY] = "0.92";
+    clearOAuthCache();
+  });
+
+  afterEach(() => {
+    clearOAuthCache();
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  test("the meter's resets_at OVERRIDES the env seed and yields the window START", async () => {
+    // resets_at is the window END (one window ahead of now); the anchor is the
+    // window START, i.e. exactly 7d earlier.
+    const nowMs = Date.parse("2026-08-14T18:00:00.000Z");
+    const resetsAt = "2026-08-15T09:59:59.000Z";
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(readWithReset(resetsAt, 39)),
+      now: () => nowMs,
+    });
+    assert.equal(r.input.weeklyResetAnchor, "2026-08-08T09:59:59.000Z");
+    const envRolled = new Date(
+      projectResetWindow(Date.parse(WRONG_ENV_ANCHOR), nowMs).currentMs,
+    ).toISOString();
+    assert.notEqual(
+      r.input.weeklyResetAnchor,
+      envRolled,
+      "the stale per-account env seed must NOT win over the meter's own boundary",
+    );
+  });
+
+  test("MEASURED (2026-08-14): the wrong-account anchor reads 'ahead'; the meter's reads 'behind'", async () => {
+    const nowMs = Date.parse("2026-08-14T18:00:00.000Z");
+    const BURN = 39;
+
+    // (a) Meter supplies no boundary -> env fallback -> the incident's phase.
+    const stale = await getEligibilityUsage({
+      readUsage: fixedReader(readWithReset(null, BURN)),
+      now: () => nowMs,
+    });
+    const staleVerdict = projectEligibility(stale.input);
+    assert.equal(
+      staleVerdict.paceState,
+      "ahead",
+      "the wrong-account env phase understates elapsed time, so real burn looks hot",
+    );
+
+    // (b) Same instant, same burn, meter supplies the real boundary.
+    clearOAuthCache();
+    const followed = await getEligibilityUsage({
+      readUsage: fixedReader(readWithReset("2026-08-15T09:59:59.000Z", BURN)),
+      now: () => nowMs,
+    });
+    const followedVerdict = projectEligibility(followed.input);
+    assert.equal(
+      followedVerdict.paceState,
+      "behind",
+      "6.3 days into a 7-day window at 39% burn is BEHIND the curve — the Pace Gate must launch",
+    );
+    assert.ok(
+      followedVerdict.targetPercent > staleVerdict.targetPercent,
+      `the true phase is later in the week, so its target must be higher ` +
+        `(stale=${staleVerdict.targetPercent}, followed=${followedVerdict.targetPercent})`,
+    );
+    assert.equal(followedVerdict.allow, true);
+  });
+
+  test("a null resets_at falls back to the env seed (meter-dark compatibility)", async () => {
+    const nowMs = Date.parse("2026-08-14T18:00:00.000Z");
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(readWithReset(null, 20)),
+      now: () => nowMs,
+    });
+    const envRolled = new Date(
+      projectResetWindow(Date.parse(WRONG_ENV_ANCHOR), nowMs).currentMs,
+    ).toISOString();
+    assert.equal(r.input.weeklyResetAnchor, envRolled);
+  });
+
+  test("an unparseable resets_at falls back to the env seed rather than NaN-ing the curve", async () => {
+    const nowMs = Date.parse("2026-08-14T18:00:00.000Z");
+    // `parseOAuthUsageBody` coerces garbage to null upstream, but the field is
+    // typed `string | null`, so the guard here must hold independently.
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(readWithReset("not-a-date", 20)),
+      now: () => nowMs,
+    });
+    const envRolled = new Date(
+      projectResetWindow(Date.parse(WRONG_ENV_ANCHOR), nowMs).currentMs,
+    ).toISOString();
+    assert.equal(r.input.weeklyResetAnchor, envRolled);
+    assert.equal(projectEligibility(r.input).paceState !== undefined, true);
+  });
+
+  test("a STALE (past) resets_at is floored to the CURRENT window, not left behind", async () => {
+    // Robustness: projectResetWindow floors any reset instant — past or future —
+    // into the window containing `now`, so a boundary several weeks old still
+    // produces the current window's start rather than a >1.0 fraction.
+    const nowMs = Date.parse("2026-08-14T18:00:00.000Z");
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(readWithReset("2026-07-11T09:59:59.000Z", 39)),
+      now: () => nowMs,
+    });
+    const anchorMs = Date.parse(r.input.weeklyResetAnchor!);
+    assert.ok(anchorMs <= nowMs, "the anchor must be at or before now (a window START)");
+    assert.ok(
+      nowMs - anchorMs < 7 * DAY,
+      "the anchor must be inside the current 7-day window, not a stale multi-week-old instant",
+    );
+    // Same phase as the future-boundary case: both floor to the Saturday start.
+    assert.equal(r.input.weeklyResetAnchor, "2026-08-08T09:59:59.000Z");
+  });
+
+  test("a sustained meter outage still reports the env-seeded anchor", async () => {
+    const nowMs = Date.parse("2026-08-14T18:00:00.000Z");
+    let last;
+    for (let i = 0; i < OAUTH_SUSTAINED_FAILURE_THRESHOLD; i++) {
+      last = await getEligibilityUsage({
+        readUsage: fixedReader(FAIL),
+        now: () => nowMs + i * STEP_MS,
+      });
+    }
+    assert.equal(last!.meterUnavailable, true);
+    const envRolled = new Date(
+      projectResetWindow(Date.parse(WRONG_ENV_ANCHOR), nowMs + (OAUTH_SUSTAINED_FAILURE_THRESHOLD - 1) * STEP_MS)
+        .currentMs,
+    ).toISOString();
+    assert.equal(
+      last!.input.weeklyResetAnchor,
+      envRolled,
+      "with no meter value there is no boundary to follow — the env seed is the documented fallback",
+    );
   });
 });

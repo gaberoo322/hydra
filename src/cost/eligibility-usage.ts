@@ -33,6 +33,16 @@
  * whole Pacing Curve; its 5-hour sibling is still ~2.4x off. Anthropic's number
  * needs no calibration and cannot drift.
  *
+ * THE ANCHOR FOLLOWS THE ACCOUNT, for the same reason. The Weekly Reset Anchor
+ * is derived from the meter's own `seven_day.resets_at`, with the
+ * `HYDRA_USAGE_WEEKLY_RESET_ANCHOR` env seed demoted to a meter-dark fallback.
+ * That env var is one global constant while the reset boundary is per-account
+ * (different weekdays across accounts), so a `/login` to a different account
+ * used to leave the Pacing Curve phased to the previous account's week — a
+ * silent mis-pace in both directions (starving the Pace Gate, or pacing it too
+ * hot). The meter already auto-follows the credentials file by design; now the
+ * anchor does too. See {@link getEligibilityUsage} for the measured incident.
+ *
  * FAIL-OPEN IS PRESERVED, DELIBERATELY. {@link deriveHardStop} gates on
  * `usageSource === "oauth"` (issue #1124): when the meter is unavailable the
  * hard stop does NOT engage. Rebuilding that invariant here would be a silent
@@ -127,17 +137,19 @@ export async function getEligibilityUsage(
   const anchorEnvMs = getWeeklyResetAnchorMs();
   // INV-1 (issue #3751, design-concept issue-3751): the admission path's Weekly
   // Reset Anchor MUST be the effective CURRENT-WINDOW boundary —
-  // `projectResetWindow(anchorEnvMs, nowMs).currentMs` — projected forward in
-  // 7-day multiples per CONTEXT.md ("projected forward in 7-day multiples"), NOT
-  // the raw seed instant from the env var. The snapshot path already rolls the
-  // anchor via `deriveSinceReset` (snapshot-assembly.ts); this path used the raw
-  // seed, so a stale anchor (e.g. 8 weeks old) clamped `projectPacingCurve`'s
-  // `fraction = clamp01((now-anchor)/7d)` to 1.000, pinning `targetPercent` at
-  // the full Pacing Ceiling and making `paceState === "ahead"` unreachable — the
-  // Pacing Curve ran inert. The meter-only path has no observed-reset signal to
-  // auto-correct with (it opens no transcript), so it projects the env anchor
-  // directly, identical to the snapshot path's `envWindow.currentMs`.
-  const weeklyResetAnchor =
+  // `projectResetWindow(seedMs, nowMs).currentMs` — projected in 7-day multiples
+  // per CONTEXT.md ("projected forward in 7-day multiples"), NOT a raw seed
+  // instant. The snapshot path already rolls the anchor via `deriveSinceReset`
+  // (snapshot-assembly.ts); this path used the raw seed, so a stale anchor (e.g.
+  // 8 weeks old) clamped `projectPacingCurve`'s `fraction =
+  // clamp01((now-anchor)/7d)` to 1.000, pinning `targetPercent` at the full
+  // Pacing Ceiling and making `paceState === "ahead"` unreachable — the Pacing
+  // Curve ran inert.
+  //
+  // The env value is the FALLBACK seed only (see the meter-derived anchor
+  // below): it is a single hand-maintained global constant, so it is correct for
+  // at most one Claude account at a time.
+  const envAnchor =
     anchorEnvMs === null
       ? null
       : new Date(projectResetWindow(anchorEnvMs, nowMs).currentMs).toISOString();
@@ -158,7 +170,7 @@ export async function getEligibilityUsage(
     // ordinary meter-read failure — it never absorbed transient blips in the
     // first place, so there is no sustained-vs-transient distinction to make.
     // Report unavailable immediately.
-    return unavailable(generatedAt, weeklyResetAnchor, true);
+    return unavailable(generatedAt, envAnchor, true);
   }
 
   if (!isOAuthUsageOk(cached.result)) {
@@ -182,11 +194,46 @@ export async function getEligibilityUsage(
         ? "[eligibility-usage] OAuth meter sustained-unavailable; admission verdict blocks (#3821/#3804)"
         : "[eligibility-usage] OAuth meter read failed (transient, below sustained-failure threshold); admission verdict unaffected (#3821)",
     );
-    return unavailable(generatedAt, weeklyResetAnchor, sustained);
+    return unavailable(generatedAt, envAnchor, sustained);
   }
 
   const percentLast5h = cached.result.data.fiveHour.utilization;
   const percentLast7d = cached.result.data.sevenDay.utilization;
+
+  // ACCOUNT-FOLLOWING ANCHOR (this PR). The Weekly Reset Anchor is derived from
+  // the meter's OWN `seven_day.resets_at` whenever the meter supplies one, and
+  // falls back to the env seed only when it does not.
+  //
+  // WHY: `HYDRA_USAGE_WEEKLY_RESET_ANCHOR` is a single global constant, but the
+  // weekly reset boundary is PER ACCOUNT and not even the same weekday across
+  // accounts (observed: one account resets Wed 17:00Z, another Sat 09:59:59Z).
+  // `readAccessToken()` in oauth-usage.ts deliberately re-reads the credentials
+  // file on every call so the meter auto-follows a `/login` to a different
+  // account — but the anchor did not follow, so after a switch the Pacing Curve
+  // was phased to the WRONG account's week with no alarm. Measured 2026-08-14 on
+  // a personal->work switch: elapsed read 29% instead of 90%, so targetPercent
+  // was 26.8% against 38% actual, `paceState` pinned to "ahead", and the Pace
+  // Gate skipped EVERY tick. The fake target would not have crossed actual until
+  // after the real reset, so the whole remaining ~60% of the week would have
+  // expired unused. The failure is silent in both directions: the opposite phase
+  // error inflates the target and paces the burn too HOT.
+  //
+  // The meter already carries the true boundary and `parseOAuthUsageBody` already
+  // parses it into `sevenDay.resetsAt` — it was simply discarded here. The stale
+  // comment this replaces claimed "the meter-only path has no observed-reset
+  // signal to auto-correct with"; that was true of the TRANSCRIPT scan (which
+  // this path deliberately never opens), not of the meter.
+  //
+  // `resets_at` is the window END; the anchor is the window START. Rather than
+  // subtract 7d by hand, feed it through the same `projectResetWindow` used for
+  // the env seed: `currentMs` floors ANY reset instant — future (the normal
+  // case, one window ahead) or past (a stale/clamped value) — to the start of
+  // the window containing `nowMs`. One code path, both semantics, no new
+  // constant.
+  const meterResetMs = Date.parse(cached.result.data.sevenDay.resetsAt ?? "");
+  const weeklyResetAnchor = Number.isFinite(meterResetMs)
+    ? new Date(projectResetWindow(meterResetMs, nowMs).currentMs).toISOString()
+    : envAnchor;
 
   // The meter's own 7-day utilization IS the position within the weekly window,
   // so it doubles as `percentSinceReset` for the Pacing Curve. This is the
