@@ -17,6 +17,7 @@ Canonical label vocabulary for `gaberoo322/hydra` issues. The `/triage` skill, `
 | `target-backlog` | Finding about `~/hydra-betting`, not the orchestrator itself | Triage; `hydra-sweep` queues these to the target work queue |
 | `operator-approved` | Tier-0 PR approval marker (see ADR-0004) | Operator only |
 | `enhancement` / `bug` / `refactor` | Classification | Triage |
+| `hitl-grill` | Agent-proposed idea parked for operator grill-or-dismiss; agents never action this | Agent proposing the idea |
 
 ## `ready-for-agent` precondition (issue #396)
 
@@ -56,3 +57,19 @@ A subagent escalates to `ready-for-human` only for the **closed list** in ADR-00
 - Vision-level conflicts
 
 Infrastructure aborts (worktree-isolation failures, harness errors) do NOT escalate to `ready-for-human` — they re-label as `ready-for-agent` so the next dispatch can retry once the infra recovers. See `docs/operator-playbooks/hydra-dev.md` Step 6 for the exact contract.
+
+## `hitl-grill` (issue #4025)
+
+`hitl-grill` is a **terminal park state** for agent-proposed ideas that no agent should ever action. An agent proposing a speculative idea (a possible improvement, a "we could also…" surfaced during another task) applies `hitl-grill` and stops — the idea sits parked until the operator either grills it into real work or dismisses it.
+
+`scripts/autopilot/collect-state.sh` excludes `hitl-grill` from the `untriaged_orphans` triage backstop (issue #2426) by exact-name match, the same mechanism as `ready-for-human` / `needs-info` / `needs-design-concept` / `needs-tickets` — NOT the `wayfinder:*` prefix rule, since `hitl-grill` is a single fixed label, not a family. Without the exclusion, an issue carrying only `hitl-grill` would pin `untriaged_orphans` above zero permanently and cause `sweep_orch` to re-triage the parked idea into an actionable lane every cooldown, draining the very inbox the label exists to hold.
+
+### Two boundaries — do not conflate
+
+- **vs `ready-for-human`** — `ready-for-human` means an agent gave up and the operator must decide *now*; it is also an `INTERVENTION_LABEL` in `src/aggregators/autonomy-classifier.ts`, so parking an idea there would incorrectly degrade the autonomy metric. `hitl-grill` is not an escalation and must never be counted as an intervention.
+- **vs the attention feed (#4007)** — ADR-0034 scopes the attention feed to threshold crossings that render their own line item. A speculative idea crosses no threshold. `hitl-grill` and the attention feed are separate surfaces; do not fold them together.
+
+### Exit contract
+
+- **Promotion**: the operator grills the idea into real work. Remove `hitl-grill` and add the appropriate lifecycle label (typically `ready-for-agent`). A promoted issue also needs a `## Files in scope` section per the `ready-for-agent` precondition above — otherwise `issue-label-validation` reverts the label.
+- **Dismissal**: the operator closes the issue `not_planned`. `hitl-grill` is retained on the closed issue as a record of why it was parked; it is not removed on dismissal.
