@@ -45,7 +45,7 @@
 
 import test, { describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -67,6 +67,20 @@ import { getRedisConnection } from "../src/redis/connection.ts";
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
 
+// A `docker exec hydra-redis-1 redis-cli ...` round-trip is normally
+// sub-second, but on a shared, loaded self-hosted CI runner (4 runners plus
+// the orchestrator, Redis, and live autopilot subagents on one box) it can
+// stall well past a tight ceiling. The three sibling watchdog test files
+// (test/autopilot-watchdog.test.mts, test/watchdog-deploy-drift.test.mts,
+// test/watchdog-skill-mirror-drift.test.mts) hit this exact class of flake on
+// the REQUIRED `test` gate and were fixed in PR #4054 by widening to a single
+// generous shared ceiling instead of independently tuning tight ones that keep
+// getting blown by ambient host load. This file kept its own 4s/8s/15s
+// ceilings and was the one #4044/#4054 missed (issue #4065) — bring it in
+// line with the same 120s bound, which is a hang guard, not a
+// slow-but-correct-run guard.
+const WATCHDOG_TIMEOUT_MS = 120_000;
+
 const SIGNALS = ["fail-safe", "meter-dark", "quota", "pause", "latency"] as const;
 const SINCE = (s: string) => `${LAUNCH_FLOW_KEY_PREFIX}:since:${s}`;
 const FIRED = (s: string) => `${LAUNCH_FLOW_KEY_PREFIX}:fired:${s}`;
@@ -79,11 +93,40 @@ const T0 = 1_700_000_000_000;
 // test/autopilot-hooks.test.mts gating contract.
 // ---------------------------------------------------------------------------
 
+/**
+ * spawnSync kills the child on timeout: `status` becomes `null` (not a real
+ * exit code) and `error.code` is `"ETIMEDOUT"`. A caller that only looks at
+ * `status`/`stdout` sees a misleading bare exit-code (or empty-output)
+ * mismatch that reads as a behaviour regression rather than contention
+ * (issue #4044, the same defect class PR #4054 fixed in the sibling watchdog
+ * test files). Detect it explicitly and throw a labelled error instead.
+ */
+function assertNotTimedOut(r: SpawnSyncReturns<string>, label: string): void {
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
+    throw new Error(
+      `${label} exceeded ${WATCHDOG_TIMEOUT_MS}ms timeout (killed with ${r.signal ?? "unknown signal"}); ` +
+        `stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`,
+    );
+  }
+}
+
 function dockerRedisAvailable(): boolean {
   const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "PING"], {
     encoding: "utf-8",
-    timeout: 4_000,
+    timeout: WATCHDOG_TIMEOUT_MS,
   });
+  // Called once at module load to decide whether the whole behavioural
+  // describe block below is gated (`{ skip: !DOCKER }`) — throwing here would
+  // abort loading the file entirely, including the docker-independent
+  // structural tests. A genuine timeout is functionally indistinguishable
+  // from "docker unavailable" for gating purposes, so log it loudly and
+  // degrade to skip rather than crashing the whole file.
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
+    console.error(
+      `[watchdog-launch-flow.test.mts] dockerRedisAvailable PING exceeded ${WATCHDOG_TIMEOUT_MS}ms — treating docker as unavailable`,
+    );
+    return false;
+  }
   return (r.stdout ?? "").trim() === "PONG";
 }
 
@@ -92,8 +135,9 @@ const DOCKER = dockerRedisAvailable();
 function drc(args: string[]): string {
   const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
     encoding: "utf-8",
-    timeout: 8_000,
+    timeout: WATCHDOG_TIMEOUT_MS,
   });
+  assertNotTimedOut(r, `drc(${args.join(" ")})`);
   return (r.stdout ?? "").trim();
 }
 
@@ -101,28 +145,31 @@ function drc(args: string[]): string {
 function cleanState(): void {
   const keys = [PACE_GATE_LAST_TICK_KEY];
   for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
+  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
     encoding: "utf-8",
-    timeout: 8_000,
+    timeout: WATCHDOG_TIMEOUT_MS,
   });
+  assertNotTimedOut(r, "cleanState DEL");
 }
 
 function hsetLastTick(fields: Record<string, string>): void {
   const args = ["HSET", PACE_GATE_LAST_TICK_KEY];
   for (const [k, v] of Object.entries(fields)) args.push(k, v);
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
+  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
     encoding: "utf-8",
-    timeout: 8_000,
+    timeout: WATCHDOG_TIMEOUT_MS,
   });
+  assertNotTimedOut(r, "hsetLastTick HSET");
 }
 
 /** Pre-seed a signal's since-anchor (stands in for "the streak began long ago"). */
 function seedSince(signal: string, ms: number): void {
-  spawnSync(
+  const r = spawnSync(
     "docker",
     ["exec", "hydra-redis-1", "redis-cli", "--raw", "SET", SINCE(signal), String(ms), "NX"],
-    { encoding: "utf-8", timeout: 8_000 },
+    { encoding: "utf-8", timeout: WATCHDOG_TIMEOUT_MS },
   );
+  assertNotTimedOut(r, `seedSince(${signal})`);
 }
 
 function getFired(signal: string): boolean {
@@ -167,8 +214,9 @@ function runBlock(env: Record<string, string>): { status: number; stdout: string
   const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`], {
     env: { ...process.env, HYDRA_REDIS_HOST: "docker", ...env, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
-    timeout: 15_000,
+    timeout: WATCHDOG_TIMEOUT_MS,
   });
+  assertNotTimedOut(r, "runBlock run_launch_flow");
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -482,9 +530,10 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
           PATH: process.env.PATH ?? "",
         },
         encoding: "utf-8",
-        timeout: 15_000,
+        timeout: WATCHDOG_TIMEOUT_MS,
       },
     );
+    assertNotTimedOut(r, "INV-10 unreachable-redis run_launch_flow");
     assert.equal(r.status ?? -1, 0, `read failure must not abort (set -e); stderr=${r.stderr}`);
     const out = (r.stdout ?? "").split("\n").filter((l) => l.includes("hydra-launch-flow-watchdog:")).join("\n");
     assert.match(out, /WARN no pace-gate last-tick record/, "read failure must log a distinguishable WARN");
