@@ -28,34 +28,33 @@ export async function getCycleHash(cycleId: string): Promise<Record<string, stri
 }
 
 /**
- * List all cycle IDs (newest-first by ID), stripped of the `hydra:cycle:` prefix
- * and filtered to exclude per-cycle sub-keys (`:agents`, `:costs`, `:tasks`).
+ * List every cycle id ever recorded, newest-first, via the recent-cycles index.
  *
- * Used by `getCycleHistory()` to enumerate completed cycles for the /cycle/history
- * endpoint. The scan + filter + prefix-strip composition lives behind one
- * accessor so the storage shape isn't re-encoded at the call site.
+ * Reads the `hydra:cycle:index` ZSET (written by `addCycleToIndex()` in the
+ * autopilot cycle-close path, `src/autopilot/cycle-close.ts`, scored by the
+ * completion epoch) with ZREVRANGE, so the ids come back ordered by recency.
+ * Used by `getCycleHistory()` to enumerate completed cycles for the
+ * /cycle/history endpoint.
+ *
+ * Why the index and not a keyspace scan (issue #3997): the previous
+ * implementation matched `hydra:cycle:cycle-*`, but live cycle keys are
+ * `hydra:cycle:<hex>` (e.g. `hydra:cycle:aeef970d909cccd8a`) — no `cycle-`
+ * segment — so the pattern matched nothing and /cycle/history silently returned
+ * `[]` while 118 real records sat in Redis. The index is the single source of
+ * truth for which ids exist, because `addCycleToIndex` is the only recordCycle
+ * writer; reading it can never accidentally enumerate a non-cycle sibling that
+ * merely shares the `hydra:cycle:` prefix (`hydra:cycle:active`,
+ * `hydra:cycle:index`, `hydra:cycle:active:<source>`), and ordering by ZSET
+ * score is chronologically correct for the hex id shape, unlike a lexical
+ * reverse-sort over id strings which assumed ISO-timestamp-shaped ids.
+ *
+ * A cycle hash written without ever going through `addCycleToIndex` is
+ * intentionally not enumerated: the index is authoritative by construction of
+ * the single recordCycle writer.
  */
 export async function listCycleIds(): Promise<string[]> {
   const r = getRedisConnection();
-  const pattern = redisKeys.cycle("cycle-*");
-  const prefix = redisKeys.cycle("");
-  const fullKeys: string[] = [];
-  let cursor = "0";
-  do {
-    const [nextCursor, batch] = await r.scan(cursor, "MATCH", pattern, "COUNT", 100);
-    fullKeys.push(...batch);
-    cursor = nextCursor;
-  } while (cursor !== "0");
-
-  const ids = fullKeys
-    .filter((k) => !k.endsWith(":agents") && !k.endsWith(":costs") && !k.endsWith(":tasks"))
-    .map((k) => k.startsWith(prefix) ? k.slice(prefix.length) : k);
-
-  // Sort newest-first. Cycle IDs are ISO-timestamp-shaped so lexical reverse-sort
-  // gives chronological reverse — same behaviour as the legacy implementation
-  // in src/cycle.ts which used `.sort().reverse()`.
-  ids.sort().reverse();
-  return ids;
+  return r.zrevrange(redisKeys.cycleIndex(), 0, -1);
 }
 
 /** Init cycle hash fields and set TTL. */

@@ -1,0 +1,1 @@
+- fix: /cycle/history reads the hydra:cycle:index ZSET instead of a scan pattern that never matched real keys, so it returns actual cycle records (#3997)
