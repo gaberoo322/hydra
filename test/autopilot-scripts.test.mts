@@ -1978,6 +1978,107 @@ describe("collect-state.sh wayfinder frontier no-pick sentinel (#3400)", () => {
 });
 
 /**
+ * Regression test for issue #4014 — `collect-state.sh` must EMIT the
+ * `tickets_available` signal that wakes the dormant `tickets_orch` selector.
+ *
+ * Before #4014, the `tickets_orch` class was wired in decide.py (#3423, ADR-0030
+ * Decision 2/5) but NOTHING emitted `tickets_available` — the selector gated on
+ * a signal with zero producers repo-wide, so the tickets-STAGE producer was a
+ * documented, tested no-op. This block is the producer that feeds it.
+ *
+ * collect-state.sh is network-dependent (live gh), so — like the wayfinder
+ * frontier sentinel test above and the untriaged_orphans exclusion test — this
+ * pins the SOURCE shape of the producer, not its live execution. Four invariants
+ * the design concept (#4014) requires, each pinned independently so a partial
+ * regression cannot slip through:
+ *   1. the `tickets_available` boolean emitter exists and emits `true`/`false`
+ *      directly (the bool("false")==True Python trap is avoided by emitting the
+ *      boolean in shell, same shape as `orch_backfill_idle`);
+ *   2. the board condition is the EXISTING `needs-tickets` label (#3817) — no
+ *      new label;
+ *   3. currently-ASSIGNED needs-tickets issues are excluded (in-flight dedup,
+ *      mirroring wayfinder_orch's assignee-based single-flight);
+ *   4. the companion `tickets_orch_pending_spec=issue-N`/`none` ref is emitted
+ *      (the verbatim-string seam decide.py threads into prompt_args.spec_issue);
+ *   5. the fail-closed shape: only a bare positive integer promotes a spec —
+ *      empty output (gh down) and `null` (empty lane's .[0]) both degrade to
+ *      suppressed (never dispatch a decomposition with no resolved target).
+ */
+describe("collect-state.sh tickets_orch producer (#4014)", () => {
+  const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+
+  /** Slice the tickets_orch producer block from the `tickets_available=` echo
+   *  through the if/else that emits both signals. */
+  function producerBlock(): string {
+    const start = src.indexOf('echo -n "tickets_available="');
+    assert.ok(start >= 0, "tickets_available emitter missing from collect-state.sh");
+    // The block ends at the `fi` closing the if/else that emits both signals.
+    const fi = src.indexOf("\nfi\n", start);
+    assert.ok(fi >= 0, "tickets_orch producer if/else terminator (fi) missing");
+    return src.slice(start, fi + "\nfi".length);
+  }
+
+  test("emits tickets_available as a direct true/false boolean (not a count)", () => {
+    const block = producerBlock();
+    assert.match(
+      block,
+      /echo -n "tickets_available="/,
+      "producer must emit the tickets_available signal",
+    );
+    assert.ok(
+      block.includes('echo "true"') && block.includes('echo "false"'),
+      "tickets_available must be emitted as a direct boolean (true/false), mirroring orch_backfill_idle — emitting a count would hit bool(\"0\") and the bool(\"false\")==True Python trap downstream",
+    );
+  });
+
+  test("board condition is the EXISTING needs-tickets label (no new label)", () => {
+    const block = producerBlock();
+    assert.ok(
+      block.includes("--label needs-tickets"),
+      "the board condition must reuse the existing needs-tickets label (#3817) — a new label would fragment the parking lane (label-drift bug class)",
+    );
+  });
+
+  test("excludes currently-assigned needs-tickets issues (in-flight dedup)", () => {
+    const block = producerBlock();
+    assert.ok(
+      block.includes("select((.assignees | length) == 0)"),
+      "an assigned needs-tickets spec is mid-decomposition (a live hydra-tickets worker self-assigns it) and must be excluded, mirroring wayfinder_orch's assignee-based single-flight — pins design-concept INV-4",
+    );
+  });
+
+  test("emits the companion tickets_orch_pending_spec ref (verbatim-string seam)", () => {
+    const block = producerBlock();
+    assert.ok(
+      block.includes('echo "tickets_orch_pending_spec=issue-${TICKETS_PICK_NUM}"'),
+      "the resolved oldest-spec ref must be emitted as issue-<N> for the eligible branch",
+    );
+    assert.ok(
+      block.includes('echo "tickets_orch_pending_spec=none"'),
+      "the suppressing branch must emit tickets_orch_pending_spec=none (fail-closed ref, same seam as wayfinder_orch_frontier)",
+    );
+  });
+
+  test("promotes only a bare positive integer (fail-closed on gh-down / empty lane)", () => {
+    const block = producerBlock();
+    // The case guard: '' (empty) or any non-digit char (incl. the literal `null`
+    // gh --jq prints for an empty list's .[0]) keeps both signals suppressed.
+    assert.match(
+      block,
+      /case "\$TICKETS_JSON" in\s*\n\s*''\|\*\[!0-9\]\*\)\s*;;/,
+      "only a bare positive integer may promote a spec — empty output (gh down via `|| true`) and `null` (empty lane's .[0]) must degrade to tickets_available=false, never dispatch a decomposition with no resolved target",
+    );
+    // Belt-and-suspenders: the gh read must tolerate failure (|| true) so a
+    // transient gh outage does not abort the whole collect-state.sh run.
+    assert.match(
+      block,
+      /\|\| true\)/,
+      "the gh issue list read must be wrapped in `|| true` so a gh outage degrades to empty (suppressed) rather than aborting collect-state.sh",
+    );
+  });
+});
+
+/**
  * Regression test for issue #3728 — `collect-state.sh`'s `untriaged_orphans`
  * backstop must NOT count wayfinder tickets.
  *

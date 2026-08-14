@@ -356,9 +356,15 @@ fi
 #     (observed live on issue #3815) — so counting it as an orphan re-fires
 #     `sweep_orch` every cooldown to re-confirm the same no-op, forever.
 #   - `needs-tickets` parks a published spec awaiting `/to-tickets`
-#     decomposition in the operator's `hydra-review` cockpit (§0.8) — an
-#     autopilot-invisible, operator-driven lane by the same design as
-#     `needs-design-concept`. `sweep_orch` has no rule to act on it either.
+#     decomposition. It is the board condition for the `tickets_orch` producer
+#     (issue #4014, ADR-0030's one-lineage AFK spine — collect-state.sh emits
+#     `tickets_available` from it just below the wayfinder block), so it is now
+#     autopilot-VISIBLE. It stays in this orphan-exclusion array regardless:
+#     `sweep_orch` has no rule to act on it (the tickets_orch producer owns it),
+#     and counting it as an orphan would re-fire `sweep_orch` every cooldown to
+#     re-confirm a no-op. (Pre-#4014 this lane was autopilot-invisible by
+#     design — the spine made it visible; the orphan-exclusion rationale is
+#     unchanged.)
 # Both are ADDED to the exclusion array (not given a prefix rule like
 # `wayfinder:*`, since each is a single fixed label, not a family).
 #
@@ -1474,6 +1480,78 @@ fi
 echo "$WF_FRONTIER"
 echo "wayfinder_orch_ticket_type=${WF_TICKET_TYPE}"
 echo "wayfinder_orch_inflight_global=${WF_INFLIGHT_GLOBAL}"
+
+# tickets_orch board condition — resolved plan awaiting ticketing (issue #4014,
+# design-concept issue-4014). Wakes the dormant tickets-STAGE producer wired in
+# #3423 (ADR-0030 Decision 2/5 — the §0.8 needs-tickets -> children slicing
+# step the class was built for; until this block landed, `tickets_available` had
+# zero producers repo-wide and the selector was a documented, tested no-op).
+#
+# Structural sibling of the wayfinder_orch_frontier collector above: the
+# tickets-STAGE producer needs the SAME pre-resolution decide.py cannot do
+# itself (it stays PURE — AC: no gh/curl/GraphQL inside decide.py; the board
+# enumeration lives ONLY here). This block answers "does a resolved plan await
+# ticketing?" and emits two signals the model stitches into state.signals:
+#
+#   - `tickets_available`          — `true` when >=1 eligible spec exists, else
+#     `false` (a direct boolean emit, same shape as `orch_backfill_idle`).
+#   - `tickets_orch_pending_spec`  — an `issue-<N>` ref for the OLDEST eligible
+#     spec, or `none` when nothing awaits (verbatim string, the SAME seam as
+#     `wayfinder_orch_frontier` / `orch_pending_grill_anchor`).
+#
+# Board condition (design-concept INV-3): an OPEN issue carrying the EXISTING
+# `needs-tickets` label (#3817's parking lane — a published spec/plan awaiting
+# /to-tickets decomposition). No new label is introduced: `needs-tickets`
+# already encodes exactly this semantic, so a second parallel parking lane
+# would fragment it (the label-drift bug class this repo's operator memory
+# documents). Making needs-tickets autopilot-visible is the intended
+# consequence of ADR-0030's one-lineage AFK spine, not a contradiction of its
+# prior 'operator-driven' framing — that framing predates the spine.
+#
+# In-flight dedup (design-concept INV-4): a spec currently being decomposed is
+# excluded by ASSIGNMENT, mirroring wayfinder_orch's assignee-based
+# single-flight. A live hydra-tickets worker self-assigns the spec as its first
+# step (the same `--add-assignee @me` claim every AFK working class uses), so
+# an OPEN ASSIGNED needs-tickets issue is mid-decomposition and never re-picked
+# within the window. This bounds duplicate-epic risk BEYOND the existing 1h
+# SIGNAL_COOLDOWNS["tickets_orch"] backstop decide.py honors. (Long-term
+# re-fire prevention is the composed hydra-tickets skill dropping needs-tickets
+# on successful decomposition — design-concept INV-6, the skill's
+# responsibility — so the NEXT enumeration does not re-surface the same spec.)
+#
+# One-per-fire: we take the OLDEST eligible spec (number ascending, stable
+# across ticks) — the 1h class cooldown paces the rest, exactly as wayfinder
+# takes the first frontier ticket per fire. A single cheap REST `gh issue list`
+# suffices (no sub-issue / blocked-by walk is needed, unlike wayfinder maps).
+#
+# Best-effort: any failure (gh down, malformed output, empty lane) degrades to
+# `tickets_available=false` + `tickets_orch_pending_spec=none` — the
+# SUPPRESSING direction (never dispatch a decomposition with no resolved
+# target), mirroring wayfinder's `none` fail-closed.
+echo -n "tickets_available="
+TICKETS_PICK_NUM=""
+TICKETS_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label needs-tickets \
+  --limit "$GH_ISSUE_LIST_LIMIT" \
+  --json number,assignees --jq '
+    [ .[]
+      | select((.assignees | length) == 0)
+      | .number ]
+    | sort
+    | .[0]' 2>/dev/null || true)
+# Accept only a bare positive integer: `gh --jq` prints `null` for an empty
+# list's .[0], and a transient gh failure yields empty output (the `|| true`
+# above). Any non-numeric / null result keeps both signals suppressed.
+case "$TICKETS_JSON" in
+  ''|*[!0-9]*) ;;
+  *) TICKETS_PICK_NUM="$TICKETS_JSON" ;;
+esac
+if [ -n "$TICKETS_PICK_NUM" ]; then
+  echo "true"
+  echo "tickets_orch_pending_spec=issue-${TICKETS_PICK_NUM}"
+else
+  echo "false"
+  echo "tickets_orch_pending_spec=none"
+fi
 
 # Stalled-map staleness sweep — housekeeping backstop (issue #3355, epic #3350,
 # ADR-0029).

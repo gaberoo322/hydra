@@ -4022,13 +4022,19 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         #
         # SIGNAL-SEAM DISCIPLINE: decide.py stays PURE — no gh / curl / GraphQL
         # here. collect-state.sh owns the board enumeration ("does a resolved plan
-        # await ticketing?") and pre-resolves it into the precomputed
-        # `tickets_available` signal, which this selector reads VERBATIM. That
-        # emission is a follow-on (bootstrap.sh signal_last_fired seed + the
-        # collect-state.sh producer) outside this slice's Files-in-scope; until it
-        # lands the signal is simply absent and this arm is a clean no-op — the
-        # same expand-then-wire cadence wayfinder_orch used (its bootstrap seed was
-        # likewise deferred to a follow-on slice).
+        # await ticketing?") and pre-resolves it into two signals this selector
+        # reads VERBATIM: `tickets_available` (the presence gate) and
+        # `tickets_orch_pending_spec` (an `issue-<N>` ref for the oldest
+        # unassigned open `needs-tickets` spec, or `none`). That producer + the
+        # `needs-tickets` board condition landed in #4014 — pre-#4014 the signal
+        # had zero producers repo-wide and this arm was a documented, tested
+        # no-op (the same expand-then-wire cadence wayfinder_orch used: wire the
+        # selector in one slice, land the collect-state.sh producer in the next).
+        # NOTE (#4014): the 1h plan-anchored `tickets_orch` class is, like its
+        # structural twin `wayfinder_orch`, DELIBERATELY NOT seeded into
+        # bootstrap.sh's carry-forward `signal_last_fired` set — a missing entry
+        # reads as never-fired (immediately eligible) with no #2575 re-run hazard,
+        # so the producer alone is sufficient to wake the class.
         #
         # 1h class cooldown (SIGNAL_COOLDOWNS["tickets_orch"], honored by the
         # shared signal_is_cooled guard at the top of this function) is the
@@ -4037,10 +4043,26 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # BACKFILL_SIGNAL_CLASSES (plan-anchored, not idle-backfill). The model
         # param is OMITTED (producer work inherits the parent per #1093).
         if _signal_present(state, events, "tickets_available"):
+            # Thread the pre-resolved spec ref into prompt_args so hydra-tickets
+            # knows EXACTLY which spec to decompose — the same pre-resolution seam
+            # wayfinder_orch uses (frontier ref -> prompt_args.ticket). decide.py
+            # stays PURE: it reads the precomputed ref, never enumerates the board.
+            _tk_signals = state.get("signals") if isinstance(state, dict) else None
+            pending_spec = (
+                _tk_signals.get("tickets_orch_pending_spec")
+                if isinstance(_tk_signals, dict)
+                else None
+            )
             return make_dispatch(
                 sig,
                 "hydra-tickets",
-                reason="resolved plan awaits ticketing — render epic + tracer children",
+                prompt_args={"spec_issue": pending_spec} if pending_spec else {},
+                reason=(
+                    f"resolved plan {pending_spec} awaits ticketing"
+                    f" — render epic + tracer children"
+                    if pending_spec
+                    else "resolved plan awaits ticketing — render epic + tracer children"
+                ),
             )
         return None
     return None

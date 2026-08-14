@@ -233,4 +233,64 @@ describe("decide.py — tickets_orch signal class (ADR-0030 delta, #3423)", () =
       "dev_orch pipeline dispatch must still fire when orch work is available",
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // #4014 — the resolved-ref seam. collect-state.sh emits BOTH tickets_available
+  // AND a companion tickets_orch_pending_spec=issue-N (the oldest unassigned
+  // needs-tickets spec). decide.py threads that verbatim string into the
+  // dispatch prompt_args.spec_issue so hydra-tickets decomposes exactly that
+  // spec — the same pre-resolution pattern as wayfinder_orch_frontier. These
+  // tests pin the consumer side; the producer (collect-state.sh) is pinned in
+  // test/autopilot-scripts.test.mts.
+  // ---------------------------------------------------------------------------
+
+  test("threads tickets_orch_pending_spec into prompt_args.spec_issue (#4014)", () => {
+    const state = baseState({
+      signals: {
+        tickets_available: true,
+        tickets_orch_pending_spec: "issue-1234",
+      },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, ticketsDispatch);
+    assert.ok(a, "tickets_orch must dispatch on tickets_available");
+    assert.equal(
+      a.prompt_args?.spec_issue,
+      "issue-1234",
+      "the resolved spec ref must be threaded verbatim into prompt_args.spec_issue so hydra-tickets decomposes exactly that spec",
+    );
+  });
+
+  test("omits spec_issue when no companion ref is present (#4014 fail-open)", () => {
+    // tickets_available=true but tickets_orch_pending_spec absent — decide.py
+    // must not invent a ref; hydra-tickets dispatches with no target and relies
+    // on its own board read (fail-open, never fabricate issue-N).
+    const state = baseState({ signals: { tickets_available: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, ticketsDispatch);
+    assert.ok(a, "tickets_orch must still dispatch on tickets_available alone");
+    assert.equal(
+      a.prompt_args?.spec_issue,
+      undefined,
+      "no spec_issue must be threaded when collect-state.sh emitted no companion ref",
+    );
+  });
+
+  test("ignores a companion ref when tickets_available is false (#4014 gating)", () => {
+    // The boolean is the gate; a stale/echoed pending_spec string alone must
+    // NOT wake tickets_orch. Pins that the two signals are decoupled: the ref
+    // is advisory context, the boolean is authoritative.
+    const state = baseState({
+      signals: {
+        tickets_available: false,
+        tickets_orch_pending_spec: "issue-1234",
+      },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, ticketsDispatch),
+      undefined,
+      "tickets_orch must not fire on a companion ref without the tickets_available gate",
+    );
+  });
 });
