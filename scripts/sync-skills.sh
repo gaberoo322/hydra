@@ -685,11 +685,15 @@ if [ "$DRY_RUN" = 1 ]; then
   echo "  (dry-run; no files modified)"
 fi
 
-# Exit non-zero only when a playbook with frontmatter (a real skill) failed to
-# generate. Playbooks like `hydra-target-adversarial.md` intentionally have no
-# frontmatter (stub markers); they emit a "skip ... no valid frontmatter" line
-# but must not fail the deploy. The original trailing `[ -- ] && ...` test left
-# the script's exit status equal to that test under `set -e`, which made every
-# deploy fail once deploy.sh started invoking sync-skills.sh (issue #433). We
-# normalize the exit code here.
+# A playbook whose frontmatter fails to parse is SKIPPED, not fatal: it emits a
+# "skip ... " line, increments `errors`, and the run continues to this `exit 0`.
+# The skip tolerates an in-progress draft playbook that has not yet gained
+# frontmatter, so staging one does not wedge the deploy; the `errors` count
+# surfaces in the summary above for an operator to notice. The original
+# errors-driven trailing `[ -- ] && ...` test under `set -e` made every deploy
+# fail once deploy.sh started invoking sync-skills.sh (issue #433); this
+# normalized `exit 0` is the explicit success path. (Promoting a malformed
+# playbook to a hard abort is a deliberate behaviour change, NOT part of this
+# PR's reconciled design-concept — which preserves fail-soft — and is left as a
+# separate, independently-grilled change.)
 exit 0

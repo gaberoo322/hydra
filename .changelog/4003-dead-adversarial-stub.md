@@ -1,0 +1,1 @@
+- fix: remove the never-generated hydra-target-adversarial playbook stub (eliminates a per-deploy "no valid frontmatter" skip error) and its dead Redis keys from the reference docs (#4003)
