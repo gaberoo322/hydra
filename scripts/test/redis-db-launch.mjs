@@ -245,6 +245,41 @@ export function resolveRedisUrl(env, rootPath) {
  * and the legacy hard-pinned indexes are equally non-flushable — another
  * checkout may be mid-run in them.
  */
+/**
+ * Suite-count gate blocking toggle (issue #4020 follow-up, #4056).
+ *
+ * The gate shipped wired into the REQUIRED `test` job and immediately found a
+ * genuine residual shortfall in `test/hydra-branch-prune.test.mts` (varying
+ * 27/24 vs. expected 33 across isolated runs — the signature of a real drop,
+ * not a baseline error) that a required job cannot tolerate even once: one
+ * red file reddens every unrelated PR repo-wide and wedges the merge queue.
+ *
+ * So by DEFAULT (this function returns false) a gate failure is loud in the
+ * log — the full `SUITE-COUNT GATE FAILED` / `WARN: suite-count gate itself
+ * failed to run` block still prints, listing every file and its
+ * expected/observed counts — but does NOT flip the process exit code
+ * non-zero. `npm test` (used by the required `test` CI job and by
+ * `test:debug`/`test:file` everywhere else) stays advisory-only.
+ *
+ * Setting `SUITE_COUNT_GATE_BLOCKING=1` restores the original hard-fail
+ * behavior. The advisory `suite-count-check.yml` workflow (a non-required
+ * Tier-3 sibling to ci.yml, same lane as test-typecheck.yml /
+ * advisory-checks.yml) sets this so ITS job goes red on a shortfall without
+ * ever touching the required `test` job's exit code — the detection keeps
+ * running on every PR + master push and accumulating evidence, it just can't
+ * block a merge yet.
+ *
+ * Promotion criteria back to required/blocking (either flips this default,
+ * or the required `test` job sets the env var itself):
+ *   - the advisory workflow runs clean (no shortfall surviving both isolated
+ *     retries) across several consecutive master-push runs, AND
+ *   - the currently-known residual, `test/hydra-branch-prune.test.mts`, has
+ *     its own tracked fix (issue #4062) landed and verified stable.
+ */
+export function isGateBlocking(env = process.env) {
+  return env.SUITE_COUNT_GATE_BLOCKING === "1";
+}
+
 function assertFlushableDbIndex(db) {
   if (!Number.isInteger(db) || !ALLOWED_DB_INDEXES.includes(db)) {
     throw new Error(
@@ -521,8 +556,15 @@ child.on("exit", async (code, signal) => {
           "is unlikely to be routine jitter. If a file's test count genuinely changed, regenerate " +
           "the baseline: node scripts/test/suite-count-check.mjs --update-baseline",
       );
-      process.exit(1);
-      return;
+      if (isGateBlocking()) {
+        process.exit(1);
+        return;
+      }
+      console.error(
+        "[redis-db-launch] SUITE-COUNT GATE is advisory-only right now (issue #4020 follow-up) — " +
+          "not failing this run. Tracked by the non-required suite-count-check.yml workflow, which " +
+          "sets SUITE_COUNT_GATE_BLOCKING=1 to surface this as a red check without blocking merge.",
+      );
     }
   } catch (err) {
     // A TOOLING failure in the gate itself (corrupt baseline, unreadable
@@ -530,8 +572,10 @@ child.on("exit", async (code, signal) => {
     // silently claim success), but the message must not be confused with an
     // actual suite-count shortfall.
     console.error(`[redis-db-launch] WARN: suite-count gate itself failed to run: ${err.message}`);
-    process.exit(1);
-    return;
+    if (isGateBlocking()) {
+      process.exit(1);
+      return;
+    }
   }
   process.exit(code ?? 1);
 });

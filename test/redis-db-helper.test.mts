@@ -373,3 +373,26 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
     );
   });
 });
+
+describe("scripts/test/redis-db-launch.mjs — suite-count gate blocking toggle (#4020 follow-up, PR #4056)", () => {
+  test("defaults to non-blocking (advisory) when SUITE_COUNT_GATE_BLOCKING is unset", async () => {
+    const { isGateBlocking } = await import("../scripts/test/redis-db-launch.mjs");
+    assert.equal(isGateBlocking({}), false);
+  });
+
+  test("stays non-blocking for any value other than the exact string \"1\"", async () => {
+    const { isGateBlocking } = await import("../scripts/test/redis-db-launch.mjs");
+    for (const value of ["true", "yes", "0", "01", " 1", "1 ", ""]) {
+      assert.equal(
+        isGateBlocking({ SUITE_COUNT_GATE_BLOCKING: value }),
+        false,
+        `SUITE_COUNT_GATE_BLOCKING=${JSON.stringify(value)} must not enable blocking mode`,
+      );
+    }
+  });
+
+  test("becomes blocking only when SUITE_COUNT_GATE_BLOCKING is exactly \"1\" (suite-count-check.yml's contract)", async () => {
+    const { isGateBlocking } = await import("../scripts/test/redis-db-launch.mjs");
+    assert.equal(isGateBlocking({ SUITE_COUNT_GATE_BLOCKING: "1" }), true);
+  });
+});
