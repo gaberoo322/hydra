@@ -55,7 +55,7 @@ interface Issue {
 function extractPythonBlock(lhs: string): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const re = new RegExp(
-    `${lhs}=[\\s\\S]*?python3 -c "([\\s\\S]*?)" 2>/dev/null \\|\\| true\\)`,
+    `${lhs}=[\\s\\S]*?python3 -c "\\$\\(cat <<'PY'([\\s\\S]*?)\\nPY\\n\\)" 2>/dev/null \\|\\| true\\)`,
   );
   const m = src.match(re);
   assert.ok(m, `could not locate the ${lhs} python3 block in collect-state.sh`);
