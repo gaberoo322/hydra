@@ -40,7 +40,7 @@ const src = readFileSync(SCRIPT, "utf-8");
 // python3 -c "` and its closing `"`.
 function extractArchEmitter(): string {
   const match = src.match(
-    /printf '%s' "\$ARCH_BOARD_JSON"[\s\S]*?python3 -c "([\s\S]*?)"\s*2>\/dev\/null/,
+    /printf '%s' "\$ARCH_BOARD_JSON"[\s\S]*?python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
   );
   assert.ok(match, "could not locate the arch emitter python block in collect-state.sh");
   return match[1];

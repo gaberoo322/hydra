@@ -44,10 +44,12 @@ set -uo pipefail
 GH_ISSUE_LIST_LIMIT="${HYDRA_GH_ISSUE_LIST_LIMIT:-100}"
 
 # health
-hydra health 2>/dev/null | python3 -c "
+hydra health 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
-try: d=json.load(sys.stdin); print(f'health={d[\"status\"]} redis={d[\"redis\"]}')
-except: print('health=FAIL')"
+try: d=json.load(sys.stdin); print(f'health={d["status"]} redis={d["redis"]}')
+except: print('health=FAIL')
+PY
+)"
 
 # failed services
 echo -n "failed_services="; systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep -c hydra || echo 0
@@ -123,7 +125,7 @@ echo "$_dd_drift"
 # returns `degraded:true` (its `gh` read failed), we drop back to the inline
 # `gh` call so a transient outage never wedges the autopilot turn.
 BOARD_STATE_JSON=$(hydra raw GET /autopilot/board-state 2>/dev/null || true)
-BOARD_STATE_DEGRADED=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "
+BOARD_STATE_DEGRADED=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin)
@@ -131,15 +133,19 @@ try:
   ok = isinstance(d,dict) and not d.get('degraded', False) and 'ready_for_agent' in d
   print('0' if ok else '1')
 except Exception:
-  print('1')" 2>/dev/null || echo 1)
+  print('1')
+PY
+)" 2>/dev/null || echo 1)
 if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
   # Strip the endpoint-only fields (degraded, generatedAt) so the emitted shape
   # matches the historical inline `--jq` output exactly.
-  printf '%s' "$BOARD_STATE_JSON" | python3 -c "
+  printf '%s' "$BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 d=json.load(sys.stdin)
 keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress','blocked','stale_in_progress','stale_blocked']
-print(json.dumps({k:d[k] for k in keys}))"
+print(json.dumps({k:d[k] for k in keys}))
+PY
+)"
 else
   # Fallback: orchestrator down or its gh read degraded — read directly.
   # This jq MUST stay behaviourally identical to `deriveBoardState`
@@ -255,16 +261,18 @@ gh issue list --repo gaberoo322/hydra --state open --label needs-triage \
 # money-critical Target hot path), so a transient outage never wedges the turn.
 TARGET_GH_REPO="${HYDRA_TARGET_GITHUB_REPO:-gaberoo322/hydra-betting}"
 TARGET_BOARD_STATE_JSON=$(hydra raw GET "/autopilot/board-state?scope=target" 2>/dev/null || true)
-TARGET_BOARD_STATE_DEGRADED=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "
+TARGET_BOARD_STATE_DEGRADED=$(printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin)
   ok = isinstance(d,dict) and not d.get('degraded', False) and 'ready_for_agent' in d
   print('0' if ok else '1')
 except Exception:
-  print('1')" 2>/dev/null || echo 1)
+  print('1')
+PY
+)" 2>/dev/null || echo 1)
 if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
-  printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "
+  printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 d=json.load(sys.stdin)
 # Emit only the counts decide.py's Target branch consumes, prefixed target_ so
@@ -272,7 +280,9 @@ d=json.load(sys.stdin)
 print('target_ready_for_agent=' + str(d.get('ready_for_agent', 0)))
 print('target_needs_qa=' + str(d.get('needs_qa', 0)))
 print('target_needs_triage=' + str(d.get('needs_triage', 0)))
-print('target_needs_research=' + str(d.get('needs_research', 0)))"
+print('target_needs_research=' + str(d.get('needs_research', 0)))
+PY
+)"
 else
   # Fallback: orchestrator down or its gh read degraded — read the Target repo
   # directly over REST (never GraphQL — ADR-0031 Decision 6). Note this fallback
@@ -576,7 +586,7 @@ echo
 # dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
 # set, which is exactly today's (no-exclusion) behaviour.
 ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json headRefName,body 2>/dev/null || true)
-ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "
+ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
 import json, re, sys
 try:
   out = set()
@@ -591,7 +601,8 @@ try:
   print(' '.join(str(x) for x in sorted(out)))
 except Exception:
   pass
-" 2>/dev/null || true)
+PY
+)" 2>/dev/null || true)
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)
@@ -640,7 +651,7 @@ ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --labe
 # Step 1 — the union of strict-blocker refs declared across the candidate pool
 # (self-refs excluded), mirroring `resolveOpenBlockers`' ref collection. The
 # two PATTERNS are byte-identical to STRICT_BLOCKER_PATTERN_SOURCES.
-ORCH_BLOCKER_REFS=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
+ORCH_BLOCKER_REFS=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "$(cat <<'PY'
 import json, re, sys
 PATTERNS = [
   r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
@@ -662,7 +673,8 @@ try:
   print(' '.join(str(x) for x in sorted(refs)))
 except Exception:
   pass
-" 2>/dev/null || true)
+PY
+)" 2>/dev/null || true)
 # Step 2 — ONE batched open-state lookup over that union (mirrors
 # fetchOpenBlockerNumbers: a single `gh issue list --state open --search`).
 # FAIL-SAFE: a gh failure treats EVERY referenced blocker as still-OPEN.
@@ -673,7 +685,7 @@ if [ -n "$ORCH_BLOCKER_REFS" ]; then
     # against unrelated matches that merely mention a number). An empty result
     # is CORRECT here (no referenced blocker is open) and is NOT a fail-safe
     # trigger. A parse error despite gh success still fails toward exclusion.
-    ORCH_OPEN_BLOCKERS=$(printf '%s' "$ORCH_OPEN_BLOCKERS_JSON" | ORCH_BLOCKER_REFS="$ORCH_BLOCKER_REFS" python3 -c "
+    ORCH_OPEN_BLOCKERS=$(printf '%s' "$ORCH_OPEN_BLOCKERS_JSON" | ORCH_BLOCKER_REFS="$ORCH_BLOCKER_REFS" python3 -c "$(cat <<'PY'
 import json, os, sys
 try:
   req = {int(x) for x in (os.environ.get('ORCH_BLOCKER_REFS') or '').split() if x.isdigit()}
@@ -683,7 +695,8 @@ try:
   print(' '.join(str(x) for x in sorted(req & open_nums)))
 except Exception:
   print(os.environ.get('ORCH_BLOCKER_REFS') or '')
-" 2>/dev/null || true)
+PY
+)" 2>/dev/null || true)
   else
     # gh failure -> treat every referenced blocker as still open (wait a tick).
     ORCH_OPEN_BLOCKERS="$ORCH_BLOCKER_REFS"
@@ -691,7 +704,7 @@ except Exception:
 fi
 # Step 3 — the candidate numbers blocked by an OPEN strict blocker, given the
 # resolved open set. Re-parses bodies with the same byte-identical patterns.
-ORCH_BLOCKED_DEPENDENCY_ISSUES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_OPEN_BLOCKERS="$ORCH_OPEN_BLOCKERS" python3 -c "
+ORCH_BLOCKED_DEPENDENCY_ISSUES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_OPEN_BLOCKERS="$ORCH_OPEN_BLOCKERS" python3 -c "$(cat <<'PY'
 import json, os, re, sys
 PATTERNS = [
   r'\bblock(?:ed|s)?(?:[\s-]+by)?\s*:?\s*#(\d+)',
@@ -716,13 +729,14 @@ try:
   print(' '.join(str(x) for x in sorted(blocked)))
 except Exception:
   pass
-" 2>/dev/null || true)
+PY
+)" 2>/dev/null || true)
 # Stable candidate order: issue number ASCENDING (oldest first), capped at 10,
 # minus every anchor with dev work already in flight OR an open strict blocker
 # (issue #3965). Both the ordering and the cap live here rather than in the jq
 # so a newly-filed issue can neither reorder nor displace the pool (issue
 # #3711, sub-defect (a)).
-ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_INFLIGHT_ISSUES="$ORCH_INFLIGHT_ISSUES" ORCH_BLOCKED_DEPENDENCY_ISSUES="$ORCH_BLOCKED_DEPENDENCY_ISSUES" python3 -c "
+ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_INFLIGHT_ISSUES="$ORCH_INFLIGHT_ISSUES" ORCH_BLOCKED_DEPENDENCY_ISSUES="$ORCH_BLOCKED_DEPENDENCY_ISSUES" python3 -c "$(cat <<'PY'
 import json, os, sys
 try:
   inflight = {int(x) for x in (os.environ.get('ORCH_INFLIGHT_ISSUES') or '').split() if x.isdigit()}
@@ -740,7 +754,8 @@ try:
     print(n)
 except Exception:
   pass
-" 2>/dev/null || true)
+PY
+)" 2>/dev/null || true)
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
 if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
@@ -755,7 +770,7 @@ if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
       # draft/!gateOk-but-fresh artifact is still "fresh present" per the
       # selector's contract, so we don't re-grill it here either). A stale
       # or unparseable artifact falls through to the trivial gate below.
-      FRESH_OK=$(printf '%s' "$DC_JSON" | python3 -c "
+      FRESH_OK=$(printf '%s' "$DC_JSON" | python3 -c "$(cat <<'PY'
 import json, sys, time
 try:
   d = json.load(sys.stdin)
@@ -764,7 +779,9 @@ try:
   fresh = (now_ms - created) <= (7 * 24 * 60 * 60 * 1000)
   print('1' if fresh else '0')
 except Exception:
-  print('0')" 2>/dev/null || echo "0")
+  print('0')
+PY
+)" 2>/dev/null || echo "0")
       if [ "$FRESH_OK" = "1" ]; then
         # Fresh artifact already present — nothing to grill for this anchor,
         # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711).
@@ -780,9 +797,9 @@ except Exception:
     # straight to dev, needs no design) OR has a `track:` title prefix
     # (calendar-bound measurement window, not implementable now). MECHANICAL=1
     # means suppress; any parse error prints 0 → fall through to the next gate.
-    MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
-import json, sys
-target = int('${n}')
+    MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
+import json, os, sys
+target = int(os.environ['ORCH_GRILL_N'])
 try:
   items = json.load(sys.stdin)
   it = next((x for x in items if int(x.get('number', -1)) == target), None)
@@ -798,7 +815,9 @@ try:
     print('1'); sys.exit(0)
   print('0')
 except Exception:
-  print('0')" 2>/dev/null || echo "0")
+  print('0')
+PY
+)" 2>/dev/null || echo "0")
     if [ "$MECHANICAL" = "1" ]; then
       # Mechanical (cleanup-scan) or calendar-bound (track:) anchor — needs no
       # design concept. Suppress the grill and let dev_orch dispatch directly.
@@ -807,16 +826,18 @@ except Exception:
       # implementable now, so it must NOT be pinned — only the cleanup-scan arm
       # records a dev-ready pick (issue #3711).
       if [ "$ORCH_DEV_READY_PICK" = "none" ] \
-        && printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
-import json, sys
-target = int('${n}')
+        && printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
+import json, os, sys
+target = int(os.environ['ORCH_GRILL_N'])
 try:
   items = json.load(sys.stdin)
   it = next((x for x in items if int(x.get('number', -1)) == target), None)
   labels = {l.get('name', '') for l in ((it or {}).get('labels') or [])}
   sys.exit(0 if 'cleanup-scan' in labels else 1)
 except Exception:
-  sys.exit(1)" 2>/dev/null; then
+  sys.exit(1)
+PY
+)" 2>/dev/null; then
         ORCH_DEV_READY_PICK="issue-${n}"
       fi
       continue
@@ -825,9 +846,9 @@ except Exception:
     # trivial signal. TRIVIAL=1 means "explicit Expected tier: T1/1 stamp AND
     # no needs-design-concept label". Any ambiguity (parse error, missing
     # field) prints 0 → fail-toward-grill.
-    TRIVIAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
-import json, re, sys
-target = int('${n}')
+    TRIVIAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | ORCH_GRILL_N="$n" python3 -c "$(cat <<'PY'
+import json, os, re, sys
+target = int(os.environ['ORCH_GRILL_N'])
 try:
   items = json.load(sys.stdin)
   it = next((x for x in items if int(x.get('number', -1)) == target), None)
@@ -843,7 +864,9 @@ try:
   trivial = re.search(r'Expected\s+tier:\s*T?1\b', body, re.IGNORECASE) is not None
   print('1' if trivial else '0')
 except Exception:
-  print('0')" 2>/dev/null || echo "0")
+  print('0')
+PY
+)" 2>/dev/null || echo "0")
     if [ "$TRIVIAL" = "1" ]; then
       # Provably trivial (T1-stamped, no opt-in label) — suppress the grill
       # and let this anchor fall straight through to dev_orch. Grill-clear by
@@ -1033,7 +1056,7 @@ if ! [[ "$ARCH_WORK_QUEUE" =~ ^[0-9]+$ ]]; then
   ARCH_WORK_QUEUE=0
 fi
 echo -n "arch_last_run_iso="; docker exec hydra-redis-1 redis-cli GET hydra:architecture:last-run 2>/dev/null | tr -d '"' || echo ""
-printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" python3 -c "
+printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
 import json, os, sys
 try:
   d = json.load(sys.stdin)
@@ -1055,7 +1078,8 @@ print('arch_board_open_scan=' + str(arch))
 print('arch_board_saturated=' + ('true' if saturated else 'false'))
 print('cleanup_board_open_scan=' + str(cleanup))
 print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
-" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; }
+PY
+)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; }
 
 # Target cleanup backfill — cleanup_target signal class (the Target mirror of
 # cleanup_orch; operator-approved 2026-06-10).
@@ -1147,7 +1171,7 @@ if [ -n "$TARGET_BOARD_ISSUES_JSON" ]; then
     TARGET_WIRE_OR_RETIRE_LABEL="$TARGET_WIRE_OR_RETIRE_LABEL" \
     TARGET_DESIGN_QA_LABEL="$TARGET_DESIGN_QA_LABEL" \
     TARGET_DESIGN_QA_BOARD_SATURATION_CAP="$TARGET_DESIGN_QA_BOARD_SATURATION_CAP" \
-    TARGET_CLEANUP_BOARD_SATURATION_CAP="$TARGET_CLEANUP_BOARD_SATURATION_CAP" python3 -c "
+    TARGET_CLEANUP_BOARD_SATURATION_CAP="$TARGET_CLEANUP_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
 import json, os, sys
 try:
   rows = json.load(sys.stdin)
@@ -1256,7 +1280,8 @@ except Exception:
   print('design_qa_target_open=0')
   print('design_qa_target_saturated=true')
   print('design_qa_target_due=false')
-" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_needs_triage_items="; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "wire_or_retire_target_unlabelled=0"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
+PY
+)" 2>/dev/null || { echo "target_board_signals_truncated=false"; echo "target_needs_triage_items="; echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; echo "wire_or_retire_target_triage=0"; echo "wire_or_retire_target_available=false"; echo "wire_or_retire_target_unlabelled=0"; echo "design_qa_target_open=0"; echo "design_qa_target_saturated=true"; echo "design_qa_target_due=false"; }
 else
   # Fail closed AND observable: the board read was unreachable/empty, so emit
   # the suppressing defaults (never dispatch a scan/resolver that cannot read
@@ -1298,7 +1323,7 @@ fi
 # Orchestrator-down / empty-index degrades to `false` (nothing to retro),
 # which suppresses the dispatch — the safe default.
 echo -n "retro_run_available="
-hydra raw GET /autopilot/runs?limit=14 2>/dev/null | python3 -c "
+hydra raw GET /autopilot/runs?limit=14 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin)
@@ -1306,7 +1331,9 @@ try:
   completed=[r for r in runs if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running')]
   print('true' if completed else 'false')
 except Exception:
-  print('false')" || echo "false"
+  print('false')
+PY
+)" || echo "false"
 
 # Wayfinder map frontier — AFK working path (issue #3351, epic #3350, ADR-0029).
 #
@@ -1376,14 +1403,15 @@ WF_FRONTIER="none"
 WF_TICKET_TYPE=""
 WF_INFLIGHT_GLOBAL=0
 if [ -n "$WF_MAPS_JSON" ]; then
-  WF_MAP_NUMS=$(printf '%s' "$WF_MAPS_JSON" | python3 -c "
+  WF_MAP_NUMS=$(printf '%s' "$WF_MAPS_JSON" | python3 -c "$(cat <<'PY'
 import json, sys
 try:
   for n in json.load(sys.stdin):
     print(int(n))
 except Exception:
   pass
-" 2>/dev/null || true)
+PY
+)" 2>/dev/null || true)
   for map_n in $WF_MAP_NUMS; do
     # ONE native GraphQL query per map (docs/agents/issue-tracker.md) derives BOTH
     # this map's in-flight count and its frontier pick. Emits a single line:
@@ -1541,10 +1569,12 @@ echo "$WF_STALE_HITL"
 # inside the dispatched scout skill after a successful run, so a
 # crash here doesn't suppress the next tick's retry.
 echo -n "scout_alert_eligible_count="
-hydra raw GET /scout/alert-plan 2>/dev/null | python3 -c "
+hydra raw GET /scout/alert-plan 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try: d=json.load(sys.stdin); print(len(d.get('eligible',[])))
-except: print(0)" || echo 0
+except: print(0)
+PY
+)" || echo 0
 
 # Subscription Usage Tracker — PR B1 eligibility verdict.
 #
@@ -1597,35 +1627,43 @@ echo -n "class_stats_json="
 hydra raw GET /autopilot/class-stats 2>/dev/null || echo '{"scoreboard":{"classes":[]},"shadow":{"verdicts":[]}}'
 
 # capacity-floor (orchestrator self-improvement share)
-hydra raw GET /capacity 2>/dev/null | python3 -c "
+hydra raw GET /capacity 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin); o=d['orchestrator']
-  print(f'capacity_orch_share={o[\"share\"]:.2f} capacity_floor_met={d[\"floorMet\"]} capacity_window={o[\"window\"]}')
-except: print('capacity_floor_met=true capacity_window=0')"
+  print(f'capacity_orch_share={o["share"]:.2f} capacity_floor_met={d["floorMet"]} capacity_window={o["window"]}')
+except: print('capacity_floor_met=true capacity_window=0')
+PY
+)"
 
 # scheduler / cycle
-hydra cycle status 2>/dev/null | python3 -c "
+hydra cycle status 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try: d=json.load(sys.stdin); print('CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE')
-except: print('CODEX_IDLE')"
-hydra scheduler status 2>/dev/null | python3 -c "
+except: print('CODEX_IDLE')
+PY
+)"
+hydra scheduler status 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin)
   s=d.get('state','?'); nm=d.get('consecutiveNonMerges',0)
   stall='ok' if nm<5 else ('hard-stop' if nm>=8 else 'alert')
   print(f'scheduler={s} nonmerges={nm} stall={stall}')
-except: print('scheduler=unknown stall=unknown')"
+except: print('scheduler=unknown stall=unknown')
+PY
+)"
 
 # recommendations
-hydra recommendations 2>/dev/null | python3 -c "
+hydra recommendations 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   items=json.load(sys.stdin)
-  if items: print(f'recommendations={len(items)}: {items[0].get(\"action\",\"?\")[:60]}')
+  if items: print(f'recommendations={len(items)}: {items[0].get("action","?")[:60]}')
   else: print('recommendations=0')
-except: print('recommendations=unavailable')"
+except: print('recommendations=unavailable')
+PY
+)"
 
 # slot-events stream (issue #509) — drained on every turn.
 #
@@ -1643,7 +1681,7 @@ SLOT_EVENTS_STREAM="${HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM:-hydra:autopilot:slot-e
 SLOT_EVENTS_LAST_ID="${HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID:-0}"
 SLOT_EVENTS_COUNT="${HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT:-100}"
 echo -n "slot_events_json="
-docker exec hydra-redis-1 redis-cli XREAD COUNT "$SLOT_EVENTS_COUNT" STREAMS "$SLOT_EVENTS_STREAM" "$SLOT_EVENTS_LAST_ID" 2>/dev/null | python3 -c "
+docker exec hydra-redis-1 redis-cli XREAD COUNT "$SLOT_EVENTS_COUNT" STREAMS "$SLOT_EVENTS_STREAM" "$SLOT_EVENTS_LAST_ID" 2>/dev/null | python3 -c "$(cat <<'PY'
 # XREAD returns either nothing (empty result) or a list of one stream
 # entry: [stream_name, [[id, [k1,v1,k2,v2,...]], ...]]. The redis-cli
 # default formatter outputs that as flat indented text. We re-parse it
@@ -1679,4 +1717,5 @@ while i < len(toks):
   else:
     i += 1
 print(json.dumps({'events': events, 'last_id': last_id}))
-" 2>/dev/null || echo '{"events": [], "last_id": null}'
+PY
+)" 2>/dev/null || echo '{"events": [], "last_id": null}'

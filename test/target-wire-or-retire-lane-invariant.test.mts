@@ -203,7 +203,7 @@ describe("collect-state.sh — wire-or-retire co-presence predicate, negative ca
   /** The Target lane-signal emitter (same block test/autopilot-target-board-signals.test.mts exercises). */
   function extractLaneEmitter(): string {
     const match = collectStateSrc.match(
-      /python3 -c "(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)"\s*2>\/dev\/null/,
+      /python3 -c "\$\(cat <<'PY'(\nimport json, os, sys\ntry:\n  rows = json\.load[\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
     );
     assert.ok(match, "could not locate the Target lane-signal python block in collect-state.sh");
     return match![1];

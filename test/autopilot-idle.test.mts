@@ -352,7 +352,7 @@ describe("collect-state.sh — unified orch_backfill_idle signal (issue #959)", 
 
   function extractBackfillEmitter(): string {
     const match = collectSrc.match(
-      /printf '%s' "\$ARCH_BOARD_JSON"[\s\S]*?python3 -c "([\s\S]*?)"\s*2>\/dev\/null/,
+      /printf '%s' "\$ARCH_BOARD_JSON"[\s\S]*?python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
     );
     assert.ok(match, "could not locate the board-idle emitter python block in collect-state.sh");
     return match![1];

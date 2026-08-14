@@ -1,0 +1,1 @@
+- fix: collect-state.sh no longer runs its Python reducers as shell-interpolated double-quoted strings, closing a command-injection-shaped bug where backticks inside a Python comment executed as shell commands (#4042)
