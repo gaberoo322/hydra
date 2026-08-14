@@ -65,15 +65,51 @@ interface OAuthUsageWindow {
 }
 
 /**
- * The parsed, gating-relevant slice of the OAuth meter. Only the two windows
- * the tracker rebases onto are surfaced: the rolling 5-hour window (drives the
- * 5h `emergencyStop`) and the rolling 7-day window (the weekly headline). The
- * opus/sonnet/extra_usage sub-windows the endpoint also returns are not part of
- * this contract — the tracker does not gate on them.
+ * The account's paid-overage ("extra usage") facility, as reported by the
+ * meter's `extra_usage` object.
+ *
+ * Subscription quota is prepaid; **extra usage bills real money OUTSIDE the
+ * subscription** once a window is exhausted. It is an account-level setting,
+ * not a Hydra one, so it silently follows a `/login` to a different account the
+ * same way the meter itself does — which is exactly why a gate keyed off
+ * {@link armed} must live in code rather than in a per-account env constant.
+ */
+export interface OAuthExtraUsage {
+  /**
+   * True when overage CAN bill: the facility is enabled AND the user has not
+   * switched it off. This is a CAPABILITY flag, not evidence of spend — see
+   * {@link usedCredits} for that.
+   */
+  armed: boolean;
+  /**
+   * The meter's raw `used_credits` counter, or `null` when absent/non-numeric.
+   *
+   * DELIBERATELY UNINTERPRETED. The meter reports `used_credits`,
+   * `monthly_limit`, `currency` and `decimal_places` whose units do not
+   * self-consistently reconcile with the sibling `utilization` field (observed
+   * 2026-08-14: used_credits=51547, monthly_limit=1000, decimal_places=2,
+   * utilization=100.0 — 51547 reads as $515.47 against $1000, i.e. 51.5%, not
+   * 100%). Treat this as an opaque MONOTONIC COUNTER: a change means overage
+   * was billed. Never render it as a currency amount, and never divide it by
+   * the limit.
+   */
+  usedCredits: number | null;
+}
+
+/**
+ * The parsed, gating-relevant slice of the OAuth meter. Two rolling windows —
+ * the 5-hour (drives the 5h `emergencyStop`) and the 7-day (the weekly
+ * headline) — plus the account's paid-overage facility. The opus/sonnet
+ * sub-windows the endpoint also returns are not part of this contract.
+ *
+ * `extraUsage` is OPTIONAL so the many `OAuthUsageData` literals already in the
+ * test suite keep type-checking; an absent value reads as "no overage
+ * facility", never as "armed".
  */
 export interface OAuthUsageData {
   fiveHour: OAuthUsageWindow;
   sevenDay: OAuthUsageWindow;
+  extraUsage?: OAuthExtraUsage;
 }
 
 /**
@@ -209,12 +245,39 @@ function parseWindow(raw: unknown): OAuthUsageWindow | null {
 }
 
 /**
+ * Parse the meter's `extra_usage` object into {@link OAuthExtraUsage}.
+ *
+ * Total function — never null. An absent/garbage object yields
+ * `{armed: false, usedCredits: null}`, which is the SEMANTICALLY correct
+ * reading rather than a mere fail-open: no `extra_usage` object means the
+ * account exposes no overage facility, so nothing can bill.
+ *
+ * `armed` requires `is_enabled === true` AND `user_disabled !== true` — both
+ * strict, so any non-boolean garbage in either field reads as not-armed rather
+ * than coercing. The two fields are independent: an account can have the
+ * facility enabled at the plan level while the user has explicitly turned it
+ * off, and only the combination can actually bill.
+ */
+function parseExtraUsage(raw: unknown): OAuthExtraUsage {
+  if (raw === null || typeof raw !== "object") return { armed: false, usedCredits: null };
+  const r = raw as Record<string, unknown>;
+  const armed = r.is_enabled === true && r.user_disabled !== true;
+  const usedCredits =
+    typeof r.used_credits === "number" && Number.isFinite(r.used_credits) ? r.used_credits : null;
+  return { armed, usedCredits };
+}
+
+/**
  * Parse the full OAuth usage response body into {@link OAuthUsageData}, or
  * `null` when either gating window (five_hour / seven_day) is absent or
- * unparseable. The opus/sonnet/extra_usage sub-windows are ignored — the
- * tracker gates only on the two rolling windows. Maximally defensive: a
+ * unparseable. The opus/sonnet sub-windows are ignored — the tracker gates only
+ * on the two rolling windows plus `extra_usage`. Maximally defensive: a
  * 200-with-garbage body parses to `null`, which the caller classifies as
  * `oauth-usage-parse` (=> fall back to estimate), never as 0% utilization.
+ *
+ * A malformed `extra_usage` never invalidates an otherwise-good body — the two
+ * rolling windows remain the availability contract, and `parseExtraUsage`
+ * degrades to not-armed on its own.
  *
  * Exported so the defensive parse is unit-testable without a live endpoint.
  */
@@ -223,7 +286,7 @@ export function parseOAuthUsageBody(body: unknown): OAuthUsageData | null {
   const fiveHour = parseWindow((body as any).five_hour);
   const sevenDay = parseWindow((body as any).seven_day);
   if (fiveHour === null || sevenDay === null) return null;
-  return { fiveHour, sevenDay };
+  return { fiveHour, sevenDay, extraUsage: parseExtraUsage((body as any).extra_usage) };
 }
 
 /**
