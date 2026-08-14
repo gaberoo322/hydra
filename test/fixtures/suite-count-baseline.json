@@ -421,6 +421,7 @@
   "test/watchdog-launch-flow.test.mts": 3,
   "test/watchdog-pending-work.test.mts": 1,
   "test/watchdog-skill-mirror-drift.test.mts": 1,
+  "test/watchdog-spawn-timeout-ratchet.test.mts": 1,
   "test/weighted-quota-report.test.mts": 4,
   "test/wire-or-retire-carveout-drift.test.mts": 1,
   "test/wiring-caller-check.test.mts": 2,

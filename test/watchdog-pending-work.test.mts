@@ -34,6 +34,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { WATCHDOG_SPAWN_TIMEOUT_MS, throwIfTimedOut } from "./_helpers/watchdog-timeouts.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
@@ -92,8 +93,9 @@ function runHelper(opts: HelperOpts = {}): RunResult {
         HYDRA_DOCKER_BIN: dockerFake,
       },
       encoding: "utf-8",
-      timeout: 20_000,
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
     });
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "read_pending_work harness");
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   } finally {
     rmSync(binDir, { recursive: true, force: true });
@@ -119,8 +121,9 @@ describe("scripts/hydra-watchdog.sh — read_pending_work (issue #3794)", () => 
     // and print their log lines (which hit real docker/HTTP on the host).
     const r = spawnSync("bash", ["-c", `source ${JSON.stringify(WATCHDOG)}`], {
       encoding: "utf-8",
-      timeout: 10_000,
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
     });
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "sourcing hydra-watchdog.sh");
     assert.equal(r.status, 0, `source should exit 0; stderr=${r.stderr}`);
     assert.doesNotMatch(
       r.stdout,
