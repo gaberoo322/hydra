@@ -1,0 +1,2 @@
+- fix: /cycle/history reads the hydra:cycle:index ZSET instead of a scan pattern that never matched real keys, so it returns actual cycle records (#3997)
+- fix: initCycleHash/updateCycleHash now index the cycle id themselves, so cycles registered via POST /cycle/register (not just the autopilot recordCycle path) also show up in /cycle/history (#3997)
