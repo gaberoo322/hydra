@@ -1,0 +1,1 @@
+- fix: design-concept reconciliation gate now parses Markdown-bold/italic `INV-<n>` bullets, not just the plain form (#4037)

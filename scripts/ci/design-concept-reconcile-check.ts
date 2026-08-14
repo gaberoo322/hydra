@@ -222,7 +222,22 @@ function stripBackticks(s: string): string {
   return (s ?? "").trim().replace(/^`+/, "").replace(/`+$/, "").trim();
 }
 
-const ENTRY_RE = /^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?INV[\s-]?(\d+)\b\s*[:.–—-]?\s*(.*)$/;
+/**
+ * `(\*\*|__|\*|_)?` (group 1) optionally consumes a Markdown emphasis opener —
+ * `**`/`__`/`*`/`_` — directly before the `INV-<n>` label, and the later `\1?`
+ * consumes the SAME marker as a closer directly after the digits (e.g.
+ * `**INV-1**`, `*INV-2*`, `__INV-3__`). Per ECMA-262, a backreference to a
+ * group that did not participate matches the empty string, so the unbolded
+ * form (`- INV-1: …`) is untouched: group 1 stays unset and `\1?` contributes
+ * nothing. The digit run is closed with `(?!\d)` rather than `\b` — `_` is a
+ * word character, so `\b` would refuse to fire between the digits and an
+ * underscore-emphasis closer (`INV-3__`), silently dropping the `__…__` form.
+ * The bullet-marker anchor (`^\s*(?:[-*+]|\d+[.)])…`) still requires INV
+ * (optionally emphasised) to follow immediately, so a mid-sentence mention of
+ * "INV-1" elsewhere in a bullet's prose still does not match (issue #4037).
+ */
+const ENTRY_RE =
+  /^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?(\*\*|__|\*|_)?INV[\s-]?(\d+)(?!\d)\1?\s*[:.–—-]?\s*(.*)$/;
 
 /**
  * Parse the reconciliation section into a cited artifact hash plus one entry
@@ -248,7 +263,9 @@ export function parseReconciliationSection(body: string): ParsedSection {
     const m = ENTRY_RE.exec(line);
     if (!m) continue;
 
-    let text = m[2];
+    // m[1] is the optional emphasis marker (unused past the match itself);
+    // m[2] is the INV-<n> digit capture; m[3] is the trailing bullet text.
+    let text = m[3];
     // Absorb wrapped continuation lines.
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j];
@@ -261,7 +278,7 @@ export function parseReconciliationSection(body: string): ParsedSection {
     }
 
     entries.push({
-      index: parseInt(m[1], 10),
+      index: parseInt(m[2], 10),
       quoted: extractQuotedText(text),
       assertion: extractAssertionText(text),
       raw: text.trim(),
