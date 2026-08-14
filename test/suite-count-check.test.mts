@@ -1,0 +1,249 @@
+/**
+ * Tests for scripts/test/suite-count-check.mjs — the per-file top-level
+ * suite/test count detector for the `--test-force-exit` silent-drop race
+ * (issue #4020). See that file's header for the full mechanism.
+ *
+ * No Redis, no network — pure filesystem + string fixtures.
+ */
+import { test, describe, after } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  countTopLevelEntries,
+  compareCapture,
+  testFilesFromArgs,
+} from "../scripts/test/suite-count-check.mjs";
+
+describe("suite-count-check — countTopLevelEntries (static source scan)", () => {
+  test("counts top-level describe() calls", () => {
+    const src = `
+describe("a", () => {
+  test("x", () => {});
+});
+describe("b", () => {
+  test("y", () => {});
+});
+`;
+    assert.equal(countTopLevelEntries(src), 2);
+  });
+
+  test("counts bare top-level test() calls not wrapped in describe", () => {
+    const src = `
+test("a", () => {});
+test("b", () => {});
+test("c", async () => {});
+`;
+    assert.equal(countTopLevelEntries(src), 3);
+  });
+
+  test("does not count nested test()/describe() calls", () => {
+    const src = `
+describe("outer", () => {
+  test("inner 1", () => {});
+  describe("nested describe", () => {
+    test("inner 2", () => {});
+  });
+});
+`;
+    // Only "outer" is top-level; everything else is nested inside its callback.
+    assert.equal(countTopLevelEntries(src), 1);
+  });
+
+  test("counts describe.skip/.only/.todo the same as a plain call", () => {
+    const src = `
+describe.skip("a", () => {});
+test.only("b", () => {});
+describe.todo("c", () => {});
+`;
+    assert.equal(countTopLevelEntries(src), 3);
+  });
+
+  test("handles the 3-arg test(name, options, fn) form (test/build-spritesheet.test.mts shape)", () => {
+    // The options object's own `{` must NOT be mistaken for the callback body
+    // — it is preceded by neither `=>` nor a `function (...)` header.
+    const src = `
+test("a", { skip: "reason" }, () => {
+  test("should not be reachable in this fixture, but if mis-parsed as inline this would still be a describe/test call");
+});
+test("b", { skip: false }, () => {});
+`;
+    assert.equal(countTopLevelEntries(src), 2);
+  });
+
+  test("ignores describe/test-looking text inside comments and strings", () => {
+    const src = `
+// describe("fake top-level from a comment", () => {});
+const s = "describe(\\"also fake, inside a string\\", () => {})";
+/* describe("fake, block comment", () => {}); */
+describe("real one", () => {
+  test("x", () => {});
+});
+`;
+    assert.equal(countTopLevelEntries(src), 1);
+  });
+
+  test("a bare top-level for-loop does not itself add nesting (only a describe/test callback does)", () => {
+    // Mirrors test/hydra-dev-reflection-deposit.test.mts's shape: a for-loop
+    // is not a describe/test call, so a describe() call site directly inside
+    // it is still top-level. Known, documented limitation: this counts the
+    // CALL SITE once — it does not evaluate the loop to know how many times it
+    // fires at runtime (see STATIC_COUNT_OVERRIDES in the source module).
+    const src = `
+for (const name of ["a", "b"]) {
+  describe(\`\${name} suite\`, () => {
+    test("x", () => {});
+  });
+}
+describe("also top-level", () => {});
+`;
+    assert.equal(countTopLevelEntries(src), 2);
+  });
+});
+
+describe("suite-count-check — testFilesFromArgs", () => {
+  test("extracts only .test.mts args, preserving order", () => {
+    const args = [
+      "--test-force-exit",
+      "test/foo.test.mts",
+      "--test-concurrency=1",
+      "test/bar.test.mts",
+    ];
+    assert.deepEqual(testFilesFromArgs(args), ["test/foo.test.mts", "test/bar.test.mts"]);
+  });
+
+  test("returns an empty array when no test files are present", () => {
+    assert.deepEqual(testFilesFromArgs(["--print-url"]), []);
+  });
+});
+
+describe("suite-count-check — compareCapture (comparator)", () => {
+  const scratchDirs: string[] = [];
+  after(() => {
+    for (const dir of scratchDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* intentional: best-effort scratch-dir cleanup on teardown */
+      }
+    }
+  });
+
+  function writeCapture(lines: Array<{ file: string; name: string; ok: boolean }>): string {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-suite-count-"));
+    scratchDirs.push(dir);
+    const path = join(dir, "capture.ndjson");
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    return path;
+  }
+
+  test("ok=true when every relevant file meets its baseline", () => {
+    const capturePath = writeCapture([
+      { file: "test/a.test.mts", name: "s1", ok: true },
+      { file: "test/a.test.mts", name: "s2", ok: true },
+      { file: "test/b.test.mts", name: "s1", ok: true },
+    ]);
+    const baseline = { "test/a.test.mts": 2, "test/b.test.mts": 1 };
+    const result = compareCapture({
+      capturePath,
+      baseline,
+      testFiles: ["test/a.test.mts", "test/b.test.mts"],
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.shortfalls, []);
+    assert.equal(result.checkedFileCount, 2);
+  });
+
+  test("ok=false and names the file + counts when observed is under baseline", () => {
+    const capturePath = writeCapture([
+      { file: "test/a.test.mts", name: "s1", ok: true },
+      // s2 dropped — only 1 of the expected 2 top-level entries fired.
+    ]);
+    const baseline = { "test/a.test.mts": 2 };
+    const result = compareCapture({
+      capturePath,
+      baseline,
+      testFiles: ["test/a.test.mts"],
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.shortfalls, [{ file: "test/a.test.mts", expected: 2, observed: 0 + 1 }]);
+  });
+
+  test("a fully-dropped file (zero capture lines) is still caught — not silently skipped", () => {
+    // This is the worst case the design doc calls out explicitly: a file with
+    // NO capture lines at all must not be treated as "wasn't part of this
+    // run" when it WAS named in testFiles.
+    const capturePath = writeCapture([
+      { file: "test/other.test.mts", name: "s1", ok: true },
+    ]);
+    const baseline = { "test/a.test.mts": 3, "test/other.test.mts": 1 };
+    const result = compareCapture({
+      capturePath,
+      baseline,
+      testFiles: ["test/a.test.mts", "test/other.test.mts"],
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.shortfalls, [{ file: "test/a.test.mts", expected: 3, observed: 0 }]);
+  });
+
+  test("a file with no baseline entry is never checked (new file, no manifest row yet)", () => {
+    const capturePath = writeCapture([
+      { file: "test/brand-new.test.mts", name: "s1", ok: true },
+    ]);
+    const result = compareCapture({
+      capturePath,
+      baseline: {},
+      testFiles: ["test/brand-new.test.mts"],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.checkedFileCount, 0);
+  });
+
+  test("only checks files named in testFiles — a single-file run never flags every OTHER baselined file", () => {
+    const capturePath = writeCapture([
+      { file: "test/a.test.mts", name: "s1", ok: true },
+    ]);
+    // Baseline has many files with high expected counts, but only test/a.test.mts
+    // was part of THIS run.
+    const baseline = {
+      "test/a.test.mts": 1,
+      "test/never-ran-1.test.mts": 50,
+      "test/never-ran-2.test.mts": 100,
+    };
+    const result = compareCapture({
+      capturePath,
+      baseline,
+      testFiles: ["test/a.test.mts"],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.checkedFileCount, 1);
+  });
+
+  test("missing capture file reports a readError but does not throw", () => {
+    const result = compareCapture({
+      capturePath: "/nonexistent/path/capture.ndjson",
+      baseline: { "test/a.test.mts": 1 },
+      testFiles: ["test/a.test.mts"],
+    });
+    assert.ok(result.readError, "must surface a readError for a missing capture file");
+    // With no capture data, everything relevant is a 0-vs-expected shortfall.
+    assert.equal(result.ok, false);
+  });
+
+  test("tolerates a truncated/corrupt final NDJSON line without failing the whole comparison", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-suite-count-"));
+    scratchDirs.push(dir);
+    const path = join(dir, "capture.ndjson");
+    writeFileSync(
+      path,
+      `${JSON.stringify({ file: "test/a.test.mts", name: "s1", ok: true })}\n{"file":"test/a.test.mts","name":"s2","ok":tr`,
+    );
+    const result = compareCapture({
+      capturePath: path,
+      baseline: { "test/a.test.mts": 1 },
+      testFiles: ["test/a.test.mts"],
+    });
+    assert.equal(result.ok, true, "the one valid line already meets baseline 1");
+  });
+});

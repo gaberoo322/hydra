@@ -95,10 +95,12 @@
 
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { connect } from "node:net";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
 import process from "node:process";
+import { compareCapture, loadBaseline, testFilesFromArgs } from "./suite-count-check.mjs";
 
 const REDIS_HOST = "127.0.0.1";
 const REDIS_PORT = 6379;
@@ -296,6 +298,85 @@ function flushDbOnce(db) {
   });
 }
 
+/**
+ * One isolated per-file retry for files that fell short of their baseline in
+ * the full multi-file run (issue #4020). Measured directly during this
+ * change's development: random 30-file batches from this suite hit the
+ * `--test-force-exit` drop on roughly half of runs — wiring the raw
+ * comparison straight into `npm test`'s exit code with zero tolerance would
+ * redden the REQUIRED CI job on most invocations, which is not "detect the
+ * bug," it is a new poison pill (the exact failure class this repo already
+ * routes around elsewhere: `npm audit`'s ambient-red history, seam checks
+ * being advisory-only). Re-running JUST the shortfall file(s) alone — no
+ * contention from ~428 sibling files sharing one event loop — measurably
+ * reduces the race's odds without paying for a full ~9-10 minute re-run of
+ * everything. A shortfall that STILL reproduces after this isolated retry is
+ * unlikely to be routine jitter and is reported as a real failure.
+ */
+async function retryShortfallsInIsolation(result, baseline, redisUrl) {
+  const stillShort = [];
+  const suiteCountCheckPath = fileURLToPath(new URL("./suite-count-check.mjs", import.meta.url));
+  for (const shortfall of result.shortfalls) {
+    const retryCapturePath = resolve(
+      process.cwd(),
+      `.suite-count-retry-${shortfall.file.replace(/[\\/]/g, "_")}.ndjson`,
+    );
+    try {
+      rmSync(retryCapturePath, { force: true });
+    } catch {
+      /* intentional: best-effort stale-retry-capture cleanup */
+    }
+    console.error(
+      `[redis-db-launch] retrying ${shortfall.file} in isolation (expected ${shortfall.expected}, ` +
+        `first pass observed ${shortfall.observed})...`,
+    );
+    spawnSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--test",
+        "--test-force-exit",
+        `--test-reporter=${suiteCountCheckPath}`,
+        `--test-reporter-destination=${retryCapturePath}`,
+        shortfall.file,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, REDIS_URL: redisUrl },
+        stdio: ["ignore", "ignore", "inherit"],
+        timeout: 60_000,
+      },
+    );
+    const retryResult = compareCapture({
+      capturePath: retryCapturePath,
+      baseline,
+      testFiles: [shortfall.file],
+    });
+    try {
+      rmSync(retryCapturePath, { force: true });
+    } catch {
+      /* intentional: best-effort retry-capture cleanup */
+    }
+    if (retryResult.ok) {
+      console.error(
+        `[redis-db-launch]   ${shortfall.file}: retry met baseline (${shortfall.expected}) — routine jitter, not a real drop.`,
+      );
+    } else {
+      const retried = retryResult.shortfalls[0] ?? shortfall;
+      console.error(
+        `[redis-db-launch]   ${shortfall.file}: retry STILL short (expected ${retried.expected}, observed ${retried.observed}).`,
+      );
+      stillShort.push(retried);
+    }
+  }
+  return {
+    ok: stillShort.length === 0,
+    shortfalls: stillShort,
+    readError: null,
+    checkedFileCount: result.checkedFileCount,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // CLI entrypoint. Guarded so this module can be IMPORTED for its exported pure
 // helpers (deriveDbIndex / resolveRedisUrl / parseOwnedDbIndex) without running
@@ -343,6 +424,28 @@ if (resolved.db !== null) {
   );
 }
 
+// Per-file top-level suite/test count gate (issue #4020). `--test-force-exit`
+// (above, required — see scripts/test/suite-count-check.mjs's header for why)
+// can silently tear down not-yet-settled subtests: exit 0, `# fail 0`, whole
+// suites just never ran. scripts/test/suite-count-check.mjs's reporter mode
+// streams a durable per-entry NDJSON capture DURING the run (survives the
+// forced exit for whatever fired); this launcher compares that capture
+// against the checked-in baseline ONLY AFTER the child has fully terminated —
+// running the comparison inside the measured process would expose the
+// comparison itself to the identical race.
+const SUITE_COUNT_CAPTURE_FILE = ".suite-count-capture.ndjson";
+const testFiles = testFilesFromArgs(args);
+const capturePath = resolve(process.cwd(), SUITE_COUNT_CAPTURE_FILE);
+if (testFiles.length > 0) {
+  // Fresh capture every run — a stale file from a prior invocation must never
+  // leak into this run's comparison.
+  try {
+    rmSync(capturePath, { force: true });
+  } catch (err) {
+    console.error(`[redis-db-launch] WARN: could not clear stale capture file: ${err.message}`);
+  }
+}
+
 const child = spawn(args[0], args.slice(1), {
   stdio: "inherit",
   env: { ...process.env, REDIS_URL: resolved.url },
@@ -351,10 +454,49 @@ child.on("error", (err) => {
   console.error(`[redis-db-launch] failed to spawn ${args[0]}: ${err.message}`);
   process.exit(1);
 });
-child.on("exit", (code, signal) => {
+child.on("exit", async (code, signal) => {
   if (signal) {
     // Re-raise so the parent observes the same termination signal.
     process.kill(process.pid, signal);
+    return;
+  }
+  if (testFiles.length === 0 || !existsSync(capturePath)) {
+    // Not a suite-count-instrumented test invocation (no --test-reporter
+    // pointed at suite-count-check.mjs, or a non-test command) — nothing to
+    // gate on.
+    process.exit(code ?? 1);
+    return;
+  }
+  try {
+    const baseline = loadBaseline();
+    let result = compareCapture({ capturePath, baseline, testFiles });
+    if (!result.ok) {
+      result = await retryShortfallsInIsolation(result, baseline, resolved.url);
+    }
+    if (!result.ok) {
+      console.error(
+        `[redis-db-launch] SUITE-COUNT GATE FAILED (issue #4020) — ${result.shortfalls.length} ` +
+          `file(s) STILL reported FEWER top-level suites/tests than expected after an isolated ` +
+          `per-file retry. This is the silent --test-force-exit drop, not a project-code regression:`,
+      );
+      for (const s of result.shortfalls) {
+        console.error(`  ${s.file}: expected ${s.expected}, observed ${s.observed}`);
+      }
+      console.error(
+        "[redis-db-launch] a shortfall that survives an isolated single-file retry is unlikely " +
+          "to be routine jitter. If a file's test count genuinely changed, regenerate the " +
+          "baseline: node scripts/test/suite-count-check.mjs --update-baseline",
+      );
+      process.exit(1);
+      return;
+    }
+  } catch (err) {
+    // A TOOLING failure in the gate itself (corrupt baseline, unreadable
+    // capture) is distinct from a detected drop — fail loud either way (never
+    // silently claim success), but the message must not be confused with an
+    // actual suite-count shortfall.
+    console.error(`[redis-db-launch] WARN: suite-count gate itself failed to run: ${err.message}`);
+    process.exit(1);
     return;
   }
   process.exit(code ?? 1);

@@ -42,6 +42,11 @@ secrets.json
 # on every debug run, never committed.
 test-debug.tap
 
+# Per-run NDJSON capture from scripts/test/suite-count-check.mjs's reporter
+# mode (issue #4020) — regenerated on every `npm test` / `test:debug` /
+# `test:file` run, never committed.
+.suite-count-capture.ndjson
+
 # Generated config artifacts (issue #1739) — runtime output that keeps showing
 # up as untracked in the main ~/hydra tree, tripping the deploy.sh dirty-tree
 # guard (post-#551 contract) and giving agents grounding against ~/hydra phantom
