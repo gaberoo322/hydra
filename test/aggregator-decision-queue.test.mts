@@ -290,7 +290,7 @@ describe("addDays — pure UTC calendar primitive", () => {
 
 describe("getDecisionQueue — happy path", () => {
   test("merges digest refs, ready-for-human, and needs-info into one age-sorted list", async () => {
-    const items = await getDecisionQueue({
+    const { items } = await getDecisionQueue({
       now: NOW,
       listIssuesBySearchOrEmpty: async (search) => {
         // Only "today"'s digest exists; yesterday's resolves empty.
@@ -349,7 +349,7 @@ describe("getDecisionQueue — happy path", () => {
 
 describe("getDecisionQueue — empty state", () => {
   test("returns [] when no source has items", async () => {
-    const items = await getDecisionQueue({
+    const { items } = await getDecisionQueue({
       now: NOW,
       listIssuesBySearchOrEmpty: async () => [],
       listIssuesByLabelOrEmpty: async () => [],
@@ -364,7 +364,7 @@ describe("getDecisionQueue — empty state", () => {
 
 describe("getDecisionQueue — sub-source failure isolation", () => {
   test("digest reader rejecting → labeled lists still produce the queue", async () => {
-    const items = await getDecisionQueue({
+    const { items } = await getDecisionQueue({
       now: NOW,
       // The *OrEmpty readers normally degrade to []; this models a harder
       // failure (the reader rejecting) to prove allSettled isolation.

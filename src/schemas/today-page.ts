@@ -109,9 +109,9 @@ export type DecisionItemSource = z.infer<typeof DecisionItemSourceSchema>;
 
 /**
  * Response body for `GET /api/v2/today/decision-queue`. The aggregator
- * returns an array — the schema wraps it under `{ items }` so the route
- * has a place to grow other top-level fields (counts, generatedAt) later
- * without breaking clients.
+ * returns its raw decision items — the schema wraps them under `{ items }`
+ * alongside the trust-contract evidence (ADR-0034 §5.2) so a client can tell
+ * a genuine zero-item day apart from a silent total sub-fetch failure.
  */
 const DecisionItemSchema = z
   .object({
@@ -125,9 +125,25 @@ const DecisionItemSchema = z
   })
   .strict();
 
-const DecisionQueueResponseSchema = z
+export const DecisionQueueResponseSchema = z
   .object({
     items: z.array(DecisionItemSchema),
+    /**
+     * Pre-dedup raw row count from the fulfilled sub-fetches — proof the
+     * lookup actually ran. ADR-0034 §5.2: zero must be ASSERTED, not inferred.
+     * `scanned` plus `sourcesOk` let the client distinguish a genuine empty
+     * day (all sub-fetches fulfilled, scanned: 0) from a silent total
+     * sub-fetch failure (items: [] but sourcesOk: false) — the #3997
+     * `/cycle/history` failure mode this contract exists to close.
+     */
+    scanned: z.number().int().nonnegative(),
+    /**
+     * True iff every underlying GitHub sub-fetch settled fulfilled — the
+     * emptiness assertion. `false` demotes the client straight to UNKNOWN
+     * regardless of `items`, because a partially/fully failed lookup cannot
+     * prove the list is complete.
+     */
+    sourcesOk: z.boolean(),
     generatedAt: z.string(),
   })
   .strict();

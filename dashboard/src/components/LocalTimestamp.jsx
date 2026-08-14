@@ -23,12 +23,16 @@ import { localTimestampParts } from "../lib/page-item-format.ts";
  *   Unix-epoch-seconds (the two shapes the API sends). Null/invalid renders
  *   the em-dash placeholder with no tooltip.
  * @param {string} [props.className]  passed through to the wrapping <time>.
+ * @param {boolean} [props.stale=false]  when true, render the timestamp in the
+ *   amber "stale" colour (ADR-0034 §5.4) so an aged as-of marker is visually
+ *   distinct from a fresh one at a glance.
  */
-export default function LocalTimestamp({ ts, className }) {
+export default function LocalTimestamp({ ts, className, stale = false }) {
   const { compact, title } = localTimestampParts(ts);
   // `title=""` reads as "no tooltip"; only attach one when we have a full form.
+  const classes = stale ? `text-amber-400 ${className || ""}`.trim() : className;
   return (
-    <time className={className} title={title || undefined}>
+    <time className={classes} title={title || undefined}>
       {compact}
     </time>
   );

@@ -39,7 +39,7 @@ import {
 import {
   getDecisionQueue,
   type DecisionQueueDeps,
-  type DecisionItem,
+  type DecisionQueueResult,
 } from "../aggregators/decision-queue.ts";
 import {
   getStuckItems,
@@ -72,7 +72,7 @@ export interface TodayPageRouterDeps {
     windowHours: number,
     deps?: OvernightSummaryDeps,
   ) => Promise<OvernightSummaryResponse>;
-  getDecisionQueue?: (deps?: DecisionQueueDeps) => Promise<DecisionItem[]>;
+  getDecisionQueue?: (deps?: DecisionQueueDeps) => Promise<DecisionQueueResult>;
   getStuckItems?: (deps?: StuckItemsDeps) => Promise<StuckItems>;
   getRecentMerges?: (
     limit: number,
@@ -111,16 +111,24 @@ export function createTodayPageRouter(deps: TodayPageRouterDeps = {}) {
   );
 
   // -------------------------------------------------------------------------
-  // GET /v2/today/decision-queue — slice 2
+  // GET /v2/today/decision-queue — slice 2 (+ ADR-0034 §5.2 trust evidence)
   // -------------------------------------------------------------------------
   router.get(
     "/today/decision-queue",
     aggregatorRouteNoQuery(
       "v2/today/decision-queue",
-      async (): Promise<DecisionQueueResponse> => ({
-        items: await aggregateDecisionQueue(),
-        generatedAt: new Date().toISOString(),
-      }),
+      async (): Promise<DecisionQueueResponse> => {
+        // Forward the asserted-emptiness evidence (scanned / sourcesOk) so the
+        // client can distinguish a genuine empty day from a silent sub-fetch
+        // failure — the route cannot infer it (the aggregator never throws).
+        const queue = await aggregateDecisionQueue();
+        return {
+          items: queue.items,
+          scanned: queue.scanned,
+          sourcesOk: queue.sourcesOk,
+          generatedAt: new Date().toISOString(),
+        };
+      },
     ),
   );
 

@@ -12,20 +12,36 @@ import { Section } from "./Section.jsx";
  * Polls /api/today/decision-queue every 30s per PRD #615. Thin renderer
  * over the page-item seam (issue #822): DecisionSourceBadge + the shared
  * coarse-age formatter (relativeAge).
+ *
+ * Trust contract (ADR-0034 §5, tracer bullet #4006): the seam now derives
+ * unknown/stale/empty from the payload's `sourcesOk` + `generatedAt`. This
+ * panel declares a minutes-tier freshness budget (attention data) and
+ * forwards the resolved status into Section so an unasserted empty renders
+ * UNKNOWN — never a confident-looking zero — while the as-of age stays
+ * visible in every branch.
  */
 export function OperatorDecisionQueue() {
-  const { items, status, error, loading } = usePageItems("/today/decision-queue", {
+  const { items, data, status, error, loading } = usePageItems("/today/decision-queue", {
     poll: 30_000,
+    // ADR-0034 §5: attention data is a minutes-tier surface — a payload older
+    // than 5 min is stale (the queue may have changed since it was generated).
+    freshnessMs: 5 * 60 * 1000,
   });
 
+  // Trust mapping: a failed refresh WITH retained data is `stale` (show the
+  // data, aged); only a hard `unknown` surfaces the raw failure message, muted
+  // inside the UNKNOWN block — never as a confident value.
   return (
     <Section
       title="Operator decision queue"
       subtitle="Items waiting on you — oldest first."
       count={items.length}
       loading={loading}
-      error={error}
+      error={status === "stale" ? null : error}
       empty={status === "empty"}
+      unknown={status === "unknown"}
+      stale={status === "stale"}
+      generatedAt={data?.generatedAt}
       emptyMessage="Inbox zero. Nothing waiting on a human decision."
     >
       <ul className="divide-y divide-zinc-700/50">
