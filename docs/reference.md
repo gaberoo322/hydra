@@ -43,8 +43,6 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:specs:index` | Sorted set -- spec IDs |
 | `hydra:plans:cache:{hash}` | Cached plan results (LRU) |
 | `hydra:alerts` | List -- dashboard alerts (kept 100) |
-| `hydra:adversarial:stats` | Adversarial validation statistics |
-| `hydra:adversarial:tracking` | Merge tracking for revert correlation |
 | `hydra:regression-hunt:last` | Timestamp of last regression hunt (3-day cooldown) |
 | `hydra:pattern-detector:cooldowns` | Pattern detector alert cooldowns |
 | `hydra:blocked:last-escalation` | Timestamp of last blocked-item escalation |
