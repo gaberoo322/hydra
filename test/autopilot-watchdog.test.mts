@@ -70,6 +70,15 @@ function makeTemp(): { dir: string; state: string; heartbeat: string } {
  * run_service_liveness (real `systemctl restart`) and run_deploy_drift
  * (can exec deploy.sh) from firing during the test.
  */
+// The wedge block itself does no network I/O in test mode, but this test
+// still spawns a real bash process on a shared host — under CI load (4
+// runners sharing one box with the orchestrator, Redis, and live autopilot
+// subagents) even a trivial spawn can stall well past a tight ceiling. Match
+// the generous, honest ceiling used by the other two watchdog test files
+// (issue #4044) rather than independently tuning a tighter one that keeps
+// getting blown by ambient host load.
+const WATCHDOG_TIMEOUT_MS = 120_000;
+
 function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const driver = [
     "set -euo pipefail",
@@ -82,8 +91,18 @@ function runWatchdog(env: Record<string, string>): { status: number; stdout: str
   const r = spawnSync("bash", ["-c", driver], {
     env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
-    timeout: 15_000, // generous — wedge block should never block in test mode
+    timeout: WATCHDOG_TIMEOUT_MS,
   });
+  // spawnSync kills the child on timeout: status becomes null (not a real
+  // exit code) and error.code is "ETIMEDOUT". Report that explicitly rather
+  // than letting it fall through as a misleading "-1 !== 0" assertion
+  // failure (issue #4044).
+  if (r.error?.code === "ETIMEDOUT") {
+    throw new Error(
+      `watchdog wedge block exceeded ${WATCHDOG_TIMEOUT_MS}ms timeout (killed with ${r.signal ?? "unknown signal"}); ` +
+        `stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`,
+    );
+  }
   return {
     status: r.status ?? -1,
     stdout: r.stdout ?? "",

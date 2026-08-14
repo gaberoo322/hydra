@@ -85,6 +85,13 @@ function regenerateInto(fixtureDir: string, claudeDir: string, codexDir: string)
   assert.equal(r.status, 0, `fixture regeneration failed: ${r.stderr}`);
 }
 
+// scripts/hydra-watchdog.sh's worst case is ~55s (9 curl calls, up to
+// --max-time 10, plus a sleep 5) — see issue #4044. 20s left only a slim
+// margin locally and reddened this REQUIRED gate on unrelated PRs whenever
+// the shared CI box was under load. 120s is comfortably above the script's
+// real worst case; this bounds a hang, not a slow-but-correct run.
+const WATCHDOG_TIMEOUT_MS = 120_000;
+
 function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync(WATCHDOG, [], {
     // Force the autopilot-wedge block to early-exit so the test doesn't
@@ -98,8 +105,18 @@ function runWatchdog(env: Record<string, string>): { status: number; stdout: str
       PATH: process.env.PATH ?? "",
     },
     encoding: "utf-8",
-    timeout: 20_000,
+    timeout: WATCHDOG_TIMEOUT_MS,
   });
+  // spawnSync kills the child on timeout: status becomes null (not a real
+  // exit code) and error.code is "ETIMEDOUT". Report that explicitly rather
+  // than letting it fall through as a misleading "-1 !== 0" assertion
+  // failure (issue #4044).
+  if (r.error?.code === "ETIMEDOUT") {
+    throw new Error(
+      `watchdog script exceeded ${WATCHDOG_TIMEOUT_MS}ms timeout (killed with ${r.signal ?? "unknown signal"}); ` +
+        `stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`,
+    );
+  }
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
