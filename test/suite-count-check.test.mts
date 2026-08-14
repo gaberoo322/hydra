@@ -100,6 +100,72 @@ describe("also top-level", () => {});
 `;
     assert.equal(countTopLevelEntries(src), 2);
   });
+
+  test("a regex literal containing a quote character does not corrupt downstream brace tracking (real bug, #4020 PR)", () => {
+    // Discovered against test/branch-prune-script.test.mts: a regex literal
+    // like /"\$FOO"/ (matching quoted shell-script text) was previously
+    // mistaken for a real string starting at its embedded `"`, which then
+    // consumed real code (including a later describe/test call's braces) as
+    // if it were still "inside a string" — corrupting every count after it.
+    // True count here is 1 (one top-level describe; the nested test() reads
+    // a regex containing a literal double-quote and must not be miscounted
+    // as ending the outer describe early or opening a phantom nested scope).
+    const src = `
+describe("outer", () => {
+  test("matches quoted text", () => {
+    const text = "some source";
+    const match = text.match(/if \\[ "\\$FOO" -gt 0 \\]; then/);
+    assert.ok(match);
+  });
+});
+describe("also top-level, must still be seen", () => {});
+`;
+    assert.equal(countTopLevelEntries(src), 2);
+  });
+
+  test("a regex literal with a {n} quantifier does not leak real braces (real bug, #4020 PR)", () => {
+    const src = `
+describe("outer", () => {
+  test("checks a mode string", () => {
+    assert.match(mode, /^[7][0-9]{2}$/);
+  });
+});
+`;
+    assert.equal(countTopLevelEntries(src), 1);
+  });
+
+  test("RegExp.prototype.test(...) is NOT mistaken for node:test's test() (real bug, #4020 PR)", () => {
+    // Discovered against test/autopilot-hooks.test.mts: `someRegex.test(x)`
+    // (JS's built-in RegExp method, used throughout this suite to assert
+    // against captured shell/log output) matched the old "\btest\s*\(" regex
+    // as a false top-level test() call — inflating the file's baseline from
+    // a true 6 to a miscounted 9 (three `.test(` call sites). A DOT
+    // immediately before "test"/"describe" means it's a property access on
+    // some other value, never node:test's own function.
+    const src = `
+function isDone(lines, i) {
+  while (/^ok/.test(lines[i])) {
+    i++;
+  }
+  return i;
+}
+describe("real one", () => {
+  test("x", () => {});
+});
+`;
+    assert.equal(countTopLevelEntries(src), 1);
+  });
+
+  test("describe.skip(...) / test.only(...) still count — the dot-exclusion only blocks a DIFFERENT object's property access", () => {
+    // Guards against an overcorrection: the (?<!\.) fix must not also reject
+    // the legitimate `describe.skip(`/`test.only(` suffix-modifier form,
+    // since there the dot sits AFTER "describe"/"test", not before it.
+    const src = `
+describe.skip("a", () => {});
+test.only("b", () => {});
+`;
+    assert.equal(countTopLevelEntries(src), 2);
+  });
 });
 
 describe("suite-count-check — testFilesFromArgs", () => {

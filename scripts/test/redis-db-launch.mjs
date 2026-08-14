@@ -299,9 +299,9 @@ function flushDbOnce(db) {
 }
 
 /**
- * One isolated per-file retry for files that fell short of their baseline in
- * the full multi-file run (issue #4020). Measured directly during this
- * change's development: random 30-file batches from this suite hit the
+ * Up to 2 isolated per-file retry attempts for files that fell short of their
+ * baseline in the full multi-file run (issue #4020). Measured directly during
+ * this change's development: random 30-file batches from this suite hit the
  * `--test-force-exit` drop on roughly half of runs — wiring the raw
  * comparison straight into `npm test`'s exit code with zero tolerance would
  * redden the REQUIRED CI job on most invocations, which is not "detect the
@@ -310,9 +310,30 @@ function flushDbOnce(db) {
  * being advisory-only). Re-running JUST the shortfall file(s) alone — no
  * contention from ~428 sibling files sharing one event loop — measurably
  * reduces the race's odds without paying for a full ~9-10 minute re-run of
- * everything. A shortfall that STILL reproduces after this isolated retry is
- * unlikely to be routine jitter and is reported as a real failure.
+ * everything.
+ *
+ * ONE attempt was not enough. Measured against a real 200-file batch of this
+ * suite: several files (`class-stats.test.mts`, `autopilot-hooks.test.mts`,
+ * others) still fell short on their FIRST isolated retry, immediately after a
+ * large run — but running the exact same file standalone moments later, once
+ * the machine had settled, came back clean. That is the same
+ * "machine-contention" mechanism issue #4020's own research documents for the
+ * adjacent SIGTERM case (three concurrent local `npm test` runs on the same
+ * host as a CI runner reddened a job that passed clean on an idle machine) —
+ * a retry fired back-to-back immediately after a big run is not truly
+ * "isolated" from a load perspective. A short pause before each attempt plus
+ * a second attempt cuts the odds of BOTH attempts landing during a residual
+ * load spike roughly quadratically vs. one attempt. A shortfall that STILL
+ * reproduces after BOTH attempts is unlikely to be routine jitter and is
+ * reported as a real failure.
  */
+const RETRY_ATTEMPTS = 2;
+const RETRY_SETTLE_DELAY_MS = 2_000;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function retryShortfallsInIsolation(result, baseline, redisUrl) {
   const stillShort = [];
   const suiteCountCheckPath = fileURLToPath(new URL("./suite-count-check.mjs", import.meta.url));
@@ -321,52 +342,64 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
       process.cwd(),
       `.suite-count-retry-${shortfall.file.replace(/[\\/]/g, "_")}.ndjson`,
     );
-    try {
-      rmSync(retryCapturePath, { force: true });
-    } catch {
-      /* intentional: best-effort stale-retry-capture cleanup */
-    }
-    console.error(
-      `[redis-db-launch] retrying ${shortfall.file} in isolation (expected ${shortfall.expected}, ` +
-        `first pass observed ${shortfall.observed})...`,
-    );
-    spawnSync(
-      process.execPath,
-      [
-        "--experimental-strip-types",
-        "--test",
-        "--test-force-exit",
-        `--test-reporter=${suiteCountCheckPath}`,
-        `--test-reporter-destination=${retryCapturePath}`,
-        shortfall.file,
-      ],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, REDIS_URL: redisUrl },
-        stdio: ["ignore", "ignore", "inherit"],
-        timeout: 60_000,
-      },
-    );
-    const retryResult = compareCapture({
-      capturePath: retryCapturePath,
-      baseline,
-      testFiles: [shortfall.file],
-    });
-    try {
-      rmSync(retryCapturePath, { force: true });
-    } catch {
-      /* intentional: best-effort retry-capture cleanup */
-    }
-    if (retryResult.ok) {
+    let resolved = null;
+    for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+      // A short settle delay before each attempt gives trailing load from the
+      // just-finished (potentially large) main run a moment to drain, rather
+      // than firing the retry into the same contention that likely caused
+      // the first-pass drop.
+      await sleep(RETRY_SETTLE_DELAY_MS);
+      try {
+        rmSync(retryCapturePath, { force: true });
+      } catch {
+        /* intentional: best-effort stale-retry-capture cleanup */
+      }
       console.error(
-        `[redis-db-launch]   ${shortfall.file}: retry met baseline (${shortfall.expected}) — routine jitter, not a real drop.`,
+        `[redis-db-launch] retrying ${shortfall.file} in isolation, attempt ${attempt}/${RETRY_ATTEMPTS} ` +
+          `(expected ${shortfall.expected}, prior observed ${shortfall.observed})...`,
       );
-    } else {
+      spawnSync(
+        process.execPath,
+        [
+          "--experimental-strip-types",
+          "--test",
+          "--test-force-exit",
+          `--test-reporter=${suiteCountCheckPath}`,
+          `--test-reporter-destination=${retryCapturePath}`,
+          shortfall.file,
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, REDIS_URL: redisUrl },
+          stdio: ["ignore", "ignore", "inherit"],
+          timeout: 60_000,
+        },
+      );
+      const retryResult = compareCapture({
+        capturePath: retryCapturePath,
+        baseline,
+        testFiles: [shortfall.file],
+      });
+      try {
+        rmSync(retryCapturePath, { force: true });
+      } catch {
+        /* intentional: best-effort retry-capture cleanup */
+      }
+      if (retryResult.ok) {
+        console.error(
+          `[redis-db-launch]   ${shortfall.file}: attempt ${attempt} met baseline (${shortfall.expected}) — routine jitter, not a real drop.`,
+        );
+        resolved = true;
+        break;
+      }
       const retried = retryResult.shortfalls[0] ?? shortfall;
       console.error(
-        `[redis-db-launch]   ${shortfall.file}: retry STILL short (expected ${retried.expected}, observed ${retried.observed}).`,
+        `[redis-db-launch]   ${shortfall.file}: attempt ${attempt} STILL short (expected ${retried.expected}, observed ${retried.observed}).`,
       );
-      stillShort.push(retried);
+      resolved = { retried };
+    }
+    if (resolved !== true) {
+      stillShort.push(resolved && resolved.retried ? resolved.retried : shortfall);
     }
   }
   return {
@@ -476,16 +509,17 @@ child.on("exit", async (code, signal) => {
     if (!result.ok) {
       console.error(
         `[redis-db-launch] SUITE-COUNT GATE FAILED (issue #4020) — ${result.shortfalls.length} ` +
-          `file(s) STILL reported FEWER top-level suites/tests than expected after an isolated ` +
-          `per-file retry. This is the silent --test-force-exit drop, not a project-code regression:`,
+          `file(s) STILL reported FEWER top-level suites/tests than expected after ${RETRY_ATTEMPTS} ` +
+          `isolated per-file retry attempts. This is the silent --test-force-exit drop, not a ` +
+          `project-code regression:`,
       );
       for (const s of result.shortfalls) {
         console.error(`  ${s.file}: expected ${s.expected}, observed ${s.observed}`);
       }
       console.error(
-        "[redis-db-launch] a shortfall that survives an isolated single-file retry is unlikely " +
-          "to be routine jitter. If a file's test count genuinely changed, regenerate the " +
-          "baseline: node scripts/test/suite-count-check.mjs --update-baseline",
+        `[redis-db-launch] a shortfall that survives ${RETRY_ATTEMPTS} isolated single-file retries ` +
+          "is unlikely to be routine jitter. If a file's test count genuinely changed, regenerate " +
+          "the baseline: node scripts/test/suite-count-check.mjs --update-baseline",
       );
       process.exit(1);
       return;

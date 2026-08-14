@@ -217,10 +217,32 @@ export function testFilesFromArgs(args) {
  * as ordinary literal content (a known, accepted simplification — no test name
  * in this repo interpolates braces).
  */
+/**
+ * Characters after which a `/` is (almost) certainly DIVISION, not a regex
+ * literal's opening slash — the standard disambiguation every JS-ish lexer
+ * needs (Acorn calls this `exprAllowed`). Getting this wrong in the OTHER
+ * direction (treating a regex as division) is the dangerous case: the
+ * regex's raw content — which routinely contains `"`/`'` characters when a
+ * test matches shell/JSON source text, e.g. `/"\$FOO"/ ` — then gets scanned
+ * as ordinary code, and an embedded quote char is misread as a real string
+ * delimiter, corrupting brace-depth tracking for everything downstream
+ * (issue #4020 PR discussion — measured directly: this exact bug inflated
+ * the baseline for test/branch-prune-script.test.mts from a true 1 to a
+ * miscounted 3). Known accepted gap: a `/` immediately after a keyword like
+ * `return`/`typeof`/`case` still misclassifies as division, since this is a
+ * lightweight heuristic, not a full tokenizer — no top-level describe/test
+ * scan target in this repo currently hits that pattern.
+ */
+const DIVISION_CANNOT_FOLLOW_WORDCHAR = /[A-Za-z0-9_$]/;
+const REGEX_CANNOT_FOLLOW = new Set([")", "]", "}"]);
+
 function stripLiteralsAndComments(src) {
   let out = "";
   let i = 0;
   const n = src.length;
+  // Last non-whitespace character already scanned, used ONLY to disambiguate
+  // a `/` as a regex-literal start vs. a division operator.
+  let lastSignificant = "";
   while (i < n) {
     const c = src[i];
     const c2 = src[i + 1];
@@ -257,9 +279,60 @@ function stripLiteralsAndComments(src) {
       }
       out += " ";
       i++;
+      lastSignificant = quote;
+      continue;
+    }
+    if (
+      c === "/" &&
+      !DIVISION_CANNOT_FOLLOW_WORDCHAR.test(lastSignificant) &&
+      !REGEX_CANNOT_FOLLOW.has(lastSignificant)
+    ) {
+      // Regex literal: scan to the closing unescaped `/`, treating a
+      // character class (`[...]`) as opaque (a `/` inside `[...]` does not
+      // close the regex), then consume trailing flag letters.
+      out += " ";
+      i++;
+      let inClass = false;
+      while (i < n) {
+        if (src[i] === "\\") {
+          out += "  ";
+          i += 2;
+          continue;
+        }
+        if (src[i] === "[") {
+          inClass = true;
+          out += " ";
+          i++;
+          continue;
+        }
+        if (src[i] === "]") {
+          inClass = false;
+          out += " ";
+          i++;
+          continue;
+        }
+        if (src[i] === "/" && !inClass) {
+          out += " ";
+          i++;
+          break;
+        }
+        if (src[i] === "\n") {
+          // Unterminated regex on this line — bail without consuming the
+          // newline, matching the string-literal handler's leniency.
+          break;
+        }
+        out += " ";
+        i++;
+      }
+      while (i < n && /[a-zA-Z]/.test(src[i])) {
+        out += " ";
+        i++;
+      }
+      lastSignificant = "/";
       continue;
     }
     out += c;
+    if (!/\s/.test(c)) lastSignificant = c;
     i++;
   }
   return out;
@@ -273,7 +346,15 @@ function stripLiteralsAndComments(src) {
 export function countTopLevelEntries(source) {
   const sanitized = stripLiteralsAndComments(source);
 
-  const callRe = /\b(?:describe|test)(?:\s*\.\s*(?:skip|only|todo))?\s*\(/g;
+  // Negative lookbehind `(?<!\.)` excludes a PRECEDING dot — without it,
+  // `someRegex.test(str)` (JS's built-in RegExp.prototype.test, used
+  // throughout this suite to assert against captured shell/log text) matches
+  // as a false "top-level test() call" (issue #4020 PR discussion — measured
+  // directly: this inflated test/autopilot-hooks.test.mts's count from a
+  // true 6 to a miscounted 9, three `someVar.test(...)` call sites). The
+  // TRAILING `.skip`/`.only`/`.todo` group is unaffected — that's a suffix on
+  // "describe"/"test" itself, not a preceding property-access dot.
+  const callRe = /(?<!\.)\b(?:describe|test)(?:\s*\.\s*(?:skip|only|todo))?\s*\(/g;
   const callStarts = [];
   let m;
   while ((m = callRe.exec(sanitized)) !== null) {
