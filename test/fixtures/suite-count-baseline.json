@@ -191,7 +191,7 @@
   "test/dispatch-pr-link.test.mts": 2,
   "test/dispatches-transcript.test.mts": 6,
   "test/dispatches.test.mts": 6,
-  "test/eligibility-usage.test.mts": 2,
+  "test/eligibility-usage.test.mts": 3,
   "test/epic-shape-classifier.test.mts": 5,
   "test/errors.test.mts": 1,
   "test/escalation-rate-gate.test.mts": 2,
