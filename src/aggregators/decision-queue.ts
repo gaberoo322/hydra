@@ -79,15 +79,48 @@ export interface DecisionQueueDeps {
 // ---------------------------------------------------------------------------
 
 /**
+ * The aggregator's widened return shape (ADR-0034 §5 rule 2 — issue #4006).
+ *
+ * A bare `DecisionItem[]` could not distinguish a genuine zero-item day from a
+ * total sub-fetch failure: `getDecisionQueue` is documented never-throw and all
+ * three GitHub sub-fetches degrade to `[]` internally via `settledOrEmpty`, so
+ * both cases arrived as `[]` — exactly the `/cycle/history` #3997 failure mode
+ * the trust contract exists to close. The two evidence fields let the route
+ * (and the client) tell them apart:
+ *
+ * - `scanned`   — the pre-dedup raw row count summed across whichever sub-fetches
+ *                 settled *fulfilled* (a rejected sub-fetch contributes 0, since
+ *                 `settledOrEmpty` degrades it to `[]`). Non-zero proves the
+ *                 lookup reached GitHub and saw rows, even if all dedupe away.
+ * - `sourcesOk` — `true` iff ALL three sub-fetches settled fulfilled. `false`
+ *                 means at least one source is unproven, so the client renders
+ *                 `UNKNOWN` rather than a confident-looking (possibly empty)
+ *                 list. This is the conservative reading of "never a confident
+ *                 number": a partially-failed lookup can silently omit real
+ *                 ready-for-human / needs-info items without the operator knowing.
+ */
+export interface DecisionQueueResult {
+  items: DecisionItem[];
+  /** Pre-dedup raw row count summed across the fulfilled sub-fetches. */
+  scanned: number;
+  /** `true` iff ALL three GitHub sub-fetches settled fulfilled. */
+  sourcesOk: boolean;
+}
+
+/**
  * Fetch and unify the operator decision queue.
  *
  * The three sub-sources run under `Promise.allSettled` so a single slow /
  * failing call can't blank the whole list. After fetch, items are deduped
  * by number and sorted oldest-first.
+ *
+ * Returns the merged items PLUS the asserted-emptiness evidence (`scanned`,
+ * `sourcesOk`) the ADR-0034 trust contract requires — see
+ * {@link DecisionQueueResult}.
  */
 export async function getDecisionQueue(
   deps: DecisionQueueDeps = {},
-): Promise<DecisionItem[]> {
+): Promise<DecisionQueueResult> {
   const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
   const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
 
@@ -101,11 +134,24 @@ export async function getDecisionQueue(
   const ready = settledOrEmpty(readyResult, "decision-queue/ready-for-human");
   const info = settledOrEmpty(infoResult, "decision-queue/needs-info");
 
-  return mergeDecisionItems({
+  const items = mergeDecisionItems({
     "operator-decision-queue": digest,
     "ready-for-human": ready,
     "needs-info": info,
   });
+
+  // Asserted-emptiness evidence (ADR-0034 §5 rule 2). `scanned` is the raw row
+  // count from the fulfilled sub-fetches pre-dedup; a rejected sub-fetch has
+  // already degraded to [] above so it contributes 0. `sourcesOk` is true only
+  // when every sub-fetch settled fulfilled, so a total/partial failure is never
+  // silently identical to a genuine zero.
+  const scanned = digest.length + ready.length + info.length;
+  const sourcesOk =
+    digestResult.status === "fulfilled" &&
+    readyResult.status === "fulfilled" &&
+    infoResult.status === "fulfilled";
+
+  return { items, scanned, sourcesOk };
 }
 
 // ---------------------------------------------------------------------------

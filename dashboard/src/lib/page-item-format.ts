@@ -250,3 +250,88 @@ export interface LocalTimestampParts {
 export function localTimestampParts(ts: string | number | null | undefined): LocalTimestampParts {
   return { compact: formatDateTime(ts), title: formatDateTimeFull(ts) };
 }
+
+// ---------------------------------------------------------------------------
+// Trust-contract status derivation (ADR-0034 §5, issue #4006)
+// ---------------------------------------------------------------------------
+
+/**
+ * The trust-aware status enum a page-item payload resolves to (ADR-0034 §5).
+ * Extends the original loading / error / empty / ready quartet with two states
+ * the trust contract requires:
+ *
+ *   - `unknown` — the payload is not trustworthy enough to render a value
+ *     (failed first load, an unproven lookup, or no parseable timestamp).
+ *   - `stale`   — a payload is present but not current (a failed later poll
+ *     with retained data, or a payload past its freshness budget).
+ *
+ * Lives in this pure seam (not inside the React hook) for the same reason the
+ * formatters above do: the orchestrator's node:test suite can pin the priority
+ * order without a React tree — and that order IS the trust contract.
+ */
+export type PageItemStatus =
+  | "loading"
+  | "error"
+  | "unknown"
+  | "stale"
+  | "empty"
+  | "ready";
+
+/** A present, parseable timestamp — the precondition for trusting a payload's age. */
+function isValidTimestamp(ts: unknown): boolean {
+  if (ts === null || ts === undefined || ts === "") return false;
+  return Number.isFinite(Date.parse(ts as string));
+}
+
+/**
+ * True when `generatedAt` is older than the declared `freshnessMs` budget.
+ * `now` is injectable for deterministic tests; defaults to `Date.now()`.
+ */
+function isStale(generatedAt: string, freshnessMs: number, now: number = Date.now()): boolean {
+  const ms = Date.parse(generatedAt);
+  if (!Number.isFinite(ms)) return false; // an unparseable timestamp is handled upstream as unknown
+  return now - ms > freshnessMs;
+}
+
+/**
+ * Derive the trust-aware status for a page-item payload — a small deterministic
+ * priority sequence (highest-confidence demotion wins) read directly off ADR-
+ * 0034 §5's four numbered rules, not an ambiguous reducer:
+ *
+ *   1. loading                              -> "loading"
+ *   2. first-load failure (error, no data)  -> "unknown"   (nothing trustworthy)
+ *   3. sourcesOk === false                  -> "unknown"   (lookup unproven)
+ *   4. generatedAt missing/unparseable      -> "unknown"   (no trustworthy timestamp)
+ *   5. failed refresh with retained data    -> "stale"     (last-known as context)
+ *   6. generatedAt older than freshnessMs   -> "stale"     (aged past budget)
+ *   7. items.length === 0                   -> "empty"     (asserted zero)
+ *   8. otherwise                            -> "ready"
+ *
+ * Rule 3 fires only when the payload carries `sourcesOk` and it is exactly
+ * `false` — endpoints that never assert (no field) are unaffected. Rule 6 fires
+ * only when the caller declared a `freshnessMs > 0`. This ordering is what makes
+ * the unasserted-empty regression hold: rule 3 runs BEFORE rule 7, so an
+ * `items: []` + `sourcesOk: false` payload resolves to "unknown", never "empty".
+ *
+ * `now` is injectable for deterministic staleness tests; defaults to `Date.now()`.
+ */
+export function derivePageStatus(opts: {
+  loading: boolean;
+  error: string | null;
+  data: any;
+  items: any[];
+  freshnessMs?: number;
+  now?: number;
+}): PageItemStatus {
+  const { loading, error, data, items } = opts;
+  const freshnessMs = opts.freshnessMs ?? 0;
+  const now = opts.now ?? Date.now();
+  if (loading) return "loading";
+  if (error && !data) return "unknown";
+  if (data && data.sourcesOk === false) return "unknown";
+  if (data && !isValidTimestamp(data.generatedAt)) return "unknown";
+  if (error && data) return "stale";
+  if (freshnessMs > 0 && data && isStale(data.generatedAt, freshnessMs, now)) return "stale";
+  if (items.length === 0) return "empty";
+  return "ready";
+}

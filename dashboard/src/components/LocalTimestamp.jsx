@@ -23,12 +23,17 @@ import { localTimestampParts } from "../lib/page-item-format.ts";
  *   Unix-epoch-seconds (the two shapes the API sends). Null/invalid renders
  *   the em-dash placeholder with no tooltip.
  * @param {string} [props.className]  passed through to the wrapping <time>.
+ * @param {string} [props.label]  optional muted prefix rendered before the
+ *   time (e.g. "as of"), so a provenance line reads "as of 8/13, 2:00 PM" as
+ *   one unit (ADR-0034 §5 rule 4 — age always visible). Omit for byte-identical
+ *   rendering to the label-less form every existing caller uses.
  */
-export default function LocalTimestamp({ ts, className }) {
+export default function LocalTimestamp({ ts, className, label }) {
   const { compact, title } = localTimestampParts(ts);
   // `title=""` reads as "no tooltip"; only attach one when we have a full form.
   return (
     <time className={className} title={title || undefined}>
+      {label ? <span className="opacity-70">{label} </span> : null}
       {compact}
     </time>
   );

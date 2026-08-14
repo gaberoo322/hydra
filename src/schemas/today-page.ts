@@ -109,9 +109,10 @@ export type DecisionItemSource = z.infer<typeof DecisionItemSourceSchema>;
 
 /**
  * Response body for `GET /api/v2/today/decision-queue`. The aggregator
- * returns an array — the schema wraps it under `{ items }` so the route
- * has a place to grow other top-level fields (counts, generatedAt) later
- * without breaking clients.
+ * returns its items under `{ items }` alongside the ADR-0034 §5 rule 2
+ * asserted-emptiness evidence (`scanned`, `sourcesOk`) so the client can tell
+ * a genuine zero-item day from a total sub-fetch failure — the #3997 failure
+ * mode the trust contract exists to close.
  */
 const DecisionItemSchema = z
   .object({
@@ -125,9 +126,19 @@ const DecisionItemSchema = z
   })
   .strict();
 
-const DecisionQueueResponseSchema = z
+export const DecisionQueueResponseSchema = z
   .object({
     items: z.array(DecisionItemSchema),
+    /**
+     * Pre-dedup raw row count summed across the fulfilled sub-fetches — proves
+     * the lookup reached GitHub. Non-zero even when all rows dedupe away.
+     */
+    scanned: z.number().int().nonnegative(),
+    /**
+     * `true` iff ALL three sub-fetches (digest, ready-for-human, needs-info)
+     * settled fulfilled. `false` demotes the client to `UNKNOWN`.
+     */
+    sourcesOk: z.boolean(),
     generatedAt: z.string(),
   })
   .strict();

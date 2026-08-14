@@ -1,0 +1,1 @@
+- feat: /today/decision-queue carries asserted-emptiness evidence (scanned/sourcesOk) and the Today page renders UNKNOWN/stale trust states with an always-visible as-of age (#4006)

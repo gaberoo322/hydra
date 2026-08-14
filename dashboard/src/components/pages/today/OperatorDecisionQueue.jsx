@@ -12,10 +12,19 @@ import { Section } from "./Section.jsx";
  * Polls /api/today/decision-queue every 30s per PRD #615. Thin renderer
  * over the page-item seam (issue #822): DecisionSourceBadge + the shared
  * coarse-age formatter (relativeAge).
+ *
+ * The pilot panel for the ADR-0034 trust contract (issue #4006): it
+ * declares a 5-minute freshness budget (an attention surface is "minutes"
+ * tier per ADR-0034 §5) and forwards the seam's resolved `unknown` /
+ * `stale` statuses plus the payload's `generatedAt` into <Section>, so an
+ * unproven lookup renders UNKNOWN rather than a confident-looking zero.
  */
 export function OperatorDecisionQueue() {
-  const { items, status, error, loading } = usePageItems("/today/decision-queue", {
+  const { items, data, status, error, loading } = usePageItems("/today/decision-queue", {
     poll: 30_000,
+    // ADR-0034 §5 freshness budget: the decision queue is an attention surface
+    // ("minutes" tier) — demote to stale past 5 minutes.
+    freshnessMs: 5 * 60 * 1000,
   });
 
   return (
@@ -27,6 +36,9 @@ export function OperatorDecisionQueue() {
       error={error}
       empty={status === "empty"}
       emptyMessage="Inbox zero. Nothing waiting on a human decision."
+      unknown={status === "unknown"}
+      stale={status === "stale"}
+      generatedAt={data?.generatedAt ?? null}
     >
       <ul className="divide-y divide-zinc-700/50">
         {items.map((item) => (
