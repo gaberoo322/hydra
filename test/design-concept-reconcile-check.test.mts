@@ -221,6 +221,61 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(parseReconciliationSection(midSentence).entries.length, 0, "mid-sentence mention must not match");
   });
 
+  test("ENTRY_RE rejects an alphanumeric suffix on the digit run and an asymmetric emphasis closer (issue #4037 follow-up)", () => {
+    // `(?!\d)` (the first attempt at closing the digit run) only blocks a
+    // FOLLOWING DIGIT — a following LETTER slipped through, so `INV-10x` wrongly
+    // parsed as `INV-10` with "x is not an invariant reference" absorbed as
+    // trailing text. On a required-check merge gate this is the dangerous
+    // direction: a genuinely unreconciled bullet is silently accepted.
+    const letterSuffixTwoDigit = [
+      RECONCILIATION_HEADING,
+      "",
+      "- INV-10x is not an invariant reference",
+    ].join("\n");
+    assert.equal(
+      parseReconciliationSection(letterSuffixTwoDigit).entries.length,
+      0,
+      "INV-10x must not match — trailing letter is not a valid closer",
+    );
+
+    const letterSuffixOneDigit = [
+      RECONCILIATION_HEADING,
+      "",
+      "- INV-1abc some other identifier entirely",
+    ].join("\n");
+    assert.equal(
+      parseReconciliationSection(letterSuffixOneDigit).entries.length,
+      0,
+      "INV-1abc must not match — trailing letters are not a valid closer",
+    );
+
+    // The emphasis-closer forms this fix must keep working.
+    const underscoreBold = [RECONCILIATION_HEADING, "", "- __INV-3__ underscore bold text"].join("\n");
+    const underscoreBoldParsed = parseReconciliationSection(underscoreBold);
+    assert.equal(underscoreBoldParsed.entries.length, 1, "__INV-3__ must still match");
+    assert.equal(underscoreBoldParsed.entries[0].index, 3);
+
+    const doubleStar = [RECONCILIATION_HEADING, "", "- **INV-1** some text"].join("\n");
+    const doubleStarParsed = parseReconciliationSection(doubleStar);
+    assert.equal(doubleStarParsed.entries.length, 1, "**INV-1** must still match");
+    assert.equal(doubleStarParsed.entries[0].index, 1);
+
+    // Multi-digit index: must be captured as 12, not truncated to 1.
+    const multiDigit = [RECONCILIATION_HEADING, "", "- INV-12 some text"].join("\n");
+    const multiDigitParsed = parseReconciliationSection(multiDigit);
+    assert.equal(multiDigitParsed.entries.length, 1, "INV-12 must match");
+    assert.equal(multiDigitParsed.entries[0].index, 12, "index must be 12, not truncated to 1");
+
+    // Asymmetric emphasis: opened with `**`, "closed" with `_` — the two
+    // markers don't match, so this must NOT be accepted as a valid entry.
+    const asymmetric = [RECONCILIATION_HEADING, "", "- **INV-1_ some text"].join("\n");
+    assert.equal(
+      parseReconciliationSection(asymmetric).entries.length,
+      0,
+      "asymmetric ** ... _ emphasis must not match",
+    );
+  });
+
   test("a wrapped entry absorbs its indented continuation lines", () => {
     const body = [
       RECONCILIATION_HEADING,
