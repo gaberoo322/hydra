@@ -156,6 +156,126 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(parsed.entries[2].assertion, "file-absent: b.yml");
   });
 
+  test("ENTRY_RE tolerates Markdown emphasis wrapping the INV-<n> label (issue #4037)", () => {
+    // A fully-reconciled PR body dev agents actually write, e.g.
+    // `- **INV-1** — text` or `- **INV-2**: text`, parsed to ZERO entries
+    // before #4037 (ENTRY_RE required INV to follow the bullet marker
+    // directly), reddening the required `test` job with entry-count-mismatch
+    // plus one missing-entry per invariant on an otherwise-compliant PR.
+    const plain = [
+      RECONCILIATION_HEADING,
+      "",
+      '- INV-1: "first invariant text" — verified by: `file-exists: a.ts`',
+    ].join("\n");
+    assert.equal(parseReconciliationSection(plain).entries.length, 1, "plain form: unchanged baseline");
+    assert.equal(parseReconciliationSection(plain).entries[0].index, 1);
+
+    const boldDash = [
+      RECONCILIATION_HEADING,
+      "",
+      "- **INV-1** — text **verified by:** git diff",
+    ].join("\n");
+    const boldDashParsed = parseReconciliationSection(boldDash);
+    assert.equal(boldDashParsed.entries.length, 1, "bold em-dash form must parse to one entry");
+    assert.equal(boldDashParsed.entries[0].index, 1);
+
+    const boldColon = [RECONCILIATION_HEADING, "", "- **INV-2**: something"].join("\n");
+    const boldColonParsed = parseReconciliationSection(boldColon);
+    assert.equal(boldColonParsed.entries.length, 1, "bold-with-colon form must parse to one entry");
+    assert.equal(boldColonParsed.entries[0].index, 2);
+    assert.equal(boldColonParsed.entries[0].raw, "something");
+
+    const checkbox = [RECONCILIATION_HEADING, "", "- [x] INV-1 checkbox form text"].join("\n");
+    const checkboxParsed = parseReconciliationSection(checkbox);
+    assert.equal(checkboxParsed.entries.length, 1, "checkbox form must parse to one entry");
+    assert.equal(checkboxParsed.entries[0].index, 1);
+
+    const numbered = [RECONCILIATION_HEADING, "", "1. INV-1 numbered form text"].join("\n");
+    const numberedParsed = parseReconciliationSection(numbered);
+    assert.equal(numberedParsed.entries.length, 1, "numbered-list form must parse to one entry");
+    assert.equal(numberedParsed.entries[0].index, 1);
+
+    const italicStar = [RECONCILIATION_HEADING, "", "- *INV-2*: italic single-star text"].join("\n");
+    const italicStarParsed = parseReconciliationSection(italicStar);
+    assert.equal(italicStarParsed.entries.length, 1, "single-asterisk italic form must parse to one entry");
+    assert.equal(italicStarParsed.entries[0].index, 2);
+
+    // Underscore emphasis is the trap case: `_` is a regex word character, so a
+    // naive `\b` boundary after the digit run refuses to fire between "3" and
+    // the underscore closer, silently dropping this one form even though the
+    // other emphasis markers worked.
+    const underscoreBold = [RECONCILIATION_HEADING, "", "- __INV-3__ underscore bold text"].join("\n");
+    const underscoreBoldParsed = parseReconciliationSection(underscoreBold);
+    assert.equal(underscoreBoldParsed.entries.length, 1, "double-underscore bold form must parse to one entry");
+    assert.equal(underscoreBoldParsed.entries[0].index, 3);
+
+    // Negative case (guard against a vacuous widening): a bullet that merely
+    // MENTIONS "INV-1" mid-sentence, rather than opening with it as a label
+    // right after the bullet marker, must still parse to zero entries — the
+    // bullet-marker anchor is what keeps the widened regex precise.
+    const midSentence = [
+      RECONCILIATION_HEADING,
+      "",
+      "- this bullet just mentions INV-1 mid sentence and is not a label",
+    ].join("\n");
+    assert.equal(parseReconciliationSection(midSentence).entries.length, 0, "mid-sentence mention must not match");
+  });
+
+  test("ENTRY_RE rejects an alphanumeric suffix on the digit run and an asymmetric emphasis closer (issue #4037 follow-up)", () => {
+    // `(?!\d)` (the first attempt at closing the digit run) only blocks a
+    // FOLLOWING DIGIT — a following LETTER slipped through, so `INV-10x` wrongly
+    // parsed as `INV-10` with "x is not an invariant reference" absorbed as
+    // trailing text. On a required-check merge gate this is the dangerous
+    // direction: a genuinely unreconciled bullet is silently accepted.
+    const letterSuffixTwoDigit = [
+      RECONCILIATION_HEADING,
+      "",
+      "- INV-10x is not an invariant reference",
+    ].join("\n");
+    assert.equal(
+      parseReconciliationSection(letterSuffixTwoDigit).entries.length,
+      0,
+      "INV-10x must not match — trailing letter is not a valid closer",
+    );
+
+    const letterSuffixOneDigit = [
+      RECONCILIATION_HEADING,
+      "",
+      "- INV-1abc some other identifier entirely",
+    ].join("\n");
+    assert.equal(
+      parseReconciliationSection(letterSuffixOneDigit).entries.length,
+      0,
+      "INV-1abc must not match — trailing letters are not a valid closer",
+    );
+
+    // The emphasis-closer forms this fix must keep working.
+    const underscoreBold = [RECONCILIATION_HEADING, "", "- __INV-3__ underscore bold text"].join("\n");
+    const underscoreBoldParsed = parseReconciliationSection(underscoreBold);
+    assert.equal(underscoreBoldParsed.entries.length, 1, "__INV-3__ must still match");
+    assert.equal(underscoreBoldParsed.entries[0].index, 3);
+
+    const doubleStar = [RECONCILIATION_HEADING, "", "- **INV-1** some text"].join("\n");
+    const doubleStarParsed = parseReconciliationSection(doubleStar);
+    assert.equal(doubleStarParsed.entries.length, 1, "**INV-1** must still match");
+    assert.equal(doubleStarParsed.entries[0].index, 1);
+
+    // Multi-digit index: must be captured as 12, not truncated to 1.
+    const multiDigit = [RECONCILIATION_HEADING, "", "- INV-12 some text"].join("\n");
+    const multiDigitParsed = parseReconciliationSection(multiDigit);
+    assert.equal(multiDigitParsed.entries.length, 1, "INV-12 must match");
+    assert.equal(multiDigitParsed.entries[0].index, 12, "index must be 12, not truncated to 1");
+
+    // Asymmetric emphasis: opened with `**`, "closed" with `_` — the two
+    // markers don't match, so this must NOT be accepted as a valid entry.
+    const asymmetric = [RECONCILIATION_HEADING, "", "- **INV-1_ some text"].join("\n");
+    assert.equal(
+      parseReconciliationSection(asymmetric).entries.length,
+      0,
+      "asymmetric ** ... _ emphasis must not match",
+    );
+  });
+
   test("a wrapped entry absorbs its indented continuation lines", () => {
     const body = [
       RECONCILIATION_HEADING,
