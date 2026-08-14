@@ -44,6 +44,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  WATCHDOG_SPAWN_TIMEOUT_MS,
+  throwIfTimedOut,
+} from "./_helpers/watchdog-timeouts.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
@@ -90,7 +94,6 @@ function regenerateInto(fixtureDir: string, claudeDir: string, codexDir: string)
 // margin locally and reddened this REQUIRED gate on unrelated PRs whenever
 // the shared CI box was under load. 120s is comfortably above the script's
 // real worst case; this bounds a hang, not a slow-but-correct run.
-const WATCHDOG_TIMEOUT_MS = 120_000;
 
 function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync(WATCHDOG, [], {
@@ -105,18 +108,9 @@ function runWatchdog(env: Record<string, string>): { status: number; stdout: str
       PATH: process.env.PATH ?? "",
     },
     encoding: "utf-8",
-    timeout: WATCHDOG_TIMEOUT_MS,
+    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
-  // spawnSync kills the child on timeout: status becomes null (not a real
-  // exit code) and error.code is "ETIMEDOUT". Report that explicitly rather
-  // than letting it fall through as a misleading "-1 !== 0" assertion
-  // failure (issue #4044).
-  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
-    throw new Error(
-      `watchdog script exceeded ${WATCHDOG_TIMEOUT_MS}ms timeout (killed with ${r.signal ?? "unknown signal"}); ` +
-        `stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`,
-    );
-  }
+  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "watchdog script");
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 

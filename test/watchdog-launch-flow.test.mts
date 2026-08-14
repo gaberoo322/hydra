@@ -48,6 +48,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import {
@@ -63,13 +64,56 @@ import {
   clearLaunchFlowStreak,
 } from "../src/redis/launch-flow.ts";
 import { getRedisConnection } from "../src/redis/connection.ts";
+import {
+  WATCHDOG_SPAWN_TIMEOUT_MS,
+  WATCHDOG_REDIS_TIMEOUT_MS,
+  throwIfTimedOut,
+} from "./_helpers/watchdog-timeouts.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
 
 const SIGNALS = ["fail-safe", "meter-dark", "quota", "pause", "latency"] as const;
-const SINCE = (s: string) => `${LAUNCH_FLOW_KEY_PREFIX}:since:${s}`;
-const FIRED = (s: string) => `${LAUNCH_FLOW_KEY_PREFIX}:fired:${s}`;
+
+// ---------------------------------------------------------------------------
+// PER-RUN KEY NAMESPACE — the fix for the #4072 flake.
+//
+// These behavioural cases seed a streak anchor, run the block, and assert the
+// exact resulting value. They talk to the docker `hydra-redis-1` container on
+// DB 0 — and `run_launch_flow` hardcodes `LF_KEY_PREFIX` /
+// `LAST_TICK_KEY` as bash locals with no `-n <db>` selector, so DB 0 is the
+// ONLY keyspace it can use. On the dev host and on the self-hosted CI runner
+// (the same box, `gabenuc`) the REAL hydra-watchdog.timer fires every 2
+// minutes and runs that same block against those same keys. Observed live:
+//
+//   12:53:23  launch-flow signal 'quota' streak 0ms …  (reason=weekly-emergency-stop)
+//   12:55:28  launch-flow tick processed (reason=eligible-launch)
+//   12:57:35  launch-flow tick processed (reason=session-blocked)
+//
+// so a production tick landing mid-case rewrites or DELs the fixture the case
+// just seeded. That is the whole flake: the suite passes in ~16s alone (one
+// chance in eight of overlapping a tick) and fails inside an ~11-minute full
+// run, with a DIFFERENT random subtest subset each time — whichever cases were
+// in flight when the tick landed. It is NOT a timeout; generous ceilings were
+// measured and the failures persisted.
+//
+// The interference ran BOTH ways, which is the more serious half: `cleanState`
+// used to DEL the production `hydra:autopilot:pace-gate:last-tick`, and the
+// live watchdog then logged `WARN no pace-gate last-tick record` — a test run
+// was blinding real monitoring for as long as it took the pace gate to write
+// that key again.
+//
+// Namespacing per run removes both directions without touching the script
+// (out of scope per #4072) and without serialising against a systemd timer.
+// The extracted block is rewritten onto this namespace in `before()`; the
+// structural/drift cases keep reading the REAL script source, so the
+// production literals stay pinned exactly as before.
+const RUN_NS = `hydra:test:launch-flow-${process.pid}-${randomUUID().slice(0, 8)}`;
+const TEST_LF_PREFIX = `${RUN_NS}:launch-flow`;
+const TEST_LAST_TICK_KEY = `${RUN_NS}:pace-gate:last-tick`;
+
+const SINCE = (s: string) => `${TEST_LF_PREFIX}:since:${s}`;
+const FIRED = (s: string) => `${TEST_LF_PREFIX}:fired:${s}`;
 
 /** Fixed deterministic clock for threshold maths (epoch-ms). */
 const T0 = 1_700_000_000_000;
@@ -82,7 +126,7 @@ const T0 = 1_700_000_000_000;
 function dockerRedisAvailable(): boolean {
   const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "PING"], {
     encoding: "utf-8",
-    timeout: 4_000,
+    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
   });
   return (r.stdout ?? "").trim() === "PONG";
 }
@@ -92,27 +136,27 @@ const DOCKER = dockerRedisAvailable();
 function drc(args: string[]): string {
   const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
     encoding: "utf-8",
-    timeout: 8_000,
+    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
   });
   return (r.stdout ?? "").trim();
 }
 
 /** Wipe the last-tick record and ALL ten launch-flow keys for a clean slate. */
 function cleanState(): void {
-  const keys = [PACE_GATE_LAST_TICK_KEY];
+  const keys = [TEST_LAST_TICK_KEY];
   for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
   spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
     encoding: "utf-8",
-    timeout: 8_000,
+    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
   });
 }
 
 function hsetLastTick(fields: Record<string, string>): void {
-  const args = ["HSET", PACE_GATE_LAST_TICK_KEY];
+  const args = ["HSET", TEST_LAST_TICK_KEY];
   for (const [k, v] of Object.entries(fields)) args.push(k, v);
   spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
     encoding: "utf-8",
-    timeout: 8_000,
+    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
   });
 }
 
@@ -121,8 +165,31 @@ function seedSince(signal: string, ms: number): void {
   spawnSync(
     "docker",
     ["exec", "hydra-redis-1", "redis-cli", "--raw", "SET", SINCE(signal), String(ms), "NX"],
-    { encoding: "utf-8", timeout: 8_000 },
+    { encoding: "utf-8", timeout: WATCHDOG_REDIS_TIMEOUT_MS },
   );
+}
+
+/**
+ * Delete leftover `hydra:test:launch-flow-*` keys from earlier runs.
+ *
+ * `after()` cleans up precisely, but `--test-force-exit` can tear the process
+ * down before it runs, and these keys live in production's DB 0 (the only
+ * keyspace the block can address). SCAN — never KEYS — because DB 0 is the live
+ * orchestrator's database and a blocking full-keyspace walk there is not a cost
+ * a test gets to impose. Bounded: one pass, and failures are ignored, since
+ * this is opportunistic hygiene rather than a precondition of any assertion.
+ */
+function sweepOrphanNamespaces(): void {
+  let cursor = "0";
+  for (let i = 0; i < 64; i++) {
+    const out = drc(["SCAN", cursor, "MATCH", "hydra:test:launch-flow-*", "COUNT", "500"]);
+    const lines = out.split("\n").filter((l) => l !== "");
+    if (lines.length === 0) return;
+    cursor = lines[0];
+    const keys = lines.slice(1).filter((k) => !k.startsWith(RUN_NS));
+    if (keys.length > 0) drc(["DEL", ...keys]);
+    if (cursor === "0") return;
+  }
 }
 
 function getFired(signal: string): boolean {
@@ -140,6 +207,7 @@ function getSince(signal: string): string {
 const BLOCK = join(tmpdir(), `hydra-launch-flow-block-${process.pid}.sh`);
 
 before(() => {
+  if (DOCKER) sweepOrphanNamespaces();
   const src = readFileSync(WATCHDOG, "utf-8");
   const start = src.indexOf("run_launch_flow()");
   assert.ok(start >= 0, "run_launch_flow() not found in hydra-watchdog.sh");
@@ -150,7 +218,36 @@ before(() => {
   assert.ok(end >= 0, "run_launch_flow() closing brace not found");
   const body = after.slice(0, end + 1);
   assert.ok(body.includes("track_signal"), "extracted block missing track_signal");
-  writeFileSync(BLOCK, body);
+
+  // Rebind the extracted COPY onto this run's private namespace so a
+  // concurrent production watchdog tick cannot touch our fixtures (and we
+  // cannot touch its). Only the temp copy is rewritten — the structural cases
+  // below still read the real script, so the production literals stay pinned.
+  //
+  // Asserted, not best-effort: if the script renames these literals, a silent
+  // no-op replace would put the behavioural cases straight back onto the shared
+  // production keys and the flake would return looking like a fresh mystery.
+  // Fail loudly here instead.
+  const namespaced = body
+    .split(`"${PACE_GATE_LAST_TICK_KEY}"`)
+    .join(`"${TEST_LAST_TICK_KEY}"`)
+    .split(`"${LAUNCH_FLOW_KEY_PREFIX}"`)
+    .join(`"${TEST_LF_PREFIX}"`);
+  assert.ok(
+    namespaced.includes(`"${TEST_LAST_TICK_KEY}"`),
+    `failed to rebind LAST_TICK_KEY: the block no longer contains the literal "${PACE_GATE_LAST_TICK_KEY}". ` +
+      `Without this rebinding the behavioural cases race the live hydra-watchdog.timer (#4072).`,
+  );
+  assert.ok(
+    namespaced.includes(`"${TEST_LF_PREFIX}"`),
+    `failed to rebind LF_KEY_PREFIX: the block no longer contains the literal "${LAUNCH_FLOW_KEY_PREFIX}". ` +
+      `Without this rebinding the behavioural cases race the live hydra-watchdog.timer (#4072).`,
+  );
+  assert.ok(
+    !namespaced.includes(`"${LAUNCH_FLOW_KEY_PREFIX}"`),
+    "the production launch-flow prefix must not survive anywhere in the rebound block",
+  );
+  writeFileSync(BLOCK, namespaced);
 });
 
 after(() => {
@@ -167,8 +264,9 @@ function runBlock(env: Record<string, string>): { status: number; stdout: string
   const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`], {
     env: { ...process.env, HYDRA_REDIS_HOST: "docker", ...env, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
-    timeout: 15_000,
+    timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
+  throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_launch_flow block");
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
@@ -482,9 +580,10 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
           PATH: process.env.PATH ?? "",
         },
         encoding: "utf-8",
-        timeout: 15_000,
+        timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
       },
     );
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_launch_flow block (unreachable-redis case)");
     assert.equal(r.status ?? -1, 0, `read failure must not abort (set -e); stderr=${r.stderr}`);
     const out = (r.stdout ?? "").split("\n").filter((l) => l.includes("hydra-launch-flow-watchdog:")).join("\n");
     assert.match(out, /WARN no pace-gate last-tick record/, "read failure must log a distinguishable WARN");
