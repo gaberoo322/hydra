@@ -295,6 +295,13 @@ SESSION_BLOCKED_UNTIL=$(jq -r '.reasons.sessionBlockedUntil // ""' <<<"$ELIGIBIL
 # hard-stops in decide.py within seconds, so launching is pure churn until the
 # Weekly Reset Anchor passes.
 WEEKLY_EMERGENCY_STOP=$(jq -r '.reasons.weeklyEmergencyStop // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Paid overage ("extra usage") armed on the logged-in account. The route folds
+# this into `.allow`, so the catch-all arm below would already skip the launch —
+# this reason-specific parse exists so the journal names the CAUSE, which here
+# is an operator ACTION ITEM (disable it in the Claude console) rather than a
+# wait-it-out quota state. Deliberately NOT `// false`-tolerant of a missing
+# field in a blocking direction: absent reads as false and defers to `.allow`.
+EXTRA_USAGE_ARMED=$(jq -r '.reasons.extraUsageArmed // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 # Issue #2956: workless-board backoff hint. The route overlays
 # `.reasons.worklessUntil` (ISO-8601) when the autopilot last exited cause=idle
 # having dispatched NOTHING — i.e. the board was fully workless (every class on
@@ -318,7 +325,7 @@ WORKLESS_UNTIL=$(jq -r '.reasons.worklessUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/
 # field => "null", garbage, parse failure) fails safe.
 ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$METER_UNAVAILABLE" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$WORKLESS_UNTIL" == "parse-error" || "$EXTRA_USAGE_ARMED" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   record_tick "eligibility-unparseable" "fail-safe" "$LATENCY_MS" || true
   exit 0
@@ -366,6 +373,16 @@ fi
 if [[ "$WEEKLY_EMERGENCY_STOP" == "true" ]]; then
   log "weekly emergencyStop (7-day window exhausted) — skip until weekly reset"
   record_tick "weekly-emergency-stop" "deliberate-skip" "$LATENCY_MS" || true
+  exit 0
+fi
+
+# Paid overage armed. Reason-specific arm in front of the catch-all, same as the
+# stops above. UNLIKE every other skip reason this one does NOT clear on its own
+# — no reset instant, no cooldown — so the message states the required operator
+# action instead of implying a wait.
+if [[ "$EXTRA_USAGE_ARMED" == "true" ]]; then
+  log "extra usage (paid overage) ARMED on the logged-in account — skip; disable it in the Claude console to resume (this will NOT clear by itself)"
+  record_tick "extra-usage-armed" "deliberate-skip" "$LATENCY_MS" || true
   exit 0
 fi
 

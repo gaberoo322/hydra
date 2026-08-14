@@ -4040,6 +4040,7 @@ describe("usage-tracker", () => {
         pacingShed: false,
         fiveHourThrottleShed: false,
         calibrated: true,
+        extraUsageArmed: false,
         paused: false,
         sessionBlockedUntil: null,
         worklessUntil: null,

@@ -76,6 +76,18 @@ export interface EligibilityUsageInput {
   calibrated: boolean;
   weeklyResetAnchor: string | null;
   generatedAt: string;
+  /**
+   * True when the logged-in account has paid overage ("extra usage") armed —
+   * see `UsageEligibility.reasons.extraUsageArmed`, which this feeds.
+   *
+   * OPTIONAL on purpose. `UsageSnapshot` satisfies this interface structurally
+   * (that is what proves the transcript scan is not a dependency of the
+   * admission verdict), and it carries no such field — making this required
+   * would break that structural fit at every `projectEligibility(snapshot)`
+   * call. Absent reads as `false`, which is correct for the snapshot path
+   * because that path gates nothing.
+   */
+  extraUsageArmed?: boolean;
 }
 
 /** Outcome of a meter-only eligibility read. Never throws. */
@@ -200,6 +212,24 @@ export async function getEligibilityUsage(
     usageSource: "oauth",
   });
 
+  // Paid-overage gate. `armed` is a CAPABILITY, not a spend reading: it says
+  // that when this account exhausts a window the overflow bills real money
+  // outside the subscription. Because it is read from the meter — which
+  // re-reads the credentials file on every call — the gate follows a `/login`
+  // to a different account with no per-account configuration, which is the
+  // whole point (the operator's rule is "never extra usage, on ANY account").
+  // A meter that omits `extra_usage` yields armed:false from `parseExtraUsage`:
+  // no facility means nothing can bill.
+  const extraUsageArmed = cached.result.data.extraUsage?.armed === true;
+  if (extraUsageArmed) {
+    logger.warn(
+      { usedCredits: cached.result.data.extraUsage?.usedCredits ?? null },
+      "[eligibility-usage] paid overage (extra usage) is ARMED on the logged-in account; " +
+        "blocking ALL autopilot dispatch until it is disabled in the Claude console " +
+        "(Hydra cannot switch it off through the API)",
+    );
+  }
+
   return {
     input: {
       percentLast5h,
@@ -218,6 +248,7 @@ export async function getEligibilityUsage(
       calibrated: true,
       weeklyResetAnchor,
       generatedAt,
+      extraUsageArmed,
     },
     stale: cached.stale,
     ageMs: cached.ageMs,
@@ -257,6 +288,14 @@ function unavailable(
       calibrated: false,
       weeklyResetAnchor,
       generatedAt,
+      // No meter value means no evidence either way about overage. Reporting
+      // `true` here would turn every transient GET blip into a full autopilot
+      // halt with a misleading reason attached — the #1124/#3821 fail-open
+      // exists precisely to prevent that. The dark-meter case is already
+      // covered: a SUSTAINED failure sets `meterUnavailable`, which forces
+      // allow=false on its own (#3804). So there is no window where the
+      // autopilot dispatches on an unverified account.
+      extraUsageArmed: false,
     },
     stale: false,
     ageMs: null,

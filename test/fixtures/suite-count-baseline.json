@@ -200,6 +200,7 @@
   "test/event-bus-vocabulary.test.mts": 5,
   "test/event-bus.test.mts": 37,
   "test/exec-with-timeout.test.mts": 2,
+  "test/extra-usage-gate.test.mts": 2,
   "test/friction-cue-dedup.test.mts": 2,
   "test/github-issues.test.mts": 6,
   "test/github-prs.test.mts": 2,

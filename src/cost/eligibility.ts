@@ -274,6 +274,32 @@ export interface UsageEligibility {
     fiveHourThrottleShed: boolean;
     calibrated: boolean;
     /**
+     * True when the logged-in Claude account has **paid overage ("extra usage")
+     * armed** — the meter's `extra_usage.is_enabled` is set and the user has not
+     * switched it off.
+     *
+     * Forces `allow=false`, blocking every dispatch class, like the two
+     * emergency stops. This is NOT a quota signal: it does not say the account
+     * is out of headroom, it says that when the account DOES run out, the
+     * overflow bills real money outside the subscription. The operator's
+     * standing instruction is to never spend it, and the only true guarantee is
+     * the account-side off switch — which Hydra cannot reach through this API.
+     *
+     * So this gate is deliberately a REFUSAL TO DISPATCH rather than a spend
+     * cap: an account with overage armed is one where an autopilot run could
+     * bill, so the autopilot stays dark until the operator disables it in the
+     * console. Because it is derived from the meter (which re-reads credentials
+     * on every call), the protection follows a `/login` to a different account
+     * automatically and needs no per-account configuration.
+     *
+     * Absent on the snapshot path (`UsageSnapshot` does not carry it), where it
+     * reads as `false`. That path gates nothing — only the admission verdict
+     * consumes it — and a meter-dark admission read is already blocked by
+     * `meterUnavailable` (#3804), so there is no window in which the gate is
+     * silently off while dispatch proceeds.
+     */
+    extraUsageArmed: boolean;
+    /**
      * Operator-only **Autopilot pause** flag (issue #988). When true, the
      * autopilot is paused: the launcher (pace-gate.sh) skips spawning a run
      * and the brain (decide.py) drains (no new dispatches). It forces
@@ -447,7 +473,15 @@ function projectPacingCurve(
 export function projectEligibility(snapshot: EligibilityUsageInput): UsageEligibility {
   // EITHER hard-stop (5h OR weekly) blocks every dispatch class. Both ride the
   // same allow=false drain path the operator pause uses.
-  const allow = !snapshot.emergencyStop && !snapshot.weeklyEmergencyStop;
+  //
+  // Paid overage joins them as a THIRD blocking reason. It is not a quota
+  // signal — it says that when this account exhausts a window, the overflow
+  // bills real money outside the subscription. Standing operator policy is to
+  // never spend it, and the account-side off switch is out of Hydra's reach, so
+  // the autopilot refuses to dispatch at all on an account where overage is
+  // armed. Keyed off the meter, it follows an account switch automatically.
+  const extraUsageArmed = snapshot.extraUsageArmed === true;
+  const allow = !snapshot.emergencyStop && !snapshot.weeklyEmergencyStop && !extraUsageArmed;
   const pacingShed = snapshot.pacingState === "over";
   // Two independent soft-throttles COMPOSE into the shed list (issue #1087):
   //   - the weekly-projection pacing shed (existing, `pacingState === "over"`)
@@ -487,6 +521,7 @@ export function projectEligibility(snapshot: EligibilityUsageInput): UsageEligib
       pacingShed,
       fiveHourThrottleShed: fiveHourThrottleShed_,
       calibrated: snapshot.calibrated,
+      extraUsageArmed,
       // Default not-paused. The pause flag is a Redis read that does NOT
       // belong inside this pure projection — it is overlaid at the
       // route/collector seam via overlayPauseEligibility().
