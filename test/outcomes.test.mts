@@ -111,7 +111,12 @@ outcomes:
     noise_epsilon: 0.5
 `);
     const r = await loadOutcomes(path);
-    assert.equal(r.ok, true, `expected ok; errors=${!r.ok ? r.errors.join("; ") : ""}`);
+    // Explicit `r.ok === false` (not `!r.ok`): with this repo's `strict: false`
+    // tsconfig, discriminated-union narrowing on a boolean discriminant via
+    // truthiness alone doesn't narrow `r` to the `errors`-bearing arm here
+    // (strictNullChecks-gated CFA refinement), so `!r.ok ? r.errors...` reads
+    // as a TS2339 on `LoadOutcomesResult`.
+    assert.equal(r.ok, true, `expected ok; errors=${r.ok === false ? r.errors.join("; ") : ""}`);
     if (!r.ok) throw new Error("unreachable");
     assert.equal(r.outcomes.length, 2);
     assert.equal(r.outcomes[0].name, "clv-promotion");

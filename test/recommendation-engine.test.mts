@@ -496,7 +496,12 @@ test("end-to-end: 10 synthetic turn_ends ⇒ ≤10 LLM calls, all parsed, cap ho
         ts_epoch: nowEpoch,
       }),
     );
-    if (r.fired) fired += 1;
+    // Explicit `=== true`/`=== false` (not truthy-check) narrowing: with this
+    // repo's `strict: false` tsconfig, discriminated-union narrowing on a
+    // boolean discriminant via truthiness alone (`if (r.fired)`) does not
+    // narrow the `else` branch to the `fired: false` arm, so `r.reason` reads
+    // as a TS2339 on `OnTurnEndResult` (strictNullChecks-gated CFA refinement).
+    if (r.fired === true) fired += 1;
     else if (r.reason === "cap") paused += 1;
     // Advance > 30s every iteration so the interval gate doesn't suppress.
     nowEpoch += MIN_CALL_INTERVAL_SECONDS + 1;

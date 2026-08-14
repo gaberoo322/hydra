@@ -44,7 +44,9 @@ function metaReader(rows: Array<Partial<IssueRow> & { number: number }>) {
 
 describe("filterNearPromotion — pure helper", () => {
   test("returns [] when patterns is not an array", () => {
-    // @ts-expect-error: intentionally passing wrong type to pin defensiveness.
+    // Non-strict tsconfig (strict: false) allows `null` here without a type
+    // error, so `@ts-expect-error` would be unused (TS2578) — the runtime
+    // defensiveness is still pinned by the `!Array.isArray(patterns)` guard.
     assert.deepEqual(filterNearPromotion("hydra-dev", null, 1), []);
   });
 
