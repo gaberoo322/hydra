@@ -44,7 +44,11 @@ function metaReader(rows: Array<Partial<IssueRow> & { number: number }>) {
 
 describe("filterNearPromotion — pure helper", () => {
   test("returns [] when patterns is not an array", () => {
-    // @ts-expect-error: intentionally passing wrong type to pin defensiveness.
+    // Intentionally passing a wrong runtime type to pin defensiveness. No type-
+    // suppression comment: strictNullChecks is off project-wide (tsconfig.json
+    // `strict: false`), so `null` type-checks against `FrictionPattern[]`
+    // cleanly — a suppression here would be (and was) reported as unused
+    // (issue #4046).
     assert.deepEqual(filterNearPromotion("hydra-dev", null, 1), []);
   });
 

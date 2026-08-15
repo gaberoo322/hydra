@@ -496,7 +496,13 @@ test("end-to-end: 10 synthetic turn_ends ⇒ ≤10 LLM calls, all parsed, cap ho
         ts_epoch: nowEpoch,
       }),
     );
-    if (r.fired) fired += 1;
+    // `r.fired === true` (not the bare truthy check) so the `else` branch
+    // narrows `r` to the `reason`-bearing members under this project's
+    // `strict: false` tsconfig — TypeScript 6.0.2 does not narrow a
+    // discriminated union's else-branch through a positive bare property
+    // access when strictNullChecks is off, only through an explicit literal
+    // comparison (issue #4046).
+    if (r.fired === true) fired += 1;
     else if (r.reason === "cap") paused += 1;
     // Advance > 30s every iteration so the interval gate doesn't suppress.
     nowEpoch += MIN_CALL_INTERVAL_SECONDS + 1;
