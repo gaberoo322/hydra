@@ -881,21 +881,66 @@ run_skill_mirror_drift() {
 # (stateless recovery). This block is the SOLE writer (SET NX / DEL via
 # redis-cli); TypeScript owns only the key NAMES.
 #
-# DETECTION ONLY. This block does NOT call Telegram, POST a dashboard alert,
-# or touch src/api/alerts.ts (out of scope on #3847). Its only externally-
-# observable effect beyond the ten keys is a per-signal WARNING log at the
-# exact tick a fired marker transitions absent→present — the hook #3848
-# (gamma, blocked on this issue) extends with a real delivery call.
+# DELIVERY (issue #3848, gamma — the half every previous attempt missed).
+# Detection without a delivery surface is indistinguishable from no detection.
+# At the EXACT tick a fired marker transitions absent→present (the same
+# instant the WARNING log fires, inside track_signal), the block delivers on a
+# surface derived per signal from whether the Orchestrator is provably up in
+# that signal's failure mode:
+#
+#   fail-safe, meter-dark → OUT-OF-BAND: a direct bash curl POST to the
+#       Telegram Bot API. Both mean "DEFECTIVE AND FULLY BLOCKING" — the
+#       Orchestrator process that would consume an in-band event may itself be
+#       unreachable, and a bash LPUSH an operator can only read through
+#       GET /api/alerts on port 4000 is the "written and unreadable" trap.
+#       This makes the watchdog the third Telegram consumer alongside
+#       DLQ_ALERT and CONSUMER_DEAD (same infrastructure-is-broken character).
+#
+#   quota, latency → IN-BAND: an enveloped event XADD'd directly onto the
+#       hydra:notifications stream (id/type/source/timestamp/correlationId/
+#       payload — the on-wire shape src/event-bus.ts's publish() constructs,
+#       ADR-0017 Category A). Both fire only when pace-gate's last-tick hash
+#       was successfully READ, which proves the Orchestrator was up at
+#       detection time. The in-process notification-consumer (unmodified)
+#       picks the event up: it lands in ALERT_TYPES (dashboard alert via the
+#       compile-checked formatAlertMessage grammar) AND in CRITICAL_EVENT_TYPES
+#       (immediate digest-surfaced Telegram line via formatCriticalAlert's
+#       generic default arm) — no new digest-format.ts batched section.
+#
+#   pause → IN-BAND, DIGEST LINE ONLY: the same enveloped XADD, but
+#       launch:pause_forgotten is deliberately NOT in ALERT_TYPES — a
+#       deliberate overnight operator pause must never leave a lingering
+#       unread dashboard alert (the alarm-fatigue failure the taxonomy exists
+#       to prevent). It reaches the operator via CRITICAL_EVENT_TYPES' immediate
+#       digest bypass only.
+#
+# Credential placement: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are read from
+# the watchdog's process env (the same vars src/notify.ts reads). Wiring them
+# into hydra-watchdog.service is an explicit OPERATOR action out of scope here
+# (issue #3848) — so when either is absent the out-of-band block logs a
+# distinguishable WARN naming the missing var and continues: an unconfigured
+# signal must be visible as unconfigured, never silent and never fatal.
+#
+# Dedup/un-suppression need NO new machinery: delivery fires at the same
+# absent→present fired-marker transition the WARNING already detects (the
+# #3847 fired/since keys are the sole dedup state, zero new Redis keys), the
+# fired marker suppresses re-alarm for a streak's duration, and recovery DELs
+# it — so a fresh streak re-crossing the threshold delivers again (recurrence,
+# never acknowledgement).
 #
 # Fail-safe (HARD): this block NEVER throws and NEVER returns non-zero (matches
-# the watchdog's per-block contract, set -euo pipefail notwithstanding). Any
+# the watchdog's per-block contract, set -euo pipefail notwithstanding). The
+# delivery calls follow the same best-effort discipline as rc_write/rc_read
+# (redirected output, || true, bounded --max-time) — a curl or XADD failure
+# degrades to a logged WARN and never propagates out of run_launch_flow. Any
 # redis-cli/docker failure or an empty/absent last-tick hash logs a
 # distinguishable WARN and returns WITHOUT mutating any anchor or fired marker
 # — it must NEVER clear on a read failure (clearing on failure would falsely
 # erase an in-progress streak, a worse outcome than leaving stale state one
 # extra tick).
 #
-# Testability hooks (off-by-default; pinned by test/watchdog-launch-flow.test.mts):
+# Testability hooks (off-by-default; pinned by test/watchdog-launch-flow.test.mts
+# and test/launch-flow-delivery.test.mts):
 #   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT  redis-cli target (default: docker exec
 #                                        hydra-redis-1). Any non-"docker" host
 #                                        calls redis-cli -h/-p directly, so the
@@ -909,6 +954,16 @@ run_skill_mirror_drift() {
 #   HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS          (default 86400 = 24h)
 #   HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS      (default 1000  = 1s)
 #   HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS (default 3600  = 1h)
+#   HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM  In-band delivery stream key (default
+#                                        hydra:notifications — the literal owned
+#                                        by src/event-bus-stream-keys.ts's
+#                                        STREAMS.NOTIFICATIONS, drift-guarded by
+#                                        the test). The delivery test rebinds it
+#                                        to a private namespace so behavioural
+#                                        cases never write a real event onto the
+#                                        PRODUCTION notifications stream (the
+#                                        live consumer would push a real
+#                                        dashboard alert + Telegram line).
 
 run_launch_flow() {
   local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
@@ -921,6 +976,10 @@ run_launch_flow() {
   # LAUNCH_FLOW_KEY_PREFIX / launchFlowSinceKey / launchFlowFiredKey; the test
   # asserts the bash template and the TS builder emit identical strings.
   local LF_KEY_PREFIX="hydra:autopilot:launch-flow"
+  # In-band delivery stream — the literal owned by src/event-bus-stream-keys.ts's
+  # STREAMS.NOTIFICATIONS, drift-guarded by test/launch-flow-delivery.test.mts.
+  # HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM is a test-only override (see header).
+  local NOTIFY_STREAM="${HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM:-hydra:notifications}"
 
   # Thresholds (env in SECONDS, the AUTODEPLOY_GRACE_SECONDS precedent; the
   # delta math is epoch-MS, so multiply by 1000). Sanitize each to its
@@ -967,6 +1026,97 @@ run_launch_flow() {
   lf_since_key() { printf '%s:since:%s\n' "$LF_KEY_PREFIX" "$1"; }
   lf_fired_key() { printf '%s:fired:%s\n' "$LF_KEY_PREFIX" "$1"; }
 
+  # --- Delivery helpers (issue #3848, gamma) — every one best-effort ---
+  #
+  # Both helpers are called ONLY from track_signal's fired absent→present
+  # transition (the same instant the WARNING fires) and MUST return 0 on every
+  # path — a delivery failure degrades to a logged WARN, never a non-zero out
+  # of run_launch_flow. The caller's locals `reason` and `REDIS_*` are visible
+  # via bash dynamic scoping.
+
+  # deliver_out_of_band SIGNAL DUR_MS THR_MS — direct bash curl to the Telegram
+  # Bot API (fail-safe / meter-dark; mirrors src/notify.ts's endpoint shape).
+  # Zero dependency on any Orchestrator HTTP endpoint or in-process module:
+  # both signals mean the Orchestrator may itself be unreachable, so an
+  # in-band event would be written and unreadable.
+  deliver_out_of_band() {
+    local sig="$1" dur_ms="$2" thr_ms="$3"
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+      local missing=""
+      [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && missing="TELEGRAM_BOT_TOKEN"
+      [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && missing="${missing:+$missing }TELEGRAM_CHAT_ID"
+      log "WARN launch-flow out-of-band delivery for '$sig' SKIPPED — missing Telegram config: ${missing} (credential placement into the watchdog service env is an operator action, see #3848); the streak is still detected and logged"
+      return 0
+    fi
+    local text
+    text="$(printf 'HYDRA LAUNCH FLOW ALERT (out-of-band — Orchestrator may be down)\nsignal: %s\nsustained: %sms >= %sms threshold\nreason: %s\nhost: %s' \
+      "$sig" "$dur_ms" "$thr_ms" "${reason:-n/a}" "$(hostname 2>/dev/null || echo unknown)")"
+    # Best-effort by contract: bounded --max-time, output redirected, `|| log`
+    # (not `|| true`) so a failed Telegram send is distinguishable in the
+    # journal from a skipped one — but still never fails the block.
+    if curl -sS --max-time 10 -X POST \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${text}" >/dev/null 2>&1; then
+      log "out-of-band Telegram delivery sent for '$sig'"
+    else
+      log "WARN launch-flow out-of-band Telegram send FAILED for '$sig' (curl non-zero, best-effort — will not retry this streak; recovery + a fresh streak re-alarm)"
+    fi
+    return 0
+  }
+
+  # deliver_in_band SIGNAL DUR_MS THR_MS — enveloped XADD directly onto the
+  # notifications stream (quota / latency / pause). The on-wire field set is
+  # exactly what src/event-bus.ts's publish() constructs (ADR-0017 Category
+  # A), so the unmodified in-process notification-consumer folds it through
+  # the compile-checked grammar: ALERT_TYPES members become dashboard alerts;
+  # CRITICAL_EVENT_TYPES members bypass the digest and send immediately.
+  # pause's type is deliberately absent from ALERT_TYPES (digest line only).
+  deliver_in_band() {
+    local sig="$1" dur_ms="$2" thr_ms="$3" etype
+    case "$sig" in
+      quota)   etype="launch:quota_stretch" ;;
+      latency) etype="launch:latency_breach" ;;
+      pause)   etype="launch:pause_forgotten" ;;
+      *) return 0 ;;
+    esac
+    # reason is a fixed pace-gate exit literal, but sanitize anyway so a future
+    # reason containing a quote/backslash can never break the payload JSON.
+    local reason_clean
+    reason_clean="$(printf '%s' "${reason:-}" | tr -dc 'a-zA-Z0-9_.:-')"
+    local iso payload
+    iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
+    payload="$(printf '{"signal":"%s","reason":"%s","durationMs":%s,"thresholdMs":%s}' \
+      "$sig" "$reason_clean" "$dur_ms" "$thr_ms")"
+    # rc_write is fire-and-forget by contract (|| true): a redis failure costs
+    # this one delivery, never the block's exit code — matching the read-path
+    # discipline the rest of the block already relies on.
+    rc_write XADD "$NOTIFY_STREAM" '*' \
+      id "launch-flow-$(date +%s 2>/dev/null || echo 0)-$$" \
+      type "$etype" \
+      source "watchdog-launch-flow" \
+      timestamp "$iso" \
+      correlationId "launch-flow-${sig}" \
+      payload "$payload"
+    log "in-band delivery published (best-effort) for '$sig' (type=${etype} -> ${NOTIFY_STREAM})"
+    return 0
+  }
+
+  # deliver_signal SIGNAL DUR_MS THR_MS — surface routing per the #3848
+  # taxonomy: fail-safe/meter-dark go OUT-OF-BAND (Orchestrator unproven);
+  # everything else goes IN-BAND (a successfully-read verdict proves the
+  # Orchestrator was up at detection time). Always returns 0.
+  deliver_signal() {
+    local sig="$1" dur_ms="$2" thr_ms="$3"
+    case "$sig" in
+      fail-safe|meter-dark)
+        deliver_out_of_band "$sig" "$dur_ms" "$thr_ms" ;;
+      *)
+        deliver_in_band "$sig" "$dur_ms" "$thr_ms" ;;
+    esac
+    return 0
+  }
+
   # track_signal SIGNAL THRESHOLD_MS IS_MEMBER — the UNIFORM streak rule. The
   # caller's locals `now_ms` and `reason` are visible via bash dynamic scoping.
   # IS_MEMBER=1 extends: SET NX since (locked on the first qualifying tick,
@@ -988,7 +1138,14 @@ run_launch_flow() {
       if (( dur >= thr_ms )); then
         if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" != "1" ]]; then
           log "WARNING LAUNCH FLOW — signal '$sig' sustained ${dur}ms >= ${thr_ms}ms threshold (reason=${reason:-n/a}); see epic #3844"
+          # The fired marker is set BEFORE delivering: dedup holds even if the
+          # delivery call itself fails (delivery is best-effort per streak).
           rc_write SET "$fired_key" 1
+          # #3848 delivery — at the exact absent→present transition, the same
+          # instant as the WARNING. The fired/since keys remain the ONLY dedup
+          # state; un-suppression is recurrence after recovery (DEL on
+          # membership flip), never acknowledgement.
+          deliver_signal "$sig" "$dur" "$thr_ms"
         fi
       else
         log "launch-flow signal '$sig' streak ${dur}ms (< ${thr_ms}ms threshold); not firing"
