@@ -3,6 +3,7 @@ import { useWebSocket } from "./hooks/useWebSocket.js";
 import { ToastProvider } from "./hooks/useToast.jsx";
 import Layout from "./components/Layout.jsx";
 import Today from "./pages/Today.jsx";
+import Health from "./pages/Health.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
 import NowPixel from "./pages/now-pixel/NowPixel.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
@@ -89,6 +90,9 @@ export default function App() {
       <Layout connected={ws.connected}>
         <Routes>
           <Route path="/" element={<Today />} />
+          {/* Dashboard v3 slice gamma (#4008, ADR-0034) — the phone-grade
+              is-it-on-fire / burning-money surface. */}
+          <Route path="/health" element={<Health />} />
           <Route path="/now" element={<NowRoute ws={ws} />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/explore" element={<Explore />} />

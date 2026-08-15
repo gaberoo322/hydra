@@ -61,6 +61,14 @@ export interface DeployedShaDeps {
 // the route) so the watchdog hot path shares one cache across requests.
 let deployedShaCache: { sha: string | null; at: number } = { sha: null, at: 0 };
 
+// Sibling cache for the origin/master probe (issue #4008). Unlike
+// deployedShaCache, this one caches a null RESULT too: `git ls-remote origin`
+// is a network round-trip, so a failure must be TTL-cached or every /health
+// hit re-pays the timeout — the deployedSha local-read failure mode is cheap
+// enough to retry per-request, the remote one is not. `at: -Infinity` makes
+// the very first read an unconditional cache miss.
+let remoteMasterShaCache: { sha: string | null; at: number } = { sha: null, at: -Infinity };
+
 /**
  * Read the SHA the orchestrator is running from (`git rev-parse HEAD` against
  * $HYDRA_ROOT), cached for {@link DEPLOYED_SHA_TTL_MS}.
@@ -109,4 +117,56 @@ export async function getDeployedSha(deps: DeployedShaDeps = {}): Promise<string
  */
 export function resetDeployedShaCache(): void {
   deployedShaCache = { sha: null, at: 0 };
+}
+
+/**
+ * Read origin/master's HEAD SHA (`git ls-remote origin master`), cached for
+ * {@link DEPLOYED_SHA_TTL_MS} (issue #4008 — the /health page's deploy-DRIFT
+ * axis).
+ *
+ * The sibling probe to {@link getDeployedSha}, with the same contract
+ * (design-concept 2880e735, invariant 4): NEVER throws and NEVER blocks
+ * /health — a network/git failure (offline host, credential prompt, no
+ * remote) degrades to null, and the client renders the drift axis UNKNOWN
+ * rather than a confident in-sync/drifted claim. The route ships the RAW SHA;
+ * drift itself is computed client-side from the two decomposable inputs
+ * (ADR-0034 §5 rule 3 — never a server-side derived boolean).
+ *
+ * A null result is TTL-cached like a success (see remoteMasterShaCache) so an
+ * unreachable origin costs one timeout per cache window, not one per hit.
+ *
+ * @param deps injectable clock + git seam (both defaulted; production passes none).
+ */
+export async function getRemoteMasterSha(deps: DeployedShaDeps = {}): Promise<string | null> {
+  const now = deps.now ?? Date.now;
+  const gitExec = deps.gitExec ?? defaultGitExec;
+
+  const at = now();
+  if (at - remoteMasterShaCache.at < DEPLOYED_SHA_TTL_MS) {
+    return remoteMasterShaCache.sha;
+  }
+  // `git ls-remote origin master` prints `<sha>\trefs/heads/master`; the SHA is
+  // the first whitespace-delimited field (empty output → null, not a crash).
+  const result = await gitExec(["-C", HYDRA_ROOT, "ls-remote", "origin", "master"], { timeout: 5000 });
+  let sha: string | null = null;
+  if (isGhFailure(result)) {
+    // Log once-per-cache-window so a misconfigured/offline host is visible
+    // without spamming, then degrade to null (UNKNOWN on the drift axis).
+    logger.error(
+      { code: result.code, stderr: result.stderr.slice(0, 200) },
+      "[API] /health originMasterSha unavailable",
+    );
+  } else {
+    sha = result.data.stdout.trim().split(/\s+/)[0] || null;
+  }
+  remoteMasterShaCache = { sha, at };
+  return sha;
+}
+
+/**
+ * Test hook: drop the memoized origin/master cache (the sibling of
+ * {@link resetDeployedShaCache}).
+ */
+export function resetRemoteMasterShaCache(): void {
+  remoteMasterShaCache = { sha: null, at: -Infinity };
 }

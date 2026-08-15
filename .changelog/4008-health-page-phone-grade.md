@@ -1,0 +1,1 @@
+- feat: add the phone-grade /health dashboard page — deploy drift/health axes, surfaced /health/deep, cost + quota burn, server-confirmed pause and confirm-gated emergency brake (#4008)
