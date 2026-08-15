@@ -26,9 +26,9 @@
  *    from Redis or the tier-classifier.
  *
  * 2. **Artifact identity + gate predicates** — `computeArtifactHash`
- *    (+ `canonicalJson`), `isFresh`, `gateCheck`, and
- *    `DESIGN_CONCEPT_MAX_AGE_MS`. Pure — no Redis IO. `gateCheck` imports the
- *    tier-classifier (`classifyChange`, `permitsBreakingChange`) for the
+ *    (+ `canonicalJson`), `isFresh`, `contentGateCheck` / `gateCheck`, and
+ *    `DESIGN_CONCEPT_MAX_AGE_MS`. Pure — no Redis IO. The gate pair imports
+ *    the tier-classifier (`classifyChange`, `permitsBreakingChange`) for the
  *    breaking-impact rule.
  *
  * 3. **Green-light criterion** — `computeGreenLight`
@@ -181,10 +181,16 @@ export function isFresh(
 }
 
 /**
- * Gate check — the 7 deterministic failure modes from ADR-0008 §"Gate
- * check". Returns `{ ok: true, reasons: [] }` only when EVERY rule
- * passes. Pure function — no Redis IO. The autopilot consumes this
- * verbatim in Phase B.
+ * Content gate check — ADR-0008 rules 1-6 only (everything except the
+ * rule-7 approval-status check). This is the PRE-APPROVAL verdict
+ * `hydra-grill` Step 8 consumes: a freshly-written artifact is always
+ * `status: 'draft'`, so the full `gateCheck` can never pass before the
+ * approve call — rule 7 requires the very approval it would be gating
+ * (issue #4035). The content gate answers "does this draft satisfy every
+ * rule the approve call itself would satisfy?" — approving on its pass is
+ * not a rubber stamp precisely because rules 1-6 were evaluated against
+ * the draft BEFORE `status` flipped, and the full `gateCheck` re-run after
+ * approve re-confirms all 7. Pure function — no Redis IO.
  *
  * For Phase A: `glossaryGaps` fails closed (any non-empty list is a
  * reject). The whitelist-via-Redis escape hatch lands later.
@@ -204,7 +210,7 @@ export function isFresh(
  * carry the most verification, not be rejected). Intended behavior delta,
  * not a regression.
  */
-export function gateCheck(
+export function contentGateCheck(
   d: DesignConcept,
   now: number,
 ): GateResult {
@@ -252,6 +258,26 @@ export function gateCheck(
   if (!isFresh(d, now)) {
     reasons.push("artifact is stale (older than 7 days)");
   }
+
+  return { ok: reasons.length === 0, reasons };
+}
+
+/**
+ * Full gate check — the 7 deterministic failure modes from ADR-0008
+ * §"Gate check": `contentGateCheck` (rules 1-6) plus the rule-7
+ * approval-status check. Returns `{ ok: true, reasons: [] }` only when
+ * EVERY rule passes. Pure function — no Redis IO. The autopilot consumes
+ * this verbatim in Phase B. Behavior is identical to the pre-#4035
+ * single-function form: same rules, same order, same reason strings —
+ * the split exists so a pre-approval caller can evaluate rules 1-6 alone
+ * via `contentGateCheck` without loosening what this full check asserts
+ * for its post-approval consumers (QA resolve, GET, approve responses).
+ */
+export function gateCheck(
+  d: DesignConcept,
+  now: number,
+): GateResult {
+  const { reasons } = contentGateCheck(d, now);
 
   // 7. Status must be approved.
   if (d.status !== "approved") {

@@ -3,9 +3,11 @@ import { useWebSocket } from "./hooks/useWebSocket.js";
 import { ToastProvider } from "./hooks/useToast.jsx";
 import Layout from "./components/Layout.jsx";
 import Today from "./pages/Today.jsx";
+import Health from "./pages/Health.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
 import NowPixel from "./pages/now-pixel/NowPixel.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
+import Builder from "./pages/Builder.jsx";
 import Explore from "./pages/Explore.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
 import DispatchTranscript from "./pages/DispatchTranscript.jsx";
@@ -89,9 +91,14 @@ export default function App() {
       <Layout connected={ws.connected}>
         <Routes>
           <Route path="/" element={<Today />} />
+          {/* Dashboard v3 slice gamma (#4008, ADR-0034) — the phone-grade
+              is-it-on-fire / burning-money surface. */}
+          <Route path="/health" element={<Health />} />
           <Route path="/now" element={<NowRoute ws={ws} />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/explore" element={<Explore />} />
+          {/* Dashboard v3 (ADR-0034 §2) — the weekly journey, slice zeta (#4011). */}
+          <Route path="/builder" element={<Builder />} />
           <Route path="/explore/:tab" element={<Explore />} />
           {/* Slice 4 (issue #500) — per-run autopilot detail page. */}
           <Route path="/autopilot/:runId" element={<Autopilot />} />

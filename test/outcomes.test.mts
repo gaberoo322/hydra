@@ -111,7 +111,12 @@ outcomes:
     noise_epsilon: 0.5
 `);
     const r = await loadOutcomes(path);
-    assert.equal(r.ok, true, `expected ok; errors=${!r.ok ? r.errors.join("; ") : ""}`);
+    // `r.ok === false` (not `!r.ok`) so the ternary narrows `r` to the `errors`
+    // member under this project's `strict: false` tsconfig — TypeScript 6.0.2
+    // does not narrow a discriminated union through a negated bare property
+    // access (`!r.ok`) when strictNullChecks is off, only through an explicit
+    // literal comparison (issue #4046).
+    assert.equal(r.ok, true, `expected ok; errors=${r.ok === false ? r.errors.join("; ") : ""}`);
     if (!r.ok) throw new Error("unreachable");
     assert.equal(r.outcomes.length, 2);
     assert.equal(r.outcomes[0].name, "clv-promotion");

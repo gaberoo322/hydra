@@ -394,4 +394,29 @@ export const redisKeys = {
   // Dynamic stream lookup (for GET /events/:stream)
   // ---------------------------------------------------------------------------
   stream: (name: string) => `hydra:${name}`,
+
+  // ---------------------------------------------------------------------------
+  // Attention feed (issue #4007, ADR-0034 §4 — threshold-crossing surface).
+  //
+  // Per-signal (three members: blocked-on-human / breakage / repetition):
+  //
+  // `attentionDismissed` — hash, field=item id, value=ISO dismissed-at. The
+  //   durable dismissal ledger; feed reads filter members younger than the
+  //   30-day snooze TTL and lazily prune older ones, so a genuinely
+  //   still-crossing item resurfaces after a month rather than being
+  //   silently gone forever. NOT TTLed as a key — the read-side filter owns
+  //   the snooze semantics.
+  //
+  // `attentionSurfaced` — hash, field=item id, value=ISO first-surfaced-at.
+  //   The once-per-item dedup ledger behind the surfaced counter, so a 30s
+  //   poll cadence cannot inflate the calibration count.
+  //
+  // `attentionCountSurfaced` / `attentionCountDismissed` — INT counters keyed
+  //   per threshold (signal), NOT per item: the calibration signal is about
+  //   the LINE, not the item (ADR-0034 §4's falsifiability rule).
+  // ---------------------------------------------------------------------------
+  attentionDismissed: (signal: string) => `hydra:attention:dismissed:${signal}`,
+  attentionSurfaced: (signal: string) => `hydra:attention:surfaced:${signal}`,
+  attentionCountSurfaced: (signal: string) => `hydra:attention:counts:${signal}:surfaced`,
+  attentionCountDismissed: (signal: string) => `hydra:attention:counts:${signal}:dismissed`,
 };

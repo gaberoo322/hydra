@@ -1,8 +1,9 @@
 /**
  * Regression tests for the /hydra-review pickup-set aggregator (issue #745).
  *
- * The pickup set unifies three buckets — operator-decision-queue +
- * ready-for-human + stale-blocked — which is intentionally NOT the same as the
+ * The pickup set unifies four buckets — operator-decision-queue +
+ * ready-for-human + stale-blocked + hitl-grill (issue #4026) — which is
+ * intentionally NOT the same as the
  * dashboard-v2 `getDecisionQueue()` (whose third bucket is `needs-info`). The
  * phone-notify hook reads THIS aggregator so it mirrors what the operator sees
  * in `/hydra-review`.
@@ -74,6 +75,25 @@ describe("mergePickupItems — pure helper", () => {
 
   test("empty input yields empty list", () => {
     assert.deepEqual(mergePickupItems({}), []);
+  });
+
+  test("hitl-grill is last in priority — an earlier bucket wins as primary source", () => {
+    const merged = mergePickupItems({
+      "stale-blocked": [{ number: 10, title: "A", url: "ua" }],
+      "hitl-grill": [{ number: 10, title: "A-dup", url: "ua" }],
+    });
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].source, "stale-blocked");
+    assert.deepEqual(merged[0].sources, ["stale-blocked", "hitl-grill"]);
+  });
+
+  test("hitl-grill-only item surfaces with hitl-grill as primary source", () => {
+    const merged = mergePickupItems({
+      "hitl-grill": [{ number: 10, title: "A", url: "ua" }],
+    });
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].source, "hitl-grill");
+    assert.deepEqual(merged[0].sources, ["hitl-grill"]);
   });
 });
 
@@ -240,5 +260,52 @@ describe("getReviewPickupSet — integration", () => {
       listIssuesBySearch: async () => ({ ok: true, rows: [] }),
     });
     assert.deepEqual(items, []);
+  });
+
+  test("hitl-grill merges as a fourth bucket", async () => {
+    const items = await getReviewPickupSet({
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => [],
+      listIssuesByLabelOrEmpty: async (label) =>
+        label === "hitl-grill"
+          ? [issueRow({ number: 700, title: "Parked idea", url: "https://x/700" })]
+          : [],
+      listIssuesBySearch: async () => ({ ok: true, rows: [] }),
+    });
+    assert.deepEqual(items.map((i) => i.number), [700]);
+    assert.equal(items[0].source, "hitl-grill");
+  });
+
+  test("item in both hitl-grill and ready-for-human reports the urgent bucket as primary, both in sources", async () => {
+    const items = await getReviewPickupSet({
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => [],
+      listIssuesByLabelOrEmpty: async (label) => {
+        if (label === "ready-for-human" || label === "hitl-grill") {
+          return [issueRow({ number: 200, title: "Both", url: "https://x/200" })];
+        }
+        return [];
+      },
+      listIssuesBySearch: async () => ({ ok: true, rows: [] }),
+    });
+    assert.equal(items.length, 1);
+    assert.equal(items[0].source, "ready-for-human");
+    assert.deepEqual(items[0].sources, ["ready-for-human", "hitl-grill"]);
+  });
+
+  test("a failing hitl-grill sub-source yields an empty bucket, not a blanked set", async () => {
+    const items = await getReviewPickupSet({
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => [],
+      listIssuesByLabelOrEmpty: async (label) => {
+        if (label === "hitl-grill") throw new Error("hitl-grill reader exploded");
+        return label === "ready-for-human"
+          ? [issueRow({ number: 200, title: "rfh", url: "https://x/200" })]
+          : [];
+      },
+      listIssuesBySearch: async () => ({ ok: true, rows: [] }),
+    });
+    // The surviving ready-for-human source still ships.
+    assert.deepEqual(items.map((i) => i.number), [200]);
   });
 });

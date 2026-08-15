@@ -122,6 +122,7 @@
   "test/build-spritesheet.test.mts": 2,
   "test/builder-health-stagnation.test.mts": 6,
   "test/builder-health.test.mts": 6,
+  "test/builder-page.test.mts": 2,
   "test/capacity-floor-classifier.test.mts": 2,
   "test/capacity-floor.test.mts": 2,
   "test/cascade-telemetry.test.mts": 4,

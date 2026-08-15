@@ -311,9 +311,11 @@ persisting an artifact without a confirmation beat.
   invariants, rejected alternatives) back in one short recap and get explicit
   confirmation before the POST. If the operator amends, loop back to Step 3.
 - **Autopilot (non-interactive) runs** — there is no operator to confirm, so
-  the automated stand-in is the Step 8 `gateCheck()`: it is the shared-
-  understanding gate. Never hand-wave past a gate FAIL by approving anyway
-  (Safety rule 3); an unconfirmable design escalates via handoff (Step 8).
+  the automated stand-in is the Step 8 content gate (`contentGateCheck()` —
+  ADR-0008 rules 1-6, the half of the gate a fresh draft CAN pass): it is
+  the shared-understanding gate. Never hand-wave past a gate FAIL by
+  approving anyway (Safety rule 3); an unconfirmable design escalates via
+  handoff (Step 8).
 
 POST the full body to `/api/design-concepts`. The store computes
 `createdAt` and `artifactHash` server-side; the skill MUST NOT supply
@@ -355,30 +357,53 @@ rm -f "$BODY_PATH"
 The response is the persisted artifact including the server-computed
 `artifactHash`. Save it — Step 8 uses it.
 
-### Step 8 — Gate-check → auto-approve OR escalate
+### Step 8 — Content-gate → auto-approve → full-gate confirm OR escalate
 
-Run the gate against the freshly-written artifact:
+A freshly-written artifact is always `status: 'draft'`, and the full
+gate's rule 7 requires `status === 'approved'` — so running the FULL gate
+before approving can never take its success branch; the pre-#4035
+gate-then-approve sequence was structurally dead. The reachable sequence
+checks the CONTENT rules (ADR-0008 rules 1-6) first, approves, then
+CONFIRMS with the full gate (rules 1-7):
 
 ```bash
-if bash scripts/autopilot/grill-artifact.sh gate "$ANCHOR"; then
-  # Gate ok → auto-approve.
+GATE_CONFIRMED=false
+if bash scripts/autopilot/grill-artifact.sh content-gate "$ANCHOR"; then
+  # Content rules 1-6 pass → auto-approve. approveDesignConcept is
+  # unconditional at the persistence layer (it does not re-check the
+  # rules), so the content-gate verdict above is the ONLY thing standing
+  # between a draft and 'approved' — never call approve without a
+  # content-gate pass (Safety rule 3).
   bash scripts/autopilot/grill-artifact.sh approve "$ANCHOR" "auto-gate"
-  echo "design-concept approved: $ANCHOR (artifactHash=$ARTIFACT_HASH)"
-else
+  # Full-gate confirm: rule 7 can only pass now that status is approved.
+  bash scripts/autopilot/grill-artifact.sh gate "$ANCHOR" && GATE_CONFIRMED=true
+fi
+
+if [ "$GATE_CONFIRMED" != "true" ]; then
   # Gate fail → write a structured handoff into the operator queue,
-  # do NOT approve, do NOT retry.
+  # do NOT retry. If the approve step already ran (content-gate passed
+  # but the full-gate confirm failed — only the freshness race is
+  # plausible), the handoff MUST note the artifact is
+  # approved-but-unconfirmed.
   GATE_REASONS=$(bash scripts/autopilot/grill-artifact.sh gate "$ANCHOR" 2>/dev/null || true)
   # Invoke the upstream handoff skill via the Agent tool — see below.
 fi
 ```
 
-`grill-artifact.sh gate` exits 0 iff the gate passes; otherwise prints the
-reasons and exits 1. The skill MUST trust the helper's verdict — re-
+`grill-artifact.sh content-gate` / `gate` exit 0 iff the named gate
+passes; otherwise they print the reasons and exit 1. `content-gate`
+evaluates rules 1-6 against the draft; `gate` evaluates all 7 against
+the stored artifact. The skill MUST trust the helper's verdict — re-
 inferring "is this approvable?" from the artifact body in prose has been
-the failure mode the design-concept gate exists to prevent.
+the failure mode the design-concept gate exists to prevent. In
+particular, do NOT reorder the sequence back to gate-then-approve and do
+NOT skip the content-gate: the first is unreachable by construction, and
+the second would make `approve` a rubber stamp with no rule enforcement
+at all.
 
-**Auto-approve** (gate ok) writes `approvedBy: 'auto-gate'`. The Phase B
-autopilot wiring will then accept the artifact for dispatch.
+**Auto-approve** (content-gate ok, then full-gate confirm ok) writes
+`approvedBy: 'auto-gate'`. The Phase B autopilot wiring will then accept
+the artifact for dispatch.
 
 **Escalate** (gate fail) writes a structured handoff. The handoff:
 
@@ -453,7 +478,9 @@ Side effects:
 # Operator grills an issue before dispatching dev_orch:
 claude --dangerously-skip-permissions -p "/hydra-grill 439 orch"
 
-# Just gate-check an existing draft without re-grilling:
+# Just gate-check an existing draft without re-grilling (rules 1-6,
+# pre-approval) — or the full 7-rule check on an approved artifact:
+bash scripts/autopilot/grill-artifact.sh content-gate 439
 bash scripts/autopilot/grill-artifact.sh gate 439
 
 # Operator overrides a failed gate (rare; reserved for edge cases the
@@ -466,7 +493,7 @@ bash scripts/autopilot/grill-artifact.sh approve 439 "operator:gabe"
 | Symptom | First place to look |
 |---|---|
 | Skill exits without a Redis artifact | `curl http://localhost:4000/api/design-concepts/<anchor>` — was the POST attempted? |
-| Gate fails on a freshly-approved artifact | Check `gateCheck()` reasons; the artifact was likely approved before all rules passed — re-grill. |
+| Gate fails on a freshly-approved artifact | Check `gateCheck()` reasons; the artifact was either approved before all content rules passed (a skipped Step 8 `content-gate` — re-grill) or tripped the freshness race between `content-gate` and `gate`. |
 | Prototype sandbox left behind on disk | The cleanup in Step 4 was skipped; `rm -rf /tmp/hydra-prototype-<anchor>` manually and file a bug. |
 | Handoff written as freeform prose | The skill bypassed the upstream `handoff` skill — that is a regression; re-dispatch via Agent tool. |
 | `qaTrace.length < 6` despite a long session | The skill summarised multiple turns into one entry; the rule is one entry per resolved branch, not one per topic. |

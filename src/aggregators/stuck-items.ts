@@ -56,6 +56,14 @@ export interface StuckItems {
   /** Echo of the thresholds used so the dashboard can render "stale ≥ Xd". */
   thresholds: StuckThresholds;
   generatedAt: string;
+  /**
+   * ADR-0034 §5.2 asserted-emptiness evidence (issue #4007) — same contract
+   * `DecisionQueueResult` shipped in #4006. Raw row count from the fulfilled
+   * sub-fetches, so an empty snapshot can prove the lookup actually ran.
+   */
+  scanned: number;
+  /** True iff all three sub-fetches settled fulfilled (the emptiness assertion). */
+  sourcesOk: boolean;
 }
 
 export interface StuckThresholds {
@@ -114,12 +122,25 @@ export async function getStuckItems(
   const info = settledOrEmpty(infoResult, "stuck-items/needs-info");
   const prs = settledOrEmpty(prsResult, "stuck-items/prs-failed-ci");
 
+  // ADR-0034 §5.2 (issue #4007): a genuine zero-item snapshot must never be
+  // bit-for-bit identical to a total sub-fetch failure. `scanned` counts the
+  // raw rows the fulfilled sub-fetches returned (rejected ones contribute []
+  // → 0 via settledOrEmpty); `sourcesOk` requires every sub-fetch to have
+  // settled fulfilled, mirroring the #4006 DecisionQueueResult contract.
+  const scanned = blocked.length + info.length + prs.length;
+  const sourcesOk =
+    blockedResult.status === "fulfilled" &&
+    infoResult.status === "fulfilled" &&
+    prsResult.status === "fulfilled";
+
   return {
     blockedOver2d: classifyByAge(blocked, now, thresholds.blockedDays),
     needsInfoWaiting: classifyByAge(info, now, thresholds.needsInfoDays),
     prsWithFailedCi: prs,
     thresholds,
     generatedAt: now.toISOString(),
+    scanned,
+    sourcesOk,
   };
 }
 
