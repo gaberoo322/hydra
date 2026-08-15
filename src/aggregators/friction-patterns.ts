@@ -112,6 +112,15 @@ export interface FrictionPatternsSnapshot {
   /** Echo of the window used for `recentMetaFrictionIssues` so the UI can label "last Xh". */
   windowHours: number;
   generatedAt: string;
+  /**
+   * ADR-0034 §5.2 asserted-emptiness evidence (issue #4007) — same contract
+   * `DecisionQueueResult` shipped in #4006. Raw row count (grouped pattern
+   * rows + meta-friction issues) from the fulfilled sub-reads, so an empty
+   * snapshot can prove the lookup actually ran.
+   */
+  scanned: number;
+  /** True iff both sub-reads settled fulfilled (the emptiness assertion). */
+  sourcesOk: boolean;
 }
 
 export interface FrictionPatternsDeps {
@@ -185,6 +194,17 @@ export async function getFrictionPatterns(
   }
   thresholdCandidates.sort((a, b) => a.hitsToPromotion - b.hitsToPromotion);
 
+  // ADR-0034 §5.2 (issue #4007): asserted-emptiness evidence, mirroring the
+  // #4006 DecisionQueueResult contract. `scanned` counts the raw rows the
+  // fulfilled sub-reads returned (rejected ones contribute [] → 0 via
+  // settledOrEmpty); `sourcesOk` requires every sub-read to have settled
+  // fulfilled so a total scan failure demotes the client to UNKNOWN rather
+  // than a confident all-clear.
+  let scanned = issues.length;
+  for (const group of bySkill) scanned += group.patterns.length;
+  const sourcesOk =
+    groupsResult.status === "fulfilled" && issuesResult.status === "fulfilled";
+
   return {
     bySkill,
     thresholdCandidates,
@@ -193,6 +213,8 @@ export async function getFrictionPatterns(
     candidateWindow,
     windowHours,
     generatedAt: now.toISOString(),
+    scanned,
+    sourcesOk,
   };
 }
 
