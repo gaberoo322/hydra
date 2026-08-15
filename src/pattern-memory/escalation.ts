@@ -50,6 +50,7 @@
 
 import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
+import { addIssueLabel, isIssueLabelWriteFailure } from "../github/issues.ts";
 import { logger } from "../logger.ts";
 // Issue #3850 — the rate-vs-baseline gate for steady-rate cues is composed of
 // a pure parser/decision pair in the zero-IO cue-policy leaf
@@ -67,6 +68,14 @@ import {
 const REPO = process.env.HYDRA_GH_REPO || "gaberoo322/hydra";
 const META_FRICTION_LABEL = "meta-friction";
 const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguish
+// Issue #4073 — the lifecycle label re-applied after ANY CLOSED→reopen (see
+// `applyReopenLifecycleLabel`). The closing paths (operator review, automated
+// sweep) strip the lifecycle label and `reopenIssue()` restores nothing, so an
+// unguarded reopen lands the issue as an untriaged orphan that forces a sweep
+// to re-route it. `ready-for-human` is the uniform default for every reopen —
+// simplest correct choice; an operator or a later sweep can re-route from
+// there.
+const REOPEN_LIFECYCLE_LABEL = "ready-for-human";
 
 // ---------------------------------------------------------------------------
 // Cue policy moved out (issue #2569)
@@ -351,6 +360,27 @@ async function reopenIssue(issueNumber: number): Promise<void> {
 }
 
 /**
+ * Issue #4073 — re-apply a lifecycle label immediately after a CLOSED→reopen
+ * so the issue never lands label-less (an untriaged orphan). Best-effort: a
+ * label-write failure is logged with context and does NOT fail the reopen
+ * itself — the issue is already back OPEN with a comment by the time this
+ * runs, so surfacing an error here would misreport an escalation that did
+ * succeed. Rides `src/github/issues.ts`'s `addIssueLabel`, the repo's one
+ * narrow issue-mutation surface, passing this module's own `REPO` explicitly
+ * so it stays independent of `addIssueLabel`'s separate `HYDRA_GITHUB_REPO`
+ * env override (this module resolves its repo via `HYDRA_GH_REPO`).
+ */
+async function applyReopenLifecycleLabel(issueNumber: number): Promise<void> {
+  const result = await addIssueLabel(issueNumber, REOPEN_LIFECYCLE_LABEL, { repo: REPO });
+  if (isIssueLabelWriteFailure(result)) {
+    logger.error(
+      { issueNumber, code: result.code, stderr: result.stderr.slice(0, 200) },
+      "escalation reopen: failed to re-apply lifecycle label — issue may land untriaged",
+    );
+  }
+}
+
+/**
  * Public entry — escalate a pattern to a GitHub issue. Best-effort:
  * always resolves; never throws. Caller (`recordPattern`) does not need to
  * await the result for correctness, but awaiting is recommended so the audit
@@ -374,11 +404,12 @@ export async function escalatePatternToIssue(
       // cumulative-count threshold (150 / 20) re-bumps every +10 hits forever
       // because the count only rises while the rate is ~constant; this gate
       // suppresses a bump whose recent rate has not risen above the cue's own
-      // creation-anchored baseline. Only the comment-bump path is gated:
-      // issue CREATION (handled below, findExistingIssue → null) and the
-      // CLOSED→reopen path are NEVER gated — a first occurrence and any
-      // post-close recurrence are always informative. Non-rate-gated cues
-      // never reach this branch.
+      // creation-anchored baseline. Issue CREATION (handled below,
+      // findExistingIssue → null) is NEVER gated — a first occurrence is
+      // always informative. The CLOSED→reopen branch below applies the SAME
+      // gate for rate-gated cues (issue #4073 — see that branch for why the
+      // original "reopen is never gated" premise broke down for a steady-rate
+      // cue). Non-rate-gated cues never reach either gate.
       if (isRateGatedCue(input.cue)) {
         const history = await fetchIssueHistory(existing.number);
         // history === null → gh fetch failed → fail OPEN: post unconditionally
@@ -403,7 +434,42 @@ export async function escalatePatternToIssue(
       return { status: "commented", issueNumber: existing.number };
     }
     if (existing && existing.state === "CLOSED") {
+      // Issue #4073 — the CLOSED→reopen path is gated for rate-gated cues,
+      // using the exact same rate-vs-baseline decision as the OPEN-issue
+      // comment-bump branch above. Before #4073 ANY post-close recurrence
+      // reopened unconditionally, which for a steady-rate cue guarantees a
+      // reopen within days of every close — closing the issue is precisely
+      // what routed the next hit around the OPEN-path gate (issue #2528: four
+      // reopen cycles in 15 days, none of which ever reached the #3850 gate).
+      // Non-rate-gated cues are unaffected — they keep reopening
+      // unconditionally, exactly as before.
+      if (isRateGatedCue(input.cue)) {
+        const history = await fetchIssueHistory(existing.number);
+        // Same fail-open contract as the OPEN-path gate: history === null (any
+        // gh failure) reopens unconditionally rather than suppress a
+        // possibly-genuine recurrence signal.
+        if (history !== null) {
+          const series = parseEscalationBumpSeries(
+            history.body,
+            history.createdAt,
+            history.comments,
+          );
+          if (!shouldRateEscalate(series, input.hitCount, new Date().toISOString())) {
+            return {
+              status: "skipped",
+              reason:
+                `rate-gated: recent rate not above baseline ` +
+                `(window=${RATE_ESCALATION_WINDOW_DAYS}d, multiplier=${RATE_ESCALATION_MULTIPLIER})`,
+            };
+          }
+        }
+      }
       await reopenIssue(existing.number);
+      // Issue #4073 — re-apply a lifecycle label on every reopen that
+      // proceeds (rate-gated or not) so the issue never lands as an
+      // untriaged orphan (the closing paths strip it; reopenIssue() restores
+      // nothing).
+      await applyReopenLifecycleLabel(existing.number);
       await commentOnIssue(existing.number, input);
       return { status: "reopened", issueNumber: existing.number };
     }

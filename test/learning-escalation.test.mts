@@ -264,6 +264,14 @@ describe("escalation to GitHub (issue #512)", () => {
     assert.ok(invocations.some(l => l.startsWith("issue reopen 999")), "expected reopen on 999");
     assert.ok(invocations.some(l => l.startsWith("issue comment 999")), "expected comment after reopen");
     assert.ok(!invocations.some(l => l.startsWith("issue create ")), "must NOT create a duplicate");
+    // Issue #4073 — every reopen that proceeds re-applies a lifecycle label
+    // so the issue never lands as an untriaged orphan (this cue is NOT
+    // rate-gated, so the label re-apply is the only #4073 behaviour visible
+    // here; the rate gate itself is exercised in escalation-rate-gate.test.mts).
+    assert.ok(
+      invocations.some(l => l.startsWith("issue edit 999") && l.includes("--add-label") && l.includes("ready-for-human")),
+      "expected a lifecycle label re-applied after reopen",
+    );
   });
 
   test("returns status=error when gh fails — never throws", async () => {

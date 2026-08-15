@@ -1,0 +1,1 @@
+- fix: gate the CLOSED→reopen auto-escalation path for steady-rate cues, and re-apply a lifecycle label on every reopen (#4073)

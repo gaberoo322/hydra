@@ -226,13 +226,14 @@ export function shouldEscalateAtHitCount(
 // reason — the `acceptance-criterion-unmet` (150) and `-deferred` (20) pair.
 //
 // IMPORTANT — the gate lives DOWNSTREAM of decideRecordActions, inside
-// escalation.ts's OPEN-issue comment-bump branch (see the design-concept for
-// issue-3850). decideRecordActions / recordPattern keep deciding
-// escalate=true at the existing count cadence for EVERY cue; the gate only
-// decides whether an already-fired OPEN-issue comment-bump actually POSTs.
-// Issue CREATION (findExistingIssue → null) and the CLOSED→reopen path are
-// NEVER gated: a first occurrence and any post-close recurrence are always
-// informative. Every non-rate-gated cue's behaviour is byte-identical because
+// escalation.ts's OPEN-issue comment-bump branch AND, as of issue #4073, its
+// CLOSED→reopen branch (see the design-concepts for issue-3850 and the #4073
+// follow-up). decideRecordActions / recordPattern keep deciding escalate=true
+// at the existing count cadence for EVERY cue; the gate only decides whether
+// an already-fired OPEN-issue comment-bump, or a CLOSED-issue reopen, for a
+// RATE-GATED cue actually proceeds. Issue CREATION (findExistingIssue → null)
+// is NEVER gated: a first occurrence is always informative. Every
+// non-rate-gated cue's behaviour is byte-identical on BOTH branches because
 // the gate is never reached for them.
 
 /**
@@ -248,8 +249,9 @@ const RATE_GATED_CUES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * True when a cue's OPEN-issue comment-bumps are rate-gated (issue #3850).
- * Exported for escalation.ts's gate branch and for tests.
+ * True when a cue's OPEN-issue comment-bumps (issue #3850) AND CLOSED-issue
+ * reopens (issue #4073) are rate-gated. Exported for escalation.ts's two gate
+ * branches and for tests.
  */
 export function isRateGatedCue(cue: string): boolean {
   return typeof cue === "string" && RATE_GATED_CUES.has(cue);
