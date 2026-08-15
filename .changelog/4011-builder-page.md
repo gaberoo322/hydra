@@ -1,0 +1,1 @@
+- feat: new /builder dashboard page — weekly "is the system getting better" view with ranked most-tangled modules, quality-gate trends, and the Outcomes quality panels re-homed (#4011)
