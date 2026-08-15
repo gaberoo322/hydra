@@ -41,10 +41,11 @@ export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
   E.PATTERN_TEST_DECLINE, E.PATTERN_HIGH_ABANDONMENT,
   // Issue #3848: the two in-band launch-flow signals. Both are reached only
   // via a successfully-read pace-gate verdict, which proves the Orchestrator
-  // was up at detection time, so a dashboard alert is the right surface.
-  // E.LAUNCH_PAUSE_FORGOTTEN is deliberately NOT here — a deliberate overnight
-  // operator pause must never leave a lingering unread dashboard alert; the
-  // pause signal surfaces as a digest line only (CRITICAL_EVENT_TYPES).
+  // was up at detection time, so a dashboard alert is the right surface. The
+  // forgotten-pause signal is deliberately NOT an alert type — a deliberate
+  // overnight operator pause must never leave a lingering unread dashboard
+  // alert; pause surfaces as a digest line only (CRITICAL_EVENT_TYPES in
+  // digest.ts — this file contains no pause member at all, by design).
   E.LAUNCH_QUOTA_STRETCH, E.LAUNCH_LATENCY_BREACH,
 ]);
 
