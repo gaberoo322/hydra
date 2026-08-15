@@ -1,13 +1,17 @@
 import { NavLink } from "react-router-dom";
 import VersionBadge from "./VersionBadge.jsx";
 
-// Dashboard v2 atomic swap (issue #621 / PRD #615). Sidebar is four flat
-// items. /now-pixel epic (#642) slice 7 PR2 (#649) flipped Now to the
+// Dashboard v2 atomic swap (issue #621 / PRD #615). Sidebar is flat items.
+// /now-pixel epic (#642) slice 7 PR2 (#649) flipped Now to the
 // pixel habitat; the temporary "Pixel View" link from PR1 was removed
 // because /now IS pixel now. The deprecated /now-classic fallback was
-// retired on 2026-06-10 (issue #664).
+// retired on 2026-06-10 (issue #664). Dashboard v3 (#4008) added Health —
+// the phone-grade is-it-on-fire surface (ADR-0034).
 const NAV_ITEMS = [
   { to: "/", label: "Today", end: true, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
+  // Dashboard v3 slice gamma (#4008, ADR-0034): the phone-grade /health
+  // surface — is it on fire, or burning money.
+  { to: "/health", label: "Health", icon: "M3 12h4l3 8 4-16 3 8h4" },
   { to: "/now", label: "Now", icon: "M13 10V3L4 14h7v7l9-11h-7z" },
   { to: "/outcomes", label: "Outcomes", icon: "M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" },
   { to: "/explore", label: "Explore", icon: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" },

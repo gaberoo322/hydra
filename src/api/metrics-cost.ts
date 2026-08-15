@@ -62,8 +62,29 @@ const CostPerMergedPrQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(90).optional(),
 });
 
-export function createMetricsCostRouter() {
+/**
+ * Injectable dependencies for {@link createMetricsCostRouter} (issue #4008) —
+ * the same factory-seam pattern as createTodayPageRouter. Every reader
+ * defaults to the production binding, so existing zero-arg callers are
+ * unchanged; a test substitutes them to pin the generatedAt trust field
+ * without a live Redis or transcript scan.
+ */
+export interface MetricsCostRouterDeps {
+  /** Clock source (default `new Date`) — pins generatedAt in tests. */
+  now?: () => Date;
+  getRollingCostByClass?: typeof getRollingCostByClass;
+  getCostByClass?: typeof getCostByClass;
+  getCostPerMergedPr?: typeof getCostPerMergedPr;
+  getMetricsTrend?: typeof getMetricsTrend;
+}
+
+export function createMetricsCostRouter(deps: MetricsCostRouterDeps = {}) {
   const router = Router();
+  const now = deps.now ?? (() => new Date());
+  const rollingCostByClass = deps.getRollingCostByClass ?? getRollingCostByClass;
+  const costByClass = deps.getCostByClass ?? getCostByClass;
+  const costPerMergedPr = deps.getCostPerMergedPr ?? getCostPerMergedPr;
+  const metricsTrend = deps.getMetricsTrend ?? getMetricsTrend;
 
   // GET /metrics/cost — Daily token counter (issue #394, #704).
   //
@@ -105,12 +126,17 @@ export function createMetricsCostRouter() {
   //    rank classes on it; use the default arm for a per-class share).
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4008 (design-concept 2880e735 INV-8): the response now carries its
+  // OWN generatedAt so the /health page's CostPanel renders one as-of age per
+  // figure — each of the three cost figures stays independently timestamped,
+  // never blended into one combined number. Additive: the cost fields survive.
   router.get(
     "/metrics/cost-by-class",
-    aggregatorRouteNoQuery("api/metrics/cost-by-class", (req) => {
+    aggregatorRouteNoQuery("api/metrics/cost-by-class", async (req) => {
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       // Explicit date → single-day read; default → rolling trailing-24h window.
-      return parsedDate ? getCostByClass(parsedDate) : getRollingCostByClass();
+      const base = parsedDate ? await costByClass(parsedDate) : await rollingCostByClass();
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -132,6 +158,7 @@ export function createMetricsCostRouter() {
   // src/metrics/ import — the single-public-Interface + no-cross-import invariant.
   //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // Issue #4008 (INV-8): own generatedAt, same as /metrics/cost-by-class above.
   router.get(
     "/metrics/cost-per-merged-pr",
     aggregatorRouteNoQuery("api/metrics/cost-per-merged-pr", async (req) => {
@@ -141,9 +168,10 @@ export function createMetricsCostRouter() {
       // Merged-PR count over the recent cycle window (cycle-metrics carries a
       // 7-day TTL, so this is a recent-window count; `count` bounds the read).
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
-      const trend = await getMetricsTrend(count);
+      const trend = await metricsTrend(count);
       const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
-      return getCostPerMergedPr(mergedPrCount, days);
+      const base = await costPerMergedPr(mergedPrCount, days);
+      return { ...base, generatedAt: now().toISOString() };
     }),
   );
 
@@ -175,7 +203,7 @@ export function createMetricsCostRouter() {
     "/metrics/cost-efficiency",
     aggregatorRouteNoQuery("api/metrics/cost-efficiency", async (req) => {
       const count = countQuerySchema(200).safeParse(req.query).data?.count ?? 200;
-      const trend = await getMetricsTrend(count);
+      const trend = await metricsTrend(count);
       const mergedPrCount = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
       return getClassCostEfficiency(mergedPrCount);
     }),

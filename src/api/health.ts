@@ -43,11 +43,36 @@ import {
   // like fan-out.ts/wol.ts) so this route becomes stateless. Zero behavioural
   // change — /health produces `deployedSha` exactly as before.
   getDeployedSha,
+  // Issue #4008: the origin/master sibling probe — the second raw input of the
+  // /health page's deploy-DRIFT axis. Same never-throw / TTL-cache contract as
+  // getDeployedSha (see src/health/deployed-sha.ts).
+  getRemoteMasterSha,
 } from "../health/index.ts";
 import type { PingableBus } from "../event-bus-seams.ts";
+import type { ProbeInputs } from "../health/types.ts";
+import type { EmergencyBrakeState } from "../redis/emergency-brake.ts";
+import type { AutopilotPauseState } from "../redis/autopilot-pause.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
+
+/**
+ * Injectable dependencies for {@link createHealthRouter} (issue #4008) — the
+ * same factory-seam pattern as createTodayPageRouter. Every reader defaults to
+ * the production binding, so existing one-arg callers are unchanged; a test
+ * substitutes them to pin the trust fields (generatedAt / originMasterSha /
+ * the ok flags) without a live git remote or a broken Redis.
+ */
+export interface HealthRouteDeps {
+  /** Clock source (default `new Date`) — pins generatedAt in tests. */
+  now?: () => Date;
+  getDeployedSha?: () => Promise<string | null>;
+  getRemoteMasterSha?: () => Promise<string | null>;
+  getEmergencyBrake?: () => Promise<EmergencyBrakeState>;
+  getAutopilotPaused?: () => Promise<AutopilotPauseState>;
+  /** Deep-route probe fan-out (default the real collectProbeInputs). */
+  collectProbeInputs?: (deps: { pingRedis: () => Promise<boolean> }) => Promise<ProbeInputs>;
+}
 
 // Issue #734 (deploy-drift backstop): the SHA the orchestrator is running from
 // (advisory `git rev-parse HEAD` vs origin/master HEAD, cached 60s). Issue #2605:
@@ -63,8 +88,15 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 // inline; the /health/deep fan-out is owned by the Health Probe Fan-out Module
 // (src/health/fan-out.ts, issue #2089).
 
-export function createHealthRouter(eventBus: PingableBus) {
+export function createHealthRouter(eventBus: PingableBus, deps: HealthRouteDeps = {}) {
   const router = Router();
+  // Issue #4008: the injectable production defaults (see HealthRouteDeps).
+  const readDeployedSha = deps.getDeployedSha ?? getDeployedSha;
+  const readRemoteMasterSha = deps.getRemoteMasterSha ?? getRemoteMasterSha;
+  const readEmergencyBrake = deps.getEmergencyBrake ?? getEmergencyBrake;
+  const readAutopilotPaused = deps.getAutopilotPaused ?? getAutopilotPaused;
+  const collectInputs = deps.collectProbeInputs ?? collectProbeInputs;
+  const now = deps.now ?? (() => new Date());
 
   // GET /health — Basic health check
   router.get("/health", async (req, res) => {
@@ -77,15 +109,32 @@ export function createHealthRouter(eventBus: PingableBus) {
 
     // Issue #734: advisory deployed-SHA for the deploy-drift backstop. null
     // when unresolvable (omitted-by-coalesce below); never blocks /health.
-    const deployedSha = await getDeployedSha();
+    const deployedSha = await readDeployedSha();
+    // Issue #4008: advisory origin/master HEAD — the second raw input the
+    // /health page's drift axis decomposes into (the CLIENT computes
+    // deployedSha !== originMasterSha; the server never asserts a derived
+    // drift boolean). null when unresolvable; never blocks /health. The probe
+    // itself never throws by contract — this guard is the belt-and-braces
+    // that keeps /health answering even if that contract is ever violated.
+    let originMasterSha: string | null = null;
+    try {
+      originMasterSha = await readRemoteMasterSha();
+    } catch (err: any) {
+      console.error(`[API] /health originMasterSha read failed: ${err?.message ?? err}`);
+    }
 
     // Issue #744: operator-only emergency-brake state. Fail-safe to
     // disengaged if Redis is unreachable — the brake read must never block
     // /health (the watchdog polls this surface). The brake itself still
     // holds; this read is purely advisory observability.
-    let emergencyBrake: { engaged: boolean; since?: number; engagedBy?: string } = { engaged: false };
+    // Issue #4008 (design-concept 2880e735 INV-5): the fail-safe fallback now
+    // carries an additive sibling `ok:false` so an UNVERIFIED
+    // `{engaged:false}` is distinguishable from a verified one on the wire —
+    // the /health page renders the brake UNKNOWN (never a confident
+    // "disengaged") when the read failed.
+    let emergencyBrake: { engaged: boolean; since?: number; engagedBy?: string; ok: boolean } = { engaged: false, ok: false };
     try {
-      emergencyBrake = await getEmergencyBrake();
+      emergencyBrake = { ...(await readEmergencyBrake()), ok: true };
     } catch (err: any) {
       console.error(`[API] /health emergency-brake read failed: ${err?.message ?? err}`);
     }
@@ -95,9 +144,10 @@ export function createHealthRouter(eventBus: PingableBus) {
     // distinguish "operator paused autopilot on purpose" from "autopilot
     // wedged", and never report a pause as degraded. Fail-safe to not-paused
     // if Redis is unreachable; the read is purely advisory observability.
-    let autopilotPause: { paused: boolean; since?: number } = { paused: false };
+    // Issue #4008 (INV-5): same additive `ok` flag as the brake read above.
+    let autopilotPause: { paused: boolean; since?: number; ok: boolean } = { paused: false, ok: false };
     try {
-      autopilotPause = await getAutopilotPaused();
+      autopilotPause = { ...(await readAutopilotPaused()), ok: true };
     } catch (err: any) {
       console.error(`[API] /health autopilot-pause read failed: ${err?.message ?? err}`);
     }
@@ -110,16 +160,27 @@ export function createHealthRouter(eventBus: PingableBus) {
       // ever returns.
       cycle: "idle",
       uptime: process.uptime(),
+      // Issue #4008 (ADR-0034 §5 rule 4): machine-readable as-of timestamp so
+      // the /health page renders an always-visible age per panel. /health
+      // never carried checkedAt, so this is purely additive.
+      generatedAt: now().toISOString(),
       // Issue #734: SHA the orchestrator is running from (deploy.sh leaves
       // $HYDRA_ROOT on master HEAD). Advisory — null/absent if git is
       // unavailable. The watchdog compares this against origin/master.
       deployedSha,
-      // Issue #744: emergency-brake state. `{engaged:false}` by default;
-      // `{engaged:true, since, engagedBy}` while the operator holds the brake.
+      // Issue #4008: origin/master HEAD from the sibling ls-remote probe.
+      // Advisory — null when the remote is unreachable; the page's drift axis
+      // renders UNKNOWN rather than guessing.
+      originMasterSha,
+      // Issue #744: emergency-brake state. `{engaged:false, ok:true}` when
+      // verified disengaged; `{engaged:true, since, engagedBy, ok:true}` while
+      // the operator holds the brake; `{engaged:false, ok:false}` when the
+      // read itself failed (INV-5 — not-verified, never confident).
       emergencyBrake,
-      // Issue #988: autopilot-pause state. `{paused:false}` by default;
-      // `{paused:true, since}` while the operator has paused autopilot. A
-      // HEALTHY/expected state — NOT degraded.
+      // Issue #988: autopilot-pause state. `{paused:false, ok:true}` when
+      // verified not-paused; `{paused:true, since, ok:true}` while the
+      // operator has paused autopilot (a HEALTHY/expected state — NOT
+      // degraded); `{paused:false, ok:false}` when the read itself failed.
       autopilotPause,
     });
   });
@@ -132,13 +193,15 @@ export function createHealthRouter(eventBus: PingableBus) {
 
   // GET /health/deep — Comprehensive health with diagnostic reasoning
   router.get("/health/deep", async (req, res) => {
-    const checkedAt = new Date().toISOString();
+    // Issue #4008: stamped through the injectable clock (production: new
+    // Date) so a test can pin generatedAt/checkedAt deterministically.
+    const checkedAt = now().toISOString();
     // Issue #2089: the 19-probe fan-out + the positional-to-named assembly is
     // owned by the Health Probe Fan-out Module (src/health/fan-out.ts). The
     // handler hands it the eventBus ping (the only request-scoped dep) and
     // receives a named ProbeInputs record — no Promise.allSettled positional
     // array or integer subscript crosses into this route file.
-    const probeInputs = await collectProbeInputs({
+    const probeInputs = await collectInputs({
       pingRedis: async () => {
         try { await eventBus.publisher.ping(); return true; } catch { /* intentional: ping failure reflected via redisOk=false */ return false; }
       },
@@ -178,7 +241,16 @@ export function createHealthRouter(eventBus: PingableBus) {
     // `probeInputs` argument only to read the two OV-quality rollups
     // (ovSearchWindow/knowledgeContext) that parseProbes did not consume; both
     // were removed with OpenViking, so it now projects from the snapshot alone.
-    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt));
+    //
+    // Issue #4008 (design-concept 2880e735 INV-1): the response now ALSO
+    // carries `generatedAt` — the machine-readable as-of the /health page's
+    // panels derive their always-visible age from. It aliases checkedAt (same
+    // instant), and checkedAt is KEPT, not removed — every existing consumer
+    // keeps working; this is an additive sibling field.
+    res.json({
+      ...projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt),
+      generatedAt: checkedAt,
+    });
   });
 
   // GET /recommendations (operator action items) was extracted to
