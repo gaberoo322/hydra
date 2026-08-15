@@ -50,6 +50,7 @@ import {
 } from "../design-concept.ts";
 import {
   gateCheck,
+  contentGateCheck,
   type DesignConceptScope,
 } from "../design-concept-gate.ts";
 // Body schemas + the read-route query schemas (`ExemptLogQuerySchema` /
@@ -281,7 +282,9 @@ export function createDesignConceptsRouter() {
    * stored artifact's top-level fields (`anchorRef`, `scope`, `invariants`,
    * `qaTrace`, `modulesTouched`, `glossaryTerms`, `rejectedAlternatives`,
    * `prototypes`, `status`, `approvedBy`, `artifactHash`, `createdAt`, ...)
-   * plus a single `gate` sub-object (`gateCheck(dc, now)`). There is NO
+   * plus a single `gate` sub-object (`gateCheck(dc, now)`) and — additively,
+   * issue #4035 — a `contentGate` sub-object (`contentGateCheck(dc, now)`:
+   * ADR-0008 rules 1-6 only, the pre-approval half). There is NO
    * `.concept` envelope — consumers read the artifact fields at the TOP
    * level (e.g. `.invariants`, NOT `.concept.invariants`) and the gate verdict
    * at `.gate`. Probing for a `.concept` field returns `undefined`; do not add
@@ -298,7 +301,8 @@ export function createDesignConceptsRouter() {
         return;
       }
       const gate = gateCheck(dc, Date.now());
-      res.json({ ...dc, gate });
+      const contentGate = contentGateCheck(dc, Date.now());
+      res.json({ ...dc, gate, contentGate });
     } catch (err: any) {
       logger.error({ err }, "[api/design-concepts] get failed");
       res.status(500).json({ error: err?.message ?? "get failed" });

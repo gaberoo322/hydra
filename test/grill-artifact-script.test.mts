@@ -471,3 +471,204 @@ describe("scripts/autopilot/grill-artifact.sh — gate", async () => {
     );
   });
 });
+
+// --------------------------------------------------------------------------
+// content-gate subcommand (issue #4035)
+// --------------------------------------------------------------------------
+//
+// The pre-approval half of the gate: `content-gate` reads the
+// `contentGate` sub-object (ADR-0008 rules 1-6 only) so hydra-grill Step 8
+// can pass a draft through content rules, approve, then confirm with the
+// FULL `gate` (rule 7 included). The old gate-then-approve order was
+// structurally dead — rule 7 requires the approval it gates.
+// --------------------------------------------------------------------------
+
+describe("scripts/autopilot/grill-artifact.sh — content-gate", async () => {
+  let server: Server;
+  let base: string;
+  let setHandler: (h: Handler) => void;
+
+  before(async () => {
+    const s = await startMockServer();
+    server = s.server;
+    base = s.base;
+    setHandler = s.setHandler;
+  });
+
+  after(async () => {
+    await stopServer(server);
+  });
+
+  test("usage banner lists the content-gate subcommand", async () => {
+    const r = await runScript(["content-gate"], { HYDRA_API_BASE: base });
+    assert.equal(r.status, 2, `missing anchorRef → exit 2, got ${r.status}: ${r.stderr}`);
+    assert.ok(r.stderr.includes("usage:"), "missing anchorRef must fall through to usage()");
+    assert.ok(
+      r.stderr.includes("grill-artifact.sh content-gate <anchorRef>"),
+      `usage line must document content-gate: ${JSON.stringify(r.stderr)}`,
+    );
+  });
+
+  test("contentGate ok=true → exit 0, prints exactly the .contentGate JSON on STDOUT", async () => {
+    setHandler((req, res) => {
+      assert.equal(req.method, "GET");
+      assert.equal(req.url, "/api/design-concepts/issue-91");
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        anchorRef: "issue-91",
+        status: "draft",
+        // The full gate FAILS this draft (rule 7) while the content gate
+        // passes it — exactly the fresh-artifact case `content-gate` exists
+        // to classify correctly.
+        gate: { ok: false, reasons: ["status must be 'approved' (got 'draft')"] },
+        contentGate: { ok: true, reasons: [] },
+      }));
+    });
+
+    const r = await runScript(["content-gate", "issue-91"], { HYDRA_API_BASE: base });
+    assert.equal(r.status, 0, `content-gate pass must exit 0, got ${r.status}: ${r.stderr}`);
+    const parsed = JSON.parse(r.stdout.trim());
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.reasons, []);
+    // Negative: only the .contentGate sub-object, never the whole artifact.
+    assert.ok(
+      !r.stdout.includes("anchorRef"),
+      `content-gate must print only .contentGate sub-object: ${JSON.stringify(r.stdout)}`,
+    );
+  });
+
+  test("contentGate ok=false with content reasons → exit 1, contentGate JSON on STDOUT", async () => {
+    setHandler((_req, res) => {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        gate: {
+          ok: false,
+          reasons: ["glossaryGaps non-empty (1): Undefined Term", "status must be 'approved' (got 'draft')"],
+        },
+        contentGate: { ok: false, reasons: ["glossaryGaps non-empty (1): Undefined Term"] },
+      }));
+    });
+
+    const r = await runScript(["content-gate", "issue-92"], { HYDRA_API_BASE: base });
+    assert.equal(r.status, 1, `content-gate fail must exit 1, got ${r.status}: ${r.stderr}`);
+    const parsed = JSON.parse(r.stdout.trim());
+    assert.equal(parsed.ok, false);
+    assert.deepEqual(parsed.reasons, ["glossaryGaps non-empty (1): Undefined Term"]);
+  });
+
+  test("a response WITHOUT a contentGate field fails CLOSED (exit 1, never a silent auto-approve)", async () => {
+    // A service older than this script: the field is absent, jq yields null.
+    setHandler((_req, res) => {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        gate: { ok: false, reasons: ["status must be 'approved' (got 'draft')"] },
+      }));
+    });
+
+    const r = await runScript(["content-gate", "issue-93"], { HYDRA_API_BASE: base });
+    assert.equal(r.status, 1, `missing contentGate must fail closed (exit 1), got ${r.status}`);
+  });
+
+  test("404 → exit 2 with 'no artifact' error on STDERR (same contract as gate)", async () => {
+    setHandler((_req, res) => {
+      res.statusCode = 404;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+
+    const r = await runScript(["content-gate", "missing-ref"], { HYDRA_API_BASE: base });
+    assert.equal(r.status, 2, `404 → exit 2 (missing-artifact), got ${r.status}: ${r.stderr}`);
+    assert.ok(
+      r.stderr.includes("no artifact for anchorRef 'missing-ref'"),
+      `error must be on stderr: ${JSON.stringify(r.stderr)}`,
+    );
+  });
+
+  test("5xx → exit 3 with HTTP code on STDERR (same contract as gate)", async () => {
+    setHandler((_req, res) => {
+      res.statusCode = 500;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ error: "internal explode" }));
+    });
+
+    const r = await runScript(["content-gate", "any-ref"], { HYDRA_API_BASE: base });
+    assert.equal(r.status, 3, `5xx → exit 3, got ${r.status}: ${r.stderr}`);
+    assert.ok(r.stderr.includes("API returned HTTP 500"));
+  });
+
+  /**
+   * THE reachable-sequence pin (issue #4035 acceptance criterion): the exact
+   * Step 8 order — content-gate (draft passes rules 1-6) → approve → full
+   * gate confirm (rule 7 passes post-approval) — completes without ever
+   * taking the escalate branch. A stateful mock stands in for the store:
+   * GET returns the draft until the approve POST flips it.
+   */
+  test("Step 8 sequence end-to-end: content-gate 0 → approve POST → gate 0", async () => {
+    let approved = false;
+    let approveRequested = false;
+    setHandler((req, res, _body) => {
+      if (req.method === "POST" && (req.url ?? "").endsWith("/approve")) {
+        approveRequested = true;
+        approved = true;
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ status: "approved", approvedBy: "auto-gate" }));
+        return;
+      }
+      // GET — serve the draft (full gate fails on rule 7, content gate
+      // passes) until approve flips it (both gates pass).
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      if (approved) {
+        res.end(JSON.stringify({
+          gate: { ok: true, reasons: [] },
+          contentGate: { ok: true, reasons: [] },
+        }));
+      } else {
+        res.end(JSON.stringify({
+          gate: { ok: false, reasons: ["status must be 'approved' (got 'draft')"] },
+          contentGate: { ok: true, reasons: [] },
+        }));
+      }
+    });
+
+    // 1. Content gate against the fresh draft → PASS (the branch that was
+    //    dead pre-#4035, because Step 8 used the full `gate` here).
+    const rContent = await runScript(["content-gate", "issue-4035"], { HYDRA_API_BASE: base });
+    assert.equal(rContent.status, 0, `content-gate on a content-clean draft must pass: ${rContent.stderr}`);
+
+    // 2. Approve.
+    const rApprove = await runScript(["approve", "issue-4035", "auto-gate"], { HYDRA_API_BASE: base });
+    assert.equal(rApprove.status, 0, `approve must succeed: ${rApprove.stderr}`);
+    assert.ok(approveRequested, "approve POST must have hit the API");
+
+    // 3. Full-gate confirm → PASS (rule 7 satisfied post-approval).
+    const rGate = await runScript(["gate", "issue-4035"], { HYDRA_API_BASE: base });
+    assert.equal(rGate.status, 0, `full gate must confirm post-approval: ${rGate.stderr}`);
+  });
+
+  test("a content failure takes the escalate branch: content-gate 1, approve NEVER called", async () => {
+    let approveRequested = false;
+    setHandler((req, res, _body) => {
+      if (req.method === "POST" && (req.url ?? "").endsWith("/approve")) {
+        approveRequested = true;
+      }
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        gate: {
+          ok: false,
+          reasons: ["glossaryGaps non-empty (1): Undefined Term", "status must be 'approved' (got 'draft')"],
+        },
+        contentGate: { ok: false, reasons: ["glossaryGaps non-empty (1): Undefined Term"] },
+      }));
+    });
+
+    const rContent = await runScript(["content-gate", "issue-4036"], { HYDRA_API_BASE: base });
+    assert.equal(rContent.status, 1, `content failure must exit 1: ${rContent.stderr}`);
+    assert.ok(!approveRequested, "Step 8 must not call approve when the content gate fails");
+  });
+});
