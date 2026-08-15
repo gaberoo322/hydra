@@ -496,7 +496,13 @@ test("end-to-end: 10 synthetic turn_ends ⇒ ≤10 LLM calls, all parsed, cap ho
         ts_epoch: nowEpoch,
       }),
     );
-    if (r.fired) fired += 1;
+    // Explicit `=== true` (not a bare `if (r.fired)`): under this repo's
+    // `strict: false` tsconfig (no strictNullChecks), TS's control-flow
+    // narrowing does not correctly discriminate the implicit `else` arm of a
+    // boolean-literal union field — it resolves `r` to the WRONG arm inside
+    // the `else`. An explicit `=== true`/`=== false` comparison narrows
+    // correctly on both arms even without strictNullChecks.
+    if (r.fired === true) fired += 1;
     else if (r.reason === "cap") paused += 1;
     // Advance > 30s every iteration so the interval gate doesn't suppress.
     nowEpoch += MIN_CALL_INTERVAL_SECONDS + 1;

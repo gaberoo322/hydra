@@ -111,7 +111,13 @@ outcomes:
     noise_epsilon: 0.5
 `);
     const r = await loadOutcomes(path);
-    assert.equal(r.ok, true, `expected ok; errors=${!r.ok ? r.errors.join("; ") : ""}`);
+    // Explicit `=== false` (not `!r.ok`): under this repo's `strict: false`
+    // tsconfig (no strictNullChecks), TS's control-flow narrowing does not
+    // correctly discriminate the negated/`else` arm of a boolean-literal
+    // union field — `!r.ok` (and a bare `if (r.ok) {} else {}`) resolves `r`
+    // to the WRONG arm inside the branch. An explicit `=== true`/`=== false`
+    // comparison narrows correctly on both arms even without strictNullChecks.
+    assert.equal(r.ok, true, `expected ok; errors=${r.ok === false ? r.errors.join("; ") : ""}`);
     if (!r.ok) throw new Error("unreachable");
     assert.equal(r.outcomes.length, 2);
     assert.equal(r.outcomes[0].name, "clv-promotion");

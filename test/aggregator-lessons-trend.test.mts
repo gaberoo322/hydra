@@ -51,7 +51,11 @@ function metaReader(rows: Array<Partial<IssueRow> & { number: number }>) {
 
 describe("collectPromoted — pure helper", () => {
   test("returns [] for non-array input", () => {
-    // @ts-expect-error: intentional bad input
+    // Deliberately passing a non-array to pin runtime defensiveness. This is
+    // NOT a compile-time type error under the project's `strict: false`
+    // tsconfig (no strictNullChecks — `null` is assignable to every type), so
+    // no `@ts-expect-error` is warranted — an unused one is itself a
+    // `test-typecheck-check` (issue #750) violation.
     assert.deepEqual(collectPromoted(null, WINDOW_START, NOW), []);
   });
 
