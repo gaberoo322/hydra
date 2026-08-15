@@ -1,0 +1,1 @@
+- chore: stop committing the GLM drainer's `.glm-drainer-pr-body.md` scratch file to master (#4071)

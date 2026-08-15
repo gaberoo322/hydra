@@ -70,3 +70,9 @@ config/digests/
 config/feedback/to-*.md
 config/feedback/retro-artifacts/
 config/feedback/*-iotest.md
+
+# GLM dev-drainer scratch file (issue #4071) — scripts/glm/drainer-loop.sh
+# writes the intended PR body here before `gh pr create --body-file` and the
+# drainer's `git add -A` swept it into master twice (3c259a57, 51a52891)
+# because nothing ignored it. Regenerated per drainer run, never committed.
+.glm-drainer-pr-body.md
