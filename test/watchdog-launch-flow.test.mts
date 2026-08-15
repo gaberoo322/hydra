@@ -133,40 +133,63 @@ function dockerRedisAvailable(): boolean {
 
 const DOCKER = dockerRedisAvailable();
 
+/**
+ * One `docker exec … redis-cli --raw` round-trip, retried on TRANSPORT failure.
+ *
+ * WHY THIS IS NOT FIRE-AND-FORGET. Every helper here used to end in
+ * `(r.stdout ?? "").trim()`, which makes a failed `docker exec` (daemon busy,
+ * container momentarily unavailable, timeout) indistinguishable from a
+ * successful read of an ABSENT key — both yield `""`. Two consequences, both
+ * observed as flakes on the loaded CI box:
+ *
+ *   - a silently-failed `seedSince` leaves no anchor, so the case's own
+ *     precondition never held and the later assertion fails on a fixture that
+ *     was never written;
+ *   - a silently-failed `getSince` reads `""` and asserts against `T0`.
+ *
+ * Both surface as "the watchdog misbehaved", which is exactly the wrong
+ * conclusion. `redis-cli` exits 0 for a genuinely-missing key, so a non-zero
+ * exit or a spawn error is unambiguously TRANSPORT, never data — safe to retry,
+ * and safe to throw on once retries are exhausted. Throwing names the real
+ * cause instead of laundering infrastructure trouble into a false assertion.
+ */
+function execRedis(args: string[], what: string): string {
+  let last = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
+      encoding: "utf-8",
+      timeout: WATCHDOG_REDIS_TIMEOUT_MS,
+    });
+    throwIfTimedOut(r, WATCHDOG_REDIS_TIMEOUT_MS, `${what} (docker exec redis-cli)`);
+    if (!r.error && r.status === 0) return (r.stdout ?? "").trim();
+    last = `status=${r.status} error=${r.error?.message ?? "none"} stderr=${(r.stderr ?? "").trim()}`;
+  }
+  throw new Error(
+    `${what}: docker exec redis-cli failed 3x — ${last}. This is a TRANSPORT failure, ` +
+      `NOT a watchdog behaviour change; the fixture was never read/written.`,
+  );
+}
+
 function drc(args: string[]): string {
-  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
-  return (r.stdout ?? "").trim();
+  return execRedis(args, `redis ${args[0]}`);
 }
 
 /** Wipe the last-tick record and ALL ten launch-flow keys for a clean slate. */
 function cleanState(): void {
   const keys = [TEST_LAST_TICK_KEY];
   for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
+  execRedis(["DEL", ...keys], "cleanState DEL");
 }
 
 function hsetLastTick(fields: Record<string, string>): void {
   const args = ["HSET", TEST_LAST_TICK_KEY];
   for (const [k, v] of Object.entries(fields)) args.push(k, v);
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
+  execRedis(args, "hsetLastTick HSET");
 }
 
 /** Pre-seed a signal's since-anchor (stands in for "the streak began long ago"). */
 function seedSince(signal: string, ms: number): void {
-  spawnSync(
-    "docker",
-    ["exec", "hydra-redis-1", "redis-cli", "--raw", "SET", SINCE(signal), String(ms), "NX"],
-    { encoding: "utf-8", timeout: WATCHDOG_REDIS_TIMEOUT_MS },
-  );
+  execRedis(["SET", SINCE(signal), String(ms), "NX"], `seedSince ${signal}`);
 }
 
 /**
@@ -180,15 +203,22 @@ function seedSince(signal: string, ms: number): void {
  * this is opportunistic hygiene rather than a precondition of any assertion.
  */
 function sweepOrphanNamespaces(): void {
-  let cursor = "0";
-  for (let i = 0; i < 64; i++) {
-    const out = drc(["SCAN", cursor, "MATCH", "hydra:test:launch-flow-*", "COUNT", "500"]);
-    const lines = out.split("\n").filter((l) => l !== "");
-    if (lines.length === 0) return;
-    cursor = lines[0];
-    const keys = lines.slice(1).filter((k) => !k.startsWith(RUN_NS));
-    if (keys.length > 0) drc(["DEL", ...keys]);
-    if (cursor === "0") return;
+  // Opportunistic hygiene, never a precondition — `drc` throws on transport
+  // failure (deliberately, so a real fixture read/write cannot fail silently),
+  // but a housekeeping sweep must not be the thing that reddens the suite.
+  try {
+    let cursor = "0";
+    for (let i = 0; i < 64; i++) {
+      const out = drc(["SCAN", cursor, "MATCH", "hydra:test:launch-flow-*", "COUNT", "500"]);
+      const lines = out.split("\n").filter((l) => l !== "");
+      if (lines.length === 0) return;
+      cursor = lines[0];
+      const keys = lines.slice(1).filter((k) => !k.startsWith(RUN_NS));
+      if (keys.length > 0) drc(["DEL", ...keys]);
+      if (cursor === "0") return;
+    }
+  } catch (err) {
+    console.error("[watchdog-launch-flow] orphan-namespace sweep failed (ignored):", err);
   }
 }
 
