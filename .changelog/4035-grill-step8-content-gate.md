@@ -1,0 +1,1 @@
+- fix: hydra-grill Step 8 auto-approve is now reachable — a content-gate (ADR-0008 rules 1-6) runs before approve, then the full 7-rule gate confirms (#4035)

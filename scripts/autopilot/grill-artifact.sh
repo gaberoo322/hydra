@@ -23,7 +23,19 @@
 #       GET /api/design-concepts/:anchorRef and print just the `gate`
 #       sub-object on stdout: {"ok": <bool>, "reasons": [...]}. Exit
 #       code mirrors `.gate.ok`: 0 when ok, 1 when not. Use this from
-#       the skill to decide auto-approve vs escalate.
+#       the skill to confirm an APPROVED artifact post-approve.
+#
+#   content-gate <anchorRef>
+#       Same fetch + exit contract as `gate`, but reads the
+#       `contentGate` sub-object — ADR-0008 rules 1-6 ONLY, i.e. the full
+#       gate minus the rule-7 approval-status check. This is the
+#       PRE-approval verdict: a freshly-written artifact is always
+#       status:'draft', so the full gate can never pass before the
+#       approve call (issue #4035) — Step 8 runs `content-gate` first,
+#       approves on pass, then confirms with the full `gate`. If the
+#       response carries no `contentGate` field (service older than this
+#       script), jq yields null and the check fails closed (exit 1 →
+#       escalate, never a silent auto-approve).
 #
 # Environment:
 #   HYDRA_API_BASE  defaults to http://localhost:4000
@@ -43,8 +55,41 @@ usage:
   grill-artifact.sh write <json-body-path>
   grill-artifact.sh approve <anchorRef> <by>
   grill-artifact.sh gate <anchorRef>
+  grill-artifact.sh content-gate <anchorRef>
 EOF
   exit 2
+}
+
+# fetch_gate <anchorRef> <fieldName>
+# Shared body of the `gate` and `content-gate` subcommands: GET the
+# artifact, map 404 → exit 2 (no artifact, distinguishable from a gate
+# fail) and any other non-200 → exit 3, then print the named gate
+# sub-object ({"ok": <bool>, "reasons": [...]}) on stdout. Exit code
+# mirrors `.ok`: 0 when ok, 1 when not.
+fetch_gate() {
+  ref="$1"
+  field="$2"
+
+  response=$(curl -sS --max-time 10 -w '\n%{http_code}' \
+    "$API/api/design-concepts/$ref")
+  http_code=$(printf '%s' "$response" | tail -n1)
+  body=$(printf '%s' "$response" | sed '$d')
+
+  if [ "$http_code" = "404" ]; then
+    echo "grill-artifact: no artifact for anchorRef '$ref'" >&2
+    exit 2
+  fi
+  if [ "$http_code" != "200" ]; then
+    echo "grill-artifact: API returned HTTP $http_code" >&2
+    printf '%s\n' "$body" >&2
+    exit 3
+  fi
+
+  gate=$(printf '%s' "$body" | jq -c ".$field")
+  ok=$(printf '%s' "$gate" | jq -r '.ok')
+  printf '%s\n' "$gate"
+
+  [ "$ok" = "true" ] && exit 0 || exit 1
 }
 
 cmd="${1:-}"
@@ -88,28 +133,14 @@ case "$cmd" in
     ref="${1:-}"
     [ -z "$ref" ] && usage
 
-    # 404 → propagate as exit 2 (no artifact) so the caller can
-    # distinguish missing-artifact from gate-fail.
-    response=$(curl -sS --max-time 10 -w '\n%{http_code}' \
-      "$API/api/design-concepts/$ref")
-    http_code=$(printf '%s' "$response" | tail -n1)
-    body=$(printf '%s' "$response" | sed '$d')
+    fetch_gate "$ref" "gate"
+    ;;
 
-    if [ "$http_code" = "404" ]; then
-      echo "grill-artifact: no artifact for anchorRef '$ref'" >&2
-      exit 2
-    fi
-    if [ "$http_code" != "200" ]; then
-      echo "grill-artifact: API returned HTTP $http_code" >&2
-      printf '%s\n' "$body" >&2
-      exit 3
-    fi
+  content-gate)
+    ref="${1:-}"
+    [ -z "$ref" ] && usage
 
-    gate=$(printf '%s' "$body" | jq -c '.gate')
-    ok=$(printf '%s' "$gate" | jq -r '.ok')
-    printf '%s\n' "$gate"
-
-    [ "$ok" = "true" ] && exit 0 || exit 1
+    fetch_gate "$ref" "contentGate"
     ;;
 
   *)
