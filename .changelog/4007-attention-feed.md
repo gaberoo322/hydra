@@ -1,0 +1,1 @@
+- feat: attention feed on the Today page — one threshold-crossing list (blocked-on-human, breakage, repetition) with dismissable items and per-line surfaced/dismissed calibration counts (#4007)

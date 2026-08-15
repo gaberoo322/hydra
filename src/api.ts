@@ -42,6 +42,7 @@ import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
 import { createAutopilotClassStatsRouter } from "./api/class-stats.ts";
 import { createTaxonomyRouter } from "./api/taxonomy.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
+import { createAttentionRouter } from "./api/attention.ts";
 import { createNowPageRouter } from "./api/now-page.ts";
 import { createNowRecommendationsRouter } from "./api/now-recommendations.ts";
 import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
@@ -183,6 +184,10 @@ function createApi(eventBus: EventBus) {
   // routes are mounted at their final names; the historical `/api/v2/*`
   // incremental-delivery prefix is gone.
   api.use(createTodayPageRouter());
+  // Attention feed (issue #4007, ADR-0034 §4) — the Today page's
+  // threshold-crossing "what needs me" surface. Sibling top-level router,
+  // deliberately not widened into today-page.ts.
+  api.use(createAttentionRouter());
   // Now page — slice 3 (issue #618).
   api.use(createNowPageRouter());
   // Now page recommendation write-path — extracted from now-page (#1323).

@@ -1,4 +1,5 @@
 import { useApi } from "../hooks/useApi.js";
+import { AttentionFeed } from "../components/pages/today/AttentionFeed.jsx";
 import { OvernightBanner } from "../components/pages/today/OvernightBanner.jsx";
 import { WeekModelMix } from "../components/pages/today/WeekModelMix.jsx";
 import { OperatorDecisionQueue } from "../components/pages/today/OperatorDecisionQueue.jsx";
@@ -14,13 +15,15 @@ import Versions from "../components/Versions.jsx";
  * Slice 1 shipped the OvernightBanner. Slice 2 adds five more sections
  * in the order specified by the PRD:
  *
- *   1. OvernightBanner (banner — fed by /today/summary)
- *   2. OperatorDecisionQueue
- *   3. StuckItems
- *   4. RecentMerges
- *   5. NewTargetFindings
- *   6. LessonsOvernight
- *   7. Versions (issue #3681 — the /api/versions panel; lives one level up in
+ *   1. AttentionFeed (issue #4007, ADR-0034 §4 — threshold-crossing feed;
+ *      renders FIRST: the "what needs me" question owns the page)
+ *   2. OvernightBanner (banner — fed by /today/summary)
+ *   3. OperatorDecisionQueue
+ *   4. StuckItems
+ *   5. RecentMerges
+ *   6. NewTargetFindings
+ *   7. LessonsOvernight
+ *   8. Versions (issue #3681 — the /api/versions panel; lives one level up in
  *      `components/` because the footer VersionBadge shares its formatting seam
  *      and renders on every route, not just Today)
  *
@@ -55,6 +58,12 @@ export default function Today() {
           <div className="text-sm font-mono break-all">{error}</div>
         </div>
       )}
+
+      {/* AttentionFeed is FIRST (ADR-0034 §4): the threshold-crossing feed
+          owns the "what needs me" primacy on `/`, ahead of the overnight
+          banner. The other sections stay — the full Today-page teardown of
+          non-conforming panels belongs to the epic, not this slice. */}
+      <AttentionFeed />
 
       {data && <OvernightBanner summary={data} />}
 
