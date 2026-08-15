@@ -6,6 +6,7 @@ import Today from "./pages/Today.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
 import NowPixel from "./pages/now-pixel/NowPixel.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
+import Builder from "./pages/Builder.jsx";
 import Explore from "./pages/Explore.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
 import DispatchTranscript from "./pages/DispatchTranscript.jsx";
@@ -92,6 +93,8 @@ export default function App() {
           <Route path="/now" element={<NowRoute ws={ws} />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/explore" element={<Explore />} />
+          {/* Dashboard v3 (ADR-0034 §2) — the weekly journey, slice zeta (#4011). */}
+          <Route path="/builder" element={<Builder />} />
           <Route path="/explore/:tab" element={<Explore />} />
           {/* Slice 4 (issue #500) — per-run autopilot detail page. */}
           <Route path="/autopilot/:runId" element={<Autopilot />} />
