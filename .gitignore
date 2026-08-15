@@ -70,3 +70,8 @@ config/digests/
 config/feedback/to-*.md
 config/feedback/retro-artifacts/
 config/feedback/*-iotest.md
+
+# GLM dev-drainer scratch file (issue #4071) — holds the PR body before
+# `gh pr create --body-file` at the worktree root; the drainer's `git add -A`
+# swept it into at least two master merges before this ignore existed.
+.glm-drainer-pr-body.md
