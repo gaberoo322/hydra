@@ -775,8 +775,34 @@ except Exception:
   pass
 PY
 )" 2>/dev/null || true)
+# ARTIFACT-APPROVAL DISCRIMINATOR (issue #3798, corrected 2026-08-13). A THIRD
+# signal rides the SAME loop pass: `orch_dev_ready_anchor_artifact_approved`.
+# `orch_dev_ready_anchor` alone conflates two structurally different
+# populations that both count as "grill-clear" — (a) a GENUINE fresh,
+# APPROVED design-concept artifact (the anchor was consequential enough to be
+# grilled, and the grill-clear operator/auto-gate approved it), and (b) the
+# mechanical (#1230) / trivial (#1088) EXEMPTION, which is grill-clear
+# precisely because it is NOT architecturally consequential. decide.py's
+# per-anchor frontier-routing HINT (issue #3798) needs to tell these apart —
+# routing the exemption population to the frontier tier would spend Opus on
+# exactly the cheap work #3798 wants to keep on Sonnet.
+#
+# `orch_dev_ready_anchor_artifact_approved` is `true` ONLY when the dev-ready
+# pick was resolved via the fresh-artifact branch below AND that artifact's
+# `status` field is `"approved"` (a `draft`/warn-only fresh artifact is still
+# a valid dev pin per Phase B, but is NOT "approved" — see
+# `_design_concept_is_fresh`'s sibling `status` check). It stays `false` for
+# every other path, INCLUDING both exemptions — they never touch this
+# variable, so the "approved" claim is never made for exemption-sourced picks.
+#
+# A prior attempt (PR #3882, closed) sourced this discriminator from
+# `/api/anchor/candidates`' `best.designConcept` block — a retired, wrong-scope
+# feed (issue #751 removed that read from the decision path; #3455 retired the
+# API). This is the corrected source: pre-resolved HERE, in the SAME curl this
+# loop already pays for, exactly like `orch_dev_ready_anchor` itself.
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
+ORCH_DEV_READY_ARTIFACT_APPROVED="false"
 if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
   for n in $ORCH_GRILL_CANDIDATES; do
     # Both picks resolved — stop paying for design-concept round-trips.
@@ -789,22 +815,32 @@ if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
       # draft/!gateOk-but-fresh artifact is still "fresh present" per the
       # selector's contract, so we don't re-grill it here either). A stale
       # or unparseable artifact falls through to the trivial gate below.
-      FRESH_OK=$(printf '%s' "$DC_JSON" | python3 -c "$(cat <<'PY'
+      # Also resolve the #3798 approval dimension in the SAME parse (one
+      # process, not two) — `FRESH_AND_APPROVED` is "<fresh 0|1> <approved 0|1>".
+      FRESH_AND_APPROVED=$(printf '%s' "$DC_JSON" | python3 -c "$(cat <<'PY'
 import json, sys, time
 try:
   d = json.load(sys.stdin)
   created = int(d.get('createdAt', 0) or 0)
   now_ms = int(time.time() * 1000)
   fresh = (now_ms - created) <= (7 * 24 * 60 * 60 * 1000)
-  print('1' if fresh else '0')
+  approved = d.get('status') == 'approved'
+  print(('1' if fresh else '0') + ' ' + ('1' if approved else '0'))
 except Exception:
-  print('0')
+  print('0 0')
 PY
-)" 2>/dev/null || echo "0")
+)" 2>/dev/null || echo "0 0")
+      FRESH_OK="${FRESH_AND_APPROVED%% *}"
+      ARTIFACT_APPROVED="${FRESH_AND_APPROVED#* }"
       if [ "$FRESH_OK" = "1" ]; then
         # Fresh artifact already present — nothing to grill for this anchor,
         # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711).
         if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
+          # #3798: stamp the approval dimension in lockstep with the pick —
+          # this is the ONLY branch that ever sets it to "true".
+          if [ "$ARTIFACT_APPROVED" = "1" ]; then
+            ORCH_DEV_READY_ARTIFACT_APPROVED="true"
+          fi
           ORCH_DEV_READY_PICK="issue-${n}"
         fi
         continue
@@ -906,6 +942,7 @@ PY
 fi
 echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
 echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
+echo "orch_dev_ready_anchor_artifact_approved=$ORCH_DEV_READY_ARTIFACT_APPROVED"
 
 # active dev_orch detector (issue #412): an open PR on a hydra-dev head
 # branch updated within the last 90 minutes is the only reliable gate

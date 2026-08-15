@@ -64,6 +64,14 @@ interface GateOpts {
    * what makes an anchor "grill-clear" and therefore a valid dev pin.
    */
   freshArtifacts?: number[];
+  /**
+   * Issue numbers whose `/api/design-concepts/issue-<N>` probe returns a FRESH
+   * but DRAFT (unapproved) artifact — disjoint from `freshArtifacts`, which
+   * always returns `status: "approved"`. Issue #3798: this is the fixture that
+   * exercises the artifact-APPROVAL dimension of the frontier-routing
+   * discriminator, orthogonal to freshness.
+   */
+  draftArtifacts?: number[];
   /** Fixture for the `gh pr list --json headRefName,body` in-flight probe (#3711). */
   openPrs?: OpenPr[];
 }
@@ -73,6 +81,8 @@ interface GatePicks {
   grill: string;
   /** The `orch_dev_ready_anchor=` value (issue #3711). */
   devReady: string;
+  /** The `orch_dev_ready_anchor_artifact_approved=` value (issue #3798). */
+  artifactApproved: string;
 }
 
 /**
@@ -98,6 +108,11 @@ function runGate(issues: Issue[], opts: GateOpts = {}): GatePicks {
     writeFileSync(
       join(dir, "fresh.txt"),
       (opts.freshArtifacts ?? []).map((n) => String(n)).join("\n") + "\n",
+    );
+    // Issue #3798: a disjoint fresh-but-DRAFT fixture list, same format.
+    writeFileSync(
+      join(dir, "fresh-draft.txt"),
+      (opts.draftArtifacts ?? []).map((n) => String(n)).join("\n") + "\n",
     );
 
     // `gh` stub: two invocations matter, both keyed on their exact `--json`
@@ -129,8 +144,10 @@ exit 0
     );
 
     // `curl` stub: a /api/design-concepts/issue-<N> probe returns a FRESH
-    // artifact iff <N> is in fresh.txt; otherwise it mimics `curl -sf` on a 404
-    // (no body, non-zero exit) so the issue counts as "no fresh artifact".
+    // APPROVED artifact iff <N> is in fresh.txt, a FRESH DRAFT (unapproved)
+    // artifact iff <N> is in fresh-draft.txt (issue #3798), otherwise it
+    // mimics `curl -sf` on a 404 (no body, non-zero exit) so the issue counts
+    // as "no fresh artifact".
     writeStub(
       bin,
       "curl",
@@ -143,8 +160,15 @@ case "$url" in
   */api/design-concepts/issue-*)
     n="\${url##*/issue-}"
     if grep -qxF "$n" "${join(dir, "fresh.txt")}" 2>/dev/null; then
-      # A fresh artifact: createdAt = now (ms), well inside the 7-day window.
+      # A fresh, APPROVED artifact: createdAt = now (ms), well inside the
+      # 7-day window.
       echo "{\\"createdAt\\": $(( $(date +%s) * 1000 )), \\"status\\": \\"approved\\"}"
+      exit 0
+    fi
+    if grep -qxF "$n" "${join(dir, "fresh-draft.txt")}" 2>/dev/null; then
+      # A fresh but DRAFT (unapproved) artifact — issue #3798: still
+      # "grill-clear" (Phase B warn-only), but must NOT set the approval flag.
+      echo "{\\"createdAt\\": $(( $(date +%s) * 1000 )), \\"status\\": \\"draft\\"}"
       exit 0
     fi
     ;;
@@ -179,6 +203,7 @@ exit 22
     return {
       grill: read("orch_pending_grill_anchor"),
       devReady: read("orch_dev_ready_anchor"),
+      artifactApproved: read("orch_dev_ready_anchor_artifact_approved"),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -508,6 +533,97 @@ describe("collect-state.sh — orch_dev_ready_anchor, the per-anchor half of the
     assert.equal(picks.grill, "issue-740");
     assert.equal(picks.devReady, "issue-741",
       "the lowest-numbered grill-clear anchor wins, mirroring the grill pick's stability");
+  });
+});
+
+describe("collect-state.sh — orch_dev_ready_anchor_artifact_approved, the #3798 frontier-routing discriminator", () => {
+  // `orch_dev_ready_anchor` alone conflates two populations that are BOTH
+  // "grill-clear": a genuine fresh+APPROVED design-concept artifact, and the
+  // mechanical (#1230) / trivial (#1088) exemption. decide.py's per-anchor
+  // frontier-routing HINT (issue #3798) must tell them apart — routing the
+  // exemption population to the frontier tier would spend Opus on exactly the
+  // cheap work #3798 measured Sonnet as sufficient for. This signal is
+  // stamped in LOCKSTEP with `orch_dev_ready_anchor`, in the same loop pass.
+
+  test("fresh + APPROVED artifact -> artifact_approved=true", () => {
+    const picks = runGate(
+      [issue(1101, "Already grilled and approved.\n")],
+      { freshArtifacts: [1101] },
+    );
+    assert.equal(picks.devReady, "issue-1101");
+    assert.equal(picks.artifactApproved, "true",
+      "a fresh, status:approved artifact is the genuine-artifact population");
+  });
+
+  test("fresh but DRAFT (unapproved) artifact -> artifact_approved=false", () => {
+    // Phase B warn-only: a draft artifact is still a valid dev pin, but the
+    // approval dimension is orthogonal to freshness and must read false.
+    const picks = runGate(
+      [issue(1102, "Grilled, awaiting approval.\n")],
+      { draftArtifacts: [1102] },
+    );
+    assert.equal(picks.devReady, "issue-1102",
+      "a fresh draft artifact is still grill-clear (Phase B warn-only)");
+    assert.equal(picks.artifactApproved, "false",
+      "a draft (unapproved) artifact must never set the approval flag");
+  });
+
+  test("mechanical (cleanup-scan) exemption -> artifact_approved=false", () => {
+    const picks = runGate([
+      issue(1103, "remove dead export.\n", ["ready-for-agent", "cleanup-scan"]),
+    ]);
+    assert.equal(picks.devReady, "issue-1103");
+    assert.equal(picks.artifactApproved, "false",
+      "the mechanical exemption is grill-clear by construction, NOT via an artifact — must not claim approval");
+  });
+
+  test("trivial (T1-stamped) exemption -> artifact_approved=false", () => {
+    const picks = runGate([
+      issue(1104, "Trivial tweak.\n\nExpected tier: T1\n"),
+    ]);
+    assert.equal(picks.devReady, "issue-1104");
+    assert.equal(picks.artifactApproved, "false",
+      "the trivial exemption is grill-clear by construction, NOT via an artifact — must not claim approval");
+  });
+
+  test("no dev-ready anchor at all -> artifact_approved=false (conservative default)", () => {
+    const picks = runGate([issue(1105, "No stamp, needs a grill.\n")]);
+    assert.equal(picks.devReady, "none");
+    assert.equal(picks.artifactApproved, "false");
+  });
+
+  test("emits false on an empty board", () => {
+    const picks = runGate([]);
+    assert.equal(picks.devReady, "none");
+    assert.equal(picks.artifactApproved, "false");
+  });
+
+  test("the flag tracks the FIRST dev-ready pick, not a later approved one", () => {
+    // issue-1110 is dev-ready via the trivial exemption (first, wins the
+    // pick); issue-1111 has a genuine approved artifact but is never reached
+    // because the first pick already resolved ORCH_DEV_READY_PICK.
+    const picks = runGate(
+      [
+        issue(1110, "Trivial.\n\nExpected tier: T1\n"),
+        issue(1111, "Approved artifact.\n"),
+      ],
+      { freshArtifacts: [1111] },
+    );
+    assert.equal(picks.devReady, "issue-1110");
+    assert.equal(picks.artifactApproved, "false",
+      "the pick is the exemption anchor; a later anchor's approved artifact must not leak onto it");
+  });
+
+  test("a genuinely approved artifact still wins when it is the FIRST candidate", () => {
+    const picks = runGate(
+      [
+        issue(1120, "Approved artifact.\n"),
+        issue(1121, "Trivial.\n\nExpected tier: T1\n"),
+      ],
+      { freshArtifacts: [1120] },
+    );
+    assert.equal(picks.devReady, "issue-1120");
+    assert.equal(picks.artifactApproved, "true");
   });
 });
 

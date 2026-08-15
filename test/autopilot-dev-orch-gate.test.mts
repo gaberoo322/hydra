@@ -27,7 +27,8 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -290,6 +291,231 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
       collector,
       /gh pr list --repo gaberoo322\/hydra --state open --json [^\n]*\blabels\b/,
       "active_dev_orch collector must request `labels` from gh",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dev_orch anchor-shape frontier routing (issue #3798)
+// ---------------------------------------------------------------------------
+//
+// PR #3795 demoted dev_orch to Sonnet on evidence. Issue #3798 adds a LEADING
+// discriminator: a PINNED dev_orch dispatch (the one branch where decide.py
+// knows with certainty which anchor is about to be built — see #3711's
+// per-anchor gate) whose anchor's grill-clearance came from a genuine fresh,
+// APPROVED design-concept artifact routes to the frontier tier for that one
+// dispatch; every other shape (no artifact, stale, unapproved, or grill-clear
+// only via the mechanical #1230 / trivial #1088 exemption) keeps Sonnet.
+// decide.py emits the routing as a `prompt_args.route_model` HINT — never a
+// concrete `model` field (#1093) — that the playbook maps to the Agent model
+// kwarg, parallel to the `escalate_model` cascade-routing override.
+//
+// CORRECTED SOURCE (2026-08-13 operator review): a prior attempt (PR #3882,
+// closed) read the discriminator from `_candidate_design_concept(candidates,
+// best)` — `best.designConcept` off the retired `/api/anchor/candidates`
+// feed (issue #751 removed that read from the decision path; #3455 retired
+// the API), making the PR a functional no-op. The discriminator here instead
+// reads `state.signals.orch_dev_ready_anchor_artifact_approved`, pre-resolved
+// by the SAME `collect-state.sh` loop pass that resolves `orch_dev_ready_anchor`
+// (issue #3711) — orch-scope, no new signal, no new collection step.
+//
+// Exercised at the decision-core level by invoking `decide.py decide` with
+// constructed `state.signals` fixtures, mirroring the existing #3711
+// per-anchor-gate tests in `test/autopilot-design-concept-sequencing.test.mts`.
+
+const DECIDE_PY = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+
+function devOrchBaseState(signals: Record<string, unknown> = {}): any {
+  return {
+    started_epoch: Math.floor(Date.now() / 1000),
+    limits: {
+      token_budget: 2_000_000,
+      wall_clock_max_sec: 28_800,
+      idle_drain_turns: 5,
+      scope: "all",
+      subagent_max_tokens: 400_000,
+      subagent_hard_max_tokens: 800_000,
+    },
+    cumulative_tokens: 0,
+    dispatches: 0,
+    idle_turns: 0,
+    turn: 0,
+    burned_classes: [],
+    reaped_task_ids: [],
+    failure_log: [],
+    slots: {
+      dev_orch: null, qa_orch: null, research_orch: null,
+      dev_target: null, qa_target: null, research_target: null,
+      design_concept_orch: null,
+    },
+    signal_last_fired: {
+      health: 0, sweep_orch: 0, sweep_target: 0,
+      discover_orch: 0, discover_target: 0,
+    },
+    signals: { orch_work_available: true, ...signals },
+  };
+}
+
+function runDecidePy(state: any, candidates: any = { candidates: [], research_recommended: false }, events: any[] = []): any {
+  const dir = mkdtempSync(join(tmpdir(), "dev-orch-gate-3798-"));
+  const statePath = join(dir, "state.json");
+  const candsPath = join(dir, "candidates.json");
+  const eventsPath = join(dir, "events.json");
+  writeFileSync(statePath, JSON.stringify(state));
+  writeFileSync(candsPath, JSON.stringify(candidates));
+  writeFileSync(eventsPath, JSON.stringify(events));
+  const r = spawnSync("python3", [DECIDE_PY, "decide", statePath, candsPath, eventsPath], {
+    encoding: "utf-8",
+  });
+  const out = r.stdout ?? "";
+  const err = r.stderr ?? "";
+  rmSync(dir, { recursive: true, force: true });
+  if (r.status !== 0) {
+    throw new Error(`decide.py decide exited ${r.status}\nstdout: ${out}\nstderr: ${err}`);
+  }
+  return JSON.parse(out);
+}
+
+function devOrchDispatch(plan: any): any | undefined {
+  return (plan.actions ?? []).find((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+}
+
+// A PINNED-dispatch state: a grill is pending on a DIFFERENT anchor
+// (issue-9999) while issue-3798 is the pre-resolved grill-clear dev-ready
+// anchor — the ONLY shape that yields `prompt_args.anchor` (#3711), and
+// therefore the only shape `route_model` may ever ride.
+function pinnedState(artifactApproved: unknown): any {
+  return devOrchBaseState({
+    orch_pending_grill_anchor: "issue-9999",
+    orch_dev_ready_anchor: "issue-3798",
+    orch_dev_ready_anchor_artifact_approved: artifactApproved,
+  });
+}
+
+describe("decide.py — dev_orch anchor-shape frontier routing (issue #3798)", () => {
+  test("PINNED dispatch + artifact_approved:true -> route_model HINT set to the frontier alias", () => {
+    const plan = runDecidePy(pinnedState(true));
+    const d = devOrchDispatch(plan);
+    assert.ok(d, "expected a pinned dev_orch dispatch");
+    assert.equal(d.prompt_args?.anchor, "issue-3798", "sanity: this IS the pinned dispatch");
+    assert.equal(
+      d.prompt_args?.route_model,
+      "fable",
+      "a genuine fresh+approved artifact routes the pinned dev_orch dispatch to the frontier tier",
+    );
+  });
+
+  test("PINNED dispatch + artifact_approved:false -> NO route_model (stays Sonnet)", () => {
+    // false covers BOTH the mechanical/trivial exemption and a stale/draft
+    // artifact — collect-state.sh collapses them to the same conservative
+    // value; the per-source distinction is exercised in
+    // test/autopilot-grill-gate.test.mts.
+    const plan = runDecidePy(pinnedState(false));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args?.route_model, undefined,
+      "artifact_approved:false must never route to the frontier tier");
+  });
+
+  test("PINNED dispatch + artifact_approved signal ABSENT -> NO route_model (conservative default)", () => {
+    const state = devOrchBaseState({
+      orch_pending_grill_anchor: "issue-9999",
+      orch_dev_ready_anchor: "issue-3798",
+      // orch_dev_ready_anchor_artifact_approved omitted entirely — an older
+      // autopilot turn's collect-state.sh, or a degraded read.
+    });
+    const plan = runDecidePy(state);
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args?.route_model, undefined,
+      "an absent signal must fail closed onto Sonnet, not speculatively route frontier");
+  });
+
+  test("PINNED dispatch + MALFORMED artifact_approved (non-boolean) -> NO route_model", () => {
+    // The discriminator requires the literal JSON boolean `true` — a
+    // stringly-typed "true" (or any other non-boolean truthy value) must not
+    // be mistaken for the real signal. Guards against the generic
+    // `bool(...)`-on-a-string footgun that `_signal_present` (a DIFFERENT,
+    // intentionally looser reader used elsewhere) would fall into.
+    const plan = runDecidePy(pinnedState("true"));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args?.route_model, undefined,
+      "a malformed (non-boolean) approval signal must fail closed, never route frontier");
+  });
+
+  test("UNPINNED dispatch never carries route_model, even when the dev-ready anchor is approved (issue #3711 self-selection)", () => {
+    // No grill pending anywhere -> dev_orch dispatches UNPINNED (hydra-dev
+    // self-selects its own anchor, #458). decide.py does NOT know which
+    // anchor that will be, so the #3798 discriminator must not apply here —
+    // this is a DELIBERATE, narrower scope than PR #3882 (closed), which
+    // applied it to both branches.
+    const state = devOrchBaseState({
+      orch_pending_grill_anchor: "none",
+      orch_dev_ready_anchor: "issue-3798",
+      orch_dev_ready_anchor_artifact_approved: true,
+    });
+    const plan = runDecidePy(state);
+    const d = devOrchDispatch(plan);
+    assert.ok(d, "expected an unpinned dev_orch dispatch");
+    assert.equal(d.prompt_args?.anchor, undefined, "sanity: this IS the unpinned dispatch");
+    assert.equal(
+      d.prompt_args?.route_model,
+      undefined,
+      "route_model must never ride the unpinned dispatch — the anchor identity is not certain",
+    );
+  });
+
+  test("#1093 purity: route_model is a HINT in prompt_args, never a concrete model field", () => {
+    const plan = runDecidePy(pinnedState(true));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args?.route_model, "fable");
+    assert.equal(
+      d.model,
+      undefined,
+      "decide.py must NOT stamp a concrete `model` field — only the route_model HINT (the lever lives in the playbook)",
+    );
+  });
+
+  test("route_model is a distinct channel from the subagent_failure escalation HINT", () => {
+    const plan = runDecidePy(pinnedState(true));
+    const d = devOrchDispatch(plan);
+    assert.ok(d);
+    assert.equal(d.prompt_args?.route_model, "fable");
+    assert.equal(
+      d.prompt_args?.escalate_model,
+      undefined,
+      "the anchor-shape frontier HINT is not the failure-escalation HINT",
+    );
+    assert.equal(
+      d.prompt_args?.attempt,
+      undefined,
+      "attempt / prior_attempt_status belong to the subagent_failure re-dispatch, not this routing",
+    );
+  });
+
+  test("decide.py never calls the retired _candidate_design_concept discriminator for this feature", () => {
+    // The 2026-08-13 correction: `_candidate_design_concept` / `best.designConcept`
+    // was removed from the decision path by issue #751 and its feed
+    // (`/api/anchor/candidates`) is retired (#3455). The function definition
+    // may still exist (canonical shape documentation), but it must never be
+    // CALLED anywhere in decide.py.
+    const src = readFileSync(DECIDE_PY, "utf-8");
+    assert.equal(
+      /_candidate_design_concept\(candidates/.test(src),
+      false,
+      "_candidate_design_concept must not be invoked — it is retired from the decision path (#751/#3455)",
+    );
+    assert.match(
+      src,
+      /def _dev_ready_anchor_artifact_approved\(/,
+      "the corrected #3798 discriminator helper must be present",
+    );
+    assert.match(
+      src,
+      /orch_dev_ready_anchor_artifact_approved/,
+      "decide.py must read the pre-resolved collect-state.sh signal, not compute approval itself",
     );
   });
 });

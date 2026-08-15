@@ -2875,6 +2875,46 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     return raw
 
 
+def _dev_ready_anchor_artifact_approved(signals: dict | None) -> bool:
+    """Issue #3798 anchor-shape frontier-routing discriminator.
+
+    True iff `collect-state.sh` resolved `orch_dev_ready_anchor` (the pinned
+    dev_orch anchor) via a GENUINE fresh, APPROVED design-concept artifact —
+    as opposed to the mechanical (#1230) / trivial (#1088) exemption, which
+    ALSO makes an anchor "grill-clear" (and therefore also sets
+    `orch_dev_ready_anchor`) but is the opposite of "architecturally
+    consequential". Routing the exemption population to the frontier tier
+    would spend Opus on exactly the cheap work #3798 measured Sonnet as
+    sufficient for (PR #3795).
+
+    `collect-state.sh` stamps `orch_dev_ready_anchor_artifact_approved` in
+    lockstep with `orch_dev_ready_anchor` — it is `true` ONLY on the
+    fresh-artifact branch of that loop, and only when the artifact's `status`
+    field is `"approved"` (a `draft`/warn-only fresh artifact is a valid dev
+    pin per Phase B but is not "approved"). Every other path — including both
+    exemptions, a stale/absent artifact, and "no dev-ready anchor at all" —
+    leaves it at the conservative default `false`.
+
+    CORRECTED SOURCE (2026-08-13 operator review of #3798): a prior attempt
+    (PR #3882, closed) read this discriminator via the `_candidate_design_concept`
+    helper (applied to `candidates` and `best`) — `best.designConcept` off
+    `/api/anchor/candidates`. That path was REMOVED from the decision core by
+    issue #751 (the candidates feed is structurally target-product work post
+    #458, never an orch-scope grill anchor) and the API itself is retired
+    (#3455); reading it here reproduced the #3882 no-op (the feed essentially
+    never matches `orch_dev_ready_anchor`). `orch_dev_ready_anchor_*` is the
+    orch-scope, pre-resolved replacement — the same signal family
+    `_orch_anchor_signal` reads, resolved by the SAME collect-state.sh loop
+    pass, precisely because `decide.py` must stay pure (#1093) and cannot
+    itself probe design-concept freshness/approval (no network/FS/Redis).
+
+    Pure: reads the passed-in dict only, mirroring `_orch_anchor_signal`.
+    """
+    if not isinstance(signals, dict):
+        return False
+    return signals.get("orch_dev_ready_anchor_artifact_approved") is True
+
+
 def _select_for_slot(
     cls: str,
     state: dict,
@@ -3066,16 +3106,42 @@ def _select_for_slot(
                 # today's behaviour rather than dispatching onto an un-grilled
                 # anchor.
                 return None
+            # ISSUE #3798 — per-anchor frontier-routing HINT. This PINNED branch
+            # is the ONLY place in this selector where the anchor dev_orch will
+            # actually build is known with certainty (`dev_ready_anchor`, named
+            # verbatim in `prompt_args.anchor` below). When collect-state.sh
+            # resolved that pin via a genuine fresh, APPROVED design-concept
+            # artifact (not the mechanical/trivial exemption —
+            # `_dev_ready_anchor_artifact_approved` tells the two apart), emit a
+            # `prompt_args.route_model` HINT the playbook maps to the frontier
+            # tier for this ONE dispatch (#1093 purity: never a concrete `model`
+            # field here — the lever stays in the playbook).
+            dev_prompt_args: dict = {"anchor": dev_ready_anchor}
+            if _dev_ready_anchor_artifact_approved(signals):
+                dev_prompt_args["route_model"] = "fable"
             return make_dispatch(
                 cls,
                 "hydra-dev",
-                prompt_args={"anchor": dev_ready_anchor},
+                prompt_args=dev_prompt_args,
                 reason=(
                     f"orch board has a grill-clear ready-for-agent anchor "
                     f"({dev_ready_anchor}) while {orch_anchor} awaits a design "
                     f"concept (per-anchor gate, #3711)"
                 ),
             )
+        # UNPINNED dispatch (no grill pending anywhere): hydra-dev self-selects
+        # its own anchor off the live GH board (`gh issue list --label
+        # ready-for-agent | .[0]`, the #458 contract) — decide.py deliberately
+        # does NOT know which anchor that will be (see the "no grill pending →
+        # dev_orch dispatches UNPINNED" test, #3711: pinning here would
+        # "quietly narrow dev_orch to whatever single anchor collect-state
+        # happened to resolve first"). The #3798 routing discriminator needs
+        # the anchor identity to be certain, so it deliberately does NOT apply
+        # on this path — `dev_ready_anchor`'s approval flag describes a
+        # candidate collect-state.sh resolved, not a guarantee of what
+        # hydra-dev will actually pick, and misrouting an unrelated build to
+        # the frontier tier is exactly the risk #3798's conservative-default
+        # principle rules out.
         return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
     if cls == "dev_target":
         # Use board signal (work_queue / target backlog) — dev_target dispatches

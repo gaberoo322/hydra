@@ -99,7 +99,7 @@ INV-008.
 
 | Action type | Tool the model invokes |
 |---|---|
-| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **`dev_target` exception (issue #3889):** omit `isolation="worktree"` for `dev_target` dispatches ONLY. The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, a pinned session is refused ALL git ops against it — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches). `dev_target` isolates itself via Step 0.6's `/dev/shm/hydra-worktrees/` worktree, and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the orchestrator-only classes. Every other class keeps `isolation="worktree"`. |
+| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. If the action carries `prompt_args.escalate_model` (cascade-routing re-dispatch) or `prompt_args.route_model` (per-anchor frontier routing on a PINNED `dev_orch` dispatch, issue #3798), that HINT **overrides** the static map for this one dispatch — pass `model=<that hint>` instead (see the override sections below). `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **`dev_target` exception (issue #3889):** omit `isolation="worktree"` for `dev_target` dispatches ONLY. The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, a pinned session is refused ALL git ops against it — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches). `dev_target` isolates itself via Step 0.6's `/dev/shm/hydra-worktrees/` worktree, and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the orchestrator-only classes. Every other class keeps `isolation="worktree"`. |
 | `auto-merge` | `Bash` → `gh pr merge --auto --squash`, then a SINGLE `POST /api/holdback/pending {prNumber, tier, cycleId}` register call (see Phase 6). **No self-approve prefix** — every agent shares the `gaberoo322` identity and GitHub 422s a self-approval, so chaining an approval before the merge (`… && gh pr merge …`) short-circuits and silently skips the merge-enable, leaving green PRs to pile up for admin-merge (reference_qa_cannot_self_approve / #848; hydra-qa removed the same trap via #974). There is no approving-review branch-protection gate — CI required-status-checks are the merge gate — so approval is a no-op regardless. Guarded by `test/autopilot-auto-merge-no-self-approve.test.mts`. The handler does NOT itself enroll the holdback or write the merged cycle-record — it only ARMS the PR; the in-process merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue #2623) fires both merge-coupled follow-ups once the merge lands. |
 | `route-prs-to-review` | `Bash` → emitted only while the operator-only **emergency brake** (issue #744) is engaged, IN PLACE OF every `auto-merge` action. The model routes the current open PRs to the `/hydra-review` pickup set: `gh pr list --repo gaberoo322/hydra --state open --json number` to enumerate them, then for each apply the review label (`gh api .../labels` — `gh pr edit` is broken, per operator memory) so `/hydra-review` surfaces them. The action carries no per-PR list — `decide()` is pure and cannot enumerate PRs. Because the brake suppresses all `auto-merge`, no PR auto-merges this turn; the operator clears the brake via `hydra brake off` once the incident is resolved. The autopilot NEVER engages or disengages the brake — there is no such action type. |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
@@ -156,7 +156,7 @@ smoke test first, per the fallback rule below).
 
 | Class (`slot`) | Model | Rationale |
 |---|---|---|
-| `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. `qa_orch` + CI unchanged. |
+| `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. A **per-anchor `route_model` HINT** (issue #3798) overrides this row to frontier for a PINNED dispatch whose anchor carries a fresh, APPROVED design-concept artifact — see the override section below. `qa_orch` + CI unchanged. |
 | `dev_target` | Sonnet (trial, 2026-08-04) | Money-critical betting code — was silently paying Opus (Fable unentitled); demoted under cost emergency, unmeasured at this tier. Watch Target PR QA/CI closely; revert to Fable/Opus on quality regression. |
 | `retro_orch` | Sonnet (2026-08-04) | Reshapes future behaviour; per-run low volume; orchestrator-side, not money-critical — same evidence class as `dev_orch`'s demotion |
 | `design_concept_orch` | Sonnet (2026-08-04) | A weak design concept wastes a full dev+QA cycle, but orchestrator-side and not money-critical — same evidence class as `dev_orch`'s demotion |
@@ -233,6 +233,57 @@ invocation can never fabricate a bogus escalation marker. A non-escalated
 dispatch never runs this — no deposit → reap omits the fields (truthful null,
 the overwhelming majority).
 
+**Per-anchor frontier-routing override (issue #3798).** When a `dev_orch`
+`dispatch` action carries `prompt_args.route_model` (a string model alias,
+today always `"fable"` — the frontier alias the fallback rule above resolves
+to Opus while `fable` stays unentitled), that value **overrides** the static
+`dev_orch` row above for that ONE dispatch — pass
+`model=action.prompt_args.route_model` to the `Agent` call instead of Sonnet.
+This is the leading anchor-shape lever PR #3795's Sonnet demotion left a gap
+for: a `dev_orch` dispatch whose anchor carries a fresh, APPROVED
+design-concept artifact — known at dispatch time, before any code is written,
+exactly the population where quality compounds (multi-file, tier-gated
+self-modification) — routes to the frontier tier; every other anchor (no
+artifact, stale, unapproved, or grill-clear only via the mechanical #1230 /
+trivial #1088 exemption) keeps Sonnet.
+
+`route_model` rides **only the PINNED `dev_orch` dispatch** (the one that also
+carries `prompt_args.anchor` — see the pinned-anchor section right below):
+that is the one branch where `decide.py` knows with certainty which anchor is
+about to be built. The ordinary UNPINNED dispatch (`hydra-dev` self-selects
+its own issue off the live board, #458) never carries `route_model` — decide.py
+cannot name that anchor in advance, and routing on a guess risks sending an
+unrelated, possibly-cheap build to the frontier tier. This is a deliberate,
+narrower scope than a prior attempt (PR #3882, closed 2026-08-13) — see below.
+
+decide.py stays PURE — it emits only the `route_model` HINT (never a concrete
+`model` field; the model lever stays here in the playbook per #1093), reading
+one pre-resolved boolean signal, `state.signals.orch_dev_ready_anchor_artifact_approved`
+(see the Signal wiring table), which `collect-state.sh` stamps in lockstep
+with `orch_dev_ready_anchor` in the SAME loop pass — `true` only when that
+pin's grill-clearance came from a genuine fresh, `status: "approved"`
+design-concept artifact, `false` for every other path including both
+exemptions. A dispatch with no `route_model` key uses the static routing map
+unchanged.
+
+This routing is INDEPENDENT of the `subagent_failure` escalation above: a
+frontier-routed pinned dispatch that then fails still escalates per
+`ESCALATION_POLICY["dev_orch"]`, and a Sonnet-routed dispatch that fails
+escalates just as before — the two levers attach to different dispatches
+(initial vs. re-dispatch) and never collide on one action.
+
+**Corrected source (2026-08-13 operator review of issue #3798).** A prior
+attempt (PR #3882, closed) sourced the artifact-approval discriminator from
+`_candidate_design_concept(candidates, best)` — `best.designConcept` off
+`/api/anchor/candidates`. That path was REMOVED from the decision core by
+issue #751 (the candidates feed is structurally target-product work post
+#458, never an orch-scope grill anchor) and the API itself is retired
+(#3455), so the PR was a functional no-op — the feed essentially never
+matched the anchor `dev_orch` actually pins to. The corrected discriminator
+is orch-scope and pre-resolved by the SAME `collect-state.sh` loop pass that
+already produces `orch_dev_ready_anchor` (issue #3711) — no new signal, no
+new collection step, and no read of the retired candidates feed.
+
 ### `dev_orch` dispatch — honour a pinned anchor (issue #3711)
 
 `dev_orch` normally dispatches **unpinned** — `hydra-dev` picks its own issue off
@@ -248,6 +299,11 @@ self-selects via an unguarded `gh issue list --label ready-for-agent … | .[0]`
 with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
+
+**This same pinned dispatch may also carry `prompt_args.route_model` (issue
+#3798)** — see "Per-anchor frontier-routing override" above. It rides ONLY
+this pinned path, never the unpinned self-selection, because this is the one
+branch where the anchor being built is certain.
 
 **A second, independent source of a pinned anchor: draining
 `state.dev_resume_pending` (issue #3866).** `reap.py` appends a resume record
@@ -704,6 +760,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. **The `dev_orch` yield it triggers is PER-ANCHOR, not global, post-#3711** — see the row below. |
 | `orch_dev_ready_anchor=issue-N` (or `none`) | `state.signals.orch_dev_ready_anchor` (string, or omit — verbatim, no rename) | `dev_orch` (issue #3711) — the first orch-board `ready-for-agent` anchor already **grill-clear**: fresh design-concept artifact, or the mechanical (#1230) / trivial (#1088) exemption. Resolved by the SAME `collect-state.sh` loop pass as `orch_pending_grill_anchor` because `decide.py` must stay pure and cannot look up artifact freshness — same division of labour as `wayfinder_orch_frontier`. When a grill is pending AND this names a **different** anchor, `dev_orch` dispatches **pinned to it** (`prompt_args.anchor`) instead of yielding board-wide; when it is `none` or equals the pending-grill anchor, `dev_orch` yields as it did pre-#3711. gh/API-down degrades to `none` (fail closed). |
+| `orch_dev_ready_anchor_artifact_approved=true` (or `false`) | `state.signals.orch_dev_ready_anchor_artifact_approved` (boolean, or omit — the model merges it as a boolean, same shape as `orch_backfill_idle`) | `dev_orch` (issue #3798) — the per-anchor **frontier-routing discriminator**, stamped by the SAME `collect-state.sh` loop pass and lockstep with `orch_dev_ready_anchor`. `true` ONLY when that pin's grill-clearance came from a genuine fresh design-concept artifact whose `status` field is `"approved"` — NOT from the mechanical (#1230) / trivial (#1088) exemption, which also sets `orch_dev_ready_anchor` but must never route frontier. `decide.py` reads it ONLY on the PINNED dispatch (where `orch_dev_ready_anchor` is the certain build target) to emit `prompt_args.route_model = "fable"` — see "Per-anchor frontier-routing override" above. Absent/malformed → `false` (conservative default, stays Sonnet). |
 | `wayfinder_orch_frontier=issue-N` (or `none`) | `state.signals.wayfinder_orch_frontier` (string, or omit — verbatim, no rename) | `wayfinder_orch` (issue #3351, epic #3350, ADR-0029) — the pre-resolved next AFK-typed, unblocked, unclaimed frontier ticket across all open **approved** (`wayfinder:map` minus `wayfinder:destination-pending`) maps. collect-state.sh owns the native GraphQL sub-issue/blocked-by enumeration so decide.py stays pure; gh/GraphQL-down degrades to `none` (fail closed). |
 | `wayfinder_orch_ticket_type=research\|task` | `state.signals.wayfinder_orch_ticket_type` (string) | the frontier ticket's type, threaded into the dispatch `prompt_args.ticket_type` so the dispatch step below resolves ticket-type → skill (`research` → hydra-issue-research, `task` → hydra-dev). |
 | `wayfinder_orch_inflight_global=N` | `state.signals.wayfinder_orch_inflight_global` (string integer) | the count of live `wayfinder_orch` workers — open, self-assigned, AFK-typed (`wayfinder:research`\|`wayfinder:task`) sub-issues across all open **approved** maps (issue #3354, ADR-0029 Decision 2). `decide.py` reads it verbatim and suppresses a new dispatch at ≥2 (global cap of ≤2 concurrent workers). collect-state.sh owns the count so decide.py stays pure; absent/malformed → treated as 0 (fail-open on absence — the structural per-map single-flight guard still holds). |
