@@ -1,0 +1,1 @@
+- fix: eliminate the 4 remaining `npm run typecheck:test` type errors and add a blocking `test/*.test.mts` drift guard so new test-file type rot fails the required test suite instead of drifting silently (#4046)
