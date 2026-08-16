@@ -1,0 +1,1 @@
+- feat: add the /work dashboard page — board state, ready-for-agent queue with confirm-gated promote/relabel/close/reopen actions, and the anchor-distribution rationale (#4010)

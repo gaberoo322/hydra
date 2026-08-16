@@ -1,9 +1,13 @@
 /**
- * Schemas for the autopilot board-state endpoint (issue #934).
+ * Schemas for the autopilot board endpoints (issue #934; extended #4010).
  *
- * One read-only endpoint:
+ * The board router's surfaces:
  *
- *   GET /api/autopilot/board-state → AutopilotBoardStateResponse
+ *   GET  /api/autopilot/board-state  → AutopilotBoardStateResponse
+ *   GET  /api/autopilot/work-queue   → WorkQueueResponse        (#4010)
+ *   GET  /api/autopilot/hitl-grill   → HitlGrillResponse        (#4028)
+ *   POST /api/autopilot/board/promote|relabel|close|reopen      (#4010)
+ *                                     → BoardActionResponse
  *
  * # Why this exists
  *
@@ -105,6 +109,14 @@ export const AutopilotBoardStateResponseSchema = z
      * turn; the autopilot turn can also see the degradation explicitly.
      */
     degraded: z.boolean(),
+    /**
+     * Trust seam (issue #4010, ADR-0034 §5): `!degraded` — the board-state's
+     * "lookup ran cleanly" assertion. Additive; `degraded` and its consumer
+     * (`collect-state.sh`) are untouched. `sourcesOk === false` is what the
+     * dashboard's derivePageStatus reads to render UNKNOWN instead of a
+     * confident all-zero board.
+     */
+    sourcesOk: z.boolean(),
     /** ISO timestamp the projection was assembled. */
     generatedAt: z.string(),
   })
@@ -113,3 +125,233 @@ export const AutopilotBoardStateResponseSchema = z
 export type AutopilotBoardStateResponse = z.infer<
   typeof AutopilotBoardStateResponseSchema
 >;
+
+// ---------------------------------------------------------------------------
+// Work queue (issue #4010 — the /work page's ready-for-agent + triage queue)
+// ---------------------------------------------------------------------------
+
+/**
+ * The operator-lane labels the /work queue surfaces, in lane-resolution order
+ * (first match wins — `ready-for-agent` outranks a stray `needs-triage` because
+ * the dispatch signal is the stronger claim). `in-progress` / `needs-qa` are
+ * agent-owned lifecycle states, not operator lanes, and are deliberately absent
+ * (the queue is the operator's backlog view, not a dispatch mirror).
+ */
+export const WORK_QUEUE_LANES = [
+  "ready-for-agent",
+  "needs-info",
+  "needs-triage",
+  "blocked",
+  "ready-for-human",
+] as const;
+export type WorkQueueLane = (typeof WORK_QUEUE_LANES)[number];
+
+/**
+ * The lane labels a relabel action may move an issue between (ADR-0034 §7:
+ * relabel is immediate-tier). Promoting to `ready-for-agent` is its own
+ * confirm-gated action; `in-progress`/`needs-qa` are agent-owned and never
+ * set by hand.
+ */
+export const RELABEL_TARGETS = [
+  "needs-triage",
+  "needs-info",
+  "ready-for-human",
+  "blocked",
+] as const;
+export type RelabelTarget = (typeof RELABEL_TARGETS)[number];
+
+/** One /work queue row. */
+export const WorkQueueRowSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    labels: z.array(z.string()),
+    /** Resolved operator lane (first match from WORK_QUEUE_LANES). */
+    lane: z.enum(WORK_QUEUE_LANES),
+    /** ISO last-updated timestamp (staleness rendering). */
+    updatedAt: z.string(),
+    /**
+     * OPEN strict-blocker numbers this row cites (resolved only for
+     * `ready-for-agent` rows — the same population `resolveOpenBlockers`
+     * resolves for the board counts). Empty array otherwise.
+     */
+    openBlockers: z.array(z.number().int().positive()),
+    /** Carries the GLM dev-drainer eligibility label (ADR-0032). */
+    glmEligible: z.boolean(),
+  })
+  .strict();
+
+export type WorkQueueRow = z.infer<typeof WorkQueueRowSchema>;
+
+/** `GET /autopilot/work-queue` response — the trust-seam list contract. */
+export const WorkQueueResponseSchema = z
+  .object({
+    items: z.array(WorkQueueRowSchema),
+    /** Asserted-emptiness evidence: the count of open issues the lookup scanned. */
+    scanned: z.number().int().nonnegative(),
+    sourcesOk: z.boolean(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type WorkQueueResponse = z.infer<typeof WorkQueueResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// HITL grill lane (issue #4028 — the parked-idea inbox slice 4 of epic #4024)
+// ---------------------------------------------------------------------------
+
+/**
+ * The terminal park label the whole hitl-grill lane keys on
+ * (`docs/agents/triage-labels.md`: a park state no agent actions — the
+ * operator grills it into real work or dismisses it). Lives here, beside
+ * `WORK_QUEUE_LANES`, because this schema file is the label-vocabulary home
+ * for the board router's surfaces.
+ */
+export const HITL_GRILL_LABEL = "hitl-grill";
+
+/**
+ * The open-park count at which the producers' pre-park cap check stops
+ * parking new ideas (`docs/operator-playbooks/hydra-architecture-scan.md`
+ * step 4c). The lane surfaces the state, not the gate: `capReached` on the
+ * response is precomputed from the SAME read the lane renders.
+ */
+export const HITL_GRILL_CAP = 10;
+
+/** One parked-idea row — an OPEN issue carrying {@link HITL_GRILL_LABEL}. */
+export const HitlGrillRowSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    /**
+     * The producer provenance labels: every label on the issue EXCEPT the
+     * `hitl-grill` lane label itself (the pilot producer always attaches
+     * `architecture-scan` alongside; filtering rather than hardcoding one
+     * producer generalizes to the other feeders named in epic #4024).
+     */
+    provenance: z.array(z.string()),
+    /**
+     * The parsed park reason: an explicit `Recommendation strength:` line
+     * wins (a future producer's literal field), falling back to today's
+     * blockquoted `> Reason:` park-body line; blank when neither is present.
+     */
+    reason: z.string(),
+    /** ISO creation timestamp — the lane's oldest-first ordering key. */
+    createdAt: z.string(),
+  })
+  .strict();
+
+export type HitlGrillRow = z.infer<typeof HitlGrillRowSchema>;
+
+/** `GET /autopilot/hitl-grill` response — the trust-seam list contract. */
+export const HitlGrillResponseSchema = z
+  .object({
+    items: z.array(HitlGrillRowSchema),
+    /** Asserted-emptiness evidence: the count of issues the lookup scanned. */
+    scanned: z.number().int().nonnegative(),
+    /**
+     * `items.length >= HITL_GRILL_CAP` — the producer's parking cap is
+     * reached, precomputed from this same read (never a second network call
+     * to a producer's own cap check).
+     */
+    capReached: z.boolean(),
+    sourcesOk: z.boolean(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type HitlGrillResponse = z.infer<typeof HitlGrillResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Issue-lifecycle actions (issue #4010, ADR-0034 §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /autopilot/board/promote` body. `confirm: true` is the explicit
+ * confirm step ADR-0034 §7 requires for anything that starts an agent (a
+ * promote IS a dispatch trigger in disguise) — `z.literal(true)` means an
+ * absent/false/mistyped confirm is a 400 before any write is attempted.
+ */
+export const BoardPromoteActionSchema = z
+  .object({
+    issue: z.number().int().positive(),
+    confirm: z.literal(true),
+  })
+  .strict();
+
+/** `POST /autopilot/board/relabel` body (immediate-tier, no confirm). */
+export const BoardRelabelActionSchema = z
+  .object({
+    issue: z.number().int().positive(),
+    label: z.enum(RELABEL_TARGETS),
+  })
+  .strict();
+
+/**
+ * `POST /autopilot/board/close` body (immediate-tier). The OPTIONAL `reason`
+ * rides `gh issue close --reason` verbatim (issue #4028: the hitl-grill lane's
+ * Dismiss verdict closes `"not planned"`); omitted preserves #4010's plain
+ * close. Constrained to GitHub's own close-reason vocabulary so an
+ * off-vocabulary literal is a 400 before any write.
+ */
+export const BOARD_CLOSE_REASONS = ["completed", "not planned"] as const;
+export type BoardCloseReason = (typeof BOARD_CLOSE_REASONS)[number];
+
+export const BoardCloseActionSchema = z
+  .object({
+    issue: z.number().int().positive(),
+    reason: z.enum(BOARD_CLOSE_REASONS).optional(),
+  })
+  .strict();
+
+/** `POST /autopilot/board/reopen` body (immediate-tier). */
+export const BoardIssueRefSchema = z
+  .object({
+    issue: z.number().int().positive(),
+  })
+  .strict();
+
+/**
+ * The machine-readable refusal/write outcomes an action returns. HTTP status
+ * stays 200 for every content outcome (the never-throw result-object
+ * convention — callers discriminate on `ok`/`reason`, not on status codes);
+ * only a malformed body is a 400 `schema-validation-failed`.
+ */
+export const BOARD_ACTION_REASONS = [
+  "already-ready",
+  "closed",
+  "missing-scope-section",
+  "blocked",
+  "read-failed",
+  "write-failed",
+  "write-unverified",
+] as const;
+export type BoardActionReason = (typeof BOARD_ACTION_REASONS)[number];
+
+/** One action's response envelope. */
+export const BoardActionResponseSchema = z
+  .object({
+    ok: z.boolean(),
+    action: z.enum(["promote", "relabel", "close", "reopen"]),
+    issue: z.number().int().positive(),
+    /** Present on every `ok:false` — the specific reason, surfaced by the UI. */
+    reason: z.enum(BOARD_ACTION_REASONS).optional(),
+    /** Human-readable one-liner expanding the reason (also on success notes). */
+    detail: z.string().optional(),
+    /**
+     * The VERIFIED post-write state (present only when the follow-up re-read
+     * confirmed the write — ADR-0034 §7: no action renders success it has not
+     * verified).
+     */
+    verified: z
+      .object({
+        state: z.string(),
+        labels: z.array(z.string()),
+      })
+      .optional(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type BoardActionResponse = z.infer<typeof BoardActionResponseSchema>;

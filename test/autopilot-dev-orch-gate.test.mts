@@ -27,11 +27,13 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
+const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
 
 // The jq filter is the load-bearing part of the collector. Extract it
 // from the script so any drift in the script is caught here.
@@ -167,13 +169,18 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
     assert.equal(r.stdout, "3", "three fresh hydra-dev PRs out of five total");
   });
 
-  // --- GLM dev-drainer partition (ADR-0032 / issue #3687) -------------------
+  // --- GLM dev-drainer partition (ADR-0032 / issue #3687, widened by #4048) --
   // The drainer authors in a git worktree, so its PR head branch carries the
-  // SAME `worktree-agent-*` prefix as an Opus dev_orch PR. Provenance is
-  // therefore a LABEL, not a branch name (ADR-0032 Decision 5 / invariant 9),
-  // and the collector must subtract `glm-authored` PRs — otherwise an open
-  // drainer PR inflates `active_dev_orch` and idles the Opus dev_orch slot on
-  // quota the drainer isn't spending.
+  // SAME `worktree-agent-*` prefix as an Opus dev_orch PR. Provenance is the
+  // `glm-authored` LABEL first (ADR-0032 Decision 5 / invariant 9) — and,
+  // since #4048, the drainer's exact literal `worktree-agent-glm-` branch
+  // prefix as an OR-fallback: the label's non-atomic `--label` mutation was
+  // silently missing on 29 of 62 real drainer PRs, and every miss inflated
+  // `active_dev_orch` and idled the Opus dev_orch slot on quota the drainer
+  // wasn't spending. The prefix discriminates perfectly because Opus harness
+  // branches are `worktree-agent-<hex-hash>-...` and a hex hash cannot
+  // contain g or l. This must stay the IDENTICAL OR-predicate
+  // glm-beachhead-report.sh applies.
 
   test("fresh glm-authored PR on worktree-agent- head is NOT counted (#3687)", () => {
     const prs = [
@@ -223,6 +230,62 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
     const r = runJq(filter, prs);
     assert.equal(r.status, 0);
     assert.equal(r.stdout, "1", "missing labels ⇒ not glm-authored ⇒ still counted");
+  });
+
+  test("fresh UNLABELLED worktree-agent-glm- PR is NOT counted (#4048 — the branch-prefix fallback)", () => {
+    // The #4048 regression, second consumer: the drainer's `--label`
+    // mutation is non-atomic and was silently missing on 29 of 62 drainer
+    // PRs. Label-only partitioning counted every one of them as Opus
+    // dev_orch work and mis-gated the busy slot.
+    const prs = [
+      {
+        headRefName: "worktree-agent-glm-4048-1786841729",
+        updatedAt: iso(60),
+        labels: [],
+      },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(
+      r.stdout,
+      "0",
+      "an unlabelled drainer PR must not gate the Opus dev_orch slot — the branch prefix excludes it",
+    );
+  });
+
+  test("unlabelled worktree-agent-glm- PR is subtracted while a sibling hex-hash Opus PR still counts (#4048)", () => {
+    const prs = [
+      // drainer PR — label lost, discriminated by the exact glm- infix.
+      {
+        headRefName: "worktree-agent-glm-3690-1752950000",
+        updatedAt: iso(60),
+        labels: [],
+      },
+      // genuine Opus dev_orch harness PR — hex hash, no g/l, still counts.
+      {
+        headRefName: "worktree-agent-cafebabe0123456789abcdef-1752950001",
+        updatedAt: iso(60),
+        labels: [],
+      },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(
+      r.stdout,
+      "1",
+      "only the hex-hash Opus PR counts — the glm infix cannot appear in a hex hash, so the prefix never false-excludes Opus work",
+    );
+  });
+
+  test("a branch that merely CONTAINS glm but diverges before the dash is still Opus work (prefix-exact match, #4048)", () => {
+    // e.g. an Opus PR authored for a GLM-lane issue like #4048 itself, whose
+    // slug mentions glm — a loose "contains glm" match would mis-exclude it.
+    const prs = [
+      { headRefName: "worktree-agent-glmtree-not-the-drainer", updatedAt: iso(60), labels: [] },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, "1", "startswith(worktree-agent-glm-) is prefix-exact — glm alone must not exclude");
   });
 
   test("collector script is executable and emits active_dev_orch line", () => {
@@ -290,6 +353,253 @@ describe("hydra-autopilot dev_orch rule (issue #412)", () => {
       collector,
       /gh pr list --repo gaberoo322\/hydra --state open --json [^\n]*\blabels\b/,
       "active_dev_orch collector must request `labels` from gh",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frontier-tier routing hint on a pinned dev_orch anchor (issue #3798,
+// #3795 follow-up).
+//
+// dev_orch was demoted to Sonnet in PR #3795. Its only escalation net was
+// `ESCALATION_POLICY["dev_orch"]` — a capability-failure retry triggered by
+// `subagent_failure` — which cannot catch a PR that compiles, passes tests
+// and CI, but is architecturally weak. This closes the LEADING half of that
+// gap: a pinned dev_orch anchor (the per-anchor gate, #3711) whose
+// grill-clearness came from a genuine, APPROVED design-concept artifact is
+// architecturally consequential enough to route to the frontier tier for
+// that one dispatch, via a `prompt_args.route_model` HINT the playbook maps
+// to the Agent model kwarg. An anchor that is grill-clear ONLY via the
+// mechanical (#1230) or trivial (#1088) exemption — the opposite of
+// architecturally consequential — must NEVER receive the hint, and neither
+// must the (far more common) unpinned dispatch, which has no anchor known to
+// decide.py at dispatch time.
+//
+// `orch_dev_ready_anchor_design_concept_status` (collect-state.sh) is the
+// pre-resolved discriminator: "approved"/"draft" only in the fresh-artifact
+// branch, "none" in both exemption branches. decide.py performs no I/O to
+// compute it — this stays a pure function of (state, events, now), per #3711.
+// ---------------------------------------------------------------------------
+
+interface DecideStateOverrides {
+  signals?: Record<string, unknown>;
+}
+
+function decideBaseState(o: DecideStateOverrides = {}): any {
+  return {
+    started_epoch: Math.floor(Date.now() / 1000),
+    limits: {
+      token_budget: 2_000_000,
+      wall_clock_max_sec: 28_800,
+      idle_drain_turns: 5,
+      scope: "all",
+      subagent_max_tokens: 400_000,
+      subagent_hard_max_tokens: 800_000,
+    },
+    cumulative_tokens: 0,
+    dispatches: 0,
+    idle_turns: 0,
+    turn: 0,
+    burned_classes: [],
+    reaped_task_ids: [],
+    failure_log: [],
+    slots: {
+      dev_orch: null, qa_orch: null, research_orch: null,
+      dev_target: null, qa_target: null, research_target: null,
+      design_concept_orch: null,
+    },
+    signal_last_fired: {
+      health: 0, sweep_orch: 0, sweep_target: 0,
+      discover_orch: 0, discover_target: 0,
+    },
+    signals: o.signals ?? {},
+  };
+}
+
+function runDecide(state: any, candidates: any | null = null, events: any[] = []): any {
+  const dir = mkdtempSync(join(tmpdir(), "autopilot-dev-orch-route-"));
+  try {
+    const statePath = join(dir, "state.json");
+    const candsPath = join(dir, "candidates.json");
+    const eventsPath = join(dir, "events.json");
+    writeFileSync(statePath, JSON.stringify(state));
+    writeFileSync(candsPath, JSON.stringify(candidates ?? { candidates: [], research_recommended: false }));
+    writeFileSync(eventsPath, JSON.stringify(events));
+    const r = spawnSync("python3", [DECIDE, "decide", statePath, candsPath, eventsPath], { encoding: "utf-8" });
+    assert.equal(r.status, 0, `decide.py exited non-zero: ${r.stderr}`);
+    return JSON.parse(r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function findDevDispatch(plan: any): any | undefined {
+  return (plan.actions ?? []).find((a: any) => a.type === "dispatch" && a.slot === "dev_orch");
+}
+
+describe("decide.py — dev_orch route_model frontier hint on a pinned anchor (issue #3798)", () => {
+  test("genuine fresh (approved) artifact on the pinned anchor → route_model hint attached", () => {
+    const state = decideBaseState({
+      signals: {
+        orch_work_available: true,
+        orch_pending_grill_anchor: "issue-3730",
+        orch_dev_ready_anchor: "issue-3707",
+        orch_dev_ready_anchor_design_concept_status: "approved",
+      },
+    });
+    const plan = runDecide(state);
+    const dev = findDevDispatch(plan);
+    assert.ok(dev, "dev_orch must still be pinned to the grill-clear anchor");
+    assert.equal(dev.prompt_args.anchor, "issue-3707");
+    assert.equal(
+      dev.prompt_args.route_model,
+      "fable",
+      "an approved design-concept artifact must route the pinned dispatch to the frontier tier",
+    );
+  });
+
+  test("mechanical/trivial exemption (status=none) on the pinned anchor → NO route_model hint", () => {
+    const state = decideBaseState({
+      signals: {
+        orch_work_available: true,
+        orch_pending_grill_anchor: "issue-3730",
+        orch_dev_ready_anchor: "issue-3707",
+        orch_dev_ready_anchor_design_concept_status: "none",
+      },
+    });
+    const plan = runDecide(state);
+    const dev = findDevDispatch(plan);
+    assert.ok(dev, "dev_orch must still be pinned to the grill-clear anchor");
+    assert.equal(
+      dev.prompt_args.route_model,
+      undefined,
+      "the mechanical/trivial exemption is the OPPOSITE of architecturally consequential — must stay on Sonnet",
+    );
+  });
+
+  test("draft (not yet approved) artifact on the pinned anchor → NO route_model hint", () => {
+    const state = decideBaseState({
+      signals: {
+        orch_work_available: true,
+        orch_pending_grill_anchor: "issue-3730",
+        orch_dev_ready_anchor: "issue-3707",
+        orch_dev_ready_anchor_design_concept_status: "draft",
+      },
+    });
+    const plan = runDecide(state);
+    const dev = findDevDispatch(plan);
+    assert.ok(dev);
+    assert.equal(
+      dev.prompt_args.route_model,
+      undefined,
+      "only an APPROVED artifact permits frontier routing — draft stays on Sonnet",
+    );
+  });
+
+  test("absent design-concept status signal on the pinned anchor → NO route_model hint (conservative default)", () => {
+    // An older autopilot turn, or a collect-state.sh emitting only the first
+    // two signals — the new key is simply missing from state.signals.
+    const state = decideBaseState({
+      signals: {
+        orch_work_available: true,
+        orch_pending_grill_anchor: "issue-3730",
+        orch_dev_ready_anchor: "issue-3707",
+      },
+    });
+    const plan = runDecide(state);
+    const dev = findDevDispatch(plan);
+    assert.ok(dev);
+    assert.equal(
+      dev.prompt_args.route_model,
+      undefined,
+      "an absent signal must never fail OPEN to the frontier tier",
+    );
+  });
+
+  test("malformed (non-string) design-concept status signal → NO route_model hint", () => {
+    const state = decideBaseState({
+      signals: {
+        orch_work_available: true,
+        orch_pending_grill_anchor: "issue-3730",
+        orch_dev_ready_anchor: "issue-3707",
+        orch_dev_ready_anchor_design_concept_status: 1,
+      },
+    });
+    const plan = runDecide(state);
+    const dev = findDevDispatch(plan);
+    assert.ok(dev);
+    assert.equal(dev.prompt_args.route_model, undefined,
+      "a non-string signal must never be mistaken for 'approved'");
+  });
+
+  test("UNPINNED dev_orch dispatch never carries route_model, even with an approved status signal", () => {
+    // No grill pending → dev_orch dispatches unpinned (hydra-dev self-selects
+    // per #458). The routing hint is scoped to the pinned-dispatch branch
+    // ONLY (design-concept artifact rejected-alternatives: widening it to the
+    // unpinned path is a separate, larger #3711-scoped decision).
+    const state = decideBaseState({
+      signals: {
+        orch_work_available: true,
+        orch_pending_grill_anchor: "none",
+        orch_dev_ready_anchor: "issue-3707",
+        orch_dev_ready_anchor_design_concept_status: "approved",
+      },
+    });
+    const plan = runDecide(state);
+    const dev = findDevDispatch(plan);
+    assert.ok(dev, "dev_orch dispatches when no grill is pending");
+    assert.equal(dev.prompt_args?.anchor, undefined, "no grill pending → no pin");
+    assert.equal(
+      dev.prompt_args?.route_model,
+      undefined,
+      "the unpinned self-select path must never receive the frontier hint",
+    );
+  });
+
+  test("#1093 purity — decide.py emits NO concrete `model` field, only the route_model HINT", () => {
+    const state = decideBaseState({
+      signals: {
+        orch_work_available: true,
+        orch_pending_grill_anchor: "issue-3730",
+        orch_dev_ready_anchor: "issue-3707",
+        orch_dev_ready_anchor_design_concept_status: "approved",
+      },
+    });
+    const plan = runDecide(state);
+    const dev = findDevDispatch(plan);
+    assert.ok(dev);
+    assert.equal(dev.model, undefined, "decide.py must never emit a concrete model field (#1093)");
+    assert.equal(typeof dev.prompt_args.route_model, "string",
+      "route_model must be a plain string alias, not a resolved model object");
+  });
+
+  test("decision core does not consult the retired candidate-feed design-concept path (#751, #3455)", () => {
+    // The issue's operator correction (2026-08-13): `_candidate_design_concept`
+    // / `_design_concept_is_fresh` read `best.designConcept` from the RETIRED
+    // /api/anchor/candidates feed and were removed from the decision path by
+    // #751. The dev_orch pinned-dispatch branch below must source the routing
+    // discriminator ONLY from the pre-resolved collect-state.sh signal, never
+    // from those dead-code helpers.
+    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    const start = src.indexOf('if cls == "dev_orch":');
+    assert.ok(start > 0, "could not locate the dev_orch selector branch in decide.py");
+    const after = src.indexOf('\n    if cls == "dev_target":', start);
+    assert.ok(after > start, "could not locate the end of the dev_orch selector branch");
+    const body = src.slice(start, after);
+    assert.match(body, /_orch_dev_ready_design_concept_status\(/,
+      "sanity: the sliced region must be the branch that reads the new signal");
+    for (const forbidden of ["_candidate_design_concept(", "_design_concept_is_fresh(", 'best.get("designConcept")']) {
+      assert.equal(body.includes(forbidden), false,
+        `dev_orch selector must not consult the retired candidate feed — found "${forbidden}"`);
+    }
+  });
+
+  test("route_model is sourced live from ESCALATION_POLICY, never a duplicated literal", () => {
+    const src = readFileSync(join(REPO_ROOT, "scripts", "autopilot", "decide.py"), "utf-8");
+    assert.match(
+      src,
+      /prompt_args\["route_model"\]\s*=\s*ESCALATION_POLICY\["dev_orch"\]\["model"\]/,
+      "route_model must read ESCALATION_POLICY live so the two channels (route_model / escalate_model) never drift apart",
     );
   });
 });

@@ -158,14 +158,10 @@ jobs:
           exit 0
 
       # ── control-plane-drift (issue #2611) ──────────────────────────────────
-      # Re-parses the control-plane census sources in --check mode and exits 1 if
-      # the committed dashboard/src/data/control-plane.json is stale.
-      - name: Re-parse control-plane census and diff against the committed JSON
-        if: always()
-        # `--check` re-parses the repo sources and compares against
-        # dashboard/src/data/control-plane.json WITHOUT writing; it exits 1 (with
-        # a "regenerate with ..." message) when the committed copy is stale.
-        run: node dashboard/scripts/parse-control-plane.mjs --check
+      # RETIRED with the Orchestrator Map (issue #4012, ADR-0034 §3): the
+      # census artifact, its generator, and this drift check left together —
+      # the map rendered a checked-in snapshot and could never reflect live
+      # state, which is why the whole surface died.
 
       # ── coupling-check (issue #731) ────────────────────────────────────────
       # Target-coupling gate (ADR-0013 swap-seam guard). Fails on any NEW

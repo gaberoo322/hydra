@@ -1,0 +1,1 @@
+- feat: route a pinned `dev_orch` dispatch to the frontier tier when its anchor's design-concept artifact is genuinely approved, not just grill-clear via the mechanical/trivial exemption (#3798)

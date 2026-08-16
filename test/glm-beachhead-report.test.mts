@@ -182,6 +182,10 @@ interface FakePr {
   // Matches gh's real --json labels shape ([{name, id, ...}]), NOT a plain
   // string array — the script's jq filter reads `.labels | map(.name)`.
   labels: Array<{ name: string }>;
+  // Head branch name, served for the branch-scan / merged-baseline fetches
+  // (issue #4048). Optional as in the pre-#4048 fixtures — gh only returns
+  // requested fields, and the script's jq guards with `// ""`.
+  headRefName?: string;
 }
 
 interface FakeComment {
@@ -190,17 +194,24 @@ interface FakeComment {
 }
 
 /**
- * Write a fake `gh` onto PATH serving the exact three read-only shapes this
+ * Write a fake `gh` onto PATH serving the exact read-only shapes this
  * script issues (all RAW --json, filtered by our own jq afterward — see the
  * script header's "never gh's own --jq" note, which is precisely what makes
  * this stub tractable):
- *   gh pr list --repo R --state merged --json additions,deletions,labels --limit 100
- *   gh pr list --repo R --label glm-authored --state all --json number,createdAt,additions,deletions --limit 100
+ *   gh pr list --repo R --state merged --json additions,deletions,labels,headRefName --limit 100
+ *   gh pr list --repo R --label glm-authored --state all --json number,createdAt,additions,deletions,labels,headRefName --limit 100
+ *   gh pr list --repo R --state all --json number,createdAt,additions,deletions,labels,headRefName --limit 500   (branch scan, issue #4048)
  *   gh pr view N --repo R --json comments
  */
 function makeGhStub(
   dir: string,
-  opts: { mergedBaselinePrs: FakePr[]; glmAuthoredPrs: FakePr[]; commentsByPr: Record<number, FakeComment[]> },
+  opts: {
+    mergedBaselinePrs: FakePr[];
+    glmAuthoredPrs: FakePr[];
+    /** Served to the label-less `--state all` branch scan (issue #4048). */
+    allPrsForBranchScan?: FakePr[];
+    commentsByPr: Record<number, FakeComment[]>;
+  },
 ): string {
   const binDir = join(dir, "bin");
   const fixtureFile = join(dir, "fixture.json");
@@ -236,6 +247,8 @@ def main():
             rows = fx["mergedBaselinePrs"]
         elif label == "glm-authored":
             rows = fx["glmAuthoredPrs"]
+        elif state == "all":
+            rows = fx.get("allPrsForBranchScan", [])
         else:
             rows = []
         sys.stdout.write(json.dumps(rows))
@@ -265,12 +278,24 @@ exec python3 ${JSON.stringify(helperPath)} "$@"
   return binDir;
 }
 
-/** Serve `{usage: {percentLast7d: N}}` on an ephemeral port. */
-function usageServer(percentLast7d: number): Promise<{ url: string; close: () => void }> {
+/**
+ * Serve `{usage: {percentLast7d: N, weeklyResetAnchor?: ISO}}` on an ephemeral
+ * port. The anchor is the live eligibility response's weekly-window start
+ * (`.usage.weeklyResetAnchor`) — omitted when not passed, mirroring an
+ * orchestrator too old (or a fetch too broken) to expose it (issue #4049).
+ */
+function usageServer(
+  percentLast7d: number,
+  weeklyResetAnchor?: string,
+): Promise<{ url: string; close: () => void }> {
   return new Promise((resolve) => {
     const server = http.createServer((_req, res) => {
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ usage: { percentLast7d } }));
+      const usage: Record<string, unknown> = { percentLast7d };
+      if (weeklyResetAnchor !== undefined) {
+        usage.weeklyResetAnchor = weeklyResetAnchor;
+      }
+      res.end(JSON.stringify({ usage }));
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as any;
@@ -292,6 +317,21 @@ function runReport(env: Record<string, string>): Promise<{ status: number; stdou
 }
 
 const AUTOMATED_QA_PREFIX = "> *Automated QA";
+
+/** Unix seconds for an ISO instant (feeds HYDRA_GLM_BEACHHEAD_NOW_EPOCH). */
+function epochOf(iso: string): number {
+  return Math.floor(new Date(iso).getTime() / 1000);
+}
+
+/** ISO instant exactly `days` before `iso` (a weeklyResetAnchor fixture). */
+function isoMinusDays(iso: string, days: number): string {
+  return new Date(new Date(iso).getTime() - days * 86_400_000).toISOString();
+}
+
+/** Hand-write a baseline.json exactly as a prior run left it. */
+function seedBaselineFile(file: string, fields: Record<string, unknown>): void {
+  writeFileSync(file, JSON.stringify({ churnSampleSize: 2, ...fields }, null, 2));
+}
 
 describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
   test("no glm-authored PRs yet -> insufficient-data, baseline still bootstrapped", async () => {
@@ -352,9 +392,12 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
         const baselineAfterSecond = readFileSync(baselineFile, "utf8");
         assert.equal(baselineAfterFirst, baselineAfterSecond);
         // The CURRENT percent in the report reflects the new live value (90),
-        // while the baseline stays 40 -- proving the delta is live-vs-frozen,
-        // not live-vs-live.
-        assert.match(r2.stdout, /percentLast7d 90% \(baseline 40%/);
+        // while the baseline stays 40 -- proving the comparison is
+        // live-vs-frozen, not live-vs-live. Neither fixture server serves a
+        // weeklyResetAnchor, so both window positions print n/a and the relief
+        // figure is explicitly "not comparable" (issue #4049) rather than a
+        // raw subtraction.
+        assert.match(r2.stdout, /percentLast7d 90% @ n\/a into window \(baseline 40% @ n\/a into window; relief: not comparable/);
       } finally {
         usageSecond.close();
       }
@@ -499,5 +542,440 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
     const r = callHelper('PATH=/nonexistent-empty-dir require_tools; echo "exit=$?"');
     assert.match(r.stderr, /ERROR required tool/);
     assert.match(r.stdout, /exit=1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Label-OR-branch provenance (issue #4048)
+//
+// `gh pr create` and its separate `--label glm-authored` mutation are not
+// atomic (drainer-loop.sh's #3900 investigation note), so 29 of 62 real
+// drainer PRs sat on their worktree-agent-glm-* branch with the label
+// missing — and this report's label-only query judged the lane on 53% of
+// its output. The fix counts a PR as drainer output when it carries the
+// label OR its head branch carries the drainer's exact literal
+// `worktree-agent-glm-` prefix (label stays PRIMARY per ADR-0032 Decision 5;
+// the prefix is a perfect discriminator because Opus harness branches are
+// `worktree-agent-<hex-hash>-...` and a hex hash cannot contain g or l).
+// ---------------------------------------------------------------------------
+
+describe("glm-beachhead-report.sh — label-OR-branch provenance (issue #4048)", () => {
+  test("a PR on a worktree-agent-glm-* branch with NO label is counted as drainer output, side by side with the label count, deduped, and without false positives", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4048-"));
+    const usage = await usageServer(50);
+    try {
+      const labeled = {
+        number: 500,
+        createdAt: "2026-07-27T00:00:00Z",
+        additions: 10,
+        deletions: 5,
+        labels: [{ name: "glm-authored" }],
+        headRefName: "worktree-agent-glm-3990-1111",
+      };
+      // THE regression: label lost to the non-atomic `--label` mutation —
+      // only the branch prefix says "drainer".
+      const unlabeled = {
+        number: 501,
+        createdAt: "2026-07-28T00:00:00Z",
+        additions: 20,
+        deletions: 10,
+        labels: [],
+        headRefName: "worktree-agent-glm-3991-2222",
+      };
+      // Opus dev_orch harness PR — hex-hash branch, must NOT match.
+      const opusHexHash = {
+        number: 502,
+        createdAt: "2026-07-29T00:00:00Z",
+        additions: 40,
+        deletions: 30,
+        labels: [],
+        headRefName: "worktree-agent-a802a6552d648d1c8-3333",
+      };
+      // Prefix-EXACTness: starts like the drainer prefix but diverges before
+      // the trailing dash — must NOT match a loose "contains glm" test.
+      const glmLookalike = {
+        number: 503,
+        createdAt: "2026-07-29T00:00:00Z",
+        additions: 40,
+        deletions: 30,
+        labels: [],
+        headRefName: "worktree-agent-glmtree-not-the-drainer",
+      };
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [labeled],
+        // The branch scan sees every recent PR, including the labelled one —
+        // the union must dedupe it back to a single row.
+        allPrsForBranchScan: [labeled, unlabeled, opusHexHash, glmLookalike],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+      });
+      assert.equal(r.status, 0);
+      // 2 drainer PRs of 4 scanned: the union counts the unlabelled one, the
+      // labelled one is not double-counted, and neither Opus PR counts. The
+      // side-by-side provenance counts (label 1 / branch 2) make the gap
+      // visible instead of silent.
+      assert.match(
+        r.stdout,
+        /, 2\/25 PRs \(glm-authored label 1 \/ worktree-agent-glm-\* branch 2\)/,
+      );
+      assert.doesNotMatch(r.stdout, /of 3 total|of 4 total/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the churn baseline sample excludes an UNLABELLED worktree-agent-glm-* merged PR — same OR-predicate, negated", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4048-"));
+    const usage = await usageServer(50);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [
+          // Opus PR, counts toward the baseline: 60+40 = 100.
+          { number: 1, createdAt: "2026-06-01T00:00:00Z", additions: 60, deletions: 40, labels: [], headRefName: "issue-1234-some-slug" },
+          // Opus harness PR on a hex-hash branch, counts: 60+40 = 100.
+          { number: 2, createdAt: "2026-06-02T00:00:00Z", additions: 60, deletions: 40, labels: [], headRefName: "worktree-agent-ab12cd34ef567890-1" },
+          // Drainer PR with the label LOST — must be excluded exactly like a
+          // labelled one, else its 1800-line diff pollutes the Opus baseline.
+          { number: 3, createdAt: "2026-06-03T00:00:00Z", additions: 900, deletions: 900, labels: [], headRefName: "worktree-agent-glm-3992-777" },
+        ],
+        // Drainer sample: (100+50)/2 and (20+30)/2 -> churn avg (150+50)/2 = 100.
+        glmAuthoredPrs: [
+          { number: 600, createdAt: "2026-07-27T00:00:00Z", additions: 100, deletions: 50, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-3993-888" },
+          { number: 601, createdAt: "2026-07-27T00:00:00Z", additions: 20, deletions: 30, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-3994-999" },
+        ],
+        allPrsForBranchScan: [],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+      });
+      assert.equal(r.status, 0);
+      // Baseline = mean(100, 100) = 100 — the 1800-line unlabelled drainer PR
+      // is excluded by the branch side of the predicate. If it leaked into
+      // the Opus baseline, it would be mean(100, 100, 1800) = 666.67 and the
+      // ratio would collapse to ~0.15.
+      assert.match(r.stdout, /churn avg 100\.00 vs baseline 100\.00 \(ratio 1\.00\)/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Window-phase-corrected quota relief (issue #4049)
+//
+// percentLast7d is NOT a trailing average — src/cost/eligibility-usage.ts
+// assigns percentSinceReset = percentLast7d, so it is a POSITION within a
+// window that resets weekly. A raw subtraction of two readings taken at
+// different phases of their respective windows measures sampling phase as
+// much as quota relief: the operator-review instance (baseline 64% ~2.38
+// days into its window vs current 16% ~1.07 days into the next) printed
+// "delta -49" when the honest normalised comparison is ~-44% daily use, and
+// a day-1-vs-day-6 sampling pair inverts the sign for identical underlying
+// use. The fix: normalise each reading to a window-relative daily-use rate
+// (%/day = percent / days-into-window, with BOTH positions printed), refuse
+// to emit a figure when either position is missing or under the minimum, and
+// let the recommendation string carry the corrected figure as descriptive
+// text only.
+// ---------------------------------------------------------------------------
+
+describe("glm-beachhead-report.sh — relief-figure pure helpers (issue #4049)", () => {
+  test("days_into_window: fractional days between anchor and reading, 2dp", () => {
+    // 216000s = 2.5 days.
+    const r = callHelper("days_into_window 1216000 1000000");
+    assert.equal(r.stdout.trim(), "2.50");
+  });
+
+  test("days_into_window: reading exactly at the anchor -> 0.00", () => {
+    const r = callHelper("days_into_window 1000000 1000000");
+    assert.equal(r.stdout.trim(), "0.00");
+  });
+
+  test("days_into_window: reading BEFORE the anchor -> empty (clock skew never fabricates a phase)", () => {
+    const r = callHelper('echo "[$(days_into_window 999999 1000000)]"');
+    assert.equal(r.stdout.trim(), "[]");
+  });
+
+  test("days_into_window: empty or non-numeric epochs -> empty", () => {
+    const r = callHelper('echo "[$(days_into_window "" 1000000)][$(days_into_window 1000000 "")][$(days_into_window not-a-number 1000000)]"');
+    assert.equal(r.stdout.trim(), "[][][]");
+  });
+
+  test("relief_rate: percent divided by days-into-window, 1dp", () => {
+    const base = callHelper("relief_rate 64 2.38");
+    assert.equal(base.stdout.trim(), "26.9");
+    const cur = callHelper("relief_rate 16 1.07");
+    assert.equal(cur.stdout.trim(), "15.0");
+  });
+
+  test("relief_rate: empty / zero-day / negative-day / non-numeric inputs -> empty (never a fabricated figure)", () => {
+    const r = callHelper('printf \'[%s][%s][%s][%s][%s]\' "$(relief_rate 10 \'\')" "$(relief_rate \'\' 3)" "$(relief_rate 10 0)" "$(relief_rate 10 -2)" "$(relief_rate abc 3)"');
+    assert.equal(r.stdout.trim(), "[][][][][]");
+  });
+
+  test("relief_figure: the measured 2026-08-13 instance — normalised %/day figure, not the raw -48 subtraction", () => {
+    // Baseline 64% @ 2.38d (26.9 %/day) vs current 16% @ 1.07d (15.0 %/day)
+    // -> -44% daily use. The raw subtraction would claim -48.
+    const r = callHelper("relief_figure 64 2.38 16 1.07 0.5");
+    assert.equal(r.stdout.trim(), "rate 26.9 -> 15.0 %/day (-44% daily use)");
+  });
+
+  test("relief_figure: identical daily-use rates sampled at opposite window phases -> ~0% change (a raw subtraction would swing +80)", () => {
+    // 16% one day into a window vs 96% 6.4 days into a window are the SAME
+    // 15 %/day underlying use — the phase confound a raw subtraction turns
+    // into a fabricated "+80 worse" signal.
+    const r = callHelper("relief_figure 16 1.07 96 6.40 0.5");
+    assert.equal(r.stdout.trim(), "rate 15.0 -> 15.0 %/day (+0% daily use)");
+  });
+
+  test("relief_figure: legacy baseline.json without an anchor -> explicitly not comparable", () => {
+    const r = callHelper('relief_figure 64 "" 16 1.07 0.5');
+    assert.equal(r.stdout.trim(), "not comparable (baseline days-into-window unknown)");
+  });
+
+  test("relief_figure: null baseline percent snapshot -> explicitly not comparable", () => {
+    // jq -r prints JSON null as the literal string "null".
+    const r = callHelper("relief_figure null 2.38 16 1.07 0.5");
+    assert.equal(r.stdout.trim(), "not comparable (no baseline percentLast7d snapshot)");
+  });
+
+  test("relief_figure: live percent unavailable -> explicitly not comparable", () => {
+    const r = callHelper('relief_figure 64 2.38 "" 1.07 0.5');
+    assert.equal(r.stdout.trim(), "not comparable (live percentLast7d unavailable)");
+  });
+
+  test("relief_figure: current window position unknown -> explicitly not comparable", () => {
+    const r = callHelper('relief_figure 64 2.38 16 "" 0.5');
+    assert.equal(r.stdout.trim(), "not comparable (current days-into-window unknown)");
+  });
+
+  test("relief_figure: current reading too early in its window -> not comparable, with the threshold visible", () => {
+    const r = callHelper("relief_figure 64 2.38 16 0.25 0.5");
+    assert.equal(r.stdout.trim(), "not comparable (current only 0.25d into its window; need >= 0.5d)");
+  });
+
+  test("relief_figure: baseline reading too early in its window -> not comparable", () => {
+    const r = callHelper("relief_figure 64 0.10 16 1.07 0.5");
+    assert.equal(r.stdout.trim(), "not comparable (baseline only 0.10d into its window; need >= 0.5d)");
+  });
+
+  test("relief_figure: a reading exactly AT the minimum is comparable (guard is >=, not >)", () => {
+    // 64/0.5 = 128.0 %/day vs 32/1.0 = 32.0 %/day -> -75%.
+    const r = callHelper("relief_figure 64 0.5 32 1.0 0.5");
+    assert.equal(r.stdout.trim(), "rate 128.0 -> 32.0 %/day (-75% daily use)");
+  });
+});
+
+describe("glm-beachhead-report.sh — window-phase-corrected relief figure (issue #4049)", () => {
+  // The operator-review instance, verbatim: baseline 64% taken
+  // 2026-08-08T02:02:46Z into a window anchored 2026-08-05T17:00:00Z
+  // (~2.38 days in); current 16% taken 2026-08-13T18:43:23Z into a window
+  // anchored 2026-08-12T17:00:00Z (~1.07 days in).
+  const NOW_MEASURED = "2026-08-13T18:43:23Z";
+
+  test("late-window baseline vs early-window current prints normalised %/day relief, both window positions, and no raw delta", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4049-"));
+    const usage = await usageServer(16, "2026-08-12T17:00:00Z");
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      seedBaselineFile(baselineFile, {
+        day0: "2026-08-08T02:02:46Z",
+        percentLast7dBaseline: 64,
+        weeklyResetAnchorBaseline: "2026-08-05T17:00:00Z",
+        churnBaseline: 100.0,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 700, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-1" },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf(NOW_MEASURED)),
+      });
+      assert.equal(r.status, 0);
+      // Both readings carry their days-into-window (the phase is VISIBLE),
+      // and the figure is the %/day comparison — 26.9 -> 15.0 (-44%) — not
+      // the phase-confounded raw subtraction (-48).
+      assert.match(
+        r.stdout,
+        /percentLast7d 16% @ 1\.07d into window \(baseline 64% @ 2\.38d into window; relief: rate 26\.9 -> 15\.0 %\/day \(-44% daily use\)\)/,
+      );
+      // The recommendation string consumes the corrected figure.
+      assert.match(
+        r.stdout,
+        /no action needed yet; quota relief: rate 26\.9 -> 15\.0 %\/day \(-44% daily use\)/,
+      );
+      // A raw subtraction figure is gone from the line entirely.
+      assert.doesNotMatch(r.stdout, /delta/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("regression: a day-1 baseline against a day-6 current with IDENTICAL daily use does NOT produce a large spurious relief delta", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4049-"));
+    // Same 15 %/day underlying use on both sides: 16% @ 1.07d baseline,
+    // 96% @ 6.40d current. A raw subtraction would print +80 ("use way up");
+    // the normalised figure correctly reports no change.
+    const usage = await usageServer(96, isoMinusDays(NOW_MEASURED, 6.4));
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      seedBaselineFile(baselineFile, {
+        day0: "2026-08-08T02:02:46Z",
+        percentLast7dBaseline: 16,
+        weeklyResetAnchorBaseline: isoMinusDays("2026-08-08T02:02:46Z", 1.07),
+        churnBaseline: 100.0,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 710, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-2" },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf(NOW_MEASURED)),
+      });
+      assert.equal(r.status, 0);
+      assert.match(
+        r.stdout,
+        /relief: rate 15\.0 -> 15\.0 %\/day \(\+0% daily use\)/,
+      );
+      assert.doesNotMatch(r.stdout, /delta/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a legacy baseline.json without weeklyResetAnchorBaseline degrades to an explicit not-comparable, never a crash", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4049-"));
+    const usage = await usageServer(16, "2026-08-12T17:00:00Z");
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      // Exactly the pre-#4049 bootstrap shape: no anchor field.
+      seedBaselineFile(baselineFile, {
+        day0: "2026-08-08T02:02:46Z",
+        percentLast7dBaseline: 64,
+        churnBaseline: 100.0,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 720, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-3" },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf(NOW_MEASURED)),
+      });
+      assert.equal(r.status, 0);
+      // The CURRENT reading still prints its window position (visible), the
+      // baseline side says n/a, and the report states not-comparable instead
+      // of emitting a misleading figure — the recommendation too.
+      assert.match(
+        r.stdout,
+        /percentLast7d 16% @ 1\.07d into window \(baseline 64% @ n\/a into window; relief: not comparable \(baseline days-into-window unknown\)\)/,
+      );
+      assert.match(r.stdout, /quota relief: not comparable \(baseline days-into-window unknown\)/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a current reading under the minimum days-into-window is explicitly not comparable even when the baseline is fine", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4049-"));
+    const usage = await usageServer(16, isoMinusDays(NOW_MEASURED, 0.25));
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      seedBaselineFile(baselineFile, {
+        day0: "2026-08-08T02:02:46Z",
+        percentLast7dBaseline: 64,
+        weeklyResetAnchorBaseline: "2026-08-05T17:00:00Z",
+        churnBaseline: 100.0,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 730, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-4" },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf(NOW_MEASURED)),
+      });
+      assert.equal(r.status, 0);
+      assert.match(
+        r.stdout,
+        /relief: not comparable \(current only 0\.25d into its window; need >= 0\.5d\)/,
+      );
+      assert.doesNotMatch(r.stdout, /relief: rate /);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("bootstrap captures weeklyResetAnchorBaseline alongside the percent, so the baseline reading's window phase is frozen too", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4049-"));
+    const usage = await usageServer(55, "2026-08-05T17:00:00Z");
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [
+          { number: 1, createdAt: "2026-06-01T00:00:00Z", additions: 60, deletions: 40, labels: [] },
+        ],
+        glmAuthoredPrs: [],
+        commentsByPr: {},
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf("2026-08-08T02:02:46Z")),
+      });
+      assert.equal(r.status, 0);
+      // The bootstrap records the anchor of the window the baseline percent
+      // was read in; the baseline position (2.38d) matches the reading's own
+      // snapshot, not a later window's.
+      const baseline = JSON.parse(readFileSync(baselineFile, "utf8"));
+      assert.equal(baseline.percentLast7dBaseline, 55);
+      assert.equal(baseline.weeklyResetAnchorBaseline, "2026-08-05T17:00:00Z");
+      // First run: baseline and current are the same reading -> 23.1 %/day on
+      // both sides, +0% change.
+      assert.match(
+        r.stdout,
+        /percentLast7d 55% @ 2\.38d into window \(baseline 55% @ 2\.38d into window; relief: rate 23\.1 -> 23\.1 %\/day \(\+0% daily use\)\)/,
+      );
+      assert.match(r.stdout, /nothing to judge\); quota relief: rate 23\.1 -> 23\.1 %\/day/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

@@ -1,0 +1,1 @@
+- feat: the /runs page — the forensics drill-down spine (runs list → run detail → transcript), with failed-run landing on the failing turn, per-event trigger attribution, and the Friction/Behavior content absorbed from Explore (#4009)

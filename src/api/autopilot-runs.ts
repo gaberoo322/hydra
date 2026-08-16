@@ -76,7 +76,13 @@ export function createAutopilotRunsRouter() {
     // materialise), so a consumer (hydra-doctor / the dashboard) can alarm on
     // it. Pure + read-only over the digests already fetched — no extra reads.
     const terminationHealth = summarizeTerminationHealth(result.runs);
-    return res.json({ runs: result.runs, terminationHealth });
+    // Issue #4009 (ADR-0034 §5, INV-3): stamp the request-time as-of. The
+    // dashboard /runs list consumes this endpoint through the slice-alpha
+    // trust seam, whose state machine demotes any payload without a parseable
+    // generatedAt to UNKNOWN — without this field the whole runs table would
+    // render UNKNOWN forever. Additive only: no existing field renamed or
+    // removed, so HistoryTable and every other consumer are unaffected.
+    return res.json({ runs: result.runs, terminationHealth, generatedAt: new Date().toISOString() });
   });
 
   // -------------------------------------------------------------------------

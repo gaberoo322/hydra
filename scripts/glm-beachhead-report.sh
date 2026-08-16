@@ -21,6 +21,19 @@
 # OPERATOR JUDGMENT. The recommendation string is advisory prose only — no
 # caller may treat it as a command.
 #
+# Provenance of "a drainer PR" (issue #4048): glm-authored label (PRIMARY,
+# ADR-0032 Decision 5) OR head branch matching the drainer's exact literal
+# `worktree-agent-glm-` prefix (FALLBACK). `gh pr create` and its separate
+# `--label glm-authored` mutation are not atomic (drainer-loop.sh's #3900
+# investigation note), so the label alone silently dropped 29 of 62 drainer
+# PRs (measured live 2026-08-13) and this report judged the lane on 53% of
+# its output. The prefix is a perfect discriminator because the drainer
+# builds `worktree-agent-glm-${issue}-${ts}` while Opus dev_orch harness
+# branches are `worktree-agent-<hex-hash>-...` and a hex hash cannot contain
+# g or l. The report line prints both side counts so a widening
+# label-vs-branch gap stays visible. Still READ-ONLY — this widens the
+# measurement query only.
+#
 # Two DIFFERENT "day-0" anchors are deliberately kept separate:
 #   - The WINDOW clock (elapsed days + PR count vs the ~2wk/~25-PR target) is
 #     anchored to the EARLIEST glm-authored PR's `createdAt` — the drainer's
@@ -44,14 +57,24 @@
 #     hard gate — nothing in this script blocks, throttles, or disables
 #     anything when the window completes; it only changes the wording of the
 #     printed recommendation string.
-#   - percentLast7d delta: current live value (GET /api/usage/eligibility,
-#     `.usage.percentLast7d`) minus the baseline-snapshot value, captured once
-#     at this script's first run and never silently overwritten (an operator
-#     wanting to reset the baseline deletes the baseline file by hand). This
-#     script deliberately never reads or reports the CLI's per-run USD-cost
-#     field for GLM runs — the CLI prices GLM tokens against the Anthropic
-#     price table, which is meaningless for z.ai's flat-rate plan (ADR-0032
-#     #3758 amendment); percentLast7d is the only quota-relief signal used.
+#   - Quota relief (issue #4049): percentLast7d is a POSITION within a window
+#     that resets weekly, not a trailing average — src/cost/eligibility-usage.ts
+#     assigns percentSinceReset = percentLast7d — so a raw subtraction of two
+#     readings taken at different phases of their respective windows measures
+#     sampling phase as much as quota relief. The report instead normalises
+#     each reading to a window-relative daily-use rate (%/day = percent /
+#     days-into-window, with BOTH readings' days-into-window printed so a
+#     phase mismatch is visible), and compares THOSE. The current reading's
+#     phase comes from the live eligibility response's `.usage.weeklyResetAnchor`;
+#     the baseline's comes from `weeklyResetAnchorBaseline`, frozen into
+#     baseline.json at bootstrap alongside the percent it qualifies. When
+#     either reading's window position is missing (a legacy pre-#4049
+#     baseline.json) or younger than MIN_DAYS_INTO_WINDOW, the report prints
+#     "not comparable" instead of a figure. This script deliberately never
+#     reads or reports the CLI's per-run USD-cost field for GLM runs — the
+#     CLI prices GLM tokens against the Anthropic price table, which is
+#     meaningless for z.ai's flat-rate plan (ADR-0032 #3758 amendment);
+#     percentLast7d is the only quota-relief signal used.
 #   - First-pass QA PASS-rate: across ALL glm-authored PRs (state=all, no
 #     day-0 filter — a running quality signal, not a windowed one), the FIRST
 #     "> *Automated QA" comment's **Verdict:** line. PASS / PASS-pending-CI
@@ -82,6 +105,9 @@
 #   HYDRA_GLM_BEACHHEAD_WINDOW_DAYS      default 14
 #   HYDRA_GLM_BEACHHEAD_WINDOW_PRS       default 25
 #   HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE  default 20 (recent merged non-glm PRs sampled for churn baseline)
+#   HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW  default 0.5 (a reading younger than this many days
+#                                          into its weekly window is "not comparable" — its
+#                                          window-relative %/day is still near-totally sampling noise)
 #   HYDRA_GLM_BEACHHEAD_NOW_EPOCH        override "now" (unix seconds) for deterministic tests
 #
 # Sourceable for tests (test/glm-beachhead-report.test.mts) without running main.
@@ -89,12 +115,31 @@
 set -uo pipefail
 
 GLM_LABEL_AUTHORED="glm-authored"
+# Exact literal head-branch prefix the drainer builds in drainer-loop.sh's
+# create_worktree(): `worktree-agent-glm-${issue}-${ts}`. The drainer inserts
+# its OWN literal `glm` segment after the shared `worktree-agent-` prefix;
+# Opus dev_orch harness branches are `worktree-agent-<hex-hash>-...` and a
+# hex hash can never contain `g` or `l`, so this prefix discriminates the
+# drainer's PRs from Opus ones perfectly (issue #4048). PREFIX-EXACT match
+# only — never a loose "contains glm" substring, which would false-match
+# e.g. an Opus PR authored for a GLM-lane issue like this very one. The
+# label stays PRIMARY (ADR-0032 Decision 5); the prefix is the FALLBACK that
+# recovers PRs whose non-atomic `--label` mutation was lost (#3900).
+GLM_DRAINER_BRANCH_PREFIX="worktree-agent-glm-"
+# ONE jq predicate for "is this PR drainer output?" — carries the label OR
+# its head branch carries the drainer prefix — used by BOTH the measurement
+# fetch (positively) and the churn-baseline sample (negated), so the report's
+# two sides can never disagree on what a GLM PR is (issue #4048, same
+# OR-predicate scripts/autopilot/collect-state.sh's GLM partition applies).
+# `$label` / `$prefix` are jq --arg bindings supplied at each call site.
+GLM_PR_MATCH_JQ='((.labels // []) | map(.name) | index($label)) or ((.headRefName // "") | startswith($prefix))'
 REPO="${HYDRA_GLM_BEACHHEAD_REPO:-gaberoo322/hydra}"
 USAGE_URL="${HYDRA_GLM_BEACHHEAD_USAGE_URL:-http://localhost:4000/api/usage/eligibility}"
 BASELINE_FILE="${HYDRA_GLM_BEACHHEAD_BASELINE_FILE:-$HOME/.local/state/hydra-glm/baseline.json}"
 WINDOW_DAYS="${HYDRA_GLM_BEACHHEAD_WINDOW_DAYS:-14}"
 WINDOW_PRS="${HYDRA_GLM_BEACHHEAD_WINDOW_PRS:-25}"
 BASELINE_SAMPLE="${HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE:-20}"
+MIN_DAYS_INTO_WINDOW="${HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW:-0.5}"
 NOW_EPOCH="${HYDRA_GLM_BEACHHEAD_NOW_EPOCH:-$(date -u +%s)}"
 
 log() {
@@ -109,6 +154,13 @@ log() {
 # ---------------------------------------------------------------------------
 
 iso_to_epoch() { # <iso8601>
+  # Empty input MUST yield "" — GNU `date -d ""` succeeds with midnight-today
+  # rather than failing, which would fabricate a window anchor out of nothing
+  # (issue #4049: 0.47d "into window" on an anchor-less fixture).
+  if [[ -z "${1:-}" ]]; then
+    echo ""
+    return 0
+  fi
   date -u -d "$1" +%s 2>/dev/null || echo ""
 }
 
@@ -158,6 +210,87 @@ ratio() {
     return 0
   fi
   awk -v a="$a" -v b="$b" 'BEGIN{ if (b+0==0) { print ""; exit } printf "%.2f", a/b }'
+}
+
+# days_into_window <reading_epoch> <anchor_epoch> -> days between the weekly
+# window's reset anchor and the reading, 2dp; "" when either epoch is
+# empty/non-numeric or the reading predates its anchor (clock skew never
+# fabricates a window phase). Issue #4049.
+days_into_window() {
+  local reading="${1:-}" anchor="${2:-}"
+  if [[ -z "$reading" || -z "$anchor" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -v r="$reading" -v a="$anchor" 'BEGIN{
+    if (r !~ /^[0-9]+$/ || a !~ /^[0-9]+$/) { print ""; exit }
+    d = (r - a) / 86400
+    if (d < 0) { print ""; exit }
+    printf "%.2f", d
+  }'
+}
+
+# relief_rate <percent> <days_into_window> -> the window-relative daily-use
+# rate in %/day, 1dp; "" on empty/zero/negative/non-numeric input. A within-
+# window position only becomes comparable once divided by its own phase
+# (issue #4049).
+relief_rate() {
+  local percent="${1:-}" days="${2:-}"
+  if [[ -z "$percent" || -z "$days" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -v p="$percent" -v d="$days" 'BEGIN{
+    if (p !~ /^[0-9.]+$/ || d !~ /^[0-9.]+$/) { print ""; exit }
+    if (d + 0 <= 0) { print ""; exit }
+    printf "%.1f", p / d
+  }'
+}
+
+# relief_figure <baseline_percent> <baseline_days|empty|"null"> \
+#               <current_percent> <current_days|empty> <min_days>
+#   -> the corrected quota-relief figure for the report line and the
+#      recommendation string (issue #4049):
+#        "rate 26.9 -> 15.0 %/day (-44% daily use)"
+#        "not comparable (<reason>)"
+#      NEVER a raw subtraction of the two percent readings — their weekly
+#      window phases differ. Percent change is computed from the displayed
+#      1dp rates so the printed arithmetic is self-consistent.
+relief_figure() {
+  local bp="${1:-}" bd="${2:-}" cp="${3:-}" cd="${4:-}" min="${5:-}"
+  if [[ -z "$bp" || "$bp" == "null" ]]; then
+    echo "not comparable (no baseline percentLast7d snapshot)"
+    return 0
+  fi
+  if [[ -z "$cp" ]]; then
+    echo "not comparable (live percentLast7d unavailable)"
+    return 0
+  fi
+  if [[ -z "$bd" ]]; then
+    echo "not comparable (baseline days-into-window unknown)"
+    return 0
+  fi
+  if [[ -z "$cd" ]]; then
+    echo "not comparable (current days-into-window unknown)"
+    return 0
+  fi
+  if awk -v d="$bd" -v m="$min" 'BEGIN{exit !(d < m)}'; then
+    echo "not comparable (baseline only ${bd}d into its window; need >= ${min}d)"
+    return 0
+  fi
+  if awk -v d="$cd" -v m="$min" 'BEGIN{exit !(d < m)}'; then
+    echo "not comparable (current only ${cd}d into its window; need >= ${min}d)"
+    return 0
+  fi
+  local base_rate cur_rate pct_change
+  base_rate=$(relief_rate "$bp" "$bd")
+  cur_rate=$(relief_rate "$cp" "$cd")
+  if [[ -z "$base_rate" || -z "$cur_rate" ]]; then
+    echo "not comparable (unreadable window-position data)"
+    return 0
+  fi
+  pct_change=$(awk -v b="$base_rate" -v c="$cur_rate" 'BEGIN{printf "%+.0f", (c-b)/b*100}')
+  echo "rate ${base_rate} -> ${cur_rate} %/day (${pct_change}% daily use)"
 }
 
 # recommend <pr_count_since_day0> <pass_rate_or_empty> <churn_ratio_or_empty> \
@@ -216,24 +349,36 @@ require_tools() {
   return 0
 }
 
-fetch_percent_last7d() {
+# fetch_usage_snapshot -> "<percentLast7d>|<weeklyResetAnchor iso>", either
+# side empty when the fetch failed or the field is absent. ONE eligibility
+# fetch serves both the relief figure's current reading and the baseline
+# bootstrap, so a percent and the window anchor that qualifies it can never
+# come from different fetches (issue #4049).
+fetch_usage_snapshot() {
   local json
   if ! json=$(curl -fsS --max-time 10 "$USAGE_URL" 2>/dev/null); then
-    echo ""
+    echo "|"
     return 0
   fi
-  jq -r '.usage.percentLast7d // ""' <<<"$json" 2>/dev/null || echo ""
+  local percent anchor
+  percent=$(jq -r '.usage.percentLast7d // ""' <<<"$json" 2>/dev/null || echo "")
+  anchor=$(jq -r '.usage.weeklyResetAnchor // ""' <<<"$json" 2>/dev/null || echo "")
+  echo "${percent}|${anchor}"
 }
 
 # fetch_baseline_churn_sample -> "<avg>|<sampleSize>"
-# Samples the most recent BASELINE_SAMPLE merged PRs that do NOT carry
-# glm-authored, as the "is GLM thrashier than Opus dev_orch" baseline.
+# Samples the most recent BASELINE_SAMPLE merged PRs that are NOT drainer
+# output, as the "is GLM thrashier than Opus dev_orch" baseline. Not-drainer
+# uses the same OR-predicate as the measurement fetch, negated — an
+# unlabelled drainer PR must not pollute the Opus baseline either (issue
+# #4048), exactly as it must not drop out of the measurement.
 fetch_baseline_churn_sample() {
   local rows
-  rows=$(gh pr list --repo "$REPO" --state merged --json additions,deletions,labels --limit 100 2>/dev/null || echo "[]")
+  rows=$(gh pr list --repo "$REPO" --state merged --json additions,deletions,labels,headRefName --limit 100 2>/dev/null || echo "[]")
   local nums arr=()
-  nums=$(jq -r --arg label "$GLM_LABEL_AUTHORED" --argjson n "$BASELINE_SAMPLE" \
-    '[.[] | select((.labels | map(.name) | index($label)) | not) | (.additions + .deletions)][:$n][]' \
+  nums=$(jq -r --arg label "$GLM_LABEL_AUTHORED" --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
+    --argjson n "$BASELINE_SAMPLE" \
+    "[.[] | select((${GLM_PR_MATCH_JQ}) | not) | (.additions + .deletions)][:\$n][]" \
     <<<"$rows" 2>/dev/null)
   while IFS= read -r n; do
     [[ -n "$n" ]] && arr+=("$n")
@@ -241,9 +386,33 @@ fetch_baseline_churn_sample() {
   echo "$(avg "${arr[@]}")|${#arr[@]}"
 }
 
+# fetch_glm_authored_prs -> union JSON of drainer-output PRs (issue #4048):
+# PRs carrying glm-authored (PRIMARY, filtered server-side by gh) OR on a
+# worktree-agent-glm-* head branch (the FALLBACK recovering PRs whose
+# non-atomic `--label` mutation was lost). Two raw-JSON fetches, unioned +
+# deduped by PR number in jq below (same never-gh's-own---jq convention as
+# every other fetch in this script). The per-side counts are derived from
+# the union rows by main() so the label-vs-branch gap stays VISIBLE.
 fetch_glm_authored_prs() {
-  gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
-    --json number,createdAt,additions,deletions --limit 100 2>/dev/null || echo "[]"
+  local labeled branch_pool
+  labeled=$(gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
+    --json number,createdAt,additions,deletions,labels,headRefName --limit 100 \
+    2>/dev/null || echo "[]")
+  # Branch scan over recent PRs of every state. The scan depth bounds how far
+  # back the branch fallback can see: 500 recent PRs spans months at this
+  # repo's merge rate, well past the ~2-week window this report judges. (The
+  # label side is filtered server-side, so its own --limit caps a set that is
+  # already all-drainer.) A PR appearing in BOTH fetches dedupes onto its
+  # label-fetch row below.
+  branch_pool=$(gh pr list --repo "$REPO" --state all \
+    --json number,createdAt,additions,deletions,labels,headRefName --limit 500 \
+    2>/dev/null || echo "[]")
+  printf '%s\n%s\n' "$labeled" "$branch_pool" | jq -s \
+    --arg label "$GLM_LABEL_AUTHORED" \
+    --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
+    "(.[1] | map(select(${GLM_PR_MATCH_JQ}))) as \$branchside
+     | .[0] + \$branchside | unique_by(.number)" \
+    2>/dev/null || echo "[]"
 }
 
 # window_day0_epoch_from_rows <rows_json> <fallback_epoch> -> the earliest
@@ -323,8 +492,10 @@ bootstrap_or_load_baseline() {
   log "no baseline at $BASELINE_FILE -- bootstrapping day-0 now"
   mkdir -p "$(dirname "$BASELINE_FILE")" 2>/dev/null || true
 
-  local percent percent_json
-  percent="$(fetch_percent_last7d)"
+  local snapshot percent percent_json anchor
+  snapshot="$(fetch_usage_snapshot)"
+  percent="${snapshot%%|*}"
+  anchor="${snapshot##*|}"
   if [[ -z "$percent" ]]; then
     percent_json="null"
   else
@@ -347,9 +518,10 @@ bootstrap_or_load_baseline() {
   jq -n \
     --arg day0 "$day0_iso" \
     --argjson percent "$percent_json" \
+    --arg anchor "$anchor" \
     --argjson churnAvg "$churn_json" \
     --argjson churnN "${churn_n:-0}" \
-    '{day0: $day0, percentLast7dBaseline: $percent, churnBaseline: $churnAvg, churnSampleSize: $churnN}' \
+    '{day0: $day0, percentLast7dBaseline: $percent, weeklyResetAnchorBaseline: (if $anchor == "" then null else $anchor end), churnBaseline: $churnAvg, churnSampleSize: $churnN}' \
     > "$BASELINE_FILE"
   cat "$BASELINE_FILE"
 }
@@ -376,24 +548,53 @@ main() {
   local baseline_json
   baseline_json="$(bootstrap_or_load_baseline)"
 
-  local baseline_day0_iso baseline_day0_epoch baseline_percent baseline_churn
+  local baseline_day0_iso baseline_day0_epoch baseline_percent baseline_churn baseline_anchor_iso
   baseline_day0_iso=$(jq -r '.day0' <<<"$baseline_json" 2>/dev/null)
   baseline_day0_epoch=$(iso_to_epoch "$baseline_day0_iso")
   baseline_percent=$(jq -r '.percentLast7dBaseline' <<<"$baseline_json" 2>/dev/null)
   baseline_churn=$(jq -r '.churnBaseline' <<<"$baseline_json" 2>/dev/null)
-
-  local current_percent
-  current_percent="$(fetch_percent_last7d)"
-
-  local percent_delta="n/a"
-  if [[ -n "$current_percent" && "$baseline_percent" != "null" && -n "$baseline_percent" ]]; then
-    percent_delta=$(awk -v c="$current_percent" -v b="$baseline_percent" 'BEGIN{printf "%+d", c-b}')
+  # A legacy pre-#4049 baseline.json has no anchor field: jq's `// ""` keeps
+  # this an empty string and the relief figure degrades to "not comparable"
+  # below — never a crash, never a phase-blind subtraction.
+  baseline_anchor_iso=$(jq -r '.weeklyResetAnchorBaseline // ""' <<<"$baseline_json" 2>/dev/null)
+  if [[ -n "$baseline_percent" && "$baseline_percent" != "null" && -z "$baseline_anchor_iso" ]]; then
+    log "baseline has a percent snapshot but no weeklyResetAnchorBaseline (pre-#4049 bootstrap) -- delete $BASELINE_FILE by hand to re-bootstrap with window position; relief stays 'not comparable' until then"
   fi
+
+  local snapshot current_percent current_anchor_iso
+  snapshot="$(fetch_usage_snapshot)"
+  current_percent="${snapshot%%|*}"
+  current_anchor_iso="${snapshot##*|}"
+
+  # Window-relative quota relief (issue #4049): each reading's days-into-window
+  # is printed so the phase is VISIBLE, and the figure itself compares
+  # %/day rates, never the raw percents.
+  local baseline_anchor_epoch current_anchor_epoch
+  baseline_anchor_epoch=$(iso_to_epoch "$baseline_anchor_iso")
+  current_anchor_epoch=$(iso_to_epoch "$current_anchor_iso")
+  local baseline_days current_days
+  baseline_days=$(days_into_window "$baseline_day0_epoch" "$baseline_anchor_epoch")
+  current_days=$(days_into_window "$NOW_EPOCH" "$current_anchor_epoch")
+  local relief_text
+  relief_text=$(relief_figure "$baseline_percent" "$baseline_days" "$current_percent" "$current_days" "$MIN_DAYS_INTO_WINDOW")
 
   local rows
   rows="$(fetch_glm_authored_prs)"
   local pr_count_total
   pr_count_total=$(jq -r 'length' <<<"$rows" 2>/dev/null || echo 0)
+
+  # Side-by-side provenance counts (issue #4048): of the union rows above,
+  # how many carry the label vs sit on a drainer head branch. The label is
+  # the PRIMARY signal; branch >= label is expected, and a widening gap means
+  # non-atomic `--label` mutations are being lost (drainer-loop.sh's #3900
+  # note) — printed so that drift is visible, not silent.
+  local labeled_n branch_n
+  labeled_n=$(jq -r --arg label "$GLM_LABEL_AUTHORED" \
+    '[.[] | select((.labels // []) | map(.name) | index($label))] | length' \
+    <<<"$rows" 2>/dev/null || echo 0)
+  branch_n=$(jq -r --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
+    '[.[] | select((.headRefName // "") | startswith($prefix))] | length' \
+    <<<"$rows" 2>/dev/null || echo 0)
 
   # Window clock: anchored to the earliest glm-authored PR, NOT the baseline
   # bootstrap moment above (see the file header's two-anchors note).
@@ -413,13 +614,23 @@ main() {
 
   local rec
   rec=$(recommend "$pr_count_total" "$pass_rate" "$churn_ratio" "$days_elapsed" "$WINDOW_DAYS" "$WINDOW_PRS")
+  # The corrected relief figure rides along as DESCRIPTIVE TEXT ONLY —
+  # recommend()'s branch thresholds are untouched (the issue scopes
+  # keep/kill/expand thresholds out). relief_figure always returns a string,
+  # comparable figure or explicit not-comparable.
+  rec="${rec}; quota relief: ${relief_text}"
 
   local excluded_n=$((pr_count_total - denom))
 
-  printf 'GLM beachhead: window %s/%sd, %s/%s PRs | first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s total) | percentLast7d %s%% (baseline %s%%, delta %s) | churn avg %s vs baseline %s (ratio %s) | recommendation: %s\n' \
-    "$days_elapsed" "$WINDOW_DAYS" "$pr_count_total" "$WINDOW_PRS" \
+  local current_days_disp baseline_days_disp
+  current_days_disp="$(display "${current_days:+${current_days}d}")"
+  baseline_days_disp="$(display "${baseline_days:+${baseline_days}d}")"
+
+  printf 'GLM beachhead: window %s/%sd, %s/%s PRs (glm-authored label %s / worktree-agent-glm-* branch %s) | first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s total) | percentLast7d %s%% @ %s into window (baseline %s%% @ %s into window; relief: %s) | churn avg %s vs baseline %s (ratio %s) | recommendation: %s\n' \
+    "$days_elapsed" "$WINDOW_DAYS" "$pr_count_total" "$WINDOW_PRS" "$labeled_n" "$branch_n" \
     "$(display "$pass_rate")" "$pass_n" "$fail_n" "$excluded_n" "$pr_count_total" \
-    "$(display "$current_percent")" "$(display "$baseline_percent")" "$percent_delta" \
+    "$(display "$current_percent")" "$current_days_disp" \
+    "$(display "$baseline_percent")" "$baseline_days_disp" "$relief_text" \
     "$(display "$churn_current")" "$(display "$baseline_churn")" "$(display "$churn_ratio")" \
     "$rec"
 }

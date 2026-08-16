@@ -1,0 +1,1 @@
+- fix: hydra-dev anchor selection skips ready-for-agent issues already claimed by an open PR (shared pr-refs.py predicate, fail-open) (#4103)

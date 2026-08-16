@@ -346,27 +346,39 @@ fi
 # genuinely NO labels matches neither the exclusion set NOR the prefix, so it
 # is still counted — the orphan detector's actual target stays intact.
 #
-# `needs-design-concept` and `needs-tickets` (issue #3817) are BOTH
-# deliberate, stable HITL parking lanes — same shape as `ready-for-human` /
-# `needs-info` above, not the "wrong label" blind spot this backstop exists
-# to catch:
-#   - `needs-design-concept` parks an issue awaiting `hydra-grill` /
-#     `design_concept_orch` (issue #628 gate). `sweep_orch`'s only correct
-#     action on one is to confirm it is already routed and change nothing
-#     (observed live on issue #3815) — so counting it as an orphan re-fires
-#     `sweep_orch` every cooldown to re-confirm the same no-op, forever.
-#   - `needs-tickets` parks a published spec awaiting `/to-tickets`
-#     decomposition. It is the board condition for the `tickets_orch` producer
-#     (issue #4014, ADR-0030's one-lineage AFK spine — collect-state.sh emits
-#     `tickets_available` from it just below the wayfinder block), so it is now
+# `needs-design-concept` (issues #3817 -> #4096): #3817 added it to this
+# exclusion array as a deliberate HITL parking lane. #4096 REMOVED it — that
+# framing held only for the parked-AND-routed state. The label is an override
+# INSIDE the grill selector's walk, not an entry point INTO it: the
+# design-concept gate below resolves `orch_pending_grill_anchor` by iterating
+# the `ready-for-agent` candidate list (`--label ready-for-agent`), and within
+# that walk `needs-design-concept` only forces TRIVIAL=0 (never suppress the
+# grill). An issue carrying the label WITHOUT `ready-for-agent` is therefore
+# unreachable by EVERY consumer: never in the grill walk (design_concept_orch
+# cannot fire on it), listed by no HITL surface, and — pre-#4096 — exempt from
+# this backstop by its own name. Observed live on #4093 (run bdbf82c8):
+# sweep_orch triaged it needs-triage -> needs-design-concept, a reasonable
+# verdict that wrote the issue into a silent sink. With the label gone from
+# this array such an issue COUNTS as an orphan, sweep_orch recovers it by
+# ADDING `ready-for-agent` (through the #772 Open-PR pre-promotion gate, never
+# stripping the label — docs/operator-playbooks/hydra-sweep.md), the issue
+# enters the grill walk, and the count drops to zero — one fire, one fix, no
+# churn. When `ready-for-agent` (or any other lifecycle label) IS present the
+# issue stays excluded via that label's own entry, preserving #3817's
+# no-churn property for the parked-and-routed state.
+#
+# `needs-tickets` (issue #3817) stays excluded — it is a genuine standalone
+# parking lane with a consumer of its own:
+#   - it parks a published spec awaiting `/to-tickets` decomposition, and it
+#     is the board condition for the `tickets_orch` producer (issue #4014,
+#     ADR-0030's one-lineage AFK spine — collect-state.sh emits
+#     `tickets_available` from it just below the wayfinder block), so it is
 #     autopilot-VISIBLE. It stays in this orphan-exclusion array regardless:
-#     `sweep_orch` has no rule to act on it (the tickets_orch producer owns it),
-#     and counting it as an orphan would re-fire `sweep_orch` every cooldown to
-#     re-confirm a no-op. (Pre-#4014 this lane was autopilot-invisible by
-#     design — the spine made it visible; the orphan-exclusion rationale is
-#     unchanged.)
-# Both are ADDED to the exclusion array (not given a prefix rule like
-# `wayfinder:*`, since each is a single fixed label, not a family).
+#     `sweep_orch` has no rule to act on it (the tickets_orch producer owns
+#     it), and counting it as an orphan would re-fire `sweep_orch` every
+#     cooldown to re-confirm a no-op. (Pre-#4014 this lane was
+#     autopilot-invisible by design — the spine made it visible; the
+#     orphan-exclusion rationale is unchanged.)
 #
 # `hitl-grill` (issue #4025) is a TERMINAL park state, not a "wrong label"
 # blind spot either: it marks an agent-proposed idea the operator must
@@ -418,8 +430,8 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
         (.labels | map(.name)) as $n
         | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
              "needs-triage", "needs-research", "target-backlog",
-             "ready-for-human", "needs-info", "needs-design-concept",
-             "needs-tickets", "hitl-grill" ]
+             "ready-for-human", "needs-info", "needs-tickets",
+             "hitl-grill" ]
            | any(. as $lbl | $n | index($lbl))) | not
       )
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)
@@ -510,13 +522,22 @@ echo
 #     complex unstamped issue goes straight to dev_orch without a design
 #     concept — so absence of a signal NEVER suppresses.
 #
-# PER-ANCHOR GATE (issue #3711) — this ONE loop pass now emits TWO signals:
+# PER-ANCHOR GATE (issue #3711) — this ONE loop pass now emits THREE signals:
 #
 #   - `orch_pending_grill_anchor` — the first candidate that still needs a
 #     grill (unchanged semantics).
-#   - `orch_dev_ready_anchor` — NEW: the first candidate that is already
+#   - `orch_dev_ready_anchor` — the first candidate that is already
 #     GRILL-CLEAR, i.e. it has a fresh artifact, or it qualifies for the
 #     mechanical (#1230) / trivial (#1088) exemption.
+#   - `orch_dev_ready_anchor_design_concept_status` — NEW (issue #3798): the
+#     design-concept `status` ("approved"/"draft") of `orch_dev_ready_anchor`
+#     when — and ONLY when — that pick was earned via a genuine fresh
+#     artifact. It stays "none" when the pick came from the mechanical or
+#     trivial exemption instead, so decide.py can tell "architecturally
+#     consequential, worth a frontier-tier dev_orch dispatch" apart from
+#     "grill-clear by construction, needs no design at all" without decide.py
+#     itself doing any I/O (see the `design_concept_permits_frontier`
+#     discriminator in decide.py).
 #
 # WHY: decide.py's `dev_orch` selector used to yield whenever
 # `orch_pending_grill_anchor` was set to anything — a GLOBAL stop, not a
@@ -777,6 +798,14 @@ PY
 )" 2>/dev/null || true)
 ORCH_GRILL_PICK="none"
 ORCH_DEV_READY_PICK="none"
+# ISSUE #3798: a THIRD signal, tied to ORCH_DEV_READY_PICK, so decide.py can
+# tell a genuine fresh design-concept artifact apart from the mechanical
+# (#1230) / trivial (#1088) exemption branches below — both of which set
+# ORCH_DEV_READY_PICK but must NEVER be mistaken for "architecturally
+# consequential enough to route dev_orch to the frontier tier". Only the
+# fresh-artifact branch (below) sets this away from "none"; both exemption
+# branches deliberately leave it untouched.
+ORCH_DEV_READY_DESIGN_CONCEPT_STATUS="none"
 if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
   for n in $ORCH_GRILL_CANDIDATES; do
     # Both picks resolved — stop paying for design-concept round-trips.
@@ -806,6 +835,21 @@ PY
         # and it is GRILL-CLEAR: dev_orch may be pinned to it (issue #3711).
         if [ "$ORCH_DEV_READY_PICK" = "none" ]; then
           ORCH_DEV_READY_PICK="issue-${n}"
+          # ISSUE #3798: capture the artifact's approval status alongside the
+          # pin, sourced from the SAME DC_JSON already fetched above (no extra
+          # round-trip). A parse failure or missing field conservatively
+          # defaults to "none" — same fail-toward-Sonnet direction as every
+          # other best-effort read in this loop.
+          ORCH_DEV_READY_DESIGN_CONCEPT_STATUS=$(printf '%s' "$DC_JSON" | python3 -c "$(cat <<'PY'
+import json, sys
+try:
+  d = json.load(sys.stdin)
+  s = d.get('status')
+  print(s if isinstance(s, str) and s else 'none')
+except Exception:
+  print('none')
+PY
+)" 2>/dev/null || echo "none")
         fi
         continue
       fi
@@ -906,6 +950,7 @@ PY
 fi
 echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
 echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
+echo "orch_dev_ready_anchor_design_concept_status=$ORCH_DEV_READY_DESIGN_CONCEPT_STATUS"
 
 # active dev_orch detector (issue #412): an open PR on a hydra-dev head
 # branch updated within the last 90 minutes is the only reliable gate
@@ -916,15 +961,21 @@ echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
 # isolation=worktree). 5400s = 90 min, matching the Phase 1.5 stale
 # threshold so the two signals line up.
 #
-# GLM PARTITION (ADR-0032 / issue #3687): a `glm-authored` PR is EXCLUDED. The
-# dev-drainer authors in a git worktree too, so its head branch carries the SAME
-# `worktree-agent-*` prefix as an Opus dev_orch PR — a branch-name carve-out
-# cannot discriminate them (ADR-0032 Decision 5 / invariant 9, which is exactly
-# why provenance is a label). Without this filter every open drainer PR would
-# inflate `active_dev_orch`, and decide.py's busy-slot guard would idle the Opus
-# dev_orch slot on quota the drainer isn't even spending — inverting the whole
-# point of the lane. `.labels // []` keeps the filter total: a PR row with no
-# labels field is simply not glm-authored.
+# GLM PARTITION (ADR-0032 / issue #3687, widened by #4048): a drainer PR is
+# EXCLUDED. Provenance is the `glm-authored` label FIRST (ADR-0032 Decision 5)
+# with the drainer's exact literal `worktree-agent-glm-` head-branch prefix as
+# an OR-fallback: the drainer builds `worktree-agent-glm-${issue}-${ts}`
+# (drainer-loop.sh create_worktree) while Opus dev_orch harness branches are
+# `worktree-agent-<hex-hash>-...`, and a hex hash cannot contain g or l — so
+# the prefix discriminates perfectly where the bare shared `worktree-agent-`
+# prefix could not (#4048: the label's non-atomic `--label` mutation was
+# silently missing on 29 of 62 drainer PRs, mis-partitioning this count too).
+# This must stay the IDENTICAL OR-predicate glm-beachhead-report.sh applies,
+# so the two consumers never disagree on what "a GLM PR" is. Without this
+# filter every open drainer PR would inflate `active_dev_orch`, and decide.py's
+# busy-slot guard would idle the Opus dev_orch slot on quota the drainer isn't
+# even spending — inverting the whole point of the lane. `.labels // []` keeps
+# the filter total: a PR row with no labels field is simply not glm-authored.
 echo -n "active_dev_orch="
 gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,labels --jq '[
   .[]
@@ -933,7 +984,11 @@ gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,lab
       or (.headRefName | startswith("hydra-dev/"))
       or (.headRefName | startswith("worktree-agent-"))
     )
-  | select(((.labels // []) | map(.name) | index("glm-authored")) | not)
+  | select(
+      (((.labels // []) | map(.name) | index("glm-authored"))
+        or (.headRefName | startswith("worktree-agent-glm-")))
+      | not
+    )
   | select((now - (.updatedAt | fromdateiso8601)) < 5400)
 ] | length' 2>/dev/null || echo 0
 
