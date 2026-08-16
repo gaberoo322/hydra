@@ -1,0 +1,1 @@
+- fix: beachhead report normalises quota relief to %/day within each weekly window (days-into-window printed for both readings) instead of a phase-confounded raw percentLast7d subtraction (#4049)
