@@ -1,0 +1,1 @@
+- fix: dispatched hydra-dev children must fetch the design-concept artifact before opening a PR — "Not applicable" is valid only for a 404 (#4102)
