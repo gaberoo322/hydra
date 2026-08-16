@@ -1,0 +1,1 @@
+- fix: the GLM beachhead report's quota-relief figure is phase-normalised to %/day across each reading's own weekly-reset window (with days-into-window printed for both readings, and an explicit not-comparable when the phase data is missing or too fresh) instead of a raw percentLast7d subtraction that conflated window position with relief (#4049)

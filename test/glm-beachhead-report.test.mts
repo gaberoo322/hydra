@@ -117,6 +117,104 @@ describe("glm-beachhead-report.sh — pure helpers", () => {
     assert.equal(r.stdout.trim(), "0");
   });
 
+  // --- issue #4049: the weekly-reset phase confound -------------------------
+
+  test("days_into_window: fractional days between the window anchor and the reading, 2dp", () => {
+    const r = callHelper("days_into_window 0 205632"); // 205632s = 2.38d
+    assert.equal(r.stdout.trim(), "2.38");
+  });
+
+  test("days_into_window: empty anchor -> empty string (no window-position data)", () => {
+    const r = callHelper('echo "[$(days_into_window "" 205632)]"');
+    assert.equal(r.stdout.trim(), "[]");
+  });
+
+  test("fmt_days: appends the d unit, or n/a when there is no window position", () => {
+    assert.equal(callHelper('fmt_days "2.38"').stdout.trim(), "2.38d");
+    assert.equal(callHelper('fmt_days ""').stdout.trim(), "n/a");
+  });
+
+  test("extract_weekly_reset_anchor reads .usage.weeklyResetAnchor off the eligibility response", () => {
+    const r = callHelper(
+      `extract_weekly_reset_anchor '{"usage":{"percentLast7d":16,"weeklyResetAnchor":"2026-08-12T17:00:00Z"}}'`,
+    );
+    assert.equal(r.stdout.trim(), "2026-08-12T17:00:00Z");
+    const missing = callHelper('extract_weekly_reset_anchor \'{"usage":{"percentLast7d":16}}\'');
+    assert.equal(missing.stdout.trim(), "");
+  });
+
+  test("quota_relief_desc: normalises both readings to %/day — the issue #4049 worked example, NOT the raw -49", () => {
+    // Baseline 64% taken 2.38d into its window vs current 16% taken 1.07d into
+    // the NEXT window: raw subtraction says -48; phase-normalised says a ~44%
+    // lower daily rate (26.89 -> 14.95 %/day).
+    const r = callHelper("quota_relief_desc 64 2.38 16 1.07 0.1");
+    assert.equal(r.stdout.trim(), "26.89 -> 14.95 %/day (-44%)");
+  });
+
+  test("quota_relief_desc: a reading taken six days into a window vs a day-1 baseline keeps its sign", () => {
+    // The mirror of the measured instance: same underlying daily rate on both
+    // sides (25 %/day) must compare as ~0%, where a raw subtraction of the
+    // within-window positions (14% vs 25%) would invent -11.
+    const r = callHelper("quota_relief_desc 25 1.0 150 6.0 0.1");
+    assert.equal(r.stdout.trim(), "25.00 -> 25.00 %/day (+0%)");
+  });
+
+  test("quota_relief_desc: baseline without window-position data -> explicit not-comparable, never a raw delta", () => {
+    const r = callHelper('quota_relief_desc 64 "" 16 1.07 0.1');
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /baseline predates window-tracking/);
+    assert.match(r.stdout, /delete the baseline file to re-bootstrap/);
+  });
+
+  test("quota_relief_desc: current anchor missing -> not comparable", () => {
+    const r = callHelper('quota_relief_desc 64 2.38 16 "" 0.1');
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /weeklyResetAnchor unavailable/);
+  });
+
+  test("quota_relief_desc: days-into-window below the floor -> not comparable (a percent/days division would blow up)", () => {
+    const earlyCurrent = callHelper("quota_relief_desc 64 2.38 16 0.05 0.1");
+    assert.match(earlyCurrent.stdout, /^not comparable/);
+    assert.match(earlyCurrent.stdout, /insufficient time into window: current 0\.05d/);
+    const earlyBaseline = callHelper("quota_relief_desc 64 0.05 16 1.07 0.1");
+    assert.match(earlyBaseline.stdout, /insufficient time into window: baseline 0\.05d/);
+  });
+
+  test("quota_relief_desc: an estimate-mode current reading is not comparable — the meter's fail-open zeros would read as -100% relief", () => {
+    // eligibility-usage.ts fail-opens to percentLast7d 0 / usageSource
+    // "estimate" when the OAuth meter is down; 0 %/day against a real
+    // baseline is "meter unavailable", never "usage eliminated".
+    const est = callHelper("quota_relief_desc 64 2.38 0 1.07 0.1 estimate");
+    assert.match(est.stdout, /^not comparable/);
+    assert.match(est.stdout, /current usage reading is an estimate \(meter unavailable\)/);
+    // A live oauth reading compares; a response predating the field does too.
+    assert.equal(callHelper("quota_relief_desc 64 2.38 16 1.07 0.1 oauth").stdout.trim(), "26.89 -> 14.95 %/day (-44%)");
+    assert.equal(callHelper("quota_relief_desc 64 2.38 16 1.07 0.1 ''").stdout.trim(), "26.89 -> 14.95 %/day (-44%)");
+  });
+
+  test("quota_relief_desc: zero baseline rate -> both rates printed, no relative change invented", () => {
+    const r = callHelper("quota_relief_desc 0 2.38 16 1.07 0.1");
+    assert.equal(r.stdout.trim(), "0.00 -> 14.95 %/day");
+  });
+
+  test("recommend: the relief description is appended as trailing text and changes no branch", () => {
+    const withDesc = callHelper("recommend 10 0.9 1.0 5 14 25 '26.89 -> 14.95 %/day (-44%)'");
+    assert.match(withDesc.stdout, /^KEEP/);
+    assert.match(withDesc.stdout, /window in progress/);
+    assert.match(withDesc.stdout, /quota-relief: 26\.89 -> 14\.95 %\/day \(-44%\)/);
+    // Six-arg calls (no relief text) are byte-for-byte the pre-#4049 output.
+    const without = callHelper("recommend 10 0.9 1.0 5 14 25");
+    assert.doesNotMatch(without.stdout, /quota-relief/);
+  });
+
+  test("recommend: a not-comparable relief description rides along as text too", () => {
+    const r = callHelper(
+      "recommend 10 0.9 1.0 5 14 25 'not comparable -- baseline predates window-tracking; delete the baseline file to re-bootstrap'",
+    );
+    assert.match(r.stdout, /^KEEP/);
+    assert.match(r.stdout, /quota-relief: not comparable -- baseline predates window-tracking/);
+  });
+
   test("recommend: zero PRs -> insufficient-data", () => {
     const r = callHelper("recommend 0 '' '' 0 14 25");
     assert.match(r.stdout, /^insufficient-data/);
@@ -265,12 +363,22 @@ exec python3 ${JSON.stringify(helperPath)} "$@"
   return binDir;
 }
 
-/** Serve `{usage: {percentLast7d: N}}` on an ephemeral port. */
-function usageServer(percentLast7d: number): Promise<{ url: string; close: () => void }> {
+/**
+ * Serve `{usage: {percentLast7d, weeklyResetAnchor, usageSource}}` on an
+ * ephemeral port (the live response's shape, issue #4049). The anchor
+ * defaults to a date far in the past so that, for tests that don't care
+ * about window phase, days-into-window is large and positive and the relief
+ * comparison never trips the too-early guard.
+ */
+function usageServer(
+  percentLast7d: number,
+  weeklyResetAnchor: string = "2020-01-01T00:00:00Z",
+  usageSource = "oauth",
+): Promise<{ url: string; close: () => void }> {
   return new Promise((resolve) => {
     const server = http.createServer((_req, res) => {
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ usage: { percentLast7d } }));
+      res.end(JSON.stringify({ usage: { percentLast7d, weeklyResetAnchor, usageSource } }));
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as any;
@@ -484,6 +592,200 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
       assert.match(r.stdout, /window 12\/14d, 2\/25 PRs/);
     } finally {
       usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("quota-relief is phase-normalised: a baseline late in one window vs a current reading early in the next does NOT emit a spurious raw delta (issue #4049)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
+    // The measured instance from the issue, reconstructed exactly:
+    //   baseline 64% at 2.38d into window A (anchor 2026-08-05T17:00Z)
+    //   current  16% at 1.07d into window B (anchor 2026-08-12T17:00Z)
+    // A raw subtraction prints delta -48/-49 and reads as "quota usage nearly
+    // eliminated"; phase-normalised it is a ~44% lower daily rate.
+    const anchorA = "2026-08-05T17:00:00Z";
+    const tA = Math.floor(Date.parse(anchorA) / 1000) + Math.round(2.38 * 86400);
+    const anchorB = "2026-08-12T17:00:00Z";
+    const tB = Math.floor(Date.parse(anchorB) / 1000) + Math.round(1.07 * 86400);
+    const baselineFile = join(tmp, "baseline.json");
+    try {
+      // Run 1: bootstrap the baseline 2.38d into window A.
+      const boot = await usageServer(64, anchorA);
+      try {
+        const binDir = makeGhStub(tmp, { mergedBaselinePrs: [], glmAuthoredPrs: [], commentsByPr: {} });
+        const r1 = await runReport({
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_USAGE_URL: boot.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(tA),
+        });
+        assert.equal(r1.status, 0);
+      } finally {
+        boot.close();
+      }
+      // The bootstrap captured window A's anchor — that window has since
+      // rolled over and can never be recomputed from the live response.
+      const baseline = JSON.parse(readFileSync(baselineFile, "utf8"));
+      assert.equal(baseline.weeklyResetAnchorBaseline, anchorA);
+
+      // Run 2: read 16% at 1.07d into the NEXT window.
+      const cur = await usageServer(16, anchorB);
+      try {
+        const binDir = makeGhStub(tmp, {
+          mergedBaselinePrs: [],
+          glmAuthoredPrs: [
+            { number: 500, createdAt: "2026-07-27T00:00:00Z", additions: 10, deletions: 5, labels: [{ name: "glm-authored" }] },
+          ],
+          commentsByPr: {
+            "500": [{ createdAt: "2026-07-27T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+          },
+        });
+        const r2 = await runReport({
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_USAGE_URL: cur.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(tB),
+        });
+        assert.equal(r2.status, 0);
+        // Phase visibility: days-into-window for BOTH readings.
+        assert.match(r2.stdout, /days-into-window current 1\.07d, baseline 2\.38d/);
+        // The corrected figure — the ~44% class, nothing like a raw -49.
+        assert.match(r2.stdout, /relief-rate 26\.89 -> 14\.95 %\/day \(-44%\)/);
+        assert.doesNotMatch(r2.stdout, /delta -4[0-9]/);
+        // The recommendation string consumes the corrected figure.
+        assert.match(r2.stdout, /quota-relief: 26\.89 -> 14\.95 %\/day \(-44%\)/);
+      } finally {
+        cur.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a legacy baseline.json without weeklyResetAnchorBaseline degrades to an explicit not-comparable, never a misleading delta (issue #4049)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
+    const anchorB = "2026-08-12T17:00:00Z";
+    const tB = Math.floor(Date.parse(anchorB) / 1000) + Math.round(1.07 * 86400);
+    const baselineFile = join(tmp, "baseline.json");
+    // A bootstrap from BEFORE this fix: no window anchor was captured, so the
+    // baseline's within-window phase is unknowable — not silently guessed.
+    writeFileSync(
+      baselineFile,
+      JSON.stringify({
+        day0: "2026-08-08T02:02:46Z",
+        percentLast7dBaseline: 64,
+        churnBaseline: null,
+        churnSampleSize: 0,
+      }),
+    );
+    const baselineBefore = readFileSync(baselineFile, "utf8");
+    const usage = await usageServer(16, anchorB);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 500, createdAt: "2026-07-27T00:00:00Z", additions: 10, deletions: 5, labels: [{ name: "glm-authored" }] },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(tB),
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /relief-rate not comparable -- baseline predates window-tracking; delete the baseline file to re-bootstrap/);
+      // The current reading's window position still prints — only the
+      // comparison is refused.
+      assert.match(r.stdout, /days-into-window current 1\.07d, baseline n\/a/);
+      assert.doesNotMatch(r.stdout, /delta -4[0-9]/);
+      // Graceful degradation, not migration: the legacy file is untouched.
+      assert.equal(readFileSync(baselineFile, "utf8"), baselineBefore);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a current reading minutes into a fresh window is not comparable (percent/days would blow up into a spike) (issue #4049)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
+    const anchorA = "2026-08-05T17:00:00Z";
+    const tA = Math.floor(Date.parse(anchorA) / 1000) + Math.round(2.38 * 86400);
+    const tB = Math.floor(Date.parse("2026-08-12T17:00:00Z") / 1000) + Math.round(1.07 * 86400);
+    // Window C started 0.05d (72 min) before the reading.
+    const anchorC = new Date((tB - Math.round(0.05 * 86400)) * 1000).toISOString();
+    const baselineFile = join(tmp, "baseline.json");
+    try {
+      const binDir = makeGhStub(tmp, { mergedBaselinePrs: [], glmAuthoredPrs: [], commentsByPr: {} });
+      const boot = await usageServer(64, anchorA);
+      try {
+        const r1 = await runReport({
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_USAGE_URL: boot.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(tA),
+        });
+        assert.equal(r1.status, 0);
+      } finally {
+        boot.close();
+      }
+      const cur = await usageServer(16, anchorC);
+      try {
+        const r2 = await runReport({
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_USAGE_URL: cur.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(tB),
+        });
+        assert.equal(r2.status, 0);
+        assert.match(r2.stdout, /relief-rate not comparable -- insufficient time into window: current 0\.05d/);
+      } finally {
+        cur.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("meter fail-open (usageSource estimate, zeroed percent) is not comparable — never read as -100% relief (issue #4049)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
+    const anchorA = "2026-08-05T17:00:00Z";
+    const tA = Math.floor(Date.parse(anchorA) / 1000) + Math.round(2.38 * 86400);
+    const anchorB = "2026-08-12T17:00:00Z";
+    const tB = Math.floor(Date.parse(anchorB) / 1000) + Math.round(1.07 * 86400);
+    const baselineFile = join(tmp, "baseline.json");
+    try {
+      const binDir = makeGhStub(tmp, { mergedBaselinePrs: [], glmAuthoredPrs: [], commentsByPr: {} });
+      const boot = await usageServer(64, anchorA);
+      try {
+        const r1 = await runReport({
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_USAGE_URL: boot.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(tA),
+        });
+        assert.equal(r1.status, 0);
+      } finally {
+        boot.close();
+      }
+      // The meter goes down: eligibility fail-opens to zeroed percents with
+      // usageSource "estimate" (src/cost/eligibility-usage.ts).
+      const cur = await usageServer(0, anchorB, "estimate");
+      try {
+        const r2 = await runReport({
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_USAGE_URL: cur.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(tB),
+        });
+        assert.equal(r2.status, 0);
+        assert.match(r2.stdout, /relief-rate not comparable -- current usage reading is an estimate \(meter unavailable\)/);
+        assert.doesNotMatch(r2.stdout, /-100%/);
+      } finally {
+        cur.close();
+      }
+    } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   });

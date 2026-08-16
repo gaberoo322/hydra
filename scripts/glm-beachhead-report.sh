@@ -44,14 +44,37 @@
 #     hard gate — nothing in this script blocks, throttles, or disables
 #     anything when the window completes; it only changes the wording of the
 #     printed recommendation string.
-#   - percentLast7d delta: current live value (GET /api/usage/eligibility,
-#     `.usage.percentLast7d`) minus the baseline-snapshot value, captured once
-#     at this script's first run and never silently overwritten (an operator
-#     wanting to reset the baseline deletes the baseline file by hand). This
-#     script deliberately never reads or reports the CLI's per-run USD-cost
-#     field for GLM runs — the CLI prices GLM tokens against the Anthropic
-#     price table, which is meaningless for z.ai's flat-rate plan (ADR-0032
-#     #3758 amendment); percentLast7d is the only quota-relief signal used.
+#   - Quota relief (issue #4049): percentLast7d is a position WITHIN the
+#     weekly quota window (src/cost/eligibility-usage.ts assigns
+#     percentSinceReset = percentLast7d), so the value depends on WHEN in its
+#     window a reading is sampled — two readings taken at different phases of
+#     different windows are NOT directly subtractable (that measured sampling
+#     phase as much as relief). Instead each reading is normalised to a
+#     window-relative rate — percent / days-into-window, printed as %/day —
+#     and the report prints the days-into-window of BOTH readings so a phase
+#     mismatch is visible instead of hidden. The window position comes from
+#     `.usage.weeklyResetAnchor` on the same /api/usage/eligibility response
+#     the percent is read from: the CURRENT reading uses the live anchor at
+#     report time; the BASELINE captures its window's anchor ONCE into
+#     baseline.json (weeklyResetAnchorBaseline), because that window has
+#     since rolled over and can never be recomputed later. When the position
+#     data is missing (a legacy baseline.json bootstrapped before this field
+#     existed) or unusably small (below MIN_DAYS_INTO_WINDOW, where a
+#     percent/days division would blow up into a meaningless spike), the
+#     report prints an explicit "not comparable" instead of a number. The
+#     current reading is likewise refused while `.usage.usageSource` is not
+#     "oauth" — the meter's fail-open shape is a zeroed estimate that would
+#     otherwise read as "usage eliminated". The
+#     recommendation string carries the resulting description as trailing
+#     text ONLY — never a new gating condition (the keep/kill/expand
+#     thresholds are out of scope for #4049). Local naming note: this rate is
+#     called "relief rate" / "%/day" — deliberately NOT the CONTEXT.md
+#     Pacing-Curve _Avoid_ synonym for a different, cumulative concept.
+#     This script deliberately never reads or reports the CLI's per-run
+#     USD-cost field for GLM runs — the CLI prices GLM tokens against the
+#     Anthropic price table, which is meaningless for z.ai's flat-rate plan
+#     (ADR-0032 #3758 amendment); percentLast7d is the only quota-relief
+#     signal used.
 #   - First-pass QA PASS-rate: across ALL glm-authored PRs (state=all, no
 #     day-0 filter — a running quality signal, not a windowed one), the FIRST
 #     "> *Automated QA" comment's **Verdict:** line. PASS / PASS-pending-CI
@@ -96,6 +119,10 @@ WINDOW_DAYS="${HYDRA_GLM_BEACHHEAD_WINDOW_DAYS:-14}"
 WINDOW_PRS="${HYDRA_GLM_BEACHHEAD_WINDOW_PRS:-25}"
 BASELINE_SAMPLE="${HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE:-20}"
 NOW_EPOCH="${HYDRA_GLM_BEACHHEAD_NOW_EPOCH:-$(date -u +%s)}"
+# Floor on days-into-window for the %/day relief comparison (issue #4049):
+# below ~0.1 day (~2.4h) into a window, percent/days blows up into a
+# meaningless spike, so the report prints "not comparable" instead.
+MIN_DAYS_INTO_WINDOW="0.1"
 
 log() {
   # STDERR, deliberately — several functions below return a value via stdout
@@ -109,6 +136,13 @@ log() {
 # ---------------------------------------------------------------------------
 
 iso_to_epoch() { # <iso8601>
+  # Empty input is EMPTY, not "now": GNU `date -d ""` silently succeeds with
+  # the current instant, which would fabricate a window position out of a
+  # missing weeklyResetAnchor (issue #4049 legacy-baseline path).
+  if [[ -z "${1:-}" ]]; then
+    echo ""
+    return 0
+  fi
   date -u -d "$1" +%s 2>/dev/null || echo ""
 }
 
@@ -119,6 +153,86 @@ elapsed_days() { # <epoch_then> <epoch_now>
     return 0
   fi
   echo $(( (now - then) / 86400 ))
+}
+
+# days_into_window <anchor_epoch> <reading_epoch> -> fractional days between
+# the weekly-reset anchor and the moment the reading was taken, 2dp. Empty
+# string when the anchor is unknown (no window-position data for that
+# reading). See the file header's quota-relief note (issue #4049).
+days_into_window() {
+  local anchor="$1" at="$2"
+  if [[ -z "$anchor" || -z "$at" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -v a="$anchor" -v t="$at" 'BEGIN{printf "%.2f", (t-a)/86400}'
+}
+
+# fmt_days <days_or_empty> -> "2.38d" or "n/a" (display form for the report).
+fmt_days() {
+  local d="${1:-}"
+  if [[ -z "$d" ]]; then
+    echo "n/a"
+  else
+    echo "${d}d"
+  fi
+}
+
+# quota_relief_desc <base_percent> <base_days_into_window> <cur_percent> \
+#                   <cur_days_into_window> <min_days> [cur_usage_source]
+#   -> "26.89 -> 14.95 %/day (-44%)" when both readings normalise cleanly
+#   -> "not comparable -- <reason>" otherwise — NEVER a raw subtraction of
+#      two differently-phased percentLast7d readings (issue #4049).
+# Guard order: an estimate-mode current reading first — the meter's fail-open
+# shape is percentLast7d 0 with usageSource "estimate" (src/cost/
+# eligibility-usage.ts pins consumption to usageSource == "oauth"), and a
+# zeroed estimate divided into %/day would read as "usage eliminated" — then
+# legacy baseline (no captured anchor), then a missing current anchor, then
+# missing percents, then the too-early floor on each side.
+quota_relief_desc() {
+  local base_percent="${1:-}" base_days="${2:-}"
+  local cur_percent="${3:-}" cur_days="${4:-}" min_days="${5:-}" cur_source="${6:-}"
+
+  if [[ -n "$cur_source" && "$cur_source" != "oauth" ]]; then
+    echo "not comparable -- current usage reading is an estimate (meter unavailable), not a live meter value"
+    return 0
+  fi
+  if [[ -z "$base_days" ]]; then
+    echo "not comparable -- baseline predates window-tracking; delete the baseline file to re-bootstrap"
+    return 0
+  fi
+  if [[ -z "$cur_days" ]]; then
+    echo "not comparable -- current weeklyResetAnchor unavailable"
+    return 0
+  fi
+  if [[ -z "$base_percent" ]]; then
+    echo "not comparable -- baseline percentLast7d unavailable"
+    return 0
+  fi
+  if [[ -z "$cur_percent" ]]; then
+    echo "not comparable -- current percentLast7d unavailable"
+    return 0
+  fi
+  if ! awk -v d="$base_days" -v m="$min_days" 'BEGIN{exit !(d>=m)}'; then
+    echo "not comparable -- insufficient time into window: baseline ${base_days}d"
+    return 0
+  fi
+  if ! awk -v d="$cur_days" -v m="$min_days" 'BEGIN{exit !(d>=m)}'; then
+    echo "not comparable -- insufficient time into window: current ${cur_days}d"
+    return 0
+  fi
+
+  local base_rate cur_rate pct
+  base_rate=$(awk -v p="$base_percent" -v d="$base_days" 'BEGIN{printf "%.2f", p/d}')
+  cur_rate=$(awk -v p="$cur_percent" -v d="$cur_days" 'BEGIN{printf "%.2f", p/d}')
+  # Relative change is only meaningful against a non-zero baseline rate.
+  pct=$(awk -v b="$base_rate" -v c="$cur_rate" \
+    'BEGIN{ if (b+0==0) { print ""; exit } printf "%+.0f%%", (c-b)/b*100 }')
+  if [[ -n "$pct" ]]; then
+    echo "${base_rate} -> ${cur_rate} %/day (${pct})"
+  else
+    echo "${base_rate} -> ${cur_rate} %/day"
+  fi
 }
 
 # classify_qa_verdict <comment_body> -> pass|fail|unknown
@@ -161,10 +275,29 @@ ratio() {
 }
 
 # recommend <pr_count_since_day0> <pass_rate_or_empty> <churn_ratio_or_empty> \
-#           <days_elapsed> <window_days> <pr_target>
+#           <days_elapsed> <window_days> <pr_target> [quota_relief_desc]
 # Informational prose only — see the hard invariant in the file header. No
 # caller may treat this as a command; it is text for the operator to read.
+# The optional 7th argument (the phase-normalised quota-relief description
+# from quota_relief_desc) is APPENDED as trailing descriptive text to
+# whichever branch string the heuristic returns — it is never a gating
+# condition. The branch thresholds themselves are byte-for-byte the pre-#4049
+# ones (issue #4049 keeps the keep/kill/expand thresholds out of scope); a
+# six-argument call produces byte-for-byte the pre-#4049 output.
 recommend() {
+  local pr_count="$1" pass_rate="$2" churn_ratio="$3"
+  local days_elapsed="$4" window_days="$5" pr_target="$6"
+  local relief_desc="${7:-}"
+  local verdict
+  verdict="$(recommend_branch "$pr_count" "$pass_rate" "$churn_ratio" "$days_elapsed" "$window_days" "$pr_target")"
+  if [[ -n "$relief_desc" ]]; then
+    verdict="${verdict} | quota-relief: ${relief_desc}"
+  fi
+  echo "$verdict"
+}
+
+# recommend_branch — the branch heuristic, unchanged by #4049.
+recommend_branch() {
   local pr_count="$1" pass_rate="$2" churn_ratio="$3"
   local days_elapsed="$4" window_days="$5" pr_target="$6"
 
@@ -216,13 +349,28 @@ require_tools() {
   return 0
 }
 
-fetch_percent_last7d() {
+# One fetch, two extractions — the percent and its weeklyResetAnchor come
+# off the SAME /api/usage/eligibility response (issue #4049); never a second
+# network call for the anchor.
+fetch_usage_json() {
   local json
   if ! json=$(curl -fsS --max-time 10 "$USAGE_URL" 2>/dev/null); then
     echo ""
     return 0
   fi
-  jq -r '.usage.percentLast7d // ""' <<<"$json" 2>/dev/null || echo ""
+  printf '%s' "$json"
+}
+
+extract_percent_last7d() { # <usage_json> -> number or ""
+  jq -r '.usage.percentLast7d // ""' <<<"${1:-}" 2>/dev/null || echo ""
+}
+
+extract_weekly_reset_anchor() { # <usage_json> -> ISO-8601 instant or ""
+  jq -r '.usage.weeklyResetAnchor // ""' <<<"${1:-}" 2>/dev/null || echo ""
+}
+
+extract_usage_source() { # <usage_json> -> "oauth" | "estimate" | ""
+  jq -r '.usage.usageSource // ""' <<<"${1:-}" 2>/dev/null || echo ""
 }
 
 # fetch_baseline_churn_sample -> "<avg>|<sampleSize>"
@@ -323,8 +471,10 @@ bootstrap_or_load_baseline() {
   log "no baseline at $BASELINE_FILE -- bootstrapping day-0 now"
   mkdir -p "$(dirname "$BASELINE_FILE")" 2>/dev/null || true
 
-  local percent percent_json
-  percent="$(fetch_percent_last7d)"
+  local usage_json percent percent_json anchor_iso
+  usage_json="$(fetch_usage_json)"
+  percent="$(extract_percent_last7d "$usage_json")"
+  anchor_iso="$(extract_weekly_reset_anchor "$usage_json")"
   if [[ -z "$percent" ]]; then
     percent_json="null"
   else
@@ -346,10 +496,11 @@ bootstrap_or_load_baseline() {
 
   jq -n \
     --arg day0 "$day0_iso" \
+    --arg anchor "${anchor_iso:-}" \
     --argjson percent "$percent_json" \
     --argjson churnAvg "$churn_json" \
     --argjson churnN "${churn_n:-0}" \
-    '{day0: $day0, percentLast7dBaseline: $percent, churnBaseline: $churnAvg, churnSampleSize: $churnN}' \
+    '{day0: $day0, weeklyResetAnchorBaseline: (if $anchor == "" then null else $anchor end), percentLast7dBaseline: $percent, churnBaseline: $churnAvg, churnSampleSize: $churnN}' \
     > "$BASELINE_FILE"
   cat "$BASELINE_FILE"
 }
@@ -377,18 +528,33 @@ main() {
   baseline_json="$(bootstrap_or_load_baseline)"
 
   local baseline_day0_iso baseline_day0_epoch baseline_percent baseline_churn
+  local baseline_anchor_iso baseline_anchor_epoch
   baseline_day0_iso=$(jq -r '.day0' <<<"$baseline_json" 2>/dev/null)
   baseline_day0_epoch=$(iso_to_epoch "$baseline_day0_iso")
-  baseline_percent=$(jq -r '.percentLast7dBaseline' <<<"$baseline_json" 2>/dev/null)
+  baseline_percent=$(jq -r '.percentLast7dBaseline // ""' <<<"$baseline_json" 2>/dev/null)
   baseline_churn=$(jq -r '.churnBaseline' <<<"$baseline_json" 2>/dev/null)
+  # A baseline bootstrapped before #4049 captured no window anchor: its
+  # within-window phase is unknowable, which quota_relief_desc reports as an
+  # explicit not-comparable rather than guessing (the file is never migrated
+  # — resetting the baseline stays an explicit operator action).
+  baseline_anchor_iso=$(jq -r '.weeklyResetAnchorBaseline // ""' <<<"$baseline_json" 2>/dev/null)
+  baseline_anchor_epoch=$(iso_to_epoch "$baseline_anchor_iso")
 
-  local current_percent
-  current_percent="$(fetch_percent_last7d)"
+  local usage_json current_percent current_anchor_epoch current_usage_source
+  usage_json="$(fetch_usage_json)"
+  current_percent="$(extract_percent_last7d "$usage_json")"
+  current_anchor_epoch=$(iso_to_epoch "$(extract_weekly_reset_anchor "$usage_json")")
+  current_usage_source="$(extract_usage_source "$usage_json")"
 
-  local percent_delta="n/a"
-  if [[ -n "$current_percent" && "$baseline_percent" != "null" && -n "$baseline_percent" ]]; then
-    percent_delta=$(awk -v c="$current_percent" -v b="$baseline_percent" 'BEGIN{printf "%+d", c-b}')
-  fi
+  # Quota relief, phase-normalised (issue #4049): each reading is positioned
+  # within ITS OWN weekly window — the baseline at its bootstrap moment
+  # (day0), the current reading at now. A raw subtraction of the two
+  # percentLast7d values is never computed, let alone printed.
+  local base_days_in_window cur_days_in_window relief_desc
+  base_days_in_window=$(days_into_window "$baseline_anchor_epoch" "$baseline_day0_epoch")
+  cur_days_in_window=$(days_into_window "$current_anchor_epoch" "$NOW_EPOCH")
+  relief_desc=$(quota_relief_desc "$baseline_percent" "$base_days_in_window" \
+    "$current_percent" "$cur_days_in_window" "$MIN_DAYS_INTO_WINDOW" "$current_usage_source")
 
   local rows
   rows="$(fetch_glm_authored_prs)"
@@ -412,14 +578,17 @@ main() {
   IFS='|' read -r pass_rate pass_n fail_n denom <<<"$pass_line"
 
   local rec
-  rec=$(recommend "$pr_count_total" "$pass_rate" "$churn_ratio" "$days_elapsed" "$WINDOW_DAYS" "$WINDOW_PRS")
+  rec=$(recommend "$pr_count_total" "$pass_rate" "$churn_ratio" "$days_elapsed" \
+    "$WINDOW_DAYS" "$WINDOW_PRS" "$relief_desc")
 
   local excluded_n=$((pr_count_total - denom))
 
-  printf 'GLM beachhead: window %s/%sd, %s/%s PRs | first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s total) | percentLast7d %s%% (baseline %s%%, delta %s) | churn avg %s vs baseline %s (ratio %s) | recommendation: %s\n' \
+  printf 'GLM beachhead: window %s/%sd, %s/%s PRs | first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s total) | percentLast7d %s%% (baseline %s%%; days-into-window current %s, baseline %s; relief-rate %s) | churn avg %s vs baseline %s (ratio %s) | recommendation: %s\n' \
     "$days_elapsed" "$WINDOW_DAYS" "$pr_count_total" "$WINDOW_PRS" \
     "$(display "$pass_rate")" "$pass_n" "$fail_n" "$excluded_n" "$pr_count_total" \
-    "$(display "$current_percent")" "$(display "$baseline_percent")" "$percent_delta" \
+    "$(display "$current_percent")" "$(display "$baseline_percent")" \
+    "$(fmt_days "$cur_days_in_window")" "$(fmt_days "$base_days_in_window")" \
+    "$relief_desc" \
     "$(display "$churn_current")" "$(display "$baseline_churn")" "$(display "$churn_ratio")" \
     "$rec"
 }
