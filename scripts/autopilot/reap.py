@@ -437,10 +437,12 @@ def _handle_dev_orch_stall(
         return
     pr_exists = _dev_orch_pr_exists_for_anchor(anchor_ref)
     if pr_exists is not False:
-        # True (PR found) or None (unknown/gh unreachable) — no action. A
-        # found PR means the anchor is legitimately progressing (needs-qa
-        # transition, if any, is the child/QA path's job, not reap's); an
-        # unknown result fails open rather than risking a false stall label.
+        # True (PR found) or None (unknown/gh unreachable) — no action here.
+        # A found PR means the anchor is legitimately progressing — the
+        # ready-for-agent -> needs-qa promotion for that case is a SEPARATE
+        # best-effort step (`_handle_dev_orch_needs_qa_promotion`, issue
+        # #4045), not this function's job; an unknown result fails open
+        # rather than risking a false stall label.
         return
 
     m = re.match(r"^issue-(\d+)$", anchor_ref)
@@ -523,6 +525,192 @@ def _handle_dev_orch_stall(
         f"dev_stall_no_pr anchor={anchor_ref} task_id={task_id} "
         f"branch={worktree_branch or ''} relabelled={relabelled}"
     )
+    print(f"[autopilot] {line}")
+    _append_log(line)
+
+
+def _dev_orch_pr_closes_anchor(anchor_ref: str) -> bool | None:
+    """Does an OPEN PR on REPO actually CLOSE `anchor_ref`'s issue? (#4045)
+
+    Own `gh pr list` call, independent of `_dev_orch_pr_exists_for_anchor` —
+    same best-effort/self-contained shape as every other post-accounting
+    step in `run_completion` (each `_fire_*`/`_handle_*` helper owns its own
+    `gh`/Redis calls rather than threading shared fetch state through the
+    caller). Uses `pr-refs.py`'s `closing_issues()` predicate, which is
+    deliberately narrower than `referenced_issues()`: a bare branch-name
+    match or a non-closing `Refs #N` body keyword do NOT count here — only a
+    real GitHub closing verb (Closes/Fixes/Resolves) does.
+
+    Returns:
+      True  — an open PR's body closes the issue.
+      False — `gh pr list` succeeded and no open PR closes it.
+      None  — the check could not be completed (malformed anchor, `gh`
+              failure/timeout, unparseable output). Callers MUST treat this
+              as "unknown" and take no action — never as a false `False`.
+    """
+    m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
+    if not m:
+        return None
+    issue_num = int(m.group(1))
+    try:
+        proc = subprocess.run(
+            _gh_argv(
+                "pr", "list", "--repo", REPO, "--state", "open",
+                "--json", "headRefName,body", "--limit", "200",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: gh pr list failed for needs-qa promotion "
+            f"anchor={anchor_ref} ({exc}); no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    if proc.returncode != 0:
+        print(
+            f"[autopilot] reap: gh pr list exited {proc.returncode} for "
+            f"needs-qa promotion anchor={anchor_ref}; no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "hydra_autopilot_pr_refs", Path(__file__).parent / "pr-refs.py"
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("cannot load pr-refs.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        closing = mod.closing_issues(proc.stdout)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never abort the reap
+        print(
+            f"[autopilot] reap: pr-refs closing-parse failed for "
+            f"anchor={anchor_ref} ({exc}); no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    return issue_num in closing
+
+
+def _handle_dev_orch_needs_qa_promotion(
+    cls: str,
+    anchor_ref: str | None,
+) -> None:
+    """Advance ready-for-agent -> needs-qa once a dev_orch completion's PR
+    actually CLOSES the anchor issue (issue #4045).
+
+    Motivating incident: measured during autopilot run f1347b80 — 9 of the
+    10 open PRs with a resolvable linked issue left that issue labelled
+    `ready-for-agent`. Nothing in the dev flow or the reap path advances
+    the lane once a PR exists, so `qa_orch` (which gates on `needs-qa`) sat
+    idle while reviewable PRs piled up, AND `dev_orch`'s own unpinned
+    `ready-for-agent` self-selection (no open-PR check anywhere in its
+    path) was free to pick an issue that already has a PR waiting for
+    review, inviting a duplicate build.
+
+    Deliberately gated on a CLOSING reference only (see
+    `_dev_orch_pr_closes_anchor` / `pr-refs.py`'s `closing_issues()`) —
+    never a bare branch-name match or a non-closing `Refs #N`, which are
+    enough to say a dispatch didn't stall (`_handle_dev_orch_stall`'s
+    job) but NOT enough to say the work is done and reviewable.
+
+    Idempotent by construction: the relabel only fires when the issue is
+    CURRENTLY `ready-for-agent` (checked via a fresh `gh issue view` right
+    before the edit) — an issue already on `needs-qa`, or moved to any
+    other lane by another actor, is left untouched, so a repeated reap on
+    the same anchor across multiple completions is a safe no-op.
+
+    Every step is best-effort/non-fatal, matching every other
+    post-accounting side effect in `run_completion`: a `gh` failure at any
+    point logs to stderr and this function returns without raising.
+    """
+    if cls != "dev_orch" or not anchor_ref:
+        return
+    closes = _dev_orch_pr_closes_anchor(anchor_ref)
+    if closes is not True:
+        # False (no closing PR yet) or None (unknown/gh unreachable) — no
+        # action. An unknown result fails open rather than risking a
+        # premature or incorrect promotion.
+        return
+
+    m = re.match(r"^issue-(\d+)$", anchor_ref)
+    issue_num = m.group(1) if m else None
+    if issue_num is None:
+        return
+
+    try:
+        view = subprocess.run(
+            _gh_argv("issue", "view", issue_num, "--repo", REPO, "--json", "labels"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: WARN gh issue view failed for #{issue_num} "
+            f"needs-qa promotion (non-fatal): {exc}",
+            file=sys.stderr,
+        )
+        return
+    if view.returncode != 0:
+        print(
+            f"[autopilot] reap: WARN gh issue view exited {view.returncode} "
+            f"for #{issue_num} needs-qa promotion; no relabel this reap",
+            file=sys.stderr,
+        )
+        return
+    try:
+        current_labels = {
+            entry.get("name")
+            for entry in json.loads(view.stdout).get("labels", [])
+            if isinstance(entry, dict)
+        }
+    except Exception as exc:  # noqa: BLE001 — best-effort, never abort the reap
+        print(
+            f"[autopilot] reap: WARN labels parse failed for #{issue_num} "
+            f"needs-qa promotion (non-fatal): {exc}",
+            file=sys.stderr,
+        )
+        return
+    if "ready-for-agent" not in current_labels:
+        # Already advanced (by this same check on a prior reap, by a human,
+        # or never was ready-for-agent to begin with) — idempotent no-op.
+        return
+
+    relabelled = False
+    try:
+        edit = subprocess.run(
+            _gh_argv(
+                "issue", "edit", issue_num, "--repo", REPO,
+                "--remove-label", "ready-for-agent",
+                "--add-label", "needs-qa",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        relabelled = edit.returncode == 0
+        if not relabelled:
+            print(
+                f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
+                f"to needs-qa (non-fatal): {edit.stderr.strip()}",
+                file=sys.stderr,
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: WARN gh issue edit failed for #{issue_num} "
+            f"needs-qa promotion (non-fatal): {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    line = f"dev_pr_closes_anchor anchor={anchor_ref} relabelled={relabelled}"
     print(f"[autopilot] {line}")
     _append_log(line)
 
@@ -1989,6 +2177,14 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # reflection fire above so a `gh` hiccup here can never affect the
     # accounting/reflection writes that already landed.
     _handle_dev_orch_stall(s, cls, skill, anchor_ref, task_id, worktree_branch)
+
+    # Issue #4045: the flip side of the stall check above — a dev_orch
+    # completion whose PR ACTUALLY CLOSES the anchor means the issue is done
+    # and reviewable, so advance it ready-for-agent -> needs-qa here rather
+    # than leaving that transition to a human/agent remembering to do it.
+    # Independent best-effort step; a `gh` hiccup here can never affect the
+    # stall check or accounting above.
+    _handle_dev_orch_needs_qa_promotion(cls, anchor_ref)
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
     # reap time rather than waiting for the daily timer. Best-effort, fully
