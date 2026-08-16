@@ -117,6 +117,101 @@ describe("glm-beachhead-report.sh — pure helpers", () => {
     assert.equal(r.stdout.trim(), "0");
   });
 
+  // --- window position + quota-relief rate helpers (issue #4049) ---
+  // percentLast7d is a position WITHIN the weekly window (it doubles as
+  // percentSinceReset in src/cost/eligibility-usage.ts), so quota relief is
+  // compared as a window-relative %/day rate -- never a raw subtraction of
+  // two differently-phased readings. Named "relief rate", deliberately NOT
+  // the term CONTEXT.md's Pacing Curve entry reserves for another concept.
+
+  test("days_into_window: fractional days between anchor and reading, 2dp", () => {
+    const r = callHelper("days_into_window 1205632 1000000"); // 205632s = 2.38d
+    assert.equal(r.stdout.trim(), "2.38");
+  });
+
+  test("days_into_window: missing epoch -> empty string", () => {
+    const r = callHelper('echo "[$(days_into_window 1205632 "")]"');
+    assert.equal(r.stdout.trim(), "[]");
+  });
+
+  test("days_into_window: zero/negative span (anchor at or after the reading) -> empty string", () => {
+    assert.equal(callHelper('echo "[$(days_into_window 1000000 1000000)]"').stdout.trim(), "[]");
+    assert.equal(callHelper('echo "[$(days_into_window 1000000 1205632)]"').stdout.trim(), "[]");
+  });
+
+  test("relief_rate: percent / days-into-window to 2dp", () => {
+    assert.equal(callHelper("relief_rate 64 2.38").stdout.trim(), "26.89");
+    assert.equal(callHelper("relief_rate 16 1.07").stdout.trim(), "14.95");
+  });
+
+  test("relief_rate: empty or zero days -> empty string (never divide by zero)", () => {
+    assert.equal(callHelper('echo "[$(relief_rate 64 "")]"').stdout.trim(), "[]");
+    assert.equal(callHelper('echo "[$(relief_rate 64 0)]"').stdout.trim(), "[]");
+  });
+
+  test("relief_change: signed whole-percent change of current vs baseline rate", () => {
+    assert.equal(callHelper("relief_change 14.95 26.89").stdout.trim(), "-44");
+    assert.equal(callHelper("relief_change 30 20").stdout.trim(), "+50");
+  });
+
+  test("relief_change: zero baseline rate -> empty string", () => {
+    assert.equal(callHelper('echo "[$(relief_change 10 0)]"').stdout.trim(), "[]");
+  });
+
+  test("quota_relief_line: #4049 scenario -- baseline 64% @2.38d in one window vs current 16% @1.07d in the next -> honest -44% rate change, NOT the spurious raw -48", () => {
+    // baseline: anchor 1000000, reading 1205632 (2.38d into its window).
+    // current:  anchor 1604800 (one window later), reading 1697248 (1.07d in).
+    // A raw subtraction of the two percents prints -48 and reads as "quota
+    // nearly eliminated"; normalised to %/day the honest change is -44%.
+    const r = callHelper("quota_relief_line 16 1697248 1604800 64 1205632 1000000 0.25");
+    assert.equal(r.stdout.trim(), "14.95 vs 26.89 %/day (-44%)");
+    assert.doesNotMatch(r.stdout, /-48/);
+  });
+
+  test("quota_relief_line: same underlying rate at different window phases -> ~0% change (raw subtraction would print +80 and invert the sign)", () => {
+    // baseline 20% @1.00d into its window (rate 20%/day); current 100% @5.00d
+    // (rate 20%/day). Same pace, wildly different window positions.
+    const r = callHelper("quota_relief_line 100 3432000 3000000 20 2086400 2000000 0.25");
+    assert.equal(r.stdout.trim(), "20.00 vs 20.00 %/day (+0%)");
+  });
+
+  test("quota_relief_line: legacy baseline.json (no weeklyResetAnchor captured) -> explicit not-comparable, never a misleading delta", () => {
+    const r = callHelper('quota_relief_line 16 1697248 1604800 64 1205632 "" 0.25');
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /legacy baseline\.json predates weeklyResetAnchor capture/);
+  });
+
+  test("quota_relief_line: live response missing weeklyResetAnchor -> explicit not-comparable for the CURRENT reading", () => {
+    const r = callHelper('quota_relief_line 16 1697248 "" 64 1205632 1000000 0.25');
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /current reading has no usable window position/);
+  });
+
+  test("quota_relief_line: reading too early in its window (under the minimum) -> not comparable rather than a noisy rate", () => {
+    // current 8640s (0.10d) into its window -- under the 0.25d default minimum.
+    const r = callHelper("quota_relief_line 16 1613440 1604800 64 1205632 1000000 0.25");
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /only 0\.10d into its window -- under the 0\.25d minimum/);
+  });
+
+  test("quota_relief_line: the minimum is honored for BOTH readings (baseline 2.38d fails a 3d minimum)", () => {
+    const r = callHelper("quota_relief_line 16 1697248 1604800 64 1205632 1000000 3");
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /under the 3d minimum/);
+  });
+
+  test("quota_relief_line: baseline percent never captured (null) -> not comparable", () => {
+    const r = callHelper("quota_relief_line 16 1697248 1604800 null 1205632 1000000 0.25");
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /baseline percentLast7d was never captured/);
+  });
+
+  test("quota_relief_line: current percent unavailable -> not comparable", () => {
+    const r = callHelper('quota_relief_line "" 1697248 1604800 64 1205632 1000000 0.25');
+    assert.match(r.stdout, /^not comparable/);
+    assert.match(r.stdout, /current percentLast7d unavailable/);
+  });
+
   test("recommend: zero PRs -> insufficient-data", () => {
     const r = callHelper("recommend 0 '' '' 0 14 25");
     assert.match(r.stdout, /^insufficient-data/);
@@ -158,6 +253,35 @@ describe("glm-beachhead-report.sh — pure helpers", () => {
   test("recommend: no churn baseline sample (empty ratio) doesn't block EXPAND on its own", () => {
     const r = callHelper("recommend 25 0.9 '' 14 14 25");
     assert.match(r.stdout, /^EXPAND-signal/);
+  });
+
+  // --- recommend() + the corrected quota-relief figure (issue #4049) ---
+  // The figure rides along as DESCRIPTIVE text appended to the judgment
+  // branches; every branch THRESHOLD is pinned unchanged (design-concept
+  // invariant: the figure never gates keep/kill/expand).
+
+  test("recommend: the corrected quota-relief figure rides along as descriptive text (KEEP branch)", () => {
+    const r = callHelper("recommend 10 0.9 1.0 5 14 25 '14.95 vs 26.89 %/day (-44%)'");
+    assert.match(r.stdout, /^KEEP/);
+    assert.match(r.stdout, /quota-relief: 14\.95 vs 26\.89 %\/day \(-44%\)/);
+  });
+
+  test("recommend: relief figure never gates -- a bad PASS-rate still KILL-signals with the figure appended", () => {
+    const r = callHelper("recommend 5 0.30 1.0 3 14 25 '14.95 vs 26.89 %/day (-44%)'");
+    assert.match(r.stdout, /^KILL-signal/);
+    assert.match(r.stdout, /quota-relief: 14\.95 vs 26\.89 %\/day \(-44%\)/);
+  });
+
+  test("recommend: EXPAND branch also carries the relief figure as description only (a not-comparable figure doesn't block EXPAND)", () => {
+    const r = callHelper("recommend 10 0.9 1.1 14 14 25 'not comparable (baseline reading has no usable window position)'");
+    assert.match(r.stdout, /^EXPAND-signal/);
+    assert.match(r.stdout, /quota-relief: not comparable/);
+  });
+
+  test("recommend: six-arg call (no relief descriptor) still works -- the suffix is purely additive", () => {
+    const r = callHelper("recommend 10 0.9 1.0 5 14 25");
+    assert.match(r.stdout, /^KEEP/);
+    assert.doesNotMatch(r.stdout, /quota-relief/);
   });
 
   test("recommend text is advisory prose, never a directive the caller could execute", () => {
@@ -265,12 +389,19 @@ exec python3 ${JSON.stringify(helperPath)} "$@"
   return binDir;
 }
 
-/** Serve `{usage: {percentLast7d: N}}` on an ephemeral port. */
-function usageServer(percentLast7d: number): Promise<{ url: string; close: () => void }> {
+/** Serve `{usage: {percentLast7d: N, weeklyResetAnchor?: ISO}}` on an ephemeral port. */
+function usageServer(
+  percentLast7d: number,
+  weeklyResetAnchor?: string,
+): Promise<{ url: string; close: () => void }> {
   return new Promise((resolve) => {
     const server = http.createServer((_req, res) => {
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ usage: { percentLast7d } }));
+      const usage: Record<string, unknown> = { percentLast7d };
+      if (weeklyResetAnchor !== undefined) {
+        usage.weeklyResetAnchor = weeklyResetAnchor;
+      }
+      res.end(JSON.stringify({ usage }));
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as any;
@@ -294,9 +425,10 @@ function runReport(env: Record<string, string>): Promise<{ status: number; stdou
 const AUTOMATED_QA_PREFIX = "> *Automated QA";
 
 describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
-  test("no glm-authored PRs yet -> insufficient-data, baseline still bootstrapped", async () => {
+  test("no glm-authored PRs yet -> insufficient-data, baseline still bootstrapped (now including the weekly reset anchor)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
-    const usage = await usageServer(55);
+    const usage = await usageServer(55, "2026-08-05T17:00:00Z");
+    const nowEpoch = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 1000);
     try {
       const binDir = makeGhStub(tmp, {
         mergedBaselinePrs: [
@@ -310,12 +442,17 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
         HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(nowEpoch),
       });
       assert.equal(r.status, 0);
       assert.match(r.stdout, /insufficient-data/);
       assert.match(r.stdout, /window 0\/14d, 0\/25 PRs/);
+      // Days-into-window is printed for the reading (#4049): 2026-08-08T00:00
+      // minus the 2026-08-05T17:00 anchor is 2.29d.
+      assert.match(r.stdout, /percentLast7d 55% @2\.29d-in-window/);
       const baseline = JSON.parse(readFileSync(baselineFile, "utf8"));
       assert.equal(baseline.percentLast7dBaseline, 55);
+      assert.equal(baseline.weeklyResetAnchorBaseline, "2026-08-05T17:00:00Z");
       assert.equal(baseline.churnBaseline, 150);
     } finally {
       usage.close();
@@ -325,7 +462,8 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
 
   test("baseline is bootstrapped ONCE and never silently overwritten on a second run", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
-    const usageFirst = await usageServer(40);
+    const usageFirst = await usageServer(40, "2026-08-05T17:00:00Z");
+    const now1 = String(Math.floor(Date.parse("2026-08-08T00:00:00Z") / 1000));
     try {
       const binDir = makeGhStub(tmp, { mergedBaselinePrs: [], glmAuthoredPrs: [], commentsByPr: {} });
       const baselineFile = join(tmp, "baseline.json");
@@ -333,28 +471,33 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HYDRA_GLM_BEACHHEAD_USAGE_URL: usageFirst.url,
         HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: now1,
       });
       assert.equal(r1.status, 0);
       const baselineAfterFirst = readFileSync(baselineFile, "utf8");
       assert.match(baselineAfterFirst, /"percentLast7dBaseline": 40/);
+      assert.match(baselineAfterFirst, /"weeklyResetAnchorBaseline": "2026-08-05T17:00:00Z"/);
 
-      // Second run: usage value has changed AND the fixture's usage server is
-      // now different — if the baseline were silently overwritten, this run
-      // would show a different baseline percent. It must not.
-      const usageSecond = await usageServer(90);
+      // Second run: usage value, window anchor, AND "now" have all moved on —
+      // if the baseline were silently overwritten, this run would show the new
+      // values. It must not.
+      const usageSecond = await usageServer(90, "2026-08-12T17:00:00Z");
+      const now2 = String(Math.floor(Date.parse("2026-08-12T17:00:00Z") / 1000) + 92448); // 1.07d into the new window
       try {
         const r2 = await runReport({
           PATH: `${binDir}:${process.env.PATH ?? ""}`,
           HYDRA_GLM_BEACHHEAD_USAGE_URL: usageSecond.url,
           HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_BEACHHEAD_NOW_EPOCH: now2,
         });
         assert.equal(r2.status, 0);
         const baselineAfterSecond = readFileSync(baselineFile, "utf8");
         assert.equal(baselineAfterFirst, baselineAfterSecond);
-        // The CURRENT percent in the report reflects the new live value (90),
-        // while the baseline stays 40 -- proving the delta is live-vs-frozen,
-        // not live-vs-live.
-        assert.match(r2.stdout, /percentLast7d 90% \(baseline 40%/);
+        // The CURRENT percent + window position in the report reflect the new
+        // live values (90, 1.07d into the new window), while the baseline stays
+        // frozen at 40 @2.29d -- proving the comparison is live-vs-frozen, not
+        // live-vs-live.
+        assert.match(r2.stdout, /percentLast7d 90% @1\.07d-in-window \(baseline 40% @2\.29d-in-window\)/);
       } finally {
         usageSecond.close();
       }
@@ -482,6 +625,110 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
       // bootstrap-moment anchor would have produced, since the baseline file
       // is created in this same invocation).
       assert.match(r.stdout, /window 12\/14d, 2\/25 PRs/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("#4049 regression: baseline 64% late in one window vs current 16% early in the next -> honest -44% rate change, days-into-window for BOTH, no raw delta", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
+    const ANCHOR_A = "2026-08-05T17:00:00Z";
+    const ANCHOR_B = "2026-08-12T17:00:00Z";
+    // The issue's measured instance, reconstructed: baseline captured 2.38d
+    // into its window, current read 1.07d into the NEXT window. The old raw
+    // subtraction printed delta -48 and read as "quota nearly eliminated";
+    // normalised to %/day the honest change is -44%.
+    const now1 = Math.floor(Date.parse(ANCHOR_A) / 1000) + 205632; // 2.38d into window A
+    const now2 = Math.floor(Date.parse(ANCHOR_B) / 1000) + 92448; // 1.07d into window B
+    const usage1 = await usageServer(64, ANCHOR_A);
+    const usage2 = await usageServer(16, ANCHOR_B);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 500, createdAt: "2026-08-13T00:00:00Z", additions: 10, deletions: 5, labels: [{ name: "glm-authored" }] },
+        ],
+        commentsByPr: {
+          "500": [{ createdAt: "2026-08-13T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+        },
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      // Run 1 bootstraps the baseline from window A.
+      const r1 = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage1.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(now1),
+      });
+      assert.equal(r1.status, 0);
+      const baseline = JSON.parse(readFileSync(baselineFile, "utf8"));
+      assert.equal(baseline.percentLast7dBaseline, 64);
+      assert.equal(baseline.weeklyResetAnchorBaseline, ANCHOR_A);
+
+      // Run 2 reads window B early-phase current against that baseline.
+      const r2 = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage2.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(now2),
+      });
+      assert.equal(r2.status, 0);
+      // The window phase is VISIBLE for both readings instead of hidden.
+      assert.match(r2.stdout, /percentLast7d 16% @1\.07d-in-window \(baseline 64% @2\.38d-in-window\)/);
+      // The corrected, window-relative figure — and no raw subtraction delta.
+      assert.match(r2.stdout, /quota-relief 14\.95 vs 26\.89 %\/day \(-44%\)/);
+      assert.doesNotMatch(r2.stdout, /delta/);
+      // The recommendation string consumes the corrected figure.
+      assert.match(r2.stdout, /recommendation: KEEP \(informational, operator-driven\)[^\n]*quota-relief: 14\.95 vs 26\.89 %\/day \(-44%\)/);
+    } finally {
+      usage1.close();
+      usage2.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("#4049 legacy baseline.json without weeklyResetAnchorBaseline -> explicit not-comparable, never a crash, never a misleading delta", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
+    const ANCHOR_B = "2026-08-12T17:00:00Z";
+    const now2 = Math.floor(Date.parse(ANCHOR_B) / 1000) + 92448; // 1.07d into window B
+    const usage = await usageServer(16, ANCHOR_B);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 501, createdAt: "2026-08-13T00:00:00Z", additions: 10, deletions: 5, labels: [{ name: "glm-authored" }] },
+        ],
+        commentsByPr: {},
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      // A LEGACY baseline bootstrapped before this fix: percentLast7d is
+      // present but the weekly reset anchor was never captured, so the two
+      // readings cannot be placed on a comparable footing.
+      writeFileSync(baselineFile, JSON.stringify({
+        day0: "2026-08-08T02:07:12Z",
+        percentLast7dBaseline: 64,
+        churnBaseline: 100,
+        churnSampleSize: 2,
+      }));
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(now2),
+      });
+      assert.equal(r.status, 0); // graceful — never a crash, never an awk blowup
+      assert.match(r.stdout, /percentLast7d 16% @1\.07d-in-window \(baseline 64% @n\/ad-in-window\)/);
+      assert.match(
+        r.stdout,
+        /quota-relief not comparable \(baseline reading has no usable window position -- legacy baseline\.json predates weeklyResetAnchor capture; delete the baseline file to re-bootstrap\)/,
+      );
+      // The recommendation still carries the honest not-comparable verdict.
+      assert.match(r.stdout, /quota-relief: not comparable/);
+      // And the legacy file is left untouched (bootstrap never overwrites).
+      const after = JSON.parse(readFileSync(baselineFile, "utf8"));
+      assert.equal(after.weeklyResetAnchorBaseline, undefined);
+      assert.equal(after.percentLast7dBaseline, 64);
     } finally {
       usage.close();
       rmSync(tmp, { recursive: true, force: true });

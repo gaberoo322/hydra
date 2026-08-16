@@ -1,0 +1,1 @@
+- fix: the GLM beachhead report compares quota relief as a window-relative %/day rate and prints both readings' days-into-window, replacing the raw percentLast7d subtraction that the weekly reset confounded (#4049)
