@@ -1,0 +1,1 @@
+- fix: hydra-dev child-flow now mandates an unconditional design-concept artifact fetch before every PR — "Not applicable" is valid only for a 404/unreachable response, never for "I did not fetch" (#4102)
