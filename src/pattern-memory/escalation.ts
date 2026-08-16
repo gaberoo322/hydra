@@ -11,8 +11,12 @@
  * -----------
  * Each cue maps to a single GitHub issue. Lookup is by title-substring match
  * with the `meta-friction` label so reruns can:
- *   - if an OPEN issue exists, post a comment-bump (no duplicate)
- *   - if a CLOSED issue exists, reopen with a comment
+ *   - if an OPEN issue exists, post a comment-bump (no duplicate) — rate-gated
+ *     for the two steady-rate cues (issue #3850)
+ *   - if a CLOSED issue exists, reopen with a comment — ALSO rate-gated for the
+ *     same two steady-rate cues (issue #4073): closing the issue must not be
+ *     the thing that routes the next hit around the gate. Non-rate-gated cues
+ *     still reopen unconditionally, as before.
  *   - otherwise, create a new issue with the `meta-friction` label
  *
  * Re-fire policy
@@ -50,12 +54,15 @@
 
 import { ghExec, ghJson } from "../github/gh.ts";
 import { isGhFailure } from "../github/exec.ts";
+import { addIssueLabel, isIssueLabelWriteFailure } from "../github/issues.ts";
 import { logger } from "../logger.ts";
-// Issue #3850 — the rate-vs-baseline gate for steady-rate cues is composed of
-// a pure parser/decision pair in the zero-IO cue-policy leaf
+// Issue #3850 / #4073 — the rate-vs-baseline gate for steady-rate cues is
+// composed of a pure parser/decision pair in the zero-IO cue-policy leaf
 // (parseEscalationBumpSeries / shouldRateEscalate) plus the rate-gated-cue
 // predicate. escalation.ts owns the GitHub-IO fetch that feeds them; cue-policy
 // owns the math. Import direction is one-way, as for the existing policy helpers.
+// The gate now applies to BOTH the OPEN-issue comment-bump branch (#3850) and
+// the CLOSED-issue reopen branch (#4073) — see `rateGateSkipReason` below.
 import {
   isRateGatedCue,
   parseEscalationBumpSeries,
@@ -350,6 +357,60 @@ async function reopenIssue(issueNumber: number): Promise<void> {
   if (isGhFailure(result)) throw new GhInvocationError(result.code, result.stderr);
 }
 
+/** Issue #4073 — the label a reopened escalation issue is routed to by default. */
+const DEFAULT_REOPEN_LABEL = "ready-for-human";
+
+/**
+ * Issue #4073 — re-apply a lifecycle label after a reopen. The closing paths
+ * (operator review, automated sweep) strip whatever lifecycle label was
+ * present, and `reopenIssue()` itself restores nothing, so every reopened
+ * escalation issue previously arrived as a label-less untriaged orphan —
+ * forcing the sweep to re-route it and consuming an operator-review slot on
+ * every single cycle (issue #2528's own timeline shows `unlabeled
+ * ready-for-human` / `unlabeled needs-triage` on each of its four reopens).
+ * Defaults to `ready-for-human`: the escalation itself IS the operator-facing
+ * signal, so routing a freshly-reopened issue straight to the human-review
+ * lane is the correct default absent a recorded "label present at close" to
+ * restore verbatim. Best-effort — a label-add failure must not fail the
+ * reopen it follows (which has already succeeded); logged for visibility via
+ * the same seam `addIssueLabel` already uses.
+ */
+async function restoreLifecycleLabel(issueNumber: number): Promise<void> {
+  const result = await addIssueLabel(issueNumber, DEFAULT_REOPEN_LABEL, { repo: REPO });
+  if (isIssueLabelWriteFailure(result)) {
+    logger.warn(
+      { issueNumber, code: result.code, stderr: result.stderr.slice(0, 200) },
+      "restoreLifecycleLabel: gh issue edit --add-label failed — issue may remain label-less",
+    );
+  }
+}
+
+/**
+ * Issue #3850 / #4073 — shared rate-vs-baseline skip decision, used by BOTH
+ * the OPEN-issue comment-bump branch and the CLOSED-issue reopen branch. Only
+ * called when `isRateGatedCue(cue)` is true (the caller checks). Returns a
+ * skip reason string when the cue's recent hit rate has not risen above its
+ * own creation-anchored baseline; returns `null` ("do not suppress") when the
+ * caller should proceed — including the fail-open case where
+ * `fetchIssueHistory()` itself failed, so a possibly-genuine rising-rate
+ * signal is never silently swallowed by a transient gh/auth/network blip.
+ */
+async function rateGateSkipReason(
+  issueNumber: number,
+  hitCount: number,
+): Promise<string | null> {
+  const history = await fetchIssueHistory(issueNumber);
+  // history === null → gh fetch failed → fail OPEN: proceed unconditionally
+  // rather than suppress a possibly-genuine rising-rate signal.
+  if (history === null) return null;
+  const series = parseEscalationBumpSeries(history.body, history.createdAt, history.comments);
+  if (shouldRateEscalate(series, hitCount, new Date().toISOString())) return null;
+  return (
+    `rate-gated: recent rate not above baseline ` +
+    `(window=${RATE_ESCALATION_WINDOW_DAYS}d, multiplier=${RATE_ESCALATION_MULTIPLIER})`
+  );
+}
+
 /**
  * Public entry — escalate a pattern to a GitHub issue. Best-effort:
  * always resolves; never throws. Caller (`recordPattern`) does not need to
@@ -374,36 +435,41 @@ export async function escalatePatternToIssue(
       // cumulative-count threshold (150 / 20) re-bumps every +10 hits forever
       // because the count only rises while the rate is ~constant; this gate
       // suppresses a bump whose recent rate has not risen above the cue's own
-      // creation-anchored baseline. Only the comment-bump path is gated:
-      // issue CREATION (handled below, findExistingIssue → null) and the
-      // CLOSED→reopen path are NEVER gated — a first occurrence and any
-      // post-close recurrence are always informative. Non-rate-gated cues
-      // never reach this branch.
+      // creation-anchored baseline. Issue CREATION (handled below,
+      // findExistingIssue → null) is NEVER gated — a first occurrence is
+      // always informative. Non-rate-gated cues never reach this branch.
       if (isRateGatedCue(input.cue)) {
-        const history = await fetchIssueHistory(existing.number);
-        // history === null → gh fetch failed → fail OPEN: post unconditionally
-        // rather than suppress a possibly-genuine rising-rate signal.
-        if (history !== null) {
-          const series = parseEscalationBumpSeries(
-            history.body,
-            history.createdAt,
-            history.comments,
-          );
-          if (!shouldRateEscalate(series, input.hitCount, new Date().toISOString())) {
-            return {
-              status: "skipped",
-              reason:
-                `rate-gated: recent rate not above baseline ` +
-                `(window=${RATE_ESCALATION_WINDOW_DAYS}d, multiplier=${RATE_ESCALATION_MULTIPLIER})`,
-            };
-          }
+        const skipReason = await rateGateSkipReason(existing.number, input.hitCount);
+        if (skipReason !== null) {
+          return { status: "skipped", reason: skipReason };
         }
       }
       await commentOnIssue(existing.number, input);
       return { status: "commented", issueNumber: existing.number };
     }
     if (existing && existing.state === "CLOSED") {
+      // Issue #4073 — the CLOSED→reopen path now applies the SAME
+      // rate-vs-baseline gate as the OPEN comment-bump path above, for the
+      // same two rate-gated cues. Before this fix the reopen path was NEVER
+      // gated, on the premise that "any post-close recurrence is always
+      // informative" — true for a bursty cue, but exactly inverted for a
+      // steady-rate cue: a post-close recurrence is near-guaranteed within
+      // days, so closing the issue was precisely what routed the next hit
+      // around the OPEN-path gate (issue #2528: 4 reopens in 15 days, every
+      // one via this path, the rate gate never once applying to it).
+      // Non-rate-gated cues are unaffected — they still reopen
+      // unconditionally, exactly as before.
+      if (isRateGatedCue(input.cue)) {
+        const skipReason = await rateGateSkipReason(existing.number, input.hitCount);
+        if (skipReason !== null) {
+          return { status: "skipped", reason: skipReason };
+        }
+      }
       await reopenIssue(existing.number);
+      // Re-apply a lifecycle label so a reopen never lands as a label-less
+      // untriaged orphan (issue #4073) — best-effort, does not affect the
+      // already-successful reopen/comment outcome below.
+      await restoreLifecycleLabel(existing.number);
       await commentOnIssue(existing.number, input);
       return { status: "reopened", issueNumber: existing.number };
     }

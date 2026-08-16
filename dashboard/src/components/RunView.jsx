@@ -1,13 +1,116 @@
+import { useEffect } from "react";
 import { StatusPill, MetaCell, BudgetBar } from "./AutopilotAtoms.jsx";
 import PipelineSnapshot from "./PipelineSnapshot.jsx";
 import TurnTimeline from "./TurnTimeline.jsx";
 import LogsSection from "./LogsSection.jsx";
+import LocalTimestamp from "./LocalTimestamp.jsx";
 import { statusKey, formatElapsed, formatTokens, truncId } from "../lib/autopilot-format.js";
+import { classifyRunOutcome, findFailingTurn } from "./pages/runs/runs-state.js";
 
 // Extracted from dashboard/src/pages/Autopilot.jsx (issue #3589). The
 // four-section run view (header + pipeline + timeline + logs) plus the
 // TokenBudget subsection it owns. Behavior is identical to the inline
 // originals.
+//
+// Issue #4009 (ADR-0034 §2, the /runs forensics spine) adds one OPTIONAL,
+// backward-compatible prop: `focusFailingTurn`. When true and the run's
+// outcome is failure, the failing turn renders EXPANDED in a landing panel
+// above the timeline and scrolls into view on mount — the GitHub-Actions
+// affordance ("failed steps auto-expand; no hunt-for-the-red-thing").
+// Existing callers that omit the prop see byte-identical output.
+
+// ---------------------------------------------------------------------------
+// Failing-turn landing panel (issue #4009 — INV-4, the failed step
+// auto-expands). The turn the operator must see first, rendered expanded
+// (its failed dispatch actions with slot/skill/anchor attribution) and
+// scrolled into view on mount, so opening a failed run lands on the failure
+// rather than on a summary.
+// ---------------------------------------------------------------------------
+
+function FailingActionRow({ action }) {
+  const slot = action.slot || action.class || "—";
+  const skill = action.skill || "—";
+  const anchor = action.prompt_args?.anchor || action.anchor || null;
+  const outcomeStatus = action.outcome?.status || "unknown";
+  const prNumber = action.outcome?.prNumber || null;
+  return (
+    <div className="border-l-2 border-red-500/60 pl-3 py-1.5 text-xs space-y-1" data-testid="failing-action-row">
+      <div className="text-red-300 font-mono">
+        dispatch:{slot} <span className="text-zinc-400">→ {skill}</span>
+      </div>
+      {/* Attribution: the anchor this dispatch was fired at. A missing
+          anchor is shown as unattributed, never guessed (INV-8). */}
+      <div className="text-zinc-400 truncate" title={anchor || undefined}>
+        anchor:{" "}
+        {anchor ? (
+          <span className="font-mono">{anchor}</span>
+        ) : (
+          <span className="uppercase tracking-wide text-amber-400/80">unattributed</span>
+        )}
+      </div>
+      {action.reason && <div className="text-zinc-500 italic">{action.reason}</div>}
+      <div className="text-[11px] text-zinc-400 flex flex-wrap gap-x-3">
+        <span>
+          status: <span className="text-red-400">{outcomeStatus}</span>
+        </span>
+        {prNumber && (
+          <span>
+            PR{" "}
+            <a
+              href={`https://github.com/gaberoo322/hydra/pull/${prNumber}`}
+              className="text-blue-400 hover:underline"
+              target="_blank"
+              rel="noreferrer"
+            >
+              #{prNumber}
+            </a>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FailingTurnPanel({ turn }) {
+  // Auto-focus on mount: the panel IS the landing target (INV-4 — "opens on
+  // the failing turn, not on a summary"). No dependency array noise: run the
+  // scroll exactly once when the panel mounts.
+  useEffect(() => {
+    const el = document.getElementById("failing-turn");
+    if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "start" });
+  }, []);
+
+  const actions = Array.isArray(turn.actions) ? turn.actions : [];
+  return (
+    <div
+      id="failing-turn"
+      data-testid="failing-turn-panel"
+      className="border border-red-500/40 rounded-lg p-5 bg-red-950/20 space-y-3"
+    >
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h2 className="text-base font-semibold text-red-300">
+          Failing turn — Turn {turn.turn_n}
+        </h2>
+        <LocalTimestamp ts={turn.epoch} className="text-xs text-zinc-400 font-mono" />
+      </div>
+      <div className="space-y-2">
+        {actions.length === 0 ? (
+          <div className="text-xs text-zinc-500 italic">(no actions recorded on this turn)</div>
+        ) : (
+          actions.map((a, i) => <FailingActionRow key={i} action={a} />)
+        )}
+      </div>
+      {Array.isArray(turn.reasons) && turn.reasons.length > 0 && (
+        <div className="text-[11px] text-zinc-500 italic pt-1 border-t border-red-500/20">
+          {turn.reasons.join(" · ")}
+        </div>
+      )}
+      <p className="text-[11px] text-zinc-500">
+        The full turn timeline (all turns, filterable) follows below.
+      </p>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Token budget subsection
@@ -43,7 +146,7 @@ function TokenBudget({ run }) {
 // everything to the run's final state.
 // ---------------------------------------------------------------------------
 
-export default function RunView({ run, turns, mode }) {
+export default function RunView({ run, turns, mode, focusFailingTurn = false }) {
   const limits = run.limits || {};
   const tokenBudget = Number(limits.token_budget) || 0;
   const wallClockMax = Number(limits.wall_clock_max_sec) || 0;
@@ -51,6 +154,12 @@ export default function RunView({ run, turns, mode }) {
   const key = statusKey(run);
   const latestTurn = turns[0] || null;
   const isLive = mode === "live";
+  // INV-4: only a FAILED run gets a failing-turn landing target. The
+  // derivation is pure (runs-state.js) and returns null for anything else,
+  // so the prop is a no-op on healthy runs and absent on legacy callers.
+  const runFailed =
+    classifyRunOutcome(run.status, run.exit_code ?? null, run.term_reason ?? null) === "failure";
+  const failingTurn = focusFailingTurn ? findFailingTurn(turns, runFailed) : null;
 
   return (
     <>
@@ -117,6 +226,8 @@ export default function RunView({ run, turns, mode }) {
       </div>
 
       <PipelineSnapshot run={run} latestTurn={latestTurn} />
+
+      {failingTurn && <FailingTurnPanel turn={failingTurn} />}
 
       <TurnTimeline turns={turns} />
 
