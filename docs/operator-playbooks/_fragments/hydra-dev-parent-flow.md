@@ -9,9 +9,31 @@ contract lives in the sibling `hydra-dev-child-flow.md`.
 
 ### 1. Select issue
 
-If `$issue_number` provided, use it. Otherwise:
+If `$issue_number` provided, use it. Otherwise, take the first
+`ready-for-agent` issue NOT already claimed by an open PR (#4103). An issue
+keeps `ready-for-agent` while its PR is in flight (nothing relabels it until
+the PR merges or `reap.py` promotes it to `needs-qa`), so an unguarded `.[0]`
+manufactures a duplicate dispatch — a full wasted dev cycle (fresh worktree,
+implementation, `npm test`, duplicate PR) whenever a PR is open on the head of
+that list. The claim-check uses the ONE shared reference predicate
+(`scripts/autopilot/pr-refs.py`, issue #3852) — never re-implement the
+branch/body matching inline: the body-ref arm catches PRs whose head branch
+carries no issue number at all (`worktree-agent-*` branches link only via
+`Closes #N` in the body, invisible to a branch-name scan).
+
 ```bash
-gh issue list --repo gaberoo322/hydra --label "ready-for-agent" --state open --json number,title --jq '.[0]'
+# Issue numbers already claimed by an open PR (branch convention OR body ref),
+# via the shared predicate. FAIL-OPEN: a failed or empty gh pr list yields an
+# empty CLAIMED, the jq filter below becomes a no-op, and selection falls back
+# to today's unfiltered .[0] — a transient GitHub hiccup loses only the dedup,
+# never the dispatch.
+CLAIMED=$(gh pr list --repo gaberoo322/hydra --state open --json headRefName,body \
+  | python3 scripts/autopilot/pr-refs.py 2>/dev/null || true)
+CLAIMED_JQ=$(printf '%s' "$CLAIMED" | tr ' ' ',')
+# Take the first ready-for-agent issue NOT in the claimed set.
+gh issue list --repo gaberoo322/hydra --label "ready-for-agent" --state open \
+  --json number,title \
+  --jq "map(select(.number as \$n | [${CLAIMED_JQ}] | index(\$n) | not))[0]"
 ```
 None → report and stop.
 
