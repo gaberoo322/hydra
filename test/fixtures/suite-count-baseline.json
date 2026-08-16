@@ -443,7 +443,7 @@
   "test/wiring-liveness-output-series.test.mts": 1,
   "test/wiring-liveness-output.test.mts": 3,
   "test/wiring-liveness.test.mts": 10,
-  "test/work-page.test.mts": 13,
+  "test/work-page.test.mts": 20,
   "test/workless-hint.test.mts": 4,
   "test/worktree-orphan-prune.test.mts": 1,
   "test/worktree-orphan.test.mts": 4,

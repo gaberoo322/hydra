@@ -1,0 +1,1 @@
+- feat: retire the Explore, Outcomes, Orchestrator Map, Anomalies and Now Habitat surfaces; their deep links redirect to /runs, /builder and / (#4012)

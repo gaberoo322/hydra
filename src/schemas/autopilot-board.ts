@@ -5,6 +5,7 @@
  *
  *   GET  /api/autopilot/board-state  → AutopilotBoardStateResponse
  *   GET  /api/autopilot/work-queue   → WorkQueueResponse        (#4010)
+ *   GET  /api/autopilot/hitl-grill   → HitlGrillResponse        (#4028)
  *   POST /api/autopilot/board/promote|relabel|close|reopen      (#4010)
  *                                     → BoardActionResponse
  *
@@ -197,6 +198,72 @@ export const WorkQueueResponseSchema = z
 export type WorkQueueResponse = z.infer<typeof WorkQueueResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// HITL grill lane (issue #4028 — the parked-idea inbox slice 4 of epic #4024)
+// ---------------------------------------------------------------------------
+
+/**
+ * The terminal park label the whole hitl-grill lane keys on
+ * (`docs/agents/triage-labels.md`: a park state no agent actions — the
+ * operator grills it into real work or dismisses it). Lives here, beside
+ * `WORK_QUEUE_LANES`, because this schema file is the label-vocabulary home
+ * for the board router's surfaces.
+ */
+export const HITL_GRILL_LABEL = "hitl-grill";
+
+/**
+ * The open-park count at which the producers' pre-park cap check stops
+ * parking new ideas (`docs/operator-playbooks/hydra-architecture-scan.md`
+ * step 4c). The lane surfaces the state, not the gate: `capReached` on the
+ * response is precomputed from the SAME read the lane renders.
+ */
+export const HITL_GRILL_CAP = 10;
+
+/** One parked-idea row — an OPEN issue carrying {@link HITL_GRILL_LABEL}. */
+export const HitlGrillRowSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    /**
+     * The producer provenance labels: every label on the issue EXCEPT the
+     * `hitl-grill` lane label itself (the pilot producer always attaches
+     * `architecture-scan` alongside; filtering rather than hardcoding one
+     * producer generalizes to the other feeders named in epic #4024).
+     */
+    provenance: z.array(z.string()),
+    /**
+     * The parsed park reason: an explicit `Recommendation strength:` line
+     * wins (a future producer's literal field), falling back to today's
+     * blockquoted `> Reason:` park-body line; blank when neither is present.
+     */
+    reason: z.string(),
+    /** ISO creation timestamp — the lane's oldest-first ordering key. */
+    createdAt: z.string(),
+  })
+  .strict();
+
+export type HitlGrillRow = z.infer<typeof HitlGrillRowSchema>;
+
+/** `GET /autopilot/hitl-grill` response — the trust-seam list contract. */
+export const HitlGrillResponseSchema = z
+  .object({
+    items: z.array(HitlGrillRowSchema),
+    /** Asserted-emptiness evidence: the count of issues the lookup scanned. */
+    scanned: z.number().int().nonnegative(),
+    /**
+     * `items.length >= HITL_GRILL_CAP` — the producer's parking cap is
+     * reached, precomputed from this same read (never a second network call
+     * to a producer's own cap check).
+     */
+    capReached: z.boolean(),
+    sourcesOk: z.boolean(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type HitlGrillResponse = z.infer<typeof HitlGrillResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // Issue-lifecycle actions (issue #4010, ADR-0034 §7)
 // ---------------------------------------------------------------------------
 
@@ -221,7 +288,24 @@ export const BoardRelabelActionSchema = z
   })
   .strict();
 
-/** `POST /autopilot/board/close` + `/reopen` body (immediate-tier). */
+/**
+ * `POST /autopilot/board/close` body (immediate-tier). The OPTIONAL `reason`
+ * rides `gh issue close --reason` verbatim (issue #4028: the hitl-grill lane's
+ * Dismiss verdict closes `"not planned"`); omitted preserves #4010's plain
+ * close. Constrained to GitHub's own close-reason vocabulary so an
+ * off-vocabulary literal is a 400 before any write.
+ */
+export const BOARD_CLOSE_REASONS = ["completed", "not planned"] as const;
+export type BoardCloseReason = (typeof BOARD_CLOSE_REASONS)[number];
+
+export const BoardCloseActionSchema = z
+  .object({
+    issue: z.number().int().positive(),
+    reason: z.enum(BOARD_CLOSE_REASONS).optional(),
+  })
+  .strict();
+
+/** `POST /autopilot/board/reopen` body (immediate-tier). */
 export const BoardIssueRefSchema = z
   .object({
     issue: z.number().int().positive(),
