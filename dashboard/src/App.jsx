@@ -1,9 +1,10 @@
-import { Routes, Route, useSearchParams } from "react-router-dom";
+import { Routes, Route, useSearchParams, useParams, Navigate } from "react-router-dom";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 import { ToastProvider } from "./hooks/useToast.jsx";
 import Layout from "./components/Layout.jsx";
 import Today from "./pages/Today.jsx";
 import Health from "./pages/Health.jsx";
+import Runs from "./pages/Runs.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
 import NowPixel from "./pages/now-pixel/NowPixel.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
@@ -83,6 +84,20 @@ function NowRoute({ ws }) {
   );
 }
 
+/**
+ * LegacyRunRedirect — `/autopilot/:runId` → `/runs/:runId` (issue #4009,
+ * INV-5). ADR-0034's consequence: "deep links break … redirects map to the
+ * pages that absorbed their content." The run detail now lives in the /runs
+ * forensics spine; the old deep link (HistoryTable rows, bookmarks, chat
+ * references) must still resolve, so it redirects rather than 404s. Parameter
+ * is forwarded verbatim — a redirect that dropped it would break the link it
+ * exists to preserve.
+ */
+function LegacyRunRedirect() {
+  const { runId } = useParams();
+  return <Navigate replace to={runId ? `/runs/${runId}` : "/runs"} />;
+}
+
 export default function App() {
   const ws = useWebSocket();
 
@@ -100,8 +115,13 @@ export default function App() {
           {/* Dashboard v3 (ADR-0034 §2) — the weekly journey, slice zeta (#4011). */}
           <Route path="/builder" element={<Builder />} />
           <Route path="/explore/:tab" element={<Explore />} />
-          {/* Slice 4 (issue #500) — per-run autopilot detail page. */}
-          <Route path="/autopilot/:runId" element={<Autopilot />} />
+          {/* Dashboard v3 (ADR-0034 §2) — the forensics journey, slice delta
+              (#4009): runs list → run detail → transcript. */}
+          <Route path="/runs" element={<Runs />} />
+          <Route path="/runs/:runId" element={<Autopilot />} />
+          {/* Legacy deep link (was the run detail's only home until #4009) —
+              redirect, never 404 (INV-5). */}
+          <Route path="/autopilot/:runId" element={<LegacyRunRedirect />} />
           {/* Issue #695 — subagent transcript viewer (deep-linkable). */}
           <Route path="/dispatch/:dispatchId/transcript" element={<DispatchTranscript />} />
         </Routes>
