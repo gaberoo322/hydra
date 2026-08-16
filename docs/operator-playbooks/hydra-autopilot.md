@@ -700,6 +700,44 @@ to do. The L2 decision brain in `decide.py` benefits from a stable in-process
 view of pipeline state across many turns, so the Gate launches one long run
 and lets it run to budget/clock/idle rather than firing many short bursts.
 
+**Operator pause vs. stopping the Pace Gate (issue #3868).** These are two
+different stop levers with different blast radius — pick the one that matches
+what you actually want to stop:
+
+- **`POST /api/autopilot/paused` (operator pause, #988) stops EVERYTHING**,
+  including the GLM drainer's free lane (`drainer-loop.sh` honors
+  `paused=true` too, ADR-0032 Decision 6). During the 2026-08-05 cost-emergency
+  shutdown the drainer sat idle for days while ~30 glm-eligible issues queued,
+  because `paused` was the lever used — the correct choice for "stop all spend,
+  including the free lane" but the wrong one if the goal is only "stop new
+  Claude AFK runs, keep the drainer draining."
+- **`systemctl --user stop hydra-pace-gate.timer` stops ONLY the Claude AFK
+  admission path** — no new `hydra-autopilot.service` runs launch, but the GLM
+  drainer (`hydra-glm-drainer.timer`) is untouched and keeps claiming and
+  authoring glm-eligible issues on z.ai.
+
+Use `paused` for a full stop (including free-lane spend); stop the pace-gate
+timer for a Claude-only stop that leaves the drainer running.
+
+**GLM drainer zero-throughput alarm (issue #3868).** The watchdog's
+`## GLM DRAINER ZERO-THROUGHPUT` block (`scripts/hydra-watchdog.sh`,
+`run_glm_zero_throughput`) closes the gap the pause/pace-gate levers above
+don't cover: a drainer heartbeat can stay fresh while the drainer itself is
+"live but sterile" — claiming issues but never landing a PR (observed
+2026-08-05, #3863: `gh pr create` failed on every attempt for ~40 min with no
+alarm, because the existing liveness check watches the heartbeat, not
+throughput). On each 2-minute tick the block reads the drainer's heartbeat
+(`hydra:glm:drainer:active`) plus a bounded recent window of
+`journalctl --user -u hydra-glm-drainer.service`, and fires
+`WARNING GLM ZERO-THROUGHPUT` (once, until recovery) when the heartbeat is
+fresh AND at least `HYDRA_WATCHDOG_GLM_ZERO_THROUGHPUT_CLAIMS` (default 3)
+claim attempts in the window produced zero `"PR opened"` lines — distinct from
+both a stale heartbeat (down, the existing liveness alarm's job) and a fresh
+heartbeat with no claims at all (no work queued). Detection only, matching the
+`## LAUNCH FLOW` block's contract — see `journalctl --user -u
+hydra-watchdog.service` for the alarm; there is no push/Telegram delivery for
+this signal yet (a future slice, mirroring #3847 -> #3848's split).
+
 ## Slot lifecycle events (issue #509)
 
 Subagent slot accounting is event-driven: `SubagentStop` and `Notification` hooks XADD events onto `hydra:autopilot:slot-events`; `collect-state.sh` drains it each turn; `decide.py` translates `subagent_stop` events into completions and appends failures to `state.failure_log`. A silent-wedge wall-clock fallback (`subagent_max_wall_seconds=3600`) covers hook failures. Full event schema, turn-consumption detail, env overrides, and best-effort guarantees are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).

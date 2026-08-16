@@ -1,0 +1,1 @@
+- feat: watchdog alarms when the GLM drainer is live but sterile (heartbeat fresh, no PRs landing) (#3868)
