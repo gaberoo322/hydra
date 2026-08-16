@@ -150,20 +150,26 @@ export async function removeIssueLabel(
 }
 
 /**
- * Close ONE issue — the native `gh issue close`. No comment is posted (the
- * action's result is verified by the post-write re-read, not by prose).
+ * Close ONE issue — the native `gh issue close`, with GitHub's own optional
+ * close-reason vocabulary (`--reason completed | "not planned"`, issue #4028:
+ * the /work hitl-grill lane's Dismiss verdict closes `not planned`). The
+ * accepted literals are constrained at the route's request schema
+ * (`BOARD_CLOSE_REASONS`); this primitive stays a thin pass-through so it
+ * mirrors `removeIssueLabel`'s `(number, label, opts)` argument order. No
+ * comment is posted (the action's result is verified by the post-write
+ * re-read, not by prose).
  */
 export async function closeIssue(
   issueNumber: number,
+  reason?: string,
   opts: IssueActionOptions = {},
 ): Promise<IssueActionWriteResult> {
   const repo = resolveGithubRepo(opts.repo);
   if (!repo) return { ok: true };
   const transport: IssueActionTransport = opts.transport ?? ghExec;
-  const res = await transport(
-    ["issue", "close", String(issueNumber), "--repo", repo],
-    execOpts(opts),
-  );
+  const args = ["issue", "close", String(issueNumber), "--repo", repo];
+  if (reason) args.push("--reason", reason);
+  const res = await transport(args, execOpts(opts));
   if (res.ok === false) return writeFailure(res);
   return { ok: true };
 }

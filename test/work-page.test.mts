@@ -22,6 +22,13 @@
  *      (INV-7/INV-8), and anchor-distribution's boundary-stamped trust
  *      fields (INV-4).
  *
+ * Slice 4 (issue #4028 — the hitl-grill lane) extends all three bands in the
+ * same shapes: the pure lane projections (park-reason parse, provenance,
+ * oldest-first), the GET /autopilot/hitl-grill read + the promote/close
+ * extensions (atomic grill strip, not-planned close reason), and structural
+ * pins for HitlGrillLane.jsx's trust-seam wiring and its INV-6 separation
+ * from the #4007 attention feed.
+ *
  * Lifecycle: top-level describes with their OWN before/after (per the
  * CLAUDE.md shared-Redis-teardown authoring rule — nothing here nests under
  * a sibling suite's after(), and no Redis is opened at all: every HTTP test
@@ -39,7 +46,12 @@ import {
   compareWorkQueueRows,
   evaluatePromoteEligibility,
   computeRelabelTransitions,
+  parseParkReason,
+  toHitlGrillRow,
+  compareHitlGrillRows,
 } from "../src/api/autopilot-board.ts";
+import { closeIssue } from "../src/github/issue-actions.ts";
+import { HITL_GRILL_CAP, HITL_GRILL_LABEL } from "../src/schemas/autopilot-board.ts";
 import {
   hasScopeSection,
   extractScopeFromBody,
@@ -97,6 +109,28 @@ function issue(overrides: any = {}): any {
     updatedAt: "2026-08-10T00:00:00Z",
     ...overrides,
   };
+}
+
+/**
+ * One PARKED-issue fixture — the park body schema
+ * docs/operator-playbooks/hydra-architecture-scan.md step 4c writes: the two
+ * hard labels (`hitl-grill` + the producer's provenance label) and the
+ * blockquoted `> Reason:` line, over a body that also carries the
+ * `## Files in scope` section promotion later requires.
+ */
+function parked(overrides: any = {}): any {
+  return issue({
+    number: 77,
+    title: "hitl-grill: something worth exploring",
+    labels: ["hitl-grill", "architecture-scan"],
+    body:
+      "# hitl-grill: something worth exploring\n\n" +
+      "> Parked by `/hydra-architecture-scan` on 2026-08-14 against the Orchestrator (~/hydra).\n" +
+      "> Reason: Worth exploring.\n\n" +
+      "## Problem\n\nFriction.\n\n" +
+      "## Files in scope\n\n- `src/a.ts`",
+    ...overrides,
+  });
 }
 
 /** A view() seam over a scripted row sequence; the string "FAIL" fails. */
@@ -681,7 +715,9 @@ describe("POST /autopilot/board/close + /reopen — immediate-tier state writes"
     await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
     assert.equal(res._body.ok, true);
     assert.equal(res._body.verified.state, "CLOSED");
-    assert.deepEqual(close.calls, [[5]]);
+    // #4028: the close write now carries the optional reason slot — undefined
+    // when the body omitted it (the plain-close shape).
+    assert.deepEqual(close.calls, [[5, undefined]]);
   });
 
   test("close whose post state stays OPEN → write-unverified", async () => {
@@ -728,6 +764,395 @@ describe("POST /autopilot/board/close + /reopen — immediate-tier state writes"
 });
 
 // ---------------------------------------------------------------------------
+// GET /autopilot/hitl-grill — the lane read (issue #4028 slice 4)
+// ---------------------------------------------------------------------------
+
+describe("GET /autopilot/hitl-grill — the parked-idea inbox read", () => {
+  function routerWith(readHitl: any, overrides: any = {}) {
+    return createAutopilotBoardRouter({
+      readHitlGrillIssues: readHitl,
+      ...overrides,
+    });
+  }
+
+  test("projects ONLY open hitl-grill rows, oldest first, with trust fields + parsed reason", async () => {
+    const router = routerWith(async () => ({
+      ok: true,
+      rows: [
+        parked({ number: 3, createdAt: "2026-08-12T00:00:00Z" }),
+        parked({ number: 1, createdAt: "2026-08-02T00:00:00Z" }),
+        parked({ number: 2, createdAt: "2026-08-07T00:00:00Z" }),
+        parked({ number: 4, state: "CLOSED" }), // closed park: dropped
+        issue({ number: 5, labels: ["needs-triage"] }), // not parked: dropped
+      ],
+    }));
+    const handler = findHandler(router, "GET", "/autopilot/hitl-grill");
+    assert.ok(handler, "GET /autopilot/hitl-grill route not found");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._status, 200);
+    assert.deepEqual(
+      res._body.items.map((r: any) => r.number),
+      [1, 2, 3], // oldest createdAt first
+    );
+    assert.equal(res._body.items[0].provenance.length, 1);
+    assert.equal(res._body.items[0].reason, "Worth exploring.");
+    assert.equal(res._body.scanned, 5); // the lookup ran over every row read
+    assert.equal(res._body.capReached, false);
+    assert.equal(res._body.sourcesOk, true);
+    assert.ok(Number.isFinite(Date.parse(res._body.generatedAt)));
+  });
+
+  test("cap indicator: 9 open parks → capReached false", async () => {
+    const rows = Array.from({ length: 9 }, (_, i) =>
+      parked({ number: i + 1, createdAt: `2026-08-0${i + 1}T00:00:00Z` }),
+    );
+    const router = routerWith(async () => ({ ok: true, rows }));
+    const handler = findHandler(router, "GET", "/autopilot/hitl-grill");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._body.items.length, 9);
+    assert.equal(res._body.capReached, false);
+  });
+
+  test("cap indicator: 10 open parks → capReached true (the producer has stopped parking)", async () => {
+    const rows = Array.from({ length: 10 }, (_, i) =>
+      parked({ number: i + 1, createdAt: `2026-08-0${i + 1}T00:00:00Z` }),
+    );
+    const router = routerWith(async () => ({ ok: true, rows }));
+    const handler = findHandler(router, "GET", "/autopilot/hitl-grill");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._body.items.length, 10);
+    assert.equal(res._body.capReached, true);
+    assert.equal(HITL_GRILL_CAP, 10); // the threshold the indicator derives from
+  });
+
+  test("degraded read → sourcesOk:false with an EMPTY lane (UNKNOWN, not a confident empty)", async () => {
+    const router = routerWith(async () => ({ ok: false, code: "gh-failed" }));
+    const handler = findHandler(router, "GET", "/autopilot/hitl-grill");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._status, 200); // never-throw: degraded IS the safe default
+    assert.equal(res._body.sourcesOk, false);
+    assert.equal(res._body.scanned, 0);
+    assert.deepEqual(res._body.items, []);
+    assert.equal(res._body.capReached, false);
+  });
+
+  test("a reader that THROWS degrades too (never-throw contract)", async () => {
+    const router = routerWith(async () => {
+      throw new Error("boom");
+    });
+    const handler = findHandler(router, "GET", "/autopilot/hitl-grill");
+    const res = mockRes();
+    await handler!(mockReq(), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.sourcesOk, false);
+    assert.deepEqual(res._body.items, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /autopilot/board/promote — the atomic grill strip (issue #4028 slice 4)
+// ---------------------------------------------------------------------------
+
+describe("POST /autopilot/board/promote — hitl-grill strip is atomic + verified", () => {
+  function routerWith(overrides: any) {
+    return createAutopilotBoardRouter({
+      resolveOpenBlockers: async () => new Set(),
+      ...overrides,
+    });
+  }
+
+  test("pre-state carries hitl-grill → add ready-for-agent AND remove hitl-grill in ONE write set", async () => {
+    const add = recorder();
+    const remove = recorder();
+    const router = routerWith({
+      view: seqView([
+        parked({ number: 42, labels: ["hitl-grill", "architecture-scan"] }),
+        parked({ number: 42, labels: ["ready-for-agent", "architecture-scan"] }),
+      ]),
+      addLabel: add.fn,
+      removeLabel: remove.fn,
+    });
+    const handler = findHandler(router, "POST", "/autopilot/board/promote");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ok, true);
+    assert.deepEqual(add.calls, [[42, "ready-for-agent"]]);
+    assert.deepEqual(remove.calls, [[42, "hitl-grill"]]);
+    // verified carries the OBSERVED post state — no lingering park label.
+    assert.deepEqual(res._body.verified.labels, ["ready-for-agent", "architecture-scan"]);
+  });
+
+  test("post-write state where hitl-grill LINGERS alongside ready-for-agent → write-unverified", async () => {
+    const add = recorder();
+    const remove = recorder();
+    const router = routerWith({
+      view: seqView([
+        parked({ number: 42, labels: ["hitl-grill", "architecture-scan"] }),
+        // The remove never landed: both labels present — the verify re-read
+        // must catch it, never report success.
+        parked({ number: 42, labels: ["ready-for-agent", "hitl-grill", "architecture-scan"] }),
+      ]),
+      addLabel: add.fn,
+      removeLabel: remove.fn,
+    });
+    const handler = findHandler(router, "POST", "/autopilot/board/promote");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
+    assert.equal(res._body.ok, false);
+    assert.equal(res._body.reason, "write-unverified");
+    assert.match(res._body.detail, /hitl-grill/);
+    assert.equal(add.calls.length + remove.calls.length, 2); // both writes DID fire
+  });
+
+  test("plain promote (no hitl-grill anywhere) → the single add write, byte-identical to #4010", async () => {
+    const add = recorder();
+    const remove = recorder();
+    const router = routerWith({
+      view: seqView([
+        issue({ number: 42, labels: ["needs-triage"] }),
+        issue({ number: 42, labels: ["ready-for-agent", "needs-triage"] }),
+      ]),
+      addLabel: add.fn,
+      removeLabel: remove.fn,
+    });
+    const handler = findHandler(router, "POST", "/autopilot/board/promote");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
+    assert.equal(res._body.ok, true);
+    assert.deepEqual(add.calls, [[42, "ready-for-agent"]]);
+    assert.equal(remove.calls.length, 0); // no gratuitous strip write
+  });
+
+  test("a parked issue whose body lacks a scope section → the SAME missing-scope-section refusal (no new gate)", async () => {
+    const add = recorder();
+    const remove = recorder();
+    const router = routerWith({
+      view: seqView([
+        parked({
+          number: 42,
+          body: "# hitl-grill: x\n\n> Reason: Worth exploring.\n\nNo scope section.",
+        }),
+      ]),
+      addLabel: add.fn,
+      removeLabel: remove.fn,
+    });
+    const handler = findHandler(router, "POST", "/autopilot/board/promote");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 42, confirm: true } }), res);
+    assert.equal(res._body.ok, false);
+    assert.equal(res._body.reason, "missing-scope-section");
+    assert.equal(add.calls.length + remove.calls.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /autopilot/board/close — the optional not-planned reason (Dismiss)
+// ---------------------------------------------------------------------------
+
+describe("POST /autopilot/board/close — optional not-planned reason (issue #4028 slice 4)", () => {
+  test("reason 'not planned' rides the write; hitl-grill is RETAINED (no label writes)", async () => {
+    const close = recorder();
+    const remove = recorder();
+    const router = createAutopilotBoardRouter({
+      view: seqView([
+        parked({ number: 5, labels: ["hitl-grill", "architecture-scan"], state: "OPEN" }),
+        parked({ number: 5, labels: ["hitl-grill", "architecture-scan"], state: "CLOSED" }),
+      ]),
+      close: close.fn,
+      removeLabel: remove.fn,
+    });
+    const handler = findHandler(router, "POST", "/autopilot/board/close");
+    const res = mockRes();
+    await handler!(
+      mockReq({ method: "POST", body: { issue: 5, reason: "not planned" } }),
+      res,
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.ok, true);
+    assert.equal(res._body.verified.state, "CLOSED");
+    assert.deepEqual(close.calls, [[5, "not planned"]]);
+    // Dismiss NEVER strips the label — retained for audit + producer dedup.
+    assert.equal(remove.calls.length, 0);
+  });
+
+  test("reason omitted → the write carries no reason (back-compat with #4010's plain close)", async () => {
+    const close = recorder();
+    const router = createAutopilotBoardRouter({
+      view: seqView([
+        issue({ number: 5, state: "OPEN" }),
+        issue({ number: 5, state: "CLOSED" }),
+      ]),
+      close: close.fn,
+    });
+    const handler = findHandler(router, "POST", "/autopilot/board/close");
+    const res = mockRes();
+    await handler!(mockReq({ method: "POST", body: { issue: 5 } }), res);
+    assert.equal(res._body.ok, true);
+    assert.deepEqual(close.calls, [[5, undefined]]);
+  });
+
+  test("an off-vocabulary reason → 400 schema-validation-failed before any write", async () => {
+    const close = recorder();
+    const router = createAutopilotBoardRouter({ view: seqView([]), close: close.fn });
+    const handler = findHandler(router, "POST", "/autopilot/board/close");
+    const res = mockRes();
+    await handler!(
+      mockReq({ method: "POST", body: { issue: 5, reason: "duplicate" } }),
+      res,
+    );
+    assert.equal(res._status, 400);
+    assert.equal(res._body.code, "schema-validation-failed");
+    assert.equal(close.calls.length, 0);
+  });
+
+  test("reopen keeps the bare issue-ref body (no reason field there)", async () => {
+    const reopen = recorder();
+    const router = createAutopilotBoardRouter({
+      view: seqView([
+        issue({ number: 5, state: "CLOSED" }),
+        issue({ number: 5, state: "OPEN" }),
+      ]),
+      reopen: reopen.fn,
+    });
+    const handler = findHandler(router, "POST", "/autopilot/board/reopen");
+    const res = mockRes();
+    await handler!(
+      mockReq({ method: "POST", body: { issue: 5, reason: "not planned" } }),
+      res,
+    );
+    // Reopen never accepted a reason: the strict schema rejects the extra key.
+    assert.equal(res._status, 400);
+    assert.equal(res._body.code, "schema-validation-failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// closeIssue — the --reason argv primitive (issue #4028 slice 4)
+// ---------------------------------------------------------------------------
+
+describe("closeIssue — the optional --reason argv", () => {
+  function transportRecorder() {
+    const calls: any[][] = [];
+    const transport: any = async (args: any[], _opts: any) => {
+      calls.push(args);
+      return { ok: true, stdout: "", stderr: "" };
+    };
+    return { transport, calls };
+  }
+
+  test("reason 'not planned' → gh issue close --reason 'not planned'", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await closeIssue(5, "not planned", {
+      repo: "gaberoo322/hydra",
+      transport,
+    });
+    assert.deepEqual(res, { ok: true });
+    assert.deepEqual(calls, [
+      ["issue", "close", "5", "--repo", "gaberoo322/hydra", "--reason", "not planned"],
+    ]);
+  });
+
+  test("no reason → the argv carries no --reason flag (the #4010 shape)", async () => {
+    const { transport, calls } = transportRecorder();
+    const res = await closeIssue(5, undefined, {
+      repo: "gaberoo322/hydra",
+      transport,
+    });
+    assert.deepEqual(res, { ok: true });
+    assert.equal(calls[0].includes("--reason"), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseParkReason / toHitlGrillRow / compareHitlGrillRows — the hitl-grill
+// lane's pure projections (issue #4028 slice 4)
+// ---------------------------------------------------------------------------
+
+describe("parseParkReason — the park-reason parser", () => {
+  test("today's signal: the blockquoted '> Reason:' line of the park body", () => {
+    const body =
+      "> Parked by `/hydra-architecture-scan` on 2026-08-14 against the Orchestrator (~/hydra).\n" +
+      "> Reason: Worth exploring.";
+    assert.equal(parseParkReason(body), "Worth exploring.");
+  });
+
+  test("a future producer's explicit 'Recommendation strength:' line WINS over '> Reason:'", () => {
+    const body =
+      "> Reason: Worth exploring.\n\nRecommendation strength: promising";
+    assert.equal(parseParkReason(body), "promising");
+  });
+
+  test("neither marker → blank, never a fabricated reason", () => {
+    assert.equal(parseParkReason(""), "");
+    assert.equal(parseParkReason("## Why parked\n\nJust prose, no marker."), "");
+    // An UNQUOTED bare `Reason:` line is not today's producer's shape — the
+    // parser must not free-associate a reason out of arbitrary prose.
+    assert.equal(parseParkReason("Reason: not a park body"), "");
+  });
+
+  test("captures the full multi-word reason text (Untouchable Core shape)", () => {
+    const body =
+      "> Reason: primary change touches the Untouchable Core (src/untouchable.ts protected paths).";
+    assert.equal(
+      parseParkReason(body),
+      "primary change touches the Untouchable Core (src/untouchable.ts protected paths).",
+    );
+  });
+});
+
+describe("toHitlGrillRow — lane projection (open hitl-grill only)", () => {
+  test("projects number/title/url/createdAt, provenance labels, and the parsed reason", () => {
+    const row = toHitlGrillRow(parked({ number: 77, createdAt: "2026-08-14T00:00:00Z" }));
+    assert.ok(row);
+    assert.equal(row!.number, 77);
+    assert.equal(row!.title, "hitl-grill: something worth exploring");
+    assert.equal(row!.url, parked().url);
+    assert.equal(row!.createdAt, "2026-08-14T00:00:00Z");
+    // Provenance = every label except the hitl-grill lane label itself.
+    assert.deepEqual(row!.provenance, ["architecture-scan"]);
+    assert.equal(row!.reason, "Worth exploring.");
+  });
+
+  test("an issue NOT carrying hitl-grill → null (never in the lane)", () => {
+    assert.equal(
+      toHitlGrillRow(parked({ labels: ["needs-triage", "architecture-scan"] })),
+      null,
+    );
+  });
+
+  test("a CLOSED hitl-grill issue → null (the lane lists ONLY open parks)", () => {
+    assert.equal(toHitlGrillRow(parked({ state: "CLOSED" })), null);
+  });
+
+  test("hitl-grill as the only label → empty provenance, still a lane row", () => {
+    const row = toHitlGrillRow(parked({ labels: [HITL_GRILL_LABEL] }));
+    assert.ok(row);
+    assert.deepEqual(row!.provenance, []);
+  });
+});
+
+describe("compareHitlGrillRows — oldest createdAt first", () => {
+  test("older park sorts ahead", () => {
+    const older = { createdAt: "2026-08-01T00:00:00Z" } as any;
+    const newer = { createdAt: "2026-08-09T00:00:00Z" } as any;
+    assert.ok(compareHitlGrillRows(older, newer) < 0);
+    assert.ok(compareHitlGrillRows(newer, older) > 0);
+  });
+
+  test("unparseable createdAt sorts LAST, never ahead of a dated row", () => {
+    const undated = { createdAt: "" } as any;
+    const dated = { createdAt: "2026-08-01T00:00:00Z" } as any;
+    assert.ok(compareHitlGrillRows(undated, dated) > 0);
+    assert.ok(compareHitlGrillRows(dated, undated) < 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // projectAnchorDistribution — the pure projection stays boundary-free (INV-4)
 // ---------------------------------------------------------------------------
 
@@ -760,10 +1185,11 @@ describe("structural pins — /work page wiring", () => {
     assert.match(src, /import Work from "\.\/pages\/Work\.jsx"/);
   });
 
-  test("Work.jsx is the two-panel shell — board + rationale, nothing else (INV-1)", async () => {
+  test("Work.jsx is the page shell — board, hitl-grill inbox, rationale (INV-1)", async () => {
     const src = await readSource("../dashboard/src/pages/Work.jsx");
     assert.match(src, /BoardState/);
     assert.match(src, /AnchorRationale/);
+    assert.match(src, /HitlGrillLane/);
     // INV-1: no run history or failure detail on this page.
     assert.equal(src.includes("/autopilot/runs"), false);
     assert.equal(src.includes("/runs/"), false);
@@ -799,6 +1225,53 @@ describe("structural pins — /work page wiring", () => {
     assert.match(src, /\/metrics\/anchor-distribution/);
     assert.match(src, /itemsKey: "distribution"/);
     assert.equal(src.includes("/autopilot/runs"), false);
+  });
+
+  test("HitlGrillLane.jsx rides the trust seam + both verdicts + the cap indicator (#4028)", async () => {
+    const src = await readSource(
+      "../dashboard/src/components/pages/work/HitlGrillLane.jsx",
+    );
+    // The same trust idiom BoardState uses: usePageItems + Section, the
+    // sourcesOk-driven statuses, generatedAt always visible.
+    assert.match(src, /usePageItems\(/);
+    assert.match(src, /\/autopilot\/hitl-grill/);
+    assert.match(src, /generatedAt=\{lane\.data\?\.generatedAt\}/);
+    assert.match(src, /unknown=\{lane\.status === "unknown"\}/);
+    assert.match(src, /stale=\{lane\.status === "stale"\}/);
+    // Grill: confirm-first, reusing the promote verb + its confirm:true body.
+    assert.match(src, /data-testid="hitl-grill-arm"/);
+    assert.match(src, /data-testid="hitl-grill-confirm-yes"/);
+    assert.match(src, /data-testid="hitl-grill-confirm-no"/);
+    assert.match(src, /\/autopilot\/board\/promote/);
+    assert.match(src, /confirm: true/);
+    // Dismiss: closes not planned, no label writes (the label is retained).
+    assert.match(src, /data-testid="hitl-grill-dismiss"/);
+    assert.match(src, /reason: "not planned"/);
+    // The cap indicator derives from the SAME read's precomputed boolean.
+    assert.match(src, /data-testid="hitl-grill-cap"/);
+    assert.match(src, /capReached/);
+    // Verified outcomes surface verbatim (ADR-0034 §7).
+    assert.match(src, /actionResult\.reason/);
+    assert.match(src, /actionResult\.verified/);
+    assert.match(src, /lane\.refresh\(\)/);
+    // INV-1: no run history or failure detail.
+    assert.equal(src.includes("/autopilot/runs"), false);
+  });
+
+  test("the lane is structurally separate from the #4007 attention feed (INV-6)", async () => {
+    const laneSrc = await readSource(
+      "../dashboard/src/components/pages/work/HitlGrillLane.jsx",
+    );
+    const feedSrc = await readSource(
+      "../dashboard/src/components/pages/today/AttentionFeed.jsx",
+    );
+    // No shared lane component, no merged data source: neither file IMPORTS
+    // the other, and the feed never reads the hitl-grill lane's endpoint.
+    // (Prose mentions are fine — the invariant is about wiring, not naming.)
+    assert.equal(/from "[^"]*AttentionFeed/.test(laneSrc), false);
+    assert.equal(/from "[^"]*HitlGrillLane/.test(feedSrc), false);
+    assert.equal(feedSrc.includes("hitl-grill"), false);
+    assert.equal(laneSrc.includes("/autopilot/hitl-grill"), true);
   });
 
   test("metrics.ts stamps generatedAt + sourcesOk at the anchor-distribution boundary (INV-4)", async () => {
