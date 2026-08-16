@@ -510,6 +510,9 @@ describe("reap.py completion → closed-anchor short-circuit (issue #4057)", () 
       });
       assert.equal(r.status, 0);
 
+      const log = runLog(tmp);
+      assert.ok(!log.includes("dev_stall_no_pr"), "unparseable state must never be treated as a stall");
+
       const calls = ghCalls(tmp);
       assert.ok(
         !calls.some((c) => c.startsWith("issue edit")),
