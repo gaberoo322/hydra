@@ -252,6 +252,23 @@ const ENTRY_RE =
   /^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?(\*\*|__|\*|_)?INV[\s-]?(\d+)(?![0-9A-Za-z])\1\s*[:.–—-]?\s*(.*)$/;
 
 /**
+ * Labelled same-line hash finder — `Artifact: `8c0dfe60…``, `artifact hash =
+ * 8c0dfe60…` (case-insensitive, backticks optional). This is the ORIGINAL
+ * (#3740) matching strategy and stays PRIMARY; the label-adjacent fallback in
+ * {@link parseReconciliationSection} only runs when it finds nothing.
+ */
+const LABELLED_HASH_RE = /artifact(?:\s*hash)?\s*[:=]\s*`?([0-9a-fA-F]{8,64})`?/i;
+
+/**
+ * A line that OPENS a hash citation (`Artifact:` / `artifact hash =`) whether
+ * or not a hash follows on that same line.
+ */
+const HASH_LABEL_RE = /artifact(?:\s*hash)?\s*[:=]/i;
+
+/** A hash token on its own line — backticks optional (issue #4101 wrap form). */
+const BARE_HASH_RE = /`?([0-9a-fA-F]{8,64})`?/i;
+
+/**
  * Parse the reconciliation section into a cited artifact hash plus one entry
  * per `- INV-<n>` bullet. A bullet may wrap: any following indented, non-empty,
  * non-heading, non-bullet line is joined onto it with a single space.
@@ -268,7 +285,7 @@ export function parseReconciliationSection(body: string): ParsedSection {
     const line = lines[i];
 
     if (artifactHash === null) {
-      const h = /artifact(?:\s*hash)?\s*[:=]\s*`?([0-9a-fA-F]{8,64})`?/i.exec(line);
+      const h = LABELLED_HASH_RE.exec(line);
       if (h) artifactHash = h[1].toLowerCase();
     }
 
@@ -295,6 +312,27 @@ export function parseReconciliationSection(body: string): ParsedSection {
       assertion: extractAssertionText(text),
       raw: text.trim(),
     });
+  }
+
+  // Label-adjacent next-line fallback (issue #4101): a fully-compliant section
+  // can wrap — the `Artifact:` / `artifact hash:` label ends its line and the
+  // hash lands on the NEXT line (PR #4100 reddened the required `test` job on
+  // exactly this shape, quoting the very hash the body already contained).
+  // Reaching here means the same-line finder located no hash ANYWHERE, so every
+  // label line by construction carries none on its own line. Resolution is
+  // deliberately BOUNDED to the line IMMEDIATELY following a label line — no
+  // unbounded full-section hex scan (#4101 design-concept INV-2) — and
+  // hashesMatch still validates whatever is found, so widening the finder
+  // never weakens the check.
+  if (artifactHash === null) {
+    for (let i = 0; i + 1 < lines.length; i++) {
+      if (!HASH_LABEL_RE.test(lines[i])) continue;
+      const h = BARE_HASH_RE.exec(lines[i + 1]);
+      if (h) {
+        artifactHash = h[1].toLowerCase();
+        break;
+      }
+    }
   }
 
   return { present: true, artifactHash, entries };
@@ -381,6 +419,24 @@ export function hashesMatch(cited: string, actual: string): boolean {
   const a = stripBackticks(actual).toLowerCase();
   if (c.length < MIN_HASH_PREFIX) return false;
   return a.startsWith(c);
+}
+
+/**
+ * Message-time companion diagnostic (issue #4101, item 3): when the finder
+ * could not read a hash, does the section nonetheless contain a hex run the
+ * LIVE artifact hash starts with? Message-only — the return never feeds
+ * {@link ParsedSection.artifactHash}, so it cannot widen hash *resolution*
+ * (which the #4101 design concept bounds to label lines and their immediate
+ * successor); it only stops the gate from telling an author "you cited no
+ * hash" about a body that visibly contains the correct one.
+ */
+export function findCorrectHashMention(section: string, liveHash: string): string | null {
+  const live = (liveHash ?? "").toLowerCase();
+  if (live.length === 0) return null;
+  for (const m of (section ?? "").matchAll(/[0-9a-fA-F]{8,64}/g)) {
+    if (live.startsWith(m[0].toLowerCase())) return m[0];
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -593,14 +649,23 @@ export function checkReconciliation(input: ReconcileInput): Violation[] {
   }
 
   if (parsed.artifactHash === null) {
+    // Companion diagnostic (issue #4101, item 3): when the correct hash IS in
+    // the section but not in a position the finder reads, say that — "cites no
+    // artifact hash" is misleading about a body that visibly contains it.
+    const correctMention = findCorrectHashMention(extractReconciliationSection(prBody) ?? "", artifactHash);
     violations.push({
       code: "missing-artifact-hash",
       invariantIndex: null,
       invariant: null,
-      message:
-        `The reconciliation section cites no artifact hash. Add a line ` +
-        `"Artifact: \`${artifactHash.slice(0, 12)}\`" so the gate can prove the reconciliation was ` +
-        `written against the CURRENT artifact.`,
+      message: correctMention
+        ? `The reconciliation section cites no artifact hash the gate can read — the correct hash ` +
+          `("${correctMention.toLowerCase().slice(0, 12)}…") appears in the section, but not on an ` +
+          `"Artifact:" line and not on the line immediately following one. Cite it on the label line, ` +
+          `e.g. "Artifact: \`${artifactHash.slice(0, 12)}\`", so the gate can prove the reconciliation ` +
+          `was written against the CURRENT artifact.`
+        : `The reconciliation section cites no artifact hash. Add a line ` +
+          `"Artifact: \`${artifactHash.slice(0, 12)}\`" so the gate can prove the reconciliation was ` +
+          `written against the CURRENT artifact.`,
     });
   } else if (!hashesMatch(parsed.artifactHash, artifactHash)) {
     violations.push({
