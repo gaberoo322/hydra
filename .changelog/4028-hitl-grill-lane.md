@@ -1,0 +1,1 @@
+- feat: /work gains the hitl-grill inbox — grill parked ideas into ready-for-agent or dismiss them as not planned (#4028)

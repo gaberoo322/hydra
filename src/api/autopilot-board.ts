@@ -47,9 +47,12 @@ import {
   AutopilotBoardStateQuerySchema,
   BoardPromoteActionSchema,
   BoardRelabelActionSchema,
+  BoardCloseActionSchema,
   BoardIssueRefSchema,
   WORK_QUEUE_LANES,
   RELABEL_TARGETS,
+  HITL_GRILL_LABEL,
+  HITL_GRILL_CAP,
   type AutopilotBoardStateResponse,
   type BoardStateScope,
   type BoardActionResponse,
@@ -57,9 +60,11 @@ import {
   type WorkQueueRow,
   type WorkQueueLane,
   type RelabelTarget,
+  type HitlGrillRow,
 } from "../schemas/autopilot-board.ts";
 import {
   listOpenIssues,
+  listIssuesByLabel,
   addIssueLabel,
   ISSUE_JSON_FIELDS,
   type IssueRow,
@@ -257,6 +262,61 @@ export function computeRelabelTransitions(
 }
 
 // ---------------------------------------------------------------------------
+// Pure hitl-grill projections (issue #4028 slice 4) — exported for tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a parked idea's reason out of its body. The shipped producers write a
+ * blockquoted `> Reason: <…>` line (`docs/operator-playbooks/
+ * hydra-architecture-scan.md` step 4c park-body schema); an explicit
+ * `Recommendation strength:` line anywhere wins first so a future producer
+ * that emits the literal field is picked up without a lane rewrite. Blank
+ * when neither marker is present — never a fabricated reason.
+ */
+export function parseParkReason(body: string): string {
+  const strength = body.match(/^\s*>?\s*Recommendation strength:\s*(.+?)\s*$/m);
+  if (strength !== null) return strength[1];
+  const parked = body.match(/^\s*>\s*Reason:\s*(.+?)\s*$/m);
+  if (parked !== null) return parked[1];
+  return "";
+}
+
+/**
+ * Project one issue into a {@link HitlGrillRow}, or null when it is not an
+ * OPEN issue carrying the {@link HITL_GRILL_LABEL} park label (the label read
+ * is label-filtered and open-by-construction; the guard is the defensive
+ * boundary so a future reader change cannot silently widen the lane).
+ * Provenance is every label except the lane label itself — the pilot producer
+ * always attaches `architecture-scan` alongside, and filtering (not
+ * hardcoding one producer) generalizes to the other feeders in epic #4024.
+ */
+export function toHitlGrillRow(row: IssueRow): HitlGrillRow | null {
+  if (row.state === "CLOSED") return null;
+  if (!row.labels.includes(HITL_GRILL_LABEL)) return null;
+  return {
+    number: row.number,
+    title: row.title,
+    url: row.url,
+    provenance: row.labels.filter((l) => l !== HITL_GRILL_LABEL),
+    reason: parseParkReason(row.body),
+    createdAt: row.createdAt ?? "",
+  };
+}
+
+/**
+ * Lane ordering: oldest `createdAt` first — these are ideas waiting for a
+ * verdict, not queue rows the autopilot updates in place. Unparseable
+ * timestamps sort LAST (never ahead of a dated row).
+ */
+export function compareHitlGrillRows(a: HitlGrillRow, b: HitlGrillRow): number {
+  const ta = Date.parse(a.createdAt);
+  const tb = Date.parse(b.createdAt);
+  const na = Number.isFinite(ta) ? ta : Number.POSITIVE_INFINITY;
+  const nb = Number.isFinite(tb) ? tb : Number.POSITIVE_INFINITY;
+  return na - nb;
+}
+
+// ---------------------------------------------------------------------------
 // Router factory
 // ---------------------------------------------------------------------------
 
@@ -296,6 +356,15 @@ export interface AutopilotBoardRouterDeps {
    * never-throw catch in the handler).
    */
   glmDrainerLiveness?: (nowMs: number) => Promise<boolean>;
+  /**
+   * Reader for the open `hitl-grill` park lane (issue #4028). Defaults to the
+   * GitHub-Read seam's `listIssuesByLabel` (the discriminated reader — NOT
+   * its `…OrEmpty` wrapper, whose degrade-to-`[]` would erase the
+   * `sourcesOk:false` signal the trust seam requires) with the canonical
+   * `--json` field set, which already carries `createdAt`/`body`/`state`.
+   * Injected so the lane read is testable without a live `gh`.
+   */
+  readHitlGrillIssues?: () => Promise<IssueReadResult<IssueRow>>;
   // ---- Issue-lifecycle action seams (issue #4010, ADR-0034 §7) ------------
   // Every default is the real GitHub seam; injectable so tests drive the
   // refusal / verification matrix without a live `gh`.
@@ -311,8 +380,15 @@ export interface AutopilotBoardRouterDeps {
     issueNumber: number,
     label: string,
   ) => Promise<IssueActionWriteResult>;
-  /** Close write (default the issue-actions leaf). */
-  close?: (issueNumber: number) => Promise<IssueActionWriteResult>;
+  /**
+   * Close write (default the issue-actions leaf). The optional `reason` rides
+   * `gh issue close --reason` (issue #4028: Dismiss closes `"not planned"`);
+   * `undefined` preserves the plain close.
+   */
+  close?: (
+    issueNumber: number,
+    reason?: string,
+  ) => Promise<IssueActionWriteResult>;
   /** Reopen write (default the issue-actions leaf). */
   reopen?: (issueNumber: number) => Promise<IssueActionWriteResult>;
 }
@@ -479,6 +555,55 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     });
   });
 
+  // ---- The hitl-grill lane read (issue #4028) -----------------------------
+  //
+  // The parked-idea inbox the /work page renders upstream of the board: open
+  // `hitl-grill` issues, oldest first, with producer provenance and the
+  // parsed park reason. One label-filtered seam fetch. Trust contract mirrors
+  // the work-queue read: `sourcesOk` false on a degraded read so an
+  // unasserted empty lane renders UNKNOWN, `scanned` as the lookup-ran
+  // evidence, and `capReached` precomputed from THIS read (never a second
+  // call to a producer's own cap check).
+  router.get("/autopilot/hitl-grill", async (_req, res) => {
+    const nowMs = clock();
+    const readLane =
+      deps.readHitlGrillIssues ?? (() => defaultReadHitlGrillIssues());
+    let items: HitlGrillRow[] = [];
+    let scanned = 0;
+    let sourcesOk = true;
+
+    try {
+      const result = await readLane();
+      if (result.ok === false) {
+        sourcesOk = false;
+        logger.error(
+          { code: result.code },
+          "[autopilot/hitl-grill] gh issue list --label failed — degraded empty lane",
+        );
+      } else {
+        scanned = result.rows.length;
+        items = result.rows
+          .map((row) => toHitlGrillRow(row))
+          .filter((row): row is HitlGrillRow => row !== null)
+          .sort(compareHitlGrillRows);
+      }
+    } catch (err: any) {
+      sourcesOk = false;
+      logger.error(
+        { err },
+        "[autopilot/hitl-grill] lane read threw despite never-throw seam",
+      );
+    }
+
+    return res.json({
+      items,
+      scanned,
+      capReached: items.length >= HITL_GRILL_CAP,
+      sourcesOk,
+      generatedAt: new Date(nowMs).toISOString(),
+    });
+  });
+
   // ---- The issue-lifecycle actions (issue #4010, ADR-0034 §7) -------------
   //
   // Shared write spine: ONE pre-read → action-specific gate → writes →
@@ -493,7 +618,9 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
   const removeLabel =
     deps.removeLabel ??
     ((n: number, label: string) => removeIssueLabel(n, label));
-  const closeWrite = deps.close ?? ((n: number) => closeIssue(n));
+  const closeWrite =
+    deps.close ??
+    ((n: number, reason?: string) => closeIssue(n, reason));
   const reopenWrite = deps.reopen ?? ((n: number) => reopenIssue(n));
 
   function actionResponse(
@@ -608,12 +735,25 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
             }),
           };
         }
-        // The add side rides issues.ts's ONE proven write surface.
-        return { writes: [() => addLabel(issue, "ready-for-agent")] };
+        // The add side rides issues.ts's ONE proven write surface. When the
+        // pre-write view shows the hitl-grill park label, the grill verdict
+        // strips it in the SAME write set (issue #4028): one write-then-verify
+        // round trip, never a second network call that could half-succeed and
+        // leave the park label lingering alongside ready-for-agent. Queued
+        // only when present, so a plain promote's writes stay byte-identical.
+        const writes: Array<
+          () => Promise<IssueLabelWriteResult | IssueActionWriteResult>
+        > = [() => addLabel(issue, "ready-for-agent")];
+        if (row.labels.includes(HITL_GRILL_LABEL)) {
+          writes.push(() => removeLabel(issue, HITL_GRILL_LABEL));
+        }
+        return { writes };
       },
-      verify: (post) => post.labels.includes("ready-for-agent"),
+      verify: (post) =>
+        post.labels.includes("ready-for-agent") &&
+        !post.labels.includes(HITL_GRILL_LABEL),
       verifyMissDetail: (post) =>
-        `post-write state lacks ready-for-agent (labels: ${post.labels.join(", ") || "none"})`,
+        `post-write state does not show ready-for-agent free of hitl-grill (labels: ${post.labels.join(", ") || "none"})`,
     });
     return res.json(result);
   });
@@ -658,17 +798,21 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     return res.json(result);
   });
 
-  // POST /autopilot/board/close — immediate-tier.
+  // POST /autopilot/board/close — immediate-tier. The optional `reason` (issue
+  // #4028: the hitl-grill lane's Dismiss verdict closes "not planned") rides
+  // the write; NO label writes happen alongside it — Dismiss deliberately
+  // RETAINS hitl-grill on the closed issue for audit and the producer's dedup
+  // baseline.
   router.post("/autopilot/board/close", async (req, res) => {
-    const parsed = BoardIssueRefSchema.safeParse(req.body ?? {});
+    const parsed = BoardCloseActionSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
-    const { issue } = parsed.data;
+    const { issue, reason } = parsed.data;
     const result = await runVerifiedAction({
       action: "close",
       issue,
-      gate: async () => ({ writes: [() => closeWrite(issue)] }),
+      gate: async () => ({ writes: [() => closeWrite(issue, reason)] }),
       verify: (post) => post.state === "CLOSED",
       verifyMissDetail: (post) =>
         `post-write state is ${post.state || "(unset)"} — close unconfirmed`,
@@ -713,4 +857,14 @@ function defaultReadOpenIssues(
   repo?: string,
 ): Promise<IssueReadResult<IssueRow>> {
   return listOpenIssues({ fields: BOARD_ISSUE_FIELDS, repo });
+}
+
+/**
+ * Default hitl-grill lane reader through the GitHub-Read seam: one
+ * label-filtered open-issue fetch on the canonical `--json` field set (which
+ * already carries `createdAt`/`body`/`state` — everything the projection and
+ * the park-reason parser need). Orch-scope only, like the whole /work page.
+ */
+function defaultReadHitlGrillIssues(): Promise<IssueReadResult<IssueRow>> {
+  return listIssuesByLabel(HITL_GRILL_LABEL);
 }
