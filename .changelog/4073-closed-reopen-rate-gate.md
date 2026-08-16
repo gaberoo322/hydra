@@ -1,0 +1,2 @@
+- fix: the CLOSED→reopen escalation path now applies the same rate-vs-baseline gate as the OPEN comment-bump path for rate-gated cues, so closing a steady-rate cue's issue no longer routes the next recurrence around the gate and resurrect it days later (#4073)
+- fix: a proceeding reopen re-applies a `ready-for-human` lifecycle label, so a reopened escalation issue no longer lands carrying only `meta-friction` as an untriaged orphan (#4073)
