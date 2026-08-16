@@ -45,21 +45,37 @@ import { Router } from "express";
 
 import {
   AutopilotBoardStateQuerySchema,
+  PromoteActionBodySchema,
+  RelabelActionBodySchema,
+  IssueRefBodySchema,
   type AutopilotBoardStateResponse,
   type BoardStateScope,
+  type BoardActionResult,
+  type ReadyQueueRow,
 } from "../schemas/autopilot-board.ts";
 import {
   listOpenIssues,
+  addIssueLabel,
   ISSUE_JSON_FIELDS,
   type IssueRow,
   type IssueReadResult,
 } from "../github/issues.ts";
+import {
+  removeIssueLabel,
+  closeIssue,
+  reopenIssue,
+  viewIssueRow,
+} from "../github/issue-actions.ts";
+import { extractStrictBlockerRefs } from "../github/blockers.ts";
+import { ORCH_BOARD_LABELS } from "../board-labels.ts";
+import { extractScopeFromBody } from "../scope-section.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
   deriveBoardState,
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
 import { getGlmDrainerLiveness } from "../redis/autopilot.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -138,6 +154,73 @@ export interface AutopilotBoardRouterDeps {
    * never-throw catch in the handler).
    */
   glmDrainerLiveness?: (nowMs: number) => Promise<boolean>;
+  /**
+   * Single-issue read for the action routes' guards + post-write verification
+   * (issue #4010). Defaults to the issue-actions leaf's `viewIssueRow`
+   * (`gh issue view --json`, parsed through the seam). Injected so the action
+   * tests never spawn a real `gh`.
+   */
+  viewIssue?: (issueNumber: number) => Promise<IssueRow | null>;
+  /** Label-add write for promote/relabel. Defaults to `issues.ts`'s addIssueLabel. */
+  addLabel?: typeof addIssueLabel;
+  /** Label-remove write for promote/relabel. Defaults to the issue-actions leaf. */
+  removeLabel?: typeof removeIssueLabel;
+  /** Close write. Defaults to the issue-actions leaf. */
+  closeIssue?: typeof closeIssue;
+  /** Reopen write. Defaults to the issue-actions leaf. */
+  reopenIssue?: typeof reopenIssue;
+}
+
+// ---------------------------------------------------------------------------
+// Ready-queue projection (issue #4010, INV-1) — pure, exported for tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Project the ready-for-agent QUEUE rows: every row carrying the label, each
+ * annotated with WHY it does not count toward `deriveBoardState`'s
+ * `ready_for_agent` dispatch pool when it doesn't (`excluded`), so the /work
+ * page answers "what is queued, and why is THAT next" instead of a bare count.
+ *
+ * The exclusion reasons mirror `deriveBoardState`'s filter arms exactly (same
+ * parser, same label vocabulary, same liveness conditioning) — reason priority
+ * is the filter's condition order: `target-backlog`, then
+ * `glm-eligible-drainer-live`, then `blocked-by-open-issue`. A drift-guard
+ * test asserts the structural invariant this mirroring promises:
+ * `rows.filter(r => r.excluded === null).length === deriveBoardState(...).ready_for_agent`.
+ *
+ * Pure: rows + pre-resolved open-blocker set + liveness flag in, rows out.
+ */
+export function deriveReadyQueue(
+  rows: readonly IssueRow[],
+  openBlockers: ReadonlySet<number>,
+  glmPartitionActive: boolean,
+): ReadyQueueRow[] {
+  const queue: ReadyQueueRow[] = [];
+  for (const row of rows) {
+    const labels = new Set(row.labels);
+    if (!labels.has(ORCH_BOARD_LABELS.ready_for_agent)) continue;
+    const blockedBy = extractStrictBlockerRefs(row.body).filter(
+      (n) => n !== row.number && openBlockers.has(n),
+    );
+    let excluded: ReadyQueueRow["excluded"] = null;
+    if (labels.has(ORCH_BOARD_LABELS.target_backlog)) {
+      excluded = "target-backlog";
+    } else if (glmPartitionActive && labels.has(ORCH_BOARD_LABELS.glm_eligible)) {
+      excluded = "glm-eligible-drainer-live";
+    } else if (blockedBy.length > 0) {
+      excluded = "blocked-by-open-issue";
+    }
+    queue.push({
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      updatedAt: row.updatedAt ?? "",
+      excluded,
+      blockedBy: excluded === "blocked-by-open-issue" ? blockedBy : [],
+    });
+  }
+  queue.sort((a, b) => a.number - b.number);
+  return queue;
 }
 
 export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) {
@@ -170,6 +253,7 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
     const nowMs = clock();
     let counts = emptyCounts();
     let degraded = false;
+    let readyQueue: ReadyQueueRow[] = [];
 
     try {
       const result = await readOpenIssues();
@@ -214,6 +298,11 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
           openBlockers,
           glmPartitionActive,
         );
+        readyQueue = deriveReadyQueue(
+          result.rows,
+          openBlockers,
+          glmPartitionActive,
+        );
       }
     } catch (err: any) {
       // Belt-and-braces: the seam never throws, but honour the never-throw
@@ -229,8 +318,304 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       ...counts,
       degraded,
       generatedAt: new Date(nowMs).toISOString(),
+      // ADR-0034 §5 (issue #4010, INV-2/INV-3): the additive trust spelling
+      // `usePageItems` reads — `sourcesOk === false` demotes the whole panel
+      // to UNKNOWN so a degraded all-zero board never renders as a confident
+      // zero. `degraded` itself stays byte-identical for collect-state.sh.
+      sourcesOk: !degraded,
+      // INV-1: the ready-for-agent queue rows (why-not annotations included),
+      // empty on a degraded read (nothing to assert).
+      ready_queue: readyQueue,
     };
     return res.json(body);
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue-lifecycle action routes (issue #4010, ADR-0034 §7) — the /work page's
+  // write surface. Policy lives HERE, server-side (never re-derived client-
+  // side): promote is confirm-first + double-refused; relabel/close/reopen are
+  // immediate-tier; every action re-reads the issue's actual post-write state
+  // before reporting success (INV-6 — no unverified success). All writes ride
+  // `gh issue` subcommands through the seams above (INV-7). Handled refusals
+  // are 200 `{ok:false, reason}` — the dashboard surfaces the specific reason;
+  // only a malformed body 400s and only an impossible throw 500s.
+  // -------------------------------------------------------------------------
+
+  const viewIssue = deps.viewIssue ?? ((n: number) => viewIssueRow(n));
+  const addLabel = deps.addLabel ?? addIssueLabel;
+  const removeLabel = deps.removeLabel ?? removeIssueLabel;
+  const doClose = deps.closeIssue ?? closeIssue;
+  const doReopen = deps.reopenIssue ?? reopenIssue;
+
+  /** The same blocker resolver the GET uses — deps-injectable, orch scope. */
+  const resolveBlockersForAction = deps.resolveOpenBlockers ?? resolveOpenBlockers;
+
+  /** Run a write primitive; fold a failure into the uniform refusal result. */
+  async function runWrite(
+    action: BoardActionResult["action"],
+    issue: number,
+    what: string,
+    write: () => Promise<{ ok: true } | { ok: false; code: string; stderr: string }>,
+  ): Promise<BoardActionResult | null> {
+    const res = await write();
+    if (res.ok === true) return null;
+    // The failure arm — `code`/`stderr` only exist there.
+    const code = res.code;
+    const stderr = res.stderr;
+    logger.error(
+      { action, issue, code, stderr: stderr.slice(0, 300) },
+      "[autopilot/board-state] issue action write failed",
+    );
+    return {
+      ok: false,
+      action,
+      issue,
+      reason: "write-failed",
+      detail: `${what} failed (${code}): ${stderr.slice(0, 200)}`,
+    };
+  }
+
+  /** Re-read the issue and verify the predicate holds — or refuse (INV-6). */
+  async function verifyPostWrite(
+    action: BoardActionResult["action"],
+    issue: number,
+    holds: (post: IssueRow) => boolean,
+  ): Promise<{ post: IssueRow } | BoardActionResult> {
+    const post = await viewIssue(issue);
+    if (!post) {
+      return {
+        ok: false,
+        action,
+        issue,
+        reason: "verify-failed",
+        detail: "post-write re-read failed — the write may or may not have landed; re-check the issue",
+      };
+    }
+    if (!holds(post)) {
+      return {
+        ok: false,
+        action,
+        issue,
+        reason: "verify-failed",
+        detail: `post-write state disagrees (labels: ${post.labels.join(", ") || "none"}; state: ${post.state})`,
+      };
+    }
+    return { post };
+  }
+
+  function verifiedFrom(post: IssueRow) {
+    return {
+      number: post.number,
+      state: post.state,
+      labels: post.labels,
+      url: post.url,
+    };
+  }
+
+  // POST /autopilot/board-state/promote — confirm-first, double-refused.
+  router.post("/autopilot/board-state/promote", async (req, res) => {
+    const parsed = PromoteActionBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const { issue, confirm } = parsed.data;
+    return isolateAggregator(res, "autopilot/board-state/promote", async () => {
+      // ADR-0034 §7: promote is "confirm first" — ready-for-agent is a
+      // dispatch trigger in disguise. The server re-checks the client's
+      // explicit confirm step; it is never trusted alone.
+      if (!confirm) {
+        return {
+          ok: false,
+          action: "promote",
+          issue,
+          reason: "confirm-required",
+          detail: "promote to ready-for-agent arms a dispatch — pass confirm:true after an explicit confirm step",
+        };
+      }
+
+      const pre = await viewIssue(issue);
+      if (!pre) {
+        return {
+          ok: false,
+          action: "promote",
+          issue,
+          reason: "issue-read-failed",
+          detail: `could not read issue #${issue} (absent, or gh unreachable)`,
+        };
+      }
+
+      // Refusal 1 — blocked issue (INV-5): reuse the SAME open-strict-blocker
+      // resolver the board count filters through (`resolveOpenBlockers`,
+      // issue #3059). The target row typically does not carry the
+      // ready-for-agent label yet (that is what promote adds), so the label is
+      // synthesized onto the row passed in — asking the count path's own
+      // resolver "would THIS row's blockers gate it" rather than re-deriving
+      // blockedness a second way.
+      const refs = extractStrictBlockerRefs(pre.body).filter(
+        (n) => n !== issue,
+      );
+      if (refs.length > 0) {
+        const openBlockers = await resolveBlockersForAction([
+          { ...pre, labels: [...pre.labels, ORCH_BOARD_LABELS.ready_for_agent] },
+        ]);
+        const open = refs.filter((n) => openBlockers.has(n));
+        if (open.length > 0) {
+          return {
+            ok: false,
+            action: "promote",
+            issue,
+            reason: "blocked-by-open-issue",
+            detail: `open strict blocker(s): ${open.map((n) => `#${n}`).join(", ")}`,
+          };
+        }
+      }
+
+      // Refusal 2 — missing "## Files in scope" section (INV-5): without it,
+      // the issue-label-validation workflow reverts ready-for-agent a moment
+      // later. Reuses the CI scope gate's own parser (extractScopeFromBody,
+      // relocated to src/scope-section.ts) — never a re-implemented regex.
+      if (extractScopeFromBody(pre.body).length === 0) {
+        return {
+          ok: false,
+          action: "promote",
+          issue,
+          reason: "missing-files-in-scope",
+          detail: "the issue body has no '## Files in scope' section — issue-label-validation would revert ready-for-agent",
+        };
+      }
+
+      // Write: add the label; clear the promote-source lanes so the board
+      // does not double-count the issue in two lanes.
+      const addFailure = await runWrite("promote", issue, "add ready-for-agent", () =>
+        addLabel(issue, ORCH_BOARD_LABELS.ready_for_agent),
+      );
+      if (addFailure) return addFailure;
+      for (const lane of [ORCH_BOARD_LABELS.needs_triage, ORCH_BOARD_LABELS.needs_research]) {
+        if (!pre.labels.includes(lane)) continue;
+        const rmFailure = await runWrite("promote", issue, `remove ${lane}`, () =>
+          removeLabel(issue, lane),
+        );
+        if (rmFailure) return rmFailure;
+      }
+
+      // Verify (INV-6): success renders only off the re-read state.
+      const verdict = await verifyPostWrite(
+        "promote",
+        issue,
+        (post) =>
+          post.labels.includes(ORCH_BOARD_LABELS.ready_for_agent) &&
+          !post.labels.includes(ORCH_BOARD_LABELS.needs_triage) &&
+          !post.labels.includes(ORCH_BOARD_LABELS.needs_research),
+      );
+      if (!("post" in verdict)) return verdict;
+      return { ok: true, action: "promote", issue, verified: verifiedFrom(verdict.post) };
+    });
+  });
+
+  // POST /autopilot/board-state/relabel — immediate-tier lane move.
+  router.post("/autopilot/board-state/relabel", async (req, res) => {
+    const parsed = RelabelActionBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const { issue, label } = parsed.data;
+    return isolateAggregator(res, "autopilot/board-state/relabel", async () => {
+      const pre = await viewIssue(issue);
+      if (!pre) {
+        return {
+          ok: false,
+          action: "relabel",
+          issue,
+          reason: "issue-read-failed",
+          detail: `could not read issue #${issue} (absent, or gh unreachable)`,
+        };
+      }
+      // Lane move: clear every orch lane label the row carries, then add the
+      // target. (ready-for-agent can never be the target — that is promote's
+      // gated path; the schema enum enforces it, this is the belt to it.)
+      const laneLabels = [
+        ORCH_BOARD_LABELS.needs_qa,
+        ORCH_BOARD_LABELS.needs_triage,
+        ORCH_BOARD_LABELS.needs_research,
+        ORCH_BOARD_LABELS.in_progress,
+        ORCH_BOARD_LABELS.blocked,
+      ];
+      for (const lane of laneLabels) {
+        if (lane === label || !pre.labels.includes(lane)) continue;
+        const rmFailure = await runWrite("relabel", issue, `remove ${lane}`, () =>
+          removeLabel(issue, lane),
+        );
+        if (rmFailure) return rmFailure;
+      }
+      if (!pre.labels.includes(label)) {
+        const addFailure = await runWrite("relabel", issue, `add ${label}`, () =>
+          addLabel(issue, label),
+        );
+        if (addFailure) return addFailure;
+      }
+      const others = laneLabels.filter((l) => l !== label);
+      const verdict = await verifyPostWrite("relabel", issue, (post) =>
+        post.labels.includes(label) && others.every((l) => !post.labels.includes(l)),
+      );
+      if (!("post" in verdict)) return verdict;
+      return { ok: true, action: "relabel", issue, verified: verifiedFrom(verdict.post) };
+    });
+  });
+
+  // POST /autopilot/board-state/close — immediate-tier, verified.
+  router.post("/autopilot/board-state/close", async (req, res) => {
+    const parsed = IssueRefBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const { issue } = parsed.data;
+    return isolateAggregator(res, "autopilot/board-state/close", async () => {
+      const writeFailure = await runWrite("close", issue, "close issue", () =>
+        doClose(issue),
+      );
+      if (writeFailure) return writeFailure;
+      const verdict = await verifyPostWrite(
+        "close",
+        issue,
+        (post) => post.state === "CLOSED",
+      );
+      if (!("post" in verdict)) return verdict;
+      return { ok: true, action: "close", issue, verified: verifiedFrom(verdict.post) };
+    });
+  });
+
+  // POST /autopilot/board-state/reopen — immediate-tier, verified.
+  router.post("/autopilot/board-state/reopen", async (req, res) => {
+    const parsed = IssueRefBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const { issue } = parsed.data;
+    return isolateAggregator(res, "autopilot/board-state/reopen", async () => {
+      const writeFailure = await runWrite("reopen", issue, "reopen issue", () =>
+        doReopen(issue),
+      );
+      if (writeFailure) return writeFailure;
+      const verdict = await verifyPostWrite(
+        "reopen",
+        issue,
+        (post) => post.state === "OPEN",
+      );
+      if (!("post" in verdict)) return verdict;
+      return { ok: true, action: "reopen", issue, verified: verifiedFrom(verdict.post) };
+    });
   });
 
   return router;

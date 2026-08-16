@@ -36,6 +36,8 @@
 
 import { z } from "zod";
 
+import { ORCH_BOARD_LABELS } from "../board-labels.ts";
+
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
@@ -107,9 +109,164 @@ export const AutopilotBoardStateResponseSchema = z
     degraded: z.boolean(),
     /** ISO timestamp the projection was assembled. */
     generatedAt: z.string(),
+    /**
+     * ADR-0034 §5 trust field (issue #4010, INV-3): `true` when every source
+     * the projection reads ran cleanly — here exactly `!degraded`. The legacy
+     * `degraded` field stays untouched (its consumer, `collect-state.sh`,
+     * branches on it); `sourcesOk` is the additive spelling the dashboard's
+     * `usePageItems` status machine reads (`sourcesOk === false` → UNKNOWN,
+     * never a confident zero).
+     *
+     * OPTIONAL so the count-only fixtures and `deriveBoardState`'s
+     * `Omit<AutopilotBoardStateResponse, "degraded" | "generatedAt">` return
+     * type stay valid unchanged — the ROUTE always emits it; optionality is a
+     * back-compat affordance for the strict parse of hand-built count bodies.
+     */
+    sourcesOk: z.boolean().optional(),
+    /**
+     * The ready-for-agent queue rows (issue #4010, INV-1): every open issue
+     * carrying `ready-for-agent`, each annotated with WHY it does not count
+     * toward `ready_for_agent` when it doesn't (`excluded`). Same optionality
+     * rationale as `sourcesOk` — the route always emits it (empty when
+     * degraded); hand-built count bodies keep parsing.
+     */
+    ready_queue: z.array(z.lazy(() => ReadyQueueRowSchema)).optional(),
   })
   .strict();
 
 export type AutopilotBoardStateResponse = z.infer<
   typeof AutopilotBoardStateResponseSchema
 >;
+
+// ---------------------------------------------------------------------------
+// Ready queue rows (issue #4010, INV-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a `ready-for-agent` row does NOT count toward the `ready_for_agent`
+ * dispatch pool. `null` = counted (dispatchable). Machine-readable literals —
+ * the dashboard renders them verbatim; they mirror `deriveBoardState`'s
+ * exclusion order (target-backlog, glm-eligible-under-live-drainer, open
+ * strict blocker).
+ */
+export const READY_QUEUE_EXCLUDED_REASONS = [
+  "target-backlog",
+  "glm-eligible-drainer-live",
+  "blocked-by-open-issue",
+] as const;
+
+/** One ready-for-agent queue row. */
+export const ReadyQueueRowSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    /** ISO last-updated timestamp (may be "" when the row carried none). */
+    updatedAt: z.string(),
+    /** null = counted in `ready_for_agent`; otherwise one of the reason literals. */
+    excluded: z.nullable(z.enum(READY_QUEUE_EXCLUDED_REASONS)),
+    /** The specific OPEN strict-blocker numbers, when excluded for that reason. */
+    blockedBy: z.array(z.number().int().positive()),
+  })
+  .strict();
+
+export type ReadyQueueRow = z.infer<typeof ReadyQueueRowSchema>;
+
+// ---------------------------------------------------------------------------
+// Issue-lifecycle action bodies + results (issue #4010, ADR-0034 §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The relabel targets — every orch board lane EXCEPT `ready-for-agent`.
+ * Relabel is the immediate-tier action (no confirm step); reaching
+ * `ready-for-agent` through it would bypass the promote gate's confirm +
+ * two refusal guards ("ready-for-agent is a dispatch trigger in disguise",
+ * ADR-0034 §7) — so the promote action is the only route onto that label.
+ */
+export const RELABEL_TARGET_LABELS = [
+  ORCH_BOARD_LABELS.needs_qa,
+  ORCH_BOARD_LABELS.needs_triage,
+  ORCH_BOARD_LABELS.needs_research,
+  ORCH_BOARD_LABELS.in_progress,
+  ORCH_BOARD_LABELS.blocked,
+] as const;
+
+/** Body for `POST /autopilot/board-state/promote`. */
+export const PromoteActionBodySchema = z
+  .object({
+    /** The issue to promote onto `ready-for-agent`. */
+    issue: z.number().int().positive(),
+    /**
+     * ADR-0034 §7 confirm-first tier: the client must have shown an explicit
+     * confirm step; the server re-checks (never trust the UI alone).
+     */
+    confirm: z.boolean(),
+  })
+  .strict();
+
+/** Body for `POST /autopilot/board-state/relabel`. */
+export const RelabelActionBodySchema = z
+  .object({
+    issue: z.number().int().positive(),
+    /** Target lane label — one of {@link RELABEL_TARGET_LABELS}. */
+    label: z.enum(RELABEL_TARGET_LABELS),
+  })
+  .strict();
+
+/** Body for `POST /autopilot/board-state/close` and `/reopen`. */
+export const IssueRefBodySchema = z
+  .object({
+    issue: z.number().int().positive(),
+  })
+  .strict();
+
+/**
+ * The machine-readable refusal reasons every action route may return with
+ * `ok: false`. Surfaced verbatim by the dashboard so the operator sees the
+ * SPECIFIC reason (INV-5), never a generic failure.
+ */
+export const BOARD_ACTION_REFUSAL_REASONS = [
+  /** `confirm` was not true (promote only — ADR-0034 §7 confirm-first tier). */
+  "confirm-required",
+  /** The single-issue verification read failed (gh down, or no such number —
+   *  the seam cannot distinguish the two; the detail says which issue). */
+  "issue-read-failed",
+  /** Promote refusal: the issue declares an OPEN strict blocker (INV-5). */
+  "blocked-by-open-issue",
+  /** Promote refusal: body lacks a "## Files in scope" section (INV-5). */
+  "missing-files-in-scope",
+  /** A write primitive failed (gh non-zero / timeout / spawn). */
+  "write-failed",
+  /** The write's command succeeded but the post-write re-read disagrees. */
+  "verify-failed",
+] as const;
+
+/** The verified post-write issue state returned on success (INV-6). */
+export const VerifiedIssueStateSchema = z
+  .object({
+    number: z.number().int().positive(),
+    state: z.string(),
+    labels: z.array(z.string()),
+    url: z.string(),
+  })
+  .strict();
+
+export type VerifiedIssueState = z.infer<typeof VerifiedIssueStateSchema>;
+
+/** Uniform result envelope for the four action routes. */
+export const BoardActionResultSchema = z
+  .object({
+    ok: z.boolean(),
+    /** Which action produced this result. */
+    action: z.enum(["promote", "relabel", "close", "reopen"]),
+    issue: z.number().int().positive(),
+    /** Present iff `ok: false` — one of {@link BOARD_ACTION_REFUSAL_REASONS}. */
+    reason: z.enum(BOARD_ACTION_REFUSAL_REASONS).optional(),
+    /** Human-readable detail (e.g. the blocking issue numbers, gh stderr). */
+    detail: z.string().optional(),
+    /** Present iff `ok: true` — the re-read post-write state (INV-6). */
+    verified: VerifiedIssueStateSchema.optional(),
+  })
+  .strict();
+
+export type BoardActionResult = z.infer<typeof BoardActionResultSchema>;

@@ -1,0 +1,1 @@
+- feat: the /work page — board-state lane counts, the ready-for-agent queue with per-row why-not annotations, anchor-distribution as the rationale, and verified issue-lifecycle actions (confirm-first promote with blocker/scope refusals; immediate relabel/close/reopen) (#4010)

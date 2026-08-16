@@ -65,18 +65,23 @@ const DEFAULT_MIN_COUNT = 3;
  */
 export const ALWAYS_IN_SCOPE: string[] = [".changelog/"];
 
-export function extractScopeFromBody(body: string): string[] {
-  return extractSection(body, /Files in scope/i);
-}
+// ---------------------------------------------------------------------------
+// Section parsers — RELOCATED to src/scope-section.ts (issue #4010)
+// ---------------------------------------------------------------------------
+//
+// extractScopeFromBody / extractOutOfScopeFromBody / extractSection moved
+// VERBATIM into the src/ leaf so the runtime promote guard
+// (src/api/autopilot-board.ts) reuses the SAME parser instead of growing a
+// third copy (tsconfig rootDir=./src forbids src importing scripts/; the
+// reverse direction is fine). Re-exported here so this script's import surface
+// — and test/ci-scope-check.test.mts — is unchanged.
 
-/**
- * Issue #396: explicit "Files out of scope" block. Any changed file matching
- * one of these entries triggers a hard fail (unless justified — see
- * extractScopeJustifications).
- */
-export function extractOutOfScopeFromBody(body: string): string[] {
-  return extractSection(body, /Files out of scope/i);
-}
+export { extractScopeFromBody, extractOutOfScopeFromBody } from "../../src/scope-section.ts";
+import {
+  extractScopeFromBody,
+  extractOutOfScopeFromBody,
+  looksLikePath,
+} from "../../src/scope-section.ts";
 
 /**
  * Issue #396: parse `scope-justification:` blocks from the PR body. Each
@@ -115,39 +120,6 @@ export function extractScopeJustifications(body: string): string[] {
   return Array.from(new Set(justified));
 }
 
-function extractSection(body: string, headerRe: RegExp): string[] {
-  if (!body) return [];
-  // Build a markdown-section regex anchored on the header keyword. The
-  // section runs until the next markdown heading, a sibling section
-  // (Risk / Implementation / Files in/out of scope / Acceptance), or EOF.
-  const headerSource = headerRe.source.replace(/\\b/g, "");
-  const re = new RegExp(
-    `(?:^|\\n)\\s*(?:##+\\s*|\\*\\*)?${headerSource}(?:\\*\\*)?\\s*[\\r\\n]+([\\s\\S]*?)(?=\\n\\s*(?:##+\\s|\\*\\*[A-Z])|\\n\\s*Files (?:in|out of) scope|\\n\\s*Risk\\b|\\n\\s*Implementation\\b|\\n\\s*Acceptance\\b|\\n\\s*scope-justification|\\n\\s*$|$)`,
-    "i",
-  );
-  const m = body.match(re);
-  if (!m) return [];
-  const block = m[1];
-  // Collect paths from BOTH code spans AND bullet/line entries (issue #836).
-  // A single backticked path inside the section (e.g. from a scope-justification
-  // line that the boundary lookahead failed to strip) must never suppress the
-  // plain bullet-list entries — that early-return was the #836 regression.
-  const codeSpans = Array.from(block.matchAll(/`([^`]+)`/g))
-    .map((x) => x[1].trim())
-    .filter(looksLikePath);
-  const bulletPaths = block
-    .split("\n")
-    // Strip the bullet marker, THEN strip backticks so a backticked bullet
-    // contributes the same clean path as the code-span branch (no corrupted
-    // literal-backtick duplicate), then trim.
-    .map((l) => l.replace(/^\s*[-*]\s+/, "").replace(/`/g, "").trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .filter(looksLikePath);
-  // Union, deduped — backticked-bullet and plain-bullet sections both stay
-  // byte-identical to the pre-#836 behaviour; mixed sections now keep all paths.
-  return Array.from(new Set([...codeSpans, ...bulletPaths]));
-}
-
 /**
  * Issue #2175: a path that belongs to the **Target** repo (`hydra-betting`),
  * not this orchestrator repo. A scope section that lists Target-repo siblings
@@ -167,14 +139,6 @@ export function isTargetRepoPath(path: string): boolean {
   const p = (path || "").trim();
   if (!p) return false;
   return /(^|\/)(gaberoo322\/)?hydra-betting(\/|$)/.test(p);
-}
-
-function looksLikePath(s: string): boolean {
-  // Heuristic: contains a slash or a recognised extension, no spaces.
-  if (/\s/.test(s)) return false;
-  if (s.includes("/")) return true;
-  if (/\.(ts|tsx|js|mjs|cjs|mts|cts|md|yml|yaml|json|sh|toml)$/.test(s)) return true;
-  return false;
 }
 
 export function classifyScope(

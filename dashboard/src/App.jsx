@@ -5,6 +5,7 @@ import Layout from "./components/Layout.jsx";
 import Today from "./pages/Today.jsx";
 import Health from "./pages/Health.jsx";
 import Runs from "./pages/Runs.jsx";
+import Work from "./pages/Work.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
 import NowPixel from "./pages/now-pixel/NowPixel.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
@@ -115,6 +116,9 @@ export default function App() {
           {/* Dashboard v3 (ADR-0034 §2) — the weekly journey, slice zeta (#4011). */}
           <Route path="/builder" element={<Builder />} />
           <Route path="/explore/:tab" element={<Explore />} />
+          {/* Dashboard v3 (ADR-0034 §3) — the queue journey, slice epsilon
+              (#4010): board state, ready-for-agent queue, anchor rationale. */}
+          <Route path="/work" element={<Work />} />
           {/* Dashboard v3 (ADR-0034 §2) — the forensics journey, slice delta
               (#4009): runs list → run detail → transcript. */}
           <Route path="/runs" element={<Runs />} />

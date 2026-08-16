@@ -32,8 +32,23 @@ const SessionTokensQuerySchema = z.object({
   session: z.string().trim().min(1),
 });
 
-export function createMetricsRouter() {
+/**
+ * Injectable deps for the metrics router (issue #4010, INV-4). All optional;
+ * the defaults are the production seams. `readMetricsTrend` lets the
+ * anchor-distribution trust-field tests run without Redis; `now` pins the
+ * `generatedAt` stamp in tests.
+ */
+export type MetricsRouterDeps = {
+  /** Trend read backing /metrics/anchor-distribution. Defaults to getMetricsTrend. */
+  readMetricsTrend?: typeof getMetricsTrend;
+  /** Clock for the generatedAt stamp. Defaults to Date.now. */
+  now?: () => number;
+};
+
+export function createMetricsRouter(deps: MetricsRouterDeps = {}) {
   const router = Router();
+  const readMetricsTrend = deps.readMetricsTrend ?? getMetricsTrend;
+  const clock = deps.now ?? (() => Date.now());
 
   // GET /summary — Human-readable system summary.
   //
@@ -144,19 +159,33 @@ export function createMetricsRouter() {
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   // The inner `.catch` on the trend read stays (it's a best-effort
   // degrade-to-empty, not the route's failure isolation).
+  //
+  // Issue #4010 (ADR-0034 §5, INV-4): the response carries `sourcesOk` +
+  // `generatedAt` so the /work page's `usePageItems` status machine can render
+  // UNKNOWN when the trend read degraded to empty (never a confident zero) and
+  // show the projection's age. Stamped HERE at the HTTP boundary — NOT inside
+  // the pure `projectAnchorDistribution` projection, which stays
+  // fixture-testable with no clock/degradation concept. Additive fields: the
+  // projection's own shape is spread unchanged underneath them.
   router.get(
     "/metrics/anchor-distribution",
     aggregatorRouteNoQuery("api/metrics/anchor-distribution", async (req) => {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
 
-      const trend = await getMetricsTrend(count).catch((err: any) => {
+      let trendOk = true;
+      const trend = await readMetricsTrend(count).catch((err: any) => {
+        trendOk = false;
         logger.error({ err }, "[api/metrics] anchor-distribution: trend read failed");
         return [];
       });
 
       // Aggregation lives in src/metrics/aggregate.ts; this route is a thin
       // delegate (issue #2126).
-      return projectAnchorDistribution(trend);
+      return {
+        ...projectAnchorDistribution(trend),
+        sourcesOk: trendOk,
+        generatedAt: new Date(clock()).toISOString(),
+      };
     }),
   );
 
