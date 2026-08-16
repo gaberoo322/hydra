@@ -541,6 +541,22 @@ def _dev_orch_pr_closes_anchor(anchor_ref: str) -> bool | None:
     match or a non-closing `Refs #N` body keyword do NOT count here — only a
     real GitHub closing verb (Closes/Fixes/Resolves) does.
 
+    KNOWN GAP vs the approved #4045 design-concept artifact (PR #4090's
+    Friction Report): the artifact's INV-5 requires "Exactly one `gh pr
+    list ...` call" serving BOTH `_dev_orch_pr_exists_for_anchor` (the
+    #3866 stall check) AND this closing-PR check, "no doubling of gh
+    --json call volume". The "own call, independent" design above means
+    `run_completion` actually issues TWO separate `gh pr list --json
+    headRefName,body --limit 200` calls per qualifying dev_orch
+    completion (this one and the one in `_dev_orch_pr_exists_for_anchor`)
+    — a real, verified violation of INV-5, not a PR-body wording gap.
+    Closing it requires threading one shared `gh pr list` JSON payload
+    (fetched once in `run_completion`, guarded on `cls == "dev_orch" and
+    anchor_ref`) into both `_handle_dev_orch_stall` and
+    `_handle_dev_orch_needs_qa_promotion`, which is a real behavior change
+    to an already-shipped best-effort path — left as a follow-up rather
+    than risking it same-session without dedicated test coverage.
+
     Returns:
       True  — an open PR's body closes the issue.
       False — `gh pr list` succeeded and no open PR closes it.
