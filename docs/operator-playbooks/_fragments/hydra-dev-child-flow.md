@@ -62,14 +62,30 @@ Run these numbered steps.
     never blocks merge.
 8. **Classify the change via the live tier API** (see "Tier classification"
    below). Never self-classify by path patterns.
-9a. **Reconcile the diff against the design-concept artifact BEFORE opening the
-   PR** (issues #2537, #2528). If an artifact was fetched at planning time, run
-   the "Design-concept reconciliation gate" below and write its section into the
-   PR body. This is **mechanically enforced inside the REQUIRED `test` job** —
-   a missing, miscounted, misquoted or falsified entry fails `npm test` and
-   blocks auto-merge. If ANY invariant cannot be satisfied, do NOT open the
-   PR — emit a `## Friction Report` naming the unmet invariant and stop. A 404
-   at planning time makes this a clean no-op.
+9a. **Unconditionally fetch the design-concept artifact BEFORE opening the
+   PR** (issues #2537, #2528, #4102). ALWAYS run
+   `GET /api/design-concepts/<anchor.reference>` right before `gh pr create` —
+   the **response**, not your memory of planning and not the issue's labels,
+   decides what happens next. An artifact can exist even when the issue went
+   straight to `ready-for-agent` with no dispatch-prompt mention of one — its
+   existence is not visible from labels, only from the endpoint.
+   ```bash
+   ANCHOR_ENC=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)
+   DC_JSON=$(curl -sf --max-time 5 \
+     "http://localhost:4000/api/design-concepts/${ANCHOR_ENC}" || echo '')
+   # empty     -> 404 or unreachable: genuine clean no-op, say so in the PR body
+   # non-empty -> you MUST reconcile every .invariants[] entry and cite .artifactHash
+   ```
+   - **Empty (404 / unreachable)** — a clean no-op. "Not applicable" is a valid
+     PR-body statement **only** in this case.
+   - **Non-empty (200)** — run the "Design-concept reconciliation gate" below
+     and write its section into the PR body. This is **mechanically enforced
+     inside the REQUIRED `test` job** — a missing, miscounted, misquoted or
+     falsified entry fails `npm test` and blocks auto-merge, and the gate reads
+     the PR body from the webhook payload, so fixing it costs a **new commit**
+     — the most expensive way to be wrong. If ANY invariant cannot be
+     satisfied, do NOT open the PR — emit a `## Friction Report` naming the
+     unmet invariant and stop.
 9. Open a PR with `closes #$issue_number`, a `## Files in scope` mirror of the
     issue's section, and a `Tier: <0|1|2|3>` line from the API. Acceptance
     criteria MUST be checkboxes with a mechanical "verified by:" assertion —
@@ -141,8 +157,11 @@ composition, not delivery).
 
 ## Design-concept artifact — live API (cue: design-concept-endpoint-path-plural)
 
-A grilled anchor carries a **design-concept artifact**. When the dispatch prompt
-references one, fetch it at planning time.
+A grilled anchor carries a **design-concept artifact**. If the dispatch prompt
+references one, fetching it at planning time gives useful early context — but
+that early fetch is optional and does NOT excuse the **mandatory, unconditional**
+pre-PR fetch in child-step 9a below, which runs regardless of whether you
+fetched here, and regardless of what the issue's labels imply.
 **Endpoint:** `GET /api/design-concepts/<anchor.reference>` — **plural** resource
 name, anchor ref as a **path param** (e.g. `/api/design-concepts/issue-1699`).
 There is no `/api/design-concept` route and no `?anchor=` query form. Response
@@ -150,8 +169,9 @@ There is no `/api/design-concept` route and no `?anchor=` query form. Response
 is NO `.concept` envelope, read `.invariants` directly. 404 → no artifact; do not
 retry alternate spellings.
 
-**Design-concept reconciliation gate (issues #2537, #2528 — MANDATORY pre-PR
-step when an artifact was fetched).** Run as child-step 9a — AFTER the change is
+**Design-concept reconciliation gate (issues #2537, #2528, #4102 — MANDATORY
+pre-PR step whenever the unconditional fetch in step 9a returns a live
+artifact).** Run as child-step 9a — AFTER the change is
 committed and tier-classified, BEFORE `gh pr create`. **Mechanical, not
 advisory:** `test/design-concept-reconcile-check.test.mts` runs in the REQUIRED
 `test` job, re-fetches the artifact for your `Closes #N` anchor and re-executes
@@ -190,8 +210,10 @@ Assertion grammar (Node-stdlib only, evaluated against the tree at HEAD — neve
 file — never a vacuous pass.
 
 **If ANY invariant cannot be satisfied, do NOT open the PR**: emit a
-`## Friction Report` naming the unmet invariant and stop. A 404 at planning time
-is a clean no-op. The gate fails OPEN on transport misses (no artifact,
+`## Friction Report` naming the unmet invariant and stop. A 404 (or unreachable
+orchestrator) from the mandatory pre-PR fetch is a clean no-op — that response
+is what decides "Not applicable", never the fact that you didn't fetch. The
+gate fails OPEN on transport misses (no artifact,
 orchestrator unreachable) so it never reddens on downtime, and it reads the PR
 body from the webhook payload — fixing the body needs a **new commit**, not just
 an edit.
