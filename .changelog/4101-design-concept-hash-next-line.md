@@ -1,0 +1,1 @@
+- fix: design-concept gate resolves an artifact hash wrapped onto the line below the label instead of reddening compliant PRs (#4101)

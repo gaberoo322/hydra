@@ -1,0 +1,1 @@
+- fix: hydra-dev child agents now always fetch the design-concept artifact before opening a PR — a "Not applicable" reconciliation section is valid only for a 404/unreachable response, never for "I did not fetch" (#4102)

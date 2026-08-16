@@ -169,13 +169,18 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
     assert.equal(r.stdout, "3", "three fresh hydra-dev PRs out of five total");
   });
 
-  // --- GLM dev-drainer partition (ADR-0032 / issue #3687) -------------------
+  // --- GLM dev-drainer partition (ADR-0032 / issue #3687, widened by #4048) --
   // The drainer authors in a git worktree, so its PR head branch carries the
-  // SAME `worktree-agent-*` prefix as an Opus dev_orch PR. Provenance is
-  // therefore a LABEL, not a branch name (ADR-0032 Decision 5 / invariant 9),
-  // and the collector must subtract `glm-authored` PRs — otherwise an open
-  // drainer PR inflates `active_dev_orch` and idles the Opus dev_orch slot on
-  // quota the drainer isn't spending.
+  // SAME `worktree-agent-*` prefix as an Opus dev_orch PR. Provenance is the
+  // `glm-authored` LABEL first (ADR-0032 Decision 5 / invariant 9) — and,
+  // since #4048, the drainer's exact literal `worktree-agent-glm-` branch
+  // prefix as an OR-fallback: the label's non-atomic `--label` mutation was
+  // silently missing on 29 of 62 real drainer PRs, and every miss inflated
+  // `active_dev_orch` and idled the Opus dev_orch slot on quota the drainer
+  // wasn't spending. The prefix discriminates perfectly because Opus harness
+  // branches are `worktree-agent-<hex-hash>-...` and a hex hash cannot
+  // contain g or l. This must stay the IDENTICAL OR-predicate
+  // glm-beachhead-report.sh applies.
 
   test("fresh glm-authored PR on worktree-agent- head is NOT counted (#3687)", () => {
     const prs = [
@@ -225,6 +230,62 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
     const r = runJq(filter, prs);
     assert.equal(r.status, 0);
     assert.equal(r.stdout, "1", "missing labels ⇒ not glm-authored ⇒ still counted");
+  });
+
+  test("fresh UNLABELLED worktree-agent-glm- PR is NOT counted (#4048 — the branch-prefix fallback)", () => {
+    // The #4048 regression, second consumer: the drainer's `--label`
+    // mutation is non-atomic and was silently missing on 29 of 62 drainer
+    // PRs. Label-only partitioning counted every one of them as Opus
+    // dev_orch work and mis-gated the busy slot.
+    const prs = [
+      {
+        headRefName: "worktree-agent-glm-4048-1786841729",
+        updatedAt: iso(60),
+        labels: [],
+      },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(
+      r.stdout,
+      "0",
+      "an unlabelled drainer PR must not gate the Opus dev_orch slot — the branch prefix excludes it",
+    );
+  });
+
+  test("unlabelled worktree-agent-glm- PR is subtracted while a sibling hex-hash Opus PR still counts (#4048)", () => {
+    const prs = [
+      // drainer PR — label lost, discriminated by the exact glm- infix.
+      {
+        headRefName: "worktree-agent-glm-3690-1752950000",
+        updatedAt: iso(60),
+        labels: [],
+      },
+      // genuine Opus dev_orch harness PR — hex hash, no g/l, still counts.
+      {
+        headRefName: "worktree-agent-cafebabe0123456789abcdef-1752950001",
+        updatedAt: iso(60),
+        labels: [],
+      },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(
+      r.stdout,
+      "1",
+      "only the hex-hash Opus PR counts — the glm infix cannot appear in a hex hash, so the prefix never false-excludes Opus work",
+    );
+  });
+
+  test("a branch that merely CONTAINS glm but diverges before the dash is still Opus work (prefix-exact match, #4048)", () => {
+    // e.g. an Opus PR authored for a GLM-lane issue like #4048 itself, whose
+    // slug mentions glm — a loose "contains glm" match would mis-exclude it.
+    const prs = [
+      { headRefName: "worktree-agent-glmtree-not-the-drainer", updatedAt: iso(60), labels: [] },
+    ];
+    const r = runJq(filter, prs);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, "1", "startswith(worktree-agent-glm-) is prefix-exact — glm alone must not exclude");
   });
 
   test("collector script is executable and emits active_dev_orch line", () => {
