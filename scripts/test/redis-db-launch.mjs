@@ -490,6 +490,27 @@ if (resolved.db !== null) {
         ? `(derived from ${resolve(process.cwd())})`
         : `(pre-set REDIS_URL)`),
   );
+} else {
+  // Issue #4083: a pre-set REDIS_URL that resolves to a DB this launcher does
+  // NOT own (production DB 0, the legacy shared DB 1, or a remote host) is
+  // left un-flushed BY DESIGN — the "verbatim" contract above protects a
+  // deliberate CI/operator override. Until now that path was ALSO silent,
+  // making a deliberate override indistinguishable from an accidentally
+  // inherited/leaked REDIS_URL (e.g. a shell or service env var pointing at
+  // production DB 0). That silence is exactly what let the #4072 hazard class
+  // go undetected: a test asserting on state a concurrently-running
+  // production process is also writing, with no log line to confirm or rule
+  // it out after the fact. Fail loud instead — this repo's convention (see
+  // CLAUDE.md "Fail loud") — so a flaky run against this same mechanism
+  // leaves a greppable trail.
+  console.error(
+    `[redis-db-launch] WARN: pre-set REDIS_URL="${resolved.url}" resolves to ` +
+      "a DB this launcher does NOT own (production DB 0, the legacy shared " +
+      "DB 1, or a remote host) — no flush, no per-run isolation applied. If " +
+      "this is unintentional (a leaked shell/service REDIS_URL rather than a " +
+      "deliberate CI/operator override), test assertions here may race a " +
+      "live process writing the same keys.",
+  );
 }
 
 // Per-file top-level suite/test count gate (issue #4020). `--test-force-exit`

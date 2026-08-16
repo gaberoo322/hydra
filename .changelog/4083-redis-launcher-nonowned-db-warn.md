@@ -1,0 +1,1 @@
+- fix: `scripts/test/redis-db-launch.mjs` now logs loudly instead of silently when a pre-set `REDIS_URL` resolves to a DB it doesn't own (production DB 0, the legacy shared DB 1, or a remote host) (#4083)

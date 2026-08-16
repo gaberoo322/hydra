@@ -423,6 +423,59 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
     );
   });
 
+  test("WARNs loudly (not silently) when a pre-set REDIS_URL resolves to a non-owned DB (issue #4083)", () => {
+    // Issue #4083: before this fix, a pre-set REDIS_URL landing on a
+    // non-owned DB (production DB 0 here) was silently left un-flushed with
+    // NO log line — indistinguishable from a deliberate CI/operator
+    // override. Pin that the launcher now emits a greppable WARN instead.
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    env.REDIS_URL = "redis://localhost:6379/0";
+    const run = spawnSync(
+      process.execPath,
+      [LAUNCHER, process.execPath, "-e", "process.exit(0)"],
+      {
+        cwd: scratchRoot(),
+        env,
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    );
+    assert.equal(run.status, 0, `launcher must still exit 0: stderr was ${run.stderr}`);
+    assert.match(
+      run.stderr,
+      /\[redis-db-launch\] WARN: pre-set REDIS_URL="redis:\/\/localhost:6379\/0" resolves to a DB this launcher does NOT own/,
+      `a non-owned pre-set REDIS_URL must be logged loudly; stderr was: ${run.stderr}`,
+    );
+  });
+
+  test("does NOT emit the non-owned WARN for a launcher-owned pre-set REDIS_URL (issue #4083)", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    env.REDIS_URL = "redis://localhost:6379/9";
+    const run = spawnSync(
+      process.execPath,
+      [LAUNCHER, process.execPath, "-e", "process.exit(0)"],
+      {
+        cwd: scratchRoot(),
+        env,
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    );
+    assert.equal(run.status, 0, `launcher must still exit 0: stderr was ${run.stderr}`);
+    assert.doesNotMatch(
+      run.stderr,
+      /WARN: pre-set REDIS_URL/,
+      `an owned pre-set REDIS_URL must not trigger the non-owned WARN; stderr was: ${run.stderr}`,
+    );
+    assert.match(
+      run.stderr,
+      /\[redis-db-launch\] per-run Redis DB 9 \(pre-set REDIS_URL\)/,
+      `an owned pre-set REDIS_URL must still take the normal flush+log path; stderr was: ${run.stderr}`,
+    );
+  });
+
   test("does NOT annotate a genuine code-based test failure as INFRA-KILL (issue #4043)", () => {
     const env: Record<string, string | undefined> = { ...process.env };
     delete env.REDIS_URL;
