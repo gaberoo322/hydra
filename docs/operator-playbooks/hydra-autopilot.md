@@ -491,7 +491,23 @@ monitor, or a background process ("I'll wait for the test run to finish",
 FOREGROUND, or your final message reports one of: a PR is open (dev_orch) / a
 verdict was posted (qa_orch), OR a hard blocker via ## Friction Report. There
 is no third option.
+
+You MUST do this work yourself, in THIS session. Do NOT delegate the skill
+invocation to a nested background agent (`Agent(run_in_background=true)`) and
+end your turn waiting on it — a background child does not keep you alive, and
+reap.py will record your session as a completion with no PR the moment you go
+quiet. Read-only helper sub-agents for search are fine; handing off the
+implementation is not.
 ```
+
+The delegation clause above closes a route the original wording missed (issue
+#4052, autopilot run f7b47a0c): a `dev_orch` dispatch on #4041 spawned a
+nested `Agent(run_in_background=true)` to run the whole skill invocation,
+then ended its turn to "wait for its completion notification" — satisfying
+the letter of "poll to a terminal state in the FOREGROUND" while violating
+its spirit, because a background child does not keep the parent session
+alive. Cost: 75k tokens and ~5.8 min for zero deliverable, plus a race
+between the still-live child and the no-PR-stall backstop it triggered.
 
 Motivating incidents (autopilot run 2bcba309, 2026-08-05): a `dev_orch`
 dispatch on #3726 did ~9.5 min of real implementation, backgrounded `npm

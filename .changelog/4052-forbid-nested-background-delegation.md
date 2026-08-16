@@ -1,0 +1,1 @@
+- fix: the NEVER END WAITING dispatch preamble now explicitly forbids delegating the skill invocation to a nested background agent and ending the turn waiting on it, closing the loophole that burned 75k tokens for zero deliverable on a dev_orch dispatch (#4052)
