@@ -56,9 +56,15 @@
 #      gate, `src/glm/drainer-runner.ts`) MUST pass before this loop's OWN
 #      `gh pr create`.
 #  10. `gh pr create --label glm-authored` (ADR-0032 Decision 5 — provenance
-#      by label, since the drainer's worktree branch shares the
-#      `worktree-agent-*` prefix Opus `dev_orch` PRs also use, so a
-#      branch-name carve-out cannot discriminate them). If `gh pr create`
+#      by label FIRST. Issue #4048 corrects this step's original carve-out
+#      premise: the branch create_worktree() builds below inserts a literal
+#      `glm` segment — `worktree-agent-glm-${issue}-${ts}` — that Opus
+#      dev_orch's hex-hash `worktree-agent-<hash>-...` branches can never
+#      contain (g/l are not hex digits), so the exact prefix
+#      `worktree-agent-glm-` discriminates the drainer's PRs perfectly.
+#      glm-beachhead-report.sh and collect-state.sh use it as an OR-fallback
+#      for PRs whose non-atomic `--label` mutation was lost; the label stays
+#      primary). If `gh pr create`
 #      fails because a PR for this exact branch already exists (issue #3900 —
 #      "already exists" is a real GitHub answer, not a generic failure),
 #      `open_pr()` ADOPTS that PR (logs the anomaly, returns success) instead

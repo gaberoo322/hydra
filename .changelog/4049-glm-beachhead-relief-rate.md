@@ -1,0 +1,1 @@
+- fix: the GLM beachhead report's quota-relief figure now compares window-relative %/day rates (both readings' days-into-window printed, "not comparable" when a reading's window position is missing or under half a day) instead of a raw subtraction of two differently-phased percentLast7d readings (#4049)
