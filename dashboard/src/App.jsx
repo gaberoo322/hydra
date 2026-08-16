@@ -1,4 +1,4 @@
-import { Routes, Route, useSearchParams, useParams, Navigate } from "react-router-dom";
+import { Routes, Route, useParams, Navigate } from "react-router-dom";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 import { ToastProvider } from "./hooks/useToast.jsx";
 import Layout from "./components/Layout.jsx";
@@ -7,80 +7,29 @@ import Health from "./pages/Health.jsx";
 import Runs from "./pages/Runs.jsx";
 import Work from "./pages/Work.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
-import NowPixel from "./pages/now-pixel/NowPixel.jsx";
-import Outcomes from "./pages/Outcomes.jsx";
 import Builder from "./pages/Builder.jsx";
-import Explore from "./pages/Explore.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
 import DispatchTranscript from "./pages/DispatchTranscript.jsx";
-import {
-  NOW_VIEW_QUERY_KEY,
-  VIEW_CONSOLE,
-  VIEW_HABITAT,
-  resolveNowView,
-  writeStoredNowView,
-} from "./pages/now-console/console-state.ts";
 
-// Dashboard atomic swap #2 (epic #642 — /now-pixel). PR2 of slice 7
-// (#649) made the pixel-habitat view the canonical /now. The /now Console
-// redesign (epic #887, issue #891) then made /now a mode-toggled shell:
-// the diagnostics Console is the default surface and the pixel Habitat is
-// the preserved alternate. The deprecated /now-classic fallback route and
-// the /now-pixel direct-to-Habitat alias were retired on 2026-06-10 once
-// the PRD #615 deprecation window closed (issue #664).
+// Dashboard v3 slice eta (#4012, ADR-0034 §3 "What dies"): the Orchestrator
+// Map, Anomalies tab, Now Habitat, Outcomes page, and the Explore container
+// are retired. Their deep links redirect to the pages that absorbed their
+// content (client-side <Navigate replace>, the #4009 LegacyRunRedirect
+// precedent); every leaf component they rendered stays on disk, unrouted,
+// for a follow-up hydra-cleanup/knip pass.
 
 /**
- * NowRoute — /now mode-toggle shell (issue #891, now-console-4).
- *
- * Resolves the active view from the `?view=` deep-link first, then
- * localStorage, then the Console default (console-state.resolveNowView).
- * Selecting a mode writes BOTH the query param (shareable URL) and
- * localStorage (survives reloads).
+ * NowRoute — /now shell. The Console/Habitat mode toggle collapsed with the
+ * Habitat (ADR-0034 §3): the `?view=` deep-link param and the localStorage
+ * view-mode machinery are gone, and /now renders the surviving diagnostics
+ * Console unconditionally — an old `/now?view=habitat` deep link degrades
+ * to Console content in place rather than 404ing.
  */
-function NowRoute({ ws }) {
-  const [params, setParams] = useSearchParams();
-  const view = resolveNowView(
-    params.get(NOW_VIEW_QUERY_KEY),
-    typeof window !== "undefined" ? window.localStorage : null,
-  );
-
-  const select = (next) => {
-    writeStoredNowView(
-      typeof window !== "undefined" ? window.localStorage : null,
-      next,
-    );
-    const p = new URLSearchParams(params);
-    p.set(NOW_VIEW_QUERY_KEY, next);
-    setParams(p, { replace: true });
-  };
-
-  const tab = (mode, label) => (
-    <button
-      type="button"
-      data-testid={`now-view-toggle-${mode}`}
-      data-active={view === mode ? "true" : "false"}
-      aria-pressed={view === mode}
-      onClick={() => select(mode)}
-      className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-        view === mode
-          ? "bg-zinc-100 text-zinc-900 border-zinc-100 font-semibold"
-          : "bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200"
-      }`}
-    >
-      {label}
-    </button>
-  );
-
+function NowRoute() {
   return (
-    <div className="space-y-4" data-testid="now-route" data-view={view}>
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Now</h1>
-        <div className="flex gap-1" role="group" aria-label="Now view mode">
-          {tab(VIEW_CONSOLE, "Console")}
-          {tab(VIEW_HABITAT, "Habitat")}
-        </div>
-      </div>
-      {view === VIEW_HABITAT ? <NowPixel ws={ws} /> : <NowConsole />}
+    <div className="space-y-4" data-testid="now-route">
+      <h1 className="text-2xl font-bold">Now</h1>
+      <NowConsole />
     </div>
   );
 }
@@ -99,6 +48,42 @@ function LegacyRunRedirect() {
   return <Navigate replace to={runId ? `/runs/${runId}` : "/runs"} />;
 }
 
+/**
+ * Where each retired `/explore/:tab` deep link lands — the page that
+ * absorbed that tab's content (ADR-0034 §3). Friction and Behavior folded
+ * into the /runs forensics spine, Flow into the / attention feed, Lessons
+ * into /builder; Architecture follows Lessons to /builder (Builder.jsx
+ * already renders the re-rendered architecture view as TangledModules).
+ * Anomalies and the Orchestrator Map have no named successor anywhere —
+ * their endpoints are dead — so they fall back to /.
+ */
+const EXPLORE_TAB_REDIRECTS = {
+  friction: "/runs",
+  behavior: "/runs",
+  flow: "/",
+  lessons: "/builder",
+  architecture: "/builder",
+  anomalies: "/",
+  "orchestrator-map": "/",
+};
+
+// Explore.jsx previously sent bare /explore and unrecognized tabs to its
+// default tab (friction); friction's successor is /runs, so the fallback
+// folds there too.
+const EXPLORE_DEFAULT_TAB = "friction";
+
+/**
+ * ExploreRedirect — `/explore` and `/explore/:tab` retired-route handler
+ * (issue #4012, INV-2). A replace-redirect, never a 404: bookmarks and chat
+ * references still pointing at a dead tab land on the page that owns its
+ * content now.
+ */
+function ExploreRedirect() {
+  const { tab } = useParams();
+  const to = EXPLORE_TAB_REDIRECTS[tab ?? ""] ?? EXPLORE_TAB_REDIRECTS[EXPLORE_DEFAULT_TAB];
+  return <Navigate replace to={to} />;
+}
+
 export default function App() {
   const ws = useWebSocket();
 
@@ -110,12 +95,9 @@ export default function App() {
           {/* Dashboard v3 slice gamma (#4008, ADR-0034) — the phone-grade
               is-it-on-fire / burning-money surface. */}
           <Route path="/health" element={<Health />} />
-          <Route path="/now" element={<NowRoute ws={ws} />} />
-          <Route path="/outcomes" element={<Outcomes />} />
-          <Route path="/explore" element={<Explore />} />
+          <Route path="/now" element={<NowRoute />} />
           {/* Dashboard v3 (ADR-0034 §2) — the weekly journey, slice zeta (#4011). */}
           <Route path="/builder" element={<Builder />} />
-          <Route path="/explore/:tab" element={<Explore />} />
           {/* Dashboard v3 (ADR-0034 §2) — the forensics journey, slice delta
               (#4009): runs list → run detail → transcript. */}
           <Route path="/runs" element={<Runs />} />
@@ -129,6 +111,12 @@ export default function App() {
           <Route path="/autopilot/:runId" element={<LegacyRunRedirect />} />
           {/* Issue #695 — subagent transcript viewer (deep-linkable). */}
           <Route path="/dispatch/:dispatchId/transcript" element={<DispatchTranscript />} />
+          {/* Retired surfaces (issue #4012, ADR-0034 §3) — redirects, never
+              404s. /outcomes content was re-homed by question: cost → /health,
+              quality → /builder; the quality majority lives on /builder. */}
+          <Route path="/outcomes" element={<Navigate replace to="/builder" />} />
+          <Route path="/explore" element={<Navigate replace to="/runs" />} />
+          <Route path="/explore/:tab" element={<ExploreRedirect />} />
         </Routes>
       </Layout>
     </ToastProvider>
