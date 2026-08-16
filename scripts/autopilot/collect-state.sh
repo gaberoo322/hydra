@@ -916,15 +916,21 @@ echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
 # isolation=worktree). 5400s = 90 min, matching the Phase 1.5 stale
 # threshold so the two signals line up.
 #
-# GLM PARTITION (ADR-0032 / issue #3687): a `glm-authored` PR is EXCLUDED. The
-# dev-drainer authors in a git worktree too, so its head branch carries the SAME
-# `worktree-agent-*` prefix as an Opus dev_orch PR — a branch-name carve-out
-# cannot discriminate them (ADR-0032 Decision 5 / invariant 9, which is exactly
-# why provenance is a label). Without this filter every open drainer PR would
-# inflate `active_dev_orch`, and decide.py's busy-slot guard would idle the Opus
-# dev_orch slot on quota the drainer isn't even spending — inverting the whole
-# point of the lane. `.labels // []` keeps the filter total: a PR row with no
-# labels field is simply not glm-authored.
+# GLM PARTITION (ADR-0032 / issue #3687, widened by #4048): a drainer PR is
+# EXCLUDED. Provenance is the `glm-authored` label FIRST (ADR-0032 Decision 5)
+# with the drainer's exact literal `worktree-agent-glm-` head-branch prefix as
+# an OR-fallback: the drainer builds `worktree-agent-glm-${issue}-${ts}`
+# (drainer-loop.sh create_worktree) while Opus dev_orch harness branches are
+# `worktree-agent-<hex-hash>-...`, and a hex hash cannot contain g or l — so
+# the prefix discriminates perfectly where the bare shared `worktree-agent-`
+# prefix could not (#4048: the label's non-atomic `--label` mutation was
+# silently missing on 29 of 62 drainer PRs, mis-partitioning this count too).
+# This must stay the IDENTICAL OR-predicate glm-beachhead-report.sh applies,
+# so the two consumers never disagree on what "a GLM PR" is. Without this
+# filter every open drainer PR would inflate `active_dev_orch`, and decide.py's
+# busy-slot guard would idle the Opus dev_orch slot on quota the drainer isn't
+# even spending — inverting the whole point of the lane. `.labels // []` keeps
+# the filter total: a PR row with no labels field is simply not glm-authored.
 echo -n "active_dev_orch="
 gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,labels --jq '[
   .[]
@@ -933,7 +939,11 @@ gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName,lab
       or (.headRefName | startswith("hydra-dev/"))
       or (.headRefName | startswith("worktree-agent-"))
     )
-  | select(((.labels // []) | map(.name) | index("glm-authored")) | not)
+  | select(
+      (((.labels // []) | map(.name) | index("glm-authored"))
+        or (.headRefName | startswith("worktree-agent-glm-")))
+      | not
+    )
   | select((now - (.updatedAt | fromdateiso8601)) < 5400)
 ] | length' 2>/dev/null || echo 0
 
