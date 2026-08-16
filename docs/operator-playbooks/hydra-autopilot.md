@@ -531,22 +531,6 @@ its spirit, because a background child does not keep the parent session
 alive. Cost: 75k tokens and ~5.8 min for zero deliverable, plus a race
 between the still-live child and the no-PR-stall backstop it triggered.
 
-The flat Agent-tool ban above closes the adjacent route the #4052 wording
-left open (issue #4109, autopilot run 62e8020d, the run AFTER PR #4091
-merged): a `dev_orch` dispatch spawned a read-only exploration sub-agent —
-squarely inside the read-only-helper carve-out this block used to end with —
-and ended its turn "Now waiting for the exploration agent's findings before
-writing code". The carve-out banned delegating *the implementation*; it did
-not ban *going quiet while a child runs*, and only the second is the harm:
-111,625 tokens and 50 tool uses for zero deliverable, recovered only by a
-manual `SendMessage` resume. Fan-out from a worktree-isolated dispatch is
-strictly worse on both axes because the children cannot outlive the parent's
-worktree (run 793fa896: a `qa_orch` fan-out cost ~790k tokens and produced
-zero verdicts when the hourly worktree-orphan-prune reaped the parent, while
-the serial-inline re-dispatch of the same work cost 260k and produced 5
-verdicts + 2 merges). A carve-out an agent can satisfy while still going
-quiet is not a guard.
-
 Motivating incidents (autopilot run 2bcba309, 2026-08-05): a `dev_orch`
 dispatch on #3726 did ~9.5 min of real implementation, backgrounded `npm
 test`, then ended its session waiting on the test run — no PR existed at reap
