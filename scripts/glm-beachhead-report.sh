@@ -21,6 +21,19 @@
 # OPERATOR JUDGMENT. The recommendation string is advisory prose only — no
 # caller may treat it as a command.
 #
+# Provenance of "a drainer PR" (issue #4048): glm-authored label (PRIMARY,
+# ADR-0032 Decision 5) OR head branch matching the drainer's exact literal
+# `worktree-agent-glm-` prefix (FALLBACK). `gh pr create` and its separate
+# `--label glm-authored` mutation are not atomic (drainer-loop.sh's #3900
+# investigation note), so the label alone silently dropped 29 of 62 drainer
+# PRs (measured live 2026-08-13) and this report judged the lane on 53% of
+# its output. The prefix is a perfect discriminator because the drainer
+# builds `worktree-agent-glm-${issue}-${ts}` while Opus dev_orch harness
+# branches are `worktree-agent-<hex-hash>-...` and a hex hash cannot contain
+# g or l. The report line prints both side counts so a widening
+# label-vs-branch gap stays visible. Still READ-ONLY — this widens the
+# measurement query only.
+#
 # Two DIFFERENT "day-0" anchors are deliberately kept separate:
 #   - The WINDOW clock (elapsed days + PR count vs the ~2wk/~25-PR target) is
 #     anchored to the EARLIEST glm-authored PR's `createdAt` — the drainer's
@@ -89,6 +102,24 @@
 set -uo pipefail
 
 GLM_LABEL_AUTHORED="glm-authored"
+# Exact literal head-branch prefix the drainer builds in drainer-loop.sh's
+# create_worktree(): `worktree-agent-glm-${issue}-${ts}`. The drainer inserts
+# its OWN literal `glm` segment after the shared `worktree-agent-` prefix;
+# Opus dev_orch harness branches are `worktree-agent-<hex-hash>-...` and a
+# hex hash can never contain `g` or `l`, so this prefix discriminates the
+# drainer's PRs from Opus ones perfectly (issue #4048). PREFIX-EXACT match
+# only — never a loose "contains glm" substring, which would false-match
+# e.g. an Opus PR authored for a GLM-lane issue like this very one. The
+# label stays PRIMARY (ADR-0032 Decision 5); the prefix is the FALLBACK that
+# recovers PRs whose non-atomic `--label` mutation was lost (#3900).
+GLM_DRAINER_BRANCH_PREFIX="worktree-agent-glm-"
+# ONE jq predicate for "is this PR drainer output?" — carries the label OR
+# its head branch carries the drainer prefix — used by BOTH the measurement
+# fetch (positively) and the churn-baseline sample (negated), so the report's
+# two sides can never disagree on what a GLM PR is (issue #4048, same
+# OR-predicate scripts/autopilot/collect-state.sh's GLM partition applies).
+# `$label` / `$prefix` are jq --arg bindings supplied at each call site.
+GLM_PR_MATCH_JQ='((.labels // []) | map(.name) | index($label)) or ((.headRefName // "") | startswith($prefix))'
 REPO="${HYDRA_GLM_BEACHHEAD_REPO:-gaberoo322/hydra}"
 USAGE_URL="${HYDRA_GLM_BEACHHEAD_USAGE_URL:-http://localhost:4000/api/usage/eligibility}"
 BASELINE_FILE="${HYDRA_GLM_BEACHHEAD_BASELINE_FILE:-$HOME/.local/state/hydra-glm/baseline.json}"
@@ -226,14 +257,18 @@ fetch_percent_last7d() {
 }
 
 # fetch_baseline_churn_sample -> "<avg>|<sampleSize>"
-# Samples the most recent BASELINE_SAMPLE merged PRs that do NOT carry
-# glm-authored, as the "is GLM thrashier than Opus dev_orch" baseline.
+# Samples the most recent BASELINE_SAMPLE merged PRs that are NOT drainer
+# output, as the "is GLM thrashier than Opus dev_orch" baseline. Not-drainer
+# uses the same OR-predicate as the measurement fetch, negated — an
+# unlabelled drainer PR must not pollute the Opus baseline either (issue
+# #4048), exactly as it must not drop out of the measurement.
 fetch_baseline_churn_sample() {
   local rows
-  rows=$(gh pr list --repo "$REPO" --state merged --json additions,deletions,labels --limit 100 2>/dev/null || echo "[]")
+  rows=$(gh pr list --repo "$REPO" --state merged --json additions,deletions,labels,headRefName --limit 100 2>/dev/null || echo "[]")
   local nums arr=()
-  nums=$(jq -r --arg label "$GLM_LABEL_AUTHORED" --argjson n "$BASELINE_SAMPLE" \
-    '[.[] | select((.labels | map(.name) | index($label)) | not) | (.additions + .deletions)][:$n][]' \
+  nums=$(jq -r --arg label "$GLM_LABEL_AUTHORED" --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
+    --argjson n "$BASELINE_SAMPLE" \
+    "[.[] | select((${GLM_PR_MATCH_JQ}) | not) | (.additions + .deletions)][:\$n][]" \
     <<<"$rows" 2>/dev/null)
   while IFS= read -r n; do
     [[ -n "$n" ]] && arr+=("$n")
@@ -241,9 +276,33 @@ fetch_baseline_churn_sample() {
   echo "$(avg "${arr[@]}")|${#arr[@]}"
 }
 
+# fetch_glm_authored_prs -> union JSON of drainer-output PRs (issue #4048):
+# PRs carrying glm-authored (PRIMARY, filtered server-side by gh) OR on a
+# worktree-agent-glm-* head branch (the FALLBACK recovering PRs whose
+# non-atomic `--label` mutation was lost). Two raw-JSON fetches, unioned +
+# deduped by PR number in jq below (same never-gh's-own---jq convention as
+# every other fetch in this script). The per-side counts are derived from
+# the union rows by main() so the label-vs-branch gap stays VISIBLE.
 fetch_glm_authored_prs() {
-  gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
-    --json number,createdAt,additions,deletions --limit 100 2>/dev/null || echo "[]"
+  local labeled branch_pool
+  labeled=$(gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
+    --json number,createdAt,additions,deletions,labels,headRefName --limit 100 \
+    2>/dev/null || echo "[]")
+  # Branch scan over recent PRs of every state. The scan depth bounds how far
+  # back the branch fallback can see: 500 recent PRs spans months at this
+  # repo's merge rate, well past the ~2-week window this report judges. (The
+  # label side is filtered server-side, so its own --limit caps a set that is
+  # already all-drainer.) A PR appearing in BOTH fetches dedupes onto its
+  # label-fetch row below.
+  branch_pool=$(gh pr list --repo "$REPO" --state all \
+    --json number,createdAt,additions,deletions,labels,headRefName --limit 500 \
+    2>/dev/null || echo "[]")
+  printf '%s\n%s\n' "$labeled" "$branch_pool" | jq -s \
+    --arg label "$GLM_LABEL_AUTHORED" \
+    --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
+    "(.[1] | map(select(${GLM_PR_MATCH_JQ}))) as \$branchside
+     | .[0] + \$branchside | unique_by(.number)" \
+    2>/dev/null || echo "[]"
 }
 
 # window_day0_epoch_from_rows <rows_json> <fallback_epoch> -> the earliest
@@ -395,6 +454,19 @@ main() {
   local pr_count_total
   pr_count_total=$(jq -r 'length' <<<"$rows" 2>/dev/null || echo 0)
 
+  # Side-by-side provenance counts (issue #4048): of the union rows above,
+  # how many carry the label vs sit on a drainer head branch. The label is
+  # the PRIMARY signal; branch >= label is expected, and a widening gap means
+  # non-atomic `--label` mutations are being lost (drainer-loop.sh's #3900
+  # note) — printed so that drift is visible, not silent.
+  local labeled_n branch_n
+  labeled_n=$(jq -r --arg label "$GLM_LABEL_AUTHORED" \
+    '[.[] | select((.labels // []) | map(.name) | index($label))] | length' \
+    <<<"$rows" 2>/dev/null || echo 0)
+  branch_n=$(jq -r --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
+    '[.[] | select((.headRefName // "") | startswith($prefix))] | length' \
+    <<<"$rows" 2>/dev/null || echo 0)
+
   # Window clock: anchored to the earliest glm-authored PR, NOT the baseline
   # bootstrap moment above (see the file header's two-anchors note).
   local window_day0_epoch days_elapsed
@@ -416,8 +488,8 @@ main() {
 
   local excluded_n=$((pr_count_total - denom))
 
-  printf 'GLM beachhead: window %s/%sd, %s/%s PRs | first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s total) | percentLast7d %s%% (baseline %s%%, delta %s) | churn avg %s vs baseline %s (ratio %s) | recommendation: %s\n' \
-    "$days_elapsed" "$WINDOW_DAYS" "$pr_count_total" "$WINDOW_PRS" \
+  printf 'GLM beachhead: window %s/%sd, %s/%s PRs (glm-authored label %s / worktree-agent-glm-* branch %s) | first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s total) | percentLast7d %s%% (baseline %s%%, delta %s) | churn avg %s vs baseline %s (ratio %s) | recommendation: %s\n' \
+    "$days_elapsed" "$WINDOW_DAYS" "$pr_count_total" "$WINDOW_PRS" "$labeled_n" "$branch_n" \
     "$(display "$pass_rate")" "$pass_n" "$fail_n" "$excluded_n" "$pr_count_total" \
     "$(display "$current_percent")" "$(display "$baseline_percent")" "$percent_delta" \
     "$(display "$churn_current")" "$(display "$baseline_churn")" "$(display "$churn_ratio")" \

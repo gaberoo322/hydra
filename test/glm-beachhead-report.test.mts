@@ -182,6 +182,10 @@ interface FakePr {
   // Matches gh's real --json labels shape ([{name, id, ...}]), NOT a plain
   // string array — the script's jq filter reads `.labels | map(.name)`.
   labels: Array<{ name: string }>;
+  // Head branch name, served for the branch-scan / merged-baseline fetches
+  // (issue #4048). Optional as in the pre-#4048 fixtures — gh only returns
+  // requested fields, and the script's jq guards with `// ""`.
+  headRefName?: string;
 }
 
 interface FakeComment {
@@ -190,17 +194,24 @@ interface FakeComment {
 }
 
 /**
- * Write a fake `gh` onto PATH serving the exact three read-only shapes this
+ * Write a fake `gh` onto PATH serving the exact read-only shapes this
  * script issues (all RAW --json, filtered by our own jq afterward — see the
  * script header's "never gh's own --jq" note, which is precisely what makes
  * this stub tractable):
- *   gh pr list --repo R --state merged --json additions,deletions,labels --limit 100
- *   gh pr list --repo R --label glm-authored --state all --json number,createdAt,additions,deletions --limit 100
+ *   gh pr list --repo R --state merged --json additions,deletions,labels,headRefName --limit 100
+ *   gh pr list --repo R --label glm-authored --state all --json number,createdAt,additions,deletions,labels,headRefName --limit 100
+ *   gh pr list --repo R --state all --json number,createdAt,additions,deletions,labels,headRefName --limit 500   (branch scan, issue #4048)
  *   gh pr view N --repo R --json comments
  */
 function makeGhStub(
   dir: string,
-  opts: { mergedBaselinePrs: FakePr[]; glmAuthoredPrs: FakePr[]; commentsByPr: Record<number, FakeComment[]> },
+  opts: {
+    mergedBaselinePrs: FakePr[];
+    glmAuthoredPrs: FakePr[];
+    /** Served to the label-less `--state all` branch scan (issue #4048). */
+    allPrsForBranchScan?: FakePr[];
+    commentsByPr: Record<number, FakeComment[]>;
+  },
 ): string {
   const binDir = join(dir, "bin");
   const fixtureFile = join(dir, "fixture.json");
@@ -236,6 +247,8 @@ def main():
             rows = fx["mergedBaselinePrs"]
         elif label == "glm-authored":
             rows = fx["glmAuthoredPrs"]
+        elif state == "all":
+            rows = fx.get("allPrsForBranchScan", [])
         else:
             rows = []
         sys.stdout.write(json.dumps(rows))
@@ -499,5 +512,130 @@ describe("glm-beachhead-report.sh — end-to-end (issue #3690)", () => {
     const r = callHelper('PATH=/nonexistent-empty-dir require_tools; echo "exit=$?"');
     assert.match(r.stderr, /ERROR required tool/);
     assert.match(r.stdout, /exit=1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Label-OR-branch provenance (issue #4048)
+//
+// `gh pr create` and its separate `--label glm-authored` mutation are not
+// atomic (drainer-loop.sh's #3900 investigation note), so 29 of 62 real
+// drainer PRs sat on their worktree-agent-glm-* branch with the label
+// missing — and this report's label-only query judged the lane on 53% of
+// its output. The fix counts a PR as drainer output when it carries the
+// label OR its head branch carries the drainer's exact literal
+// `worktree-agent-glm-` prefix (label stays PRIMARY per ADR-0032 Decision 5;
+// the prefix is a perfect discriminator because Opus harness branches are
+// `worktree-agent-<hex-hash>-...` and a hex hash cannot contain g or l).
+// ---------------------------------------------------------------------------
+
+describe("glm-beachhead-report.sh — label-OR-branch provenance (issue #4048)", () => {
+  test("a PR on a worktree-agent-glm-* branch with NO label is counted as drainer output, side by side with the label count, deduped, and without false positives", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4048-"));
+    const usage = await usageServer(50);
+    try {
+      const labeled = {
+        number: 500,
+        createdAt: "2026-07-27T00:00:00Z",
+        additions: 10,
+        deletions: 5,
+        labels: [{ name: "glm-authored" }],
+        headRefName: "worktree-agent-glm-3990-1111",
+      };
+      // THE regression: label lost to the non-atomic `--label` mutation —
+      // only the branch prefix says "drainer".
+      const unlabeled = {
+        number: 501,
+        createdAt: "2026-07-28T00:00:00Z",
+        additions: 20,
+        deletions: 10,
+        labels: [],
+        headRefName: "worktree-agent-glm-3991-2222",
+      };
+      // Opus dev_orch harness PR — hex-hash branch, must NOT match.
+      const opusHexHash = {
+        number: 502,
+        createdAt: "2026-07-29T00:00:00Z",
+        additions: 40,
+        deletions: 30,
+        labels: [],
+        headRefName: "worktree-agent-a802a6552d648d1c8-3333",
+      };
+      // Prefix-EXACTness: starts like the drainer prefix but diverges before
+      // the trailing dash — must NOT match a loose "contains glm" test.
+      const glmLookalike = {
+        number: 503,
+        createdAt: "2026-07-29T00:00:00Z",
+        additions: 40,
+        deletions: 30,
+        labels: [],
+        headRefName: "worktree-agent-glmtree-not-the-drainer",
+      };
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [labeled],
+        // The branch scan sees every recent PR, including the labelled one —
+        // the union must dedupe it back to a single row.
+        allPrsForBranchScan: [labeled, unlabeled, opusHexHash, glmLookalike],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+      });
+      assert.equal(r.status, 0);
+      // 2 drainer PRs of 4 scanned: the union counts the unlabelled one, the
+      // labelled one is not double-counted, and neither Opus PR counts. The
+      // side-by-side provenance counts (label 1 / branch 2) make the gap
+      // visible instead of silent.
+      assert.match(
+        r.stdout,
+        /, 2\/25 PRs \(glm-authored label 1 \/ worktree-agent-glm-\* branch 2\)/,
+      );
+      assert.doesNotMatch(r.stdout, /of 3 total|of 4 total/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the churn baseline sample excludes an UNLABELLED worktree-agent-glm-* merged PR — same OR-predicate, negated", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4048-"));
+    const usage = await usageServer(50);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [
+          // Opus PR, counts toward the baseline: 60+40 = 100.
+          { number: 1, createdAt: "2026-06-01T00:00:00Z", additions: 60, deletions: 40, labels: [], headRefName: "issue-1234-some-slug" },
+          // Opus harness PR on a hex-hash branch, counts: 60+40 = 100.
+          { number: 2, createdAt: "2026-06-02T00:00:00Z", additions: 60, deletions: 40, labels: [], headRefName: "worktree-agent-ab12cd34ef567890-1" },
+          // Drainer PR with the label LOST — must be excluded exactly like a
+          // labelled one, else its 1800-line diff pollutes the Opus baseline.
+          { number: 3, createdAt: "2026-06-03T00:00:00Z", additions: 900, deletions: 900, labels: [], headRefName: "worktree-agent-glm-3992-777" },
+        ],
+        // Drainer sample: (100+50)/2 and (20+30)/2 -> churn avg (150+50)/2 = 100.
+        glmAuthoredPrs: [
+          { number: 600, createdAt: "2026-07-27T00:00:00Z", additions: 100, deletions: 50, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-3993-888" },
+          { number: 601, createdAt: "2026-07-27T00:00:00Z", additions: 20, deletions: 30, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-3994-999" },
+        ],
+        allPrsForBranchScan: [],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+      });
+      assert.equal(r.status, 0);
+      // Baseline = mean(100, 100) = 100 — the 1800-line unlabelled drainer PR
+      // is excluded by the branch side of the predicate. If it leaked into
+      // the Opus baseline, it would be mean(100, 100, 1800) = 666.67 and the
+      // ratio would collapse to ~0.15.
+      assert.match(r.stdout, /churn avg 100\.00 vs baseline 100\.00 \(ratio 1\.00\)/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
