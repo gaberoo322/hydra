@@ -346,27 +346,39 @@ fi
 # genuinely NO labels matches neither the exclusion set NOR the prefix, so it
 # is still counted — the orphan detector's actual target stays intact.
 #
-# `needs-design-concept` and `needs-tickets` (issue #3817) are BOTH
-# deliberate, stable HITL parking lanes — same shape as `ready-for-human` /
-# `needs-info` above, not the "wrong label" blind spot this backstop exists
-# to catch:
-#   - `needs-design-concept` parks an issue awaiting `hydra-grill` /
-#     `design_concept_orch` (issue #628 gate). `sweep_orch`'s only correct
-#     action on one is to confirm it is already routed and change nothing
-#     (observed live on issue #3815) — so counting it as an orphan re-fires
-#     `sweep_orch` every cooldown to re-confirm the same no-op, forever.
-#   - `needs-tickets` parks a published spec awaiting `/to-tickets`
-#     decomposition. It is the board condition for the `tickets_orch` producer
-#     (issue #4014, ADR-0030's one-lineage AFK spine — collect-state.sh emits
-#     `tickets_available` from it just below the wayfinder block), so it is now
+# `needs-design-concept` (issues #3817 -> #4096): #3817 added it to this
+# exclusion array as a deliberate HITL parking lane. #4096 REMOVED it — that
+# framing held only for the parked-AND-routed state. The label is an override
+# INSIDE the grill selector's walk, not an entry point INTO it: the
+# design-concept gate below resolves `orch_pending_grill_anchor` by iterating
+# the `ready-for-agent` candidate list (`--label ready-for-agent`), and within
+# that walk `needs-design-concept` only forces TRIVIAL=0 (never suppress the
+# grill). An issue carrying the label WITHOUT `ready-for-agent` is therefore
+# unreachable by EVERY consumer: never in the grill walk (design_concept_orch
+# cannot fire on it), listed by no HITL surface, and — pre-#4096 — exempt from
+# this backstop by its own name. Observed live on #4093 (run bdbf82c8):
+# sweep_orch triaged it needs-triage -> needs-design-concept, a reasonable
+# verdict that wrote the issue into a silent sink. With the label gone from
+# this array such an issue COUNTS as an orphan, sweep_orch recovers it by
+# ADDING `ready-for-agent` (through the #772 Open-PR pre-promotion gate, never
+# stripping the label — docs/operator-playbooks/hydra-sweep.md), the issue
+# enters the grill walk, and the count drops to zero — one fire, one fix, no
+# churn. When `ready-for-agent` (or any other lifecycle label) IS present the
+# issue stays excluded via that label's own entry, preserving #3817's
+# no-churn property for the parked-and-routed state.
+#
+# `needs-tickets` (issue #3817) stays excluded — it is a genuine standalone
+# parking lane with a consumer of its own:
+#   - it parks a published spec awaiting `/to-tickets` decomposition, and it
+#     is the board condition for the `tickets_orch` producer (issue #4014,
+#     ADR-0030's one-lineage AFK spine — collect-state.sh emits
+#     `tickets_available` from it just below the wayfinder block), so it is
 #     autopilot-VISIBLE. It stays in this orphan-exclusion array regardless:
-#     `sweep_orch` has no rule to act on it (the tickets_orch producer owns it),
-#     and counting it as an orphan would re-fire `sweep_orch` every cooldown to
-#     re-confirm a no-op. (Pre-#4014 this lane was autopilot-invisible by
-#     design — the spine made it visible; the orphan-exclusion rationale is
-#     unchanged.)
-# Both are ADDED to the exclusion array (not given a prefix rule like
-# `wayfinder:*`, since each is a single fixed label, not a family).
+#     `sweep_orch` has no rule to act on it (the tickets_orch producer owns
+#     it), and counting it as an orphan would re-fire `sweep_orch` every
+#     cooldown to re-confirm a no-op. (Pre-#4014 this lane was
+#     autopilot-invisible by design — the spine made it visible; the
+#     orphan-exclusion rationale is unchanged.)
 #
 # `hitl-grill` (issue #4025) is a TERMINAL park state, not a "wrong label"
 # blind spot either: it marks an agent-proposed idea the operator must
@@ -418,8 +430,8 @@ gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT
         (.labels | map(.name)) as $n
         | ([ "ready-for-agent", "in-progress", "blocked", "needs-qa",
              "needs-triage", "needs-research", "target-backlog",
-             "ready-for-human", "needs-info", "needs-design-concept",
-             "needs-tickets", "hitl-grill" ]
+             "ready-for-human", "needs-info", "needs-tickets",
+             "hitl-grill" ]
            | any(. as $lbl | $n | index($lbl))) | not
       )
     | select((.labels | map(.name) | any(.[]; startswith("wayfinder:"))) | not)

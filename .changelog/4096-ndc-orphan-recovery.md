@@ -1,0 +1,1 @@
+- fix: recover `needs-design-concept`-without-`ready-for-agent` issues through the orphan backstop instead of leaving them in an unreachable lane (#4096)
