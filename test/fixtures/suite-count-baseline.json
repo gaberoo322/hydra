@@ -360,7 +360,7 @@
   "test/run-health.test.mts": 1,
   "test/scheduler-atomicity.test.mts": 1,
   "test/scheduler-deliberate-stop.test.mts": 1,
-  "test/scheduler-merge-rate-persistence.test.mts": 1,
+  "test/scheduler-merge-rate-persistence.test.mts": 2,
   "test/scheduler-status-projection.test.mts": 1,
   "test/scheduler-status.test.mts": 2,
   "test/scheduler-stop-semantics.test.mts": 1,

@@ -41,6 +41,7 @@ import type {
   RedisKey,
   RedisValue,
 } from "ioredis/built/utils/RedisCommander.js";
+import { RedisSeamError } from "../errors.ts";
 
 /**
  * The ioredis command verbs that the whole-project `tsc` elaboration budget
@@ -152,10 +153,51 @@ export type RedisClient = Redis & RedisCommands;
 let _instance: RedisClient | null = null;
 let _subscriber: RedisClient | null = null;
 
+/**
+ * DB index a redis:// URL resolves to (issue #4083). An absent trailing
+ * `/<n>` index resolves to 0 — Redis's own default, which on this host IS
+ * production. NaN for a URL the WHATWG parser rejects (caller fails later at
+ * connect time, as before this helper existed).
+ */
+export function redisUrlDbIndex(url: string): number {
+  try {
+    const pathname = new URL(url).pathname;
+    return Number(pathname.slice(1));
+  } catch {
+    return Number.NaN;
+  }
+}
+
+/**
+ * Refuse to hand a node:test child process a connection that would land on
+ * DB 0 (issue #4083). node:test marks every test-file child process with
+ * `NODE_TEST_CONTEXT` (e.g. `child-v8`) — production never sets it — and a
+ * test silently connecting to production is the #4072/#4083 shared-state
+ * hazard class: the suite's keyspace wipes and exact-count assertions then
+ * race the live scheduler on production state. Throw loudly at the seam
+ * instead of letting the first DEL land on `hydra:*` in DB 0.
+ *
+ * Outside a test process (service, scripts) the default URL is untouched.
+ */
+export function assertNotProductionDbForTestProcess(
+  url: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (!env.NODE_TEST_CONTEXT) return;
+  if (redisUrlDbIndex(url) !== 0) return;
+  throw new RedisSeamError(
+    `test process (NODE_TEST_CONTEXT=${env.NODE_TEST_CONTEXT}) would connect ` +
+      `to production Redis DB 0 via ${url} — refusing. Unset REDIS_URL so the ` +
+      `per-run launcher (scripts/test/redis-db-launch.mjs) derives an isolated ` +
+      `DB, or point it at one (issue #4083).`,
+  );
+}
+
 /** Shared Redis connection. Lazy-initialized on first call. */
 export function getRedisConnection(): RedisClient {
   if (!_instance) {
     const url = process.env.REDIS_URL || "redis://localhost:6379";
+    assertNotProductionDbForTestProcess(url);
     _instance = new Redis(url) as RedisClient;
   }
   return _instance;
@@ -169,6 +211,7 @@ export function getRedisConnection(): RedisClient {
 export function getRedisSubscriber(): RedisClient {
   if (!_subscriber) {
     const url = process.env.REDIS_URL || "redis://localhost:6379";
+    assertNotProductionDbForTestProcess(url);
     _subscriber = new Redis(url) as RedisClient;
   }
   return _subscriber;

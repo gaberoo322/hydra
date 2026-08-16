@@ -1,0 +1,1 @@
+- fix: npm test now logs its resolved Redis DB on every run and warns loudly when a pre-set REDIS_URL bypasses per-run isolation; node:test processes are refused a production DB-0 connection at the redis seam (#4083)

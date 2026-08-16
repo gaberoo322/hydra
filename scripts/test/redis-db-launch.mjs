@@ -482,13 +482,36 @@ if (args.length === 0) {
 // non-owned DB (0/1, remote) resolves db=null and is left untouched.
 if (resolved.db !== null) {
   await flushDbOnce(resolved.db);
-  // Info to stderr so the node:test TAP footer on stdout (the CI MIN_TESTS
-  // grep surface) stays untouched.
+}
+// Resolved DB + source, logged UNCONDITIONALLY (issue #4083 AC1): a failing
+// run's log must always answer "which Redis DB was this run actually pointed
+// at, and who decided that" — exactly the capture that settled #4072 and
+// #4083. Before #4083 this line only printed when the launcher owned (and
+// flushed) the DB, so a pre-set url on a NON-owned DB left no trace at all.
+// Still stderr so the node:test TAP footer on stdout (the CI MIN_TESTS grep
+// surface) stays untouched.
+console.error(
+  `[redis-db-launch] per-run Redis DB ${resolved.db ?? "<not launcher-owned>"}` +
+    (resolved.derived
+      ? ` (derived from ${resolve(process.cwd())})`
+      : ` (pre-set REDIS_URL)`),
+);
+if (resolved.db === null) {
+  // A pre-set REDIS_URL on a DB this launcher does NOT own (0, 1, or a remote
+  // host) — issue #4083 AC2. It is still respected VERBATIM and never flushed
+  // (the #1676 contract; `flushDbOnce` independently hard-refuses it), but it
+  // is no longer SILENT: before #4083 this path skipped the log line above
+  // entirely, so an ambient REDIS_URL pointing at DB 0 (production) was
+  // indistinguishable from a deliberate operator override — the exact
+  // indistinguishability the repo's fail-loud convention (CLAUDE.md) forbids.
+  // Warn loudly so flake forensics or an operator reading the output sees
+  // that per-run isolation is NOT active for this run.
   console.error(
-    `[redis-db-launch] per-run Redis DB ${resolved.db} ` +
-      (resolved.derived
-        ? `(derived from ${resolve(process.cwd())})`
-        : `(pre-set REDIS_URL)`),
+    `[redis-db-launch] WARN: pre-set REDIS_URL=${resolved.url} resolves to a ` +
+      `non-owned DB — per-run isolation is NOT active and this run was NOT ` +
+      `flushed. If this was not a deliberate operator override, unset ` +
+      `REDIS_URL so this launcher can derive an isolated DB — DB 0 is ` +
+      `production (issue #4083).`,
   );
 }
 
