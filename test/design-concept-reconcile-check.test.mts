@@ -39,6 +39,7 @@ import {
   extractAssertionText,
   extractQuotedText,
   extractReconciliationSection,
+  findCorrectHashMention,
   formatViolations,
   hashesMatch,
   isMachineCheckable,
@@ -154,6 +155,69 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(parsed.entries[0].quoted, "first invariant text");
     assert.equal(parsed.entries[0].assertion, "file-exists: a.ts");
     assert.equal(parsed.entries[2].assertion, "file-absent: b.yml");
+  });
+
+  test("a hash on the line BELOW the label resolves instead of parsing as null (issue #4101)", () => {
+    // PR #4100's reconciliation section exactly as it stood when the required
+    // `test` job reddened it: fully compliant (10/10 entries, correct live
+    // hash), but the `artifact hash:` label ends its line and the backticked
+    // hash wraps onto the NEXT line. The single-line finder parsed that as
+    // artifactHash: null and CI's only violation was missing-artifact-hash —
+    // quoting the very hash the body already contained (a #4037-class
+    // benign-formatting false red on a required merge-gate check).
+    const body = [
+      RECONCILIATION_HEADING,
+      "",
+      "Artifact: `hydra:design-concept:issue-4010`, artifact hash:",
+      "`967957884177d62e2d0e4a14d3e584c2fb9b567b871b2b846a3b852c9c40f316`",
+      "(status: approved)",
+      '- INV-1: "first invariant text goes here" — verified by: `manual: ok`',
+    ].join("\n");
+    const parsed = parseReconciliationSection(body);
+    assert.equal(parsed.present, true);
+    assert.equal(
+      parsed.artifactHash,
+      "967957884177d62e2d0e4a14d3e584c2fb9b567b871b2b846a3b852c9c40f316",
+      "hash on the line below the label must resolve, not parse as null",
+    );
+    assert.equal(parsed.entries.length, 1, "entries still parse alongside the wrapped hash");
+  });
+
+  test("hash-finder matrix: same-line forms unchanged; next-line bounded to the label-adjacent line (issue #4101)", () => {
+    const p = (sectionLines: string[]) =>
+      parseReconciliationSection(
+        [RECONCILIATION_HEADING, "", ...sectionLines, '- INV-1: "first invariant text" — verified by: `manual: ok`'].join("\n"),
+      ).artifactHash;
+
+    // Same-line forms — the pre-#4101 finder, byte-for-byte unchanged.
+    assert.equal(p(["Artifact: `8C0DFE60287A`"]), "8c0dfe60287a", "label line, backticked");
+    assert.equal(p(["Artifact: 8c0dfe60287a"]), "8c0dfe60287a", "label line, bare");
+    assert.equal(
+      p(["Artifact: `hydra:design-concept:issue-4010`, artifact hash: `8c0dfe60287a`"]),
+      "8c0dfe60287a",
+      "id and hash on one line",
+    );
+    assert.equal(
+      p(["Artifact: `hydra:design-concept:issue-4010`", "Artifact hash: `8c0dfe60287a`"]),
+      "8c0dfe60287a",
+      "id line, then a label+hash line (the form PR #4100 settled on)",
+    );
+
+    // Next-line forms — what #4101 adds: a label line that captures no
+    // same-line hash may carry its hash on the IMMEDIATELY following line.
+    assert.equal(p(["Artifact:", "`8c0dfe60287a`"]), "8c0dfe60287a", "bare label, backticked hash below");
+    assert.equal(p(["artifact hash:", "8c0dfe60287a"]), "8c0dfe60287a", "lowercase label, bare hash below");
+
+    // A same-line citation anywhere in the section still WINS over an earlier
+    // bare label's next line: the fix is additive to the finder's precedence,
+    // never a rewrite of it (#4101 design-concept INV-3).
+    assert.equal(p(["Artifact:", "deadbeefcafe", "Artifact: 8c0dfe60287a"]), "8c0dfe60287a");
+
+    // Bounded: a hex token that is neither on a label line nor on the line
+    // immediately following one stays unread — there is no unbounded
+    // full-section hex scan (#4101 design-concept INV-2).
+    assert.equal(p(["some prose with no label at all", "`8c0dfe60287a`"]), null, "no label line above");
+    assert.equal(p(["Artifact:", "", "`8c0dfe60287a`"]), null, "a blank line breaks label adjacency");
   });
 
   test("ENTRY_RE tolerates Markdown emphasis wrapping the INV-<n> label (issue #4037)", () => {
@@ -345,6 +409,15 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(hashesMatch("deadbeef", "8c0dfe60287afcf4"), false);
   });
 
+  test("findCorrectHashMention fires only on a hex run the live hash starts with (issue #4101)", () => {
+    // An all-hex-digit date is the false-positive shape the live-hash prefix
+    // filter rules out: present, >=8 chars, but not a prefix of the live hash.
+    assert.equal(findCorrectHashMention("approved on 20260814, no hash cited", "8c0dfe60287afcf4"), null);
+    assert.equal(findCorrectHashMention("deadbeefcafe stale token", "8c0dfe60287afcf4"), null, "a wrong token is not a correct mention");
+    assert.equal(findCorrectHashMention("hash 8c0dfe60287a ok", "8c0dfe60287afcf4f464b5e94c35e0fd"), "8c0dfe60287a");
+    assert.equal(findCorrectHashMention("", "8c0dfe60287afcf4"), null);
+  });
+
   test("isSafeRepoRelativePath rejects traversal, absolute paths and odd charsets", () => {
     assert.equal(isSafeRepoRelativePath("src/api/design-concepts.ts"), true);
     assert.equal(isSafeRepoRelativePath("/etc/passwd"), false);
@@ -500,6 +573,61 @@ describe("design-concept reconcile check (pure)", () => {
   test("a stale or absent artifact hash blocks", () => {
     assert.ok(codes(run(goodBody().replace("8c0dfe60287a", "deadbeefcafe"))).includes("artifact-hash-mismatch"));
     assert.ok(codes(run(goodBody().replace("Artifact: `8c0dfe60287a`", ""))).includes("missing-artifact-hash"));
+  });
+
+  test("a WRONG hash on the line below the label is found and still fails validation (issue #4101)", () => {
+    // Widening the finder never weakens the check: whatever the next-line
+    // fallback picks up is still validated by hashesMatch against the live
+    // artifact hash, so a stale token blocks as artifact-hash-mismatch.
+    const body = goodBody().replace("Artifact: `8c0dfe60287a`", "Artifact:\n`deadbeefcafe`");
+    assert.equal(parseReconciliationSection(body).artifactHash, "deadbeefcafe", "the next-line token is found, not ignored");
+    assert.ok(codes(run(body)).includes("artifact-hash-mismatch"));
+  });
+
+  test("a section with no hex token anywhere still yields null and still blocks (issue #4101)", () => {
+    // The vacuous-widening guard (#4037's fix used the same shape): a section
+    // whose only "citation" is prose must not start resolving hashes.
+    const body = [
+      "Closes #2528",
+      "",
+      RECONCILIATION_HEADING,
+      "",
+      "Artifact: (see the approved grill thread)",
+      '- INV-1: "The checker MUST live in scripts/ci" — verified by: `file-contains: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation`',
+      '- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: `file-absent: .github/workflows/design-concept-reconcile.yml`',
+    ].join("\n");
+    assert.equal(parseReconciliationSection(body).artifactHash, null);
+    assert.ok(codes(run(body)).includes("missing-artifact-hash"));
+  });
+
+  test("missing-artifact-hash names a correct hash the finder cannot read (issue #4101)", () => {
+    // The residual shape after the fix: the CORRECT live hash is present but
+    // not on a label line nor on the line immediately following one (here:
+    // bare, two lines below the label). Saying "cites no artifact hash" is
+    // misleading in exactly this case — the message must say the hash does
+    // appear in the section, and where the gate needs it instead.
+    const body = [
+      "Closes #2528",
+      "",
+      RECONCILIATION_HEADING,
+      "",
+      "Artifact: grill-approved;",
+      "status: approved, full hash below",
+      HASH,
+      '- INV-1: "The checker MUST live in scripts/ci" — verified by: `file-contains: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation`',
+      '- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: `file-absent: .github/workflows/design-concept-reconcile.yml`',
+    ].join("\n");
+    assert.equal(parseReconciliationSection(body).artifactHash, null, "non-adjacent bare hash still does not resolve");
+    const withMention = run(body).find((v) => v.code === "missing-artifact-hash");
+    assert.ok(withMention, "expected missing-artifact-hash");
+    assert.match(withMention!.message, /appears in the section/);
+    assert.match(withMention!.message, /8c0dfe60287a/);
+
+    // A section with no hash anywhere keeps the original wording.
+    const without = run(goodBody().replace("Artifact: `8c0dfe60287a`", "")).find((v) => v.code === "missing-artifact-hash");
+    assert.ok(without, "expected missing-artifact-hash");
+    assert.doesNotMatch(without!.message, /appears in the section/);
+    assert.match(without!.message, /cites no artifact hash/);
   });
 
   test("entry count must equal invariants.length", () => {
