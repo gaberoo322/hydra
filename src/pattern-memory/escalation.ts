@@ -351,6 +351,33 @@ async function reopenIssue(issueNumber: number): Promise<void> {
 }
 
 /**
+ * Issue #4073 — the closing paths elsewhere in the codebase strip the
+ * lifecycle label (`ready-for-agent`, `needs-qa`, ...) when they close an
+ * issue, leaving only `meta-friction` behind. `reopenIssue()` restores
+ * nothing, so a reopened issue previously landed back on the board as a
+ * label-less, untriaged orphan. Default deterministically to
+ * `ready-for-human` — the existing "subagent gave up, operator must decide"
+ * label (`docs/agents/triage-labels.md`) — so every reopen the CLOSED branch
+ * performs leaves the issue immediately actionable rather than invisible to
+ * the triage backstop. `--add-label` is idempotent (a no-op if the label
+ * somehow survived close), so this never double-applies or errors on repeat.
+ */
+const REOPEN_LIFECYCLE_LABEL = "ready-for-human";
+
+async function applyReopenLifecycleLabel(issueNumber: number): Promise<void> {
+  const result = await ghExec([
+    "issue",
+    "edit",
+    String(issueNumber),
+    "--repo",
+    REPO,
+    "--add-label",
+    REOPEN_LIFECYCLE_LABEL,
+  ]);
+  if (isGhFailure(result)) throw new GhInvocationError(result.code, result.stderr);
+}
+
+/**
  * Public entry — escalate a pattern to a GitHub issue. Best-effort:
  * always resolves; never throws. Caller (`recordPattern`) does not need to
  * await the result for correctness, but awaiting is recommended so the audit
@@ -374,11 +401,12 @@ export async function escalatePatternToIssue(
       // cumulative-count threshold (150 / 20) re-bumps every +10 hits forever
       // because the count only rises while the rate is ~constant; this gate
       // suppresses a bump whose recent rate has not risen above the cue's own
-      // creation-anchored baseline. Only the comment-bump path is gated:
-      // issue CREATION (handled below, findExistingIssue → null) and the
-      // CLOSED→reopen path are NEVER gated — a first occurrence and any
-      // post-close recurrence are always informative. Non-rate-gated cues
-      // never reach this branch.
+      // creation-anchored baseline. Only the comment-bump path is gated here:
+      // issue CREATION (handled below, findExistingIssue → null) is NEVER
+      // gated — a first occurrence is always informative. The CLOSED→reopen
+      // path below applies the SAME gate for the two rate-gated cues only
+      // (issue #4073) — see that branch for why. Non-rate-gated cues never
+      // reach either gated branch.
       if (isRateGatedCue(input.cue)) {
         const history = await fetchIssueHistory(existing.number);
         // history === null → gh fetch failed → fail OPEN: post unconditionally
@@ -403,7 +431,43 @@ export async function escalatePatternToIssue(
       return { status: "commented", issueNumber: existing.number };
     }
     if (existing && existing.state === "CLOSED") {
+      // Issue #4073 — a CLOSED issue is normally an explicit operator belief
+      // the problem was fixed, so ANY post-close recurrence is worth
+      // resurfacing regardless of rate. That holds for ordinary cues, but NOT
+      // for a rate-gated cue: closing acceptance-criterion-unmet /
+      // -deferred's issue is exactly what routes the next hit around the
+      // OPEN-path rate gate above (#3936/#3850) — a post-close recurrence on
+      // those two cues is near-guaranteed within days and carries zero
+      // signal (issue #2528 reopened 4x in 15 days via this exact path).
+      // Reuse the SAME rate-vs-baseline decision the OPEN path applies —
+      // verbatim, via shouldRateEscalate()/parseEscalationBumpSeries() — so
+      // the CLOSED path degrades to a no-op comment-less skip instead of an
+      // unconditional reopen for the two rate-gated cues only.
+      if (isRateGatedCue(input.cue)) {
+        const history = await fetchIssueHistory(existing.number);
+        // history === null → gh fetch failed → fail OPEN (same contract as
+        // the OPEN-path gate): reopen unconditionally rather than suppress a
+        // possibly-genuine rising-rate signal.
+        if (history !== null) {
+          const series = parseEscalationBumpSeries(
+            history.body,
+            history.createdAt,
+            history.comments,
+          );
+          if (!shouldRateEscalate(series, input.hitCount, new Date().toISOString())) {
+            return {
+              status: "skipped",
+              reason:
+                `rate-gated: recent rate not above baseline, issue stays closed ` +
+                `(window=${RATE_ESCALATION_WINDOW_DAYS}d, multiplier=${RATE_ESCALATION_MULTIPLIER})`,
+            };
+          }
+        }
+      }
       await reopenIssue(existing.number);
+      // Restore a lifecycle label so the reopened issue doesn't land as a
+      // meta-friction-only untriaged orphan (issue #4073).
+      await applyReopenLifecycleLabel(existing.number);
       await commentOnIssue(existing.number, input);
       return { status: "reopened", issueNumber: existing.number };
     }

@@ -6,15 +6,27 @@
  * cue's OPEN issue every +10 hits forever. Issue #3850 adds a DOWNSTREAM rate
  * gate inside escalation.ts's OPEN-issue comment-bump branch: for the two
  * rate-gated cues, a comment-bump POSTs only when the cue's recent hit rate
- * has risen above its own creation-anchored baseline. Creation + reopen paths
- * are never gated; non-rate-gated cues are byte-identical.
+ * has risen above its own creation-anchored baseline. Non-rate-gated cues are
+ * byte-identical.
  *
- * Two test groups:
+ * Issue #4073 extends the SAME gate to the CLOSED→reopen branch for the two
+ * rate-gated cues only: closing one of their issues was exactly what routed
+ * the next recurrence around the OPEN-path gate above (issue #2528 reopened
+ * 4x in 15 days via the previously-ungated CLOSED path). Every other cue's
+ * CLOSED→reopen behaviour is unchanged — a post-close recurrence still
+ * reopens unconditionally.
+ *
+ * Three test groups:
  *   1. Pure policy (cue-policy.ts) — deterministic, no gh, no Redis. Includes
  *      a replay of the REAL #2528 escalation history that grounds the
  *      window/multiplier constants.
- *   2. Integration (escalation.ts) — fake gh script; asserts the gate's
- *      skipped/commented/fail-open behaviour through escalatePatternToIssue.
+ *   2. Integration (escalation.ts), OPEN-issue branch — fake gh script;
+ *      asserts the gate's skipped/commented/fail-open behaviour through
+ *      escalatePatternToIssue.
+ *   3. Integration (escalation.ts), CLOSED→reopen branch (issue #4073) —
+ *      same fake gh harness, asserts the reopen path applies the identical
+ *      gate for rate-gated cues, fails open on a fetch failure, leaves
+ *      non-rate-gated cues unchanged, and re-labels a proceeding reopen.
  */
 
 import { test, describe, before, beforeEach, after } from "node:test";
@@ -459,22 +471,138 @@ exit 0
     assert.ok(invocations.some(l => l.startsWith("issue comment 4242")), "expected an unconditional comment-bump");
   });
 
-  test("closed issue → reopen path is NEVER rate-gated (rate-gated cue reopens unconditionally)", async () => {
-    // Invariant #5 of the issue-3850 design: a CLOSED issue is an explicit
-    // operator belief the problem was fixed, so ANY post-close recurrence is
-    // worth resurfacing regardless of rate. The rate gate sits only on the
-    // OPEN comment-bump branch, so a rate-gated cue on a CLOSED issue must
-    // reopen + comment unconditionally — no history fetch, no suppression.
-    process.env.FAKE_GH_LIST_STATE = "CLOSED";
-    const result = await escalatePatternToIssue(input(220));
-    assert.equal(result.status, "reopened");
-    if (result.status === "reopened") assert.equal(result.issueNumber, 4242);
-    const invocations = await readInvocations();
-    assert.ok(invocations.some(l => l.startsWith("issue reopen 4242")), "expected reopen on the closed path");
-    assert.ok(invocations.some(l => l.startsWith("issue comment 4242")), "expected a comment after reopen");
-    assert.ok(
-      !invocations.some(l => l.startsWith("issue view ")),
-      "the closed path must NOT fetch history or consult the rate gate",
-    );
+  // ---------------------------------------------------------------------------
+  // 3. CLOSED→reopen branch (issue #4073) — the SAME rate gate as OPEN.
+  // ---------------------------------------------------------------------------
+  //
+  // Historical note: prior to #4073 there was a test here asserting the
+  // opposite invariant ("closed issue → reopen path is NEVER rate-gated ...
+  // no history fetch"). That was byte-for-byte the #2528 bug: closing a
+  // rate-gated cue's issue routed every subsequent hit around the OPEN-path
+  // gate via this exact unconditional-reopen branch. These cases replace it.
+
+  describe("closed-issue reopen path (issue #4073)", () => {
+    test("rate-gated cue, steady rate vs baseline → status=skipped, issue stays closed", async () => {
+      process.env.FAKE_GH_LIST_STATE = "CLOSED";
+      // Same steady-rate fixture as the OPEN-path case above: creation@100
+      // 60d ago, bump@160 30d ago (baseline 2.0/day); current 220 (recent
+      // 2.0/day < 3.0/day bar) → suppress.
+      await stageHistory(
+        "Auto-escalated by the learning system after 100 hits on cue `acceptance-criterion-unmet`.",
+        isoFromNow(-60),
+        [{ body: "Pattern still firing — now 160 hits on `acceptance-criterion-unmet`.", createdAt: isoFromNow(-30) }],
+      );
+      const result = await escalatePatternToIssue(input(220));
+      assert.equal(result.status, "skipped");
+      if (result.status === "skipped") assert.match(result.reason, /rate-gated/);
+      const invocations = await readInvocations();
+      assert.ok(!invocations.some(l => l.startsWith("issue reopen ")), "steady-rate must NOT reopen a closed issue");
+      assert.ok(!invocations.some(l => l.startsWith("issue comment ")), "steady-rate must NOT comment either");
+      assert.ok(
+        invocations.some(l => l.startsWith("issue view ")),
+        "the closed path must fetch history before deciding, same as the OPEN path",
+      );
+    });
+
+    test("rate-gated cue, rate above baseline → status=reopened, comments, and re-labels", async () => {
+      process.env.FAKE_GH_LIST_STATE = "CLOSED";
+      // Same rising-rate fixture as the OPEN-path case above: creation@100
+      // 60d ago, bump@130 30d ago (baseline 1.0/day); current 220 (recent
+      // 3.0/day >= 1.5/day bar) → reopen.
+      await stageHistory(
+        "Auto-escalated by the learning system after 100 hits on cue `acceptance-criterion-unmet`.",
+        isoFromNow(-60),
+        [{ body: "Pattern still firing — now 130 hits on `acceptance-criterion-unmet`.", createdAt: isoFromNow(-30) }],
+      );
+      const result = await escalatePatternToIssue(input(220));
+      assert.equal(result.status, "reopened");
+      if (result.status === "reopened") assert.equal(result.issueNumber, 4242);
+      const invocations = await readInvocations();
+      assert.ok(invocations.some(l => l.startsWith("issue reopen 4242")), "expected a reopen");
+      assert.ok(invocations.some(l => l.startsWith("issue comment 4242")), "expected a comment after reopen");
+      assert.ok(
+        invocations.some(
+          (l) => l.startsWith("issue edit 4242") && l.includes("--add-label") && l.includes("ready-for-human"),
+        ),
+        "a proceeding reopen must re-apply a lifecycle label, not leave the issue meta-friction-only",
+      );
+    });
+
+    test("gh history-fetch failure on the closed path → fail OPEN (reopens unconditionally)", async () => {
+      process.env.FAKE_GH_LIST_STATE = "CLOSED";
+      process.env.FAKE_GH_VIEW_FAILS = "1";
+      const result = await escalatePatternToIssue(input(220));
+      assert.equal(result.status, "reopened");
+      const invocations = await readInvocations();
+      assert.ok(
+        invocations.some(l => l.startsWith("issue reopen 4242")),
+        "a gh fetch failure must fail-open to a reopen, matching the OPEN-path fail-open contract",
+      );
+    });
+
+    test("non-rate-gated cue → reopens unconditionally, no behaviour change", async () => {
+      process.env.FAKE_GH_LIST_STATE = "CLOSED";
+      process.env.FAKE_GH_LIST_CUE = "stale-local-master-ref";
+      const result = await escalatePatternToIssue({
+        kind: "friction",
+        cue: "stale-local-master-ref",
+        hitCount: 13,
+        skills: ["hydra-dev"],
+      });
+      assert.equal(result.status, "reopened");
+      const invocations = await readInvocations();
+      assert.ok(
+        !invocations.some(l => l.startsWith("issue view ")),
+        "non-rate-gated cues must NOT trigger a history fetch on the closed path either",
+      );
+      assert.ok(invocations.some(l => l.startsWith("issue reopen 4242")), "expected an unconditional reopen");
+      assert.ok(invocations.some(l => l.startsWith("issue comment 4242")), "expected an unconditional comment");
+    });
+
+    test("REAL #2528 regression: 160→170→180→190→200→210 series — reopen suppressed after the first", async () => {
+      // Reproduces the actual issue #2528 pattern named in #4073: the
+      // operator closed the cue's issue believing it fixed, then hit after
+      // hit arrived within days of each other — the previously-ungated
+      // CLOSED path reopened (and got re-closed) FOUR times in 15 days with
+      // zero signal. With the gate applied, only the first post-close hit
+      // (which has no baseline bump yet) reopens; every later hit compares
+      // against that fresh anchor and — arriving well within the 7-day
+      // window — is suppressed.
+      process.env.FAKE_GH_LIST_STATE = "CLOSED";
+      const creationAt = isoFromNow(-45); // far enough back that the first
+      // post-creation attempt always clears the window.
+      let bumps: Array<{ body: string; createdAt: string }> = [];
+      const restage = () =>
+        stageHistory(
+          "Auto-escalated by the learning system after 100 hits on cue `acceptance-criterion-unmet`.",
+          creationAt,
+          bumps,
+        );
+
+      const series = [160, 170, 180, 190, 200, 210];
+      const results: string[] = [];
+      for (const hit of series) {
+        await restage();
+        const result = await escalatePatternToIssue(input(hit));
+        results.push(result.status);
+        if (result.status === "reopened") {
+          // Mirror the comment the reopen just posted so the NEXT attempt's
+          // staged history reflects reality — same fixture-update discipline
+          // as the pure-policy REAL #2528 replay above.
+          bumps = [
+            ...bumps,
+            {
+              body: `Pattern still firing — now ${hit} hits on \`acceptance-criterion-unmet\`.`,
+              createdAt: isoFromNow(0),
+            },
+          ];
+        }
+      }
+      assert.deepEqual(
+        results,
+        ["reopened", "skipped", "skipped", "skipped", "skipped", "skipped"],
+        "only the first post-close hit should reopen; every later hit in the series must be suppressed",
+      );
+    });
   });
 });
