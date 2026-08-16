@@ -32,6 +32,15 @@
  *     a PR that references but does not close, and an issue already
  *     `needs-qa`.
  *
+ * INV-5 (PR #4090 design-concept reconciliation, closed in this revision):
+ * `run_completion` fetches `gh pr list --json
+ * headRefName,body,closingIssuesReferences --limit 200` ONCE per qualifying
+ * dev_orch completion and shares the parsed JSON with BOTH this check and
+ * the sibling #3866 stall check (`_handle_dev_orch_stall`) — no more
+ * doubling the `gh` call volume. A single fetch failure now fails BOTH
+ * checks open. See the "SHARED FETCH" and the PROMOTE test's trailing
+ * assertion below for the regression coverage.
+ *
  * A stub `gh` binary (HYDRA_AUTOPILOT_GH_CLI override, mirroring
  * test/autopilot-dev-resume-stall.test.mts's injection pattern) replaces the
  * real CLI so these tests run hermetically — no network, no real repo.
@@ -216,6 +225,50 @@ describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion
         ),
         `must relabel issue #4001 ready-for-agent -> needs-qa: ${JSON.stringify(calls)}`,
       );
+
+      // Issue #4045 INV-5 (PR #4090 design-concept reconciliation): this
+      // completion qualifies for BOTH the sibling #3866 stall check
+      // (_handle_dev_orch_stall, which finds the PR and no-ops) AND this
+      // needs-qa promotion — exactly the case that used to fire TWO
+      // independent `gh pr list` subprocesses. Assert exactly one.
+      const prListCalls = calls.filter((c) => c.startsWith("pr list"));
+      assert.equal(
+        prListCalls.length,
+        1,
+        `the #3866 stall check and the #4045 promotion check must share ONE ` +
+          `gh pr list call, not one each: ${JSON.stringify(calls)}`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("SHARED FETCH: exactly one gh pr list subprocess serves both the #3866 stall check and the #4045 promotion check, even when neither fires (issue #4045 INV-5)", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, baseSlotState("t10", "issue-4010"));
+
+      // A PR that neither closes (no closing verb) nor is fully absent — a
+      // bare branch-name match. This trips the #3866 stall check's "found"
+      // path (no-op) and the #4045 promotion check's "not closing" path
+      // (no-op) — both handlers still run, both still consult the SAME
+      // fetched payload, so the assertion below would catch a regression to
+      // the old two-independent-calls shape even when neither mutates.
+      const prJson = JSON.stringify([{ headRefName: "issue-4010-fix", body: "" }]);
+      const r = runCompletion(["dev_orch", "t10", "35000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: prJson,
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const calls = ghCalls(tmp);
+      const prListCalls = calls.filter((c) => c.startsWith("pr list"));
+      assert.equal(
+        prListCalls.length,
+        1,
+        `exactly one gh pr list subprocess must serve both checks per ` +
+          `qualifying dev_orch completion: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(!calls.some((c) => c.startsWith("issue edit")), "neither check should relabel in this scenario");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
