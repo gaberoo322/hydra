@@ -41,9 +41,16 @@ import {
 } from "../src/pattern-memory/cue-policy.ts";
 
 const DAY_MS = 86_400_000;
-/** ISO timestamp `offsetDays` from the real wall-clock now (test-only). */
+// Single clock read, hoisted to module scope (issue #4110): every assertion in
+// this file is about *relative* spans between isoFromNow() calls, never the
+// absolute current time, so one shared NOW makes those spans exact by
+// construction instead of drifting by the sub-millisecond gap between two
+// separate Date.now() reads (which flipped the exact-equality boundary case
+// at line ~174 under CI load).
+const NOW = Date.now();
+/** ISO timestamp `offsetDays` from the single hoisted NOW (test-only). */
 const isoFromNow = (offsetDays: number): string =>
-  new Date(Date.now() + offsetDays * DAY_MS).toISOString();
+  new Date(NOW + offsetDays * DAY_MS).toISOString();
 
 // ===========================================================================
 // 1. Pure policy
