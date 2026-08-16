@@ -1,0 +1,1 @@
+- fix: hydra-dev's pre-PR design-concept fetch is now unconditional, scoping the reconciliation no-op to a 404/unreachable response instead of to whether the agent remembered to fetch (#4102)
