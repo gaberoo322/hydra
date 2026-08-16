@@ -1,9 +1,13 @@
 /**
- * Schemas for the autopilot board-state endpoint (issue #934).
+ * Schemas for the autopilot board-state endpoints (issues #934, #4010).
  *
- * One read-only endpoint:
+ * One read endpoint plus the four /work issue-lifecycle action endpoints:
  *
- *   GET /api/autopilot/board-state → AutopilotBoardStateResponse
+ *   GET  /api/autopilot/board-state          → AutopilotBoardStateResponse
+ *   POST /api/autopilot/board-state/promote  → BoardActionResponse
+ *   POST /api/autopilot/board-state/relabel  → BoardActionResponse
+ *   POST /api/autopilot/board-state/close    → BoardActionResponse
+ *   POST /api/autopilot/board-state/reopen   → BoardActionResponse
  *
  * # Why this exists
  *
@@ -71,6 +75,23 @@ export const AutopilotBoardStateQuerySchema = z
 // ---------------------------------------------------------------------------
 
 /**
+ * One row of the ready-for-agent queue: the identity + labels the /work page
+ * needs to render the queue and its row actions. Deliberately carries NO
+ * `body` (issue bodies are large; every body-derived decision runs
+ * server-side in the action routes).
+ */
+const ReadyQueueEntrySchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    labels: z.array(z.string()),
+  })
+  .strict();
+
+export type ReadyQueueEntry = z.infer<typeof ReadyQueueEntrySchema>;
+
+/**
  * The orchestrator issue-board projection the autopilot brain consumes each
  * turn. The count fields and the two stale-number lists are a 1:1 mirror of the
  * JSON `collect-state.sh` used to shape inline with `--jq`; preserving the
@@ -105,6 +126,23 @@ export const AutopilotBoardStateResponseSchema = z
      * turn; the autopilot turn can also see the degradation explicitly.
      */
     degraded: z.boolean(),
+    /**
+     * The ADR-0034 §5 asserted-cleanliness signal (issue #4010, additive):
+     * `!degraded`. An all-zero board from an unreachable `gh` must render as
+     * UNKNOWN on /work, never as a confident zero — `usePageItems` keys its
+     * unknown status off exactly this field. Kept as a SEPARATE field rather
+     * than a replacement so `collect-state.sh`'s existing `degraded` consumer
+     * is byte-for-byte untouched (design-concept invariant 3).
+     */
+    sourcesOk: z.boolean(),
+    /**
+     * The dispatchable ready-for-agent pool as issue rows (issue #4010): the
+     * rows that count toward `ready_for_agent` above — i.e. after the
+     * `target-backlog` / live-`glm-eligible` / open-strict-blocker exclusions
+     * the pure projection applies. The /work page renders this as the
+     * ready-for-agent queue. Empty when degraded.
+     */
+    ready_for_agent_queue: z.array(ReadyQueueEntrySchema),
     /** ISO timestamp the projection was assembled. */
     generatedAt: z.string(),
   })
@@ -113,3 +151,132 @@ export const AutopilotBoardStateResponseSchema = z
 export type AutopilotBoardStateResponse = z.infer<
   typeof AutopilotBoardStateResponseSchema
 >;
+
+// ---------------------------------------------------------------------------
+// Issue-lifecycle action endpoints (issue #4010, ADR-0034 §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The lane labels a /work action may write. The orchestrator's triage +
+ * board vocabulary (docs/agents/triage-labels.md + `src/board-labels.ts`) —
+ * restricting writes to this closed list keeps an arbitrary string out of
+ * the `gh issue edit` argv and out of the board.
+ */
+export const ACTIONABLE_LABELS = [
+  "needs-triage",
+  "needs-info",
+  "needs-research",
+  "needs-qa",
+  "ready-for-agent",
+  "ready-for-human",
+  "in-progress",
+  "blocked",
+  "wontfix",
+  "target-backlog",
+] as const;
+export type ActionableLabel = (typeof ACTIONABLE_LABELS)[number];
+
+/** Body for `POST /autopilot/board-state/promote` (issue #4010). */
+export const PromoteActionBodySchema = z
+  .object({
+    /** The issue to promote to `ready-for-agent`. */
+    issue: z.number().int().positive(),
+    /**
+     * MUST be `true`. Promoting to ready-for-agent is a dispatch trigger in
+     * disguise (ADR-0034 §7) — the UI shows an explicit confirm step and the
+     * route independently refuses a request without it (HTTP 400
+     * `promote-confirm-required`), so the guard holds even if a client skips
+     * the dialog. A bare boolean rather than `z.literal(true)` so the missing
+     * / false case is separable from generic schema garbage.
+     */
+    confirm: z.boolean(),
+  })
+  .strict();
+
+export type PromoteActionBody = z.infer<typeof PromoteActionBodySchema>;
+
+/** Body for `POST /autopilot/board-state/relabel` (issue #4010). */
+export const RelabelActionBodySchema = z
+  .object({
+    /** The issue to relabel. */
+    issue: z.number().int().positive(),
+    /** The lane label to add. */
+    addLabel: z.enum(ACTIONABLE_LABELS),
+    /** Lane labels to remove first (the lane being moved away from). */
+    removeLabels: z.array(z.enum(ACTIONABLE_LABELS)).default([]),
+  })
+  .strict();
+
+export type RelabelActionBody = z.infer<typeof RelabelActionBodySchema>;
+
+/** Body for `POST /autopilot/board-state/close` and `.../reopen`. */
+export const IssueStateActionBodySchema = z
+  .object({
+    /** The issue to close / reopen. */
+    issue: z.number().int().positive(),
+  })
+  .strict();
+
+export type IssueStateActionBody = z.infer<typeof IssueStateActionBodySchema>;
+
+/**
+ * The post-write issue snapshot every verified action response carries — the
+ * re-read ACTUAL state (design-concept invariant 6), never a projection of
+ * what the write should have achieved.
+ */
+const BoardIssueStateSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    labels: z.array(z.string()),
+    state: z.string(),
+  })
+  .strict();
+
+/** The four /work actions (ADR-0034 §7's confirm-tier vs immediate-tier). */
+export const BOARD_ACTIONS = ["promote", "relabel", "close", "reopen"] as const;
+export type BoardAction = (typeof BOARD_ACTIONS)[number];
+
+/**
+ * Machine-readable refusal / failure codes an action response can carry.
+ * `promote-blocked-issue` and `promote-missing-scope` are the two guard
+ * refusals (ADR-0034 §7); `verification-mismatch` is a write that claimed
+ * success but whose read-back disagreed — reported, never papered over.
+ */
+export const BOARD_ACTION_REFUSAL_CODES = [
+  "promote-blocked-issue",
+  "promote-missing-scope",
+  "verification-mismatch",
+] as const;
+
+/**
+ * Response for all four action endpoints: a discriminated union on `ok`.
+ * Success carries the verified post-write snapshot; refusal carries a
+ * machine-readable `code` plus the operator-readable `reason` (the specific
+ * refusal grounds surfaced in the UI).
+ */
+export const BoardActionResponseSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      action: z.enum(BOARD_ACTIONS),
+      issue: BoardIssueStateSchema,
+      generatedAt: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(false),
+      action: z.enum(BOARD_ACTIONS),
+      code: z.enum(BOARD_ACTION_REFUSAL_CODES),
+      reason: z.string(),
+      /** Open blocker issue numbers, when the refusal is `promote-blocked-issue`. */
+      blockers: z.array(z.number().int().positive()).optional(),
+      issue: BoardIssueStateSchema.optional(),
+      generatedAt: z.string(),
+    })
+    .strict(),
+]);
+
+export type BoardActionResponse = z.infer<typeof BoardActionResponseSchema>;

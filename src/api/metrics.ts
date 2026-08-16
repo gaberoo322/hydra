@@ -141,6 +141,14 @@ export function createMetricsRouter() {
   // gauges were retired in ADR-0036 (no live writer), so this surface now
   // covers only the live priority lanes. Read-only and best-effort.
   //
+  // Issue #4010 (ADR-0034 §5): the response now carries `generatedAt` +
+  // `sourcesOk`, stamped HERE at the HTTP boundary — never inside the pure
+  // `projectAnchorDistribution` projection, which stays synthetic-trend-
+  // testable and wall-clock-free (design-concept invariant 4). `sourcesOk`
+  // is false exactly when the trend read degraded to empty (the lookup did
+  // not run cleanly), so /work's AnchorRationale panel renders UNKNOWN
+  // rather than an unasserted all-zero lane table.
+  //
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   // The inner `.catch` on the trend read stays (it's a best-effort
   // degrade-to-empty, not the route's failure isolation).
@@ -149,14 +157,20 @@ export function createMetricsRouter() {
     aggregatorRouteNoQuery("api/metrics/anchor-distribution", async (req) => {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
 
+      let trendReadOk = true;
       const trend = await getMetricsTrend(count).catch((err: any) => {
         logger.error({ err }, "[api/metrics] anchor-distribution: trend read failed");
+        trendReadOk = false;
         return [];
       });
 
       // Aggregation lives in src/metrics/aggregate.ts; this route is a thin
-      // delegate (issue #2126).
-      return projectAnchorDistribution(trend);
+      // delegate (issue #2126) plus the boundary trust stamps (issue #4010).
+      return {
+        ...projectAnchorDistribution(trend),
+        generatedAt: new Date().toISOString(),
+        sourcesOk: trendReadOk,
+      };
     }),
   );
 

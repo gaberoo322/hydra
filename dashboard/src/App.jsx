@@ -5,6 +5,7 @@ import Layout from "./components/Layout.jsx";
 import Today from "./pages/Today.jsx";
 import Health from "./pages/Health.jsx";
 import Runs from "./pages/Runs.jsx";
+import Work from "./pages/Work.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
 import NowPixel from "./pages/now-pixel/NowPixel.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
@@ -119,6 +120,10 @@ export default function App() {
               (#4009): runs list → run detail → transcript. */}
           <Route path="/runs" element={<Runs />} />
           <Route path="/runs/:runId" element={<Autopilot />} />
+          {/* Dashboard v3 (ADR-0034 §2) — the backlog journey, slice epsilon
+              (#4010): board state, the ready queue, and why the autopilot
+              picked what it picked (+ issue-lifecycle actions, §7). */}
+          <Route path="/work" element={<Work />} />
           {/* Legacy deep link (was the run detail's only home until #4009) —
               redirect, never 404 (INV-5). */}
           <Route path="/autopilot/:runId" element={<LegacyRunRedirect />} />

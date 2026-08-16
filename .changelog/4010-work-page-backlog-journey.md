@@ -1,0 +1,1 @@
+- feat: the /work page — board state with the ready-for-agent queue and trust fields, the anchor-rationale panel, and the four verified issue-lifecycle actions (promote/relabel/close/reopen) with ADR-0034 §7 guard refusals (#4010)

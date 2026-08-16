@@ -84,7 +84,10 @@ export function deriveBoardState(
    * header doc for the fail-open semantics. Default `false`.
    */
   glmPartitionActive = false,
-): Omit<AutopilotBoardStateResponse, "degraded" | "generatedAt"> {
+): Omit<
+  AutopilotBoardStateResponse,
+  "degraded" | "generatedAt" | "sourcesOk" | "ready_for_agent_queue"
+> {
   let needs_qa = 0;
   let ready_for_agent = 0;
   let needs_triage = 0;
