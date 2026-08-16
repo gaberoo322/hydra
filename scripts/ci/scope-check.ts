@@ -53,6 +53,27 @@
 const DEFAULT_RATIO = 0.8;
 const DEFAULT_MIN_COUNT = 3;
 
+// ---------------------------------------------------------------------------
+// Shared section parser — relocated to the pure src leaf (issue #4010)
+// ---------------------------------------------------------------------------
+//
+// `extractScopeFromBody` + the private `extractSection`/`looksLikePath`
+// helpers moved VERBATIM to `src/scope-section.ts` so the /work page's runtime
+// promote gate (which refuses an issue lacking a "## Files in scope" section,
+// mirroring issue #396) reuses the ONE parser instead of growing a second
+// regex — src cannot import scripts/ (tsconfig rootDir), but scripts CAN
+// import src (established: mutation-check.ts, target-risk-core-check.ts,
+// branch-prune-runner.ts). `extractScopeFromBody` is re-exported so every
+// existing consumer keeps its import path; `extractSection` and `looksLikePath`
+// stay imported here for the sibling extractors below.
+import {
+  extractScopeFromBody,
+  extractSection,
+  looksLikePath,
+} from "../../src/scope-section.ts";
+
+export { extractScopeFromBody };
+
 /**
  * Issue #3678: path prefixes that are ALWAYS in scope for every PR, regardless
  * of the "Files in scope" section. `.changelog/` fragments (the per-PR release-
@@ -64,10 +85,6 @@ const DEFAULT_MIN_COUNT = 3;
  * away any incidental out-of-scope listing of a `.changelog/` path.
  */
 export const ALWAYS_IN_SCOPE: string[] = [".changelog/"];
-
-export function extractScopeFromBody(body: string): string[] {
-  return extractSection(body, /Files in scope/i);
-}
 
 /**
  * Issue #396: explicit "Files out of scope" block. Any changed file matching
@@ -115,39 +132,6 @@ export function extractScopeJustifications(body: string): string[] {
   return Array.from(new Set(justified));
 }
 
-function extractSection(body: string, headerRe: RegExp): string[] {
-  if (!body) return [];
-  // Build a markdown-section regex anchored on the header keyword. The
-  // section runs until the next markdown heading, a sibling section
-  // (Risk / Implementation / Files in/out of scope / Acceptance), or EOF.
-  const headerSource = headerRe.source.replace(/\\b/g, "");
-  const re = new RegExp(
-    `(?:^|\\n)\\s*(?:##+\\s*|\\*\\*)?${headerSource}(?:\\*\\*)?\\s*[\\r\\n]+([\\s\\S]*?)(?=\\n\\s*(?:##+\\s|\\*\\*[A-Z])|\\n\\s*Files (?:in|out of) scope|\\n\\s*Risk\\b|\\n\\s*Implementation\\b|\\n\\s*Acceptance\\b|\\n\\s*scope-justification|\\n\\s*$|$)`,
-    "i",
-  );
-  const m = body.match(re);
-  if (!m) return [];
-  const block = m[1];
-  // Collect paths from BOTH code spans AND bullet/line entries (issue #836).
-  // A single backticked path inside the section (e.g. from a scope-justification
-  // line that the boundary lookahead failed to strip) must never suppress the
-  // plain bullet-list entries — that early-return was the #836 regression.
-  const codeSpans = Array.from(block.matchAll(/`([^`]+)`/g))
-    .map((x) => x[1].trim())
-    .filter(looksLikePath);
-  const bulletPaths = block
-    .split("\n")
-    // Strip the bullet marker, THEN strip backticks so a backticked bullet
-    // contributes the same clean path as the code-span branch (no corrupted
-    // literal-backtick duplicate), then trim.
-    .map((l) => l.replace(/^\s*[-*]\s+/, "").replace(/`/g, "").trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .filter(looksLikePath);
-  // Union, deduped — backticked-bullet and plain-bullet sections both stay
-  // byte-identical to the pre-#836 behaviour; mixed sections now keep all paths.
-  return Array.from(new Set([...codeSpans, ...bulletPaths]));
-}
-
 /**
  * Issue #2175: a path that belongs to the **Target** repo (`hydra-betting`),
  * not this orchestrator repo. A scope section that lists Target-repo siblings
@@ -167,14 +151,6 @@ export function isTargetRepoPath(path: string): boolean {
   const p = (path || "").trim();
   if (!p) return false;
   return /(^|\/)(gaberoo322\/)?hydra-betting(\/|$)/.test(p);
-}
-
-function looksLikePath(s: string): boolean {
-  // Heuristic: contains a slash or a recognised extension, no spaces.
-  if (/\s/.test(s)) return false;
-  if (s.includes("/")) return true;
-  if (/\.(ts|tsx|js|mjs|cjs|mts|cts|md|yml|yaml|json|sh|toml)$/.test(s)) return true;
-  return false;
 }
 
 export function classifyScope(

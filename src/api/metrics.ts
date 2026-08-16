@@ -144,19 +144,33 @@ export function createMetricsRouter() {
   // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
   // The inner `.catch` on the trend read stays (it's a best-effort
   // degrade-to-empty, not the route's failure isolation).
+  //
+  // Trust seam (issue #4010, ADR-0034 §5): generatedAt + sourcesOk are stamped
+  // HERE, at the HTTP boundary — NOT inside the pure projectAnchorDistribution
+  // projection, which stays a synthetic-trend-testable pure function (a
+  // wall-clock read inside it would make it impure). `sourcesOk:false` marks
+  // the degraded-to-empty trend (a failed read, not an asserted zero) so the
+  // /work anchor-rationale panel renders UNKNOWN rather than a confident
+  // all-zero distribution.
   router.get(
     "/metrics/anchor-distribution",
     aggregatorRouteNoQuery("api/metrics/anchor-distribution", async (req) => {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
 
+      let sourcesOk = true;
       const trend = await getMetricsTrend(count).catch((err: any) => {
         logger.error({ err }, "[api/metrics] anchor-distribution: trend read failed");
+        sourcesOk = false;
         return [];
       });
 
       // Aggregation lives in src/metrics/aggregate.ts; this route is a thin
       // delegate (issue #2126).
-      return projectAnchorDistribution(trend);
+      return {
+        ...projectAnchorDistribution(trend),
+        sourcesOk,
+        generatedAt: new Date().toISOString(),
+      };
     }),
   );
 
