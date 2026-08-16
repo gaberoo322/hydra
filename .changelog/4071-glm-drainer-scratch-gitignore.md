@@ -1,0 +1,1 @@
+- chore: stop tracking the GLM dev-drainer's `.glm-drainer-pr-body.md` scratch file (#4071)

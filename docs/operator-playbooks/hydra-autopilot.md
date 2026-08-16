@@ -249,6 +249,28 @@ with no design-concept check in its path, so an unpinned dispatch could land on
 the very anchor being grilled this turn — the grill-before-dev violation #628
 exists to prevent. No `prompt_args.anchor` → today's self-selection.
 
+**Frontier-tier routing hint on a pinned anchor (issue #3798, #3795
+follow-up).** A pinned `dev_orch` dispatch MAY also carry
+`prompt_args.route_model` — a string model alias (today `fable`, read live
+from `ESCALATION_POLICY["dev_orch"]["model"]`) `decide.py` attaches ONLY when
+the pin's grill-clearness came from a genuine, **approved** design-concept
+artifact (never the mechanical #1230 / trivial #1088 exemption, which are the
+*opposite* of architecturally consequential). **When `prompt_args.route_model`
+is present, pass `model=action.prompt_args.route_model` to the `Agent` call
+for that one dispatch, overriding the static per-class Sonnet default** — the
+same override mechanics as the cascade-routing `escalate_model` hint above,
+but a **distinct key**: `route_model` is a first-attempt, dispatch-time
+routing decision with no `attempt` / `prior_attempt_status` fields, so it must
+never be conflated with (or substituted for) `escalate_model`'s
+retry-after-failure telemetry. No `prompt_args.route_model` → resolve `model`
+from the static per-class map as usual (the overwhelmingly common case: most
+`dev_orch` dispatches are unpinned, and most pinned ones are grill-clear via
+the mechanical/trivial exemption, not a fresh artifact). This routing is
+purely additive to — and structurally independent of — the
+`subagent_failure`-triggered `escalate_model` cascade: that net still fires
+identically on top of whichever model this hint (or its absence) resolved for
+the first attempt.
+
 **A second, independent source of a pinned anchor: draining
 `state.dev_resume_pending` (issue #3866).** `reap.py` appends a resume record
 here when a PRIOR `dev_orch` completion opened no PR for its anchor (the
@@ -491,7 +513,23 @@ monitor, or a background process ("I'll wait for the test run to finish",
 FOREGROUND, or your final message reports one of: a PR is open (dev_orch) / a
 verdict was posted (qa_orch), OR a hard blocker via ## Friction Report. There
 is no third option.
+
+You MUST do this work yourself, in THIS session. Do NOT delegate the skill
+invocation to a nested background agent (`Agent(run_in_background=true)`) and
+end your turn waiting on it — a background child does not keep you alive, and
+reap.py will record your session as a completion with no PR the moment you go
+quiet. Read-only helper sub-agents for search are fine; handing off the
+implementation is not.
 ```
+
+The delegation clause above closes a route the original wording missed (issue
+#4052, autopilot run f7b47a0c): a `dev_orch` dispatch on #4041 spawned a
+nested `Agent(run_in_background=true)` to run the whole skill invocation,
+then ended its turn to "wait for its completion notification" — satisfying
+the letter of "poll to a terminal state in the FOREGROUND" while violating
+its spirit, because a background child does not keep the parent session
+alive. Cost: 75k tokens and ~5.8 min for zero deliverable, plus a race
+between the still-live child and the no-PR-stall backstop it triggered.
 
 Motivating incidents (autopilot run 2bcba309, 2026-08-05): a `dev_orch`
 dispatch on #3726 did ~9.5 min of real implementation, backgrounded `npm

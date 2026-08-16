@@ -16,6 +16,13 @@ closed, collect-state.sh should call THIS script instead of its inline copy, so
 the two predicates can never drift; until then this is the BROADER of the two
 (it never under-detects relative to collect-state.sh).
 
+`closing_issues()` (issue #4045) is a second, NARROWER predicate over the
+same JSON shape: issue numbers an open PR actually CLOSES (body closing verb
+only — never the branch-name convention, never the non-closing `Refs #N`
+form). `reap.py` uses it to promote an issue from `ready-for-agent` to
+`needs-qa` once a real closing PR exists, which is a stricter bar than
+`referenced_issues()`'s "this PR is at least related to the issue".
+
 Pure: stdin JSON in, stdout numbers out. It NEVER shells out to `gh` — the
 caller (recover-stale.sh) owns the `gh pr list` call and the never-abort
 degradation contract. Any parse error prints nothing and exits 0: an empty
@@ -40,6 +47,16 @@ _BODY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Closing-verb-only subset of _BODY_RE (issue #4045) — deliberately EXCLUDES
+# the non-closing `Ref(s) #N` form and never matches on branch name alone.
+# GitHub's own auto-close mechanism keys on exactly these verbs in a PR body,
+# so this is the predicate for "this PR marks the issue done", not merely
+# "this PR is related to the issue".
+_CLOSE_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b",
+    re.IGNORECASE,
+)
+
 
 def referenced_issues(pr_json):
     """Return the set of ints referenced by the open-PR JSON on stdin."""
@@ -57,6 +74,34 @@ def referenced_issues(pr_json):
         if m:
             out.add(int(m.group(1)))
         for m in _BODY_RE.finditer(pr.get("body") or ""):
+            out.add(int(m.group(1)))
+    return out
+
+
+def closing_issues(pr_json):
+    """Return the set of ints an open PR ACTUALLY CLOSES (issue #4045).
+
+    Narrower than `referenced_issues()` on purpose: a bare `issue-<N>`
+    branch-name match or a non-closing `Refs #N` body keyword both count as
+    "referenced" (enough to say a dev_orch dispatch didn't stall — see
+    `reap.py`'s `_dev_orch_pr_exists_for_anchor`), but neither means the PR
+    is actually done and ready for review. Only a real GitHub closing verb
+    in the PR body (Closes/Fixes/Resolves, any tense) counts here — this is
+    the predicate `reap.py` uses to promote an issue from `ready-for-agent`
+    to `needs-qa`, and promoting on a merely-related PR would move an issue
+    into the review lane before it's reviewable.
+    """
+    out = set()
+    try:
+        prs = json.loads(pr_json)
+    except Exception:
+        return out
+    if not isinstance(prs, list):
+        return out
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        for m in _CLOSE_RE.finditer(pr.get("body") or ""):
             out.add(int(m.group(1)))
     return out
 
