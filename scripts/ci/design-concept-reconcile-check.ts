@@ -252,6 +252,25 @@ const ENTRY_RE =
   /^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?(\*\*|__|\*|_)?INV[\s-]?(\d+)(?![0-9A-Za-z])\1\s*[:.–—-]?\s*(.*)$/;
 
 /**
+ * A label (`Artifact:` / `artifact hash:`) with nothing hex-looking after it
+ * on the SAME line — the wrapped-hash shape this module exists to recover
+ * (issue #4101): `Artifact: \`hydra:design-concept:issue-4010\`, artifact hash:`
+ * followed by the hash alone on the next line.
+ */
+const ARTIFACT_LABEL_RE = /artifact(?:\s*hash)?\s*[:=]/i;
+
+/**
+ * A line whose entire (trimmed) content is a single backticked hex token —
+ * optionally bullet-prefixed and/or followed by trailing punctuation, e.g.
+ * `` `967957884177…` `` or `` - `967957884177…`, ``. Deliberately NOT a bare
+ * scan of every line in the section: restricting the fallback to "the line
+ * right after a label line" (rather than "any standalone hex token anywhere")
+ * keeps the widening precise per issue #4101's own guard requirement — a
+ * section with no hex token anywhere must still yield `artifactHash: null`.
+ */
+const STANDALONE_HASH_LINE_RE = /^\s*(?:[-*]\s*)?`([0-9a-fA-F]{8,64})`\s*[,.;:)]*\s*$/;
+
+/**
  * Parse the reconciliation section into a cited artifact hash plus one entry
  * per `- INV-<n>` bullet. A bullet may wrap: any following indented, non-empty,
  * non-heading, non-bullet line is joined onto it with a single space.
@@ -269,7 +288,16 @@ export function parseReconciliationSection(body: string): ParsedSection {
 
     if (artifactHash === null) {
       const h = /artifact(?:\s*hash)?\s*[:=]\s*`?([0-9a-fA-F]{8,64})`?/i.exec(line);
-      if (h) artifactHash = h[1].toLowerCase();
+      if (h) {
+        artifactHash = h[1].toLowerCase();
+      } else if (ARTIFACT_LABEL_RE.test(line) && i + 1 < lines.length) {
+        // Same-line attempt failed but this line still carries the label —
+        // a compliant reconciliation section wraps the hash onto the very
+        // next line (markdown line-length hygiene). Only the LABEL detection
+        // is same-line; the hash token itself may be found one line below.
+        const next = STANDALONE_HASH_LINE_RE.exec(lines[i + 1]);
+        if (next) artifactHash = next[1].toLowerCase();
+      }
     }
 
     const m = ENTRY_RE.exec(line);

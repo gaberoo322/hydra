@@ -156,6 +156,64 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(parsed.entries[2].assertion, "file-absent: b.yml");
   });
 
+  test("parseReconciliationSection finds the hash on the line BELOW the Artifact: label (issue #4101)", () => {
+    // The exact shape PR #4100 shipped — a fully compliant section whose
+    // hash wraps onto the line after the label (markdown line-length
+    // hygiene). Before the fix this parsed to artifactHash: null and the
+    // required `test` job blocked the PR on `missing-artifact-hash` while
+    // quoting the very hash the body already contained.
+    const wrappedBody = [
+      RECONCILIATION_HEADING,
+      "",
+      "Artifact: `hydra:design-concept:issue-4010`, artifact hash:",
+      "`967957884177d62e2d0e4a14d3e584c2fb9b567b871b2b846a3b852c9c40f316`",
+      "(status: approved)",
+      "",
+      '- INV-1: "some invariant text goes here" — verified by: `manual: fine`',
+    ].join("\n");
+    const parsed = parseReconciliationSection(wrappedBody);
+    assert.equal(
+      parsed.artifactHash,
+      "967957884177d62e2d0e4a14d3e584c2fb9b567b871b2b846a3b852c9c40f316",
+      "hash wrapped onto the next line must still resolve",
+    );
+
+    // Unchanged baseline: hash glued to the label on the SAME line still works.
+    const sameLine = [RECONCILIATION_HEADING, "", "Artifact: `abcdef1234`", "- x"].join("\n");
+    assert.equal(parseReconciliationSection(sameLine).artifactHash, "abcdef1234");
+
+    // Unchanged baseline: the `id, artifact hash: <hash>` same-line variant.
+    const sameLineIdForm = [
+      RECONCILIATION_HEADING,
+      "",
+      "id, artifact hash: `abcdef1234567890`",
+      "- x",
+    ].join("\n");
+    assert.equal(parseReconciliationSection(sameLineIdForm).artifactHash, "abcdef1234567890");
+
+    // Guard against a vacuous widening (issue #4101's own guard requirement):
+    // a label line with NO hex token anywhere in the section — including the
+    // line right below it — must still yield null, not swallow unrelated text.
+    const noHashAnywhere = [
+      RECONCILIATION_HEADING,
+      "",
+      "Artifact: (hash omitted, still pending)",
+      '- INV-1: "some invariant text goes here" — verified by: `manual: fine`',
+    ].join("\n");
+    assert.equal(parseReconciliationSection(noHashAnywhere).artifactHash, null);
+
+    // Guard: a label line followed by a line that ISN'T a standalone hash
+    // token (prose, not just backticks-and-hex) must not be misread as one.
+    const labelThenProse = [
+      RECONCILIATION_HEADING,
+      "",
+      "Artifact: see the design concept for the hash,",
+      "not written down here for some reason",
+      '- INV-1: "some invariant text goes here" — verified by: `manual: fine`',
+    ].join("\n");
+    assert.equal(parseReconciliationSection(labelThenProse).artifactHash, null);
+  });
+
   test("ENTRY_RE tolerates Markdown emphasis wrapping the INV-<n> label (issue #4037)", () => {
     // A fully-reconciled PR body dev agents actually write, e.g.
     // `- **INV-1** — text` or `- **INV-2**: text`, parsed to ZERO entries
@@ -489,6 +547,15 @@ describe("design-concept reconcile check (pure)", () => {
 
   test("a well-formed reconciliation section produces zero violations", () => {
     assert.deepEqual(run(goodBody()), []);
+  });
+
+  test("a compliant section wrapping the hash onto the next line produces zero violations (issue #4101)", () => {
+    // Same content as goodBody(), but the label and its hash sit on
+    // consecutive lines the way PR #4100 actually wrote it — this is the
+    // regression this issue exists to fix: it must reconcile clean, not fail
+    // closed on missing-artifact-hash while quoting the very hash present.
+    const wrapped = goodBody().replace("Artifact: `8c0dfe60287a`", "Artifact:\n`8c0dfe60287a`");
+    assert.deepEqual(run(wrapped), []);
   });
 
   test("a missing section is a single blocking violation naming the heading", () => {
