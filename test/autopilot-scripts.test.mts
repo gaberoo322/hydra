@@ -1913,6 +1913,13 @@ describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () =
   // the jq exclusion array must contain every operator-wait / lifecycle label.
   // Missing `ready-for-human` (#2828) and `needs-info` (#2958) each caused
   // sweep_orch re-triage churn against issues sweep cannot advance.
+  //
+  // `needs-design-concept` was REMOVED from this array by #4096: without
+  // `ready-for-agent` the label is an unreachable lane (no AFK selector, no
+  // HITL surface), so the orphan backstop is its only recovery path. An issue
+  // carrying it WITH `ready-for-agent` stays excluded via the ready-for-agent
+  // entry itself. The behavioural pin for both directions lives in
+  // test/autopilot-collect-state-signals.test.mts (#4096).
   test("exclusion array contains all lifecycle + operator-wait labels", () => {
     const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
     const required = [
@@ -1925,7 +1932,6 @@ describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () =
       "target-backlog",
       "ready-for-human",
       "needs-info",
-      "needs-design-concept",
       "needs-tickets",
       "hitl-grill",
     ];
@@ -1940,6 +1946,10 @@ describe("collect-state.sh untriaged_orphans exclusion set (#2828, #2958)", () =
         `untriaged_orphans exclusion array missing "${label}"`,
       );
     }
+    assert.ok(
+      !block.includes('"needs-design-concept"'),
+      'untriaged_orphans must NOT unconditionally exclude "needs-design-concept" (#4096) — an issue carrying it without ready-for-agent is an unreachable lane the backstop exists to recover',
+    );
   });
 });
 
@@ -2204,28 +2214,31 @@ describe("collect-state.sh untriaged_orphans wayfinder prefix exclusion (#3728)"
 
 /**
  * Regression test for issue #3817 — `collect-state.sh`'s `untriaged_orphans`
- * backstop must NOT count `needs-design-concept`-only or `needs-tickets`-only
- * issues.
+ * backstop must NOT count `needs-tickets`-only issues.
  *
- * Both are deliberate, stable HITL parking lanes — same shape as the already
- * -excluded `ready-for-human` (#2828) / `needs-info` (#2958) — not the
- * "wrong label" blind spot this backstop exists to catch:
- *   - `needs-design-concept` parks an issue awaiting `hydra-grill` /
- *     `design_concept_orch` (the #628 gate). Observed live on issue #3815:
- *     `sweep_orch`'s only correct action is to confirm the issue is already
- *     routed and change nothing — so counting it as an orphan re-fires
- *     `sweep_orch` on its cooldown forever to re-confirm the same no-op.
- *   - `needs-tickets` parks a published spec awaiting `/to-tickets`
- *     decomposition in the operator's `hydra-review` cockpit (§0.8) — an
- *     autopilot-invisible, operator-driven lane by the same design.
+ * `needs-tickets` is a deliberate, stable HITL parking lane — same shape as
+ * the already-excluded `ready-for-human` (#2828) / `needs-info` (#2958) — not
+ * the "wrong label" blind spot this backstop exists to catch: it parks a
+ * published spec awaiting `/to-tickets` decomposition, a lane with its own
+ * consumer (`tickets_orch` reads the `tickets_available` signal the same
+ * collector emits; `/hydra-review` §0.8 lists it).
+ *
+ * NOTE: #3817 ALSO excluded `needs-design-concept` here. #4096 NARROWED that
+ * half: without `ready-for-agent` the label is an unreachable lane (the grill
+ * walk iterates ONLY ready-for-agent candidates; no HITL surface lists it), so
+ * such an issue IS now an orphan the backstop recovers — while the
+ * paired-with-ready-for-agent state stays excluded. The both-directions
+ * behavioural pin for that label lives in
+ * test/autopilot-collect-state-signals.test.mts; the flipped case below keeps
+ * this block honest about the mixed-board arithmetic.
  *
  * These cases run the COMMITTED jq filter through real `jq`, mirroring the
  * #3728 wayfinder-prefix precedent above so the shipped logic cannot drift.
- * Both directions matter: these two labels are NOT orphans, but a genuinely
+ * Both directions matter: `needs-tickets` is NOT an orphan, but a genuinely
  * label-less issue — and a `meta-friction`-only issue, the backstop's actual
  * motivating example — STILL is.
  */
-describe("collect-state.sh untriaged_orphans needs-design-concept / needs-tickets exclusion (#3817)", () => {
+describe("collect-state.sh untriaged_orphans needs-tickets exclusion (#3817; needs-design-concept half narrowed by #4096)", () => {
   const src = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
 
   /** Extract the committed untriaged_orphans jq filter verbatim from the script. */
@@ -2250,11 +2263,11 @@ describe("collect-state.sh untriaged_orphans needs-design-concept / needs-ticket
     return (r.stdout ?? "").trim();
   }
 
-  test("an issue with only [enhancement, needs-design-concept] is NOT an untriaged orphan", () => {
+  test("an issue with only [enhancement, needs-design-concept] IS an untriaged orphan (#4096 flip)", () => {
     assert.equal(
       count([{ labels: ["enhancement", "needs-design-concept"] }]),
-      "0",
-      "needs-design-concept is a deliberate parking lane awaiting hydra-grill — sweep_orch's correct action is no action",
+      "1",
+      "needs-design-concept without ready-for-agent is an unreachable lane — the grill walk iterates ONLY ready-for-agent candidates, so the orphan backstop is its sole recovery path",
     );
   });
 
@@ -2281,14 +2294,14 @@ describe("collect-state.sh untriaged_orphans needs-design-concept / needs-ticket
   test("a mixed board counts exactly the non-excluded orphans", () => {
     assert.equal(
       count([
-        { labels: ["needs-design-concept"] },
+        { labels: ["needs-design-concept"] }, // genuine orphan (#4096 — no ready-for-agent)
         { labels: ["needs-tickets"] },
         { labels: ["wayfinder:grilling"] },
         { labels: ["meta-friction"] }, // genuine orphan
         { labels: [] }, // genuine orphan
         { labels: ["ready-for-agent"] }, // excluded (lifecycle label)
       ]),
-      "2",
+      "3",
     );
   });
 });
@@ -2298,9 +2311,11 @@ describe("collect-state.sh untriaged_orphans needs-design-concept / needs-ticket
  * backstop must NOT count `hitl-grill`-only issues.
  *
  * `hitl-grill` is a TERMINAL park state for agent-proposed ideas that no
- * agent should ever action — same shape as the already-excluded
- * `needs-design-concept` / `needs-tickets` (#3817) above, not the
- * "wrong label" blind spot this backstop exists to catch. Without the
+ * agent should ever action — same shape as the still-excluded `needs-tickets`
+ * (#3817) above, not the "wrong label" blind spot this backstop exists to
+ * catch. (The #3817 `needs-design-concept` exclusion was narrowed by #4096 —
+ * that label is only a parking lane WHEN paired with `ready-for-agent`.)
+ * Without the
  * exclusion, an issue carrying only `hitl-grill` pins `untriaged_orphans`
  * above zero permanently and `sweep_orch` re-triages the parked idea into
  * an actionable lane on every cooldown, draining the inbox the label exists
@@ -2366,13 +2381,13 @@ describe("collect-state.sh untriaged_orphans hitl-grill exclusion (#4025)", () =
     assert.equal(
       count([
         { labels: ["hitl-grill"] },
-        { labels: ["needs-design-concept"] },
+        { labels: ["needs-design-concept"] }, // genuine orphan (#4096 — no ready-for-agent)
         { labels: ["wayfinder:grilling"] },
         { labels: ["meta-friction"] }, // genuine orphan
         { labels: [] }, // genuine orphan
         { labels: ["ready-for-agent"] }, // excluded (lifecycle label)
       ]),
-      "2",
+      "3",
     );
   });
 });
