@@ -390,6 +390,71 @@ def _dev_orch_pr_exists_for_anchor(anchor_ref: str) -> bool | None:
     return issue_num in referenced
 
 
+def _anchor_issue_is_closed(issue_num: str) -> bool | None:
+    """Is anchor issue #N currently CLOSED? (issue #4057)
+
+    `_handle_dev_orch_stall` treats "dev_orch completed and no open PR
+    references the anchor" as a stall. That evidence is incomplete: the
+    dispatch may have legitimately closed the anchor itself (verified the
+    defect was already resolved elsewhere and closed the issue with evidence
+    instead of inventing a fix — the motivating #4032 case), which is a
+    terminal outcome with no PR by design. This read is the disambiguator:
+    scoped to that single issue, deliberately NOT folded into
+    `_dev_orch_pr_exists_for_anchor`'s shared open-PR-list fetch — no shape
+    of PR-list payload can observe a closure that has no PR.
+
+    Returns:
+      True  — `gh issue view` succeeded and the issue's state is CLOSED.
+      False — succeeded and the state is OPEN.
+      None  — unreadable (`gh` failure/timeout, non-zero exit, or unparseable
+              output). Callers MUST treat this as "unknown" and mutate
+              nothing — the same fail-open-as-no-mutation convention
+              `_dev_orch_pr_exists_for_anchor` follows.
+    """
+    try:
+        proc = subprocess.run(
+            _gh_argv(
+                "issue", "view", issue_num, "--repo", REPO,
+                "--json", "state",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: gh issue view failed for #{issue_num} "
+            f"({exc}); issue state unknown, no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    if proc.returncode != 0:
+        print(
+            f"[autopilot] reap: gh issue view exited {proc.returncode} for "
+            f"#{issue_num}; issue state unknown, no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        state = json.loads(proc.stdout).get("state")
+    except (json.JSONDecodeError, AttributeError) as exc:
+        print(
+            f"[autopilot] reap: gh issue view returned unparseable output for "
+            f"#{issue_num} ({exc}); issue state unknown, no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(state, str) or not state.strip():
+        print(
+            f"[autopilot] reap: gh issue view returned no state for "
+            f"#{issue_num}; issue state unknown, no relabel this reap",
+            file=sys.stderr,
+        )
+        return None
+    return state.strip().upper() == "CLOSED"
+
+
 def _handle_dev_orch_stall(
     s: dict,
     cls: str,
@@ -416,7 +481,16 @@ def _handle_dev_orch_stall(
     hiccup, so a transient network/auth failure never mislabels a healthy
     in-flight/merged anchor — see `_dev_orch_pr_exists_for_anchor`.
 
-    On a confirmed stall (PR-existence == False):
+    Issue #4057: "no open PR" alone is NOT sufficient stall evidence — the
+    dispatch may have legitimately CLOSED the anchor itself (verified the
+    defect was already resolved elsewhere and closed the issue with evidence
+    instead of inventing a fix). A closed anchor is terminal by definition,
+    so before any mutation the handler reads the anchor issue's own state
+    (`_anchor_issue_is_closed`, fired only on this already-narrow no-PR
+    branch) and short-circuits when it reads CLOSED. An unreadable state
+    fails open as no-mutation, like every other `gh` gate here.
+
+    On a confirmed stall (PR-existence == False, anchor OPEN):
       - relabel the issue away from ready-for-agent/in-progress to
         `needs-dev-resume` (label pre-created for this issue) so hydra-dev's
         own `gh issue list --label ready-for-agent | .[0]` self-selection can
@@ -446,6 +520,24 @@ def _handle_dev_orch_stall(
     m = re.match(r"^issue-(\d+)$", anchor_ref)
     issue_num = m.group(1) if m else None
     if issue_num is None:
+        return
+
+    # Issue #4057: disambiguate the stall signal before mutating. A closed
+    # anchor is a terminal outcome (closed by a merged PR's Closes ref, or by
+    # the agent itself with evidence that the work is already done — observed
+    # on #4032): relabelling it would tag a CLOSED issue needs-dev-resume and
+    # queue a redispatch of work that is finished. Unreadable state → no
+    # mutation, per the fail-open convention above.
+    issue_closed = _anchor_issue_is_closed(issue_num)
+    if issue_closed is None:
+        return
+    if issue_closed:
+        line = (
+            f"dev_stall_no_pr_skipped_closed anchor={anchor_ref} "
+            f"task_id={task_id} branch={worktree_branch or ''}"
+        )
+        print(f"[autopilot] {line}")
+        _append_log(line)
         return
 
     relabelled = False
