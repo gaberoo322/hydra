@@ -227,13 +227,21 @@ export function shouldEscalateAtHitCount(
 //
 // IMPORTANT — the gate lives DOWNSTREAM of decideRecordActions, inside
 // escalation.ts's OPEN-issue comment-bump branch (see the design-concept for
-// issue-3850). decideRecordActions / recordPattern keep deciding
-// escalate=true at the existing count cadence for EVERY cue; the gate only
-// decides whether an already-fired OPEN-issue comment-bump actually POSTs.
-// Issue CREATION (findExistingIssue → null) and the CLOSED→reopen path are
-// NEVER gated: a first occurrence and any post-close recurrence are always
-// informative. Every non-rate-gated cue's behaviour is byte-identical because
-// the gate is never reached for them.
+// issue-3850) AND, since issue #4073, its CLOSED-issue reopen branch too.
+// decideRecordActions / recordPattern keep deciding escalate=true at the
+// existing count cadence for EVERY cue; the gate only decides whether an
+// already-fired OPEN-issue comment-bump or CLOSED-issue reopen actually
+// PROCEEDS. Issue CREATION (findExistingIssue → null) is NEVER gated — a
+// first occurrence is always informative. Every non-rate-gated cue's
+// behaviour is byte-identical (including its CLOSED→reopen path, which still
+// reopens unconditionally) because the gate is never reached for them.
+//
+// Why the CLOSED path needed the same gate (#4073): "any post-close
+// recurrence is always informative" is correct for a bursty cue but exactly
+// inverted for a steady-rate cue — a post-close recurrence is near-guaranteed
+// within days, so closing the issue was precisely what routed the next hit
+// around this gate (issue #2528: 4 reopens in 15 days, every one via the
+// then-ungated reopen path).
 
 /**
  * The cues whose OPEN-issue comment-bumps are rate-gated. Seeded with exactly
