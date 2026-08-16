@@ -212,10 +212,8 @@ Assertion grammar (Node-stdlib only, evaluated against the tree at HEAD — neve
 file — never a vacuous pass.
 
 **If ANY invariant cannot be satisfied, do NOT open the PR**: emit a
-`## Friction Report` naming the unmet invariant and stop. A 404 (or an
-unreachable orchestrator) RESPONSE is the clean no-op — "I did not fetch"
-never is. The gate fails OPEN on transport misses (no artifact, orchestrator
-unreachable) so it never reddens on downtime.
+`## Friction Report` naming the unmet invariant and stop.
+A 404 (or an unreachable orchestrator) RESPONSE is the clean no-op — "I did not fetch" never is. The gate fails OPEN on transport misses (no artifact, orchestrator unreachable) so it never reddens on downtime.
 
 ## Tier classification — live API (issue #406)
 
