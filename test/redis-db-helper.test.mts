@@ -524,7 +524,7 @@ describe("scripts/test/redis-db-launch.mjs — suite-count gate blocking toggle 
     }
   });
 
-  test("becomes blocking only when SUITE_COUNT_GATE_BLOCKING is exactly \"1\" (suite-count-check.yml's contract)", async () => {
+  test("becomes blocking only when SUITE_COUNT_GATE_BLOCKING is exactly \"1\" (reserved for #4141's zero-entry gate)", async () => {
     const { isGateBlocking } = await import("../scripts/test/redis-db-launch.mjs");
     assert.equal(isGateBlocking({ SUITE_COUNT_GATE_BLOCKING: "1" }), true);
   });
