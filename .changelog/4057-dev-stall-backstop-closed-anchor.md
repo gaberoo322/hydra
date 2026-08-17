@@ -1,0 +1,1 @@
+- fix: dev_orch's no-PR stall backstop no longer relabels or queues a resume for an anchor issue that was correctly closed without a PR (#4057)

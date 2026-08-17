@@ -29,6 +29,16 @@
  *     negative (PR found / gh unreachable / no anchor) cases so a future
  *     change can't quietly turn this into a false-positive relabel machine.
  *
+ * issue #4057 extends the fix: a no-PR completion is NOT always a stall —
+ * the dev_orch agent may have found the anchor already resolved and closed
+ * it directly with evidence instead of inventing a fix (the #4032 motivating
+ * incident). Once PR-existence === false, `_handle_dev_orch_stall` now reads
+ * the anchor issue's own state via a dedicated `gh issue view --json state`
+ * call (`_dev_orch_anchor_is_closed`) and skips the relabel/comment/queue
+ * entirely when that state reads CLOSED — or when the read itself fails,
+ * failing closed on the mutation, matching every other gh-failure branch in
+ * this module.
+ *
  * A stub `gh` binary (HYDRA_AUTOPILOT_GH_CLI override, mirroring the existing
  * HYDRA_AUTOPILOT_REDIS_CLI test-injection pattern for `_redis_cli`) replaces
  * the real CLI so these tests run hermetically — no network, no real repo.
@@ -57,6 +67,10 @@ interface Paths {
  *   - records every invocation (space-joined argv) as one line in ghCallsLog
  *   - answers `pr list ...` with $STUB_PR_LIST_JSON on stdout, exit
  *     $STUB_PR_LIST_EXIT (default 0)
+ *   - answers `issue view ...` (the #4057 closed-anchor check) with
+ *     $STUB_ISSUE_VIEW_JSON on stdout, exit $STUB_ISSUE_VIEW_EXIT (default 0);
+ *     the JSON default is `{"state":"OPEN"}` so tests that don't care about
+ *     this path fall through to the pre-#4057 relabel behaviour unchanged
  *   - answers `issue edit ...` / `issue comment ...` with exit
  *     $STUB_ISSUE_EDIT_EXIT / $STUB_ISSUE_COMMENT_EXIT (default 0)
  */
@@ -69,6 +83,11 @@ function makeTmp(): Paths {
     `#!/usr/bin/env bash
 set -u
 echo "$*" >> "${ghCallsLog}"
+# Default is assigned to a plain variable first (rather than inlined into a
+# \${VAR:-default} expansion) — a literal-brace JSON default word inside the
+# expansion itself confuses bash's brace-matching for the substitution and
+# leaks trailing characters onto stdout.
+default_view_json='{"state":"OPEN"}'
 case "\${1:-} \${2:-}" in
   "pr list")
     exit_code="\${STUB_PR_LIST_EXIT:-0}"
@@ -76,6 +95,14 @@ case "\${1:-} \${2:-}" in
       exit "\$exit_code"
     fi
     printf '%s' "\${STUB_PR_LIST_JSON:-[]}"
+    exit 0
+    ;;
+  "issue view")
+    exit_code="\${STUB_ISSUE_VIEW_EXIT:-0}"
+    if [ "\$exit_code" != "0" ]; then
+      exit "\$exit_code"
+    fi
+    printf '%s' "\${STUB_ISSUE_VIEW_JSON:-\$default_view_json}"
     exit 0
     ;;
   "issue edit")
@@ -187,6 +214,10 @@ describe("reap.py completion → dev_orch no-PR stall detection (issue #3866)", 
         `must query open PRs for the anchor's repo: ${JSON.stringify(calls)}`,
       );
       assert.ok(
+        calls.some((c) => c.startsWith("issue view 3726") && c.includes("--json state")),
+        `must check the anchor's own state before relabelling (issue #4057): ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
         calls.some(
           (c) =>
             c.startsWith("issue edit 3726") &&
@@ -207,6 +238,94 @@ describe("reap.py completion → dev_orch no-PR stall detection (issue #3866)", 
       assert.equal(s.dev_resume_pending[0].task_id, "t1");
       assert.equal(s.dev_resume_pending[0].branch, "issue-3726-fix");
       assert.equal(typeof s.dev_resume_pending[0].stalled_epoch, "number");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("CLOSED ANCHOR (issue #4057): no open PR, but the anchor is already CLOSED → no relabel, no comment, no queue entry", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000) - 600,
+            task_id: "t7",
+            anchor: "issue-4032",
+            branch: "issue-4032-fix",
+          },
+        },
+      });
+
+      const r = runCompletion(["dev_orch", "t7", "45000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]", // no open PRs — the agent closed the issue directly, no PR at all
+        STUB_ISSUE_VIEW_JSON: JSON.stringify({ state: "CLOSED" }),
+      });
+      assert.equal(r.status, 0, `reap must exit 0, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.ok(!log.includes("dev_stall_no_pr"), "a correctly-CLOSED anchor must never log a stall");
+
+      const calls = ghCalls(tmp);
+      assert.ok(
+        calls.some((c) => c.startsWith("issue view 4032") && c.includes("--json state")),
+        `must check the anchor's state before deciding: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        !calls.some((c) => c.startsWith("issue edit")),
+        `must NOT relabel an already-CLOSED anchor: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        !calls.some((c) => c.startsWith("issue comment")),
+        `must NOT comment on an already-CLOSED anchor: ${JSON.stringify(calls)}`,
+      );
+
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(
+        !s.dev_resume_pending || s.dev_resume_pending.length === 0,
+        "a correctly-CLOSED anchor must never queue a resume record",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("UNKNOWN ANCHOR STATE (issue #4057): no open PR, but gh issue view fails → fail CLOSED on the mutation, no relabel, no queue entry", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000) - 600,
+            task_id: "t8",
+            anchor: "issue-4033",
+          },
+        },
+      });
+
+      const r = runCompletion(["dev_orch", "t8", "35000", "hydra-dev"], tmp, {
+        STUB_PR_LIST_JSON: "[]",
+        STUB_ISSUE_VIEW_EXIT: "1", // simulate gh auth/network failure on the state read
+      });
+      assert.equal(r.status, 0, "an unreadable anchor state must never fail the reap");
+
+      const log = runLog(tmp);
+      assert.ok(!log.includes("dev_stall_no_pr"), "an unreadable anchor state must never be treated as a confirmed stall");
+
+      const calls = ghCalls(tmp);
+      assert.ok(
+        !calls.some((c) => c.startsWith("issue edit")),
+        `must NOT relabel when the anchor's state can't be read: ${JSON.stringify(calls)}`,
+      );
+      assert.ok(
+        !calls.some((c) => c.startsWith("issue comment")),
+        `must NOT comment when the anchor's state can't be read: ${JSON.stringify(calls)}`,
+      );
+
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(!s.dev_resume_pending || s.dev_resume_pending.length === 0);
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }

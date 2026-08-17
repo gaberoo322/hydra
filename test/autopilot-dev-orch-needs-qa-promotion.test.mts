@@ -332,7 +332,12 @@ describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion
       // `needs-dev-resume` — that behavior is pinned by
       // test/autopilot-dev-resume-stall.test.mts and is out of scope here.
       // This test only pins that the #4045 needs-qa PROMOTION path never
-      // fires without a PR to promote on.
+      // fires without a PR to promote on. As of issue #4057, the sibling
+      // stall check itself now issues a `gh issue view --json state` call
+      // (the closed-anchor check) even in this no-PR case — that call is
+      // pinned by the #4057 tests in autopilot-dev-resume-stall.test.mts, so
+      // this test narrows its assertion to the needs-qa-PROMOTION-specific
+      // `--json labels` shape rather than "no issue view call at all".
       const r = runCompletion(["dev_orch", "t4", "30000", "hydra-dev"], tmp, {
         STUB_PR_LIST_JSON: "[]",
       });
@@ -342,7 +347,10 @@ describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion
       assert.ok(!log.includes("dev_pr_closes_anchor"), "no PR means no needs-qa promotion");
 
       const calls = ghCalls(tmp);
-      assert.ok(!calls.some((c) => c.startsWith("issue view")), "no PR means no reason to check labels");
+      assert.ok(
+        !calls.some((c) => c.startsWith("issue view") && c.includes("--json labels")),
+        "no PR means no reason for the needs-qa promotion path to check labels",
+      );
       assert.ok(
         !calls.some((c) => c.startsWith("issue edit") && c.includes("--add-label needs-qa")),
         "no PR means no needs-qa relabel",
