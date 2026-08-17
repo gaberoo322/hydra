@@ -1,0 +1,1 @@
+- fix: ban all Agent-tool use in the dev_orch/qa_orch forbidden-ending preamble, closing the read-only-helper carve-out that let dispatches go quiet on a sub-agent (#4109)
