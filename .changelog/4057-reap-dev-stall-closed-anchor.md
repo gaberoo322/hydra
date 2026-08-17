@@ -1,0 +1,1 @@
+- fix: stop the autopilot's dev_stall_no_pr backstop from relabelling correctly-CLOSED anchors `needs-dev-resume` and queueing duplicate redispatches of already-finished work (#4057)
