@@ -490,6 +490,30 @@ if (resolved.db !== null) {
         ? `(derived from ${resolve(process.cwd())})`
         : `(pre-set REDIS_URL)`),
   );
+} else {
+  // Issue #4083: this branch used to be a silent no-op — indistinguishable
+  // from an intentional operator override, in violation of this repo's
+  // fail-loud convention. `resolveRedisUrl` only reaches `db === null` when
+  // REDIS_URL was PRE-SET (an unset REDIS_URL always derives an owned index
+  // via `deriveDbIndex`, never null), and `parseOwnedDbIndex` returned null
+  // for it — i.e. the pre-set url points at production DB 0, the legacy
+  // shared DB 1, a legacy per-file hard-pin (2..7), or a remote host. The
+  // flush is correctly skipped (this launcher must never touch a DB it
+  // doesn't own), but a test run against that DB reads/writes the exact same
+  // keys any live process on it uses — the shared-production-state hazard
+  // class diagnosed in #4072 and hypothesised (not yet confirmed) for #4083.
+  // Logging this unconditionally is also the durable diagnostic #4083's
+  // acceptance criteria asks for: the next time a flake in this class
+  // recurs, this line records the actual resolved REDIS_URL + db + source
+  // that was in play, settling the hypothesis empirically instead of by
+  // static inspection.
+  console.error(
+    `[redis-db-launch] WARN: REDIS_URL=${resolved.url} resolves to a DB this ` +
+      "launcher does not own (production DB 0, legacy DB 1, a legacy " +
+      "per-file hard-pin, or a remote host) — skipping the start-of-run " +
+      "FLUSHDB. Tests in this run share that DB's keyspace with whatever " +
+      "else is reading/writing it (#4083).",
+  );
 }
 
 // Per-file top-level suite/test count gate (issue #4020). `--test-force-exit`
