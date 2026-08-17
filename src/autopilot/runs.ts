@@ -119,7 +119,11 @@ import { RUN_TTL_SECONDS } from "./sweep-reader.ts";
 // idle exit so the pace-gate skips relaunch into a still-workless board. The
 // setter is injected via the deps bag (defaulting to the real Redis write) so
 // the endRun path stays testable without Redis.
-import { setWorklessUntil, worklessBackoffSec } from "../redis/workless-hint.ts";
+import {
+  setWorklessUntil,
+  worklessBackoffSec,
+  worklessBackoffPostworkSec,
+} from "../redis/workless-hint.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -150,6 +154,15 @@ import { setWorklessUntil, worklessBackoffSec } from "../redis/workless-hint.ts"
  * agents are unaffected — the next pace-gate-launched run re-seeds occupied
  * slots via the same #1352 ledger read regardless of which cause ended the
  * prior run.
+ *
+ * `quota` (issue #3867) is the sibling of `budget` denominated in the currency
+ * the operator actually pays: the run's account-utilization delta (percentLast5h
+ * / percentSinceReset measured against the run-start baseline) crossed its
+ * opt-in `--quota-5h-max` / `--quota-week-max` cap. `budget` counts
+ * subagent-reported tokens, which under-measure real cache-weighted spend by
+ * roughly two orders of magnitude (run 2bcba309: 801k of a 4M token budget while
+ * the meter moved 2%→30%). Clean and deliberate for exactly the same reason
+ * `budget` is — a stop rule the decision loop reached, not a truncation.
  */
 const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "budget",
@@ -160,6 +173,7 @@ const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "failure_backstop",
   "crash",
   "context_compaction",
+  "quota",
 ]);
 
 /**
@@ -458,29 +472,49 @@ export async function endRun(
 
     await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
-    // Issue #2956 — workless-board backoff hint. When a run terminates
-    // cause=idle having dispatched NOTHING, the board was fully workless (every
-    // class on cooldown, no signals firing): decide.py's first wait-only turn
-    // tripped `_rule_idle_fallback` and ended the run in ~2 minutes. Stamp a
-    // short temporal hint so the pace-gate skips relaunch into that same
-    // workless board instead of spawning another zero-dispatch idle exit
-    // (~14% of runs). ONLY on idle + zero-dispatch: any dispatch (or a
-    // budget/wall_clock/crash exit) means real work was available, so we must
-    // launch normally next cadence. Best-effort — a write failure must never
-    // change the run-end verdict, so its own catch swallows and logs.
+    // Issue #2956 — workless-board backoff hint, widened by issue #3867 slice 2.
+    //
+    // #2956 (unchanged): when a run terminates cause=idle having dispatched
+    // NOTHING, the board was fully workless (every class on cooldown, no signals
+    // firing): decide.py's first wait-only turn tripped `_rule_idle_fallback` and
+    // ended the run in ~2 minutes. Stamp a temporal hint so the pace-gate skips
+    // relaunch into that same workless board instead of spawning another
+    // zero-dispatch idle exit (~14% of runs). That case keeps the FULL
+    // `worklessBackoffSec()` window, bit-for-bit.
+    //
+    // #3867 slice 2 (new): a PRODUCTIVE run that drains the board and THEN
+    // idle-exits (the observed run: 5 dispatches, then terminate cause=idle) used
+    // to stamp nothing at all — so the pace-gate's next ~15-min tick launched a
+    // fresh claude session into the just-drained board, which zero-dispatch
+    // idle-exited once (~one wasted session bootstrap) before the 45-min backoff
+    // finally engaged. One wasted session per drain cycle, structurally. Such a
+    // run now stamps the SHORTER `worklessBackoffPostworkSec()` window: new
+    // QA-able output (dev PRs, GLM drainer PRs) can arrive sooner after a
+    // productive drain than after a genuinely workless board, so the suppression
+    // must be brief — long enough to swallow the immediate wasted relaunch, short
+    // enough not to sit on real work.
+    //
+    // ONLY on cause=idle: a budget/wall_clock/quota/crash exit says nothing about
+    // board emptiness, so those must launch normally next cadence (unchanged).
+    // Launcher-only per ADR-0021/#2956 — both branches write the same key via the
+    // same `stampWorklessHint` seam, so nothing here can flip `allow` or drain an
+    // in-flight session. Best-effort: a write failure must never change the
+    // run-end verdict, so its own catch swallows and logs.
     if (termReason === "idle") {
-      // Fail SAFE to "had work" on an unparseable count: only an AFFIRMATIVE
-      // zero suppresses the next launch, so a garbage `dispatches` field can
-      // never wrongly hold the launcher off.
+      // Fail SAFE to "no hint" on an unparseable count: a garbage `dispatches`
+      // field leaves the launcher entirely unsuppressed rather than guessing a
+      // window, so a bad write can never wrongly hold the launcher off.
       const dispatches = Number(existing.dispatches || "0");
-      if (Number.isFinite(dispatches) && dispatches === 0) {
+      if (Number.isFinite(dispatches) && dispatches >= 0) {
+        const backoffSec =
+          dispatches === 0 ? worklessBackoffSec() : worklessBackoffPostworkSec();
         try {
           const nowMs = deps.now();
-          const worklessUntilMs = nowMs + worklessBackoffSec() * 1000;
+          const worklessUntilMs = nowMs + backoffSec * 1000;
           await deps.stampWorklessHint(worklessUntilMs, nowMs);
         } catch (err: any) {
           logger.error(
-            { runId, err },
+            { runId, err, dispatches, backoffSec },
             "[autopilot] endRun workless-hint stamp failed; pace-gate will launch normally",
           );
         }

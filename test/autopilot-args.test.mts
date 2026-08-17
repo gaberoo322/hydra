@@ -101,6 +101,14 @@ describe("scripts/autopilot/args-parse.sh — slash-arg parsing", () => {
         // Turns (not raw API calls; see decide.py's
         // CONTEXT_COMPACTION_TURNS_DEFAULT docstring for the unit rationale).
         context_compaction_turns: 8,
+        // issue #3867 — quota-percent budget, in utilization POINTS over this
+        // run's own run-start baseline. BOTH default to 0 = DISABLED: there is
+        // no calibration data for a safe default, and the standing systemd
+        // invocation must not silently gain a second governor on deploy. This
+        // assertion is the guard on that default — a non-zero here would mean
+        // every existing run had quietly become quota-capped.
+        quota_5h_max_pts: 0,
+        quota_week_max_pts: 0,
         scope: "all",
         subagent_max_tokens: 400000,
         subagent_hard_max_tokens: 800000,

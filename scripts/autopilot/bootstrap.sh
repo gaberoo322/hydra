@@ -755,6 +755,26 @@ IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
 # rationale behind the 8-turn default.
 CONTEXT_COMPACTION_TURNS="${HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS:-8}"
 
+# Quota-percent budget (issue #3867) — the per-run spend cap denominated in the
+# currency the operator actually pays. `token_budget` above counts
+# subagent-reported input/output tokens, which under-measure real cache-weighted
+# account utilization by roughly two orders of magnitude: run 2bcba309 (2026-08-05)
+# "spent" 801k of a 4M token budget while the OAuth meter moved 2% -> 30% over the
+# same window (~150M raw tokens). These caps are measured in UTILIZATION POINTS
+# added over this run's own run-start baseline — decide.py captures the baseline
+# lazily on the first turn that sees a calibrated `state.usage_eligibility` payload
+# (already collected every turn by collect-state.sh, so zero new I/O) and emits
+# `TERM:quota` once the delta crosses the cap.
+#
+# BOTH DEFAULT TO 0 = DISABLED. There is no calibration data for a safe default
+# yet, and the systemd unit's existing invocation must not silently change
+# behaviour on deploy — so an unset flag leaves the termination path byte-identical
+# to a pre-#3867 run (ADR-0021 D5: per-run limits are hygiene caps subordinate to
+# the Pace Gate, never a second governor switched on behind the operator's back).
+# Fractional values are accepted (the percentages are floats server-side).
+QUOTA_5H_MAX="${HYDRA_AUTOPILOT_QUOTA_5H_MAX:-0}"
+QUOTA_WEEK_MAX="${HYDRA_AUTOPILOT_QUOTA_WEEK_MAX:-0}"
+
 # Per-subagent token caps (issue #395). Soft cap = stop re-dispatching that
 # class; hard cap = abandon the in-flight slot and open a runaway issue.
 # Soft must be <= hard. Defaults bound a single misbehaving subagent to
@@ -1104,6 +1124,15 @@ fi
 #     The 7 long-cooldown `signal_last_fired` classes are seeded from prior
 #     state the same way (issue #2575 — COOLDOWN_SIGNAL_SEED above).
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
+#   - `limits.quota_5h_max_pts` / `limits.quota_week_max_pts` (issue #3867) are
+#     the opt-in quota-percent budget, in utilization POINTS over this run's own
+#     baseline; 0 = disabled (the default). Deliberately NOT seeded from prior
+#     state: the cap is per-run, and the matching `quota_baseline` key (written
+#     lazily by decide.py on the first calibrated turn) is likewise absent here,
+#     so overwriting state.json each bootstrap is exactly what re-arms the
+#     baseline capture for the new run. Additive + tolerated-missing by all
+#     readers (term-check.py skips the cap when either is absent), so no
+#     schema_version bump.
 #   - `cumulative_tokens` seeds at 0 and is advanced ONLY by reap.py on each
 #     subagent completion (the per-turn token surrogate). This is the field the
 #     LIVE `TERM:budget` gate reads in term-check.py + decide.py — NOT dead code
@@ -1126,6 +1155,8 @@ cat > "${STATE_PATH}" <<EOF
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
     "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
+    "quota_5h_max_pts": ${QUOTA_5H_MAX},
+    "quota_week_max_pts": ${QUOTA_WEEK_MAX},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
@@ -1148,7 +1179,7 @@ cat > "${STATE_PATH}" <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} context_compaction_turns=${CONTEXT_COMPACTION_TURNS} quota_5h_max_pts=${QUOTA_5H_MAX} quota_week_max_pts=${QUOTA_WEEK_MAX} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
 echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"
 
 # Issue #435 — overwrite the Phase 0 heartbeat with the structured
@@ -1199,6 +1230,8 @@ else
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
     "context_compaction_turns": ${CONTEXT_COMPACTION_TURNS},
+    "quota_5h_max_pts": ${QUOTA_5H_MAX},
+    "quota_week_max_pts": ${QUOTA_WEEK_MAX},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},

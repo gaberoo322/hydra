@@ -93,6 +93,7 @@
   "test/autopilot-logs.test.mts": 1,
   "test/autopilot-os-heartbeat.test.mts": 4,
   "test/autopilot-pause.test.mts": 4,
+  "test/autopilot-quota-budget-3867.test.mts": 3,
   "test/autopilot-read-and-sweep.test.mts": 1,
   "test/autopilot-reap-segment-softcap.test.mts": 1,
   "test/autopilot-reap-task-id-mismatch.test.mts": 1,

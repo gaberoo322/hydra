@@ -1,0 +1,1 @@
+- feat: cap an autopilot run on real account-utilization percent, not subagent-reported tokens — opt-in `--quota-5h-max` / `--quota-week-max`, plus a shorter workless backoff after a productive drain (#3867)
