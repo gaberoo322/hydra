@@ -518,8 +518,8 @@ You MUST do this work yourself, in THIS session. Do NOT delegate the skill
 invocation to a nested background agent (`Agent(run_in_background=true)`) and
 end your turn waiting on it — a background child does not keep you alive, and
 reap.py will record your session as a completion with no PR the moment you go
-quiet. Read-only helper sub-agents for search are fine; handing off the
-implementation is not.
+quiet. Do NOT use the Agent tool at all. Search with Grep/Glob/Read yourself,
+inline, in THIS session. There is no sub-agent that keeps you alive.
 ```
 
 The delegation clause above closes a route the original wording missed (issue
