@@ -424,6 +424,13 @@ export function describeIncompleteRun(spawnResult) {
 async function retryShortfallsInIsolation(result, baseline, redisUrl) {
   const stillShort = [];
   const inconclusive = [];
+  // Issue #4141: `missingFiles` (zero observed entries) is deliberately NOT
+  // retried, and that is load-bearing rather than an oversight. A retry runs
+  // the file by NAME, which bypasses whatever glob or runner config dropped it
+  // from the batch — so it would always "pass" and would mask precisely the
+  // regression the zero-entry verdict exists to catch. Carried through
+  // untouched instead.
+  const missingFiles = result.missingFiles ?? [];
   const suiteCountCheckPath = fileURLToPath(new URL("./suite-count-check.mjs", import.meta.url));
   for (const shortfall of result.shortfalls) {
     const retryCapturePath = resolve(
@@ -513,9 +520,10 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
     stillShort.push(resolved && resolved.retried ? resolved.retried : shortfall);
   }
   return {
-    ok: stillShort.length === 0 && inconclusive.length === 0,
+    ok: stillShort.length === 0 && inconclusive.length === 0 && missingFiles.length === 0,
     shortfalls: stillShort,
     inconclusive,
+    missingFiles,
     readError: null,
     checkedFileCount: result.checkedFileCount,
   };
@@ -663,6 +671,26 @@ child.on("exit", async (code, signal) => {
     if (!result.ok) {
       const shortfalls = result.shortfalls ?? [];
       const inconclusive = result.inconclusive ?? [];
+      const missingFiles = result.missingFiles ?? [];
+      if (missingFiles.length > 0) {
+        console.error(
+          `[redis-db-launch] SUITE-COUNT GATE FAILED — FILE NEVER RAN (issue #4141) — ` +
+            `${missingFiles.length} baselined file(s) were part of this run but produced ZERO ` +
+            `top-level entries. This is NOT the #4137 reporter truncation: truncation drops a ` +
+            `TAIL, and even a fully-skipped file still emits one entry per top-level ` +
+            `registration. Zero means the file did not execute — a glob change, a runner-config ` +
+            `change, a rename, or a file dropped from the suite:`,
+        );
+        for (const s of missingFiles) {
+          console.error(`  ${s.file}: expected ${s.expected}, observed 0`);
+        }
+        console.error(
+          "[redis-db-launch] this verdict is NOT retried in isolation on purpose: a by-name retry " +
+            "bypasses the glob that dropped the file and would always pass, masking the very " +
+            "regression this catches. If the file was deliberately removed or renamed, regenerate " +
+            "the baseline in the same PR: node scripts/test/suite-count-check.mjs --update-baseline",
+        );
+      }
       if (shortfalls.length > 0) {
         console.error(
           `[redis-db-launch] SUITE-COUNT GATE FAILED (issue #4020) — ${shortfalls.length} ` +
@@ -697,15 +725,40 @@ child.on("exit", async (code, signal) => {
             "raise RETRY_TIMEOUT_MS; if it hangs, that hang is the bug to fix.",
         );
       }
+      // Issue #4141 — the zero-entry verdict blocks UNCONDITIONALLY, without
+      // consulting isGateBlocking(). That env flag exists to keep the
+      // truncation-prone PARTIAL verdict off the required `test` job; the
+      // zero-entry verdict is not truncation-prone, so gating it behind the
+      // same flag would leave the one deterministic case unenforced.
+      //
+      // One carve-out: when the run ALREADY failed, we exit non-zero anyway
+      // and a crashed child can leave every not-yet-reached file at zero. In
+      // that state the list above is context, not a verdict of its own —
+      // adding a second failure reason to an already-red run would just make
+      // the real one harder to find.
+      if (missingFiles.length > 0 && (code ?? 1) === 0) {
+        console.error(
+          "[redis-db-launch] failing the run on the zero-entry verdict — this one is deterministic.",
+        );
+        process.exit(1);
+        return;
+      }
       if (isGateBlocking()) {
         process.exit(1);
         return;
       }
+      if (missingFiles.length > 0) {
+        console.error(
+          `[redis-db-launch] the run had already failed (exit ${code}), so the zero-entry list above ` +
+            "is reported as context rather than as the failure reason — a crashed child leaves every " +
+            "file it never reached at zero.",
+        );
+      }
       console.error(
-        "[redis-db-launch] SUITE-COUNT GATE is advisory-only — not failing this run. Per #4137 a " +
-          "shortfall is the parent truncating the child's reporter stream, NOT tests being skipped: " +
-          "your verification held. Nothing sets SUITE_COUNT_GATE_BLOCKING today (#4133); #4141 " +
-          "re-scopes the gate to block only on a file contributing ZERO entries.",
+        "[redis-db-launch] the PARTIAL-shortfall verdict is advisory-only — not failing this run on " +
+          "its account. Per #4137 a partial shortfall is the parent truncating the child's reporter " +
+          "stream, NOT tests being skipped: your verification held. Nothing sets " +
+          "SUITE_COUNT_GATE_BLOCKING today (#4133). Only the ZERO-entry verdict above blocks (#4141).",
       );
     }
   } catch (err) {

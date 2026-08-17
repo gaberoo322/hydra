@@ -19,7 +19,7 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -586,5 +586,80 @@ describe("scripts/test/redis-db-launch.mjs — incomplete-retry classification (
       RETRY_TIMEOUT_MS >= 300_000,
       `RETRY_TIMEOUT_MS=${RETRY_TIMEOUT_MS} is too tight for the suite's slowest file (~151s idle)`,
     );
+  });
+});
+
+describe("scripts/test/redis-db-launch.mjs — zero-entry verdict wiring (#4141)", () => {
+  // compareCapture's own tests cover the DECISION (partial vs zero). What only
+  // the launcher can get wrong is the WIRING around it, and both mistakes here
+  // are silent: a retried zero-entry file always passes, and a zero-entry
+  // verdict left behind SUITE_COUNT_GATE_BLOCKING never fires. Neither shows up
+  // as a failing assertion anywhere else, so they are pinned structurally.
+  const SOURCE = readFileSync(
+    join(import.meta.dirname, "..", "scripts", "test", "redis-db-launch.mjs"),
+    "utf8",
+  );
+
+  /** Just the body of `retryShortfallsInIsolation`, where the retry decision lives. */
+  function retryFnBody(): string {
+    const start = SOURCE.indexOf("async function retryShortfallsInIsolation");
+    assert.ok(start >= 0, "retryShortfallsInIsolation not found");
+    const end = SOURCE.indexOf("\n}", start);
+    assert.ok(end > start, "retryShortfallsInIsolation closing brace not found");
+    return SOURCE.slice(start, end);
+  }
+
+  test("the retry loop iterates shortfalls only — a missing file is never retried", () => {
+    // A by-name retry bypasses the glob that dropped the file, so it would
+    // always pass and mask the regression. Scoped to the retry function on
+    // purpose: the REPORTING block further down legitimately iterates
+    // missingFiles to print them, and must not trip this.
+    const body = retryFnBody();
+    const loop = body.match(/for \(const shortfall of ([^)]+)\)/);
+    assert.ok(loop, "expected the isolation-retry loop over shortfalls");
+    assert.equal(loop[1].trim(), "result.shortfalls");
+    assert.ok(
+      !/for \(const \w+ of [^)]*missingFiles[^)]*\)/.test(body),
+      "missingFiles must not be iterated inside the retry function — a by-name retry always passes",
+    );
+    // `missingFiles` may appear in the function only to be carried through to
+    // the return value — never as the subject of a loop or a spawn argument.
+    for (const line of body.split("\n")) {
+      if (!line.includes("missingFiles")) continue;
+      assert.ok(
+        /^\s*(\/\/|\*)/.test(line) ||
+          /const missingFiles = result\.missingFiles/.test(line) ||
+          /missingFiles(,|\.length === 0)/.test(line),
+        `unexpected use of missingFiles inside the retry function: ${line.trim()}`,
+      );
+    }
+  });
+
+  test("the zero-entry exit is NOT gated behind isGateBlocking()", () => {
+    // SUITE_COUNT_GATE_BLOCKING exists to keep the truncation-prone PARTIAL
+    // verdict off the required `test` job. The zero-entry verdict is not
+    // truncation-prone; gating it behind the same flag would leave the one
+    // deterministic case unenforced, which is the whole point of #4141.
+    const guardAt = SOURCE.indexOf("if (missingFiles.length > 0 &&");
+    assert.ok(guardAt >= 0, "expected a zero-entry exit guard");
+    const guardBlock = SOURCE.slice(guardAt, guardAt + 600);
+    assert.match(guardBlock, /process\.exit\(1\)/);
+    assert.ok(
+      !guardBlock.slice(0, guardBlock.indexOf("process.exit(1)")).includes("isGateBlocking"),
+      "the zero-entry exit must not consult isGateBlocking() — it blocks unconditionally",
+    );
+    // And it must come BEFORE the advisory isGateBlocking() branch, or the
+    // advisory path would decide the run first.
+    assert.ok(
+      guardAt < SOURCE.indexOf("if (isGateBlocking()) {\n        process.exit(1)"),
+      "the zero-entry guard must be evaluated before the advisory isGateBlocking() branch",
+    );
+  });
+
+  test("an already-failed run does not add the zero-entry verdict as a second reason", () => {
+    // A crashed child leaves every file it never reached at zero. The run is
+    // already exiting non-zero, so re-reporting that as the failure reason
+    // would bury the real one.
+    assert.match(SOURCE, /missingFiles\.length > 0 && \(code \?\? 1\) === 0/);
   });
 });

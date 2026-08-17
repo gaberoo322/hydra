@@ -236,10 +236,16 @@ describe("suite-count-check — compareCapture (comparator)", () => {
     assert.deepEqual(result.shortfalls, [{ file: "test/a.test.mts", expected: 2, observed: 0 + 1 }]);
   });
 
-  test("a fully-dropped file (zero capture lines) is still caught — not silently skipped", () => {
+  test("a fully-dropped file (zero capture lines) is a MISSING file, not a shortfall (#4141)", () => {
     // This is the worst case the design doc calls out explicitly: a file with
     // NO capture lines at all must not be treated as "wasn't part of this
     // run" when it WAS named in testFiles.
+    //
+    // Since #4141 it is also reported in its own bucket. The two verdicts
+    // carry opposite evidential weight — a partial shortfall is the #4137
+    // reporter truncation and is advisory; zero entries means the file never
+    // executed, which is deterministic and blocks — so they must not share a
+    // list.
     const capturePath = writeCapture([
       { file: "test/other.test.mts", name: "s1", ok: true },
     ]);
@@ -250,7 +256,75 @@ describe("suite-count-check — compareCapture (comparator)", () => {
       testFiles: ["test/a.test.mts", "test/other.test.mts"],
     });
     assert.equal(result.ok, false);
-    assert.deepEqual(result.shortfalls, [{ file: "test/a.test.mts", expected: 3, observed: 0 }]);
+    assert.deepEqual(result.missingFiles, [{ file: "test/a.test.mts", expected: 3, observed: 0 }]);
+    assert.deepEqual(result.shortfalls, [], "a zero-entry file must NOT also appear as a shortfall");
+  });
+
+  test("partial and zero verdicts are separated in the same run (#4141)", () => {
+    // The discriminating case: one file truncated (advisory) and one absent
+    // (blocking) at once. Collapsing them would either wedge the merge queue
+    // on truncation or let a dropped file through on a technicality.
+    const capturePath = writeCapture([
+      { file: "test/partial.test.mts", name: "s1", ok: true },
+    ]);
+    const baseline = { "test/partial.test.mts": 4, "test/absent.test.mts": 2 };
+    const result = compareCapture({
+      capturePath,
+      baseline,
+      testFiles: ["test/partial.test.mts", "test/absent.test.mts"],
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.shortfalls, [
+      { file: "test/partial.test.mts", expected: 4, observed: 1 },
+    ]);
+    assert.deepEqual(result.missingFiles, [
+      { file: "test/absent.test.mts", expected: 2, observed: 0 },
+    ]);
+  });
+
+  test("an out-of-run file is never a missing file — single-file runs stay safe (#4141)", () => {
+    // The zero-entry verdict blocks, so a false positive here would be an
+    // ambient poison pill: `npm run test:file -- one.test.mts` must not fail
+    // the other ~450 baselined files, every one of which observed zero.
+    const capturePath = writeCapture([{ file: "test/a.test.mts", name: "s1", ok: true }]);
+    const result = compareCapture({
+      capturePath,
+      baseline: { "test/a.test.mts": 1, "test/elsewhere.test.mts": 30 },
+      testFiles: ["test/a.test.mts"],
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.missingFiles, []);
+  });
+
+  test("a fully-SKIPPED file is not a missing file — skips still emit entries (#4141)", () => {
+    // Verified against node:test rather than assumed (the issue asked for
+    // exactly this check): a suite and a test both declared `{ skip: true }`
+    // still each emit a top-level `test:pass` event, so a skipped file
+    // observes its full baseline count and never reaches the zero verdict.
+    const capturePath = writeCapture([
+      { file: "test/all-skipped.test.mts", name: "skipped suite", ok: true },
+      { file: "test/all-skipped.test.mts", name: "skipped test", ok: true },
+    ]);
+    const result = compareCapture({
+      capturePath,
+      baseline: { "test/all-skipped.test.mts": 2 },
+      testFiles: ["test/all-skipped.test.mts"],
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.missingFiles, []);
+  });
+
+  test("a baseline of 0 never produces a missing-file verdict", () => {
+    // Guard against `expected > 0` being dropped from the condition: a file
+    // baselined at 0 observing 0 is correct, not a regression.
+    const capturePath = writeCapture([{ file: "test/other.test.mts", name: "s", ok: true }]);
+    const result = compareCapture({
+      capturePath,
+      baseline: { "test/zero.test.mts": 0, "test/other.test.mts": 1 },
+      testFiles: ["test/zero.test.mts", "test/other.test.mts"],
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.missingFiles, []);
   });
 
   test("a file with no baseline entry is never checked (new file, no manifest row yet)", () => {

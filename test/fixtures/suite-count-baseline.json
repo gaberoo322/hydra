@@ -325,7 +325,7 @@
   "test/recommendations-api.test.mts": 5,
   "test/recover-stale.test.mts": 1,
   "test/redis-adapter-roundtrip.test.mts": 1,
-  "test/redis-db-helper.test.mts": 6,
+  "test/redis-db-helper.test.mts": 7,
   "test/redis-dispatches.test.mts": 3,
   "test/redis-keys.test.mts": 3,
   "test/redis-oauth-backoff.test.mts": 3,

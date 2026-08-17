@@ -183,18 +183,37 @@ export function compareCapture({ capturePath, baseline, testFiles, repoRoot = RE
     .map((f) => relative(repoRoot, resolve(repoRoot, f)).split("\\").join("/"))
     .filter((f) => Object.prototype.hasOwnProperty.call(baseline, f));
 
+  // Issue #4141 — TWO verdicts, because they have opposite evidential weight.
+  //
+  // A PARTIAL shortfall (0 < observed < expected) is the #4137 reporter
+  // truncation: the parent `process.exit()`s before draining the child's
+  // per-test events, so a tail of entries is lost at a rate set by machine
+  // timing. It is a reporting artifact and stays advisory.
+  //
+  // ZERO observed entries is a different animal. Truncation loses a TAIL; it
+  // cannot make a file that ran vanish entirely — verified directly: even a
+  // file whose every suite and test is `{ skip: true }` still emits one entry
+  // per top-level registration (node:test reports a skipped test as
+  // `test:pass`). So a baselined file that was part of this run and produced
+  // nothing at all did not run: a glob change, a runner-config change, a
+  // rename, a file dropped from the suite. That is deterministic, it is the
+  // regression class this gate actually exists for, and it is worth blocking.
   const shortfalls = [];
+  const missingFiles = [];
   for (const file of relevantFiles) {
     const expected = baseline[file];
     const observed = observedByFile.get(file) ?? 0;
-    if (observed < expected) {
+    if (expected > 0 && observed === 0) {
+      missingFiles.push({ file, expected, observed });
+    } else if (observed < expected) {
       shortfalls.push({ file, expected, observed });
     }
   }
 
   return {
-    ok: shortfalls.length === 0,
+    ok: shortfalls.length === 0 && missingFiles.length === 0,
     shortfalls,
+    missingFiles,
     readError,
     checkedFileCount: relevantFiles.length,
   };
