@@ -1,0 +1,65 @@
+name: design-concept-reconcile
+
+# Fast standalone home for the design-concept reconciliation gate's CI adapter
+# (issue #4132).
+#
+# The adapter used to be a `test()` case inside the required `test` job, so a
+# lint on the PR *description* cost a full ~11-minute suite run to report
+# itself. Measured across 60 ci.yml runs it was the single largest source of
+# red CI: 12 of 19 red `test` jobs, ~155 minutes of runner time spent
+# reporting malformed PR bodies. Standalone this is ~30 seconds.
+#
+# It also cannot self-clear on a GitHub re-run — the PR body comes from the
+# triggering webhook payload (GITHUB_EVENT_PATH), so a re-run replays the
+# ORIGINAL body and only a new push produces a new one. Paying 11 minutes per
+# attempt for a check that requires a push to clear was the worst pairing.
+#
+# ## Enforcement status — READ THIS BEFORE REMOVING THE IN-SUITE COPY
+#
+# The gate is enforced today only because it rides inside the REQUIRED `test`
+# job. Branch protection on master requires exactly:
+#   test, dashboard-build, tier-gate, mutation-test, scope-check, secret-scan,
+#   deep-qa-gate
+# `design-concept-reconcile` is NOT in that list, so THIS workflow is advisory
+# until an operator adds it (a repo-settings change, ADR-0005 escalation).
+#
+# So this ships alongside the in-suite copy, deliberately duplicating it: the
+# fast signal arrives now, and gate strength is unchanged. Removing the
+# `test()` case is a SEPARATE follow-up, gated on this check being added to
+# branch protection — otherwise that removal silently turns a required merge
+# gate into an advisory one. The duplicate costs ~30s per PR.
+#
+# Deliberately NOT added to ci.yml: that file is exact-match Verifier Core
+# (ADR-0001/ADR-0015, T4/operator-only). A new advisory verification belongs in
+# a sibling that lands as a normal T3 change — same lane as test-typecheck.yml
+# and suite-count-check.yml (operator memory
+# feedback_ci_gate_separate_workflow_avoids_tier0).
+
+on:
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: design-concept-reconcile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  design-concept-reconcile:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: npm ci
+
+      # The adapter reads the PR body from GITHUB_EVENT_PATH (provided by
+      # Actions, no token needed) and the artifact from the local orchestrator.
+      # Every environmental uncertainty — no payload, no Closes ref, 404, an
+      # unreachable orchestrator, an unapproved artifact — exits 0. Only a
+      # resolved APPROVED artifact whose invariants the PR body fails to
+      # reconcile exits 1.
+      - name: Design-concept reconciliation gate
+        run: npx tsx scripts/ci/design-concept-reconcile-run.ts
