@@ -529,3 +529,62 @@ describe("scripts/test/redis-db-launch.mjs — suite-count gate blocking toggle 
     assert.equal(isGateBlocking({ SUITE_COUNT_GATE_BLOCKING: "1" }), true);
   });
 });
+
+/**
+ * Issue #4137 — an isolated retry that never finished must not be reported as
+ * a confirmed suite-count drop.
+ *
+ * The retry ran under a 60s `spawnSync` timeout and never inspected the spawn
+ * result. test/sync-skills.test.mts takes ~151s standalone, so every attempt
+ * was SIGTERMed at 60s with a near-empty capture, and the gate published
+ * "expected 15, observed 0 ... after 2 isolated retry attempts" — a fabricated
+ * verdict about a file it never actually measured (CI run 32051075513).
+ */
+describe("scripts/test/redis-db-launch.mjs — incomplete-retry classification (#4137)", () => {
+  test("a completed run is conclusive regardless of a non-zero exit status", async () => {
+    const { describeIncompleteRun } = await import("../scripts/test/redis-db-launch.mjs");
+    // status 1 is the ordinary "a test in this file failed" case: the child
+    // RAN, so its capture is trustworthy and must still be compared.
+    assert.equal(describeIncompleteRun({ status: 1, signal: null, error: undefined }), null);
+    assert.equal(describeIncompleteRun({ status: 0, signal: null, error: undefined }), null);
+  });
+
+  test("a timeout kill is inconclusive and says so", async () => {
+    const { describeIncompleteRun, RETRY_TIMEOUT_MS } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+    const err = Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" });
+    const reason = describeIncompleteRun({ status: null, signal: "SIGTERM", error: err });
+    assert.ok(reason, "a timeout kill must produce an inconclusive reason, not null");
+    assert.match(reason, /timed out/);
+    assert.match(reason, new RegExp(String(RETRY_TIMEOUT_MS)));
+  });
+
+  test("a signal kill with no error object is still inconclusive", async () => {
+    const { describeIncompleteRun } = await import("../scripts/test/redis-db-launch.mjs");
+    assert.equal(
+      describeIncompleteRun({ status: null, signal: "SIGKILL", error: undefined }),
+      "killed by SIGKILL",
+    );
+  });
+
+  test("a non-timeout spawn error is reported verbatim rather than swallowed", async () => {
+    const { describeIncompleteRun } = await import("../scripts/test/redis-db-launch.mjs");
+    const err = Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+    assert.equal(
+      describeIncompleteRun({ status: null, signal: null, error: err }),
+      "spawn error: ENOENT: no such file",
+    );
+  });
+
+  test("the retry timeout clears the slowest known file standalone", async () => {
+    const { RETRY_TIMEOUT_MS } = await import("../scripts/test/redis-db-launch.mjs");
+    // test/sync-skills.test.mts measured ~151s standalone on an idle machine.
+    // The ceiling must keep real headroom over that on a loaded CI runner, or
+    // the #4137 false-verdict regression returns.
+    assert.ok(
+      RETRY_TIMEOUT_MS >= 300_000,
+      `RETRY_TIMEOUT_MS=${RETRY_TIMEOUT_MS} is too tight for the suite's slowest file (~151s idle)`,
+    );
+  });
+});
