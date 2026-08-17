@@ -15,7 +15,7 @@
   "scripts/autopilot/assert_invariants.py": 1,
   "scripts/autopilot/bootstrap.sh": 2,
   "scripts/autopilot/collect-state.sh": 9,
-  "scripts/autopilot/decide.py": 20,
+  "scripts/autopilot/decide.py": 12,
   "scripts/autopilot/grill-artifact.sh": 1,
   "scripts/autopilot/hooks/on-subagent-permission-wait.sh": 1,
   "scripts/autopilot/hooks/on-subagent-tool-call.sh": 2,
