@@ -753,22 +753,37 @@ received target-product anchors (item-26x). Post-#458, candidates are
 treated as target-side work: `dev_target` surfaces the top candidate as
 a hint, and a low best-score forces `research_target` (not `research_orch`).
 
-**Discover signals (revived).** `discover_orch` was **revived by issue #959**
-(epic #958): it no longer gates on the dead `orch_idle` name — its `decide.py`
-selector (`decide.py:2296`) now reads the unified **`orch_backfill_idle`**
-board-empty signal, the SAME signal `architecture_orch` reads. Both classes are
-members of `BACKFILL_SIGNAL_CLASSES` (`decide.py:329`) and share the 1h backfill
-cadence, so `discover_orch` **fires today** on an idle orch board. `collect-state.sh`
-emits `orch_backfill_idle` (line ~488); the dead `orch_idle` name it never
-produced is gone. `discover_target` still gates on `target_idle` (its own
-selector at `decide.py:2307`); whether that signal is produced is a separate
-Target-side question.
+**Discover signals (revived, then un-starved — #4114).** `discover_orch` was
+**revived by issue #959** (epic #958) onto the unified **`orch_backfill_idle`**
+board-empty signal — the SAME signal `architecture_orch` reads
+(`collect-state.sh` line ~1150; the dead `orch_idle` name it never produced is
+gone). Both classes are members of `BACKFILL_SIGNAL_CLASSES` (`decide.py:373`)
+and share the 1h backfill cadence. **But idle-only gating starved the class for
+3+ weeks (#4114)**: the board-empty conjunction (`ready_for_agent==0 &&
+needs_research==0 && needs_triage==0 && work_queue==0` — `collect-state.sh`'s
+`fallback_due`) stays permanently false on a healthy, continuously-stocked orch
+board, so `discover_orch` recorded **0 lifetime dispatches** (never fired;
+`signal_last_fired.discover_orch == 0`), and #3920's cooldown carry-forward fix
+was orthogonal — a tracking fix, not a dispatch-gap fix. The **#4114 fix** gives
+the selector (`decide.py:3708`) a SECOND trigger path: it fires on
+`orch_backfill_idle` OR the **7-day staleness floor**
+(`DISCOVER_STALENESS_FLOOR_SEC`, `decide.py:420`, via `signal_dark_past_floor`)
+— a never-fired class (last == 0) counts as dark, and a floor dispatch carries
+the "discover staleness floor (>7d dark since last fire)" reason so it is
+distinguishable from an idle dispatch in the `dispatch_decision` audit trail.
+**Deferred follow-up:** `architecture_orch` and `cleanup_orch` share the
+dark-producer symptom (both last fired 2026-07-25 at #4114 diagnosis) and
+deliberately keep idle-only gating in this change — extending the floor to them
+is a separate decision (the helper is class-parameterized for it).
+`discover_target` still gates on `target_idle` (its own selector at
+`decide.py:3720`); whether that signal is produced is a separate Target-side
+question.
 
 **Backfill dedup baseline (issue #2554).** Because `discover_orch` and
 `architecture_orch` both fire on `orch_backfill_idle`, the **one-per-turn
 stagger guard** (it lets only one `BACKFILL_SIGNAL_CLASSES` member dispatch per
 turn) prevents them co-firing the same TURN — but their independent per-class 1h
-cooldowns plus the `BACKFILL_STARVATION_FLOOR` (`decide.py:331+`, which forces a
+cooldowns plus the `BACKFILL_STARVATION_FLOOR` (`decide.py:392+`, which forces a
 starved backfill class through) mean **both can dispatch within the same idle
 HOUR**. `cleanup_orch` co-fires on the same signal every idle turn (it is
 deliberately NOT in `BACKFILL_SIGNAL_CLASSES`, so exempt from the stagger).

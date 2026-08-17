@@ -254,7 +254,12 @@ describe("decide.py — turn_start / turn_end events (issue #668)", () => {
 
   test("idle=1 on turn_end when no dispatch action emitted", () => {
     // Empty signals + no slots in flight => idle heartbeat path.
-    const plan = runDecide(baseState());
+    // discover_orch seeded as fired-just-now: post-#4114 a never-fired
+    // discover_orch dispatches via the staleness floor, which would flip
+    // this to a dispatch-bearing turn.
+    const plan = runDecide(baseState({
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    }));
     const end = eventsOfType(plan, "turn_end")[0];
     assert.equal(end.idle, "1");
     assert.equal(end.dispatches, "0");
@@ -262,7 +267,12 @@ describe("decide.py — turn_start / turn_end events (issue #668)", () => {
 
   test("idle=0 on turn_end when at least one dispatch fired", () => {
     const plan = runDecide(
-      baseState({ signals: { needs_qa_orch: true } }),
+      baseState({
+        signals: { needs_qa_orch: true },
+        // fired-just-now so the #4114 staleness floor does not add a SECOND
+        // dispatch (discover_orch) to this turn's count.
+        signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+      }),
     );
     const end = eventsOfType(plan, "turn_end")[0];
     assert.equal(end.idle, "0");
