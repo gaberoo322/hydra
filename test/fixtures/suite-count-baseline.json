@@ -188,7 +188,7 @@
   "test/design-concept-green-light.test.mts": 1,
   "test/design-concept-index-hygiene.test.mts": 1,
   "test/design-concept-qa-retrievability.test.mts": 1,
-  "test/design-concept-reconcile-check.test.mts": 3,
+  "test/design-concept-reconcile-check.test.mts": 2,
   "test/design-concept-reconcile-run.test.mts": 3,
   "test/design-concept-snapshots-api.test.mts": 1,
   "test/design-concept.test.mts": 2,

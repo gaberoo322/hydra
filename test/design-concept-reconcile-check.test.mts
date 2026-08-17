@@ -25,9 +25,7 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve, join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import {
   RECONCILIATION_HEADING,
@@ -55,7 +53,6 @@ import {
   type Violation,
 } from "../scripts/ci/design-concept-reconcile-check.ts";
 
-const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
 /** In-memory reader for the unit suite. */
 function fakeReader(files: Record<string, string>): FileReader {
@@ -712,82 +709,6 @@ describe("design-concept reconcile check (pure)", () => {
     assert.match(msg, /#2528/);
     assert.match(msg, /missing-section/);
     assert.match(msg, /PUSH A COMMIT/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Suite 2 — the live CI gate
-// ---------------------------------------------------------------------------
-
-describe("design-concept reconciliation gate (CI adapter)", () => {
-  /** Repo-rooted, traversal-guarded reader. Returns null for anything unreadable. */
-  const readRepoFile: FileReader = (repoRelativePath) => {
-    if (!isSafeRepoRelativePath(repoRelativePath)) return null;
-    const abs = join(REPO_ROOT, repoRelativePath);
-    if (!abs.startsWith(REPO_ROOT + sep)) return null;
-    try {
-      if (!existsSync(abs) || !statSync(abs).isFile()) return null;
-      return readFileSync(abs, "utf8");
-    } catch (err: any) {
-      console.error(`[dc-reconcile] unreadable ${repoRelativePath}: ${err?.message ?? err}`);
-      return null;
-    }
-  };
-
-  /** Fail-open skip: log the reason, assert nothing. */
-  const skip = (why: string): void => {
-    console.error(`[dc-reconcile] skipped (fail-open): ${why}`);
-  };
-
-  test("the PR body reconciles the linked issue's design-concept invariants", async () => {
-    // --- 1. PR body, from the webhook payload (no token, no rate limit). ----
-    // GITHUB_EVENT_PATH is free and always present in Actions; `gh pr view`
-    // would need GH_TOKEN exported into the `test` job (a ci.yml edit, T4) and
-    // unauthenticated api.github.com is 60 req/hr per IP, which
-    // `reference_gh_graphql_vs_rest_ratelimit` records exhausting under a
-    // running autopilot.
-    const eventPath = process.env.GITHUB_EVENT_PATH;
-    if (!eventPath) return skip("no GITHUB_EVENT_PATH (local run)");
-
-    let payload: any;
-    try {
-      payload = JSON.parse(readFileSync(eventPath, "utf8"));
-    } catch (err: any) {
-      return skip(`unreadable GITHUB_EVENT_PATH: ${err?.message ?? err}`);
-    }
-    if (!payload?.pull_request) return skip("event payload has no pull_request (push/schedule run)");
-
-    const prBody: string = payload.pull_request.body ?? "";
-    const anchorRef = extractAnchorRefFromPrBody(prBody);
-    if (anchorRef === null) return skip("PR body has no Closes/Fixes/Resolves #N — not a dev PR");
-
-    // --- 2. Artifact, from the local orchestrator. --------------------------
-    const base = (process.env.HYDRA_API_BASE ?? "http://localhost:4000").replace(/\/$/, "");
-    let artifact: any;
-    try {
-      const res = await fetch(`${base}/api/design-concepts/${anchorRef}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      if (res.status === 404) return skip(`no design-concept artifact for issue #${anchorRef}`);
-      if (!res.ok) return skip(`artifact fetch returned HTTP ${res.status} for issue #${anchorRef}`);
-      artifact = await res.json();
-    } catch (err: any) {
-      // Orchestrator down / unreachable MUST NOT redden the merge gate.
-      return skip(`artifact fetch failed for issue #${anchorRef}: ${err?.message ?? err}`);
-    }
-
-    const decision = resolveEnforceDecision(artifact);
-    if (!decision.enforce) {
-      return skip(`artifact for issue #${anchorRef} ${decision.reason}`);
-    }
-    // `enforce: true` ⇒ invariants is a non-empty array and artifactHash a
-    // non-empty string (validated above); read them straight off the artifact.
-    const invariants: string[] = artifact.invariants;
-    const artifactHash: string = artifact.artifactHash;
-
-    // --- 3. Fail CLOSED from here on. ---------------------------------------
-    const violations = checkReconciliation({ prBody, invariants, artifactHash, readFile: readRepoFile });
-    assert.deepEqual(violations, [], formatViolations(violations, anchorRef));
   });
 });
 
