@@ -37,7 +37,9 @@ import {
   setWorklessUntil,
   clearWorklessUntil,
   worklessBackoffSec,
+  worklessBackoffPostworkSec,
   WORKLESS_BACKOFF_DEFAULT_SEC,
+  WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC,
   WORKLESS_TTL_BUFFER_SEC,
 } from "../src/redis/workless-hint.ts";
 import { overlayWorklessEligibility, projectEligibility } from "../src/cost/eligibility.ts";
@@ -169,6 +171,58 @@ describe("worklessBackoffSec (issue #2956)", () => {
     assert.equal(worklessBackoffSec({ HYDRA_WORKLESS_BACKOFF_SEC: "0" }), WORKLESS_BACKOFF_DEFAULT_SEC);
     assert.equal(worklessBackoffSec({ HYDRA_WORKLESS_BACKOFF_SEC: "-5" }), WORKLESS_BACKOFF_DEFAULT_SEC);
     assert.equal(worklessBackoffSec({ HYDRA_WORKLESS_BACKOFF_SEC: "nope" }), WORKLESS_BACKOFF_DEFAULT_SEC);
+  });
+});
+
+// Issue #3867 slice 2 — the POST-WORK window: a deliberate SIBLING of
+// worklessBackoffSec (own constant, own env override) rather than a mode
+// parameter, so each window stays independently tunable and unit-testable.
+describe("worklessBackoffPostworkSec (issue #3867)", () => {
+  test("missing env => the 20-min post-work default", () => {
+    assert.equal(worklessBackoffPostworkSec({}), WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC);
+  });
+
+  test("a valid positive value is honored via its OWN env var", () => {
+    assert.equal(
+      worklessBackoffPostworkSec({ HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC: "300" }),
+      300,
+    );
+  });
+
+  test("a non-positive / garbage value fails SAFE to the post-work default", () => {
+    for (const raw of ["0", "-5", "nope", ""]) {
+      assert.equal(
+        worklessBackoffPostworkSec({ HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC: raw }),
+        WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC,
+        `raw=${JSON.stringify(raw)} must fail safe to the default`,
+      );
+    }
+  });
+
+  test("the two windows are INDEPENDENT — neither env var bleeds into the other", () => {
+    // Overriding the zero-dispatch window must not move the post-work window,
+    // and vice-versa: they are separate operator knobs.
+    assert.equal(
+      worklessBackoffPostworkSec({ HYDRA_WORKLESS_BACKOFF_SEC: "999" }),
+      WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC,
+    );
+    assert.equal(
+      worklessBackoffSec({ HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC: "999" }),
+      WORKLESS_BACKOFF_DEFAULT_SEC,
+    );
+  });
+
+  test("the post-work default is strictly SHORTER than the zero-dispatch default", () => {
+    assert.ok(
+      WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC < WORKLESS_BACKOFF_DEFAULT_SEC,
+      "a productive drain must back off for LESS time than a workless board",
+    );
+    // ...and longer than the pace-gate's ~15-min tick, or it would fail to
+    // suppress the one wasted relaunch it exists to prevent.
+    assert.ok(
+      WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC > 15 * 60,
+      "must outlast the ~15-min pace-gate tick to suppress the wasted relaunch",
+    );
   });
 });
 

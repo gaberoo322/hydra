@@ -41,6 +41,14 @@ import {
 // began and #2568 extended). Its injectable DispatchClassesDeps seam is
 // unchanged, so the getRunDispatchClasses cases below pass their stub as before.
 import { getRunDispatchClasses } from "../src/autopilot/run-reads.ts";
+// Issue #3867 slice 2 — the two workless-backoff window constants. Asserting the
+// stamped instant against the CONSTANTS (rather than a hard-coded 45/20 minutes)
+// keeps these cases pinned to the intent ("post-work is shorter") instead of to a
+// number an operator may retune.
+import {
+  WORKLESS_BACKOFF_DEFAULT_SEC,
+  WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC,
+} from "../src/redis/workless-hint.ts";
 // recordCycle (the cross-domain cycle-close coordinator) + UNCLASSIFIED_ANCHOR_TYPE
 // + the CycleCloseDeps bag moved to the sibling cycle-close Module (#2768). The
 // fixture below builds a single object satisfying BOTH AutopilotRunsDeps (the
@@ -324,7 +332,13 @@ describe("endRun — injected deps (#2158)", () => {
     assert.ok(stamp.worklessUntilMs > FIXED_NOW_MS, "hint must be in the future");
   });
 
-  test("idle exit WITH dispatches (>0) does NOT stamp — real work was available", async () => {
+  // Issue #3867 slice 2 — a PRODUCTIVE idle exit stamps too, with a SHORTER
+  // window. This case previously asserted the opposite ("does NOT stamp"): that
+  // was the structural waste #3867 diagnosed — the Pace Gate's next ~15-min tick
+  // launched a fresh session into the just-drained board, which zero-dispatch
+  // idle-exited once before the 45-min backoff engaged. One wasted session
+  // bootstrap per drain cycle.
+  test("idle exit WITH dispatches (>0) stamps the SHORTER post-work window", async () => {
     const store = newStore();
     const deps = makeDeps(store);
     await startRun({ run_id: "run-idleN", limits: {} } as any, deps);
@@ -332,7 +346,52 @@ describe("endRun — injected deps (#2158)", () => {
     store.runs.get("run-idleN")!.dispatches = "3";
 
     await endRun({ run_id: "run-idleN", cause: "idle" } as any, deps);
-    assert.equal(store.worklessStamps.length, 0, "a run that dispatched must launch normally");
+    assert.equal(store.worklessStamps.length, 1, "a productive drain must still back off");
+    const stamp = store.worklessStamps[0];
+    assert.equal(stamp.nowMs, FIXED_NOW_MS);
+    assert.ok(stamp.worklessUntilMs > FIXED_NOW_MS, "hint must be in the future");
+    // The post-work window is the 20-min default, strictly shorter than the
+    // 45-min zero-dispatch window: new QA-able output can arrive sooner after a
+    // productive drain, so the suppression must be brief.
+    assert.equal(
+      stamp.worklessUntilMs,
+      FIXED_NOW_MS + WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC * 1000,
+      "post-work idle exit uses the postwork window",
+    );
+    assert.ok(
+      WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC < WORKLESS_BACKOFF_DEFAULT_SEC,
+      "the post-work window must be shorter than the zero-dispatch window",
+    );
+  });
+
+  // The zero-dispatch window is UNCHANGED by #3867 — a genuinely workless board
+  // still deserves the full #2956 backoff. Pinned against the full constant so a
+  // future edit cannot silently collapse the two windows into one.
+  test("zero-dispatch idle exit keeps the FULL window (unchanged by #3867)", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-idle-full", limits: {} } as any, deps);
+
+    await endRun({ run_id: "run-idle-full", cause: "idle" } as any, deps);
+    assert.equal(store.worklessStamps.length, 1);
+    assert.equal(
+      store.worklessStamps[0].worklessUntilMs,
+      FIXED_NOW_MS + WORKLESS_BACKOFF_DEFAULT_SEC * 1000,
+    );
+  });
+
+  // Issue #3867 slice 2 — the cause gate is unchanged: only cause=idle stamps.
+  test("the new quota terminate cause never stamps a workless hint", async () => {
+    const store = newStore();
+    const deps = makeDeps(store);
+    await startRun({ run_id: "run-quota", limits: {} } as any, deps);
+    store.runs.get("run-quota")!.dispatches = "5";
+
+    const r = await endRun({ run_id: "run-quota", cause: "quota" } as any, deps);
+    assert.equal(store.worklessStamps.length, 0, "a spend-cap exit says nothing about the board");
+    // `quota` must also survive the VALID_TERM_REASONS filter rather than
+    // degrading to "unknown" (issue #3867).
+    assert.equal((r as any).term_reason, "quota");
   });
 
   test("a NON-idle exit (budget) never stamps a workless hint", async () => {

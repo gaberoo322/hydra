@@ -17,6 +17,19 @@
  * the gate keeps NO work-selection knowledge (that stays in decide.py); the
  * hint self-heals if it is stale.
  *
+ * Slice 2 of issue #3867 widens the WHEN, not the mechanism: a PRODUCTIVE run
+ * that drains the board and then idle-exits (`cause=idle` with `dispatches > 0`)
+ * used to stamp NOTHING, so the pace-gate's next ~15-min tick launched a fresh
+ * claude session into the just-drained board, which zero-dispatch idle-exited
+ * once — one wasted session bootstrap per drain cycle, structurally. `endRun`
+ * now stamps on EVERY `cause=idle` termination, choosing the window by whether
+ * the run did work: {@link worklessBackoffSec} (the full 45-min window) for a
+ * true zero-dispatch exit, {@link worklessBackoffPostworkSec} (a shorter ~20-min
+ * window) after a productive drain, because new QA-able output (e.g. GLM drainer
+ * PRs) can arrive sooner once work has actually shipped. Both windows write the
+ * SAME key through the SAME {@link setWorklessUntil} path, so the launcher-only
+ * boundary below is untouched.
+ *
  * **Launcher-only, NOT a hard stop.** UNLIKE the session block
  * (`session-block.ts`) and the operator pause (`autopilot-pause.ts`), this hint
  * does NOT force `allow=false`. `decide.py` gates ALL dispatch on
@@ -53,6 +66,19 @@ import { logger } from "../logger.ts";
 export const WORKLESS_BACKOFF_DEFAULT_SEC = 45 * 60;
 
 /**
+ * Default POST-WORK backoff window (issue #3867 slice 2): how long to treat the
+ * board as workless after an idle exit from a run that DID dispatch. Deliberately
+ * shorter than {@link WORKLESS_BACKOFF_DEFAULT_SEC} — a run that drained the board
+ * has just produced new artifacts (dev PRs awaiting QA, GLM drainer output), so
+ * fresh eligible work can appear sooner than after a genuinely workless board.
+ * 20 minutes is the issue's suggested value: longer than the pace-gate's ~15-min
+ * tick (so it actually suppresses the one wasted relaunch it exists to prevent)
+ * while staying well under the full window. Overridable via
+ * `HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC`.
+ */
+export const WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC = 20 * 60;
+
+/**
  * Extra seconds of TTL beyond the hint instant, absorbing host-vs-Redis clock
  * skew so the key does not expire a hair before the window actually passes. The
  * read still treats a past instant as not-workless, so an over-long TTL is inert.
@@ -70,6 +96,27 @@ export function worklessBackoffSec(env: NodeJS.ProcessEnv = process.env): number
   if (raw === undefined) return WORKLESS_BACKOFF_DEFAULT_SEC;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return WORKLESS_BACKOFF_DEFAULT_SEC;
+  return Math.floor(n);
+}
+
+/**
+ * Resolve the configured POST-WORK backoff window in seconds (issue #3867 slice 2).
+ * Reads `HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC` and falls back to
+ * {@link WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC} for a missing / non-positive /
+ * unparseable value — the same fail-safe-to-the-default shape as
+ * {@link worklessBackoffSec}, never a zero or negative window (which would make
+ * the hint a no-op and re-open the wasted-relaunch gap).
+ *
+ * A deliberate SIBLING of {@link worklessBackoffSec} rather than a mode parameter
+ * on it: this file's shape is one-constant-one-function-per-window, and keeping
+ * the two independent leaves each separately unit-testable and separately tunable
+ * by an operator.
+ */
+export function worklessBackoffPostworkSec(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC;
+  if (raw === undefined) return WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return WORKLESS_BACKOFF_POSTWORK_DEFAULT_SEC;
   return Math.floor(n);
 }
 
