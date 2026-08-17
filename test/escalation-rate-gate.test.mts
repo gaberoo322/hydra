@@ -41,9 +41,15 @@ import {
 } from "../src/pattern-memory/cue-policy.ts";
 
 const DAY_MS = 86_400_000;
-/** ISO timestamp `offsetDays` from the real wall-clock now (test-only). */
+// Issue #4110: ONE clock read for the whole file. A per-call clock read made
+// the boundary test's exact `90/30 = 3.0 >= 3.0` comparison load-flaky — the
+// `isoFromNow(-30)` and `isoFromNow(0)` reads were separated by ε, so the true
+// span was 30 days + ε → recent = 2.999… < 3.0 → false. Deriving every offset
+// from the same instant makes relative spans exact by construction.
+const NOW = Date.now();
+/** ISO timestamp `offsetDays` from the single module-load `NOW` (test-only). */
 const isoFromNow = (offsetDays: number): string =>
-  new Date(Date.now() + offsetDays * DAY_MS).toISOString();
+  new Date(NOW + offsetDays * DAY_MS).toISOString();
 
 // ===========================================================================
 // 1. Pure policy
