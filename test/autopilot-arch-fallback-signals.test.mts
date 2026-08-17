@@ -47,7 +47,7 @@ function extractArchEmitter(): string {
 }
 
 function runEmitter(
-  board: Record<string, number>,
+  board: Record<string, unknown>,
   env: Record<string, string>,
 ): string[] {
   const r = spawnSync("python3", ["-c", extractArchEmitter()], {
@@ -133,7 +133,24 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     assert.ok(overCap.includes("arch_board_open_scan=7"));
   });
 
-  test("malformed board JSON degrades to safe zeros (fallback_due reflects work_queue only)", () => {
+  // -------------------------------------------------------------------------
+  // Degraded-read fail-closed discipline (issue #4114).
+  //
+  // The pre-#4114 emitter degraded unreadable board input to all-zero counts,
+  // which the four-way-zero predicate then read as a GENUINELY empty board →
+  // orch_backfill_idle=true → every backfill class (discover_orch /
+  // architecture_orch / cleanup_orch / skill_prune) dispatching into a
+  // phantom-idle board during the very gh/API outage that degraded the read.
+  // The Target mirror of this gate documents the correct direction
+  // (collect-state.sh, target_cleanup_* block): "Orchestrator-API-down
+  // degrades to idle=false / saturated=true — BOTH in the suppressing
+  // direction (fail closed: never dispatch a scan that cannot read its own
+  // board)." These tests pin that direction for the orch gate too: any
+  // degraded input (malformed JSON, non-object JSON, or the shell's
+  // degraded-marked gh-failure fallback) must emit the suppressing triple.
+  // -------------------------------------------------------------------------
+
+  test("malformed board JSON fails CLOSED (idle=false + saturated=true, issue #4114)", () => {
     const r = spawnSync("python3", ["-c", extractArchEmitter()], {
       input: "not json",
       encoding: "utf-8",
@@ -141,7 +158,59 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     });
     assert.equal(r.status, 0);
     const out = r.stdout.trim().split("\n");
+    assert.ok(out.includes("orch_backfill_idle=false"), "unreadable board must never read as idle");
     assert.ok(out.includes("arch_board_open_scan=0"));
-    assert.ok(out.includes("arch_board_saturated=false"));
+    assert.ok(out.includes("arch_board_saturated=true"), "degraded read suppresses architecture_orch");
+    assert.ok(out.includes("cleanup_board_saturated=true"), "degraded read suppresses cleanup_orch");
+  });
+
+  test("non-object board JSON fails CLOSED (issue #4114)", () => {
+    const r = spawnSync("python3", ["-c", extractArchEmitter()], {
+      input: "[1,2,3]",
+      encoding: "utf-8",
+      env: { ...process.env, ...env },
+    });
+    assert.equal(r.status, 0);
+    const out = r.stdout.trim().split("\n");
+    assert.ok(out.includes("orch_backfill_idle=false"));
+    assert.ok(out.includes("arch_board_saturated=true"));
+    assert.ok(out.includes("cleanup_board_saturated=true"));
+  });
+
+  test("degraded-marked board JSON (gh-failure fallback) fails CLOSED (issue #4114)", () => {
+    const out = runEmitter({ degraded: true }, env);
+    assert.ok(out.includes("orch_backfill_idle=false"));
+    assert.ok(out.includes("arch_board_saturated=true"));
+    assert.ok(out.includes("cleanup_board_saturated=true"));
+  });
+
+  test("the gh-failure shell fallback emits a degraded-marked JSON, not zeros (issue #4114)", () => {
+    // The shell substitution feeding $ARCH_BOARD_JSON on a gh failure must
+    // mark the read degraded so the emitter can fail closed. The pre-#4114
+    // zeros JSON was indistinguishable from a genuinely empty board.
+    assert.match(
+      src,
+      /\|\| echo '\{"degraded":true\}'/,
+      "gh failure must substitute a degraded-marked JSON",
+    );
+    assert.doesNotMatch(
+      src,
+      /echo '\{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0,"cleanup_sourced":0\}'/,
+      "the zeros-fallback JSON (phantom empty board) must be gone",
+    );
+  });
+
+  test("the python-failure shell fallback emits the suppressing direction (issue #4114)", () => {
+    // If python3 itself is missing/broken the script's `|| { ... }` branch
+    // must emit idle=false with BOTH saturation flags true — the same
+    // fail-closed triple, not the old saturated=false pair.
+    const m = src.match(
+      /\)\"\s*2>\/dev\/null\s*\|\|\s*\{([^}]*)\}/,
+    );
+    assert.ok(m, "could not locate the python-failure fallback branch");
+    const branch = m[1]!;
+    assert.ok(branch.includes('echo "orch_backfill_idle=false"'));
+    assert.ok(branch.includes('echo "arch_board_saturated=true"'));
+    assert.ok(branch.includes('echo "cleanup_board_saturated=true"'));
   });
 });

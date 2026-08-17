@@ -1,0 +1,1 @@
+- fix: backfill gate fails closed on a degraded board read (a gh outage no longer reads as a phantom-empty board and dispatches the whole backfill set); discover_orch's multi-week silences documented as expected regime-gated dormancy (#4114)

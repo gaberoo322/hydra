@@ -73,7 +73,7 @@ Each tick:
 | signal | `health` | hydra-doctor (scope-agnostic) |
 | signal | `sweep_orch` | hydra-sweep |
 | signal | `sweep_target` | hydra-target-sweep |
-| signal | `discover_orch` | hydra-discover |
+| signal | `discover_orch` | hydra-discover (#959; backfill-set producer on `orch_backfill_idle` — **regime-gated dormant**: fires only in genuinely drained-board windows, which the standing ready-for-agent pool makes rare; multi-week silence is expected, see the dormancy record under "Discover signals" — #4114) |
 | signal | `discover_target` | hydra-target-discover |
 | signal | `scout_orch` | hydra-tool-scout (Phase B, weekly calendar walk) |
 | signal | `architecture_orch` | hydra-architecture-scan (#788; idle-time fallback, issue-producing) |
@@ -730,9 +730,9 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
 | `dev_target_spend_usd_cycle` | (read directly from state) | halts `dev_target` via per-cycle cost-cap backstop (issue #1059) |
-| `arch_fallback_due` (`ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`) | `arch_fallback_due` | `architecture_orch` (issues #789/#790) |
+| `orch_backfill_idle` (emitted directly by collect-state.sh: `ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`; a degraded board read fails CLOSED to `false` — issue #4114) | `orch_backfill_idle` | `architecture_orch` (issues #789/#790) + `discover_orch` (the `BACKFILL_SIGNAL_CLASSES` stagger set) — **regime-gated dormant while the board keeps a standing ready-for-agent pool** (issue #4114; see the dormancy record under "Discover signals" before treating silence as an anomaly) |
 | `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
-| `orch_backfill_idle` (same signal as above) | `orch_backfill_idle` | also drives `cleanup_orch` (issue #960) — NOT staggered, so it may co-fire with the backfill set |
+| `orch_backfill_idle` (same signal as above) | `orch_backfill_idle` | also drives `cleanup_orch` (issue #960) — NOT staggered, so it may co-fire with the backfill set — and `skill_prune` (7d cooldown, same idle signal) |
 | `cleanup_board_open_scan > CLEANUP_BOARD_SATURATION_CAP (10)` → `cleanup_board_saturated` | `cleanup_board_saturated` | suppresses `cleanup_orch` (checked FIRST, mirrors `arch_board_saturated`) (issue #960) |
 | `target_backfill_idle` (target triage + queued lanes empty AND `work_queue==0`) | `target_backfill_idle` | drives `cleanup_target` (Target mirror of cleanup_orch; API-down degrades to `false`) |
 | `target_cleanup_board_open_scan > 10` → `target_cleanup_board_saturated` | `target_cleanup_board_saturated` | suppresses `cleanup_target` (checked FIRST; API-down degrades to `true` — fail closed) |
@@ -753,22 +753,48 @@ received target-product anchors (item-26x). Post-#458, candidates are
 treated as target-side work: `dev_target` surfaces the top candidate as
 a hint, and a low best-score forces `research_target` (not `research_orch`).
 
-**Discover signals (revived).** `discover_orch` was **revived by issue #959**
-(epic #958): it no longer gates on the dead `orch_idle` name — its `decide.py`
-selector (`decide.py:2296`) now reads the unified **`orch_backfill_idle`**
-board-empty signal, the SAME signal `architecture_orch` reads. Both classes are
-members of `BACKFILL_SIGNAL_CLASSES` (`decide.py:329`) and share the 1h backfill
-cadence, so `discover_orch` **fires today** on an idle orch board. `collect-state.sh`
-emits `orch_backfill_idle` (line ~488); the dead `orch_idle` name it never
-produced is gone. `discover_target` still gates on `target_idle` (its own
-selector at `decide.py:2307`); whether that signal is produced is a separate
+**Discover signals (revived; regime-gated dormant per #4114).** `discover_orch`
+was **revived by issue #959** (epic #958): it no longer gates on the dead
+`orch_idle` name — its `decide.py` selector (the `discover_orch` arm of
+`_select_for_signal`) reads the unified **`orch_backfill_idle`** board-empty
+signal, the SAME signal `architecture_orch` reads. Both classes are members of
+`BACKFILL_SIGNAL_CLASSES` and share the 1h backfill cadence; `collect-state.sh`
+emits `orch_backfill_idle` from the board-idle emitter block; the dead
+`orch_idle` name it never produced is gone. `discover_target` still gates on
+`target_idle` (its own selector); whether that signal is produced is a separate
 Target-side question.
+
+**discover_orch dormancy record (issue #4114, 2026-08-17).** The class's
+multi-week silences (`dispatches: 0` in class-stats, `signal_last_fired` stuck
+at 0) are **expected regime-gated dormancy, not a defect**. Verified
+2026-08-17: the selector is sound end-to-end (live-script replay with
+`orch_backfill_idle=true` dispatches discover_orch, which WINS the stagger over
+architecture_orch); the class is reachable from the taxonomy; the #3920/#3942
+cooldown-carry fix is deployed. The gate — four-way board exhaustion
+(`ready_for_agent == 0 && needs_research == 0 && needs_triage == 0 &&
+work_queue == 0`) — is what never fires: the board deliberately keeps a
+standing ready-for-agent pool (9–36 open across 2026-08), so `orch_backfill_idle`
+goes true only in genuinely drained windows (last observed 2026-07-26 ~04:30
+UTC; every idle-consumer's stamp froze that morning — architecture_orch
+04:43:39, cleanup_orch 04:34:15, skill_prune 2026-07-23). Firing a discovery
+producer while ready-for-agent work sits unworked would manufacture work ahead
+of existing work; the gate's conservatism is the intended behavior. **Do NOT
+file "discover_orch has 0 dispatches" issues while the board is stocked.**
+Discriminator before treating silence as an anomaly: check
+`jq '.signals.orch_backfill_idle' /tmp/hydra-autopilot-state.json` and the
+sibling stamps in `.signal_last_fired` — if `architecture_orch`/`cleanup_orch`
+are equally dark, the shared gate is simply unfired (healthy); only a genuinely
+drained board (`orch_backfill_idle=true`) with NO discover_orch dispatch is a
+defect. One adjacent REAL defect was found and fixed in the same gate by #4114:
+the collect-state board read failed OPEN on a gh/API outage (a zeros fallback
+read as a phantom empty board); it now fails CLOSED (idle=false + saturated=true),
+mirroring the Target mirror's documented discipline.
 
 **Backfill dedup baseline (issue #2554).** Because `discover_orch` and
 `architecture_orch` both fire on `orch_backfill_idle`, the **one-per-turn
 stagger guard** (it lets only one `BACKFILL_SIGNAL_CLASSES` member dispatch per
 turn) prevents them co-firing the same TURN — but their independent per-class 1h
-cooldowns plus the `BACKFILL_STARVATION_FLOOR` (`decide.py:331+`, which forces a
+cooldowns plus the `BACKFILL_STARVATION_FLOOR` (which forces a
 starved backfill class through) mean **both can dispatch within the same idle
 HOUR**. `cleanup_orch` co-fires on the same signal every idle turn (it is
 deliberately NOT in `BACKFILL_SIGNAL_CLASSES`, so exempt from the stagger).

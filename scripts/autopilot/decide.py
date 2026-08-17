@@ -3619,6 +3619,18 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
         # discover_orch and architecture_orch don't both fire on the same idle
         # turn; round-robin emerges from the per-class 1h cooldowns.
+        #
+        # Issue #4114 (2026-08-17): this selector is verified sound end-to-end
+        # — with orch_backfill_idle=true it dispatches (winning the stagger
+        # over architecture_orch; live-script replay). The class's multi-week
+        # silences are NOT a selector defect: orch_backfill_idle requires
+        # four-way board exhaustion (ready_for_agent == needs_research ==
+        # needs_triage == work_queue == 0), and the board deliberately keeps a
+        # standing ready-for-agent pool, so the gate fires only in genuinely
+        # drained windows (last observed 2026-07-26; architecture_orch /
+        # cleanup_orch / skill_prune stamps froze the same day). Regime-gated
+        # dormancy is EXPECTED — see the playbook's "Discover signals"
+        # section for the discriminator before treating silence as a defect.
         if _signal_present(state, events, "orch_backfill_idle"):
             return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
         return None

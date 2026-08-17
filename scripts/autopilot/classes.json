@@ -120,7 +120,7 @@
       "cooldownSeconds": 3600,
       "scope": "orch",
       "provenanceLabel": null,
-      "notes": "issue #959, epic #958: 1h backfill cadence. Dropped from 30m to 3600s so it round-robins with architecture_orch off the unified orch_backfill_idle signal — both backfill-set classes share the same 1h cadence and the one-per-turn stagger guard (BACKFILL_SIGNAL_CLASSES in decide.py) picks one per idle turn. Files issues via the standard triage flow; stamps no dedicated provenance label."
+      "notes": "issue #959, epic #958: 1h backfill cadence. Dropped from 30m to 3600s so it round-robins with architecture_orch off the unified orch_backfill_idle signal — both backfill-set classes share the same 1h cadence and the one-per-turn stagger guard (BACKFILL_SIGNAL_CLASSES in decide.py) picks one per idle turn. Files issues via the standard triage flow; stamps no dedicated provenance label. REGIME-GATED DORMANT (issue #4114, 2026-08-17): the selector is verified sound; the four-way-zero orch_backfill_idle gate fires only in genuinely drained-board windows, which the standing ready-for-agent pool makes rare — multi-week dispatches:0 silences are EXPECTED while the board is stocked (discriminator + dormancy record in the hydra-autopilot playbook's Discover-signals section). Not removed from the taxonomy: it is live and fires on the next drained window."
     },
     {
       "name": "discover_target",

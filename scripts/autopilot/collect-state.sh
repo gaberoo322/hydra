@@ -1117,14 +1117,23 @@ CLEANUP_SCAN_LABEL="cleanup-scan"
 CLEANUP_BOARD_SATURATION_CAP=10
 # Single board read: the three actionable-label counts plus the
 # architecture-sourced and cleanup-sourced counts, in one gh call to keep this
-# collector cheap.
+# collector cheap. A FAILED read substitutes a degraded-marked JSON (issue
+# #4114) — NOT zeros: the pre-#4114 zeros fallback was indistinguishable from
+# a genuinely empty board, so a gh/API outage made the emitter report
+# orch_backfill_idle=true and every backfill class (discover_orch /
+# architecture_orch / cleanup_orch / skill_prune) dispatched into a
+# phantom-idle board during the very outage that degraded the read. The
+# degraded flag fails CLOSED downstream (idle=false + saturated=true), the
+# same discipline the Target mirror of this gate documents ("API-down
+# degrades to idle=false / saturated=true — BOTH in the suppressing
+# direction").
 ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq "{
   ready_for_agent: [.[] | select((.labels | map(.name)) as \$n | (\$n | index(\"ready-for-agent\")) and ((\$n | index(\"target-backlog\")) | not))] | length,
   needs_research: [.[] | select(.labels | map(.name) | index(\"needs-research\"))] | length,
   needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,
   arch_sourced: [.[] | select(.labels | map(.name) | index(\"${ARCH_SCAN_LABEL}\"))] | length,
   cleanup_sourced: [.[] | select(.labels | map(.name) | index(\"${CLEANUP_SCAN_LABEL}\"))] | length
-}" 2>/dev/null || echo '{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0,"cleanup_sourced":0}')
+}" 2>/dev/null || echo '{"degraded":true}')
 ARCH_WORK_QUEUE=$(docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0)
 if ! [[ "$ARCH_WORK_QUEUE" =~ ^[0-9]+$ ]]; then
   ARCH_WORK_QUEUE=0
@@ -1132,14 +1141,26 @@ fi
 echo -n "arch_last_run_iso="; docker exec hydra-redis-1 redis-cli GET hydra:architecture:last-run 2>/dev/null | tr -d '"' || echo ""
 printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
 import json, os, sys
+# Issue #4114: a degraded/unreadable board read must NEVER present as an
+# empty board. The four-way-zero idle predicate reads zero counts as
+# "nothing else to do, go backfill" — so zeros manufactured by a read
+# failure (the shell's degraded-marked gh-failure substitution above, or an
+# unparseable/non-object payload) fail CLOSED here: idle=false AND both
+# saturation flags=true, all in the suppressing direction, mirroring the
+# Target mirror's documented fail-closed discipline for the same gate.
+degraded = False
 try:
   d = json.load(sys.stdin)
+  if not isinstance(d, dict):
+    raise ValueError('board JSON is not an object')
+  degraded = bool(d.get('degraded', False))
   rfa = int(d.get('ready_for_agent', 0) or 0)
   nr = int(d.get('needs_research', 0) or 0)
   nt = int(d.get('needs_triage', 0) or 0)
   arch = int(d.get('arch_sourced', 0) or 0)
   cleanup = int(d.get('cleanup_sourced', 0) or 0)
 except Exception:
+  degraded = True
   rfa = nr = nt = arch = cleanup = 0
 wq = int(os.environ.get('ARCH_WORK_QUEUE', '0') or 0)
 cap = int(os.environ.get('ARCH_BOARD_SATURATION_CAP', '6') or 6)
@@ -1147,13 +1168,13 @@ cleanup_cap = int(os.environ.get('CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
 fallback_due = (rfa == 0 and nr == 0 and nt == 0 and wq == 0)
 saturated = (arch > cap)
 cleanup_saturated = (cleanup > cleanup_cap)
-print('orch_backfill_idle=' + ('true' if fallback_due else 'false'))
+print('orch_backfill_idle=' + ('false' if degraded else ('true' if fallback_due else 'false')))
 print('arch_board_open_scan=' + str(arch))
-print('arch_board_saturated=' + ('true' if saturated else 'false'))
+print('arch_board_saturated=' + ('true' if (degraded or saturated) else 'false'))
 print('cleanup_board_open_scan=' + str(cleanup))
-print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
+print('cleanup_board_saturated=' + ('true' if (degraded or cleanup_saturated) else 'false'))
 PY
-)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; }
+)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=true"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=true"; }
 
 # Target cleanup backfill — cleanup_target signal class (the Target mirror of
 # cleanup_orch; operator-approved 2026-06-10).
