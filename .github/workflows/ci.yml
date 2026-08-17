@@ -88,19 +88,21 @@ jobs:
           fi
           PASS_COUNT=$(grep -oP '^# pass \K[0-9]+' test-output.txt)
           echo "Tests passed: $PASS_COUNT"
-          # Partial-collapse detector, raised 450 -> 6000 (issue #3741). Now
-          # that a red suite actually reddens this job, the count floor's only
-          # remaining job is catching a suite that ran FEWER tests and still
-          # exited 0 — a glob or runner-config change that silently drops test
-          # files. At 450 against a live ~6900 it was ~15x too low to catch any
-          # such collapse. 6000 keeps ~900 tests of headroom so it can never
-          # become an ambient poison pill that reddens the merge queue with no
-          # code change. This floor may only ever move UP.
-          MIN_TESTS=6000
-          if [ "$PASS_COUNT" -lt "$MIN_TESTS" ]; then
-            echo "::error::Test count regression: $PASS_COUNT < $MIN_TESTS minimum"
-            exit 1
-          fi
+          # The MIN_TESTS=6000 floor that used to live here was deleted in
+          # #4141. It was a partial-collapse detector, and the per-file
+          # zero-entry verdict in scripts/test/redis-db-launch.mjs strictly
+          # dominates it: that gate fails the run when a BASELINED file
+          # contributes zero top-level entries, which catches a dropped file
+          # regardless of what the total is — whereas a global floor cannot see
+          # one file vanish while the total stays above the line.
+          #
+          # The floor was also measuring the wrong number. $PASS_COUNT comes
+          # from the TAP footer, which #4137 showed is TRUNCATED by
+          # --test-force-exit: observed on master with no code change as 7,416
+          # / 7,434 / 7,436 / 7,455 / 7,495. It survived only because its
+          # headroom was wider than its jitter, and that headroom structurally
+          # forbade the consolidation work in epic #4131 (26 test files merged
+          # into 5). PASS_COUNT is still echoed above, for the log only.
 
   dashboard-build:
     runs-on: self-hosted

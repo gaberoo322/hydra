@@ -42,7 +42,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -56,6 +56,14 @@ const CI_WORKFLOW = resolve(REPO_ROOT, ".github/workflows/ci.yml");
  * live pass count so it never becomes an ambient poison pill.
  */
 export const MIN_TESTS_FLOOR = 6000;
+
+/**
+ * Historical note (#4141): the floor above is no longer asserted against
+ * ci.yml — it was deleted from the workflow and replaced by the per-file
+ * zero-entry verdict. The constant and {@link extractMinTests} are retained
+ * because the live assertion is now the NEGATIVE one (the floor must stay
+ * gone), and that check needs the same parser.
+ */
 
 /** Drop whole-line comments (YAML `#` and shell `#` alike). */
 export function stripComments(text: string): string {
@@ -181,14 +189,51 @@ describe("ci.yml `test` job — pipefail invariant (#3741)", () => {
     );
   });
 
-  test("the MIN_TESTS count floor is present and has not been lowered", () => {
+  test("the MIN_TESTS count floor is GONE — superseded by the zero-entry gate (#4141)", () => {
+    // This case previously asserted the opposite: that MIN_TESTS was present
+    // and >= 6000. It is flipped rather than deleted, because the invariant
+    // that actually matters — "a silently shrinking suite must fail the job" —
+    // still holds; only its implementation moved.
+    //
+    // MIN_TESTS was a global floor, and a global floor cannot see one FILE
+    // vanish while the total stays above the line. The per-file zero-entry
+    // verdict in scripts/test/redis-db-launch.mjs (#4152) fails the run when a
+    // BASELINED file contributes zero top-level entries, regardless of the
+    // total, so it strictly dominates what the floor was for.
+    //
+    // The floor was also comparing a TRUNCATED number to a constant:
+    // $PASS_COUNT comes from the TAP footer, which #4137 measured under-
+    // reporting at 7,416 / 7,434 / 7,436 / 7,455 / 7,495 on master with no
+    // code change. It survived only because its headroom exceeded its jitter,
+    // and that headroom structurally forbade the consolidation in epic #4131.
     const job = extractJobBlock(workflow, "test");
     const step = findSuiteStep(extractSteps(job as string));
-    const floor = extractMinTests(step as string);
-    assert.notEqual(floor, null, "MIN_TESTS is no longer set in the suite step — the partial-collapse detector is gone");
-    assert.ok(
-      (floor as number) >= MIN_TESTS_FLOOR,
-      `MIN_TESTS=${floor} is below the ratchet floor ${MIN_TESTS_FLOOR}; this floor may only ever move UP (issue #3741)`,
+    assert.equal(
+      extractMinTests(step as string),
+      null,
+      "MIN_TESTS is set again in the suite step. Do not reinstate a global count floor — " +
+        "it cannot detect one file dropping, and it measures a truncated TAP number against " +
+        "a constant. The zero-entry verdict in scripts/test/redis-db-launch.mjs replaces it.",
+    );
+  });
+
+  test("the replacement is wired: the launcher still owns the zero-entry verdict", () => {
+    // Deleting the floor is only safe while its replacement exists. Pin that
+    // here so the two can never be separated by a later change.
+    const launcher = readFileSync(
+      join(REPO_ROOT, "scripts", "test", "redis-db-launch.mjs"),
+      "utf8",
+    );
+    assert.match(
+      launcher,
+      /FILE NEVER RAN/,
+      "the zero-entry verdict is gone from redis-db-launch.mjs — nothing now detects a dropped test file, " +
+        "and MIN_TESTS was removed in #4141 on the strength of it",
+    );
+    assert.match(
+      launcher,
+      /missingFiles\.length > 0 && \(code \?\? 1\) === 0/,
+      "the zero-entry verdict no longer exits non-zero — it must BLOCK, not merely report",
     );
   });
 });
