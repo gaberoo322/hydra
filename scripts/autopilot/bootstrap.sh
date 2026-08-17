@@ -774,6 +774,22 @@ CONTEXT_COMPACTION_TURNS="${HYDRA_AUTOPILOT_CONTEXT_COMPACTION_TURNS:-8}"
 # Fractional values are accepted (the percentages are floats server-side).
 QUOTA_5H_MAX="${HYDRA_AUTOPILOT_QUOTA_5H_MAX:-0}"
 QUOTA_WEEK_MAX="${HYDRA_AUTOPILOT_QUOTA_WEEK_MAX:-0}"
+# Both values are interpolated UNQUOTED into the state.json heredoc below (they
+# are JSON numbers, like token_budget). So a typo — `--quota-5h-max=ten` — would
+# otherwise emit torn JSON and break every downstream jq/json.load reader at
+# Phase 0 with a baffling parse error instead of a clear message. Validate here
+# and FATAL loudly, matching the --scope validator's style.
+for _q_pair in "QUOTA_5H_MAX=${QUOTA_5H_MAX}" "QUOTA_WEEK_MAX=${QUOTA_WEEK_MAX}"; do
+  _q_name="${_q_pair%%=*}"
+  _q_val="${_q_pair#*=}"
+  case "$_q_val" in
+    ''|*[!0-9.]*|*.*.*|.)
+      echo "[autopilot] FATAL: ${_q_name}=${_q_val} invalid (expected a non-negative number of utilization points, e.g. 10 or 2.5; 0 disables the cap)"
+      exit 1
+      ;;
+  esac
+done
+unset _q_pair _q_name _q_val
 
 # Per-subagent token caps (issue #395). Soft cap = stop re-dispatching that
 # class; hard cap = abandon the in-flight slot and open a runaway issue.

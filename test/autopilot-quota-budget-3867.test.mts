@@ -543,7 +543,11 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
    * host's systemd drop-in exports some, and a leak would make the
    * default-value assertions read the HOST's override (issue #1231).
    */
-  function runBootstrap(env: Record<string, string>, argv: string[]): any {
+  function runBootstrap(
+    env: Record<string, string>,
+    argv: string[],
+    expectFailure = false,
+  ): any {
     const tmp = makeBootstrapTmp();
     try {
       const sanitized = Object.fromEntries(
@@ -561,6 +565,9 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
         },
         encoding: "utf-8",
       });
+      if (expectFailure) {
+        return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+      }
       assert.equal(r.status, 0, `bootstrap failed: ${r.stderr}`);
       assert.ok(existsSync(tmp.state), "bootstrap must write the state file");
       const state = JSON.parse(readFileSync(tmp.state, "utf-8"));
@@ -611,5 +618,14 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
     assert.equal("quota_baseline" in armed.state, false,
       "bootstrap must NOT seed a baseline — that is what re-arms capture per run");
     assert.match(runTermCheck(armed.state).stdout, /^OK /);
+  });
+
+  // The caps are interpolated UNQUOTED into the state.json heredoc (they are
+  // JSON numbers). A typo must FATAL with a clear message rather than emit torn
+  // JSON that breaks every downstream jq/json.load reader at Phase 0.
+  test("a non-numeric cap FATALs loudly instead of writing torn JSON", () => {
+    const r = runBootstrap({}, ["--quota-5h-max=ten"], true);
+    assert.notEqual(r.status, 0, "a non-numeric cap must abort bootstrap");
+    assert.match(r.stdout + r.stderr, /FATAL: QUOTA_5H_MAX=ten invalid/);
   });
 });
