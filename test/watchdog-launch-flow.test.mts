@@ -68,6 +68,8 @@ import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   WATCHDOG_REDIS_TIMEOUT_MS,
   throwIfTimedOut,
+  assertSpawnOk,
+  describeExitStatus,
 } from "./_helpers/watchdog-timeouts.mts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -133,40 +135,51 @@ function dockerRedisAvailable(): boolean {
 
 const DOCKER = dockerRedisAvailable();
 
-function drc(args: string[]): string {
+/**
+ * Run one `docker exec … redis-cli` round-trip, or THROW (issue #4135).
+ *
+ * Every Redis helper below routes through here. Previously each called
+ * `spawnSync` and dropped the result on the floor: a seeding `HSET` that never
+ * ran returned `void` exactly like one that succeeded, and a `GET` whose child
+ * was killed returned `""` — indistinguishable from a genuinely-empty key.
+ * The next assertion then measured an unseeded fixture and failed as though
+ * the WATCHDOG had changed behaviour, which is #4135's intermittent INV-5 red:
+ * loaded CI runner only, never a quiet laptop, same tree either way.
+ *
+ * `assertSpawnOk` covers timeout, spawn error (EAGAIN under fork pressure),
+ * killing signal and non-zero `redis-cli` exit. The distinction it preserves
+ * is the whole point: "the box could not run docker" must never be reported as
+ * "the invariant is broken".
+ */
+function redisCli(args: string[], what: string): string {
   const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
     encoding: "utf-8",
     timeout: WATCHDOG_REDIS_TIMEOUT_MS,
   });
+  assertSpawnOk(r, WATCHDOG_REDIS_TIMEOUT_MS, what);
   return (r.stdout ?? "").trim();
+}
+
+function drc(args: string[]): string {
+  return redisCli(args, `redis-cli ${args[0]}`);
 }
 
 /** Wipe the last-tick record and ALL ten launch-flow keys for a clean slate. */
 function cleanState(): void {
   const keys = [TEST_LAST_TICK_KEY];
   for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
+  redisCli(["DEL", ...keys], "cleanState DEL");
 }
 
 function hsetLastTick(fields: Record<string, string>): void {
   const args = ["HSET", TEST_LAST_TICK_KEY];
   for (const [k, v] of Object.entries(fields)) args.push(k, v);
-  spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", ...args], {
-    encoding: "utf-8",
-    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
-  });
+  redisCli(args, `hsetLastTick HSET (${Object.keys(fields).join(",")})`);
 }
 
 /** Pre-seed a signal's since-anchor (stands in for "the streak began long ago"). */
 function seedSince(signal: string, ms: number): void {
-  spawnSync(
-    "docker",
-    ["exec", "hydra-redis-1", "redis-cli", "--raw", "SET", SINCE(signal), String(ms), "NX"],
-    { encoding: "utf-8", timeout: WATCHDOG_REDIS_TIMEOUT_MS },
-  );
+  redisCli(["SET", SINCE(signal), String(ms), "NX"], `seedSince SET ${signal}`);
 }
 
 /**
@@ -178,17 +191,28 @@ function seedSince(signal: string, ms: number): void {
  * orchestrator's database and a blocking full-keyspace walk there is not a cost
  * a test gets to impose. Bounded: one pass, and failures are ignored, since
  * this is opportunistic hygiene rather than a precondition of any assertion.
+ *
+ * Since #4135 `drc` THROWS when the `docker exec` does not complete cleanly.
+ * That is right for every other caller — a dropped seed or an unreadable key
+ * must never be mistaken for a behaviour change — but wrong here, where a
+ * failure genuinely does not matter. Hence the one deliberate catch in this
+ * file: hygiene stays best-effort, everything load-bearing stays loud.
  */
 function sweepOrphanNamespaces(): void {
-  let cursor = "0";
-  for (let i = 0; i < 64; i++) {
-    const out = drc(["SCAN", cursor, "MATCH", "hydra:test:launch-flow-*", "COUNT", "500"]);
-    const lines = out.split("\n").filter((l) => l !== "");
-    if (lines.length === 0) return;
-    cursor = lines[0];
-    const keys = lines.slice(1).filter((k) => !k.startsWith(RUN_NS));
-    if (keys.length > 0) drc(["DEL", ...keys]);
-    if (cursor === "0") return;
+  try {
+    let cursor = "0";
+    for (let i = 0; i < 64; i++) {
+      const out = drc(["SCAN", cursor, "MATCH", "hydra:test:launch-flow-*", "COUNT", "500"]);
+      const lines = out.split("\n").filter((l) => l !== "");
+      if (lines.length === 0) return;
+      cursor = lines[0];
+      const keys = lines.slice(1).filter((k) => !k.startsWith(RUN_NS));
+      if (keys.length > 0) drc(["DEL", ...keys]);
+      if (cursor === "0") return;
+    }
+  } catch (err) {
+    /* intentional: opportunistic cross-run hygiene, never a precondition. */
+    console.error(`[watchdog-launch-flow] orphan-namespace sweep skipped: ${String(err)}`);
   }
 }
 
@@ -385,6 +409,111 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW structure (issue #3847)",
 });
 
 // =============================================================================
+// The seeding-spawn guard itself (#4135). Runs unconditionally — no docker.
+// =============================================================================
+
+describe("watchdog Redis seeding never fails silently (issue #4135)", () => {
+  // #4135's INV-5 red was not a watchdog bug: a seeding `docker exec … HSET`
+  // that died under CI load returned void, the fixture was never written, and
+  // the following assertion measured an unseeded key. These cases pin the four
+  // ways that spawn can die, so the guard cannot regress back to silence.
+
+  test("a timed-out seed throws, and says TIMEOUT rather than blaming behaviour", () => {
+    const timedOut = { error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }), signal: "SIGTERM" as const, status: null, stdout: "", stderr: "" };
+    assert.throws(
+      () => assertSpawnOk(timedOut, WATCHDOG_REDIS_TIMEOUT_MS, "hsetLastTick HSET"),
+      (err: Error) => {
+        assert.match(err.message, /hsetLastTick HSET/);
+        assert.match(err.message, /TIMEOUT, not an assertion failure/);
+        return true;
+      },
+    );
+  });
+
+  test("a spawn error that is NOT a timeout still throws — EAGAIN under fork pressure", () => {
+    // The likelier failure on a runner executing four jobs at once: the child
+    // never starts at all. `throwIfTimedOut` alone returns quietly here, which
+    // is exactly the hole this guard closes.
+    const eagain = { error: Object.assign(new Error("spawn EAGAIN"), { code: "EAGAIN" }), signal: null, status: null, stdout: "", stderr: "" };
+    assert.doesNotThrow(() => throwIfTimedOut(eagain, WATCHDOG_REDIS_TIMEOUT_MS, "x"));
+    assert.throws(
+      () => assertSpawnOk(eagain, WATCHDOG_REDIS_TIMEOUT_MS, "seedSince SET latency"),
+      (err: Error) => {
+        assert.match(err.message, /seedSince SET latency/);
+        assert.match(err.message, /EAGAIN/);
+        assert.match(err.message, /never written/);
+        return true;
+      },
+    );
+  });
+
+  test("a killed seed throws", () => {
+    assert.throws(
+      () => assertSpawnOk({ signal: "SIGKILL", status: null, stdout: "", stderr: "" }, WATCHDOG_REDIS_TIMEOUT_MS, "cleanState DEL"),
+      /killed by SIGKILL/,
+    );
+  });
+
+  test("a non-zero redis-cli exit throws — the command did not succeed", () => {
+    assert.throws(
+      () => assertSpawnOk({ status: 1, signal: null, stdout: "", stderr: "Could not connect" }, WATCHDOG_REDIS_TIMEOUT_MS, "hsetLastTick HSET"),
+      (err: Error) => {
+        assert.match(err.message, /exited 1/);
+        assert.match(err.message, /Could not connect/);
+        return true;
+      },
+    );
+  });
+
+  test("a clean run does not throw", () => {
+    assert.doesNotThrow(() =>
+      assertSpawnOk({ status: 0, signal: null, stdout: "OK", stderr: "" }, WATCHDOG_REDIS_TIMEOUT_MS, "seedSince SET quota"),
+    );
+  });
+
+  test("a 128+N exit is reported as a signal death, not a bare number", () => {
+    // The concrete cost this repays: a #4135 reproduction under load failed
+    // with `141 !== 0` and an EMPTY stderr, which says nothing at all. 141 is
+    // 128 + 13 — some command in the block died of SIGPIPE. Naming that in the
+    // assertion is the difference between a one-line read and an hour.
+    const msg = describeExitStatus(141);
+    assert.match(msg, /128 \+ 13/);
+    assert.match(msg, /SIGPIPE/);
+    assert.match(msg, /ENVIRONMENT/);
+    assert.match(describeExitStatus(137), /SIGKILL/);
+    assert.match(describeExitStatus(143), /SIGTERM/);
+  });
+
+  test("an ordinary exit code is left alone, and a missing one says so", () => {
+    assert.equal(describeExitStatus(1), "1");
+    assert.equal(describeExitStatus(0), "0");
+    assert.match(describeExitStatus(null), /did not run to completion/);
+  });
+
+  test("every Redis helper routes through the guarded round-trip", () => {
+    // The defect was per-call-site, so a new unguarded docker spawn
+    // reintroduces it. Exactly one may remain outside redisCli:
+    // dockerRedisAvailable, the PING probe whose whole job is to fail quietly
+    // when there is no container to talk to.
+    //
+    // The pattern requires the argv array that a REAL call has, so this
+    // case's own prose does not count itself — the self-match trap that
+    // CLAUDE.md records for `pgrep -f`, and which the first draft of this
+    // assertion walked straight into (it reported 4 sites, two of them these
+    // very lines).
+    const src = readFileSync(join(REPO_ROOT, "test", "watchdog-launch-flow.test.mts"), "utf-8");
+    const dockerSpawns = src.match(/spawnSync\(\s*"docker",\s*\[/g) ?? [];
+    assert.equal(
+      dockerSpawns.length,
+      2,
+      `expected exactly 2 docker spawn sites (redisCli + the dockerRedisAvailable PING), found ` +
+        `${dockerSpawns.length}. A new one must go through redisCli() or it can drop a seed ` +
+        `silently and reopen #4135.`,
+    );
+  });
+});
+
+// =============================================================================
 // Behavioural cases — gated on the docker redis container (CI runners + dev).
 // =============================================================================
 
@@ -412,7 +541,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
     hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
     seedSince("fail-safe", T0);
     const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "60", HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000) });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.equal(warnLines(r.stdout), "", "must not fire under threshold");
     assert.equal(getFired("fail-safe"), false, "no fired marker when under threshold");
   });
@@ -427,7 +556,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
     cleanState();
     hsetLastTick({ reason: "eligible-launch", class: "launch", at: String(T0 + 6_000), latency_ms: "120" });
     const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2", HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000) });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.equal(getSince("fail-safe"), "", "fail-safe since-anchor cleared on recovery");
     assert.equal(getFired("fail-safe"), false, "fail-safe fired marker cleared on recovery");
   });
@@ -439,7 +568,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       HYDRA_WATCHDOG_LAUNCH_METER_DARK_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.match(warnLines(r.stdout), /signal 'meter-dark' sustained 5000ms >= 2000ms/);
     // A meter-dark tick must CLEAR the fail-safe streak (distinct signal → not a member).
     assert.equal(getSince("fail-safe"), "", "meter-dark tick must clear fail-safe streak (different root cause)");
@@ -453,7 +582,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
     for (const reason of ["emergency-stop", "weekly-emergency-stop", "session-blocked"]) {
       hsetLastTick({ reason, class: "deliberate-skip", at: String(T0), latency_ms: "100" });
       const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS: "2", HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000) });
-      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr: ${r.stderr}`);
       warnings += warnLines(r.stdout).split("\n").filter((l) => l.includes("'quota'")).length;
       // The anchor set on tick 1 must survive ticks 2 and 3 unchanged.
       assert.equal(getSince("quota"), String(T0), `quota anchor must not reset on flip to ${reason}`);
@@ -465,7 +594,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
     hsetLastTick({ reason: "paused", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
     seedSince("pause", T0);
     const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS: "2", HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000) });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.match(warnLines(r.stdout), /signal 'pause' sustained 5000ms >= 2000ms/);
   });
 
@@ -482,7 +611,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS: "999",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000),
     });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.equal(getSince("fail-safe"), "", "fail-safe streak cleared on class change to pause");
     assert.equal(getFired("fail-safe"), false, "fail-safe fired marker cleared on class change");
     assert.doesNotMatch(warnLines(r.stdout), /'fail-safe'/, "fail-safe must not fire after the class change");
@@ -497,7 +626,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
     });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.match(warnLines(r.stdout), /signal 'latency' sustained 5000ms >= 2000ms/);
     assert.equal(getFired("latency"), true, "latency fired marker set");
 
@@ -529,7 +658,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000),
     });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.equal(getSince("latency"), "", "absent latency_ms must clear the latency streak");
   });
 
@@ -545,7 +674,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS: "2",
       HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 3_000),
     });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     const w = warnLines(r.stdout);
     assert.match(w, /'latency'/, "latency must fire as the leading indicator");
     assert.doesNotMatch(w, /'fail-safe'/, "fail-safe must NOT have fired yet (it lags)");
@@ -559,7 +688,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
     // Default pause threshold is 24h; with only a 5s elapsed, the default would
     // never fire. Inject 2s and it must.
     const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS: "2", HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000) });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     assert.match(warnLines(r.stdout), /signal 'pause' sustained 5000ms >= 2000ms/);
   });
 
@@ -595,7 +724,7 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
   test("INV-10: absent last-tick key (no tick ever recorded) logs WARN, exits 0, no mutation", () => {
     // cleanState already DELed the last-tick key in beforeEach.
     const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0), HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2" });
-    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
     const out = r.stdout.split("\n").filter((l) => l.includes("hydra-launch-flow-watchdog:")).join("\n");
     assert.match(out, /WARN no pace-gate last-tick record/);
     for (const s of SIGNALS) {
