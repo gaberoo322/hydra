@@ -88,9 +88,15 @@ state.json {
     "scout_orch":      unix-epoch | 0
     # architecture_orch (#790) and retro_orch (#920) also track last-fired
     # here when they fire; absent keys default to 0 (never fired).
-    # The backfill starvation floor (#2428, signal_starved) reads these same
-    # timestamps to force a backfill class through the stagger if it has gone
-    # dark for >24h — an absent/0 entry counts as never-fired → force-eligible.
+    # TWO distinct floors read these same timestamps with deliberately
+    # OPPOSITE never-fired semantics — do not conflate them:
+    #   - The backfill starvation floor (#2428, signal_starved) forces a
+    #     backfill class through the intra-turn STAGGER if it has gone dark
+    #     >24h; an absent/0 entry is NOT starved (normal cold-start).
+    #   - The discover staleness floor (#4114, signal_dark_past_floor) fires
+    #     discover_orch's selector when the class has been dark >7d; an
+    #     absent/0 entry IS dark (a never-fired producer is exactly the dark
+    #     state the floor exists to break).
   }
 
   # NEW IN #3729 — per-item verdict-stability stamps for sweep_target. Keyed by
@@ -384,6 +390,34 @@ BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 # bootstrap forces any still-dark backfill class through rather than letting the
 # stagger starve it for another full window.
 BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
+
+# Discover staleness floor (issue #4114). discover_orch's ONLY trigger from
+# its #959 revival until #4114 was the shared `orch_backfill_idle` board-empty
+# signal, which requires ready_for_agent==0 AND needs_research==0 AND
+# needs_triage==0 AND work_queue==0 SIMULTANEOUSLY — a conjunction that
+# essentially never holds on a healthy, continuously-stocked board (live
+# evidence 2026-07-26..2026-08-17: 5-36 ready-for-agent issues at every
+# sample, so the gate stayed false for 3+ weeks and the PRODUCER class went
+# structurally dark — 0 dispatches since its revival, with architecture_orch /
+# cleanup_orch frozen on the same shared gate since 2026-07-25). #3920's
+# cooldown carry-forward fix was live and orthogonal: the selector simply
+# never had a true input. A producer whose only trigger is "the board is
+# empty" can never fire on a board that is doing its job.
+#
+# The floor gives discover_orch an alternate, additive trigger: fire on
+# `orch_backfill_idle` OR when the class has been dark longer than this floor
+# (7d — the scout_orch walk / design_qa_target / skill_prune calendar-cadence
+# family: long enough to never meaningfully compete with active dev
+# throughput week-to-week, short enough to guarantee the producer role is
+# never dark for a month+). Deliberately DISTINCT from
+# BACKFILL_STARVATION_FLOOR_SEC / signal_starved above (design-concept #4114
+# INV-2): that floor is an intra-turn STAGGER override and keeps its exact
+# semantics; this is a gate-level dispatch trigger on the selector itself.
+# Scope (INV-3): discover_orch ONLY in this change — architecture_orch and
+# cleanup_orch keep idle-only gating; the predicate is class-parameterized
+# (see signal_dark_past_floor) so extending it to the siblings is a small
+# follow-up, not a rewrite.
+DISCOVER_STALENESS_FLOOR_SEC = 7 * 24 * 60 * 60
 
 # Per-item verdict-stability backoff for sweep_target (issue #3729). A FIXED
 # (not exponential, not class-wide) window: each Target needs-triage item carries
@@ -1473,6 +1507,46 @@ def signal_starved(
         # drain it normally; the floor only protects a class with a real prior
         # last-fired time that has since gone dark for >floor_sec.
         return False
+    return (now - last_i) >= floor_sec
+
+
+def signal_dark_past_floor(
+    state: dict, sig: str, now: int, floor_sec: int
+) -> bool:
+    """True iff `sig`'s last-fired timestamp is older than `floor_sec`, OR the
+    class has never fired (last == 0 — maximally dark).
+
+    Issue #4114's gate-level staleness floor. Reads ONLY
+    `state.signal_last_fired[sig]` + `now` — no new I/O, no fs/network/Redis
+    (design-concept #4114 INV-1; ADR-0007 purity), the same seam
+    signal_is_cooled / signal_starved read.
+
+    The never-fired semantics deliberately INVERT signal_starved's, and the
+    contrast is the point: for the #2428 intra-turn stagger override, "never
+    fired" is normal cold-start (treating every unseen class as starved would
+    force them ALL through and defeat the stagger); for a gate-level PRODUCER
+    trigger, "never fired" IS the dark state the floor exists to break — the
+    #4114 finding was precisely a producer class at last==0 that the idle-only
+    gate could never unlock (a floor that required last>0 would be a no-op on
+    the exact state it was added to fix). Mirrors scout_orch's
+    scout_walk_due ">=7d old OR EMPTY" calendar precedent.
+
+    Pure: never mutates state and never touches fs/network/Redis.
+
+    Class-parameterized (floor passed explicitly, no discover_orch default):
+    #4114 wires it for discover_orch only, but the predicate itself is generic
+    so the deferred architecture_orch / cleanup_orch follow-up reuses it
+    verbatim (design-concept #4114 INV-3 + rejectedAlternatives).
+    """
+    last = (state.get("signal_last_fired") or {}).get(sig, 0) or 0
+    try:
+        last_i = int(last)
+    except (TypeError, ValueError):
+        last_i = 0
+    if last_i <= 0:
+        # Never fired → maximally stale: dark TODAY, which is exactly the
+        # condition the floor exists to break (see the #4114 note above).
+        return True
     return (now - last_i) >= floor_sec
 
 
@@ -3619,8 +3693,29 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
         # discover_orch and architecture_orch don't both fire on the same idle
         # turn; round-robin emerges from the per-class 1h cooldowns.
+        #
+        # Issue #4114: the idle-only trigger proved structurally dark on a
+        # healthy board — orch_backfill_idle requires FOUR board metrics at
+        # zero simultaneously, and a continuously-stocked board keeps it false
+        # for weeks (the producer went 3+ weeks at 0 dispatches; see
+        # DISCOVER_STALENESS_FLOOR_SEC above). The selector now fires on
+        # EITHER the idle signal OR the staleness floor. The reason strings
+        # keep the two paths distinguishable in the dispatch_decision audit
+        # trail (design-concept #4114 INV-4, mirroring signal_starved's
+        # 'backfill starvation floor (>24h since last X)' annotation pattern).
+        # architecture_orch / cleanup_orch deliberately keep idle-only gating
+        # (INV-3 — the sibling extension is a deferred follow-up).
         if _signal_present(state, events, "orch_backfill_idle"):
             return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
+        if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
+            return make_dispatch(
+                sig,
+                "hydra-discover",
+                reason=(
+                    f"discover staleness floor (>{DISCOVER_STALENESS_FLOOR_SEC // (24 * 60 * 60)}d"
+                    " dark since last fire): producer class dark on a busy board"
+                ),
+            )
         return None
     if sig == "discover_target":
         if _signal_present(state, events, "target_idle"):

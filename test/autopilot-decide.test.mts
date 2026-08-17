@@ -1594,8 +1594,16 @@ describe("decide.py — board-idle backfill set (issue #959)", () => {
 
   test("discover_orch does NOT fire on the dead orch_idle signal anymore", () => {
     // The old (never-emitted) signal must no longer trigger discover_orch —
-    // the seam is orch_backfill_idle now.
-    const state = baseState({ signals: { orch_idle: true } });
+    // the seam is orch_backfill_idle now. discover_orch is seeded as
+    // recently-fired-but-cooled (2h ago: past the 1h cooldown, inside the 7d
+    // #4114 staleness floor) so the class is eligible on EVERY axis except
+    // the signal itself — no dispatch proves the dead name is not honored.
+    const state = baseState({
+      signals: { orch_idle: true },
+      signal_last_fired: {
+        discover_orch: Math.floor(Date.now() / 1000) - 2 * 60 * 60,
+      } as any,
+    });
     const plan = runDecide(state, null);
     assert.equal(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_orch"),
@@ -1996,7 +2004,13 @@ describe("decide.py — idle fallback / heartbeat", () => {
     // the reap backstop stamped the run `interrupted` (the retro-starvation
     // mechanism of issue #1352). A wait-only turn with zero occupied slots
     // now records the designed exit as a clean idle drain.
-    const plan = runDecide(baseState(), null);
+    //
+    // discover_orch seeded as fired-just-now: post-#4114 a never-fired
+    // discover_orch dispatches via the staleness floor, which would make
+    // this turn dispatch-bearing and mask the idle-drain path under test.
+    const plan = runDecide(baseState({
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    }), null);
     const t = findAction(plan, (a) => a.type === "terminate");
     assert.ok(t, "wait-only turn with empty slots must terminate cleanly");
     assert.equal(t.cause, "idle");
@@ -2011,12 +2025,16 @@ describe("decide.py — idle fallback / heartbeat", () => {
     // Background dispatches hold the print-mode process alive and re-invoke
     // it on completion — the busy-wait nap is real there, and terminating
     // would orphan the in-flight slot.
+    //
+    // discover_orch seeded as fired-just-now (see the terminate(idle) test
+    // above): the #4114 staleness floor would otherwise add a dispatch.
     const state = baseState({
       slots: {
         dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 100_000 },
         qa_orch: null, research_orch: null,
         dev_target: null, qa_target: null, research_target: null,
       },
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
     });
     const plan = runDecide(state, null);
     const w = findAction(plan, (a) => a.type === "wait");
@@ -2030,7 +2048,11 @@ describe("decide.py — idle fallback / heartbeat", () => {
   });
 
   test("idle-drain terminate carries merged_prs from state", () => {
-    const state = baseState();
+    // discover_orch seeded as fired-just-now so the #4114 staleness floor
+    // does not turn this into a dispatch-bearing turn.
+    const state = baseState({
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    });
     (state as any).merged_prs = 3;
     const plan = runDecide(state, null);
     const t = findAction(plan, (a) => a.type === "terminate");
@@ -2043,11 +2065,16 @@ describe("decide.py — idle fallback / heartbeat", () => {
     // qa-verdict) but no dispatch must NOT terminate — only a true
     // wait-only turn drains. The heartbeat wait stays so the model
     // finishes the housekeeping before the session ends.
+    //
+    // discover_orch seeded as fired-just-now so the #4114 staleness floor
+    // keeps this a HOUSEKEEPING-ONLY turn (no dispatch).
     const events = [{
       type: "qa-verdict", pr_number: 555, tier: 1,
       mechanical: null, has_scope_justification: false, verdict: "PASS",
     }];
-    const plan = runDecide(baseState(), null, events);
+    const plan = runDecide(baseState({
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    }), null, events);
     assert.ok(
       findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 555),
       "fixture must produce an auto-merge action",
@@ -2128,7 +2155,11 @@ describe("decide.py — terminate run-end POST (#1352)", () => {
 
   test("a terminating plan POSTs run-end with the plan's cause before exit", async () => {
     await withCaptureServer(async (baseUrl, requests) => {
-      const state = baseState(); // wait-only turn → terminate(idle)
+      // wait-only turn → terminate(idle). discover_orch seeded as
+      // fired-just-now so the #4114 staleness floor does not add a dispatch.
+      const state = baseState({
+        signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+      });
       (state as any).run_id = RUN_ID;
       const out = await spawnDecideAsync(state, {
         HYDRA_API_BASE: baseUrl,
@@ -2749,7 +2780,11 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
     // terminate(idle) since #1352) — confirm the stamping loop is
     // dispatch-scoped and doesn't leak the field onto other action types
     // (which would confuse the schema-additivity gates).
-    const state = baseState(); // no signals → idle drain terminate
+    // discover_orch seeded as fired-just-now so the #4114 staleness floor
+    // does not make this a dispatch-bearing turn.
+    const state = baseState({
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    }); // no signals → idle drain terminate
     const plan = runDecide(state, null);
     const idleAction = findAction(plan, (a) => a.type === "terminate");
     assert.ok(idleAction, "idle path must emit a terminate action");

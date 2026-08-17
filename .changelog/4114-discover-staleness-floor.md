@@ -1,0 +1,1 @@
+- fix: autopilot's discovery producer (discover_orch) was structurally dark on a healthy board — it now also dispatches via a 7-day staleness floor, not only when the orch board is completely empty (#4114)
