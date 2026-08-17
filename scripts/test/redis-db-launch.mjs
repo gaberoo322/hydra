@@ -262,19 +262,30 @@ export function resolveRedisUrl(env, rootPath) {
  * `test:debug`/`test:file` everywhere else) stays advisory-only.
  *
  * Setting `SUITE_COUNT_GATE_BLOCKING=1` restores the original hard-fail
- * behavior. The advisory `suite-count-check.yml` workflow (a non-required
- * Tier-3 sibling to ci.yml, same lane as test-typecheck.yml /
- * advisory-checks.yml) sets this so ITS job goes red on a shortfall without
- * ever touching the required `test` job's exit code — the detection keeps
- * running on every PR + master push and accumulating evidence, it just can't
- * block a merge yet.
+ * behavior. **Nothing sets it today** (issue #4133).
  *
- * Promotion criteria back to required/blocking (either flips this default,
- * or the required `test` job sets the env var itself):
- *   - the advisory workflow runs clean (no shortfall surviving both isolated
- *     retries) across several consecutive master-push runs, AND
- *   - the currently-known residual, `test/hydra-branch-prune.test.mts`, has
- *     its own tracked fix (issue #4062) landed and verified stable.
+ * It used to be set by a `suite-count-check.yml` workflow that re-ran the
+ * ENTIRE suite a second time on every PR and master push purely to obtain a
+ * blocking exit code. That cost ~11 minutes per PR — measured across 22
+ * merged PRs it burned 484 runner-minutes against `ci.yml`'s own 498 — for a
+ * non-required job that blocked nothing. The reporter already runs inside the
+ * ordinary `npm test` invocation (see `package.json`'s `test` script), so the
+ * detection was never what the second run bought; only the exit code was. The
+ * workflow was deleted.
+ *
+ * Its stated promotion criteria ("runs clean across several consecutive
+ * master pushes") are also unreachable, which is why deleting it costs
+ * nothing: #4137 established that the shortfall is the PARENT truncating the
+ * child's reporter stream under `--test-force-exit`, not tests being skipped.
+ * That truncation fires at a rate set by machine timing — measured ~50% of
+ * ISOLATED runs for `test/health-diagnostics.test.mts` — so clean runs can
+ * never accumulate and blocking on partial counts would wedge the merge queue
+ * repo-wide.
+ *
+ * This toggle is deliberately KEPT rather than removed: issue #4141 re-scopes
+ * the gate to block only on a baselined file contributing ZERO entries, which
+ * IS immune to partial truncation (truncation loses a tail; it does not make a
+ * file that ran vanish) and is therefore promotable. That work will set this.
  */
 export function isGateBlocking(env = process.env) {
   return env.SUITE_COUNT_GATE_BLOCKING === "1";
@@ -691,9 +702,10 @@ child.on("exit", async (code, signal) => {
         return;
       }
       console.error(
-        "[redis-db-launch] SUITE-COUNT GATE is advisory-only right now (issue #4020 follow-up) — " +
-          "not failing this run. Tracked by the non-required suite-count-check.yml workflow, which " +
-          "sets SUITE_COUNT_GATE_BLOCKING=1 to surface this as a red check without blocking merge.",
+        "[redis-db-launch] SUITE-COUNT GATE is advisory-only — not failing this run. Per #4137 a " +
+          "shortfall is the parent truncating the child's reporter stream, NOT tests being skipped: " +
+          "your verification held. Nothing sets SUITE_COUNT_GATE_BLOCKING today (#4133); #4141 " +
+          "re-scopes the gate to block only on a file contributing ZERO entries.",
       );
     }
   } catch (err) {
