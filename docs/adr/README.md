@@ -49,6 +49,7 @@ What an ADR *is* here — an agent-facing normative spec, not a one-paragraph me
 | [0035](./0035-spec-stage-stays-hydra-owned.md) | accepted (supersedes ADR-0030 Decision 2's spec binding) | The spec stage stays Hydra-owned; `to-spec` is not its base — the two skills contradict each other on instruction, output artifact, and consumer. | Tempted to compose `hydra-grill` on `_vendor/to-spec.md`, or wondering why the spec stage has no upstream base. |
 | [0036](./0036-anchor-selection-retired-candidate-feed.md) | accepted (renumbered from 0016) | Anchor selection is retired; the Candidate Feed is data the brain reads, not a decision the orchestrator makes. Establishes the **Locality** principle. | Touching candidate scoring, or tempted to resurrect the reframe queue. |
 | [0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md) | accepted | Hydra ADRs are agent-facing normative specs: Pocock's write gate applies, its one-paragraph size target does not. | Before writing a new ADR, or before "fixing" the corpus to be shorter. |
+| [0038](./0038-the-test-suite-is-not-padded.md) | accepted | The test suite is not padded — consolidate it mechanically; do not delete, semantically rewrite, or parallelise it. The metric is operator Claude quota, not CI minutes. | Tempted to trim the test suite, hunt flaky tests, or parallelise the runner. |
 
 ## Numbering
 

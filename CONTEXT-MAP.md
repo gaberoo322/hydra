@@ -44,6 +44,7 @@ get their own rows:
 | `dashboard/` | ADR-0034 |
 | `config/direction/`, `config/orchestrator/` | ADR-0003, ADR-0005 |
 | `docs/adr/` itself | ADR-0037 |
+| `test/`, `scripts/test/` (the suite itself) | ADR-0038 |
 | **process / policy** (no code area) | ADR-0002, ADR-0013, ADR-0014, ADR-0024 |
 
 The deep-module discipline is the load-bearing simplicity strategy here: each Seam (Redis Adapters, Schemas, Cost) hides its complexity behind a narrow typed interface so a subagent can use it correctly by reading only the glossary entry — not the implementation. Keep new subsystems to that shape.
