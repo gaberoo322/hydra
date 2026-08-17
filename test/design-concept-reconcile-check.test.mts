@@ -49,6 +49,8 @@ import {
   parseAssertion,
   parseReconciliationSection,
   quoteMatchesInvariant,
+  resolveEnforceDecision,
+  type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
 } from "../scripts/ci/design-concept-reconcile-check.ts";
@@ -60,42 +62,6 @@ function fakeReader(files: Record<string, string>): FileReader {
   return (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null);
 }
 
-/**
- * Verdict from the live adapter's fail-OPEN skip ladder for a RESOLVED artifact
- * (HTTP 200, body parsed). `enforce: false` + a bare `reason` for every skip;
- * only a structurally-complete, APPROVED artifact returns `enforce: true` (with
- * an empty `reason`), at which point the adapter fails CLOSED via
- * {@link checkReconciliation}.
- *
- * Extracted from the adapter's inline ladder so the skip rungs are unit-testable
- * without GITHUB_EVENT_PATH or a live orchestrator (issue #3849). The live
- * adapter composes this bare `reason` into its `issue #N`-prefixed skip line, so
- * the structural-skip messages are byte-identical to the pre-extraction form.
- */
-type ArtifactEnforceDecision = { enforce: boolean; reason: string };
-function resolveEnforceDecision(artifact: any): ArtifactEnforceDecision {
-  const invariants: string[] = Array.isArray(artifact?.invariants) ? artifact.invariants : [];
-  if (invariants.length === 0) return { enforce: false, reason: "declares no invariants" };
-  const artifactHash: string = typeof artifact?.artifactHash === "string" ? artifact.artifactHash : "";
-  if (artifactHash.length === 0) return { enforce: false, reason: "has no artifactHash" };
-  // Approval guard (issue #3849): only an APPROVED artifact may bind a PR. A
-  // draft or stale artifact skips green, exactly like a missing one — without
-  // this rung, a stale/abandoned DRAFT carrying real invariants + a hash became
-  // a binding reconciliation requirement on any later PR closing the same issue,
-  // on a REQUIRED merge-gate job (the npm-audit ambient-poison-pill class, where
-  // a check reddens the merge queue from state outside the PR's own diff). A
-  // missing or unrecognised status is treated as not-approved (fail OPEN — never
-  // bind on a shape we cannot confirm is approved). This is an ADDITIONAL rung:
-  // the four pre-existing skip conditions above are unchanged.
-  const status = typeof artifact?.status === "string" ? artifact.status : "";
-  if (status !== "approved") {
-    return {
-      enforce: false,
-      reason: `is not approved (status: ${status ? `'${status}'` : "unknown"}) — only an approved artifact binds a PR`,
-    };
-  }
-  return { enforce: true, reason: "" };
-}
 
 // ---------------------------------------------------------------------------
 // Suite 1 — pure decision core
