@@ -1,0 +1,1 @@
+- fix: the holdback merge-watch chore now evicts a pending PR that was closed WITHOUT merging instead of retrying it forever under `stillOpen`, and self-heals via the existing reconcile self-arm backstop if the PR is later reopened and merged (#4119)

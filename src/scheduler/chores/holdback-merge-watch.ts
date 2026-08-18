@@ -33,14 +33,28 @@
  * **A still-open pending PR is left untouched (AC2).** No `mergeCommit` yet →
  * the entry stays in the registry for a later tick.
  *
+ * **A PR closed WITHOUT merging is evicted, not retried forever (issue #4119).**
+ * No `mergeCommit` AND `state === "CLOSED"` (case-insensitive; checked strictly
+ * AFTER the merge-commit check, since a merged PR also reports a non-open
+ * state) is terminal: it can never land, so treating it as `stillOpen` left it
+ * in the registry — and re-fetched every tick — forever. It is dropped WITHOUT
+ * firing either merge-coupled write (no `enrollHoldback`, no cycle-record
+ * enrichment) and counted under the distinct `droppedClosed` counter, kept
+ * apart from `stillOpen` so the two outcomes stay distinguishable in the
+ * chore's log line. Safe against the reopened-then-merged case: the sibling
+ * `cycle-merge-reconcile` chore's self-arm backstop (issue #3078) re-registers
+ * any confirmed-merged PR it finds missing from the pending-enroll registry, so
+ * an evicted-then-reopened-then-merged PR is recovered on the next
+ * housekeeping tick with no new event surface.
+ *
  * **Never throws (AC5).** Per CLAUDE.md the whole chore is best-effort: a
  * `gh`/API failure for one PR is logged and that entry is left in the registry
  * to retry next tick; a failure never aborts the remaining entries. It returns
  * a summary object rather than throwing.
  *
  * **Observable (AC6).** After every run it persists a `{ ranAt, pendingDepth,
- * landed, droppedExempt, stillOpen }` health snapshot to Redis via
- * {@link setMergeWatchHealth} so a stalled watcher is diagnosable.
+ * landed, droppedExempt, droppedClosed, stillOpen }` health snapshot to Redis
+ * via {@link setMergeWatchHealth} so a stalled watcher is diagnosable.
  */
 
 import {
@@ -174,6 +188,12 @@ export interface HoldbackMergeWatchResult {
   landed: number;
   /** Landed T1/unknown-tier PRs dropped from the registry without enrolling. */
   droppedExempt: number;
+  /**
+   * PRs closed WITHOUT merging, evicted as terminal (issue #4119). Kept
+   * distinct from `stillOpen` — a closed-unmerged PR can never land, so it is
+   * never a "wait for the next tick" case.
+   */
+  droppedClosed: number;
   /** Entries left untouched (PR still open / no merge commit). */
   stillOpen: number;
   /** Entries left in place because a step failed (retried next tick). */
@@ -210,6 +230,7 @@ export async function runHoldbackMergeWatch(
     pendingDepth: 0,
     landed: 0,
     droppedExempt: 0,
+    droppedClosed: 0,
     stillOpen: 0,
     retried: 0,
   };
@@ -240,12 +261,13 @@ export async function runHoldbackMergeWatch(
 
   await persistHealth(setHealth, result);
 
-  if (result.landed > 0 || result.droppedExempt > 0) {
+  if (result.landed > 0 || result.droppedExempt > 0 || result.droppedClosed > 0) {
     logger.info(
       {
         pending: result.pendingDepth,
         landed: result.landed,
         droppedExempt: result.droppedExempt,
+        droppedClosed: result.droppedClosed,
         stillOpen: result.stillOpen,
         retried: result.retried,
       },
@@ -287,8 +309,22 @@ async function processOne(
       return;
     }
 
-    // Not landed yet — no merge commit. Leave the entry untouched (AC2).
+    // Not landed yet — no merge commit. Issue #4119: a PR closed WITHOUT
+    // merging is terminal — it can never land, so it is evicted rather than
+    // retried forever under `stillOpen`. Checked strictly after the
+    // merge-commit check above (a merged PR also reports a non-open `state`,
+    // so that check must win first); compared case-insensitively since `gh pr
+    // view` reports `state` uppercase (`OPEN`/`CLOSED`/`MERGED`). Neither
+    // merge-coupled write fires (no enroll, no cycle-record enrichment) — there
+    // is nothing to enroll or enrich for a PR that never merged. Safe against
+    // reopen-then-merge: see the module-doc note on the cycle-merge-reconcile
+    // self-arm backstop (issue #3078).
     if (!status.mergeCommitSha) {
+      if (typeof status.state === "string" && status.state.toUpperCase() === "CLOSED") {
+        await ctx.removePending(prNumber);
+        ctx.result.droppedClosed += 1;
+        return;
+      }
       ctx.result.stillOpen += 1;
       return;
     }
@@ -410,6 +446,7 @@ async function persistHealth(
       pendingDepth: result.pendingDepth,
       landed: result.landed,
       droppedExempt: result.droppedExempt,
+      droppedClosed: result.droppedClosed,
       stillOpen: result.stillOpen,
     });
   } catch (err: any) {

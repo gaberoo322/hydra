@@ -390,6 +390,29 @@ describe("cycle-merge-reconcile — pending-enroll self-arm backstop (#3078)", (
     assert.equal(r.upgraded, 1);
   });
 
+  test("self-arm recovers a PR previously evicted by merge-watch's closed-unmerged path once it is later reopened and merged (#4119)", async () => {
+    // The exact reopen-safety scenario issue #4119 relies on to justify
+    // dropping (not retrying-forever) a pending-enroll entry once its PR is
+    // observed CLOSED without a merge commit: holdback-merge-watch evicts it,
+    // leaving it absent from BOTH the pending registry and the enrolled
+    // marker — structurally identical to the generic "dropped-arm" case this
+    // suite already covers, since a closed-unmerged eviction never marks the
+    // PR enrolled. If the PR is later reopened and merged, this self-arm
+    // backstop must re-register it with no operator intervention.
+    const fx: Fixture = {
+      metrics: new Map([["c-evicted", { status: "completed", prNumber: "3875", tasksMerged: "0" }]]),
+      prState: new Map([[3875, "MERGED"]]),
+      reposts: [],
+      pending: new Set(), // evicted by holdback-merge-watch's droppedClosed path
+      enrolled: new Set(), // never marked — a closed-unmerged eviction skips markEnrolled
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 1, "the reopened-then-merged PR is re-armed");
+    assert.equal(fx.arms!.length, 1);
+    assert.equal(fx.arms![0].prNumber, 3875);
+  });
+
   test("self-arm forwards the metrics-hash anchorType verbatim, not a hardcoded lane (#3579)", async () => {
     // A signal-class cycle (reap classified it `discover`) whose arm was dropped.
     // The self-arm entry MUST carry the real `discover` lane read off the hash —

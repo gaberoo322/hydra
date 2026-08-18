@@ -881,6 +881,60 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(h.registry.has(502), true, "still-open entry survives for a later tick");
   });
 
+  test("closed-without-merge: a closed-unmerged PR is evicted from the registry and counted as droppedClosed, not stillOpen", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 540, tier: 3, cycleId: "cyc-540", registeredAt: 1 }],
+      { 540: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1, "a closed-unmerged PR is counted under droppedClosed");
+    assert.equal(res.stillOpen, 0, "it must NOT be double-counted (or counted at all) as stillOpen");
+    assert.equal(res.landed, 0);
+    assert.equal(res.droppedExempt, 0);
+    assert.deepEqual(h.removeCalls, [540], "the entry is evicted from the registry");
+    assert.equal(h.registry.has(540), false);
+  });
+
+  test("closed-without-merge: eviction fires neither enrollHoldback nor recordCycle", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 541, tier: 3, cycleId: "cyc-541", registeredAt: 1 }],
+      { 541: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    await runHoldbackMergeWatch(h.deps);
+
+    assert.deepEqual(h.enrollCalls, [], "no enroll for a PR that never merged");
+    assert.deepEqual(h.cycleCalls, [], "no cycle-record enrichment for a PR that never merged");
+  });
+
+  test("closed-without-merge: the CLOSED comparison is case-insensitive", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 542, tier: 3, cycleId: "cyc-542", registeredAt: 1 }],
+      { 542: { state: "closed", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1);
+    assert.deepEqual(h.removeCalls, [542]);
+  });
+
+  test("closed-without-merge: a null/absent state on a not-yet-landed PR is retained as stillOpen, never evicted", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 543, tier: 3, cycleId: "cyc-543", registeredAt: 1 }],
+      { 543: { state: null, mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.stillOpen, 1, "an unreported state is NOT assumed closed — stays stillOpen, retried next tick");
+    assert.equal(res.droppedClosed, 0);
+    assert.deepEqual(h.removeCalls, []);
+    assert.equal(h.registry.has(543), true);
+  });
+
   test("AC3: enroll + enrichment fire at most once per PR across repeated ticks", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 503, tier: 2, cycleId: "cyc-503", registeredAt: 1 }],
@@ -997,29 +1051,48 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     ], "no filesChanged key when the view didn't report one");
   });
 
+  test("closed-without-merge: a health snapshot records droppedClosed alongside the other counters", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 550, tier: 3, cycleId: "cyc-550", registeredAt: 1 }],
+      { 550: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1);
+    assert.equal(h.healthWrites.length, 1);
+    assert.equal(h.healthWrites[0].droppedClosed, 1, "the health snapshot carries the droppedClosed counter");
+    assert.equal(h.healthWrites[0].landed, 0);
+    assert.equal(h.healthWrites[0].stillOpen, 0);
+  });
+
   test("summary counts + a health snapshot are produced every run", async () => {
     const h = makeWatchHarness(
       [
         { prNumber: 520, tier: 3, cycleId: "c520", registeredAt: 1 }, // lands
         { prNumber: 521, tier: 3, cycleId: "c521", registeredAt: 2 }, // still open
         { prNumber: 522, tier: 1, cycleId: "c522", registeredAt: 3 }, // dropped exempt
+        { prNumber: 523, tier: 3, cycleId: "c523", registeredAt: 4 }, // dropped closed (#4119)
       ],
       {
         520: { state: "MERGED", mergeCommitSha: "s520", changedFiles: 2, headRefName: null },
         521: { state: "OPEN", mergeCommitSha: null, changedFiles: null, headRefName: null },
         522: { state: "MERGED", mergeCommitSha: "s522", changedFiles: 1, headRefName: null },
+        523: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null },
       },
     );
 
     const res = await runHoldbackMergeWatch(h.deps);
 
-    assert.equal(res.pendingDepth, 3);
+    assert.equal(res.pendingDepth, 4);
     assert.equal(res.landed, 1);
     assert.equal(res.stillOpen, 1);
     assert.equal(res.droppedExempt, 1);
+    assert.equal(res.droppedClosed, 1);
     assert.equal(h.healthWrites.length, 1);
-    assert.equal(h.healthWrites[0].pendingDepth, 3);
+    assert.equal(h.healthWrites[0].pendingDepth, 4);
     assert.equal(h.healthWrites[0].landed, 1);
+    assert.equal(h.healthWrites[0].droppedClosed, 1);
     assert.equal(typeof h.healthWrites[0].ranAt, "string");
   });
 });
@@ -1084,6 +1157,7 @@ describe("Merge-completion watcher (#2623) — marker + health (Redis)", () => {
       pendingDepth: 5,
       landed: 2,
       droppedExempt: 1,
+      droppedClosed: 0,
       stillOpen: 2,
     });
     const got = await getMergeWatchHealth();

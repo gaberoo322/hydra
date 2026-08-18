@@ -135,6 +135,11 @@ export interface MergeWatchHealthRecord {
   landed: number;
   /** How many landed T1/unknown-tier PRs were dropped without enrolling. */
   droppedExempt: number;
+  /**
+   * How many entries were evicted because their PR was closed WITHOUT merging
+   * (issue #4119) — a terminal outcome, kept distinct from `stillOpen`.
+   */
+  droppedClosed: number;
   /** How many entries were left untouched (PR still open / no merge commit). */
   stillOpen: number;
 }
