@@ -44,6 +44,8 @@ import {
   countBySubject,
   srcImportsOf,
   scriptTargetsOf,
+  stripComments,
+  readTestFacts,
   TEST_DIR,
   BASELINE_PATH,
   type FileFacts,
@@ -153,6 +155,94 @@ describe("test-file sprawl ratchet — subject resolution (#4134)", () => {
     ];
     // Both imported once; the path-sorted first wins, every run.
     assert.equal(resolvePrimarySubjects(facts).get("test/a.test.mts"), "src/a.ts");
+  });
+});
+
+describe("test-file sprawl ratchet — subjects come from CODE, not prose (#4136 follow-up)", () => {
+  // A prose mention used to outrank everything a file actually did. Because a
+  // single scripts/** target wins the specificity ladder outright, ONE
+  // backticked path in a JSDoc block decided the subject:
+  //
+  //   test/api-scheduler.test.mts:154  // brain (`scripts/autopilot/decide.py`)
+  //
+  // Three API tests were attributed to decide.py that way. It inflated its
+  // baseline to 12 against a true 9 — three units of slack in a ratchet whose
+  // entire job is resisting growth.
+
+  test("a path mentioned only in a line comment is not a target", () => {
+    const source = `
+      // the brain (\`scripts/autopilot/decide.py\`) emits this
+      import { test } from "node:test";
+    `;
+    assert.deepEqual(scriptTargetsOf(source), []);
+  });
+
+  test("a path mentioned only in a JSDoc block is not a target", () => {
+    const source = [
+      "/**",
+      " * Mirrors the action emitted by `scripts/autopilot/decide.py`, so the",
+      " * dashboard can correlate it.",
+      " */",
+      'import Redis from "ioredis";',
+    ].join("\n");
+    assert.deepEqual(scriptTargetsOf(source), []);
+  });
+
+  test("a src import mentioned only in a comment is not an import", () => {
+    const source = `// see from "../src/autopilot/anchor-type.ts" for the ladder\nconst x = 1;`;
+    assert.deepEqual(srcImportsOf(source), []);
+  });
+
+  test("stripComments keeps string and template contents verbatim", () => {
+    // The whole point: comments go, strings stay. A URL's "//" must not be
+    // read as a comment, and a quote inside a comment must not open a string.
+    const src = 'const u = "https://x/y"; // don\'t break here\nconst v = `a/*b*/c`;';
+    const out = stripComments(src);
+    assert.match(out, /"https:\/\/x\/y"/);
+    assert.match(out, /`a\/\*b\*\/c`/);
+    assert.ok(!out.includes("break here"), "the line comment must be gone");
+  });
+
+  test("a segment-built path IS a target — join(ROOT, \"scripts\", ..., \"x.py\")", () => {
+    // Most files build the path a segment at a time, which the whole-path
+    // pattern never matched. That went unnoticed only because the header
+    // comment matched instead — right answer, wrong reason.
+    const source = `const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");`;
+    assert.deepEqual(scriptTargetsOf(source), ["scripts/autopilot/decide.py"]);
+  });
+
+  test("a two-step segment build is resolved through its binding", () => {
+    const source = [
+      'const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");',
+      'const DECIDE = join(SCRIPTS, "decide.py");',
+    ].join("\n");
+    assert.deepEqual(scriptTargetsOf(source), ["scripts/autopilot/decide.py"]);
+  });
+
+  test("resolve() builds a path the same way join() does", () => {
+    const source = `const D = resolve(REPO_ROOT, "scripts", "autopilot", "decide.py");`;
+    assert.deepEqual(scriptTargetsOf(source), ["scripts/autopilot/decide.py"]);
+  });
+
+  test("a whole-path string literal still works", () => {
+    const source = `spawnSync("python3", ["scripts/autopilot/decide.py", "--json"]);`;
+    assert.deepEqual(scriptTargetsOf(source), ["scripts/autopilot/decide.py"]);
+  });
+
+  test("the live tree has no subject resolved purely from prose", () => {
+    // Regression on the real files: all three were decide.py, none executes it.
+    const subjects = resolvePrimarySubjects(readTestFacts(TEST_DIR));
+    for (const f of [
+      "test/api-scheduler.test.mts",
+      "test/scheduler-status.test.mts",
+      "test/agent-stream-correlation.test.mts",
+    ]) {
+      assert.notEqual(
+        subjects.get(f),
+        "scripts/autopilot/decide.py",
+        `${f} mentions decide.py only in a comment and must not be attributed to it`,
+      );
+    }
   });
 });
 
