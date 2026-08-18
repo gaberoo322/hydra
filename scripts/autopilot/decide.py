@@ -88,9 +88,15 @@ state.json {
     "scout_orch":      unix-epoch | 0
     # architecture_orch (#790) and retro_orch (#920) also track last-fired
     # here when they fire; absent keys default to 0 (never fired).
-    # The backfill starvation floor (#2428, signal_starved) reads these same
-    # timestamps to force a backfill class through the stagger if it has gone
-    # dark for >24h — an absent/0 entry counts as never-fired → force-eligible.
+    # TWO distinct floors read these same timestamps with deliberately
+    # OPPOSITE never-fired semantics — do not conflate them:
+    #   - The backfill starvation floor (#2428, signal_starved) forces a
+    #     backfill class through the intra-turn STAGGER if it has gone dark
+    #     >24h; an absent/0 entry is NOT starved (normal cold-start).
+    #   - The discover staleness floor (#4114, signal_dark_past_floor) fires
+    #     discover_orch's selector when the class has been dark >7d; an
+    #     absent/0 entry IS dark (a never-fired producer is exactly the dark
+    #     state the floor exists to break).
   }
 
   # NEW IN #3729 — per-item verdict-stability stamps for sweep_target. Keyed by
@@ -123,6 +129,25 @@ state.json {
   # an absent/empty map means the current head is fresh (0 prior attempts).
   "qa_orch_item_attempts": {
     "<orch_issue_number>": int
+  }
+
+  # NEW IN #3867 — quota-percent budget baseline. Present ONLY on a run whose
+  # `limits.quota_5h_max_pts` / `limits.quota_week_max_pts` is non-zero (the cap
+  # is opt-in; unset = the key never appears at all, and a default run's state is
+  # byte-identical to pre-#3867). Written ONCE by `_capture_quota_baseline` on the
+  # first turn that sees a CALIBRATED `state.usage_eligibility.usage` payload, and
+  # rebased DOWNWARD only on a mid-run 5h/weekly window reset (a current
+  # percentage below the baseline = headroom returned, never negative spend).
+  # `_quota_delta_exceeded` compares the current percentages against it and emits
+  # `TERM:quota` once the delta crosses the cap. Persisted via
+  # _persist_state_writeback (same pattern as research_force_counter);
+  # bootstrap.sh deliberately does NOT seed it from prior state, which is what
+  # re-arms the capture for each new run.
+  "quota_baseline": {
+    "percent_5h": float|null,     # usage.percentLast5h at capture
+    "percent_week": float|null,   # usage.percentSinceReset at capture
+    "captured_epoch": unix-epoch,
+    "rebased_epoch": unix-epoch|null
   }
 
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
@@ -191,6 +216,7 @@ pattern terminate the autopilot with a `failure_digest_path`.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -385,6 +411,34 @@ BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 # stagger starve it for another full window.
 BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
 
+# Discover staleness floor (issue #4114). discover_orch's ONLY trigger from
+# its #959 revival until #4114 was the shared `orch_backfill_idle` board-empty
+# signal, which requires ready_for_agent==0 AND needs_research==0 AND
+# needs_triage==0 AND work_queue==0 SIMULTANEOUSLY — a conjunction that
+# essentially never holds on a healthy, continuously-stocked board (live
+# evidence 2026-07-26..2026-08-17: 5-36 ready-for-agent issues at every
+# sample, so the gate stayed false for 3+ weeks and the PRODUCER class went
+# structurally dark — 0 dispatches since its revival, with architecture_orch /
+# cleanup_orch frozen on the same shared gate since 2026-07-25). #3920's
+# cooldown carry-forward fix was live and orthogonal: the selector simply
+# never had a true input. A producer whose only trigger is "the board is
+# empty" can never fire on a board that is doing its job.
+#
+# The floor gives discover_orch an alternate, additive trigger: fire on
+# `orch_backfill_idle` OR when the class has been dark longer than this floor
+# (7d — the scout_orch walk / design_qa_target / skill_prune calendar-cadence
+# family: long enough to never meaningfully compete with active dev
+# throughput week-to-week, short enough to guarantee the producer role is
+# never dark for a month+). Deliberately DISTINCT from
+# BACKFILL_STARVATION_FLOOR_SEC / signal_starved above (design-concept #4114
+# INV-2): that floor is an intra-turn STAGGER override and keeps its exact
+# semantics; this is a gate-level dispatch trigger on the selector itself.
+# Scope (INV-3): discover_orch ONLY in this change — architecture_orch and
+# cleanup_orch keep idle-only gating; the predicate is class-parameterized
+# (see signal_dark_past_floor) so extending it to the siblings is a small
+# follow-up, not a rewrite.
+DISCOVER_STALENESS_FLOOR_SEC = 7 * 24 * 60 * 60
+
 # Per-item verdict-stability backoff for sweep_target (issue #3729). A FIXED
 # (not exponential, not class-wide) window: each Target needs-triage item carries
 # its OWN independent clock in `state.target_triage_item_stamps`. An item is
@@ -475,13 +529,23 @@ def _normalize_usage_eligibility(raw) -> dict:
       - older state.json files (pre-PR-B1) won't have the field at all
 
     Returns the canonical shape:
-        {"allow": bool, "shed": set[str], "reasons": dict}
+        {"allow": bool, "shed": set[str], "reasons": dict, "usage": dict}
 
     Missing / malformed input → {"allow": True, "shed": set(),
-    "reasons": {}} so the tracker stays informational, not load-bearing.
+    "reasons": {}, "usage": {}} so the tracker stays informational, not
+    load-bearing.
+
+    Issue #3867 added `usage` — the nested `usage` object of the eligibility
+    payload (`percentLast5h` / `percentSinceReset` / `calibrated` /
+    `usageSource`, from `EligibilityUsageInput`). It was previously extracted
+    and DISCARDED here; the quota-percent budget reads it, which is why that cap
+    needs zero new I/O (collect-state.sh already fetches the whole payload every
+    turn). A missing / non-dict `usage` degrades to `{}`, and every reader below
+    treats an absent percentage as "meter not usable this turn" — the same
+    fail-open direction as `allow`.
     """
     if not isinstance(raw, dict):
-        return {"allow": True, "shed": set(), "reasons": {}}
+        return {"allow": True, "shed": set(), "reasons": {}, "usage": {}}
     allow = raw.get("allow")
     if not isinstance(allow, bool):
         allow = True
@@ -492,7 +556,9 @@ def _normalize_usage_eligibility(raw) -> dict:
         shed = set()
     reasons_raw = raw.get("reasons")
     reasons = reasons_raw if isinstance(reasons_raw, dict) else {}
-    return {"allow": allow, "shed": shed, "reasons": reasons}
+    usage_raw = raw.get("usage")
+    usage = usage_raw if isinstance(usage_raw, dict) else {}
+    return {"allow": allow, "shed": shed, "reasons": reasons, "usage": usage}
 
 
 def _normalize_emergency_brake(raw) -> dict:
@@ -595,6 +661,209 @@ PER_CYCLE_COST_CAP_USD_DEFAULT = 25.0
 # gating on idle slots would make this cause fire only where `idle` already
 # does.
 CONTEXT_COMPACTION_TURNS_DEFAULT = 8
+
+# ---------------------------------------------------------------------------
+# Quota-percent budget (issue #3867)
+# ---------------------------------------------------------------------------
+#
+# The autopilot's `token_budget` is denominated in the WRONG CURRENCY. It counts
+# cumulative subagent-reported input/output tokens (`state.cumulative_tokens`,
+# advanced by reap.py on each completion), but what the operator actually pays is
+# cache-weighted ACCOUNT UTILIZATION. Measured on run 2bcba309 (2026-08-05): the
+# run "spent" 801k of a 4,000,000 token budget — 20% — and would have kept
+# dispatching, while the OAuth meter over the same window moved the 5h
+# utilization window 2% -> 30% (~150M raw tokens). One QA dispatch (4-subagent
+# adversarial fan-out) moved ~15M raw tokens; one dev dispatch ~40M. A
+# "conservative" token budget therefore does not bound real spend at all.
+#
+# The fix is a SECOND per-run cap denominated in utilization POINTS accrued over
+# this run's own run-start baseline, read from the SAME `state.usage_eligibility`
+# payload collect-state.sh already fetches every turn (`hydra raw GET
+# /usage/eligibility` -> the nested `usage` object) — so the cap costs zero new
+# I/O. The token budget stays as a secondary bound; both remain hygiene caps.
+#
+# OPT-IN, DEFAULT DISABLED. `limits.quota_5h_max_pts` / `limits.quota_week_max_pts`
+# default to 0 in bootstrap.sh and 0 (or absent, or unparseable) means the cap
+# never fires, leaving every existing termination path byte-identical. There is no
+# calibration data for a safe default, and ADR-0021 D5 keeps per-run limits
+# "hygiene caps, subordinate to the [Pace] Gate, which is the real governor" — so
+# this must never become a second load-bearing governor the operator didn't ask
+# for. Accordingly this code reads raw `usage.percentLast5h` /
+# `usage.percentSinceReset` ONLY: never `paceState` / `targetPercent`, which are
+# weekly-CURVE-relative (ADR-0021 D2/D3) and answer a different question
+# ("ahead/behind the target ramp") than this cap's ("did THIS run burn N points").
+#
+# `term-check.py` mirrors the READ half of this logic verbatim (the same
+# literal-duplicate convention as CONTEXT_COMPACTION_TURNS_DEFAULT above, so
+# Phase 3 stays a cheap dependency-free pre-check). Only decide.py performs the
+# baseline CAPTURE — term-check.py is intentionally side-effect-free, so it skips
+# the cap entirely until decide.py has written `state.quota_baseline`.
+QUOTA_CAP_DISABLED = 0.0
+
+
+def _quota_finite_pct(value) -> float | None:
+    """Coerce a usage percentage to a usable float, or None.
+
+    Rejects bools (`isinstance(True, int)` is True in Python, and a JSON `true`
+    must never read as 1%), non-numerics, NaN/±inf (Python's json accepts NaN
+    even though the spec forbids it), and negatives. `None` means "no usable
+    reading this turn" and every caller treats that as fail-open (skip the cap),
+    matching `_normalize_usage_eligibility`'s tolerance for a missing payload.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    if not math.isfinite(f) or f < 0:
+        return None
+    return f
+
+
+def _quota_caps(limits: dict) -> tuple[float, float]:
+    """Resolve `(cap_5h_pts, cap_week_pts)` from `state.limits`.
+
+    `0.0` for either means DISABLED (the default). A negative / unparseable /
+    absent value also resolves to disabled — the fail-safe direction, because the
+    alternative (a tiny accidental cap) would terminate healthy runs instantly.
+    """
+    def _one(key: str) -> float:
+        try:
+            raw = limits.get(key, 0)
+            v = float(raw if raw is not None else 0)
+        except (TypeError, ValueError):
+            return QUOTA_CAP_DISABLED
+        if not math.isfinite(v) or v <= 0:
+            return QUOTA_CAP_DISABLED
+        return v
+
+    return _one("quota_5h_max_pts"), _one("quota_week_max_pts")
+
+
+def _quota_current_percents(state: dict) -> tuple[float | None, float | None]:
+    """Current `(percentLast5h, percentSinceReset)` from `state.usage_eligibility`.
+
+    Returns `(None, None)` when the meter is not usable this turn — an absent /
+    malformed payload, or `usage.calibrated` anything other than `True`. An
+    uncalibrated meter is a guess, and terminating a run on a guessed spend
+    figure is strictly worse than letting the wall-clock / token bounds catch it.
+    """
+    usage = _normalize_usage_eligibility(state.get("usage_eligibility"))["usage"]
+    if usage.get("calibrated") is not True:
+        return (None, None)
+    return (
+        _quota_finite_pct(usage.get("percentLast5h")),
+        _quota_finite_pct(usage.get("percentSinceReset")),
+    )
+
+
+def _capture_quota_baseline(state: dict, now: int) -> None:
+    """Lazily capture (and reset-rebase) `state.quota_baseline`. MUTATES `state`.
+
+    The ONE mutating half of the quota cap, and the reason the capture lives in
+    decide.py rather than bootstrap.sh: bootstrap's Phase 0 side effects are
+    enumerated in its own header docstring (heartbeat/log/state init only), and
+    adding an HTTP dependency there risks failing Phase 0 on a transient
+    orchestrator hiccup before any turn has run. Capturing lazily here reuses the
+    payload collect-state.sh already injects every turn — zero new I/O — and
+    inherits `_normalize_usage_eligibility`'s fail-open tolerance.
+
+    Three behaviours, in order:
+
+    1. **Cap disabled** → return immediately WITHOUT touching `state`. This is
+       what keeps a default run byte-identical: no `quota_baseline` key ever
+       appears, so main()'s change-detection never fires a write-back either.
+    2. **First calibrated turn** → write the baseline once. `captured_epoch`
+       records when, for operator forensics.
+    3. **5h-window / weekly reset mid-run** → a CURRENT percentage BELOW the
+       baseline means the window rolled over and headroom came back. That is good
+       news, not a spend event: clamp the delta to zero (see
+       `_quota_delta_exceeded`) AND rebase the baseline down to the new current
+       value, so post-reset spend is measured fresh from the new window. A reset
+       must never register as negative spend and must never itself terminate.
+
+    Persistence is main()'s job via the existing `_persist_state_writeback`
+    tmp-file + `os.replace` helper (the same mechanism proven for the
+    force-research counter and the #1769 turn counter) — no new persistence
+    machinery, and a crash mid-write can never tear state.json.
+    """
+    limits = state.get("limits") or {}
+    cap_5h, cap_week = _quota_caps(limits)
+    if cap_5h <= 0 and cap_week <= 0:
+        return
+    cur_5h, cur_week = _quota_current_percents(state)
+    if cur_5h is None and cur_week is None:
+        return
+
+    base = state.get("quota_baseline")
+    if not isinstance(base, dict):
+        state["quota_baseline"] = {
+            "percent_5h": cur_5h,
+            "percent_week": cur_week,
+            "captured_epoch": now,
+            "rebased_epoch": None,
+        }
+        return
+
+    rebased = False
+    for key, cur in (("percent_5h", cur_5h), ("percent_week", cur_week)):
+        if cur is None:
+            continue
+        prev = _quota_finite_pct(base.get(key))
+        if prev is None:
+            # The baseline never got a usable reading for this window (the meter
+            # reported only one of the two on the capture turn) — fill it now.
+            base[key] = cur
+            rebased = True
+        elif cur < prev:
+            base[key] = cur
+            rebased = True
+    if rebased:
+        base["rebased_epoch"] = now
+        state["quota_baseline"] = base
+
+
+def _quota_delta_exceeded(state: dict) -> tuple[str, str] | None:
+    """PURE: has this run's utilization delta crossed its cap? `(window, detail)`.
+
+    Mirrored verbatim by `term-check.py`. Returns `None` — keep iterating — for
+    every fail-open condition: cap disabled, no baseline captured yet, no usable
+    current reading. The 5h window is checked before the weekly one because it is
+    the tighter, faster-moving bound (and the one the issue's acceptance criterion
+    names).
+
+    A NEGATIVE delta is clamped to zero rather than compared: a mid-run window
+    reset must never read as spend, and must never itself force a termination
+    (`_capture_quota_baseline` has already rebased the baseline for subsequent
+    turns).
+    """
+    limits = state.get("limits") or {}
+    cap_5h, cap_week = _quota_caps(limits)
+    if cap_5h <= 0 and cap_week <= 0:
+        return None
+    base = state.get("quota_baseline")
+    if not isinstance(base, dict):
+        return None
+    cur_5h, cur_week = _quota_current_percents(state)
+
+    for window, cap, cur, base_key in (
+        ("5h", cap_5h, cur_5h, "percent_5h"),
+        ("week", cap_week, cur_week, "percent_week"),
+    ):
+        if cap <= 0 or cur is None:
+            continue
+        prev = _quota_finite_pct(base.get(base_key))
+        if prev is None:
+            continue
+        delta = cur - prev
+        if delta < 0:
+            delta = 0.0
+        if delta >= cap:
+            return (
+                window,
+                f"{window} utilization +{delta:.1f}pts >= cap {cap:.1f}pts "
+                f"(baseline={prev:.1f} current={cur:.1f})",
+            )
+    return None
+
 
 # Per-run cap on how many wire-or-retire items the resolver may advance
 # (design concept for #2722, epic #2720): "At most 2 items resolved per run,
@@ -1473,6 +1742,46 @@ def signal_starved(
         # drain it normally; the floor only protects a class with a real prior
         # last-fired time that has since gone dark for >floor_sec.
         return False
+    return (now - last_i) >= floor_sec
+
+
+def signal_dark_past_floor(
+    state: dict, sig: str, now: int, floor_sec: int
+) -> bool:
+    """True iff `sig`'s last-fired timestamp is older than `floor_sec`, OR the
+    class has never fired (last == 0 — maximally dark).
+
+    Issue #4114's gate-level staleness floor. Reads ONLY
+    `state.signal_last_fired[sig]` + `now` — no new I/O, no fs/network/Redis
+    (design-concept #4114 INV-1; ADR-0007 purity), the same seam
+    signal_is_cooled / signal_starved read.
+
+    The never-fired semantics deliberately INVERT signal_starved's, and the
+    contrast is the point: for the #2428 intra-turn stagger override, "never
+    fired" is normal cold-start (treating every unseen class as starved would
+    force them ALL through and defeat the stagger); for a gate-level PRODUCER
+    trigger, "never fired" IS the dark state the floor exists to break — the
+    #4114 finding was precisely a producer class at last==0 that the idle-only
+    gate could never unlock (a floor that required last>0 would be a no-op on
+    the exact state it was added to fix). Mirrors scout_orch's
+    scout_walk_due ">=7d old OR EMPTY" calendar precedent.
+
+    Pure: never mutates state and never touches fs/network/Redis.
+
+    Class-parameterized (floor passed explicitly, no discover_orch default):
+    #4114 wires it for discover_orch only, but the predicate itself is generic
+    so the deferred architecture_orch / cleanup_orch follow-up reuses it
+    verbatim (design-concept #4114 INV-3 + rejectedAlternatives).
+    """
+    last = (state.get("signal_last_fired") or {}).get(sig, 0) or 0
+    try:
+        last_i = int(last)
+    except (TypeError, ValueError):
+        last_i = 0
+    if last_i <= 0:
+        # Never fired → maximally stale: dark TODAY, which is exactly the
+        # condition the floor exists to break (see the #4114 note above).
+        return True
     return (now - last_i) >= floor_sec
 
 
@@ -3619,8 +3928,29 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
         # discover_orch and architecture_orch don't both fire on the same idle
         # turn; round-robin emerges from the per-class 1h cooldowns.
+        #
+        # Issue #4114: the idle-only trigger proved structurally dark on a
+        # healthy board — orch_backfill_idle requires FOUR board metrics at
+        # zero simultaneously, and a continuously-stocked board keeps it false
+        # for weeks (the producer went 3+ weeks at 0 dispatches; see
+        # DISCOVER_STALENESS_FLOOR_SEC above). The selector now fires on
+        # EITHER the idle signal OR the staleness floor. The reason strings
+        # keep the two paths distinguishable in the dispatch_decision audit
+        # trail (design-concept #4114 INV-4, mirroring signal_starved's
+        # 'backfill starvation floor (>24h since last X)' annotation pattern).
+        # architecture_orch / cleanup_orch deliberately keep idle-only gating
+        # (INV-3 — the sibling extension is a deferred follow-up).
         if _signal_present(state, events, "orch_backfill_idle"):
             return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
+        if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
+            return make_dispatch(
+                sig,
+                "hydra-discover",
+                reason=(
+                    f"discover staleness floor (>{DISCOVER_STALENESS_FLOOR_SEC // (24 * 60 * 60)}d"
+                    " dark since last fire): producer class dark on a busy board"
+                ),
+            )
         return None
     if sig == "discover_target":
         if _signal_present(state, events, "target_idle"):
@@ -4320,7 +4650,16 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
 
 
 def _check_termination(state: dict, now: int) -> dict | None:
-    """Mirror of term-check.py logic, expressed as an action."""
+    """Mirror of term-check.py logic, expressed as an action.
+
+    NOT pure, by one narrow exception (issue #3867): `_capture_quota_baseline`
+    mutates `state["quota_baseline"]` on the first calibrated turn of a
+    quota-capped run, and rebases it on a mid-run window reset. That is the same
+    sanctioned in-`decide()` mutation shape as `_research_force_stamp`'s counter
+    bump — main() detects the change and persists it via the existing
+    `_persist_state_writeback`. When the quota cap is disabled (the default) the
+    call touches nothing, so `decide()` stays byte-for-byte pure on a default run.
+    """
     limits = state.get("limits") or {}
     cumulative = int(state.get("cumulative_tokens", 0))
     budget = int(limits.get("token_budget", 10_000_000))
@@ -4331,6 +4670,19 @@ def _check_termination(state: dict, now: int) -> dict | None:
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
     merged_prs = int(state.get("merged_prs", 0))
+
+    # Quota-percent budget (issue #3867) — capture/rebase the baseline, then check
+    # the delta. Checked FIRST because it is the cap denominated in the currency
+    # the operator actually pays: when both it and the token budget trip on the
+    # same turn, `quota` is the more diagnostic cause to report (the token figure
+    # under-measures real spend by ~2 orders of magnitude). Disabled by default,
+    # so on a default run this branch is inert and `budget` still wins exactly as
+    # before.
+    _capture_quota_baseline(state, now)
+    quota_hit = _quota_delta_exceeded(state)
+    if quota_hit is not None:
+        _window, quota_detail = quota_hit
+        return make_terminate("quota", merged_prs=merged_prs, reason=quota_detail)
 
     if cumulative >= budget:
         return make_terminate("budget", merged_prs=merged_prs, reason=f"tokens={cumulative}/{budget}")
@@ -4869,6 +5221,17 @@ def main(argv: list[str]) -> int:
         qa_attempts_before = json.dumps(
             state.get("qa_orch_item_attempts"), sort_keys=True,
         )
+        # Issue #3867: same change-detection for the quota-percent baseline.
+        # `_capture_quota_baseline` (called from `_check_termination`) writes it
+        # once on the first calibrated turn of a quota-capped run, and rebases it
+        # on a mid-run 5h/weekly window reset. Snapshot-before/compare-after
+        # persists it via the SAME `_persist_state_writeback` helper — no new
+        # persistence mechanism, mirroring the four blocks above. On a run with
+        # the cap disabled (the default) the key never appears, so this compare
+        # never fires a write.
+        quota_baseline_before = json.dumps(
+            state.get("quota_baseline"), sort_keys=True,
+        )
         # Issue #2713 — main() owns the clock: real time in production, the
         # frozen --now epoch when replaying a captured fixture. decide()
         # itself never reads the wall clock when `now` is supplied.
@@ -4911,6 +5274,13 @@ def main(argv: list[str]) -> int:
         if qa_attempts_after != qa_attempts_before:
             _persist_state_writeback(
                 argv[2], state, what="qa_orch_item_attempts stamp (#3829)",
+            )
+        quota_baseline_after = json.dumps(
+            state.get("quota_baseline"), sort_keys=True,
+        )
+        if quota_baseline_after != quota_baseline_before:
+            _persist_state_writeback(
+                argv[2], state, what="quota_baseline capture/rebase (#3867)",
             )
         print(plan.to_json())
         # Issue #2943 — SHADOW MODE. AFTER the plan is computed + printed, log the

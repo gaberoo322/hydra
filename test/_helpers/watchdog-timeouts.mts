@@ -58,6 +58,7 @@ export const MIN_WATCHDOG_TEST_TIMEOUT_MS = WATCHDOG_REDIS_TIMEOUT_MS;
 interface SpawnLike {
   error?: Error;
   signal?: NodeJS.Signals | null;
+  status?: number | null;
   stdout?: string | null;
   stderr?: string | null;
 }
@@ -80,4 +81,87 @@ export function throwIfTimedOut(r: SpawnLike, timeoutMs: number, what: string): 
       `this is a TIMEOUT, not an assertion failure — the box was slow or the child wedged, ` +
       `NOT evidence of a watchdog behaviour change. stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`,
   );
+}
+
+/**
+ * Signal names by number, for decoding a `128 + N` shell exit status.
+ *
+ * Only the ones a watchdog child plausibly dies from — enough to turn a bare
+ * number into a name without pulling in a table nobody reads.
+ */
+const SIGNAL_BY_NUMBER: Record<number, string> = {
+  1: "SIGHUP",
+  2: "SIGINT",
+  9: "SIGKILL",
+  13: "SIGPIPE",
+  15: "SIGTERM",
+};
+
+/**
+ * Render a shell exit status so a failure message explains itself (issue #4135).
+ *
+ * A watchdog case that fails with `141 !== 0` and an empty stderr is nearly
+ * uninformative: 141 is `128 + 13`, i.e. some command in the block died of
+ * SIGPIPE, but nothing on the screen says so. Chasing exactly that number
+ * through a #4135 investigation is what motivated this helper — the next
+ * person should read the cause off the assertion rather than rediscover the
+ * `128 + N` convention.
+ */
+export function describeExitStatus(status: number | null | undefined): string {
+  if (status === null || status === undefined) return "no exit status (child did not run to completion)";
+  if (status > 128 && status < 128 + 32) {
+    const n = status - 128;
+    const name = SIGNAL_BY_NUMBER[n] ?? `signal ${n}`;
+    return `${status} (= 128 + ${n}, i.e. killed by ${name} — an ENVIRONMENT/plumbing death, not an assertion about watchdog behaviour)`;
+  }
+  return String(status);
+}
+
+/**
+ * Throw unless `spawnSync` actually ran the child to a clean exit (issue #4135).
+ *
+ * WHY THIS EXISTS, AND WHY IT IS STRICTER THAN {@link throwIfTimedOut}.
+ * `throwIfTimedOut` protects the calls whose RESULT a test then asserts on —
+ * there, a dead child surfaces as `status ?? -1` and at least fails loudly.
+ * The dangerous calls are the opposite kind: the `docker exec … redis-cli`
+ * helpers that SEED state and return `void`. When one of those dies —
+ * timeout, `EAGAIN` on fork under load, a busy container, any non-zero
+ * `redis-cli` exit — nothing is thrown and nothing is written. The next
+ * assertion then reads state that was never seeded and fails as though the
+ * watchdog's BEHAVIOUR had changed.
+ *
+ * That is the mechanism behind #4135: `watchdog-launch-flow`'s INV-5 seeds a
+ * tick with an absent `latency_ms` and asserts the latency streak clears. If
+ * that one seeding `HSET` is silently dropped, the previous over-budget tick
+ * is still in place, the streak legitimately does NOT clear, and the run goes
+ * red with "absent latency_ms must clear the latency streak" — on a loaded CI
+ * runner only, never on a quiet laptop. Same tree, different outcome.
+ *
+ * So: never let a seeding spawn fail quietly. A test may fail because the
+ * behaviour is wrong, or it may fail because the box could not run `docker`,
+ * but it must never confuse the two.
+ */
+export function assertSpawnOk(r: SpawnLike, timeoutMs: number, what: string): void {
+  throwIfTimedOut(r, timeoutMs, what);
+  const tail = `stdout=${r.stdout ?? ""} stderr=${r.stderr ?? ""}`;
+  if (r.error) {
+    const code = (r.error as NodeJS.ErrnoException).code ?? "unknown";
+    throw new Error(
+      `${what} could not be spawned (${code}: ${r.error.message}); this is an ENVIRONMENT ` +
+        `failure, not a watchdog behaviour change — the state it was to seed was never ` +
+        `written. ${tail}`,
+    );
+  }
+  if (r.signal) {
+    throw new Error(
+      `${what} was killed by ${r.signal}; the state it was to seed was never written, so any ` +
+        `assertion after this point would be measuring an unseeded fixture. ${tail}`,
+    );
+  }
+  if (r.status !== 0) {
+    throw new Error(
+      `${what} exited ${r.status}; the Redis command did not succeed, so the state it was to ` +
+        `seed was never written. ${tail}`,
+    );
+  }
 }

@@ -217,6 +217,12 @@ export function deriveLifecycleState(
  * shipped (every ~100 turns by default) — excluding it here would otherwise
  * artificially depress `cleanTerminationRate` and spuriously re-trip the
  * #1352/#1815 starvation alarm.
+ *
+ * `quota` (issue #3867) is clean for exactly the reason `budget` is — it is the
+ * same per-run spend cap denominated in account-utilization percent instead of
+ * subagent-reported tokens, reached by the same `decide.py`/`term-check.py` stop
+ * rule. Omitting it would make every quota-capped run read as a truncation once
+ * an operator enables `--quota-5h-max` / `--quota-week-max`.
  */
 const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
   "idle",
@@ -224,6 +230,7 @@ const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
   "wall_clock",
   "handoff",
   "context_compaction",
+  "quota",
 ]);
 
 /**

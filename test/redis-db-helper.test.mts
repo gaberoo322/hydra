@@ -19,7 +19,7 @@ process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -448,6 +448,63 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
       `a code-based exit must never be misclassified as an infra kill; stderr was: ${run.stderr}`,
     );
   });
+
+  /**
+   * Issue #4083: the "resolved DB is not launcher-owned" branch used to be a
+   * silent no-op — indistinguishable from an intentional operator override,
+   * and the exact gap that let a pre-set REDIS_URL pointing at production
+   * DB 0 (or the legacy shared DB 1, or a remote host) run tests against a
+   * live-shared keyspace with zero trace in the log. These two cases pin the
+   * launcher's silent-path fix: a non-owned resolved DB is now loud, and an
+   * owned one (derived, the common case) stays exactly as before — no new
+   * noise on the path every ordinary `npm test` run takes.
+   */
+  test("logs a loud WARN when a pre-set REDIS_URL resolves to a non-owned DB (issue #4083)", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    env.REDIS_URL = "redis://localhost:6379/0";
+    const run = spawnSync(
+      process.execPath,
+      [LAUNCHER, process.execPath, "-e", "process.exit(0)"],
+      {
+        cwd: scratchRoot(),
+        env,
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    );
+    assert.equal(
+      run.status,
+      0,
+      `launcher must relay the child's exit code unchanged; stderr: ${run.stderr}`,
+    );
+    assert.match(
+      run.stderr,
+      /\[redis-db-launch\] WARN: REDIS_URL=redis:\/\/localhost:6379\/0 resolves to a DB this launcher does not own/,
+      `launcher must emit a loud WARN for a non-owned pre-set DB; stderr was: ${run.stderr}`,
+    );
+  });
+
+  test("stays silent on the non-owned-DB WARN when the resolved DB is launcher-owned (issue #4083)", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL; // unset → derives an owned index (2..15 minus legacy pins)
+    const run = spawnSync(
+      process.execPath,
+      [LAUNCHER, process.execPath, "-e", "process.exit(0)"],
+      {
+        cwd: scratchRoot(),
+        env,
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    );
+    assert.equal(run.status, 0, `unexpected failure; stderr: ${run.stderr}`);
+    assert.doesNotMatch(
+      run.stderr,
+      /WARN: REDIS_URL=.*resolves to a DB this launcher does not own/,
+      `an owned/derived DB must never trip the non-owned-DB WARN; stderr was: ${run.stderr}`,
+    );
+  });
 });
 
 describe("scripts/test/redis-db-launch.mjs — suite-count gate blocking toggle (#4020 follow-up, PR #4056)", () => {
@@ -467,8 +524,142 @@ describe("scripts/test/redis-db-launch.mjs — suite-count gate blocking toggle 
     }
   });
 
-  test("becomes blocking only when SUITE_COUNT_GATE_BLOCKING is exactly \"1\" (suite-count-check.yml's contract)", async () => {
+  test("becomes blocking only when SUITE_COUNT_GATE_BLOCKING is exactly \"1\" (reserved for #4141's zero-entry gate)", async () => {
     const { isGateBlocking } = await import("../scripts/test/redis-db-launch.mjs");
     assert.equal(isGateBlocking({ SUITE_COUNT_GATE_BLOCKING: "1" }), true);
+  });
+});
+
+/**
+ * Issue #4137 — an isolated retry that never finished must not be reported as
+ * a confirmed suite-count drop.
+ *
+ * The retry ran under a 60s `spawnSync` timeout and never inspected the spawn
+ * result. test/sync-skills.test.mts takes ~151s standalone, so every attempt
+ * was SIGTERMed at 60s with a near-empty capture, and the gate published
+ * "expected 15, observed 0 ... after 2 isolated retry attempts" — a fabricated
+ * verdict about a file it never actually measured (CI run 32051075513).
+ */
+describe("scripts/test/redis-db-launch.mjs — incomplete-retry classification (#4137)", () => {
+  test("a completed run is conclusive regardless of a non-zero exit status", async () => {
+    const { describeIncompleteRun } = await import("../scripts/test/redis-db-launch.mjs");
+    // status 1 is the ordinary "a test in this file failed" case: the child
+    // RAN, so its capture is trustworthy and must still be compared.
+    assert.equal(describeIncompleteRun({ status: 1, signal: null, error: undefined }), null);
+    assert.equal(describeIncompleteRun({ status: 0, signal: null, error: undefined }), null);
+  });
+
+  test("a timeout kill is inconclusive and says so", async () => {
+    const { describeIncompleteRun, RETRY_TIMEOUT_MS } = await import(
+      "../scripts/test/redis-db-launch.mjs"
+    );
+    const err = Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" });
+    const reason = describeIncompleteRun({ status: null, signal: "SIGTERM", error: err });
+    assert.ok(reason, "a timeout kill must produce an inconclusive reason, not null");
+    assert.match(reason, /timed out/);
+    assert.match(reason, new RegExp(String(RETRY_TIMEOUT_MS)));
+  });
+
+  test("a signal kill with no error object is still inconclusive", async () => {
+    const { describeIncompleteRun } = await import("../scripts/test/redis-db-launch.mjs");
+    assert.equal(
+      describeIncompleteRun({ status: null, signal: "SIGKILL", error: undefined }),
+      "killed by SIGKILL",
+    );
+  });
+
+  test("a non-timeout spawn error is reported verbatim rather than swallowed", async () => {
+    const { describeIncompleteRun } = await import("../scripts/test/redis-db-launch.mjs");
+    const err = Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+    assert.equal(
+      describeIncompleteRun({ status: null, signal: null, error: err }),
+      "spawn error: ENOENT: no such file",
+    );
+  });
+
+  test("the retry timeout clears the slowest known file standalone", async () => {
+    const { RETRY_TIMEOUT_MS } = await import("../scripts/test/redis-db-launch.mjs");
+    // test/sync-skills.test.mts measured ~151s standalone on an idle machine.
+    // The ceiling must keep real headroom over that on a loaded CI runner, or
+    // the #4137 false-verdict regression returns.
+    assert.ok(
+      RETRY_TIMEOUT_MS >= 300_000,
+      `RETRY_TIMEOUT_MS=${RETRY_TIMEOUT_MS} is too tight for the suite's slowest file (~151s idle)`,
+    );
+  });
+});
+
+describe("scripts/test/redis-db-launch.mjs — zero-entry verdict wiring (#4141)", () => {
+  // compareCapture's own tests cover the DECISION (partial vs zero). What only
+  // the launcher can get wrong is the WIRING around it, and both mistakes here
+  // are silent: a retried zero-entry file always passes, and a zero-entry
+  // verdict left behind SUITE_COUNT_GATE_BLOCKING never fires. Neither shows up
+  // as a failing assertion anywhere else, so they are pinned structurally.
+  const SOURCE = readFileSync(
+    join(import.meta.dirname, "..", "scripts", "test", "redis-db-launch.mjs"),
+    "utf8",
+  );
+
+  /** Just the body of `retryShortfallsInIsolation`, where the retry decision lives. */
+  function retryFnBody(): string {
+    const start = SOURCE.indexOf("async function retryShortfallsInIsolation");
+    assert.ok(start >= 0, "retryShortfallsInIsolation not found");
+    const end = SOURCE.indexOf("\n}", start);
+    assert.ok(end > start, "retryShortfallsInIsolation closing brace not found");
+    return SOURCE.slice(start, end);
+  }
+
+  test("the retry loop iterates shortfalls only — a missing file is never retried", () => {
+    // A by-name retry bypasses the glob that dropped the file, so it would
+    // always pass and mask the regression. Scoped to the retry function on
+    // purpose: the REPORTING block further down legitimately iterates
+    // missingFiles to print them, and must not trip this.
+    const body = retryFnBody();
+    const loop = body.match(/for \(const shortfall of ([^)]+)\)/);
+    assert.ok(loop, "expected the isolation-retry loop over shortfalls");
+    assert.equal(loop[1].trim(), "result.shortfalls");
+    assert.ok(
+      !/for \(const \w+ of [^)]*missingFiles[^)]*\)/.test(body),
+      "missingFiles must not be iterated inside the retry function — a by-name retry always passes",
+    );
+    // `missingFiles` may appear in the function only to be carried through to
+    // the return value — never as the subject of a loop or a spawn argument.
+    for (const line of body.split("\n")) {
+      if (!line.includes("missingFiles")) continue;
+      assert.ok(
+        /^\s*(\/\/|\*)/.test(line) ||
+          /const missingFiles = result\.missingFiles/.test(line) ||
+          /missingFiles(,|\.length === 0)/.test(line),
+        `unexpected use of missingFiles inside the retry function: ${line.trim()}`,
+      );
+    }
+  });
+
+  test("the zero-entry exit is NOT gated behind isGateBlocking()", () => {
+    // SUITE_COUNT_GATE_BLOCKING exists to keep the truncation-prone PARTIAL
+    // verdict off the required `test` job. The zero-entry verdict is not
+    // truncation-prone; gating it behind the same flag would leave the one
+    // deterministic case unenforced, which is the whole point of #4141.
+    const guardAt = SOURCE.indexOf("if (missingFiles.length > 0 &&");
+    assert.ok(guardAt >= 0, "expected a zero-entry exit guard");
+    const guardBlock = SOURCE.slice(guardAt, guardAt + 600);
+    assert.match(guardBlock, /process\.exit\(1\)/);
+    assert.ok(
+      !guardBlock.slice(0, guardBlock.indexOf("process.exit(1)")).includes("isGateBlocking"),
+      "the zero-entry exit must not consult isGateBlocking() — it blocks unconditionally",
+    );
+    // And it must come BEFORE the advisory isGateBlocking() branch, or the
+    // advisory path would decide the run first.
+    assert.ok(
+      guardAt < SOURCE.indexOf("if (isGateBlocking()) {\n        process.exit(1)"),
+      "the zero-entry guard must be evaluated before the advisory isGateBlocking() branch",
+    );
+  });
+
+  test("an already-failed run does not add the zero-entry verdict as a second reason", () => {
+    // A crashed child leaves every file it never reached at zero. The run is
+    // already exiting non-zero, so re-reporting that as the failure reason
+    // would bury the real one.
+    assert.match(SOURCE, /missingFiles\.length > 0 && \(code \?\? 1\) === 0/);
   });
 });

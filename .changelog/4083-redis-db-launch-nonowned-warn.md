@@ -1,0 +1,1 @@
+- fix: redis-db-launch now warns loudly instead of silently skipping when a pre-set REDIS_URL resolves to a Redis DB it doesn't own (#4083)

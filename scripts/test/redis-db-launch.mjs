@@ -262,19 +262,30 @@ export function resolveRedisUrl(env, rootPath) {
  * `test:debug`/`test:file` everywhere else) stays advisory-only.
  *
  * Setting `SUITE_COUNT_GATE_BLOCKING=1` restores the original hard-fail
- * behavior. The advisory `suite-count-check.yml` workflow (a non-required
- * Tier-3 sibling to ci.yml, same lane as test-typecheck.yml /
- * advisory-checks.yml) sets this so ITS job goes red on a shortfall without
- * ever touching the required `test` job's exit code — the detection keeps
- * running on every PR + master push and accumulating evidence, it just can't
- * block a merge yet.
+ * behavior. **Nothing sets it today** (issue #4133).
  *
- * Promotion criteria back to required/blocking (either flips this default,
- * or the required `test` job sets the env var itself):
- *   - the advisory workflow runs clean (no shortfall surviving both isolated
- *     retries) across several consecutive master-push runs, AND
- *   - the currently-known residual, `test/hydra-branch-prune.test.mts`, has
- *     its own tracked fix (issue #4062) landed and verified stable.
+ * It used to be set by a `suite-count-check.yml` workflow that re-ran the
+ * ENTIRE suite a second time on every PR and master push purely to obtain a
+ * blocking exit code. That cost ~11 minutes per PR — measured across 22
+ * merged PRs it burned 484 runner-minutes against `ci.yml`'s own 498 — for a
+ * non-required job that blocked nothing. The reporter already runs inside the
+ * ordinary `npm test` invocation (see `package.json`'s `test` script), so the
+ * detection was never what the second run bought; only the exit code was. The
+ * workflow was deleted.
+ *
+ * Its stated promotion criteria ("runs clean across several consecutive
+ * master pushes") are also unreachable, which is why deleting it costs
+ * nothing: #4137 established that the shortfall is the PARENT truncating the
+ * child's reporter stream under `--test-force-exit`, not tests being skipped.
+ * That truncation fires at a rate set by machine timing — measured ~50% of
+ * ISOLATED runs for `test/health-diagnostics.test.mts` — so clean runs can
+ * never accumulate and blocking on partial counts would wedge the merge queue
+ * repo-wide.
+ *
+ * This toggle is deliberately KEPT rather than removed: issue #4141 re-scopes
+ * the gate to block only on a baselined file contributing ZERO entries, which
+ * IS immune to partial truncation (truncation loses a tail; it does not make a
+ * file that ran vanish) and is therefore promotable. That work will set this.
  */
 export function isGateBlocking(env = process.env) {
   return env.SUITE_COUNT_GATE_BLOCKING === "1";
@@ -365,12 +376,61 @@ function flushDbOnce(db) {
 const RETRY_ATTEMPTS = 2;
 const RETRY_SETTLE_DELAY_MS = 2_000;
 
+/**
+ * Wall-clock ceiling for ONE isolated retry attempt (issue #4137).
+ *
+ * This was 60s and that was too short for the suite's slowest files, which
+ * turned the retry into a fabricated verdict. Measured on an idle machine:
+ * `test/sync-skills.test.mts` takes ~151s standalone (65 tests, 48 subprocess
+ * spawns of scripts/sync-skills.sh). `spawnSync`'s `timeout` SIGTERMs the
+ * child, so every attempt was killed at 60s with an essentially empty capture
+ * — and because the spawn result was never inspected, the gate reported
+ * `expected 15, observed 0` as a CONFIRMED drop that had "survived 2 isolated
+ * retries". Observed directly in CI (run 32051075513, master).
+ *
+ * A ceiling is still wanted — an actually-hung file must not stall the run
+ * forever — so this is a generous bound (10 minutes, ~4x the slowest known
+ * file) rather than no bound at all. Crucially, hitting it is now reported as
+ * INCONCLUSIVE, never as a confirmed shortfall: see `runRetryAttempt`.
+ */
+export const RETRY_TIMEOUT_MS = 600_000;
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Classify one isolated retry attempt's spawn result (issue #4137).
+ *
+ * The distinction that matters: a child that RAN and reported fewer entries
+ * is evidence of a drop; a child that never got to finish is evidence of
+ * NOTHING. `spawnSync` signals the latter via `error` (ETIMEDOUT) and/or a
+ * termination `signal`. A non-zero `status` is deliberately NOT inconclusive —
+ * that is the ordinary "a test in this file failed" case, where the file did
+ * run and its capture is trustworthy.
+ */
+export function describeIncompleteRun(spawnResult) {
+  if (spawnResult.error) {
+    return spawnResult.error.code === "ETIMEDOUT"
+      ? `timed out after ${RETRY_TIMEOUT_MS}ms`
+      : `spawn error: ${spawnResult.error.message}`;
+  }
+  if (spawnResult.signal) {
+    return `killed by ${spawnResult.signal}`;
+  }
+  return null;
+}
+
 async function retryShortfallsInIsolation(result, baseline, redisUrl) {
   const stillShort = [];
+  const inconclusive = [];
+  // Issue #4141: `missingFiles` (zero observed entries) is deliberately NOT
+  // retried, and that is load-bearing rather than an oversight. A retry runs
+  // the file by NAME, which bypasses whatever glob or runner config dropped it
+  // from the batch — so it would always "pass" and would mask precisely the
+  // regression the zero-entry verdict exists to catch. Carried through
+  // untouched instead.
+  const missingFiles = result.missingFiles ?? [];
   const suiteCountCheckPath = fileURLToPath(new URL("./suite-count-check.mjs", import.meta.url));
   for (const shortfall of result.shortfalls) {
     const retryCapturePath = resolve(
@@ -393,7 +453,7 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
         `[redis-db-launch] retrying ${shortfall.file} in isolation, attempt ${attempt}/${RETRY_ATTEMPTS} ` +
           `(expected ${shortfall.expected}, prior observed ${shortfall.observed})...`,
       );
-      spawnSync(
+      const spawnResult = spawnSync(
         process.execPath,
         [
           "--experimental-strip-types",
@@ -407,9 +467,26 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
           cwd: process.cwd(),
           env: { ...process.env, REDIS_URL: redisUrl },
           stdio: ["ignore", "ignore", "inherit"],
-          timeout: 60_000,
+          timeout: RETRY_TIMEOUT_MS,
         },
       );
+      // Issue #4137: a retry that did not COMPLETE proves nothing about the
+      // file's entry count. Bail out of the attempt loop and report it as
+      // inconclusive rather than reading its truncated capture as a drop.
+      const incomplete = describeIncompleteRun(spawnResult);
+      if (incomplete) {
+        try {
+          rmSync(retryCapturePath, { force: true });
+        } catch {
+          /* intentional: best-effort retry-capture cleanup */
+        }
+        console.error(
+          `[redis-db-launch]   ${shortfall.file}: attempt ${attempt} did NOT COMPLETE (${incomplete}) — ` +
+            "inconclusive, not counted as a drop.",
+        );
+        resolved = { incomplete };
+        continue;
+      }
       const retryResult = compareCapture({
         capturePath: retryCapturePath,
         baseline,
@@ -433,13 +510,20 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
       );
       resolved = { retried };
     }
-    if (resolved !== true) {
-      stillShort.push(resolved && resolved.retried ? resolved.retried : shortfall);
+    if (resolved === true) continue;
+    if (resolved && resolved.incomplete) {
+      // Every attempt failed to complete — we still have no evidence either
+      // way, so this file is reported separately from confirmed shortfalls.
+      inconclusive.push({ ...shortfall, reason: resolved.incomplete });
+      continue;
     }
+    stillShort.push(resolved && resolved.retried ? resolved.retried : shortfall);
   }
   return {
-    ok: stillShort.length === 0,
+    ok: stillShort.length === 0 && inconclusive.length === 0 && missingFiles.length === 0,
     shortfalls: stillShort,
+    inconclusive,
+    missingFiles,
     readError: null,
     checkedFileCount: result.checkedFileCount,
   };
@@ -489,6 +573,30 @@ if (resolved.db !== null) {
       (resolved.derived
         ? `(derived from ${resolve(process.cwd())})`
         : `(pre-set REDIS_URL)`),
+  );
+} else {
+  // Issue #4083: this branch used to be a silent no-op — indistinguishable
+  // from an intentional operator override, in violation of this repo's
+  // fail-loud convention. `resolveRedisUrl` only reaches `db === null` when
+  // REDIS_URL was PRE-SET (an unset REDIS_URL always derives an owned index
+  // via `deriveDbIndex`, never null), and `parseOwnedDbIndex` returned null
+  // for it — i.e. the pre-set url points at production DB 0, the legacy
+  // shared DB 1, a legacy per-file hard-pin (2..7), or a remote host. The
+  // flush is correctly skipped (this launcher must never touch a DB it
+  // doesn't own), but a test run against that DB reads/writes the exact same
+  // keys any live process on it uses — the shared-production-state hazard
+  // class diagnosed in #4072 and hypothesised (not yet confirmed) for #4083.
+  // Logging this unconditionally is also the durable diagnostic #4083's
+  // acceptance criteria asks for: the next time a flake in this class
+  // recurs, this line records the actual resolved REDIS_URL + db + source
+  // that was in play, settling the hypothesis empirically instead of by
+  // static inspection.
+  console.error(
+    `[redis-db-launch] WARN: REDIS_URL=${resolved.url} resolves to a DB this ` +
+      "launcher does not own (production DB 0, legacy DB 1, a legacy " +
+      "per-file hard-pin, or a remote host) — skipping the start-of-run " +
+      "FLUSHDB. Tests in this run share that DB's keyspace with whatever " +
+      "else is reading/writing it (#4083).",
   );
 }
 
@@ -561,28 +669,96 @@ child.on("exit", async (code, signal) => {
       result = await retryShortfallsInIsolation(result, baseline, resolved.url);
     }
     if (!result.ok) {
-      console.error(
-        `[redis-db-launch] SUITE-COUNT GATE FAILED (issue #4020) — ${result.shortfalls.length} ` +
-          `file(s) STILL reported FEWER top-level suites/tests than expected after ${RETRY_ATTEMPTS} ` +
-          `isolated per-file retry attempts. This is the silent --test-force-exit drop, not a ` +
-          `project-code regression:`,
-      );
-      for (const s of result.shortfalls) {
-        console.error(`  ${s.file}: expected ${s.expected}, observed ${s.observed}`);
+      const shortfalls = result.shortfalls ?? [];
+      const inconclusive = result.inconclusive ?? [];
+      const missingFiles = result.missingFiles ?? [];
+      if (missingFiles.length > 0) {
+        console.error(
+          `[redis-db-launch] SUITE-COUNT GATE FAILED — FILE NEVER RAN (issue #4141) — ` +
+            `${missingFiles.length} baselined file(s) were part of this run but produced ZERO ` +
+            `top-level entries. This is NOT the #4137 reporter truncation: truncation drops a ` +
+            `TAIL, and even a fully-skipped file still emits one entry per top-level ` +
+            `registration. Zero means the file did not execute — a glob change, a runner-config ` +
+            `change, a rename, or a file dropped from the suite:`,
+        );
+        for (const s of missingFiles) {
+          console.error(`  ${s.file}: expected ${s.expected}, observed 0`);
+        }
+        console.error(
+          "[redis-db-launch] this verdict is NOT retried in isolation on purpose: a by-name retry " +
+            "bypasses the glob that dropped the file and would always pass, masking the very " +
+            "regression this catches. If the file was deliberately removed or renamed, regenerate " +
+            "the baseline in the same PR: node scripts/test/suite-count-check.mjs --update-baseline",
+        );
       }
-      console.error(
-        `[redis-db-launch] a shortfall that survives ${RETRY_ATTEMPTS} isolated single-file retries ` +
-          "is unlikely to be routine jitter. If a file's test count genuinely changed, regenerate " +
-          "the baseline: node scripts/test/suite-count-check.mjs --update-baseline",
-      );
+      if (shortfalls.length > 0) {
+        console.error(
+          `[redis-db-launch] SUITE-COUNT GATE FAILED (issue #4020) — ${shortfalls.length} ` +
+            `file(s) STILL reported FEWER top-level suites/tests than expected after ${RETRY_ATTEMPTS} ` +
+            `isolated per-file retry attempts. This is the silent --test-force-exit drop, not a ` +
+            `project-code regression:`,
+        );
+        for (const s of shortfalls) {
+          console.error(`  ${s.file}: expected ${s.expected}, observed ${s.observed}`);
+        }
+        console.error(
+          `[redis-db-launch] a shortfall that survives ${RETRY_ATTEMPTS} isolated single-file retries ` +
+            "is unlikely to be routine jitter. If a file's test count genuinely changed, regenerate " +
+            "the baseline: node scripts/test/suite-count-check.mjs --update-baseline",
+        );
+      }
+      if (inconclusive.length > 0) {
+        // Issue #4137: distinct from a shortfall on purpose. Regenerating the
+        // baseline here would be exactly the wrong move — the file's count was
+        // never measured, so a "fix" would just lower the floor on an
+        // unmeasured file.
+        console.error(
+          `[redis-db-launch] SUITE-COUNT GATE INCONCLUSIVE (issue #4137) — ${inconclusive.length} ` +
+            `file(s) could not be measured: every isolated retry failed to COMPLETE. This is NOT ` +
+            `evidence that the file dropped tests, and regenerating the baseline will not fix it:`,
+        );
+        for (const s of inconclusive) {
+          console.error(`  ${s.file}: ${s.reason} (baseline expects ${s.expected})`);
+        }
+        console.error(
+          `[redis-db-launch] if the file simply needs longer than ${RETRY_TIMEOUT_MS}ms standalone, ` +
+            "raise RETRY_TIMEOUT_MS; if it hangs, that hang is the bug to fix.",
+        );
+      }
+      // Issue #4141 — the zero-entry verdict blocks UNCONDITIONALLY, without
+      // consulting isGateBlocking(). That env flag exists to keep the
+      // truncation-prone PARTIAL verdict off the required `test` job; the
+      // zero-entry verdict is not truncation-prone, so gating it behind the
+      // same flag would leave the one deterministic case unenforced.
+      //
+      // One carve-out: when the run ALREADY failed, we exit non-zero anyway
+      // and a crashed child can leave every not-yet-reached file at zero. In
+      // that state the list above is context, not a verdict of its own —
+      // adding a second failure reason to an already-red run would just make
+      // the real one harder to find.
+      if (missingFiles.length > 0 && (code ?? 1) === 0) {
+        console.error(
+          "[redis-db-launch] failing the run on the zero-entry verdict — this one is deterministic.",
+        );
+        process.exit(1);
+        return;
+      }
       if (isGateBlocking()) {
         process.exit(1);
         return;
       }
+      if (missingFiles.length > 0) {
+        console.error(
+          `[redis-db-launch] the run had already failed (exit ${code}), so the zero-entry list above ` +
+            "is reported as context rather than as the failure reason — a crashed child leaves every " +
+            "file it never reached at zero.",
+        );
+      }
       console.error(
-        "[redis-db-launch] SUITE-COUNT GATE is advisory-only right now (issue #4020 follow-up) — " +
-          "not failing this run. Tracked by the non-required suite-count-check.yml workflow, which " +
-          "sets SUITE_COUNT_GATE_BLOCKING=1 to surface this as a red check without blocking merge.",
+        "[redis-db-launch] the PARTIAL-shortfall verdict is advisory-only — not failing this run on " +
+          "its account. Per #4137 a partial shortfall is the parent truncating the child's reporter " +
+          "stream, NOT tests being skipped: your verification held. Nothing sets " +
+          "SUITE_COUNT_GATE_BLOCKING today (#4133). Only the ZERO-entry verdict above blocks (#4141).",
       );
     }
   } catch (err) {

@@ -342,7 +342,17 @@ describe("reap.py completion → dev_orch ready-for-agent → needs-qa promotion
       assert.ok(!log.includes("dev_pr_closes_anchor"), "no PR means no needs-qa promotion");
 
       const calls = ghCalls(tmp);
-      assert.ok(!calls.some((c) => c.startsWith("issue view")), "no PR means no reason to check labels");
+      // Scoped to the LABELS read specifically, not every `issue view`: issue
+      // #4057 deliberately added a `--json state` read on this same no-PR path
+      // (the sibling #3866 stall check disambiguating a real stall from an
+      // anchor the dispatch correctly closed itself). A bare
+      // `startsWith("issue view")` here would pin the pre-#4057 behaviour that
+      // #4057 exists to change, which is out of scope for this test — it only
+      // pins that the #4045 needs-qa PROMOTION path never fires without a PR.
+      assert.ok(
+        !calls.some((c) => c.startsWith("issue view") && c.includes("--json labels")),
+        `no PR means no reason to check labels: ${JSON.stringify(calls)}`,
+      );
       assert.ok(
         !calls.some((c) => c.startsWith("issue edit") && c.includes("--add-label needs-qa")),
         "no PR means no needs-qa relabel",

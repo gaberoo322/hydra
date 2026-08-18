@@ -434,7 +434,7 @@ the table back on the assumption that time alone fixed it.
 
 > **CONTEXT POINTER:** full Phase 6 implementation contracts (cycle-record write, register handoff on auto-merge, token-surrogate write) live in `hydra-autopilot-phase6-ops.md` (sibling of this SKILL.md).
 
-- **Phase 7** — `drain.sh <merged_prs>` (always) + `hydra-digest` dispatch for cause in `{budget, wall_clock, idle, failure_backstop}`. SKIPPED when cause is `context_compaction` (issue #3787, periodic restart not a run boundary) — dispatching a costed digest every ~8-turn restart would multiply that cost and fragment the summary.
+- **Phase 7** — `drain.sh <merged_prs>` (always) + `hydra-digest` dispatch for cause in `{budget, quota, wall_clock, idle, failure_backstop}` (`quota` is issue #3867's spend cap — a genuine run boundary, same as `budget`). SKIPPED when cause is `context_compaction` (issue #3787, periodic restart not a run boundary) — dispatching a costed digest every ~8-turn restart would multiply that cost and fragment the summary.
 
 ## Phase 0 schema-version handshake (issue #434)
 
@@ -474,7 +474,35 @@ no in-place upgrader: bootstrap is the single writer for state.json.
 
 ## Termination
 
-`decide.py` emits a `terminate` action when the token budget, wall-clock limit, idle-drain turns, or failure backstop trips, when the turn count reaches the periodic session-restart cadence (`context_compaction`, issue #3787 — default every 8 Autopilot Turns via `state.limits.context_compaction_turns`, cuts the parent session's own prompt-cache re-read cost), or when the turn is wait-only with zero occupied slots (handoff baton-pass). Full termination conditions and the handoff baton-pass contract (issue #1903) are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
+`decide.py` emits a `terminate` action when the token budget, wall-clock limit, idle-drain turns, or failure backstop trips, when the **quota-percent budget** trips (`quota`, issue #3867 — see below), when the turn count reaches the periodic session-restart cadence (`context_compaction`, issue #3787 — default every 8 Autopilot Turns via `state.limits.context_compaction_turns`, cuts the parent session's own prompt-cache re-read cost), or when the turn is wait-only with zero occupied slots (handoff baton-pass). Full termination conditions and the handoff baton-pass contract (issue #1903) are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
+
+### Quota-percent budget (issue #3867)
+
+`token_budget` is denominated in the **wrong currency**. It counts cumulative subagent-reported input/output tokens; what the operator pays is cache-weighted **account utilization**. Measured on run 2bcba309 (2026-08-05): the run "spent" 801k of a 4,000,000 token budget and would have kept dispatching, while the OAuth meter moved the 5h utilization window 2% → 30% over the same period (~150M raw tokens — one QA dispatch's 4-subagent fan-out moved ~15M, one dev dispatch ~40M). So a "conservative" token budget does not bound real spend.
+
+The quota-percent budget is a second per-run cap denominated in **utilization points accrued over this run's own run-start baseline**:
+
+| Knob | Env var | Meaning |
+|---|---|---|
+| `--quota-5h-max=<pts>` | `HYDRA_AUTOPILOT_QUOTA_5H_MAX` | terminate once `usage.percentLast5h` has risen this many points over the run-start baseline |
+| `--quota-week-max=<pts>` | `HYDRA_AUTOPILOT_QUOTA_WEEK_MAX` | same, against `usage.percentSinceReset` |
+
+- **Opt-in, default disabled.** Both stamp `state.limits.quota_5h_max_pts` / `quota_week_max_pts`, defaulting to `0` = the cap never fires. An unset flag leaves every existing termination path byte-identical, so the standing systemd invocation is unchanged by this feature. The token budget stays as a **secondary** bound.
+- **Zero new I/O.** `collect-state.sh` already fetches `/usage/eligibility` every turn; the cap reads the nested `usage` object out of `state.usage_eligibility`.
+- **Baseline capture.** `decide.py` writes `state.quota_baseline` **once**, lazily, on the first turn that sees a *calibrated* payload (persisted through the same tmp-file + `os.replace` write-back as the force-research and turn counters). `term-check.py` only *reads* that baseline — it stays side-effect-free, so Phase 3 simply prints `OK` on the very first turn and the authoritative check lands moments later in Phase 4.
+- **Window resets are not spend.** If a current percentage drops below the baseline the 5h window (or the weekly reset anchor) rolled over: the delta clamps to zero **and** the baseline rebases down, so post-reset spend is measured fresh. A reset never reads as negative spend and never itself terminates.
+- **Subordinate to the Pace Gate.** Per ADR-0021 D5 this is a per-run *hygiene* cap, not a second governor: it reads raw `percentLast5h` / `percentSinceReset` only, never `paceState` / `targetPercent`, and touches no Pace Gate admission logic.
+
+### Workless-board backoff on a productive idle exit (issue #3867 slice 2)
+
+The #2956 workless-board hint used to be stamped only on a **zero-dispatch** `cause=idle` exit. A productive run that drained the board and then idle-exited stamped nothing — so the Pace Gate's next ~15-min tick launched a fresh session into the just-drained board, which zero-dispatch idle-exited once before the 45-min backoff engaged: **one wasted session bootstrap per drain cycle, structurally.** `endRun` now stamps on **every** `cause=idle` termination:
+
+| Idle exit | Window |
+|---|---|
+| dispatched nothing | full `HYDRA_WORKLESS_BACKOFF_SEC` (default 45 min) — unchanged |
+| dispatched work (`dispatches > 0`) | shorter `HYDRA_WORKLESS_BACKOFF_POSTWORK_SEC` (default 20 min) — new QA-able output can arrive sooner after a drain |
+
+Non-idle causes still stamp nothing. Pace Gate semantics are unchanged: it already honours whatever instant `reasons.worklessUntil` carries, and the hint remains **launcher-only** — never `allow=false`, never draining an in-flight or operator-launched session (the #2956 / ADR-0021 boundary).
 
 ## Worktree-guard preamble (REQUIRED for code-writing dispatches)
 
@@ -622,8 +650,10 @@ HYDRA_AUTOPILOT_SCOPE=orch-only claude --dangerously-skip-permissions -p "/hydra
 ```
 
 Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
-`--subagent-soft=`, `--subagent-hard=`, `--unattended=`) parse via
-`args-parse.sh` and override env vars.
+`--subagent-soft=`, `--subagent-hard=`, `--unattended=`, `--quota-5h-max=`,
+`--quota-week-max=`) parse via `args-parse.sh` and override env vars. The two
+`--quota-*` flags are the opt-in quota-percent budget (issue #3867 — see
+**Termination**); unset means disabled.
 
 ### Scheduling — the Pace Gate (ADR-0021)
 
@@ -753,22 +783,37 @@ received target-product anchors (item-26x). Post-#458, candidates are
 treated as target-side work: `dev_target` surfaces the top candidate as
 a hint, and a low best-score forces `research_target` (not `research_orch`).
 
-**Discover signals (revived).** `discover_orch` was **revived by issue #959**
-(epic #958): it no longer gates on the dead `orch_idle` name — its `decide.py`
-selector (`decide.py:2296`) now reads the unified **`orch_backfill_idle`**
-board-empty signal, the SAME signal `architecture_orch` reads. Both classes are
-members of `BACKFILL_SIGNAL_CLASSES` (`decide.py:329`) and share the 1h backfill
-cadence, so `discover_orch` **fires today** on an idle orch board. `collect-state.sh`
-emits `orch_backfill_idle` (line ~488); the dead `orch_idle` name it never
-produced is gone. `discover_target` still gates on `target_idle` (its own
-selector at `decide.py:2307`); whether that signal is produced is a separate
-Target-side question.
+**Discover signals (revived, then un-starved — #4114).** `discover_orch` was
+**revived by issue #959** (epic #958) onto the unified **`orch_backfill_idle`**
+board-empty signal — the SAME signal `architecture_orch` reads
+(`collect-state.sh` line ~1150; the dead `orch_idle` name it never produced is
+gone). Both classes are members of `BACKFILL_SIGNAL_CLASSES` (`decide.py:373`)
+and share the 1h backfill cadence. **But idle-only gating starved the class for
+3+ weeks (#4114)**: the board-empty conjunction (`ready_for_agent==0 &&
+needs_research==0 && needs_triage==0 && work_queue==0` — `collect-state.sh`'s
+`fallback_due`) stays permanently false on a healthy, continuously-stocked orch
+board, so `discover_orch` recorded **0 lifetime dispatches** (never fired;
+`signal_last_fired.discover_orch == 0`), and #3920's cooldown carry-forward fix
+was orthogonal — a tracking fix, not a dispatch-gap fix. The **#4114 fix** gives
+the selector (`decide.py:3708`) a SECOND trigger path: it fires on
+`orch_backfill_idle` OR the **7-day staleness floor**
+(`DISCOVER_STALENESS_FLOOR_SEC`, `decide.py:420`, via `signal_dark_past_floor`)
+— a never-fired class (last == 0) counts as dark, and a floor dispatch carries
+the "discover staleness floor (>7d dark since last fire)" reason so it is
+distinguishable from an idle dispatch in the `dispatch_decision` audit trail.
+**Deferred follow-up:** `architecture_orch` and `cleanup_orch` share the
+dark-producer symptom (both last fired 2026-07-25 at #4114 diagnosis) and
+deliberately keep idle-only gating in this change — extending the floor to them
+is a separate decision (the helper is class-parameterized for it).
+`discover_target` still gates on `target_idle` (its own selector at
+`decide.py:3720`); whether that signal is produced is a separate Target-side
+question.
 
 **Backfill dedup baseline (issue #2554).** Because `discover_orch` and
 `architecture_orch` both fire on `orch_backfill_idle`, the **one-per-turn
 stagger guard** (it lets only one `BACKFILL_SIGNAL_CLASSES` member dispatch per
 turn) prevents them co-firing the same TURN — but their independent per-class 1h
-cooldowns plus the `BACKFILL_STARVATION_FLOOR` (`decide.py:331+`, which forces a
+cooldowns plus the `BACKFILL_STARVATION_FLOOR` (`decide.py:392+`, which forces a
 starved backfill class through) mean **both can dispatch within the same idle
 HOUR**. `cleanup_orch` co-fires on the same signal every idle turn (it is
 deliberately NOT in `BACKFILL_SIGNAL_CLASSES`, so exempt from the stagger).

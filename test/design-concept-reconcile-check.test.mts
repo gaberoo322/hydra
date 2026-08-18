@@ -25,9 +25,7 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve, join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import {
   RECONCILIATION_HEADING,
@@ -49,53 +47,18 @@ import {
   parseAssertion,
   parseReconciliationSection,
   quoteMatchesInvariant,
+  resolveEnforceDecision,
+  type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
 } from "../scripts/ci/design-concept-reconcile-check.ts";
 
-const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
 /** In-memory reader for the unit suite. */
 function fakeReader(files: Record<string, string>): FileReader {
   return (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null);
 }
 
-/**
- * Verdict from the live adapter's fail-OPEN skip ladder for a RESOLVED artifact
- * (HTTP 200, body parsed). `enforce: false` + a bare `reason` for every skip;
- * only a structurally-complete, APPROVED artifact returns `enforce: true` (with
- * an empty `reason`), at which point the adapter fails CLOSED via
- * {@link checkReconciliation}.
- *
- * Extracted from the adapter's inline ladder so the skip rungs are unit-testable
- * without GITHUB_EVENT_PATH or a live orchestrator (issue #3849). The live
- * adapter composes this bare `reason` into its `issue #N`-prefixed skip line, so
- * the structural-skip messages are byte-identical to the pre-extraction form.
- */
-type ArtifactEnforceDecision = { enforce: boolean; reason: string };
-function resolveEnforceDecision(artifact: any): ArtifactEnforceDecision {
-  const invariants: string[] = Array.isArray(artifact?.invariants) ? artifact.invariants : [];
-  if (invariants.length === 0) return { enforce: false, reason: "declares no invariants" };
-  const artifactHash: string = typeof artifact?.artifactHash === "string" ? artifact.artifactHash : "";
-  if (artifactHash.length === 0) return { enforce: false, reason: "has no artifactHash" };
-  // Approval guard (issue #3849): only an APPROVED artifact may bind a PR. A
-  // draft or stale artifact skips green, exactly like a missing one — without
-  // this rung, a stale/abandoned DRAFT carrying real invariants + a hash became
-  // a binding reconciliation requirement on any later PR closing the same issue,
-  // on a REQUIRED merge-gate job (the npm-audit ambient-poison-pill class, where
-  // a check reddens the merge queue from state outside the PR's own diff). A
-  // missing or unrecognised status is treated as not-approved (fail OPEN — never
-  // bind on a shape we cannot confirm is approved). This is an ADDITIONAL rung:
-  // the four pre-existing skip conditions above are unchanged.
-  const status = typeof artifact?.status === "string" ? artifact.status : "";
-  if (status !== "approved") {
-    return {
-      enforce: false,
-      reason: `is not approved (status: ${status ? `'${status}'` : "unknown"}) — only an approved artifact binds a PR`,
-    };
-  }
-  return { enforce: true, reason: "" };
-}
 
 // ---------------------------------------------------------------------------
 // Suite 1 — pure decision core
@@ -746,82 +709,6 @@ describe("design-concept reconcile check (pure)", () => {
     assert.match(msg, /#2528/);
     assert.match(msg, /missing-section/);
     assert.match(msg, /PUSH A COMMIT/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Suite 2 — the live CI gate
-// ---------------------------------------------------------------------------
-
-describe("design-concept reconciliation gate (CI adapter)", () => {
-  /** Repo-rooted, traversal-guarded reader. Returns null for anything unreadable. */
-  const readRepoFile: FileReader = (repoRelativePath) => {
-    if (!isSafeRepoRelativePath(repoRelativePath)) return null;
-    const abs = join(REPO_ROOT, repoRelativePath);
-    if (!abs.startsWith(REPO_ROOT + sep)) return null;
-    try {
-      if (!existsSync(abs) || !statSync(abs).isFile()) return null;
-      return readFileSync(abs, "utf8");
-    } catch (err: any) {
-      console.error(`[dc-reconcile] unreadable ${repoRelativePath}: ${err?.message ?? err}`);
-      return null;
-    }
-  };
-
-  /** Fail-open skip: log the reason, assert nothing. */
-  const skip = (why: string): void => {
-    console.error(`[dc-reconcile] skipped (fail-open): ${why}`);
-  };
-
-  test("the PR body reconciles the linked issue's design-concept invariants", async () => {
-    // --- 1. PR body, from the webhook payload (no token, no rate limit). ----
-    // GITHUB_EVENT_PATH is free and always present in Actions; `gh pr view`
-    // would need GH_TOKEN exported into the `test` job (a ci.yml edit, T4) and
-    // unauthenticated api.github.com is 60 req/hr per IP, which
-    // `reference_gh_graphql_vs_rest_ratelimit` records exhausting under a
-    // running autopilot.
-    const eventPath = process.env.GITHUB_EVENT_PATH;
-    if (!eventPath) return skip("no GITHUB_EVENT_PATH (local run)");
-
-    let payload: any;
-    try {
-      payload = JSON.parse(readFileSync(eventPath, "utf8"));
-    } catch (err: any) {
-      return skip(`unreadable GITHUB_EVENT_PATH: ${err?.message ?? err}`);
-    }
-    if (!payload?.pull_request) return skip("event payload has no pull_request (push/schedule run)");
-
-    const prBody: string = payload.pull_request.body ?? "";
-    const anchorRef = extractAnchorRefFromPrBody(prBody);
-    if (anchorRef === null) return skip("PR body has no Closes/Fixes/Resolves #N — not a dev PR");
-
-    // --- 2. Artifact, from the local orchestrator. --------------------------
-    const base = (process.env.HYDRA_API_BASE ?? "http://localhost:4000").replace(/\/$/, "");
-    let artifact: any;
-    try {
-      const res = await fetch(`${base}/api/design-concepts/${anchorRef}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-      if (res.status === 404) return skip(`no design-concept artifact for issue #${anchorRef}`);
-      if (!res.ok) return skip(`artifact fetch returned HTTP ${res.status} for issue #${anchorRef}`);
-      artifact = await res.json();
-    } catch (err: any) {
-      // Orchestrator down / unreachable MUST NOT redden the merge gate.
-      return skip(`artifact fetch failed for issue #${anchorRef}: ${err?.message ?? err}`);
-    }
-
-    const decision = resolveEnforceDecision(artifact);
-    if (!decision.enforce) {
-      return skip(`artifact for issue #${anchorRef} ${decision.reason}`);
-    }
-    // `enforce: true` ⇒ invariants is a non-empty array and artifactHash a
-    // non-empty string (validated above); read them straight off the artifact.
-    const invariants: string[] = artifact.invariants;
-    const artifactHash: string = artifact.artifactHash;
-
-    // --- 3. Fail CLOSED from here on. ---------------------------------------
-    const violations = checkReconciliation({ prBody, invariants, artifactHash, readFile: readRepoFile });
-    assert.deepEqual(violations, [], formatViolations(violations, anchorRef));
   });
 });
 
