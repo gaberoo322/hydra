@@ -725,40 +725,43 @@ child.on("exit", async (code, signal) => {
             "raise RETRY_TIMEOUT_MS; if it hangs, that hang is the bug to fix.",
         );
       }
-      // Issue #4141 — the zero-entry verdict blocks UNCONDITIONALLY, without
-      // consulting isGateBlocking(). That env flag exists to keep the
-      // truncation-prone PARTIAL verdict off the required `test` job; the
-      // zero-entry verdict is not truncation-prone, so gating it behind the
-      // same flag would leave the one deterministic case unenforced.
+      // Issue #4141 shipped this verdict as BLOCKING on the argument that
+      // truncation drops a tail and therefore cannot zero a file that ran.
+      // That argument was WRONG, and production falsified it within hours:
       //
-      // One carve-out: when the run ALREADY failed, we exit non-zero anyway
-      // and a crashed child can leave every not-yet-reached file at zero. In
-      // that state the list above is context, not a verdict of its own —
-      // adding a second failure reason to an already-red run would just make
-      // the real one harder to find.
-      if (missingFiles.length > 0 && (code ?? 1) === 0) {
-        console.error(
-          "[redis-db-launch] failing the run on the zero-entry verdict — this one is deterministic.",
-        );
-        process.exit(1);
-        return;
-      }
+      //   SUITE-COUNT GATE FAILED — FILE NEVER RAN
+      //     test/design-concept-reconcile-check.test.mts: expected 2, observed 0
+      //
+      // on a PR whose entire diff was a workflow comment and one test file.
+      // That file exists, is in the glob, and runs. The premise confused a
+      // per-FILE tail with the RUN's event-stream tail: the parent exits with
+      // events still buffered, and for a small file whose entries all sit in
+      // that window the loss is total, not partial. Two entries is a very
+      // small window to survive.
+      //
+      // The gate could not have caught its motivating case anyway. `npm test`
+      // passes a SHELL-EXPANDED `test/*.test.mts`, so a glob or runner-config
+      // change that drops files drops them from `testFiles` too — and
+      // compareCapture only checks files present in `testFiles`. The dropped
+      // file is never examined, so "a file vanished from the suite" was
+      // outside this gate's reach from the start.
+      //
+      // So it is advisory like the partial verdict: unable to catch what it
+      // was for, but able to redden the REQUIRED `test` job repo-wide with no
+      // code change — the ambient poison-pill class. The separate REPORTING is
+      // kept, because "observed 0" really is worth reading differently from a
+      // partial shortfall; only the exit is withdrawn.
       if (isGateBlocking()) {
         process.exit(1);
         return;
       }
-      if (missingFiles.length > 0) {
-        console.error(
-          `[redis-db-launch] the run had already failed (exit ${code}), so the zero-entry list above ` +
-            "is reported as context rather than as the failure reason — a crashed child leaves every " +
-            "file it never reached at zero.",
-        );
-      }
       console.error(
-        "[redis-db-launch] the PARTIAL-shortfall verdict is advisory-only — not failing this run on " +
-          "its account. Per #4137 a partial shortfall is the parent truncating the child's reporter " +
-          "stream, NOT tests being skipped: your verification held. Nothing sets " +
-          "SUITE_COUNT_GATE_BLOCKING today (#4133). Only the ZERO-entry verdict above blocks (#4141).",
+        "[redis-db-launch] SUITE-COUNT GATE is advisory-only — not failing this run. Per #4137 a " +
+          "shortfall is the parent truncating the child's reporter stream, NOT tests being skipped: " +
+          "your verification held. That applies to the ZERO-entry verdict too — #4141 briefly made " +
+          "it blocking on the theory that truncation cannot zero a file, and a false positive on " +
+          "test/design-concept-reconcile-check.test.mts (expected 2, observed 0, file present and " +
+          "running) disproved it. Nothing sets SUITE_COUNT_GATE_BLOCKING today (#4133).",
       );
     }
   } catch (err) {
