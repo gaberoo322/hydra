@@ -635,31 +635,35 @@ describe("scripts/test/redis-db-launch.mjs — zero-entry verdict wiring (#4141)
     }
   });
 
-  test("the zero-entry exit is NOT gated behind isGateBlocking()", () => {
-    // SUITE_COUNT_GATE_BLOCKING exists to keep the truncation-prone PARTIAL
-    // verdict off the required `test` job. The zero-entry verdict is not
-    // truncation-prone; gating it behind the same flag would leave the one
-    // deterministic case unenforced, which is the whole point of #4141.
-    const guardAt = SOURCE.indexOf("if (missingFiles.length > 0 &&");
-    assert.ok(guardAt >= 0, "expected a zero-entry exit guard");
-    const guardBlock = SOURCE.slice(guardAt, guardAt + 600);
-    assert.match(guardBlock, /process\.exit\(1\)/);
+  test("the zero-entry verdict does NOT exit on its own (#4141 reverted)", () => {
+    // #4141 shipped this as an unconditional exit, on the argument that
+    // truncation drops a tail and so cannot zero a file that ran. Production
+    // falsified that within hours: test/design-concept-reconcile-check.test.mts
+    // reported "expected 2, observed 0" on a PR whose diff was a workflow
+    // comment and one test file. The premise confused a per-FILE tail with the
+    // RUN's event-stream tail — for a 2-entry file the whole thing fits inside
+    // the undrained window.
+    //
+    // It also could not catch its motivating case: `npm test` passes a
+    // SHELL-EXPANDED test/*.test.mts, so a glob change that drops files drops
+    // them from testFiles too, and compareCapture only inspects files in
+    // testFiles. Nothing about "a file vanished" was ever reachable here.
     assert.ok(
-      !guardBlock.slice(0, guardBlock.indexOf("process.exit(1)")).includes("isGateBlocking"),
-      "the zero-entry exit must not consult isGateBlocking() — it blocks unconditionally",
+      !/failing the run on the zero-entry verdict/.test(SOURCE),
+      "the unconditional zero-entry exit is back; it false-positives on truncation and " +
+        "cannot detect a dropped file, so it must not redden the required `test` job",
     );
-    // And it must come BEFORE the advisory isGateBlocking() branch, or the
-    // advisory path would decide the run first.
     assert.ok(
-      guardAt < SOURCE.indexOf("if (isGateBlocking()) {\n        process.exit(1)"),
-      "the zero-entry guard must be evaluated before the advisory isGateBlocking() branch",
+      !/missingFiles\.length > 0 && \(code \?\? 1\) === 0/.test(SOURCE),
+      "the zero-entry blocking guard is back",
     );
   });
 
-  test("an already-failed run does not add the zero-entry verdict as a second reason", () => {
-    // A crashed child leaves every file it never reached at zero. The run is
-    // already exiting non-zero, so re-reporting that as the failure reason
-    // would bury the real one.
-    assert.match(SOURCE, /missingFiles\.length > 0 && \(code \?\? 1\) === 0/);
+  test("the zero-entry verdict is still REPORTED separately", () => {
+    // Withdrawing the exit is not the same as withdrawing the signal.
+    // "observed 0" reads differently from a partial shortfall and is worth
+    // surfacing; only the process.exit is gone.
+    assert.match(SOURCE, /FILE NEVER RAN/);
+    assert.match(SOURCE, /missingFiles/);
   });
 });
