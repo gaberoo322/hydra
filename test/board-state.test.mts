@@ -35,9 +35,22 @@ import {
   extractStrictBlockerRefs,
   STRICT_BLOCKER_PATTERN_SOURCES,
 } from "../src/github/blockers.ts";
+import { isGlmWithheld } from "../src/autopilot/board-state.ts";
+import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
+import {
+  GLM_DRAINER_ACTIVE_KEY,
+  GLM_DRAINER_HEARTBEAT_STALE_MS,
+} from "../src/redis/autopilot.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
+const HYDRA_DEV_PARENT_FLOW = join(
+  REPO_ROOT,
+  "docs",
+  "operator-playbooks",
+  "_fragments",
+  "hydra-dev-parent-flow.md",
+);
 
 interface Issue {
   number: number;
@@ -332,3 +345,141 @@ function occurrences(haystack: string, needle: string): number {
   }
   return count;
 }
+
+// ---------------------------------------------------------------------------
+// isGlmWithheld — the shared GLM partition-withholding predicate (#4153)
+// ---------------------------------------------------------------------------
+
+describe("isGlmWithheld (issue #4153) — the shared count/selection predicate", () => {
+  test("withholds a glm-eligible issue while the partition is live", () => {
+    assert.equal(
+      isGlmWithheld(new Set([ORCH_BOARD_LABELS.glm_eligible]), true),
+      true,
+    );
+  });
+
+  test("does NOT withhold a non-glm-eligible issue even while the partition is live", () => {
+    assert.equal(
+      isGlmWithheld(new Set([ORCH_BOARD_LABELS.ready_for_agent]), true),
+      false,
+    );
+  });
+
+  test("fail-open: does NOT withhold a glm-eligible issue while the partition is inactive", () => {
+    assert.equal(
+      isGlmWithheld(new Set([ORCH_BOARD_LABELS.glm_eligible]), false),
+      false,
+    );
+  });
+
+  test("accepts a plain label array, not just a Set", () => {
+    assert.equal(isGlmWithheld([ORCH_BOARD_LABELS.glm_eligible], true), true);
+    assert.equal(isGlmWithheld([], true), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hydra-dev "1. Select issue" GLM partition exclusion (issue #4153)
+// ---------------------------------------------------------------------------
+//
+// `docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md` has no
+// TypeScript bridge (it is bash/jq the operator/parent dispatcher runs
+// directly), so the `isGlmWithheld` predicate is mirrored there in bash. These
+// tests extract the ACTUAL committed block and (a) drift-guard its three
+// literals (Redis key, staleness window, label) against the TS source of
+// truth, and (b) run its jq filter through real jq against constructed
+// fixtures to confirm behavioural parity with `isGlmWithheld` — the same
+// "extract the real block, drift-guard the literals" discipline the
+// strict-blocker suite above uses for `collect-state.sh`.
+
+/** The literal "1. Select issue" bash fenced block from the parent-flow doc. */
+function selectIssueBashBlock(): string {
+  const src = readFileSync(HYDRA_DEV_PARENT_FLOW, "utf-8");
+  const marker = src.indexOf("### 1. Select issue");
+  assert.ok(marker > 0, "could not locate the '### 1. Select issue' section");
+  const fenceStart = src.indexOf("```bash", marker);
+  const fenceEnd = src.indexOf("```", fenceStart + "```bash".length);
+  assert.ok(
+    fenceStart > 0 && fenceEnd > fenceStart,
+    "could not locate the fenced bash block under '### 1. Select issue'",
+  );
+  return src.slice(fenceStart, fenceEnd);
+}
+
+/** Pull the jq `select(...)` predicate assigned to GLM_JQ_FILTER when the partition IS active. */
+function extractGlmJqFilter(block: string): string {
+  const m = block.match(/GLM_JQ_FILTER='([^']+)'/);
+  assert.ok(m, "could not locate the active-partition GLM_JQ_FILTER assignment");
+  return m[1];
+}
+
+/** Run the extracted jq filter over synthetic ready-for-agent issues via real jq. */
+function jqSelectGlmEligible(filter: string, issues: { labels: string[] }[]): boolean[] {
+  const input = JSON.stringify(
+    issues.map((i) => ({ labels: i.labels.map((name) => ({ name })) })),
+  );
+  const r = spawnSync("jq", [`map(select(${filter}))`], {
+    input,
+    encoding: "utf-8",
+  });
+  assert.equal(r.status, 0, `jq filter failed: ${r.stderr}`);
+  const kept: { labels: { name: string }[] }[] = JSON.parse(r.stdout);
+  // True per input issue when it SURVIVED the filter (i.e. was NOT withheld).
+  return issues.map((issue) =>
+    kept.some((k) => JSON.stringify(k.labels.map((l) => l.name)) === JSON.stringify(issue.labels)),
+  );
+}
+
+describe("hydra-dev '1. Select issue' GLM partition exclusion (issue #4153)", () => {
+  test("drift guard: the doc's Redis key literal matches GLM_DRAINER_ACTIVE_KEY", () => {
+    const block = selectIssueBashBlock();
+    assert.ok(
+      block.includes(`redis-cli GET ${GLM_DRAINER_ACTIVE_KEY}`),
+      `doc must read the exact key ${JSON.stringify(GLM_DRAINER_ACTIVE_KEY)} (src/redis/autopilot.ts) — the bash mirror has drifted`,
+    );
+  });
+
+  test("drift guard: the doc's staleness-window literal matches GLM_DRAINER_HEARTBEAT_STALE_MS", () => {
+    const block = selectIssueBashBlock();
+    assert.ok(
+      block.includes(`-le ${GLM_DRAINER_HEARTBEAT_STALE_MS}`),
+      `doc must compare heartbeat age against ${GLM_DRAINER_HEARTBEAT_STALE_MS}ms (src/redis/autopilot.ts) — the bash mirror has drifted`,
+    );
+  });
+
+  test("drift guard: the doc's label literal matches ORCH_BOARD_LABELS.glm_eligible", () => {
+    const block = selectIssueBashBlock();
+    const filter = extractGlmJqFilter(block);
+    assert.ok(
+      filter.includes(`index("${ORCH_BOARD_LABELS.glm_eligible}")`),
+      `doc's jq filter must key off ${JSON.stringify(ORCH_BOARD_LABELS.glm_eligible)} (src/board-labels.ts) — the bash mirror has drifted`,
+    );
+  });
+
+  test("fail-open: the doc sets GLM_JQ_FILTER to a literal no-op when the partition is inactive", () => {
+    const block = selectIssueBashBlock();
+    assert.match(
+      block,
+      /GLM_JQ_FILTER="true"/,
+      "the default (partition inactive) filter must be the unconditional jq no-op 'true' — fail-open toward work (#3754)",
+    );
+  });
+
+  test("behavioural parity: the extracted jq filter agrees with isGlmWithheld when the partition is active", () => {
+    const block = selectIssueBashBlock();
+    const filter = extractGlmJqFilter(block);
+    const issues = [
+      { labels: [ORCH_BOARD_LABELS.ready_for_agent, ORCH_BOARD_LABELS.glm_eligible] },
+      { labels: [ORCH_BOARD_LABELS.ready_for_agent] },
+    ];
+    const survived = jqSelectGlmEligible(filter, issues);
+    const expected = issues.map((i) => !isGlmWithheld(i.labels, true));
+    assert.deepEqual(
+      survived,
+      expected,
+      "jq filter's kept/dropped set must match isGlmWithheld(labels, glmPartitionActive=true) for every fixture issue",
+    );
+    // Concretely: the glm-eligible issue is dropped, the plain one survives.
+    assert.deepEqual(survived, [false, true]);
+  });
+});

@@ -10,9 +10,10 @@ contract lives in the sibling `hydra-dev-child-flow.md`.
 ### 1. Select issue
 
 If `$issue_number` provided, use it. Otherwise, take the first
-`ready-for-agent` issue NOT already claimed by an open PR (#4103). An issue
-keeps `ready-for-agent` while its PR is in flight (nothing relabels it until
-the PR merges or `reap.py` promotes it to `needs-qa`), so an unguarded `.[0]`
+`ready-for-agent` issue NOT already claimed by an open PR (#4103) AND NOT
+withheld by a live GLM dev-drainer partition (#4153). An issue keeps
+`ready-for-agent` while its PR is in flight (nothing relabels it until the PR
+merges or `reap.py` promotes it to `needs-qa`), so an unguarded `.[0]`
 manufactures a duplicate dispatch — a full wasted dev cycle (fresh worktree,
 implementation, `npm test`, duplicate PR) whenever a PR is open on the head of
 that list. The claim-check uses the ONE shared reference predicate
@@ -20,6 +21,24 @@ that list. The claim-check uses the ONE shared reference predicate
 branch/body matching inline: the body-ref arm catches PRs whose head branch
 carries no issue number at all (`worktree-agent-*` branches link only via
 `Closes #N` in the body, invisible to a branch-name scan).
+
+**GLM partition exclusion (issue #4153).** The COUNT path
+(`deriveBoardState`/`resolveOpenBlockers` in `src/autopilot/board-state.ts`,
+via the shared `isGlmWithheld` predicate) already excludes a `glm-eligible`
+issue from `ready_for_agent` while the GLM dev-drainer heartbeat is fresh — the
+drainer owns that issue on z.ai's independent quota, so counting or selecting
+it here would dispatch a second author. This SELECTION step previously applied
+NO such filter, so an unpinned `dev_orch` dispatch could still pick `.[0]` off
+a GLM-owned issue even though the count said it wasn't part of the pool. The
+block below mirrors `isGlmWithheld` exactly: same Redis key
+(`GLM_DRAINER_ACTIVE_KEY` = `hydra:glm:drainer:active`), same staleness window
+(`GLM_DRAINER_HEARTBEAT_STALE_MS` = 2700000ms / 45min), same label
+(`ORCH_BOARD_LABELS.glm_eligible` = `glm-eligible`) — `test/board-state.test.mts`
+pins the three literals with a byte-identical drift guard so this doc and the
+TS predicate cannot silently diverge. **Fail-open toward work (#3754,
+ADR-0032):** an absent/unreadable/stale heartbeat leaves
+`GLM_PARTITION_ACTIVE=false`, which turns the jq filter into a no-op — a down
+drainer never starves the Opus `dev_orch` lane.
 
 ```bash
 # Issue numbers already claimed by an open PR (branch convention OR body ref),
@@ -30,10 +49,32 @@ carries no issue number at all (`worktree-agent-*` branches link only via
 CLAIMED=$(gh pr list --repo gaberoo322/hydra --state open --json headRefName,body \
   | python3 scripts/autopilot/pr-refs.py 2>/dev/null || true)
 CLAIMED_JQ=$(printf '%s' "$CLAIMED" | tr ' ' ',')
-# Take the first ready-for-agent issue NOT in the claimed set.
+
+# GLM dev-drainer partition liveness (issue #4153, mirrors isGlmWithheld in
+# src/autopilot/board-state.ts). FAIL-OPEN: any docker/redis-cli failure, an
+# absent key, or a non-numeric value leaves GLM_HEARTBEAT_RAW unmatched by the
+# regex below, so GLM_PARTITION_ACTIVE stays "false" and glm-eligible issues
+# stay selectable.
+GLM_HEARTBEAT_RAW=$(docker exec hydra-redis-1 redis-cli GET hydra:glm:drainer:active 2>/dev/null || true)
+GLM_PARTITION_ACTIVE=false
+if [[ "$GLM_HEARTBEAT_RAW" =~ ^[0-9]+$ ]]; then
+  NOW_MS=$(($(date +%s%N)/1000000))
+  AGE_MS=$((NOW_MS - GLM_HEARTBEAT_RAW))
+  # 2700000ms = 45min = GLM_DRAINER_HEARTBEAT_STALE_MS (src/redis/autopilot.ts)
+  if [ "$AGE_MS" -ge 0 ] && [ "$AGE_MS" -le 2700000 ]; then
+    GLM_PARTITION_ACTIVE=true
+  fi
+fi
+# When the partition is live, drop any issue carrying `glm-eligible`
+# (ORCH_BOARD_LABELS.glm_eligible in src/board-labels.ts). Otherwise a no-op.
+GLM_JQ_FILTER="true"
+[ "$GLM_PARTITION_ACTIVE" = "true" ] && GLM_JQ_FILTER='((.labels | map(.name) | index("glm-eligible")) | not)'
+
+# Take the first ready-for-agent issue NOT in the claimed set AND NOT withheld
+# by a live GLM partition.
 gh issue list --repo gaberoo322/hydra --label "ready-for-agent" --state open \
-  --json number,title \
-  --jq "map(select(.number as \$n | [${CLAIMED_JQ}] | index(\$n) | not))[0]"
+  --json number,title,labels \
+  --jq "map(select(.number as \$n | [${CLAIMED_JQ}] | index(\$n) | not)) | map(select($GLM_JQ_FILTER))[0]"
 ```
 None → report and stop.
 

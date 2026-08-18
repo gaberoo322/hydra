@@ -38,6 +38,39 @@ import {
 } from "../board-labels.ts";
 
 // ---------------------------------------------------------------------------
+// Shared GLM partition-withholding predicate (issue #4153)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when an issue carrying `glm-eligible` must be WITHHELD from the Opus
+ * `dev_orch` authoring pool because the GLM dev-drainer partition is LIVE
+ * (issue #3754, ADR-0032). This is the ONE predicate `deriveBoardState`
+ * (count path, below) and `resolveOpenBlockers` share — and it is also the
+ * predicate the `hydra-dev` "1. Select issue" query mirrors in bash/jq
+ * (`docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md`), so the
+ * COUNT path (`ready_for_agent`, gates *whether* `dev_orch` fires) and the
+ * SELECTION path (`hydra-dev`, decides *which* issue is built) cannot drift
+ * apart the way they did before #4153 — the same class of divergence #3965
+ * fixed for the strict-blocker predicate. `test/board-state.test.mts` pins the
+ * doc's bash mirror to this exact predicate with a byte-identical drift guard,
+ * the same convention `STRICT_BLOCKER_PATTERN_SOURCES` uses there.
+ *
+ * **Fail-open-toward-work (issue #3754).** `glmPartitionActive=false` — the
+ * value every caller sees on an absent/stale/unreadable heartbeat read
+ * (`getGlmDrainerLiveness`'s default failure mode) — makes this ALWAYS return
+ * `false`: a `glm-eligible` issue is never withheld while the drainer looks
+ * down, so a dead drainer can never starve the Opus `dev_orch` lane.
+ */
+export function isGlmWithheld(
+  labels: ReadonlySet<string> | readonly string[],
+  glmPartitionActive: boolean,
+): boolean {
+  if (!glmPartitionActive) return false;
+  const set = labels instanceof Set ? labels : new Set(labels);
+  return set.has(ORCH_BOARD_LABELS.glm_eligible);
+}
+
+// ---------------------------------------------------------------------------
 // Pure derivation — exported for the route and tests
 // ---------------------------------------------------------------------------
 
@@ -118,7 +151,7 @@ export function deriveBoardState(
     if (
       labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
       !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
-      !(glmPartitionActive && labels.has(ORCH_BOARD_LABELS.glm_eligible)) &&
+      !isGlmWithheld(labels, glmPartitionActive) &&
       !hasOpenStrictBlocker(row, openBlockers)
     )
       ready_for_agent++;
@@ -221,7 +254,7 @@ export async function resolveOpenBlockers(
     if (
       !labels.has(ORCH_BOARD_LABELS.ready_for_agent) ||
       labels.has(ORCH_BOARD_LABELS.target_backlog) ||
-      (glmPartitionActive && labels.has(ORCH_BOARD_LABELS.glm_eligible))
+      isGlmWithheld(labels, glmPartitionActive)
     )
       continue;
     for (const n of extractStrictBlockerRefs(row.body)) {
