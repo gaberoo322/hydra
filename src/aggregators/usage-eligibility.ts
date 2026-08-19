@@ -39,6 +39,7 @@ import {
   overlaySessionBlockEligibility,
   overlayWorklessEligibility,
   overlayMeterUnavailableEligibility,
+  overlayMeterFreshnessEligibility,
   type UsageEligibility,
   type UsageSnapshot,
 } from "../cost/index.ts";
@@ -58,11 +59,20 @@ export interface EligibilityViewDeps {
    * `getUsage({ force })` OUTSIDE the fail-safe guards — a snapshot failure is a
    * genuine 500, not a degradable slice — so it arrives pre-read here. */
   snapshot: EligibilityUsageInput;
-  /** True when the OAuth meter could not be read at all (no fresh value and no
-   * last-good one inside the max-stale window). Forces `allow=false` — quota
-   * cannot be measured, so dispatch blocks (2026-07-30 operator decision).
+  /** True when the OAuth meter could not be read at all — no fresh value AND no
+   * last-good one inside the admission staleness ceiling (issue #4165). Forces
+   * `allow=false` — quota cannot be measured, so dispatch blocks (2026-07-30
+   * operator decision).
    * Defaults to `false` so existing callers keep the prior behaviour. */
   meterUnavailable?: boolean;
+  /** True when the verdict was computed from a STALE last-good meter reading
+   * rather than a fresh one (issue #4165). Observability only — never flips
+   * `allow`; the reading is real, so the stops derived from it are real. */
+  meterStale?: boolean;
+  /** Age in ms of the meter reading backing this verdict, or `null` when none
+   * backs it (issue #4165). The "with its age" half of serving a last-known-good
+   * instead of a fabricated zero. */
+  meterAgeMs?: number | null;
   /** Reader for the operator-only Autopilot pause flag (#988). A REJECTED
    * promise degrades to NOT paused (fails safe to running). */
   readPaused: () => Promise<boolean>;
@@ -122,6 +132,8 @@ export async function getEligibilityView(
   const {
     snapshot,
     meterUnavailable = false,
+    meterStale = false,
+    meterAgeMs = null,
     readPaused,
     readSessionBlockedUntil,
     readWorklessUntil,
@@ -149,14 +161,21 @@ export async function getEligibilityView(
   // earlier overlay, and so `reasons.meterUnavailable` survives onto the final
   // verdict the pace gate logs.
   return overlayMeterUnavailableEligibility(
-    overlayWorklessEligibility(
-      overlaySessionBlockEligibility(
-        overlayPauseEligibility(projectEligibility(snapshot), paused),
-        sessionBlockedUntilMs,
+    // Freshness is stamped INSIDE the meter-unavailable overlay so the two can
+    // never fight over `allow`: this one only writes observability fields, and
+    // the outer one owns the block (issue #4165).
+    overlayMeterFreshnessEligibility(
+      overlayWorklessEligibility(
+        overlaySessionBlockEligibility(
+          overlayPauseEligibility(projectEligibility(snapshot), paused),
+          sessionBlockedUntilMs,
+          nowMs,
+        ),
+        worklessUntilMs,
         nowMs,
       ),
-      worklessUntilMs,
-      nowMs,
+      meterStale,
+      meterAgeMs,
     ),
     meterUnavailable,
   );

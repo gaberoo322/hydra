@@ -70,6 +70,30 @@ interface OAuthCacheEntry {
 let oauthCache: OAuthCacheEntry | null = null;
 
 /**
+ * The LAST SUCCESSFUL OAuth meter read of this process, kept INDEPENDENTLY of
+ * {@link oauthCache} (issue #4165).
+ *
+ * `oauthCache` is the HEADLINE cache and is deliberately EVICTED once its value
+ * ages past `TTL + maxStale` (it is no longer trustworthy enough to back the
+ * headline). That eviction used to also destroy the only record that a real
+ * meter reading had ever been seen, so `CachedOAuthRead.lastKnownOAuth` — whose
+ * documented job is "the last-known successful value" — silently became `null`
+ * one read after the too-stale cliff.
+ *
+ * That mattered once the ADMISSION verdict started consuming it: the spend
+ * governor's degrade-to-last-good path (`src/cost/eligibility-usage.ts`) needs
+ * to know both what the last real reading was AND how old it is, precisely in
+ * the window where the headline has already given up on it. Keeping this entry
+ * alive across the eviction is what lets a rate-limited meter fall back to a
+ * known number instead of to a fabricated `0`.
+ *
+ * Written ONLY on a successful GET; never evicted by age (age is reported and
+ * the CONSUMER decides how stale is too stale); nulled by
+ * {@link clearOAuthCache} for test isolation.
+ */
+let oauthLastKnown: OAuthCacheEntry | null = null;
+
+/**
  * Exponential-backoff state for the OAuth meter GET (issue #2619). Before this,
  * every post-TTL scan UNCONDITIONALLY re-attempted the external GET, so a
  * sustained 429 produced ~1–2 GETs/min (~90–100 failed reads/hour) that kept
@@ -294,6 +318,10 @@ let oauthInFlight: Promise<CachedOAuthRead> | null = null;
  */
 export function clearOAuthCache(): void {
   oauthCache = null;
+  // The eviction-surviving last-known singleton (issue #4165) is cleared here
+  // too — it outlives the headline cache by design, so ONLY the explicit test-
+  // isolation reset may drop it.
+  oauthLastKnown = null;
   oauthBackoff = null;
   oauthInFlight = null;
   // Re-arm the per-process hydrate so the next cached-path read re-seeds the
@@ -301,6 +329,27 @@ export function clearOAuthCache(): void {
   // on this: each test that drives the cached path re-hydrates from its own
   // injected store rather than inheriting a prior test's seeded gate.
   oauthBackoffHydrated = false;
+}
+
+/**
+ * The `{ lastKnownOAuth, lastKnownOAuthAgeMs }` pair for a read produced at
+ * `nowMs`, derived from the eviction-surviving {@link oauthLastKnown} singleton
+ * (issue #4165). One helper so every branch of {@link readOAuthCached} reports
+ * the SAME last-known value and age — the previous per-branch
+ * `oauthCache !== null ? oauthCache.data : null` derivations disagreed with each
+ * other once the too-stale eviction fired.
+ */
+function lastKnownFields(nowMs: number): {
+  lastKnownOAuth: OAuthUsageData | null;
+  lastKnownOAuthAgeMs: number | null;
+} {
+  if (oauthLastKnown === null) {
+    return { lastKnownOAuth: null, lastKnownOAuthAgeMs: null };
+  }
+  return {
+    lastKnownOAuth: oauthLastKnown.data,
+    lastKnownOAuthAgeMs: nowMs - oauthLastKnown.storedAt,
+  };
 }
 
 /**
@@ -338,7 +387,9 @@ export interface CachedOAuthRead {
    * cache) OR the injected bypass path is in use. Populated on EVERY cached-path
    * branch — fresh, served-stale, backoff-suppressed, and estimate-fallback —
    * INCLUDING the too-stale case where the cache is about to be evicted from the
-   * HEADLINE (the value is captured BEFORE eviction). Distinct from what backs
+   * HEADLINE (issue #4165 keeps this value in a separate eviction-surviving
+   * singleton, so it stays populated after the cliff rather than going null one
+   * read later). Distinct from what backs
    * the headline: on the estimate-fallback path `result.ok === false` (the
    * headline is the estimate) yet `lastKnownOAuth` can still carry the last real
    * meter reading, which is exactly the baseline the AC3 divergence detector
@@ -347,6 +398,22 @@ export interface CachedOAuthRead {
    * 7d utilization. A pure observability channel — nothing gates on it.
    */
   lastKnownOAuth: OAuthUsageData | null;
+  /**
+   * Age in ms of {@link lastKnownOAuth} at the moment this result was produced,
+   * or `null` when no last-known value exists (issue #4165).
+   *
+   * Distinct from {@link ageMs}, which is the age of the value backing the
+   * HEADLINE and is `null` on every failure branch. This one survives the
+   * too-stale eviction, so a caller can answer "how old is the newest real
+   * reading we have?" even while the headline has fallen through to the
+   * estimate. The admission verdict uses it to decide whether a stale-but-known
+   * reading is still fit to gate spend on.
+   *
+   * OPTIONAL so the pre-existing {@link CachedOAuthRead} literals (the
+   * `bypassOAuthCache` path and test fixtures) keep compiling; absent reads as
+   * `null`.
+   */
+  lastKnownOAuthAgeMs?: number | null;
   /**
    * The current consecutive-failed-GET count backing {@link oauthBackoff}, or
    * `0` when the meter is healthy (no active backoff — either it has never
@@ -412,7 +479,7 @@ export async function readOAuthCached(
       result: { ok: true, data: oauthCache.data },
       stale: false,
       ageMs: nowMs - oauthCache.storedAt,
-      lastKnownOAuth: oauthCache.data,
+      ...lastKnownFields(nowMs),
       consecutiveFailures: oauthBackoff?.failures ?? 0,
     };
   }
@@ -425,10 +492,10 @@ export async function readOAuthCached(
   // reads/hour steady state: no GET is spent while backing off.
   if (oauthBackoff !== null && nowMs < oauthBackoff.nextAttemptMs) {
     // Capture the last-known real meter value for the AC3 divergence detector
-    // (issue #2832) BEFORE any headline decision — it is the baseline the
+    // (issue #2832) independently of the headline decision — it is the baseline the
     // fail-open estimate is compared against, independent of whether it is
     // fresh-enough to still back the headline.
-    const lastKnownOAuth = oauthCache !== null ? oauthCache.data : null;
+    const lastKnown = lastKnownFields(nowMs);
     if (oauthCache !== null) {
       const ageMs = nowMs - oauthCache.storedAt;
       if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
@@ -436,7 +503,7 @@ export async function readOAuthCached(
           result: { ok: true, data: oauthCache.data },
           stale: true,
           ageMs,
-          lastKnownOAuth,
+          ...lastKnown,
           consecutiveFailures: oauthBackoff.failures,
         };
       }
@@ -452,7 +519,7 @@ export async function readOAuthCached(
       result: { ok: false, code: "oauth-usage-non-2xx" },
       stale: false,
       ageMs: null,
-      lastKnownOAuth,
+      ...lastKnown,
       consecutiveFailures: oauthBackoff.failures,
     };
   }
@@ -491,6 +558,10 @@ async function attemptOAuthRead(
     // Success — refresh the cache AND reset the backoff clock so the next reads
     // resume the healthy fixed-TTL cadence immediately (issue #2619 recovery).
     oauthCache = { data: result.data, storedAt: nowMs };
+    // Mirror into the eviction-surviving last-known singleton (issue #4165) so
+    // the admission verdict still has a real reading to fall back on after the
+    // headline cache is evicted at the too-stale cliff.
+    oauthLastKnown = { data: result.data, storedAt: nowMs };
     if (oauthBackoff !== null) {
       logger.error(
         { failures: oauthBackoff.failures },
@@ -502,8 +573,15 @@ async function attemptOAuthRead(
       // fail-open — the seam never throws and a stale key self-expires at TTL.
       void oauthBackoffPersistence.clear();
     }
-    // A fresh success IS the last-known value.
-    return { result, stale: false, ageMs: 0, lastKnownOAuth: result.data, consecutiveFailures: 0 };
+    // A fresh success IS the last-known value (age 0).
+    return {
+      result,
+      stale: false,
+      ageMs: 0,
+      lastKnownOAuth: result.data,
+      lastKnownOAuthAgeMs: 0,
+      consecutiveFailures: 0,
+    };
   }
 
   // Read failed. Arm/advance the exponential-backoff gate so subsequent scans
@@ -575,10 +653,10 @@ async function attemptOAuthRead(
   }
 
   // Capture the last-known real meter value for the AC3 divergence detector
-  // (issue #2832) BEFORE any eviction below — it is the baseline the fail-open
+  // (issue #2832) independently of the eviction below — it is the baseline the fail-open
   // estimate is compared against, so it must survive even the too-stale eviction
   // that drops the value from the HEADLINE.
-  const lastKnownOAuth = oauthCache !== null ? oauthCache.data : null;
+  const lastKnown = lastKnownFields(nowMs);
 
   // Serve the last-good value (now stale) instead of flipping to the estimate —
   // UNLESS it is older than TTL + maxStale, in which case it is too stale to
@@ -590,7 +668,7 @@ async function attemptOAuthRead(
         result: { ok: true, data: oauthCache.data },
         stale: true,
         ageMs,
-        lastKnownOAuth,
+        ...lastKnown,
         consecutiveFailures: failures,
       };
     }
@@ -602,5 +680,5 @@ async function attemptOAuthRead(
     );
     oauthCache = null;
   }
-  return { result, stale: false, ageMs: null, lastKnownOAuth, consecutiveFailures: failures };
+  return { result, stale: false, ageMs: null, ...lastKnown, consecutiveFailures: failures };
 }

@@ -223,6 +223,11 @@ export function fiveHourThrottleShed(
   // estimate is too rough to gate on (and is 0 when uncalibrated).
   if (snapshot.usageSource !== "oauth") return [];
   const pct = snapshot.percentLast5h;
+  // Explicitly-unknown reading (issue #4165): there is no utilization to compare
+  // against a threshold, so shed nothing here. This is not a fail-open — such an
+  // input always arrives with `meterUnavailable`, which forces `allow: false`
+  // and blocks EVERY class, making the shed list moot.
+  if (pct === null) return [];
   // Defensive ordering: T2 must not cut below T1. If an operator mis-sets
   // T2 < T1, treat the larger as the T2 boundary (the T1 set still sheds at T1).
   const t2Pct = Math.max(t1, t2) * 100;
@@ -337,16 +342,30 @@ export interface UsageEligibility {
      */
     worklessUntil: string | null;
     /**
-     * True when the Anthropic OAuth meter is SUSTAINED-unavailable — either no
-     * fresh value and no last-good one inside the max-stale window (default
-     * ~35 min total: TTL + max-stale), or 3+ consecutive failed reads against
-     * a cold cache with no last-good to fall back on at all (issue #3821 —
-     * every process restart starts cold, so a single transient blip right
-     * after a deploy must not trip this). Forces `allow=false`: quota cannot
-     * be measured, so dispatch BLOCKS. (2026-07-30 operator decision; see
-     * overlayMeterUnavailableEligibility.)
+     * True when the Anthropic OAuth meter could not be read AND no last-good
+     * reading was inside the admission staleness ceiling
+     * (`HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS`, default 60 min) — i.e. quota
+     * cannot be measured at all. Forces `allow=false`: a spend governor that
+     * cannot measure must not admit. (2026-07-30 operator decision; hardened by
+     * issue #4165, which removed the consecutive-failure threshold that let a
+     * blind meter report `false`; see overlayMeterUnavailableEligibility.)
      */
     meterUnavailable: boolean;
+    /**
+     * True when the verdict was computed from a STALE last-good meter reading
+     * rather than a fresh one (issue #4165). Observability only — it does NOT
+     * flip `allow`: the reading is real, so the hard stops derived from it are
+     * real too, and blocking on it would turn every 429 burst into a halt.
+     * Pairs with {@link meterAgeMs}.
+     */
+    meterStale: boolean;
+    /**
+     * Age in ms of the meter reading backing this verdict, or `null` when no
+     * reading backs it (`meterUnavailable`) (issue #4165). This is the "with its
+     * age" half of surfacing a last-known-good instead of a zero: an operator
+     * or log reader can tell a 30-second-old reading from a 50-minute-old one.
+     */
+    meterAgeMs: number | null;
   };
   /**
    * Position of total burn relative to the **Pacing Curve** for this instant
@@ -366,8 +385,13 @@ export interface UsageEligibility {
    * Actual % of weekly quota consumed since the current Weekly Reset Anchor
    * boundary — `usage.percentSinceReset`, surfaced here so a caller comparing
    * it against `targetPercent` needn't reach back into the snapshot. (issue #857)
+   *
+   * `null` when the meter could not be read and no last-good reading was usable
+   * (issue #4165) — an explicit unknown, mirroring `usage.percentSinceReset`.
+   * Never a fabricated `0`: that is the degrade-to-zero shape that let the spend
+   * governor admit a run at ~92% real weekly usage.
    */
-  sinceResetPercent: number;
+  sinceResetPercent: number | null;
   /**
    * ISO-8601 of the effective current-window Weekly Reset Anchor boundary
    * (`usage.weeklyResetAnchor`), or `null` when the Anchor env var is
@@ -410,7 +434,12 @@ export interface UsageEligibility {
 function projectPacingCurve(
   snapshot: EligibilityUsageInput,
   ceiling: number,
-): { paceState: PaceState; targetPercent: number; sinceResetPercent: number } {
+): { paceState: PaceState; targetPercent: number; sinceResetPercent: number | null } {
+  // `null` = explicitly unknown (issue #4165). It is surfaced AS null rather
+  // than coerced to 0 — the top-level `sinceResetPercent` mirrors this field,
+  // and a fabricated 0 there is the same lie the `usage` block stopped telling.
+  // The ahead/behind comparison below is already gated on `usageSource ===
+  // "oauth"`, which a null reading never is, so the null never reaches the math.
   const sinceResetPercent = snapshot.percentSinceReset;
   const anchorIso = snapshot.weeklyResetAnchor;
 
@@ -446,7 +475,7 @@ function projectPacingCurve(
   // `targetPercent` is a pure function of the Anchor + `now`, so it stays valid
   // (and is surfaced for observability) regardless of source — only the
   // comparison that READS `percentSinceReset` is guarded.
-  if (snapshot.usageSource !== "oauth") {
+  if (snapshot.usageSource !== "oauth" || sinceResetPercent === null) {
     return { paceState: "on", targetPercent, sinceResetPercent };
   }
 
@@ -538,6 +567,12 @@ export function projectEligibility(snapshot: EligibilityUsageInput): UsageEligib
       // overlaid at the route seam — projectEligibility is pure over its input
       // and cannot observe whether that input came from a live meter.
       meterUnavailable: false,
+      // Default fresh / unknown age, for the same reason (issue #4165): the
+      // freshness of the read is a property of HOW the input was obtained, which
+      // this pure projection cannot see. Overlaid by
+      // overlayMeterFreshnessEligibility at the route seam.
+      meterStale: false,
+      meterAgeMs: null,
     },
     paceState,
     targetPercent,
@@ -589,11 +624,16 @@ export function projectEligibilityView(snapshot: UsageSnapshot): EligibilityView
   return {
     paceState: e.paceState,
     targetPercent: e.targetPercent,
-    sinceResetPercent: e.sinceResetPercent,
     anchor: e.anchor,
     emergencyStop: e.reasons.emergencyStop,
     calibrated: e.reasons.calibrated,
-    percentLast5h: e.usage.percentLast5h,
+    // Read from the SNAPSHOT, not `e.usage`: this narrowing is snapshot-only, and
+    // `UsageSnapshot` percentages are always numeric. The `EligibilityUsageInput`
+    // view of the same fields is `number | null` because the meter-only admission
+    // path can report an explicit unknown (issue #4165) — a state a snapshot
+    // cannot reach, so this view keeps its plain `number` contract.
+    sinceResetPercent: snapshot.percentSinceReset,
+    percentLast5h: snapshot.percentLast5h,
   };
 }
 
@@ -726,20 +766,39 @@ export function overlayWorklessEligibility(
  * Why this is not as aggressive as it sounds. `readOAuthCached` already absorbs
  * transient failures — it serves the last-good meter value for up to
  * `HYDRA_OAUTH_USAGE_MAX_STALE_MS` (default 30 min) past the TTL (default 5
- * min), i.e. ~35 min total from a warm cache, behind an exponential backoff
- * gate. So `meterUnavailable` does NOT mean "a GET returned 429" (observed 76
- * times in one 24h window, essentially all absorbed); it means either no
- * usable reading for ~35 minutes, OR — for a COLD cache with no last-good to
- * serve at all (every process restart, i.e. every deploy, starts cold) — 3+
- * consecutive failed reads (issue #3821, so one transient blip right after a
- * deploy doesn't trip this off the very first GET). Either way this is a
- * genuine measurement outage, not flakiness.
+ * min) as the HEADLINE, behind an exponential backoff gate; and past that cliff
+ * `eligibility-usage.ts` keeps gating on the last real reading until it is older
+ * than `HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS` (default 60 min, issue #4165).
+ * So `meterUnavailable` does NOT mean "a GET returned 429" (observed 76 times in
+ * one 24h window, essentially all absorbed); it means there is no reading at all
+ * recent enough to gate spend on.
+ *
+ * ISSUE #4165 REMOVED THE CONSECUTIVE-FAILURE ESCAPE HATCH. This flag used to
+ * also require 3+ consecutive failed reads whenever the cache was cold (#3821),
+ * on the theory that a post-deploy blip should not halt the autopilot. But the
+ * backoff ladder RESUMES from Redis across a restart while the in-memory
+ * last-good does NOT, so "cold cache, fewer than 3 failures" is reachable
+ * mid-outage — and in that state the verdict reported zeroed usage with
+ * `meterUnavailable: false` and `allow: true`. Measured 2026-08-19: admitted a
+ * run at ~92% real weekly usage, past the 90% weekly stop, which then reached
+ * turn 5 / 221k tokens. A failure COUNT is not evidence of headroom; only a
+ * reading is. The blip protection now comes from the last-good window above,
+ * which rides out a 429 burst on a real number instead of on an unmeasured
+ * `false`.
  *
  * The failure mode this accepts, stated plainly: a sustained meter outage now
  * stops the autopilot instead of letting it run blind. That is the operator's
- * chosen trade. `reasons.meterUnavailable` makes the cause explicit in the
- * verdict the pace gate already logs, so this can never present as the silent
- * "healthy but idle" state that motivated the change.
+ * chosen trade, and it is a SKIP rather than a halt — `pace-gate.sh` re-consults
+ * every tick and admission resumes on the first successful read.
+ * `reasons.meterUnavailable` makes the cause explicit in the verdict the pace
+ * gate already logs, so this can never present as the silent "healthy but idle"
+ * state that motivated the change.
+ *
+ * DO NOT reinstate a fail-open default here by analogy with
+ * `design-concept-reconcile-check`, which fails open on transport miss on
+ * purpose (#3650). That is right for a MERGE GATE — failing closed on an infra
+ * blip wedges the merge queue for zero safety gain — and exactly wrong for a
+ * spend governor, where failing open spends real money.
  *
  * Pure: no IO, no mutation. `false` returns the input UNCHANGED.
  */
@@ -752,5 +811,32 @@ export function overlayMeterUnavailableEligibility(
     ...eligibility,
     allow: false,
     reasons: { ...eligibility.reasons, meterUnavailable: true },
+  };
+}
+
+/**
+ * Overlay the FRESHNESS of the meter reading that backed this verdict (issue
+ * #4165) — whether it was a stale last-good, and how old it was.
+ *
+ * Deliberately separate from {@link overlayMeterUnavailableEligibility}, and
+ * deliberately NOT gating: staleness is an observability fact about a REAL
+ * reading, unavailability is the absence of one. A stale reading still drives
+ * genuine hard stops (weekly utilization only rises within a window, so a recent
+ * last-good is a lower bound on current spend), so blocking on `stale` would
+ * turn every rate-limit burst into a halt for no safety gain. Keeping the two
+ * overlays apart is what stops a future edit from conflating "old" with
+ * "absent" — the conflation that produced the 2026-08-19 incident in the first
+ * place, only in the opposite direction.
+ *
+ * Pure: no IO, no mutation of the input object.
+ */
+export function overlayMeterFreshnessEligibility(
+  eligibility: UsageEligibility,
+  stale: boolean,
+  ageMs: number | null,
+): UsageEligibility {
+  return {
+    ...eligibility,
+    reasons: { ...eligibility.reasons, meterStale: stale, meterAgeMs: ageMs },
   };
 }

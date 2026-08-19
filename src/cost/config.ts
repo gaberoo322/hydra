@@ -61,6 +61,31 @@ export const DEFAULT_OAUTH_USAGE_TTL_MS = 300_000;
 export const DEFAULT_OAUTH_USAGE_MAX_STALE_MS = 1_800_000;
 
 /**
+ * Default ceiling on how old the last-good OAuth reading may be and still be
+ * used to gate ADMISSION (`GET /api/usage/eligibility`), in ms (issue #4165).
+ * 60 minutes.
+ *
+ * A SEPARATE lever from {@link DEFAULT_OAUTH_USAGE_MAX_STALE_MS}, which governs
+ * the HEADLINE on `/api/usage`. The two answer different questions:
+ *   - maxStale: "is this value fresh enough to *display* as the headline before
+ *     falling through to the transcript estimate?" (~35 min servable window)
+ *   - this:     "is this value fresh enough to *spend real quota against*?"
+ *
+ * The admission window is deliberately the LONGER of the two, because the two
+ * failure modes are not symmetric. Falling to the transcript estimate is cheap
+ * and reversible; refusing to launch at all is a full stop on the loop. Weekly
+ * utilization also only ever RISES within a window, so a stale reading is a
+ * strict LOWER bound on current spend — a 55-minute-old 92% still proves the
+ * weekly stop should be engaged, which is exactly the 2026-08-19 incident this
+ * exists for. What a stale reading cannot do is prove there is HEADROOM, and
+ * that is why the ceiling is finite rather than unbounded: past it, the reading
+ * is too weak to license a launch and the governor blocks instead.
+ *
+ * Overridable via `HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS`.
+ */
+export const DEFAULT_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS = 3_600_000;
+
+/**
  * Default OAuth-meter backoff BASE delay (issue #2619): after the first failed
  * external GET (a 429 or a transient network/timeout error) the read cadence
  * backs off — the NEXT external GET is suppressed until `now + base` even though
@@ -197,6 +222,38 @@ export function getOAuthUsageMaxStaleMs(): number {
       "[usage-tracker] HYDRA_OAUTH_USAGE_MAX_STALE_MS is set but not a positive finite number; falling back to default",
     );
     return DEFAULT_OAUTH_USAGE_MAX_STALE_MS;
+  }
+  return parsed;
+}
+
+/**
+ * How old the last-good OAuth reading may be and still gate ADMISSION, in ms
+ * (issue #4165), from `HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS`, defaulting to
+ * {@link DEFAULT_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS} (60 min).
+ *
+ * Inside this window a failed meter read degrades to the last real reading,
+ * marked stale, and the verdict keeps gating on a REAL number. Past it there is
+ * no usable measurement and the spend governor fails CLOSED (`allow: false`,
+ * `reasons.meterUnavailable: true`) rather than admitting on fabricated zeros.
+ *
+ * A non-empty-but-invalid value (non-finite or <= 0) is logged (fail-loud) and
+ * falls back to the default — never to "unbounded", which would silently
+ * reinstate the fail-open the issue exists to remove. Pure + env-only.
+ */
+export function getEligibilityLastGoodMaxAgeMs(): number {
+  const raw = process.env.HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS;
+  if (raw === undefined || raw === "") return DEFAULT_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.error(
+      {
+        envVar: "HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS",
+        raw,
+        fallback: DEFAULT_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS,
+      },
+      "[usage-tracker] HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS is set but not a positive finite number; falling back to default",
+    );
+    return DEFAULT_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS;
   }
   return parsed;
 }

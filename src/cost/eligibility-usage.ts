@@ -43,22 +43,46 @@
  * hot). The meter already auto-follows the credentials file by design; now the
  * anchor does too. See {@link getEligibilityUsage} for the measured incident.
  *
- * FAIL-OPEN IS PRESERVED, DELIBERATELY. {@link deriveHardStop} gates on
- * `usageSource === "oauth"` (issue #1124): when the meter is unavailable the
- * hard stop does NOT engage. Rebuilding that invariant here would be a silent
- * policy change, so this module reproduces it exactly — a meter outage yields
- * `usageSource: "estimate"` with zeroed percentages, which reads as "no
- * evidence to stop on", never as "0% used, run freely" (the percentages are
- * only ever consumed through the `usageSource === "oauth"` guard). The
- * observability gap that fail-open leaves — a brake that is off while nobody is
- * told — is real and is tracked separately; it is NOT this module's to invent.
+ * THE GOVERNOR FAILS CLOSED, NOT OPEN (issue #4165, 2026-08-19). A blind meter
+ * used to degrade to `usageSource: "estimate"` with ZEROED percentages and a
+ * `meterUnavailable` flag gated behind a sustained-failure count — so a
+ * rate-limited meter produced `percentLast7d: 0` and `allow: true` while real
+ * weekly usage was ~92%, past the 90% weekly stop. Measured: the verdict flipped
+ * from allow to block purely because the meter came back, with consumption
+ * unchanged between the two reads. Admission was tracking METER AVAILABILITY,
+ * not spend.
+ *
+ * The zeros were defended on the grounds that every consumer reads them behind
+ * the `usageSource === "oauth"` guard. That was never fully true (`paceState`
+ * had to be patched for exactly this in #3751), and it is the wrong shape
+ * regardless: a spend governor must not synthesise a number it did not measure.
+ * So the outage shape now reports `null` — an explicit unknown that cannot be
+ * read as "0% used" by any consumer, guarded or not.
+ *
+ * The order of preference on a failed read is therefore:
+ *   1. a LAST-GOOD reading inside {@link getEligibilityLastGoodMaxAgeMs} — used
+ *      as real `usageSource: "oauth"` input, marked stale with its age, so the
+ *      hard stops keep engaging off a real number;
+ *   2. otherwise, explicit unknown (`null` percentages) with
+ *      `meterUnavailable: true`, which forces `allow: false`.
+ *
+ * DO NOT COPY THE `design-concept-reconcile-check` PRECEDENT HERE. That gate
+ * fails OPEN on a transport miss on purpose (#3650): a merge gate that fails
+ * closed on an infra blip wedges the whole merge queue for zero safety gain.
+ * The reasoning inverts for a spend governor — failing open spends real money
+ * during exactly the windows where usage is high enough to be rate-limiting the
+ * meter. The two must not share a default.
+ *
+ * The cost of failing closed is a SKIP, not a halt: `pace-gate.sh` re-consults
+ * this endpoint every tick and admission resumes on the first successful read,
+ * and step 1 above absorbs ordinary 429 bursts without blocking at all.
  */
 
-import { readOAuthCached, OAUTH_SUSTAINED_FAILURE_THRESHOLD } from "./oauth-read-cache.ts";
+import { readOAuthCached } from "./oauth-read-cache.ts";
 import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
-import type { OAuthUsageResult } from "./oauth-usage.ts";
+import type { OAuthUsageResult, OAuthUsageData } from "./oauth-usage.ts";
 import { deriveHardStop } from "./eligibility.ts";
-import { getWeeklyResetAnchorMs } from "./config.ts";
+import { getWeeklyResetAnchorMs, getEligibilityLastGoodMaxAgeMs } from "./config.ts";
 // Pure leaf (issue #1909): `projectResetWindow` rolls the seeded Weekly Reset
 // Anchor forward in 7-day multiples to the current-window boundary. Imported
 // one-way FROM this pure math leaf (it pulls in no eligibility/scan machinery),
@@ -76,9 +100,24 @@ import { logger } from "../logger.ts";
  * {@link projectEligibility} keeps working unchanged.
  */
 export interface EligibilityUsageInput {
-  percentLast5h: number;
-  percentLast7d: number;
-  percentSinceReset: number;
+  /**
+   * NULL means EXPLICITLY UNKNOWN — the meter could not be read and there is no
+   * usable last-good reading (issue #4165). It does NOT mean zero, and no
+   * consumer may coerce it to zero for a gating decision: the whole defect this
+   * models is a governor that read blindness as headroom. `null` always travels
+   * with `meterUnavailable`, which forces `allow: false`, so a gate that cannot
+   * interpret the null simply never runs.
+   *
+   * The three percentages are `null` together or numeric together; there is no
+   * partial-reading state.
+   *
+   * `UsageSnapshot` (whose fields are plain `number`) still satisfies this
+   * interface structurally — `number` is assignable to `number | null` — so the
+   * snapshot path is unaffected and never produces a null.
+   */
+  percentLast5h: number | null;
+  percentLast7d: number | null;
+  percentSinceReset: number | null;
   usageSource: "oauth" | "estimate";
   emergencyStop: boolean;
   weeklyEmergencyStop: boolean;
@@ -108,20 +147,21 @@ export interface EligibilityUsageResult {
   /** Age of the served meter value in ms, or null when none was served. */
   ageMs: number | null;
   /**
-   * True when the meter is SUSTAINED-unavailable, so the verdict is running
-   * fail-open per #1124 AND `overlayMeterUnavailableEligibility` forces
-   * `allow=false` for the whole autopilot (2026-07-30 operator decision, PR
-   * #3804) — this field is NOT a passive observability flag, it gates.
+   * True when the verdict has NO usable measurement of quota — no fresh meter
+   * read AND no last-good reading inside
+   * {@link getEligibilityLastGoodMaxAgeMs}. `overlayMeterUnavailableEligibility`
+   * turns it into `allow: false` for the whole autopilot: this field is NOT a
+   * passive observability flag, it gates.
    *
-   * Set true only when the consecutive-failed-read count from
-   * {@link readOAuthCached} reaches {@link OAUTH_SUSTAINED_FAILURE_THRESHOLD}
-   * (3), OR when the cached reader itself throws (a programming/IO fault, not
-   * a meter outage). A single failed read — including the very first read of a
-   * freshly-restarted process, where `oauthCache` is `null` and there is no
-   * last-good value to fall back on — does NOT set this (issue #3821): every
-   * process restart (i.e. every deploy) starts cold, and one transient GET
-   * blip against that cold cache used to halt the whole autopilot until the
-   * next successful read landed.
+   * Issue #4165 removed the sustained-failure threshold that used to gate this.
+   * Requiring 3 consecutive failures meant one or two failed reads against a
+   * cold cache (every process restart starts cold, and the backoff ladder
+   * RESUMES from Redis across a restart while the in-memory last-good does not)
+   * produced zeroed percentages with `meterUnavailable: false` — the exact
+   * shape that admitted a run at ~92% real weekly usage on 2026-08-19. The
+   * transient-blip protection that threshold was reaching for now lives where
+   * it belongs: in the last-good fallback above, which rides out a 429 burst on
+   * a REAL number instead of on an unmeasured `false`.
    */
   meterUnavailable: boolean;
 }
@@ -176,43 +216,89 @@ export async function getEligibilityUsage(
     // the first place.
     logger.error(
       { err },
-      "[eligibility-usage] cached OAuth read threw; degrading to fail-open input",
+      "[eligibility-usage] cached OAuth read threw; admission verdict blocks (no measurement)",
     );
-    // A throw here is a programming/IO fault in the cache seam itself, not an
-    // ordinary meter-read failure — it never absorbed transient blips in the
-    // first place, so there is no sustained-vs-transient distinction to make.
-    // Report unavailable immediately.
-    return unavailable(generatedAt, envAnchor, true);
+    // A throw here is a programming/IO fault in the cache seam itself. There is
+    // no reading and no age to reason about, so the governor has nothing to
+    // gate on: block.
+    return unavailable(generatedAt, envAnchor);
   }
 
   if (!isOAuthUsageOk(cached.result)) {
-    // Require SUSTAINED failure before reporting the meter unavailable (issue
-    // #3821): `cached.consecutiveFailures` is 0 or unset only when the meter
-    // has never failed on this ladder; a fresh process with a cold cache (every
-    // process restart, i.e. every deploy) sees its first-ever failed read at
-    // `consecutiveFailures === 1`, which is well below the threshold, so
-    // `meterUnavailable` correctly stays false and the autopilot keeps running.
-    // The same threshold `oauth-read-cache.ts` already uses for its sustained-
-    // failure alarm (issue #3601) — reused rather than inventing a second one.
-    const sustained = cached.consecutiveFailures >= OAUTH_SUSTAINED_FAILURE_THRESHOLD;
-    logger.warn(
+    // The fresh read failed. Prefer a REAL last-good reading over refusing
+    // outright (issue #4165 AC4) — `readOAuthCached` keeps the last successful
+    // meter value alive past the headline's too-stale eviction precisely so this
+    // path has something to gate on. Weekly utilization only rises within a
+    // window, so a recent last-good is a lower bound on current spend: it can
+    // still prove a stop, which is what the 2026-08-19 incident needed.
+    const lastGood = cached.lastKnownOAuth ?? null;
+    const lastGoodAgeMs = cached.lastKnownOAuthAgeMs ?? null;
+    const maxAgeMs = getEligibilityLastGoodMaxAgeMs();
+    if (lastGood !== null && lastGoodAgeMs !== null && lastGoodAgeMs <= maxAgeMs) {
+      logger.warn(
+        {
+          code: cached.result.code,
+          lastGoodAgeMs,
+          maxAgeMs,
+          consecutiveFailures: cached.consecutiveFailures,
+          percentLast7d: lastGood.sevenDay.utilization,
+        },
+        "[eligibility-usage] OAuth meter read failed; gating on the STALE last-good reading (#4165)",
+      );
+      return {
+        input: buildMeterInput(lastGood, generatedAt, envAnchor, nowMs),
+        stale: true,
+        ageMs: lastGoodAgeMs,
+        meterUnavailable: false,
+      };
+    }
+    // No fresh read and no usable last-good: the governor is blind. FAIL CLOSED
+    // (issue #4165 AC3). Deliberately NOT gated on a consecutive-failure count —
+    // "we have failed fewer than 3 times" is not evidence of headroom, and the
+    // blip protection it was standing in for is the last-good branch above.
+    logger.error(
       {
         code: cached.result.code,
-        ageMs: cached.ageMs,
+        lastGoodAgeMs,
+        maxAgeMs,
         consecutiveFailures: cached.consecutiveFailures,
-        sustained,
       },
-      sustained
-        ? "[eligibility-usage] OAuth meter sustained-unavailable; admission verdict blocks (#3821/#3804)"
-        : "[eligibility-usage] OAuth meter read failed (transient, below sustained-failure threshold); admission verdict unaffected (#3821)",
+      lastGood === null
+        ? "[eligibility-usage] OAuth meter unreadable and no last-good reading exists; admission BLOCKS (#4165)"
+        : "[eligibility-usage] OAuth meter unreadable and the last-good reading is past the admission staleness ceiling; admission BLOCKS (#4165)",
     );
-    return unavailable(generatedAt, envAnchor, sustained);
+    return unavailable(generatedAt, envAnchor);
   }
 
-  const percentLast5h = cached.result.data.fiveHour.utilization;
-  const percentLast7d = cached.result.data.sevenDay.utilization;
+  return {
+    input: buildMeterInput(cached.result.data, generatedAt, envAnchor, nowMs),
+    stale: cached.stale,
+    ageMs: cached.ageMs,
+    meterUnavailable: false,
+  };
+}
 
-  // ACCOUNT-FOLLOWING ANCHOR (this PR). The Weekly Reset Anchor is derived from
+/**
+ * Build the admission-verdict input from ONE OAuth meter reading.
+ *
+ * Shared by the FRESH-read path and the stale-last-good fallback (issue #4165)
+ * so the two cannot drift: a served last-good must be projected through exactly
+ * the same anchor derivation, hard-stop derivation and paid-overage gate as a
+ * live read, or "we fell back to last-good" would quietly also mean "we stopped
+ * enforcing some of the stops". `nowMs` (not the reading's own timestamp) drives
+ * the reset-window projection, because the question is which weekly window we
+ * are in NOW.
+ */
+function buildMeterInput(
+  data: OAuthUsageData,
+  generatedAt: string,
+  envAnchor: string | null,
+  nowMs: number,
+): EligibilityUsageInput {
+  const percentLast5h = data.fiveHour.utilization;
+  const percentLast7d = data.sevenDay.utilization;
+
+  // ACCOUNT-FOLLOWING ANCHOR. The Weekly Reset Anchor is derived from
   // the meter's OWN `seven_day.resets_at` whenever the meter supplies one, and
   // falls back to the env seed only when it does not.
   //
@@ -242,7 +328,7 @@ export async function getEligibilityUsage(
   // case, one window ahead) or past (a stale/clamped value) — to the start of
   // the window containing `nowMs`. One code path, both semantics, no new
   // constant.
-  const meterResetMs = Date.parse(cached.result.data.sevenDay.resetsAt ?? "");
+  const meterResetMs = Date.parse(data.sevenDay.resetsAt ?? "");
   const weeklyResetAnchor = Number.isFinite(meterResetMs)
     ? new Date(projectResetWindow(meterResetMs, nowMs).currentMs).toISOString()
     : envAnchor;
@@ -267,10 +353,10 @@ export async function getEligibilityUsage(
   // whole point (the operator's rule is "never extra usage, on ANY account").
   // A meter that omits `extra_usage` yields armed:false from `parseExtraUsage`:
   // no facility means nothing can bill.
-  const extraUsageArmed = cached.result.data.extraUsage?.armed === true;
+  const extraUsageArmed = data.extraUsage?.armed === true;
   if (extraUsageArmed) {
     logger.warn(
-      { usedCredits: cached.result.data.extraUsage?.usedCredits ?? null },
+      { usedCredits: data.extraUsage?.usedCredits ?? null },
       "[eligibility-usage] paid overage (extra usage) is ARMED on the logged-in account; " +
         "blocking ALL autopilot dispatch until it is disabled in the Claude console " +
         "(Hydra cannot switch it off through the API)",
@@ -278,74 +364,70 @@ export async function getEligibilityUsage(
   }
 
   return {
-    input: {
-      percentLast5h,
-      percentLast7d,
-      percentSinceReset,
-      usageSource: "oauth",
-      emergencyStop,
-      weeklyEmergencyStop,
-      // `pacingState` is the SNAPSHOT-level weekly-projection verdict, distinct
-      // from the Pacing Curve's `paceState` that projectEligibility computes
-      // from percentSinceReset. Only `=== "over"` sheds classes, and shedding on
-      // an unprojected value would be a guess, so this path never sheds on it.
-      pacingState: "under",
-      // Calibration described the local quota CONSTANTS. A meter-sourced verdict
-      // does not use them, so it is authoritative by construction.
-      calibrated: true,
-      weeklyResetAnchor,
-      generatedAt,
-      extraUsageArmed,
-    },
-    stale: cached.stale,
-    ageMs: cached.ageMs,
-    meterUnavailable: false,
+    percentLast5h,
+    percentLast7d,
+    percentSinceReset,
+    usageSource: "oauth",
+    emergencyStop,
+    weeklyEmergencyStop,
+    // `pacingState` is the SNAPSHOT-level weekly-projection verdict, distinct
+    // from the Pacing Curve's `paceState` that projectEligibility computes
+    // from percentSinceReset. Only `=== "over"` sheds classes, and shedding on
+    // an unprojected value would be a guess, so this path never sheds on it.
+    pacingState: "under",
+    // Calibration described the local quota CONSTANTS. A meter-sourced verdict
+    // does not use them, so it is authoritative by construction.
+    calibrated: true,
+    weeklyResetAnchor,
+    generatedAt,
+    extraUsageArmed,
   };
 }
 
 /**
- * The fail-open input served when no meter value is available (#1124).
+ * The EXPLICIT-UNKNOWN input served when quota cannot be measured at all — no
+ * fresh meter read and no last-good reading inside the admission staleness
+ * ceiling (issue #4165).
  *
- * Zeroed percentages are safe ONLY because every consumer reads them behind the
- * `usageSource === "oauth"` guard — `deriveHardStop` and `fiveHourThrottleShed`
- * both short-circuit on a non-oauth source, so these zeros can never be mistaken
- * for a measured "0% used".
+ * The percentages are `null`, not `0`. Zeros were the whole defect: they read as
+ * "0% used, run freely" to anything that did not happen to be behind the
+ * `usageSource === "oauth"` guard, and on 2026-08-19 that produced
+ * `percentLast7d: 0` with `allow: true` against ~92% real weekly usage.
+ * `null` cannot be misread that way by any consumer.
  *
- * `meterUnavailable` is a caller-supplied verdict, not hardcoded `true` (issue
- * #3821): this shape is also returned for a single transient failed read
- * against a cold cache, where the fail-open `usageSource: "estimate"` input is
- * still correct (there genuinely is no meter value to report) but the
- * `allow=false`-forcing `meterUnavailable` flag must stay `false` until the
- * failure is sustained. See {@link OAUTH_SUSTAINED_FAILURE_THRESHOLD}.
+ * `meterUnavailable` is always `true` here — it is no longer a caller-supplied
+ * verdict. There is exactly one condition that reaches this function (no usable
+ * measurement) and exactly one correct response to it for a spend governor:
+ * block. `overlayMeterUnavailableEligibility` turns it into `allow: false`.
  */
 function unavailable(
   generatedAt: string,
   weeklyResetAnchor: string | null,
-  meterUnavailable: boolean,
 ): EligibilityUsageResult {
   return {
     input: {
-      percentLast5h: 0,
-      percentLast7d: 0,
-      percentSinceReset: 0,
+      // Explicitly UNKNOWN, not zero. See the function docstring.
+      percentLast5h: null,
+      percentLast7d: null,
+      percentSinceReset: null,
       usageSource: "estimate",
+      // The stops derived from the (absent) percentages stay false — there is no
+      // reading to derive them from. They are not what blocks here;
+      // `meterUnavailable` is, and it blocks unconditionally.
       emergencyStop: false,
       weeklyEmergencyStop: false,
       pacingState: "under",
       calibrated: false,
       weeklyResetAnchor,
       generatedAt,
-      // No meter value means no evidence either way about overage. Reporting
-      // `true` here would turn every transient GET blip into a full autopilot
-      // halt with a misleading reason attached — the #1124/#3821 fail-open
-      // exists precisely to prevent that. The dark-meter case is already
-      // covered: a SUSTAINED failure sets `meterUnavailable`, which forces
-      // allow=false on its own (#3804). So there is no window where the
-      // autopilot dispatches on an unverified account.
+      // No meter value means no evidence either way about paid overage. It does
+      // not need to be inferred: `meterUnavailable` already forces allow=false,
+      // so there is no window in which the autopilot dispatches on an
+      // unverified account.
       extraUsageArmed: false,
     },
     stale: false,
     ageMs: null,
-    meterUnavailable,
+    meterUnavailable: true,
   };
 }
