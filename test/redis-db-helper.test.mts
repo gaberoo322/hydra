@@ -667,3 +667,110 @@ describe("scripts/test/redis-db-launch.mjs — zero-entry verdict wiring (#4141)
     assert.match(SOURCE, /missingFiles/);
   });
 });
+
+// =============================================================================
+// File-set coverage gate (issue #4141).
+//
+// Its own top-level suite with its own lifecycle — a nested case would inherit
+// a sibling's teardown timing.
+//
+// This is the only suite-count verdict that may block, and the reason is
+// structural rather than empirical: it compares two static lists and reads no
+// reporter capture, so `--test-force-exit`'s truncation (#4137) has no route
+// into it. The zero-entry verdict was promoted on an empirical argument in
+// #4141's first attempt and production falsified it within hours; the gate
+// here does not rest on one.
+// =============================================================================
+describe("scripts/test/redis-db-launch.mjs — file-set coverage gate (issue #4141)", () => {
+  const LAUNCHER = fileURLToPath(new URL("../scripts/test/redis-db-launch.mjs", import.meta.url));
+  const covScratch: string[] = [];
+
+  after(() => {
+    for (const dir of covScratch) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* intentional: best-effort scratch-dir cleanup on teardown */
+      }
+    }
+  });
+
+  function covRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-coverage-gate-"));
+    covScratch.push(dir);
+    return dir;
+  }
+
+  /**
+   * Run the launcher over a child that exits 0, naming ONE test file. The real
+   * baseline lists 400+, so a full-suite run that names one file is by
+   * definition missing the rest — the cheapest honest way to drive the gate
+   * without fabricating a baseline.
+   */
+  function runLauncher(fullSuite: boolean) {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    if (fullSuite) env.HYDRA_FULL_SUITE = "1";
+    else delete env.HYDRA_FULL_SUITE;
+    return spawnSync(
+      process.execPath,
+      [LAUNCHER, process.execPath, "-e", "process.exit(0)", "test/suite-count-check.test.mts"],
+      { cwd: covRoot(), env, encoding: "utf8", timeout: 30_000 },
+    );
+  }
+
+  test("isFullSuiteRun keys on the invocation, not on the shape of argv", async () => {
+    const { isFullSuiteRun } = await import("../scripts/test/redis-db-launch.mjs");
+    assert.equal(isFullSuiteRun({ HYDRA_FULL_SUITE: "1" }), true);
+    assert.equal(isFullSuiteRun({}), false);
+    assert.equal(isFullSuiteRun({ HYDRA_FULL_SUITE: "0" }), false);
+    // Not truthiness — only the exact opt-in string, so a stray inherited
+    // value cannot switch a subset run into full-suite mode.
+    assert.equal(isFullSuiteRun({ HYDRA_FULL_SUITE: "true" }), false);
+    assert.equal(isFullSuiteRun({ HYDRA_FULL_SUITE: "" }), false);
+  });
+
+  test("a full-suite run missing baselined files FAILS, and names them", () => {
+    const run = runLauncher(true);
+    assert.equal(run.status, 1, `expected the gate to block; stderr was: ${run.stderr}`);
+    assert.match(
+      run.stderr,
+      /BASELINED FILE\(S\) WERE NOT RUN \(issue #4141\)/,
+      `gate must name the class it detected; stderr was: ${run.stderr}`,
+    );
+    assert.match(
+      run.stderr,
+      /--update-baseline/,
+      "a blocking gate must state the deterministic way to clear it",
+    );
+    // It must NOT be mistaken for the truncation artifact, which is advisory
+    // and means something entirely different to whoever reads the log.
+    assert.match(run.stderr, /This is NOT the #4137 truncation artifact/);
+  });
+
+  test("the SAME invocation without the full-suite opt-in does NOT fail — test:file stays usable", () => {
+    // The safety property. `npm run test:file -- test/one.test.mts` omits 400+
+    // baselined files by design; if that read as a drop, the single-file path
+    // documented in CLAUDE.md would be unusable and the gate would be an
+    // ambient poison pill.
+    const run = runLauncher(false);
+    assert.equal(run.status, 0, `a subset run must not be failed by the coverage gate; stderr was: ${run.stderr}`);
+    assert.doesNotMatch(run.stderr, /WERE NOT RUN \(issue #4141\)/);
+  });
+
+  test("package.json wires the opt-in on the full suite ONLY", () => {
+    const pkg = JSON.parse(
+      readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+    ) as { scripts: Record<string, string> };
+    assert.match(
+      pkg.scripts.test,
+      /^HYDRA_FULL_SUITE=1 /,
+      "the `test` script is the single place that declares a run to be the whole suite",
+    );
+    assert.doesNotMatch(
+      pkg.scripts["test:file"],
+      /HYDRA_FULL_SUITE/,
+      "test:file runs a hand-picked subset and must never claim full-suite coverage",
+    );
+  });
+});

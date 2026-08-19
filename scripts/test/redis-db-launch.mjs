@@ -100,7 +100,7 @@ import { connect } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import process from "node:process";
-import { compareCapture, loadBaseline, testFilesFromArgs } from "./suite-count-check.mjs";
+import { compareCapture, fileCoverageDiff, loadBaseline, testFilesFromArgs } from "./suite-count-check.mjs";
 
 const REDIS_HOST = "127.0.0.1";
 const REDIS_PORT = 6379;
@@ -287,6 +287,19 @@ export function resolveRedisUrl(env, rootPath) {
  * IS immune to partial truncation (truncation loses a tail; it does not make a
  * file that ran vanish) and is therefore promotable. That work will set this.
  */
+/**
+ * Is this the WHOLE suite, rather than a hand-picked subset?
+ *
+ * Only the full run may assert "every baselined file was executed" — a
+ * deliberate `npm run test:file -- test/one.test.mts` legitimately omits the
+ * other 433 and must not be failed for it. `package.json`'s `test` script is
+ * the single place that sets this, so the signal comes from the invocation
+ * itself rather than being guessed from the shape of argv.
+ */
+export function isFullSuiteRun(env = process.env) {
+  return env.HYDRA_FULL_SUITE === "1";
+}
+
 export function isGateBlocking(env = process.env) {
   return env.SUITE_COUNT_GATE_BLOCKING === "1";
 }
@@ -654,6 +667,49 @@ child.on("exit", async (code, signal) => {
     // Re-raise so the parent observes the same termination signal.
     process.kill(process.pid, signal);
     return;
+  }
+  // Issue #4141 — file-set coverage. Deliberately BEFORE the capture branch
+  // below and independent of it: this is the only drop-detection that
+  // `--test-force-exit` cannot reach, because it consults no capture, counts
+  // nothing, and has no timing component. It is therefore the only one of
+  // these verdicts that may block.
+  if (isFullSuiteRun() && testFiles.length > 0) {
+    try {
+      const coverage = fileCoverageDiff({ baseline: loadBaseline(), testFiles });
+      if (!coverage.ok) {
+        if (coverage.droppedFromRun.length > 0) {
+          console.error(
+            `[redis-db-launch] SUITE-COUNT GATE FAILED — ${coverage.droppedFromRun.length} ` +
+              "BASELINED FILE(S) WERE NOT RUN (issue #4141). The suite no longer includes a file " +
+              "the baseline says it should. This is NOT the #4137 truncation artifact — no " +
+              "reporter output was consulted to reach it:",
+          );
+          for (const f of coverage.droppedFromRun) console.error(`  - ${f}`);
+        }
+        if (coverage.unbaselined.length > 0) {
+          console.error(
+            `[redis-db-launch] SUITE-COUNT GATE FAILED — ${coverage.unbaselined.length} ` +
+              "FILE(S) RAN BUT ARE NOT BASELINED (issue #4141). Every count-based verdict " +
+              "silently exempts them, so they sit outside the gate entirely:",
+          );
+          for (const f of coverage.unbaselined) console.error(`  - ${f}`);
+        }
+        console.error(
+          "[redis-db-launch] If this change to the file set is intended, regenerate the baseline " +
+            "IN THIS PR: node scripts/test/suite-count-check.mjs --update-baseline",
+        );
+        // Never mask a red suite: a genuine test failure keeps its own exit
+        // code, and this verdict only decides the outcome of an otherwise
+        // green run.
+        process.exit(code === 0 ? 1 : (code ?? 1));
+        return;
+      }
+    } catch (err) {
+      // Tooling failure (corrupt/unreadable baseline) is not a detected drop.
+      // Loud, but it does not get to redden a green suite on its own — the
+      // same stance the capture-side gate takes below.
+      console.error(`[redis-db-launch] WARN: file-coverage gate itself failed to run: ${err.message}`);
+    }
   }
   if (testFiles.length === 0 || !existsSync(capturePath)) {
     // Not a suite-count-instrumented test invocation (no --test-reporter
