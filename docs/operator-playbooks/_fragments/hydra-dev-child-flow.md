@@ -286,5 +286,6 @@ emit `## Friction Report` with the literal body `- (none)`.
   re-run + grep** (issue #1076). The default reporter buffers stdout and
   force-exit tears down before the per-test `not ok` lines flush. `test:debug`
   keeps the same flags plus a `tap → test-debug.tap` sink; read the `not ok`
-  lines out of `test-debug.tap`. Do NOT edit the `test` script (CI greps its
-  footer for the `MIN_TESTS` ratchet).
+  lines out of `test-debug.tap`. Do NOT edit the `test` script — it declares
+  the run to be the whole suite (`HYDRA_FULL_SUITE=1`), which arms the file-set
+  coverage gate (issue #4141).

@@ -88,19 +88,31 @@ jobs:
           fi
           PASS_COUNT=$(grep -oP '^# pass \K[0-9]+' test-output.txt)
           echo "Tests passed: $PASS_COUNT"
-          # Partial-collapse detector, raised 450 -> 6000 (issue #3741). Now
-          # that a red suite actually reddens this job, the count floor's only
-          # remaining job is catching a suite that ran FEWER tests and still
+          # The MIN_TESTS=6000 floor that used to live here was REMOVED in
+          # issue #4141. It is reported above, never asserted on.
+          #
+          # Its stated job was "catching a suite that ran FEWER tests and still
           # exited 0 — a glob or runner-config change that silently drops test
-          # files. At 450 against a live ~6900 it was ~15x too low to catch any
-          # such collapse. 6000 keeps ~900 tests of headroom so it can never
-          # become an ambient poison pill that reddens the merge queue with no
-          # code change. This floor may only ever move UP.
-          MIN_TESTS=6000
-          if [ "$PASS_COUNT" -lt "$MIN_TESTS" ]; then
-            echo "::error::Test count regression: $PASS_COUNT < $MIN_TESTS minimum"
-            exit 1
-          fi
+          # files". It could not do that job:
+          #
+          #   - It compared against `# pass`, which issue #4137 measured as a
+          #     TRUNCATED number: --test-force-exit makes the parent exit with
+          #     the child's reporter events still buffered. Observed on master
+          #     with NO code change: 7,416 / 7,434 / 7,436 / 7,455 / 7,495. The
+          #     floor survived only because the headroom was wider than the
+          #     jitter — a constant compared against noise.
+          #   - One dropped FILE never moves the total by the ~1,470 tests of
+          #     headroom, so the single regression it was named for was exactly
+          #     the one it could not detect.
+          #
+          # It is REPLACED, not merely deleted. scripts/test/redis-db-launch.mjs
+          # runs fileCoverageDiff inside `npm test` above: it compares the
+          # suite-count baseline's FILE LIST against the files the runner was
+          # told to run, names the missing ones, and fails. That reads no
+          # reporter capture and has no timing component, so the truncation
+          # cannot reach it — which is why it can block where a count cannot.
+          # test/ci-test-job-pipefail-guard.test.mts pins both halves: that the
+          # floor stays gone, and that its replacement stays wired.
 
   dashboard-build:
     runs-on: self-hosted

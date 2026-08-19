@@ -579,8 +579,8 @@ if (args.length === 0) {
 // non-owned DB (0/1, remote) resolves db=null and is left untouched.
 if (resolved.db !== null) {
   await flushDbOnce(resolved.db);
-  // Info to stderr so the node:test TAP footer on stdout (the CI MIN_TESTS
-  // grep surface) stays untouched.
+  // Info to stderr so the node:test TAP footer on stdout stays untouched —
+  // ci.yml still greps it for `# fail N` and reports `# pass`.
   console.error(
     `[redis-db-launch] per-run Redis DB ${resolved.db} ` +
       (resolved.derived

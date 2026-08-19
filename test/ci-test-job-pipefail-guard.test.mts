@@ -48,15 +48,6 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CI_WORKFLOW = resolve(REPO_ROOT, ".github/workflows/ci.yml");
 
-/**
- * The floor the `test` job's count ratchet must be at or above. Raised from
- * 450 to 6000 in #3741: once a red suite actually reddens the job, the count
- * floor's only remaining job is catching a suite that ran FEWER tests and still
- * exited 0. This constant may only ever move UP, and must stay well below the
- * live pass count so it never becomes an ambient poison pill.
- */
-export const MIN_TESTS_FLOOR = 6000;
-
 /** Drop whole-line comments (YAML `#` and shell `#` alike). */
 export function stripComments(text: string): string {
   return text
@@ -181,16 +172,35 @@ describe("ci.yml `test` job — pipefail invariant (#3741)", () => {
     );
   });
 
-  test("the MIN_TESTS count floor is present and has not been lowered", () => {
+  test("the MIN_TESTS count floor is GONE — it measured noise against a constant (issue #4141)", () => {
+    // Flipped from "is present and has not been lowered". The floor's stated
+    // job (ci.yml's own comment) was "catching a suite that ran FEWER tests and
+    // still exited 0 — a glob or runner-config change that silently drops test
+    // files". It could not do that:
+    //
+    //   - It was compared against `# pass`, which #4137 showed is a TRUNCATED
+    //     number. Observed on master with no code change: 7,416 / 7,434 /
+    //     7,436 / 7,455 / 7,495. It survived only because the headroom was
+    //     wider than the jitter — measuring noise against a constant.
+    //   - A single dropped FILE never moves the total by the ~1,470 tests of
+    //     headroom, so the one regression it named was exactly the one it
+    //     could not see.
+    //
+    // It is replaced, not merely deleted: `fileCoverageDiff` compares the
+    // baseline's file list against what the runner was told to run, by name
+    // and deterministically. That replacement is pinned by
+    // test/redis-db-helper.test.mts's "file-set coverage gate" suite, which
+    // owns scripts/test/redis-db-launch.mjs as its subject — asserting it a
+    // second time from here would be exactly the sprawl #4134 guards.
     const job = extractJobBlock(workflow, "test");
     const step = findSuiteStep(extractSteps(job as string));
-    const floor = extractMinTests(step as string);
-    assert.notEqual(floor, null, "MIN_TESTS is no longer set in the suite step — the partial-collapse detector is gone");
-    assert.ok(
-      (floor as number) >= MIN_TESTS_FLOOR,
-      `MIN_TESTS=${floor} is below the ratchet floor ${MIN_TESTS_FLOOR}; this floor may only ever move UP (issue #3741)`,
+    assert.equal(
+      extractMinTests(step as string),
+      null,
+      "MIN_TESTS is back in the suite step — it was removed deliberately; see issue #4141 before restoring it",
     );
   });
+
 });
 
 describe("pipefail mechanism — why the one-line fix works (#3741)", () => {
