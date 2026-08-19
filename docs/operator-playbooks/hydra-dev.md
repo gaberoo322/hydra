@@ -80,7 +80,8 @@ worktree-fence violations are safety failures.
    diagnostic lines flush. `test:debug` runs the identical flags plus a dual
    reporter (`tap → test-debug.tap`); read the `not ok` lines out of
    `test-debug.tap`. The artifact is git-ignored. Do **not** edit the `test`
-   script — CI greps its footer for the `MIN_TESTS` ratchet.
+   script — it declares the run to be the whole suite (`HYDRA_FULL_SUITE=1`),
+   which is what arms the file-set coverage gate (issue #4141).
 7. **NEVER end your session waiting on CI, a monitor, or a background
    process (issue #3866).** The full rule lives ONCE, canonically, in
    `hydra-autopilot.md`'s "Worktree-guard preamble" section — it is prepended
