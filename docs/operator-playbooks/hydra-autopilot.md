@@ -833,6 +833,50 @@ an `@include` fragment), so it is independent of the `_fragments`/#2552 work.
 
 > **CONTEXT POINTER:** troubleshooting quick-look (wrong dispatch, burned class, wedge, stale heartbeat), cross-run Redis mirror, termination baton-pass detail, slot lifecycle event schema + env overrides, and merge-rate stabilization history (2026-05 → 2026-06) live in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
 
+## Self-filed work — the admission rule (operator directive 2026-08-19)
+
+**When you discover a defect in Hydra's own machinery, you file it as `hitl-grill`, never as `ready-for-agent`.**
+
+You may file freely — noticing defects is valuable and nothing here discourages it.
+What you may NOT do is promote your own finding into the dispatch queue. Only the
+operator moves an issue from `hitl-grill` to `ready-for-agent`. The `/work` inbox
+and the `/hydra-review` hitl-grill bucket are where they do it.
+
+Applies to every issue you file about the orchestrator itself: autopilot loop bugs,
+CI/test-harness defects, gate false-positives, dashboard faults, cost-accounting
+gaps, drainer routing, watchdog behaviour. It applies whether the defect surfaced
+from a reaped dispatch, a failed check, your own tick, or a subagent's report.
+
+Three carve-outs, all narrow:
+
+1. **`needs-triage` for a wedge** — the stale-heartbeat recovery path keeps filing
+   `needs-triage` with the run-log tail. Unchanged.
+2. **`queue-decision.sh`** — the operator decision queue is a different surface and
+   is not an issue you are promoting. Unchanged.
+3. **Runaway-subagent issues (#395)** — a hard-cap breach is an incident, not a
+   proposal. Unchanged.
+
+Target-scope work is unaffected: `dev_target` anchors come from the Target board,
+which you do not author.
+
+### Why (do not undo this without reading it)
+
+Measured over the 14 days to 2026-08-19, orchestrator-side: **137 issues created,
+159 closed, 0.9-day median lifetime, 78% closed inside 2 days, 100% inside 7.**
+That board was not a backlog — it was a churn buffer the loop refilled as fast as
+it drained, and `hydra-dev` implementing it consumed **49.8%** of all tokens while
+the Target merged 1 commit in 7 days.
+
+The specimen that made it legible: #4141 filed a suite-count gate, #4152 merged it,
+it false-positived and reddened master, #4154 was filed CRITICAL, and #4157 reverted
+it — filed, built, broke production, withdrawn, in roughly 36 hours, net change zero.
+
+None of that came from a producer class. `discover_orch` / `research_orch` /
+`architecture_orch` / `cleanup_orch` had all been dark since 2026-07-26, gated off a
+`orch_backfill_idle` signal that cannot be true while the board is non-empty. The
+supply was self-filed. This rule cuts the edge from "the loop noticed a defect" to
+"the loop funds fixing it", which is the only edge that was ever load-bearing.
+
 ## Safety rules
 
 1. NEVER modify `~/hydra` or `~/hydra-betting` working trees directly.
@@ -841,3 +885,4 @@ an `@include` fragment), so it is independent of the `_fragments`/#2552 work.
 4. Token budget is a hard cap; subagent caps (#395) bound a single misbehaving subagent.
 5. `hydra-architect` is operator-only.
 6. Phase 7 is the only path to the end-of-run digest (idempotent shutdown).
+7. Self-filed orchestrator defects are filed `hitl-grill`, never `ready-for-agent` — see the admission rule above. Only the operator promotes.
