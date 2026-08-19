@@ -394,7 +394,7 @@
   "test/taxonomy-classes.test.mts": 8,
   "test/taxonomy-route.test.mts": 2,
   "test/telegram-seam-check.test.mts": 2,
-  "test/test-file-sprawl-guard.test.mts": 3,
+  "test/test-file-sprawl-guard.test.mts": 4,
   "test/test-typecheck-check.test.mts": 6,
   "test/tick-stagnation-alert.test.mts": 1,
   "test/tier-classifier.test.mts": 6,

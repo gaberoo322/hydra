@@ -67,8 +67,101 @@ const SRC_IMPORT_RE = /from\s+["'](\.\.\/(?:src|dashboard)\/[^"']+)["']/g;
  * `spawnSync` argv entry, or a path built from a fixture root. Subprocess
  * targets are referenced as bare strings far more often than as imports, so
  * matching the path shape rather than an import statement is deliberate.
+ *
+ * Applied to COMMENT-STRIPPED source only — see {@link stripComments}.
  */
 const SCRIPT_TARGET_RE = /["'`]([^"'`\s]*scripts\/[A-Za-z0-9_./-]+\.(?:ts|mts|mjs|js|sh|py))["'`]/g;
+
+/**
+ * Blank out `//` and block comments, preserving string and template-literal
+ * CONTENTS (issue #4136 follow-up).
+ *
+ * # Why this is necessary rather than tidy
+ *
+ * Both patterns above are text regexes over raw source, and the script-target
+ * one requires only that the path sit between quotes — which a Markdown-style
+ * backtick inside a JSDoc block satisfies perfectly. Three files were
+ * mis-attributed to `scripts/autopilot/decide.py` on the strength of a single
+ * PROSE mention:
+ *
+ *   test/agent-stream-correlation.test.mts:7    * action emitted by `scripts/autopilot/decide.py`
+ *   test/api-scheduler.test.mts:154             // brain (`scripts/autopilot/decide.py`)
+ *   test/scheduler-status.test.mts:270          // (`scripts/autopilot/decide.py`)
+ *
+ * None of the three executes decide.py; all three are API tests. Because a
+ * single `scripts/**` target wins the specificity ladder outright, one comment
+ * outranked everything the file actually imports.
+ *
+ * The cost is not cosmetic. It inflated decide.py's baseline to 12 against a
+ * true 9, which is three units of SLACK in a ratchet whose whole job is to
+ * resist growth — three new decide.py test files could have landed without
+ * tripping it — and it left three files' real subjects unrecorded.
+ *
+ * This is the exact failure mode CLAUDE.md's search guidance names when it
+ * says to prefer ast-search over text grep because it "never false-matches a
+ * comment or string literal". A full parse would be the principled fix; per
+ * ADR-0014 simplicity this detector strips comments and keeps the regexes,
+ * matching what `scripts/test/suite-count-check.mjs`'s scanner already does
+ * for the same reason.
+ *
+ * Comments are replaced by spaces rather than removed so that offsets and
+ * line structure survive, and a stripped comment can never glue two tokens
+ * together.
+ */
+export function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    const next = source[i + 1];
+    // Line comment — consume to EOL, keeping the newline.
+    if (c === "/" && next === "/") {
+      while (i < n && source[i] !== "\n") {
+        out += " ";
+        i++;
+      }
+      continue;
+    }
+    // Block comment — consume to the terminator, keeping newlines so line
+    // numbers do not shift.
+    if (c === "/" && next === "*") {
+      out += "  ";
+      i += 2;
+      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) {
+        out += source[i] === "\n" ? "\n" : " ";
+        i++;
+      }
+      out += "  ";
+      i += 2;
+      continue;
+    }
+    // String or template literal — copy VERBATIM. Their contents are exactly
+    // what the patterns above are looking for.
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n) {
+        if (source[i] === "\\") {
+          out += source[i] + (source[i + 1] ?? "");
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        if (source[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
 
 function uniq(values: string[]): string[] {
   return [...new Set(values)];
@@ -82,11 +175,75 @@ function normalise(p: string): string {
 }
 
 export function srcImportsOf(source: string): string[] {
-  return uniq([...source.matchAll(SRC_IMPORT_RE)].map((m) => normalise(m[1])));
+  const code = stripComments(source);
+  return uniq([...code.matchAll(SRC_IMPORT_RE)].map((m) => normalise(m[1])));
 }
 
+/**
+ * A `join(...)` / `resolve(...)` call with no nested call in its arguments.
+ * That covers every path-building form in this suite; a nested call would be
+ * skipped rather than mis-parsed.
+ */
+const PATH_CALL_RE = /\b(?:join|resolve)\s*\(([^()]*)\)/g;
+/** `const NAME = join(...)` — the binding half of a two-step path build. */
+const PATH_BINDING_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(?:join|resolve)\s*\(([^()]*)\)/g;
+
+/**
+ * Evaluate one path call's argument list into a partial path.
+ *
+ * String literals contribute their text; a previously-bound identifier
+ * contributes its resolved value; anything else (REPO_ROOT,
+ * import.meta.dirname, "..") contributes nothing. We only care whether the
+ * result contains a `scripts/**` target, so an unresolved absolute prefix is
+ * irrelevant.
+ */
+function evalPathCall(argsSrc: string, bindings: Map<string, string>): string {
+  const parts: string[] = [];
+  for (const raw of argsSrc.split(",")) {
+    const arg = raw.trim();
+    if (!arg) continue;
+    const lit = arg.match(/^["'`]([^"'`]*)["'`]$/);
+    if (lit) {
+      if (lit[1] && lit[1] !== "..") parts.push(lit[1]);
+      continue;
+    }
+    const bound = bindings.get(arg);
+    if (bound) parts.push(bound);
+  }
+  return parts.join("/");
+}
+
+const SCRIPT_PATH_SHAPE = /(?:^|\/)(scripts\/[A-Za-z0-9_./-]+\.(?:ts|mts|mjs|js|sh|py))$/;
+
+/**
+ * Every `scripts/**` file this test EXECUTES, read from code rather than prose.
+ *
+ * Two forms, both needed. A few files name the whole path in one string
+ * literal. Far more build it a segment at a time —
+ * `join(REPO_ROOT, "scripts", "autopilot", "decide.py")`, or in two steps via
+ * `const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot")` — and the
+ * whole-path regex never saw those at all. Before {@link stripComments} that
+ * went unnoticed because a backticked path in the file's header comment
+ * matched instead, so the attribution came out right for the wrong reason;
+ * once comments stopped counting, reading the actual construction became
+ * mandatory. `scripts/autopilot/collect-state.sh` alone owns 9 files that
+ * resolve this way.
+ */
 export function scriptTargetsOf(source: string): string[] {
-  return uniq([...source.matchAll(SCRIPT_TARGET_RE)].map((m) => normalise(m[1])));
+  const code = stripComments(source);
+
+  const bindings = new Map<string, string>();
+  for (const m of code.matchAll(PATH_BINDING_RE)) {
+    bindings.set(m[1], evalPathCall(m[2], bindings));
+  }
+
+  const found: string[] = [];
+  for (const m of code.matchAll(SCRIPT_TARGET_RE)) found.push(normalise(m[1]));
+  for (const m of code.matchAll(PATH_CALL_RE)) {
+    const shape = evalPathCall(m[1], bindings).match(SCRIPT_PATH_SHAPE);
+    if (shape) found.push(shape[1]);
+  }
+  return uniq(found);
 }
 
 export type FileFacts = { file: string; srcImports: string[]; scriptTargets: string[] };
