@@ -64,6 +64,10 @@ const EXPECTED_MEMBERS = [
   "CONSUMER_DEAD",
   // Operator review pickup
   "REVIEW_PICKUP_READY",
+  // Launch-flow watchdog signals (issue #3848, epic #3844)
+  "LAUNCH_QUOTA_STRETCH",
+  "LAUNCH_LATENCY_BREACH",
+  "LAUNCH_PAUSE_FORGOTTEN",
   // Learning-system pattern alerts
   "PATTERN_LOW_MERGE_RATE",
   "PATTERN_CONSECUTIVE_FAILURES",
