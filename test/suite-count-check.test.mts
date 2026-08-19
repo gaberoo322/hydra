@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   countTopLevelEntries,
   compareCapture,
+  fileCoverageDiff,
   testFilesFromArgs,
 } from "../scripts/test/suite-count-check.mjs";
 
@@ -385,5 +386,92 @@ describe("suite-count-check — compareCapture (comparator)", () => {
       testFiles: ["test/a.test.mts"],
     });
     assert.equal(result.ok, true, "the one valid line already meets baseline 1");
+  });
+});
+
+// =============================================================================
+// fileCoverageDiff — the one drop-detection --test-force-exit cannot reach
+// (issue #4141).
+//
+// The count-based verdicts consult the reporter capture, so they inherit its
+// truncation. This one compares two static lists — what the baseline says the
+// suite contains, and what the runner was told to run — and consults no
+// capture at all. Its own top-level suite with its own lifecycle.
+// =============================================================================
+describe("suite-count-check — fileCoverageDiff (issue #4141)", () => {
+  const ROOT = "/repo";
+  const baseline = { "test/a.test.mts": 3, "test/b.test.mts": 5, "test/c.test.mts": 1 };
+
+  test("a run that covers exactly the baselined set is clean", () => {
+    const r = fileCoverageDiff({
+      baseline,
+      testFiles: ["test/a.test.mts", "test/b.test.mts", "test/c.test.mts"],
+      repoRoot: ROOT,
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.droppedFromRun, []);
+    assert.deepEqual(r.unbaselined, []);
+  });
+
+  test("THE MOTIVATING CASE: a baselined file the runner was never told to run", () => {
+    // This is what a glob or runner-config change looks like from here, and it
+    // is exactly what compareCapture cannot see: the dropped file is absent
+    // from testFiles, so the count comparison never inspects it.
+    const r = fileCoverageDiff({
+      baseline,
+      testFiles: ["test/a.test.mts", "test/c.test.mts"],
+      repoRoot: ROOT,
+    });
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.droppedFromRun, ["test/b.test.mts"]);
+    assert.deepEqual(r.unbaselined, []);
+  });
+
+  test("a file that ran but is not baselined is reported too — it sits outside every count verdict", () => {
+    const r = fileCoverageDiff({
+      baseline,
+      testFiles: ["test/a.test.mts", "test/b.test.mts", "test/c.test.mts", "test/new.test.mts"],
+      repoRoot: ROOT,
+    });
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.unbaselined, ["test/new.test.mts"]);
+    assert.deepEqual(r.droppedFromRun, []);
+  });
+
+  test("both directions are reported together, each sorted, never one masking the other", () => {
+    const r = fileCoverageDiff({
+      baseline,
+      testFiles: ["test/c.test.mts", "test/z.test.mts", "test/n.test.mts"],
+      repoRoot: ROOT,
+    });
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.droppedFromRun, ["test/a.test.mts", "test/b.test.mts"]);
+    assert.deepEqual(r.unbaselined, ["test/n.test.mts", "test/z.test.mts"]);
+  });
+
+  test("absolute and redundant relative paths normalise to the repo-relative form", () => {
+    // `npm test` passes a shell-expanded glob; other callers pass absolute
+    // paths. A path-shape difference must never read as a dropped file.
+    const r = fileCoverageDiff({
+      baseline,
+      testFiles: ["/repo/test/a.test.mts", "./test/b.test.mts", "test/./c.test.mts"],
+      repoRoot: ROOT,
+    });
+    assert.equal(r.ok, true, `expected clean, got ${JSON.stringify(r)}`);
+  });
+
+  test("an empty baseline never invents a dropped file", () => {
+    const r = fileCoverageDiff({ baseline: {}, testFiles: ["test/a.test.mts"], repoRoot: ROOT });
+    assert.deepEqual(r.droppedFromRun, []);
+    assert.deepEqual(r.unbaselined, ["test/a.test.mts"]);
+  });
+
+  test("the verdict is independent of any capture — no reporter output is consulted", () => {
+    // Pinning the property that makes this the only blockable verdict: the
+    // function takes no capture path, so #4137's truncation has no route in.
+    const params = fileCoverageDiff.length;
+    assert.equal(params, 1, "fileCoverageDiff takes a single options object");
+    const src = fileCoverageDiff.toString();
+    assert.ok(!/capturePath|parseCapture|observedByFile/.test(src), "fileCoverageDiff must not read the capture");
   });
 });

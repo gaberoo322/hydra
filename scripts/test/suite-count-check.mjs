@@ -190,14 +190,21 @@ export function compareCapture({ capturePath, baseline, testFiles, repoRoot = RE
   // per-test events, so a tail of entries is lost at a rate set by machine
   // timing. It is a reporting artifact and stays advisory.
   //
-  // ZERO observed entries is a different animal. Truncation loses a TAIL; it
-  // cannot make a file that ran vanish entirely — verified directly: even a
-  // file whose every suite and test is `{ skip: true }` still emits one entry
-  // per top-level registration (node:test reports a skipped test as
-  // `test:pass`). So a baselined file that was part of this run and produced
-  // nothing at all did not run: a glob change, a runner-config change, a
-  // rename, a file dropped from the suite. That is deterministic, it is the
-  // regression class this gate actually exists for, and it is worth blocking.
+  // ZERO observed entries READS differently, so it is reported separately —
+  // but it is NOT stronger evidence, and #4157 withdrew the exit it once
+  // carried. The premise that justified blocking ("truncation loses a TAIL, so
+  // it cannot zero a file that ran") is false: it confused a per-FILE tail
+  // with the RUN's event-stream tail. The parent exits with events still
+  // buffered, and a file whose entries all sit inside that window loses ALL of
+  // them. Production falsified it within hours on
+  // test/design-concept-reconcile-check.test.mts — expected 2, observed 0,
+  // file present and running. Two entries is a very small window to survive.
+  //
+  // Neither verdict can catch a file DROPPED from the suite, because a file
+  // absent from `testFiles` is never examined here at all. That class is
+  // covered by `fileCoverageDiff` below, which compares the baseline's file
+  // list against what the runner was told to run and never consults the
+  // capture.
   const shortfalls = [];
   const missingFiles = [];
   for (const file of relevantFiles) {
@@ -217,6 +224,42 @@ export function compareCapture({ capturePath, baseline, testFiles, repoRoot = RE
     readError,
     checkedFileCount: relevantFiles.length,
   };
+}
+
+/**
+ * Compare the BASELINE's file list against the files this run was told to
+ * execute — the one drop-detection that does not depend on the capture.
+ *
+ * `compareCapture` above cannot see a file that vanished from the suite:
+ * `npm test` passes a SHELL-EXPANDED `test/*.test.mts`, so a glob or
+ * runner-config change that drops files drops them from `testFiles` too, and
+ * only files present in `testFiles` are ever inspected. The dropped file is
+ * invisible precisely when it matters. That is why the count-based verdicts
+ * could never catch their own motivating case.
+ *
+ * This check reads no capture, counts nothing, and has no timing component, so
+ * `--test-force-exit`'s reporter truncation cannot reach it. Both directions
+ * are real regressions:
+ *
+ *   - `droppedFromRun` — baselined, but the runner was not told to run it. A
+ *     file silently left out of the suite.
+ *   - `unbaselined`    — run, but absent from the baseline, so every
+ *     count-based verdict silently exempts it. Regenerating the baseline
+ *     during #4137 found two such files; nothing forced the regeneration.
+ *
+ * Both are fixed the same way, in the same PR that caused them:
+ * `node scripts/test/suite-count-check.mjs --update-baseline`.
+ */
+export function fileCoverageDiff({ baseline, testFiles, repoRoot = REPO_ROOT }) {
+  const told = new Set(
+    testFiles.map((f) => relative(repoRoot, resolve(repoRoot, f)).split("\\").join("/")),
+  );
+  const baselined = Object.keys(baseline);
+  const droppedFromRun = baselined.filter((f) => !told.has(f)).sort();
+  const unbaselined = [...told]
+    .filter((f) => !Object.prototype.hasOwnProperty.call(baseline, f))
+    .sort();
+  return { ok: droppedFromRun.length === 0 && unbaselined.length === 0, droppedFromRun, unbaselined };
 }
 
 /** Extract `test/*.test.mts`-style args from an argv-like array. */
