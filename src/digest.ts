@@ -82,6 +82,15 @@ export const CRITICAL_EVENT_TYPES: readonly string[] = [
   E.SCHEDULER_STOPPED,
   E.SCHEDULER_PAUSED_REPETITION,
   E.SCHEDULER_BACKLOG_EMPTY,
+  // Issue #3848 (epic #3844): the three in-band launch-flow signals ride the
+  // immediate CRITICAL bypass (formatCriticalAlert's generic default arm
+  // renders them) rather than the batched digest — a sustained-streak alarm
+  // must not wait up to 4h for the next batch window. All three reach the
+  // digest/Telegram surface this way; only quota/latency are ALSO in
+  // ALERT_TYPES (pause must never raise a dashboard alert).
+  E.LAUNCH_QUOTA_STRETCH,
+  E.LAUNCH_LATENCY_BREACH,
+  E.LAUNCH_PAUSE_FORGOTTEN,
 ];
 
 /**

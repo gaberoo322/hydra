@@ -1,0 +1,1 @@
+- feat: watchdog launch-flow alarms now reach the operator — out-of-band Telegram for fail-safe/meter-dark, dashboard alert + digest line for quota/latency, digest-only for a forgotten pause (#3848)

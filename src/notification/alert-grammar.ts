@@ -39,6 +39,14 @@ export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
   E.PATTERN_LOW_MERGE_RATE, E.PATTERN_CONSECUTIVE_FAILURES,
   E.PATTERN_RECURRING_REGRESSIONS, E.PATTERN_ANCHOR_STUCK,
   E.PATTERN_TEST_DECLINE, E.PATTERN_HIGH_ABANDONMENT,
+  // Issue #3848: the two in-band launch-flow signals. Both are reached only
+  // via a successfully-read pace-gate verdict, which proves the Orchestrator
+  // was up at detection time, so a dashboard alert is the right surface. The
+  // forgotten-pause signal is deliberately NOT an alert type — a deliberate
+  // overnight operator pause must never leave a lingering unread dashboard
+  // alert; pause surfaces as a digest line only (CRITICAL_EVENT_TYPES in
+  // digest.ts — this file contains no pause member at all, by design).
+  E.LAUNCH_QUOTA_STRETCH, E.LAUNCH_LATENCY_BREACH,
 ]);
 
 /**
@@ -55,6 +63,21 @@ export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
  * (#1857) and `buildDigestMessage(DigestGrammarEvent[])` in `digest-format.ts`
  * (#1835). A renamed read field is a compile error here, not a silent miss.
  */
+/**
+ * Render a launch-flow streak duration (issue #3848) for a dashboard-alert
+ * message. The watchdog sends epoch-ms deltas; the operator reads minutes or
+ * hours. Absent/garbage input renders as "?" so a malformed payload degrades
+ * to a vague alert, never an exception.
+ */
+function fmtStreakMs(ms: unknown): string {
+  const n = typeof ms === "number" ? ms : Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "?";
+  if (n < 60_000) return `${Math.round(n / 1000)}s`;
+  if (n < 3_600_000) return `${Math.round(n / 60_000)}min`;
+  const hours = n / 3_600_000;
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
+}
+
 export function formatAlertMessage(event: AlertGrammarEvent): string {
   const p = event.payload || {};
   switch (event.type) {
@@ -67,6 +90,8 @@ export function formatAlertMessage(event: AlertGrammarEvent): string {
     case E.RESEARCH_COMPLETED: return `Research cycle complete: ${p.opportunityCount || 0} opportunities found`;
     case E.SCHEDULER_ERROR: return `Scheduler error: ${p.message || p.error || "unknown"}`;
     case E.CYCLE_OPERATOR_BLOCKED: return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
+    case E.LAUNCH_QUOTA_STRETCH: return `Launch quota stretch: autopilot blocked (${p.reason || "unknown reason"}) for ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
+    case E.LAUNCH_LATENCY_BREACH: return `Launch latency breach: eligibility probe took ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
     default: return `${event.type}: ${JSON.stringify(p).slice(0, 200)}`;
   }
 }
@@ -123,6 +148,9 @@ export interface AlertGrammarEvent {
       | "message"
       | "title"
       | "blockedReason"
+      | "signal"
+      | "durationMs"
+      | "thresholdMs"
     >;
 }
 

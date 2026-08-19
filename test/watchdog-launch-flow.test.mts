@@ -21,7 +21,10 @@
  *          at threshold; non-member→DEL both (stateless recovery).
  *   INV-5  latency is independent of reason; over-budget extends, absent OR
  *          <=budget clears.
- *   INV-9  DETECTION ONLY — no alerts.ts / telegram / POST.
+ *   INV-9  no Orchestrator alerting HTTP surface (superseded by #3848: the
+ *          block now DELIVERS — see test/launch-flow-delivery.test.mts; the
+ *          surviving constraint is "never POST to the Orchestrator's own
+ *          alert API", not "no telegram").
  *   INV-10 never throws / never non-zero; never clears on a read failure.
  *   INV-12 the bash key-template and the TS key builder emit identical strings.
  *
@@ -388,12 +391,15 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW structure (issue #3847)",
     assert.equal(hgetall.length, 1, "block must issue exactly ONE HGETALL per tick");
     assert.equal((block.match(/HGET /g) ?? []).length, 0, "must not read fields via separate HGET calls");
     assert.equal((block.match(/\/api\/usage\/eligibility/g) ?? []).length, 0, "must not consume /api/usage/eligibility");
-    // A `curl` COMMAND invocation (curl + whitespace) is forbidden — the latency
-    // is read from the hash's latency_ms field, never re-probed here. NB this is
-    // deliberately NOT `curl\b`: that would false-match the `curl-missing`
-    // REASON literal in the case pattern below (a pace-gate exit reason, not a
-    // curl invocation).
-    assert.equal((block.match(/curl\s/g) ?? []).length, 0, "must not issue any HTTP probe of its own (curl command)");
+    // Detection still reads ONLY the hash — the block must never probe the
+    // Orchestrator over HTTP. NB #3848 (gamma) deliberately ADDED a `curl`
+    // invocation to the block: the out-of-band Telegram DELIVERY call (target
+    // api.telegram.org, fired once per streak, not per tick). The forbidden
+    // surface is therefore an ORCHESTRATOR-directed curl (localhost / port
+    // 4000), not the curl command itself — the pre-#3848 `curl\s`-count-zero
+    // assertion pinned the detection-only era and would false-fail gamma.
+    assert.equal((block.match(/curl\s[^"\n]*localhost/g) ?? []).length, 0, "must not curl any Orchestrator endpoint (detection reads only the hash; delivery goes to api.telegram.org / the notifications stream)");
+    assert.equal((block.match(/curl\s[^"\n]*localhost:4000/g) ?? []).length, 0, "must not curl the Orchestrator HTTP API");
     // The HGETALL references the last-tick key variable, whose literal equals the TS constant.
     assert.ok(block.includes('LAST_TICK_KEY='), "block must define LAST_TICK_KEY");
     const lit = block.match(/LAST_TICK_KEY="([^"]+)"/);
@@ -401,12 +407,25 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW structure (issue #3847)",
     assert.equal(lit![1], PACE_GATE_LAST_TICK_KEY, "watchdog LAST_TICK_KEY drifted from PACE_GATE_LAST_TICK_KEY");
   });
 
-  test("INV-9: DETECTION ONLY — no alerts.ts / telegram / alert POST in the block", () => {
+  test("INV-9 (#3848 supersession): delivery is wired but never touches the Orchestrator HTTP API for alerting", () => {
+    // The #3847 artifact's INV-9 was "DETECTION ONLY — no alerts.ts / telegram
+    // / alert POST". Issue #3848 (gamma) deliberately superseded it: the block
+    // now DELIVERS at the fired absent→present transition — out-of-band direct
+    // Telegram for fail-safe/meter-dark, enveloped XADD onto the notifications
+    // stream for quota/latency/pause. The surface constraint that SURVIVES is
+    // the one INV-9 actually existed for: the block must never call the
+    // Orchestrator's own alerting HTTP surface (a dashboard-alert POST would
+    // be written and unreadable in exactly the failure modes this block
+    // detects). Full delivery contract: test/launch-flow-delivery.test.mts.
     const src = readFileSync(WATCHDOG, "utf-8");
     const block = src.slice(src.indexOf("run_launch_flow()"), src.indexOf("# Entry point"));
-    for (const forbidden of ["alerts.ts", "telegram", "Telegram", "sendAlert", "POST /api/alerts"]) {
-      assert.ok(!block.includes(forbidden), `launch-flow block must not reference ${forbidden} (detection only)`);
+    for (const forbidden of ["alerts.ts", "pushAlert", "POST /api/alerts", "/api/webhooks/sentry"]) {
+      assert.ok(!block.includes(forbidden), `launch-flow block must not reference ${forbidden} (no Orchestrator alerting surface)`);
     }
+    // And the delivery hook itself must exist exactly at the fired transition
+    // (the #3848 contract): one deliver_signal call inside track_signal.
+    assert.equal((block.match(/deliver_signal "\$sig"/g) ?? []).length, 1,
+      "track_signal must deliver exactly once, at the fired absent→present transition");
   });
 
   test("INV-12: bash key-template and TS key builder emit identical strings", () => {

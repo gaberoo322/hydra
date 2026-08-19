@@ -83,6 +83,17 @@ const NOTIFICATION_EVENT_TYPES = {
   // --- Operator review pickup (issue #745) ---
   REVIEW_PICKUP_READY: "review:pickup_ready",
 
+  // --- Launch-flow watchdog signals (issue #3848, epic #3844) ---
+  // Published by the watchdog's run_launch_flow block (a direct enveloped
+  // redis-cli XADD from bash — the ADR-0017 Category A on-wire shape
+  // EventBus.publish constructs) at the exact tick a sustained-streak fired
+  // marker transitions absent→present. quota/latency are ALSO in ALERT_TYPES
+  // (dashboard alert via the notification-consumer's compile-checked grammar);
+  // pause is deliberately withheld from ALERT_TYPES (digest line only).
+  LAUNCH_QUOTA_STRETCH: "launch:quota_stretch",
+  LAUNCH_LATENCY_BREACH: "launch:latency_breach",
+  LAUNCH_PAUSE_FORGOTTEN: "launch:pause_forgotten",
+
   // --- Learning-system pattern alerts ---
   PATTERN_LOW_MERGE_RATE: "pattern:low_merge_rate",
   PATTERN_CONSECUTIVE_FAILURES: "pattern:consecutive_failures",
@@ -195,6 +206,9 @@ type NotificationEventPayload = Record<string, unknown> & {
   blockedReason?: string;
   reescalation?: boolean;
   blockedDays?: number | string;
+  // --- Launch-flow watchdog signals (issue #3848) ---
+  signal?: string;
+  thresholdMs?: number;
 };
 
 export { NOTIFICATION_EVENT_TYPES };
