@@ -26,6 +26,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 import {
   RECONCILIATION_HEADING,
@@ -45,6 +46,7 @@ import {
   isSafeRepoRelativePath,
   normaliseInvariantText,
   parseAssertion,
+  declaresSubtest,
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
@@ -502,9 +504,14 @@ describe("design-concept reconcile check (pure)", () => {
     "INV-2 MUST NOT deliver the enforcement as a new advisory workflow file.",
   ];
   const HASH = "8c0dfe60287afcf4f464b5e94c35e0fd";
+  // Issue #4118: a MUST-NOT invariant is dischargeable ONLY by naming a test,
+  // so the fixture needs a suite file that genuinely declares one.
+  const SUBTEST = "the enforcement is not delivered as a new advisory workflow";
   const FILES = {
     "scripts/ci/design-concept-reconcile-check.ts": "export function checkReconciliation() {}",
+    "test/design-concept-reconcile-check.test.mts": `  test("${SUBTEST}", () => {});\n`,
   };
+  const TEST_ASSERTION = `\`test: test/design-concept-reconcile-check.test.mts :: "${SUBTEST}"\``;
 
   function goodBody(): string {
     return [
@@ -514,7 +521,7 @@ describe("design-concept reconcile check (pure)", () => {
       "",
       "Artifact: `8c0dfe60287a`",
       '- INV-1: "The checker MUST live in scripts/ci" — verified by: `file-contains: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation`',
-      '- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: `file-absent: .github/workflows/design-concept-reconcile.yml`',
+      `- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: ${TEST_ASSERTION}`,
     ].join("\n");
   }
 
@@ -557,7 +564,7 @@ describe("design-concept reconcile check (pure)", () => {
       "",
       "Artifact: (see the approved grill thread)",
       '- INV-1: "The checker MUST live in scripts/ci" — verified by: `file-contains: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation`',
-      '- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: `file-absent: .github/workflows/design-concept-reconcile.yml`',
+      `- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: ${TEST_ASSERTION}`,
     ].join("\n");
     assert.equal(parseReconciliationSection(body).artifactHash, null);
     assert.ok(codes(run(body)).includes("missing-artifact-hash"));
@@ -578,7 +585,7 @@ describe("design-concept reconcile check (pure)", () => {
       "status: approved, full hash below",
       HASH,
       '- INV-1: "The checker MUST live in scripts/ci" — verified by: `file-contains: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation`',
-      '- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: `file-absent: .github/workflows/design-concept-reconcile.yml`',
+      `- INV-2: "MUST NOT deliver the enforcement as a new advisory workflow" — verified by: ${TEST_ASSERTION}`,
     ].join("\n");
     assert.equal(parseReconciliationSection(body).artifactHash, null, "non-adjacent bare hash still does not resolve");
     const withMention = run(body).find((v) => v.code === "missing-artifact-hash");
@@ -613,17 +620,89 @@ describe("design-concept reconcile check (pure)", () => {
     assert.ok(q!.message.includes(INVARIANTS[0]));
   });
 
-  test("a MUST-NOT invariant cannot be discharged with prose", () => {
-    const v = run(
-      goodBody().replace(
-        "`file-absent: .github/workflows/design-concept-reconcile.yml`",
-        "`manual: I checked, there is no workflow`",
-      ),
+  test("a MUST-NOT invariant cannot be discharged by ANY lexical assertion kind (issue #4118)", () => {
+    // Was "cannot be discharged with prose". Rejecting only `manual:` left
+    // every other kind available — which is exactly how PR #4090 discharged a
+    // MUST-NEVER invariant with an occurrences: count. The rule is now
+    // test-or-nothing, so this enumerates the whole grammar rather than one
+    // member of it.
+    const LEXICAL = [
+      "`manual: I checked, there is no workflow`",
+      "`file-absent: .github/workflows/design-concept-reconcile.yml`",
+      "`file-exists: scripts/ci/design-concept-reconcile-check.ts`",
+      "`file-contains: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation`",
+      "`file-lacks: scripts/ci/design-concept-reconcile-check.ts :: nonesuch`",
+      "`file-matches: scripts/ci/design-concept-reconcile-check.ts :: /checkReconciliation/`",
+      "`file-not-matches: scripts/ci/design-concept-reconcile-check.ts :: /nonesuch/`",
+      "`occurrences: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation == 1`",
+    ];
+    for (const declared of LEXICAL) {
+      const v = run(goodBody().replace(TEST_ASSERTION, declared));
+      const m = v.find((x) => x.code === "must-not-needs-machine-assertion");
+      assert.ok(m, `expected ${declared} to be rejected on a MUST-NOT invariant`);
+      assert.equal(m!.invariantIndex, 2);
+      assert.equal(m!.invariant, INVARIANTS[1]);
+    }
+  });
+
+  test("PR #4090 shape: an occurrences: count that evaluates TRUE still blocks (issue #4118)", () => {
+    // The incident, reduced. `checkReconciliation` appears exactly once in the
+    // fixture, so this assertion is TRUE — and that is the whole problem: it
+    // was never evidence about a prohibition. It must be rejected on KIND,
+    // before evaluation runs at all.
+    const declared = "`occurrences: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation == 1`";
+    const v = run(goodBody().replace(TEST_ASSERTION, declared));
+    assert.ok(
+      v.some((x) => x.code === "must-not-needs-machine-assertion"),
+      "a TRUE lexical assertion must still be rejected as the wrong KIND of evidence",
     );
-    const m = v.find((x) => x.code === "must-not-needs-machine-assertion");
-    assert.ok(m, "expected must-not-needs-machine-assertion");
-    assert.equal(m!.invariantIndex, 2);
-    assert.equal(m!.invariant, INVARIANTS[1]);
+    assert.ok(
+      !v.some((x) => x.code === "assertion-failed"),
+      "and rejected for its kind, not for evaluating false — it evaluated TRUE",
+    );
+  });
+
+  test("a MUST-NOT invariant discharged by a test: naming a real subtest passes (issue #4118)", () => {
+    assert.deepEqual(run(goodBody()), [], "the fixture's MUST-NOT entry is discharged by a named, declared test");
+  });
+
+  test("a test: assertion naming a subtest that does not exist FAILS", () => {
+    const v = run(goodBody().replace(SUBTEST, "a subtest nobody ever wrote"));
+    assert.ok(
+      v.some((x) => x.code === "assertion-failed"),
+      "naming a test that is not declared must not pass, or the kind is decoration",
+    );
+  });
+
+  test("a test: name appearing only in a COMMENT fails — structural, not substring", () => {
+    // The difference from occurrences: in one case. A mention is not a
+    // declaration.
+    const v = checkReconciliation({
+      prBody: goodBody(),
+      invariants: INVARIANTS,
+      artifactHash: HASH,
+      readFile: fakeReader({
+        ...FILES,
+        "test/design-concept-reconcile-check.test.mts": `// ${SUBTEST}\nconst s = "${SUBTEST}";\n`,
+      }),
+    });
+    assert.ok(v.some((x) => x.code === "assertion-failed"), "a mention must not discharge an invariant");
+  });
+
+  test("a SKIPPED test does not discharge an invariant", () => {
+    const v = checkReconciliation({
+      prBody: goodBody(),
+      invariants: INVARIANTS,
+      artifactHash: HASH,
+      readFile: fakeReader({
+        ...FILES,
+        "test/design-concept-reconcile-check.test.mts": `  test.skip("${SUBTEST}", () => {});\n`,
+      }),
+    });
+    assert.ok(
+      v.some((x) => x.code === "assertion-failed"),
+      "a skipped test asserts nothing, so it cannot be the evidence for a prohibition",
+    );
   });
 
   test("prose IS accepted for a positive (non-MUST-NOT) invariant", () => {
@@ -637,22 +716,26 @@ describe("design-concept reconcile check (pure)", () => {
   });
 
   test("a falsified assertion blocks with expected-vs-observed and the named invariant", () => {
+    // Retargeted onto INV-1 (positive) by #4118: on a MUST-NOT invariant the
+    // wrong-KIND rejection now fires first, so a lexical assertion never
+    // reaches evaluation and this case could no longer observe what it exists
+    // to observe.
     const v = run(
       goodBody().replace(
-        "`file-absent: .github/workflows/design-concept-reconcile.yml`",
-        "`file-exists: .github/workflows/design-concept-reconcile.yml`",
+        "`file-contains: scripts/ci/design-concept-reconcile-check.ts :: checkReconciliation`",
+        "`file-contains: scripts/ci/design-concept-reconcile-check.ts :: neverAppearsAnywhere`",
       ),
     );
     const f = v.find((x) => x.code === "assertion-failed");
     assert.ok(f, "expected assertion-failed");
-    assert.equal(f!.invariant, INVARIANTS[1]);
+    assert.equal(f!.invariant, INVARIANTS[0]);
     assert.match(f!.message, /expected:/);
     assert.match(f!.message, /observed:/);
   });
 
   test("an unparseable assertion blocks rather than passing silently", () => {
     const v = run(
-      goodBody().replace("`file-absent: .github/workflows/design-concept-reconcile.yml`", "`I eyeballed it`"),
+      goodBody().replace(TEST_ASSERTION, "`I eyeballed it`"),
     );
     assert.ok(codes(v).includes("unparseable-assertion"));
   });
@@ -812,5 +895,159 @@ describe("design-concept reconcile adapter approval guard (issue #3849)", () => 
     } else {
       assert.fail("expected a draft artifact to skip, not bind");
     }
+  });
+});
+
+// =============================================================================
+// The `test:` assertion kind — parsing (issue #4118).
+// =============================================================================
+describe("design-concept-reconcile — parseAssertion, `test:` kind (issue #4118)", () => {
+  test("parses a path and a quoted subtest name, in any of the three quote styles", () => {
+    for (const q of ['"', "'", "`"]) {
+      assert.deepEqual(
+        parseAssertion(`test: test/a.test.mts :: ${q}does the thing${q}`),
+        { kind: "test", path: "test/a.test.mts", name: "does the thing" },
+        `quote style ${q} must parse`,
+      );
+    }
+  });
+
+  test("a subtest name containing :: and regex metacharacters survives intact", () => {
+    // The name is whatever the test is actually called; real subtest names in
+    // this repo contain colons, parentheses and dots.
+    const a = parseAssertion('test: test/a.test.mts :: "INV-5: absent latency_ms clears the streak (probe never reached)"');
+    assert.equal(a.kind, "test");
+    assert.equal(
+      (a as { name: string }).name,
+      "INV-5: absent latency_ms clears the streak (probe never reached)",
+    );
+  });
+
+  test("a path outside the suite is UNPARSEABLE, never a pass", () => {
+    // The kind's whole value is that it names something the `test` job ran.
+    for (const path of ["src/api.ts", "scripts/ci/x.ts", "test/helper.mts", "docs/a.md"]) {
+      const a = parseAssertion(`test: ${path} :: "x"`);
+      assert.equal(a.kind, "unparseable", `${path} must not parse as a test assertion`);
+      assert.match((a as { reason: string }).reason, /test\/\*\*\.test\.mts|name a file in the suite/);
+    }
+  });
+
+  test("an unsafe path is rejected by the same guard as every other kind", () => {
+    for (const path of ["/etc/passwd", "../../test/a.test.mts", "~/test/a.test.mts"]) {
+      assert.equal(parseAssertion(`test: ${path} :: "x"`).kind, "unparseable");
+    }
+  });
+
+  test("an unquoted or empty subtest name is unparseable", () => {
+    assert.equal(parseAssertion("test: test/a.test.mts :: does the thing").kind, "unparseable");
+    assert.equal(parseAssertion('test: test/a.test.mts :: ""').kind, "unparseable");
+    assert.equal(parseAssertion("test: test/a.test.mts").kind, "unparseable");
+  });
+
+  test("a `test:` assertion is machine-checkable — it is evidence, not prose", () => {
+    assert.equal(isMachineCheckable(parseAssertion('test: test/a.test.mts :: "x"')), true);
+  });
+});
+
+// =============================================================================
+// declaresSubtest — the structural match behind the `test:` kind (issue #4118).
+// =============================================================================
+describe("design-concept-reconcile — declaresSubtest (issue #4118)", () => {
+  const NAME = "does the thing";
+
+  test("matches test( / it( / describe( at the head of a line, with any indentation", () => {
+    for (const fn of ["test", "it", "describe"]) {
+      assert.equal(declaresSubtest(`${fn}("${NAME}", () => {});`, NAME), true, `${fn}( must match`);
+      assert.equal(declaresSubtest(`      ${fn}('${NAME}', () => {});`, NAME), true, `indented ${fn}( must match`);
+    }
+  });
+
+  test("does NOT match a mention in a comment, a string, or mid-line", () => {
+    assert.equal(declaresSubtest(`// ${NAME}`, NAME), false);
+    assert.equal(declaresSubtest(`const s = "${NAME}";`, NAME), false);
+    assert.equal(declaresSubtest(`  /* test("${NAME}") */`, NAME), false, "a commented-out declaration is not a declaration");
+    assert.equal(declaresSubtest(`assert.ok(x, "${NAME}");`, NAME), false);
+  });
+
+  test("does NOT match a skipped or todo declaration", () => {
+    assert.equal(declaresSubtest(`test.skip("${NAME}", () => {});`, NAME), false);
+    assert.equal(declaresSubtest(`it.todo("${NAME}");`, NAME), false);
+  });
+
+  test("requires the EXACT name — a prefix or a superstring does not satisfy it", () => {
+    assert.equal(declaresSubtest(`test("${NAME} and more", () => {});`, NAME), false);
+    assert.equal(declaresSubtest(`test("does the", () => {});`, NAME), false);
+  });
+
+  test("a name containing regex metacharacters is matched literally", () => {
+    const tricky = "INV-5: clears (probe never reached) [a.b]";
+    assert.equal(declaresSubtest(`test("${tricky}", () => {});`, tricky), true);
+    assert.equal(declaresSubtest(`test("INV-5X clears XprobeYneverYreachedZ XaXbZ", () => {});`, tricky), false);
+  });
+
+  test("finds a declaration anywhere in a multi-line file", () => {
+    const src = ['import test from "node:test";', "", 'describe("outer", () => {', `  test("${NAME}", () => {});`, "});"].join("\n");
+    assert.equal(declaresSubtest(src, NAME), true);
+  });
+});
+
+// =============================================================================
+// Additivity + contract-documentation guards (issue #4118).
+// =============================================================================
+describe("design-concept-reconcile — the test: kind is strictly additive (issue #4118)", () => {
+  const FILES = {
+    "src/x.ts": "export function doThing() {}\nconst other = 1;\n",
+    "test/a.test.mts": 'test("real subtest", () => {});\n',
+  };
+  const ev = (raw: string) => evaluateAssertion(parseAssertion(raw), fakeReader(FILES));
+
+  test("INV-4: every pre-existing assertion kind evaluates exactly as it did before", () => {
+    // Pinning that adding a union member and a switch case changed no other
+    // branch. If a future edit to the `test:` case leaks into these, this
+    // fails rather than quietly shifting the meaning of an existing kind.
+    assert.equal(ev("file-exists: src/x.ts").ok, true);
+    assert.equal(ev("file-exists: src/missing.ts").ok, false);
+    assert.equal(ev("file-absent: src/missing.ts").ok, true);
+    assert.equal(ev("file-absent: src/x.ts").ok, false);
+    assert.equal(ev("file-contains: src/x.ts :: doThing(").ok, true);
+    assert.equal(ev("file-contains: src/x.ts :: nonesuch").ok, false);
+    assert.equal(ev("file-lacks: src/x.ts :: nonesuch").ok, true);
+    assert.equal(ev("file-lacks: src/x.ts :: doThing(").ok, false);
+    // A missing file is never a vacuous pass for the negative kinds.
+    assert.equal(ev("file-lacks: src/missing.ts :: anything").ok, false);
+    assert.equal(ev("file-not-matches: src/missing.ts :: /anything/").ok, false);
+    assert.equal(ev("file-matches: src/x.ts :: /doThing/").ok, true);
+    assert.equal(ev("file-not-matches: src/x.ts :: /nonesuch/").ok, true);
+    assert.equal(ev("occurrences: src/x.ts :: doThing == 1").ok, true);
+    assert.equal(ev("occurrences: src/x.ts :: doThing == 2").ok, false);
+    assert.equal(ev("occurrences: src/x.ts :: doThing >= 1").ok, true);
+    assert.equal(ev("manual: I read it").ok, true);
+  });
+
+  test("INV-4: a positive invariant may still be discharged by any kind, including test:", () => {
+    // The new kind is permitted everywhere; it is only REQUIRED on
+    // prohibitions. Nothing about positive invariants got narrower.
+    assert.equal(ev('test: test/a.test.mts :: "real subtest"').ok, true);
+    assert.equal(ev('test: test/a.test.mts :: "not a real subtest"').ok, false);
+  });
+});
+
+describe("design-concept-reconcile — the dispatch contract documents the test: kind (issue #4118)", () => {
+  const FRAGMENT = join(
+    import.meta.dirname,
+    "..",
+    "docs/operator-playbooks/_fragments/hydra-dev-child-flow.md",
+  );
+
+  test("INV-6: the hydra-dev fragment documents test: and states MUST-NOT requires it exclusively", () => {
+    // A gate whose contract is not written down where dispatches read it turns
+    // into a surprise red on a PR body that was written in good faith. This
+    // fragment is what a dev_orch dispatch is handed, so the grammar change
+    // has to be visible there before the first PR meets it.
+    const md = readFileSync(FRAGMENT, "utf-8");
+    assert.match(md, /test: test\/<file>\.test\.mts :: "<subtest name>"/, "the grammar list must show the test: form");
+    assert.match(md, /MUST NOT \/ MUST NEVER can ONLY be discharged with a `test:`/, "exclusivity must be stated, not implied");
+    assert.match(md, /#4118/, "the fragment must cite the issue that changed the contract");
+    assert.match(md, /test\.skip\(` does not count|does not count \(a skipped test asserts nothing\)/, "the skip rule must be documented — it is surprising otherwise");
   });
 });
