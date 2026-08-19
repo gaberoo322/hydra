@@ -730,6 +730,40 @@ to do. The L2 decision brain in `decide.py` benefits from a stable in-process
 view of pipeline state across many turns, so the Gate launches one long run
 and lets it run to budget/clock/idle rather than firing many short bursts.
 
+### Stop levers: operator `paused` vs `hydra-pace-gate.timer` (issue #3868)
+
+Two independent levers stop autopilot activity, and they stop **different
+things** — picking the wrong one either burns quota you meant to freeze, or
+starves the free lane you meant to keep running.
+
+| Lever | What it stops | What keeps running |
+|---|---|---|
+| `POST /api/autopilot/paused` (`.reasons.paused == true`) | **Everything**, including the GLM dev-drainer (ADR-0032 Decision 6: `scripts/glm/drainer-loop.sh`'s kill-switch honors operator `paused` — see `is_operator_paused()`, `GET /api/autopilot/paused`) | Nothing — this is the full kill switch |
+| Stopping `hydra-pace-gate.timer` (`systemctl --user stop hydra-pace-gate.timer`) | Only Claude AFK relaunches — the Pace Gate simply never fires `systemctl --user start hydra-autopilot.service` again | The GLM drainer (`hydra-glm-drainer.timer` is a separate unit, untouched) keeps draining `glm-eligible` issues on z.ai's own quota |
+
+**Use `paused=true`** for a genuine cost emergency or full-system freeze —
+Anthropic quota exhaustion, an incident under investigation, anything where
+*no* autonomous authoring (Claude or GLM) should happen. This was the
+original design; the operational footgun discovered 2026-08 is that a
+cost-emergency pause left on for days also silently idled the FREE GLM lane,
+queuing ~30 `glm-eligible` issues with zero drainer activity, because
+`paused` was never scoped to "stop spending Anthropic quota" — it stops
+spending *any* quota, including the independent one that isn't the problem.
+
+**Use `hydra-pace-gate.timer` stop** when the goal is specifically "stop
+Claude from launching new AFK runs" while the GLM drainer — running on its
+own z.ai credential, its own daily PR cap, and identical `qa_orch` + CI
+gating — keeps working through its backlog unattended. This is the narrower,
+usually-correct lever for anything that isn't a full-system stop: pausing to
+debug the Claude-side decision loop, throttling Anthropic spend specifically,
+or any Claude-only maintenance window.
+
+Neither lever alone diagnoses a *sterile* drainer (heartbeat fresh, zero PRs
+landing) — that is what `scripts/hydra-watchdog.sh`'s `run_glm_drainer_throughput`
+block alarms on (see that script's `## GLM DRAINER ZERO-THROUGHPUT` header
+comment); a drainer alarming zero-throughput is a bug in the drainer's
+authoring/PR step, not something either stop lever fixes.
+
 ## Slot lifecycle events (issue #509)
 
 Subagent slot accounting is event-driven: `SubagentStop` and `Notification` hooks XADD events onto `hydra:autopilot:slot-events`; `collect-state.sh` drains it each turn; `decide.py` translates `subagent_stop` events into completions and appends failures to `state.failure_log`. A silent-wedge wall-clock fallback (`subagent_max_wall_seconds=3600`) covers hook failures. Full event schema, turn-consumption detail, env overrides, and best-effort guarantees are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
