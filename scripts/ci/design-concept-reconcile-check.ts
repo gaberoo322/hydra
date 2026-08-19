@@ -133,6 +133,7 @@ export type Assertion =
   | { kind: "file-matches"; path: string; source: string; flags: string }
   | { kind: "file-not-matches"; path: string; source: string; flags: string }
   | { kind: "occurrences"; path: string; needle: string; op: "==" | "<=" | ">="; count: number }
+  | { kind: "test"; path: string; name: string }
   | { kind: "manual"; note: string }
   | { kind: "unparseable"; raw: string; reason: string };
 
@@ -527,7 +528,51 @@ export function parseAssertion(raw: string): Assertion {
     return { kind: "occurrences", path, needle, op: cmp[2] as "==" | "<=" | ">=", count: parseInt(cmp[3], 10) };
   }
 
+  if (kind === "test") {
+    const parts = splitOnDoubleColon(rest);
+    if (!parts) return bad(s, 'test needs `<path> :: "<subtest name>"`');
+    const path = stripBackticks(parts[0]);
+    if (!isSafeRepoRelativePath(path)) return bad(s, `unsafe or malformed path: ${path || "(empty)"}`);
+    // A `test:` assertion's whole value is that it points at the SUITE. A path
+    // outside test/ could not have been executed by the required `test` job,
+    // so accepting one would reintroduce exactly the false pass this kind
+    // exists to prevent — it is unparseable, never a pass.
+    if (!/^test\/.*\.test\.mts$/.test(path)) {
+      return bad(s, `test assertions must name a file in the suite (test/**.test.mts), got: ${path}`);
+    }
+    // Quote forms: '...', "..." and `...`. The backtick form needs the extra
+    // arm below because `stripBackticks` at the top of this function removes
+    // the assertion's own Markdown code-span wrapper — and a trailing run of
+    // backticks is indistinguishable from the name's own closer, so the closer
+    // is already gone by the time we get here. Accept it with or without.
+    const raw = parts[1].trim();
+    const q = /^(['"])([\s\S]*)\1$/.exec(raw) ?? /^`([\s\S]*?)`?$/.exec(raw);
+    if (!q) return bad(s, 'test needs the subtest name in quotes, e.g. `test: test/x.test.mts :: "does the thing"`');
+    const name = q.length === 3 ? q[2] : q[1];
+    if (name.trim().length === 0) return bad(s, "test needs a non-empty subtest name");
+    return { kind: "test", path, name };
+  }
+
   return bad(s, `unknown assertion kind \`${kind}\``);
+}
+
+/**
+ * Does this source DECLARE a test with exactly this name?
+ *
+ * Structural, not a substring count. The line must — after leading whitespace
+ * only — open `test(`, `it(` or `describe(` and then the quoted name, so a
+ * mention of the name in a comment, a prose sentence, or an unrelated string
+ * never satisfies it. That distinction is the entire point: `occurrences:`
+ * counting a substring is what let PR #4090 discharge a MUST-NEVER invariant
+ * against an implementation that did the opposite.
+ *
+ * `test.skip(` / `it.todo(` deliberately do NOT match. A skipped test asserts
+ * nothing, so it cannot discharge an invariant — only the bare call forms do.
+ */
+export function declaresSubtest(source: string, name: string): boolean {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(String.raw`^[ \t]*(?:test|it|describe)\(\s*(['"\x60])` + esc + String.raw`\1`, "m");
+  return re.test(source);
 }
 
 /** True iff the assertion is re-executable by the gate (i.e. not prose). */
@@ -600,6 +645,16 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
         ok: hit === want,
         expected: `${a.path} ${want ? "matches" : "does not match"} /${a.source}/`,
         observed: hit ? "matched" : "no match",
+      };
+    }
+    case "test": {
+      const c = readFile(a.path);
+      if (c === null) return missing(a.path);
+      const hit = declaresSubtest(c, a.name);
+      return {
+        ok: hit,
+        expected: `${a.path} declares a test named "${a.name}"`,
+        observed: hit ? "declared" : "no test/it/describe declares that name",
       };
     }
     case "occurrences": {
@@ -758,14 +813,40 @@ export function checkReconciliation(input: ReconcileInput): Violation[] {
       continue;
     }
 
-    if (assertion.kind === "manual" && isMustNotInvariant(invariant)) {
+    // Issue #4118 — a MUST-NOT / MUST-NEVER invariant is a claim about
+    // BEHAVIOUR, and no lexical assertion can discharge one. The gate used to
+    // reject only `manual:` prose here, which left every other kind available:
+    // PR #4090 discharged
+    //
+    //   "... the non-closing 'Refs #N' form must never trigger the transition"
+    //
+    // with `occurrences: scripts/autopilot/pr-refs.py :: |refs?) == 1`. The
+    // gate returned 7/7 TRUE; independent adversarial QA FAILed the same PR on
+    // that same invariant. Both were right — a substring count proves some
+    // text exists in some file, and is satisfiable by an implementation doing
+    // the exact opposite of what the invariant requires.
+    //
+    // So the accepted evidence for a prohibition is a NAMED TEST. Combined
+    // with the required `test` job, which proves the whole suite passed, that
+    // is a passing test asserting the prohibition — evidence of the right KIND
+    // for the claim.
+    //
+    // Deliberately narrow: the trigger is today's already-proven MUST NOT /
+    // MUST NEVER lexical signal, reused verbatim (isMustNotInvariant is
+    // untouched). Broadening it to positive "must" claims would sweep in
+    // nearly every invariant this schema produces — #4093's own 7 contain 5
+    // positive-MUST claims — and a wrong heuristic inside a REQUIRED gate
+    // wedges the merge queue repo-wide.
+    if (assertion.kind !== "test" && isMustNotInvariant(invariant)) {
       violations.push({
         code: "must-not-needs-machine-assertion",
         invariantIndex: n,
         invariant,
         message:
-          `INV-${n} is a MUST-NOT invariant, so prose ("manual:") is not accepted — it needs a ` +
-          `machine-checkable assertion (file-absent / file-lacks / file-not-matches / occurrences).\n` +
+          `INV-${n} is a MUST-NOT / MUST-NEVER invariant, so it can only be discharged by NAMING A ` +
+          `TEST that asserts it: \`test: test/<file>.test.mts :: "<subtest name>"\`. ` +
+          `A "${assertion.kind}" assertion proves text exists in a file, which is satisfiable by an ` +
+          `implementation that does the opposite of what the invariant forbids (issue #4118, PR #4090).\n` +
           `    invariant: ${invariant}\n    declared:  ${JSON.stringify(entry.assertion)}`,
       });
       continue;

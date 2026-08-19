@@ -177,13 +177,20 @@ would swallow these backticked paths as scope entries):
 Artifact: `<first 12+ chars of .artifactHash>`
 
 - INV-1: "<verbatim prefix of invariants[0], >=16 chars>" — verified by: `file-contains: src/x.ts :: doThing(`
-- INV-2: "<verbatim prefix of invariants[1]>" — verified by: `file-lacks: src/api.ts :: pruneIndex(`
+- INV-2: "<verbatim prefix of invariants[1], a MUST NOT>" — verified by: `test: test/api.test.mts :: "pruneIndex is never called on a closed lane"`
 ```
 
 Rules: one `INV-<n>` bullet per invariant (count must match); the quote must be
 a verbatim whitespace-normalised **prefix** of that invariant (paraphrase
 fails); the cited hash must prefix the live `artifactHash`; and an invariant
-containing **MUST NOT / MUST NEVER cannot be discharged with `manual:` prose**.
+containing **MUST NOT / MUST NEVER can ONLY be discharged with a `test:`
+assertion** — not `manual:` prose, and not any lexical kind either (issue
+#4118). A prohibition is a claim about behaviour, and a substring count proves
+only that some text exists in some file: PR #4090 discharged a MUST-NEVER
+invariant with `occurrences: … == 1` against an implementation that did the
+opposite, and the gate returned 7/7 TRUE while adversarial QA FAILed it. Name
+the test that asserts the prohibition instead; the required `test` job proves
+it passed.
 The `INV-<n>` label may optionally be wrapped in Markdown emphasis —
 `**INV-1**`, `*INV-2*`, `__INV-3__` all parse identically to the plain
 `INV-1` form shown above (issue #4037); the bullet-marker anchor still means a
@@ -195,9 +202,19 @@ Assertion grammar (Node-stdlib only, evaluated against the tree at HEAD — neve
 `file-absent: <path>` · `file-contains: <path> :: <literal>` ·
 `file-lacks: <path> :: <literal>` · `file-matches: <path> :: /<re>/<flags>` ·
 `file-not-matches: <path> :: /<re>/<flags>` ·
-`occurrences: <path> :: <literal> == <n>` (also `<=`, `>=`) · `manual: <prose>`
-(positive invariants only). `file-lacks` / `file-not-matches` FAIL on a missing
-file — never a vacuous pass.
+`occurrences: <path> :: <literal> == <n>` (also `<=`, `>=`) ·
+`test: test/<file>.test.mts :: "<subtest name>"` (**required** for MUST NOT /
+MUST NEVER; permitted for any invariant) · `manual: <prose>` (positive
+invariants only). `file-lacks` / `file-not-matches` FAIL on a missing file —
+never a vacuous pass.
+
+`test:` is satisfied only when the named file declares that subtest
+structurally — a line opening `test(`, `it(` or `describe(` followed by the
+exact quoted name. A mention in a comment or a string does not count, a
+`test.skip(` does not count (a skipped test asserts nothing), and the path must
+be a `test/**.test.mts` file: a path outside the suite could not have been
+executed by the `test` job, so it is rejected as unparseable rather than
+passing.
 
 **If ANY invariant cannot be satisfied, do NOT open the PR**: emit a
 `## Friction Report` naming the unmet invariant and stop. "Not applicable" is
