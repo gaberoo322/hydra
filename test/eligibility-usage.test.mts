@@ -1,24 +1,34 @@
 /**
- * Unit test for `getEligibilityUsage()` (`src/cost/eligibility-usage.ts`),
- * which had ZERO test coverage before this suite (issue #3821).
+ * Unit tests for `getEligibilityUsage()` (`src/cost/eligibility-usage.ts`) — the
+ * meter-only usage input behind the autopilot admission verdict.
  *
- * PRIMARY ACCEPTANCE CRITERION (issue #3821): a single failed usage read
- * against a cold (`null`) OAuth cache must NOT produce `meterUnavailable:
- * true` / force `allow=false` on the whole autopilot. Before this fix, PR
- * #3804 wired `overlayMeterUnavailableEligibility` to force `allow=false`
- * whenever `getEligibilityUsage()` reported `meterUnavailable: true` — and
- * that flag flipped true on the VERY FIRST failed GET whenever `oauthCache`
- * was `null`, which is the state of every freshly-restarted process (i.e.
- * after every deploy). One transient GET blip right after a deploy could
- * silently halt the whole autopilot until the next successful read.
+ * PRIMARY ACCEPTANCE CRITERION (issue #4165): the spend governor must FAIL
+ * CLOSED when it cannot measure. Before this fix a meter that could not be read
+ * degraded to `usageSource: "estimate"` with ZEROED percentages and a
+ * `meterUnavailable` flag gated behind a consecutive-failure count, so a
+ * rate-limited meter produced `percentLast7d: 0` with `allow: true` while real
+ * weekly usage was ~92% — past the 90% weekly stop. The verdict flipped from
+ * allow to block purely because the meter came back, with consumption unchanged
+ * between the two reads: admission was tracking METER AVAILABILITY, not spend.
  *
- * The fix requires SUSTAINED failure — the consecutive-failed-read count
- * reaching `OAUTH_SUSTAINED_FAILURE_THRESHOLD` (3), the same threshold
- * `oauth-read-cache.ts`'s sustained-failure alarm (#3601) already uses —
- * before `meterUnavailable` is set. This suite drives `getEligibilityUsage`
- * with an injected `readUsage`/`now`, exercising the real
- * `readOAuthCached` cache/backoff state machine underneath (not a stub),
- * so the threshold crossing is pinned end-to-end.
+ * The three states this suite pins, straight off the issue's AC5:
+ *   1. live read            → verdict follows the usage
+ *   2. read fails, recent last-good exists → use it, MARKED STALE, still gating
+ *   3. read fails, no usable reading       → explicit unknown + fail closed
+ *
+ * SUPERSEDES the #3821 fail-open cases this block used to hold. #3821 required
+ * 3 consecutive failures before `meterUnavailable` could be set, so that a
+ * post-deploy blip against a cold cache would not halt the autopilot. That is
+ * the behaviour #4165 removes: the backoff ladder RESUMES from Redis across a
+ * restart while the in-memory last-good does NOT, so "cold cache, fewer than 3
+ * failures" is reachable mid-outage — and it was the exact state that admitted
+ * the 2026-08-19 run. The blip protection #3821 wanted now comes from the
+ * last-good window (case 2), which rides out a 429 burst on a REAL number
+ * instead of on an unmeasured `false`.
+ *
+ * The suite drives `getEligibilityUsage` with an injected `readUsage`/`now`,
+ * exercising the real `readOAuthCached` cache/backoff state machine underneath
+ * (not a stub), so the fallback ordering is pinned end-to-end.
  *
  * Suite lifecycle (CLAUDE.md authoring rules): a NEW top-level describe with
  * its own beforeEach/afterEach; env knobs pinned per-case; the shared
@@ -31,27 +41,35 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 const { getEligibilityUsage } = await import("../src/cost/eligibility-usage.ts");
-const { clearOAuthCache, OAUTH_SUSTAINED_FAILURE_THRESHOLD } = await import(
-  "../src/cost/oauth-read-cache.ts"
+const { clearOAuthCache } = await import("../src/cost/oauth-read-cache.ts");
+const { projectEligibility, overlayMeterUnavailableEligibility } = await import(
+  "../src/cost/eligibility.ts"
 );
-const { projectEligibility } = await import("../src/cost/eligibility.ts");
 const { projectResetWindow } = await import("../src/cost/token-math.ts");
 import type { OAuthUsageResult } from "../src/cost/oauth-usage.ts";
 
 const TTL_MS = 60_000;
-const MAX_STALE_MS = 0; // no stale headroom — isolates the cold-cache failure path
+// 1ms of HEADLINE stale headroom — effectively none, so `readOAuthCached`
+// stops serving its own stale value almost immediately and the ADMISSION-level
+// last-good fallback (#4165) is what these cases exercise. NOT `0`: the env
+// reader rejects a non-positive value as invalid and falls back to the 30-minute
+// default, which would silently keep the headline path in play instead.
+const MAX_STALE_MS = 1;
 const BACKOFF_BASE_MS = 30_000;
 const BACKOFF_MAX_MS = 900_000;
 const STEP_MS = 30 * 60_000; // > the backoff ceiling, so every call re-probes
+/** Admission-level last-good ceiling for these cases: 60 min (the default). */
+const LAST_GOOD_MAX_AGE_MS = 60 * 60_000;
 
 const ENV_KEYS = [
   "HYDRA_OAUTH_USAGE_TTL_MS",
   "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
   "HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS",
   "HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS",
+  "HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS",
 ] as const;
 
-const FAIL: OAuthUsageResult = { ok: false, code: "oauth-usage-non-2xx" };
+const FAIL: OAuthUsageResult = { ok: false, code: "oauth-usage-rate-limited" };
 const OK_READ: OAuthUsageResult = {
   ok: true,
   data: {
@@ -59,12 +77,20 @@ const OK_READ: OAuthUsageResult = {
     sevenDay: { utilization: 34, resetsAt: null },
   },
 };
+/** The 2026-08-19 shape: weekly burn already past the 90% weekly hard stop. */
+const OK_READ_PAST_WEEKLY_STOP: OAuthUsageResult = {
+  ok: true,
+  data: {
+    fiveHour: { utilization: 2, resetsAt: null },
+    sevenDay: { utilization: 92, resetsAt: null },
+  },
+};
 
 function fixedReader(r: OAuthUsageResult): () => Promise<OAuthUsageResult> {
   return async () => r;
 }
 
-describe("getEligibilityUsage meterUnavailable gating (issue #3821)", () => {
+describe("getEligibilityUsage fails CLOSED on a blind meter (issue #4165)", () => {
   let saved: Map<string, string | undefined>;
 
   beforeEach(() => {
@@ -74,6 +100,7 @@ describe("getEligibilityUsage meterUnavailable gating (issue #3821)", () => {
     process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = String(MAX_STALE_MS);
     process.env.HYDRA_OAUTH_USAGE_BACKOFF_BASE_MS = String(BACKOFF_BASE_MS);
     process.env.HYDRA_OAUTH_USAGE_BACKOFF_MAX_MS = String(BACKOFF_MAX_MS);
+    process.env.HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS = String(LAST_GOOD_MAX_AGE_MS);
     clearOAuthCache();
   });
 
@@ -85,66 +112,128 @@ describe("getEligibilityUsage meterUnavailable gating (issue #3821)", () => {
     }
   });
 
-  test("a healthy meter reports meterUnavailable: false with real percentages", async () => {
+  // --- AC5 case 1: a live read gates on the usage it read ------------------
+
+  test("AC5/1: a healthy meter reports meterUnavailable:false with real percentages", async () => {
     const r = await getEligibilityUsage({ readUsage: fixedReader(OK_READ), now: () => 0 });
     assert.equal(r.meterUnavailable, false);
+    assert.equal(r.stale, false, "a fresh read is not stale");
+    assert.equal(r.input.usageSource, "oauth");
+    assert.equal(r.input.percentLast5h, 12);
+    assert.equal(r.input.percentLast7d, 34);
+    assert.equal(projectEligibility(r.input).allow, true, "34% weekly is well under the stop");
+  });
+
+  test("AC5/1: a live read PAST the weekly stop blocks, on the usage rather than on the meter", async () => {
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(OK_READ_PAST_WEEKLY_STOP),
+      now: () => 0,
+    });
+    assert.equal(r.meterUnavailable, false);
+    assert.equal(r.input.weeklyEmergencyStop, true);
+    assert.equal(projectEligibility(r.input).allow, false);
+  });
+
+  // --- AC5 case 2: rate-limited WITH a recent last-good --------------------
+
+  test("AC5/2: a failed read falls back to the recent last-good reading, MARKED STALE", async () => {
+    const t0 = Date.parse("2026-08-19T15:46:00.000Z");
+    await getEligibilityUsage({ readUsage: fixedReader(OK_READ), now: () => t0 });
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(FAIL),
+      now: () => t0 + STEP_MS, // 30 min later — inside the 60-min ceiling
+    });
+    assert.equal(r.meterUnavailable, false, "a usable reading exists, so the governor is not blind");
+    assert.equal(r.stale, true, "it must be reported as stale, not passed off as fresh");
+    assert.equal(r.ageMs, STEP_MS, "the age of the served reading is surfaced (AC1/AC4)");
     assert.equal(r.input.usageSource, "oauth");
     assert.equal(r.input.percentLast5h, 12);
     assert.equal(r.input.percentLast7d, 34);
   });
 
-  test("ACCEPTANCE: a single failed read against a cold cache does NOT set meterUnavailable", async () => {
-    const t0 = Date.parse("2026-07-31T00:00:00.000Z");
+  test("AC5/2: REGRESSION — a stale last-good past the weekly stop still BLOCKS", async () => {
+    // The incident in one case: real weekly usage 92%, then the meter is
+    // rate-limited. The stale reading must keep the weekly stop engaged.
+    // Pre-fix this produced percentLast7d:0 / weeklyEmergencyStop:false / allow:true.
+    const t0 = Date.parse("2026-08-19T15:46:00.000Z");
+    await getEligibilityUsage({
+      readUsage: fixedReader(OK_READ_PAST_WEEKLY_STOP),
+      now: () => t0,
+    });
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(FAIL),
+      now: () => t0 + STEP_MS,
+    });
+    assert.equal(r.input.percentLast7d, 92, "must NOT degrade the reading to 0");
+    assert.equal(r.input.weeklyEmergencyStop, true);
+    const verdict = overlayMeterUnavailableEligibility(
+      projectEligibility(r.input),
+      r.meterUnavailable,
+    );
+    assert.equal(verdict.allow, false, "a governor holding a 92% reading must not admit");
+  });
+
+  // --- AC5 case 3: rate-limited with NO usable reading ---------------------
+
+  test("AC5/3: a failed read against a cold cache reports UNKNOWN and blocks", async () => {
+    const t0 = Date.parse("2026-08-19T15:53:00.000Z");
     const r = await getEligibilityUsage({ readUsage: fixedReader(FAIL), now: () => t0 });
     assert.equal(
       r.meterUnavailable,
-      false,
-      "one transient blip against a cold cache (every process restart, i.e. every deploy) " +
-        "must not force allow=false for the whole autopilot",
+      true,
+      "no reading at all means the governor is blind; a spend governor that cannot measure " +
+        "must not admit (this is the #3821 fail-open that #4165 removed)",
     );
-    // Fail-open input is still preserved — usageSource stays 'estimate' with
-    // zeroed percentages so deriveHardStop's #1124 guard stays inert.
+    // AC1: explicit unknown, NEVER a fabricated zero.
+    assert.equal(r.input.percentLast5h, null);
+    assert.equal(r.input.percentLast7d, null);
+    assert.equal(r.input.percentSinceReset, null);
     assert.equal(r.input.usageSource, "estimate");
-    assert.equal(r.input.percentLast5h, 0);
-    assert.equal(r.input.percentLast7d, 0);
+    // AC3: the composed verdict blocks, with the reason attached.
+    const verdict = overlayMeterUnavailableEligibility(
+      projectEligibility(r.input),
+      r.meterUnavailable,
+    );
+    assert.equal(verdict.allow, false);
+    assert.equal(verdict.reasons.meterUnavailable, true);
   });
 
-  test("the SECOND consecutive failed read also stays below the sustained threshold", async () => {
-    const t0 = Date.parse("2026-07-31T00:00:00.000Z");
+  test("AC5/3: a SECOND consecutive failed read stays blocked (no failure-count escape hatch)", async () => {
+    const t0 = Date.parse("2026-08-19T15:53:00.000Z");
     await getEligibilityUsage({ readUsage: fixedReader(FAIL), now: () => t0 });
     const r2 = await getEligibilityUsage({ readUsage: fixedReader(FAIL), now: () => t0 + STEP_MS });
-    assert.equal(r2.meterUnavailable, false);
-  });
-
-  test("SUSTAINED failure (3 consecutive) sets meterUnavailable: true", async () => {
-    const t0 = Date.parse("2026-07-31T00:00:00.000Z");
-    let last;
-    for (let i = 0; i < OAUTH_SUSTAINED_FAILURE_THRESHOLD; i++) {
-      last = await getEligibilityUsage({
-        readUsage: fixedReader(FAIL),
-        now: () => t0 + i * STEP_MS,
-      });
-    }
     assert.equal(
-      last!.meterUnavailable,
+      r2.meterUnavailable,
       true,
-      "the Nth failure crossing the sustained-failure threshold must block",
+      "'we have failed fewer than 3 times' is not evidence of headroom",
     );
-    assert.equal(last!.input.usageSource, "estimate");
   });
 
-  test("a recovery read after sub-threshold failures clears the ladder and stays available", async () => {
-    const t0 = Date.parse("2026-07-31T00:00:00.000Z");
+  test("AC5/3: a last-good reading PAST the staleness ceiling stops being usable and blocks", async () => {
+    process.env.HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS = String(60_000); // 1 min
+    const t0 = Date.parse("2026-08-19T15:46:00.000Z");
+    await getEligibilityUsage({ readUsage: fixedReader(OK_READ), now: () => t0 });
+    const r = await getEligibilityUsage({
+      readUsage: fixedReader(FAIL),
+      now: () => t0 + STEP_MS, // 30 min old against a 1-min ceiling
+    });
+    assert.equal(r.meterUnavailable, true, "too old to license a launch");
+    assert.equal(r.input.percentLast7d, null, "and reported as unknown, not as the stale number");
+  });
+
+  test("a recovery read after a failure clears the ladder and returns to a live verdict", async () => {
+    const t0 = Date.parse("2026-08-19T15:53:00.000Z");
     await getEligibilityUsage({ readUsage: fixedReader(FAIL), now: () => t0 });
     const recovered = await getEligibilityUsage({
       readUsage: fixedReader(OK_READ),
       now: () => t0 + STEP_MS,
     });
     assert.equal(recovered.meterUnavailable, false);
+    assert.equal(recovered.stale, false);
     assert.equal(recovered.input.usageSource, "oauth");
   });
 
-  test("a thrown reader (programming/IO fault, not a meter outage) reports meterUnavailable immediately", async () => {
+  test("a thrown reader (programming/IO fault) reports meterUnavailable immediately", async () => {
     const throwing = async (): Promise<OAuthUsageResult> => {
       throw new Error("boom");
     };
@@ -152,10 +241,9 @@ describe("getEligibilityUsage meterUnavailable gating (issue #3821)", () => {
     assert.equal(
       r.meterUnavailable,
       true,
-      "a throw from the cached reader is a code fault, not a transient blip — it never " +
-        "had the sustained-vs-transient distinction to make",
+      "a throw from the cached reader leaves no reading and no age to reason about",
     );
-    assert.equal(r.input.usageSource, "estimate");
+    assert.equal(r.input.percentLast7d, null);
   });
 });
 
@@ -274,19 +362,26 @@ describe("getEligibilityUsage Pacing Curve anchor rollover (issue #3751)", () =>
     assert.equal(v.allow, true);
   });
 
-  test("INV-4: a meter outage yields neutral paceState 'on', not a false 'behind' from the zero", async () => {
-    // Mid-window (target ≈ 66) but no meter value: the fail-open input carries
-    // zeros. Those zeros MUST NOT read as 'behind' (the Pacing Curve would then
-    // chase the meter during its own outage). Only the authoritative oauth source
-    // drives an ahead/behind verdict.
+  test("INV-4: a meter outage yields neutral paceState 'on', never a verdict off a synthesised number", async () => {
+    // Mid-window (target ≈ 66) but no meter value. #3751 pinned that the outage
+    // input must not read as 'behind' (the Pacing Curve would then chase the
+    // meter during its own outage). #4165 strengthens the same invariant at the
+    // source: the outage input no longer carries ZEROS to be misread — it
+    // carries an explicit `null` — and the verdict now BLOCKS rather than
+    // riding the #1124 fail-open.
     const nowMs = ANCHOR_MS + 26 * DAY;
     const r = await getEligibilityUsage({ readUsage: fixedReader(FAIL), now: () => nowMs });
     assert.equal(r.input.usageSource, "estimate");
-    assert.equal(r.input.percentSinceReset, 0);
-    assert.equal(r.meterUnavailable, false, "a single transient failure is below the sustained threshold");
+    assert.equal(r.input.percentSinceReset, null, "explicit unknown, not a fabricated 0 (#4165)");
+    assert.equal(r.meterUnavailable, true, "no reading at all — the spend governor fails closed");
     const v = projectEligibility(r.input);
-    assert.equal(v.paceState, "on", "non-oauth source is neutral 'on', never a verdict off the zeros");
-    assert.equal(v.allow, true, "transient outage preserves the #1124 fail-open");
+    assert.equal(v.paceState, "on", "non-oauth source is neutral 'on', never a verdict off the unknown");
+    assert.equal(v.sinceResetPercent, null, "the top-level mirror is the same explicit unknown");
+    assert.equal(
+      overlayMeterUnavailableEligibility(v, r.meterUnavailable).allow,
+      false,
+      "the composed verdict blocks — the #1124 fail-open was removed by #4165",
+    );
   });
 
   test("AC1: percentSinceReset === percentLast7d (the meter's 7d utilization doubles as window position)", async () => {
@@ -465,22 +560,21 @@ describe("getEligibilityUsage anchor follows the account via meter resets_at", (
     assert.equal(r.input.weeklyResetAnchor, "2026-08-08T09:59:59.000Z");
   });
 
-  test("a sustained meter outage still reports the env-seeded anchor", async () => {
+  test("a meter outage still reports the env-seeded anchor", async () => {
+    // Cold cache + a failed read = no usable reading at all, so this is the
+    // fail-closed shape (#4165). The anchor is still reported: it is derived
+    // from config + `now`, not from the meter, so an outage never blanks it.
     const nowMs = Date.parse("2026-08-14T18:00:00.000Z");
-    let last;
-    for (let i = 0; i < OAUTH_SUSTAINED_FAILURE_THRESHOLD; i++) {
-      last = await getEligibilityUsage({
-        readUsage: fixedReader(FAIL),
-        now: () => nowMs + i * STEP_MS,
-      });
-    }
-    assert.equal(last!.meterUnavailable, true);
+    const last = await getEligibilityUsage({
+      readUsage: fixedReader(FAIL),
+      now: () => nowMs,
+    });
+    assert.equal(last.meterUnavailable, true);
     const envRolled = new Date(
-      projectResetWindow(Date.parse(WRONG_ENV_ANCHOR), nowMs + (OAUTH_SUSTAINED_FAILURE_THRESHOLD - 1) * STEP_MS)
-        .currentMs,
+      projectResetWindow(Date.parse(WRONG_ENV_ANCHOR), nowMs).currentMs,
     ).toISOString();
     assert.equal(
-      last!.input.weeklyResetAnchor,
+      last.input.weeklyResetAnchor,
       envRolled,
       "with no meter value there is no boundary to follow — the env seed is the documented fallback",
     );
