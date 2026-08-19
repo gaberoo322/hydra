@@ -46,6 +46,17 @@
  * without posting would be worse than failing, because the required context
  * would still be absent and the job would now look green while the PR stayed
  * unmergeable.
+ *
+ * # This fix does not protect its own merge
+ *
+ * `deep-qa-gate.yml` is Verifier Core, and its `issue_comment` arm — the one
+ * that verifies the SHA-bound Deep-QA PASS marker — runs GitHub's DEFAULT-
+ * BRANCH copy of the workflow, not the PR's (ADR-0020 Decision 4, the
+ * Live-Gate Invariant of ADR-0015). So the T4 PR that INTRODUCES this wrapper
+ * is still gated by the un-wrapped, bare-`gh api` version on master. That is
+ * by design, not an oversight to route around: a gate that judged itself by
+ * its own proposed replacement would not be a gate. The protection starts
+ * applying to the NEXT T4 PR, once this has merged.
  */
 
 import { spawnSync } from "node:child_process";
