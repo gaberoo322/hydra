@@ -206,9 +206,10 @@ describe("extra usage armed blocks autopilot dispatch", () => {
 
   test("a dark meter reports NOT armed — the block comes from meterUnavailable instead", async () => {
     // Attributing "armed" to an account we cannot read would be a fabricated
-    // reason, and would turn every GET blip into a misleading permanent-looking
-    // halt. The sustained-failure path already forces allow=false (#3804), so
-    // nothing dispatches unverified.
+    // reason. It is also unnecessary: an unreadable meter already forces
+    // allow=false on its own via `meterUnavailable` (#3804, hardened by #4165 to
+    // fire as soon as there is no usable reading rather than after a
+    // consecutive-failure count), so nothing dispatches unverified.
     const fail: OAuthUsageResult = { ok: false, code: "oauth-usage-non-2xx" };
     let last;
     for (let i = 0; i < OAUTH_SUSTAINED_FAILURE_THRESHOLD; i++) {
