@@ -52,6 +52,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import {
+  type WatchdogLaunchSignal,
   PACE_GATE_LAST_TICK_KEY,
   LAUNCH_FLOW_KEY_PREFIX,
   launchFlowSinceKey,
@@ -183,6 +184,48 @@ function seedSince(signal: string, ms: number): void {
 }
 
 /**
+ * The pid embedded in a per-run namespace, or null if the key is not shaped
+ * like one. `RUN_NS` is `hydra:test:launch-flow-<pid>-<uuid8>`, so the pid is
+ * the segment between the fixed prefix and the first `-` after it.
+ */
+function runNsPid(key: string): number | null {
+  const m = /^hydra:test:launch-flow-(\d+)-[0-9a-f]{8}(?::|$)/.exec(key);
+  if (m === null) return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * Is this namespace owned by a process that is STILL RUNNING?
+ *
+ * The sweep below exists to collect namespaces whose owner died before its
+ * `after()` could run. Before #4135 it collected every namespace that was not
+ * this run's — which includes the namespaces of runs that are alive and
+ * mid-assertion. Two suite runs sharing a Redis DB therefore deleted each
+ * other's fixtures, and the victim failed on whichever case happened to be in
+ * flight. That is precisely the reported symptom: same tree, different
+ * outcome, and a DIFFERENT subtest each time.
+ *
+ * Sharing a DB is not exotic. `scripts/test/redis-db-launch.mjs` derives the
+ * index from the WORKTREE PATH ("Same worktree -> same DB"), so any two runs
+ * out of one checkout collide by design — which is what a second full-suite
+ * workflow on the same self-hosted runner used to do on every PR until #4133
+ * deleted it.
+ *
+ * `/proc/<pid>` is the liveness probe rather than `pgrep -f`, whose `-f` form
+ * matches the CALLER's own command line and would report every namespace as
+ * live (the trap documented in CLAUDE.md). Pid reuse can only make a dead
+ * run look alive, which skips a delete — the safe direction for hygiene that
+ * is explicitly best-effort.
+ */
+function isRunNamespaceLive(key: string): boolean {
+  const pid = runNsPid(key);
+  if (pid === null) return false;
+  if (pid === process.pid) return true;
+  return existsSync(`/proc/${pid}`);
+}
+
+/**
  * Delete leftover `hydra:test:launch-flow-*` keys from earlier runs.
  *
  * `after()` cleans up precisely, but `--test-force-exit` can tear the process
@@ -206,7 +249,7 @@ function sweepOrphanNamespaces(): void {
       const lines = out.split("\n").filter((l) => l !== "");
       if (lines.length === 0) return;
       cursor = lines[0];
-      const keys = lines.slice(1).filter((k) => !k.startsWith(RUN_NS));
+      const keys = lines.slice(1).filter((k) => !k.startsWith(RUN_NS) && !isRunNamespaceLive(k));
       if (keys.length > 0) drc(["DEL", ...keys]);
       if (cursor === "0") return;
     }
@@ -740,14 +783,40 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
 // dependency on the docker container.
 // =============================================================================
 
+/**
+ * Reset the keys the typed-seam cases actually operate on.
+ *
+ * These cases go through the PRODUCTION key builders — `launchFlowSinceKey` /
+ * `launchFlowFiredKey`, i.e. `hydra:autopilot:launch-flow:*`. Until #4135 the
+ * `beforeEach` deleted `SINCE()`/`FIRED()` instead: the per-run
+ * `hydra:test:launch-flow-*` namespace the BASH cases use. Those two share no
+ * key, so the reset was a silent no-op and every case here inherited whatever
+ * the previous case — or a previous RUN — happened to leave behind.
+ *
+ * That is what made "returns null on an absent streak" fail with
+ * `actual: 1700000000000`: T0 is this file's own fixed clock, written by the
+ * very next case in the same suite. The assertion was right; the reset it
+ * relied on had never run.
+ */
+async function resetSeamState(sig: WatchdogLaunchSignal): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(launchFlowSinceKey(sig), launchFlowFiredKey(sig));
+}
+
 describe("src/redis/launch-flow.ts — typed launch-flow read seam (issue #3847, INV-11)", () => {
   // Use the latency signal (never written by the docker-gated behavioural
   // cases' DB-0 traffic; the TS connection is a different DB via REDIS_URL).
   const sig = "latency" as const;
 
   beforeEach(async () => {
-    const r = getRedisConnection();
-    await r.del(SINCE(sig), FIRED(sig));
+    await resetSeamState(sig);
+  });
+
+  after(async () => {
+    // Leave nothing behind: these are PRODUCTION-shaped key names, so a
+    // leftover value is indistinguishable from real state to the next run
+    // that lands on this DB.
+    await resetSeamState(sig);
   });
 
   test("getLaunchFlowSince / isLaunchFlowFired return null/false on an absent streak", async () => {
@@ -771,5 +840,86 @@ describe("src/redis/launch-flow.ts — typed launch-flow read seam (issue #3847,
     await clearLaunchFlowStreak(sig);
     assert.equal(await isLaunchFlowFired(sig), false);
     assert.equal(await getLaunchFlowSince(sig), null);
+  });
+});
+
+// =============================================================================
+// Cross-run isolation (issue #4135).
+//
+// The reported symptom was "same tree, different outcome, and a DIFFERENT
+// subtest each time" — the signature of shared state, not of a logic error in
+// any one case. Measured: two concurrent runs of THIS FILE out of one worktree
+// go red in ~1 run in 5 (4 of 20), while 14 sequential runs under a load
+// average of 31-55 stayed green. Load was never the variable; a second
+// concurrent run was.
+//
+// Its own top-level suite with its own lifecycle rather than a child of a
+// sibling — a nested case would inherit that sibling's teardown timing.
+// =============================================================================
+describe("cross-run isolation: one run must not delete another's fixtures (issue #4135)", () => {
+  const OTHER = "quota" as const;
+
+  after(async () => {
+    await resetSeamState(OTHER);
+  });
+
+  test("runNsPid parses the owning pid, and rejects anything not shaped like a run namespace", () => {
+    assert.equal(runNsPid(`hydra:test:launch-flow-4242-0badc0de:launch-flow:since:latency`), 4242);
+    assert.equal(runNsPid(`hydra:test:launch-flow-4242-0badc0de`), 4242);
+    // Not ours: the production keyspace must never be mistaken for a namespace
+    // this sweep is entitled to collect.
+    assert.equal(runNsPid(launchFlowSinceKey("latency")), null);
+    assert.equal(runNsPid("hydra:test:launch-flow-notapid-0badc0de:x"), null);
+    assert.equal(runNsPid("hydra:test:launch-flow-4242-SHORT:x"), null);
+  });
+
+  test("a LIVE run's namespace is never swept — this is the regression", () => {
+    // This process is by definition alive, so its own namespace and any other
+    // live pid's must both be protected.
+    assert.equal(isRunNamespaceLive(`${RUN_NS}:launch-flow:since:latency`), true);
+    assert.equal(isRunNamespaceLive(`hydra:test:launch-flow-${process.pid}-0badc0de:x`), true);
+  });
+
+  test("a dead run's namespace is still collectable, and a non-namespace key is left alone", () => {
+    // 2^22 is above the default pid_max (4194304 is the ceiling, and this is
+    // not a pid any live process can hold on this host); if it somehow were,
+    // the sweep would merely skip one delete.
+    const deadPid = 4_194_303;
+    assert.equal(existsSync(`/proc/${deadPid}`), false, "precondition: chosen pid must not be live");
+    assert.equal(isRunNamespaceLive(`hydra:test:launch-flow-${deadPid}-0badc0de:x`), false);
+    // A key that is not a per-run namespace at all is not "live" — it is
+    // simply not this sweep's business, and the RUN_NS guard already excludes
+    // it from the delete list.
+    assert.equal(isRunNamespaceLive(launchFlowSinceKey("latency")), false);
+  });
+
+  test("resetSeamState clears the PRODUCTION-builder keys the seam cases assert on", async () => {
+    // The bug this pins: the reset used to target the per-run test namespace
+    // while every assertion read the production builders, so it cleared
+    // nothing. Assert against the builders directly — if the reset ever drifts
+    // back onto a different keyspace, this fails.
+    const r = getRedisConnection();
+    await r.set(launchFlowSinceKey(OTHER), String(T0));
+    await r.set(launchFlowFiredKey(OTHER), "1");
+    assert.equal(await getLaunchFlowSince(OTHER), T0, "precondition: the streak must actually be seeded");
+    assert.equal(await isLaunchFlowFired(OTHER), true, "precondition: the fired marker must actually be seeded");
+
+    await resetSeamState(OTHER);
+
+    assert.equal(await getLaunchFlowSince(OTHER), null, "resetSeamState must clear the since anchor it is asked to clear");
+    assert.equal(await isLaunchFlowFired(OTHER), false, "resetSeamState must clear the fired marker it is asked to clear");
+  });
+
+  test("clearing one signal's streak does not disturb another's", async () => {
+    // The seam suite pins `latency`; this suite pins `quota`. If a reset were
+    // ever written to wipe the whole prefix, these two would silently start
+    // racing each other inside a single run.
+    const r = getRedisConnection();
+    await r.set(launchFlowSinceKey(OTHER), String(T0));
+    await r.set(launchFlowSinceKey("latency"), String(T0 + 1));
+    await resetSeamState(OTHER);
+    assert.equal(await getLaunchFlowSince(OTHER), null);
+    assert.equal(await getLaunchFlowSince("latency"), T0 + 1, "resetting one signal must not touch another");
+    await resetSeamState("latency");
   });
 });
