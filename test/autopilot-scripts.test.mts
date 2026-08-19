@@ -2078,12 +2078,16 @@ describe("collect-state.sh tickets_orch producer (#4014)", () => {
       /case "\$TICKETS_JSON" in\s*\n\s*''\|\*\[!0-9\]\*\)\s*;;/,
       "only a bare positive integer may promote a spec — empty output (gh down via `|| true`) and `null` (empty lane's .[0]) must degrade to tickets_available=false, never dispatch a decomposition with no resolved target",
     );
-    // Belt-and-suspenders: the gh read must tolerate failure (|| true) so a
-    // transient gh outage does not abort the whole collect-state.sh run.
+    // Belt-and-suspenders: the gh read must tolerate failure so a transient gh
+    // outage does not abort the whole collect-state.sh run. Post-#4130 the read
+    // routes through the shared `_gh_capture` helper (which captures gh's REAL
+    // exit code — a failure degrades to empty/suppressed AND flips the orch
+    // lane's degraded flag instead of hiding behind `2>/dev/null || true`),
+    // with `|| true` keeping the call best-effort.
     assert.match(
       block,
-      /\|\| true\)/,
-      "the gh issue list read must be wrapped in `|| true` so a gh outage degrades to empty (suppressed) rather than aborting collect-state.sh",
+      /_gh_capture orch gh issue list[\s\S]*?\|\| true/,
+      "the gh issue list read must route through _gh_capture (exit-code-captured, best-effort) so a gh outage degrades to empty (suppressed) and flips the orch degraded flag rather than aborting collect-state.sh or hiding the failure",
     );
   });
 });

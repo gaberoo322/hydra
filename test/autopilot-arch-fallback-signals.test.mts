@@ -144,4 +144,65 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     assert.ok(out.includes("arch_board_open_scan=0"));
     assert.ok(out.includes("arch_board_saturated=false"));
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #4130 — orch_backfill_idle fails CLOSED on a degraded board read.
+  //
+  // The zeroed ARCH_BOARD_JSON fallback used to be indistinguishable from a
+  // genuinely empty board, so a FAILED gh read (GraphQL-only outage, run
+  // 161d9642) manufactured fallback_due=true and fired the whole
+  // orch_backfill_idle-consuming backfill set (discover_orch /
+  // architecture_orch / cleanup_orch / skill_prune) against a full board.
+  // collect-state.sh now threads ARCH_BOARD_READ_FAILED=1 into this emitter
+  // when the gh read behind ARCH_BOARD_JSON exited nonzero; the emitter must
+  // then emit orch_backfill_idle=false regardless of the (zeroed) counts.
+  // -------------------------------------------------------------------------
+
+  test("a FAILED board read forces orch_backfill_idle=false even on all-zero counts (issue #4130)", () => {
+    const out = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      { ...env, ARCH_BOARD_READ_FAILED: "1" },
+    );
+    assert.ok(
+      out.includes("orch_backfill_idle=false"),
+      "a degraded read must fail CLOSED — zeroed fallback counts must never fabricate board-empty",
+    );
+  });
+
+  test("a genuinely empty board still evaluates orch_backfill_idle=true when the read succeeded (issue #4130 regression)", () => {
+    // ARCH_BOARD_READ_FAILED=0 (the healthy path) and unset (the emitter's
+    // default) must BOTH behave exactly as before #4130: real zeros from a
+    // successful read are a legitimately empty board.
+    const zeroBoard = { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 };
+    const explicit = runEmitter(zeroBoard, { ...env, ARCH_BOARD_READ_FAILED: "0" });
+    assert.ok(
+      explicit.includes("orch_backfill_idle=true"),
+      "ARCH_BOARD_READ_FAILED=0 + all-zero counts must still read as board-empty",
+    );
+    const unset = runEmitter(zeroBoard, env);
+    assert.ok(
+      unset.includes("orch_backfill_idle=true"),
+      "an absent ARCH_BOARD_READ_FAILED must default to the healthy path",
+    );
+  });
+
+  test("collect-state.sh threads ARCH_BOARD_READ_FAILED from the captured gh exit code (issue #4130)", () => {
+    // Source pin: the flag is set to 1 exactly on the _gh_capture failure
+    // branch of the ARCH_BOARD_JSON read, and passed into the emitter's env.
+    assert.match(
+      src,
+      /ARCH_BOARD_READ_FAILED=1/,
+      "the failed-read branch must set ARCH_BOARD_READ_FAILED=1",
+    );
+    assert.match(
+      src,
+      /ARCH_BOARD_READ_FAILED="\$ARCH_BOARD_READ_FAILED" python3 -c/,
+      "the emitter invocation must receive ARCH_BOARD_READ_FAILED in its environment",
+    );
+    assert.match(
+      src,
+      /_gh_capture orch gh issue list[\s\S]{0,900}ARCH_BOARD_JSON="\$GH_CAPTURE_OUT"/,
+      "the ARCH_BOARD_JSON read must route through _gh_capture so the exit code is real, not folded into a fallback",
+    );
+  });
 });

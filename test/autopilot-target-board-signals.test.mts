@@ -236,10 +236,18 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
   });
 
   test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+    // Post-#4130 the read routes through `_gh_capture target ...` (which flips
+    // the target lane's degraded flag on a nonzero gh exit) and the zeroed
+    // fallback lives on the else branch — same four zeros, no longer silent.
     assert.match(
       src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+      /else\n\s*echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"\n\s*fi/,
       "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+    );
+    assert.match(
+      src,
+      /_gh_capture target gh issue list --repo "\$TARGET_GH_REPO"/,
+      "the fallback read must route through _gh_capture so its failure flips target_board_signals_degraded (issue #4130)",
     );
   });
 
@@ -559,10 +567,16 @@ describe("collect-state.sh — Target board truncation signal (issue #3710)", ()
 
   test("the key is emitted on the degraded branch too, so decide.py never sees it missing", () => {
     // A read that never happened is not a truncated read — it is a degraded
-    // one. Both branches must still publish the key.
-    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    // one. Both branches must still publish the key. (Post-#4130 the degraded
+    // else-branch no longer emits the lane flag inline — _gh_capture flips the
+    // TARGET_BOARD_SIGNALS_DEGRADED accumulator and the flag is emitted ONCE,
+    // OR-composed, at the end of the script — so the branch is anchored by its
+    // marker comment rather than the retired inline echo.)
+    const marker = src.indexOf("DEGRADED TARGET BOARD READ (issue #4130)");
+    assert.ok(marker >= 0, "degraded target-board else-branch marker missing");
+    const degradedBranch = src.slice(marker);
     assert.match(
-      degradedBranch.slice(0, 400),
+      degradedBranch.slice(0, 800),
       /echo "target_board_signals_truncated=false"/,
       "the unreachable-read branch must emit truncated=false, not omit the key",
     );
@@ -725,9 +739,14 @@ describe("collect-state.sh — wire-or-retire unlabelled advisory count (issue #
     // The outer else branch (TARGET_BOARD_ISSUES_JSON empty/unreachable) fails
     // closed to 0 — the suppressing direction, so a transient gh outage never
     // raises a false alarm. Mirrors every sibling target_* count in that branch.
-    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    // (Anchored on the branch's #4130 marker comment — the inline
+    // `target_board_signals_degraded=true` echo it used to anchor on was
+    // replaced by the OR-composed end-of-script lane-flag emission.)
+    const marker = src.indexOf("DEGRADED TARGET BOARD READ (issue #4130)");
+    assert.ok(marker >= 0, "degraded target-board else-branch marker missing");
+    const degradedBranch = src.slice(marker);
     assert.match(
-      degradedBranch.slice(0, 700),
+      degradedBranch.slice(0, 1100),
       /echo "wire_or_retire_target_unlabelled=0"/,
       "the unreachable-read branch must emit wire_or_retire_target_unlabelled=0, not omit it or emit non-zero",
     );

@@ -121,7 +121,10 @@ describe("collect-state.sh — python3 -c block quoting (issue #4042)", () => {
     // there (so this test would catch a regression if the comments were
     // rewritten to no longer exercise the fix) AND that they sit inside the
     // single-quoted-heredoc form, not a bare double-quoted `python3 -c "`.
-    const marker = "TARGET_BOARD_ISSUES_JSON=$(gh issue list";
+    // Post-#4130 the gh read routes through `_gh_capture target gh issue list
+    // ...` and the variable is assigned from $GH_CAPTURE_OUT, so the anchor is
+    // the assignment itself rather than the retired `$(gh issue list` form.
+    const marker = 'TARGET_BOARD_ISSUES_JSON="$GH_CAPTURE_OUT"';
     const blockStart = src.indexOf(marker);
     assert.ok(blockStart >= 0, "could not locate the Target-board reducer invocation");
     const pythonInvoke = src.indexOf('python3 -c "', blockStart);

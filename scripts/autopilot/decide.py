@@ -2836,7 +2836,16 @@ def _rule_idle_fallback(
     out = _RuleOutput()
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
-    if not dispatched_any and occupied == 0 and not plan_has_actions:
+    # Issue #4130: this is the SECOND idle-conclusion site (the first is
+    # _check_termination's idle_turns drain) — a blind snapshot reaches it on
+    # its very first wait-only turn, before idle_turns ever accumulates. Same
+    # gate, same pre-resolved lane flags: a degraded board read must never be
+    # recorded as a clean idle drain, so hold at the heartbeat wait instead
+    # (the pace-gate relaunch retries once the outage clears).
+    board_read_degraded = _signal_present(state, [], "orch_board_signals_degraded") or _signal_present(
+        state, [], "target_board_signals_degraded"
+    )
+    if not dispatched_any and occupied == 0 and not plan_has_actions and not board_read_degraded:
         out.emit(
             make_terminate(
                 "idle",
@@ -2846,6 +2855,19 @@ def _rule_idle_fallback(
             reason="idle-drain",
         )
         out.debug["idle_fallback"] = "terminate"
+    elif not dispatched_any and occupied == 0 and not plan_has_actions and board_read_degraded:
+        # Degraded board read on an otherwise idle-looking turn: the snapshot
+        # cannot be trusted to say "no work", so wait instead of terminating
+        # (issue #4130). Distinguishable in the audit trail via the reason and
+        # the debug hint below.
+        out.emit(
+            make_wait(
+                WALL_CLOCK_HEARTBEAT_SEC,
+                "degraded board read — idle conclusion suppressed (issue #4130)",
+            ),
+            reason="degraded-idle-hold",
+        )
+        out.debug["idle_fallback"] = "degraded-hold"
     elif not dispatched_any and occupied == 0:
         out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
     elif not dispatched_any:
@@ -4688,7 +4710,22 @@ def _check_termination(state: dict, now: int) -> dict | None:
         return make_terminate("budget", merged_prs=merged_prs, reason=f"tokens={cumulative}/{budget}")
     if elapsed >= wall_max:
         return make_terminate("wall_clock", merged_prs=merged_prs, reason=f"elapsed={elapsed}s")
-    if idle >= idle_max and occupied == 0:
+    # Issue #4130: never conclude idle from a snapshot flagged degraded. A
+    # GraphQL-only GitHub outage zeroes every board signal collect-state.sh
+    # derives from `gh`, so successive blind turns look wait-only and would
+    # drain to a *clean* terminate(idle) with real work on the board. The two
+    # lane flags are pre-resolved facts collect-state.sh OR-composes across
+    # every gh call in the lane this turn, read here via _signal_present
+    # exactly like every other collect-state-owned signal — no recomputation,
+    # no I/O, decide() stays pure. OR of BOTH lanes because state["idle_turns"]
+    # is a single global counter fed by orch and target selectors alike: a
+    # target-only degradation reaches the identical terminate:idle hazard.
+    # Budget / wall-clock / failure-backstop terminations above and below are
+    # deliberately NOT gated — they are spend/safety caps, not board reads.
+    board_read_degraded = _signal_present(state, [], "orch_board_signals_degraded") or _signal_present(
+        state, [], "target_board_signals_degraded"
+    )
+    if idle >= idle_max and occupied == 0 and not board_read_degraded:
         return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.

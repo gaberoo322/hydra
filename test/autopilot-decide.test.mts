@@ -858,6 +858,72 @@ describe("decide.py — termination paths", () => {
     assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
   });
 
+  // Issue #4130 — a degraded board read (GraphQL-only GitHub outage zeroing
+  // every collect-state gh signal) must never be concluded as "idle": handed a
+  // blind snapshot, decide.py cannot tell "the board is empty" from "the board
+  // read failed", so the idle drain is suppressed while EITHER lane's
+  // pre-resolved degraded flag is set. Budget/wall-clock/failure terminations
+  // are spend/safety caps, not board reads, and stay ungated.
+  test("idle drain is SUPPRESSED on a degraded orch board read (issue #4130)", () => {
+    const state = baseState({
+      idle_turns: 5,
+      idle_drain_turns: 5,
+      signals: { orch_board_signals_degraded: true },
+      // discover_orch seeded as fired-just-now so the #4114 staleness floor
+      // cannot add a dispatch and mask the idle path under test.
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "a blind snapshot must not drain to terminate(idle) — the board may be full",
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "wait"),
+      "the degraded turn holds at a wait so the pace-gate relaunch retries after the outage",
+    );
+  });
+
+  test("idle drain is SUPPRESSED on a degraded target board read too (issue #4130)", () => {
+    // idle_turns is ONE global counter fed by both lanes' selectors, so a
+    // target-only degradation reaches the identical terminate:idle hazard.
+    const state = baseState({
+      idle_turns: 5,
+      idle_drain_turns: 5,
+      signals: { target_board_signals_degraded: true },
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
+  });
+
+  test("explicit false degraded flags keep the clean idle drain (genuinely-empty-board regression, issue #4130)", () => {
+    // The load-bearing regression case: a healthy read of a genuinely empty
+    // board (flags emitted as false) must behave exactly as before #4130.
+    const state = baseState({
+      idle_turns: 5,
+      idle_drain_turns: 5,
+      signals: { orch_board_signals_degraded: false, target_board_signals_degraded: false },
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    });
+    const plan = runDecide(state, null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "false flags are a healthy read — the idle drain must fire as before");
+    assert.equal(t.cause, "idle");
+  });
+
+  test("degraded flags do NOT suppress budget termination (issue #4130)", () => {
+    const state = baseState({
+      cumulative_tokens: 2_000_001,
+      signals: { orch_board_signals_degraded: true, target_board_signals_degraded: true },
+    });
+    const plan = runDecide(state, null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "budget is a spend cap, not a board read — it must still terminate");
+    assert.equal(t.cause, "budget");
+  });
+
   test("5 consecutive failures of same pattern -> failure_backstop terminate", () => {
     const state = baseState({
       failure_log: Array.from({ length: 5 }, () => ({
@@ -2018,6 +2084,30 @@ describe("decide.py — idle fallback / heartbeat", () => {
       findAction(plan, (a) => a.type === "wait"),
       undefined,
       "no wait action alongside the clean idle drain",
+    );
+  });
+
+  test("wait-only turn with a DEGRADED board read holds at a heartbeat wait, not a clean idle drain (issue #4130)", () => {
+    // The #1352 clean-drain path is the SECOND idle-conclusion site (the first
+    // is _check_termination's idle_turns drain): a blind snapshot reaches it on
+    // its very first wait-only turn, before idle_turns ever accumulates. A
+    // degraded read must not be recorded as a designed idle exit — the board
+    // may be full; hold at the heartbeat and let the pace-gate relaunch retry.
+    const plan = runDecide(baseState({
+      signals: { target_board_signals_degraded: true },
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    }), null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "a degraded wait-only turn must not terminate(idle) via the #1352 path",
+    );
+    const w = findAction(plan, (a) => a.type === "wait");
+    assert.ok(w, "the degraded turn emits a heartbeat wait instead");
+    assert.match(
+      String(w.reason ?? ""),
+      /degraded board read/,
+      "the wait carries the degraded-hold reason so the audit trail distinguishes it from an ordinary heartbeat",
     );
   });
 

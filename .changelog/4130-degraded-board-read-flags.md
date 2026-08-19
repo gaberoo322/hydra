@@ -1,0 +1,1 @@
+- fix: a failed GitHub board read now flips a per-lane degraded flag instead of masquerading as an empty board, and autopilot refuses to conclude idle or fire backfill while blind (#4130)
