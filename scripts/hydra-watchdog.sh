@@ -1055,6 +1055,176 @@ run_launch_flow() {
 }
 
 # =============================================================================
+# ## GLM DRAINER THROUGHPUT
+# =============================================================================
+#
+# Zero-throughput backstop for the GLM dev-drainer (issue #3868). ADR-0032's
+# GLM partition makes the drainer's heartbeat (`hydra:glm:drainer:active`,
+# src/redis/autopilot.ts) load-bearing for the WHOLE board: while it is fresh,
+# every `glm-eligible` `ready-for-agent` issue is excluded from the Opus
+# `dev_orch` lane (issue #3754's fail-open gate, src/autopilot/board-state.ts).
+# Observed 2026-08-05 (run 2bcba309): the drainer was LIVE (fresh heartbeat,
+# claims proceeding) but broken at its final step (#3863 — `gh pr create`
+# failed on every attempt), so it authored ~40 min per issue on z.ai, shipped
+# nothing, and the affected issues were invisible to BOTH lanes — no alarm
+# fired, because "the heartbeat is fresh" and "the process is doing useful
+# work" are different questions, and the pre-existing liveness signal only
+# answers the first.
+#
+# This block answers the second by reading scripts/glm/drainer-loop.sh's own
+# log lines (the systemd journal for hydra-glm-drainer.service in production)
+# and counting CONSECUTIVE claim attempts — `log "picked issue #$issue"`,
+# emitted once per tick that found a glm-eligible + design-approved candidate
+# — since the last successful PR creation/adoption —
+# `log "issue #$issue: PR opened (branch=...), advanced to needs-qa, ..."`,
+# emitted by `attempt_one_issue()` for BOTH a fresh `gh pr create` AND an
+# issue-#3900 "already exists" adopt (`open_pr()` returns 0 either way, so
+# this counts real dispatch outcomes, not just the literal creation call). A
+# tick that finds nothing to claim logs "no glm-eligible ... — idle" and never
+# logs "picked issue #" at all, so it neither extends nor resets the streak —
+# that is what tells "live but sterile" apart from "no work queued" (both
+# leave the heartbeat fresh; only the former produces claim attempts with no
+# PRs).
+#
+# Distinguishing THREE conditions that all look identical from outside (a
+# quiet drainer, no alarm from the pre-existing liveness check):
+#   1. DOWN            — heartbeat stale/absent. Already handled by #3754's
+#                         fail-open (un-gates the Opus lane). This block does
+#                         NOT alarm here — a down drainer is a DIFFERENT,
+#                         already-covered condition, not "sterile".
+#   2. NO WORK QUEUED   — heartbeat fresh, zero "picked issue #" lines in the
+#                         window (every tick logged idle/paused/cap-reached).
+#                         This block does NOT alarm — the streak never grows.
+#   3. LIVE BUT STERILE — heartbeat fresh AND >= N (default 3) consecutive
+#                         "picked issue #" lines with no intervening "PR
+#                         opened" line. THIS is what alarms — same log channel
+#                         (`journalctl --user -u hydra-glm-drainer.service`).
+#
+# Detection only (same contract as ## LAUNCH FLOW): a WARNING log line is the
+# only externally-observable effect — no Telegram, no dashboard POST, no
+# label/issue mutation.
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-glm-drainer-throughput.test.mts). This block mirrors the ##
+# AUTOPILOT WEDGE / ## DEPLOY DRIFT blocks' direct-value-injection style
+# (inject the already-resolved value, skip the live read) rather than ##
+# LAUNCH FLOW's live-Redis style, so it stays a pure function of its inputs
+# with zero docker/systemd dependency in CI:
+#   HYDRA_WATCHDOG_GLM_DRAINER_LOG_FILE    Read log lines from this file
+#                                          instead of running journalctl.
+#   HYDRA_WATCHDOG_GLM_DRAINER_LOG_LINES   journalctl lookback (default 500);
+#                                          ignored when LOG_FILE is set.
+#   HYDRA_WATCHDOG_GLM_HEARTBEAT_MS        Inject the heartbeat's epoch-ms
+#                                          directly, skipping the real
+#                                          `docker exec hydra-redis-1
+#                                          redis-cli GET
+#                                          hydra:glm:drainer:active` read. An
+#                                          explicitly-empty value simulates an
+#                                          absent key.
+#   HYDRA_WATCHDOG_GLM_NOW_MS              Inject `now` (epoch-ms) for
+#                                          deterministic staleness math.
+#   HYDRA_WATCHDOG_GLM_HEARTBEAT_STALE_MS  Override the staleness window
+#                                          (default 2700000 = 45 min — MUST
+#                                          match GLM_DRAINER_HEARTBEAT_STALE_MS
+#                                          in src/redis/autopilot.ts).
+#   HYDRA_WATCHDOG_GLM_ZERO_THROUGHPUT_N   Consecutive-claims-without-a-PR
+#                                          threshold (default 3, the issue's
+#                                          acceptance criterion).
+#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT    Shared with ## LAUNCH FLOW — redis-
+#                                          cli target for the real heartbeat
+#                                          read (default: docker exec
+#                                          hydra-redis-1).
+
+run_glm_drainer_throughput() {
+  local UNIT="hydra-glm-drainer.service"
+  local HEARTBEAT_KEY="hydra:glm:drainer:active"
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  local STALE_MS="${HYDRA_WATCHDOG_GLM_HEARTBEAT_STALE_MS:-2700000}"
+  local THRESHOLD_N="${HYDRA_WATCHDOG_GLM_ZERO_THROUGHPUT_N:-3}"
+  local LOOKBACK_LINES="${HYDRA_WATCHDOG_GLM_DRAINER_LOG_LINES:-500}"
+  [[ "$STALE_MS" =~ ^[0-9]+$ ]] || STALE_MS=2700000
+  [[ "$THRESHOLD_N" =~ ^[0-9]+$ ]] || THRESHOLD_N=3
+  [[ "$LOOKBACK_LINES" =~ ^[0-9]+$ ]] || LOOKBACK_LINES=500
+
+  log() {
+    echo "hydra-glm-drainer-throughput-watchdog: $*"
+  }
+
+  # --- Resolve `now` (epoch-ms; injectable for deterministic tests) ---
+  local now_ms
+  if [[ -n "${HYDRA_WATCHDOG_GLM_NOW_MS+x}" ]]; then
+    now_ms="$HYDRA_WATCHDOG_GLM_NOW_MS"
+  else
+    now_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+  fi
+  [[ "$now_ms" =~ ^[0-9]+$ ]] || now_ms=0
+
+  # --- Resolve the heartbeat's epoch-ms (injectable; else the real read) ---
+  local heartbeat_ms
+  if [[ -n "${HYDRA_WATCHDOG_GLM_HEARTBEAT_MS+x}" ]]; then
+    heartbeat_ms="$HYDRA_WATCHDOG_GLM_HEARTBEAT_MS"
+  elif [[ "$REDIS_HOST" == "docker" ]]; then
+    heartbeat_ms="$(docker exec hydra-redis-1 redis-cli --raw GET "$HEARTBEAT_KEY" 2>/dev/null | tr -dc '0-9')"
+  else
+    heartbeat_ms="$(redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" GET "$HEARTBEAT_KEY" 2>/dev/null | tr -dc '0-9')"
+  fi
+
+  if [[ -z "$heartbeat_ms" ]] || ! [[ "$heartbeat_ms" =~ ^[0-9]+$ ]]; then
+    log "heartbeat absent/unreadable — drainer liveness is #3754's separate, already-handled signal; skipping zero-throughput check this tick"
+    return 0
+  fi
+
+  local age_ms=$((now_ms - heartbeat_ms))
+  if (( age_ms < 0 )); then age_ms=0; fi
+
+  if (( age_ms > STALE_MS )); then
+    log "heartbeat stale (${age_ms}ms old > ${STALE_MS}ms) — drainer presumed DOWN, not sterile; skipping zero-throughput check (down is #3754's existing, already-handled signal)"
+    return 0
+  fi
+
+  # --- Read the drain log (injectable file; else journalctl) ---
+  local log_text=""
+  if [[ -n "${HYDRA_WATCHDOG_GLM_DRAINER_LOG_FILE:-}" ]]; then
+    if [[ -f "$HYDRA_WATCHDOG_GLM_DRAINER_LOG_FILE" ]]; then
+      log_text="$(cat "$HYDRA_WATCHDOG_GLM_DRAINER_LOG_FILE" 2>/dev/null || echo "")"
+    else
+      log "WARN log file not found at $HYDRA_WATCHDOG_GLM_DRAINER_LOG_FILE — cannot evaluate throughput this tick"
+      return 0
+    fi
+  else
+    if ! command -v journalctl >/dev/null 2>&1; then
+      log "WARN journalctl unavailable — cannot evaluate throughput this tick"
+      return 0
+    fi
+    log_text="$(journalctl --user -u "$UNIT" -n "$LOOKBACK_LINES" --no-pager -o cat 2>/dev/null || echo "")"
+  fi
+
+  if [[ -z "$log_text" ]]; then
+    log "heartbeat fresh (${age_ms}ms old) but the drain log is empty/unreadable — cannot evaluate throughput this tick"
+    return 0
+  fi
+
+  # Single linear pass, chronological order (journalctl -n and a plain log
+  # file are both oldest-first within the window): count "picked issue #"
+  # lines since the last "PR opened" line.
+  local streak
+  streak=$(printf '%s\n' "$log_text" | awk '
+    /picked issue #[0-9]+/  { streak++; next }
+    /: PR opened \(branch=/ { streak=0;  next }
+    END { print streak+0 }
+  ')
+  [[ "$streak" =~ ^[0-9]+$ ]] || streak=0
+
+  if (( streak >= THRESHOLD_N )); then
+    log "WARNING ZERO-THROUGHPUT — drainer heartbeat fresh (${age_ms}ms old) but ${streak} consecutive claim attempt(s) with zero PR creations (threshold ${THRESHOLD_N}) — live but sterile (issue #3868)"
+  else
+    log "healthy (heartbeat fresh ${age_ms}ms old, ${streak} consecutive claim(s) without a PR, threshold ${THRESHOLD_N})"
+  fi
+  return 0
+}
+
+# =============================================================================
 # Entry point — run all blocks on every tick ONLY when the script is executed
 # directly, not when it is sourced. test/watchdog-pending-work.test.mts sources
 # this file to exercise read_pending_work in isolation (without faking the
@@ -1068,5 +1238,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_deploy_drift
   run_skill_mirror_drift
   run_launch_flow
+  run_glm_drainer_throughput
   exit 0
 fi

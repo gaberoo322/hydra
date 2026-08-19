@@ -730,6 +730,32 @@ to do. The L2 decision brain in `decide.py` benefits from a stable in-process
 view of pipeline state across many turns, so the Gate launches one long run
 and lets it run to budget/clock/idle rather than firing many short bursts.
 
+### Two stop levers — operator `paused` vs stopping `hydra-pace-gate.timer` (issue #3868)
+
+Two different actions both look like "make the autopilot stop," but they gate
+different lanes. Confusing them either freezes work that should keep running
+(the free GLM lane sitting idle for days during a cost-emergency shutdown,
+observed 2026-08-05 — see ADR-0032 Decision 6) or leaves the Claude/Anthropic
+lane spending when the operator only meant to pause it.
+
+| Lever | How | What stops | What keeps running |
+|---|---|---|---|
+| **Operator pause** | `POST /api/autopilot/paused` (`paused=true`) | **EVERYTHING.** `pace-gate.sh` step 2 skips launching `hydra-autopilot.service` on `reasons.paused == true` (#988), AND `scripts/glm/drainer-loop.sh`'s `is_operator_paused()` kill-switch honors this SAME flag (ADR-0032 Decision 6 — it deliberately ignores Anthropic `emergencyStop`/`paceState`/`weeklyEmergencyStop`, but not this) — so the GLM dev-drainer's free z.ai-quota lane freezes too, even though its quota has nothing to do with the Anthropic emergency the pause was meant for. | Nothing — this is the full kill switch. |
+| **Stop the Pace Gate** | `systemctl --user stop hydra-pace-gate.timer` (no relaunch until re-enabled) | Only new `hydra-autopilot.service` (Claude AFK) launches — the Pace Gate simply never fires `systemctl --user start hydra-autopilot.service` again. | `hydra-glm-drainer.timer` is a **separate systemd unit**, unaffected by the Pace Gate's timer — the drainer keeps draining on its own ~15-min cadence, gated only by its own flock/cap/kill-switch logic. |
+
+**Rule of thumb:** stopping `hydra-pace-gate.timer` is the correct **Claude-only**
+stop (e.g. pausing Anthropic-quota spend without touching the independent
+z.ai-quota lane). Setting the operator `paused` flag is the correct **total**
+stop (e.g. an incident where all autonomous authoring, on any quota, must
+halt). Using `paused=true` as a Claude-only lever is the footgun this section
+exists to prevent — it silently starves the GLM lane of ticks (and, per
+ADR-0032, of stale-claim recovery) for as long as the pause is set.
+
+The watchdog's `## GLM DRAINER THROUGHPUT` block (`scripts/hydra-watchdog.sh`,
+issue #3868) complements this by alarming when the drainer's heartbeat is
+fresh (i.e., neither lever above is engaged) but it is authoring nothing —
+"live but sterile" — a condition orthogonal to which stop lever is set.
+
 ## Slot lifecycle events (issue #509)
 
 Subagent slot accounting is event-driven: `SubagentStop` and `Notification` hooks XADD events onto `hydra:autopilot:slot-events`; `collect-state.sh` drains it each turn; `decide.py` translates `subagent_stop` events into completions and appends failures to `state.failure_log`. A silent-wedge wall-clock fallback (`subagent_max_wall_seconds=3600`) covers hook failures. Full event schema, turn-consumption detail, env overrides, and best-effort guarantees are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).

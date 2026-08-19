@@ -70,7 +70,7 @@
   "scripts/cost/weighted-quota-report.ts": 1,
   "scripts/deploy.sh": 2,
   "scripts/glm-beachhead-report.sh": 1,
-  "scripts/hydra-watchdog.sh": 5,
+  "scripts/hydra-watchdog.sh": 6,
   "scripts/hydra/footer.sh": 1,
   "scripts/parse-control-plane.mjs": 1,
   "scripts/probe-search.ts": 1,
