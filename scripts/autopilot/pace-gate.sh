@@ -272,9 +272,12 @@ PACE_STATE=$(jq -r '.paceState // "unknown"' <<<"$ELIGIBILITY_JSON" 2>/dev/null 
 # launch entirely (no throwaway run spawned) — the operator paused autopilot.
 PAUSED=$(jq -r '.reasons.paused // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 # Issue #3845 (epic #3844, decided in #3809's resolution addendum): the route
-# overlays `.reasons.meterUnavailable` (true once #3821's sustained-failure
-# gate trips — 3+ consecutive OAuth-meter read failures) when the usage
-# meter itself cannot be read. Before this the script never parsed this
+# overlays `.reasons.meterUnavailable` when the usage meter itself cannot be
+# read — since issue #4165 that means NO fresh OAuth read AND no last-good
+# reading inside `HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS` (default 60 min).
+# (It previously also required 3+ consecutive failed reads, which let a blind
+# meter report `false` alongside zeroed percentages and admitted a run at ~92%
+# real weekly usage on 2026-08-19.) Before this the script never parsed this
 # field, so a meter-dark block fell through to the generic `.allow == false`
 # backstop below and was recorded (in the pre-#3845 world, only as a log
 # line) as an indistinguishable "deliberate skip" — the exact

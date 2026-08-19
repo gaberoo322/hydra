@@ -4045,6 +4045,8 @@ describe("usage-tracker", () => {
         sessionBlockedUntil: null,
         worklessUntil: null,
         meterUnavailable: false,
+        meterStale: false,
+        meterAgeMs: null,
       },
       paceState: "on",
       targetPercent: 0,

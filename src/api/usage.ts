@@ -131,14 +131,23 @@ export function createUsageRouter() {
       const eligibility = await getEligibilityView({
         snapshot: meter.input,
         // BLOCK when quota cannot be measured (2026-07-30 operator decision,
-        // replacing the #1124 fail-open). Requires a SUSTAINED outage (issue
-        // #3821): either ~35 min with no usable meter reading (TTL + maxStale
-        // — a stale-but-warm cache keeps serving through that window) or 3+
-        // consecutive failed reads against a cold cache (every process
-        // restart starts cold, so a single blip right after a deploy must not
-        // trip this). Transient 429s are absorbed by last-good / the backoff
-        // gate well before either threshold is reached.
+        // replacing the #1124 fail-open; hardened by issue #4165). True only
+        // when there is NO fresh meter read AND no last-good reading inside
+        // `HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS` (default 60 min). Transient
+        // 429s are absorbed by last-good + the backoff gate well before this.
+        //
+        // #4165 removed the consecutive-failure threshold that used to also
+        // gate this: a blind meter with fewer than 3 recorded failures reported
+        // `false` alongside ZEROED percentages, and the governor admitted a run
+        // at ~92% real weekly usage. A failure count is not evidence of
+        // headroom. Do NOT reintroduce a fail-open default here by analogy with
+        // `design-concept-reconcile-check` — that fail-open is correct for a
+        // merge gate and inverted for a spend governor.
         meterUnavailable: meter.meterUnavailable,
+        // Observability for the stale-but-usable case (#4165): the verdict is
+        // gating on a REAL reading that is not fresh. Never flips `allow`.
+        meterStale: meter.stale,
+        meterAgeMs: meter.ageMs,
         readPaused: async () => (await getAutopilotPaused()).paused,
         readSessionBlockedUntil: () => getSessionBlockedUntil(),
         readWorklessUntil: () => getWorklessUntil(),

@@ -1,0 +1,1 @@
+- fix: the autopilot spend governor now blocks instead of admitting when the usage meter cannot be read, falling back to the last known reading while it is recent (#4165)
