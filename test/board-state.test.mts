@@ -35,9 +35,22 @@ import {
   extractStrictBlockerRefs,
   STRICT_BLOCKER_PATTERN_SOURCES,
 } from "../src/github/blockers.ts";
+import { isGlmWithheldFromClaude } from "../src/autopilot/board-state.ts";
+import {
+  GLM_DRAINER_ACTIVE_KEY,
+  GLM_DRAINER_HEARTBEAT_STALE_MS,
+} from "../src/redis/autopilot.ts";
+import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
+const HYDRA_DEV_FRAGMENT = join(
+  REPO_ROOT,
+  "docs",
+  "operator-playbooks",
+  "_fragments",
+  "hydra-dev-parent-flow.md",
+);
 
 interface Issue {
   number: number;
@@ -332,3 +345,184 @@ function occurrences(haystack: string, needle: string): number {
   }
   return count;
 }
+
+/**
+ * Regression + parity tests for issue #4153 — the `hydra-dev` skill's
+ * SELECTION path ("1. Select issue" in
+ * `docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md`) applied no
+ * `glm-eligible` filter at all, while the COUNT path
+ * (`src/autopilot/board-state.ts::deriveBoardState`) already excludes a
+ * `glm-eligible` issue when the GLM dev-drainer partition is live (#3754).
+ * An unpinned `dev_orch` dispatch could therefore land on — and
+ * double-author — a GLM-drainer-owned issue.
+ *
+ * Same shape as the #3965 suite above: the fragment is bash/python (no TS
+ * bridge), so its liveness check and label filter MIRROR the TS predicate
+ * (`isGlmWithheldFromClaude`) rather than importing it. These tests pin the
+ * TS predicate directly, extract the ACTUAL embedded python liveness snippet
+ * from the committed fragment and run it against constructed heartbeat
+ * values, and assert a byte-identical drift guard between the fragment's
+ * inlined constants and their TS sources (`GLM_DRAINER_ACTIVE_KEY`,
+ * `GLM_DRAINER_HEARTBEAT_STALE_MS` in `src/redis/autopilot.ts`, and the
+ * `glm-eligible` label literal in `ORCH_BOARD_LABELS.glm_eligible`).
+ */
+describe("isGlmWithheldFromClaude — the shared count/selection predicate (issue #4153)", () => {
+  test("glm-eligible + partition LIVE -> withheld", () => {
+    assert.equal(isGlmWithheldFromClaude(["ready-for-agent", "glm-eligible"], true), true);
+  });
+
+  test("glm-eligible + partition NOT live (fail-open) -> NOT withheld", () => {
+    assert.equal(isGlmWithheldFromClaude(["ready-for-agent", "glm-eligible"], false), false);
+  });
+
+  test("no glm-eligible label, partition live -> NOT withheld", () => {
+    assert.equal(isGlmWithheldFromClaude(["ready-for-agent"], true), false);
+  });
+
+  test("no glm-eligible label, partition not live -> NOT withheld", () => {
+    assert.equal(isGlmWithheldFromClaude(["ready-for-agent"], false), false);
+  });
+
+  test("default glmPartitionActive is the fail-open direction when explicitly false", () => {
+    // Mirrors deriveBoardState's own `glmPartitionActive = false` default —
+    // a caller that never resolves liveness must never withhold.
+    assert.equal(isGlmWithheldFromClaude(["glm-eligible"], false), false);
+  });
+});
+
+describe("hydra-dev selector — GLM partition selection-path exclusion (issue #4153)", () => {
+  const fragmentSrc = readFileSync(HYDRA_DEV_FRAGMENT, "utf-8");
+
+  /**
+   * Extract the embedded `python3 -c "..."` liveness snippet piped from the
+   * `GLM_PARTITION_ACTIVE=$(docker exec ... | python3 -c "..." )` assignment
+   * in the committed fragment, and run it with `raw` fed on stdin — exactly
+   * as `docker exec hydra-redis-1 redis-cli GET ...` would feed it in
+   * production. Runs the COMMITTED logic, not a re-implementation.
+   */
+  function glmLivenessFromRaw(raw: string): string {
+    const re =
+      /GLM_PARTITION_ACTIVE=\$\(docker exec hydra-redis-1 redis-cli GET hydra:glm:drainer:active[\s\S]*?python3 -c "([\s\S]*?)"\s*2>\/dev\/null \|\| echo false\)/;
+    const m = fragmentSrc.match(re);
+    assert.ok(m, "could not locate the GLM_PARTITION_ACTIVE python3 block in hydra-dev-parent-flow.md");
+    const code = m[1];
+    const r = spawnSync("python3", ["-c", code], {
+      input: raw,
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `python liveness block exited non-zero: ${r.stderr}`);
+    return r.stdout.trim();
+  }
+
+  test("a FRESH heartbeat (1 min old) resolves live=true", () => {
+    const nowMs = Date.now();
+    assert.equal(glmLivenessFromRaw(String(nowMs - 60_000)), "true");
+  });
+
+  test("a STALE heartbeat (past GLM_DRAINER_HEARTBEAT_STALE_MS) resolves live=false", () => {
+    const nowMs = Date.now();
+    assert.equal(
+      glmLivenessFromRaw(String(nowMs - (GLM_DRAINER_HEARTBEAT_STALE_MS + 60_000))),
+      "false",
+    );
+  });
+
+  test("an ABSENT heartbeat (empty stdin) resolves live=false (fail-open)", () => {
+    assert.equal(glmLivenessFromRaw(""), "false");
+  });
+
+  test("an UNPARSEABLE heartbeat value resolves live=false (fail-open)", () => {
+    assert.equal(glmLivenessFromRaw("not-a-number"), "false");
+  });
+
+  test("a non-positive heartbeat value resolves live=false", () => {
+    assert.equal(glmLivenessFromRaw("0"), "false");
+    assert.equal(glmLivenessFromRaw("-1"), "false");
+  });
+
+  test("the jq glm-eligible exclusion filter drops a glm-eligible row only when live", () => {
+    const rows = [
+      { number: 1, title: "a", labels: [{ name: "ready-for-agent" }, { name: "glm-eligible" }] },
+      { number: 2, title: "b", labels: [{ name: "ready-for-agent" }] },
+    ];
+    const liveFilter = '((.labels // []) | map(.name) | index("glm-eligible")) == null';
+    assert.match(
+      fragmentSrc,
+      /GLM_FILTER_JQ='\(\(\.labels \/\/ \[\]\) \| map\(\.name\) \| index\("glm-eligible"\)\) == null'/,
+      "the committed jq filter string has drifted from the tested one",
+    );
+    const r = spawnSync("jq", [`map(select(${liveFilter}))`], {
+      input: JSON.stringify(rows),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0, `jq exited non-zero: ${r.stderr}`);
+    const filtered = JSON.parse(r.stdout);
+    assert.deepEqual(
+      filtered.map((x: { number: number }) => x.number),
+      [2],
+      "a live-partition filter must drop the glm-eligible issue and keep the plain one",
+    );
+  });
+
+  test("the selection query requests `labels` in --json (needed to evaluate the filter)", () => {
+    assert.match(
+      fragmentSrc,
+      /gh issue list --repo gaberoo322\/hydra --label "ready-for-agent" --state open[\s\S]*?--json number,title,labels/,
+      "the selector must fetch labels or the glm-eligible filter has nothing to read",
+    );
+  });
+
+  test("GLM_FILTER_JQ defaults to a no-op ('true') before liveness is known (fail-open)", () => {
+    assert.match(
+      fragmentSrc,
+      /GLM_FILTER_JQ='true'/,
+      "the filter must default to a no-op so an unresolved/negative liveness never withholds",
+    );
+  });
+
+  // ---- Drift guard: the fragment's inlined constants stay pinned to TS ----
+
+  test("the fragment's inlined Redis key is byte-identical to GLM_DRAINER_ACTIVE_KEY (drift guard)", () => {
+    assert.equal(
+      GLM_DRAINER_ACTIVE_KEY,
+      "hydra:glm:drainer:active",
+      "sanity: the TS constant itself must still be the documented key",
+    );
+    assert.ok(
+      fragmentSrc.includes(`redis-cli GET ${GLM_DRAINER_ACTIVE_KEY}`),
+      "the fragment's inlined Redis key literal has drifted from GLM_DRAINER_ACTIVE_KEY in src/redis/autopilot.ts",
+    );
+  });
+
+  test("the fragment's inlined staleness window is byte-identical to GLM_DRAINER_HEARTBEAT_STALE_MS (drift guard)", () => {
+    assert.equal(
+      GLM_DRAINER_HEARTBEAT_STALE_MS,
+      45 * 60 * 1000,
+      "sanity: the TS constant itself must still be 45 minutes",
+    );
+    assert.ok(
+      fragmentSrc.includes(`<= ${GLM_DRAINER_HEARTBEAT_STALE_MS}`),
+      "the fragment's inlined staleness threshold has drifted from GLM_DRAINER_HEARTBEAT_STALE_MS in src/redis/autopilot.ts",
+    );
+  });
+
+  test("the fragment's inlined label literal is byte-identical to ORCH_BOARD_LABELS.glm_eligible (drift guard)", () => {
+    assert.equal(
+      ORCH_BOARD_LABELS.glm_eligible,
+      "glm-eligible",
+      "sanity: the TS constant itself must still be the documented label",
+    );
+    assert.ok(
+      fragmentSrc.includes(`index("${ORCH_BOARD_LABELS.glm_eligible}")`),
+      "the fragment's inlined glm-eligible label literal has drifted from ORCH_BOARD_LABELS.glm_eligible",
+    );
+  });
+
+  test("fail-open direction is documented and must not be inverted", () => {
+    assert.match(
+      fragmentSrc,
+      /Fail-open preserved \(#3754\)/,
+      "the fragment must document the fail-open contract inline, mirroring board-state.ts's header doc",
+    );
+  });
+});

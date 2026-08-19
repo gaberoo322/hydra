@@ -75,6 +75,40 @@ import {
  * async by the endpoint (via the typed accessor in `src/redis/autopilot.ts`)
  * and injected here as a boolean — keeping this function pure/sync.
  */
+/**
+ * True when `labels` carries `glm-eligible` AND the GLM dev-drainer partition
+ * is LIVE (issue #3754, ADR-0032) — i.e. this issue is withheld from the
+ * Claude `dev_orch` authoring pool because the drainer already owns it on
+ * z.ai's independent quota.
+ *
+ * THE single predicate both call sites apply (issue #4153, the #3965 shape):
+ * the COUNT path (`deriveBoardState` / `resolveOpenBlockers` below) and the
+ * `hydra-dev` skill's SELECTION path (`docs/operator-playbooks/_fragments/
+ * hydra-dev-parent-flow.md`, "1. Select issue"). Before #4153 the selection
+ * path applied NO glm-eligible filter at all, so an unpinned `dev_orch`
+ * dispatch could land on — and double-author — a GLM-drainer-owned issue even
+ * though the count path had already excluded it from `ready_for_agent`.
+ *
+ * The selection path is bash/python (no TS bridge), so it necessarily MIRRORS
+ * this predicate rather than importing it; `test/board-state.test.mts` pins
+ * the mirror with a byte-identical drift guard over `GLM_DRAINER_ACTIVE_KEY` /
+ * `GLM_DRAINER_HEARTBEAT_STALE_MS` (`src/redis/autopilot.ts`) and the
+ * `glm-eligible` label literal — the same convention issue #3965 established
+ * for the strict-blocker predicate mirrored into `collect-state.sh`.
+ *
+ * `glmPartitionActive=false` — the default, and the value ANY liveness-read
+ * failure resolves to per `getGlmDrainerLiveness` — always returns `false`
+ * here regardless of labels. That is the fail-open-toward-work direction
+ * (#3754): a down/absent/stale drainer un-gates `glm-eligible` issues rather
+ * than starving the Claude lane. Must not be inverted.
+ */
+export function isGlmWithheldFromClaude(
+  labels: readonly string[],
+  glmPartitionActive: boolean,
+): boolean {
+  return glmPartitionActive && labels.includes(ORCH_BOARD_LABELS.glm_eligible);
+}
+
 export function deriveBoardState(
   rows: readonly IssueRow[],
   nowMs: number,
@@ -118,7 +152,7 @@ export function deriveBoardState(
     if (
       labels.has(ORCH_BOARD_LABELS.ready_for_agent) &&
       !labels.has(ORCH_BOARD_LABELS.target_backlog) &&
-      !(glmPartitionActive && labels.has(ORCH_BOARD_LABELS.glm_eligible)) &&
+      !isGlmWithheldFromClaude(row.labels, glmPartitionActive) &&
       !hasOpenStrictBlocker(row, openBlockers)
     )
       ready_for_agent++;
@@ -221,7 +255,7 @@ export async function resolveOpenBlockers(
     if (
       !labels.has(ORCH_BOARD_LABELS.ready_for_agent) ||
       labels.has(ORCH_BOARD_LABELS.target_backlog) ||
-      (glmPartitionActive && labels.has(ORCH_BOARD_LABELS.glm_eligible))
+      isGlmWithheldFromClaude(row.labels, glmPartitionActive)
     )
       continue;
     for (const n of extractStrictBlockerRefs(row.body)) {
