@@ -10,9 +10,10 @@ contract lives in the sibling `hydra-dev-child-flow.md`.
 ### 1. Select issue
 
 If `$issue_number` provided, use it. Otherwise, take the first
-`ready-for-agent` issue NOT already claimed by an open PR (#4103). An issue
-keeps `ready-for-agent` while its PR is in flight (nothing relabels it until
-the PR merges or `reap.py` promotes it to `needs-qa`), so an unguarded `.[0]`
+`ready-for-agent` issue NOT already claimed by an open PR (#4103) AND NOT
+withheld by a live GLM dev-drainer partition (#4153). An issue keeps
+`ready-for-agent` while its PR is in flight (nothing relabels it until the PR
+merges or `reap.py` promotes it to `needs-qa`), so an unguarded `.[0]`
 manufactures a duplicate dispatch — a full wasted dev cycle (fresh worktree,
 implementation, `npm test`, duplicate PR) whenever a PR is open on the head of
 that list. The claim-check uses the ONE shared reference predicate
@@ -20,6 +21,23 @@ that list. The claim-check uses the ONE shared reference predicate
 branch/body matching inline: the body-ref arm catches PRs whose head branch
 carries no issue number at all (`worktree-agent-*` branches link only via
 `Closes #N` in the body, invisible to a branch-name scan).
+
+**GLM partition exclusion (issue #4153, ADR-0032, mirrors `isGlmWithheldFromClaude`
+in `src/autopilot/board-state.ts`).** The board-state COUNT path already
+excludes a `glm-eligible` issue from `ready_for_agent` while the drainer
+heartbeat (`hydra:glm:drainer:active`) is fresh — the drainer owns it on z.ai's
+independent quota, so counting/selecting it here would dispatch a second
+author. This SELECTION query previously applied no such filter at all, so an
+unpinned dispatch could land on — and double-author — a GLM-owned issue (the
+gap #4153 closed). This is bash/python (no TS bridge), so it MIRRORS the TS
+predicate rather than importing it; `test/board-state.test.mts` pins the
+mirror with a drift guard against `GLM_DRAINER_ACTIVE_KEY` /
+`GLM_DRAINER_HEARTBEAT_STALE_MS` (`src/redis/autopilot.ts`) and the
+`glm-eligible` label literal. **Fail-open preserved (#3754):** ANY liveness-read
+failure — `docker`/`redis-cli` absent, an empty/unparseable heartbeat value, or
+a stale one — resolves `GLM_PARTITION_ACTIVE=false`, which makes the
+glm-eligible filter below a no-op. A down/absent drainer never starves this
+lane.
 
 ```bash
 # Issue numbers already claimed by an open PR (branch convention OR body ref),
@@ -30,10 +48,36 @@ carries no issue number at all (`worktree-agent-*` branches link only via
 CLAIMED=$(gh pr list --repo gaberoo322/hydra --state open --json headRefName,body \
   | python3 scripts/autopilot/pr-refs.py 2>/dev/null || true)
 CLAIMED_JQ=$(printf '%s' "$CLAIMED" | tr ' ' ',')
-# Take the first ready-for-agent issue NOT in the claimed set.
+
+# GLM dev-drainer partition liveness (issue #4153, mirrors
+# getGlmDrainerLiveness in src/redis/autopilot.ts). FAIL-OPEN: any read/parse
+# failure resolves to "false" (not live) below, never "true".
+GLM_PARTITION_ACTIVE=$(docker exec hydra-redis-1 redis-cli GET hydra:glm:drainer:active 2>/dev/null \
+  | python3 -c "
+import sys, time
+raw = sys.stdin.read().strip()
+try:
+    heartbeat_ms = float(raw)
+    now_ms = time.time() * 1000
+    # 2700000 == GLM_DRAINER_HEARTBEAT_STALE_MS (src/redis/autopilot.ts), 45 min.
+    live = heartbeat_ms > 0 and (now_ms - heartbeat_ms) <= 2700000
+    print('true' if live else 'false')
+except Exception:
+    print('false')
+" 2>/dev/null || echo false)
+# No-op filter (`true`) unless the partition is live, in which case a
+# glm-eligible issue is excluded — the same "glm-eligible" literal the count
+# path reads via ORCH_BOARD_LABELS.glm_eligible.
+GLM_FILTER_JQ='true'
+if [ "$GLM_PARTITION_ACTIVE" = "true" ]; then
+  GLM_FILTER_JQ='((.labels // []) | map(.name) | index("glm-eligible")) == null'
+fi
+
+# Take the first ready-for-agent issue NOT in the claimed set AND NOT
+# glm-withheld.
 gh issue list --repo gaberoo322/hydra --label "ready-for-agent" --state open \
-  --json number,title \
-  --jq "map(select(.number as \$n | [${CLAIMED_JQ}] | index(\$n) | not))[0]"
+  --json number,title,labels \
+  --jq "map(select(.number as \$n | [${CLAIMED_JQ}] | index(\$n) | not)) | map(select(${GLM_FILTER_JQ}))[0]"
 ```
 None → report and stop.
 
