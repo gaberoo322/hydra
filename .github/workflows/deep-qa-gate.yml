@@ -170,13 +170,30 @@ jobs:
           fi
 
           echo "Reporting deep-qa-gate=$STATE on $HEAD_SHA: $DESCRIPTION"
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${REPO}/statuses/${HEAD_SHA}" \
-            -f state="$STATE" \
-            -f context="deep-qa-gate" \
-            -f description="$DESCRIPTION"
+          # Issue #4117. This POST used to be a bare `gh api` under
+          # `set -euo pipefail`. On PR #4116 a transient 5xx during a GitHub
+          # outage killed the step AFTER it had printed "success", leaving the
+          # REQUIRED deep-qa-gate context unposted with no diagnostic beyond
+          # `exit 1` — and because this check is required for EVERY PR
+          # (non-T4 ones included, where it is a formality), that froze the
+          # merge queue until a human noticed.
+          #
+          # The wrapper retries transient failures (5xx / 429 / no response)
+          # on a bounded backoff, fails fast on 4xx so a 403 permissions bug
+          # is not buried under a retry storm, and always prints the HTTP
+          # status and response body. The logic lives in scripts/ci/ so it can
+          # be unit-tested (test/post-commit-status.test.mts) rather than
+          # embedded in a Verifier-Core workflow, where it could not be.
+          # The exit status is captured rather than allowed to abort the step,
+          # so the advisory CheckRun mirror below is still ATTEMPTED even when
+          # the authoritative status POST failed (artifact INV-7: the two are
+          # executed independently, and neither's failure silently prevents
+          # the other). The failure is re-raised at the end of the step, so a
+          # PR whose status never posted still ends red.
+          STATUS_POST_RC=0
+          node --no-warnings --experimental-strip-types \
+            scripts/ci/post-commit-status.ts \
+            "$HEAD_SHA" "$STATE" "deep-qa-gate" "$DESCRIPTION" || STATUS_POST_RC=$?
 
           # CheckRun rollup mirror (issue #868). The commit status above is the
           # single branch-protection-required primitive; this CheckRun is an
@@ -217,4 +234,12 @@ jobs:
           if [ "$STATE" != "success" ]; then
             echo "::error::deep-qa-gate failed: $DESCRIPTION"
             exit 1
+          fi
+
+          # Re-raise a failed status POST (issue #4117). Deferred to here so it
+          # never short-circuits the CheckRun mirror above; the diagnostics
+          # naming the HTTP status and body were already printed by the wrapper.
+          if [ "$STATUS_POST_RC" -ne 0 ]; then
+            echo "::error::deep-qa-gate computed '$STATE' but could NOT post the commit status on $HEAD_SHA — the required context is absent and this PR cannot merge until it is posted. See the [post-commit-status] diagnostics above."
+            exit "$STATUS_POST_RC"
           fi
