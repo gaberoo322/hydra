@@ -6,7 +6,7 @@ Routing by code area lives in [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md); this ros
 
 What an ADR *is* here — an agent-facing normative spec, not a one-paragraph memory aid — is set by [ADR-0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md). Read it before writing a new one.
 
-**Reserved numbers:** none outstanding — `0034` and `0035` are both landed (below). Take `0038` or higher for anything new. `test/adr-roster.test.mts` fails on a duplicate number.
+**Reserved numbers:** none outstanding — `0034` and `0035` are both landed (below). Take `0040` or higher for anything new. `test/adr-roster.test.mts` fails on a duplicate number.
 
 **A new ADR needs two entries, not one:** a row in the table below, *and* its number in a `Relevant ADRs` cell of [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md). The roster makes it findable; the map makes it routed and gives it a weight budget. An ADR with only a roster row is invisible from every code area and escapes the per-area ratchet entirely. If it governs no code area, the "process / policy (no code area)" row is its home. Both are enforced by `test/adr-roster.test.mts`.
 
@@ -50,6 +50,7 @@ What an ADR *is* here — an agent-facing normative spec, not a one-paragraph me
 | [0036](./0036-anchor-selection-retired-candidate-feed.md) | accepted (renumbered from 0016) | Anchor selection is retired; the Candidate Feed is data the brain reads, not a decision the orchestrator makes. Establishes the **Locality** principle. | Touching candidate scoring, or tempted to resurrect the reframe queue. |
 | [0037](./0037-hydra-adrs-are-agent-facing-normative-specs.md) | accepted | Hydra ADRs are agent-facing normative specs: Pocock's write gate applies, its one-paragraph size target does not. | Before writing a new ADR, or before "fixing" the corpus to be shorter. |
 | [0038](./0038-the-test-suite-is-not-padded.md) | accepted | The test suite is not padded — consolidate it mechanically; do not delete, semantically rewrite, or parallelise it. The metric is operator Claude quota, not CI minutes. | Tempted to trim the test suite, hunt flaky tests, or parallelise the runner. |
+| [0039](./0039-dependency-graph-is-a-seam-hydra-owns.md) | accepted | The dependency graph is a seam Hydra owns; extractors are swappable producers. TS uses a sound resolver, not a regex or tree-sitter; Graphify is a candidate producer, never a substrate. | Proposing a third-party code-graph tool, or touching `scanArchitecture()` / `/api/architecture`. |
 
 ## Numbering
 

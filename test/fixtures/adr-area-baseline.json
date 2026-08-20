@@ -8,7 +8,7 @@
   "src/scheduler/": 20409,
   "src/pattern-memory/": 0,
   "src/reflections/": 5611,
-  "src/metrics/, src/aggregators/": 12895,
+  "src/metrics/, src/aggregators/": 26596,
   "src/api/, src/api.ts": 31444,
   "src/logger.ts": 5930,
   "src/target-config.ts": 8848,

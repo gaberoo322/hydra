@@ -21,7 +21,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping, Research Floor | _lazy_ | ADR-0012 |
 | `src/pattern-memory/` | Pattern Memory | _lazy_ | — |
 | `src/reflections/` | Reflections | _lazy_ | ADR-0023 |
-| `src/metrics/`, `src/aggregators/` | Cost, Quota Weight | _lazy_ | ADR-0016, ADR-0028 |
+| `src/metrics/`, `src/aggregators/` | Cost, Quota Weight | _lazy_ | ADR-0016, ADR-0028, ADR-0039 |
 | `src/api/`, `src/api.ts` | — (see `src/api/ENDPOINT-REGISTRY.md`) | n/a | ADR-0011, ADR-0022, ADR-0024 |
 | `src/logger.ts` | — | n/a | ADR-0027 |
 | `src/target-config.ts` | Target Manifest | n/a | ADR-0002, ADR-0026 |
