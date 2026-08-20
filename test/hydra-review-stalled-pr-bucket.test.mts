@@ -180,13 +180,31 @@ describe("hydra-review playbook — Stalled PRs bucket (issue #3963)", () => {
     );
   });
 
-  test("the five resolution options are present, including the two merge paths", () => {
+  test("the four canonical options are present, and Land-it carries BOTH merge mechanisms", () => {
     const section = stalledSection();
-    // INV-5: the drain loop offers Update branch / Enable auto-merge / Merge now
-    // / Close / Skip, and no merge fires without the operator picking one.
+    // INV-5 (revised by #4185): the drain loop now offers the canonical
+    // four — Land it / Update branch / Close / Skip — via AskUserQuestion,
+    // whose 4-option ceiling cannot fit the previous five.
+    //
+    // "Land it" COLLAPSES the old "Merge now" + "Enable auto-merge" pair: they
+    // were the same operator intent, differing only on whether required checks
+    // were already green, which the skill already knows. Both mechanisms must
+    // therefore still be documented INSIDE the Land-it option — the collapse is
+    // in the operator's choice, never in the commands available — so these two
+    // assertions are unchanged from the pre-#4185 five-option contract.
     assert.match(section, /gh pr update-branch/, "Update branch option must be present");
-    assert.match(section, /gh pr merge <PR> --auto/, "Enable auto-merge option must be present");
-    assert.match(section, /gh pr merge <PR> --squash/, "Merge now option must be present");
+    assert.match(section, /gh pr merge <PR> --auto/, "the arm-auto-merge mechanism must survive inside Land it");
+    assert.match(section, /gh pr merge <PR> --squash/, "the merge-now mechanism must survive inside Land it");
+    assert.match(
+      section,
+      /\*\*Land it\*\*/,
+      "the canonical slot-1 option label must be 'Land it' (issue #4185 option table)",
+    );
+    assert.match(
+      section,
+      /required checks/i,
+      "Land it must state that the mechanism is chosen by required-check state, not guessed",
+    );
     assert.match(section, /Do not auto-resolve/, "the Update branch option must forbid auto-resolving a real conflict");
     assert.match(
       section,

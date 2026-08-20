@@ -165,14 +165,19 @@ done
 
 `UNSHEPHERDED?` is a candidate, not a verdict — confirm every **required** check
 above passes before treating the row as stalled. Walk the combined list
-oldest-first, one PR at a time, and offer:
+oldest-first, one PR at a time, and offer the canonical four (§4):
 
+- **Land it** — the slot-1 recommended action. **The mechanism is decided by the
+  required checks, never guessed:** if every required check already
+  passes, `gh pr merge <PR> --squash --repo <RREPO>` (merge now); otherwise
+  `gh pr merge <PR> --auto --repo <RREPO>` to arm auto-merge so it lands the
+  moment CI goes green. State which one will fire in the option's `description`,
+  and put the check table in the `preview` so the operator sees the state that
+  decided it. **The collapse is in the operator's CHOICE, not in the commands
+  available** — both mechanisms remain, reachable via "Other".
 - **Update branch** — `gh pr update-branch <PR> --repo <RREPO>`; if it reports
   conflicts, surface them and move on. **Do not auto-resolve** — a conflict on a
   regenerated file or a modify/delete usually encodes a real design question.
-- **Enable auto-merge** — `gh pr merge <PR> --auto --squash --repo <RREPO>` (the
-  `unshepherded` case).
-- **Merge now** — when required checks already pass: `gh pr merge <PR> --squash --repo <RREPO>`.
 - **Close** — the PR is superseded or wrong.
 - **Skip** — leave for tomorrow.
 
@@ -244,87 +249,194 @@ its prior-attempt history so the operator decides informed.
 |---|------|-------|-----|---------------------------|
 ```
 
+### 2.5. Classify, then (only if large) filter
+
+**Classification is not optional, and it runs inline.** Before presenting
+anything, resolve each gathered row's *cheap* facts with parallel `gh` calls — no
+subagents, no `Workflow`:
+
+- **stale-blocked candidates** — does the named blocker still exist, is it CLOSED,
+  and does its close event carry a real `commit_id`? A `completed` close with a
+  null `commit_id` is not proof a fix shipped, so confirm the change is actually
+  on the default branch before calling a row stale.
+- **stalled PRs** — the state of each *required* check (branch-protection set
+  only; `advisory-checks` is ambient-red and must never count).
+
+~1–2 `gh` calls per row, and what makes the table and the §3 previews truthful.
+It is also the real winnowing — report a row confirmed *genuinely* blocked as a
+suppressed count, never walk it.
+
+**The multi-select filter is gated.** `multiSelect` does **not** lift the
+4-option ceiling (4 × 4 = 16 rows per call), and after classification most boards
+have 2–3 actionable rows, where a filter is ceremony. So:
+
+> Fire the filter **only when the post-classification actionable list exceeds 5
+> rows.** Chunk it 4-per-question, one question per bucket, and ask the operator
+> to select the rows to work this session. At 5 or fewer, skip the filter and
+> walk them all.
+
+**Expensive enrichment fans out via `Workflow`, past a floor.** Reading PR failure
+logs, full comment histories, prior-attempt histories, or exploring a Target
+codebase is agent work. Run it **only on rows that survived the filter**, and
+**only when there are ≥4** — below that, inline beats subagent spin-up, so on a
+typical 2-row day it never fires. A `Workflow` subagent has **no channel to the operator and cannot call `AskUserQuestion`**;
+it returns data, and the main loop does every prompt.
+
+```js
+export const meta = {
+  name: 'hydra-review-enrich',
+  description: 'Deep-read each selected review row in parallel',
+  phases: [{ title: 'Enrich', detail: 'one agent per selected row' }],
+}
+phase('Enrich')
+const ROW_SCHEMA = {
+  type: 'object',
+  required: ['ref', 'finding', 'recommendation'],
+  properties: {
+    ref: { type: 'string' },
+    finding: { type: 'string' },
+    recommendation: { type: 'string' },
+    evidence: { type: 'string' },
+  },
+}
+const rows = await parallel(args.rows.map((r) => () =>
+  agent(
+    `Deep-read ${r.repo}#${r.number} ("${r.title}") for an operator review.\n` +
+    `Read the issue body, ALL comments, linked PRs, and any failing CI logs.\n` +
+    `Report what a decision actually turns on. Verify claims against the tracker ` +
+    `and the default branch — never trust a label or a close event alone.`,
+    { label: `enrich:${r.repo}#${r.number}`, phase: 'Enrich', schema: ROW_SCHEMA },
+  )))
+return rows.filter(Boolean)
+```
+
+Pass the surviving rows as `args.rows`. Results feed the §3 summaries; they never
+replace the operator's pick.
+
 Then: "I'll walk through these one at a time, starting with the overnight queue. Ready?"
 
-### 3. Review loop (one issue at a time)
+### 3. Review loop — one issue at a time, via `AskUserQuestion`
 
-1. Read full issue (body, comments, labels, linked PRs) — for a Target row, against that Target's repo
-2. Identify entry path (queue row / triage / tracking parent / dev failure / blocked / **Target ready-for-human / reframe / stale-blocked**)
-3. Present concise summary
-4. Offer 2–4 resolution options (see below)
-5. Include your recommendation with brief reasoning. For queue rows, the autopilot's recommendation is already the default.
-6. Wait for operator's choice
-7. Execute via `gh` CLI — **always pass the row's own repo** (`--repo gaberoo322/hydra` for Orchestrator rows, `--repo <TREPO>` for Target rows); explore that repo's checkout (`~/hydra` vs the Target workspace, e.g. `~/hydra-betting/web`) before asking obvious questions
-8. Move on
+Every row is presented as a **single-select `AskUserQuestion`**, never as prose
+asking the operator to type a reply.
+
+Per row:
+
+1. Read the full issue (body, comments, labels, linked PRs) — for a Target row,
+   against that Target's repo.
+2. Identify the entry path (queue row / stalled PR / triage / tracking parent /
+   dev failure / stale-blocked / **Target ready-for-human / reframe /
+   stale-blocked**).
+3. Write a concise summary as ordinary text *above* the prompt — the prompt
+   carries the choice, the text carries the reasoning.
+4. Call `AskUserQuestion` with **exactly one question** for this row, using that
+   bucket's canonical options from §4. One row = one question = one call; never
+   batch two rows into one call, and never pre-stage the next row's question.
+5. Execute the pick via `gh` — **always pass the row's own repo**
+   (`--repo gaberoo322/hydra` for Orchestrator rows, `--repo <TREPO>` for Target
+   rows); explore that repo's checkout (`~/hydra` vs `~/hydra-betting/web`)
+   before asking obvious questions.
+6. Move on.
+
+**Prompt shape.** `header` is the bucket (≤12 chars: `Stalled PR`, `Blocked`,
+`Triage`, `Reframe`). `question` names the row by number and title. Each option
+carries a `description` saying what will actually happen — the label is the verb,
+the description is the consequence.
+
+**Slot 1 is the recommendation**, labelled `<action> (Recommended)`. This is the
+whole point: the operator clicks option 1 without reading further when they agree.
+Never present a neutral menu — commit to a position and put it first.
+
+**Slot 4 is always Skip.** "Other" is appended automatically by the tool for free
+text, so it is never an option you write.
+
+**Evidence `preview` — two buckets only.** `preview` renders monospace markdown
+beside the options and is single-select-only, which is exactly this walk. Use it
+where **evidence decides the row**:
+
+- **Stale-blocked** — the blocker's number, state, and (if closed) its close-event
+  `commit_id`, plus whether that commit is actually on the default branch. A
+  `completed` close with a null `commit_id` is NOT proof a fix shipped.
+- **Stalled PRs** — the required-check table (name → state), so the operator sees
+  the state that decided which mechanism "Land it" will use.
+
+Do **not** attach a preview to judgment rows (triage, `ready-for-human`,
+`reframe`). There the decision is prose the summary already carries, and a
+preview would compete with the options instead of informing them.
 
 **Transcript deep-link (issue #695).** Whenever a row references a subagent
-dispatch — e.g. a dev failure that names the dispatching session, or a queue
-row whose recommendation cites a subagent's run — include a transcript
-deep-link line so the operator can read the full conversation in one click:
+dispatch — a dev failure naming its dispatching session, a queue row citing a
+subagent's run — include a deep-link line in the summary text:
 
 ```
 - transcript: http://localhost:4000/dispatch/<sessionId>/transcript
 ```
 
-`<sessionId>` is the harness session id (the unified active-dispatch row's
-`id` for `source === "subagent"`). The link resolves a known dispatch even
-after its row expires from the Now page; a registered dispatch whose JSONL was
-cleaned up renders a "transcript not available" state with metadata, never a
-500. Emit one line per dispatch the row references; omit the line for rows
-with no associated subagent dispatch.
+`<sessionId>` is the harness session id (the unified active-dispatch row's `id`
+for `source === "subagent"`). It resolves a known dispatch even after its row
+expires from the Now page; a registered dispatch whose JSONL was cleaned up
+renders a "transcript not available" state, never a 500. One line per referenced
+dispatch; omit it for rows with none.
 
 Explore the codebase before asking obvious questions.
 
-### 4. Resolution options by entry path
+### 4. The canonical option table
 
-#### Overnight queue row (autopilot deferred)
-- **Apply** — execute the recommendation (most common; ~85% of the autopilot's suggestions are right)
-- **Override** — operator chooses a different action
-- **Defer** — keep the row for tomorrow's review (rare; only when more context is needed)
-- **Drop** — discard without action
+One row per bucket. **Slot 1 is the recommended action, slot 4 is always Skip**,
+giving three substantive options plus the tool's automatic "Other". This table is
+the contract — pinned by `test/hydra-review-option-table.test.mts` — so the same
+bucket renders the same choices every session and the operator builds muscle
+memory on position, not wording.
 
-#### Triage origin (judgment/design needed)
-- **Make it agent-ready** — write agent brief, relabel `ready-for-agent`
-- **Break it down** — create child issues, convert to tracking parent or close
-- **Needs more info** — post questions, relabel `needs-info`
-- **Won't do** — close, label `wontfix`
+| Bucket | 1 (Recommended) | 2 | 3 | 4 |
+|---|---|---|---|---|
+| Overnight queue row | Apply | Override | Drop | Skip |
+| Stalled PR | Land it | Update branch | Close | Skip |
+| Triage origin | Make it agent-ready | Needs more info | Won't do | Skip |
+| Tracking parent | Close (children done) | Restructure | Unblock children | Skip |
+| Dev failure | Retry with narrower scope | Provide implementation hints | Abandon | Skip |
+| Stale-blocked | Unblock | Still blocked (update ref) | No longer relevant | Skip |
+| Target ready-for-human | Make it agent-ready | Needs more info | Won't do | Skip |
+| Target reframe | Narrow scope | Provide implementation approach | Abandon | Skip |
+| Target stale-blocked | Unblock | Still blocked (update ref) | No longer relevant | Skip |
 
-#### Tracking parent
-- **Close (children done)** — if all children closed AND no open PR references the epic (see Rules; check before closing)
-- **Unblock children** — re-triage stuck ones
-- **Restructure** — merge/split/reorder children
-- **Keep as-is** — active oversight work
+**The slot-1 escape hatch.** Slot 1's *label* may be specialised to the row when
+the generic action would be wrong — e.g. a stalled PR wedged on a fixable gate
+takes **"Fix and push"** instead of "Land it", because arming auto-merge on a PR
+that can never go green does nothing. **Slots 2–4 never change.** Without this
+carve-out the table would force such a row into an action that cannot work.
 
-#### Dev failure (agent tried, failed)
-- **Retry with narrower scope** — simplify criteria, relabel `ready-for-agent`
-- **Provide implementation hints** — add comment, relabel `ready-for-agent`
-- **Take over manually** — operator implements
-- **Abandon** — close `wontfix`
+**What each option does**
 
-#### Stale-blocked
-- **Unblock** — remove `blocked`, apply next state
-- **Still blocked (update reference)** — link the actual open blocker
-- **No longer relevant** — close `wontfix`
+- **Apply** — execute the autopilot's recommendation verbatim (~85% are right).
+  **Override** — operator supplies a different action. **Drop** — discard as a
+  false alarm. *Deferring is `Skip`* — the row stays for tomorrow either way.
+- **Land it** — see §0.9; mechanism decided by required-check state.
+  **Update branch** — `gh pr update-branch`; surface conflicts, never auto-resolve.
+- **Make it agent-ready** — write the agent brief (category, summary,
+  current/desired behavior, acceptance criteria, out-of-scope, key interfaces)
+  **including any operator hints**, then relabel `ready-for-agent` (stripping
+  `ready-for-human` / `reframe`). Absorbs the former "Provide guidance".
+- **Close (children done)** — only after the open-PR check in Rules.
+  **Restructure** — merge/split/reorder children. **Unblock children** —
+  re-triage the stuck ones. *"Keep as-is" is `Skip`.*
+- **Unblock** — remove `blocked`, apply the next state. **Still blocked (update
+  ref)** — write the real blocker into the **body** as `## Blocked by`, never a
+  comment: the staleness sweep parses bodies only, so a blocker recorded in a
+  comment is invisible and the row resurfaces forever.
+- **Retry with narrower scope** / **Narrow scope** — rewrite smaller, relabel
+  `ready-for-agent`. **Abandon** — repeated failure means infeasible; close
+  `wontfix`. *"Take over manually" is `Skip`* — the operator doing it themselves
+  needs no machine action.
 
-#### Target `ready-for-human` (§1.5)
-An item `hydra-target-qa` (or the Target build loop) routed to the operator. Resolve against the Target repo (`--repo <TREPO>`); explore the Target workspace (e.g. `~/hydra-betting/web`) before deciding.
-- **Make it agent-ready** — write the agent brief, relabel `ready-for-agent` so `hydra-target-sweep` / `dev_target` picks it up (strip `ready-for-human`)
-- **Provide guidance** — add specific hints (files, functions, criteria), then relabel `ready-for-agent`
-- **Needs more info** — post questions, relabel `needs-info`
-- **Won't do** — close `wontfix`
+**Reachable only via "Other" (deliberate).** *Break it down* (triage) and *Split
+into steps* (Target reframe) — both create child issues, both are rare here, and
+both lose to keeping slot 4 free for Skip.
 
-#### Target `reframe` (build failed 2+ times)
-Always surface the prior attempts first (the failure history names the dispatching `hydra-target-build` session — include its transcript deep-link). Then offer:
-- **Narrow scope** — rewrite as a smaller task, relabel `ready-for-agent` (remove `reframe`)
-- **Provide implementation approach** — operator insight added as a comment, relabel `ready-for-agent`
-- **Split into steps** — file child issues, then close/keep the parent
-- **Abandon** — repeated failure means infeasible / not worth the cost; close `wontfix`
-
-#### Target stale-blocked
-Same as the Orchestrator stale-blocked, against the Target repo.
-- **Unblock** — remove `blocked`, apply next state
-- **Still blocked (update reference)** — link the actual open blocker
-- **No longer relevant** — close `wontfix`
+**Target rows resolve against the Target repo.** Every `gh` call for a Target row
+carries `--repo <TREPO>`, and exploration uses that Target's workspace
+(`~/hydra-betting/web`). A `reframe` row is a build that failed 2+ times: surface
+the prior attempts, with transcript deep-links, *before* the prompt.
 
 ### 5. Wrap-up
 
@@ -347,7 +459,21 @@ carries on its next tick. That is the point of the cockpit — count it.
 
 - **Drain order: overnight queue → stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning). Stalled PRs come next because they are the cheapest conversion of effort into merged work on the board. Don't reorder anything ahead of the overnight queue. **Per-Target items always drain last** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
 - **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (e.g. `~/hydra-betting/web`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
-- One issue at a time. No batching.
+- **One issue at a time. No batching.** This survives `AskUserQuestion` intact:
+  one row = one question = one call. The multi-select filter (§2.5) batches only
+  the *choice of which rows to work*, never a resolution — and it fires only above
+  5 post-classification rows. Filtering is cheap; resolution is where the
+  verification lives — see the pre-close PR check below for what batching cost
+  once.
+- **Classify before presenting, and verify rather than trust a label.** A
+  `blocked` row is only stale once its blocker is confirmed closed AND its fix
+  confirmed on the default branch — a `completed` close with a null `commit_id`
+  ships nothing. A stalled PR is only unshepherded once every *required* check is
+  confirmed green; `advisory-checks` is ambient-red on master and must never
+  count toward that predicate.
+- **Never present a neutral menu.** Slot 1 is a committed recommendation labelled
+  `(Recommended)`, so agreeing costs one click. Slot 4 is always Skip. "Other" is
+  appended by the tool — never write it as an option.
 - Every comment posted to GitHub starts with: `> *This was generated by AI during operator review.*`
 - Agent briefs (when relabeling to `ready-for-agent`) include: category, summary, current/desired behavior, acceptance criteria, out-of-scope, key interfaces.
 - Explore the codebase before asking obvious questions.
