@@ -1,0 +1,1 @@
+- fix: hydra-target-build's shipped-anchor preflight no longer closes live Target board issues on a false positive — it scores subject-coverage per commit instead of against a saturated union of 100 commits, and a positive verdict now only skips the anchor instead of calling `gh issue close` (#4167)

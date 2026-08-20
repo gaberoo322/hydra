@@ -6,27 +6,44 @@ intersection, 3.2 — doc banner check). All three run before code is written.
 
 Cross-reference drift check. Skip if recently merged.
 
-#### 2.1. Shipped-anchor preflight (issue #2771) — reject a board anchor already merged to origin/main
+#### 2.1. Shipped-anchor preflight (issue #2771) — skip a board anchor already merged to origin/main
 
 Under ADR-0031 the Target board is GitHub Issues on `gaberoo322/hydra-betting`, and the merged/shipped-subject suppression that the Redis `work-queue-hygiene` reconciler used to run (`src/backlog/work-queue-hygiene.ts`, cause `shipped-subject`, issue #2482) is retired along with the work queue. Its role is now enforced `Closes #N` close-discipline (ADR-0031 Decision 5) — a merged PR auto-closes its issue, so a shipped anchor normally never resurfaces on the open board. But an issue whose work landed on `origin/main` via a PR that did NOT cite `Closes #N` (or a hand-filed dup of already-shipped work) can still sit open on the board and be picked. This preflight closes that window at anchor-select time. Run it ONLY when the anchor came from the board pick (Step 2 priority 3); a failing-test / priorities anchor is not a board issue and skips this check.
 
 **Invariants (do NOT weaken these):**
-- **Positive-evidence-only removal.** The *absence* of a matching `#NNN` /
+- **Never closes the board issue (issue #4167).** A positive verdict is
+  non-destructive: the preflight SKIPS the anchor (clears the `in-progress`
+  claim label so the next cycle can re-pick it) and falls through to the next
+  candidate. It MUST NEVER call `gh issue close` — that destructive branch is
+  deleted outright, not gated tighter, because a false positive must cost one
+  cycle, never a `money-critical` board item silently closed as `completed`.
+- **Positive-evidence-only skip.** The *absence* of a matching `#NNN` /
   `item-NNN` token or an `origin/main` commit is NEVER proof the anchor shipped
   — that is the documented 92%-false-positive polarity (#2031 / #2110 / #2482).
-  Removal requires a POSITIVE subject-coverage hit: the anchor subject's
+  Skipping requires a POSITIVE subject-coverage hit: the anchor subject's
   significant words (length > 3, ≥ 4 of them) must be ≥ 70% contained in a
-  concrete recent `origin/main` commit blob (the same asymmetric-containment
-  subject-coverage polarity the retired `subjectCoveredBy` matcher used —
-  score = |anchorWords ∩ commitWords| / |anchorWords| ≥ 0.70; the shell
-  reimplements it inline below, see issue #3461).
+  SINGLE concrete recent `origin/main` commit's own blob (the same
+  asymmetric-containment subject-coverage polarity the retired
+  `subjectCoveredBy` matcher used — score = |anchorWords ∩ commitWords| /
+  |anchorWords| ≥ 0.70; the shell reimplements it inline below, see issue
+  #3461).
+- **Per-commit scoring, never a union-of-commits bag (issue #4167).** The
+  containment score is computed against EACH commit's own word blob
+  independently, taking the max (first hit ≥ 0.70 wins) across the recent
+  window — never against the pooled union of all commits' words. Unioning
+  saturates the vocabulary and turns the hit-rate into a function of window
+  size instead of shipped-ness (measured: 20% → 98% hit-rate from a 5- to a
+  400-commit window, with zero change in what actually shipped). The 0.70
+  threshold is calibrated for a single-commit denominator and MUST NOT be
+  raised to compensate for a union-shaped bag — that treats the symptom, not
+  the defect.
 - **Fail-open on uncertainty.** Any unreachable `git` / empty log / short-title
   anchor (< 4 significant words) KEEPS the anchor — the preflight degrades to a
   no-op, mirroring the retired `reconcileWorkQueue` polarity and `subjectCoveredBy`.
-- **Friction cue still emitted post-close.** On a positive shipped-on-main
+- **Friction cue still emitted post-skip.** On a positive shipped-on-main
   hit, still record the `target-build-anchor-already-shipped-on-main` friction
-  cue (pattern-memory bookkeeping) even though the issue is closed — this
-  is how the learning system keeps the recurrence signal alive.
+  cue (pattern-memory bookkeeping) even though the anchor is only skipped, not
+  closed — this is how the learning system keeps the recurrence signal alive.
 - **Worktree isolation preserved.** Read `origin/main` from **inside
   `$TARGET_WT/web`** (the worktree is already branched off `origin/main` in Step
   0.6) via `git log`. NEVER `git checkout` / `git pull` in the `~/hydra-betting`
@@ -47,62 +64,77 @@ if [ -n "${ANCHOR_NUM:-}" ] && [ -n "${ANCHOR_SUBJECT:-}" ]; then
 
   SHIPPED_ON_MAIN=0
   if [ "$SIG_COUNT" -ge 4 ]; then
-    # Recent origin/main commit blobs, read from INSIDE the worktree (never the
-    # main checkout). `git log` failing (detached/empty) → empty COMMIT_WORDS →
-    # zero coverage → fail-open keep.
-    COMMIT_WORDS=$(git -C "$TARGET_WT/web" log origin/main --format='%s%n%b' -n 100 2>/dev/null \
-      | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '\n' | sort -u | sed '/^$/d')
-    if [ -n "$COMMIT_WORDS" ]; then
-      # Asymmetric containment: fraction of the anchor's significant words present
-      # in the commit blob. score = |anchorWords ∩ commitWords| / |anchorWords|.
-      # Guard-compatible form (issue #3896): the worktree-isolation Bash guard
-      # refuses the original process-substitution `comm -12 <(...) <(...)`. Both
-      # inputs are already `sort -u`'d above, so write each to a temp file and
-      # `comm` the two file paths — identical overlap count.
-      OVERLAP_TMP_A=$(mktemp)
-      OVERLAP_TMP_B=$(mktemp)
-      printf '%s\n' "$SIG_WORDS" > "$OVERLAP_TMP_A"
-      printf '%s\n' "$COMMIT_WORDS" > "$OVERLAP_TMP_B"
-      OVERLAP=$(comm -12 "$OVERLAP_TMP_A" "$OVERLAP_TMP_B" | wc -l | tr -d ' ')
-      rm -f "$OVERLAP_TMP_A" "$OVERLAP_TMP_B"
-      # ≥ 0.70 coverage → positive shipped-on-main evidence (integer math: 100*overlap >= 70*count).
+    # Recent origin/main commits, scored ONE AT A TIME from INSIDE the worktree
+    # (never the main checkout) — never pooled into a union bag (issue #4167:
+    # unioning 100 commits' vocabulary together saturates the bag, so hit-rate
+    # climbs with window size regardless of whether any single commit actually
+    # shipped the anchor's subject). `-z` NUL-terminates each formatted commit
+    # record so a multi-line commit body can never be mistaken for a commit
+    # boundary. `git log` failing (detached/empty) → the log file is empty →
+    # the read loop never runs → SHIPPED_ON_MAIN stays 0 → fail-open keep.
+    COMMIT_LOG_TMP=$(mktemp)
+    git -C "$TARGET_WT/web" log origin/main -z --format='%s%n%b' -n 100 \
+      > "$COMMIT_LOG_TMP" 2>/dev/null
+    # Guard-compatible form (issue #3896): the worktree-isolation Bash guard
+    # refuses process substitution `comm -12 <(...) <(...)`. SIG_WORDS is
+    # already `sort -u`'d above; write it to a temp file ONCE outside the loop
+    # and `comm` it against each commit's own temp file.
+    SIG_WORDS_TMP=$(mktemp)
+    printf '%s\n' "$SIG_WORDS" > "$SIG_WORDS_TMP"
+    while IFS= read -r -d '' COMMIT_RAW; do
+      COMMIT_WORDS=$(printf '%s' "$COMMIT_RAW" | tr 'A-Z' 'a-z' \
+        | tr -cs 'a-z0-9' '\n' | sort -u | sed '/^$/d')
+      [ -z "$COMMIT_WORDS" ] && continue
+      COMMIT_WORDS_TMP=$(mktemp)
+      printf '%s\n' "$COMMIT_WORDS" > "$COMMIT_WORDS_TMP"
+      # Asymmetric containment against THIS commit alone: fraction of the
+      # anchor's significant words present in this one commit's blob.
+      # score = |anchorWords ∩ thisCommitWords| / |anchorWords|.
+      OVERLAP=$(comm -12 "$SIG_WORDS_TMP" "$COMMIT_WORDS_TMP" | wc -l | tr -d ' ')
+      rm -f "$COMMIT_WORDS_TMP"
+      # ≥ 0.70 coverage in a SINGLE commit → positive shipped-on-main evidence
+      # (integer math: 100*overlap >= 70*count). First commit to clear it wins.
       if [ $((100 * OVERLAP)) -ge $((70 * SIG_COUNT)) ]; then
         SHIPPED_ON_MAIN=1
+        break
       fi
-    fi
+    done < "$COMMIT_LOG_TMP"
+    rm -f "$COMMIT_LOG_TMP" "$SIG_WORDS_TMP"
   fi
 
   if [ "$SHIPPED_ON_MAIN" = "1" ]; then
-    echo "shipped-on-main: anchor subject covered by recent origin/main — closing dup + re-selecting"
-    # 1. Close the already-shipped board issue as a dup and clear the claim label.
-    #    REST-only (`gh issue close` / `gh issue edit`); never GraphQL (ADR-0031 Decision 6).
+    echo "shipped-on-main: anchor subject covered by a single recent origin/main commit — skipping anchor + re-selecting (never closing)"
+    # 1. Non-destructive: clear the claim label so the next cycle can re-pick,
+    #    but do NOT close the board issue (issue #4167 — the destructive
+    #    `gh issue close` branch is deleted, not gated tighter, because a false
+    #    positive must cost one cycle, never a closed board item). REST-only
+    #    (`gh issue edit`); never GraphQL (ADR-0031 Decision 6).
     gh issue edit "$ANCHOR_NUM" --repo gaberoo322/hydra-betting --remove-label in-progress 2>/dev/null || true
-    gh issue close "$ANCHOR_NUM" --repo gaberoo322/hydra-betting --reason completed \
-      --comment "Already shipped on origin/main (subject-coverage ≥70% at anchor-select preflight) — closing as duplicate of merged work."
     # 2. Emit the friction cue (pattern-memory bookkeeping — MUST still fire).
     hydra raw POST /memory/subagent-friction "{
       \"skill\":\"hydra-target-build\",
       \"cue\":\"target-build-anchor-already-shipped-on-main\",
-      \"workaround\":\"closed shipped board issue as dup; selected next candidate\",
-      \"context\":\"origin/main subject-coverage hit at anchor-select preflight\",
+      \"workaround\":\"skipped anchor covered by a single origin/main commit; selected next candidate\",
+      \"context\":\"origin/main per-commit subject-coverage hit at anchor-select preflight\",
       \"cycleId\":\"$CYCLE_ID\"
     }"
     # 3. Fall through to the next candidate (re-run the priority order from the
-    #    top; the closed issue is off the open board, so the next board pick is a
+    #    top; the anchor is skipped for this cycle, so the next board pick is a
     #    fresh candidate).
     echo "re-select the next candidate before proceeding to Step 3"
   fi
 fi
 ```
 
-Positive coverage closes the dup + re-selects; anything short of it (short title,
-unreachable `git`, empty log, < 70% coverage) keeps the anchor and proceeds.
-Enforced `Closes #N` close-discipline (ADR-0031 Decision 5) is the durable
-suppression — this preflight is only the residual guard for a board issue whose
-work shipped without a `Closes` linkage. The positive-evidence subject-coverage
-matcher this preflight reimplements inline (formerly the `merged-refs` /
-`token-algebra` leaf modules, deleted in issue #3461 as they had no production
-callers post-ADR-0031) is an OPTIONAL reconciler polarity, not a hot-path gate.
+Positive per-commit coverage skips the anchor + re-selects (never closes the
+board issue); anything short of it (short title, unreachable `git`, empty log,
+< 70% coverage in any single commit) keeps the anchor and proceeds. Enforced
+`Closes #N` close-discipline (ADR-0031 Decision 5) is the durable suppression —
+this preflight is only the residual guard for a board issue whose work shipped
+without a `Closes` linkage. The positive-evidence subject-coverage matcher this
+preflight reimplements inline (formerly the `merged-refs` / `token-algebra`
+leaf modules, deleted in issue #3461 as they had no production callers
+post-ADR-0031) is an OPTIONAL reconciler polarity, not a hot-path gate.
 
 ### 3.1. Grounding preflight — ledger intersection (issue #2727)
 
