@@ -64,8 +64,8 @@ once per session at low resolution.
 epic format. But a `wayfinder:map` is **not** GC'd by `hydra-epic-close`: the
 sweeper drops every `wayfinder:map` from its candidate scan, because a map that
 reaches "all tickets CLOSED" has reached its **handoff** rung, not its grave. The
-map's death is owned by the `hydra-review` handoff flow (§0.7), which closes it as
-the final handoff step (or keeps it with `keep-open` as a reference). The
+map's death is owned by **this skill's own handoff step** (below), which closes it
+as the final handoff step (or keeps it with `keep-open` as a reference). The
 `## Sub-issues` shape still matters — `hydra-review` and human readers use it to
 see the frontier — but closing is deferred to handoff so a cleared map is never
 GC'd before it can be handed off.
@@ -300,10 +300,11 @@ the tracker.
 
 When the frontier is empty (no open tickets, no ticketable fog left toward the
 destination), the way is clear. **The handoff itself is an operator-interactive
-step and runs from `hydra-review` §0.7** — a cleared map surfaces there as
-*handoff-ready* (marked `wayfinder:handoff-pending`), and the operator drives one
-of the routes below, then `hydra-review` closes the map. You can also hand off
-directly from here in the same session that clears the last ticket. Either way:
+step and runs from HERE** — you drive one of the routes below in the same session,
+then close the map. (Issue #4179: `/hydra-review` used to carry a parallel handoff
+bucket at its §0.7; it was deleted, having never once fired — `wayfinder:handoff-pending`
+was never applied to a single issue. `/hydra-review` now only *reports* that open
+maps exist and points back here, so this skill owns the map lifecycle end to end.)
 
 - **Destination = an implementation epic** → lead with **`hydra-prd`**, the
   Hydra-native producer: a capstone task synthesises the map's Decisions-so-far
@@ -320,8 +321,8 @@ directly from here in the same session that clears the last ticket. Either way:
 - **Destination = an in-place change** → proceed to build; the map's tickets are
   the plan.
 
-The map is **closed by the handoff step** (`hydra-review` §0.7, or here if you hand
-off inline) once its Destination is reached — not by `hydra-epic-close`, which
+The map is **closed by the handoff step above**, in this skill, once its
+Destination is reached — not by `hydra-epic-close`, which
 excludes `wayfinder:map` from auto-GC so a cleared map is never closed before
 handoff. Add `keep-open` if the map should persist as a reference after handoff.
 

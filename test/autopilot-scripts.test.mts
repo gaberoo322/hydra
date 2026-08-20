@@ -2220,8 +2220,16 @@ describe("collect-state.sh untriaged_orphans wayfinder prefix exclusion (#3728)"
  * the already-excluded `ready-for-human` (#2828) / `needs-info` (#2958) — not
  * the "wrong label" blind spot this backstop exists to catch: it parks a
  * published spec awaiting `/to-tickets` decomposition, a lane with its own
- * consumer (`tickets_orch` reads the `tickets_available` signal the same
- * collector emits; `/hydra-review` §0.8 lists it).
+ * consumer: `tickets_orch` reads the `tickets_available` signal the same
+ * collector emits.
+ *
+ * NOTE (issue #4179): this rationale used to ALSO cite `/hydra-review` §0.8 as a
+ * second consumer. That bucket was deleted — `needs-tickets` had never been
+ * applied to a single issue in the repo's history, so the operator bucket was
+ * dead weight duplicating a lane autopilot already works. The exclusion below is
+ * UNCHANGED and still correct: `tickets_orch` is a live AFK consumer, so a
+ * `needs-tickets` issue is a real parked lane, not the unreachable-lane case
+ * #4096 flipped for `needs-design-concept`.
  *
  * NOTE: #3817 ALSO excluded `needs-design-concept` here. #4096 NARROWED that
  * half: without `ready-for-agent` the label is an unreachable lane (the grill

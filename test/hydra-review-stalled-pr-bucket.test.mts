@@ -76,13 +76,22 @@ describe("hydra-review playbook — Stalled PRs bucket (issue #3963)", () => {
     );
   });
 
-  test("the Rules drain-order bullet places the bucket after specs and before ready-for-human", () => {
-    // Pins INV-4: the canonical drain-order string in ## Rules must thread the
-    // new bucket between the wayfinder/spec buckets and ready-for-human.
+  test("the Rules drain-order bullet places the bucket after the queue and before ready-for-human", () => {
+    // Pins INV-4: the canonical drain-order string in ## Rules must thread this
+    // bucket between the overnight queue and ready-for-human.
+    //
+    // Issue #4179 retargeted this from its original left-neighbour. The bullet
+    // used to read "... un-ticketed specs -> stalled PRs (§0.9) -> ...", but the
+    // four wayfinder/spec buckets it named were deleted: three of their gating
+    // labels (wayfinder:destination-pending, wayfinder:handoff-pending,
+    // needs-tickets) had never been applied to a single issue in the repo's
+    // history. §0.9's POSITION is what this pins -- immediately after the
+    // overnight queue, immediately before ready-for-human -- not the identity of
+    // whatever happens to precede it.
     assert.match(
       src,
-      /un-ticketed specs → stalled PRs \(§0\.9\) → Orchestrator ready-for-human/,
-      "the drain-order bullet must place 'stalled PRs (§0.9)' after 'un-ticketed specs' and before 'Orchestrator ready-for-human'",
+      /overnight queue → stalled PRs \(§0\.9\) → Orchestrator ready-for-human/,
+      "the drain-order bullet must place 'stalled PRs (§0.9)' after the overnight queue and before 'Orchestrator ready-for-human'",
     );
   });
 
