@@ -249,11 +249,11 @@ its prior-attempt history so the operator decides informed.
 |---|------|-------|-----|---------------------------|
 ```
 
-### 2.5. Classify, then (only if large) filter
+### 2.5. Classify before presenting
 
 **Classification is not optional, and it runs inline.** Before presenting
 anything, resolve each gathered row's *cheap* facts with parallel `gh` calls — no
-subagents, no `Workflow`:
+subagents:
 
 - **stale-blocked candidates** — does the named blocker still exist, is it CLOSED,
   and does its close event carry a real `commit_id`? A `completed` close with a
@@ -266,52 +266,12 @@ subagents, no `Workflow`:
 It is also the real winnowing — report a row confirmed *genuinely* blocked as a
 suppressed count, never walk it.
 
-**The multi-select filter is gated.** `multiSelect` does **not** lift the
-4-option ceiling (4 × 4 = 16 rows per call), and after classification most boards
-have 2–3 actionable rows, where a filter is ceremony. So:
-
-> Fire the filter **only when the post-classification actionable list exceeds 5
-> rows.** Chunk it 4-per-question, one question per bucket, and ask the operator
-> to select the rows to work this session. At 5 or fewer, skip the filter and
-> walk them all.
-
-**Expensive enrichment fans out via `Workflow`, past a floor.** Reading PR failure
-logs, full comment histories, prior-attempt histories, or exploring a Target
-codebase is agent work. Run it **only on rows that survived the filter**, and
-**only when there are ≥4** — below that, inline beats subagent spin-up, so on a
-typical 2-row day it never fires. A `Workflow` subagent has **no channel to the operator and cannot call `AskUserQuestion`**;
-it returns data, and the main loop does every prompt.
-
-```js
-export const meta = {
-  name: 'hydra-review-enrich',
-  description: 'Deep-read each selected review row in parallel',
-  phases: [{ title: 'Enrich', detail: 'one agent per selected row' }],
-}
-phase('Enrich')
-const ROW_SCHEMA = {
-  type: 'object',
-  required: ['ref', 'finding', 'recommendation'],
-  properties: {
-    ref: { type: 'string' },
-    finding: { type: 'string' },
-    recommendation: { type: 'string' },
-    evidence: { type: 'string' },
-  },
-}
-const rows = await parallel(args.rows.map((r) => () =>
-  agent(
-    `Deep-read ${r.repo}#${r.number} ("${r.title}") for an operator review.\n` +
-    `Read the issue body, ALL comments, linked PRs, and any failing CI logs.\n` +
-    `Report what a decision actually turns on. Verify claims against the tracker ` +
-    `and the default branch — never trust a label or a close event alone.`,
-    { label: `enrich:${r.repo}#${r.number}`, phase: 'Enrich', schema: ROW_SCHEMA },
-  )))
-return rows.filter(Boolean)
-```
-
-Pass the surviving rows as `args.rows`. Results feed the §3 summaries; they never
-replace the operator's pick.
+**Everything else is walked.** There is no separate filter step and no
+subagent fan-out: after classification a board is routinely 2–3 actionable rows,
+which is already the shortlist a filter would have produced. If one row genuinely
+needs a deep read (CI logs, full comment history, prior attempts), read it inline
+when you reach it — spinning up subagents to make a handful of `gh` calls costs
+more than it saves.
 
 Then: "I'll walk through these one at a time, starting with the overnight queue. Ready?"
 
@@ -406,29 +366,6 @@ takes **"Fix and push"** instead of "Land it", because arming auto-merge on a PR
 that can never go green does nothing. **Slots 2–4 never change.** Without this
 carve-out the table would force such a row into an action that cannot work.
 
-**What each option does**
-
-- **Apply** — execute the autopilot's recommendation verbatim (~85% are right).
-  **Override** — operator supplies a different action. **Drop** — discard as a
-  false alarm. *Deferring is `Skip`* — the row stays for tomorrow either way.
-- **Land it** — see §0.9; mechanism decided by required-check state.
-  **Update branch** — `gh pr update-branch`; surface conflicts, never auto-resolve.
-- **Make it agent-ready** — write the agent brief (category, summary,
-  current/desired behavior, acceptance criteria, out-of-scope, key interfaces)
-  **including any operator hints**, then relabel `ready-for-agent` (stripping
-  `ready-for-human` / `reframe`). Absorbs the former "Provide guidance".
-- **Close (children done)** — only after the open-PR check in Rules.
-  **Restructure** — merge/split/reorder children. **Unblock children** —
-  re-triage the stuck ones. *"Keep as-is" is `Skip`.*
-- **Unblock** — remove `blocked`, apply the next state. **Still blocked (update
-  ref)** — write the real blocker into the **body** as `## Blocked by`, never a
-  comment: the staleness sweep parses bodies only, so a blocker recorded in a
-  comment is invisible and the row resurfaces forever.
-- **Retry with narrower scope** / **Narrow scope** — rewrite smaller, relabel
-  `ready-for-agent`. **Abandon** — repeated failure means infeasible; close
-  `wontfix`. *"Take over manually" is `Skip`* — the operator doing it themselves
-  needs no machine action.
-
 **Reachable only via "Other" (deliberate).** *Break it down* (triage) and *Split
 into steps* (Target reframe) — both create child issues, both are rare here, and
 both lose to keeping slot 4 free for Skip.
@@ -460,10 +397,9 @@ carries on its next tick. That is the point of the cockpit — count it.
 - **Drain order: overnight queue → stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning). Stalled PRs come next because they are the cheapest conversion of effort into merged work on the board. Don't reorder anything ahead of the overnight queue. **Per-Target items always drain last** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
 - **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (e.g. `~/hydra-betting/web`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
 - **One issue at a time. No batching.** This survives `AskUserQuestion` intact:
-  one row = one question = one call. The multi-select filter (§2.5) batches only
-  the *choice of which rows to work*, never a resolution — and it fires only above
-  5 post-classification rows. Filtering is cheap; resolution is where the
-  verification lives — see the pre-close PR check below for what batching cost
+  one row = one question = one call. Classification (§2.5) does the winnowing a
+  batch step would otherwise do, and it does it on evidence rather than on a
+  guess from a title. See the pre-close PR check below for what batching cost
   once.
 - **Classify before presenting, and verify rather than trust a label.** A
   `blocked` row is only stale once its blocker is confirmed closed AND its fix
