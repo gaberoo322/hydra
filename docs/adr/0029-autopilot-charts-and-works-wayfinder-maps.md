@@ -46,6 +46,13 @@ Six decisions, locked by map #3305. The through-line: **automate the AFK share, 
 
 - **Handoff is destination-typed.** An **implementation-epic** destination → a capstone task synthesizes the Decisions-so-far into an ADR + structured PRD JSON → `hydra-prd --apply` → epic + tracer-bullet children (the #3125 pattern). A **decision/ADR-only** destination → the ADR lands; the map is done. An **in-place-change** destination → the map is the plan, executed directly. (The `hydra-wayfinder` playbook's `/to-spec` mention is corrected to name `hydra-prd` for the epic route — survey F7.)
 - **Handoff is an operator surface with a first-class state (cockpit addendum).** A map whose frontier has gone empty is *handoff-ready*, not dead. It surfaces in `hydra-review` §0.7 (the HITL pipeline cockpit) marked `wayfinder:handoff-pending`, where the operator drives the destination-typed route above; `hydra-review` then **closes the map as the final handoff step** (or `keep-open` to retain it as a reference). Correspondingly, `hydra-epic-close` **excludes `wayfinder:map` from auto-GC** — a map must survive until handoff, so the handoff flow owns its death, closing the race where the sweeper would GC a cleared map before it could be handed off. The spec route (`/to-spec`) additionally relabels its output `needs-tickets` (dropping `ready-for-agent`) so an un-sliced spec lands back in `hydra-review` §0.8 for `/to-tickets` rather than being grabbed whole by `hydra-dev`.
+
+  > **Amended 2026-08-20 (#4179).** The *surface* moved; the *decision* stands.
+  > `/hydra-review`'s §0.5–§0.8 buckets were deleted (three of their four gating
+  > labels had never been applied to any issue). Handoff, the first-class
+  > handoff-ready state, and the `hydra-epic-close` `wayfinder:map` GC exclusion
+  > are all unchanged — they now live in `/hydra-wayfinder`, which owns the map
+  > lifecycle end to end. `needs-tickets` is still worked, by `tickets_orch`.
 - **wayfinder-working and `design_concept_orch` compose, they do not overlap.** They sit at different altitudes: **wayfinder is initiative-level** (upstream — resolves fog, produces the epic); **hydra-grill is issue-level** (downstream, per epic-child — produces the dev-gating design-concept artifact). A map's grilling tickets resolve initiative decisions and never dispatch `design_concept_orch`. The one obvious route for any finding is a **routing decision-tree**:
 
   | Finding shape | Route |
