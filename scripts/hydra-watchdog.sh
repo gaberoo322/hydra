@@ -1212,6 +1212,228 @@ run_launch_flow() {
 }
 
 # =============================================================================
+# ## NODE MODULES INTEGRITY
+# =============================================================================
+#
+# Detection + delivery for the 2026-08-19 incident (issue #4175): a `/dev/shm`
+# hydra-betting worktree's `web/node_modules` symlink reached back through the
+# main checkout, and a destructive install step inside the worktree wiped
+# `/home/gabe/hydra-betting/web/node_modules` — taking down six money-critical
+# Target services for ~70 minutes with NO signal to anything watching the main
+# checkout. The structural prevention (eliminating the reach-back symlink) is
+# tracked separately in #4177; this block is the detection backstop, valuable
+# regardless of which prevention lands because it is the only mitigation that
+# covers causes nobody has anticipated.
+#
+# What it asserts
+# ----------------
+# Not "the directory shrank" (needs stored history + an uncalibratable
+# threshold) but the structural invariant the incident actually violated —
+# the binaries the live services execute exist:
+#   1. the watched root exists, contains `.bin/`, and holds at least
+#      ENTRY_FLOOR top-level entries (observed wiped: 24K / no `.bin/`;
+#      observed healthy: ~995M / ~450 entries — the gap needs no tuning).
+#   2. the specific `.bin/` entry the live systemd units reference (the five
+#      `ExecStart=.../web/node_modules/.bin/tsx …` units that died
+#      `203/EXEC`) exists and is executable. Hardcoded to `tsx` — the one the
+#      watched services use — rather than derived from the unit files, per
+#      the issue's explicit fallback.
+# A resolvable-import probe (the checkpoint-refresh `ERR_MODULE_NOT_FOUND`
+# symptom) is intentionally NOT implemented — checks 1+2 already cover both
+# observed failure symptoms from the incident.
+#
+# Watched roots (a list, never a literal buried in a condition; override via
+# HYDRA_WATCHDOG_NM_ROOTS for tests, colon-separated):
+#   /home/gabe/hydra-betting/web/node_modules   (the incident)
+#   /home/gabe/hydra/node_modules
+#
+# Delivery reuses the #3848 taxonomy this file already established for
+# run_launch_flow: the SAME uniform streak-rule / dedup design (Redis SET
+# NX since + fired, DEL on recovery) and the SAME in-band delivery surface
+# (an enveloped XADD onto hydra:notifications — the Orchestrator is
+# demonstrably up when this check runs, since it is the thing running the
+# check, so out-of-band is not warranted here the way it is for
+# fail-safe/meter-dark). It is a SEPARATE block (a filesystem invariant is
+# not a pace-gate reason and cannot share run_launch_flow's `now_ms`/`reason`
+# derivation) but must never diverge from that design — if you change the
+# streak/dedup shape here, check whether run_launch_flow needs the same
+# change. Threshold is 0ms: a wiped node_modules under a live service is not
+# something to wait out a streak on, so the fired marker sets (and delivery
+# fires) on the very first qualifying tick — dedup then suppresses re-alarm
+# for the duration of the outage, and recovery (DEL) re-arms a fresh streak.
+#
+# Surface: IN-BAND, in BOTH ALERT_TYPES (src/notification/alert-grammar.ts)
+# and CRITICAL_EVENT_TYPES (src/digest.ts) — six money-critical services down
+# warrants both the dashboard alert and the immediate Telegram digest line.
+# Event type pinned in test/event-bus-vocabulary.test.mts's EXPECTED_MEMBERS
+# (that enum-completeness arm fails by design until a new member is
+# deliberately pinned).
+#
+# Fail-safe (HARD): mirrors run_launch_flow's contract — this block NEVER
+# throws and NEVER returns non-zero. All redis-cli / stat calls are
+# best-effort (`|| true` / redirected), and a read failure never mutates a
+# since/fired marker (never falsely clears an in-progress streak).
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-node-modules-integrity.test.mts):
+#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT        shared with the other blocks.
+#   HYDRA_WATCHDOG_NM_NOW_MS                   inject `now` (epoch-ms).
+#   HYDRA_WATCHDOG_NM_ROOTS                    colon-separated root override.
+#   HYDRA_WATCHDOG_NM_ENTRY_FLOOR              default 20.
+#   HYDRA_WATCHDOG_NM_REQUIRED_BIN             default "tsx".
+#   HYDRA_WATCHDOG_NM_NOTIFY_STREAM            in-band delivery stream key
+#                                               (default hydra:notifications);
+#                                               rebound in tests so a case can
+#                                               never write a real event onto
+#                                               the PRODUCTION stream.
+
+run_node_modules_integrity() {
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  local NM_KEY_PREFIX="hydra:autopilot:node-modules-integrity"
+  local NOTIFY_STREAM="${HYDRA_WATCHDOG_NM_NOTIFY_STREAM:-hydra:notifications}"
+  local ENTRY_FLOOR="${HYDRA_WATCHDOG_NM_ENTRY_FLOOR:-20}"
+  local REQUIRED_BIN="${HYDRA_WATCHDOG_NM_REQUIRED_BIN:-tsx}"
+  [[ "$ENTRY_FLOOR" =~ ^[0-9]+$ ]] || ENTRY_FLOOR=20
+
+  local -a WATCHED_ROOTS
+  if [[ -n "${HYDRA_WATCHDOG_NM_ROOTS:-}" ]]; then
+    IFS=':' read -r -a WATCHED_ROOTS <<< "$HYDRA_WATCHDOG_NM_ROOTS"
+  else
+    WATCHED_ROOTS=(
+      "/home/gabe/hydra-betting/web/node_modules"
+      "/home/gabe/hydra/node_modules"
+    )
+  fi
+
+  log() {
+    echo "hydra-node-modules-integrity-watchdog: $*"
+  }
+
+  # rc_write/rc_read — same best-effort contract as run_launch_flow's helpers
+  # (fire-and-forget mutation; "" on any read failure). Deliberately a second
+  # copy rather than a shared top-level helper: hoisting would change
+  # run_launch_flow's tested extraction boundary (test/watchdog-launch-flow
+  # .test.mts and test/launch-flow-delivery.test.mts both extract that
+  # function verbatim by name).
+  rc_write() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw "$@" >/dev/null 2>&1 || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" >/dev/null 2>&1 || true
+    fi
+  }
+  rc_read() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw "$@" 2>/dev/null || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" 2>/dev/null || true
+    fi
+  }
+
+  nm_since_key() { printf '%s:since:%s\n' "$NM_KEY_PREFIX" "$1"; }
+  nm_fired_key() { printf '%s:fired:%s\n' "$NM_KEY_PREFIX" "$1"; }
+
+  # sig_for_root ROOT — a stable, Redis-key-safe signal name derived from the
+  # watched path (non-alnum runs collapsed to single underscores).
+  sig_for_root() {
+    printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_' | tr -s '_'
+  }
+
+  # deliver_signal SIG ROOT REASON DUR_MS THR_MS — enveloped XADD onto the
+  # notifications stream, the exact on-wire shape src/event-bus.ts's publish()
+  # constructs (ADR-0017 Category A), mirroring run_launch_flow's
+  # deliver_in_band. Always returns 0 (best-effort).
+  deliver_signal() {
+    local sig="$1" root="$2" reason="$3" dur_ms="$4" thr_ms="$5"
+    local reason_clean
+    reason_clean="$(printf '%s' "$reason" | tr -dc 'a-zA-Z0-9_.:-')"
+    local root_clean
+    root_clean="$(printf '%s' "$root" | tr -dc 'a-zA-Z0-9_./-')"
+    local iso payload
+    iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
+    payload="$(printf '{"signal":"%s","reason":"%s","durationMs":%s,"thresholdMs":%s}' \
+      "$root_clean" "$reason_clean" "$dur_ms" "$thr_ms")"
+    rc_write XADD "$NOTIFY_STREAM" '*' \
+      id "node-modules-integrity-$(date +%s 2>/dev/null || echo 0)-$$" \
+      type "infra:node_modules_wiped" \
+      source "watchdog-node-modules-integrity" \
+      timestamp "$iso" \
+      correlationId "node-modules-integrity-${sig}" \
+      payload "$payload"
+    log "in-band delivery published (best-effort) for '$root' (type=infra:node_modules_wiped -> ${NOTIFY_STREAM})"
+    return 0
+  }
+
+  # track_signal SIG ROOT REASON THR_MS IS_MEMBER — the SAME uniform streak
+  # rule as run_launch_flow's track_signal (SET NX since / fire once at
+  # now-since >= threshold / DEL both on recovery), scoped to this block's own
+  # key prefix. Always returns 0.
+  track_signal() {
+    local sig="$1" root="$2" reason="$3" thr_ms="$4" is_member="$5"
+    local since_key fired_key
+    since_key="$(nm_since_key "$sig")"
+    fired_key="$(nm_fired_key "$sig")"
+    if [[ "$is_member" == "1" ]]; then
+      rc_write SET "$since_key" "$now_ms" NX
+      local since dur
+      since="$(rc_read GET "$since_key" | tr -dc '0-9')"
+      [[ "$since" =~ ^[0-9]+$ ]] || since="$now_ms"
+      dur=$((now_ms - since))
+      if (( dur < 0 )); then dur=0; fi
+      if (( dur >= thr_ms )); then
+        if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" != "1" ]]; then
+          log "WARNING NODE_MODULES INTEGRITY — '$root' ${reason} (sustained ${dur}ms >= ${thr_ms}ms threshold); see issue #4175"
+          rc_write SET "$fired_key" 1
+          deliver_signal "$sig" "$root" "$reason" "$dur" "$thr_ms"
+        fi
+      fi
+    else
+      rc_write DEL "$since_key" "$fired_key"
+    fi
+    return 0
+  }
+
+  local now_ms
+  if [[ -n "${HYDRA_WATCHDOG_NM_NOW_MS+x}" ]]; then
+    now_ms="$HYDRA_WATCHDOG_NM_NOW_MS"
+  else
+    now_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+  fi
+  [[ "$now_ms" =~ ^[0-9]+$ ]] || now_ms=0
+
+  local root sig broken reason count
+  for root in "${WATCHED_ROOTS[@]}"; do
+    sig="$(sig_for_root "$root")"
+    broken=0
+    reason=""
+    if [[ ! -d "$root" ]]; then
+      broken=1
+      reason="root-absent"
+    elif [[ ! -d "$root/.bin" ]]; then
+      broken=1
+      reason="no-bin-dir"
+    else
+      count="$(find "$root" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -dc '0-9')"
+      [[ "$count" =~ ^[0-9]+$ ]] || count=0
+      if (( count < ENTRY_FLOOR )); then
+        broken=1
+        reason="below-entry-floor:${count}<${ENTRY_FLOOR}"
+      elif [[ ! -x "$root/.bin/$REQUIRED_BIN" ]]; then
+        broken=1
+        reason="missing-binary:${REQUIRED_BIN}"
+      fi
+    fi
+    # Threshold is always 0 — see header: no streak to wait out on a wiped
+    # tree under a live service.
+    track_signal "$sig" "$root" "$reason" 0 "$broken"
+  done
+
+  log "node-modules-integrity tick processed (${#WATCHED_ROOTS[@]} root(s) watched, now_ms=$now_ms)"
+  return 0
+}
+
+# =============================================================================
 # Entry point — run all blocks on every tick ONLY when the script is executed
 # directly, not when it is sourced. test/watchdog-pending-work.test.mts sources
 # this file to exercise read_pending_work in isolation (without faking the
@@ -1225,5 +1447,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_deploy_drift
   run_skill_mirror_drift
   run_launch_flow
+  run_node_modules_integrity
   exit 0
 fi

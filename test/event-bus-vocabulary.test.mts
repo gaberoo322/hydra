@@ -68,6 +68,8 @@ const EXPECTED_MEMBERS = [
   "LAUNCH_QUOTA_STRETCH",
   "LAUNCH_LATENCY_BREACH",
   "LAUNCH_PAUSE_FORGOTTEN",
+  // Infra integrity watchdog signals (issue #4175)
+  "INFRA_NODE_MODULES_WIPED",
   // Learning-system pattern alerts
   "PATTERN_LOW_MERGE_RATE",
   "PATTERN_CONSECUTIVE_FAILURES",

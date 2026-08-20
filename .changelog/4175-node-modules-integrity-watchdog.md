@@ -1,0 +1,1 @@
+- feat: watchdog alarms when a live service's `node_modules` is wiped or missing a referenced binary, alerting on the dashboard and via immediate digest (#4175)

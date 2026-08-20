@@ -47,6 +47,11 @@ export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
   // alert; pause surfaces as a digest line only (CRITICAL_EVENT_TYPES in
   // digest.ts — this file contains no pause member at all, by design).
   E.LAUNCH_QUOTA_STRETCH, E.LAUNCH_LATENCY_BREACH,
+  // Issue #4175: a watched node_modules install root (e.g. a live Target
+  // service's dependency tree) was found broken. Always reached via a
+  // successfully-completed watchdog filesystem check, so the Orchestrator is
+  // provably up — a dashboard alert is warranted alongside the digest line.
+  E.INFRA_NODE_MODULES_WIPED,
 ]);
 
 /**
@@ -92,6 +97,7 @@ export function formatAlertMessage(event: AlertGrammarEvent): string {
     case E.CYCLE_OPERATOR_BLOCKED: return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
     case E.LAUNCH_QUOTA_STRETCH: return `Launch quota stretch: autopilot blocked (${p.reason || "unknown reason"}) for ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
     case E.LAUNCH_LATENCY_BREACH: return `Launch latency breach: eligibility probe took ${fmtStreakMs(p.durationMs)} — sustained past the ${fmtStreakMs(p.thresholdMs)} alarm threshold`;
+    case E.INFRA_NODE_MODULES_WIPED: return `node_modules integrity: ${p.signal || "unknown root"} — ${p.reason || "broken"}`;
     default: return `${event.type}: ${JSON.stringify(p).slice(0, 200)}`;
   }
 }
