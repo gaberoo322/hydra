@@ -12,6 +12,35 @@ Systems architect evaluating Hydra — not the betting app, **the machine itself
 
 If `$focus` provided, weight analysis toward that dimension.
 
+## Worktree Setup — read FIRST (issue #4174)
+
+This skill is operator-invoked, so you start with cwd at `~/hydra` — the
+**live deploy checkout** that `scripts/deploy.sh` refuses to deploy from when
+it carries any uncommitted tracked change. Every read in Phases 1–4 below
+(`vision.md`, `goals.md`, `priorities.md`, `CLAUDE.md`, the metrics/research/
+backlog queries) is safe to run against `~/hydra` as-is — reads never dirty
+the tree. Two things are NOT safe to run against `~/hydra` directly: the
+`npm test` invocation in **Architecture Shape** below, and the report write in
+**Phase 5**. A prior version of this playbook pointed both at `~/hydra`
+directly; the resulting uncommitted report write blocked two consecutive
+`deploy` jobs and left prod six commits behind with only a WARN-level alarm.
+
+Before running **Architecture Shape** (or any earlier phase, if you prefer to
+set this up up front), create and enter a throwaway worktree:
+
+```bash
+WT="/home/gabe/hydra/.claude/worktrees/architect-$(date +%s)"
+git -C ~/hydra worktree add -b "docs/architecture-review-$(date +%Y-%m-%d)-$(date +%s)" "$WT" master
+cd "$WT"
+git rev-parse --git-dir   # must print .../.git/worktrees/... -- abort if it doesn't
+```
+
+From here on, `$WT` is your cwd for the rest of this run. **Architecture
+Shape**'s `npm test` and **Phase 5**'s report write both resolve against
+`$WT`, never `~/hydra/...`. Everything else (the absolute `~/hydra/...` reads
+listed above) is untouched — reading the live checkout is fine, only writing
+to it and running the test suite there are the problem.
+
 ## What Hydra Is
 
 Autonomous development system: research → prioritize → plan → challenge → execute → verify → merge → learn. Vision in `~/hydra/config/direction/vision.md`. Architecture in `~/hydra/`.
@@ -80,7 +109,7 @@ done
 
 ### Architecture Shape
 ```bash
-echo "=== Orchestrator ==="; ls ~/hydra/src/*.ts ~/hydra/src/*.mjs 2>/dev/null | wc -l; cd ~/hydra && npm test 2>&1 | tail -3
+echo "=== Orchestrator ==="; ls ~/hydra/src/*.ts ~/hydra/src/*.mjs 2>/dev/null | wc -l; npm test 2>&1 | tail -3  # runs against $WT (your worktree cwd), never ~/hydra directly -- see Worktree Setup above
 echo "=== Target ==="; cd ~/hydra-betting/web && find src -name '*.ts' -o -name '*.tsx' | wc -l; npx vitest run 2>&1 | tail -3
 echo "=== Config ==="; find ~/hydra/config -name '*.md' | wc -l
 ```
@@ -139,7 +168,12 @@ For each: **What / Why / Evidence / Risk / Dependency**.
 
 ## Phase 5: Write Report
 
-`~/hydra/config/direction/architecture-review.md`:
+Write `config/direction/architecture-review.md` **resolved against `$WT`**
+(your worktree cwd from Worktree Setup above) — never the absolute
+`~/hydra/config/direction/architecture-review.md` path. That absolute path IS
+the live deploy checkout; an uncommitted write there is exactly the #4174
+bug (it blocked `scripts/deploy.sh`'s dirty-tree guard for two consecutive
+deploys):
 
 ```yaml
 ---
@@ -151,6 +185,34 @@ overall_score: <weighted avg>
 ```
 
 Include: executive summary, scorecard, key findings, 3-tier recommendations, comparison to state of the art, next-review triggers.
+
+Then commit it on the branch created in Worktree Setup and open a PR — never
+leave the report as an uncommitted worktree edit:
+
+```bash
+cd "$WT"
+git add config/direction/architecture-review.md
+git commit -m "docs(direction): architecture review $(date +%Y-%m-%d)"
+git push -u origin HEAD
+gh pr create --title "docs(direction): architecture review $(date +%Y-%m-%d)" \
+  --body-file /dev/stdin <<'EOF'
+## What
+
+Architecture review report -- scorecard, key findings, 3-tier recommendations.
+
+## Files in scope
+
+config/direction/architecture-review.md
+EOF
+```
+
+Once the PR is open, clean up the worktree so it doesn't leak (`hydra-branch-prune`
+will also reap it eventually, but tidy up now if convenient):
+
+```bash
+cd ~/hydra
+git worktree remove --force "$WT" 2>/dev/null || true
+```
 
 ## Board-filling relationship (issue #2554)
 
@@ -177,5 +239,5 @@ board.
 2. ...
 3. ...
 
-Full report: ~/hydra/config/direction/architecture-review.md
+Full report (PR opened in Phase 5): <PR URL>
 ```

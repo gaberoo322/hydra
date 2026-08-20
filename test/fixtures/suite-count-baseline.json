@@ -308,6 +308,7 @@
   "test/pattern-memory-decision.test.mts": 3,
   "test/pattern-memory-prompt-format.test.mts": 5,
   "test/planner-model-routing.test.mts": 1,
+  "test/playbook-absolute-write-target.test.mts": 1,
   "test/post-commit-status.test.mts": 5,
   "test/post-merge-health.test.mts": 14,
   "test/pr-lifecycle-bridge.test.mts": 7,
