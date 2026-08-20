@@ -97,24 +97,17 @@ describe("hydra-review — canonical option table (issue #4185)", () => {
     );
   });
 
-  test("the AskUserQuestion walk is one-row-one-question, and Workflow cannot prompt", () => {
+  test("the AskUserQuestion walk is one-row-one-question", () => {
+    // The Workflow-cannot-prompt assertion that used to live here went with the
+    // fan-out itself (#4187): the block was gated so hard by its own thresholds
+    // (filter only above 5 rows, fan-out only at >=4 surviving) that it could
+    // essentially never fire, while costing ~231 words of context on EVERY
+    // invocation. This half stays — it is the no-batching contract, which is
+    // load-bearing regardless of how enrichment is done.
     assert.match(
       src,
       /One row = one question = one call|one row = one question = one call/i,
       "the no-batching contract must be stated for the AskUserQuestion walk",
-    );
-    assert.match(
-      src,
-      /cannot call `AskUserQuestion`/,
-      "the playbook must state that a Workflow subagent has no operator channel — otherwise a future edit will try to prompt from inside the fan-out",
-    );
-  });
-
-  test("the multi-select filter is gated above 5 rows, not always-on", () => {
-    assert.match(
-      src,
-      /only when the post-classification actionable list exceeds 5/i,
-      "the filter must be gated on a row-count threshold; after classification most boards have 2-3 actionable rows, where filtering is ceremony",
     );
   });
 
