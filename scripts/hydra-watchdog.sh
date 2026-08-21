@@ -945,6 +945,16 @@ run_skill_mirror_drift() {
 #                                        hydra-redis-1). Any non-"docker" host
 #                                        calls redis-cli -h/-p directly, so the
 #                                        test points at a known-clean DB.
+#   HYDRA_REDIS_DB                      DB index passed as `-n <db>` to every
+#                                        rc_write/rc_read call (default 0, the
+#                                        production DB). Non-numeric input
+#                                        falls back to 0. scripts/test/
+#                                        redis-db-launch.mjs exports the run's
+#                                        derived per-run DB under this name, so
+#                                        a test that shells into this block
+#                                        writes into the run's isolated DB
+#                                        instead of past it onto production
+#                                        db 0 (issue #4183).
 #   HYDRA_WATCHDOG_LAUNCH_NOW_MS         Inject `now` (epoch-ms) so threshold
 #                                        crossings are deterministic with zero
 #                                        real-time waits.
@@ -968,6 +978,14 @@ run_skill_mirror_drift() {
 run_launch_flow() {
   local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
   local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  # DB index for the bash-side redis-cli calls in rc_write/rc_read below
+  # (issue #4183). Unset or non-numeric input falls back to db 0 so
+  # production behaviour is byte-identical to before this variable existed.
+  # scripts/test/redis-db-launch.mjs exports the run's derived DB under this
+  # same name, so any bash block a test shells into inherits the run's
+  # isolation automatically rather than opting in per call site.
+  local REDIS_DB="${HYDRA_REDIS_DB:-0}"
+  [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
   # Single source of truth for this literal is src/redis/launch-flow.ts's
   # PACE_GATE_LAST_TICK_KEY, cross-checked by test/watchdog-launch-flow.test.mts
   # (the watchdog is the SECOND bash reader of this key after pace-gate.sh).
@@ -1009,17 +1027,17 @@ run_launch_flow() {
   # rc_write — fire-and-forget redis mutation; never fails the block.
   rc_write() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw "$@" >/dev/null 2>&1 || true
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" >/dev/null 2>&1 || true
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     fi
   }
   # rc_read — capture redis output ("" on any failure).
   rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw "$@" 2>/dev/null || true
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" 2>/dev/null || true
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 
