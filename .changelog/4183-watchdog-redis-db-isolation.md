@@ -1,0 +1,1 @@
+- fix: `scripts/hydra-watchdog.sh`'s bash-side Redis helpers now honour a `HYDRA_REDIS_DB` index instead of always writing to production db 0, closing the seam that let a test's bash-shelled Redis traffic bypass the test runner's per-run DB isolation (#4183)

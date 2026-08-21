@@ -359,9 +359,24 @@ function runBlock(env: Record<string, string>): { status: number; stdout: string
     // in one day, all bearing this file's fixture thresholds/durations. A
     // caller may still override via its own `env` (last-spread wins), mirroring
     // the envWith() precedent in test/launch-flow-delivery.test.mts:459.
+    //
+    // HYDRA_REDIS_DB is pinned to "0" for the same reason (issue #4183): this
+    // suite's own seed/read helpers (hsetLastTick, seedSince, drc, cleanState)
+    // are hardcoded to db 0 with no `-n` selector — that IS db 0, the
+    // watchdog's default target, per the file-header contract above.
+    // scripts/test/redis-db-launch.mjs now exports HYDRA_REDIS_DB into this
+    // whole node:test process's env (so a bash-shelled test inherits the
+    // run's isolation automatically), so an unpinned `...process.env` here
+    // would silently redirect rc_write/rc_read to the launcher's derived
+    // per-run DB while every seed/assertion in this suite kept reading/
+    // writing db 0 — rc_read would find nothing, every case would degrade to
+    // the "no pace-gate last-tick record" branch. The dedicated #4183 describe
+    // below exercises DB-selection itself; this suite deliberately keeps
+    // testing against db 0.
     env: {
       ...process.env,
       HYDRA_REDIS_HOST: "docker",
+      HYDRA_REDIS_DB: "0",
       HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
       ...env,
       PATH: process.env.PATH ?? "",
@@ -858,6 +873,218 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       assert.equal(getSince(s), "", `no anchor mutated for ${s} on absent tick`);
       assert.equal(getFired(s), false, `no fired marker set for ${s} on absent tick`);
     }
+  });
+});
+
+// =============================================================================
+// rc_write/rc_read DB-index selection (issue #4183). Its own top-level describe
+// with its own before/beforeEach/after, per this repo's shared-Redis-state
+// authoring rule. It sources a SEPARATE extracted-block copy rebound onto its
+// OWN key namespace (OWN_NS below) rather than reusing TEST_LAST_TICK_KEY /
+// SINCE()/FIRED() from the "## LAUNCH FLOW behaviour" describe above: those
+// keys are also written on db 0 by this test's own "falls back to db 0" cases,
+// and node's test runner does not guarantee top-level describes in one file
+// never overlap in time, so sharing a key namespace with another describe's
+// db-0 traffic is a real collision risk, not just a style preference.
+// =============================================================================
+
+describe("scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through rc_write/rc_read (issue #4183)", { skip: !DOCKER }, () => {
+  // A DB this describe owns for its own lifetime — distinct from db 0
+  // (production, the fallback-on-invalid/absent-input target) so a leak in
+  // either direction is unambiguous.
+  const SELECTED_DB = "9";
+
+  // Fully separate key namespace from RUN_NS/TEST_LAST_TICK_KEY/SINCE/FIRED
+  // above — this describe never touches those keys, on any DB.
+  const OWN_NS = `${RUN_NS}-4183`;
+  const OWN_LAST_TICK_KEY = `${OWN_NS}:pace-gate:last-tick`;
+  const OWN_LF_PREFIX = `${OWN_NS}:launch-flow`;
+  const OWN_SINCE = (s: string) => `${OWN_LF_PREFIX}:since:${s}`;
+  const OWN_FIRED = (s: string) => `${OWN_LF_PREFIX}:fired:${s}`;
+
+  const OWN_BLOCK = join(tmpdir(), `hydra-launch-flow-block-4183-${process.pid}.sh`);
+
+  before(() => {
+    // Mirrors the top-level before()'s extraction + rebind, but onto this
+    // describe's OWN literals instead of TEST_LAST_TICK_KEY/TEST_LF_PREFIX —
+    // see the block comment above for why a separate namespace is required.
+    const src = readFileSync(WATCHDOG, "utf-8");
+    const start = src.indexOf("run_launch_flow()");
+    assert.ok(start >= 0, "run_launch_flow() not found in hydra-watchdog.sh");
+    const rest = src.slice(start);
+    const end = rest.search(/^}/m);
+    assert.ok(end >= 0, "run_launch_flow() closing brace not found");
+    const body = rest.slice(0, end + 1);
+    const namespaced = body
+      .split(`"${PACE_GATE_LAST_TICK_KEY}"`)
+      .join(`"${OWN_LAST_TICK_KEY}"`)
+      .split(`"${LAUNCH_FLOW_KEY_PREFIX}"`)
+      .join(`"${OWN_LF_PREFIX}"`);
+    assert.ok(
+      namespaced.includes(`"${OWN_LAST_TICK_KEY}"`) && namespaced.includes(`"${OWN_LF_PREFIX}"`),
+      "failed to rebind this describe's own key literals",
+    );
+    writeFileSync(OWN_BLOCK, namespaced);
+  });
+
+  after(() => {
+    try {
+      unlinkSync(OWN_BLOCK);
+    } catch {
+      /* best-effort cleanup */
+    }
+    cleanBothDbs();
+  });
+
+  /** One `docker exec … redis-cli -n <db> …` round-trip against an explicit DB. */
+  function drcAt(db: string, args: string[]): string {
+    return redisCli(["-n", db, ...args], `redis-cli -n ${db} ${args[0]}`);
+  }
+
+  function hsetLastTickAt(db: string, fields: Record<string, string>): void {
+    const args = ["HSET", OWN_LAST_TICK_KEY];
+    for (const [k, v] of Object.entries(fields)) args.push(k, v);
+    drcAt(db, args);
+  }
+
+  function existsAt(db: string, key: string): boolean {
+    return drcAt(db, ["EXISTS", key]) === "1";
+  }
+
+  /** Pre-seed a signal's since-anchor in an explicit DB (stands in for "the streak began at T0"). */
+  function seedSinceAt(db: string, signal: string, ms: number): void {
+    drcAt(db, ["SET", OWN_SINCE(signal), String(ms), "NX"]);
+  }
+
+  function cleanBothDbs(): void {
+    const keys = [OWN_LAST_TICK_KEY, OWN_SINCE("fail-safe"), OWN_FIRED("fail-safe")];
+    drcAt("0", ["DEL", ...keys]);
+    drcAt(SELECTED_DB, ["DEL", ...keys]);
+  }
+
+  beforeEach(() => {
+    cleanBothDbs();
+  });
+
+  /**
+   * Source THIS describe's own rebound block and call it once.
+   *
+   * Unlike runBlock() above, this deliberately does NOT pin HYDRA_REDIS_DB —
+   * that is exactly the variable under test here. But scripts/test/
+   * redis-db-launch.mjs exports HYDRA_REDIS_DB into the ambient env of this
+   * whole node:test process (issue #4183), so a bare `...process.env` would
+   * make the "unset HYDRA_REDIS_DB" case not actually be unset — it would
+   * inherit the launcher's derived per-run value. Strip it from the base env
+   * first so each call site's own `env` (or its absence) is what the child
+   * actually observes.
+   */
+  function runOwnBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
+    const baseEnv: Record<string, string | undefined> = { ...process.env };
+    delete baseEnv.HYDRA_REDIS_DB;
+    const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${OWN_BLOCK}'; run_launch_flow`], {
+      env: {
+        ...baseEnv,
+        HYDRA_REDIS_HOST: "docker",
+        HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: `${OWN_NS}:notifications`,
+        ...env,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+      timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+    });
+    throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_launch_flow block (#4183 own-namespace)");
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", () => {
+    // Seed the last-tick hash directly in the TARGET db — this is what
+    // HYDRA_REDIS_DB=9 makes rc_read visible to. db 0 is left empty, so a tick
+    // that mistakenly reads db 0 would see no record at all (a distinguishable
+    // failure mode, not a false pass).
+    hsetLastTickAt(SELECTED_DB, {
+      reason: "eligibility-unreachable",
+      class: "fail-safe",
+      at: String(T0),
+      latency_ms: "",
+    });
+    seedSinceAt(SELECTED_DB, "fail-safe", T0); // streak began at T0, in the target DB
+
+    const r = runOwnBlock({
+      HYDRA_REDIS_DB: SELECTED_DB,
+      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
+      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
+    });
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
+    assert.match(
+      warnLines(r.stdout),
+      /signal 'fail-safe' sustained 5000ms >= 2000ms/,
+      "precondition: this tick must fire against the DB-9 seed (proves rc_read honoured HYDRA_REDIS_DB)",
+    );
+
+    // The since-anchor + fired marker THIS tick just wrote via rc_write must
+    // exist in the selected DB...
+    assert.equal(
+      existsAt(SELECTED_DB, OWN_FIRED("fail-safe")),
+      true,
+      "fired marker must land in the HYDRA_REDIS_DB-selected DB",
+    );
+    assert.equal(
+      existsAt(SELECTED_DB, OWN_SINCE("fail-safe")),
+      true,
+      "since anchor must land in the HYDRA_REDIS_DB-selected DB",
+    );
+    // ...and must NEVER have leaked into production db 0 — the exact seam
+    // #4183 closes (rc_write/rc_read previously hardcoded db 0 with no `-n`).
+    assert.equal(
+      existsAt("0", OWN_FIRED("fail-safe")),
+      false,
+      "a bash-side write with HYDRA_REDIS_DB set must never land in db 0",
+    );
+    assert.equal(
+      existsAt("0", OWN_SINCE("fail-safe")),
+      false,
+      "a bash-side write with HYDRA_REDIS_DB set must never land in db 0",
+    );
+  });
+
+  test("non-numeric HYDRA_REDIS_DB falls back to db 0 (byte-identical to pre-#4183 behaviour)", () => {
+    hsetLastTickAt("0", {
+      reason: "eligibility-unreachable",
+      class: "fail-safe",
+      at: String(T0),
+      latency_ms: "",
+    });
+    seedSinceAt("0", "fail-safe", T0);
+
+    const r = runOwnBlock({
+      HYDRA_REDIS_DB: "not-a-number",
+      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
+      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
+    });
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
+    assert.match(
+      warnLines(r.stdout),
+      /signal 'fail-safe' sustained 5000ms >= 2000ms/,
+      "a non-numeric HYDRA_REDIS_DB must fall back to db 0, where the seed was written",
+    );
+    assert.equal(existsAt("0", OWN_FIRED("fail-safe")), true, "fallback DB must be 0 (the documented default)");
+  });
+
+  test("unset HYDRA_REDIS_DB defaults to db 0 (production, unchanged from before #4183)", () => {
+    hsetLastTickAt("0", {
+      reason: "eligibility-unreachable",
+      class: "fail-safe",
+      at: String(T0),
+      latency_ms: "",
+    });
+    seedSinceAt("0", "fail-safe", T0);
+
+    const r = runOwnBlock({
+      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
+      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
+    });
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
+    assert.equal(existsAt("0", OWN_FIRED("fail-safe")), true, "an unset HYDRA_REDIS_DB must default to db 0");
   });
 });
 
