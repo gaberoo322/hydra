@@ -507,6 +507,64 @@ describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", (
   });
 });
 
+describe("scripts/test/redis-db-launch.mjs — redisChildEnv (issue #4183)", () => {
+  const LAUNCHER = fileURLToPath(new URL("../scripts/test/redis-db-launch.mjs", import.meta.url));
+  const scratchDirs: string[] = [];
+
+  after(() => {
+    for (const dir of scratchDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* intentional: best-effort scratch-dir cleanup on teardown */
+      }
+    }
+  });
+
+  function scratchRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-redis-child-env-"));
+    scratchDirs.push(dir);
+    return dir;
+  }
+
+  test("sets HYDRA_REDIS_DB when the resolved DB is launcher-owned", async () => {
+    const { redisChildEnv } = await import("../scripts/test/redis-db-launch.mjs");
+    const overlay = redisChildEnv({ FOO: "bar" }, "redis://localhost:6379/9", 9);
+    assert.equal(overlay.REDIS_URL, "redis://localhost:6379/9");
+    assert.equal(overlay.HYDRA_REDIS_DB, "9", "HYDRA_REDIS_DB must be the string form of the resolved db");
+    assert.equal(overlay.FOO, "bar", "the base env must be preserved");
+  });
+
+  test("omits HYDRA_REDIS_DB when the resolved db is null (non-owned/production DB)", async () => {
+    const { redisChildEnv } = await import("../scripts/test/redis-db-launch.mjs");
+    const overlay = redisChildEnv({ FOO: "bar" }, "redis://localhost:6379/0", null);
+    assert.equal(overlay.REDIS_URL, "redis://localhost:6379/0");
+    assert.equal(
+      "HYDRA_REDIS_DB" in overlay,
+      false,
+      "a non-owned resolved db must never set HYDRA_REDIS_DB — bash's own default-to-0 must apply",
+    );
+  });
+
+  test("a spawned child observes HYDRA_REDIS_DB matching the launcher's resolved per-run DB", () => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    const run = spawnSync(
+      process.execPath,
+      [LAUNCHER, process.execPath, "-e", "console.log(process.env.HYDRA_REDIS_DB)"],
+      {
+        cwd: scratchRoot(),
+        env,
+        encoding: "utf8",
+        timeout: 15_000,
+      },
+    );
+    assert.equal(run.status, 0, `unexpected failure; stderr: ${run.stderr}`);
+    const printedDb = run.stdout.trim();
+    assert.match(printedDb, /^\d+$/, `child must observe a numeric HYDRA_REDIS_DB; got: ${JSON.stringify(printedDb)}`);
+  });
+});
+
 describe("scripts/test/redis-db-launch.mjs — suite-count gate blocking toggle (#4020 follow-up, PR #4056)", () => {
   test("defaults to non-blocking (advisory) when SUITE_COUNT_GATE_BLOCKING is unset", async () => {
     const { isGateBlocking } = await import("../scripts/test/redis-db-launch.mjs");
