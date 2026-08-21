@@ -68,6 +68,7 @@ import {
   clearLaunchFlowStreak,
 } from "../src/redis/launch-flow.ts";
 import { getRedisConnection } from "../src/redis/connection.ts";
+import { STREAMS } from "../src/event-bus-stream-keys.ts";
 import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   WATCHDOG_REDIS_TIMEOUT_MS,
@@ -117,6 +118,17 @@ const SIGNALS = ["fail-safe", "meter-dark", "quota", "pause", "latency"] as cons
 const RUN_NS = `hydra:test:launch-flow-${process.pid}-${randomUUID().slice(0, 8)}`;
 const TEST_LF_PREFIX = `${RUN_NS}:launch-flow`;
 const TEST_LAST_TICK_KEY = `${RUN_NS}:pace-gate:last-tick`;
+
+// Per-run in-band notify-stream override (issue #4182 — this file is
+// DETECTION-only and asserts nothing about delivery, but #3848 (gamma) made
+// `track_signal` call `deliver_signal` unconditionally at the fired
+// absent->present transition, so every fired-transition case here XADDs a
+// real entry unless the stream is rebound. Namespaced under RUN_NS so the
+// existing sweepOrphanNamespaces() / cleanState() machinery (which already
+// matches "hydra:test:launch-flow-*") reaps it for free — see runBlock()
+// below, which bakes this into every invocation, mirroring the envWith()
+// pattern in test/launch-flow-delivery.test.mts:459.
+const TEST_NOTIFY_STREAM = `${RUN_NS}:notifications`;
 
 const SINCE = (s: string) => `${TEST_LF_PREFIX}:since:${s}`;
 const FIRED = (s: string) => `${TEST_LF_PREFIX}:fired:${s}`;
@@ -173,6 +185,10 @@ function cleanState(): void {
   const keys = [TEST_LAST_TICK_KEY];
   for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
   redisCli(["DEL", ...keys], "cleanState DEL");
+  // Namespaced notify-stream reset (issue #4182) — a per-run key, not one of
+  // the ten launch-flow signal keys, so it needs its own DEL. DEL on a stream
+  // key is fine (same command family XADD/XRANGE/XLEN all operate on).
+  redisCli(["DEL", TEST_NOTIFY_STREAM], "cleanState DEL notify-stream");
 }
 
 function hsetLastTick(fields: Record<string, string>): void {
@@ -332,7 +348,24 @@ after(() => {
 /** Source run_launch_flow under prod flags and call it once. */
 function runBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`], {
-    env: { ...process.env, HYDRA_REDIS_HOST: "docker", ...env, PATH: process.env.PATH ?? "" },
+    // HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM is baked in here — unconditionally,
+    // for every call site in this file — rather than threaded through each of
+    // the ~15 individual runBlock({...}) call sites (issue #4182). This file
+    // is DETECTION-only and never asserts on delivery, but #3848 wired
+    // track_signal to call deliver_signal unconditionally at the fired
+    // absent->present transition, so an un-rebound stream means every
+    // fired-transition case here XADDs a REAL entry onto the production
+    // hydra:notifications stream — confirmed live: 36 false operator alerts
+    // in one day, all bearing this file's fixture thresholds/durations. A
+    // caller may still override via its own `env` (last-spread wins), mirroring
+    // the envWith() precedent in test/launch-flow-delivery.test.mts:459.
+    env: {
+      ...process.env,
+      HYDRA_REDIS_HOST: "docker",
+      HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
+      ...env,
+      PATH: process.env.PATH ?? "",
+    },
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
@@ -650,6 +683,38 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       assert.equal(getSince("quota"), String(T0), `quota anchor must not reset on flip to ${reason}`);
     }
     assert.equal(warnings, 1, "exactly one quota WARNING across the continuous flipped-reason streak");
+  });
+
+  test("issue #4182 regression: a fired-transition tick never XADDs the PRODUCTION notifications stream", () => {
+    // Reproduces the exact live incident: 36 real launch:quota_stretch /
+    // launch:latency_breach alerts landed on the dashboard from ordinary
+    // `npm test` runs, because this file (detection-only) never rebound the
+    // in-band delivery stream that #3848 wired `track_signal` to XADD onto
+    // unconditionally at the fired absent->present transition. Quota is a
+    // representative fired-transition case (matches the live incident's
+    // `launch:quota_stretch` alert type exactly, including a 2000ms
+    // threshold / 5000ms duration).
+    const before = Number(drc(["XLEN", STREAMS.NOTIFICATIONS]));
+
+    hsetLastTick({ reason: "emergency-stop", class: "deliberate-skip", at: String(T0), latency_ms: "100" });
+    seedSince("quota", T0);
+    const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_QUOTA_SECONDS: "2", HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000) });
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
+    assert.match(warnLines(r.stdout), /signal 'quota' sustained 5000ms >= 2000ms/, "precondition: this tick fired");
+
+    const after = Number(drc(["XLEN", STREAMS.NOTIFICATIONS]));
+    assert.equal(
+      after,
+      before,
+      `a fired-transition tick must not write the PRODUCTION '${STREAMS.NOTIFICATIONS}' stream ` +
+        `(XLEN went ${before} -> ${after}); it must land only on the per-run HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM override`,
+    );
+
+    // And the entry genuinely landed somewhere — on the namespaced stream —
+    // so this is proving isolation, not a delivery no-op that would pass
+    // vacuously.
+    const rebound = Number(drc(["XLEN", TEST_NOTIFY_STREAM]));
+    assert.equal(rebound, 1, "the fired transition must deliver exactly one entry onto the rebound test stream");
   });
 
   test("pause (forgotten operator pause) fires at 24h-equivalent threshold", () => {
