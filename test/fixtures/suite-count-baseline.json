@@ -244,6 +244,7 @@
   "test/hydra-retro-emit.test.mts": 6,
   "test/hydra-review-option-table.test.mts": 1,
   "test/hydra-review-stalled-pr-bucket.test.mts": 1,
+  "test/hydra-target-build-anchor-preflight.test.mts": 10,
   "test/hydra-target-build-worktree-guard.test.mts": 3,
   "test/hydra-target-cleanup-emit.test.mts": 6,
   "test/hydra-target-wire-or-retire-emit.test.mts": 4,
