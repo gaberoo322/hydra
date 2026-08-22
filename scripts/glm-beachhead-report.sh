@@ -13,6 +13,13 @@
 # line to stdout. `hydra-review` (docs/operator-playbooks/hydra-review.md)
 # runs this script and surfaces that line verbatim.
 #
+# A FAILED gh query aborts the whole report loud — stderr diagnostic quoting
+# gh's own error text, ONE stdout ERROR line, exit 1 — BEFORE any metric
+# renders: a numeric readout built on a masked "[]" is a wrong answer that
+# reads as a confident one (issue #4128). A genuinely EMPTY result set (query
+# succeeds, zero rows) still renders normally via insufficient-data; the two
+# cases are never conflated.
+#
 # HARD INVARIANT (design-concept artifact, issue #3690, ADR-0032 #3671):
 # this script NEVER writes a label, NEVER touches the autopilot decision
 # loop's source (scripts/autopilot/ is out of scope for this issue), NEVER
@@ -336,6 +343,9 @@ recommend() {
 # Data gathering — gh/curl fetch RAW json only; all filtering/math is jq/awk
 # above/below, never gh's own --jq (keeps every gh call fakeable in tests
 # with a plain JSON-serving stub, mirrors test/autopilot-recover-stale.test.mts).
+# A failed gh call inside fetch_glm_authored_prs is NEVER masked as "[]": it
+# fails the whole report loud (issue #4128) — a fabricated readout is worse
+# than no readout, because it reads as a confident one.
 # ---------------------------------------------------------------------------
 
 require_tools() {
@@ -393,26 +403,62 @@ fetch_baseline_churn_sample() {
 # deduped by PR number in jq below (same never-gh's-own---jq convention as
 # every other fetch in this script). The per-side counts are derived from
 # the union rows by main() so the label-vs-branch gap stays VISIBLE.
+#
+# FAIL LOUD (issue #4128): any failed fetch — a gh non-zero exit, gh exiting
+# 0 with EMPTY stdout (a successful --json query always prints at least []),
+# or a union jq parse failure over a malformed/partial response — makes this
+# function RETURN NON-ZERO (with a loud log() diagnostic quoting gh's own
+# stderr) instead of masking the failure as "[]". The caller detects the
+# failure via THIS return code — never a global variable: this function runs
+# inside `rows="$(fetch_glm_authored_prs)"`, a command-substitution subshell
+# whose variable assignments cannot leak back to main() anyway. During the
+# 2026-08-17 GitHub 503 window the old `2>/dev/null || echo "[]"` mask let a
+# COMPLETED 20/14d window with 83 PRs render as a confident "9/14d, 0/25
+# PRs, insufficient-data" — a wrong answer that reads as a right one.
 fetch_glm_authored_prs() {
-  local labeled branch_pool
-  labeled=$(gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
+  local labeled branch_pool union err_file rc
+  # gh's stderr lands in a temp file so the failure diagnostic can quote gh's
+  # own error text (503 / rate-limit / auth) instead of discarding it.
+  # Removed on every exit path below.
+  err_file="$(mktemp)"
+  labeled="$(gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
     --json number,createdAt,additions,deletions,labels,headRefName --limit 100 \
-    2>/dev/null || echo "[]")
+    2>"$err_file")" || {
+    rc=$?
+    log "ERROR label fetch (gh pr list --label ${GLM_LABEL_AUTHORED}) exited ${rc}, gh stderr [$(head -c 300 "$err_file" | tr -s '[:space:]' ' ')]-- a failed query is NOT an empty result set; refusing to render a report built on [] (issue #4128)"
+    rm -f "$err_file"
+    return 1
+  }
   # Branch scan over recent PRs of every state. The scan depth bounds how far
   # back the branch fallback can see: 500 recent PRs spans months at this
   # repo's merge rate, well past the ~2-week window this report judges. (The
   # label side is filtered server-side, so its own --limit caps a set that is
   # already all-drainer.) A PR appearing in BOTH fetches dedupes onto its
   # label-fetch row below.
-  branch_pool=$(gh pr list --repo "$REPO" --state all \
+  branch_pool="$(gh pr list --repo "$REPO" --state all \
     --json number,createdAt,additions,deletions,labels,headRefName --limit 500 \
-    2>/dev/null || echo "[]")
-  printf '%s\n%s\n' "$labeled" "$branch_pool" | jq -s \
+    2>"$err_file")" || {
+    rc=$?
+    log "ERROR branch scan (gh pr list --state all --limit 500) exited ${rc}, gh stderr [$(head -c 300 "$err_file" | tr -s '[:space:]' ' ')]-- a failed query is NOT an empty result set; refusing to render a report built on [] (issue #4128)"
+    rm -f "$err_file"
+    return 1
+  }
+  if [[ -z "$labeled" || -z "$branch_pool" ]]; then
+    log "ERROR a gh pr list exited 0 with EMPTY stdout (a successful --json query always prints at least []) -- treating that as a failed query, not an empty result set (issue #4128)"
+    rm -f "$err_file"
+    return 1
+  fi
+  union="$(printf '%s\n%s\n' "$labeled" "$branch_pool" | jq -s \
     --arg label "$GLM_LABEL_AUTHORED" \
     --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
     "(.[1] | map(select(${GLM_PR_MATCH_JQ}))) as \$branchside
-     | .[0] + \$branchside | unique_by(.number)" \
-    2>/dev/null || echo "[]"
+     | .[0] + \$branchside | unique_by(.number)")" || {
+    log "ERROR union jq failed (malformed/partial gh response) -- refusing to render a report built on [] (issue #4128)"
+    rm -f "$err_file"
+    return 1
+  }
+  rm -f "$err_file"
+  printf '%s\n' "$union"
 }
 
 # window_day0_epoch_from_rows <rows_json> <fallback_epoch> -> the earliest
@@ -579,7 +625,24 @@ main() {
   relief_text=$(relief_figure "$baseline_percent" "$baseline_days" "$current_percent" "$current_days" "$MIN_DAYS_INTO_WINDOW")
 
   local rows
-  rows="$(fetch_glm_authored_prs)"
+  rows="$(fetch_glm_authored_prs)" || {
+    # A failed gh query is NOT an empty result set (issue #4128): rendering on
+    # the masked [] fabricates BOTH the window position (day-0 falls back to
+    # the baseline epoch, so a completed window reads as an early one) and the
+    # recommendation (zero PRs -> insufficient-data). The loud log() stderr
+    # diagnostic above (from inside fetch_glm_authored_prs) quotes gh's own
+    # error text; this is the single stdout ERROR line, and main() exits
+    # BEFORE window_day0_epoch_from_rows() or recommend() ever run — no
+    # recommendation: line of any kind is printed on this path.
+    #
+    # Deliberate divergence from require_tools()'s exit-0-with-ERROR-text
+    # convention at the top of main(): a MISSING TOOL is the caller
+    # environment's problem (don't block hydra-review over it), while a
+    # FAILED QUERY makes every number below fiction. Do NOT "harmonize" the
+    # two exits back together (design-concept artifact, issue #4128).
+    echo "GLM beachhead: ERROR gh query failed -- no report printed (a failed query is not an empty result set; see stderr diagnostic)"
+    exit 1
+  }
   local pr_count_total
   pr_count_total=$(jq -r 'length' <<<"$rows" 2>/dev/null || echo 0)
 
