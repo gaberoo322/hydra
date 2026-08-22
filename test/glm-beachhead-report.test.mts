@@ -1095,6 +1095,42 @@ describe("glm-beachhead-report.sh — fail-loud on failed gh queries (issue #412
     }
   });
 
+  test("deliberate divergence: a MISSING TOOL still exits 0 while a FAILED QUERY exits 1 (do not harmonize the two failure classes)", async () => {
+    // Run A — missing tool: main() with a PATH that resolves NONE of
+    // gh/jq/curl/awk keeps require_tools()'s exit-0-with-ERROR-text
+    // convention (never blocks hydra-review over a caller tooling gap).
+    // callHelper's bash is resolved by node BEFORE the inline PATH change,
+    // mirroring the existing missing-tools test above.
+    const rA = callHelper("PATH=/nonexistent-empty-dir main");
+    assert.equal(rA.status, 0);
+    assert.match(rA.stdout, /ERROR required tools/);
+
+    // Run B — failed query: gh present and executable, but the queries fail:
+    // exit 1. Same script, same report, different failure CLASS.
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binB = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [INCIDENT_PR],
+        allPrsForBranchScan: [INCIDENT_PR],
+        commentsByPr: {},
+        fail: { labelFetch: true, branchScan: true },
+      });
+      const rB = await runReport({
+        PATH: `${binB}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline-b.json"),
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      assert.equal(rB.status, 1);
+      assert.match(rB.stdout, /ERROR gh query failed/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("partial failure (label fetch OK, branch scan fails) -> same fail-loud exit 1, never a union built on []", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
     const usage = await usageServer(55);
