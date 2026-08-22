@@ -858,6 +858,45 @@ describe("decide.py — termination paths", () => {
     assert.equal(findAction(plan, (a) => a.type === "terminate"), undefined);
   });
 
+  test("idle drain is WITHHELD on a degraded orch board read (issue #4130 AC-5b)", () => {
+    // Run 161d9642: a GraphQL 503 rendered a full board "empty", idle_turns
+    // hit the cap, and the run drained with a clean `idle` cause while 15
+    // ready-for-agent issues sat eligible. The degraded flag means "board
+    // contents unknown" — the idle conclusion is withheld and the condition
+    // is stamped on the turn record (AC-4).
+    const state = baseState({
+      idle_turns: 5,
+      idle_drain_turns: 5,
+      signals: { orch_board_signals_degraded: true },
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate" && a.cause === "idle"),
+      undefined,
+      "a degraded board read must not be read as a quiet board",
+    );
+    assert.equal(
+      plan.debug?.orch_board_signals_degraded,
+      true,
+      "the withheld condition is stamped on the turn record (AC-4)",
+    );
+  });
+
+  test("the harder caps still terminate on a degraded snapshot (issue #4130)", () => {
+    // Degradation withholds the IDLE conclusion only — quota / budget /
+    // wall_clock are not board evidence and must keep firing, else an outage
+    // would make a run immortal.
+    const state = baseState({
+      cumulative_tokens: 2_000_001,
+      signals: { orch_board_signals_degraded: true },
+    });
+    const plan = runDecide(state, null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t);
+    assert.equal(t.cause, "budget");
+  });
+
   test("5 consecutive failures of same pattern -> failure_backstop terminate", () => {
     const state = baseState({
       failure_log: Array.from({ length: 5 }, () => ({
@@ -1668,6 +1707,46 @@ describe("decide.py — board-idle backfill set (issue #959)", () => {
       "saturation cap is the first gate — a saturated class never consumes the stagger slot",
     );
   });
+
+  test("a degraded orch board read suppresses EVERY idle-backfill consumer (issue #4130 AC-5c)", () => {
+    // The inverse hazard from run 161d9642: a failed board read renders as
+    // board-empty, the idle signal fires, and discover/architecture/cleanup/
+    // skill_prune all "backfill" against a board that is actually FULL. On a
+    // degraded snapshot the idle arms are withheld (discover_orch seeded
+    // fresh so its staleness floor — deliberately NOT suppressed — stays out
+    // of this fixture's way).
+    const state = baseState({
+      signals: { orch_board_signals_degraded: true, orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: now } as any,
+    });
+    const plan = runDecide(state, null);
+    const backfill = (plan.actions ?? []).filter(
+      (a: any) =>
+        a.type === "dispatch" &&
+        ["discover_orch", "architecture_orch", "cleanup_orch", "skill_prune"].includes(a.slot),
+    );
+    assert.deepEqual(
+      backfill,
+      [],
+      "orch_backfill_idle on a DEGRADED snapshot must not fire any backfill class",
+    );
+  });
+
+  test("degradation does NOT suppress the discover staleness floor — #4114 stays armed (issue #4130)", () => {
+    // The floor is COOLDOWN-DARKNESS evidence, not board evidence: it fires
+    // when the producer has been dark >7d regardless of what the board read
+    // says. Suppressing it during an outage would let a transient GitHub
+    // incident push discover_orch past its #4114 starvation floor.
+    const plan = runDecide(baseState({
+      signals: { orch_board_signals_degraded: true },
+    }), null);
+    const d = findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_orch");
+    assert.ok(
+      d,
+      "a never-fired discover_orch must still dispatch via the staleness floor on a degraded turn",
+    );
+    assert.match(d.reason, /staleness floor/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2058,6 +2137,36 @@ describe("decide.py — idle fallback / heartbeat", () => {
     const t = findAction(plan, (a) => a.type === "terminate");
     assert.ok(t);
     assert.equal(t.merged_prs, 3);
+  });
+
+  test("wait-only turn on a DEGRADED board keeps the heartbeat wait — idle conclusion withheld (issue #4130 AC-5b)", () => {
+    // The #1352 clean idle drain is exactly the misread #4130 guards
+    // against: "no dispatch, no slots, no actions" was an artifact of a
+    // failed board read, not evidence of a quiet board. The degraded turn
+    // reverts to the pre-#1352 heartbeat wait so whatever the process does
+    // next, the recorded cause is the honest one.
+    //
+    // discover_orch seeded as fired-just-now so the #4114 staleness floor
+    // (deliberately LIVE during degradation) cannot turn this into a
+    // dispatch-bearing turn.
+    const plan = runDecide(baseState({
+      signals: { orch_board_signals_degraded: true },
+      signal_last_fired: { discover_orch: Math.floor(Date.now() / 1000) } as any,
+    }), null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "a degraded read is not evidence of a quiet board — no idle drain",
+    );
+    const w = findAction(plan, (a) => a.type === "wait");
+    assert.ok(w, "the degraded wait-only turn keeps the heartbeat wait");
+    assert.equal(w.seconds, 900);
+    assert.match(w.reason, /orch board read degraded/);
+    assert.equal(
+      plan.debug?.idle_fallback,
+      "wait-board-degraded",
+      "the withheld idle conclusion is named in the turn record (AC-4)",
+    );
   });
 
   test("housekeeping-only turn (auto-merge, no dispatch, empty slots) keeps the heartbeat wait", () => {

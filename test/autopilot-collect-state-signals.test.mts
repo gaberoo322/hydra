@@ -143,8 +143,10 @@ describe("collect-state.sh grill walk NOT widened by #4096 (design-concept INV-5
       "the grill-candidate walk must keep sourcing candidates exclusively from the ready-for-agent label (#4096 'Not in scope')",
     );
     // And the walk's gh call must not ALSO filter for the parking label.
+    // (#4130 note: the walk's terminator is now a bare `' 2>/dev/null)` — the
+    // read is captured for a failure guard, so the old `|| true)` is gone.)
     const walkStart = SRC.indexOf("ORCH_GRILL_LIST_JSON=$(gh issue list");
-    const walkEnd = SRC.indexOf("2>/dev/null || true)", walkStart);
+    const walkEnd = SRC.indexOf("' 2>/dev/null)", walkStart);
     const walk = SRC.slice(walkStart, walkEnd);
     assert.ok(
       !walk.includes("needs-design-concept"),

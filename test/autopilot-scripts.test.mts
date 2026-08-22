@@ -1471,6 +1471,45 @@ describe("scripts/autopilot/term-check.py", () => {
     }
   });
 
+  test("WITHHOLDS TERM:idle on a degraded orch board read (issue #4130 — mirrors decide.py)", () => {
+    // Phase 3 runs BEFORE decide.py; without this mirror its cheap TERM:idle
+    // would end the run before Phase 4's authoritative check ever saw the
+    // flag — the exact run-161d9642 drain, just one phase earlier.
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, {
+        idle_turns: 5,
+        signals: { orch_board_signals_degraded: true },
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(
+        r.stdout,
+        /^OK idle-withheld /,
+        "a degraded board read must not be read as a quiet board — the run keeps iterating under the caps",
+      );
+      assert.match(r.stdout, /orch_board_signals_degraded=true/);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("degradation withholds ONLY idle — TERM:budget still fires (issue #4130)", () => {
+    const tmp = makeTempState();
+    try {
+      writeState(tmp.state, {
+        cumulative_tokens: 2_000_001,
+        signals: { orch_board_signals_degraded: true },
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^TERM:budget /,
+        "quota/budget/wall_clock are not board evidence and must keep firing during an outage");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("does NOT trip idle when a slot is occupied", () => {
     const tmp = makeTempState();
     try {

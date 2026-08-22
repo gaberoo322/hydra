@@ -235,11 +235,72 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     );
   });
 
-  test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+  test("total failure of the fallback emits the four zero counts — but flips the degraded accumulator, never a legitimate empty board (issue #4130)", () => {
+    // Pre-#4130 the fallback failed open to an UNFLAGGED zero-set: during the
+    // 161d9642 GraphQL outage that rendered a 34-item board as
+    // target_ready_for_agent=0 with target_board_signals_degraded=false. The
+    // zeros still ship (downstream consumers need the keys) but the failure
+    // now flips TARGET_BOARD_READ_FAILED, which the single accumulator
+    // emission at the end of the script turns into
+    // target_board_signals_degraded=true.
+    const from = src.indexOf("TARGET_FALLBACK_LINES=$(gh issue list");
+    const branch = src.slice(from, src.indexOf("\nfi", from));
+    assert.match(
+      branch,
+      /else\n\s+TARGET_BOARD_READ_FAILED=1\n\s+echo "target_ready_for_agent=0"\n\s+echo "target_needs_qa=0"\n\s+echo "target_needs_triage=0"\n\s+echo "target_needs_research=0"/,
+      "a failed fallback read must still emit the four zero keys (fail closed) AND mark the turn degraded — never a phantom empty board",
+    );
+  });
+
+  test("a genuinely empty board emits four LEGITIMATE 0 lines — exit-0 zeros the degraded guard cannot trip on (issue #4130 AC-5d)", () => {
+    // The failure detector is `[ -z "$TARGET_FALLBACK_LINES" ]`, and the jq's
+    // `to_entries | map(...) | .[]` tail prints ONE line per key on EVERY
+    // successful read — zeros included. So `[]` (a real empty board, gh exit
+    // 0) produces non-empty output and does NOT flip the flag: empty boards
+    // keep behaving exactly as before, only failed reads degrade.
+    const start = src.indexOf("TARGET_FALLBACK_LINES=$(gh issue list");
+    const from = src.indexOf("--jq '", start) + "--jq '".length;
+    const end = src.indexOf("' 2>/dev/null)", from);
+    assert.ok(
+      start > 0 && from > start && end > from,
+      "could not locate the TARGET_FALLBACK_LINES jq filter",
+    );
+    const filter = src.slice(from, end);
+    // `gh --jq` prints top-level string results RAW (like jq -r) — plain jq
+    // would JSON-quote each line and the deepEqual below would test the wrong
+    // thing. `-r` here emulates the gh behavior this filter actually runs under.
+    const r = spawnSync("jq", ["-r", filter], { input: "[]", encoding: "utf-8" });
+    assert.equal(r.status, 0, `jq failed: ${r.stderr}`);
+    assert.deepEqual(
+      (r.stdout ?? "").trim().split("\n"),
+      [
+        "target_ready_for_agent=0",
+        "target_needs_qa=0",
+        "target_needs_triage=0",
+        "target_needs_research=0",
+      ],
+      "an empty board is a SUCCESSFUL read — the guard must see non-empty output and leave the flag false",
+    );
+  });
+
+  test("the lane degraded flag is emitted ONCE, from the accumulator, after both Target reads (issue #4130)", () => {
+    // Both failed-read sites (the board-STATE fallback above and the
+    // TARGET_BOARD_ISSUES_JSON block below) OR into TARGET_BOARD_READ_FAILED;
+    // the flag is emitted exactly once, unconditionally, so decide.py never
+    // sees a missing key and one branch can never overwrite the other's
+    // verdict — the exact bug that showed degraded=false beside a zeroed
+    // board during run 161d9642.
+    assert.equal(src.match(/echo "target_board_signals_degraded=/g)?.length, 1);
     assert.match(
       src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
-      "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+      /echo "target_board_signals_degraded=\$\(\[ "\$TARGET_BOARD_READ_FAILED" = "1" \] && echo true \|\| echo false\)"/,
+      "the flag must be the accumulator OR (either failed read ⇒ true), not an inline branch echo",
+    );
+    // And the accumulator is flipped by BOTH read sites.
+    assert.equal(
+      src.match(/TARGET_BOARD_READ_FAILED=1/g)?.length,
+      2,
+      "expected exactly two flip sites: the board-state fallback and the TARGET_BOARD_ISSUES_JSON else",
     );
   });
 
@@ -559,12 +620,20 @@ describe("collect-state.sh — Target board truncation signal (issue #3710)", ()
 
   test("the key is emitted on the degraded branch too, so decide.py never sees it missing", () => {
     // A read that never happened is not a truncated read — it is a degraded
-    // one. Both branches must still publish the key.
-    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    // one. Both branches must still publish the key. (#4130 moved the
+    // degraded flag itself to the accumulator emission; this branch's marker
+    // is the TARGET_BOARD_READ_FAILED flip — the LAST occurrence, i.e. this
+    // block's else, not the board-state fallback's above.)
+    const degradedBranch = src.slice(src.lastIndexOf("TARGET_BOARD_READ_FAILED=1"));
     assert.match(
       degradedBranch.slice(0, 400),
       /echo "target_board_signals_truncated=false"/,
       "the unreachable-read branch must emit truncated=false, not omit the key",
+    );
+    assert.match(
+      degradedBranch.slice(0, 400),
+      /TARGET_BOARD_READ_FAILED=1/,
+      "the unreachable-read branch must also flip the degraded accumulator (issue #4130)",
     );
     assert.equal(
       src.match(/target_board_signals_truncated=/g)?.length,
@@ -724,8 +793,11 @@ describe("collect-state.sh — wire-or-retire unlabelled advisory count (issue #
   test("a degraded/unreachable board read emits 0, never a spurious non-zero", () => {
     // The outer else branch (TARGET_BOARD_ISSUES_JSON empty/unreachable) fails
     // closed to 0 — the suppressing direction, so a transient gh outage never
-    // raises a false alarm. Mirrors every sibling target_* count in that branch.
-    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    // raises a false alarm. Mirrors every sibling target_* count in that
+    // branch. (#4130 anchor: this branch is found via its accumulator flip —
+    // the last TARGET_BOARD_READ_FAILED occurrence — because the inline
+    // degraded=true echo moved to the single accumulator emission.)
+    const degradedBranch = src.slice(src.lastIndexOf("TARGET_BOARD_READ_FAILED=1"));
     assert.match(
       degradedBranch.slice(0, 700),
       /echo "wire_or_retire_target_unlabelled=0"/,

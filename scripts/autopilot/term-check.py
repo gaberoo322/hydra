@@ -316,8 +316,26 @@ def main() -> int:
         cause = "wall_clock"
         print(f"TERM:wall_clock elapsed={elapsed}s/{limits['wall_clock_max_sec']}s tokens={tokens}")
     elif s["idle_turns"] >= limits["idle_drain_turns"] and slots_occupied == 0:
-        cause = "idle"
-        print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
+        # Issue #4130 — mirror decide.py's `_check_termination` idle branch:
+        # a degraded orch board read means the board's contents are UNKNOWN,
+        # not empty, so the idle conclusion is withheld (term-check ↔
+        # `_check_termination` mirror consistency, INV-2 in
+        # test/autopilot-quota-budget-3867.test.mts). Without this, Phase 3
+        # would `TERM:idle` the run before Phase 4's authoritative check ever
+        # saw the flag. Degradation is NOT terminal: the caps above (quota /
+        # budget / wall_clock) still fire, and the next turn re-reads the
+        # board. `signals` absent/garbage reads as not-degraded (the healthy
+        # default), matching every other signal consumer.
+        signals = s.get("signals") or {}
+        degraded = bool(signals.get("orch_board_signals_degraded")) if isinstance(signals, dict) else False
+        if degraded:
+            print(
+                f"OK idle-withheld idle_turns={s['idle_turns']}/{limits['idle_drain_turns']} "
+                f"slots={slots_occupied} orch_board_signals_degraded=true"
+            )
+        else:
+            cause = "idle"
+            print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
     else:
         # Periodic session-restart (issue #3787) — checked LAST, mirroring
         # decide.py's `_check_termination` ordering, so a genuinely urgent
