@@ -418,17 +418,28 @@ fetch_baseline_churn_sample() {
 fetch_glm_authored_prs() {
   local labeled branch_pool union err_file rc
   # gh's stderr lands in a temp file so the failure diagnostic can quote gh's
-  # own error text (503 / rate-limit / auth) instead of discarding it.
-  # Removed on every exit path below.
-  err_file="$(mktemp)"
-  labeled="$(gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
-    --json number,createdAt,additions,deletions,labels,headRefName --limit 100 \
-    2>"$err_file")" || {
-    rc=$?
-    log "ERROR label fetch (gh pr list --label ${GLM_LABEL_AUTHORED}) exited ${rc}, gh stderr [$(head -c 300 "$err_file" | tr -s '[:space:]' ' ')]-- a failed query is NOT an empty result set; refusing to render a report built on [] (issue #4128)"
-    rm -f "$err_file"
+  # own error text (503 / rate-limit / auth) instead of discarding it. The
+  # RETURN trap removes it on EVERY exit path, including ones added later —
+  # there is no per-path `rm` to forget.
+  err_file="$(mktemp)" || {
+    log "ERROR mktemp failed (TMPDIR unwritable/full?) -- cannot capture gh stderr; refusing to render a report (issue #4128)"
     return 1
   }
+  trap 'rm -f "$err_file"' RETURN
+  # The section's shared gh-failure handler, defined INSIDE this function on
+  # purpose (the design-concept artifact scopes this fix to
+  # fetch_glm_authored_prs() and main() only): loud log() diagnostic quoting
+  # gh's own stderr + `return 1`. A `return` from THIS helper only leaves the
+  # helper, so each call site follows it with its own `return 1` to propagate
+  # the failure out of fetch_glm_authored_prs (issue #4128).
+  _glm_fetch_fail_loud() {
+    rc=$?
+    log "ERROR ${1} exited ${rc}, gh stderr [$(head -c 300 "$err_file" | tr -s '[:space:]' ' ')]-- a failed query is NOT an empty result set; refusing to render a report built on [] (issue #4128)"
+    return 1
+  }
+  labeled="$(gh pr list --repo "$REPO" --label "$GLM_LABEL_AUTHORED" --state all \
+    --json number,createdAt,additions,deletions,labels,headRefName --limit 100 \
+    2>"$err_file")" || { _glm_fetch_fail_loud "label fetch (gh pr list --label ${GLM_LABEL_AUTHORED})"; return 1; }
   # Branch scan over recent PRs of every state. The scan depth bounds how far
   # back the branch fallback can see: 500 recent PRs spans months at this
   # repo's merge rate, well past the ~2-week window this report judges. (The
@@ -437,27 +448,23 @@ fetch_glm_authored_prs() {
   # label-fetch row below.
   branch_pool="$(gh pr list --repo "$REPO" --state all \
     --json number,createdAt,additions,deletions,labels,headRefName --limit 500 \
-    2>"$err_file")" || {
-    rc=$?
-    log "ERROR branch scan (gh pr list --state all --limit 500) exited ${rc}, gh stderr [$(head -c 300 "$err_file" | tr -s '[:space:]' ' ')]-- a failed query is NOT an empty result set; refusing to render a report built on [] (issue #4128)"
-    rm -f "$err_file"
+    2>"$err_file")" || { _glm_fetch_fail_loud "branch scan (gh pr list --state all --limit 500)"; return 1; }
+  if [[ -z "$labeled" ]]; then
+    log "ERROR label fetch exited 0 with EMPTY stdout (a successful --json query always prints at least []) -- treating that as a failed query, not an empty result set (issue #4128)"
     return 1
-  }
-  if [[ -z "$labeled" || -z "$branch_pool" ]]; then
-    log "ERROR a gh pr list exited 0 with EMPTY stdout (a successful --json query always prints at least []) -- treating that as a failed query, not an empty result set (issue #4128)"
-    rm -f "$err_file"
+  fi
+  if [[ -z "$branch_pool" ]]; then
+    log "ERROR branch scan exited 0 with EMPTY stdout (a successful --json query always prints at least []) -- treating that as a failed query, not an empty result set (issue #4128)"
     return 1
   fi
   union="$(printf '%s\n%s\n' "$labeled" "$branch_pool" | jq -s \
     --arg label "$GLM_LABEL_AUTHORED" \
     --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
     "(.[1] | map(select(${GLM_PR_MATCH_JQ}))) as \$branchside
-     | .[0] + \$branchside | unique_by(.number)")" || {
-    log "ERROR union jq failed (malformed/partial gh response) -- refusing to render a report built on [] (issue #4128)"
-    rm -f "$err_file"
+     | .[0] + \$branchside | unique_by(.number)" 2>"$err_file")" || {
+    log "ERROR union jq failed (malformed/partial gh response), jq stderr [$(head -c 300 "$err_file" | tr -s '[:space:]' ' ')]-- refusing to render a report built on [] (issue #4128)"
     return 1
   }
-  rm -f "$err_file"
   printf '%s\n' "$union"
 }
 
