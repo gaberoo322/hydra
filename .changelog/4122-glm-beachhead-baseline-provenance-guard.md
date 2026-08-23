@@ -1,0 +1,1 @@
+- fix: glm-beachhead-report refuses to compute quota relief from a baseline captured inside the GLM era, printing "not comparable (baseline captured <N>d into the GLM era — both sides are GLM-era)" regardless of window maturity (#4122)
