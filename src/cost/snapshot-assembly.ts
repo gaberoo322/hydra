@@ -101,6 +101,18 @@ import type { UsageSnapshot, SkillWoWEntry } from "./types.ts";
 const WEEKLY_WINDOW_MS = 7 * 86_400_000;
 
 /**
+ * Tolerance band (in percentage points of weekly quota) around the LINEAR
+ * weekly-pace target within which consumption is judged "on" pace rather than
+ * under/over it (issue #4121). Sibling of `eligibility.ts`'s
+ * `PACE_STATE_TOLERANCE_PERCENT` (same ±2pp, same anti-flicker rationale) but
+ * a DISTINCT constant: that band positions the ADR-0021 cumulative-since-Anchor
+ * burn against the Pacing Curve, this one positions the rolling `percentLast7d`
+ * against the linear window fraction — two independently-tuned pace signals
+ * (the design-concept's naming invariant, issue #4121 INV-6).
+ */
+const LINEAR_PACE_TOLERANCE_PERCENT = 2;
+
+/**
  * The composed two-axis quota-burn numerator over a per-family accumulator,
  * generalised to a full four-category weight set (issue #3825, building on
  * #873). Axis A (per-token-category weight) reshapes the token mix INSIDE each
@@ -269,8 +281,8 @@ export function deriveQuotaWeightTotals(
  */
 export interface WindowPace {
   /**
-   * Fraction of the OAuth weekly window elapsed at the snapshot instant,
-   * clamped to [0, 1]; `null` when no boundary is known.
+   * Fraction of the weekly window elapsed at the snapshot instant, clamped to
+   * [0, 1]; `null` when no boundary is known.
    */
   windowElapsedFraction: number | null;
   /**
@@ -283,36 +295,47 @@ export interface WindowPace {
 /**
  * Weekly window-position fold (issue #4121).
  *
- * `(now - (sevenDayResetsAt - 7d)) / 7d` — where the OAuth meter's 7-day
- * boundary sits relative to `now` — plus the derived pace ratio
- * `percentLast7d / (100 * windowElapsedFraction)` (`< 1` under linear pace,
- * `> 1` over). This is the window-position reference `pacingState` lacked:
- * pre-#4121 a single busy day extrapolated across seven days read "over" while
- * the account was comfortably under pace (observed 2026-08-17: 67% consumed at
- * 70.1% elapsed, `paceRatio` 0.96, reported `"over"`).
+ * `(now - windowStart) / 7d` — where the weekly window stands relative to
+ * `now` — plus the derived pace ratio `percentLast7d / (100 *
+ * windowElapsedFraction)` (`< 1` under linear pace, `> 1` over). This is the
+ * window-position reference `pacingState` lacked: pre-#4121 a single busy day
+ * extrapolated across seven days read "over" while the account was comfortably
+ * under pace (observed 2026-08-17: 67% consumed at 70.1% elapsed, `paceRatio`
+ * 0.96, reported `"over"`).
  *
- * Only the OAuth meter's boundary is used — `sevenDayResetsAt` is non-null
- * exclusively on the `"oauth"` path (`rebaseOnOAuth` nulls it on the estimate
- * fallback), so a missing boundary and a fallback headline coincide and the
- * fold returns `{null, null}` rather than ratioing a guess against a window it
- * cannot see (the same only-the-authoritative-meter discipline as
- * `projectPacingCurve`'s neutral, issue #3751 INV-4). Defensive on a malformed
- * ISO: `null`s, never a throw. Pure scalar fold — the #2041 shape, no I/O.
+ * Window-start PRECEDENCE — the meter's own boundary first, the env-anchored
+ * fixed window second:
+ *   1. the OAuth meter's `sevenDayResetsAt - 7d` (the issue-#4121 formula;
+ *      non-null exclusively on the `"oauth"` path, so it pairs with the real
+ *      meter `percentLast7d` whose own window ENDS at that boundary);
+ *   2. the Weekly Reset Anchor boundary (`deriveSinceReset`'s
+ *      `weeklyResetAnchor`, ADR-0021) — available on the estimate-fallback
+ *      path too, so a tracker with the Anchor seeded keeps a window reference
+ *      while the meter is unreadable (design-concept issue-4121 INV-3);
+ *   3. neither → `{null, null}` (and `pacingState` falls back to the legacy
+ *      projection derivation — see {@link derivePacingState}, INV-4).
+ * Defensive on a malformed ISO at either precedence level: skip it (fall
+ * through), never a throw. Pure scalar fold — the #2041 shape, no I/O.
  * Exported for direct unit test, NOT added to the `index.ts` public barrel.
  */
 export function deriveWindowPace(input: {
   nowMs: number;
   sevenDayResetsAt: string | null;
+  weeklyResetAnchor: string | null;
   percentLast7d: number;
 }): WindowPace {
-  if (input.sevenDayResetsAt === null) {
+  let windowStartMs: number | null = null;
+  if (input.sevenDayResetsAt !== null) {
+    const resetsMs = Date.parse(input.sevenDayResetsAt);
+    if (Number.isFinite(resetsMs)) windowStartMs = resetsMs - WEEKLY_WINDOW_MS;
+  }
+  if (windowStartMs === null && input.weeklyResetAnchor !== null) {
+    const anchorMs = Date.parse(input.weeklyResetAnchor);
+    if (Number.isFinite(anchorMs)) windowStartMs = anchorMs;
+  }
+  if (windowStartMs === null) {
     return { windowElapsedFraction: null, paceRatio: null };
   }
-  const resetsMs = Date.parse(input.sevenDayResetsAt);
-  if (!Number.isFinite(resetsMs)) {
-    return { windowElapsedFraction: null, paceRatio: null };
-  }
-  const windowStartMs = resetsMs - WEEKLY_WINDOW_MS;
   const elapsed = Math.min(1, Math.max(0, (input.nowMs - windowStartMs) / WEEKLY_WINDOW_MS));
   if (elapsed <= 0) {
     // Window boundary not yet reached (clock skew, or a boundary a full window
@@ -328,23 +351,38 @@ export function deriveWindowPace(input: {
 /**
  * Pacing-state fold (issue #2188; re-derived from window position in #4121).
  *
- * `pacingState` keys off the LINEAR-PACE ratio (NOT the 24h burst projection
- * it used pre-#4121): `"over"` when `paceRatio > 1` (consumed faster than the
- * window's linear rate), `"on"` in the `[0.8, 1]` informational band AND when
- * `paceRatio` is null (no window position → the neutral verdict, mirroring
- * `projectPacingCurve`'s neutral "on"; `projectEligibility`'s pacing shed
- * never fires on it), `"under"` otherwise (including every uncalibrated run,
- * unchanged). Pure scalar fold over already-computed scalars. Exported from
- * this module for direct unit test, NOT added to the `index.ts` public barrel.
+ * `pacingState` keys off position relative to LINEAR weekly pace (NOT the 24h
+ * burst projection it used pre-#4121): with a window position in hand, the
+ * linear target is `100 * windowElapsedFraction` percent of quota and the
+ * verdict compares `percentLast7d` against it within ±{@link
+ * LINEAR_PACE_TOLERANCE_PERCENT}pp — `"over"` above the band, `"on"` inside
+ * it, `"under"` below (67% consumed at 70% elapsed reads `"under"`: 3pp under
+ * target). When NO window position exists (`windowElapsedFraction` is null or
+ * 0 — no OAuth boundary and no Anchor), the fold falls back to the legacy
+ * pre-#4121 `projectedWeeklyPercent` thresholds rather than a fixed state,
+ * preserving the status quo for un-Anchor'd accounts (design-concept
+ * issue-4121 INV-4). Uncalibrated is always `"under"`, byte-for-byte the
+ * pre-#4121 short-circuit. Pure scalar fold over already-computed scalars.
+ * Exported from this module for direct unit test, NOT added to the
+ * `index.ts` public barrel.
  */
 export function derivePacingState(
   calibrated: boolean,
-  paceRatio: number | null,
+  percentLast7d: number,
+  windowElapsedFraction: number | null,
+  projectedWeeklyPercent: number,
 ): "under" | "on" | "over" {
   if (!calibrated) return "under";
-  if (paceRatio === null) return "on";
-  if (paceRatio > 1) return "over";
-  if (paceRatio >= 0.8) return "on";
+  if (windowElapsedFraction === null || windowElapsedFraction <= 0) {
+    // Legacy fallback (INV-4): no window-position reference, so the pre-#4121
+    // 24h-projection thresholds govern — byte-for-byte the old branch.
+    if (projectedWeeklyPercent > 100) return "over";
+    if (projectedWeeklyPercent >= 80) return "on";
+    return "under";
+  }
+  const targetPercent = 100 * windowElapsedFraction;
+  if (percentLast7d > targetPercent + LINEAR_PACE_TOLERANCE_PERCENT) return "over";
+  if (percentLast7d >= targetPercent - LINEAR_PACE_TOLERANCE_PERCENT) return "on";
   return "under";
 }
 
@@ -812,21 +850,6 @@ export function assembleSnapshot(
     oauthSevenDayResetsAt,
   } = rebaseOnOAuth(scan.oauth, estimatePercentLast5h, estimatePercentLast7d);
 
-  // Weekly window position + linear-pace ratio (issue #4121). Keys off the
-  // OAuth meter's own 7-day boundary and the rebased headline `percentLast7d`
-  // — NOT the 24h burst projection, which read a single busy day as "over"
-  // regardless of how much of the window remained (observed 2026-08-17: 67%
-  // consumed at 70.1% elapsed, paceRatio 0.96, reported "over"). On the
-  // estimate-fallback path `oauthSevenDayResetsAt` is null, the fold returns
-  // `{null, null}`, and `pacingState` takes the neutral "on". Pure folds:
-  // {@link deriveWindowPace} + {@link derivePacingState}.
-  const { windowElapsedFraction, paceRatio } = deriveWindowPace({
-    nowMs,
-    sevenDayResetsAt: oauthSevenDayResetsAt,
-    percentLast7d,
-  });
-  const pacingState = derivePacingState(calibrated, paceRatio);
-
   // Both hard-stops (the 5h `emergencyStop` and the weekly `weeklyEmergencyStop`)
   // are derived by the pure `deriveHardStop` threshold predicate (issue #2041),
   // folding over the three scalars now in hand. They are driven EXCLUSIVELY by
@@ -876,6 +899,29 @@ export function assembleSnapshot(
     calibrated,
     weeklyQuota,
   });
+
+  // Weekly window position + linear-pace verdict (issue #4121). Runs AFTER
+  // deriveSinceReset because the window-start precedence needs its
+  // `weeklyResetAnchor` as the fallback reference when the OAuth meter's own
+  // 7-day boundary is unavailable (estimate-fallback path) — a pure reordering
+  // of local consts; no other field's value changes (design-concept
+  // issue-4121 INV-7). Keys off window position + the rebased headline
+  // `percentLast7d`, NOT the 24h burst projection, which read a single busy
+  // day as "over" regardless of how much of the window remained (observed
+  // 2026-08-17: 67% consumed at 70.1% elapsed, paceRatio 0.96, reported
+  // "over"). Pure folds: {@link deriveWindowPace} + {@link derivePacingState}.
+  const { windowElapsedFraction, paceRatio } = deriveWindowPace({
+    nowMs,
+    sevenDayResetsAt: oauthSevenDayResetsAt,
+    weeklyResetAnchor,
+    percentLast7d,
+  });
+  const pacingState = derivePacingState(
+    calibrated,
+    percentLast7d,
+    windowElapsedFraction,
+    projectedWeeklyPercent,
+  );
 
   // Drift detector (issue #873; pure side-effecting detector extracted to
   // {@link detectCalibrationDrift} in #2188). Fail-loud, ONCE per scan: when an
