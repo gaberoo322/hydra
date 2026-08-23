@@ -1,0 +1,1 @@
+- fix: a failed gh board read is now an observable degraded flag, not a silent zero — collect-state.sh withholds counts, decide.py suspends terminate:idle and the orch_backfill_idle backfill classes (#4130)
