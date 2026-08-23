@@ -7,6 +7,7 @@ import {
   groupNotesByType,
   projectState,
   currentVersionLabel,
+  isCommitIdentity,
   formatReleaseDate,
   shortSha,
   versionAnchorId,
@@ -16,18 +17,21 @@ import {
 
 /**
  * Versions — the Today-page panel over `GET /api/versions` (issue #3681,
- * epic #3676 epsilon; wayfinder ticket #3660).
+ * epic #3676 epsilon; wayfinder ticket #3660; the Target card's
+ * commit-identity shape is #4172).
  *
  * One collapsible card per project: the current version, that release's notes
  * grouped by Conventional-Commits type, and an "older versions" expander over
  * the rest of `history[]`. Scales from one project to N by stacking cards, so
- * adding a Target to the roster needs no layout change here.
+ * adding a Target to the roster needs no layout change here. A tagless Target
+ * instead renders its COMMIT IDENTITY — sha, date, and a visible dirty/clean
+ * chip (#4172); the two card shapes differing is accepted, not a defect.
  *
  * Every real decision (the current-vs-older split that prevents rendering the
- * newest release twice, the three degraded states, the note ordering) lives in
- * `lib/versions-format.ts` and is unit-tested in `test/versions-format.test.mts`
- * — this file is deliberately a thin renderer, because the dashboard has no
- * component-test runner.
+ * newest release twice, the three degraded states, the note ordering, the
+ * commit-identity label) lives in `lib/versions-format.ts` and is unit-tested
+ * in `test/versions-format.test.mts` — this file is deliberately a thin
+ * renderer, because the dashboard has no component-test runner.
  *
  * The whole panel carries a single `id="versions"` anchor (not one per
  * project) — the footer badge in `Sidebar.jsx` always jumps to the panel as a
@@ -104,6 +108,38 @@ function ReleaseMeta({ release }) {
   );
 }
 
+/**
+ * The body of a commit-identity card (#4172): what a repository with no
+ * release stream can honestly claim — the checked-out commit, when, and
+ * whether the working tree matches it. `dirty` is surfaced as an explicit chip
+ * (amber when dirty, muted when clean) because it is the load-bearing field:
+ * with no deploy path, a restart rebuilds from the working tree, so "what is
+ * running" may correspond to no commit at all. The card shape differing from
+ * the Orchestrator's release card is accepted, not a defect.
+ */
+function CommitIdentityBody({ identity }) {
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap items-center gap-2" title={identity.sha}>
+        <ReleaseMeta release={identity} />
+        {identity.dirty ? (
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-300">
+            dirty working tree
+          </span>
+        ) : (
+          <span className="rounded bg-zinc-700/60 px-1.5 py-0.5 text-xs text-zinc-400">
+            clean tree
+          </span>
+        )}
+      </div>
+      <p className="text-sm text-zinc-500 italic">
+        No release tags — this repository has no deploy path, so the card reports
+        the checked-out commit instead of a version.
+      </p>
+    </>
+  );
+}
+
 /** The `<details>` expander over every release that is not the current one. */
 function OlderVersions({ older, scope }) {
   if (older.length === 0) return null;
@@ -138,6 +174,10 @@ function OlderVersions({ older, scope }) {
  */
 function ProjectCard({ project }) {
   const state = projectState(project);
+  // A tagless Target's `current` is a CommitIdentity (#4172) — it renders from
+  // project.current directly and is deliberately NOT promoted into the release
+  // split (splitReleases returns no current for it).
+  const identity = state === "ok" && isCommitIdentity(project.current) ? project.current : null;
   const { current, older } = splitReleases(project);
 
   return (
@@ -170,7 +210,9 @@ function ProjectCard({ project }) {
           </p>
         )}
 
-        {state === "ok" && current && (
+        {state === "ok" && identity && <CommitIdentityBody identity={identity} />}
+
+        {state === "ok" && !identity && current && (
           <>
             <div className="mb-2">
               <ReleaseMeta release={current} />

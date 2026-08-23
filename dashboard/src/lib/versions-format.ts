@@ -1,15 +1,19 @@
 /**
  * dashboard/src/lib/versions-format.ts — the pure half of the Versions panel
- * (issue #3681, epic #3676 epsilon; wayfinder ticket #3660).
+ * (issue #3681, epic #3676 epsilon; wayfinder ticket #3660; the
+ * commit-identity half is #4172).
  *
  * `GET /api/versions` (#3680) returns `{ projects: ProjectVersions[], generatedAt }`.
  * The two consumers this seam feeds — the Today-page Versions panel
  * (`components/Versions.jsx`) and the always-on footer badge
- * (`components/VersionBadge.jsx`) — must agree exactly on three decisions:
+ * (`components/VersionBadge.jsx`) — must agree exactly on four decisions:
  *
  *   1. Which release is "current", and which of `history[]` are the "older" ones.
  *   2. What a degraded project renders as ("no releases yet" vs "—").
  *   3. How notes are grouped and ordered inside a release.
+ *   4. How a tagless Target's COMMIT IDENTITY renders (#4172): the short sha
+ *      as the label, a `*` when the tree is dirty, and never a promotion into
+ *      the release split.
  *
  * Lifting those decisions here (the `page-item-format.ts` precedent, issue #822)
  * keeps the two components from drifting AND makes the logic unit-testable —
@@ -44,6 +48,19 @@ export interface VersionRef {
   sha: string;
 }
 
+/**
+ * What a tagless Target reports instead of a release (#4172): the checked-out
+ * commit and whether the working tree matches it. No `version` field — nothing
+ * may imply a semver exists where none does.
+ */
+export interface CommitIdentity {
+  sha: string;
+  /** ISO-8601 commit date. */
+  date: string;
+  /** True when the working tree has uncommitted or untracked changes. */
+  dirty: boolean;
+}
+
 /** A release plus everything that shipped in its tag window. */
 export interface VersionHistoryEntry extends VersionRef {
   notes: ReleaseNote[];
@@ -53,7 +70,7 @@ export interface VersionHistoryEntry extends VersionRef {
 export interface ProjectVersions {
   name: string;
   scope: string;
-  current: VersionRef | null;
+  current: VersionRef | CommitIdentity | null;
   history: VersionHistoryEntry[];
   /** A failure code when the read degraded, else null. Tagless is NOT an error. */
   error: string | null;
@@ -148,13 +165,26 @@ export function groupNotesByType(notes: ReleaseNote[] | null | undefined): NoteG
 // Current-vs-older split
 // ---------------------------------------------------------------------------
 
+/**
+ * Type guard: is `current` a commit identity (a tagless Target, #4172) rather
+ * than a semver release pointer? Discriminated on the ABSENCE of `version` —
+ * an identity carries exactly `sha`/`date`/`dirty`.
+ */
+export function isCommitIdentity(
+  ref: ProjectVersions["current"],
+): ref is CommitIdentity {
+  return !!ref && typeof (ref as VersionRef).version === "undefined";
+}
+
 /** The result of splitting a project's release stream. */
 export interface ReleaseSplit {
   /**
    * The current release WITH its notes — the `history` entry whose version
-   * matches `current.version`. Null when the project is tagless, degraded, or
-   * when `current` has no matching history entry (in which case a note-less
-   * synthetic entry is produced instead, so the version still renders).
+   * matches `current.version`. Null when the project is tagless, degraded, a
+   * commit-identity Target (whose `current` renders directly, never through
+   * this split), or when `current` has no matching history entry (in which
+   * case a note-less synthetic entry is produced instead, so the version still
+   * renders).
    */
   current: VersionHistoryEntry | null;
   /** Every OTHER release, newest first — never includes `current`. */
@@ -170,14 +200,20 @@ export interface ReleaseSplit {
  * (a defensive case: a tag newer than the aggregator's history window), a
  * synthetic note-less entry is returned so the operator still sees the version
  * number rather than "no releases yet".
+ *
+ * A COMMIT-IDENTITY `current` (#4172) is not a release and is never promoted
+ * into one — the card renders it from `project.current` directly. It flows
+ * down the same null branch as a tagless project: no current release, any
+ * stray history entries still surface as older.
  */
 export function splitReleases(project: ProjectVersions | null | undefined): ReleaseSplit {
   const history = (project?.history ?? []).filter(Boolean);
   const currentRef = project?.current ?? null;
 
-  if (!currentRef) {
-    // Tagless (or degraded): there is no current release to promote, but any
-    // history entries that DID come back are still worth showing as older.
+  if (!currentRef || isCommitIdentity(currentRef)) {
+    // Tagless (or degraded, or a commit-identity Target): there is no current
+    // release to promote, but any history entries that DID come back are still
+    // worth showing as older.
     return { current: null, older: history };
   }
 
@@ -233,24 +269,46 @@ export function formatVersion(version: string | null | undefined): string {
 }
 
 /**
+ * The label for a commit identity (#4172): the 7-char sha, with a trailing `*`
+ * when the tree is dirty (the `git describe --dirty` convention). Shared by the
+ * card summary and the footer chip so the two cannot disagree, and so neither
+ * ever renders the pre-#4172 blank slot (`formatVersion(undefined)`).
+ */
+export function commitIdentityLabel(
+  identity: CommitIdentity | null | undefined,
+): string {
+  const sha = shortSha(identity?.sha);
+  if (sha === ERROR_PLACEHOLDER) return sha;
+  return identity?.dirty ? `${sha}*` : sha;
+}
+
+/**
  * The version string for a project, already degraded: `—` on error,
- * `no releases yet` when tagless, else the normalised tag.
+ * `no releases yet` when tagless, the short sha (+`*` when dirty) for a
+ * commit-identity Target, else the normalised tag.
  */
 export function currentVersionLabel(project: ProjectVersions | null | undefined): string {
   const state = projectState(project);
   if (state === "error") return ERROR_PLACEHOLDER;
   if (state === "empty") return EMPTY_PLACEHOLDER;
-  return formatVersion(project?.current?.version);
+  const current = project?.current;
+  if (current && isCommitIdentity(current)) return commitIdentityLabel(current);
+  return formatVersion(current?.version);
 }
 
 /**
  * The COMPACT label for the footer chip, where horizontal space is scarce: a
  * tagless project collapses to the same `—` as an errored one (the panel is
- * where the two are distinguished in prose).
+ * where the two are distinguished in prose), while a commit-identity Target
+ * shows its short sha — blank chrome would be the false-honesty pattern again.
  */
 export function badgeVersionLabel(project: ProjectVersions | null | undefined): string {
   const state = projectState(project);
-  if (state === "ok") return formatVersion(project?.current?.version);
+  if (state === "ok") {
+    const current = project?.current;
+    if (current && isCommitIdentity(current)) return commitIdentityLabel(current);
+    return formatVersion(current?.version);
+  }
   return ERROR_PLACEHOLDER;
 }
 
