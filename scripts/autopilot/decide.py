@@ -1906,7 +1906,9 @@ class _RuleOutput:
             self.reasons.append(reason)
 
 
-def _rule_termination(state: dict, now: int) -> _RuleOutput:
+def _rule_termination(
+    state: dict, now: int, events: list[dict] | None = None
+) -> _RuleOutput:
     """Step 1 — termination check (budget / wall-clock / idle / 5-failure backstop).
 
     Returns a `_RuleOutput` whose `terminate` is the lone `terminate` action
@@ -1914,7 +1916,7 @@ def _rule_termination(state: dict, now: int) -> _RuleOutput:
     turn-ending decision in its own right), or an empty output otherwise.
     """
     out = _RuleOutput()
-    term = _check_termination(state, now)
+    term = _check_termination(state, now, events)
     if term is None:
         return out
     out.emit(term, reason="termination")
@@ -2810,7 +2812,11 @@ def _rule_silent_wedge(state: dict, events: list[dict], now: int) -> _RuleOutput
 
 
 def _rule_idle_fallback(
-    state: dict, *, dispatched_any: bool, plan_has_actions: bool
+    state: dict,
+    *,
+    dispatched_any: bool,
+    plan_has_actions: bool,
+    events: list[dict] | None = None,
 ) -> _RuleOutput:
     """Step 6 — idle fallback.
 
@@ -2831,12 +2837,20 @@ def _rule_idle_fallback(
     reaps, queue-decisions) but no dispatch also keeps the heartbeat wait —
     terminating mid-housekeeping is not this rule's call.
 
+    Issue #4130: BOTH idle conclusions (this rule's immediate drain and
+    `_check_termination`'s idle_drain_turns cap) are suppressed while either
+    lane's board read failed this turn — a "no work anywhere" verdict off an
+    UNREAD board is the outage signature this fix exists to break. The
+    suppressed turn emits the heartbeat wait instead, with a degraded reason
+    and debug keys so the condition is visible in the turn record.
+
     Also records the `occupied_slots` debug hint.
     """
     out = _RuleOutput()
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
-    if not dispatched_any and occupied == 0 and not plan_has_actions:
+    board_degraded = _board_read_degraded(state, events)
+    if not dispatched_any and occupied == 0 and not plan_has_actions and not board_degraded:
         out.emit(
             make_terminate(
                 "idle",
@@ -2847,7 +2861,19 @@ def _rule_idle_fallback(
         )
         out.debug["idle_fallback"] = "terminate"
     elif not dispatched_any and occupied == 0:
-        out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
+        if board_degraded:
+            out.emit(
+                make_wait(
+                    WALL_CLOCK_HEARTBEAT_SEC,
+                    "idle heartbeat deferred — board read degraded this turn "
+                    "(issue #4130); not concluding idle off an unread board",
+                ),
+                reason="heartbeat:board-degraded",
+            )
+            out.debug["idle_fallback"] = "deferred-board-degraded"
+            out.debug["board_signals_degraded"] = True
+        else:
+            out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
     elif not dispatched_any:
         # Pipeline is busy but we have nothing new to do — short nap
         out.emit(make_wait(60, "pipeline-busy nap"), reason="busy-wait")
@@ -2989,7 +3015,7 @@ def decide(
     plan.events.append(make_turn_start_event(state, now))
 
     # 1. Termination — a turn-ending decision; short-circuit when tripped.
-    term_out = _rule_termination(state, now)
+    term_out = _rule_termination(state, now, events)
     fold(term_out)
     if term_out.terminate is not None:
         return plan
@@ -3067,6 +3093,7 @@ def decide(
             state,
             dispatched_any=dispatched_any,
             plan_has_actions=bool(plan.actions),
+            events=events,
         )
     )
 
@@ -4462,6 +4489,29 @@ def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
     return bool((state.get("signals") or {}).get(signal))
 
 
+def _board_read_degraded(state: dict, events: list[dict] | None) -> bool:
+    """Issue #4130 — did EITHER lane's GitHub board read fail this turn?
+
+    collect-state.sh emits `orch_board_signals_degraded` /
+    `target_board_signals_degraded` as ordinary echo key=value lines; the
+    playbook merges them into `state.signals` as booleans (the same shape as
+    `orch_backfill_idle`). A nonzero gh exit code is the ONLY thing that sets
+    them — a legitimately empty board (gh exit 0) never does — and each flag
+    is the OR over every gh call in its lane this turn, so one failed read
+    marks the whole lane's counts UNREAD.
+
+    Read via `_signal_present` exactly like every other collect-state-owned
+    signal (design-concept invariant 1): decide() recomputes nothing and
+    mutates nothing. Callers refuse to conclude "idle" while this is True —
+    the 2026-08 GraphQL outage rendered every board signal zero/none and the
+    run drained to a clean `terminate:idle` off data that was never read.
+    """
+    ev = list(events or [])
+    return _signal_present(
+        state, ev, "orch_board_signals_degraded"
+    ) or _signal_present(state, ev, "target_board_signals_degraded")
+
+
 def _research_force_allowed(state: dict, slot: str, now: int) -> bool:
     """Per-day cap on forced research dispatches (grilled decision 6, AC: capped at 4/day).
 
@@ -4649,7 +4699,7 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
     return s["spend_usd"] >= s["cap_usd"]
 
 
-def _check_termination(state: dict, now: int) -> dict | None:
+def _check_termination(state: dict, now: int, events: list[dict] | None = None) -> dict | None:
     """Mirror of term-check.py logic, expressed as an action.
 
     NOT pure, by one narrow exception (issue #3867): `_capture_quota_baseline`
@@ -4689,7 +4739,17 @@ def _check_termination(state: dict, now: int) -> dict | None:
     if elapsed >= wall_max:
         return make_terminate("wall_clock", merged_prs=merged_prs, reason=f"elapsed={elapsed}s")
     if idle >= idle_max and occupied == 0:
-        return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
+        if _board_read_degraded(state, events):
+            # Issue #4130 (INV-6): `idle_turns` is a single global counter fed
+            # by BOTH lanes, so concluding "idle" off a turn whose board read
+            # FAILED — in either lane — terminates the run on zeros that were
+            # UNREAD, not empty. Suppress the idle terminate and fall through
+            # to the remaining checks; wall_clock still bounds the run if the
+            # outage outlasts it. The suppression is visible on the same turn
+            # via _rule_idle_fallback's degraded heartbeat reason.
+            pass
+        else:
+            return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.
     log = state.get("failure_log") or []

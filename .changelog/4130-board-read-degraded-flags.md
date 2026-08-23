@@ -1,0 +1,1 @@
+- fix(autopilot): distinguish a FAILED GitHub board read from a GENUINELY EMPTY one — a GraphQL-only outage now flips per-lane board_signals_degraded flags, fail-closes orch_backfill_idle, and stops decide() from concluding terminate:idle off a zeroed board (#4130)

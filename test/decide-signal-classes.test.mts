@@ -1689,3 +1689,144 @@ describe("decide.py — GitHub-board Target dispatch branch (issue #3435, ADR-00
   });
 });
 }
+
+// ===========================================================================
+// Added for issue #4130 (design-concept issue-4130) — degraded board reads
+// vs the orch_backfill_idle backfill classes.
+// ===========================================================================
+{
+/**
+ * Issue #4130: a GraphQL-only GitHub outage failed every `gh ... --json`
+ * board read in collect-state.sh, whose `|| echo` guards then emitted
+ * legitimate-LOOKING zeros — and the arch emitter's all-counts-zero
+ * conjunction fabricated `orch_backfill_idle=true`, firing the backfill
+ * classes (discover_orch / architecture_orch / cleanup_orch / skill_prune)
+ * against a board whose true state was unknown.
+ *
+ * The fix is at the SOURCE (design-concept INV-5): collect-state.sh fails
+ * orch_backfill_idle CLOSED (false) on a failed arch read, so decide.py needs
+ * NO per-class degraded gate (rejected alternative 3). These cases pin the
+ * seam contract from the decide side: the signal pair a degraded turn now
+ * produces (`orch_board_signals_degraded=true` + `orch_backfill_idle=false`)
+ * dispatches nothing, while the genuinely-empty pair (`idle=true`, no
+ * degraded flag) keeps dispatching exactly as before (INV-3 — a required
+ * regression case, not incidental).
+ *
+ * Same harness as the blocks above: spawn the `decide` CLI subcommand and
+ * pin the JSON wire contract. The emission-side fail-close itself is pinned
+ * in test/autopilot-idle.test.mts against the shipped python emitter.
+ */
+
+const REPO_ROOT2 = resolve(import.meta.dirname, "..");
+const DECIDE2 = join(REPO_ROOT2, "scripts", "autopilot", "decide.py");
+
+interface Tmp2 {
+  dir: string;
+  state: string;
+  cands: string;
+  events: string;
+}
+
+function makeTmp2(): Tmp2 {
+  const dir = mkdtempSync(join(tmpdir(), "decide-backfill-degraded-"));
+  return {
+    dir,
+    state: join(dir, "state.json"),
+    cands: join(dir, "candidates.json"),
+    events: join(dir, "events.json"),
+  };
+}
+
+function baseState2(signals: Record<string, unknown>): any {
+  // 2h-ago stamps: older than the 1h backfill class cooldowns (idle arm
+  // eligible) but younger than discover_orch's 7d staleness floor — so the
+  // FLOOR arm (deliberately not degraded-gated per the #4130 design concept)
+  // cannot fire and mask the idle-arm behaviour under test.
+  const cooledNotDark = Math.floor(Date.now() / 1000) - 7_200;
+  return {
+    started_epoch: Math.floor(Date.now() / 1000),
+    limits: { token_budget: 2_000_000, wall_clock_max_sec: 28_800, idle_drain_turns: 5, scope: "all" },
+    cumulative_tokens: 0,
+    dispatches: 0,
+    idle_turns: 0,
+    turn: 1,
+    burned_classes: [],
+    reaped_task_ids: [],
+    failure_log: [],
+    slots: {
+      dev_orch: null,
+      qa_orch: null,
+      research_orch: null,
+      dev_target: null,
+      qa_target: null,
+      research_target: null,
+      design_concept_orch: null,
+    },
+    signal_last_fired: {
+      sweep_orch: cooledNotDark,
+      sweep_target: cooledNotDark,
+      discover_orch: cooledNotDark,
+      discover_target: cooledNotDark,
+      architecture_orch: cooledNotDark,
+      cleanup_orch: cooledNotDark,
+    },
+    signals,
+    research_force_counter: {},
+  };
+}
+
+function runDecide2(state: any): any {
+  const t = makeTmp2();
+  try {
+    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.cands, JSON.stringify(null));
+    writeFileSync(t.events, JSON.stringify([]));
+    const r = spawnSync("python3", [DECIDE2, "decide", t.state, t.cands, t.events], {
+      encoding: "utf-8",
+    });
+    if (r.status !== 0) {
+      throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
+    }
+    return JSON.parse(r.stdout);
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true });
+  }
+}
+
+const BACKFILL_CLASSES = ["discover_orch", "architecture_orch", "cleanup_orch", "skill_prune"] as const;
+
+function backfillDispatches(plan: any): any[] {
+  return (plan.actions ?? []).filter(
+    (a: any) => a.type === "dispatch" && BACKFILL_CLASSES.includes(a.slot),
+  );
+}
+
+describe("decide.py — degraded board read suppresses the orch_backfill_idle backfill classes (issue #4130)", () => {
+  test("the degraded signal pair (degraded=true, idle=false) dispatches no backfill class", () => {
+    // Exactly what collect-state.sh now emits on a failed arch read. The
+    // suppression comes from idle=false (the source fail-close), not from a
+    // decide-side gate — see the sibling emission-side tests.
+    const plan = runDecide2(
+      baseState2({ orch_board_signals_degraded: true, orch_backfill_idle: false }),
+    );
+    assert.deepEqual(
+      backfillDispatches(plan),
+      [],
+      "no backfill class may fire on a snapshot whose board read failed",
+    );
+  });
+
+  test("INV-3: the genuinely-empty pair (idle=true, no degraded flag) still fires the backfill classes", () => {
+    const plan = runDecide2(baseState2({ orch_backfill_idle: true }));
+    const fired = backfillDispatches(plan).map((a: any) => a.slot);
+    assert.ok(
+      fired.length > 0,
+      "a genuinely idle board must keep backfilling exactly as before #4130",
+    );
+    assert.ok(
+      fired.includes("discover_orch"),
+      `expected discover_orch among the fired classes, got ${JSON.stringify(fired)}`,
+    );
+  });
+});
+}

@@ -18,7 +18,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 
 import {
@@ -400,5 +401,287 @@ describe("collect-state.sh — unified orch_backfill_idle signal (issue #959)", 
         `non-zero ${label} must suppress orch_backfill_idle`,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — lane board-read degradation flags (issue #4130,
+// design-concept issue-4130)
+// ---------------------------------------------------------------------------
+//
+// A GraphQL-only GitHub outage makes every `gh ... --json` board read fail;
+// the `|| echo 0` / `|| true` guards then emit legitimate-LOOKING zeros and
+// decide.py read that as "no work" — the run drained to a clean
+// terminate:idle and fired backfill classes against a full board. Issue
+// #4130 adds one degraded flag per lane, OR-composed across every gh call
+// in the lane (INV-4), set ONLY by a nonzero gh exit code (INV-2 — a
+// genuinely empty board never degrades), and makes orch_backfill_idle fail
+// CLOSED on a failed arch read (INV-5) so no backfill class fires off a
+// zeroed payload.
+//
+// Like the #959 block above, these tests pin the EMISSION side: the flag
+// plumbing in the shell source and the exact python emitter the script
+// ships (never a drift-prone copy).
+// ---------------------------------------------------------------------------
+
+describe("collect-state.sh — lane board-read degradation flags (issue #4130)", () => {
+  const COLLECT_STATE = collectStatePath();
+  const collectSrc = readFileSync(COLLECT_STATE, "utf-8");
+
+  test("both lane flags are initialised and emitted via the echo key=value convention", () => {
+    // INV-8: plain echo lines the playbook merges into state.signals — no new
+    // plumbing module. Each flag is emitted exactly once, after the last gh
+    // read of its own lane (orch at end-of-script, target at the Target board
+    // block).
+    assert.match(collectSrc, /^ORCH_BOARD_DEGRADED=false$/m);
+    assert.match(collectSrc, /^TARGET_BOARD_DEGRADED=false$/m);
+    assert.match(collectSrc, /echo "orch_board_signals_degraded=\$ORCH_BOARD_DEGRADED"/);
+    assert.match(collectSrc, /echo "target_board_signals_degraded=\$TARGET_BOARD_DEGRADED"/);
+    assert.equal(
+      collectSrc.match(/echo "orch_board_signals_degraded=/g)?.length,
+      1,
+      "orch flag must have exactly ONE emission site",
+    );
+  });
+
+  test("every orch-lane gh board read flips the flag on failure (ratchet: 13 known sites)", () => {
+    // INV-4: one failed call degrades the whole lane's turn signal. The 13
+    // known orch-lane gh reads are: board-state fallback, needs-triage item
+    // set, untriaged orphans, needs-qa numbers, inflight PRs, grill list,
+    // open-blocker lookup, active_dev_orch, scout enhancements, the arch
+    // board read, wayfinder maps, per-map graphql, and the tickets read. A
+    // 14th `gh` read added WITHOUT a flag flip must update this count
+    // consciously — that is the point of the ratchet (the design concept's
+    // rejected-alternative-2 concern, answered in test form).
+    const flips = collectSrc.match(/ORCH_BOARD_DEGRADED=true/g)?.length ?? 0;
+    assert.ok(
+      flips >= 13,
+      `expected >= 13 orch-lane degraded flips (one per gh board read), found ${flips}`,
+    );
+    // Target lane: the board-state fallback, the board read, and the
+    // degraded else branch (which sets the aggregate for its own emission).
+    const targetFlips = collectSrc.match(/TARGET_BOARD_DEGRADED=true/g)?.length ?? 0;
+    assert.ok(
+      targetFlips >= 3,
+      `expected >= 3 target-lane degraded flips, found ${targetFlips}`,
+    );
+  });
+
+  test("a failed target board-state fallback read flips the target flag while still emitting zeros", () => {
+    // The observed outage shape: the endpoint is down AND the direct REST
+    // fallback fails. The four counts still fail open to zero (the #3709
+    // contract) but the read is marked UNREAD (INV-4).
+    assert.match(
+      collectSrc,
+      /\{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+    );
+    assert.match(collectSrc, /TARGET_FALLBACK_LINES=[\s\S]{0,900}?\|\| TARGET_BOARD_DEGRADED=true/);
+  });
+
+  // The arch emitter, extracted exactly as the #959 block above does, so the
+  // INV-5 fail-close is exercised against the shipped python.
+  function extractArchEmitter(): string {
+    const match = collectSrc.match(
+      /printf '%s' "\$ARCH_BOARD_JSON"[\s\S]*?python3 -c "\$\(cat <<'PY'([\s\S]*?)\nPY\n\)"\s*2>\/dev\/null/,
+    );
+    assert.ok(match, "could not locate the arch emitter python block in collect-state.sh");
+    return match![1];
+  }
+
+  function runArchEmitter(
+    board: Record<string, number>,
+    env: Record<string, string>,
+  ): string[] {
+    const r = spawnSync("python3", ["-c", extractArchEmitter()], {
+      input: JSON.stringify(board),
+      encoding: "utf-8",
+      env: { ...process.env, ...env },
+    });
+    assert.equal(r.status, 0, `arch emitter exited non-zero: ${r.stderr}`);
+    return (r.stdout ?? "").trim().split("\n");
+  }
+
+  test("INV-5: a degraded arch read fails CLOSED — orch_backfill_idle=false even on an all-zero board", () => {
+    // The exact hazard: gh failed, the zeroed fallback JSON fed the emitter,
+    // and the all-counts-zero conjunction fabricated idle=true. With
+    // ARCH_READ_DEGRADED=true the emitter must emit false.
+    const out = runArchEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      { ARCH_WORK_QUEUE: "0", ARCH_READ_DEGRADED: "true" },
+    );
+    assert.ok(
+      out.includes("orch_backfill_idle=false"),
+      "a read that never happened must not render as a board-empty conjunction",
+    );
+  });
+
+  test("INV-2: a genuinely empty board (no degraded flag) still emits orch_backfill_idle=true", () => {
+    // The required regression case, not incidental: same zeros + work queue,
+    // but the read SUCCEEDED — the flag is absent and idle must fire exactly
+    // as before #4130.
+    const out = runArchEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      { ARCH_WORK_QUEUE: "0" },
+    );
+    assert.ok(out.includes("orch_backfill_idle=true"));
+  });
+
+  test("a non-empty work queue keeps idle=false even under degradation (fail-closed, both ways)", () => {
+    const out = runArchEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      { ARCH_WORK_QUEUE: "2", ARCH_READ_DEGRADED: "true" },
+    );
+    assert.ok(out.includes("orch_backfill_idle=false"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// decide.py — a degraded board read must not conclude idle (issue #4130)
+// ---------------------------------------------------------------------------
+//
+// The decide-side half of #4130: the two idle conclusions — _check_termination's
+// idle_drain_turns cap and _rule_idle_fallback's immediate #1352 drain — are
+// suppressed while EITHER lane's degraded flag is set (INV-6: idle_turns is a
+// single global counter fed by both lanes), and the suppressed turn emits a
+// degraded-marked heartbeat wait so the condition is visible in the turn
+// record (AC: turn record/heartbeat visibility). A genuinely empty board
+// keeps today's behaviour exactly (INV-3).
+// ---------------------------------------------------------------------------
+
+describe("decide.py — degraded board read must not conclude idle (issue #4130)", () => {
+  const REPO_ROOT = resolve(import.meta.dirname, "..");
+  const DECIDE = join(REPO_ROOT, "scripts", "autopilot", "decide.py");
+
+  function baseState(signals: Record<string, unknown>, idleTurns = 0): Record<string, unknown> {
+    // 2h-ago stamps: older than the 1h class cooldowns (so the idle arm of
+    // each backfill class is eligible) but younger than discover_orch's 7d
+    // staleness floor (so the FLOOR arm — which is deliberately not
+    // degraded-gated — cannot fire and mask the behaviour under test).
+    const cooledNotDark = Math.floor(Date.now() / 1000) - 7_200;
+    return {
+      started_epoch: Math.floor(Date.now() / 1000),
+      limits: { token_budget: 2_000_000, wall_clock_max_sec: 28_800, idle_drain_turns: 5, scope: "all" },
+      cumulative_tokens: 0,
+      dispatches: 0,
+      idle_turns: idleTurns,
+      turn: 1,
+      burned_classes: [],
+      reaped_task_ids: [],
+      failure_log: [],
+      slots: {
+        dev_orch: null, qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null,
+      },
+      signal_last_fired: {
+        sweep_orch: cooledNotDark,
+        sweep_target: cooledNotDark,
+        discover_orch: cooledNotDark,
+        discover_target: cooledNotDark,
+        architecture_orch: cooledNotDark,
+        cleanup_orch: cooledNotDark,
+      },
+      signals,
+      research_force_counter: {},
+    };
+  }
+
+  function runDecide(state: Record<string, unknown>): any {
+    const dir = mkdtempSync(join(tmpdir(), "decide-board-degraded-"));
+    const statePath = join(dir, "state.json");
+    const candsPath = join(dir, "candidates.json");
+    const eventsPath = join(dir, "events.json");
+    try {
+      writeFileSync(statePath, JSON.stringify(state));
+      writeFileSync(candsPath, JSON.stringify(null));
+      writeFileSync(eventsPath, JSON.stringify([]));
+      const r = spawnSync("python3", [DECIDE, "decide", statePath, candsPath, eventsPath], {
+        encoding: "utf-8",
+      });
+      assert.equal(r.status, 0, `decide.py decide exited ${r.status}: ${r.stderr}`);
+      return JSON.parse(r.stdout);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const terminate = (plan: any) =>
+    (plan.actions ?? []).find((a: any) => a.type === "terminate");
+
+  test("AC(d): a genuinely empty board still terminates cause=idle on a wait-only turn", () => {
+    // No signals, no candidates, no slots in flight, no degraded flag — the
+    // #1352 clean idle drain, byte-for-byte today's behaviour.
+    const plan = runDecide(baseState({}));
+    const term = terminate(plan);
+    assert.ok(term, "a genuinely quiet board must still end the run");
+    assert.equal(term.cause, "idle");
+    assert.equal(plan.debug?.idle_fallback, "terminate");
+  });
+
+  test("AC(d): a genuinely empty board still terminates cause=idle via the idle_drain_turns cap", () => {
+    // idle_turns past the cap with nothing in flight — the OTHER idle
+    // conclusion, in _check_termination.
+    const plan = runDecide(baseState({}, 5));
+    const term = terminate(plan);
+    assert.ok(term, "idle_turns >= idle_drain_turns with no slots must still terminate");
+    assert.equal(term.cause, "idle");
+    assert.equal(term.reason, "idle_turns=5");
+  });
+
+  test("AC(3): a degraded ORCH read suppresses the immediate idle drain", () => {
+    const plan = runDecide(
+      baseState({ orch_board_signals_degraded: true }),
+    );
+    const term = terminate(plan);
+    assert.equal(term, undefined, "must not terminate with cause idle on a degraded snapshot");
+    const wait = (plan.actions ?? []).find((a: any) => a.type === "wait");
+    assert.ok(wait, "the suppressed turn must emit the heartbeat wait instead");
+    assert.ok(
+      (plan.reasons ?? []).includes("heartbeat:board-degraded"),
+      "the wait must carry the degraded reason so the turn record shows WHY",
+    );
+    assert.equal(plan.debug?.board_signals_degraded, true);
+    assert.equal(plan.debug?.idle_fallback, "deferred-board-degraded");
+  });
+
+  test("INV-6: a degraded TARGET read alone also suppresses idle (either lane)", () => {
+    // idle_turns is a single global counter fed by both lanes — a target-only
+    // outage must not let the run drain to a clean idle either.
+    const plan = runDecide(
+      baseState({ target_board_signals_degraded: true }, 5),
+    );
+    const term = terminate(plan);
+    assert.equal(term, undefined, "target-lane degradation must suppress the idle terminate too");
+    assert.ok(
+      (plan.reasons ?? []).includes("heartbeat:board-degraded"),
+      "the deferred heartbeat must be marked degraded",
+    );
+  });
+
+  test("AC(3): degradation suppresses the idle_drain_turns cap terminate as well", () => {
+    const plan = runDecide(
+      baseState({ orch_board_signals_degraded: true }, 5),
+    );
+    const term = terminate(plan);
+    assert.equal(
+      term,
+      undefined,
+      "idle >= idle_drain_turns must not terminate while the board read failed",
+    );
+    const wait = (plan.actions ?? []).find((a: any) => a.type === "wait");
+    assert.ok(wait);
+  });
+
+  test("suppression is not forever: wall_clock still bounds a degraded run", () => {
+    // The guard defers, it does not immortalise — elapsed past wall_clock_max
+    // still terminates (under its own, more diagnostic cause).
+    const state: Record<string, unknown> = {
+      ...baseState({ orch_board_signals_degraded: true }, 5),
+      started_epoch: Math.floor(Date.now() / 1000) - 29_000,
+    };
+    const plan = runDecide(state);
+    const term = terminate(plan);
+    assert.ok(term, "wall_clock must still end a degraded run");
+    assert.equal(term.cause, "wall_clock");
   });
 });

@@ -235,11 +235,20 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     );
   });
 
-  test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+  test("total failure of the fallback emits target_needs_triage=0 + flips the lane degraded flag", () => {
+    // Issue #4130: the fallback's own `gh` read is fallible too. The four-zero
+    // emission shape is unchanged (fail open to zero — a degraded read must
+    // never phantom-dispatch sweep_target), but the failed read now ALSO flips
+    // TARGET_BOARD_DEGRADED so the turn carries "unread", not "empty".
     assert.match(
       src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+      /\{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
       "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+    );
+    assert.match(
+      src,
+      /gh issue list --repo "\$TARGET_GH_REPO" --state open --limit "\$GH_ISSUE_LIST_LIMIT" --json number,labels --jq[\s\S]{0,900}?\|\| TARGET_BOARD_DEGRADED=true/,
+      "issue #4130: the Target fallback's own gh failure must flip the target lane's degraded flag (INV-4 — every gh call in the lane ORs into the turn signal)",
     );
   });
 
