@@ -116,6 +116,7 @@ import {
 // scalar-input seam is asserted without pulling in the JSONL-scan coordinator.
 import {
   derivePacingState,
+  deriveWindowPace,
   rebaseOnOAuth,
   deriveSinceReset,
   detectCalibrationDrift,
@@ -635,8 +636,12 @@ describe("usage-tracker", () => {
       }
     });
 
-    test("calibrated: pacingState 'over' when projectedWeeklyPercent > 100", async () => {
-      // 24h tokens × 7 = 14k; weekly = 7k → projected 200%.
+    test("calibrated: a 24h burst projection alone no longer reads 'over' (issue #4121)", async () => {
+      // 24h tokens × 7 = 14k; weekly = 7k → projected 200%. Pre-#4121 this same
+      // fixture read pacingState "over"; without an OAuth 7d boundary there is
+      // no window position to pace against, so the verdict is the neutral "on"
+      // and the projection stays a separate, clearly-labelled forward-looking
+      // field.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
       process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
 
@@ -650,35 +655,24 @@ describe("usage-tracker", () => {
         const snap = await getUsage({ now, projectsRoot: root, force: true });
         assert.equal(snap.tokensLast24h, 2000);
         assert.equal(snap.projectedWeeklyPercent, 200);
-        assert.equal(snap.pacingState, "over");
         assert.equal(snap.emergencyStop, false); // 5h quota is huge
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
-
-    test("calibrated: pacingState 'on' when projectedWeeklyPercent in [80, 100]", async () => {
-      // 24h: 2000 tokens; quota 16800 → projected = 2000*7/16800 ≈ 83.3%.
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "16800";
-      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
-
-      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
-      try {
-        const now = new Date("2026-05-25T12:00:00Z");
-        await writeFixture(root, "p/s.jsonl", [
-          assistantLine("2026-05-25T11:00:00Z", { in: 1000, out: 1000 }),
-        ]);
-
-        const snap = await getUsage({ now, projectsRoot: root, force: true });
-        assert.ok(snap.projectedWeeklyPercent >= 80 && snap.projectedWeeklyPercent < 100);
+        assert.equal(snap.usageSource, "estimate");
+        assert.equal(snap.windowElapsedFraction, null);
+        assert.equal(snap.paceRatio, null);
         assert.equal(snap.pacingState, "on");
       } finally {
         await rm(root, { recursive: true, force: true });
       }
     });
 
-    test("calibrated: pacingState 'under' when projectedWeeklyPercent < 80", async () => {
-      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+    test("calibrated: 67% consumed at 70% window-elapsed is NOT 'over' (issue #4121 regression)", async () => {
+      // The observed 2026-08-17 reading: percentLast7d 67 with 70% of the
+      // weekly window elapsed is UNDER linear pace (paceRatio ≈ 0.96), yet the
+      // pre-#4121 24h projection read it "over". Fixed clock + fixed
+      // sevenDayResetsAt keep the window position deterministic: resetsAt
+      // 0.3*7d out ⇒ the window started 0.7*7d ago. The transcript fixture
+      // keeps the burst (projected 200%) to prove the verdict ignores it.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
       process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
 
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
@@ -687,9 +681,103 @@ describe("usage-tracker", () => {
         await writeFixture(root, "p/s.jsonl", [
           assistantLine("2026-05-25T11:00:00Z", { in: 1000, out: 1000 }),
         ]);
+        const sevenDayResetsAt = new Date(
+          now.getTime() + Math.round(0.3 * 7 * 86_400_000),
+        ).toISOString();
 
-        const snap = await getUsage({ now, projectsRoot: root, force: true });
-        assert.ok(snap.projectedWeeklyPercent < 80);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: async () => ({
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: 10, resetsAt: null },
+              sevenDay: { utilization: 67, resetsAt: sevenDayResetsAt },
+            },
+          }),
+        });
+        assert.equal(snap.usageSource, "oauth");
+        assert.equal(snap.percentLast7d, 67);
+        assert.equal(snap.projectedWeeklyPercent, 200); // burst projection retained
+        assert.ok(snap.windowElapsedFraction !== null);
+        assert.ok(Math.abs(snap.windowElapsedFraction - 0.7) < 1e-9);
+        assert.ok(snap.paceRatio !== null);
+        assert.ok(Math.abs(snap.paceRatio - 67 / 70) < 1e-9);
+        assert.notEqual(snap.pacingState, "over");
+        assert.equal(snap.pacingState, "on");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("calibrated: 80% consumed at 40% window-elapsed IS over pace", async () => {
+      // Genuinely ahead of linear pace: paceRatio = 80 / 40 = 2.0 → "over",
+      // even though the 24h burst projection here is far below 100%.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
+
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 100, out: 100 }),
+        ]);
+        const sevenDayResetsAt = new Date(
+          now.getTime() + Math.round(0.6 * 7 * 86_400_000),
+        ).toISOString();
+
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: async () => ({
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: 10, resetsAt: null },
+              sevenDay: { utilization: 80, resetsAt: sevenDayResetsAt },
+            },
+          }),
+        });
+        assert.equal(snap.percentLast7d, 80);
+        assert.ok(snap.windowElapsedFraction !== null);
+        assert.ok(Math.abs(snap.windowElapsedFraction - 0.4) < 1e-9);
+        assert.ok(snap.paceRatio !== null);
+        assert.ok(Math.abs(snap.paceRatio - 2) < 1e-9);
+        assert.equal(snap.pacingState, "over");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("calibrated: 40% consumed at 70% window-elapsed reads 'under'", async () => {
+      // Comfortably behind linear pace: paceRatio = 40 / 70 ≈ 0.57 → "under".
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "7000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
+
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 100, out: 100 }),
+        ]);
+        const sevenDayResetsAt = new Date(
+          now.getTime() + Math.round(0.3 * 7 * 86_400_000),
+        ).toISOString();
+
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: async () => ({
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: 5, resetsAt: null },
+              sevenDay: { utilization: 40, resetsAt: sevenDayResetsAt },
+            },
+          }),
+        });
+        assert.equal(snap.percentLast7d, 40);
         assert.equal(snap.pacingState, "under");
       } finally {
         await rm(root, { recursive: true, force: true });
@@ -1441,6 +1529,8 @@ describe("usage-tracker", () => {
         oauthAgeMs: null,
         oauthFiveHourResetsAt: null,
         oauthSevenDayResetsAt: null,
+        windowElapsedFraction: null,
+        paceRatio: null,
         projectedWeeklyPercent: 0,
         pacingState: "under",
         emergencyStop: false,
@@ -4426,31 +4516,73 @@ describe("deriveHardStop (pure threshold predicate, issue #2041)", () => {
 // returns its slice — testable without a ScanResult fixture or the full build.
 // ---------------------------------------------------------------------------
 
-describe("derivePacingState (pure fold, issue #2188)", () => {
-  test("uncalibrated is always 'under', regardless of projection", () => {
-    assert.equal(derivePacingState(false, 9999), "under");
+describe("derivePacingState (pure fold, issues #2188 + #4121)", () => {
+  test("uncalibrated is always 'under', regardless of pace ratio", () => {
+    assert.equal(derivePacingState(false, 2.5), "under");
     assert.equal(derivePacingState(false, 0), "under");
+    assert.equal(derivePacingState(false, null), "under");
   });
 
-  test("'over' when projection exceeds 100% (calibrated)", () => {
-    assert.equal(derivePacingState(true, 100.01), "over");
-    assert.equal(derivePacingState(true, 250), "over");
+  test("null paceRatio (no window position) is the neutral 'on'", () => {
+    // Mirrors projectPacingCurve's neutral: no boundary ⇒ no pace verdict, and
+    // "on" is the do-nothing/informational verdict (issue #4121).
+    assert.equal(derivePacingState(true, null), "on");
   });
 
-  test("'on' in the 80–100% informational band (inclusive of 80, of 100)", () => {
-    assert.equal(derivePacingState(true, 80), "on");
-    assert.equal(derivePacingState(true, 90), "on");
-    assert.equal(derivePacingState(true, 100), "on");
+  test("'over' above linear pace (paceRatio > 1)", () => {
+    assert.equal(derivePacingState(true, 1.0001), "over");
+    assert.equal(derivePacingState(true, 2), "over");
   });
 
-  test("'under' below 80% (calibrated)", () => {
-    assert.equal(derivePacingState(true, 79.99), "under");
+  test("'on' in the informational band paceRatio [0.8, 1] (inclusive of both edges)", () => {
+    assert.equal(derivePacingState(true, 0.8), "on");
+    assert.equal(derivePacingState(true, 67 / 70), "on"); // the 2026-08-17 reading
+    assert.equal(derivePacingState(true, 1), "on");
+  });
+
+  test("'under' below 0.8 (calibrated)", () => {
+    assert.equal(derivePacingState(true, 0.799), "under");
     assert.equal(derivePacingState(true, 0), "under");
   });
+});
 
-  test("byte-for-byte the inline branch: 100 is 'on', 100.0001 is 'over'", () => {
-    assert.equal(derivePacingState(true, 100), "on");
-    assert.equal(derivePacingState(true, 100.0001), "over");
+describe("deriveWindowPace (pure fold, issue #4121)", () => {
+  const DAY = 86_400_000;
+  const NOW = Date.parse("2026-05-25T12:00:00Z");
+
+  test("null sevenDayResetsAt → both fields null (estimate fallback path)", () => {
+    const r = deriveWindowPace({ nowMs: NOW, sevenDayResetsAt: null, percentLast7d: 67 });
+    assert.equal(r.windowElapsedFraction, null);
+    assert.equal(r.paceRatio, null);
+  });
+
+  test("unparseable resetsAt ISO → both null, no throw", () => {
+    const r = deriveWindowPace({ nowMs: NOW, sevenDayResetsAt: "not-a-date", percentLast7d: 67 });
+    assert.equal(r.windowElapsedFraction, null);
+    assert.equal(r.paceRatio, null);
+  });
+
+  test("70% elapsed: fraction 0.7, paceRatio = percentLast7d / 70", () => {
+    // resetsAt 0.3*7d in the future ⇒ window started 0.7*7d ago (the observed
+    // 2026-08-17 reading: 67% consumed at ~70% elapsed).
+    const resetsAt = new Date(NOW + Math.round(0.3 * 7 * DAY)).toISOString();
+    const r = deriveWindowPace({ nowMs: NOW, sevenDayResetsAt: resetsAt, percentLast7d: 67 });
+    assert.ok(r.windowElapsedFraction !== null && Math.abs(r.windowElapsedFraction - 0.7) < 1e-9);
+    assert.ok(r.paceRatio !== null && Math.abs(r.paceRatio - 67 / 70) < 1e-9);
+  });
+
+  test("window not yet started (resetsAt > 7d out) → fraction clamps to 0, paceRatio null", () => {
+    const resetsAt = new Date(NOW + 8 * DAY).toISOString();
+    const r = deriveWindowPace({ nowMs: NOW, sevenDayResetsAt: resetsAt, percentLast7d: 67 });
+    assert.equal(r.windowElapsedFraction, 0);
+    assert.equal(r.paceRatio, null);
+  });
+
+  test("resetsAt already past (stale boundary) → fraction clamps to 1, paceRatio = percent/100", () => {
+    const resetsAt = new Date(NOW - DAY).toISOString();
+    const r = deriveWindowPace({ nowMs: NOW, sevenDayResetsAt: resetsAt, percentLast7d: 80 });
+    assert.equal(r.windowElapsedFraction, 1);
+    assert.ok(r.paceRatio !== null && Math.abs(r.paceRatio - 0.8) < 1e-9);
   });
 });
 

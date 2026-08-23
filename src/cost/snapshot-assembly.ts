@@ -91,6 +91,16 @@ import { deriveHardStop } from "./eligibility.ts";
 import type { UsageSnapshot, SkillWoWEntry } from "./types.ts";
 
 /**
+ * Length of the weekly quota window in ms. Duplicated as a private const here
+ * (a fixed literal, not policy) rather than cross-imported — the same stance
+ * `eligibility.ts`'s `WINDOW_7D_MS` documents — so the pure one-way import
+ * discipline of this leaf is never broken for a single 7-day constant. The
+ * OAuth meter's 7-day boundary minus this constant is the window START the
+ * #4121 window-position math ratios against.
+ */
+const WEEKLY_WINDOW_MS = 7 * 86_400_000;
+
+/**
  * The composed two-axis quota-burn numerator over a per-family accumulator,
  * generalised to a full four-category weight set (issue #3825, building on
  * #873). Axis A (per-token-category weight) reshapes the token mix INSIDE each
@@ -255,23 +265,86 @@ export function deriveQuotaWeightTotals(
 }
 
 /**
- * Pacing-state fold (issue #2188; extracted from `assembleSnapshot`).
+ * The weekly window-position slice of the snapshot (issue #4121).
+ */
+export interface WindowPace {
+  /**
+   * Fraction of the OAuth weekly window elapsed at the snapshot instant,
+   * clamped to [0, 1]; `null` when no boundary is known.
+   */
+  windowElapsedFraction: number | null;
+  /**
+   * `percentLast7d / (100 * windowElapsedFraction)`; `null` when the fraction
+   * is null or 0.
+   */
+  paceRatio: number | null;
+}
+
+/**
+ * Weekly window-position fold (issue #4121).
  *
- * The `pacingState` keys off the transcript-derived 24h projection (NOT the
- * OAuth headline) — it is part of the ADR-0021 projection family the #1971 seam
- * leaves intact. Pure scalar fold: `"over"` when projecting past quota, `"on"`
- * in the 80–100% informational band, `"under"` otherwise (including every
- * uncalibrated run, where `projectedWeeklyPercent` is 0). Byte-for-byte the
- * inline three-way branch it replaces. Exported from this module for direct
- * unit test, NOT added to the `index.ts` public barrel.
+ * `(now - (sevenDayResetsAt - 7d)) / 7d` — where the OAuth meter's 7-day
+ * boundary sits relative to `now` — plus the derived pace ratio
+ * `percentLast7d / (100 * windowElapsedFraction)` (`< 1` under linear pace,
+ * `> 1` over). This is the window-position reference `pacingState` lacked:
+ * pre-#4121 a single busy day extrapolated across seven days read "over" while
+ * the account was comfortably under pace (observed 2026-08-17: 67% consumed at
+ * 70.1% elapsed, `paceRatio` 0.96, reported `"over"`).
+ *
+ * Only the OAuth meter's boundary is used — `sevenDayResetsAt` is non-null
+ * exclusively on the `"oauth"` path (`rebaseOnOAuth` nulls it on the estimate
+ * fallback), so a missing boundary and a fallback headline coincide and the
+ * fold returns `{null, null}` rather than ratioing a guess against a window it
+ * cannot see (the same only-the-authoritative-meter discipline as
+ * `projectPacingCurve`'s neutral, issue #3751 INV-4). Defensive on a malformed
+ * ISO: `null`s, never a throw. Pure scalar fold — the #2041 shape, no I/O.
+ * Exported for direct unit test, NOT added to the `index.ts` public barrel.
+ */
+export function deriveWindowPace(input: {
+  nowMs: number;
+  sevenDayResetsAt: string | null;
+  percentLast7d: number;
+}): WindowPace {
+  if (input.sevenDayResetsAt === null) {
+    return { windowElapsedFraction: null, paceRatio: null };
+  }
+  const resetsMs = Date.parse(input.sevenDayResetsAt);
+  if (!Number.isFinite(resetsMs)) {
+    return { windowElapsedFraction: null, paceRatio: null };
+  }
+  const windowStartMs = resetsMs - WEEKLY_WINDOW_MS;
+  const elapsed = Math.min(1, Math.max(0, (input.nowMs - windowStartMs) / WEEKLY_WINDOW_MS));
+  if (elapsed <= 0) {
+    // Window boundary not yet reached (clock skew, or a boundary a full window
+    // out): position 0 is honest, but a pace ratio against it is undefined.
+    return { windowElapsedFraction: 0, paceRatio: null };
+  }
+  return {
+    windowElapsedFraction: elapsed,
+    paceRatio: input.percentLast7d / (100 * elapsed),
+  };
+}
+
+/**
+ * Pacing-state fold (issue #2188; re-derived from window position in #4121).
+ *
+ * `pacingState` keys off the LINEAR-PACE ratio (NOT the 24h burst projection
+ * it used pre-#4121): `"over"` when `paceRatio > 1` (consumed faster than the
+ * window's linear rate), `"on"` in the `[0.8, 1]` informational band AND when
+ * `paceRatio` is null (no window position → the neutral verdict, mirroring
+ * `projectPacingCurve`'s neutral "on"; `projectEligibility`'s pacing shed
+ * never fires on it), `"under"` otherwise (including every uncalibrated run,
+ * unchanged). Pure scalar fold over already-computed scalars. Exported from
+ * this module for direct unit test, NOT added to the `index.ts` public barrel.
  */
 export function derivePacingState(
   calibrated: boolean,
-  projectedWeeklyPercent: number,
+  paceRatio: number | null,
 ): "under" | "on" | "over" {
   if (!calibrated) return "under";
-  if (projectedWeeklyPercent > 100) return "over";
-  if (projectedWeeklyPercent >= 80) return "on";
+  if (paceRatio === null) return "on";
+  if (paceRatio > 1) return "over";
+  if (paceRatio >= 0.8) return "on";
   return "under";
 }
 
@@ -707,13 +780,10 @@ export function assembleSnapshot(
 
   // Transcript+calibration ESTIMATE (the historical headline + fallback path).
   // Pure derivation extracted to {@link deriveEstimatePercents} (issue #2247).
+  // `projectedWeeklyPercent` is retained VERBATIM (a forward-looking burst
+  // projection) — #4121 decoupled `pacingState` from it, not its meaning.
   const { estimatePercentLast5h, estimatePercentLast7d, projectedWeeklyPercent } =
     deriveEstimatePercents(weightedBurns, weeklyQuota, fiveHourQuota, calibrated);
-
-  // `pacingState` keys off the transcript-derived 24h projection (NOT the OAuth
-  // headline) — it is part of the ADR-0021 projection family this seam leaves
-  // intact. Pure fold extracted to {@link derivePacingState} (issue #2188).
-  const pacingState = derivePacingState(calibrated, projectedWeeklyPercent);
 
   // OAuth rebase (issue #1083). When the authoritative meter read succeeds, the
   // headline `percentLast5h`/`percentLast7d` and the 5h `emergencyStop` are
@@ -741,6 +811,21 @@ export function assembleSnapshot(
     oauthFiveHourResetsAt,
     oauthSevenDayResetsAt,
   } = rebaseOnOAuth(scan.oauth, estimatePercentLast5h, estimatePercentLast7d);
+
+  // Weekly window position + linear-pace ratio (issue #4121). Keys off the
+  // OAuth meter's own 7-day boundary and the rebased headline `percentLast7d`
+  // — NOT the 24h burst projection, which read a single busy day as "over"
+  // regardless of how much of the window remained (observed 2026-08-17: 67%
+  // consumed at 70.1% elapsed, paceRatio 0.96, reported "over"). On the
+  // estimate-fallback path `oauthSevenDayResetsAt` is null, the fold returns
+  // `{null, null}`, and `pacingState` takes the neutral "on". Pure folds:
+  // {@link deriveWindowPace} + {@link derivePacingState}.
+  const { windowElapsedFraction, paceRatio } = deriveWindowPace({
+    nowMs,
+    sevenDayResetsAt: oauthSevenDayResetsAt,
+    percentLast7d,
+  });
+  const pacingState = derivePacingState(calibrated, paceRatio);
 
   // Both hard-stops (the 5h `emergencyStop` and the weekly `weeklyEmergencyStop`)
   // are derived by the pure `deriveHardStop` threshold predicate (issue #2041),
@@ -846,6 +931,8 @@ export function assembleSnapshot(
     oauthAgeMs,
     oauthFiveHourResetsAt,
     oauthSevenDayResetsAt,
+    windowElapsedFraction,
+    paceRatio,
     projectedWeeklyPercent,
     pacingState,
     emergencyStop,

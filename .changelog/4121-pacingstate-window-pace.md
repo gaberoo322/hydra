@@ -1,0 +1,1 @@
+- fix: usage snapshot's pacingState now reports position against linear weekly pace (new windowElapsedFraction + paceRatio fields) instead of extrapolating the last 24h across seven days, so a single busy day no longer reads "over" while the account is under pace (#4121)
