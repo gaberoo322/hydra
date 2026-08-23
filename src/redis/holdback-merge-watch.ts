@@ -137,6 +137,13 @@ export interface MergeWatchHealthRecord {
   droppedExempt: number;
   /** How many entries were left untouched (PR still open / no merge commit). */
   stillOpen: number;
+  /**
+   * How many entries were dropped because their PR was closed WITHOUT merging
+   * (issue #4119) — terminal, can never land. Kept distinct from `stillOpen`
+   * so that counter remains "PRs we are genuinely waiting on". (A record
+   * persisted before #4119 lacks this field; the 2-day TTL ages those out.)
+   */
+  droppedClosed: number;
 }
 
 // ---------------------------------------------------------------------------

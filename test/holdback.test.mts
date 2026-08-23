@@ -76,6 +76,12 @@ import {
   type MergeStatus,
   type HoldbackMergeWatchDeps,
 } from "../src/scheduler/chores/holdback-merge-watch.ts";
+// For the #4119 reopen-safety chain test: the reconcile self-arm backstop that
+// recovers an evicted pending entry when its PR is later reopened and merged.
+import {
+  runCycleMergeReconcile,
+  type CycleMergeReconcileDeps,
+} from "../src/scheduler/chores/cycle-merge-reconcile.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -881,6 +887,200 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(h.registry.has(502), true, "still-open entry survives for a later tick");
   });
 
+  // Issue #4119: a PR closed WITHOUT merging is TERMINAL — it can never land, so
+  // the entry is evicted rather than re-observed (and re-billed one gh call) on
+  // every housekeeping tick forever. Before the fix such an entry fell into the
+  // stillOpen branch and was a permanent registry resident (observed: PR #3875,
+  // closed-unmerged 4 days, still armed).
+  test("#4119: a CLOSED-unmerged PR is terminal — evicted, counted droppedClosed, NOT stillOpen", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 512, tier: 3, cycleId: "cyc-512", registeredAt: 1 }],
+      { 512: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1, "a dead PR gets its own counter");
+    assert.equal(res.stillOpen, 0, "a dead PR is NOT conflated with 'still waiting on'");
+    assert.equal(res.landed, 0);
+    assert.equal(res.droppedExempt, 0);
+    // Eviction fires NEITHER merge-coupled follow-up — no landing ever happened.
+    assert.deepEqual(h.enrollCalls, [], "no enrollHoldback on a closed-unmerged eviction");
+    assert.deepEqual(h.cycleCalls, [], "no cycle-record enrichment on a closed-unmerged eviction");
+    // No enrolled marker either: the marker means "landing processed", and worse,
+    // a marker here would make the cycle-merge-reconcile self-arm backstop skip
+    // re-arming this PR if it were later reopened and merged (#4119 reopen safety).
+    assert.equal(h.marked.has(512), false, "eviction sets NO enrolled marker");
+    assert.deepEqual(h.removeCalls, [512], "the dead entry is dropped from the registry");
+    assert.equal(h.registry.has(512), false);
+  });
+
+  test("#4119: the closed-unmerged eviction matches the gh state case-insensitively", async () => {
+    // `gh pr view` reports uppercase states today; compare defensively so a
+    // casing change in gh/GitHub can't resurrect the leak.
+    const h = makeWatchHarness(
+      [{ prNumber: 513, tier: 2, cycleId: "cyc-513", registeredAt: 1 }],
+      { 513: { state: "closed", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1);
+    assert.equal(h.registry.has(513), false);
+  });
+
+  test("#4119: a PR reporting a merge commit still LANDS even with a non-open state (the closed guard is ordered after the merge check)", async () => {
+    // A merged PR also reports a non-open state, so the CLOSED guard must never
+    // intercept it: the merge commit SHA is the landing proof, the state is not.
+    const h = makeWatchHarness(
+      [{ prNumber: 514, tier: 3, cycleId: "cyc-514", registeredAt: 1 }],
+      { 514: { state: "CLOSED", mergeCommitSha: "landedsha1", changedFiles: 2, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.landed, 1, "a reported merge commit lands regardless of the state spelling");
+    assert.equal(res.droppedClosed, 0);
+    assert.equal(h.enrollCalls.length, 1);
+  });
+
+  test("#4119: a null/unknown state with no merge commit is stillOpen — never evict on a missing signal", async () => {
+    // Fail-open on an unreadable state: eviction is destructive, so it requires
+    // the POSITIVE closed-unmerged signal, not the absence of an open one.
+    const h = makeWatchHarness(
+      [{ prNumber: 515, tier: 3, cycleId: "cyc-515", registeredAt: 1 }],
+      { 515: { state: null, mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.stillOpen, 1);
+    assert.equal(res.droppedClosed, 0);
+    assert.equal(h.registry.has(515), true, "unknown-state entry survives for a later tick");
+  });
+
+  test("#4119: one pass evicts a closed-unmerged PR while retaining an open one, and the health snapshot carries the counter", async () => {
+    const h = makeWatchHarness(
+      [
+        { prNumber: 516, tier: 3, cycleId: "cyc-516", registeredAt: 1 }, // open → retained
+        { prNumber: 517, tier: 3, cycleId: "cyc-517", registeredAt: 2 }, // closed-unmerged → evicted
+      ],
+      {
+        516: { state: "OPEN", mergeCommitSha: null, changedFiles: null, headRefName: null },
+        517: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null },
+      },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1);
+    assert.equal(res.stillOpen, 1);
+    assert.equal(h.registry.has(516), true, "the genuinely-open sibling is untouched");
+    assert.equal(h.registry.has(517), false);
+    assert.deepEqual(h.removeCalls, [517]);
+    assert.equal(h.healthWrites.length, 1);
+    assert.equal(h.healthWrites[0].droppedClosed, 1, "the health snapshot distinguishes droppedClosed from stillOpen");
+  });
+
+  test("#4119: reopen safety — an evicted PR later reopened and merged is recovered via the reconcile self-arm backstop", async () => {
+    // The full three-phase chain that makes dropping on CLOSED safe rather than
+    // lossy (the issue's Proposed-fix contract):
+    //   1. armed PR is closed without merging → merge-watch evicts it;
+    //   2. the PR is REOPENED and merges → cycle-merge-reconcile confirms the
+    //      merge on the still-`completed` cycle record and SELF-ARMS the PR back
+    //      into the pending registry (#2860/#3078);
+    //   3. the next merge-watch tick processes the recovered entry — the
+    //      merge-coupled follow-ups fire exactly once.
+    // Both chores run over ONE shared in-memory pending registry + marker set.
+    const prNumber = 518;
+    const cycleId = "cyc-518";
+    // The shared pending registry — same entry shape makeWatchHarness takes, so
+    // both the merge-watch deps and the reconcile self-arm's pendingEnrollAdd
+    // (whose entries carry `tier: null`) can write to it.
+    const registry = new Map<number, { prNumber: number; tier: number | null; cycleId: string; registeredAt: number; anchorType?: string }>([
+      [prNumber, { prNumber, tier: 3, cycleId, registeredAt: 1 }],
+    ]);
+    const marked = new Set<number>();
+    const metrics = new Map([
+      [cycleId, { status: "completed", prNumber: String(prNumber), tasksMerged: "0" }],
+    ]);
+    // The live PR view, advanced by the scenario: closed-unmerged → reopened+merged.
+    let prView: { state: string; mergeCommitSha: string | null; headRefName: string | null } = {
+      state: "CLOSED",
+      mergeCommitSha: null,
+      headRefName: null,
+    };
+    const enrollCalls: any[] = [];
+    const cycleCalls: any[] = [];
+
+    const watchDeps: HoldbackMergeWatchDeps = {
+      listPending: async () => ({ ok: true as const, entries: [...registry.values()] }),
+      removePending: async (n: number) => { registry.delete(n); },
+      wasEnrolled: async (n: number) => marked.has(n),
+      mark: async (n: number) => { marked.add(n); return { ok: true as const }; },
+      fetchMergeStatus: async () => ({
+        state: prView.state,
+        mergeCommitSha: prView.mergeCommitSha,
+        changedFiles: 3,
+        headRefName: prView.headRefName,
+      }),
+      enroll: async (input: any) => {
+        enrollCalls.push(input);
+        // Mirror the server-side carry-up: only T2/T3/T4 enroll (the self-arm
+        // entry carries tier:null, so the recovered PR lands exempt — the real
+        // tier resolution is enrollHoldback's job, not this chore's).
+        if (input.tier == null || !(input.tier >= 2 && input.tier <= 4)) {
+          return { ok: true as const, enrolled: false as const, reason: "exempt" };
+        }
+        return { ok: true as const, enrolled: true as const, leadingCount: 1, baseline: {} as any };
+      },
+      recordCycleRecord: async (body: any) => {
+        cycleCalls.push(body);
+        return { ok: true as const, cycleId: body.cycleId, status: "completed", bucketed: null, deduped: true, enriched: true };
+      },
+      setHealth: async () => {},
+    };
+    const reconcileDeps: CycleMergeReconcileDeps = {
+      listRecent: async () => [cycleId],
+      getMetrics: async (id: string) => ({ ...(metrics.get(id) ?? {}) }),
+      fetchPrState: async () => ({ state: prView.state, headRefName: prView.headRefName }),
+      recordCycleRecord: async (body: any) => {
+        // Simulate the completed→merged upgrade on the shared metrics store.
+        const m = metrics.get(body.cycleId);
+        if (m) { m.status = "merged"; m.tasksMerged = String(body.tasksMerged); }
+        return { ok: true as const, cycleId: body.cycleId, status: "merged", bucketed: null, deduped: true, enriched: true } as any;
+      },
+      listPending: async () => new Set(registry.keys()),
+      wasEnrolled: async (n: number) => marked.has(n),
+      armPending: async (entry) => { registry.set(entry.prNumber, entry); return { ok: true as const }; },
+      setHealth: async () => {},
+    };
+
+    // Phase 1 — closed without merging: evicted, no follow-ups, no marker.
+    const r1 = await runHoldbackMergeWatch(watchDeps);
+    assert.equal(r1.droppedClosed, 1);
+    assert.equal(enrollCalls.length, 0, "no enroll fired on the eviction tick");
+    assert.equal(cycleCalls.length, 0, "no enrichment fired on the eviction tick");
+    assert.equal(marked.has(prNumber), false);
+
+    // Phase 2 — reopened and later merged: the backstop self-arms it back.
+    prView = { state: "MERGED", mergeCommitSha: "reopenedsha1", headRefName: null };
+    const rec = await runCycleMergeReconcile(reconcileDeps);
+    assert.equal(rec.selfArmed, 1, "the evicted-then-merged PR is armed back into the registry");
+    assert.equal(rec.upgraded, 1, "the cycle record is upgraded completed→merged alongside");
+    assert.ok(registry.has(prNumber), "the registry holds the PR again for the next merge-watch tick");
+
+    // Phase 3 — the next merge-watch tick processes the recovered entry exactly once.
+    const r3 = await runHoldbackMergeWatch(watchDeps);
+    assert.equal(r3.droppedClosed, 0);
+    assert.equal(enrollCalls.length, 1, "the merge-coupled enroll fires on the recovered landing");
+    assert.deepEqual(enrollCalls[0], { commitSha: "reopenedsha1", prNumber, tier: null });
+    assert.equal(cycleCalls.length, 1, "the cycle-record enrichment fires on the recovered landing");
+    assert.equal(cycleCalls[0].cycleId, cycleId);
+    assert.equal(registry.has(prNumber), false, "the recovered entry is dropped after processing");
+    assert.equal(marked.has(prNumber), true, "the landing is marked processed");
+  });
+
   test("AC3: enroll + enrichment fire at most once per PR across repeated ticks", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 503, tier: 2, cycleId: "cyc-503", registeredAt: 1 }],
@@ -1085,10 +1285,12 @@ describe("Merge-completion watcher (#2623) — marker + health (Redis)", () => {
       landed: 2,
       droppedExempt: 1,
       stillOpen: 2,
+      droppedClosed: 1,
     });
     const got = await getMergeWatchHealth();
     assert.equal(got?.pendingDepth, 5);
     assert.equal(got?.landed, 2);
+    assert.equal(got?.droppedClosed, 1, "the #4119 closed-unmerged counter roundtrips");
     assert.equal(got?.ranAt, "2026-07-01T00:00:00.000Z");
   });
 

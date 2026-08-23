@@ -572,6 +572,30 @@ describe("cycle-merge-reconcile — pending-enroll self-arm backstop (#3078)", (
       [700, 701, 702],
     );
   });
+
+  // Issue #4119: the merge-watch chore now treats a closed-WITHOUT-merging PR as
+  // terminal and EVICTS its pending-enroll entry. THIS backstop is what makes
+  // that eviction safe rather than lossy: the cycle record stays `completed`
+  // (the merged-status enrichment never fired), so if the PR is later REOPENED
+  // and merges, the next reconcile tick confirms the merge and arms the PR back
+  // into the registry — merge-watch then lands it on its next tick. Pinned here
+  // so the reopen-safety reasoning is not re-litigated.
+  test("re-arms a merged PR whose pending entry was EVICTED after a close-without-merge (#4119 reopen backstop)", async () => {
+    const fx: Fixture = {
+      metrics: new Map([["c-evict", { status: "completed", prNumber: "900", tasksMerged: "0" }]]),
+      prState: new Map([[900, "MERGED"]]), // reopened after the eviction, now merged
+      reposts: [],
+      pending: new Set(), // the entry was evicted by merge-watch's closed-unmerged tick
+      enrolled: new Set(), // eviction sets NO enrolled marker (no landing happened)
+      arms: [],
+    };
+    const r = await runCycleMergeReconcile(makeDeps(fx));
+    assert.equal(r.selfArmed, 1, "the evicted-then-merged PR is armed back into the registry");
+    assert.equal(fx.arms!.length, 1);
+    assert.equal(fx.arms![0].prNumber, 900);
+    assert.equal(fx.arms![0].cycleId, "c-evict");
+    assert.equal(r.upgraded, 1, "the cycle record is upgraded to merged alongside the arm");
+  });
 });
 
 // ---------------------------------------------------------------------------
