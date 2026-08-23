@@ -892,7 +892,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
   // every housekeeping tick forever. Before the fix such an entry fell into the
   // stillOpen branch and was a permanent registry resident (observed: PR #3875,
   // closed-unmerged 4 days, still armed).
-  test("#4119: a CLOSED-unmerged PR is terminal — evicted, counted droppedClosed, NOT stillOpen", async () => {
+  test("closed-without-merge: a closed-unmerged PR is evicted from the registry and counted as droppedClosed, not stillOpen", async () => {
     const h = makeWatchHarness(
       [{ prNumber: 512, tier: 3, cycleId: "cyc-512", registeredAt: 1 }],
       { 512: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null } },
@@ -904,18 +904,29 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(res.stillOpen, 0, "a dead PR is NOT conflated with 'still waiting on'");
     assert.equal(res.landed, 0);
     assert.equal(res.droppedExempt, 0);
+    assert.deepEqual(h.removeCalls, [512], "the dead entry is dropped from the registry");
+    assert.equal(h.registry.has(512), false);
+  });
+
+  test("closed-without-merge: eviction fires neither enrollHoldback nor recordCycle", async () => {
+    const h = makeWatchHarness(
+      [{ prNumber: 519, tier: 3, cycleId: "cyc-519", registeredAt: 1 }],
+      { 519: { state: "CLOSED", mergeCommitSha: null, changedFiles: null, headRefName: null } },
+    );
+
+    const res = await runHoldbackMergeWatch(h.deps);
+
+    assert.equal(res.droppedClosed, 1);
     // Eviction fires NEITHER merge-coupled follow-up — no landing ever happened.
     assert.deepEqual(h.enrollCalls, [], "no enrollHoldback on a closed-unmerged eviction");
     assert.deepEqual(h.cycleCalls, [], "no cycle-record enrichment on a closed-unmerged eviction");
     // No enrolled marker either: the marker means "landing processed", and worse,
     // a marker here would make the cycle-merge-reconcile self-arm backstop skip
     // re-arming this PR if it were later reopened and merged (#4119 reopen safety).
-    assert.equal(h.marked.has(512), false, "eviction sets NO enrolled marker");
-    assert.deepEqual(h.removeCalls, [512], "the dead entry is dropped from the registry");
-    assert.equal(h.registry.has(512), false);
+    assert.equal(h.marked.has(519), false, "eviction sets NO enrolled marker");
   });
 
-  test("#4119: the closed-unmerged eviction matches the gh state case-insensitively", async () => {
+  test("closed-without-merge: the CLOSED comparison is case-insensitive", async () => {
     // `gh pr view` reports uppercase states today; compare defensively so a
     // casing change in gh/GitHub can't resurrect the leak.
     const h = makeWatchHarness(
@@ -944,7 +955,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(h.enrollCalls.length, 1);
   });
 
-  test("#4119: a null/unknown state with no merge commit is stillOpen — never evict on a missing signal", async () => {
+  test("closed-without-merge: a null/absent state on a not-yet-landed PR is retained as stillOpen, never evicted", async () => {
     // Fail-open on an unreadable state: eviction is destructive, so it requires
     // the POSITIVE closed-unmerged signal, not the absence of an open one.
     const h = makeWatchHarness(
@@ -959,7 +970,7 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(h.registry.has(515), true, "unknown-state entry survives for a later tick");
   });
 
-  test("#4119: one pass evicts a closed-unmerged PR while retaining an open one, and the health snapshot carries the counter", async () => {
+  test("closed-without-merge: a health snapshot records droppedClosed alongside the other counters", async () => {
     const h = makeWatchHarness(
       [
         { prNumber: 516, tier: 3, cycleId: "cyc-516", registeredAt: 1 }, // open → retained
@@ -978,7 +989,13 @@ describe("Merge-completion watcher chore (#2623) — decision logic (no Redis)",
     assert.equal(h.registry.has(516), true, "the genuinely-open sibling is untouched");
     assert.equal(h.registry.has(517), false);
     assert.deepEqual(h.removeCalls, [517]);
+    // The health snapshot is a complete accounting of the pass: the new
+    // droppedClosed counter sits alongside every pre-existing counter.
     assert.equal(h.healthWrites.length, 1);
+    assert.equal(h.healthWrites[0].pendingDepth, 2);
+    assert.equal(h.healthWrites[0].landed, 0);
+    assert.equal(h.healthWrites[0].droppedExempt, 0);
+    assert.equal(h.healthWrites[0].stillOpen, 1);
     assert.equal(h.healthWrites[0].droppedClosed, 1, "the health snapshot distinguishes droppedClosed from stillOpen");
   });
 

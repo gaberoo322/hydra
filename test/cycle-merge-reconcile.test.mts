@@ -580,7 +580,7 @@ describe("cycle-merge-reconcile — pending-enroll self-arm backstop (#3078)", (
   // and merges, the next reconcile tick confirms the merge and arms the PR back
   // into the registry — merge-watch then lands it on its next tick. Pinned here
   // so the reopen-safety reasoning is not re-litigated.
-  test("re-arms a merged PR whose pending entry was EVICTED after a close-without-merge (#4119 reopen backstop)", async () => {
+  test("self-arm recovers a PR previously evicted by merge-watch's closed-unmerged path once it is later reopened and merged (#4119)", async () => {
     const fx: Fixture = {
       metrics: new Map([["c-evict", { status: "completed", prNumber: "900", tasksMerged: "0" }]]),
       prState: new Map([[900, "MERGED"]]), // reopened after the eviction, now merged
