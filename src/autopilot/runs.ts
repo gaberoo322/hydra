@@ -163,11 +163,22 @@ import {
  * roughly two orders of magnitude (run 2bcba309: 801k of a 4M token budget while
  * the meter moved 2%→30%). Clean and deliberate for exactly the same reason
  * `budget` is — a stop rule the decision loop reached, not a truncation.
+ *
+ * `board_degraded` (issue #4130) is an idle-SHAPED clean self-stop whose board
+ * facts were UNREAD rather than empty: `decide.py` / `term-check.py` reached the
+ * idle-drain condition while `orch_board_signals_degraded` was set (a
+ * GraphQL-only GitHub outage had failed every orch board read, so
+ * `ready_for_agent=0` meant "unknown", not "no work"). The run still terminates
+ * (a wait-only print-mode turn must exit cleanly, #1352), but under its own
+ * cause so the run record never calls a blind drain a clean idle — and so
+ * operators can distinguish "the board was empty" from "we couldn't see the
+ * board" when reading a run that ended mid-outage.
  */
 const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "budget",
   "wall_clock",
   "idle",
+  "board_degraded",
   "handoff",
   "interrupted",
   "failure_backstop",

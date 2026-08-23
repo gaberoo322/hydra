@@ -1,0 +1,1 @@
+- fix: distinguish a failed GitHub board read from a genuinely empty one — a degraded orch board read now emits `orch_board_signals_degraded=true`, re-causes idle-shaped terminations to `board_degraded` (never a clean `idle`), and suppresses the `orch_backfill_idle` backfill dispatches (#4130)

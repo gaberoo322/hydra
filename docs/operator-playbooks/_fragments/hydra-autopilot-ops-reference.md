@@ -69,11 +69,17 @@ reboot via AOF + the docker volume) and reads it back as a seed tier:
 
 1. `cumulative_tokens >= limits.token_budget`
 2. `elapsed >= limits.wall_clock_max_sec`
-3. `idle_turns >= limits.idle_drain_turns` AND all slots empty
+3. `idle_turns >= limits.idle_drain_turns` AND all slots empty — cause
+   `board_degraded` (not `idle`) when `state.signals.orch_board_signals_degraded`
+   is set (issue #4130): a failed orch board read makes "all slots empty + board
+   counts zero" UNREAD rather than empty, and the run record must never call a
+   blind drain a clean idle. Same terminate path either way — only the cause
+   differs. `term-check.py`'s idle branch mirrors the same re-causing.
 4. 5 consecutive failures of the same pattern (failure backstop; see `self_heal.py`)
 5. The turn is wait-only with zero occupied slots (issue #1352): nothing
    dispatched, no other actions, no slots in flight → `terminate` with cause
-   `idle`. A `claude -p` print-mode session exits the moment the model emits
+   `idle` (cause `board_degraded` under the same degraded flag, issue #4130).
+   A `claude -p` print-mode session exits the moment the model emits
    its final message, so an idle-heartbeat `wait` was never honoured — the
    process died and the ExecStopPost reap stamped the run `interrupted`,
    leaving retro with zero drillable dispatches. Per ADR-0021 D5, continuity

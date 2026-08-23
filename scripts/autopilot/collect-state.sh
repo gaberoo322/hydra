@@ -43,6 +43,49 @@ set -uo pipefail
 # One constant, referenced everywhere: nine literals would drift apart.
 GH_ISSUE_LIST_LIMIT="${HYDRA_GH_ISSUE_LIST_LIMIT:-100}"
 
+# gh_payload_is <shape> — validate a captured `gh --json` payload (issue #4130).
+#
+# A GraphQL outage (observed live 2026-08-17: HTTP 503 on every GraphQL request
+# while REST stayed healthy) makes `gh issue list --json` / `gh pr list --json`
+# exit non-zero with empty stdout. The historical best-effort guards
+# (`2>/dev/null || true`, `|| echo ''`, `|| echo 0`) swallowed that into an
+# empty value which every downstream consumer rendered as a legitimate
+# `0` / `none` — a blind board read was indistinguishable from an empty board,
+# and decide.py concluded idle off it. Payload VALIDATION is the single
+# reliable failure predicate: a successful `gh ... --json --jq` NEVER prints
+# empty (jq emits at least `[]` / `{}`), so "valid JSON of the expected shape"
+# cleanly separates failed reads (empty / partial / error-fragment / wrong-shape
+# stdout) from genuine results. Exit-code capture adds nothing the validator
+# does not already cover, so the existing assignment shapes stay untouched.
+#
+# Shapes: `list` (a `--jq '[...]'` projection), `board_counts` (the 8-key orch
+# counts object), `target_counts` (the 4-key target counts object), and
+# `arch_counts` (the 5-key backfill board object). Reads stdin; argv[1] is the
+# shape. Exits 0 iff the payload parses and matches.
+gh_payload_is() {
+  python3 -c '
+import json, sys
+shape = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if shape == "list":
+    sys.exit(0 if isinstance(d, list) else 1)
+NEED = {
+    "board_counts": ("needs_qa", "ready_for_agent", "needs_triage",
+                     "needs_research", "in_progress", "blocked",
+                     "stale_in_progress", "stale_blocked"),
+    "target_counts": ("target_ready_for_agent", "target_needs_qa",
+                      "target_needs_triage", "target_needs_research"),
+    "arch_counts": ("ready_for_agent", "needs_research", "needs_triage",
+                    "arch_sourced", "cleanup_sourced"),
+}
+need = NEED.get(shape)
+sys.exit(0 if need and isinstance(d, dict) and all(k in d for k in need) else 1)
+' "$@"
+}
+
 # health
 hydra health 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
@@ -136,6 +179,7 @@ except Exception:
   print('1')
 PY
 )" 2>/dev/null || echo 1)
+ORCH_COUNTS_DEGRADED=0
 if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
   # Strip the endpoint-only fields (degraded, generatedAt) so the emitted shape
   # matches the historical inline `--jq` output exactly.
@@ -146,6 +190,9 @@ keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress'
 print(json.dumps({k:d[k] for k in keys}))
 PY
 )"
+  # The endpoint already validated the payload shape (BOARD_STATE_DEGRADED=0
+  # requires parseable JSON with the required fields), so the healthy path
+  # needs no gh_payload_is re-check — the fallback below is the blind arm.
 else
   # Fallback: orchestrator down or its gh read degraded — read directly.
   # This jq MUST stay behaviourally identical to `deriveBoardState`
@@ -162,7 +209,15 @@ else
   # is the always-stale mirror. The `target-backlog` exclusion (issue #2704)
   # stays — it is unconditional on liveness. The strict-blocker exclusion
   # (#3059) is endpoint-only and deliberately absent here, as before.
-  gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt --jq '{
+  #
+  # #4130: a GraphQL-only GitHub outage kills this fallback `gh` read (exit
+  # non-zero, empty stdout). Historically the block then emitted NOTHING and
+  # the absent counts rendered downstream as a legitimate empty board — the
+  # exact silent-zero #4130 fixes. Capture + validate the payload: a FAILED
+  # read emits the all-zero object (shape-preserving, so the model's stitching
+  # contract is unchanged) AND stamps ORCH_COUNTS_DEGRADED=1, which the
+  # orch_board_signals_degraded emit below folds into the turn record.
+  ORCH_COUNTS_FALLBACK=$(gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels,updatedAt --jq '{
     needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     ready_for_agent: [.[] | select((.labels | map(.name)) as $n | ($n | index("ready-for-agent")) and (($n | index("target-backlog")) | not))] | length,
     needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
@@ -171,7 +226,13 @@ else
     blocked: [.[] | select(.labels | map(.name) | index("blocked"))] | length,
     stale_in_progress: [.[] | select((.labels | map(.name) | index("in-progress")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),
     stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
-  }'
+  }' 2>/dev/null || true)
+  if printf '%s' "$ORCH_COUNTS_FALLBACK" | gh_payload_is board_counts 2>/dev/null; then
+    printf '%s\n' "$ORCH_COUNTS_FALLBACK"
+  else
+    ORCH_COUNTS_DEGRADED=1
+    echo '{"needs_qa":0,"ready_for_agent":0,"needs_triage":0,"needs_research":0,"in_progress":0,"blocked":0,"stale_in_progress":[],"stale_blocked":[]}'
+  fi
 fi
 
 # Orch needs-triage item-number set (issue #3939 — the orchestrator mirror of
@@ -271,6 +332,7 @@ except Exception:
   print('1')
 PY
 )" 2>/dev/null || echo 1)
+TARGET_COUNTS_DEGRADED=0
 if [ "$TARGET_BOARD_STATE_DEGRADED" = "0" ]; then
   printf '%s' "$TARGET_BOARD_STATE_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
@@ -298,14 +360,32 @@ else
   # `--limit 100` mirrors the healthy path's `listOpenIssues` DEFAULT_LIMIT
   # (src/github/issues.ts) — without it gh defaults to 30 and silently
   # truncates the Target board (35 open issues at #3709), under-counting every
-  # lane. Best-effort: any failure emits zeros.
-  gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '{
+  # lane. Best-effort: any failure still emits the four signal lines (zeros) —
+  # but since #4130 it also stamps TARGET_COUNTS_DEGRADED=1 instead of
+  # laundering the outage as a genuine empty board: the old `|| echo 0` arm
+  # manufactured indistinguishable-from-real zeros, which is exactly the
+  # defect class target_board_signals_degraded exists to flag.
+  TARGET_COUNTS_FALLBACK=$(gh issue list --repo "$TARGET_GH_REPO" --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq '{
     target_ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
     target_needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
     target_needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
     target_needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length
-  } | to_entries | map("\(.key)=\(.value)") | .[]' 2>/dev/null \
-    || { echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; }
+  }' 2>/dev/null || true)
+  if printf '%s' "$TARGET_COUNTS_FALLBACK" | gh_payload_is target_counts 2>/dev/null; then
+    printf '%s' "$TARGET_COUNTS_FALLBACK" | python3 -c "$(cat <<'PY'
+import json,sys
+d=json.load(sys.stdin)
+for k in ("target_ready_for_agent","target_needs_qa","target_needs_triage","target_needs_research"):
+  print(f"{k}={d[k]}")
+PY
+)"
+  else
+    TARGET_COUNTS_DEGRADED=1
+    echo "target_ready_for_agent=0"
+    echo "target_needs_qa=0"
+    echo "target_needs_triage=0"
+    echo "target_needs_research=0"
+  fi
 fi
 
 # untriaged-orphans triage backstop (issue #2426).
@@ -625,7 +705,19 @@ echo
 # Costs ONE `gh pr list`. Deliberate trade: it buys the signal that unblocks
 # dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
 # set, which is exactly today's (no-exclusion) behaviour.
+#
+# #4130: that best-effort contract is kept (empty set on failure), but the
+# failure itself is no longer silent — an empty/invalid payload sets
+# ORCH_INFLIGHT_DEGRADED=1, folded into orch_board_signals_degraded below. A
+# failed in-flight read yields active_dev_orch=0, i.e. a false "no slots
+# occupied" — exactly the blind-idle precondition #4130 exists to flag, since
+# decide.py's occupied==0 idle termination would then drain the run while
+# live workers are merely invisible.
+ORCH_INFLIGHT_DEGRADED=0
 ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json headRefName,body 2>/dev/null || true)
+if ! printf '%s' "$ORCH_INFLIGHT_PR_JSON" | gh_payload_is list 2>/dev/null; then
+  ORCH_INFLIGHT_DEGRADED=1
+fi
 ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
 import json, re, sys
 try:
@@ -643,9 +735,18 @@ except Exception:
   pass
 PY
 )" 2>/dev/null || true)
+# #4130: same treatment as the in-flight read above — the empty-set-on-failure
+# behaviour is kept (no grill candidates → no anchors emitted → fail closed),
+# but a failed read now also stamps ORCH_GRILL_DEGRADED=1 so a blind grill
+# walk is distinguishable from a genuinely empty ready-for-agent lane.
+ORCH_GRILL_DEGRADED=0
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)
+if ! printf '%s' "$ORCH_GRILL_LIST_JSON" | gh_payload_is list 2>/dev/null; then
+  ORCH_GRILL_DEGRADED=1
+  ORCH_GRILL_LIST_JSON=""
+fi
 # ---------------------------------------------------------------------------
 # BLOCKED-DEPENDENCY CANDIDATE EXCLUSION (issue #3965). The count path
 # (`src/autopilot/board-state.ts::hasOpenStrictBlocker` →
@@ -1118,20 +1219,36 @@ CLEANUP_BOARD_SATURATION_CAP=10
 # Single board read: the three actionable-label counts plus the
 # architecture-sourced and cleanup-sourced counts, in one gh call to keep this
 # collector cheap.
+#
+# #4130: the old `|| echo '{…all zeros…}'` arm MANUFACTURED a fully-idle board
+# on a failed read — zeros in, and the emitter's fallback_due conjunction
+# computed `orch_backfill_idle=true` off an outage (the inverse hazard: the
+# board was never read, yet the backfill classes were told it was empty). The
+# fallback is now `|| true` + gh_payload_is validation: a failed read still
+# emits the shape (zeros) but carries ARCH_BOARD_DEGRADED=1 into the emitter,
+# which degrades to the SUPPRESSING set — orch_backfill_idle=false and both
+# saturation flags true — mirroring the target-cleanup fail-closed contract
+# (never dispatch a scan that cannot read its own board to dedup against).
+ARCH_BOARD_DEGRADED=0
 ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json number,labels --jq "{
   ready_for_agent: [.[] | select((.labels | map(.name)) as \$n | (\$n | index(\"ready-for-agent\")) and ((\$n | index(\"target-backlog\")) | not))] | length,
   needs_research: [.[] | select(.labels | map(.name) | index(\"needs-research\"))] | length,
   needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,
   arch_sourced: [.[] | select(.labels | map(.name) | index(\"${ARCH_SCAN_LABEL}\"))] | length,
   cleanup_sourced: [.[] | select(.labels | map(.name) | index(\"${CLEANUP_SCAN_LABEL}\"))] | length
-}" 2>/dev/null || echo '{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0,"cleanup_sourced":0}')
+}" 2>/dev/null || true)
+if ! printf '%s' "$ARCH_BOARD_JSON" | gh_payload_is arch_counts 2>/dev/null; then
+  ARCH_BOARD_DEGRADED=1
+  ARCH_BOARD_JSON='{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0,"cleanup_sourced":0}'
+fi
 ARCH_WORK_QUEUE=$(docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0)
 if ! [[ "$ARCH_WORK_QUEUE" =~ ^[0-9]+$ ]]; then
   ARCH_WORK_QUEUE=0
 fi
 echo -n "arch_last_run_iso="; docker exec hydra-redis-1 redis-cli GET hydra:architecture:last-run 2>/dev/null | tr -d '"' || echo ""
-printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" python3 -c "$(cat <<'PY'
+printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" ARCH_BOARD_DEGRADED="$ARCH_BOARD_DEGRADED" python3 -c "$(cat <<'PY'
 import json, os, sys
+degraded = os.environ.get('ARCH_BOARD_DEGRADED', '0') == '1'
 try:
   d = json.load(sys.stdin)
   rfa = int(d.get('ready_for_agent', 0) or 0)
@@ -1140,20 +1257,71 @@ try:
   arch = int(d.get('arch_sourced', 0) or 0)
   cleanup = int(d.get('cleanup_sourced', 0) or 0)
 except Exception:
+  # Payload validated upstream, so this is a shape corner gh_payload_is could
+  # not foresee — treat it as degraded too (#4130): never compute a board-idle
+  # verdict off an unreadable board.
+  degraded = True
   rfa = nr = nt = arch = cleanup = 0
 wq = int(os.environ.get('ARCH_WORK_QUEUE', '0') or 0)
 cap = int(os.environ.get('ARCH_BOARD_SATURATION_CAP', '6') or 6)
 cleanup_cap = int(os.environ.get('CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
-fallback_due = (rfa == 0 and nr == 0 and nt == 0 and wq == 0)
-saturated = (arch > cap)
-cleanup_saturated = (cleanup > cleanup_cap)
+if degraded:
+  # Fail closed: counts unknown, so no idle verdict and both scan classes
+  # suppressed. Zeros keep the emitted shape (consumers never see a missing
+  # key), but orch_backfill_idle must NOT fire off an outage.
+  fallback_due = False
+  saturated = True
+  cleanup_saturated = True
+  arch = cleanup = 0
+else:
+  fallback_due = (rfa == 0 and nr == 0 and nt == 0 and wq == 0)
+  saturated = (arch > cap)
+  cleanup_saturated = (cleanup > cleanup_cap)
 print('orch_backfill_idle=' + ('true' if fallback_due else 'false'))
 print('arch_board_open_scan=' + str(arch))
 print('arch_board_saturated=' + ('true' if saturated else 'false'))
 print('cleanup_board_open_scan=' + str(cleanup))
 print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
 PY
-)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; }
+)" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=true"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=true"; }
+
+# `orch_board_signals_degraded` (issue #4130) — the orch-lane mirror of the
+# Target's `target_board_signals_degraded`. TRUE when ANY of the four
+# load-bearing orch board reads failed its gh_payload_is validation this turn:
+#
+#   ORCH_COUNTS_DEGRADED   — the board-counts read (endpoint OR its gh
+#                            fallback): the `ready_for_agent`/`needs_qa`/…
+#                            counts the whole dev/qa/sweep dispatch surface is
+#                            derived from. A silent zero here is read as "no
+#                            work", the motivating defect.
+#   ORCH_INFLIGHT_DEGRADED — the open-PR in-flight read: failure yields
+#                            active_dev_orch=0, i.e. a FALSE "no slots
+#                            occupied" — decide.py's occupied==0 idle
+#                            termination would drain the run while live
+#                            workers are merely invisible (double-dispatch on
+#                            the next healthy turn, premature idle now).
+#   ORCH_GRILL_DEGRADED    — the ready-for-agent grill walk: failure yields
+#                            orch_pending_grill_anchor=none /
+#                            orch_dev_ready_anchor=none (fail closed, kept),
+#                            but the turn must know the anchors were UNREAD,
+#                            not absent.
+#   ARCH_BOARD_DEGRADED    — the backfill board read: already handled locally
+#                            (suppressing set above); folded here too so one
+#                            flag describes the whole lane.
+#
+# Deliberately NOT gated: untriaged_orphans, needs_qa_numbers,
+# orch_needs_triage_items, scout_board_open_enhancements and the other
+# per-class reads. Each of those already fails SUPPRESSING or fail-open for
+# its OWN class (an unread orphan count routes nothing to sweep_orch; an
+# unread staleness list gates nothing on), and none of them can produce a
+# false "board is idle" conclusion — the specific hazard this flag exists to
+# catch. Adding them would flip the flag for outages decide.py can safely
+# ignore, drowning the load-bearing signal.
+if [ "$ORCH_COUNTS_DEGRADED" = "1" ] || [ "$ORCH_INFLIGHT_DEGRADED" = "1" ] || [ "$ORCH_GRILL_DEGRADED" = "1" ] || [ "$ARCH_BOARD_DEGRADED" = "1" ]; then
+  echo "orch_board_signals_degraded=true"
+else
+  echo "orch_board_signals_degraded=false"
+fi
 
 # Target cleanup backfill — cleanup_target signal class (the Target mirror of
 # cleanup_orch; operator-approved 2026-06-10).
@@ -1237,8 +1405,19 @@ TARGET_DESIGN_QA_BOARD_SATURATION_CAP=5
 TARGET_BOARD_ISSUES_JSON=$(gh issue list --repo "$TARGET_GH_REPO" --state open \
   --limit "$GH_ISSUE_LIST_LIMIT" \
   --json number,labels --jq '[ .[] | { number: .number, labels: (.labels | map(.name)) } ]' 2>/dev/null || echo '')
-if [ -n "$TARGET_BOARD_ISSUES_JSON" ]; then
-  echo "target_board_signals_degraded=false"
+# #4130: the old `[ -n "$TARGET_BOARD_ISSUES_JSON" ]` gate passed any NON-EMPTY
+# stdout — including a partial/error fragment — so a failed read printed
+# `target_board_signals_degraded=false` BEFORE the python except arm could
+# react (observed live: the flag sat false through a degraded window). The
+# gate is now payload VALIDATION (a successful `--jq '[...]'` never prints
+# empty), and the counts-fallback failure from the block above folds in: any
+# failed Target board read flips the flag, exactly as its AC 2 requires.
+if printf '%s' "$TARGET_BOARD_ISSUES_JSON" | gh_payload_is list 2>/dev/null; then
+  if [ "$TARGET_COUNTS_DEGRADED" = "1" ]; then
+    echo "target_board_signals_degraded=true"
+  else
+    echo "target_board_signals_degraded=false"
+  fi
   printf '%s' "$TARGET_BOARD_ISSUES_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
     GH_ISSUE_LIST_LIMIT="$GH_ISSUE_LIST_LIMIT" \
     TARGET_CLEANUP_SCAN_LABEL="$TARGET_CLEANUP_SCAN_LABEL" \

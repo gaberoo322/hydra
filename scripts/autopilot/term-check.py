@@ -316,8 +316,20 @@ def main() -> int:
         cause = "wall_clock"
         print(f"TERM:wall_clock elapsed={elapsed}s/{limits['wall_clock_max_sec']}s tokens={tokens}")
     elif s["idle_turns"] >= limits["idle_drain_turns"] and slots_occupied == 0:
-        cause = "idle"
-        print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
+        # #4130: a degraded orch board read makes slots=0 / every board count
+        # UNREAD rather than empty — concluding `idle` off it is a blind drain.
+        # Re-cause to `board_degraded` (mirroring decide.py's `_check_termination`)
+        # so the run record distinguishes blind idle from a clean drain. Still
+        # terminates: same reasoning as every other cause.
+        if (s.get("signals") or {}).get("orch_board_signals_degraded"):
+            cause = "board_degraded"
+            print(
+                f"TERM:board_degraded idle_turns={s['idle_turns']} slots=0 "
+                "orch board read degraded — blind idle, not a clean drain (issue #4130)"
+            )
+        else:
+            cause = "idle"
+            print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
     else:
         # Periodic session-restart (issue #3787) — checked LAST, mirroring
         # decide.py's `_check_termination` ordering, so a genuinely urgent

@@ -170,6 +170,10 @@ Helpers `make_*` construct them so call sites stay typed.
   update-branch         { type, pr_number, reason }
   reap                  { type, slot, task_id, total_tokens, skill }
   terminate             { type, cause, merged_prs, reason }
+                        cause ∈ {quota, budget, wall_clock, idle,
+                        board_degraded, failure_backstop, context_compaction}
+                        (`board_degraded` = idle-shaped exit while the orch
+                        board read failed — blind idle, not a clean drain, #4130)
   wait                  { type, seconds, reason }
   wait-for-api          { type, url, retries, reason }
 
@@ -1906,7 +1910,7 @@ class _RuleOutput:
             self.reasons.append(reason)
 
 
-def _rule_termination(state: dict, now: int) -> _RuleOutput:
+def _rule_termination(state: dict, events: list[dict], now: int) -> _RuleOutput:
     """Step 1 — termination check (budget / wall-clock / idle / 5-failure backstop).
 
     Returns a `_RuleOutput` whose `terminate` is the lone `terminate` action
@@ -1914,7 +1918,7 @@ def _rule_termination(state: dict, now: int) -> _RuleOutput:
     turn-ending decision in its own right), or an empty output otherwise.
     """
     out = _RuleOutput()
-    term = _check_termination(state, now)
+    term = _check_termination(state, events, now)
     if term is None:
         return out
     out.emit(term, reason="termination")
@@ -2810,7 +2814,7 @@ def _rule_silent_wedge(state: dict, events: list[dict], now: int) -> _RuleOutput
 
 
 def _rule_idle_fallback(
-    state: dict, *, dispatched_any: bool, plan_has_actions: bool
+    state: dict, events: list[dict], *, dispatched_any: bool, plan_has_actions: bool
 ) -> _RuleOutput:
     """Step 6 — idle fallback.
 
@@ -2825,6 +2829,12 @@ def _rule_idle_fallback(
     session, so ending the run here loses nothing — it just records the
     designed exit as the clean idle drain it actually is.
 
+    Issue #4130: when the orch board read is DEGRADED, the same terminate is
+    re-caused `board_degraded` — the zero-occupied/zero-board state means
+    UNREAD, not empty, and the run record must never call a blind drain a
+    clean idle. Still a terminate (never a `wait`): #1352's print-mode
+    constraint applies equally to a degraded turn.
+
     Slots in flight keep the old behaviour: background dispatches hold the
     print-mode process alive and re-invoke it on completion, so a short
     busy-wait nap is real there. A turn that emitted other actions (merges,
@@ -2837,15 +2847,23 @@ def _rule_idle_fallback(
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
     if not dispatched_any and occupied == 0 and not plan_has_actions:
+        degraded = _orch_board_degraded(state, events)
         out.emit(
             make_terminate(
-                "idle",
+                "board_degraded" if degraded else "idle",
                 merged_prs=int(state.get("merged_prs", 0) or 0),
-                reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
+                reason=(
+                    "wait-only turn, no slots in flight — orch board read degraded; "
+                    "blind drain, not a clean idle (issues #1352/#4130)"
+                    if degraded
+                    else "wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)"
+                ),
             ),
             reason="idle-drain",
         )
         out.debug["idle_fallback"] = "terminate"
+        if degraded:
+            out.debug["board_degraded"] = True
     elif not dispatched_any and occupied == 0:
         out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
     elif not dispatched_any:
@@ -2989,7 +3007,7 @@ def decide(
     plan.events.append(make_turn_start_event(state, now))
 
     # 1. Termination — a turn-ending decision; short-circuit when tripped.
-    term_out = _rule_termination(state, now)
+    term_out = _rule_termination(state, events, now)
     fold(term_out)
     if term_out.terminate is not None:
         return plan
@@ -3060,11 +3078,13 @@ def decide(
 
     # 6. Idle fallback (clean idle-drain terminate / heartbeat / busy-wait nap).
     #    `plan_has_actions` distinguishes a true wait-only turn (terminate
-    #    cleanly, issue #1352) from a turn that did housekeeping work
+    #    cleanly, issue #1352; re-caused `board_degraded` when the orch board
+    #    read failed, issue #4130) from a turn that did housekeeping work
     #    (merges / reaps / queue-decisions) without dispatching.
     fold(
         _rule_idle_fallback(
             state,
+            events,
             dispatched_any=dispatched_any,
             plan_has_actions=bool(plan.actions),
         )
@@ -3940,6 +3960,14 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # 'backfill starvation floor (>24h since last X)' annotation pattern).
         # architecture_orch / cleanup_orch deliberately keep idle-only gating
         # (INV-3 — the sibling extension is a deferred follow-up).
+        #
+        # Issue #4130: a degraded orch board read suppresses BOTH trigger
+        # paths. `orch_backfill_idle=true` cannot survive a failed read by
+        # construction post-#4130 (collect-state fails it closed), but the
+        # staleness floor would still fire — and dispatching discovery against
+        # a board the turn could not read files speculative work while blind.
+        if _orch_board_degraded(state, events):
+            return None
         if _signal_present(state, events, "orch_backfill_idle"):
             return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
         if signal_dark_past_floor(state, sig, now, DISCOVER_STALENESS_FLOOR_SEC):
@@ -4025,6 +4053,14 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # decide.py reads the precomputed signals only — it never recomputes
         # board-empty / cooldown here; that round-trip is exactly the gate-
         # re-parsing failure mode the signal seam exists to prevent.
+        #
+        # Issue #4130: a degraded orch board read suppresses the dispatch
+        # outright (belt-and-braces — collect-state already fails
+        # orch_backfill_idle closed on a degraded read, and arch_board_saturated
+        # degrades true, but the flag is the authoritative "do not conclude
+        # idle off this snapshot" contract).
+        if _orch_board_degraded(state, events):
+            return None
         if _signal_present(state, events, "arch_board_saturated"):
             return None
         if _signal_present(state, events, "orch_backfill_idle"):
@@ -4101,6 +4137,12 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         #
         # decide.py reads the precomputed signals only — it never recomputes
         # board-empty / saturation / cooldown here (the signal-seam discipline).
+        #
+        # Issue #4130: a degraded orch board read suppresses the dispatch
+        # outright (same contract as architecture_orch above — cleanup_board_
+        # saturated already degrades true, but the flag is authoritative).
+        if _orch_board_degraded(state, events):
+            return None
         if _signal_present(state, events, "cleanup_board_saturated"):
             return None
         if _signal_present(state, events, "orch_backfill_idle"):
@@ -4294,6 +4336,11 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # parent per #1093 — judgment work; the Haiku-premature-exit failure mode
         # is documented). decide.py reads the precomputed signals only — it never
         # reads the playbooks or runs the eval here (the signal-seam discipline).
+        #
+        # Issue #4130: a degraded orch board read suppresses the dispatch
+        # outright (same contract as architecture_orch / cleanup_orch above).
+        if _orch_board_degraded(state, events):
+            return None
         if _signal_present(state, events, "skill_prune_board_saturated"):
             return None
         if _signal_present(state, events, "orch_backfill_idle"):
@@ -4460,6 +4507,20 @@ def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
             return bool(ev.get("value", True))
     # Fallback: signals stored on state.signals (filled by collect-state.sh)
     return bool((state.get("signals") or {}).get(signal))
+
+
+def _orch_board_degraded(state: dict, events: list[dict]) -> bool:
+    """True when the orch board read failed this turn (issue #4130).
+
+    `orch_board_signals_degraded` is pre-resolved by collect-state.sh (it
+    validates the payload of every load-bearing orch board read) and lands in
+    state.signals — decide.py stays pure and only reads the flag. When set,
+    every zero on the orch board means UNREAD, not EMPTY: idle termination is
+    re-caused to `board_degraded` (never `idle`, never a `wait` — #1352's
+    print-mode constraint), and the `orch_backfill_idle` backfill classes are
+    suppressed for the turn. Absent flag = pre-#4130 behaviour, unchanged.
+    """
+    return _signal_present(state, events, "orch_board_signals_degraded")
 
 
 def _research_force_allowed(state: dict, slot: str, now: int) -> bool:
@@ -4649,7 +4710,7 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
     return s["spend_usd"] >= s["cap_usd"]
 
 
-def _check_termination(state: dict, now: int) -> dict | None:
+def _check_termination(state: dict, events: list[dict], now: int) -> dict | None:
     """Mirror of term-check.py logic, expressed as an action.
 
     NOT pure, by one narrow exception (issue #3867): `_capture_quota_baseline`
@@ -4689,6 +4750,22 @@ def _check_termination(state: dict, now: int) -> dict | None:
     if elapsed >= wall_max:
         return make_terminate("wall_clock", merged_prs=merged_prs, reason=f"elapsed={elapsed}s")
     if idle >= idle_max and occupied == 0:
+        # #4130: a degraded orch board read makes `occupied == 0` and every
+        # board count UNREAD rather than empty — concluding `idle` off it is a
+        # blind drain (the motivating defect). Terminate anyway (a wait-only
+        # print-mode turn must still exit cleanly, #1352), but under the
+        # distinct cause `board_degraded` so the run record says "blind idle",
+        # never "clean drain". quota/budget/wall_clock above stay ahead of this
+        # check, so a genuinely-capped run still reports its own cause.
+        if _orch_board_degraded(state, events):
+            return make_terminate(
+                "board_degraded",
+                merged_prs=merged_prs,
+                reason=(
+                    f"idle_turns={idle} but orch board read degraded — "
+                    "blind idle, not a clean drain (issue #4130)"
+                ),
+            )
         return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.

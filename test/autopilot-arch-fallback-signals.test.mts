@@ -133,7 +133,12 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     assert.ok(overCap.includes("arch_board_open_scan=7"));
   });
 
-  test("malformed board JSON degrades to safe zeros (fallback_due reflects work_queue only)", () => {
+  test("malformed board JSON degrades to the SUPPRESSING set (no idle verdict off an unreadable board)", () => {
+    // #4130 flipped the emitter's except arm: computing fallback_due from
+    // manufactured zeros made a failed read look like a fully-idle board and
+    // fired orch_backfill_idle=true off an outage — the inverse hazard. The
+    // except arm now behaves exactly like the ARCH_BOARD_DEGRADED=1 path
+    // below: counts 0, no idle verdict, both scan classes suppressed.
     const r = spawnSync("python3", ["-c", extractArchEmitter()], {
       input: "not json",
       encoding: "utf-8",
@@ -141,7 +146,38 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     });
     assert.equal(r.status, 0);
     const out = r.stdout.trim().split("\n");
+    assert.ok(out.includes("orch_backfill_idle=false"));
     assert.ok(out.includes("arch_board_open_scan=0"));
-    assert.ok(out.includes("arch_board_saturated=false"));
+    assert.ok(out.includes("arch_board_saturated=true"));
+    assert.ok(out.includes("cleanup_board_saturated=true"));
+  });
+
+  test("ARCH_BOARD_DEGRADED=1 degrades to the suppressing set even on a zero board (issue #4130)", () => {
+    // The exact failure shape a GraphQL outage produces: the payload never
+    // arrives, the shell arm substitutes zeros, and — pre-#4130 — the emitter
+    // computed fallback_due=true off them. With the degraded flag threaded
+    // in, the same zeros must NOT yield a board-idle verdict.
+    const out = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      { ...env, ARCH_BOARD_DEGRADED: "1" },
+    );
+    assert.ok(
+      out.includes("orch_backfill_idle=false"),
+      "a failed board read must never fire the backfill classes — zeros here mean UNREAD, not idle",
+    );
+    assert.ok(out.includes("arch_board_saturated=true"));
+    assert.ok(out.includes("cleanup_board_saturated=true"));
+    assert.ok(out.includes("arch_board_open_scan=0"));
+  });
+
+  test("ARCH_BOARD_DEGRADED=1 suppresses idle even when a non-zero board was somehow read", () => {
+    // Belt-and-braces direction: the flag is authoritative regardless of what
+    // the payload claims (e.g. a stale-but-valid fragment). The degraded
+    // contract wins over the data.
+    const out = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 2 },
+      { ...env, ARCH_BOARD_DEGRADED: "1" },
+    );
+    assert.ok(out.includes("orch_backfill_idle=false"));
   });
 });

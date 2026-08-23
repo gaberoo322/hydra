@@ -236,10 +236,25 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
   });
 
   test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+    // #4130 flipped the failure arm from a bare `|| { echo …=0; … }` one-liner
+    // to capture + payload-validation + zeros: the four zero lines still hold
+    // (a degraded read must never phantom-dispatch sweep_target), and the
+    // failure now ALSO stamps TARGET_COUNTS_DEGRADED=1 so the outage is
+    // observable instead of laundered as a genuine empty board.
+    const fallbackArm = src.slice(src.indexOf("TARGET_COUNTS_FALLBACK="));
+    const armText = fallbackArm.slice(0, 1400);
     assert.match(
-      src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+      armText,
+      /echo "target_ready_for_agent=0"/,
       "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+    );
+    assert.match(armText, /echo "target_needs_qa=0"/);
+    assert.match(armText, /echo "target_needs_triage=0"/);
+    assert.match(armText, /echo "target_needs_research=0"/);
+    assert.match(
+      armText,
+      /TARGET_COUNTS_DEGRADED=1/,
+      "issue #4130: a failed fallback read must set the degraded marker, not just emit zeros",
     );
   });
 
@@ -559,8 +574,11 @@ describe("collect-state.sh — Target board truncation signal (issue #3710)", ()
 
   test("the key is emitted on the degraded branch too, so decide.py never sees it missing", () => {
     // A read that never happened is not a truncated read — it is a degraded
-    // one. Both branches must still publish the key.
-    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    // one. Both branches must still publish the key. (#4130 note: the FIRST
+    // occurrence of the degraded-true emit is now the inner counts-folded
+    // branch inside the valid-payload arm; the unreachable-read branch is the
+    // LAST one, anchored here.)
+    const degradedBranch = src.slice(src.lastIndexOf('echo "target_board_signals_degraded=true"'));
     assert.match(
       degradedBranch.slice(0, 400),
       /echo "target_board_signals_truncated=false"/,
@@ -724,8 +742,10 @@ describe("collect-state.sh — wire-or-retire unlabelled advisory count (issue #
   test("a degraded/unreachable board read emits 0, never a spurious non-zero", () => {
     // The outer else branch (TARGET_BOARD_ISSUES_JSON empty/unreachable) fails
     // closed to 0 — the suppressing direction, so a transient gh outage never
-    // raises a false alarm. Mirrors every sibling target_* count in that branch.
-    const degradedBranch = src.slice(src.indexOf('echo "target_board_signals_degraded=true"'));
+    // raises a false alarm. Mirrors every sibling target_* count in that
+    // branch. (#4130 note: LAST occurrence — the first is now the inner
+    // counts-folded emit inside the valid-payload arm.)
+    const degradedBranch = src.slice(src.lastIndexOf('echo "target_board_signals_degraded=true"'));
     assert.match(
       degradedBranch.slice(0, 700),
       /echo "wire_or_retire_target_unlabelled=0"/,
