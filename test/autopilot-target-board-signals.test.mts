@@ -235,11 +235,16 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     );
   });
 
-  test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+  test("total failure of the fallback emits target_needs_triage=0 like its siblings, and latches the lane degraded (#4130)", () => {
+    // The #3709 fail-open contract is unchanged: a degraded read must never
+    // phantom-dispatch sweep_target, so the four zeros still ship. #4130 adds
+    // the latch — the zeros are now emitted INSIDE the branch that sets
+    // TARGET_GH_READ_FAILED=1, so target_board_signals_degraded flips true and
+    // the turn knows these zeros are not a legitimate empty board.
     assert.match(
       src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
-      "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+      /TARGET_GH_READ_FAILED=1\n\s*echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"/,
+      "a failed fallback read must fail open to zero for all four counts AND latch the read as degraded — a zero the turn knows is degraded is not a legitimate zero (#4130)",
     );
   });
 

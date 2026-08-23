@@ -144,7 +144,10 @@ describe("collect-state.sh grill walk NOT widened by #4096 (design-concept INV-5
     );
     // And the walk's gh call must not ALSO filter for the parking label.
     const walkStart = SRC.indexOf("ORCH_GRILL_LIST_JSON=$(gh issue list");
-    const walkEnd = SRC.indexOf("2>/dev/null || true)", walkStart);
+    // #4130: the walk's gh call lost its `|| true` tail — a failed read now
+    // latches ORCH_GH_READ_FAILED instead of degrading to an empty pool, so
+    // the anchor is the bare `2>/dev/null)` close of the command.
+    const walkEnd = SRC.indexOf("2>/dev/null)", walkStart);
     const walk = SRC.slice(walkStart, walkEnd);
     assert.ok(
       !walk.includes("needs-design-concept"),
