@@ -291,8 +291,8 @@ export function currentVersionLabel(project: ProjectVersions | null | undefined)
   const state = projectState(project);
   if (state === "error") return ERROR_PLACEHOLDER;
   if (state === "empty") return EMPTY_PLACEHOLDER;
-  const current = project?.current;
-  if (current && isCommitIdentity(current)) return commitIdentityLabel(current);
+  const current = project?.current ?? null;
+  if (isCommitIdentity(current)) return commitIdentityLabel(current);
   return formatVersion(current?.version);
 }
 
@@ -304,12 +304,10 @@ export function currentVersionLabel(project: ProjectVersions | null | undefined)
  */
 export function badgeVersionLabel(project: ProjectVersions | null | undefined): string {
   const state = projectState(project);
-  if (state === "ok") {
-    const current = project?.current;
-    if (current && isCommitIdentity(current)) return commitIdentityLabel(current);
-    return formatVersion(current?.version);
-  }
-  return ERROR_PLACEHOLDER;
+  if (state !== "ok") return ERROR_PLACEHOLDER;
+  const current = project?.current ?? null;
+  if (isCommitIdentity(current)) return commitIdentityLabel(current);
+  return formatVersion(current?.version);
 }
 
 // ---------------------------------------------------------------------------
