@@ -1,0 +1,1 @@
+- fix: target-build shipped-anchor preflight now scores subject coverage per commit and skips suspected-shipped anchors without closing them (#4167)
