@@ -1,12 +1,26 @@
 /**
  * versions/read-versions — the deep module behind `GET /api/versions`
- * (issue #3680, epic #3676 delta).
+ * (issue #3680, epic #3676 delta; the tagless-Target half is #4172).
  *
  * It answers one question per repository: "what release is this checkout on,
  * and what shipped in each of the last N releases?" — folding git tags (stamped
  * at deploy by #3677) together with the per-PR changelog fragments (#3678) that
  * landed inside each tag-to-tag window. All the policy lives here; the route
  * (`src/api/versions.ts`) and the roster (`project-list.ts`) are thin.
+ *
+ * ── THE TAGLESS TARGET REPORTS COMMIT IDENTITY, NOT NOTHING (#4172) ─────────
+ *    The Target has NO deploy path (hydra-betting#743): nothing stamps a semver
+ *    there, ever, so a tag-based read renders a permanently empty card — the
+ *    false-honesty failure mode (hydra-betting#815). The 2026-08-19 operator
+ *    decision (option 3 of three triggers, see the issue): for a
+ *    `scope: "target"` project with zero semver tags, report the CHECKED-OUT
+ *    COMMIT — `sha`, its `date`, and `dirty` (uncommitted or untracked tree).
+ *    `dirty` is the load-bearing field: with no deploy path, a service restart
+ *    rebuilds from the working tree, so "what is running" may correspond to no
+ *    commit at all. No pseudo-history is synthesised from recent commits — that
+ *    would re-create the false-honesty problem one layer up. The decision is
+ *    STRICTLY UPGRADEABLE: the moment the Target gains tags, the semver read
+ *    takes over unchanged (a tagged Target never reaches the identity read).
  *
  * ── FOUR CORRECTIONS PROVEN IN A SANDBOX (do not "fix" these back) ──────────
  *
@@ -40,9 +54,10 @@
  *    includes `src/**` only).
  *
  * ── ZERO TAGS IS A VALID STEADY STATE, NOT AN ERROR ─────────────────────────
- *    A tagless repo returns `{ current: null, history: [], error: null }` — the
- *    "no releases yet" card, NOT a failure. Only a genuine git failure sets
- *    `error`. This is the PRIMARY path at merge time.
+ *    A tagless ORCH repo returns `{ current: null, history: [], error: null }`
+ *    — the "no releases yet" card, NOT a failure. A tagless TARGET returns its
+ *    commit identity with `error: null`. Only a genuine git failure sets
+ *    `error`.
  *
  * ── NEVER-THROW ─────────────────────────────────────────────────────────────
  *    `gitExec` (the GitHub CLI Adapter seam, #896/#899) returns a discriminated
@@ -53,10 +68,12 @@
  * ── BOUNDED WORK ────────────────────────────────────────────────────────────
  *    Per COLD read of one repo: 1 `for-each-ref` + at most N tag-window diffs
  *    (N = the history limit, env-tunable) + at most {@link MAX_FRAGMENT_READS}
- *    `git show`s. Results cache for {@link VERSIONS_CACHE_TTL_MS} keyed by REPO
- *    ROOT PATH (the real identity — two rows could share a display name, and the
- *    root is what git is invoked against). Reads run SEQUENTIALLY so a dashboard
- *    hit can never fan out into a spawn storm.
+ *    `git show`s — or, for a tagless Target, `for-each-ref` + exactly one
+ *    `git log -1` + one `git status --porcelain`. Results cache for
+ *    {@link VERSIONS_CACHE_TTL_MS} keyed by REPO ROOT PATH (the real identity —
+ *    two rows could share a display name, and the root is what git is invoked
+ *    against). Reads run SEQUENTIALLY so a dashboard hit can never fan out into
+ *    a spawn storm.
  */
 
 import { gitExec as defaultGitExec } from "../github/git.ts";
@@ -100,6 +117,13 @@ const GIT_TIMEOUT_MS = 5_000;
 const TAG_FORMAT =
   "%(refname:short)|%(creatordate:iso-strict)|%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)";
 
+/**
+ * One `git log -1` yields the commit identity's raw row: full sha, then the
+ * strict-ISO COMMITTER date (matching `%(creatordate:iso-strict)`'s flavour on
+ * the tag side). `git show -s` is the same read; `log -1` says what it bounds.
+ */
+const COMMIT_FORMAT = "%H|%cI";
+
 /** Shape validation for a release tag. No semver arithmetic is performed. */
 const SEMVER_TAG_RE = /^v\d+\.\d+\.\d+$/;
 
@@ -142,6 +166,21 @@ export interface VersionRef {
   sha: string;
 }
 
+/**
+ * What a checkout with NO release stream can honestly report (#4172). The
+ * Target has no deploy path, so it has no tags to read — but the checked-out
+ * commit is checkable TODAY. There is deliberately NO `version` field: nothing
+ * may imply a semver exists.
+ */
+export interface CommitIdentity {
+  /** Full commit sha of the checkout's HEAD. */
+  sha: string;
+  /** ISO-8601 COMMIT date (there is no tag date — there is no tag). */
+  date: string;
+  /** True when the working tree has uncommitted or untracked changes. */
+  dirty: boolean;
+}
+
 /** One curated line from one changelog fragment. */
 export interface ReleaseNote {
   /** Conventional-Commits type, lowercased. `"other"` when unparseable. */
@@ -161,13 +200,16 @@ export interface VersionHistoryEntry extends VersionRef {
 /**
  * The per-repo payload. `current` carries NO notes — `history[0]` is the same
  * release WITH its notes, so a consumer must not double-render the newest entry.
+ * For a tagless Target, `current` is instead the checkout's {@link
+ * CommitIdentity} and `history` is empty (no pseudo-history, #4172).
  */
 export interface ProjectVersionsData {
-  current: VersionRef | null;
+  current: VersionRef | CommitIdentity | null;
   history: VersionHistoryEntry[];
   /**
    * A `gh-*` failure code when the read degraded, else null. A TAGLESS repo is
-   * NOT an error — it returns `current: null, history: [], error: null`.
+   * NOT an error — the orch card returns `current: null, history: [], error:
+   * null`, and the Target returns its commit identity.
    */
   error: string | null;
 }
@@ -226,6 +268,26 @@ export function parseTagRows(stdout: string): VersionRef[] {
     rows.push({ version, date: parts[1].trim(), sha: parts[2].trim() });
   }
   return rows;
+}
+
+/**
+ * Parse `git log -1 --format=%H|%cI` output into the identity's sha/date pair.
+ * Blank output, a missing separator, a non-hex sha, or a missing date all
+ * return null — the caller degrades rather than emitting a half-identity.
+ * Exported so tests pin the shape validation without any git process.
+ */
+export function parseCommitRow(
+  stdout: string,
+): Pick<CommitIdentity, "sha" | "date"> | null {
+  const line = stdout.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+  if (!line) return null;
+  const sep = line.indexOf("|");
+  if (sep <= 0) return null;
+  const sha = line.slice(0, sep).trim();
+  const date = line.slice(sep + 1).trim();
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+  if (!date) return null;
+  return { sha, date };
 }
 
 /**
@@ -387,9 +449,67 @@ async function readWindowNotes(
   return sortNotesByType(notes);
 }
 
+/**
+ * Read the commit identity of a tagless Target checkout (#4172): the HEAD sha,
+ * that commit's date, and whether the working tree is dirty. Never throws —
+ * a git failure degrades this entry only, exactly like the tag read.
+ *
+ * `git status --porcelain` is the dirty check because it is the one form where
+ * UNTRACKED files appear — the live Target tree carries them, and they are the
+ * case `dirty` exists to surface. A FAILED status read degrades the whole entry
+ * rather than reporting a sha next to a cleanliness that was never verified:
+ * that would be the false-honesty pattern this read replaced.
+ */
+async function readCommitIdentity(
+  root: string,
+  git: typeof defaultGitExec,
+): Promise<ProjectVersionsData> {
+  const head = await git(
+    ["-C", root, "log", "-1", `--format=${COMMIT_FORMAT}`],
+    { timeout: GIT_TIMEOUT_MS },
+  );
+  if (isGhFailure(head)) {
+    // A missing root, a non-repo, or an unborn HEAD (no commits yet) lands here.
+    logger.error(
+      { root, code: head.code, stderr: head.stderr.slice(0, 200) },
+      "[versions] commit read failed — degrading to no-releases",
+    );
+    return noReleases(head.code);
+  }
+
+  const row = parseCommitRow(head.data.stdout);
+  if (!row) {
+    logger.error(
+      { root, stdout: head.data.stdout.slice(0, 120) },
+      "[versions] commit row unparseable — degrading to no-releases",
+    );
+    return noReleases("versions-commit-unparseable");
+  }
+
+  const status = await git(["-C", root, "status", "--porcelain"], {
+    timeout: GIT_TIMEOUT_MS,
+  });
+  if (isGhFailure(status)) {
+    logger.error(
+      { root, code: status.code, stderr: status.stderr.slice(0, 200) },
+      "[versions] dirty check failed — degrading rather than asserting clean",
+    );
+    return noReleases(status.code);
+  }
+
+  return {
+    current: { ...row, dirty: status.data.stdout.trim().length > 0 },
+    // No pseudo-history: the Target has no version stream, and synthesising one
+    // from recent commits would re-create the false-honesty problem (#4172).
+    history: [],
+    error: null,
+  };
+}
+
 /** Cold read of one repo root. Never throws — degrades instead. */
 async function readVersionData(
   root: string,
+  scope: VersionProjectScope,
   limit: number,
   git: typeof defaultGitExec,
 ): Promise<ProjectVersionsData> {
@@ -417,7 +537,13 @@ async function readVersionData(
 
     const tags = parseTagRows(refs.data.stdout);
     // Tagless is a VALID steady state, not an error: exit 0 + empty stdout.
-    if (tags.length === 0) return noReleases(null);
+    // A tagless TARGET goes one step further and reports its commit identity —
+    // the scope gate, not the root path, decides, so the ORCH card keeps its
+    // "no releases yet" empty state (the Orchestrator DOES have a deploy path
+    // that will stamp its first tag).
+    if (tags.length === 0) {
+      return scope === "target" ? readCommitIdentity(root, git) : noReleases(null);
+    }
 
     const windowCount = Math.min(limit, tags.length);
     const budget = { reads: 0 };
@@ -467,7 +593,7 @@ export async function readProjectVersions(
     return { name: project.name, scope: project.scope, ...hit.value };
   }
 
-  const value = await readVersionData(project.root, limit, git);
+  const value = await readVersionData(project.root, project.scope, limit, git);
   cache.set(project.root, { value, at });
   return { name: project.name, scope: project.scope, ...value };
 }

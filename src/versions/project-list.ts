@@ -6,13 +6,16 @@
  *   One shallow question: "which checkouts have a version stream, and where do
  *   they live on disk?" It answers with a typed array so the wire response is
  *   array-shaped (N-capable) without any policy leaking in — the tag reading,
- *   caching, and note folding all live in the sibling `read-versions.ts`.
+ *   caching, note folding, and #4172's tagless-Target commit-identity read all
+ *   live in the sibling `read-versions.ts`.
  *
  * SCOPE IS THE MACHINE IDENTITY
  *   Each row carries `scope: "orch" | "target"` — the canonical alphabet the
  *   rest of the system already speaks (`DesignConceptScope`, the `scope` column
  *   in `scripts/autopilot/classes.json`, `HYDRA_AUTOPILOT_SCOPE`). Consumers
- *   discriminate on `scope`, never on the human-facing `name`.
+ *   discriminate on `scope`, never on the human-facing `name`. That includes
+ *   `read-versions.ts`: `scope` is what routes a TAGLESS entry to either the
+ *   orch "no releases yet" empty state or the Target's commit identity (#4172).
  *
  * ADR-0002 IS NOT WEAKENED
  *   This is built ON TOP OF the existing single-string helpers — `HYDRA_ROOT`

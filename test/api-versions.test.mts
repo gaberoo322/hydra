@@ -1,14 +1,17 @@
 /**
- * GET /api/versions regression tests (issue #3680, epic #3676 delta).
+ * GET /api/versions regression tests (issue #3680, epic #3676 delta; the
+ * tagless-TARGET half rewritten for #4172's commit-identity decision).
  *
- * THE HEADLINE CASE IS THE TAGLESS REPO — read this before adding cases.
- * Verified 2026-07-25: ~/hydra has ZERO tags locally and zero on origin, and
- * ~/hydra-betting has zero tags and no .changelog/ directory at all. So on the
- * day this merges, BOTH repositories legitimately return
- * `{ current: null, history: [], error: null }` and both dashboard cards render
- * "no releases yet". That is the PRIMARY path, not an edge case — a reviewer
- * seeing an empty live response must NOT read it as a bug. It is therefore the
- * first suite in this file.
+ * THE TAGLESS REPO IS THE HEADLINE CASE — read this before adding cases.
+ * Verified 2026-07-25: ~/hydra had ZERO tags at #3680's merge (it has since
+ * been stamping deploy tags), and ~/hydra-betting has zero tags and no
+ * .changelog/ directory at all — the Target has NO deploy path
+ * (hydra-betting#743), so nothing will ever stamp a semver there. #4172's
+ * operator decision: a tagless TARGET reports COMMIT IDENTITY
+ * (`{ sha, date, dirty }`) instead of an empty card, while a tagless ORCH repo
+ * keeps returning `{ current: null, history: [], error: null }` ("no releases
+ * yet"). Both are the PRIMARY path, not edge cases — a reviewer seeing either
+ * live must NOT read it as a bug. They are therefore the first suite here.
  *
  * The remaining suites pin the four traps a sandbox proved would otherwise ship
  * silently, each of which is invisible in the empty-repo response:
@@ -38,6 +41,7 @@ import {
   readAllVersions,
   resetVersionsCache,
   parseTagRows,
+  parseCommitRow,
   parseNoteLine,
   parseFragment,
   isFragmentPath,
@@ -46,6 +50,7 @@ import {
   EMPTY_TREE_SHA,
   DEFAULT_HISTORY_LIMIT,
   VERSIONS_CACHE_TTL_MS,
+  type VersionRef,
 } from "../src/versions/read-versions.ts";
 import { listVersionProjects } from "../src/versions/project-list.ts";
 import type { VersionProject } from "../src/versions/project-list.ts";
@@ -71,7 +76,8 @@ const PROJECTS = [ORCH, TARGET];
 
 /**
  * A per-root script for the fake git seam. Any key left unset behaves like the
- * real thing on a tagless / empty repo: exit 0 with empty stdout.
+ * real thing on a tagless / empty repo: exit 0 with empty stdout (except `head`,
+ * which defaults to a valid `git log -1` line — a real checkout has a HEAD).
  */
 interface RootScript {
   /** `for-each-ref` stdout. Empty string = tagless repo (exit 0, no output). */
@@ -82,6 +88,16 @@ interface RootScript {
   diffs?: Record<string, string>;
   /** Keyed by the literal `<tag>:<path>` argument. */
   shows?: Record<string, string>;
+  /** `git log -1 --format=%H|%cI` stdout for the #4172 commit-identity read. */
+  head?: string;
+  /** When set, the commit-identity `git log -1` fails with this code. */
+  headFailCode?: string;
+  /**
+   * `git status --porcelain` stdout. Empty string (the default) = clean tree.
+   */
+  status?: string;
+  /** When set, the dirty-check `git status --porcelain` fails with this code. */
+  statusFailCode?: string;
 }
 
 interface FakeGit {
@@ -137,6 +153,34 @@ function scriptedGit(scripts: Record<string, RootScript>): FakeGit {
       }
       return { ok: true as const, data: { stdout: content, stderr: "" } };
     }
+    if (sub === "log") {
+      // ["-C", root, "log", "-1", "--format=..."] — the #4172 identity read.
+      if (script.headFailCode) {
+        return {
+          ok: false as const,
+          code: script.headFailCode as any,
+          stderr: "fatal: your current branch does not have any commits yet",
+        };
+      }
+      return {
+        ok: true as const,
+        data: { stdout: `${script.head ?? DEFAULT_HEAD_LINE}\n`, stderr: "" },
+      };
+    }
+    if (sub === "status") {
+      // ["-C", root, "status", "--porcelain"] — the #4172 dirty check.
+      if (script.statusFailCode) {
+        return {
+          ok: false as const,
+          code: script.statusFailCode as any,
+          stderr: "fatal: not a git repository",
+        };
+      }
+      return {
+        ok: true as const,
+        data: { stdout: script.status ?? "", stderr: "" },
+      };
+    }
     return { ok: false as const, code: "gh-failed" as any, stderr: "unexpected" };
   }) as unknown as typeof GitExecFn;
   return { impl, calls };
@@ -174,6 +218,17 @@ const POPULATED_ORCH: RootScript = {
     "v1.0.0:.changelog/1-genesis.md": "- feat: first release (#1)\n",
   },
 };
+
+// ---------------------------------------------------------------------------
+// The #4172 commit-identity fixture — what a tagless Target checkout reports
+// ---------------------------------------------------------------------------
+
+/** A plausible full `%H` sha for the Target workspace's HEAD. */
+const TARGET_HEAD_SHA = "b824716d2ea4f9d3c8d0e5f6a7b8c9d0e1f2a3b4";
+/** A plausible strict-ISO `%cI` committer date for that commit. */
+const TARGET_HEAD_DATE = "2026-08-19T14:03:00-07:00";
+/** The default `git log -1 --format=%H|%cI` line every unset `head` serves. */
+const DEFAULT_HEAD_LINE = `${TARGET_HEAD_SHA}|${TARGET_HEAD_DATE}`;
 
 // ---------------------------------------------------------------------------
 // Route harness (mirrors test/taxonomy-route.test.mts)
@@ -225,29 +280,97 @@ async function callRoute(deps: VersionsRouterDeps = {}) {
 }
 
 // ===========================================================================
-// 1. THE HEADLINE CASE — both repositories are tagless today
+// 1. THE HEADLINE CASE — both repositories are tagless today: the ORCH card is
+//    the "no releases yet" empty state, the TARGET card reports commit identity
+//    (#4172 — the Target has no deploy path, so no semver will ever be stamped
+//    there; reporting the checked-out commit + a dirty flag is what IS honest).
 // ===========================================================================
 
-describe("GET /api/versions — the tagless no-releases-yet path (PRIMARY, #3680)", () => {
+describe("GET /api/versions — the tagless path: orch empty, target commit identity (#3680, #4172)", () => {
   beforeEach(() => resetVersionsCache());
 
-  test("a repo with zero tags returns current:null/history:[] and NO error", async () => {
-    // for-each-ref on a tagless repo exits 0 with empty stdout — this is the
-    // live state of both repos at merge time, and it is NOT a failure.
+  test("a tagless ORCH repo returns current:null/history:[] and NO error", async () => {
+    // for-each-ref on a tagless repo exits 0 with empty stdout — the live state
+    // of the Orchestrator before its first deploy tag, and NOT a failure.
     const git = scriptedGit({ "/fake/orch": {}, "/fake/target": {} });
     const res = await callRoute({ gitExec: git.impl });
 
     assert.equal(res._status, 200);
     assert.equal(res._body.projects.length, 2);
-    for (const entry of res._body.projects) {
-      assert.equal(entry.current, null, "a tagless repo has no current release");
-      assert.deepEqual(entry.history, []);
+    const orch = res._body.projects[0];
+    assert.equal(orch.current, null, "a tagless repo has no current release");
+    assert.deepEqual(orch.history, []);
+    assert.equal(
+      orch.error,
+      null,
+      "zero tags is a valid steady state — it must NOT be reported as an error",
+    );
+  });
+
+  test("a tagless TARGET reports commit identity instead of an empty card (#4172)", async () => {
+    const git = scriptedGit({ "/fake/orch": {}, "/fake/target": {} });
+    const res = await callRoute({ gitExec: git.impl });
+
+    assert.equal(res._status, 200);
+    const target = res._body.projects[1];
+    assert.equal(target.scope, "target");
+    assert.equal(target.error, null, "a tagless Target is not an error");
+    // deepEqual (strict) pins the SHAPE: exactly sha/date/dirty — no `version`
+    // field pretending a semver exists, and no notes key.
+    assert.deepEqual(target.current, {
+      sha: TARGET_HEAD_SHA,
+      date: TARGET_HEAD_DATE,
+      dirty: false,
+    });
+  });
+
+  test("the Target's dirty flag is true on an untracked file, an uncommitted edit, or both", async () => {
+    // The live ~/hydra-betting tree carries untracked files — the exact case
+    // `dirty` exists to surface.
+    for (const status of [
+      "?? scratch-notes.md\n", // untracked only
+      " M web/src/lib/thing.ts\n", // unstaged modification
+      "M  web/src/lib/thing.ts\n", // staged modification
+      " M web/src/lib/thing.ts\n?? scratch-notes.md\n", // both at once
+    ]) {
+      const git = scriptedGit({ "/fake/orch": {}, "/fake/target": { status } });
+      const res = await callRoute({ gitExec: git.impl });
       assert.equal(
-        entry.error,
-        null,
-        "zero tags is a valid steady state — it must NOT be reported as an error",
+        res._body.projects[1].current.dirty,
+        true,
+        `expected dirty:true for porcelain output ${JSON.stringify(status)}`,
       );
     }
+  });
+
+  test("the Target's commit identity synthesises no pseudo-history (#4172)", async () => {
+    const git = scriptedGit({
+      "/fake/orch": {},
+      "/fake/target": { status: "?? scratch-notes.md\n" },
+    });
+    const res = await callRoute({ gitExec: git.impl });
+
+    const target = res._body.projects[1];
+    assert.deepEqual(target.history, [], "recent commits must not masquerade as releases");
+    assert.deepEqual(target.current, {
+      sha: TARGET_HEAD_SHA,
+      date: TARGET_HEAD_DATE,
+      dirty: true,
+    });
+  });
+
+  test("a Target WITH tags reports semver, not commit identity (the upgrade path)", async () => {
+    // #4172 is strictly upgradeable: if hydra-betting#743 ever delivers a deploy
+    // path, the semver read must take over without unwinding anything.
+    const git = scriptedGit({
+      "/fake/orch": {},
+      "/fake/target": { tags: "v0.1.0|2026-07-02T09:00:00-07:00|dddd444commitsha" },
+    });
+    const res = await callRoute({ gitExec: git.impl });
+
+    const target = res._body.projects[1];
+    assert.equal(target.current.version, "v0.1.0");
+    assert.equal("dirty" in target.current, false, "a tagged repo reports a release, not a tree");
   });
 
   test("the tagless response still carries the project identity for both scopes", async () => {
@@ -266,13 +389,17 @@ describe("GET /api/versions — the tagless no-releases-yet path (PRIMARY, #3680
     assert.equal(typeof res._body.generatedAt, "string");
   });
 
-  test("a tagless read costs exactly one git spawn per repository", async () => {
+  test("a tagless read spawns once for orch and three for the target", async () => {
     const git = scriptedGit({ "/fake/orch": {}, "/fake/target": {} });
     await callRoute({ gitExec: git.impl });
-    assert.equal(
-      git.calls.length,
-      2,
-      "no tags means no windows to diff and no fragments to show",
+    // orch: for-each-ref. target: for-each-ref (tags), log -1 (identity),
+    // status --porcelain (dirty). No tags means no windows to diff anywhere.
+    assert.equal(git.calls.length, 4);
+    const targetCalls = git.calls.filter((argv) => argv[1] === "/fake/target");
+    assert.equal(targetCalls.length, 3);
+    assert.ok(
+      targetCalls.some((argv) => argv.includes("--porcelain")),
+      "the dirty check must read `git status --porcelain` — untracked files only appear there",
     );
   });
 });
@@ -508,6 +635,52 @@ describe("versions read — never-throw degradation (#3680)", () => {
     assert.deepEqual(orch.history[0].notes, []);
     assert.equal(orch.error, null, "a missing fragment is not a repo-level failure");
   });
+
+  test("a git failure in the Target's identity read degrades that entry only (#4172)", async () => {
+    // The issue's degradation contract: a git failure in the Target workspace
+    // degrades the TARGET entry to current:null/history:[]/error at HTTP 200
+    // and never fails the endpoint or the Orchestrator's entry.
+    const git = scriptedGit({
+      "/fake/orch": POPULATED_ORCH,
+      "/fake/target": { headFailCode: "gh-failed" },
+    });
+    const res = await callRoute({ gitExec: git.impl });
+
+    assert.equal(res._status, 200, "a broken Target must not 500 the whole read");
+    const [orch, target] = res._body.projects;
+    assert.equal(orch.current.version, "v1.10.0", "the Orchestrator entry is unaffected");
+    assert.equal(target.current, null);
+    assert.deepEqual(target.history, []);
+    assert.equal(target.error, "gh-failed", "the failure carries a machine code");
+  });
+
+  test("a FAILED dirty check degrades the Target rather than asserting clean (#4172)", async () => {
+    // `dirty` is the load-bearing field: reporting a sha we could read next to
+    // a cleanliness we could NOT verify would be the false-honesty pattern this
+    // issue exists to remove. A failed status read must degrade the entry.
+    const git = scriptedGit({
+      "/fake/orch": {},
+      "/fake/target": { statusFailCode: "gh-timeout" },
+    });
+    const res = await callRoute({ gitExec: git.impl });
+
+    assert.equal(res._status, 200);
+    const [orch, target] = res._body.projects;
+    assert.equal(orch.error, null);
+    assert.equal(target.current, null);
+    assert.deepEqual(target.history, []);
+    assert.equal(target.error, "gh-timeout");
+  });
+
+  test("an unparseable identity row degrades with a versions-* code (#4172)", async () => {
+    const git = scriptedGit({ "/fake/orch": {}, "/fake/target": { head: "garbage" } });
+    const res = await callRoute({ gitExec: git.impl });
+
+    assert.equal(res._status, 200);
+    const target = res._body.projects[1];
+    assert.equal(target.current, null);
+    assert.equal(target.error, "versions-commit-unparseable");
+  });
 });
 
 // ===========================================================================
@@ -529,7 +702,12 @@ describe("versions read — 60s per-root cache (#3680)", () => {
     t = NOW_MS + VERSIONS_CACHE_TTL_MS - 1;
     const second = await readAllVersions({ gitExec: git.impl, projects: PROJECTS, now });
     assert.equal(git.calls.length, cold, "no git process inside the TTL window");
-    assert.equal(second[0].current.version, "v1.10.0", "the cached value still serves");
+    // POPULATED_ORCH has tags, so `current` is the VersionRef arm of the union.
+    assert.equal(
+      (second[0].current as VersionRef).version,
+      "v1.10.0",
+      "the cached value still serves",
+    );
   });
 
   test("crossing the TTL forces a refetch", async () => {
@@ -560,8 +738,8 @@ describe("versions read — 60s per-root cache (#3680)", () => {
       projects: sameName,
       now: () => NOW_MS,
     });
-    assert.equal(out[0].current.version, "v1.10.0");
-    assert.equal(out[1].current.version, "v0.1.0", "the root, not the name, is the key");
+    assert.equal((out[0].current as VersionRef).version, "v1.10.0");
+    assert.equal((out[1].current as VersionRef).version, "v0.1.0", "the root, not the name, is the key");
   });
 
   test("resetVersionsCache drops the singleton so the next read re-reads git", async () => {
@@ -593,6 +771,23 @@ describe("versions read — pure helpers (#3680)", () => {
     );
     assert.deepEqual(rows.map((r) => r.version), ["v1.2.3", "v10.0.1"]);
     assert.equal(rows[0].sha, "sha1");
+  });
+
+  test("parseCommitRow accepts a %H|%cI line and rejects the rest (#4172)", () => {
+    assert.deepEqual(parseCommitRow(`${TARGET_HEAD_SHA}|${TARGET_HEAD_DATE}\n`), {
+      sha: TARGET_HEAD_SHA,
+      date: TARGET_HEAD_DATE,
+    });
+    // A short (but hex) sha is as valid as a full one — shape, not length.
+    assert.deepEqual(parseCommitRow("abc1234|2026-08-19T14:03:00-07:00"), {
+      sha: "abc1234",
+      date: "2026-08-19T14:03:00-07:00",
+    });
+    assert.equal(parseCommitRow(""), null, "an empty repo read has no identity");
+    assert.equal(parseCommitRow("\n"), null);
+    assert.equal(parseCommitRow("no-separator"), null);
+    assert.equal(parseCommitRow("not-hex|2026-08-19T14:03:00-07:00"), null);
+    assert.equal(parseCommitRow("abc1234|"), null, "a sha with no date is not an identity");
   });
 
   test("isFragmentPath accepts fragments and rejects README plus nested paths", () => {
