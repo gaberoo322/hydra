@@ -3535,8 +3535,6 @@ def _select_for_slot(
         # orch candidate when it has work pending AND no fresh artifact.
         # The selector is intentionally additive to Phase A:
         #
-        # - `orch_work_available` signal must be present (same gate as
-        #   dev_orch).
         # - When the artifact is missing OR stale, dispatch
         #   `hydra-grill` with the anchorRef and scope='orch'. The
         #   pipeline_priority ordering (design_concept_orch BEFORE
@@ -3572,8 +3570,25 @@ def _select_for_slot(
         #      source of truth for orch grill anchors. When it is absent
         #      or 'none', this selector returns None (no grill) and
         #      dev_orch proceeds.
-        if not _signal_present(state, events, "orch_work_available"):
-            return None
+        #
+        # ISSUE #3870: this selector used to ALSO require the
+        # `orch_work_available` signal (the same gate dev_orch uses) before
+        # ever consulting `orch_pending_grill_anchor` below. That precondition
+        # was redundant — `orch_pending_grill_anchor` alone is non-None only
+        # when collect-state.sh's board query found a real un-grilled
+        # ready-for-agent candidate, so it already fully encoded this
+        # selector's trigger — and it was actively harmful: `orch_work_available`
+        # is sourced from `ready_for_agent`, which `isGlmWithheldFromClaude`
+        # (src/autopilot/board-state.ts) zeroes out for glm-eligible issues
+        # while the GLM drainer partition is live. That starved this selector
+        # exactly when a glm-eligible issue needed grilling, so those issues
+        # got drained with no design concept at all — contradicting
+        # board-state.ts's own doc claim that design_concept_orch "still
+        # designs every glm-eligible issue". Dropping the precondition here
+        # does NOT touch dev_orch's own `orch_work_available` gate above:
+        # dev_orch yielding to the drainer while it owns the pool (#3754)
+        # is unchanged and still correct — the bug was only that *designing*
+        # had been accidentally coupled to *building*.
 
         # Same normalisation as the dev_orch gate above — one home for the
         # absent/"none"/malformed collapse (issue #3711).

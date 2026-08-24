@@ -2690,6 +2690,79 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ISSUE #3870 — design_concept_orch's dispatch condition is
+// `orch_pending_grill_anchor` alone. Before this fix, the selector ALSO
+// required the `orch_work_available` signal (the same gate dev_orch uses)
+// before it ever consulted the anchor — but `orch_work_available` is sourced
+// from `ready_for_agent`, which board-state.ts's `isGlmWithheldFromClaude`
+// zeroes out for glm-eligible issues while the GLM drainer partition is
+// live. That starved design_concept_orch exactly when a glm-eligible issue
+// needed grilling: the anchor was found (orch_pending_grill_anchor set) and
+// then discarded one line later by the redundant precondition. These tests
+// pin the regression the issue exists for (must fail against unmodified
+// decide.py), the unconditional-fire guard (an absent/none anchor still
+// yields no dispatch), and that dev_orch's own orch_work_available gate is
+// untouched so the fix cannot leak across classes.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — design_concept_orch fires on orch_pending_grill_anchor alone (issue #3870)", () => {
+  test("REGRESSION (must fail against unmodified decide.py): dispatches hydra-grill on orch_pending_grill_anchor even when orch_work_available is ABSENT", () => {
+    // Simulates a live GLM partition: collect-state.sh found a real
+    // ready-for-agent candidate lacking a fresh artifact (the anchor is
+    // set), but the glm-eligible subtraction in board-state.ts's
+    // ready_for_agent count left orch_work_available unset for this turn.
+    const state = baseState({ signals: { orch_pending_grill_anchor: "issue-3785" } });
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.ok(
+      dispatch,
+      "orch_pending_grill_anchor alone must trigger design_concept_orch, independent of orch_work_available (#3870)",
+    );
+    assert.equal(dispatch.skill, "hydra-grill");
+    assert.equal(dispatch.prompt_args.scope, "orch");
+    assert.equal(dispatch.prompt_args.anchor, "issue-3785");
+  });
+
+  test("orch_pending_grill_anchor absent → no design_concept_orch dispatch, regardless of orch_work_available", () => {
+    const state = baseState({ signals: { orch_work_available: true } });
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.equal(
+      dispatch,
+      undefined,
+      "an empty orch grill board must still yield no dispatch — the fix removes a redundant precondition, it does not make the selector fire unconditionally",
+    );
+  });
+
+  test("orch_pending_grill_anchor='none' → no design_concept_orch dispatch", () => {
+    const state = baseState({ signals: { orch_pending_grill_anchor: "none", orch_work_available: true } });
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.equal(dispatch, undefined, "the literal string 'none' normalises to no anchor (issue #3711)");
+  });
+
+  test("dev_orch's own orch_work_available gate is UNCHANGED by this fix (asserted explicitly so the change cannot leak across classes)", () => {
+    // orch_work_available absent, orch_pending_grill_anchor absent too:
+    // dev_orch must still fail to dispatch on its own pre-existing gate.
+    const stateNoSignal = baseState();
+    const planNoSignal = runDecide(stateNoSignal, null);
+    assert.equal(
+      findAction(planNoSignal, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      undefined,
+      "dev_orch must still require orch_work_available — untouched by #3870",
+    );
+
+    // orch_work_available present: dev_orch still dispatches as before.
+    const stateSignal = baseState({ signals: { orch_work_available: true } });
+    const planSignal = runDecide(stateSignal, null);
+    assert.ok(
+      findAction(planSignal, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "dev_orch must still dispatch on orch_work_available — untouched by #3870",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ISSUE #527 — stamp `worktreeBranch` on dispatch actions so the dashboard's
 // slice-4 "Watch stream" cross-link (PR #526) renders end-to-end.
 //
