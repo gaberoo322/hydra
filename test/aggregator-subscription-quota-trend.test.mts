@@ -39,6 +39,9 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     oauthAgeMs: null,
     oauthFiveHourResetsAt: null,
     oauthSevenDayResetsAt: null,
+    // Window position unknown on this estimate-path fixture (issue #4121).
+    windowElapsedFraction: null,
+    paceRatio: null,
     projectedWeeklyPercent: 50,
     pacingState: "under",
     emergencyStop: false,
