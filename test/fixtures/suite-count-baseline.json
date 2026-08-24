@@ -251,7 +251,7 @@
   "test/issue-dedup.test.mts": 3,
   "test/journal-seam-check.test.mts": 2,
   "test/knowledge-base-repo-graph.test.mts": 1,
-  "test/launch-flow-delivery.test.mts": 3,
+  "test/launch-flow-delivery.test.mts": 5,
   "test/launch-flow-key-contract.test.mts": 1,
   "test/learning-backfill-promotion-metadata.test.mts": 1,
   "test/learning-context-trace.test.mts": 1,

@@ -1176,6 +1176,14 @@ run_node_modules_integrity() {
 #   HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS          (default 86400 = 24h)
 #   HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS      (default 1000  = 1s)
 #   HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS (default 3600  = 1h)
+#   HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS    (default 3600  = 1h sustain
+#                                        before the glm-sterile streak fires —
+#                                        absorbs a just-restarted drainer that
+#                                        inherits an empty PR window, issue #3868)
+#   HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS (default 6 — the zero-drainer-PR
+#                                        lookback window; far above the observed
+#                                        ~40-min per-issue author time so a single
+#                                        slow issue never trips it)
 #   HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM  In-band delivery stream key (default
 #                                        hydra:notifications — the literal owned
 #                                        by src/event-bus-stream-keys.ts's
@@ -1212,17 +1220,22 @@ run_launch_flow() {
   local PAUSE_S="${HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS:-86400}"
   local LATENCY_BUDGET_MS="${HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS:-1000}"
   local LATENCY_BREACH_S="${HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS:-3600}"
+  local GLM_STERILE_S="${HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS:-3600}"
+  local GLM_STERILE_WINDOW_H="${HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS:-6}"
   [[ "$FAILSAFE_S" =~ ^[0-9]+$ ]] || FAILSAFE_S=7200
   [[ "$METER_DARK_S" =~ ^[0-9]+$ ]] || METER_DARK_S=7200
   [[ "$QUOTA_S" =~ ^[0-9]+$ ]] || QUOTA_S=14400
   [[ "$PAUSE_S" =~ ^[0-9]+$ ]] || PAUSE_S=86400
   [[ "$LATENCY_BUDGET_MS" =~ ^[0-9]+$ ]] || LATENCY_BUDGET_MS=1000
   [[ "$LATENCY_BREACH_S" =~ ^[0-9]+$ ]] || LATENCY_BREACH_S=3600
+  [[ "$GLM_STERILE_S" =~ ^[0-9]+$ ]] || GLM_STERILE_S=3600
+  [[ "$GLM_STERILE_WINDOW_H" =~ ^[0-9]+$ ]] || GLM_STERILE_WINDOW_H=6
   local FAILSAFE_MS=$((FAILSAFE_S * 1000))
   local METER_DARK_MS=$((METER_DARK_S * 1000))
   local QUOTA_MS=$((QUOTA_S * 1000))
   local PAUSE_MS=$((PAUSE_S * 1000))
   local LATENCY_BREACH_MS=$((LATENCY_BREACH_S * 1000))
+  local GLM_STERILE_MS=$((GLM_STERILE_S * 1000))
 
   log() {
     echo "hydra-launch-flow-watchdog: $*"
@@ -1300,6 +1313,11 @@ run_launch_flow() {
       quota)   etype="launch:quota_stretch" ;;
       latency) etype="launch:latency_breach" ;;
       pause)   etype="launch:pause_forgotten" ;;
+      # Issue #3868: live-but-sterile GLM drainer — the literal is owned by
+      # src/event-bus-vocabulary.ts's GLM_DRAINER_STERILE (in ALERT_TYPES and
+      # CRITICAL_EVENT_TYPES: dashboard alert + immediate digest line), drift-
+      # guarded by test/launch-flow-delivery.test.mts.
+      glm-sterile) etype="glm:drainer_sterile" ;;
       *) return 0 ;;
     esac
     # reason is a fixed pace-gate exit literal, but sanitize anyway so a future
@@ -1422,12 +1440,113 @@ run_launch_flow() {
     is_lat_over=1
   fi
 
-  # --- Apply the uniform streak rule to all five signals ---
+  # --- GLM drainer zero-throughput membership (issue #3868) ---
+  #
+  # "Live but sterile": while the drainer heartbeat is FRESH, the #3754
+  # partition hides every glm-eligible ready-for-agent issue from the Opus
+  # dev lane — so a drainer that is alive but shipping nothing starves the
+  # whole board invisibly. Observed 2026-08-05 (#3863): fresh heartbeat,
+  # claims proceeding, `gh pr create` failing on every attempt, ~40 min of
+  # z.ai authoring per issue, zero PRs, no alarm — liveness checks cannot see
+  # throughput. Membership here is the AND of three facts, evaluated cheap →
+  # expensive, and every upstream read failure fails QUIET in the no-alarm
+  # direction:
+  #
+  #   1. heartbeat fresh (one Redis GET) — stale/absent is the already-handled
+  #      "down" case (board-state.ts un-gates the Opus lane after 45 min,
+  #      ADR-0032 #3753 delta 2); alarming on it here would double-alarm, so
+  #      a non-fresh heartbeat clears membership and NO gh call is made.
+  #   2. work queued (one gh REST call) — at least one open glm-eligible +
+  #      ready-for-agent issue, excluding glm-withhold client-side exactly as
+  #      drainer-loop.sh's own defense-in-depth does: a withheld issue is
+  #      definitionally not work the drainer will touch. This clause is what
+  #      distinguishes STERILE (work waiting, nothing shipped) from IDLE
+  #      (nothing to do — never an alarm).
+  #   3. zero drainer PRs created in the trailing window (one gh REST call) —
+  #      "a drainer PR" is the SHARED issue-#4048 OR-predicate (glm-authored
+  #      label OR worktree-agent-glm-* head branch), reused LITERALLY below:
+  #      GLM_PR_MATCH_JQ is byte-identical to scripts/glm-beachhead-report.sh's
+  #      and MUST stay so (drift-guarded by test/launch-flow-delivery.test.mts,
+  #      mirroring the existing collect-state ↔ beachhead pairing). REST rows
+  #      are normalized to the {labels, headRefName} field names the shared
+  #      predicate reads, so the predicate text itself never forks.
+  #
+  # A FAILED gh query (non-zero exit, empty stdout, unparseable output) is not
+  # evidence of anything: it leaves the glm-sterile streak state UNTOUCHED this
+  # tick (glm_sterile_known=0 skips the track_signal call entirely — the same
+  # never-extend-AND-never-clear-on-a-read-failure discipline as the last-tick
+  # read above).
+  #
+  # The sustain threshold (default 1h) exists because the three-way AND can be
+  # INSTANTLY true the moment a drainer restarts in front of a queued board
+  # (fresh heartbeat + eligible work + an inherited empty PR window): a healthy
+  # drainer authors its first PR in ~40 min, flipping membership off well
+  # before the streak fires; a sterile one sustains it. gh api (REST) rather
+  # than gh's --json (GraphQL) because a live autopilot can exhaust the GraphQL
+  # budget and this runs on every 2-min watchdog tick.
+  local GLM_HEARTBEAT_KEY="hydra:glm:drainer:active"
+  # 45 min in ms — MUST mirror src/redis/autopilot.ts's
+  # GLM_DRAINER_HEARTBEAT_STALE_MS (drift-guarded by the delivery test).
+  local GLM_HEARTBEAT_STALE_MS=2700000
+  local GLM_REPO="gaberoo322/hydra"
+  # BYTE-IDENTICAL to scripts/glm-beachhead-report.sh's GLM_PR_MATCH_JQ — the
+  # shared "is this PR drainer output?" predicate (issue #4048). Never edit one
+  # without the other; the drift-guard test compares the two literals.
+  local GLM_PR_MATCH_JQ='((.labels // []) | map(.name) | index($label)) or ((.headRefName // "") | startswith($prefix))'
+  local is_glm_sterile=0 glm_sterile_known=1
+  local glm_hb_raw glm_hb_age=-1
+  glm_hb_raw="$(rc_read GET "$GLM_HEARTBEAT_KEY" | tr -dc '0-9')"
+  if [[ "$glm_hb_raw" =~ ^[0-9]+$ ]]; then
+    glm_hb_age=$((now_ms - glm_hb_raw))
+  fi
+  if (( glm_hb_age >= 0 && glm_hb_age <= GLM_HEARTBEAT_STALE_MS )); then
+    if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+      glm_sterile_known=0
+      log "WARN glm-sterile check needs gh+jq and one is missing — leaving the glm-sterile streak untouched this tick (#3868)"
+    else
+      local glm_queue_len
+      glm_queue_len="$(gh api "repos/${GLM_REPO}/issues?labels=glm-eligible,ready-for-agent&state=open&per_page=100" \
+        --jq '[.[] | select(has("pull_request") | not) | select(((.labels // []) | map(.name) | index("glm-withhold")) | not)] | length' 2>/dev/null)" || glm_queue_len=""
+      if ! [[ "$glm_queue_len" =~ ^[0-9]+$ ]]; then
+        glm_sterile_known=0
+        log "WARN glm-sterile queue query failed/unparseable — a failed query is not an empty queue; leaving the glm-sterile streak untouched this tick (#3868)"
+      elif (( glm_queue_len > 0 )); then
+        local glm_window_start_ms glm_recent_prs glm_jq_prog
+        glm_window_start_ms=$((now_ms - GLM_STERILE_WINDOW_H * 3600000))
+        # Normalize REST rows to the shared predicate's field names, then apply
+        # the predicate + the created-in-window filter. 100 newest-first rows
+        # comfortably cover any 6h window at this repo's PR rate.
+        glm_jq_prog='[.[] | {labels, headRefName: (.head.ref // ""), createdAt: (.created_at // "")} | select('"${GLM_PR_MATCH_JQ}"') | select((.createdAt != "") and ((.createdAt | fromdateiso8601) * 1000 >= $since_ms))] | length'
+        glm_recent_prs="$(gh api "repos/${GLM_REPO}/pulls?state=all&sort=created&direction=desc&per_page=100" 2>/dev/null \
+          | jq --arg label "glm-authored" --arg prefix "worktree-agent-glm-" \
+               --argjson since_ms "$glm_window_start_ms" "$glm_jq_prog" 2>/dev/null)" || glm_recent_prs=""
+        if ! [[ "$glm_recent_prs" =~ ^[0-9]+$ ]]; then
+          glm_sterile_known=0
+          log "WARN glm-sterile PR-window query failed/unparseable — a failed query is not zero throughput; leaving the glm-sterile streak untouched this tick (#3868)"
+        elif (( glm_recent_prs == 0 )); then
+          is_glm_sterile=1
+        fi
+      fi
+      # glm_queue_len == 0 → idle, not sterile: membership stays 0 (clears).
+    fi
+  fi
+  # Non-fresh heartbeat → membership stays 0 (the "down" case; no double alarm).
+
+  # --- Apply the uniform streak rule to all signals ---
   track_signal fail-safe  "$FAILSAFE_MS"       "$is_failsafe"
   track_signal meter-dark "$METER_DARK_MS"     "$is_meterdark"
   track_signal quota      "$QUOTA_MS"          "$is_quota"
   track_signal pause      "$PAUSE_MS"          "$is_pause"
   track_signal latency    "$LATENCY_BREACH_MS" "$is_lat_over"
+  if [[ "$glm_sterile_known" == "1" ]]; then
+    # Sixth signal, same uniform rule + fired/since dedup keys (issue #3868).
+    # Skipped ENTIRELY (state untouched) when an upstream gh query failed —
+    # never extend and never clear a streak on unknown inputs. Deliberately
+    # NOT a member of src/redis/launch-flow.ts's WATCHDOG_LAUNCH_SIGNALS:
+    # that constant enumerates the pace-gate REASON-derived signals; this one
+    # is derived from the drainer heartbeat + the GitHub board instead.
+    track_signal glm-sterile "$GLM_STERILE_MS" "$is_glm_sterile"
+  fi
 
   log "launch-flow tick processed (reason=$reason, latency_ms=${latency_ms:-none}, now_ms=$now_ms)"
   return 0

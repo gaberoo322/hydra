@@ -1,0 +1,1 @@
+- feat: watchdog alarms in-band when the GLM drainer is live but ships zero PRs while eligible work queues, and the playbook documents the paused-vs-pace-gate stop levers (#3868)

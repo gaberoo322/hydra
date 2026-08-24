@@ -65,6 +65,10 @@ import {
   LAUNCH_FLOW_KEY_PREFIX,
 } from "../src/redis/launch-flow.ts";
 import {
+  GLM_DRAINER_ACTIVE_KEY,
+  GLM_DRAINER_HEARTBEAT_STALE_MS,
+} from "../src/redis/autopilot.ts";
+import {
   WATCHDOG_SPAWN_TIMEOUT_MS,
   WATCHDOG_REDIS_TIMEOUT_MS,
   throwIfTimedOut,
@@ -73,7 +77,7 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
 
-const SIGNALS = ["fail-safe", "meter-dark", "quota", "pause", "latency"] as const;
+const SIGNALS = ["fail-safe", "meter-dark", "quota", "pause", "latency", "glm-sterile"] as const;
 
 // Per-run key namespace (see file header + test/watchdog-launch-flow.test.mts
 // #4072 for why nothing here may touch the shared production keys).
@@ -84,6 +88,12 @@ const TEST_NOTIFY_STREAM = `${RUN_NS}:notifications`;
 
 const SINCE = (s: string) => `${TEST_LF_PREFIX}:since:${s}`;
 const FIRED = (s: string) => `${TEST_LF_PREFIX}:fired:${s}`;
+
+// Issue #3868: the GLM drainer heartbeat key, rebound onto this run's
+// namespace by the extraction below so behavioural cases can seed a
+// fresh/stale heartbeat without ever touching the PRODUCTION
+// hydra:glm:drainer:active key (which gates the live Opus lane partition).
+const TEST_GLM_HB_KEY = `${RUN_NS}:glm-drainer-active`;
 
 /** Fixed deterministic clock for threshold maths (epoch-ms). */
 const T0 = 1_700_000_000_000;
@@ -111,7 +121,7 @@ function drc(args: string[]): string {
 }
 
 function cleanState(): void {
-  const keys = [TEST_LAST_TICK_KEY];
+  const keys = [TEST_LAST_TICK_KEY, TEST_GLM_HB_KEY];
   for (const s of SIGNALS) keys.push(SINCE(s), FIRED(s));
   spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "--raw", "DEL", ...keys], {
     encoding: "utf-8",
@@ -192,7 +202,15 @@ before(() => {
     .split(`"${PACE_GATE_LAST_TICK_KEY}"`)
     .join(`"${TEST_LAST_TICK_KEY}"`)
     .split(`"${LAUNCH_FLOW_KEY_PREFIX}"`)
-    .join(`"${TEST_LF_PREFIX}"`);
+    .join(`"${TEST_LF_PREFIX}"`)
+    // Issue #3868: rebind the GLM drainer heartbeat literal too, so the
+    // glm-sterile behavioural cases seed THIS run's key, never the production
+    // hydra:glm:drainer:active. Splitting on the TS-owned constant doubles as
+    // a drift-guard: if the bash literal ever diverges from
+    // src/redis/autopilot.ts's GLM_DRAINER_ACTIVE_KEY the assertion below
+    // fails loudly instead of silently leaving the production key in place.
+    .split(`"${GLM_DRAINER_ACTIVE_KEY}"`)
+    .join(`"${TEST_GLM_HB_KEY}"`);
   assert.ok(
     namespaced.includes(`"${TEST_LAST_TICK_KEY}"`),
     "failed to rebind LAST_TICK_KEY onto the test namespace",
@@ -200,6 +218,10 @@ before(() => {
   assert.ok(
     namespaced.includes(`"${TEST_LF_PREFIX}"`),
     "failed to rebind LF_KEY_PREFIX onto the test namespace",
+  );
+  assert.ok(
+    namespaced.includes(`"${TEST_GLM_HB_KEY}"`),
+    `failed to rebind the GLM drainer heartbeat key: the bash block no longer contains the literal "${GLM_DRAINER_ACTIVE_KEY}" (issue #3868) — either the watchdog literal drifted from src/redis/autopilot.ts's GLM_DRAINER_ACTIVE_KEY or the membership block was removed`,
   );
   writeFileSync(BLOCK, namespaced);
 });
@@ -680,5 +702,317 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
     throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_launch_flow delivery block (unreachable-redis case)");
     assert.equal(r.status ?? -1, 0, `read failure must not abort (set -e); stderr=${r.stderr}`);
     assert.equal(curlCalls().length, 0, "no out-of-band delivery on a read failure");
+  });
+});
+
+// =============================================================================
+// Issue #3868 — glm-sterile: the live-but-sterile GLM drainer signal.
+//
+// Detection contract (operator-rewritten spec, 2026-08-19): membership is the
+// AND of (1) fresh hydra:glm:drainer:active heartbeat, (2) at least one open
+// glm-eligible + ready-for-agent issue net of glm-withhold (work to drain —
+// distinguishes STERILE from IDLE), (3) zero drainer PRs — the shared #4048
+// OR-predicate (glm-authored label OR worktree-agent-glm-* head branch) —
+// created in the trailing window (default 6h). Delivery rides the existing
+// deliver_signal/track_signal layer IN-BAND (no new Redis keys, no second
+// alarm path); a failed gh query leaves the streak state UNTOUCHED.
+// =============================================================================
+
+describe("issue #3868 — glm-sterile structural / drift guards", () => {
+  function blockSource(): string {
+    const src = readFileSync(WATCHDOG, "utf-8");
+    return src.slice(src.indexOf("run_launch_flow()"), src.indexOf("# Entry point"));
+  }
+  /** Comment lines stripped, so "never references X" checks match CODE. */
+  function codeOnly(s: string): string {
+    return s
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+  }
+
+  test("TS grammar: glm:drainer_sterile is an alert type AND an immediate digest line", () => {
+    assert.equal(E.GLM_DRAINER_STERILE, "glm:drainer_sterile");
+    assert.ok(ALERT_TYPES.has(E.GLM_DRAINER_STERILE), "a sterile drainer must raise a dashboard alert");
+    assert.ok(
+      CRITICAL_EVENT_TYPES.includes(E.GLM_DRAINER_STERILE),
+      "a sterile drainer must bypass the batched digest (board starvation is per-hour damage)",
+    );
+    const msg = formatAlertMessage({
+      type: E.GLM_DRAINER_STERILE,
+      payload: { signal: "glm-sterile", reason: "eligible-launch", durationMs: 2 * 3_600_000, thresholdMs: 3_600_000 },
+    });
+    assert.match(msg, /GLM drainer sterile/);
+    assert.match(msg, /2h/);
+    assert.match(msg, /1h/);
+  });
+
+  test("bash publishes the TS-owned type and routes glm-sterile in-band", () => {
+    const block = blockSource();
+    assert.ok(
+      block.includes(E.GLM_DRAINER_STERILE),
+      "deliver_in_band must publish the TS-owned 'glm:drainer_sterile' literal",
+    );
+    const inBand = codeOnly(block.slice(
+      block.indexOf("deliver_in_band() {"),
+      block.indexOf("deliver_signal() {"),
+    ));
+    assert.ok(inBand.includes("glm-sterile"), "deliver_in_band must handle 'glm-sterile'");
+    const oob = codeOnly(block.slice(
+      block.indexOf("deliver_out_of_band() {"),
+      block.indexOf("deliver_in_band() {"),
+    ));
+    assert.ok(!oob.includes("glm-sterile"), "glm-sterile must NOT take the out-of-band Telegram path");
+  });
+
+  test("drainer-PR predicate is byte-identical to glm-beachhead-report.sh's (shared #4048 predicate)", () => {
+    const beach = readFileSync(join(REPO_ROOT, "scripts", "glm-beachhead-report.sh"), "utf-8");
+    const wd = readFileSync(WATCHDOG, "utf-8");
+    const re = /GLM_PR_MATCH_JQ='([^']+)'/;
+    const beachLit = beach.match(re);
+    const wdLit = wd.match(re);
+    assert.ok(beachLit, "glm-beachhead-report.sh no longer defines GLM_PR_MATCH_JQ");
+    assert.ok(wdLit, "hydra-watchdog.sh must define GLM_PR_MATCH_JQ (the shared drainer-PR predicate)");
+    assert.equal(
+      wdLit![1],
+      beachLit![1],
+      "the watchdog's drainer-PR predicate drifted from glm-beachhead-report.sh — the alarm and the beachhead report would disagree about what a drainer PR is (issue #4048)",
+    );
+    // The --arg bindings must supply the beachhead's own label/prefix values.
+    const label = beach.match(/GLM_LABEL_AUTHORED="([^"]+)"/)![1];
+    const prefix = beach.match(/GLM_DRAINER_BRANCH_PREFIX="([^"]+)"/)![1];
+    assert.ok(wd.includes(`--arg label "${label}"`), `watchdog must bind --arg label "${label}"`);
+    assert.ok(wd.includes(`--arg prefix "${prefix}"`), `watchdog must bind --arg prefix "${prefix}"`);
+  });
+
+  test("heartbeat freshness window mirrors src/redis/autopilot.ts's GLM_DRAINER_HEARTBEAT_STALE_MS", () => {
+    assert.ok(
+      blockSource().includes(`local GLM_HEARTBEAT_STALE_MS=${GLM_DRAINER_HEARTBEAT_STALE_MS}`),
+      `the bash staleness window must equal GLM_DRAINER_HEARTBEAT_STALE_MS (${GLM_DRAINER_HEARTBEAT_STALE_MS}ms) — a drift here makes the alarm and the #3754 partition disagree about "live"`,
+    );
+  });
+
+  test("track_signal for glm-sterile is guarded by glm_sterile_known (failed query never extends or clears)", () => {
+    const block = codeOnly(blockSource());
+    const guardIdx = block.indexOf('if [[ "$glm_sterile_known" == "1" ]]');
+    const callIdx = block.indexOf("track_signal glm-sterile");
+    assert.ok(guardIdx >= 0, "the glm_sterile_known guard must exist");
+    assert.ok(callIdx > guardIdx, "track_signal glm-sterile must sit inside the known-inputs guard");
+  });
+
+  test("playbook documents the two stop levers (paused vs pace-gate.timer) in one subsection", () => {
+    const play = readFileSync(join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md"), "utf-8");
+    const h = play.indexOf("### Stopping the autopilot: the two levers");
+    assert.ok(h >= 0, "playbook subsection '### Stopping the autopilot: the two levers' is missing");
+    const tail = play.slice(h);
+    const nextIdx = tail.slice(4).search(/\n#{2,3} /);
+    const section = nextIdx >= 0 ? tail.slice(0, nextIdx + 4) : tail;
+    assert.ok(section.includes("api/autopilot/paused"), "subsection must name the total-stop lever (POST /api/autopilot/paused)");
+    assert.ok(section.includes("hydra-pace-gate.timer"), "subsection must name the Claude-only stop lever (hydra-pace-gate.timer)");
+  });
+});
+
+describe("issue #3868 — glm-sterile behaviour (stubbed gh)", { skip: !DOCKER }, () => {
+  const GH_LOG = join(SHIM_DIR, "gh-calls.log");
+  const GH_SHIM = join(SHIM_DIR, "gh");
+  const ISSUES_FIXTURE = join(SHIM_DIR, "gh-issues.json");
+  const PULLS_FIXTURE = join(SHIM_DIR, "gh-pulls.json");
+
+  /** PATH-shim `gh` — serves canned REST fixtures, applies any --jq via real
+   * jq, records every invocation, never touches the network. GH_STUB_EXIT=N
+   * simulates a gh failure (rate limit / 503 / auth). */
+  function writeGhShim(): void {
+    mkdirSync(SHIM_DIR, { recursive: true });
+    writeFileSync(GH_SHIM, [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$*" >> '${GH_LOG}'`,
+      'if [[ "${GH_STUB_EXIT:-0}" != "0" ]]; then exit "${GH_STUB_EXIT}"; fi',
+      'jqprog=""; path=""; expect_jq=0',
+      'for a in "$@"; do',
+      '  if [[ "$expect_jq" == "1" ]]; then jqprog="$a"; expect_jq=0; continue; fi',
+      '  if [[ "$a" == "--jq" ]]; then expect_jq=1; continue; fi',
+      '  if [[ "$a" == repos/* ]]; then path="$a"; fi',
+      "done",
+      'case "$path" in',
+      `  *"/issues"*) src='${ISSUES_FIXTURE}' ;;`,
+      `  *"/pulls"*)  src='${PULLS_FIXTURE}' ;;`,
+      '  *) echo "[]"; exit 0 ;;',
+      "esac",
+      'if [[ -n "$jqprog" ]]; then jq "$jqprog" < "$src"; else cat "$src"; fi',
+      "",
+    ].join("\n"));
+    spawnSync("chmod", ["+x", GH_SHIM]);
+  }
+
+  function ghCalls(): string[] {
+    try {
+      return readFileSync(GH_LOG, "utf-8").split("\n").filter((l) => l !== "");
+    } catch {
+      return [];
+    }
+  }
+
+  /** REST created_at without fractional seconds (jq's fromdateiso8601 rejects them). */
+  const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  const ELIGIBLE_ISSUES = JSON.stringify([
+    { number: 9001, labels: [{ name: "glm-eligible" }, { name: "ready-for-agent" }] },
+  ]);
+  // A queue that must count as EMPTY: a glm-withhold row (the drainer's own
+  // defense-in-depth exclusion) plus a PR-typed row (REST /issues lists PRs
+  // too). If either exclusion regresses, the queue reads non-empty and the
+  // idle quiet-case below fails against the broken detector.
+  const EMPTY_QUEUE_ISSUES = JSON.stringify([
+    { number: 9003, labels: [{ name: "glm-eligible" }, { name: "ready-for-agent" }, { name: "glm-withhold" }] },
+    { number: 9004, labels: [{ name: "glm-eligible" }, { name: "ready-for-agent" }], pull_request: { url: "stub" } },
+  ]);
+
+  const PULLS_NONE_RECENT = JSON.stringify([
+    // A drainer PR OUTSIDE the 6h window and a recent NON-drainer PR: zero
+    // drainer PRs in-window, so a live+queued drainer reads STERILE.
+    { labels: [{ name: "glm-authored" }], head: { ref: "worktree-agent-glm-1-100" }, created_at: iso(T0 - 10 * 3_600_000) },
+    { labels: [], head: { ref: "worktree-agent-0abc12-x" }, created_at: iso(T0 - 10 * 60_000) },
+  ]);
+  const PULLS_RECENT_LABELED = JSON.stringify([
+    { labels: [{ name: "glm-authored" }], head: { ref: "issue-42-fix" }, created_at: iso(T0 - 30 * 60_000) },
+  ]);
+  const PULLS_RECENT_BRANCH_ONLY = JSON.stringify([
+    // No glm-authored label (the #3900 lost-label case) — the branch-prefix
+    // FALLBACK of the shared OR-predicate must still count it.
+    { labels: [], head: { ref: "worktree-agent-glm-77-999" }, created_at: iso(T0 - 30 * 60_000) },
+  ]);
+
+  function seedHeartbeat(ms: number): void {
+    drc(["SET", TEST_GLM_HB_KEY, String(ms)]);
+  }
+
+  /** Env: creds present, curl+gh PATH shims, namespaced stream, fresh-fire
+   * defaults (2s sustain threshold, now = T0+5s, healthy pace-gate tick). */
+  function glmEnv(over: Record<string, string> = {}): Record<string, string> {
+    return {
+      TELEGRAM_BOT_TOKEN: "test-token",
+      TELEGRAM_CHAT_ID: "test-chat",
+      HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
+      PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
+      HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS: "2",
+      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
+      ...over,
+    };
+  }
+
+  beforeEach(() => {
+    cleanState();
+    for (const f of [CURL_LOG, GH_LOG]) {
+      try {
+        unlinkSync(f);
+      } catch {
+        /* absent log is fine */
+      }
+    }
+    writeCurlShim(0);
+    writeGhShim();
+    writeFileSync(ISSUES_FIXTURE, ELIGIBLE_ISSUES);
+    writeFileSync(PULLS_FIXTURE, PULLS_NONE_RECENT);
+    // Healthy pace-gate tick so none of the five reason-derived signals fire —
+    // any XADD observed below is attributable to glm-sterile alone.
+    hsetLastTick({ reason: "eligible-launch", class: "launch", at: String(T0), latency_ms: "100" });
+  });
+
+  after(() => {
+    try {
+      rmSync(SHIM_DIR, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("fires: fresh heartbeat + queued work + zero drainer PRs in window → one in-band event, deduped", () => {
+    seedHeartbeat(T0);
+    seedSince("glm-sterile", T0);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+    assert.match(
+      lfLines(r.stdout),
+      /WARNING LAUNCH FLOW — signal 'glm-sterile' sustained 5000ms >= 2000ms/,
+      "the sustained streak must fire the WARNING",
+    );
+    assert.equal(getFired("glm-sterile"), true, "fired marker set");
+    assert.ok(ghCalls().length >= 2, "both the queue and the PR-window gh queries must have run");
+    assert.equal(curlCalls().length, 0, "glm-sterile is in-band only — never the Telegram curl path");
+    const entries = notifyEntriesSimple();
+    assert.equal(entries.length, 1, "exactly one XADD per streak");
+    const f = entries[0].fields;
+    assert.equal(f.type, E.GLM_DRAINER_STERILE);
+    assert.equal(f.source, "watchdog-launch-flow");
+    assert.equal(f.correlationId, "launch-flow-glm-sterile");
+    const payload = JSON.parse(f.payload);
+    assert.equal(payload.signal, "glm-sterile");
+    assert.equal(payload.durationMs, 5000);
+    assert.equal(payload.thresholdMs, 2000);
+    // Second tick within the same streak: fired marker suppresses re-delivery.
+    const r2 = runBlock(glmEnv({ HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 6_000) }));
+    assert.equal(r2.status, 0);
+    assert.equal(notifyEntriesSimple().length, 1, "no re-delivery within the same streak");
+  });
+
+  test("quiet (a): a recent drainer PR by LABEL clears membership and the streak", () => {
+    seedHeartbeat(T0);
+    seedSince("glm-sterile", T0);
+    writeFileSync(PULLS_FIXTURE, PULLS_RECENT_LABELED);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "must not fire while drainer PRs exist in the window");
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), "", "membership false must clear the since anchor (stateless recovery)");
+    assert.equal(notifyEntriesSimple().length, 0, "no delivery");
+  });
+
+  test("quiet (a'): a branch-prefix-only drainer PR (lost label, #3900) also counts — OR-predicate fallback", () => {
+    seedHeartbeat(T0);
+    seedSince("glm-sterile", T0);
+    writeFileSync(PULLS_FIXTURE, PULLS_RECENT_BRANCH_ONLY);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "the branch-prefix fallback must count as drainer output");
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(notifyEntriesSimple().length, 0);
+  });
+
+  test("quiet (b): stale heartbeat — the 'down' case is board-state's, so no alarm and NO gh calls", () => {
+    seedHeartbeat(T0 - (GLM_DRAINER_HEARTBEAT_STALE_MS + 60_000));
+    seedSince("glm-sterile", T0);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/);
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(notifyEntriesSimple().length, 0);
+    assert.equal(ghCalls().length, 0, "a non-fresh heartbeat must short-circuit BEFORE any gh query");
+  });
+
+  test("quiet (c): empty eligible queue (withheld + PR-typed rows) — idle is never sterile", () => {
+    // Zero drainer PRs in the window AND a fresh heartbeat: a detector that
+    // omitted the queue check WOULD fire here. Ours must stay quiet.
+    seedHeartbeat(T0);
+    writeFileSync(ISSUES_FIXTURE, EMPTY_QUEUE_ISSUES);
+    const r = runBlock(glmEnv());
+    assert.equal(r.status, 0, `stderr=${r.stderr}`);
+    assert.doesNotMatch(lfLines(r.stdout), /signal 'glm-sterile' sustained/, "an idle drainer (nothing to drain) must never alarm");
+    assert.equal(getFired("glm-sterile"), false);
+    assert.equal(notifyEntriesSimple().length, 0);
+  });
+
+  test("a failed gh query leaves the streak state untouched (never extends, never clears)", () => {
+    seedHeartbeat(T0);
+    seedSince("glm-sterile", T0);
+    const r = runBlock(glmEnv({ GH_STUB_EXIT: "1" }));
+    assert.equal(r.status, 0, `a gh failure must not fail the block; stderr=${r.stderr}`);
+    assert.match(
+      lfLines(r.stdout),
+      /WARN glm-sterile queue query failed/,
+      "a failed query must be loudly distinguishable from a quiet no-alarm tick",
+    );
+    assert.equal(drc(["GET", SINCE("glm-sterile")]), String(T0), "an in-progress streak must survive a gh failure");
+    assert.equal(getFired("glm-sterile"), false, "a gh failure must never fire");
+    assert.equal(notifyEntriesSimple().length, 0);
   });
 });
