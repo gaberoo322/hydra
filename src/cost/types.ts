@@ -141,15 +141,48 @@ export interface UsageSnapshot {
    */
   oauthSevenDayResetsAt: string | null;
   /**
+   * Fraction of the weekly window already elapsed at `generatedAt`:
+   * `(now - windowStart) / 7d`, clamped to [0, 1]. Window-start precedence:
+   * the OAuth meter's `sevenDayResetsAt - 7d` first (the issue-#4121
+   * formula), the Weekly Reset Anchor boundary (`weeklyResetAnchor`) second
+   * — so an Anchor-seeded tracker keeps a window reference even on the
+   * estimate-fallback path. `null` when neither boundary is known. Shipped
+   * with {@link paceRatio} so a `% consumed` headline can be read against
+   * where the window actually stands (issue #4121: 67% consumed at 70%
+   * elapsed is UNDER linear pace, but pre-#4121 read as "over" because
+   * pacingState extrapolated a single busy day across seven).
+   */
+  windowElapsedFraction: number | null;
+  /**
+   * `percentLast7d / (100 * windowElapsedFraction)` — consumption relative to
+   * LINEAR weekly pace: `< 1` under pace, `> 1` over pace, `1.0` exactly on
+   * it. `null` when {@link windowElapsedFraction} is null or clamped to 0 (no
+   * window position to ratio against). (issue #4121)
+   */
+  paceRatio: number | null;
+  /**
    * If we continued at the last-24h rate for a full 7 days, what % of
-   * weekly quota would that be? 0 when uncalibrated.
+   * weekly quota would that be? 0 when uncalibrated. FORWARD-LOOKING BURST
+   * PROJECTION, deliberately NOT a pace verdict (issue #4121): one hotter-
+   * than-average day projects past 100% regardless of how much of the week
+   * remains. Read it NEXT TO `percentLast7d` + `windowElapsedFraction`
+   * (or {@link paceRatio}), never alone.
    */
   projectedWeeklyPercent: number;
   /**
-   * "over" when projectedWeeklyPercent > 100 (shed non-essential classes
-   * in the autopilot integration that follows this PR). "on" at 80-100%
-   * (informational; no action). "under" otherwise, including all
-   * uncalibrated runs.
+   * Position relative to LINEAR weekly pace (issue #4121): with a window
+   * position ({@link windowElapsedFraction} > 0) the linear target is
+   * `100 * windowElapsedFraction` % of quota and `percentLast7d` is compared
+   * against it within ±2pp — "over" above the band (consumed faster than the
+   * window's linear rate; the `projectEligibility` pacing shed and the
+   * overnight summary's red status key off this), "on" inside it, "under"
+   * below it (67% at 70% elapsed reads "under"). With NO window position
+   * (no OAuth boundary and no Anchor) it falls back to the pre-#4121
+   * `projectedWeeklyPercent` thresholds (> 100 "over", 80–100 "on"),
+   * preserving the status quo for un-Anchor'd accounts. Uncalibrated runs
+   * are always "under", unchanged. CHANGED in #4121 — previously ALWAYS keyed
+   * off the projection thresholds, which read a single busy day as "over"
+   * with most of the weekly budget unspent.
    */
   pacingState: "under" | "on" | "over";
   /**

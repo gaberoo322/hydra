@@ -229,7 +229,7 @@ If operator gave a task, use it. Otherwise priority order:
 
 Cross-reference drift check. Skip if recently merged.
 
-> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as already-shipped if ≥70% subject-word overlap with origin/main commits (close the issue as a dup, re-select); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
+> **CONTEXT POINTER:** for a board-picked anchor run the shipped-anchor preflight (Step 2.1) and the two grounding preflights (Steps 3.1 ledger-intersection, 3.2 doc-banner) before finalising the plan. Full bash recipes live in `hydra-target-build-anchor-preflight.md` (sibling of this SKILL.md). Summary: board anchor — treat as suspected-shipped if ≥70% subject-word overlap with ONE recent origin/main commit (skip the anchor non-destructively — never close or relabel the issue — and take the next candidate; issue #4167); wire-or-retire ledger hit → HARD STOP-AND-REFRAME; superseded-doc banner → HARD STOP-AND-REFRAME. All three are fail-open on uncertainty.
 
 ### 3. Plan (planner role)
 
@@ -664,7 +664,9 @@ The Step 6 mutation-gate recipe above is the canonical rewrite for THIS playbook
 `CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)` — instead of the
 nested one-liner `$(git diff ... "$(git merge-base ...)"...)`. The shipped-anchor
 preflight (`_fragments/hydra-target-build-anchor-preflight.md`) makes the same
-substitution for its `comm -12` subject-coverage matcher.
+substitution for its subject-coverage matcher — and, because the guard also
+refuses shell `for`/`while` loops, keeps its per-commit scoring inside a single
+awk stage (issue #4167) rather than a loop.
 
 Do NOT disable or work around the guard itself — it is the isolation fence. The
 full note (with the `Monitor` CI-poll corollary) lives in

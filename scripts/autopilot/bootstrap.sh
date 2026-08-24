@@ -779,11 +779,16 @@ QUOTA_WEEK_MAX="${HYDRA_AUTOPILOT_QUOTA_WEEK_MAX:-0}"
 # otherwise emit torn JSON and break every downstream jq/json.load reader at
 # Phase 0 with a baffling parse error instead of a clear message. Validate here
 # and FATAL loudly, matching the --scope validator's style.
+# The `.*` and `*.` arms (issue #4129) reject a BARE leading/trailing decimal
+# point — `.5` and `5.` parse as tokens but are not JSON numbers either, and
+# the glob without them let both slip through to the same torn-JSON fate. A
+# valid value needs at least one digit on each side of an optional decimal
+# point (the `*.*.*` arm already bounds it to at most one point).
 for _q_pair in "QUOTA_5H_MAX=${QUOTA_5H_MAX}" "QUOTA_WEEK_MAX=${QUOTA_WEEK_MAX}"; do
   _q_name="${_q_pair%%=*}"
   _q_val="${_q_pair#*=}"
   case "$_q_val" in
-    ''|*[!0-9.]*|*.*.*|.)
+    ''|*[!0-9.]*|*.*.*|.*|*.)
       echo "[autopilot] FATAL: ${_q_name}=${_q_val} invalid (expected a non-negative number of utilization points, e.g. 10 or 2.5; 0 disables the cap)"
       exit 1
       ;;

@@ -1,0 +1,1 @@
+- fix: glm-beachhead-report fails loud (stderr diagnostic + exit 1) on a failed gh query instead of rendering a fabricated insufficient-data readout on a masked empty result (#4128)

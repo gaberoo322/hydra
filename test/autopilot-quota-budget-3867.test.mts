@@ -628,4 +628,33 @@ describe("--quota-5h-max / --quota-week-max plumbing (issue #3867)", () => {
     assert.notEqual(r.status, 0, "a non-numeric cap must abort bootstrap");
     assert.match(r.stdout + r.stderr, /FATAL: QUOTA_5H_MAX=ten invalid/);
   });
+
+  // Issue #4129 — the original glob (`''|*[!0-9.]*|*.*.*|.`) had no arm for a
+  // BARE leading or trailing decimal point, so `.5` and `5.` slipped through.
+  // Neither is a JSON number (`json.loads(".5")` -> Expecting value), so both
+  // produced exactly the torn-JSON state.json this validator exists to prevent
+  // — just via a narrower typo class than `ten`. The fix requires a digit on
+  // each side of an optional decimal point.
+  test("bare-decimal caps (.5 / 5.) FATAL too; well-formed values still pass (issue #4129)", () => {
+    const leading = runBootstrap({}, ["--quota-5h-max=.5"], true);
+    assert.notEqual(leading.status, 0, "`.5` is not a JSON number — must abort");
+    assert.match(leading.stdout + leading.stderr, /FATAL: QUOTA_5H_MAX=\.5 invalid/);
+
+    const trailing = runBootstrap({}, ["--quota-week-max=5."], true);
+    assert.notEqual(trailing.status, 0, "`5.` is not a JSON number — must abort");
+    assert.match(trailing.stdout + trailing.stderr, /FATAL: QUOTA_WEEK_MAX=5\. invalid/);
+
+    // The already-rejected classes stay rejected — pinned here so a future glob
+    // rewrite cannot silently drop one while chasing the bare-decimal fix.
+    const multiDot = runBootstrap({}, ["--quota-5h-max=1.2.3"], true);
+    assert.notEqual(multiDot.status, 0, "two decimal points are never a number");
+    const bareDot = runBootstrap({}, ["--quota-5h-max=."], true);
+    assert.notEqual(bareDot.status, 0, "a bare dot is never a number");
+
+    // And every still-valid form keeps flowing through: fractional caps
+    // (integers and the disabled default 0 are pinned by the cases above).
+    const ok = runBootstrap({}, ["--quota-5h-max=0.5", "--quota-week-max=90.5"]);
+    assert.equal(ok.limits.quota_5h_max_pts, 0.5);
+    assert.equal(ok.limits.quota_week_max_pts, 90.5);
+  });
 });
