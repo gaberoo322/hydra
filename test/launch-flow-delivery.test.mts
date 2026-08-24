@@ -249,10 +249,20 @@ function curlCalls(): string[] {
  * NB: unlike test/watchdog-launch-flow.test.mts, PATH is NOT force-restored
  * after the env spread — every caller's env must be able to prepend the curl
  * shim dir to PATH (the out-of-band interception depends on it).
+ *
+ * HYDRA_REDIS_DB is pinned to "0" for the same reason as
+ * test/watchdog-launch-flow.test.mts's runBlock() (issue #4183): this
+ * suite's own seed/read helper (drc, hardcoded to db 0 with no `-n`
+ * selector) IS db 0, the block's default target. scripts/test/
+ * redis-db-launch.mjs exports HYDRA_REDIS_DB into this whole node:test
+ * process's env, so an unpinned `...process.env` here would silently
+ * redirect run_launch_flow's rc_write/rc_read to the launcher's derived
+ * per-run DB while drc() kept reading/writing db 0 — every
+ * fired/since-marker assertion in this file would find nothing.
  */
 function runBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`], {
-    env: { ...process.env, HYDRA_REDIS_HOST: "docker", ...env },
+    env: { ...process.env, HYDRA_REDIS_HOST: "docker", HYDRA_REDIS_DB: "0", ...env },
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
