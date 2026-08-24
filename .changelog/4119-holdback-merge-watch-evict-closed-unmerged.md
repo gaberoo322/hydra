@@ -1,0 +1,1 @@
+- fix: merge-watch drops pending-enroll entries whose PR closed without merging instead of re-checking them forever (#4119)

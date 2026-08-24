@@ -31,7 +31,12 @@
  * circuits the re-fire.
  *
  * **A still-open pending PR is left untouched (AC2).** No `mergeCommit` yet →
- * the entry stays in the registry for a later tick.
+ * the entry stays in the registry for a later tick — UNLESS the PR is closed
+ * without merging (issue #4119): that is terminal (it can never land), so the
+ * entry is dropped without firing either follow-up and counted under
+ * `droppedClosed`, not `stillOpen`. Reopen-safe: a closed-evicted PR that is
+ * later reopened and merged is re-armed by the `cycle-merge-reconcile` self-arm
+ * backstop (#2860/#3078) and lands on a subsequent tick.
  *
  * **Never throws (AC5).** Per CLAUDE.md the whole chore is best-effort: a
  * `gh`/API failure for one PR is logged and that entry is left in the registry
@@ -39,8 +44,8 @@
  * a summary object rather than throwing.
  *
  * **Observable (AC6).** After every run it persists a `{ ranAt, pendingDepth,
- * landed, droppedExempt, stillOpen }` health snapshot to Redis via
- * {@link setMergeWatchHealth} so a stalled watcher is diagnosable.
+ * landed, droppedExempt, stillOpen, droppedClosed }` health snapshot to Redis
+ * via {@link setMergeWatchHealth} so a stalled watcher is diagnosable.
  */
 
 import {
@@ -176,6 +181,12 @@ export interface HoldbackMergeWatchResult {
   droppedExempt: number;
   /** Entries left untouched (PR still open / no merge commit). */
   stillOpen: number;
+  /**
+   * Entries dropped because their PR was closed WITHOUT merging (issue #4119) —
+   * terminal, can never land. Distinct from `stillOpen` so the counter stays
+   * "PRs we are genuinely waiting on" and from `droppedExempt` (a landed PR).
+   */
+  droppedClosed: number;
   /** Entries left in place because a step failed (retried next tick). */
   retried: number;
 }
@@ -186,7 +197,8 @@ export interface HoldbackMergeWatchResult {
  * For each pending entry:
  *   - fetch its merge-landing status; a fetch failure logs and leaves the entry
  *     (retried next tick);
- *   - if not landed (no merge commit), leave it (AC2);
+ *   - if not landed (no merge commit): leave it (AC2) — unless the PR is closed
+ *     without merging, which is terminal and drops the entry (#4119);
  *   - if already processed (per-PR marker set), just drop the stale entry;
  *   - otherwise fire `enrollHoldback` (which drops T1/unknown WITHOUT enrolling,
  *     AC4) + the cycle-record enrichment, then mark + remove (AC1/AC3).
@@ -211,6 +223,7 @@ export async function runHoldbackMergeWatch(
     landed: 0,
     droppedExempt: 0,
     stillOpen: 0,
+    droppedClosed: 0,
     retried: 0,
   };
 
@@ -240,13 +253,14 @@ export async function runHoldbackMergeWatch(
 
   await persistHealth(setHealth, result);
 
-  if (result.landed > 0 || result.droppedExempt > 0) {
+  if (result.landed > 0 || result.droppedExempt > 0 || result.droppedClosed > 0) {
     logger.info(
       {
         pending: result.pendingDepth,
         landed: result.landed,
         droppedExempt: result.droppedExempt,
         stillOpen: result.stillOpen,
+        droppedClosed: result.droppedClosed,
         retried: result.retried,
       },
       "merge-watch: pass complete",
@@ -287,8 +301,31 @@ async function processOne(
       return;
     }
 
-    // Not landed yet — no merge commit. Leave the entry untouched (AC2).
+    // Not landed yet — no merge commit. Leave the entry untouched (AC2)…
     if (!status.mergeCommitSha) {
+      // …unless the PR is terminally closed WITHOUT merging (issue #4119): such
+      // a PR can never land, so retaining it burns one `gh pr view` call per
+      // housekeeping tick forever and inflates stillOpen with dead entries.
+      // Guard ordered AFTER the merge check above (a merged PR also reports a
+      // non-open state — the SHA is the landing proof, the state is not) and
+      // compared case-insensitively (gh reports `OPEN`/`CLOSED`/`MERGED`).
+      if ((status.state ?? "").toUpperCase() === "CLOSED") {
+        // Evict WITHOUT firing either merge-coupled follow-up — no landing ever
+        // happened — and WITHOUT setting the enrolled marker: the marker means
+        // "landing processed", and setting it here would make the
+        // cycle-merge-reconcile self-arm backstop (#2860/#3078) skip re-arming
+        // this PR if it were later reopened and merged (the reopen-safety
+        // contract: the cycle record stays `completed`, so a confirmed-merged
+        // reopened PR is re-armed and recovered on a later tick). A failed HDEL
+        // is self-healing — the entry is re-observed and re-evicted next tick.
+        logger.info(
+          { prNumber, state: status.state },
+          "merge-watch: PR closed without merging; dropping pending entry (#4119)",
+        );
+        await ctx.removePending(prNumber);
+        ctx.result.droppedClosed += 1;
+        return;
+      }
       ctx.result.stillOpen += 1;
       return;
     }
@@ -411,6 +448,7 @@ async function persistHealth(
       landed: result.landed,
       droppedExempt: result.droppedExempt,
       stillOpen: result.stillOpen,
+      droppedClosed: result.droppedClosed,
     });
   } catch (err: any) {
     logger.error({ err }, "merge-watch: health persist failed");
