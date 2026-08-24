@@ -151,9 +151,24 @@ after(() => {
   }
 });
 
+// HYDRA_REDIS_DB is pinned to "0" for the same reason as watchdog-launch-flow
+// .test.mts's runBlock() (issue #4183): this suite's own seed/read helper
+// (drc, line ~78) is hardcoded to db 0 with no `-n` selector — that IS db 0,
+// this block's default target. scripts/test/redis-db-launch.mjs exports
+// HYDRA_REDIS_DB into this whole node:test process's env (so a bash-shelled
+// test inherits the run's isolation automatically), so an unpinned
+// `...process.env` here would silently redirect this block's rc_write/rc_read
+// to the launcher's derived per-run DB while drc() kept reading/writing db 0
+// — every seed/assertion in this suite would degrade to "nothing found".
 function runBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_node_modules_integrity`], {
-    env: { ...process.env, HYDRA_REDIS_HOST: "docker", HYDRA_WATCHDOG_NM_NOTIFY_STREAM: TEST_NOTIFY_STREAM, ...env },
+    env: {
+      ...process.env,
+      HYDRA_REDIS_HOST: "docker",
+      HYDRA_REDIS_DB: "0",
+      HYDRA_WATCHDOG_NM_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
+      ...env,
+    },
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
@@ -357,3 +372,175 @@ describe("run_node_modules_integrity — detection + delivery (issue #4175)", { 
     assert.match(nmLines(r.stdout), /root-absent/, "an absent root must be reported distinguishably");
   });
 });
+
+// =============================================================================
+// rc_write/rc_read DB-index selection (issue #4183). This block's rc_write/
+// rc_read pair is a deliberate second COPY of run_launch_flow's (see the
+// bash-side comment above run_node_modules_integrity's rc_write/rc_read) —
+// #4183's original fix only patched run_launch_flow's copy because this
+// function's copy did not exist yet (added by #4191, three days later). This
+// describe closes that gap for the SECOND copy, mirroring the pattern
+// test/watchdog-launch-flow.test.mts uses for the first. Own top-level
+// describe with its own before/beforeEach/after (per this repo's
+// shared-Redis-state authoring rule), sourcing a SEPARATE extracted-block
+// copy rebound onto its OWN key namespace — never the RUN_NS this file's
+// other describes already write on db 0.
+// =============================================================================
+
+describe(
+  "scripts/hydra-watchdog.sh — HYDRA_REDIS_DB threads through node-modules-integrity's rc_write/rc_read (issue #4183)",
+  { skip: !DOCKER },
+  () => {
+    // A DB this describe owns for its own lifetime — distinct from db 0
+    // (production, the fallback-on-invalid/absent-input target) so a leak in
+    // either direction is unambiguous.
+    const SELECTED_DB = "9";
+
+    // Fully separate key namespace from RUN_NS/TEST_NM_PREFIX above — this
+    // describe never touches those keys, on any DB.
+    const OWN_NS = `${RUN_NS}-4183`;
+    const OWN_PREFIX = `${OWN_NS}:nm-integrity`;
+    const OWN_SINCE = (sig: string) => `${OWN_PREFIX}:since:${sig}`;
+    const OWN_FIRED = (sig: string) => `${OWN_PREFIX}:fired:${sig}`;
+
+    const OWN_BLOCK = join(tmpdir(), `hydra-nm-integrity-block-4183-${process.pid}.sh`);
+    const SCRATCH = join(tmpdir(), `hydra-nm-integrity-scratch-4183-${process.pid}`);
+    let wipedRoot: string;
+
+    before(() => {
+      // Mirrors the top-level before()'s extraction + rebind, but onto this
+      // describe's OWN prefix literal instead of TEST_NM_PREFIX — see the
+      // block comment above for why a separate namespace is required.
+      const src = readFileSync(WATCHDOG, "utf-8");
+      const start = src.indexOf("run_node_modules_integrity()");
+      assert.ok(start >= 0, "run_node_modules_integrity() not found in hydra-watchdog.sh");
+      const rest = src.slice(start);
+      const end = rest.search(/^}/m);
+      assert.ok(end >= 0, "run_node_modules_integrity() closing brace not found");
+      const body = rest.slice(0, end + 1);
+      const namespaced = body.split(`"${NM_KEY_PREFIX_LITERAL}"`).join(`"${OWN_PREFIX}"`);
+      assert.ok(
+        namespaced.includes(`"${OWN_PREFIX}"`),
+        "failed to rebind this describe's own key namespace",
+      );
+      writeFileSync(OWN_BLOCK, namespaced);
+    });
+
+    after(() => {
+      try {
+        unlinkSync(OWN_BLOCK);
+      } catch {
+        /* best-effort cleanup */
+      }
+      rmSync(SCRATCH, { recursive: true, force: true });
+      cleanBothDbs();
+    });
+
+    /** One `docker exec … redis-cli -n <db> …` round-trip against an explicit DB. */
+    function drcAt(db: string, args: string[]): string {
+      const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "-n", db, "--raw", ...args], {
+        encoding: "utf-8",
+        timeout: WATCHDOG_REDIS_TIMEOUT_MS,
+      });
+      return (r.stdout ?? "").trim();
+    }
+
+    function existsAt(db: string, key: string): boolean {
+      return drcAt(db, ["EXISTS", key]) === "1";
+    }
+
+    function cleanBothDbs(): void {
+      if (!wipedRoot) return;
+      const sig = sigForRoot(wipedRoot);
+      drcAt("0", ["DEL", OWN_SINCE(sig), OWN_FIRED(sig)]);
+      drcAt(SELECTED_DB, ["DEL", OWN_SINCE(sig), OWN_FIRED(sig)]);
+    }
+
+    beforeEach(() => {
+      rmSync(SCRATCH, { recursive: true, force: true });
+      wipedRoot = join(SCRATCH, "wiped");
+      // "wiped": same measured-incident shape the sibling describe above uses
+      // — no .bin/, below the entry floor — so a real tick fires and calls
+      // rc_write, which is exactly the call site under test here.
+      mkdirSync(wipedRoot, { recursive: true });
+      writeFileSync(join(wipedRoot, "some-leftover-file"), "x");
+      cleanBothDbs();
+    });
+
+    /**
+     * Source THIS describe's own rebound block and call it once.
+     *
+     * Unlike runBlock() above, this deliberately does NOT pin HYDRA_REDIS_DB —
+     * that is exactly the variable under test here. But scripts/test/
+     * redis-db-launch.mjs exports HYDRA_REDIS_DB into the ambient env of this
+     * whole node:test process (issue #4183), so a bare `...process.env` would
+     * make the "unset HYDRA_REDIS_DB" case not actually be unset — it would
+     * inherit the launcher's derived per-run value. Strip it from the base env
+     * first so each call site's own `env` (or its absence) is what the child
+     * actually observes.
+     */
+    function runOwnBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
+      const baseEnv: Record<string, string | undefined> = { ...process.env };
+      delete baseEnv.HYDRA_REDIS_DB;
+      const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${OWN_BLOCK}'; run_node_modules_integrity`], {
+        env: {
+          ...baseEnv,
+          HYDRA_REDIS_HOST: "docker",
+          HYDRA_WATCHDOG_NM_NOTIFY_STREAM: `${OWN_NS}:notifications`,
+          HYDRA_WATCHDOG_NM_ROOTS: wipedRoot,
+          HYDRA_WATCHDOG_NM_ENTRY_FLOOR: "20",
+          ...env,
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+        timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
+      });
+      throwIfTimedOut(r, WATCHDOG_SPAWN_TIMEOUT_MS, "run_node_modules_integrity block (#4183 own-namespace)");
+      return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    }
+
+    test("a bash-side write with HYDRA_REDIS_DB set lands in that DB, never in db 0", () => {
+      const r = runOwnBlock({ HYDRA_REDIS_DB: SELECTED_DB });
+      assert.equal(r.status, 0, `unexpected failure; stderr=${r.stderr}`);
+      assert.match(
+        nmLines(r.stdout),
+        /WARNING NODE_MODULES INTEGRITY/,
+        "precondition: this tick must fire against the wiped root (proves rc_read/rc_write ran)",
+      );
+      const sig = sigForRoot(wipedRoot);
+      assert.equal(
+        existsAt(SELECTED_DB, OWN_FIRED(sig)),
+        true,
+        "fired marker must land in the HYDRA_REDIS_DB-selected DB",
+      );
+      // ...and must NEVER have leaked into production db 0 — the exact seam
+      // #4183 closes (this copy's rc_write/rc_read previously hardcoded db 0
+      // with no `-n`, unpatched by #4183's original fix since #4191 added
+      // this whole function three days after that fix was authored).
+      assert.equal(
+        existsAt("0", OWN_FIRED(sig)),
+        false,
+        "a bash-side write with HYDRA_REDIS_DB set must never land in db 0",
+      );
+    });
+
+    test("non-numeric HYDRA_REDIS_DB falls back to db 0 (byte-identical to pre-#4183 behaviour)", () => {
+      const r = runOwnBlock({ HYDRA_REDIS_DB: "not-a-number" });
+      assert.equal(r.status, 0, `unexpected failure; stderr=${r.stderr}`);
+      assert.match(
+        nmLines(r.stdout),
+        /WARNING NODE_MODULES INTEGRITY/,
+        "a non-numeric HYDRA_REDIS_DB must fall back to db 0 and still fire against the wiped root",
+      );
+      const sig = sigForRoot(wipedRoot);
+      assert.equal(existsAt("0", OWN_FIRED(sig)), true, "fallback DB must be 0 (the documented default)");
+    });
+
+    test("unset HYDRA_REDIS_DB defaults to db 0 (production, unchanged from before #4183)", () => {
+      const r = runOwnBlock({});
+      assert.equal(r.status, 0, `unexpected failure; stderr=${r.stderr}`);
+      const sig = sigForRoot(wipedRoot);
+      assert.equal(existsAt("0", OWN_FIRED(sig)), true, "an unset HYDRA_REDIS_DB must default to db 0");
+    });
+  },
+);
