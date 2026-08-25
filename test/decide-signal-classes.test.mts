@@ -562,6 +562,22 @@ describe("decide.py — design_qa_target signal class (Target visual-QA loop, #2
  *   - Orch-scope by definition: excluded under `target-only` runs via
  *     `SCOPE_TARGET_ONLY_EXCLUDE` (no `retro_target` mirror).
  *
+ * Issue #3871 added a SECOND gate on top of `retro_run_available`: the
+ * precomputed `retro_run_drillable` signal (also from collect-state.sh, via
+ * the SAME candidate run's retro bundle) must also be true, UNLESS the
+ * mandatory weekly override (>=7d dark on retro_orch's own
+ * `signal_last_fired`, or never fired) forces a dispatch through regardless —
+ * see `test/autopilot-decide.test.mts`'s dedicated "retro_orch drillable
+ * gate" suite for that contract. The fixtures below that only care about
+ * OTHER properties (run_id shape, apply-flag, scope/burn suppression,
+ * pipeline-preemption ordering) now set `retro_run_drillable: true`
+ * explicitly, so they exercise the normal dispatch path deliberately rather
+ * than incidentally riding the cold-start weekly-override branch (every
+ * fixture here that never sets `signal_last_fired.retro_orch` is, by
+ * `signal_dark_past_floor`'s "never fired == maximally dark" semantics,
+ * ALSO weekly-override-eligible — asserting `retro_run_drillable: true`
+ * keeps each case pinned to the mechanism its name claims to test).
+ *
  * We exercise decide.py through its `decide` CLI subcommand
  * (`python3 decide.py decide <state> <candidates> <events>`) so the tests
  * also pin the JSON wire contract the playbook prose consumes. Each test
@@ -664,7 +680,10 @@ function findAction(plan: any, predicate: (a: any) => boolean): any | undefined 
 
 describe("decide.py — retro_orch signal class (issue #920)", () => {
   test("retro_orch fires on retro_run_available signal and invokes hydra-retro", () => {
-    const state = baseState({ signals: { retro_run_available: true } });
+    // Issue #3871: also gated on retro_run_drillable — set true here so this
+    // case pins the normal (drillable) dispatch path, not the cold-start
+    // weekly-override coincidence (see file header).
+    const state = baseState({ signals: { retro_run_available: true, retro_run_drillable: true } });
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
     assert.ok(a, "retro_orch must dispatch on retro_run_available");
@@ -676,7 +695,7 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
     // invoked with no argument, so decide.py must NOT thread a run_id —
     // mirroring architecture_orch's argument-free dispatch and avoiding a
     // hard coupling to the run-id resolution path.
-    const state = baseState({ signals: { retro_run_available: true } });
+    const state = baseState({ signals: { retro_run_available: true, retro_run_drillable: true } });
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
     assert.ok(a, "retro_orch dispatch must be present");
@@ -693,7 +712,7 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
     // autopilot forwards `--apply` (the playbook maps `apply=true` →
     // `--apply`). This pins the emit-mode contract — without it the retro
     // signal class's entire purpose (≤2 issues + ≤1 gated PR/run) never fires.
-    const state = baseState({ signals: { retro_run_available: true } });
+    const state = baseState({ signals: { retro_run_available: true, retro_run_drillable: true } });
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
     assert.ok(a, "retro_orch dispatch must be present");
@@ -731,7 +750,7 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
   test("retro_orch is allowed under orch-only scope", () => {
     const state = baseState({
       scope: "orch-only",
-      signals: { retro_run_available: true },
+      signals: { retro_run_available: true, retro_run_drillable: true },
     });
     const plan = runDecide(state, null);
     assert.ok(
@@ -758,7 +777,12 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
   test("retro_orch fires after 24h cooldown elapses", () => {
     const now = Math.floor(Date.now() / 1000);
     const state = baseState({
-      signals: { retro_run_available: true },
+      // Issue #3871: 25h dark is past the 24h cooldown but short of the 7d
+      // weekly-override floor, so retro_run_drillable must be explicitly
+      // true here — otherwise this case would (correctly, per correction
+      // (a)) skip, which is a DIFFERENT behaviour than the cooldown this
+      // test exists to pin.
+      signals: { retro_run_available: true, retro_run_drillable: true },
       // 25h ago → past the 24h cooldown.
       signal_last_fired: { retro_orch: now - 25 * 60 * 60 } as any,
     });
@@ -775,7 +799,7 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
     // dev_orch dispatch still appears. retro_orch is the lowest-priority
     // signal class and rides alongside — it never displaces pipeline work.
     const state = baseState({
-      signals: { orch_work_available: true, retro_run_available: true },
+      signals: { orch_work_available: true, retro_run_available: true, retro_run_drillable: true },
     });
     const plan = runDecide(state, null);
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");

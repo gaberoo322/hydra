@@ -1376,7 +1376,8 @@ else
   echo "design_qa_target_due=false"
 fi
 
-# Per-run retrospective — daily trigger (issue #920, epic #917).
+# Per-run retrospective — daily trigger (issue #920, epic #917) + the
+# drillable pre-check (issue #3871).
 #
 # `retro_run_available` is true when at least one COMPLETED autopilot run
 # exists to analyse. The autopilot promotes it into
@@ -1392,22 +1393,101 @@ fi
 # writer flips it to ended/killed/completed on clean exit or read-time
 # sweep — see src/autopilot/runs.ts term_reason handling). We read the runs
 # index (`/api/autopilot/runs`, the same digest the dashboard consumes) and
-# count terminal runs. This is read-only — no Redis writes, no cursor
-# advance; the retro skill itself resolves and stamps the run it analyses.
-# Orchestrator-down / empty-index degrades to `false` (nothing to retro),
-# which suppresses the dispatch — the safe default.
+# scan for the first (most-recent, since the index is newest-first) terminal
+# run. This is read-only — no Redis writes, no cursor advance; the retro
+# skill itself resolves and stamps the run it analyses. Orchestrator-down /
+# empty-index degrades to `false` (nothing to retro), which suppresses the
+# dispatch — the safe default.
+#
+# Issue #3871: a clean candidate run (its retro bundle's
+# reflections/stuckSignals/recommendations all empty and no dispatch flagged
+# for drill) used to cost the SAME ~115k-token retro_orch dispatch as a run
+# with real findings — a standing ~800k/week no-op whenever runs are healthy.
+# `retro_run_drillable` answers "is there anything to drill into?" for one
+# extra HTTP GET (the retro-bundle fetch, `GET /autopilot/runs/:runId/retro`,
+# #918 — the same bundle hydra-retro itself assembles) instead of a full
+# dispatch. decide.py's `retro_orch` reads it verbatim (never recomputes
+# bundle state) — the same signal-seam discipline as every other precomputed
+# signal in this file.
+#
+# Both signals are derived from ONE `hydra raw GET /autopilot/runs?limit=14`
+# call: the python reducer below finds the same first-terminal-run entry
+# `retro_run_available` needs AND captures its `run_id`, so the drillable
+# check's bundle fetch is the ONLY additional round-trip per turn — not a
+# second independent runs-index fetch (design-concept issue-3871 INV-4/INV-6).
+#
+# Correction (c) (operator grilling, 2026-08-19): `retro_run_drillable`'s
+# failure mode is the OPPOSITE of `retro_run_available`'s. `retro_run_available`
+# degrades to `false` on an unreachable orchestrator — "nothing to retro" is
+# the safe default there. But degrading `retro_run_drillable` to `false` on a
+# failed/empty/unparseable bundle fetch (or a successfully-parsed bundle whose
+# `runFound` is not true) would let a transient API miss look identical to
+# "genuinely nothing to drill", silently disabling the learning loop while
+# every log line still reads "clean run, nothing to do" — the fabricated-
+# certainty failure mode #4128 documents. So every failure path below emits
+# `true` (fail toward doing the work; a wasted dispatch is recoverable, a
+# silently dark retro loop is not) — the ONLY `false` is a successfully
+# parsed, run-found bundle whose dispatches/reflections/stuckSignals/
+# recommendations are ALL empty.
 echo -n "retro_run_available="
-hydra raw GET /autopilot/runs?limit=14 2>/dev/null | python3 -c "$(cat <<'PY'
+_retro_avail_and_id=$(hydra raw GET /autopilot/runs?limit=14 2>/dev/null | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin)
   runs=d.get('runs',[]) if isinstance(d,dict) else []
-  completed=[r for r in runs if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running')]
-  print('true' if completed else 'false')
+  target=None
+  for r in runs:
+    if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running'):
+      target=r
+      break
+  if target is not None:
+    print('true')
+    print(str(target.get('run_id') or ''))
+  else:
+    print('false')
+    print('')
 except Exception:
   print('false')
+  print('')
 PY
-)" || echo "false"
+)" || printf 'false\n\n')
+_retro_available=$(printf '%s\n' "$_retro_avail_and_id" | sed -n '1p')
+_retro_target_run_id=$(printf '%s\n' "$_retro_avail_and_id" | sed -n '2p')
+[ "$_retro_available" = "true" ] || _retro_available="false"
+echo "$_retro_available"
+
+echo -n "retro_run_drillable="
+if [ "$_retro_available" != "true" ] || [ -z "$_retro_target_run_id" ]; then
+  # No completed run to analyse — retro_run_available is already false in
+  # this case, so decide.py never reads this signal; emit the safe no-op.
+  echo "false"
+else
+  _retro_drill_id_enc=$(printf '%s' "$_retro_target_run_id" | jq -sRr @uri)
+  _retro_drill_bundle=$(curl -sf --max-time 5 "http://localhost:4000/api/autopilot/runs/${_retro_drill_id_enc}/retro" 2>/dev/null || true)
+  if [ -z "$_retro_drill_bundle" ]; then
+    echo "true"
+  else
+    printf '%s' "$_retro_drill_bundle" | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d=json.load(sys.stdin)
+  if not isinstance(d, dict) or not d.get('runFound', False):
+    # Unreadable run (bundle assembler couldn't even load the run record) —
+    # degrade to drillable per correction (c).
+    print('true')
+  else:
+    dispatches=d.get('dispatches',[]) or []
+    any_flagged=any(isinstance(x,dict) and x.get('flagged') for x in dispatches)
+    reflections=d.get('reflections',[]) or []
+    stuck=d.get('stuckSignals',[]) or []
+    recs=d.get('recommendations',[]) or []
+    print('true' if (any_flagged or reflections or stuck or recs) else 'false')
+except Exception:
+  print('true')
+PY
+)" || echo "true"
+  fi
+fi
 
 # Wayfinder map frontier — AFK working path (issue #3351, epic #3350, ADR-0029).
 #

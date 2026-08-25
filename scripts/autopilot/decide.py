@@ -439,6 +439,23 @@ BACKFILL_STARVATION_FLOOR_SEC = 24 * 60 * 60
 # follow-up, not a rewrite.
 DISCOVER_STALENESS_FLOOR_SEC = 7 * 24 * 60 * 60
 
+# retro_orch mandatory periodic override (issue #3871 correction (b)). The
+# cheap `retro_run_drillable` bundle pre-check (collect-state.sh) suppresses a
+# ~115k-token retro dispatch on a clean run, but the ENTIRE saving rests on
+# that predicate being correct. If it breaks silently — a renamed bundle
+# field, a flag that stops being set — the loop goes dark with NO signal,
+# because "filed no findings" and "was never dispatched" are indistinguishable
+# from outside. This floor forces a real retro at least once a week
+# regardless of `retro_run_drillable`, converting a silent predicate bug into
+# an observable one (~115k/week against the ~800k/week the pre-check saves).
+# Reuses `signal_dark_past_floor`'s "never fired == maximally dark" semantics
+# (the #4114 discover_orch precedent) deliberately: a retro_orch class that
+# has NEVER fired is exactly the dark state this floor exists to break, not a
+# cold-start case to protect (contrast BACKFILL_STARVATION_FLOOR_SEC /
+# signal_starved, which is an intra-turn stagger override with the opposite
+# unseen-class convention).
+RETRO_ORCH_WEEKLY_OVERRIDE_SEC = 7 * 24 * 60 * 60
+
 # Per-item verdict-stability backoff for sweep_target (issue #3729). A FIXED
 # (not exponential, not class-wide) window: each Target needs-triage item carries
 # its OWN independent clock in `state.target_triage_item_stamps`. An item is
@@ -4067,12 +4084,55 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # autopilot forward `--apply` (the playbook maps `apply=true` →
         # `--apply`), so the headless retro emits. `--audit` remains the
         # explicit opt-in for a manual operator inspection run.
-        if _signal_present(state, events, "retro_run_available"):
+        #
+        # Issue #3871: a clean run (reflections/stuckSignals/recommendations
+        # all empty and every dispatch unflagged) costs the SAME ~115k-token
+        # dispatch as a run with real findings to synthesize — a standing
+        # ~800k/week no-op whenever runs are healthy. `retro_run_drillable`
+        # (also precomputed by collect-state.sh, from the SAME run's retro
+        # bundle) answers "is there anything to drill into?" for one HTTP GET
+        # instead of a full dispatch, and gates the dispatch on it.
+        #
+        # Correction (a) (operator grilling, 2026-08-19): a skip (available
+        # AND NOT drillable) must NOT stamp the cooldown — returning None here
+        # does exactly that for free, since `signal_last_fired["retro_orch"]`
+        # is stamped by the dispatcher on an ACTUAL dispatch (reap.py's
+        # `run_completion`, "the signal cooldown ... is stamped by the
+        # dispatcher, not here"), never by decide.py itself. Stamping on skip
+        # would let a clean run's cooldown suppress a DIFFERENT run that
+        # completes with real findings an hour later — by the time the 24h
+        # cooldown clears, that run is no longer the most-recent one and may
+        # never be retro'd at all. Skipping without dispatching means skipping
+        # without stamping, automatically.
+        #
+        # Correction (b): the mandatory weekly override
+        # (RETRO_ORCH_WEEKLY_OVERRIDE_SEC, defined above) forces a real retro
+        # regardless of `retro_run_drillable` once 7 days have passed since
+        # the last ACTUAL retro_orch dispatch (or if it has never fired —
+        # `signal_dark_past_floor`'s "never fired == maximally dark"
+        # semantics, the #4114 discover_orch precedent) — see the constant's
+        # comment for the full rationale. This can never fire before the 24h
+        # `signal_is_cooled` gate at the top of this function has already
+        # cleared, since 7d > 24h.
+        if not _signal_present(state, events, "retro_run_available"):
+            return None
+        if _signal_present(state, events, "retro_run_drillable"):
             return make_dispatch(
                 sig,
                 "hydra-retro",
                 prompt_args={"apply": True},
-                reason="completed run available — daily retrospective",
+                reason="completed run available and drillable — daily retrospective",
+            )
+        if signal_dark_past_floor(state, sig, now, RETRO_ORCH_WEEKLY_OVERRIDE_SEC):
+            return make_dispatch(
+                sig,
+                "hydra-retro",
+                prompt_args={"apply": True},
+                reason=(
+                    f"retro_orch weekly override (>{RETRO_ORCH_WEEKLY_OVERRIDE_SEC // (24 * 60 * 60)}d"
+                    " dark since last fire): forcing a real retro despite retro_run_drillable=false"
+                    " (#3871 correction (b) — a silent predicate bug must stay observable)"
+                ),
             )
         return None
     if sig == "cleanup_orch":

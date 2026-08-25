@@ -1567,6 +1567,146 @@ describe("decide.py — architecture_orch signal class (issue #790, #959)", () =
 });
 
 // ---------------------------------------------------------------------------
+// 7b2. retro_orch drillable pre-check (issue #3871)
+// ---------------------------------------------------------------------------
+//
+// A clean run (bundle's reflections/stuckSignals/recommendations all empty
+// and no dispatch flagged for drill) used to cost the SAME ~115k-token
+// retro_orch dispatch as a run with real findings — a standing ~800k/week
+// no-op whenever runs are healthy. collect-state.sh now precomputes a second
+// signal, `retro_run_drillable`, from the SAME run's retro bundle
+// (`GET /autopilot/runs/:runId/retro`); decide.py gates the dispatch on it,
+// with two corrections from operator grilling (2026-08-19):
+//   (a) a skip (available AND NOT drillable) must NOT stamp the cooldown —
+//       decide.py never calls stamp_signal itself (the dispatcher does, only
+//       on an ACTUAL dispatch), so returning None already satisfies this for
+//       free; pinned here as a state-file writeback assertion.
+//   (b) a MANDATORY weekly override forces a real retro regardless of
+//       `retro_run_drillable` once 7 days have passed since retro_orch last
+//       actually fired (or if it has never fired at all — reusing
+//       `signal_dark_past_floor`'s "never fired == maximally dark"
+//       semantics), so a broken drillability predicate degrades to a
+//       ~115k/week cost instead of a silently dark learning loop forever.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — retro_orch drillable gate (issue #3871)", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const DAY = 24 * 60 * 60;
+
+  test("dispatches hydra-retro when available AND drillable (unchanged from pre-#3871 behaviour)", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: true },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
+    assert.ok(a, "retro_orch must dispatch when available and drillable");
+    assert.equal(a.skill, "hydra-retro");
+    assert.equal(a.prompt_args?.apply, true, "apply:true must still be threaded (issue #1078)");
+  });
+
+  test("does NOT dispatch when available but NOT drillable (skip)", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      // Past the 24h class cooldown so the skip isn't confounded with a
+      // still-cooling class, but well inside the 7d weekly-override floor so
+      // that mandatory override does not also fire this turn (isolates the
+      // drillable=false skip from correction (b), tested separately below).
+      signal_last_fired: { retro_orch: now - 2 * DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
+      undefined,
+      "a clean (non-drillable) run must not pay for a retro dispatch",
+    );
+  });
+
+  test("a skip does NOT stamp signal_last_fired.retro_orch (correction (a))", () => {
+    const t = makeTmp();
+    try {
+      const seeded = baseState({
+        signals: { retro_run_available: true, retro_run_drillable: false },
+        signal_last_fired: { retro_orch: now - 2 * DAY } as any,
+      });
+      writeFileSync(t.state, JSON.stringify(seeded));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const before = JSON.parse(readFileSync(t.state, "utf-8"));
+      const plan = runDecideOnFiles(t);
+      assert.equal(
+        findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
+        undefined,
+      );
+      const after = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(
+        after,
+        { ...before, turn: before.turn + 1 },
+        "the persisted state must differ from the input by EXACTLY the #1769 turn bump — " +
+          "signal_last_fired.retro_orch must be BYTE-IDENTICAL to its pre-skip value",
+      );
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does NOT dispatch when retro_run_available is false, regardless of drillable", () => {
+    const state = baseState({
+      signals: { retro_run_available: false, retro_run_drillable: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
+      undefined,
+      "no completed run to analyse must suppress the dispatch even if drillable were (incorrectly) true",
+    );
+  });
+
+  test("the mandatory weekly override forces a dispatch when drillable=false but retro_orch is >7d dark (correction (b))", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      // 8 days since retro_orch last fired — past the 7d weekly floor.
+      signal_last_fired: { retro_orch: now - 8 * DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
+    assert.ok(a, "a >7d-dark retro_orch must force-dispatch even when the current run is not drillable");
+    assert.equal(a.skill, "hydra-retro");
+    assert.equal(a.prompt_args?.apply, true);
+    assert.match(String(a.reason ?? ""), /weekly override/i);
+  });
+
+  test("the weekly override does NOT fire before the 7d floor elapses (still just a skip)", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      // 6 days dark: past the 24h cooldown, short of the 7d floor.
+      signal_last_fired: { retro_orch: now - 6 * DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
+      undefined,
+      "6 days dark must not yet trip the 7d mandatory-override floor",
+    );
+  });
+
+  test("a NEVER-fired retro_orch class is treated as maximally dark — forces through even when not drillable", () => {
+    // No signal_last_fired.retro_orch entry at all (fresh bootstrap). Mirrors
+    // discover_orch's #4114 `signal_dark_past_floor` precedent: "never fired"
+    // is the dark state the floor exists to break, not a cold-start case to
+    // protect (contrast BACKFILL_STARVATION_FLOOR_SEC / signal_starved).
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: {} as any,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
+      "an unseen retro_orch class must force-dispatch via the weekly override rather than staying dark forever",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7c. Board-idle backfill set: discover_orch revival + one-per-turn stagger
 //     (issue #959, epic #958)
 // ---------------------------------------------------------------------------

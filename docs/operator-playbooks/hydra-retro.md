@@ -21,6 +21,35 @@ signals-first read, the synthesis, and the `gh`/git emit.
 > runs under `--apply`. Without `--apply` the skill prints the emit plan and
 > stops.
 
+## 0. When autopilot dispatches this skill (issue #3871)
+
+A full `retro_orch` dispatch costs ~115k tokens whether the underlying run was
+clean or not — and a clean run (empty `reflections`/`stuckSignals`/
+`recommendations`, no dispatch flagged for drill) still synthesises zero
+findings, so the whole dispatch is a paid no-op. At the daily cadence that is a
+standing ~800k/week cost whenever runs are healthy — the goal state.
+
+`hydra-autopilot`'s `collect-state.sh` runs a **cheap bundle pre-check** ahead
+of the dispatch, on the signal seam: it fetches the SAME candidate run's retro
+bundle this skill would assemble in step 2 and emits `retro_run_drillable` —
+`true` iff any dispatch is flagged for drill OR `reflections` /
+`stuckSignals` / `recommendations` is non-empty. `decide.py`'s `retro_orch`
+class fires only when `retro_run_available` **AND** `retro_run_drillable` — a
+skip costs one extra HTTP GET, not a subagent session, and does **not** stamp
+the 24h class cooldown (a clean run's skip must never suppress a *different*
+run that completes with real findings an hour later).
+
+Two things this skill's own behaviour does NOT change: the pre-check is
+autopilot-side only, so a manually-invoked `/hydra-retro [run_id]` still runs
+unconditionally regardless of drillability. And a **mandatory weekly
+override** forces a real dispatch at least once every 7 days even when
+`retro_run_drillable` is false — the entire saving above rests on that
+predicate staying correct, and a silently broken predicate (a renamed bundle
+field, a flag that stops being set) would otherwise look identical to "clean
+runs all week" from outside. The forced weekly dispatch costs ~115k against
+the ~800k/week the pre-check saves, and is the only thing that turns a silent
+predicate bug into an observable one.
+
 ## 1. Resolve the run id
 
 `/hydra-retro [run_id]` — argument is optional. Parse via the pure helper so
