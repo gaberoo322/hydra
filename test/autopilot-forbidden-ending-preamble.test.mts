@@ -95,3 +95,48 @@ describe("autopilot forbidden-ending preamble — flat Agent-tool ban (#4109)", 
     );
   });
 });
+
+describe("autopilot forbidden-ending preamble — third evasion route: backgrounded Bash + armed Monitor (#4158)", () => {
+  const playbook = readFileSync(PLAYBOOK, "utf8");
+  const preamble = neverEndWaitingPreamble(playbook);
+
+  test("the preamble generalises the ban beyond the Agent tool to any outstanding asynchronous work", () => {
+    assert.match(
+      preamble,
+      /ENDING THE TURN WITH ANY ASYNCHRONOUS WORK OUTSTANDING, not only\s+the Agent tool/,
+      "the preamble must state the ban is not scoped to the Agent tool alone (issue #4158) — a backgrounded Bash process and an armed Monitor are a third, un-closed evasion route (#4052/#4109 closed only Agent-tool routes).",
+    );
+  });
+
+  test("the preamble explicitly forbids ending the turn on a backgrounded Bash process", () => {
+    assert.match(
+      preamble,
+      /Do NOT background a Bash process \(e\.g\. `npm test`\) and end your\s+turn to "wait for it to finish"/,
+      "the preamble must name backgrounded Bash explicitly, in text, not by implication (issue #4158) — run 54dc0756 backgrounded `npm test` and ended its turn believing that satisfied the general 'poll in the FOREGROUND' sentence.",
+    );
+  });
+
+  test("the preamble explicitly forbids ending the turn on an armed Monitor", () => {
+    assert.match(
+      preamble,
+      /do NOT arm a Monitor and end your turn\s+expecting its notification to resume you/,
+      "the preamble must name Monitor explicitly, in text, not by implication (issue #4158) — a Monitor no more keeps a print-mode dispatch alive than a background child does, and reap.py records the session as complete the instant it goes quiet regardless of what is armed.",
+    );
+  });
+
+  test("the preamble instructs committing and pushing before running verification", () => {
+    assert.match(
+      preamble,
+      /Commit and push BEFORE running verification/,
+      "the preamble must instruct commit-and-push-before-verifying, in text (issue #4158) — the #4158 incident left ~10 minutes of correct implementation uncommitted, minutes from the hourly worktree-orphan-prune destroying it; a pushed branch degrades an interrupted dispatch to 'resumable' instead of 'total loss'.",
+    );
+  });
+
+  test("the flat Agent-tool ban from #4109 is unweakened by the #4158 generalisation", () => {
+    assert.match(
+      preamble,
+      /Do NOT use the Agent tool at all\. Search with Grep\/Glob\/Read yourself, inline, in THIS session\. There is no sub-agent that keeps you alive\./,
+      "the #4158 additions must not soften or replace the existing flat Agent-tool ban — they extend the same invariant to non-Agent-tool routes (per #4158's explicit instruction: 'the flat Agent-tool ban stays as-is; do not weaken it').",
+    );
+  });
+});

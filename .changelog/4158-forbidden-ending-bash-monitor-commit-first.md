@@ -1,0 +1,1 @@
+- fix: close a third dev_orch/qa_orch forbidden-ending evasion route (backgrounded Bash + armed Monitor) and require commit-and-push before verification (#4158)

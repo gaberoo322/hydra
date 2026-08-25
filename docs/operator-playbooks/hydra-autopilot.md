@@ -548,6 +548,20 @@ end your turn waiting on it — a background child does not keep you alive, and
 reap.py will record your session as a completion with no PR the moment you go
 quiet. Do NOT use the Agent tool at all. Search with Grep/Glob/Read yourself,
 inline, in THIS session. There is no sub-agent that keeps you alive.
+
+The ban covers ENDING THE TURN WITH ANY ASYNCHRONOUS WORK OUTSTANDING, not only
+the Agent tool. Do NOT background a Bash process (e.g. `npm test`) and end your
+turn to "wait for it to finish", and do NOT arm a Monitor and end your turn
+expecting its notification to resume you — a backgrounded Bash process and an
+armed Monitor keep a print-mode dispatch alive no more than a background child
+does. `reap.py` records your session as complete the instant you go quiet,
+whatever is still running or armed.
+
+Commit and push BEFORE running verification. The moment the implementation is
+structurally complete — it compiles, the change is whole — `git commit` and
+`git push` before `npm test` / `npm run typecheck` / any CI wait. That way an
+interrupted dispatch degrades to an unmerged PR the next tick can resume,
+instead of uncommitted work the hourly worktree-orphan-prune destroys.
 ```
 
 The delegation clause above closes a route the original wording missed (issue
