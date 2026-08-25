@@ -1,0 +1,1 @@
+- fix: close the backgrounded-Bash/armed-Monitor route around the dev_orch/qa_orch forbidden-ending rule, and require commit-and-push before verification (#4158)
