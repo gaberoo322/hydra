@@ -1,0 +1,1 @@
+- fix: `pace-gate.sh`'s `record_tick()` now honors `HYDRA_REDIS_DB` (`-n` on both redis-cli branches, defaulting to db 0), so a test-run write can no longer land on production Redis db 0 (#4210)
