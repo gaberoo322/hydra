@@ -55,7 +55,10 @@
 #     captured once at THIS SCRIPT's first run, per the design-concept's own
 #     wording ("bootstrapped ... on first run if absent") — a practical
 #     bootstrap timing for a comparison point, independent of the window
-#     clock above.
+#     clock above. The capture MOMENT is recorded explicitly as capturedAt
+#     (equal to day0 at bootstrap); readers fall back to day0 for baseline
+#     files that predate the field (issue #4122) — day0 alone must not carry
+#     this meaning because it is documented as a fallback window anchor.
 #
 # Metrics (definitions pinned by the approved design-concept artifact):
 #   - Window progress: elapsed days since the window day-0 (earliest
@@ -77,7 +80,13 @@
 #     baseline.json at bootstrap alongside the percent it qualifies. When
 #     either reading's window position is missing (a legacy pre-#4049
 #     baseline.json) or younger than MIN_DAYS_INTO_WINDOW, the report prints
-#     "not comparable" instead of a figure. This script deliberately never
+#     "not comparable" instead of a figure. PROVENANCE (issue #4122): the
+#     metric additionally requires the baseline to predate the GLM era — a
+#     baseline captured at/after the era's day-0 (earliest glm-authored PR)
+#     has BOTH sides GLM-era, so relief prints "not comparable (baseline
+#     captured <N>d into the GLM era ...)" and no figure is ever computed
+#     from a contaminated baseline, however mature either window position is.
+#     This script deliberately never
 #     reads or reports the CLI's per-run USD-cost field for GLM runs — the
 #     CLI prices GLM tokens against the Anthropic price table, which is
 #     meaningless for z.ai's flat-rate plan (ADR-0032 #3758 amendment);
@@ -255,16 +264,45 @@ relief_rate() {
 }
 
 # relief_figure <baseline_percent> <baseline_days|empty|"null"> \
-#               <current_percent> <current_days|empty> <min_days>
+#               <current_percent> <current_days|empty> <min_days> \
+#               <baseline_capture_epoch|empty> <glm_era_day0_epoch|empty>
 #   -> the corrected quota-relief figure for the report line and the
-#      recommendation string (issue #4049):
+#      recommendation string (issue #4049, provenance guard #4122):
 #        "rate 26.9 -> 15.0 %/day (-44% daily use)"
 #        "not comparable (<reason>)"
 #      NEVER a raw subtraction of the two percent readings — their weekly
 #      window phases differ. Percent change is computed from the displayed
 #      1dp rates so the printed arithmetic is self-consistent.
+#      PROVENANCE FIRST (issue #4122): percentLast7d relief asks "did routing
+#      dev work to the GLM drainer relieve Anthropic quota?", so the baseline
+#      side must predate the GLM era. A baseline captured at or after the
+#      era's day-0 (earliest glm-authored PR) has BOTH sides GLM-era — any
+#      figure it yields measures week-to-week variance, not GLM's effect.
+#      Contamination never expires as the window advances, so it is checked
+#      before every window-position guard: a contaminated baseline must never
+#      surface a window-position reason, which would imply the figure turns
+#      valid once the window matures. Empty epoch inputs (capture moment
+#      unknowable, or no glm-authored PRs yet to anchor the era) skip the
+#      guard — absence of evidence is not contamination. The five-arg call
+#      shape predating #4122 therefore behaves exactly as before.
 relief_figure() {
   local bp="${1:-}" bd="${2:-}" cp="${3:-}" cd="${4:-}" min="${5:-}"
+  local cap="${6:-}" era="${7:-}"
+  if [[ -n "$cap" && -n "$era" ]]; then
+    # Prints the days-into-era (2dp) only when the baseline is contaminated
+    # (capture at/after the era day-0); empty output means "not contaminated
+    # or not evaluable" and falls through to the guards below.
+    local era_days
+    era_days=$(awk -v c="$cap" -v d="$era" 'BEGIN{
+      if (c !~ /^[0-9]+$/ || d !~ /^[0-9]+$/) { exit 1 }
+      if (c+0 < d+0) { exit 1 }
+      printf "%.2f", (c-d)/86400
+    }')
+    if [[ -n "$era_days" ]]; then
+      echo "not comparable (baseline captured ${era_days}d into the GLM era — both sides are GLM-era)"
+      return 0
+    fi
+  fi
   if [[ -z "$bp" || "$bp" == "null" ]]; then
     echo "not comparable (no baseline percentLast7d snapshot)"
     return 0
@@ -468,21 +506,30 @@ fetch_glm_authored_prs() {
   printf '%s\n' "$union"
 }
 
+# glm_era_day0_epoch <rows_json> -> the earliest glm-authored PR's createdAt
+# as an epoch; "" when there are no such PRs yet or the earliest createdAt is
+# unparseable. Deliberately NO fallback, unlike window_day0_epoch_from_rows
+# below: this is the PROVENANCE anchor for relief_figure (issue #4122), and
+# the window clock's fallback is the baseline's own bootstrap moment — which
+# equals the capture moment under test and so could never witness
+# contamination. Zero glm-authored PRs also genuinely means the GLM era has
+# not started; the empty return makes relief_figure skip the guard, because a
+# baseline captured before any GLM output exists is pre-GLM by definition.
+glm_era_day0_epoch() { # <rows_json>
+  local rows="$1"
+  local earliest_iso
+  earliest_iso=$(jq -r '[.[].createdAt] | sort | .[0] // ""' <<<"$rows" 2>/dev/null)
+  iso_to_epoch "$earliest_iso"
+}
+
 # window_day0_epoch_from_rows <rows_json> <fallback_epoch> -> the earliest
 # glm-authored PR's createdAt as an epoch, or <fallback_epoch> when rows is
 # empty (nothing to anchor on yet — see the file header's two-anchors note).
-window_day0_epoch_from_rows() {
-  local rows="$1" fallback_epoch="$2"
-  local earliest_iso
-  earliest_iso=$(jq -r '[.[].createdAt] | sort | .[0] // ""' <<<"$rows" 2>/dev/null)
-  if [[ -z "$earliest_iso" ]]; then
-    echo "$fallback_epoch"
-    return 0
-  fi
+window_day0_epoch_from_rows() { # <rows_json> <fallback_epoch>
   local epoch
-  epoch=$(iso_to_epoch "$earliest_iso")
+  epoch=$(glm_era_day0_epoch "$1")
   if [[ -z "$epoch" ]]; then
-    echo "$fallback_epoch"
+    echo "$2"
   else
     echo "$epoch"
   fi
@@ -570,11 +617,12 @@ bootstrap_or_load_baseline() {
 
   jq -n \
     --arg day0 "$day0_iso" \
+    --arg capturedAt "$day0_iso" \
     --argjson percent "$percent_json" \
     --arg anchor "$anchor" \
     --argjson churnAvg "$churn_json" \
     --argjson churnN "${churn_n:-0}" \
-    '{day0: $day0, percentLast7dBaseline: $percent, weeklyResetAnchorBaseline: (if $anchor == "" then null else $anchor end), churnBaseline: $churnAvg, churnSampleSize: $churnN}' \
+    '{day0: $day0, capturedAt: $capturedAt, percentLast7dBaseline: $percent, weeklyResetAnchorBaseline: (if $anchor == "" then null else $anchor end), churnBaseline: $churnAvg, churnSampleSize: $churnN}' \
     > "$BASELINE_FILE"
   cat "$BASELINE_FILE"
 }
@@ -610,9 +658,15 @@ main() {
   # this an empty string and the relief figure degrades to "not comparable"
   # below — never a crash, never a phase-blind subtraction.
   baseline_anchor_iso=$(jq -r '.weeklyResetAnchorBaseline // ""' <<<"$baseline_json" 2>/dev/null)
-  if [[ -n "$baseline_percent" && "$baseline_percent" != "null" && -z "$baseline_anchor_iso" ]]; then
-    log "baseline has a percent snapshot but no weeklyResetAnchorBaseline (pre-#4049 bootstrap) -- delete $BASELINE_FILE by hand to re-bootstrap with window position; relief stays 'not comparable' until then"
-  fi
+  # The baseline snapshot's capture moment (issue #4122): capturedAt when the
+  # file records it, else its day0 — a bootstrap writes both as the same
+  # instant, so operator state predating the capturedAt field keeps working
+  # untouched. Kept DISTINCT from baseline_day0_epoch (which stays the window
+  # clock's fallback) because day0 is documented as a fallback window anchor;
+  # conflating the two is how a re-bootstrap taken 21 days into the GLM era
+  # could pose as a pre-GLM reading.
+  local baseline_captured_epoch
+  baseline_captured_epoch=$(iso_to_epoch "$(jq -r '.capturedAt // .day0 // ""' <<<"$baseline_json" 2>/dev/null)")
 
   local snapshot current_percent current_anchor_iso
   snapshot="$(fetch_usage_snapshot)"
@@ -621,15 +675,14 @@ main() {
 
   # Window-relative quota relief (issue #4049): each reading's days-into-window
   # is printed so the phase is VISIBLE, and the figure itself compares
-  # %/day rates, never the raw percents.
+  # %/day rates, never the raw percents. The baseline reading's moment is its
+  # CAPTURE moment (issue #4122), not the window clock's fallback anchor.
   local baseline_anchor_epoch current_anchor_epoch
   baseline_anchor_epoch=$(iso_to_epoch "$baseline_anchor_iso")
   current_anchor_epoch=$(iso_to_epoch "$current_anchor_iso")
   local baseline_days current_days
-  baseline_days=$(days_into_window "$baseline_day0_epoch" "$baseline_anchor_epoch")
+  baseline_days=$(days_into_window "$baseline_captured_epoch" "$baseline_anchor_epoch")
   current_days=$(days_into_window "$NOW_EPOCH" "$current_anchor_epoch")
-  local relief_text
-  relief_text=$(relief_figure "$baseline_percent" "$baseline_days" "$current_percent" "$current_days" "$MIN_DAYS_INTO_WINDOW")
 
   local rows
   rows="$(fetch_glm_authored_prs)" || {
@@ -653,6 +706,36 @@ main() {
   local pr_count_total
   pr_count_total=$(jq -r 'length' <<<"$rows" 2>/dev/null || echo 0)
 
+  # Window clock: anchored to the earliest glm-authored PR, NOT the baseline
+  # bootstrap moment above (see the file header's two-anchors note).
+  local window_day0_epoch days_elapsed
+  window_day0_epoch=$(window_day0_epoch_from_rows "$rows" "$baseline_day0_epoch")
+  days_elapsed=$(elapsed_days "$window_day0_epoch" "$NOW_EPOCH")
+
+  # PR-derived GLM-era day-0, with NO fallback (see glm_era_day0_epoch's
+  # comment): the provenance anchor for the relief figure below.
+  local era_day0_epoch
+  era_day0_epoch=$(glm_era_day0_epoch "$rows")
+
+  # Pre-#4049 legacy warning (issue #4122's original filing; the re-scoped
+  # fix keeps it honest): fires when a percent exists but the window phase it
+  # was read in does not. It no longer advises deleting the file as an
+  # unqualified fix — a valid relief figure requires a pre-GLM-era
+  # percentLast7d snapshot, and once "now" is at/after the window day-0 a
+  # re-bootstrap lands inside the GLM era, so the provenance guard below
+  # keeps relief "not comparable" anyway. The file itself is operator-owned
+  # state (2026-08-17 ruling: keep it, measure prospectively via #4123).
+  if [[ -n "$baseline_percent" && "$baseline_percent" != "null" && -z "$baseline_anchor_iso" ]]; then
+    local rebootstrap_note=""
+    if awk -v n="$NOW_EPOCH" -v d="$window_day0_epoch" 'BEGIN{ if (n !~ /^[0-9]+$/ || d !~ /^[0-9]+$/) exit 1; exit !(n+0 >= d+0) }'; then
+      rebootstrap_note="; re-bootstrapping today cannot produce an attributable pre-GLM baseline (a snapshot taken now is already inside the GLM era)"
+    fi
+    log "baseline has a percent snapshot but no weeklyResetAnchorBaseline (pre-#4049 bootstrap) -- relief stays 'not comparable'; a valid figure requires a pre-GLM-era percentLast7d snapshot${rebootstrap_note}; do not delete $BASELINE_FILE expecting one (operator ruling 2026-08-17)"
+  fi
+
+  local relief_text
+  relief_text=$(relief_figure "$baseline_percent" "$baseline_days" "$current_percent" "$current_days" "$MIN_DAYS_INTO_WINDOW" "$baseline_captured_epoch" "$era_day0_epoch")
+
   # Side-by-side provenance counts (issue #4048): of the union rows above,
   # how many carry the label vs sit on a drainer head branch. The label is
   # the PRIMARY signal; branch >= label is expected, and a widening gap means
@@ -665,12 +748,6 @@ main() {
   branch_n=$(jq -r --arg prefix "$GLM_DRAINER_BRANCH_PREFIX" \
     '[.[] | select((.headRefName // "") | startswith($prefix))] | length' \
     <<<"$rows" 2>/dev/null || echo 0)
-
-  # Window clock: anchored to the earliest glm-authored PR, NOT the baseline
-  # bootstrap moment above (see the file header's two-anchors note).
-  local window_day0_epoch days_elapsed
-  window_day0_epoch=$(window_day0_epoch_from_rows "$rows" "$baseline_day0_epoch")
-  days_elapsed=$(elapsed_days "$window_day0_epoch" "$NOW_EPOCH")
 
   local churn_current churn_ratio=""
   churn_current=$(churn_avg_from_rows "$rows")

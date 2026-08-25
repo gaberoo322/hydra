@@ -827,7 +827,10 @@ describe("glm-beachhead-report.sh — window-phase-corrected relief figure (issu
       const binDir = makeGhStub(tmp, {
         mergedBaselinePrs: [],
         glmAuthoredPrs: [
-          { number: 700, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-1" },
+          // Post-#4122 the PR createdAt must postdate the baseline capture
+          // (2026-08-08T02:02:46Z) or the provenance guard correctly reports
+          // the baseline as GLM-era-contaminated and no figure is printed.
+          { number: 700, createdAt: "2026-08-10T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-1" },
         ],
         commentsByPr: {},
       });
@@ -875,7 +878,7 @@ describe("glm-beachhead-report.sh — window-phase-corrected relief figure (issu
       const binDir = makeGhStub(tmp, {
         mergedBaselinePrs: [],
         glmAuthoredPrs: [
-          { number: 710, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-2" },
+          { number: 710, createdAt: "2026-08-10T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-2" },
         ],
         commentsByPr: {},
       });
@@ -911,7 +914,7 @@ describe("glm-beachhead-report.sh — window-phase-corrected relief figure (issu
       const binDir = makeGhStub(tmp, {
         mergedBaselinePrs: [],
         glmAuthoredPrs: [
-          { number: 720, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-3" },
+          { number: 720, createdAt: "2026-08-10T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-3" },
         ],
         commentsByPr: {},
       });
@@ -950,7 +953,7 @@ describe("glm-beachhead-report.sh — window-phase-corrected relief figure (issu
       const binDir = makeGhStub(tmp, {
         mergedBaselinePrs: [],
         glmAuthoredPrs: [
-          { number: 730, createdAt: "2026-08-01T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-4" },
+          { number: 730, createdAt: "2026-08-10T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }], headRefName: "worktree-agent-glm-4049-4" },
         ],
         commentsByPr: {},
       });
@@ -997,6 +1000,12 @@ describe("glm-beachhead-report.sh — window-phase-corrected relief figure (issu
       const baseline = JSON.parse(readFileSync(baselineFile, "utf8"));
       assert.equal(baseline.percentLast7dBaseline, 55);
       assert.equal(baseline.weeklyResetAnchorBaseline, "2026-08-05T17:00:00Z");
+      // issue #4122: the bootstrap also records the snapshot's capture moment
+      // as an explicit capturedAt (equal to day0 at bootstrap time) so
+      // provenance never has to lean on day0, a field documented as a
+      // fallback WINDOW anchor.
+      assert.equal(baseline.capturedAt, "2026-08-08T02:02:46Z");
+      assert.equal(baseline.day0, baseline.capturedAt);
       // First run: baseline and current are the same reading -> 23.1 %/day on
       // both sides, +0% change.
       assert.match(
@@ -1004,6 +1013,270 @@ describe("glm-beachhead-report.sh — window-phase-corrected relief figure (issu
         /percentLast7d 55% @ 2\.38d into window \(baseline 55% @ 2\.38d into window; relief: rate 23\.1 -> 23\.1 %\/day \(\+0% daily use\)\)/,
       );
       assert.match(r.stdout, /nothing to judge\); quota relief: rate 23\.1 -> 23\.1 %\/day/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Baseline provenance guard (issue #4122)
+//
+// percentLast7d relief asks "did routing dev work to the GLM drainer relieve
+// Anthropic quota?" — the comparison is only meaningful when the BASELINE
+// side predates the GLM era. The live baseline.json was re-bootstrapped
+// 2026-08-17, 21 days after the GLM window's day-0 (earliest glm-authored
+// PR #3762, 2026-07-27), so both sides of the comparison are GLM-era: any
+// figure computed from it measures week-to-week variance, not GLM's effect.
+// Window position expires on its own; contamination never does — so the
+// provenance guard runs BEFORE every window-position guard, and a
+// contaminated baseline can never surface a window-position reason (which
+// would imply the figure turns valid once the window matures). The
+// operator's 2026-08-17 ruling stands: keep the file, "not comparable" is
+// the honest output until relief is measured prospectively (epic #4123).
+// ---------------------------------------------------------------------------
+
+describe("glm-beachhead-report.sh — baseline provenance guard (issue #4122)", () => {
+  // The live state this issue was filed against, verbatim: baseline captured
+  // 2026-08-17T16:55:57Z; GLM window day-0 (earliest glm-authored PR) at
+  // 2026-07-27T00:00:00Z -> the capture sits 21.71 days into the GLM era.
+  const CAPTURED = String(epochOf("2026-08-17T16:55:57Z"));
+  const GLM_DAY0 = String(epochOf("2026-07-27T00:00:00Z"));
+  const PRE_GLM_CAPTURED = String(epochOf("2026-07-20T00:00:00Z"));
+
+  test("relief_figure: a GLM-era-captured baseline is not comparable even when BOTH window positions are mature", () => {
+    // 68% @ 4.99d vs 55% @ 1.79d — both well past the 0.5d minimum, so every
+    // window-position guard passes and only provenance stands between the
+    // operator and a confidently wrong number (the live file was ~6h from
+    // becoming one when #4122 was re-scoped).
+    const r = callHelper(`relief_figure 68 4.99 55 1.79 0.5 ${CAPTURED} ${GLM_DAY0}`);
+    assert.equal(
+      r.stdout.trim(),
+      "not comparable (baseline captured 21.71d into the GLM era — both sides are GLM-era)",
+    );
+  });
+
+  test("relief_figure: the provenance guard fires BEFORE the window-position guards — a contaminated baseline never reports a window-position reason", () => {
+    // Both readings are ALSO under the 0.5d minimum here; contamination must
+    // win because it never expires with window advance, while these reasons
+    // would imply exactly that.
+    const r = callHelper(`relief_figure 68 0.10 55 0.25 0.5 ${CAPTURED} ${GLM_DAY0}`);
+    assert.equal(
+      r.stdout.trim(),
+      "not comparable (baseline captured 21.71d into the GLM era — both sides are GLM-era)",
+    );
+    assert.doesNotMatch(r.stdout, /into its window/);
+  });
+
+  test("relief_figure: a capture exactly AT GLM day-0 counts as contaminated (the guard is at-or-after, not after)", () => {
+    const r = callHelper(`relief_figure 68 4.99 55 1.79 0.5 ${GLM_DAY0} ${GLM_DAY0}`);
+    assert.equal(
+      r.stdout.trim(),
+      "not comparable (baseline captured 0.00d into the GLM era — both sides are GLM-era)",
+    );
+  });
+
+  test("relief_figure: a pre-GLM-captured baseline with mature window positions still yields a real figure (the guard does not blanket-disable the metric)", () => {
+    const r = callHelper(`relief_figure 64 2.38 16 1.07 0.5 ${PRE_GLM_CAPTURED} ${GLM_DAY0}`);
+    assert.equal(r.stdout.trim(), "rate 26.9 -> 15.0 %/day (-44% daily use)");
+  });
+
+  test("relief_figure: empty provenance inputs skip the guard — absence of evidence is not contamination", () => {
+    // No capture moment knowable, or no glm-authored PRs yet to derive an era
+    // day-0 from (the era has not started — a baseline captured then is
+    // pre-GLM by definition): the guard must not fabricate contamination.
+    const noCap = callHelper(`relief_figure 64 2.38 16 1.07 0.5 "" ${GLM_DAY0}`);
+    assert.equal(noCap.stdout.trim(), "rate 26.9 -> 15.0 %/day (-44% daily use)");
+    const noEra = callHelper(`relief_figure 64 2.38 16 1.07 0.5 ${CAPTURED} ""`);
+    assert.equal(noEra.stdout.trim(), "rate 26.9 -> 15.0 %/day (-44% daily use)");
+  });
+
+  test("relief_figure: pre-#4122 outputs stay byte-for-byte unchanged (figure format + every existing not-comparable branch)", () => {
+    // The provenance guard ADDS a branch on a NEW input dimension (the two
+    // trailing epoch args); on the artifact-era 5-arg call shape every
+    // pre-existing output keeps its exact bytes (design-concept INV-1).
+    const cases: Array<[string, string]> = [
+      ["relief_figure 64 2.38 16 1.07 0.5", "rate 26.9 -> 15.0 %/day (-44% daily use)"],
+      ["relief_figure null 2.38 16 1.07 0.5", "not comparable (no baseline percentLast7d snapshot)"],
+      ['relief_figure 64 2.38 "" 1.07 0.5', "not comparable (live percentLast7d unavailable)"],
+      ['relief_figure 64 "" 16 1.07 0.5', "not comparable (baseline days-into-window unknown)"],
+      ['relief_figure 64 2.38 16 "" 0.5', "not comparable (current days-into-window unknown)"],
+      ["relief_figure 64 0.10 16 1.07 0.5", "not comparable (baseline only 0.10d into its window; need >= 0.5d)"],
+      ["relief_figure 64 2.38 16 0.25 0.5", "not comparable (current only 0.25d into its window; need >= 0.5d)"],
+    ];
+    for (const [expr, expected] of cases) {
+      assert.equal(callHelper(expr).stdout.trim(), expected, expr);
+    }
+  });
+
+  test("end-to-end: the live baseline shape (captured 2026-08-17, GLM day-0 2026-07-27, both windows mature) reports GLM-era contamination, never a figure", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4122-"));
+    // Current reading 55% @ 1.79d into its window — mature, so the only thing
+    // standing between the operator and a confident wrong number is the
+    // provenance guard. The seeded baseline has NO capturedAt (exactly the
+    // live file), so its day0 is the fallback capture moment.
+    const usage = await usageServer(55, "2026-08-17T17:00:00Z");
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      seedBaselineFile(baselineFile, {
+        day0: "2026-08-17T16:55:57Z",
+        percentLast7dBaseline: 68,
+        weeklyResetAnchorBaseline: "2026-08-12T17:00:00.401Z",
+        churnBaseline: 422.15,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 800, createdAt: "2026-07-27T00:00:00Z", additions: 200, deletions: 100, labels: [{ name: "glm-authored" }] },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf("2026-08-19T12:00:00Z")),
+      });
+      assert.equal(r.status, 0);
+      // Baseline position 5.00d, current 1.79d — both past the minimum — and
+      // still not comparable, naming WHY: the capture is 21.71d into the GLM
+      // era. The reason rides both the percentLast7d segment and the
+      // recommendation tail.
+      assert.match(
+        r.stdout,
+        /percentLast7d 55% @ 1\.79d into window \(baseline 68% @ 5\.00d into window; relief: not comparable \(baseline captured 21\.71d into the GLM era — both sides are GLM-era\)\)/,
+      );
+      assert.match(
+        r.stdout,
+        /quota relief: not comparable \(baseline captured 21\.71d into the GLM era — both sides are GLM-era\)/,
+      );
+      assert.doesNotMatch(r.stdout, /relief: rate /);
+      // The baseline file is operator-owned state (2026-08-17 ruling):
+      // read, never rewritten.
+      const after = JSON.parse(readFileSync(baselineFile, "utf8"));
+      assert.equal(after.day0, "2026-08-17T16:55:57Z");
+      assert.equal(after.percentLast7dBaseline, 68);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("end-to-end: an explicit capturedAt is the provenance source — a GLM-era capturedAt contaminates even when day0 predates the era", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4122-"));
+    const usage = await usageServer(55, "2026-08-17T17:00:00Z");
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      // day0 (the documented fallback WINDOW anchor) is pre-GLM here, while
+      // capturedAt (the unambiguous capture moment) is GLM-era: provenance
+      // must read capturedAt, not let the stale day0 launder the baseline.
+      seedBaselineFile(baselineFile, {
+        day0: "2026-07-20T00:00:00Z",
+        capturedAt: "2026-08-17T16:55:57Z",
+        percentLast7dBaseline: 68,
+        weeklyResetAnchorBaseline: "2026-08-12T17:00:00.401Z",
+        churnBaseline: 422.15,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 810, createdAt: "2026-07-27T00:00:00Z", additions: 200, deletions: 100, labels: [{ name: "glm-authored" }] },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf("2026-08-19T12:00:00Z")),
+      });
+      assert.equal(r.status, 0);
+      assert.match(
+        r.stdout,
+        /relief: not comparable \(baseline captured 21\.71d into the GLM era — both sides are GLM-era\)/,
+      );
+      assert.doesNotMatch(r.stdout, /relief: rate /);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("end-to-end: the pre-#4049 warning states the pre-GLM requirement and — once now is past the window day-0 — that re-bootstrapping today cannot produce an attributable baseline", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4122-"));
+    const usage = await usageServer(16, "2026-08-12T17:00:00Z");
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      // Legacy shape: percent present, weeklyResetAnchorBaseline absent.
+      // Baseline capture 2026-08-08 predates the era day-0 (PR created
+      // 2026-08-10), so the relief reason stays the LEGITIMATE legacy one.
+      seedBaselineFile(baselineFile, {
+        day0: "2026-08-08T02:02:46Z",
+        percentLast7dBaseline: 64,
+        churnBaseline: 100.0,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 820, createdAt: "2026-08-10T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }] },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf("2026-08-13T18:43:23Z")),
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stderr, /pre-#4049 bootstrap/);
+      assert.match(r.stderr, /pre-GLM-era percentLast7d snapshot/);
+      // NOW (2026-08-13) is past the window day-0 (2026-08-10), so the
+      // warning carries the re-bootstrap caveat...
+      assert.match(r.stderr, /re-bootstrapping today cannot produce an attributable pre-GLM baseline/);
+      // ...and no longer advises deletion as an unqualified fix.
+      assert.doesNotMatch(r.stderr, /by hand to re-bootstrap/);
+      // The relief reason itself stays the legacy-anchor one: the pre-GLM
+      // baseline is unusable for phase reasons, not contamination.
+      assert.match(r.stdout, /relief: not comparable \(baseline days-into-window unknown\)/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("end-to-end: the re-bootstrap caveat is conditional — before the window day-0 it is absent from the warning", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4122-"));
+    const usage = await usageServer(16, "2026-08-05T17:00:00Z");
+    try {
+      const baselineFile = join(tmp, "baseline.json");
+      seedBaselineFile(baselineFile, {
+        day0: "2026-08-08T02:02:46Z",
+        percentLast7dBaseline: 64,
+        churnBaseline: 100.0,
+      });
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [
+          { number: 830, createdAt: "2026-08-10T00:00:00Z", additions: 60, deletions: 40, labels: [{ name: "glm-authored" }] },
+        ],
+        commentsByPr: {},
+      });
+      // NOW = 2026-08-09, before the era/window day-0 (2026-08-10): the
+      // warning still fires (percent set, anchor missing) and still states
+      // the pre-GLM requirement, but the re-bootstrap caveat does NOT — a
+      // snapshot taken now is genuinely pre-GLM.
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: String(epochOf("2026-08-09T00:00:00Z")),
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stderr, /pre-#4049 bootstrap/);
+      assert.match(r.stderr, /pre-GLM-era percentLast7d snapshot/);
+      assert.doesNotMatch(r.stderr, /re-bootstrapping today/);
     } finally {
       usage.close();
       rmSync(tmp, { recursive: true, force: true });
