@@ -100,6 +100,9 @@ const T0 = 1_700_000_000_000;
 
 // ---------------------------------------------------------------------------
 // Redis helpers (docker exec → DB 0, the watchdog's default target).
+// Every call below is bare `redis-cli` with no `-n` selector, so they all
+// target db 0. The two spawn sites that source run_launch_flow therefore
+// pin HYDRA_REDIS_DB="0" to keep the block's reads on the same DB (#4183).
 // ---------------------------------------------------------------------------
 
 function dockerRedisAvailable(): boolean {
@@ -274,7 +277,19 @@ function curlCalls(): string[] {
  */
 function runBlock(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", ["-c", `set -euo pipefail; source '${BLOCK}'; run_launch_flow`], {
-    env: { ...process.env, HYDRA_REDIS_HOST: "docker", ...env },
+    // HYDRA_REDIS_DB is pinned to "0" (issue #4183), matching the identical
+    // pin in test/watchdog-launch-flow.test.mts. This suite's seed/read
+    // helpers (drc, cleanState, hsetLastTick, seedSince) shell bare
+    // `redis-cli` with no `-n` selector — that IS db 0, the watchdog's
+    // default target. scripts/test/redis-db-launch.mjs now exports
+    // HYDRA_REDIS_DB into this whole node:test process's env, so an unpinned
+    // `...process.env` would redirect rc_write/rc_read to the launcher's
+    // derived per-run DB while every seed and assertion here kept using
+    // db 0 — rc_read would find nothing and every case would degrade to the
+    // "no pace-gate last-tick record" branch. DB selection itself is covered
+    // by the dedicated #4183 describe in test/watchdog-launch-flow.test.mts.
+    // A caller may still override via its own `env` (last-spread wins).
+    env: { ...process.env, HYDRA_REDIS_HOST: "docker", HYDRA_REDIS_DB: "0", ...env },
     encoding: "utf-8",
     timeout: WATCHDOG_SPAWN_TIMEOUT_MS,
   });
@@ -691,6 +706,11 @@ describe("scripts/hydra-watchdog.sh — delivery behaviour (issue #3848)", { ski
           ...process.env,
           HYDRA_REDIS_HOST: "127.0.0.1",
           HYDRA_REDIS_PORT: "1", // nothing listening
+          // Pinned for the same reason as runBlock() above (#4183). The host
+          // is unreachable so the DB is never selected, but leaving it
+          // unpinned would leave the ambient per-run value here as a latent
+          // trap the moment this case ever points at a live Redis.
+          HYDRA_REDIS_DB: "0",
           HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
           PATH: `${SHIM_DIR}:${process.env.PATH ?? ""}`,
           ...CREDS,
