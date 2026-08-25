@@ -77,6 +77,18 @@
  * than passing vacuously: "src/api.ts does not contain pruneX()" is not
  * satisfied by pointing at a path that does not exist.
  *
+ * `occurrences:` counts against a comment/docstring-STRIPPED view of the file
+ * (see {@link stripCommentsAndDocstrings}) for `.ts`/`.mts`/`.py`/`.sh` files —
+ * a mention in a `//`/`#` line comment, a C-style block comment, or a Python
+ * triple-quoted string never counts, but a genuine single/double-quoted string
+ * literal always does (issue #4093: a docstring-only mention of a symbol
+ * previously discharged an invariant against code that never used it; the
+ * opposite direction also bit — an unrelated comment mention of the same
+ * literal previously broke an `== 1` count that the code alone satisfied).
+ * `file-contains` / `file-lacks` are unaffected — they are presence checks,
+ * and their in-scope failure mode is narrower (#4093 scopes the fix to
+ * `occurrences:` only; widening is a separate call).
+ *
  * # What this gate deliberately does NOT judge
  *
  * It never adjudicates *which* of several issue-offered options the dev chose
@@ -580,6 +592,133 @@ export function isMachineCheckable(a: Assertion): boolean {
   return a.kind !== "manual" && a.kind !== "unparseable";
 }
 
+/**
+ * File extensions {@link stripCommentsAndDocstrings} knows how to strip.
+ * Anything else is returned unchanged (fail-safe: no false exclusions on a
+ * file type the stripper does not understand).
+ */
+type StripLang = "c-style" | "python" | "shell" | null;
+
+function stripLangForPath(path: string): StripLang {
+  if (/\.m?ts$/.test(path)) return "c-style";
+  if (/\.py$/.test(path)) return "python";
+  if (/\.sh$/.test(path)) return "shell";
+  return null;
+}
+
+/**
+ * Strip comments and Python docstrings out of `source`, replacing every
+ * stripped character with a space so byte offsets — and therefore adjacency,
+ * so two tokens either side of a removed comment never fuse into a new
+ * accidental match — are preserved.
+ *
+ * Deliberately LEXICAL, not positional: a Python triple-quoted string
+ * (`'''…'''` / `"""…"""`) is always treated as docstring-class syntax and
+ * stripped, regardless of where it sits (module-level docstring, function
+ * docstring, or an ordinary triple-quoted multi-line string used as a value —
+ * all three are indistinguishable without parsing surrounding statement
+ * structure). A single- or double-quoted string is always a string literal
+ * and is NEVER stripped. This is the only rule that stays non-heuristic: it
+ * needs zero judgment about *why* a comment or docstring exists, only what
+ * lexical form it takes — the same reasoning issue #4093 used to reject the
+ * two heuristic directions (assertion-strength linting, consulting
+ * `rejectedAlternatives`) for a REQUIRED merge gate, where a wrong judgment
+ * call wedges the whole queue.
+ *
+ * Unknown file types (`stripLangForPath` returns `null`) pass through
+ * unchanged — fail-safe, never fail-strip.
+ */
+export function stripCommentsAndDocstrings(source: string, path: string): string {
+  const lang = stripLangForPath(path);
+  if (lang === null) return source;
+
+  const out: string[] = [];
+  const blank = (s: string) => out.push(s.replace(/[^\n]/g, " "));
+
+  if (lang === "c-style") {
+    let i = 0;
+    while (i < source.length) {
+      const two = source.slice(i, i + 2);
+      if (two === "//") {
+        let j = i;
+        while (j < source.length && source[j] !== "\n") j++;
+        blank(source.slice(i, j));
+        i = j;
+      } else if (two === "/*") {
+        let j = source.indexOf("*/", i + 2);
+        j = j === -1 ? source.length : j + 2;
+        blank(source.slice(i, j));
+        i = j;
+      } else if (source[i] === '"' || source[i] === "'" || source[i] === "`") {
+        const quote = source[i];
+        let j = i + 1;
+        while (j < source.length && source[j] !== quote) {
+          j += source[j] === "\\" ? 2 : 1;
+        }
+        j = Math.min(j + 1, source.length);
+        out.push(source.slice(i, j));
+        i = j;
+      } else {
+        out.push(source[i]);
+        i++;
+      }
+    }
+  } else if (lang === "python") {
+    let i = 0;
+    while (i < source.length) {
+      const three = source.slice(i, i + 3);
+      if (source[i] === "#") {
+        let j = i;
+        while (j < source.length && source[j] !== "\n") j++;
+        blank(source.slice(i, j));
+        i = j;
+      } else if (three === '"""' || three === "'''") {
+        let j = source.indexOf(three, i + 3);
+        j = j === -1 ? source.length : j + 3;
+        blank(source.slice(i, j));
+        i = j;
+      } else if (source[i] === '"' || source[i] === "'") {
+        const quote = source[i];
+        let j = i + 1;
+        while (j < source.length && source[j] !== quote) {
+          j += source[j] === "\\" ? 2 : 1;
+        }
+        j = Math.min(j + 1, source.length);
+        out.push(source.slice(i, j));
+        i = j;
+      } else {
+        out.push(source[i]);
+        i++;
+      }
+    }
+  } else {
+    // shell
+    let i = 0;
+    while (i < source.length) {
+      if (source[i] === "#") {
+        let j = i;
+        while (j < source.length && source[j] !== "\n") j++;
+        blank(source.slice(i, j));
+        i = j;
+      } else if (source[i] === '"' || source[i] === "'") {
+        const quote = source[i];
+        let j = i + 1;
+        while (j < source.length && source[j] !== quote) {
+          j += quote === '"' && source[j] === "\\" ? 2 : 1;
+        }
+        j = Math.min(j + 1, source.length);
+        out.push(source.slice(i, j));
+        i = j;
+      } else {
+        out.push(source[i]);
+        i++;
+      }
+    }
+  }
+
+  return out.join("");
+}
+
 /** Non-overlapping occurrence count of a literal. */
 export function countOccurrences(haystack: string, needle: string): number {
   if (needle.length === 0) return 0;
@@ -660,11 +799,14 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "occurrences": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      // Count against a comment/docstring-stripped view (#4093): a mention
+      // inside prose must never discharge — or accidentally break — an
+      // invariant that is actually about the code.
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       const ok = a.op === "==" ? n === a.count : a.op === "<=" ? n <= a.count : n >= a.count;
       return {
         ok,
-        expected: `occurrences of "${a.needle}" in ${a.path} ${a.op} ${a.count}`,
+        expected: `occurrences of "${a.needle}" in ${a.path} ${a.op} ${a.count} (excluding comments/docstrings)`,
         observed: `${n}`,
       };
     }

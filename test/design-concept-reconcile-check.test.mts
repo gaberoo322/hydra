@@ -50,6 +50,7 @@ import {
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
+  stripCommentsAndDocstrings,
   type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
@@ -461,6 +462,32 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(countOccurrences("abc", ""), 0);
   });
 
+  test("stripCommentsAndDocstrings strips comments/docstrings but keeps string literals (issue #4093)", () => {
+    // TS/mts: // and /* */ comments stripped, string/template literals kept.
+    const ts = 'const x = Date.now(); // unrelated mention of Date.now() here too\nconst s = "keep Date.now() in a string";\n/* also Date.now() in a block comment */\n';
+    const tsStripped = stripCommentsAndDocstrings(ts, "a.ts");
+    assert.equal(countOccurrences(tsStripped, "Date.now()"), 2, "one real call + one string literal, both kept");
+    assert.equal(stripCommentsAndDocstrings(ts, "a.mts"), stripCommentsAndDocstrings(ts, "a.ts"), ".mts uses the same c-style stripper as .ts");
+
+    // Python: # comments and triple-quoted docstrings stripped, quoted strings kept.
+    const py = 'def f():\n    """\n    mentions closingIssuesReferences in a docstring only\n    """\n    x = "closingIssuesReferences"  # a real string literal, kept\n    # closingIssuesReferences mentioned in a line comment too\n    return x\n';
+    const pyStripped = stripCommentsAndDocstrings(py, "reap.py");
+    assert.equal(countOccurrences(pyStripped, "closingIssuesReferences"), 1, "only the string-literal mention survives");
+
+    // Shell: # comments stripped, quoted strings kept.
+    const sh = 'echo "keep this mention"  # unrelated mention stripped\n';
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(sh, "deploy.sh"), "mention"), 1);
+
+    // Unknown extensions pass through unchanged (fail-safe).
+    assert.equal(stripCommentsAndDocstrings("// not stripped, unknown ext", "notes.md"), "// not stripped, unknown ext");
+
+    // Stripping preserves length/adjacency — no accidental fusion across a
+    // removed comment.
+    const adjacency = "ab/* comment */cd";
+    assert.equal(stripCommentsAndDocstrings(adjacency, "a.ts").length, adjacency.length);
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(adjacency, "a.ts"), "abcd"), 0);
+  });
+
   test("evaluateAssertion re-executes each kind against the injected reader", () => {
     const read = fakeReader({ "a.ts": "alpha doThing( beta doThing(", "empty.ts": "" });
     const ev = (s: string) => evaluateAssertion(parseAssertion(s), read);
@@ -479,6 +506,38 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(ev("occurrences: a.ts :: doThing( == 3").ok, false);
     assert.equal(ev("occurrences: a.ts :: doThing( <= 5").ok, true);
     assert.equal(ev("manual: fine").ok, true);
+  });
+
+  test("occurrences: FALSE GREEN regression (PR #4090 shape, issue #4093) — a docstring-only mention no longer discharges", () => {
+    // reap.py requests closingIssuesReferences but never parses it; the field
+    // is mentioned only inside a docstring. An `== 1` occurrences assertion
+    // against the raw file text used to pass — wrongly — against code that
+    // never used the field at all.
+    const read = fakeReader({
+      "reap.py": [
+        "def closing_issues(pr):",
+        '    """',
+        "    Uses closingIssuesReferences from the gh pr list --json payload.",
+        '    """',
+        "    return _CLOSE_RE.findall(pr.body)",
+        "",
+      ].join("\n"),
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: reap.py :: closingIssuesReferences == 1"), read);
+    assert.equal(res.ok, false, "a docstring-only mention must not satisfy the assertion");
+    assert.equal(res.observed, "0");
+  });
+
+  test("occurrences: FALSE RED regression (PR #4112 shape, issue #4093) — an unrelated comment mention no longer breaks a true count", () => {
+    // A single real Date.now() call plus an unrelated comment mentioning the
+    // same literal used to make an `== 1` single-clock-read assertion
+    // unprovable (raw count == 2). Excluding the comment restores it to 1.
+    const read = fakeReader({
+      "clock.ts": 'const t = Date.now(); // NOT a second Date.now() call, just a comment\n',
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: clock.ts :: Date.now() == 1"), read);
+    assert.equal(res.ok, true, "the comment mention must not count against the real single call");
+    assert.equal(res.observed, "1");
   });
 
   test("file-lacks / file-not-matches FAIL on a missing file (no vacuous pass)", () => {
