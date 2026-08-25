@@ -77,6 +77,16 @@
  * than passing vacuously: "src/api.ts does not contain pruneX()" is not
  * satisfied by pointing at a path that does not exist.
  *
+ * `occurrences:` counts only executable-intent text: for `.ts`/`.mts`/`.py`/
+ * `.sh` files it strips line comments, block comments (TS), and Python
+ * triple-quoted docstrings before counting (see {@link stripCommentsAndDocstrings},
+ * issue #4093) — a match sitting only in a comment or docstring must not
+ * discharge an invariant (PR #4090's false GREEN), and an unrelated comment
+ * mention alongside one genuine code match must not sink an otherwise-true
+ * count (PR #4112's false RED). String literals are NOT stripped; only
+ * comments/docstrings are. Other extensions are counted raw, unchanged from
+ * before.
+ *
  * # What this gate deliberately does NOT judge
  *
  * It never adjudicates *which* of several issue-offered options the dev chose
@@ -593,6 +603,144 @@ export function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
+/**
+ * Lower-cased extension of a repo-relative path (no leading dot), or `""`
+ * when the path has none.
+ */
+function fileExtension(path: string): string {
+  const m = /\.([A-Za-z0-9]+)$/.exec(path ?? "");
+  return m ? m[1].toLowerCase() : "";
+}
+
+/**
+ * Copy every character of `source` EXCEPT ones inside a stripped region
+ * (a line comment, a block comment, or — for Python — a triple-quoted
+ * docstring), tracking quote state so a comment-opening sequence found
+ * *inside* a string literal is not mistaken for a real comment. Every
+ * stripped region is replaced by a single space (never omitted outright),
+ * so code on either side of it can never be joined into a needle that did
+ * not exist in the source (e.g. `fo` + `<comment>` + `o` must not read as
+ * `foo`). String-literal CONTENTS are copied verbatim — only comments and
+ * docstrings are stripped (issue #4093, direction 4).
+ *
+ * `regularQuotes` are single-character string delimiters whose contents are
+ * preserved as-is (backslash-escaped). `tripleQuotes` (Python only) are
+ * docstring delimiters whose contents are stripped like a comment.
+ */
+function stripWithQuoteTracking(
+  source: string,
+  opts: {
+    lineComment: string | null;
+    blockComment: readonly [string, string] | null;
+    tripleQuotes: readonly string[];
+    regularQuotes: readonly string[];
+    /** Whether a backslash escapes the next character inside a regular-quote span. */
+    backslashEscapes: boolean;
+  },
+): string {
+  const { lineComment, blockComment, tripleQuotes, regularQuotes, backslashEscapes } = opts;
+  const n = source.length;
+  let out = "";
+  let i = 0;
+
+  while (i < n) {
+    // Triple-quoted docstring (checked before single-char quotes, since a
+    // triple-quote opener also starts with a regular-quote character).
+    const triple = tripleQuotes.find((q) => source.startsWith(q, i));
+    if (triple) {
+      const close = source.indexOf(triple, i + triple.length);
+      i = close === -1 ? n : close + triple.length;
+      out += " ";
+      continue;
+    }
+
+    if (lineComment && source.startsWith(lineComment, i)) {
+      let j = source.indexOf("\n", i);
+      if (j === -1) j = n;
+      out += " ";
+      i = j;
+      continue;
+    }
+
+    if (blockComment && source.startsWith(blockComment[0], i)) {
+      const close = source.indexOf(blockComment[1], i + blockComment[0].length);
+      i = close === -1 ? n : close + blockComment[1].length;
+      out += " ";
+      continue;
+    }
+
+    const quote = regularQuotes.find((q) => source[i] === q);
+    if (quote) {
+      let j = i + 1;
+      while (j < n) {
+        if (backslashEscapes && source[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (source[j] === quote) {
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += source.slice(i, Math.min(j, n));
+      i = j;
+      continue;
+    }
+
+    out += source[i];
+    i += 1;
+  }
+
+  return out;
+}
+
+/**
+ * Strip comments and (Python) docstrings out of `source`, keyed off `path`'s
+ * extension, so an `occurrences:` assertion counts only executable-intent
+ * text (issue #4093). Regular string literals are left untouched — a
+ * literal inside a string is still executable intent. Unsupported
+ * extensions are returned unchanged (the gate reads more file types than it
+ * has comment grammars for; leaving them raw is the pre-existing behaviour).
+ */
+export function stripCommentsAndDocstrings(source: string, path: string): string {
+  const ext = fileExtension(path);
+  if (ext === "ts" || ext === "mts") {
+    return stripWithQuoteTracking(source, {
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+      tripleQuotes: [],
+      regularQuotes: ['"', "'", "`"],
+      backslashEscapes: true,
+    });
+  }
+  if (ext === "py") {
+    return stripWithQuoteTracking(source, {
+      lineComment: "#",
+      blockComment: null,
+      tripleQuotes: ['"""', "'''"],
+      regularQuotes: ['"', "'"],
+      backslashEscapes: true,
+    });
+  }
+  if (ext === "sh") {
+    return stripWithQuoteTracking(source, {
+      lineComment: "#",
+      blockComment: null,
+      tripleQuotes: [],
+      regularQuotes: ['"', "'"],
+      // Single- and double-quoted shell strings both terminate on the next
+      // matching quote regardless of a preceding backslash (bash gives `\`
+      // no escaping power inside single quotes, and `stripWithQuoteTracking`
+      // has one `backslashEscapes` flag for both quote kinds here) — treating
+      // backslash as non-special in both is the narrower, safer reading for a
+      // literal-existence check, never opening a false stripped region.
+      backslashEscapes: false,
+    });
+  }
+  return source;
+}
+
 function missing(path: string): AssertionResult {
   return { ok: false, expected: `readable file ${path}`, observed: "file not found or unreadable" };
 }
@@ -660,7 +808,12 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "occurrences": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      // Issue #4093: count only code, not comments/docstrings. A match that
+      // exists ONLY inside a comment or docstring must not discharge the
+      // invariant (PR #4090's false GREEN), and an unrelated comment mention
+      // alongside a single genuine code match must not sink an otherwise-true
+      // count (PR #4112's false RED).
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       const ok = a.op === "==" ? n === a.count : a.op === "<=" ? n <= a.count : n >= a.count;
       return {
         ok,

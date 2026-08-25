@@ -50,6 +50,7 @@ import {
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
+  stripCommentsAndDocstrings,
   type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
@@ -461,6 +462,47 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(countOccurrences("abc", ""), 0);
   });
 
+  // --- stripCommentsAndDocstrings (issue #4093) --------------------------
+
+  test("stripCommentsAndDocstrings strips // and /* */ comments from .ts/.mts, keeps strings", () => {
+    const src = [
+      "// doThing( in a line comment",
+      "const x = doThing(); /* doThing( in a block comment */",
+      'const s = "doThing( inside a string literal";',
+    ].join("\n");
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "src/x.ts"), "doThing("), 2);
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "src/x.mts"), "doThing("), 2);
+  });
+
+  test("stripCommentsAndDocstrings strips # comments and triple-quoted docstrings from .py, keeps strings", () => {
+    const src = [
+      '"""module docstring mentioning closing_issues() here"""',
+      "def f():",
+      "    closing_issues()  # comment also mentioning closing_issues()",
+      "    s = 'closing_issues( inside a string literal'",
+      "    '''",
+      "    another docstring: closing_issues()",
+      "    '''",
+    ].join("\n");
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "scripts/autopilot/pr-refs.py"), "closing_issues("), 2);
+  });
+
+  test("stripCommentsAndDocstrings strips # comments from .sh, keeps strings", () => {
+    const src = ["#!/usr/bin/env bash", "doThing  # doThing again in a comment", 'echo "doThing in a string"'].join("\n");
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "scripts/deploy.sh"), "doThing"), 2);
+  });
+
+  test("stripCommentsAndDocstrings leaves unsupported extensions untouched", () => {
+    const src = "# not a comment in a .yml file — occurs raw\nfoo # foo";
+    assert.equal(stripCommentsAndDocstrings(src, "config/x.yml"), src);
+  });
+
+  test("stripCommentsAndDocstrings never joins code across a stripped region into a new match", () => {
+    // "fo" + comment + "o" must not read as "foo" once the comment is gone.
+    const src = "fo/* comment */o";
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "src/x.ts"), "foo"), 0);
+  });
+
   test("evaluateAssertion re-executes each kind against the injected reader", () => {
     const read = fakeReader({ "a.ts": "alpha doThing( beta doThing(", "empty.ts": "" });
     const ev = (s: string) => evaluateAssertion(parseAssertion(s), read);
@@ -479,6 +521,48 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(ev("occurrences: a.ts :: doThing( == 3").ok, false);
     assert.equal(ev("occurrences: a.ts :: doThing( <= 5").ok, true);
     assert.equal(ev("manual: fine").ok, true);
+  });
+
+  test("occurrences: regression — false GREEN, PR #4090 shape (issue #4093)", () => {
+    // The symbol appears ONLY in docstrings/comments, never in executable
+    // code. Before the fix, a raw text count discharged this; it must now
+    // read as zero code occurrences and FAIL.
+    const read = fakeReader({
+      "scripts/autopilot/reap.py": [
+        '"""',
+        "Uses closingIssuesReferences to detect a closing PR (see also",
+        "closingIssuesReferences below) — unused by either predicate today.",
+        '"""',
+        "def closing_issues():",
+        "    # closingIssuesReferences is not actually consulted here",
+        "    return _CLOSE_RE.findall(body)",
+      ].join("\n"),
+    });
+    const res = evaluateAssertion(
+      parseAssertion("occurrences: scripts/autopilot/reap.py :: closingIssuesReferences == 1"),
+      read,
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.observed, "0");
+  });
+
+  test("occurrences: regression — false RED, PR #4112 shape (issue #4093)", () => {
+    // One genuine CODE match plus one unrelated COMMENT mention of the same
+    // literal. Before the fix this raw-counted to 2 and sank an `== 1`
+    // assertion the code itself actually satisfies.
+    const read = fakeReader({
+      "src/x.ts": ["const t = Date.now(); // per-call clock read, not Date.now() again"].join("\n"),
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: src/x.ts :: Date.now() == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
+  });
+
+  test("occurrences: a literal inside a string is still counted (not stripped)", () => {
+    const read = fakeReader({ "src/x.ts": 'const label = "doThing( shown in a string";' });
+    const res = evaluateAssertion(parseAssertion("occurrences: src/x.ts :: doThing( == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
   });
 
   test("file-lacks / file-not-matches FAIL on a missing file (no vacuous pass)", () => {
