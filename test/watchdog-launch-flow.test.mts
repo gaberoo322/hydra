@@ -34,6 +34,17 @@
  *   HYDRA_WATCHDOG_LAUNCH_*_SECONDS           per-signal thresholds (default
  *                                              2h/2h/4h/24h/1h-latency).
  *   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT       redis-cli target (default docker).
+ *   HYDRA_REDIS_DB                            redis-cli `-n <db>` selector on
+ *                                              both rc_write/rc_read branches
+ *                                              (issue #4183); absent/non-numeric
+ *                                              falls back to db 0. `runBlock()`
+ *                                              below pins this to "0" by
+ *                                              default so the pre-existing
+ *                                              behavioural cases (which read
+ *                                              back via db-0-only helpers)
+ *                                              stay byte-identical; the
+ *                                              dedicated threading describe
+ *                                              further down overrides it.
  *
  * Behavioural cases that need Redis are gated on the docker `hydra-redis-1`
  * container (CI's self-hosted runners + the dev host have it; a laptop without
@@ -372,9 +383,23 @@ function runBlock(env: Record<string, string>): { status: number; stdout: string
     // in one day, all bearing this file's fixture thresholds/durations. A
     // caller may still override via its own `env` (last-spread wins), mirroring
     // the envWith() precedent in test/launch-flow-delivery.test.mts:459.
+    //
+    // HYDRA_REDIS_DB is pinned to "0" here for the SAME reason (issue #4183):
+    // this file's own Redis helpers (redisCli/drc, hsetLastTick, seedSince,
+    // getFired, getSince, cleanState) all talk to `docker exec hydra-redis-1
+    // redis-cli` with no `-n` selector — i.e. always db 0 — and isolate via
+    // the RUN_NS key-prefix rebind above, not via a DB index. Since this
+    // suite itself now runs under scripts/test/redis-db-launch.mjs, which
+    // exports HYDRA_REDIS_DB into the WHOLE test process's env post-#4183,
+    // an un-pinned spawn here would inherit that derived index and every
+    // `runBlock()` write would land off db 0 while every helper read stays on
+    // db 0 — turning every existing behavioural case in this file into a
+    // false "nothing happened". A caller (the #4183 threading cases below)
+    // may still override via its own `env` (last-spread wins).
     env: {
       ...process.env,
       HYDRA_REDIS_HOST: "docker",
+      HYDRA_REDIS_DB: "0",
       HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM: TEST_NOTIFY_STREAM,
       ...env,
       PATH: process.env.PATH ?? "",
@@ -871,6 +896,104 @@ describe("scripts/hydra-watchdog.sh — ## LAUNCH FLOW behaviour (issue #3847)",
       assert.equal(getSince(s), "", `no anchor mutated for ${s} on absent tick`);
       assert.equal(getFired(s), false, `no fired marker set for ${s} on absent tick`);
     }
+  });
+});
+
+// =============================================================================
+// HYDRA_REDIS_DB threading (issue #4183) — rc_write/rc_read in run_launch_flow
+// now accept a `-n <db>` selector sourced from HYDRA_REDIS_DB, so a bash-side
+// write during a test run can be routed off production db 0. A NEW top-level
+// describe (not nested in the behaviour suite above) per this file's own
+// documented convention: a shared-Redis `after()`/`beforeEach` teardown must
+// own its own lifecycle, never piggyback on a sibling's.
+// =============================================================================
+
+describe("run_launch_flow HYDRA_REDIS_DB threading (issue #4183)", { skip: !DOCKER }, () => {
+  // A DB this launcher's own harness never derives/owns for THIS suite
+  // (scripts/test/redis-db-launch.mjs's ALLOWED_DB_INDEXES tops out at 15;
+  // picking a value outside any real allocation keeps this describe's writes
+  // trivially distinguishable from whatever DB the outer npm-test run itself
+  // landed on).
+  const OTHER_DB = "9";
+
+  function drcOtherDb(args: string[]): string {
+    return redisCli(["-n", OTHER_DB, ...args], `redis-cli -n ${OTHER_DB} ${args[0]}`);
+  }
+
+  beforeEach(() => {
+    cleanState();
+    drcOtherDb(["DEL", TEST_LAST_TICK_KEY, SINCE("fail-safe"), FIRED("fail-safe")]);
+  });
+
+  after(() => {
+    try {
+      drcOtherDb(["DEL", TEST_LAST_TICK_KEY, SINCE("fail-safe"), FIRED("fail-safe")]);
+    } catch {
+      /* best-effort cleanup */
+    }
+  });
+
+  test("a bash-side write with HYDRA_REDIS_DB set lands on the selected db, never on production db 0", () => {
+    // Seed the tick + streak-start directly on OTHER_DB — the db the sourced
+    // block will read/write once HYDRA_REDIS_DB selects it, mirroring what
+    // scripts/test/redis-db-launch.mjs now exports into a real test run's
+    // child env.
+    drcOtherDb([
+      "HSET",
+      TEST_LAST_TICK_KEY,
+      "reason",
+      "eligibility-unreachable",
+      "class",
+      "fail-safe",
+      "at",
+      String(T0),
+      "latency_ms",
+      "",
+    ]);
+    drcOtherDb(["SET", SINCE("fail-safe"), String(T0), "NX"]);
+
+    const r = runBlock({
+      HYDRA_REDIS_DB: OTHER_DB,
+      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
+      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
+    });
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
+    assert.match(warnLines(r.stdout), /signal 'fail-safe' sustained 5000ms >= 2000ms/);
+
+    // The fired marker must land on OTHER_DB — and must NOT appear on
+    // production db 0, which is the whole point of #4183.
+    assert.equal(
+      getFired("fail-safe"),
+      false,
+      "a write threaded through HYDRA_REDIS_DB must not appear on db 0",
+    );
+    assert.equal(
+      drcOtherDb(["EXISTS", FIRED("fail-safe")]),
+      "1",
+      "the fired marker must appear on the HYDRA_REDIS_DB-selected db",
+    );
+  });
+
+  test("absent HYDRA_REDIS_DB falls back to db 0 — production behaviour is byte-identical", () => {
+    hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
+    seedSince("fail-safe", T0);
+    // No HYDRA_REDIS_DB override in this call's env — runBlock's own default
+    // pin (env.HYDRA_REDIS_DB, see runBlock's header comment) supplies "0".
+    const r = runBlock({ HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2", HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000) });
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
+    assert.equal(getFired("fail-safe"), true, "unset HYDRA_REDIS_DB must still write to db 0");
+  });
+
+  test("a non-numeric HYDRA_REDIS_DB sanitizes to db 0 rather than erroring", () => {
+    hsetLastTick({ reason: "eligibility-unreachable", class: "fail-safe", at: String(T0), latency_ms: "" });
+    seedSince("fail-safe", T0);
+    const r = runBlock({
+      HYDRA_REDIS_DB: "not-a-number",
+      HYDRA_WATCHDOG_LAUNCH_FAILSAFE_SECONDS: "2",
+      HYDRA_WATCHDOG_LAUNCH_NOW_MS: String(T0 + 5_000),
+    });
+    assert.equal(r.status, 0, `exit ${describeExitStatus(r.status)}; stderr=${r.stderr}`);
+    assert.equal(getFired("fail-safe"), true, "non-numeric HYDRA_REDIS_DB must fall back to db 0");
   });
 });
 

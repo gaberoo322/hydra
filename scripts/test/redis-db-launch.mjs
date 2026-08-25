@@ -635,9 +635,22 @@ if (testFiles.length > 0) {
   }
 }
 
+// Issue #4183: export the run's resolved DB index under HYDRA_REDIS_DB so any
+// bash block a test shells into (e.g. scripts/hydra-watchdog.sh's rc_write/
+// rc_read) can thread it through as `-n <db>` and inherit this run's Redis DB
+// isolation automatically, rather than writing straight past it to production
+// db 0. `resolved.db` is null only when a pre-set REDIS_URL points at a DB
+// this launcher does not own (production db 0, legacy db 1, a legacy
+// per-file hard-pin, or a remote host) — in that case HYDRA_REDIS_DB is left
+// unset so downstream bash falls back to its own documented default (db 0),
+// matching this launcher's own "does not own it" stance.
 const child = spawn(args[0], args.slice(1), {
   stdio: "inherit",
-  env: { ...process.env, REDIS_URL: resolved.url },
+  env: {
+    ...process.env,
+    REDIS_URL: resolved.url,
+    ...(resolved.db !== null ? { HYDRA_REDIS_DB: String(resolved.db) } : {}),
+  },
 });
 child.on("error", (err) => {
   console.error(`[redis-db-launch] failed to spawn ${args[0]}: ${err.message}`);
