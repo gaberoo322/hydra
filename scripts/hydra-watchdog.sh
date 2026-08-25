@@ -814,6 +814,228 @@ run_skill_mirror_drift() {
 }
 
 # =============================================================================
+# ## NODE MODULES INTEGRITY
+# =============================================================================
+#
+# Detection + delivery for the 2026-08-19 incident (issue #4175): a `/dev/shm`
+# hydra-betting worktree's `web/node_modules` symlink reached back through the
+# main checkout, and a destructive install step inside the worktree wiped
+# `/home/gabe/hydra-betting/web/node_modules` — taking down six money-critical
+# Target services for ~70 minutes with NO signal to anything watching the main
+# checkout. The structural prevention (eliminating the reach-back symlink) is
+# tracked separately in #4177; this block is the detection backstop, valuable
+# regardless of which prevention lands because it is the only mitigation that
+# covers causes nobody has anticipated.
+#
+# What it asserts
+# ----------------
+# Not "the directory shrank" (needs stored history + an uncalibratable
+# threshold) but the structural invariant the incident actually violated —
+# the binaries the live services execute exist:
+#   1. the watched root exists, contains `.bin/`, and holds at least
+#      ENTRY_FLOOR top-level entries (observed wiped: 24K / no `.bin/`;
+#      observed healthy: ~995M / ~450 entries — the gap needs no tuning).
+#   2. the specific `.bin/` entry the live systemd units reference (the five
+#      `ExecStart=.../web/node_modules/.bin/tsx …` units that died
+#      `203/EXEC`) exists and is executable. Hardcoded to `tsx` — the one the
+#      watched services use — rather than derived from the unit files, per
+#      the issue's explicit fallback.
+# A resolvable-import probe (the checkpoint-refresh `ERR_MODULE_NOT_FOUND`
+# symptom) is intentionally NOT implemented — checks 1+2 already cover both
+# observed failure symptoms from the incident.
+#
+# Watched roots (a list, never a literal buried in a condition; override via
+# HYDRA_WATCHDOG_NM_ROOTS for tests, colon-separated):
+#   /home/gabe/hydra-betting/web/node_modules   (the incident)
+#   /home/gabe/hydra/node_modules
+#
+# Delivery reuses the #3848 taxonomy this file already established for
+# run_launch_flow: the SAME uniform streak-rule / dedup design (Redis SET
+# NX since + fired, DEL on recovery) and the SAME in-band delivery surface
+# (an enveloped XADD onto hydra:notifications — the Orchestrator is
+# demonstrably up when this check runs, since it is the thing running the
+# check, so out-of-band is not warranted here the way it is for
+# fail-safe/meter-dark). It is a SEPARATE block (a filesystem invariant is
+# not a pace-gate reason and cannot share run_launch_flow's `now_ms`/`reason`
+# derivation) but must never diverge from that design — if you change the
+# streak/dedup shape here, check whether run_launch_flow needs the same
+# change. Threshold is 0ms: a wiped node_modules under a live service is not
+# something to wait out a streak on, so the fired marker sets (and delivery
+# fires) on the very first qualifying tick — dedup then suppresses re-alarm
+# for the duration of the outage, and recovery (DEL) re-arms a fresh streak.
+#
+# Surface: IN-BAND, in BOTH ALERT_TYPES (src/notification/alert-grammar.ts)
+# and CRITICAL_EVENT_TYPES (src/digest.ts) — six money-critical services down
+# warrants both the dashboard alert and the immediate Telegram digest line.
+# Event type pinned in test/event-bus-vocabulary.test.mts's EXPECTED_MEMBERS
+# (that enum-completeness arm fails by design until a new member is
+# deliberately pinned).
+#
+# Fail-safe (HARD): mirrors run_launch_flow's contract — this block NEVER
+# throws and NEVER returns non-zero. All redis-cli / stat calls are
+# best-effort (`|| true` / redirected), and a read failure never mutates a
+# since/fired marker (never falsely clears an in-progress streak).
+#
+# Testability hooks (off-by-default; pinned by
+# test/watchdog-node-modules-integrity.test.mts):
+#   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT        shared with the other blocks.
+#   HYDRA_WATCHDOG_NM_NOW_MS                   inject `now` (epoch-ms).
+#   HYDRA_WATCHDOG_NM_ROOTS                    colon-separated root override.
+#   HYDRA_WATCHDOG_NM_ENTRY_FLOOR              default 20.
+#   HYDRA_WATCHDOG_NM_REQUIRED_BIN             default "tsx".
+#   HYDRA_WATCHDOG_NM_NOTIFY_STREAM            in-band delivery stream key
+#                                               (default hydra:notifications);
+#                                               rebound in tests so a case can
+#                                               never write a real event onto
+#                                               the PRODUCTION stream.
+
+run_node_modules_integrity() {
+  local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
+  local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  local NM_KEY_PREFIX="hydra:autopilot:node-modules-integrity"
+  local NOTIFY_STREAM="${HYDRA_WATCHDOG_NM_NOTIFY_STREAM:-hydra:notifications}"
+  local ENTRY_FLOOR="${HYDRA_WATCHDOG_NM_ENTRY_FLOOR:-20}"
+  local REQUIRED_BIN="${HYDRA_WATCHDOG_NM_REQUIRED_BIN:-tsx}"
+  [[ "$ENTRY_FLOOR" =~ ^[0-9]+$ ]] || ENTRY_FLOOR=20
+
+  local -a WATCHED_ROOTS
+  if [[ -n "${HYDRA_WATCHDOG_NM_ROOTS:-}" ]]; then
+    IFS=':' read -r -a WATCHED_ROOTS <<< "$HYDRA_WATCHDOG_NM_ROOTS"
+  else
+    WATCHED_ROOTS=(
+      "/home/gabe/hydra-betting/web/node_modules"
+      "/home/gabe/hydra/node_modules"
+    )
+  fi
+
+  log() {
+    echo "hydra-node-modules-integrity-watchdog: $*"
+  }
+
+  # rc_write/rc_read — same best-effort contract as run_launch_flow's helpers
+  # (fire-and-forget mutation; "" on any read failure). Deliberately a second
+  # copy rather than a shared top-level helper: hoisting would change
+  # run_launch_flow's tested extraction boundary (test/watchdog-launch-flow
+  # .test.mts and test/launch-flow-delivery.test.mts both extract that
+  # function verbatim by name).
+  rc_write() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw "$@" >/dev/null 2>&1 || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" >/dev/null 2>&1 || true
+    fi
+  }
+  rc_read() {
+    if [[ "$REDIS_HOST" == "docker" ]]; then
+      docker exec hydra-redis-1 redis-cli --raw "$@" 2>/dev/null || true
+    else
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" 2>/dev/null || true
+    fi
+  }
+
+  nm_since_key() { printf '%s:since:%s\n' "$NM_KEY_PREFIX" "$1"; }
+  nm_fired_key() { printf '%s:fired:%s\n' "$NM_KEY_PREFIX" "$1"; }
+
+  # sig_for_root ROOT — a stable, Redis-key-safe signal name derived from the
+  # watched path (non-alnum runs collapsed to single underscores).
+  sig_for_root() {
+    printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_' | tr -s '_'
+  }
+
+  # deliver_signal SIG ROOT REASON DUR_MS THR_MS — enveloped XADD onto the
+  # notifications stream, the exact on-wire shape src/event-bus.ts's publish()
+  # constructs (ADR-0017 Category A), mirroring run_launch_flow's
+  # deliver_in_band. Always returns 0 (best-effort).
+  deliver_signal() {
+    local sig="$1" root="$2" reason="$3" dur_ms="$4" thr_ms="$5"
+    local reason_clean
+    reason_clean="$(printf '%s' "$reason" | tr -dc 'a-zA-Z0-9_.:-')"
+    local root_clean
+    root_clean="$(printf '%s' "$root" | tr -dc 'a-zA-Z0-9_./-')"
+    local iso payload
+    iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || echo "")"
+    payload="$(printf '{"signal":"%s","reason":"%s","durationMs":%s,"thresholdMs":%s}' \
+      "$root_clean" "$reason_clean" "$dur_ms" "$thr_ms")"
+    rc_write XADD "$NOTIFY_STREAM" '*' \
+      id "node-modules-integrity-$(date +%s 2>/dev/null || echo 0)-$$" \
+      type "infra:node_modules_wiped" \
+      source "watchdog-node-modules-integrity" \
+      timestamp "$iso" \
+      correlationId "node-modules-integrity-${sig}" \
+      payload "$payload"
+    log "in-band delivery published (best-effort) for '$root' (type=infra:node_modules_wiped -> ${NOTIFY_STREAM})"
+    return 0
+  }
+
+  # track_signal SIG ROOT REASON THR_MS IS_MEMBER — the SAME uniform streak
+  # rule as run_launch_flow's track_signal (SET NX since / fire once at
+  # now-since >= threshold / DEL both on recovery), scoped to this block's own
+  # key prefix. Always returns 0.
+  track_signal() {
+    local sig="$1" root="$2" reason="$3" thr_ms="$4" is_member="$5"
+    local since_key fired_key
+    since_key="$(nm_since_key "$sig")"
+    fired_key="$(nm_fired_key "$sig")"
+    if [[ "$is_member" == "1" ]]; then
+      rc_write SET "$since_key" "$now_ms" NX
+      local since dur
+      since="$(rc_read GET "$since_key" | tr -dc '0-9')"
+      [[ "$since" =~ ^[0-9]+$ ]] || since="$now_ms"
+      dur=$((now_ms - since))
+      if (( dur < 0 )); then dur=0; fi
+      if (( dur >= thr_ms )); then
+        if [[ "$(rc_read EXISTS "$fired_key" | tr -dc '0-9')" != "1" ]]; then
+          log "WARNING NODE_MODULES INTEGRITY — '$root' ${reason} (sustained ${dur}ms >= ${thr_ms}ms threshold); see issue #4175"
+          rc_write SET "$fired_key" 1
+          deliver_signal "$sig" "$root" "$reason" "$dur" "$thr_ms"
+        fi
+      fi
+    else
+      rc_write DEL "$since_key" "$fired_key"
+    fi
+    return 0
+  }
+
+  local now_ms
+  if [[ -n "${HYDRA_WATCHDOG_NM_NOW_MS+x}" ]]; then
+    now_ms="$HYDRA_WATCHDOG_NM_NOW_MS"
+  else
+    now_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+  fi
+  [[ "$now_ms" =~ ^[0-9]+$ ]] || now_ms=0
+
+  local root sig broken reason count
+  for root in "${WATCHED_ROOTS[@]}"; do
+    sig="$(sig_for_root "$root")"
+    broken=0
+    reason=""
+    if [[ ! -d "$root" ]]; then
+      broken=1
+      reason="root-absent"
+    elif [[ ! -d "$root/.bin" ]]; then
+      broken=1
+      reason="no-bin-dir"
+    else
+      count="$(find "$root" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -dc '0-9')"
+      [[ "$count" =~ ^[0-9]+$ ]] || count=0
+      if (( count < ENTRY_FLOOR )); then
+        broken=1
+        reason="below-entry-floor:${count}<${ENTRY_FLOOR}"
+      elif [[ ! -x "$root/.bin/$REQUIRED_BIN" ]]; then
+        broken=1
+        reason="missing-binary:${REQUIRED_BIN}"
+      fi
+    fi
+    # Threshold is always 0 — see header: no streak to wait out on a wiped
+    # tree under a live service.
+    track_signal "$sig" "$root" "$reason" 0 "$broken"
+  done
+
+  log "node-modules-integrity tick processed (${#WATCHED_ROOTS[@]} root(s) watched, now_ms=$now_ms)"
+  return 0
+}
+
+# =============================================================================
 # ## LAUNCH FLOW
 # =============================================================================
 #
@@ -954,6 +1176,14 @@ run_skill_mirror_drift() {
 #   HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS          (default 86400 = 24h)
 #   HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS      (default 1000  = 1s)
 #   HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS (default 3600  = 1h)
+#   HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS    (default 3600  = 1h sustain
+#                                        before the glm-sterile streak fires —
+#                                        absorbs a just-restarted drainer that
+#                                        inherits an empty PR window, issue #3868)
+#   HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS (default 6 — the zero-drainer-PR
+#                                        lookback window; far above the observed
+#                                        ~40-min per-issue author time so a single
+#                                        slow issue never trips it)
 #   HYDRA_WATCHDOG_LAUNCH_NOTIFY_STREAM  In-band delivery stream key (default
 #                                        hydra:notifications — the literal owned
 #                                        by src/event-bus-stream-keys.ts's
@@ -990,17 +1220,22 @@ run_launch_flow() {
   local PAUSE_S="${HYDRA_WATCHDOG_LAUNCH_PAUSE_SECONDS:-86400}"
   local LATENCY_BUDGET_MS="${HYDRA_WATCHDOG_LAUNCH_LATENCY_BUDGET_MS:-1000}"
   local LATENCY_BREACH_S="${HYDRA_WATCHDOG_LAUNCH_LATENCY_BREACH_SECONDS:-3600}"
+  local GLM_STERILE_S="${HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_SECONDS:-3600}"
+  local GLM_STERILE_WINDOW_H="${HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS:-6}"
   [[ "$FAILSAFE_S" =~ ^[0-9]+$ ]] || FAILSAFE_S=7200
   [[ "$METER_DARK_S" =~ ^[0-9]+$ ]] || METER_DARK_S=7200
   [[ "$QUOTA_S" =~ ^[0-9]+$ ]] || QUOTA_S=14400
   [[ "$PAUSE_S" =~ ^[0-9]+$ ]] || PAUSE_S=86400
   [[ "$LATENCY_BUDGET_MS" =~ ^[0-9]+$ ]] || LATENCY_BUDGET_MS=1000
   [[ "$LATENCY_BREACH_S" =~ ^[0-9]+$ ]] || LATENCY_BREACH_S=3600
+  [[ "$GLM_STERILE_S" =~ ^[0-9]+$ ]] || GLM_STERILE_S=3600
+  [[ "$GLM_STERILE_WINDOW_H" =~ ^[0-9]+$ ]] || GLM_STERILE_WINDOW_H=6
   local FAILSAFE_MS=$((FAILSAFE_S * 1000))
   local METER_DARK_MS=$((METER_DARK_S * 1000))
   local QUOTA_MS=$((QUOTA_S * 1000))
   local PAUSE_MS=$((PAUSE_S * 1000))
   local LATENCY_BREACH_MS=$((LATENCY_BREACH_S * 1000))
+  local GLM_STERILE_MS=$((GLM_STERILE_S * 1000))
 
   log() {
     echo "hydra-launch-flow-watchdog: $*"
@@ -1078,6 +1313,11 @@ run_launch_flow() {
       quota)   etype="launch:quota_stretch" ;;
       latency) etype="launch:latency_breach" ;;
       pause)   etype="launch:pause_forgotten" ;;
+      # Issue #3868: live-but-sterile GLM drainer — the literal is owned by
+      # src/event-bus-vocabulary.ts's GLM_DRAINER_STERILE (in ALERT_TYPES and
+      # CRITICAL_EVENT_TYPES: dashboard alert + immediate digest line), drift-
+      # guarded by test/launch-flow-delivery.test.mts.
+      glm-sterile) etype="glm:drainer_sterile" ;;
       *) return 0 ;;
     esac
     # reason is a fixed pace-gate exit literal, but sanitize anyway so a future
@@ -1200,16 +1440,118 @@ run_launch_flow() {
     is_lat_over=1
   fi
 
-  # --- Apply the uniform streak rule to all five signals ---
+  # --- GLM drainer zero-throughput membership (issue #3868) ---
+  #
+  # "Live but sterile": while the drainer heartbeat is FRESH, the #3754
+  # partition hides every glm-eligible ready-for-agent issue from the Opus
+  # dev lane — so a drainer that is alive but shipping nothing starves the
+  # whole board invisibly. Observed 2026-08-05 (#3863): fresh heartbeat,
+  # claims proceeding, `gh pr create` failing on every attempt, ~40 min of
+  # z.ai authoring per issue, zero PRs, no alarm — liveness checks cannot see
+  # throughput. Membership here is the AND of three facts, evaluated cheap →
+  # expensive, and every upstream read failure fails QUIET in the no-alarm
+  # direction:
+  #
+  #   1. heartbeat fresh (one Redis GET) — stale/absent is the already-handled
+  #      "down" case (board-state.ts un-gates the Opus lane after 45 min,
+  #      ADR-0032 #3753 delta 2); alarming on it here would double-alarm, so
+  #      a non-fresh heartbeat clears membership and NO gh call is made.
+  #   2. work queued (one gh REST call) — at least one open glm-eligible +
+  #      ready-for-agent issue, excluding glm-withhold client-side exactly as
+  #      drainer-loop.sh's own defense-in-depth does: a withheld issue is
+  #      definitionally not work the drainer will touch. This clause is what
+  #      distinguishes STERILE (work waiting, nothing shipped) from IDLE
+  #      (nothing to do — never an alarm).
+  #   3. zero drainer PRs created in the trailing window (one gh REST call) —
+  #      "a drainer PR" is the SHARED issue-#4048 OR-predicate (glm-authored
+  #      label OR worktree-agent-glm-* head branch), reused LITERALLY below:
+  #      GLM_PR_MATCH_JQ is byte-identical to scripts/glm-beachhead-report.sh's
+  #      and MUST stay so (drift-guarded by test/launch-flow-delivery.test.mts,
+  #      mirroring the existing collect-state ↔ beachhead pairing). REST rows
+  #      are normalized to the {labels, headRefName} field names the shared
+  #      predicate reads, so the predicate text itself never forks.
+  #
+  # A FAILED gh query (non-zero exit, empty stdout, unparseable output) is not
+  # evidence of anything: it leaves the glm-sterile streak state UNTOUCHED this
+  # tick (glm_sterile_known=0 skips the track_signal call entirely — the same
+  # never-extend-AND-never-clear-on-a-read-failure discipline as the last-tick
+  # read above).
+  #
+  # The sustain threshold (default 1h) exists because the three-way AND can be
+  # INSTANTLY true the moment a drainer restarts in front of a queued board
+  # (fresh heartbeat + eligible work + an inherited empty PR window): a healthy
+  # drainer authors its first PR in ~40 min, flipping membership off well
+  # before the streak fires; a sterile one sustains it. gh api (REST) rather
+  # than gh's --json (GraphQL) because a live autopilot can exhaust the GraphQL
+  # budget and this runs on every 2-min watchdog tick.
+  local GLM_HEARTBEAT_KEY="hydra:glm:drainer:active"
+  # 45 min in ms — MUST mirror src/redis/autopilot.ts's
+  # GLM_DRAINER_HEARTBEAT_STALE_MS (drift-guarded by the delivery test).
+  local GLM_HEARTBEAT_STALE_MS=2700000
+  local GLM_REPO="gaberoo322/hydra"
+  # BYTE-IDENTICAL to scripts/glm-beachhead-report.sh's GLM_PR_MATCH_JQ — the
+  # shared "is this PR drainer output?" predicate (issue #4048). Never edit one
+  # without the other; the drift-guard test compares the two literals.
+  local GLM_PR_MATCH_JQ='((.labels // []) | map(.name) | index($label)) or ((.headRefName // "") | startswith($prefix))'
+  local is_glm_sterile=0 glm_sterile_known=1
+  local glm_hb_raw glm_hb_age=-1
+  glm_hb_raw="$(rc_read GET "$GLM_HEARTBEAT_KEY" | tr -dc '0-9')"
+  if [[ "$glm_hb_raw" =~ ^[0-9]+$ ]]; then
+    glm_hb_age=$((now_ms - glm_hb_raw))
+  fi
+  if (( glm_hb_age >= 0 && glm_hb_age <= GLM_HEARTBEAT_STALE_MS )); then
+    if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+      glm_sterile_known=0
+      log "WARN glm-sterile check needs gh+jq and one is missing — leaving the glm-sterile streak untouched this tick (#3868)"
+    else
+      local glm_queue_len
+      glm_queue_len="$(gh api "repos/${GLM_REPO}/issues?labels=glm-eligible,ready-for-agent&state=open&per_page=100" \
+        --jq '[.[] | select(has("pull_request") | not) | select(((.labels // []) | map(.name) | index("glm-withhold")) | not)] | length' 2>/dev/null)" || glm_queue_len=""
+      if ! [[ "$glm_queue_len" =~ ^[0-9]+$ ]]; then
+        glm_sterile_known=0
+        log "WARN glm-sterile queue query failed/unparseable — a failed query is not an empty queue; leaving the glm-sterile streak untouched this tick (#3868)"
+      elif (( glm_queue_len > 0 )); then
+        local glm_window_start_ms glm_recent_prs glm_jq_prog
+        glm_window_start_ms=$((now_ms - GLM_STERILE_WINDOW_H * 3600000))
+        # Normalize REST rows to the shared predicate's field names, then apply
+        # the predicate + the created-in-window filter. 100 newest-first rows
+        # comfortably cover any 6h window at this repo's PR rate.
+        glm_jq_prog='[.[] | {labels, headRefName: (.head.ref // ""), createdAt: (.created_at // "")} | select('"${GLM_PR_MATCH_JQ}"') | select((.createdAt != "") and ((.createdAt | fromdateiso8601) * 1000 >= $since_ms))] | length'
+        glm_recent_prs="$(gh api "repos/${GLM_REPO}/pulls?state=all&sort=created&direction=desc&per_page=100" 2>/dev/null \
+          | jq --arg label "glm-authored" --arg prefix "worktree-agent-glm-" \
+               --argjson since_ms "$glm_window_start_ms" "$glm_jq_prog" 2>/dev/null)" || glm_recent_prs=""
+        if ! [[ "$glm_recent_prs" =~ ^[0-9]+$ ]]; then
+          glm_sterile_known=0
+          log "WARN glm-sterile PR-window query failed/unparseable — a failed query is not zero throughput; leaving the glm-sterile streak untouched this tick (#3868)"
+        elif (( glm_recent_prs == 0 )); then
+          is_glm_sterile=1
+        fi
+      fi
+      # glm_queue_len == 0 → idle, not sterile: membership stays 0 (clears).
+    fi
+  fi
+  # Non-fresh heartbeat → membership stays 0 (the "down" case; no double alarm).
+
+  # --- Apply the uniform streak rule to all signals ---
   track_signal fail-safe  "$FAILSAFE_MS"       "$is_failsafe"
   track_signal meter-dark "$METER_DARK_MS"     "$is_meterdark"
   track_signal quota      "$QUOTA_MS"          "$is_quota"
   track_signal pause      "$PAUSE_MS"          "$is_pause"
   track_signal latency    "$LATENCY_BREACH_MS" "$is_lat_over"
+  if [[ "$glm_sterile_known" == "1" ]]; then
+    # Sixth signal, same uniform rule + fired/since dedup keys (issue #3868).
+    # Skipped ENTIRELY (state untouched) when an upstream gh query failed —
+    # never extend and never clear a streak on unknown inputs. Deliberately
+    # NOT a member of src/redis/launch-flow.ts's WATCHDOG_LAUNCH_SIGNALS:
+    # that constant enumerates the pace-gate REASON-derived signals; this one
+    # is derived from the drainer heartbeat + the GitHub board instead.
+    track_signal glm-sterile "$GLM_STERILE_MS" "$is_glm_sterile"
+  fi
 
   log "launch-flow tick processed (reason=$reason, latency_ms=${latency_ms:-none}, now_ms=$now_ms)"
   return 0
 }
+
 
 # =============================================================================
 # Entry point — run all blocks on every tick ONLY when the script is executed
@@ -1225,5 +1567,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   run_deploy_drift
   run_skill_mirror_drift
   run_launch_flow
+  run_node_modules_integrity
   exit 0
 fi

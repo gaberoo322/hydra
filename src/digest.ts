@@ -91,6 +91,16 @@ export const CRITICAL_EVENT_TYPES: readonly string[] = [
   E.LAUNCH_QUOTA_STRETCH,
   E.LAUNCH_LATENCY_BREACH,
   E.LAUNCH_PAUSE_FORGOTTEN,
+  // Issue #4175: node_modules integrity watchdog signal — rides the same
+  // immediate CRITICAL bypass (formatCriticalAlert's generic default arm
+  // renders it) as the launch-flow signals above; a wiped install under a
+  // live money-critical service must not wait up to 4h for the next digest.
+  E.INFRA_NODE_MODULES_WIPED,
+  // Issue #3868: live-but-sterile GLM drainer — same immediate CRITICAL
+  // bypass; while the drainer heartbeat is fresh the #3754 partition hides
+  // glm-eligible work from the Opus lane, so every hour of sterility is an
+  // hour of silent board starvation. Also in ALERT_TYPES (dashboard alert).
+  E.GLM_DRAINER_STERILE,
 ];
 
 /**

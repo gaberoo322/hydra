@@ -318,11 +318,24 @@ before(() => {
     .split(`"${PACE_GATE_LAST_TICK_KEY}"`)
     .join(`"${TEST_LAST_TICK_KEY}"`)
     .split(`"${LAUNCH_FLOW_KEY_PREFIX}"`)
-    .join(`"${TEST_LF_PREFIX}"`);
+    .join(`"${TEST_LF_PREFIX}"`)
+    // Issue #3868: rebind the GLM drainer heartbeat literal too. This file's
+    // behavioural cases never seed the namespaced heartbeat, so the block's
+    // glm-sterile membership check short-circuits on "heartbeat absent" and
+    // NEVER reaches its gh calls — without this rebind, a fresh PRODUCTION
+    // drainer heartbeat on the host would make every behavioural case here
+    // shell out to the real GitHub API.
+    .split(`"hydra:glm:drainer:active"`)
+    .join(`"${RUN_NS}:glm-drainer-active"`);
   assert.ok(
     namespaced.includes(`"${TEST_LAST_TICK_KEY}"`),
     `failed to rebind LAST_TICK_KEY: the block no longer contains the literal "${PACE_GATE_LAST_TICK_KEY}". ` +
       `Without this rebinding the behavioural cases race the live hydra-watchdog.timer (#4072).`,
+  );
+  assert.ok(
+    namespaced.includes(`"${RUN_NS}:glm-drainer-active"`),
+    'failed to rebind the GLM drainer heartbeat key: the block no longer contains the literal "hydra:glm:drainer:active" (issue #3868). ' +
+      "Without this rebinding the behavioural cases read the live production heartbeat and can shell out to the real GitHub API.",
   );
   assert.ok(
     namespaced.includes(`"${TEST_LF_PREFIX}"`),

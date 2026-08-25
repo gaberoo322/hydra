@@ -1,0 +1,1 @@
+- feat: report the Target's checked-out commit and a dirty flag on the Versions card instead of a permanently empty version slot (#4172)

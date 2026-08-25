@@ -60,6 +60,9 @@ function snapshotWith(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     oauthAgeMs: null,
     oauthFiveHourResetsAt: null,
     oauthSevenDayResetsAt: null,
+    // Window position unknown on this estimate-path fixture (issue #4121).
+    windowElapsedFraction: null,
+    paceRatio: null,
     projectedWeeklyPercent: 20,
     pacingState: "under",
     emergencyStop: false,

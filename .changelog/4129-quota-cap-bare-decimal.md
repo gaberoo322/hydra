@@ -1,0 +1,1 @@
+- fix: autopilot bootstrap now FATALs on bare-decimal quota caps (.5 / 5.) instead of silently writing a torn state.json (#4129)

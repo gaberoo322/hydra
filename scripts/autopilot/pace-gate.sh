@@ -108,6 +108,15 @@
 #       `docker exec`); any other value calls `redis-cli -h $HOST -p $PORT`
 #       directly, letting the test inject an unreachable host to verify the
 #       best-effort record write never blocks a launch.
+#   HYDRA_REDIS_DB
+#       Selects the logical Redis DB index `record_tick()`'s HSET targets, via
+#       `-n <db>` on both the docker-exec and direct redis-cli branches
+#       (issue #4210, mirroring #4183's fix for scripts/hydra-watchdog.sh).
+#       Defaults to "0" (production) when absent OR non-numeric, so an unset
+#       or malformed value is byte-identical to today's hardcoded-db-0
+#       behaviour. `scripts/test/redis-db-launch.mjs` is the intended setter
+#       for a test run's child env; a bare invocation (a human, a systemd
+#       timer) always lands on db 0 exactly as before.
 #
 # Per-tick durable record (issue #3845, epic #3844)
 # --------------------------------------------------
@@ -131,6 +140,11 @@ STATE_PATH="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
 ELIGIBILITY_URL="${HYDRA_PACE_GATE_ELIGIBILITY_URL:-http://localhost:4000/api/usage/eligibility}"
 REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
 REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+# Non-numeric or absent HYDRA_REDIS_DB falls back to db 0 (production) — same
+# validation shape as #4183's watchdog fix. `[[ =~ ]]` against an unset var
+# under `set -u` is safe (bash treats the RHS as a pattern, not an expansion).
+REDIS_DB="${HYDRA_REDIS_DB:-0}"
+[[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
 # Single source of truth for this literal is cross-checked against the
 # exported PACE_GATE_LAST_TICK_KEY constant in src/redis/launch-flow.ts by
 # test/launch-flow-key-contract.test.mts — keep the two in lockstep.
@@ -179,6 +193,7 @@ record_tick() {
   # which under `set -euo pipefail` would otherwise abort the tick.
   if [[ "$REDIS_HOST" == "docker" ]]; then
     docker exec hydra-redis-1 redis-cli \
+      -n "$REDIS_DB" \
       HSET "$LAST_TICK_KEY" \
       reason "$reason" \
       class "$class" \
@@ -186,6 +201,7 @@ record_tick() {
       latency_ms "$latency_ms" >/dev/null 2>&1 || true
   else
     redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" \
+      -n "$REDIS_DB" \
       HSET "$LAST_TICK_KEY" \
       reason "$reason" \
       class "$class" \

@@ -1,12 +1,12 @@
 /**
  * test/versions-format.test.mts — pins the pure half of the dashboard Versions
- * panel (issue #3681, epic #3676 epsilon).
+ * panel (issue #3681, epic #3676 epsilon; the commit-identity half is #4172).
  *
  * The dashboard has no component-test runner, so the panel's real decisions —
- * the current-vs-older release split, the three degraded states, and the note
- * grouping order — live in `dashboard/src/lib/versions-format.ts` precisely so
- * they can be asserted here (the `test/page-item-format.test.mts` precedent,
- * issue #822).
+ * the current-vs-older release split, the three degraded states, the note
+ * grouping order, and how a tagless Target's commit identity renders — live in
+ * `dashboard/src/lib/versions-format.ts` precisely so they can be asserted here
+ * (the `test/page-item-format.test.mts` precedent, issue #822).
  *
  * The headline invariant is the DOUBLE-RENDER trap: `/api/versions` returns
  * `current` WITHOUT notes and `history[0]` as the same release WITH notes, so a
@@ -24,6 +24,8 @@ import {
   formatVersion,
   currentVersionLabel,
   badgeVersionLabel,
+  isCommitIdentity,
+  commitIdentityLabel,
   formatReleaseDate,
   shortSha,
   versionAnchorId,
@@ -60,6 +62,24 @@ function healthyProject(): ProjectVersions {
         notes: [note("fix", "deploy stamp", 3733)],
       },
     ],
+    error: null,
+  };
+}
+
+/**
+ * A tagless Target reporting commit identity (#4172). `dirty` defaults false;
+ * pass true for the live-tree case. `shortSha` renders `b824716` from this sha.
+ */
+function identityProject(dirty = false): ProjectVersions {
+  return {
+    name: "hydra-betting",
+    scope: "target",
+    current: {
+      sha: "b824716d2ea4f9d3c8d0e5f6a7b8c9d0e1f2a3b4",
+      date: "2026-08-19T14:03:00-07:00",
+      dirty,
+    },
+    history: [],
     error: null,
   };
 }
@@ -237,6 +257,22 @@ describe("versions-format: splitReleases (the double-render guard)", () => {
     assert.deepEqual(splitReleases(null), { current: null, older: [] });
     assert.deepEqual(splitReleases(undefined), { current: null, older: [] });
   });
+
+  test("a commit-identity project has no current RELEASE and never double-renders (#4172)", () => {
+    // The Target's `current` is a CommitIdentity, not a VersionRef. It must not
+    // be promoted into a note-less synthetic release (that path is for a TAG
+    // with no matching history entry) — the identity renders from
+    // project.current itself in the card, never through splitReleases.
+    const project = identityProject();
+    assert.deepEqual(splitReleases(project), { current: null, older: [] });
+
+    // Defensive: stray history entries are still surfaced as older, not eaten.
+    const stray = identityProject();
+    stray.history = healthyProject().history;
+    const { current, older } = splitReleases(stray);
+    assert.equal(current, null);
+    assert.deepEqual(older.map((e) => e.version), ["v1.1.0", "v1.0.0"]);
+  });
 });
 
 describe("versions-format: degraded states", () => {
@@ -296,6 +332,28 @@ describe("versions-format: degraded states", () => {
 
     assert.equal(badgeVersionLabel(healthyProject()), "v1.1.0");
   });
+
+  test("a commit-identity project is ok — not 'empty', not an error (#4172)", () => {
+    // The whole point of #4172: a read that succeeds must not render as the
+    // "never been tagged" empty state nor as a failure.
+    assert.equal(projectState(identityProject()), "ok");
+    assert.equal(projectState(identityProject(true)), "ok");
+  });
+
+  test("currentVersionLabel renders the short sha, marked when dirty (#4172)", () => {
+    assert.equal(currentVersionLabel(identityProject()), "b824716");
+    // The trailing `*` is the compact dirty flag (`git describe --dirty`
+    // convention) — the card body carries the explicit chip.
+    assert.equal(currentVersionLabel(identityProject(true)), "b824716*");
+  });
+
+  test("the badge renders the same identity label as the card (#4172)", () => {
+    // The two consumers must agree — that agreement is this module's reason
+    // for existing. A blank chip (the pre-#4172 `formatVersion(undefined)`)
+    // is exactly the regression this pins out.
+    assert.equal(badgeVersionLabel(identityProject()), "b824716");
+    assert.equal(badgeVersionLabel(identityProject(true)), "b824716*");
+  });
 });
 
 describe("versions-format: misc formatting", () => {
@@ -319,6 +377,18 @@ describe("versions-format: misc formatting", () => {
     assert.equal(shortSha("abcdef1234567890"), "abcdef1");
     assert.equal(shortSha(""), ERROR_PLACEHOLDER);
     assert.equal(shortSha(null), ERROR_PLACEHOLDER);
+  });
+
+  test("isCommitIdentity discriminates the two current shapes (#4172)", () => {
+    assert.equal(isCommitIdentity(identityProject().current), true);
+    assert.equal(isCommitIdentity(identityProject(true).current), true);
+    assert.equal(isCommitIdentity(healthyProject().current), false, "a VersionRef is not an identity");
+    assert.equal(isCommitIdentity(null), false);
+  });
+
+  test("commitIdentityLabel degrades like every other label (#4172)", () => {
+    assert.equal(commitIdentityLabel(undefined), ERROR_PLACEHOLDER);
+    assert.equal(commitIdentityLabel(null), ERROR_PLACEHOLDER);
   });
 
   test("the badge href and the panel's anchor id agree on a single, panel-wide anchor", () => {

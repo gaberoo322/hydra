@@ -211,6 +211,19 @@ function makeGhStub(
     /** Served to the label-less `--state all` branch scan (issue #4048). */
     allPrsForBranchScan?: FakePr[];
     commentsByPr: Record<number, FakeComment[]>;
+    /**
+     * Force selected queries to FAIL gh-style (diagnostic on stderr, exit 1,
+     * no stdout) — the 2026-08-17 503-window shape (issue #4128).
+     */
+    fail?: {
+      mergedBaseline?: boolean;
+      labelFetch?: boolean;
+      branchScan?: boolean;
+    };
+    /** Label fetch exits 0 but prints NOTHING (gh never legitimately does with --json). */
+    labelFetchEmptyOutput?: boolean;
+    /** Serve this raw string (exit 0) for the branch scan instead of JSON — the malformed/partial-response class. */
+    branchScanRaw?: string;
   },
 ): string {
   const binDir = join(dir, "bin");
@@ -237,17 +250,35 @@ def find_flag(argv, name):
     return None
 
 
+def fail_hard():
+    # gh-style failure: diagnostic on stderr, exit 1, NO stdout (issue #4128).
+    sys.stderr.write("gh-stub: HTTP 503: Service Unavailable (simulated upstream failure)")
+    sys.exit(1)
+
+
 def main():
     argv = sys.argv[1:]
     fx = load()
+    fail = fx.get("fail", {})
     if argv[:2] == ["pr", "list"]:
         state = find_flag(argv, "--state")
         label = find_flag(argv, "--label")
         if state == "merged":
+            if fail.get("mergedBaseline"):
+                fail_hard()
             rows = fx["mergedBaselinePrs"]
         elif label == "glm-authored":
+            if fail.get("labelFetch"):
+                fail_hard()
+            if fx.get("labelFetchEmptyOutput"):
+                return
             rows = fx["glmAuthoredPrs"]
         elif state == "all":
+            if fail.get("branchScan"):
+                fail_hard()
+            if fx.get("branchScanRaw") is not None:
+                sys.stdout.write(fx["branchScanRaw"])
+                return
             rows = fx.get("allPrsForBranchScan", [])
         else:
             rows = []
@@ -1246,6 +1277,306 @@ describe("glm-beachhead-report.sh — baseline provenance guard (issue #4122)", 
       assert.match(r.stderr, /pre-#4049 bootstrap/);
       assert.match(r.stderr, /pre-GLM-era percentLast7d snapshot/);
       assert.doesNotMatch(r.stderr, /re-bootstrapping today/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fail-loud on failed gh queries (issue #4128)
+//
+// During a GitHub 503 window on 2026-08-17 both `gh pr list` calls inside
+// fetch_glm_authored_prs() failed; `2>/dev/null || echo "[]"` masked each
+// failure as an empty array and the script rendered a CONFIDENT, WRONG
+// readout — "window 9/14d, 0/25 PRs ... recommendation: insufficient-data" —
+// while the true state (minutes later, unchanged repo) was "window 20/14d,
+// 83/25 PRs ... KEEP -- window complete". The empty rows cascaded through TWO
+// suppressing paths at once: recommend() mapped zero PRs to
+// insufficient-data, AND window_day0_epoch_from_rows fell back to the
+// baseline epoch, resetting the window clock so a COMPLETED window read as an
+// early one. The fix (pinned by the design-concept artifact for this issue):
+// a failed query is detected via fetch_glm_authored_prs()'s OWN return code
+// (never a global — the function runs in a command-substitution subshell that
+// cannot leak assignments back to main), short-circuits main() BEFORE
+// window_day0_epoch_from_rows() / recommend() ever run, logs a loud stderr
+// diagnostic via log(), prints ONE ERROR line on stdout, and exits non-zero —
+// a deliberate divergence from require_tools()'s exit-0 convention (a missing
+// tool is the caller environment's problem; a failed query means every number
+// in the report is fiction). A genuinely EMPTY result set (query succeeds,
+// zero rows) keeps the existing insufficient-data path — the two cases stay
+// distinct.
+// ---------------------------------------------------------------------------
+
+describe("glm-beachhead-report.sh — fail-loud on failed gh queries (issue #4128)", () => {
+  // The drainer PR the 503 window hid: with queries healthy, the window from
+  // 2026-07-28 to 2026-08-17 is 20/14 days — COMPLETE — and the honest
+  // readout is a KEEP/EXPAND-family line, never insufficient-data.
+  const INCIDENT_PR: FakePr = {
+    number: 800,
+    createdAt: "2026-07-28T00:00:00Z",
+    additions: 60,
+    deletions: 40,
+    labels: [{ name: "glm-authored" }],
+    headRefName: "worktree-agent-glm-4128-1",
+  };
+  // 2026-08-17T00:00:00Z — 20 days after the incident PR's createdAt.
+  const NOW_INCIDENT = String(epochOf("2026-08-17T00:00:00Z"));
+
+  test("the 2026-08-17 incident shape: BOTH measurement fetches failing -> exit 1, loud stderr diagnostic, one stdout ERROR line, NO recommendation and NO fabricated window position", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [
+          { number: 1, createdAt: "2026-06-01T00:00:00Z", additions: 100, deletions: 50, labels: [] },
+        ],
+        glmAuthoredPrs: [INCIDENT_PR],
+        allPrsForBranchScan: [INCIDENT_PR],
+        commentsByPr: {},
+        fail: { labelFetch: true, branchScan: true },
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      // THE regression: loud, non-zero exit.
+      assert.equal(r.status, 1);
+      // Loud stderr diagnostic via log() ("hydra-glm-beachhead: ERROR ..."),
+      // carrying the failed side + gh's own error text.
+      assert.match(r.stderr, /hydra-glm-beachhead: ERROR/);
+      assert.match(r.stderr, /503/);
+      // Exactly one ERROR line on stdout — never a recommendation of any
+      // kind, never a numeric readout built on the masked [].
+      assert.match(r.stdout.trim(), /^GLM beachhead: ERROR gh query failed/);
+      assert.doesNotMatch(r.stdout, /recommendation:/);
+      assert.doesNotMatch(r.stdout, /window \d+\/14d/);
+      assert.doesNotMatch(r.stdout, /insufficient-data/);
+      // The baseline bootstrap-once behavior is deliberately untouched by
+      // this fix (design-concept invariant): the bootstrap that runs BEFORE
+      // the measurement fetch still happened, from the fetches that succeeded.
+      const baseline = JSON.parse(readFileSync(baselineFile, "utf8"));
+      assert.equal(baseline.percentLast7dBaseline, 55);
+      assert.equal(baseline.churnBaseline, 150);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("deliberate divergence: a MISSING TOOL still exits 0 while a FAILED QUERY exits 1 (do not harmonize the two failure classes)", async () => {
+    // Run A — missing tool: main() with a PATH that resolves NONE of
+    // gh/jq/curl/awk keeps require_tools()'s exit-0-with-ERROR-text
+    // convention (never blocks hydra-review over a caller tooling gap).
+    // callHelper's bash is resolved by node BEFORE the inline PATH change,
+    // mirroring the existing missing-tools test above.
+    const rA = callHelper("PATH=/nonexistent-empty-dir main");
+    assert.equal(rA.status, 0);
+    assert.match(rA.stdout, /ERROR required tools/);
+
+    // Run B — failed query: gh present and executable, but the queries fail:
+    // exit 1. Same script, same report, different failure CLASS.
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binB = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [INCIDENT_PR],
+        allPrsForBranchScan: [INCIDENT_PR],
+        commentsByPr: {},
+        fail: { labelFetch: true, branchScan: true },
+      });
+      const rB = await runReport({
+        PATH: `${binB}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline-b.json"),
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      assert.equal(rB.status, 1);
+      assert.match(rB.stdout, /ERROR gh query failed/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("partial failure (label fetch OK, branch scan fails) -> same fail-loud exit 1, never a union built on []", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [INCIDENT_PR],
+        allPrsForBranchScan: [INCIDENT_PR],
+        commentsByPr: {},
+        fail: { branchScan: true },
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      // The masked branch scan would silently judge the lane on the label
+      // side alone (the #4048 provenance gap, re-introduced by the back door).
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /hydra-glm-beachhead: ERROR/);
+      assert.match(r.stdout, /ERROR gh query failed/);
+      assert.doesNotMatch(r.stdout, /recommendation:/);
+      assert.doesNotMatch(r.stdout, /window \d+\/14d/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("partial failure (branch scan OK, label fetch fails) -> same fail-loud exit 1", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [INCIDENT_PR],
+        allPrsForBranchScan: [INCIDENT_PR],
+        commentsByPr: {},
+        fail: { labelFetch: true },
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /hydra-glm-beachhead: ERROR/);
+      assert.match(r.stdout, /ERROR gh query failed/);
+      assert.doesNotMatch(r.stdout, /recommendation:/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("gh exiting 0 with EMPTY stdout is a failed query, not an empty result set -> fail loud", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [INCIDENT_PR],
+        allPrsForBranchScan: [INCIDENT_PR],
+        commentsByPr: {},
+        labelFetchEmptyOutput: true,
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      // A successful `gh pr list --json` always prints at least []; nothing
+      // at all on stdout means the response never arrived — the same class of
+      // silent truncation the 2026-08-17 instability exhibited.
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /hydra-glm-beachhead: ERROR/);
+      assert.doesNotMatch(r.stdout, /recommendation:/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the branch scan returning invalid JSON (partial response) -> fail loud, never a silent []", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [INCIDENT_PR],
+        commentsByPr: {},
+        // Truncated mid-object, exit 0 — the union jq cannot parse this, and
+        // the old `|| echo "[]"` mask turned that into a fabricated zero.
+        branchScanRaw: '[{"number": 900, "createdAt"',
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /hydra-glm-beachhead: ERROR/);
+      assert.doesNotMatch(r.stdout, /recommendation:/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("CONTRAST: the same queries succeeding with ZERO rows keeps insufficient-data, exit 0 (a failed query and an empty result set stay distinct)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [],
+        allPrsForBranchScan: [],
+        commentsByPr: {},
+      });
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      // Acceptance criterion 2: `[]` from a SUCCESSFUL query is the genuine
+      // no-drainer-PRs-yet state — the empty-rows -> baseline-epoch fallback
+      // in window_day0_epoch_from_rows() stays legitimate here (window 0/14d
+      // anchored to the bootstrap moment) and the recommendation stays the
+      // informational insufficient-data line, exit 0.
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /window 0\/14d, 0\/25 PRs/);
+      assert.match(r.stdout, /recommendation: insufficient-data/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a failed merged-baseline churn fetch at bootstrap degrades gracefully to a null churnBaseline (deliberately unchanged, do not fix here)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-4128-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [INCIDENT_PR],
+        allPrsForBranchScan: [INCIDENT_PR],
+        commentsByPr: {},
+        fail: { mergedBaseline: true },
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        HYDRA_GLM_BEACHHEAD_NOW_EPOCH: NOW_INCIDENT,
+      });
+      // The design-concept artifact scopes this fix to the
+      // fetch_glm_authored_prs() path ONLY: fetch_baseline_churn_sample()
+      // keeps its graceful degradation (gh failure -> "[]" -> null/n-a
+      // baseline, report still renders, exit 0). This test PINS that
+      // divergence so a later pass cannot "harmonize" it accidentally —
+      // extending fail-loud to the baseline bootstrap is a separate decision.
+      assert.equal(r.status, 0);
+      const baseline = JSON.parse(readFileSync(baselineFile, "utf8"));
+      assert.equal(baseline.churnBaseline, null);
+      assert.equal(baseline.churnSampleSize, 0);
+      assert.match(r.stdout, /vs baseline n\/a \(ratio n\/a\)/);
+      assert.match(r.stdout, /recommendation: KEEP/);
     } finally {
       usage.close();
       rmSync(tmp, { recursive: true, force: true });

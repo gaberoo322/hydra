@@ -94,6 +94,30 @@ const NOTIFICATION_EVENT_TYPES = {
   LAUNCH_LATENCY_BREACH: "launch:latency_breach",
   LAUNCH_PAUSE_FORGOTTEN: "launch:pause_forgotten",
 
+  // --- Infra integrity watchdog signals (issue #4175) ---
+  // Published by the watchdog's run_node_modules_integrity block (a direct
+  // enveloped redis-cli XADD from bash, same ADR-0017 Category A shape as the
+  // launch-flow signals above) the instant a watched node_modules install
+  // root is found broken (absent, missing .bin/, below the entry floor, or
+  // missing the referenced binary) — see scripts/hydra-watchdog.sh's
+  // "## NODE MODULES INTEGRITY" block. In both ALERT_TYPES and
+  // CRITICAL_EVENT_TYPES: a wiped install under a live money-critical service
+  // warrants both the dashboard alert and the immediate digest line.
+  INFRA_NODE_MODULES_WIPED: "infra:node_modules_wiped",
+
+  // --- GLM dev-drainer zero-throughput watchdog signal (issue #3868) ---
+  // Published by the watchdog's run_launch_flow block (same ADR-0017
+  // Category A enveloped XADD from bash as the launch-flow signals above)
+  // when the drainer is LIVE BUT STERILE: fresh hydra:glm:drainer:active
+  // heartbeat, at least one glm-eligible + ready-for-agent issue queued
+  // (work to drain), and ZERO drainer PRs — the shared issue-#4048
+  // OR-predicate (glm-authored label OR worktree-agent-glm-* head branch) —
+  // created in the trailing window, sustained past the streak threshold.
+  // In both ALERT_TYPES and CRITICAL_EVENT_TYPES: while the heartbeat is
+  // fresh the #3754 partition hides the queued work from the Opus lane, so
+  // a sterile drainer silently starves the whole board (observed #3863).
+  GLM_DRAINER_STERILE: "glm:drainer_sterile",
+
   // --- Learning-system pattern alerts ---
   PATTERN_LOW_MERGE_RATE: "pattern:low_merge_rate",
   PATTERN_CONSECUTIVE_FAILURES: "pattern:consecutive_failures",

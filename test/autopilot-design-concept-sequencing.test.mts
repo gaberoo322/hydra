@@ -8,8 +8,10 @@
  *     `designConcept` block AND that block reports the artifact is
  *     missing or stale, decide.py MUST emit a `dispatch:design_concept_orch`
  *     using the `hydra-grill` skill, and MUST suppress any
- *     `dispatch:dev_orch` for the same turn. Both gates require the
- *     `orch_work_available` signal.
+ *     `dispatch:dev_orch` for the same turn. `dev_orch` requires the
+ *     `orch_work_available` signal; `design_concept_orch` does NOT
+ *     (issue #3870 — it authors nothing, so it must not inherit
+ *     dev_orch's authoring-pool gate).
  *
  *   - When the block reports a fresh artifact (even draft / warn-only —
  *     `present:true && isFresh:true`, regardless of `gateOk`), decide.py
@@ -217,9 +219,12 @@ describe("decide.py — design_concept_orch sequencing (issue #466, Phase B)", (
       "dev_orch must proceed when designConcept block is absent (legacy candidates path)");
   });
 
-  test("does NOT fire grill when orch_work_available is absent (gating signal missing)", () => {
-    // No orch_work_available signal — nothing for hydra-dev to pick up,
-    // so there's no point in grilling either.
+  test("does NOT fire grill when orch_pending_grill_anchor is absent (no anchor named)", () => {
+    // ISSUE #3870: this case is retained but its RATIONALE was corrected.
+    // It passes because `orch_pending_grill_anchor` is absent (the #751
+    // single-source-of-truth path), NOT because `orch_work_available` is —
+    // that precondition no longer gates this selector at all. `baseState()`
+    // sets neither signal, so the case pins the anchor-absent path only.
     const state = baseState();  // no signals
     const cands = {
       candidates: [
@@ -233,7 +238,7 @@ describe("decide.py — design_concept_orch sequencing (issue #466, Phase B)", (
     const plan = runDecide(state, cands);
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
     assert.equal(grill, undefined,
-      "design_concept_orch must require the same orch_work_available signal as dev_orch");
+      "no orch_pending_grill_anchor → no grill (a candidate's designConcept block is not a trigger, #751)");
   });
 
   test("does NOT fire grill when slot is busy (INV-002)", () => {
@@ -357,16 +362,29 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
     assert.ok(dev, "dev_orch proceeds when no orch grill is pending");
   });
 
-  test("orch_work_available absent → no grill even when signal points to an anchor", () => {
-    // The orch_work_available gate is sacred — if the orch board is
-    // empty there's no point grilling for downstream dev_orch work
-    // that won't happen anyway.
+  test("orch_work_available absent → STILL grills when signal points to an anchor (#3870)", () => {
+    // ISSUE #3870: this case previously asserted the opposite — that the
+    // `orch_work_available` precondition gated this selector too. That
+    // coupling was REMOVED. `orch_work_available` is dev_orch's
+    // authoring-pool signal (`ready_for_agent > 0`), and under a live GLM
+    // dev-drainer partition it EXCLUDES every `glm-eligible` issue — so it
+    // could be absent while `orch_pending_grill_anchor` correctly named a
+    // glm-eligible anchor still awaiting a design concept. design_concept_orch
+    // authors nothing; it only produces the artifact, which that anchor needs
+    // regardless of who eventually builds it. `orch_pending_grill_anchor` is
+    // itself a strict trigger (collect-state.sh only ever sets it to a real
+    // ready-for-agent, non-target-backlog issue lacking a fresh artifact), so
+    // it alone is sufficient. dev_orch's own `orch_work_available` gate is
+    // UNCHANGED.
     const state = baseState({ orch_pending_grill_anchor: "issue-999" });
     const cands = { candidates: [] };
     const plan = runDecide(state, cands);
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
-    assert.equal(grill, undefined,
-      "orch_pending_grill_anchor requires orch_work_available to fire");
+    assert.ok(grill,
+      "orch_pending_grill_anchor alone must fire the grill — no orch_work_available precondition (#3870)");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(dev, undefined,
+      "dev_orch keeps its OWN orch_work_available gate — absent signal means no dev dispatch");
   });
 
   test("scope=target-only still excludes design_concept_orch (orch-scope class)", () => {
