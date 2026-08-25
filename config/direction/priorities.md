@@ -1,131 +1,118 @@
 ---
-updated: 2026-07-11
+updated: 2026-07-31
 refreshedBy: claude-research
-researchCycle: research-target-2026-07-01b
+researchCycle: research-target-2026-07-31f
 tags: [hydra, hydra/direction]
 ---
-> Re-verified 2026-07-11 (#3196): the priorities below remain consistent with `vision.md` and hydra-betting ADR-0002 (M13 Forecast-Directional Execution is the active program; cross-venue arbitrage was retired 2026-06-22). No active-arbitrage priority framing exists — the only `arbitrage` mentions are the legitimate ADR-0002 step-3/step-4 deletion tasks. No vision/priorities contradiction found; content unchanged.
+> **This cycle was a re-prioritization + premise-check pass, not a filing pass** (operator framing: the board already held 31–32 `ready-for-agent` items — above the 30-item target — so the job was to re-rank what exists and retire what's already shipped or already-decided, not add volume). No new issues were filed. Consistent with `vision.md` and ADR-0002 (M13 Forecast-Directional Execution active; cross-venue arbitrage retired 2026-06-22). KXBTC and KXMLB are both live series lanes — neither is narrowed to the other. KXNBA stays off-scope until October 2026 (calendar-blind rule, unaffected by today's date).
 
 # Current state
-Hydra is sports-first, executing the M13 (Forecast-Directional Execution) program. Tests are green (6820 passing, 3 skipped — verified baseline 2026-07-01b). Active backlog is 9 items (all cleanup); work queue is empty (0). Backlog gap: 21 items to target of 30.
 
-**M13 deployment is live but producing zero nominations.** The directional nomination runner (`hydra-betting-directional-nomination.timer`) fires hourly at `:25` and has run successfully every hour. However, every run reports `candidatesConsidered: 0` and `note: "no forecast-divergence candidates surfaced"`. Root cause confirmed 2026-07-01: the `loadKalshiPaperTradeCandidates` freshness window is **15 minutes** (`KALSHI_LIVE_SUBMIT_MAX_ESTIMATE_AGE_MS`), but the paper-edge-feed runner frequently takes **14–28 minutes** to complete — and on some hours **fails entirely** (exit 143 / timeout, or exit 1 / LLM parse error). The nomination timer fires at `:25`, finding estimates from the prior hour's feed run (45+ minutes old), which are beyond the 15-minute freshness window. The timing design assumed a sub-7-minute feed run; actual Ollama inference time over the gaming-PC Tailnet routinely exceeds that.
+Board health is good: **31 `ready-for-agent`**, 1 `in-progress`, 1 `blocked`, 0 `needs-triage`, 6 `ready-for-human` (verified via `gh api` against `gaberoo322/hydra-betting`, 2026-07-31). No backlog-padding needed this cycle.
 
-**Paper LLM edge estimates are accumulating (324 rows total, 25 with edge ≥ 3% in past 7 days).** The headwater is working; the freshness-window mismatch is the integration gap. High-edge estimates exist (postFeeEdge up to 0.51 on WC QF/SF fixtures), but they are evaluated-at timestamps that fall outside the 15-minute candidate-loader window by the time the nomination runner fires.
+**Six of cycle e's (2026-07-26) top-7 priorities already shipped in the five days since** — the prior `priorities.md` was correctly ranked at the time but is now stale on status, not on judgment:
+- #720 + #722 (risk-preflight + sport-cluster/per-event exposure guard into `kalshi-executor.ts`) — **DONE**, commit `540630bf`, via PR #783.
+- #724 (authenticate settings-mutation routes) — **DONE**, commit `4c105a46` (#768).
+- #725 (authenticate Telegram webhook) — **DONE**, commit `c664d87b` (#763).
+- #734 (stale Polymarket fee constants) — **DONE**, commit `ba0621ba`.
+- #736 (settlement-verification SLA for directional orders) — **DONE**, commit `f3f18044`.
+- #730 (unused `@polymarket/clob-client` v1 dep) — **DONE**, commit `a54a91c6`.
 
-**Pregame scanner timer is not deployed.** `web/ops/systemd/hydra-betting-pregame-scanner.{service,timer}` files are committed (PR #369), but `systemctl --user is-enabled hydra-betting-pregame-scanner.timer` returns `not-found`. No `forecast_outcomes` rows with `source: "scanner"` have been recorded.
+Only **#723** (orphaned circuit breaker) survives from cycle e's numbered list as still open — carried forward below.
 
-**`forecast_outcomes` is still at 0 rows.** The daily `hydra-betting-forecast-outcomes.timer` ran July 1 03:00 PDT: scanned 2 venue_orders (old arbitrage rows from June 21), recorded 0, skipped 2. The 2 rows are not directional paper orders — they predated M13, so no Brier signal has accumulated. The calibration loop has nothing to score.
+**Two "operator actions needed" money-critical decisions from every prior cycle since c/d are now resolved.** `direction/priorities.md` had carried `#659`/`#662` as pending-operator-decision for multiple cycles; both have since been explicitly ruled on directly on the issues (`#659` decided 2026-07-26/29, `#662` decided 2026-07-29, both confirmed `ready-for-agent` + `money-critical` as of today) with narrow, fail-closed, agent-safe scopes written into the issue bodies by the operator. **These are promoted into the numbered priority list below** (they no longer belong in "operator actions needed" — the decision step is done; only the build step remains). Note the operator-specified **build sequencing: #662 first, #659 second** — #659's own body states it reuses #662's refusal shape on the same two routes and is deliberately gated behind it to avoid two agents editing the same surface concurrently.
 
-**ADR-0002 step 3 tail still open (verified 2026-07-01).** Multiple imports from `@/lib/arbitrage/` remain in `lib/execution/` production modules: `run-packet.ts`, `execution-error-taxonomy.ts`, `kalshi-rfq-route-quality.ts`, `scanner-provider-degradations.ts`; also in `app/api/` (history route, execute route, run-packet route, scheduled route). These must be relocated before step 4 deletes the strategy surface.
+**New headline finding this cycle (found while premise-checking, not new research): `#743` — hydra-betting has no deploy path.** This is not theoretical: PR #742 (commit `8d2e15c7`) fixed money-critical issue #718 (settlement payoff scaling), merged to `origin/main`, but the *running* service was still several commits behind and still displaying the pre-fix, wrong P&L. Every safety fix listed as "DONE" above landed on `origin/main` — whether any of them are actually serving traffic depends entirely on `#743` being fixed. This makes `#743` the highest-leverage single item on the board: it's not just one bug, it silently discounts the verification value of every other merge until closed. Promoted to **Priority 1**.
 
-**Stale arbitrage timers confirmed stopped.** `hydra-betting-arbitrage-auto-approval.timer` and `hydra-betting-automated-pair-review.timer` are both `inactive` — operator action complete.
+**Also surfaced: `#784`**, a direct, money-critical follow-on to the just-shipped `#720`/`#722` Kalshi exposure-preflight fix — the equivalent Polymarket gate (`resolveSingleMarketExposurePreflight` in `polymarket-executor.ts`) is wired to a field (`singleMarketExposureCap`) that no production caller ever populates, so it's a no-op, and the exposure figure it *would* receive is the wrong one (account-wide instead of per-market). Same cluster, same urgency as the Kalshi fix that just landed — promoted to **Priority 2**.
 
-**Item-543 still open.** `web/src/lib/env/readiness.ts` still exports `requiredEnvVar: "OPENAI_API_KEY"` at lines 30, 37, 63, 107.
+**Confirmed still valid and unaddressed: `#747`** — the pregame scanner (KXMLB's dedicated signal path) has never persisted a single row: 672 consecutive 15-minute runs, 100% `no-pinnacle-match` against 91 ready Pinnacle anchors, every run reporting `status: "success"`. This is a silent, fully-masked forecast-pipeline failure on the KXMLB lane specifically — distinct from KXBTC's paper-edge-feed pipeline, which is producing estimates. Promoted to **Priority 5** (below the two sequenced money-critical items, above the KXBTC anchor work).
 
-Per operator preference: selection quality over backlog volume, sports edge over everything else. Do not pad the backlog.
+**Reviewed and left at general-backlog priority (no change):** `#776` (a hypothetical, not-yet-observed non-binary-event edge case in the Kalshi↔Pinnacle matcher, found by adversarial post-merge QA — real but unconfirmed in production, unlike `#747`'s 672-run confirmed failure) and the seven `cleanup(target)` dead-export demotions (`#711`–`#717`, mechanical and independent of each other, not duplicates).
 
-# Verified external venue state (2026-07-01)
-All prior state carried forward, plus:
-- **WC 2026 Quarter-Finals** — underway. QF fixtures live on Kalshi (`KXWCGAME-26JUL05*`, `KXWCGAME-26JUL06*`). Semi-finals July 8–9; Final July 13.
-- **Paper-edge-feed reliability**: ~60% of daily runs succeed in 2–4 min; ~20% timeout (SIGTERM exit 143 after 10-minute timeout); ~10% fail with LLM parse error (exit 1). The 18-market batch cap (PR #375) and `reasoning_effort: low` fix (PR #385) improved but didn't fully eliminate the tail.
-- **Directional nomination runner timing**: designed for `:00` feed → `:07` nomination, deployed as `:00` feed → `:25` nomination. At `:25` the feed has been done for 21+ minutes on fast runs; or in slow-run hours it is still running and `:25` finds stale prior-hour estimates. Either way, the 15-minute freshness gate fails.
-- **ADR-0002 step 4 surface**: 54 non-CONTEXT files remain in `lib/arbitrage/` (including test files); ~25 are strategy surface scheduled for deletion. Multiple `app/api/` routes still import from `lib/arbitrage/`.
-- **Stale arbitrage timers**: `arbitrage-auto-approval.timer` and `automated-pair-review.timer` — confirmed `inactive` (operator stopped them). ADR-0002 Step 1 tail complete.
+**Stale carryover cleared:** the previous cycle's "Operator actions needed" list (`#727` CFTC NPRM awareness, `#649` KXBTC nomination confirmation, `#647` migration-0079 status) are **all closed** — verified via `gh api`, dropped from this doc rather than carried forward again.
+
+**Possible stale monitors — flagged for the sweep, not independently verified this cycle:** `#574`/`#575` ask to confirm MLB probable-starter/standings LLM-prompt context (PRs #555/#558, deployed 2026-07-18) actually appears in KXMLB prompts post the WC→KXMLB series transition (~July 21). Ten days have elapsed with no comment. Given `#747`'s finding that the KXMLB pregame-scanner path has never resolved a single Pinnacle link, it's plausible these monitors can't be positively verified through that path at all — worth a sweep pass to either confirm (via the paper-edge-feed runner, if KXMLB still routes through it) or explicitly note the block-on-#747 dependency rather than leaving them open indefinitely.
+
+Per operator preference: selection quality over backlog volume, sports edge over everything else.
+
+# Verified external venue state (carried forward from cycle e, 2026-07-26 — unchanged this cycle)
+
+- **Kalshi KXBTC**: Live. Paper-edge-feed pipeline producing estimates. No independent fair-value anchor yet (`#726`, Priority 6).
+- **Kalshi KXMLB**: Live (MLB season through ~late September). Signal-injection modules (injury/weather/probable-starter/standings) are wired in code, but the dedicated pregame-scanner delivery path has never produced output (`#747`, Priority 5) — treat KXMLB forecast-pipeline health as unconfirmed, not healthy, until `#747` is fixed. Settlement-source risk relative to MLB's Polymarket exclusivity deal is assessed and classified LOW — see [`docs/agents/kxmlb-settlement-source-risk.md`](../docs/agents/kxmlb-settlement-source-risk.md) (`#834`); no incremental sizing shift recommended.
+- **Kalshi KXNBA**: Off-season. Do not propose before October 2026.
+- **WC 2026**: Concluded (`#626` tracks WC-module wire-or-retire).
+- **Brier trend**: accumulating via 2x/day sync.
 
 # Priority tasks
 
-M13 is the active program. Priority 1 fixes the nomination-runner timing gap so paper candidates are actually persisted. Priority 2 deploys the pregame scanner. Priority 3 closes the ADR-0002 step 3 tail. Priority 4 deletes the step 4 strategy surface. Priorities 5–6 close bounded open items. Priority 7 closes the calibration proof loop.
+Priority 1 is the single highest-leverage item (it gates confidence in everything else that's merged). Priorities 2–4 are money-critical execution-safety gaps, sequenced per the operator's own dependency note. Priority 5 is a confirmed silent forecast-pipeline failure. Priority 6 is the carried-forward KXBTC forecast anchor. Priority 7 is the carried-forward orphaned circuit breaker.
 
-## 1. Fix directional nomination runner: align timer cadence with paper-edge-feed completion window (sharpen-forecasts / close-the-learning-loop)
-The nomination runner fires at `:25` past the hour; the paper-edge-feed starts at `:00`. When the feed takes >7 min (common: typical 3–27 min, some runs time out), estimates are stale or absent by `:25`. The 15-minute freshness window (`KALSHI_LIVE_SUBMIT_MAX_ESTIMATE_AGE_MS`) then gates out all candidates — producing the `candidatesConsidered: 0` result observed on every hourly run since deploy.
+## 1. Fix the hydra-betting deploy path — merged fixes are not reaching the running service (protect-the-operation)
+Issue: [#743](https://github.com/gaberoo322/hydra-betting/issues/743) (ready-for-agent). No `deploy.yml`, no deploy timer; `hydra-betting-web.service` builds from whatever the local `~/hydra-betting` working tree happens to be checked out at. Confirmed live: money-critical fix #718 (PR #742, commit `8d2e15c7`) was on `origin/main` while the running service — several commits behind, build dated before even the local HEAD — still served the pre-fix, wrong P&L.
+- **Why now**: every "DONE" item in this doc (and every future merge) is unverified as *serving* until this is fixed. Highest-leverage single item on the board.
+- **Done when**: see issue; a merge-to-main flow deterministically updates the running service without manual pull/restart, and this is proven against a real merge, not just a design review.
 
-Fix: move the nomination timer from `:25` to `:45` — gives the feed a 45-minute window, covering all observed successful run durations (longest observed success: 27 min on July 1). No code change; only the `.timer` file needs updating. Update `web/ops/systemd/hydra-betting-directional-nomination.timer` from `OnCalendar=*-*-* *:25:00` to `OnCalendar=*-*-* *:45:00`, commit, and deploy the updated unit file.
-- **Why now**: The nomination runner has been live since PR #368 but has produced `candidatesConsidered: 0` every single run (verified 2026-07-01). WC QF matches are live now; each hour without a nomination is a missed paper sample. The calibration learning loop cannot accumulate Brier signal until at least one `venue_orders` row with `source: "directional"` exists.
-- **Done when**: `web/ops/systemd/hydra-betting-directional-nomination.timer` has `OnCalendar=*-*-* *:45:00`; updated unit deployed; next `:45` run logs `candidatesConsidered > 0` or `executedCount > 0` for at least one WC QF fixture with postFeeEdge ≥ 0.03; OR if still 0, the exact reason from the candidate-loader is logged (not the short-circuit "no forecast-divergence candidates surfaced").
+## 2. Wire the equivalent Polymarket single-market exposure gate — inert and fed the wrong quantity (protect-the-operation / improve-execution-discipline)
+Issue: [#784](https://github.com/gaberoo322/hydra-betting/issues/784) (ready-for-agent, money-critical). `polymarket-executor.ts` guards `resolveSingleMarketExposurePreflight` behind a `singleMarketExposureCap` field that no production call site ever populates (always false, gate never runs), and where it would fire, it passes account-wide exposure instead of per-market exposure. Found while wiring the Kalshi-side fix (#720/PR #783) that just landed.
+- **Why now**: same cluster, same urgency as the Kalshi exposure-preflight fix that shipped five days ago — Polymarket has the identical zero-effective-gating gap today.
+- **Done when**: see issue; `npm run typecheck && npm test` (and `npm run test:raw`) green.
 
-## 2. Deploy pregame scanner timer to production (sharpen-forecasts / close-the-learning-loop)
-`web/ops/systemd/hydra-betting-pregame-scanner.{service,timer}` were committed in PR #369 but `hydra-betting-pregame-scanner.timer` is not installed (confirmed `not-found` in `systemctl --user is-enabled`). The bin runner (`web/src/bin/pregame-scanner-runner.ts`) is built and tested. No `forecast_outcomes` rows with `source: "scanner"` exist.
-- **Why now**: WC QF fixtures are live; pre-game dislocations against Pinnacle fair values are the primary forecast signal for the calibration loop. Without the timer, `forecast_outcomes` never accumulates `source: "scanner"` rows.
-- **Done when**: `hydra-betting-pregame-scanner.timer` appears in `systemctl --user list-timers`; at least one successful service run; at least one row in `forecast_outcomes` with `source: "scanner"` confirmed via DB.
+## 3. Wire a real, restart-durable operator kill switch into the live-submit routes (protect-the-operation)
+Issue: [#662](https://github.com/gaberoo322/hydra-betting/issues/662) (ready-for-agent, money-critical). Operator-ruled scope (2026-07-29): the kill switch is display-only today — no live-submit route imports it — and two additional defects were confirmed during the ruling: it fails **open** on a service restart (the doc comment claims the opposite), and its `process.env` mutation is per-worker, not durable. **Build this first** — #659 is sequenced behind it.
+- **Why now**: this is the literal control the operator's own CFTC-contingency runbook instructs pulling in a crisis, and today it does nothing.
+- **Done when**: see issue and the 2026-07-29/30 operator-ruling comments (specification of record).
 
-## 3. ADR-0002 Step 3 tail — relocate remaining arbitrage files imported by lib/execution/ and app/api/ (protect-the-operation / improve-execution-discipline)
-Multiple `@/lib/arbitrage/` imports remain in production code (verified 2026-07-01):
-- `lib/execution/run-packet-replay-score.ts` → imports `ArbitrageRunPacket` from `@/lib/arbitrage/run-packet`
-- `lib/execution/run-packet-replay-batch-score.ts` → imports `loadArbitrageRunPacket` from `@/lib/arbitrage/run-packet`
-- `lib/execution/kalshi-bundle-decomposition.ts` → imports from `@/lib/arbitrage/kalshi-rfq-route-quality`
-- `lib/execution/execute-arbitrage.ts` → imports `classifyExecutionError` from `@/lib/arbitrage/execution-error-taxonomy`
-- `lib/execution/execution-error-category-summary.ts` → imports from `@/lib/arbitrage/execution-error-taxonomy`
-- `lib/execution/scan-history.ts` → imports from `@/lib/arbitrage/scanner` and `@/lib/arbitrage/scanner-provider-degradations`
-- `lib/execution/polymarket-negative-risk-paper-batch.ts` → imports from `@/lib/arbitrage/scanner`
-- `app/api/arbitrage/history/route.ts` → imports from `@/lib/arbitrage/run-packet`
-- `app/api/arbitrage/execute/pair-verification.ts` → imports from `@/lib/arbitrage/verified-pairs`
-- `app/api/arbitrage/execute/live-submit-preview-draft.ts` → imports from `@/lib/arbitrage/route-scoring`
-- `app/api/arbitrage/execute/route.ts` → imports from `@/lib/arbitrage/verified-pairs`
-- `app/api/arbitrage/run-packet/[runId]/route.ts` → imports from `@/lib/arbitrage/run-packet`
-- `app/api/scheduled/prediction-market-cycle/route.ts` → imports from `@/lib/arbitrage/nomination-source`
+## 4. Wire the daily-loss / drawdown halt into the live-submit path (protect-the-operation)
+Issue: [#659](https://github.com/gaberoo322/hydra-betting/issues/659) (ready-for-agent, money-critical). Operator-ruled scope (2026-07-26): wire the existing, tested `evaluateDailyLossLimit`/`evaluateDrawdownLimit` evaluators into the human-approved live-submit path as fail-closed refusals. Explicitly **do not** rebuild the deleted M14 machine-approval chain — that remains operator-gated, non-autonomous work.
+- **Why now**: no execution path today halts on a loss or drawdown breach; the evaluators are pure and tested but wired to nothing.
+- **Done when**: see issue and its 2026-07-26 operator-review comment (specification of record). Sequenced after #662 — reuse its refusal shape on the same guard surface, don't re-derive it.
 
-Relocate `run-packet.ts`, `execution-error-taxonomy.ts`, `kalshi-rfq-route-quality.ts`, `scanner-provider-degradations.ts` to `lib/execution/`. For `scanner.ts` type imports (`PolymarketNegativeRiskBundle`, `ScanGateRejections`), extract only the needed types into `lib/execution/`. Update all import paths.
-- **Why now**: Step 4 (bulk delete of the strategy surface) cannot proceed safely while these files are still in `lib/arbitrage/` — the delete would break execution and API modules. Step 3 completion unblocks the full codebase cleanup.
-- **Done when**: No `lib/execution/*.ts` or `app/api/*.ts` file imports from `@/lib/arbitrage/` (except CONTEXT.md prose); `npm run typecheck && npm test` green.
+## 5. Fix the pregame scanner matcher — KXMLB's dedicated signal path has never produced a row (sharpen-forecasts / close-the-learning-loop)
+Issue: [#747](https://github.com/gaberoo322/hydra-betting/issues/747) (ready-for-agent). 672 consecutive 15-minute runs, 100% `no-pinnacle-match` against 91 ready Pinnacle anchors and 80 live markets per run — every run reports `status: "success"`, masking a total, silent matcher failure since at least 2026-07-22.
+- **Why now**: this is the entire forecast-signal path for KXMLB (one of the two live series); it has produced zero learning-loop signal for at least 9 days while reporting green.
+- **Done when**: see issue; a resolved-link count > 0 is observed on a live run, and at least one `forecast_outcomes` row with `source: "scanner"` is confirmed post-fix.
 
-## 4. ADR-0002 Step 4 — delete the strategy surface from `lib/arbitrage/` and retire scanner/arbitrage app routes (protect-the-operation)
-With step 3 complete (priority 3), the remaining ~25 strategy files in `lib/arbitrage/` are no longer imported by live code. Delete them and their test files. Retire `app/api/arbitrage/` routes (`/run-packet/`, `/history/`, `/execute/`); retire remaining scanner routes (`/api/scanner/complete-set-candidates`, `/disagreement-candidates`, `/half-life-history`, `/sports-pair-eligibility`, `/threshold-replay`). Survey and delete arbitrage-era bin runners that import from the deleted surface (`arbitrage-scanner-runner.ts`, `arbitrage-replay-runner.ts`, `arbitrage-auto-approval-runner.ts`, `kalshi-rfq-liquidity-runner.ts`, `polymarket-us-sports-pair-seed-runner.ts`).
-- **Why now**: The strategy surface spans ~54 files (including tests) and carries dead code across ~24% of the codebase. Clearing it shrinks the blast radius for all future changes and removes the import confusion that muddies module boundaries.
-- **Done when**: `lib/arbitrage/` contains only `CONTEXT.md` (or is deleted); arbitrage app routes return 410 or are removed; bin runners that only exercised the deleted surface are deleted; `npm run typecheck && npm test` green.
+## 6. Give KXBTC an independent spot/vol-derived fair-value anchor (sharpen-forecasts / deepen-structural-understanding)
+Issue: [#726](https://github.com/gaberoo322/hydra-betting/issues/726) (ready-for-agent). Unchanged from cycle e — KXBTC's only forecast source remains an ungrounded LLM prior; Kalshi settles against CF Benchmarks' BRTI, a well-defined spot feed a digital-option model could anchor against.
+- **Why now**: KXBTC is a currently-live paper-edge-feed series with no independent reference price at all, unlike KXMLB's Pinnacle anchor.
+- **Done when**: see issue. Design-leaning — consider a design-concept pass if scope is ambiguous to the implementer.
 
-## 5. Rename `requiredEnvVar` from `OPENAI_API_KEY` to `HYDRA_PAPER_LLM_API_BASE_URL` in readiness.ts (item-543) (protect-the-operation / close-the-learning-loop)
-`web/src/lib/env/readiness.ts` still exports `requiredEnvVar: "OPENAI_API_KEY"` at lines 30, 37, 63, 107. The actual runtime gate checks `HYDRA_PAPER_LLM_API_BASE_URL`. Every `/api/status` and `/api/calibration` diagnostic call surfaces the wrong signal.
-- **Why now**: Two-file fix, bounded scope. Confirmed still open 2026-07-01. Misleads operator diagnostics daily.
-- **Done when**: `readiness.ts` exports `requiredEnvVar: "HYDRA_PAPER_LLM_API_BASE_URL"`; all existing tests pass; `/api/calibration` no longer shows `OPENAI_API_KEY` in the readiness shape.
-
-## 6. Confirm `forecast_outcomes` rows appear after first successful directional paper run (close-the-learning-loop / sharpen-forecasts)
-Once priority 1 produces a `venue_orders` row with `source: "directional"` and the WC match settles, the daily `hydra-betting-forecast-outcomes.timer` (runs 03:00 PDT) should sync it to `forecast_outcomes`. Verify this happens and that `brierScore` becomes non-null on the calibration dashboard.
-- **Why now**: The calibration learning loop has no Brier signal (0 rows in `forecast_outcomes`, confirmed 2026-07-01). WC QF matches settle within 90 minutes of kickoff — the first paper run from priority 1 can produce a scannable outcome within hours. If the sync still returns 0 after a settled match, `sync-forecast-outcomes.ts` resolution logic needs investigation.
-- **Done when**: `forecast_outcomes` row count > 0 confirmed via DB; calibration dashboard shows non-null `brierScore`; OR if still 0 after a settled match, root cause identified and remediation filed.
-
-## 7. Paper-edge-feed reliability: further reduce failure rate after PR #392 isolation fix (close-the-learning-loop / sharpen-forecasts)
-PR #392 isolated per-market LLM failures (added client-side `AbortSignal.timeout`, isolated per-market errors so one failure no longer aborts the batch). This should eliminate the exit-143 whole-batch kill and reduce the ~30% hourly failure rate significantly. Whether the fix is sufficient requires monitoring over a 24-hour window (first post-fix cadence starts 2026-07-02 00:00 PDT).
-
-If failure rate remains above ~10% after PR #392: investigate whether (a) the 120-second per-request timeout is still too long for the Ollama model load latency from idle (gaming PC wakeup), (b) markets that always time out should be gated out of the batch, or (c) the nomination timer offset (priority 1) is still not wide enough after per-market isolation changed the per-batch completion time distribution.
-- **Why now**: Each failed feed run is one hour without nomination candidates. Even partial per-market failures now degrade candidate coverage without aborting the batch.
-- **Done when**: Over any 24-hour window, fewer than 10% of paper-edge-feed timer runs log zero recommendations; the nomination runner (priority 1) sees `candidatesConsidered > 0` at least once per hour in that window.
+## 7. Fix the orphaned rolling realized-slippage circuit breaker (protect-the-operation / close-the-learning-loop)
+Issue: [#723](https://github.com/gaberoo322/hydra-betting/issues/723) (ready-for-agent). Unchanged from cycle e — doc comments still claim live enforcement via `executeArbitrage`, deleted under ADR-0002; the breaker is display-only.
+- **Why now**: lowest-urgency item of the protect-the-operation cluster this cycle, but still a live doc/behavior mismatch that could lead someone to assume a gate exists that doesn't.
+- **Done when**: see issue.
 
 # What's been completed (DO NOT re-propose)
-All M7, M8, M9, M10, M11, M12 items — full list in prior cycles. Additionally since 2026-06-27 research cycle:
-- Isolate per-market LLM failures + client-side request timeout in paper-edge feed (PR #392). DONE — addresses priority 7.
-- Surface DirectionalPaperExitCriteria verdict on markets/calibration dashboard (item-702, PR #390). DONE.
-- Wire evaluateOllamaForecastLift into GET /api/calibration/ollama-forecast-lift (item-701, PR #389). DONE.
-- Add Polymarket directional nomination path — extend executeDirectionalSingleLeg (item-706, PR #388). DONE.
-- Extend WC pre-game grouper to R32/QF/SF/Final rounds (item-708, PR #387). DONE.
-- Fix calibration: name yes-side outcome in buildLlmProbabilityPrompt (PR #386). DONE.
-- Fix calibration: use reasoning_effort:low / disable reasoning / tolerate trailing prose (PRs #383/#384/#385). DONE.
-- Add scheduled paper LLM edge-feed unit — M13 forecast-pipeline headwater (item-718, PR #373). DONE.
-- Surface per-source Brier calibration panel on dashboard (item-707, PR #381). DONE.
-- Warm cold Ollama before paper-edge-feed batch (PR #380, closes #2600). DONE.
-- Fix Kalshi: drop malformed series fee-change rows instead of crashing (closes #720, PR #382). DONE.
-- Directional paper-nomination replay scorer M13 (PR #379). DONE.
-- Retire dead Kalshi runtime schema exports, Polymarket provider exports, dead nav exports (PRs #371/#372/#374). DONE.
-- Cap paper-edge-feed batch to 18 markets + bump TimeoutStartSec to 1800 (PR #375, closes #2595). DONE.
-- Retire dead exports (PRs #376/#377/#378). DONE.
-- Deploy directional nomination runner + scheduled cadence M13 step-5 keystone (PR #368). DONE — cadence mismatch means 0 nominations (priority 1 fixes this).
-- Deploy pre-game directional scanner as scheduled bin runner epic #2394 slice 5 (PR #369). DONE — unit not installed in production (priority 2 fixes this).
-- ADR-0002 Step 1 tail: stale arbitrage timers stopped (operator action). DONE.
-- All prior "What's been completed" from 2026-06-27 cycle carried forward.
+
+All prior "What's been completed" through cycle e (2026-07-26) carried forward, plus since then (from git log, verified 2026-07-31):
+- Wire per-market + per-event exposure preflight into the Kalshi executor (#720, #722, commit `540630bf`, PR #783) — DONE.
+- Authenticate money-critical settings POST routes behind an operator credential (#724, commit `4c105a46`, #768) — DONE.
+- Verify Telegram secret-token before any Kalshi/Telegram work (#725, commit `c664d87b`, #763) — DONE.
+- Correct stale Polymarket sports fee constants to July 2026 schedule (#734, commit `ba0621ba`) — DONE.
+- Give directional single-leg orders a settlement-verification SLA lens (#736, commit `f3f18044`) — DONE.
+- Remove unused `@polymarket/clob-client` v1 runtime dependency (#730, commit `a54a91c6`) — DONE.
+- Plumb the operator credential through the settings page via an HttpOnly session cookie (#769, commit `ef6c4561`) — DONE.
+- Collapse live-submit ticker fences into named constants (#751/#777, commit `edc57281`) — DONE.
+- Classify provider quota refusals as run-level failures in the paper-edge feed (commit `167640ff`) — DONE.
+- Retry + isolate Kalshi series discovery so one non-200 no longer zeroes a paper-edge run (commit `21713c92`) — DONE.
+- Wire live KXMLB game-winner discovery for the Polymarket MLB paper-edge feed (commit `306250ed`) — DONE.
+- Wire KXMLBGAME team identity (yes_sub_title + city forms) (commit `5c4322b8`) — DONE.
+- Cut the dead `runArbitrageScanner` branch from run-cycle (commit `b965f776`) — DONE; may help unblock #622 scoping.
+- Scale settlement payoff by contracts held in realized P&L, closing money-critical #718 (commit `8d2e15c7`, PR #742) — DONE on `origin/main` (see #743 re: whether it's *serving*).
+- Series-selector slices 4–9 (publication table, round-robin evaluation order, feed alarms, reason-class alarm, eligible-set staleness signal, exploration success-exit) — commits `b5279479`/`6918106f`/`551cd6c9`/`f30e28c4`/`eb208555`, plus #757 open as slice 9 — an active, healthy in-flight epic; do not re-propose any shipped slice.
+- Regenerate wiring-status ledger, drift-free (#572, commit `31261355`) — DONE.
+- All prior "What's been completed" from 2026-07-26 cycle e carried forward.
 
 # What NOT to work on
-- Do NOT propose new module wiring into the scanner/arbitrage strategy surface — it is being deleted per ADR-0002 step 4.
-- Do NOT promote machine-execution gates to live — auto-execution dispatcher stays default-off until paper-stage exit criteria are evaluated and M14 evidence gate is satisfied.
-- Do NOT re-propose any M7, M8, M9, M10, or M11 items — all shipped.
-- Do NOT propose sportsbook wager execution — explicitly tests-only by design.
-- Do NOT re-propose scanner funnel breakdown, pair registry seeding, WC knockout pair discovery pipeline — in DELETE surface (ADR-0002 step 4).
-- Do NOT pad the backlog. Selection quality over throughput.
-- Do NOT re-propose: per-source Brier panel (DONE), paper-edge-feed deploy (DONE), directional nomination runner deploy (DONE — cadence fix in priority 1), pregame scanner bin runner (DONE — deploy in priority 2), disagreement oracle wiring (DONE), paper exit criteria (DONE), portfolio-IA slices (DONE), pre-game scanner lib slices 1–4 (DONE), fill-symmetry relocation (DONE), WC R16 ticker discovery (DONE), Brier trend chart (DONE), per-market-type dislocation panel (DONE), directional-single-leg-execute slices 1–4 (DONE).
-- Do not re-propose the Hyperliquid HIP-4 monitor — secondary domain.
-- Do not propose cloud LLM fallback — local Ollama only (vision constraint).
-- Do not propose raising the $5/leg envelope cap or machine-authorship — operator-gated, not autonomous.
+
+All exclusions from cycle e carried forward (arbitrage strategy revival, ADR-0002 step-4 bulk delete before scoping, machine-execution promotion beyond the two narrowly-scoped operator rulings above, M7–M12 re-proposals, sportsbook wager execution, pair-registry/WC-knockout work, KXNBA before October, Hyperliquid monitor, cloud LLM inference, raising the $5/leg cap). Additionally this cycle:
+- Do NOT re-propose #720/#722/#724/#725/#730/#734/#736 — all shipped, listed above.
+- Do NOT re-open the #659/#662 scope question — both are operator-decided; the only remaining work is the build, per the sequencing note (#662 then #659).
+- Do NOT treat #743 as "just" an ops nit — it is the P1 this cycle precisely because it invalidates confidence in every other merge.
+- Do NOT pad the backlog — this cycle filed zero new issues by design; re-ranking and status correction was the full scope of the pass.
 
 # Operator actions needed
-- **Priority 1 deploy**: After updating `hydra-betting-directional-nomination.timer` to `:45`, run `cp web/ops/systemd/hydra-betting-directional-nomination.timer ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user restart hydra-betting-directional-nomination.timer`.
-- **Priority 2 deploy**: `cp web/ops/systemd/hydra-betting-pregame-scanner.{service,timer} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now hydra-betting-pregame-scanner.timer`.
-- **DB migration drift**: `web/drizzle/` has 77 local migration files but only 76 are applied in the running DB (confirmed via `/api/health/full` `migrationDrift: "local=77 applied=76"`). Run `cd ~/hydra-betting && npm run db:migrate` to apply the pending migration.
+
+- None carried forward — all three prior open items (#727 CFTC NPRM awareness, #649 KXBTC-nomination confirmation, #647 migration-0079 status) are confirmed **closed** as of 2026-07-31 and are dropped from this doc.
+- Nothing new requires operator judgment this cycle; the two items that did (#659, #662) already have their operator rulings on-issue.
