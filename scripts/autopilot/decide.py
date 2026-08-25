@@ -3535,8 +3535,6 @@ def _select_for_slot(
         # orch candidate when it has work pending AND no fresh artifact.
         # The selector is intentionally additive to Phase A:
         #
-        # - `orch_work_available` signal must be present (same gate as
-        #   dev_orch).
         # - When the artifact is missing OR stale, dispatch
         #   `hydra-grill` with the anchorRef and scope='orch'. The
         #   pipeline_priority ordering (design_concept_orch BEFORE
@@ -3572,8 +3570,34 @@ def _select_for_slot(
         #      source of truth for orch grill anchors. When it is absent
         #      or 'none', this selector returns None (no grill) and
         #      dev_orch proceeds.
-        if not _signal_present(state, events, "orch_work_available"):
-            return None
+        #
+        # ISSUE #3870: the `orch_work_available` precondition that used to
+        # gate this selector (mirroring dev_orch's own gate) was REMOVED.
+        # `orch_work_available` is dev_orch's authoring-pool signal —
+        # `ready_for_agent > 0` in collect-state.sh — and under a live GLM
+        # dev-drainer partition (#3754) it EXCLUDES every `glm-eligible`
+        # issue, because a live drainer authors those on its own z.ai quota
+        # and counting them would dispatch a second Claude author onto the
+        # same work. But `design_concept_orch` doesn't author anything — it
+        # only produces a design-concept artifact, which a glm-eligible issue
+        # still needs regardless of who eventually builds it
+        # (`src/autopilot/board-state.ts`'s `deriveBoardState` doc: "still
+        # designs every glm-eligible issue"). Reusing dev_orch's pool-sizing
+        # signal as this selector's trigger accidentally coupled *designing*
+        # to *building*: with the partition live, `orch_work_available` could
+        # be absent (0 non-glm ready-for-agent issues) while
+        # `orch_pending_grill_anchor` was correctly set to a glm-eligible
+        # anchor awaiting a design concept — and that anchor sat unfired
+        # (observed: `orch_pending_grill_anchor=issue-3785` across turns 2-3
+        # of run 2bcba309). `orch_pending_grill_anchor` alone is already a
+        # strict, sufficient trigger: collect-state.sh's `ORCH_GRILL_PICK`
+        # loop only ever sets it to a real ready-for-agent, non-target-backlog
+        # issue lacking a fresh artifact (see the normalisation below), so
+        # dropping the redundant precondition does not risk firing on an
+        # empty board — it only stops a glm-eligible anchor from being
+        # discarded one line before it would have been used. dev_orch's own
+        # `orch_work_available` gate (above, in the `cls == "dev_orch"`
+        # branch) is UNCHANGED — this selector's fix does not touch it.
 
         # Same normalisation as the dev_orch gate above — one home for the
         # absent/"none"/malformed collapse (issue #3711).

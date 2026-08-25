@@ -258,6 +258,83 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
 });
 
 // ---------------------------------------------------------------------------
+// 1a. design_concept_orch fires on orch_pending_grill_anchor ALONE — no
+//     orch_work_available precondition (issue #3870)
+// ---------------------------------------------------------------------------
+
+describe("decide.py — design_concept_orch anchor-only trigger (#3870)", () => {
+  // ISSUE #3870 regression: `orch_work_available` (dev_orch's authoring-pool
+  // signal) used to gate `design_concept_orch` too. Under a live GLM
+  // dev-drainer partition, `orch_work_available` excludes `glm-eligible`
+  // issues from its count (#3754), so it could be ABSENT even though a
+  // glm-eligible anchor genuinely needed a design concept — the anchor sat
+  // unfired (observed: `orch_pending_grill_anchor=issue-3785` across turns
+  // 2-3 of run 2bcba309). This test MUST FAIL against unmodified decide.py
+  // (i.e. before this fix, with the precondition still in place).
+  test("dispatches design_concept_orch on orch_pending_grill_anchor alone, with orch_work_available ABSENT (#3870)", () => {
+    const state = baseState({ signals: { orch_pending_grill_anchor: "issue-3785" } });
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.ok(
+      dispatch,
+      "design_concept_orch must fire on orch_pending_grill_anchor alone, even with orch_work_available absent (#3870 — the GLM-partition starvation bug)",
+    );
+    assert.equal(dispatch.skill, "hydra-grill");
+    assert.equal(dispatch.prompt_args.scope, "orch");
+    assert.equal(dispatch.prompt_args.anchor, "issue-3785");
+  });
+
+  // The fix removes a redundant precondition; it must not make the selector
+  // fire unconditionally. An empty/absent anchor still yields no dispatch,
+  // regardless of orch_work_available.
+  test("does NOT dispatch design_concept_orch when orch_pending_grill_anchor is absent, regardless of orch_work_available (#3870)", () => {
+    const withSignal = baseState({ signals: { orch_work_available: true } });
+    const planWith = runDecide(withSignal, null);
+    assert.equal(
+      findAction(planWith, (a) => a.type === "dispatch" && a.slot === "design_concept_orch"),
+      undefined,
+      "orch_work_available alone must not trigger design_concept_orch — the anchor is the only trigger",
+    );
+
+    const noneAnchor = baseState({
+      signals: { orch_work_available: true, orch_pending_grill_anchor: "none" },
+    });
+    const planNone = runDecide(noneAnchor, null);
+    assert.equal(
+      findAction(planNone, (a) => a.type === "dispatch" && a.slot === "design_concept_orch"),
+      undefined,
+      "literal 'none' anchor must normalise to no dispatch",
+    );
+
+    const nothing = baseState();
+    const planNothing = runDecide(nothing, null);
+    assert.equal(
+      findAction(planNothing, (a) => a.type === "dispatch" && a.slot === "design_concept_orch"),
+      undefined,
+      "an empty board (no signals at all) must not dispatch design_concept_orch",
+    );
+  });
+
+  // dev_orch's own `orch_work_available` precondition (a textually distinct
+  // gate in the `cls == "dev_orch"` branch) is explicitly UNCHANGED by this
+  // fix — pinned here, separately from the design_concept_orch assertions
+  // above, so a future edit cannot let the two gates drift back together.
+  test("dev_orch's own orch_work_available gate is unaffected by the design_concept_orch fix (#3870)", () => {
+    // orch_pending_grill_anchor present but orch_work_available absent:
+    // design_concept_orch fires (per the fix above), dev_orch must still
+    // yield — its gate is untouched.
+    const state = baseState({ signals: { orch_pending_grill_anchor: "issue-3785" } });
+    const plan = runDecide(state, null);
+    const devDispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(
+      devDispatch,
+      undefined,
+      "dev_orch must still yield when orch_work_available is absent, even though design_concept_orch now fires on the anchor alone (#3870 must not leak across classes)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. Retired candidate-feed no longer forces research_target (#3832)
 // ---------------------------------------------------------------------------
 
