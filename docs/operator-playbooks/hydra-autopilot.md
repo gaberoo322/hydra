@@ -730,6 +730,30 @@ to do. The L2 decision brain in `decide.py` benefits from a stable in-process
 view of pipeline state across many turns, so the Gate launches one long run
 and lets it run to budget/clock/idle rather than firing many short bursts.
 
+### Stopping the autopilot: the two levers (issue #3868)
+
+Two stop levers exist and they are **not** interchangeable:
+
+| Lever | What stops | What keeps running |
+|---|---|---|
+| `POST /api/autopilot/paused` (`paused=true`) | **Everything.** The Pace Gate skips Claude AFK launches, AND `scripts/glm/drainer-loop.sh` honours the same durable flag (ADR-0032 Decision 6) — the GLM free lane freezes too. | Nothing. |
+| `systemctl --user stop hydra-pace-gate.timer` | Claude AFK relaunches only — no new Autopilot Runs are admitted (a live run finishes its budget). `paused` stays `false`. | The GLM drainer keeps draining `glm-eligible` work on z.ai. |
+
+**`paused=true` is the TOTAL stop; stopping `hydra-pace-gate.timer` is the
+Claude-only stop.** Use the timer stop for a cost emergency where Anthropic
+quota must stop burning but the free lane should keep shipping: during the
+2026-08 cost-emergency shutdown the operator pause froze the drainer for days
+while ~30 `glm-eligible` issues queued — the exact outage class this
+distinction exists to prevent. Re-arm afterwards with
+`systemctl --user start hydra-pace-gate.timer`.
+
+Related watchdog coverage: the launch-flow block's `glm-sterile` signal
+(`scripts/hydra-watchdog.sh`) alarms in-band when the drainer heartbeat is
+fresh, `glm-eligible` + `ready-for-agent` work is queued, and zero drainer PRs
+(the shared #4048 OR-predicate) were created in the trailing window (default
+6h, `HYDRA_WATCHDOG_LAUNCH_GLM_STERILE_WINDOW_HOURS`) — the live-but-sterile
+failure (#3863) that liveness checks alone cannot see.
+
 ## Slot lifecycle events (issue #509)
 
 Subagent slot accounting is event-driven: `SubagentStop` and `Notification` hooks XADD events onto `hydra:autopilot:slot-events`; `collect-state.sh` drains it each turn; `decide.py` translates `subagent_stop` events into completions and appends failures to `state.failure_log`. A silent-wedge wall-clock fallback (`subagent_max_wall_seconds=3600`) covers hook failures. Full event schema, turn-consumption detail, env overrides, and best-effort guarantees are in `hydra-autopilot-ops-reference.md` (sibling of this SKILL.md).
