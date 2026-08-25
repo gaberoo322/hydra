@@ -223,6 +223,23 @@ export function parseOwnedDbIndex(url) {
   return ALLOWED_DB_INDEXES.includes(db) ? db : null;
 }
 
+/**
+ * Env overlay for a spawned child: REDIS_URL plus, when the resolved DB is one
+ * this launcher owns, HYDRA_REDIS_DB (issue #4183). `scripts/hydra-watchdog.sh`'s
+ * rc_write/rc_read bash helpers read this same name and thread it through as
+ * `-n <db>` on every redis-cli call, so a test that shells into a bash Redis
+ * block (rather than going through src/redis/) automatically lands in this
+ * run's isolated DB instead of writing past it onto production db 0. `db ===
+ * null` (a pre-set REDIS_URL pointing at production/legacy/remote, per
+ * resolveRedisUrl above) deliberately omits the var — bash's own `${HYDRA_REDIS_DB:-0}`
+ * default then matches that same "not owned by this launcher" case.
+ */
+export function redisChildEnv(baseEnv, url, db) {
+  const overlay = { ...baseEnv, REDIS_URL: url };
+  if (db !== null) overlay.HYDRA_REDIS_DB = String(db);
+  return overlay;
+}
+
 export function resolveRedisUrl(env, rootPath) {
   if (env.REDIS_URL) {
     // Respected VERBATIM — never rewritten (issue #1676 contract). But a
@@ -478,7 +495,7 @@ async function retryShortfallsInIsolation(result, baseline, redisUrl) {
         ],
         {
           cwd: process.cwd(),
-          env: { ...process.env, REDIS_URL: redisUrl },
+          env: redisChildEnv(process.env, redisUrl, parseOwnedDbIndex(redisUrl)),
           stdio: ["ignore", "ignore", "inherit"],
           timeout: RETRY_TIMEOUT_MS,
         },
@@ -637,7 +654,7 @@ if (testFiles.length > 0) {
 
 const child = spawn(args[0], args.slice(1), {
   stdio: "inherit",
-  env: { ...process.env, REDIS_URL: resolved.url },
+  env: redisChildEnv(process.env, resolved.url, resolved.db),
 });
 child.on("error", (err) => {
   console.error(`[redis-db-launch] failed to spawn ${args[0]}: ${err.message}`);
