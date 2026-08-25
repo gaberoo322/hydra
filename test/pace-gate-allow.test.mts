@@ -19,15 +19,20 @@
  *   - exec mode (--exec-autopilot, the unit's ExecStart wrapper) honors
  *     allow:false with a CLEAN exit 0 so Restart=on-failure disarms.
  *
- * Pure shell test: eligibilityServer fixture + spawn, no Redis needed.
+ * The composed-verdict suite above is a pure shell test: eligibilityServer
+ * fixture + spawn, no Redis needed. A second, Redis-gated suite below (issue
+ * #4210) additionally pins that record_tick()'s HSET honors HYDRA_REDIS_DB.
  */
 
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+
+import { getRedisConnection } from "../src/redis/connection.ts";
+import { WATCHDOG_REDIS_TIMEOUT_MS } from "./_helpers/watchdog-timeouts.mts";
 
 const PACE_GATE = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -268,4 +273,126 @@ describe("pace-gate.sh composed-verdict admission (issue #1790)", () => {
       srv.close();
     }
   });
+});
+
+/**
+ * record_tick()'s HYDRA_REDIS_DB threading (issue #4210, mirroring #4183's
+ * fix for scripts/hydra-watchdog.sh). Every other pace-gate.sh dependency
+ * fails SAFE by skipping the launch; the redis-cli write is uniquely
+ * best-effort (`|| true`), so a failed write must never fail this suite —
+ * these cases read state back through the SAME docker `hydra-redis-1`
+ * container the write targets, using the isolated per-run DB
+ * `scripts/test/redis-db-launch.mjs` already assigns this test run via
+ * REDIS_URL (never db 0/production; see that launcher's module doc).
+ *
+ * New TOP-LEVEL describe (not nested in the suite above) with its own
+ * before/after — the composed-verdict suite above owns no Redis lifecycle to
+ * piggyback on, and this one needs its own clean-slate/teardown around the
+ * shared `hydra:autopilot:pace-gate:last-tick` key.
+ */
+function dockerRedisAvailable(): boolean {
+  const r = spawnSync("docker", ["exec", "hydra-redis-1", "redis-cli", "PING"], {
+    encoding: "utf-8",
+    timeout: WATCHDOG_REDIS_TIMEOUT_MS,
+  });
+  return (r.stdout ?? "").trim() === "PONG";
+}
+
+const DOCKER = dockerRedisAvailable();
+const LAST_TICK_KEY = "hydra:autopilot:pace-gate:last-tick";
+
+/**
+ * The DB index this test run's OWN isolated Redis connection uses (derived by
+ * scripts/test/redis-db-launch.mjs into REDIS_URL's child env — always inside
+ * 8..15 in a real `npm test`/`npm run test:file` run, never 0/production).
+ * `null` when REDIS_URL is absent or resolves to db 0 (e.g. a raw
+ * `node --test` invocation outside the launcher) — the cases below skip
+ * rather than risk probing production db 0.
+ */
+function ownedTestDb(): number | null {
+  const raw = process.env.REDIS_URL;
+  if (!raw) return null;
+  let db: number;
+  try {
+    db = Number(new URL(raw).pathname.replace(/^\//, "") || "0");
+  } catch {
+    return null;
+  }
+  return Number.isInteger(db) && db > 0 ? db : null;
+}
+
+const TEST_DB = ownedTestDb();
+const REDIS_GATED = DOCKER && TEST_DB !== null;
+
+describe("pace-gate.sh record_tick() honors HYDRA_REDIS_DB (issue #4210)", () => {
+  after(async () => {
+    if (!REDIS_GATED) return;
+    // Leave nothing behind on the isolated test DB — production-shaped key
+    // name, so a leftover value is indistinguishable from real state to
+    // whatever runs next on this DB.
+    await getRedisConnection().del(LAST_TICK_KEY);
+  });
+
+  test(
+    "a write with HYDRA_REDIS_DB set lands on that DB, readable back via the same key",
+    { skip: !REDIS_GATED },
+    async () => {
+      const conn = getRedisConnection();
+      await conn.del(LAST_TICK_KEY);
+
+      const srv = await eligibilityServer({
+        allow: true,
+        shed: [],
+        reasons: { ...baseReasons, paused: true },
+        paceState: "behind",
+      });
+      try {
+        const r = await runPaceGate(srv.url, [], { HYDRA_REDIS_DB: String(TEST_DB) });
+        assert.equal(r.status, 0);
+      } finally {
+        srv.close();
+      }
+
+      const fields = await conn.hgetall(LAST_TICK_KEY);
+      assert.equal(
+        fields.reason,
+        "paused",
+        "record_tick's HSET must land on the DB named by HYDRA_REDIS_DB, readable back through the same connection",
+      );
+    },
+  );
+
+  test(
+    "a non-numeric HYDRA_REDIS_DB does NOT get passed through to redis-cli verbatim (falls back to db 0)",
+    { skip: !REDIS_GATED },
+    async () => {
+      const conn = getRedisConnection();
+      await conn.del(LAST_TICK_KEY);
+
+      const srv = await eligibilityServer({
+        allow: true,
+        shed: [],
+        reasons: { ...baseReasons, paused: true },
+        paceState: "behind",
+      });
+      try {
+        // A garbage value must not reach `-n` verbatim (redis-cli would then
+        // error out on a non-integer index, and `|| true` would swallow
+        // that as silently as any other write failure — this proves the
+        // validation actually reroutes to db 0 rather than merely "not
+        // crashing").
+        const r = await runPaceGate(srv.url, [], { HYDRA_REDIS_DB: "not-a-number" });
+        assert.equal(r.status, 0);
+      } finally {
+        srv.close();
+      }
+
+      const fields = await conn.hgetall(LAST_TICK_KEY);
+      assert.deepEqual(
+        fields,
+        {},
+        "a non-numeric HYDRA_REDIS_DB must default to db 0 (production), never land on this test's isolated DB",
+      );
+    },
+  );
 });
