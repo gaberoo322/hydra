@@ -1,0 +1,1 @@
+- fix: design_concept_orch now dispatches on a pending grill anchor alone, no longer starved when the GLM dev-drainer partition is live (#3870)
