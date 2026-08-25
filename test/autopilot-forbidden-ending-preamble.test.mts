@@ -95,3 +95,50 @@ describe("autopilot forbidden-ending preamble — flat Agent-tool ban (#4109)", 
     );
   });
 });
+
+/**
+ * Regression guard — the `## NEVER END WAITING` preamble must also name a
+ * backgrounded Bash process and an armed Monitor as evasion routes that do
+ * NOT keep a dispatch session alive, and must instruct commit-and-push
+ * BEFORE verification (issue #4158, #4052/#4109 follow-up).
+ *
+ * ROOT CAUSE (2026-08-19, autopilot run 54dc0756, turn 2): a `dev_orch`
+ * dispatch pinned to #4153 did ~10 minutes of real implementation, then
+ * backgrounded `npm test` and armed a Monitor to resume it, ending its turn
+ * with the message "I'll pause here and resume automatically on that
+ * notification". Neither a backgrounded Bash process nor a Monitor keeps a
+ * print-mode dispatch session alive — reap.py recorded the session's end as
+ * a completion with zero deliverable, and the three modified files sat
+ * uncommitted, minutes from the hourly worktree-orphan-prune. #4052 closed
+ * the delegate-the-whole-skill route and #4109 closed the
+ * delegate-a-slice-then-wait route; this is the third route, which uses no
+ * sub-agent at all.
+ */
+describe("autopilot forbidden-ending preamble — Bash/Monitor evasion + commit-before-verify (#4158)", () => {
+  const playbook = readFileSync(PLAYBOOK, "utf8");
+  const preamble = neverEndWaitingPreamble(playbook);
+
+  test("the preamble names a backgrounded Bash process and an armed Monitor as NOT keeping the dispatch alive", () => {
+    assert.match(
+      preamble,
+      /backgrounded Bash process and an armed Monitor are the same class of handle/,
+      "the NEVER END WAITING preamble must explicitly generalize the 'does not keep you alive' framing to a backgrounded Bash process and an armed Monitor (issue #4158) — a Monitor-armed resume is not a route back into a stalled dispatch session.",
+    );
+  });
+
+  test("the preamble instructs commit-and-push BEFORE running verification", () => {
+    assert.match(
+      preamble,
+      /Commit and push your work to the branch BEFORE running verification/,
+      "the NEVER END WAITING preamble must instruct the dispatch to commit and push to the branch BEFORE npm test / typecheck, not after (issue #4158) — otherwise an interrupted dispatch's work is destroyed by the worktree-orphan-prune instead of being resumable from a pushed branch.",
+    );
+  });
+
+  test("the flat Agent-tool ban survives the #4158 edit unchanged", () => {
+    assert.match(
+      preamble,
+      /Do NOT use the Agent tool at all\. Search with Grep\/Glob\/Read yourself, inline, in THIS session\. There is no sub-agent that keeps you alive\./,
+      "the #4158 additions must be appended after the existing text, not replace it — the #4109 flat Agent-tool ban must remain byte-for-byte intact.",
+    );
+  });
+});

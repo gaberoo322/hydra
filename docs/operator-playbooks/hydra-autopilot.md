@@ -548,6 +548,18 @@ end your turn waiting on it — a background child does not keep you alive, and
 reap.py will record your session as a completion with no PR the moment you go
 quiet. Do NOT use the Agent tool at all. Search with Grep/Glob/Read yourself,
 inline, in THIS session. There is no sub-agent that keeps you alive.
+
+A backgrounded Bash process and an armed Monitor are the same class of handle
+as a background Agent: neither keeps this session alive. Ending your turn with
+a test run (or any command) still running in the background, or with a
+Monitor armed to notify you later, is exactly the forbidden ending above —
+reap.py records completion the instant you go quiet, whatever is still
+running or armed.
+
+Commit and push your work to the branch BEFORE running verification (`npm
+test`, `npm run typecheck`), not after. Verification gates whether the PR
+merges, not whether the work survives — the hourly worktree-orphan-prune
+destroys anything still uncommitted when a session stalls.
 ```
 
 The delegation clause above closes a route the original wording missed (issue
