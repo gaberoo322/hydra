@@ -593,6 +593,175 @@ export function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
+/** Strip a C-like (`.ts`/`.mts`) source's line and block comments, leaving string/template literals intact. */
+function stripCLikeComments(s: string): string {
+  let out = "";
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    const c = s[i];
+    const c2 = s[i + 1];
+    if (c === "/" && c2 === "/") {
+      let j = i + 2;
+      while (j < n && s[j] !== "\n") j++;
+      i = j;
+      continue;
+    }
+    if (c === "/" && c2 === "*") {
+      let j = i + 2;
+      while (j < n && !(s[j] === "*" && s[j + 1] === "/")) j++;
+      i = j + 2 <= n ? j + 2 : n;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n && s[i] !== quote) {
+        if (s[i] === "\\" && i + 1 < n) {
+          out += s[i] + s[i + 1];
+          i += 2;
+          continue;
+        }
+        out += s[i];
+        i++;
+      }
+      if (i < n) {
+        out += s[i];
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** Strip a Python source's `#` line comments and triple-quoted docstrings (both quote forms, wholesale), leaving normal string literals intact. */
+function stripPythonCommentsAndDocstrings(s: string): string {
+  let out = "";
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    const c = s[i];
+    if ((c === '"' || c === "'") && s[i + 1] === c && s[i + 2] === c) {
+      const triple = c + c + c;
+      let j = i + 3;
+      while (j < n && s.slice(j, j + 3) !== triple) j++;
+      i = j + 3 <= n ? j + 3 : n;
+      continue;
+    }
+    if (c === "#") {
+      let j = i + 1;
+      while (j < n && s[j] !== "\n") j++;
+      i = j;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n && s[i] !== quote) {
+        if (s[i] === "\\" && i + 1 < n) {
+          out += s[i] + s[i + 1];
+          i += 2;
+          continue;
+        }
+        out += s[i];
+        i++;
+      }
+      if (i < n) {
+        out += s[i];
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** Strip a shell source's `#` line comments, leaving `'...'`/`"..."` string bodies intact. */
+function stripShellComments(s: string): string {
+  let out = "";
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    const c = s[i];
+    if (c === "#") {
+      let j = i + 1;
+      while (j < n && s[j] !== "\n") j++;
+      i = j;
+      continue;
+    }
+    if (c === "'") {
+      out += c;
+      i++;
+      while (i < n && s[i] !== "'") {
+        out += s[i];
+        i++;
+      }
+      if (i < n) {
+        out += s[i];
+        i++;
+      }
+      continue;
+    }
+    if (c === '"') {
+      out += c;
+      i++;
+      while (i < n && s[i] !== '"') {
+        if (s[i] === "\\" && i + 1 < n) {
+          out += s[i] + s[i + 1];
+          i += 2;
+          continue;
+        }
+        out += s[i];
+        i++;
+      }
+      if (i < n) {
+        out += s[i];
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Strip comments and (Python) docstrings from source text before an
+ * `occurrences:` assertion counts literal matches over it.
+ *
+ * This is what closes issue #4093: `occurrences:` is a raw substring count,
+ * so a symbol mentioned ONLY inside a comment or docstring — never in
+ * executable code — could discharge a MUST-NEVER invariant (PR #4090:
+ * `closingIssuesReferences` appears in `reap.py` only inside docstrings,
+ * while the code path in force is an unrelated hand-rolled regex). The same
+ * blindness cuts the other way: a genuine single code match can be defeated
+ * by an unrelated comment mention of the same literal (PR #4112: a comment
+ * mentioning `Date.now()` broke an `== 1` single-call assertion). Stripping
+ * comments/docstrings before counting fixes both directions with one change.
+ *
+ * String literals are deliberately NOT stripped — a literal inside a string
+ * is still executable intent and must keep counting. Scoped to the file
+ * types this gate reads: `.ts`/`.mts` (line + block comments), `.py` (line
+ * comments + triple-quoted docstrings), `.sh` (line comments). Any other
+ * extension is returned unchanged — best-effort, not a lexer for every
+ * language the gate might one day read.
+ */
+export function stripCommentsAndDocstrings(source: string, path: string): string {
+  const ext = (/\.[^./\\]+$/.exec(path)?.[0] ?? "").toLowerCase();
+  if (ext === ".ts" || ext === ".mts") return stripCLikeComments(source);
+  if (ext === ".py") return stripPythonCommentsAndDocstrings(source);
+  if (ext === ".sh") return stripShellComments(source);
+  return source;
+}
+
 function missing(path: string): AssertionResult {
   return { ok: false, expected: `readable file ${path}`, observed: "file not found or unreadable" };
 }
@@ -660,7 +829,7 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "occurrences": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       const ok = a.op === "==" ? n === a.count : a.op === "<=" ? n <= a.count : n >= a.count;
       return {
         ok,

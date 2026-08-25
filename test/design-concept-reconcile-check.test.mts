@@ -50,6 +50,7 @@ import {
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
+  stripCommentsAndDocstrings,
   type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
@@ -459,6 +460,88 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(countOccurrences("aaaa", "aa"), 2);
     assert.equal(countOccurrences("abc", "z"), 0);
     assert.equal(countOccurrences("abc", ""), 0);
+  });
+
+  // issue #4093 — the occurrences: assertion counts a raw substring, so a
+  // symbol mentioned only in a comment/docstring could discharge a
+  // MUST-NEVER invariant (false GREEN), while an unrelated comment mention
+  // could defeat a genuine single code match (false RED). Both cure via one
+  // change: strip comments/docstrings before counting.
+  describe("stripCommentsAndDocstrings (#4093)", () => {
+    test("TS: strips // line comments, keeps code", () => {
+      const src = "const x = doThing(); // doThing( in a comment\ndoThing();";
+      assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "a.ts"), "doThing("), 2);
+    });
+
+    test("TS: strips /* block */ comments, keeps code", () => {
+      const src = "/* doThing( doThing( */\nconst x = doThing();";
+      assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "a.ts"), "doThing("), 1);
+    });
+
+    test("TS: does NOT strip a string literal — a literal inside a string is still executable intent", () => {
+      const src = 'const msg = "call doThing( to start";';
+      assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "a.ts"), "doThing("), 1);
+    });
+
+    test("Python: strips # line comments and triple-quoted docstrings (both quote forms), keeps code", () => {
+      const src = [
+        '"""',
+        "This module never calls closingIssuesReferences.",
+        '"""',
+        "def f():",
+        "    # closingIssuesReferences is unused here",
+        "    return closing_issues()",
+      ].join("\n");
+      assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "a.py"), "closingIssuesReferences"), 0);
+      const src2 = "x = '''closingIssuesReferences'''\ny = closingIssuesReferences()";
+      assert.equal(countOccurrences(stripCommentsAndDocstrings(src2, "a.py"), "closingIssuesReferences"), 1);
+    });
+
+    test("Python: does NOT strip a normal string literal", () => {
+      const src = "msg = 'please call doThing( soon'";
+      assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "a.py"), "doThing("), 1);
+    });
+
+    test("sh: strips # line comments, keeps quoted content", () => {
+      const src = '# doThing here\necho "doThing"\n';
+      assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "a.sh"), "doThing"), 1);
+    });
+
+    test("unknown extension is returned unchanged (best-effort passthrough)", () => {
+      const src = "// not actually stripped for .json";
+      assert.equal(stripCommentsAndDocstrings(src, "a.json"), src);
+    });
+  });
+
+  describe("occurrences: assertion excludes comments/docstrings (#4093 regressions)", () => {
+    test("false GREEN (PR #4090 shape): a symbol named only in a docstring must not discharge an invariant", () => {
+      const read = fakeReader({
+        "reap.py": [
+          '"""',
+          "This docstring mentions closingIssuesReferences but the code below",
+          "never parses it — it uses a hand-rolled regex instead.",
+          '"""',
+          "def closing_issues():",
+          "    return _CLOSE_RE.findall(body)",
+        ].join("\n"),
+      });
+      const ev = evaluateAssertion(parseAssertion("occurrences: reap.py :: closingIssuesReferences == 1"), read);
+      assert.equal(ev.ok, false, "a docstring-only mention must not satisfy the assertion");
+    });
+
+    test("false RED (PR #4112 shape): a single genuine code match survives an unrelated comment mention of the same literal", () => {
+      const read = fakeReader({
+        "clock.ts": "// avoid a second Date.now() read below, unlike the old code\nconst now = Date.now();",
+      });
+      const ev = evaluateAssertion(parseAssertion("occurrences: clock.ts :: Date.now() == 1"), read);
+      assert.equal(ev.ok, true, "the comment mention must not be counted alongside the one real call");
+    });
+
+    test("existing single-match behaviour is unaffected when there is no comment noise", () => {
+      const read = fakeReader({ "a.ts": "alpha doThing( beta doThing(" });
+      const ev = evaluateAssertion(parseAssertion("occurrences: a.ts :: doThing( == 2"), read);
+      assert.equal(ev.ok, true);
+    });
   });
 
   test("evaluateAssertion re-executes each kind against the injected reader", () => {
