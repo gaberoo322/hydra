@@ -879,6 +879,18 @@ run_skill_mirror_drift() {
 # Testability hooks (off-by-default; pinned by
 # test/watchdog-node-modules-integrity.test.mts):
 #   HYDRA_REDIS_HOST / HYDRA_REDIS_PORT        shared with the other blocks.
+#   HYDRA_REDIS_DB                             DB index passed as `-n <db>` to
+#                                               every rc_write/rc_read call
+#                                               (default 0, the production DB;
+#                                               non-numeric input falls back to
+#                                               0). scripts/test/redis-db-launch.mjs
+#                                               exports the run's derived
+#                                               per-run DB under this same
+#                                               name, so a test that shells
+#                                               into this block writes into the
+#                                               run's isolated DB instead of
+#                                               past it onto production db 0
+#                                               (issue #4183).
 #   HYDRA_WATCHDOG_NM_NOW_MS                   inject `now` (epoch-ms).
 #   HYDRA_WATCHDOG_NM_ROOTS                    colon-separated root override.
 #   HYDRA_WATCHDOG_NM_ENTRY_FLOOR              default 20.
@@ -892,6 +904,16 @@ run_skill_mirror_drift() {
 run_node_modules_integrity() {
   local REDIS_HOST="${HYDRA_REDIS_HOST:-docker}"
   local REDIS_PORT="${HYDRA_REDIS_PORT:-6379}"
+  # DB index for the bash-side redis-cli calls in rc_write/rc_read below
+  # (issue #4183). Unset or non-numeric input falls back to db 0 so
+  # production behaviour is byte-identical to before this variable existed.
+  # scripts/test/redis-db-launch.mjs exports the run's derived DB under this
+  # same name, so any bash block a test shells into inherits the run's
+  # isolation automatically rather than opting in per call site. Mirrors
+  # run_launch_flow's identical treatment — the two rc_write/rc_read copies
+  # must never diverge in DB-selection behaviour.
+  local REDIS_DB="${HYDRA_REDIS_DB:-0}"
+  [[ "$REDIS_DB" =~ ^[0-9]+$ ]] || REDIS_DB=0
   local NM_KEY_PREFIX="hydra:autopilot:node-modules-integrity"
   local NOTIFY_STREAM="${HYDRA_WATCHDOG_NM_NOTIFY_STREAM:-hydra:notifications}"
   local ENTRY_FLOOR="${HYDRA_WATCHDOG_NM_ENTRY_FLOOR:-20}"
@@ -920,16 +942,16 @@ run_node_modules_integrity() {
   # function verbatim by name).
   rc_write() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw "$@" >/dev/null 2>&1 || true
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" >/dev/null 2>&1 || true
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" >/dev/null 2>&1 || true
     fi
   }
   rc_read() {
     if [[ "$REDIS_HOST" == "docker" ]]; then
-      docker exec hydra-redis-1 redis-cli --raw "$@" 2>/dev/null || true
+      docker exec hydra-redis-1 redis-cli --raw -n "$REDIS_DB" "$@" 2>/dev/null || true
     else
-      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" "$@" 2>/dev/null || true
+      redis-cli --raw -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" "$@" 2>/dev/null || true
     fi
   }
 
