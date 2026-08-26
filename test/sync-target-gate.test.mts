@@ -160,6 +160,56 @@ function runSync(wt: string) {
   return spawnSync("bash", [SYNC_SCRIPT, wt], { encoding: "utf-8" });
 }
 
+/**
+ * Create a throwaway git repo whose worktree is nested under a fake `web/`
+ * ancestor directory that owns the REAL node_modules — mirroring the
+ * post-#4177 production layout (`<target-repo>/web/.worktrees/<name>`, issue
+ * #4177, prevention half of #4175). Deliberately does NOT create a
+ * `web/node_modules` inside the worktree itself: the whole point of the
+ * relocation is that no per-worktree install exists, and `zod` must still
+ * resolve for the mirror purely through Node's upward directory walk past the
+ * worktree root into the fake `web/`'s real node_modules.
+ */
+function makeFakeRelocatedWorktree(): { wt: string; cleanup: () => void } {
+  const repo = mkdtempSync(join(tmpdir(), "sgt-repo-"));
+  const run = (...args: string[]) =>
+    spawnSync("git", ["-C", repo, ...args], { encoding: "utf-8" });
+  assert.equal(
+    spawnSync("git", ["init", "-q", repo], { encoding: "utf-8" }).status,
+    0,
+    "git init failed",
+  );
+  run("config", "user.email", "t@t.com");
+  run("config", "user.name", "t");
+  writeFileSync(join(repo, "seed"), "x");
+  run("add", "seed");
+  assert.equal(run("commit", "-q", "-m", "init").status, 0, "seed commit failed");
+
+  const fakeWeb = mkdtempSync(join(tmpdir(), "sgt-web-"));
+  symlinkSync(ORCH_NODE_MODULES, join(fakeWeb, "node_modules"), "dir");
+  const worktreesDir = join(fakeWeb, ".worktrees");
+  mkdirSync(worktreesDir, { recursive: true });
+  const wt = join(worktreesDir, "hydra-betting-worktree-relocated-test");
+  const add = run("worktree", "add", "-q", "-b", "feat-relocated", wt);
+  assert.equal(add.status, 0, `worktree add failed: ${add.stderr}`);
+
+  mkdirSync(join(wt, ".hydra"), { recursive: true });
+  writeFileSync(join(wt, ".hydra", "manifest.json"), JSON.stringify(FAKE_MANIFEST), "utf-8");
+  // The checked-out web/ subdir exists (as it would from a real `git worktree
+  // add`) but deliberately has NO node_modules of its own.
+  mkdirSync(join(wt, "web"), { recursive: true });
+
+  return {
+    wt,
+    cleanup: () => {
+      spawnSync("git", ["-C", repo, "worktree", "remove", "--force", wt]);
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(fakeWeb, { recursive: true, force: true });
+      rmSync(wt, { recursive: true, force: true });
+    },
+  };
+}
+
 describe("scripts/sync-target-gate.sh (issue #1451)", () => {
   test("mirrors the full gate-script + src closure under .hydra-gate/, layout preserved", () => {
     const { wt, cleanup } = makeFakeWorktree();
@@ -399,6 +449,38 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
       { encoding: "utf-8" },
     );
     assert.equal(bad.status, 2, "nonexistent worktree must exit 2");
+  });
+});
+
+describe("sync-target-gate.sh — relocated worktree ancestor-walk resolution (issue #4177)", () => {
+  test("no per-worktree web/node_modules: zod still resolves via ancestor walk, no false WARN", () => {
+    const { wt, cleanup } = makeFakeRelocatedWorktree();
+    try {
+      assert.ok(
+        !existsSync(join(wt, "web", "node_modules")),
+        "test setup invariant: this scenario must NOT have a per-worktree install",
+      );
+      const r = runSync(wt);
+      assert.equal(r.status, 0, `sync failed: ${r.stderr}`);
+      assert.doesNotMatch(
+        r.stderr,
+        /WARN/,
+        `relocated worktree must not trigger the app-node_modules-not-found WARN: ${r.stderr}`,
+      );
+      // The mirror's own zod import must resolve end-to-end, purely via the
+      // upward walk past the worktree root — no symlink was created for it.
+      assert.ok(
+        !existsSync(join(wt, ".hydra-gate", "node_modules")),
+        "no node_modules symlink should be created when the ancestor walk already resolves zod",
+      );
+      const req = spawnSync("node", ["-e", "require.resolve('zod')"], {
+        cwd: join(wt, ".hydra-gate"),
+        encoding: "utf-8",
+      });
+      assert.equal(req.status, 0, `zod did not resolve from the mirror: ${req.stderr}`);
+    } finally {
+      cleanup();
+    }
   });
 });
 

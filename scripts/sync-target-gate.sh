@@ -151,17 +151,28 @@ printf '%s\n' '{ "type": "module" }' > "$GATE_ROOT/package.json"
 
 # Resolve bare npm imports for the mirror (issue #3018). The manifest schema
 # (src/schemas/target-manifest.ts, newly in the closure) imports `zod`. The
-# gate scripts run with cwd = the Target worktree root, whose node_modules does
-# NOT contain zod — only the app subdir's node_modules does (hydra-betting keeps
-# its deps under web/node_modules). Node resolves a bare import by walking
-# UPWARD from the importing file, so a `node_modules` symlink at the mirror root
-# ($GATE_ROOT) is found from .hydra-gate/src/schemas/target-manifest.ts before
-# the (zod-less) worktree-root node_modules. Symlink it to the app subdir's
-# node_modules so `zod` (and any future runtime dep in the closure) resolves.
-# The app subdir is read from the manifest's verify.appSubdir; we default to
-# "web" for the resolution symlink only when the manifest is unreadable here
-# (the gate itself fails loud on a bad manifest — this symlink is best-effort
-# plumbing so the loader can even run to produce that error).
+# gate scripts run with cwd = the Target worktree root. Node resolves a bare
+# import by walking UPWARD from the importing file:
+#   - Pre-#4177 (hydra-betting worktrees under /dev/shm), that walk dead-ended
+#     at the worktree root — /dev/shm has no ancestor node_modules — so the
+#     app subdir's own per-worktree install (web/node_modules) was the only
+#     candidate, and it sits OUTSIDE the walk from .hydra-gate/ (a sibling of
+#     web/, not an ancestor). A `node_modules` symlink at the mirror root
+#     ($GATE_ROOT) injected that sibling into the walk path.
+#   - Post-#4177, hydra-betting worktrees live under
+#     <target-repo>/web/.worktrees/<name> — nested INSIDE web/ — so the walk
+#     from .hydra-gate/ (also under the worktree root) continues past the
+#     worktree root, past .worktrees/, and lands on the main checkout's real
+#     web/node_modules with NO symlink needed. The app subdir's own
+#     node_modules therefore will not exist as a real dir in the common case
+#     now; that is expected, not a fault.
+# So: symlink it when a real per-worktree install happens to exist (keeps this
+# script correct for a manually-installed or pre-#4177-style worktree), and
+# otherwise verify importability the honest way — try to resolve `zod` from
+# the mirror root — before warning. This avoids a false "may fail" alarm on
+# every relocated dispatch while still failing loud if resolution genuinely
+# breaks (worktree misplaced outside web/, or the main checkout's install
+# itself is broken).
 APP_SUBDIR="web"
 if [ -f "$TARGET_WT/.hydra/manifest.json" ]; then
   # Extract verify.appSubdir without a JSON parser dep: grep the field.
@@ -179,9 +190,10 @@ else
 fi
 if [ -d "$APP_NODE_MODULES" ]; then
   ln -sfn "$APP_NODE_MODULES" "$GATE_ROOT/node_modules"
-else
-  echo "sync-target-gate: WARN — app node_modules '$APP_NODE_MODULES' not found;" \
-       "the manifest loader's zod import may fail from the mirror." >&2
+elif ! (cd "$GATE_ROOT" && node -e "require.resolve('zod')" >/dev/null 2>&1); then
+  echo "sync-target-gate: WARN — app node_modules '$APP_NODE_MODULES' not found and" \
+       "'zod' does not resolve by Node's upward walk from $GATE_ROOT either;" \
+       "the manifest loader's zod import will fail from the mirror." >&2
 fi
 
 # Exclude the mirror from the betting worktree's git so it never pollutes the

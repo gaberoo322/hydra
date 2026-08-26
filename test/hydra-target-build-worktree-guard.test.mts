@@ -52,16 +52,20 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
 
   test("creates a git worktree under ~/hydra-betting with a GC-able $TARGET_WT path", () => {
     // The load-bearing invocation: `git -C ~/hydra-betting worktree add ...`
-    // with a /dev/shm/hydra-worktrees/hydra-betting-worktree-* path so the
-    // existing branch-prune sweep can GC it. KEPT VERBATIM — these strings
-    // are the real canary, not the surrounding heading.
+    // with a `~/hydra-betting/web/.worktrees/hydra-betting-worktree-*` path so
+    // the existing branch-prune sweep can GC it. Relocated off
+    // `/dev/shm/hydra-worktrees/` by issue #4177 (prevention half of #4175) —
+    // nesting under the target's own `web/` so node_modules resolves by
+    // upward walk instead of a reach-back symlink to the main checkout's real
+    // install (the mechanism behind the 2026-08-19 incident). KEPT VERBATIM —
+    // these strings are the real canary, not the surrounding heading.
     assert.match(
       playbook,
       /git -C ~\/hydra-betting worktree add -b "feature\/\$\{CYCLE_ID\}"/,
     );
     assert.match(
       playbook,
-      /TARGET_WT="\/dev\/shm\/hydra-worktrees\/hydra-betting-worktree-\$\{CYCLE_ID\}"/,
+      /TARGET_WT="\$HOME\/hydra-betting\/web\/\.worktrees\/hydra-betting-worktree-\$\{CYCLE_ID\}"/,
     );
   });
 
@@ -96,8 +100,9 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
 
   test("removes the worktree on success", () => {
     // Leaking on crash is acceptable (branch-prune.sh will GC it), but on the
-    // happy path we should clean up so /dev/shm doesn't fill with stale dirs.
-    // The remove invocation is KEPT VERBATIM; the heading is not pinned.
+    // happy path we should clean up so ~/hydra-betting/web/.worktrees/ doesn't
+    // fill with stale dirs. The remove invocation is KEPT VERBATIM; the
+    // heading is not pinned.
     assert.match(playbook, /git -C ~\/hydra-betting worktree remove --force "\$TARGET_WT"/);
   });
 });

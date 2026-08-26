@@ -8,7 +8,10 @@
 #  - `hydra-dev` against `~/hydra` under `.claude/worktrees/agent-*` or
 #    `/dev/shm/hydra-worktrees/issue-*`
 #  - `hydra-target-build` against `~/hydra-betting` under
-#    `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` (added by #542)
+#    `~/hydra-betting/web/.worktrees/hydra-betting-worktree-*` (added by #542;
+#    relocated off `/dev/shm/hydra-worktrees/` by issue #4177 — the
+#    prevention half of #4175 — so node_modules resolves by Node's upward
+#    walk instead of a reach-back symlink to the main checkout's real install)
 #
 # When an agent finishes (or crashes) the worktree often leaks — `git branch -vv`
 # accumulates `[gone]` upstreams and the worktree dirs stick around forever.

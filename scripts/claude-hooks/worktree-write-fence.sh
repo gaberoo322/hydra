@@ -85,6 +85,15 @@ WORKTREE_ROOTS=(
   "/home/gabe/hydra/.claude/worktrees/"
   "/dev/shm/hydra-worktrees/"
   "/home/gabe/hydra-worktrees/"
+  # hydra-betting worktrees moved off /dev/shm to sit under the target's own
+  # `web/` subtree (issue #4177, prevention half of #4175) so `node_modules`
+  # resolves by Node's upward directory walk instead of a reach-back symlink
+  # to the main checkout's real install. The nesting under
+  # /home/gabe/hydra-betting/ (also a MAIN_TREE_ROOTS entry below) is
+  # deliberate and safe: the in-cwd short-circuit further down always runs
+  # BEFORE the main-tree deny, exactly like the existing
+  # /home/gabe/hydra/.claude/worktrees/ case above.
+  "/home/gabe/hydra-betting/web/.worktrees/"
 )
 
 is_worktree_cwd=0

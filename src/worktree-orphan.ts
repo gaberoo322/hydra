@@ -3,8 +3,12 @@
  * (issue #2465, recurrence of #2115).
  *
  * Background: a code-writing dispatch into the target project (hydra-betting)
- * runs in a `/dev/shm/hydra-worktrees/` worktree. When that dispatch crashes or
- * exits uncleanly, the worktree dir AND its `.git/worktrees/<id>` registry entry
+ * runs in a `<targetWorkspace>/web/.worktrees/` worktree (relocated off
+ * `/dev/shm/hydra-worktrees/` by issue #4177 — the prevention half of #4175 —
+ * so `node_modules` resolves by Node's upward directory walk instead of a
+ * reach-back symlink to the main checkout's real install). When that dispatch
+ * crashes or exits uncleanly, the worktree dir AND its `.git/worktrees/<id>`
+ * registry entry
  * survive with the feature branch still checked out there. The startup
  * `git branch -D` sweep in src/index.ts then fails closed — git refuses to
  * delete a branch a registered worktree still holds — so stale feature branches
@@ -148,7 +152,7 @@ export interface OrphanContext {
   minAgeSeconds: number;
   /**
    * Optional path prefix the destructive action is scoped to (e.g.
-   * `/dev/shm/hydra-worktrees/`). A worktree outside it classifies
+   * `<targetWorkspace>/web/.worktrees/`). A worktree outside it classifies
    * `skip-out-of-scope` so the broader hydra-branch-prune skill owns it. If
    * omitted, every worktree is in scope.
    */
@@ -256,7 +260,7 @@ export interface PruneDeps {
 }
 
 /**
- * Reclaim orphaned `/dev/shm/hydra-worktrees/` worktrees in the target
+ * Reclaim orphaned `<workspace>/web/.worktrees/` worktrees in the target
  * workspace so the stale-branch sweep (src/index.ts) can then delete their
  * feature branches — a registered worktree holding a `feature/*` branch makes
  * `git branch -D` fail closed (issue #2465, recurrence of #2115).
@@ -336,10 +340,15 @@ export async function pruneOrphanedTargetWorktrees(
       currentBranch: "main",
       isLivePid: livePid,
       minAgeSeconds: DEFAULT_WORKTREE_MIN_AGE_SECONDS,
-      // Scope the destructive action to `/dev/shm/hydra-worktrees/` — the dir
-      // family the recurrence (#2115 -> #2465) is observed in. A worktree
-      // elsewhere is left for the hydra-branch-prune skill's broader sweep.
-      scopePrefix: "/dev/shm/hydra-worktrees/",
+      // Scope the destructive action to `<workspace>/web/.worktrees/` — the
+      // dir family hydra-target-build creates today (relocated off
+      // `/dev/shm/hydra-worktrees/` by issue #4177 so node_modules resolves
+      // by upward walk instead of a reach-back symlink; see the header
+      // comment). A worktree elsewhere is left for the hydra-branch-prune
+      // skill's broader sweep. Derived from `workspace` (not a hardcoded
+      // absolute host path) so this stays correct if the target workspace is
+      // ever reconfigured.
+      scopePrefix: joinPath(workspace, "web", ".worktrees") + "/",
     });
     if (result.action !== "delete-orphan-worktree") continue;
     const removed = await gitExec(["worktree", "remove", "--force", wt.path], gitOpts);

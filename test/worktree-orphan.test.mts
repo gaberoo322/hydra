@@ -3,8 +3,10 @@
  * (issue #2465, recurrence of #2115) — src/worktree-orphan.ts.
  *
  * The pure classifier is the never-touch-first safety logic the startup branch
- * cleanup in src/index.ts relies on to reclaim the orphaned /dev/shm worktrees
- * that block `git branch -D`. These tests pin every decision-order arm.
+ * cleanup in src/index.ts relies on to reclaim the orphaned
+ * `<workspace>/web/.worktrees/` worktrees (relocated off
+ * `/dev/shm/hydra-worktrees/` by issue #4177) that block `git branch -D`.
+ * These tests pin every decision-order arm.
  *
  * Top-level describe with no shared-Redis lifecycle (the module is pure — no
  * fs/network/git), so it is isolation-safe alongside sibling suites.
@@ -22,7 +24,10 @@ import {
   type PruneDeps,
 } from "../src/worktree-orphan.ts";
 
-const SHM = "/dev/shm/hydra-worktrees/";
+// Matches the production scopePrefix in src/worktree-orphan.ts:
+// `joinPath(workspace, "web", ".worktrees") + "/"`, where workspace is
+// "/home/gabe/hydra-betting" (see mainWorktreePath/WORKSPACE below).
+const SHM = "/home/gabe/hydra-betting/web/.worktrees/";
 const OLD = DEFAULT_WORKTREE_MIN_AGE_SECONDS + 1; // comfortably past the floor
 const YOUNG = 60; // under the floor
 
@@ -59,7 +64,7 @@ describe("worktree-orphan: parseWorktreeList", () => {
     "HEAD 0091486",
     "branch refs/heads/main",
     "",
-    "worktree /dev/shm/hydra-worktrees/hydra-betting-worktree-claude-cycle-2226",
+    `worktree ${SHM}hydra-betting-worktree-claude-cycle-2226`,
     "HEAD 8b923c2",
     "branch refs/heads/feature/claude-cycle-2226",
     "",
@@ -83,7 +88,7 @@ describe("worktree-orphan: parseWorktreeList", () => {
   });
 
   test("tolerates a detached worktree (no branch line)", () => {
-    const detached = ["worktree /dev/shm/hydra-worktrees/wt-detached", "HEAD abc123", "detached", ""].join("\n");
+    const detached = [`worktree ${SHM}wt-detached`, "HEAD abc123", "detached", ""].join("\n");
     const rows = parseWorktreeList(detached);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].branch, null);

@@ -49,6 +49,10 @@ WORKTREE_PREFIXES = (
     "/home/gabe/hydra/.claude/worktrees/",
     "/dev/shm/hydra-worktrees/",
     "/home/gabe/hydra-worktrees/",
+    # hydra-betting worktrees moved off /dev/shm to <target>/web/.worktrees/
+    # (issue #4177, prevention half of #4175) so node_modules resolves by
+    # upward walk instead of a reach-back symlink to the main checkout.
+    "/home/gabe/hydra-betting/web/.worktrees/",
 )
 
 MAIN_TREE_PREFIXES = (

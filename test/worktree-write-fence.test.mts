@@ -104,6 +104,22 @@ describe("worktree-write-fence — pass-through cases", () => {
     assert.equal(r.status, 0);
   });
 
+  test("dev_target worktree relocated under hydra-betting/web/.worktrees (issue #4177) allowed when file is inside it", () => {
+    // The relocated worktree cwd nests INSIDE the /home/gabe/hydra-betting/
+    // MAIN_TREE_ROOTS entry — this pins that the in-cwd short-circuit still
+    // wins for that nesting, exactly like the pre-existing
+    // /home/gabe/hydra/.claude/worktrees/ case.
+    const r = runHook({
+      cwd: "/home/gabe/hydra-betting/web/.worktrees/hydra-betting-worktree-claude-cycle-2026-08-26-1200",
+      tool_name: "Edit",
+      tool_input: {
+        file_path:
+          "/home/gabe/hydra-betting/web/.worktrees/hydra-betting-worktree-claude-cycle-2026-08-26-1200/web/src/x.ts",
+      },
+    });
+    assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+  });
+
   test("scratch paths (/tmp) outside main tree are allowed", () => {
     const r = runHook({
       cwd: "/home/gabe/hydra/.claude/worktrees/agent-abc123",
@@ -155,6 +171,16 @@ describe("worktree-write-fence — deny cases", () => {
       tool_input: { file_path: "/home/gabe/hydra-betting/web/x.ts" },
     });
     assert.equal(r.status, 2);
+    assert.match(r.stderr, /worktree-write-fence/);
+  });
+
+  test("relocated hydra-betting worktree (issue #4177) writing OUTSIDE itself into the main tree is still DENIED", () => {
+    const r = runHook({
+      cwd: "/home/gabe/hydra-betting/web/.worktrees/hydra-betting-worktree-claude-cycle-2026-08-26-1200",
+      tool_name: "Write",
+      tool_input: { file_path: "/home/gabe/hydra-betting/web/x.ts" },
+    });
+    assert.equal(r.status, 2, `expected exit 2, got ${r.status}; stderr=${r.stderr}`);
     assert.match(r.stderr, /worktree-write-fence/);
   });
 
