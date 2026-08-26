@@ -1,0 +1,1 @@
+- feat: autopilot orch-vs-target weekly budget-share guard — collect-state.sh folds /api/usage bySkillByModel into orch_realm_weekly_share via the classes.json scope column, and decide.py suppresses orch-scope dispatch above an operator-configured max (ships disabled) (#4161)

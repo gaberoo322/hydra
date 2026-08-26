@@ -3977,3 +3977,365 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Orch-realm weekly-share guard (issue #4161)
+// ---------------------------------------------------------------------------
+//
+// The per-realm budget split, in the signal-seam shape the issue's grilled
+// ACs fix (seam correction 2026-08-19):
+//
+//   ENUMERATION — collect-state.sh folds /api/usage bySkillByModel (NOT
+//   costByClass — it covers only ~13% of measured spend) through the
+//   classes.json `scope` column into `orch_realm_weekly_share=<float>`.
+//   POLICY — decide.py reads that one signal VERBATIM from state.signals and
+//   stays pure (no network/FS/Redis; the existing purity pins hold).
+//
+// decide.py half below runs the real CLI over fixture state; the
+// collect-state.sh half extracts the collector's python fold heredoc at
+// runtime and drives it with fixture stdin + a fixture classes.json (the
+// same extract-and-golden-fixture discipline this file applied to the
+// retired wayfinder jq filters). New TOP-LEVEL describe per the CLAUDE.md
+// authoring rule — decide.py is a pure CLI over temp files, nothing shared
+// to tear down.
+// ---------------------------------------------------------------------------
+describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
+  // limits override helper: baseState's limits literal is closed, so realm
+  // tests merge the config key in after construction.
+  function realmState(
+    signals: Record<string, unknown>,
+    maxShare?: unknown,
+  ): any {
+    const state = baseState({ signals });
+    if (maxShare !== undefined) {
+      state.limits.orch_realm_weekly_share_cap = maxShare;
+    }
+    return state;
+  }
+
+  function findBudgetDecision(plan: any, cls: string): any | undefined {
+    return (plan.events ?? []).find(
+      (e: any) =>
+        e.event === "dispatch_decision" && e.class === cls && e.outcome === "budget",
+    );
+  }
+
+  test("disabled by default — no limits key, meter present: dev_orch dispatches (AC4/AC5)", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "0.99" }),
+      null,
+    );
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch");
+    assert.ok(a, "guard ships disabled — the meter alone must never suppress (ADR-0021 D5)");
+    assert.equal(plan.debug?.orch_realm_share_skipped, undefined,
+      "a disabled guard stamps no debug field");
+  });
+
+  test("max = 0 is the explicit disabled value (same no-op as absent)", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "0.99" }, 0),
+      null,
+    );
+    assert.ok(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      "an explicit 0 max must behave exactly like the absent-key default",
+    );
+  });
+
+  test("orch-over-share suppresses orch-scope dispatch with a budget decision (AC3/AC5)", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "0.87" }, 0.5),
+      null,
+    );
+    assert.equal(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      undefined,
+      "orch realm over its configured share must suppress dev_orch",
+    );
+    const decision = findBudgetDecision(plan, "dev_orch");
+    assert.ok(decision, "the suppression must surface a dispatch_decision event");
+    assert.match(decision.reason, /orch realm weekly-share exceeded/,
+      "the reason must name the guard (dashboard grep-ability)");
+    assert.deepEqual(
+      plan.debug?.orch_realm_share_skipped,
+      { share: 0.87, cap_share: 0.5 },
+      "debug carries the resolved breakdown for the turn log",
+    );
+  });
+
+  test("suppression is driven by the taxonomy scope column, not a hardcoded class list", () => {
+    // qa_orch is a DIFFERENT orch-scope class than dev_orch; the gate must
+    // suppress it too (CLASS_SCOPE derivation — a new orch class in
+    // classes.json inherits the guard with no decide.py edit).
+    const plan = runDecide(
+      realmState({ needs_qa_orch: true, orch_realm_weekly_share: "0.87" }, 0.5),
+      null,
+    );
+    assert.equal(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "qa_orch"),
+      undefined,
+      "every taxonomy scope=orch class is guarded, not just dev_orch",
+    );
+    assert.ok(findBudgetDecision(plan, "qa_orch"), "with its own budget decision event");
+  });
+
+  test("target dispatch UNAFFECTED at the same over-share — the guard is one-directional (AC5)", () => {
+    const plan = runDecide(
+      realmState({ target_work_available: true, orch_realm_weekly_share: "0.87" }, 0.5),
+      null,
+    );
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_target");
+    assert.ok(
+      a,
+      "an orch-heavy week must never suppress target-realm dispatch — target-over-share is the un-guarded direction by design",
+    );
+    assert.equal(
+      findBudgetDecision(plan, "dev_target"),
+      undefined,
+      "no budget decision may be recorded against a target class",
+    );
+  });
+
+  test("scope=both (health) is never realm-suppressed", () => {
+    const plan = runDecide(
+      realmState({ health_fail: true, orch_realm_weekly_share: "0.99" }, 0.5),
+      null,
+    );
+    assert.ok(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "health"),
+      "health is whole-system (taxonomy scope=both) — the realm guard must skip it, mirroring the scope-exclusion masks",
+    );
+  });
+
+  test("fail-open: meter 'unavailable' (collector degrade) leaves the guard disabled (AC1)", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "unavailable" }, 0.5),
+      null,
+    );
+    assert.ok(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      "an unreadable meter must never suppress dispatch — fail-open, the ADR-0032 direction",
+    );
+  });
+
+  test("fail-open: absent meter leaves the guard disabled", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true }, 0.5),
+      null,
+    );
+    assert.ok(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      "no meter this turn (playbook did not merge the signal) → no-op",
+    );
+  });
+
+  test("boundary: share exactly ON the max suppresses (the >= convention of the sibling cost gates)", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "0.5" }, 0.5),
+      null,
+    );
+    assert.equal(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      undefined,
+      "share == max is over the configured share (spend_usd >= cap_usd convention)",
+    );
+  });
+
+  test("share just under the max does not suppress", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "0.4999" }, 0.5),
+      null,
+    );
+    assert.ok(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      "a share below the configured max dispatches normally",
+    );
+  });
+
+  test("an out-of-range max (> 1) is treated as disabled, never a 100%-share clamp", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "0.99" }, 1.5),
+      null,
+    );
+    assert.ok(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      "max > 1 is a misconfiguration — resolving it to disabled (fail-open) beats clamping it to 1.0 (which would suppress)",
+    );
+  });
+
+  test("a garbage max resolves to disabled (same direction)", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: "0.99" }, "banana"),
+      null,
+    );
+    assert.ok(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      "unparseable config must degrade to the disabled default, not raise",
+    );
+  });
+
+  test("the meter parses as a JSON number too, not only the collected string form", () => {
+    const plan = runDecide(
+      realmState({ orch_work_available: true, orch_realm_weekly_share: 0.87 }, 0.5),
+      null,
+    );
+    assert.equal(
+      findAction(plan, (x) => x.type === "dispatch" && x.slot === "dev_orch"),
+      undefined,
+      "a numeric signal value (hand-merged state) must gate identically to the string form",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — the orch_realm_weekly_share collector (issue #4161)
+// ---------------------------------------------------------------------------
+describe("collect-state.sh — orch-realm weekly share fold (issue #4161)", () => {
+  const collectorSrc = readFileSync(join(SCRIPTS, "collect-state.sh"), "utf-8");
+  const decideSrc = readFileSync(DECIDE, "utf-8");
+
+  // Extract the collector's python fold heredoc — everything between the
+  // `<<'PY'` that follows the orch_realm_weekly_share= echo and its closing
+  // `PY` line. This runs the EXACT shipped fold, not a re-implementation.
+  function extractRealmFold(): string {
+    const marker = 'echo -n "orch_realm_weekly_share="';
+    const markerAt = collectorSrc.indexOf(marker);
+    assert.ok(markerAt >= 0, "collect-state.sh must emit orch_realm_weekly_share=");
+    const open = collectorSrc.indexOf("<<'PY'", markerAt);
+    assert.ok(open >= 0, "the collector's python fold heredoc must exist");
+    const openEnd = collectorSrc.indexOf("\n", open) + 1; // first char of fold body
+    const close = collectorSrc.indexOf("\nPY\n", openEnd);
+    assert.ok(close >= 0, "the fold heredoc must be closed");
+    return collectorSrc.slice(openEnd, close);
+  }
+
+  function runRealmFold(stdinData: string, classesPath: string): string {
+    const r = spawnSync("python3", ["-c", extractRealmFold()], {
+      encoding: "utf-8",
+      input: stdinData,
+      env: { ...process.env, REALM_CLASSES_JSON: classesPath },
+    });
+    assert.equal(r.status, 0, `fold python must exit 0 (stderr: ${r.stderr})`);
+    return (r.stdout || "").trim();
+  }
+
+  // A minimal taxonomy fixture with one row per scope value — enough to pin
+  // the fold's mapping without depending on the live classes.json contents.
+  function writeFixtureClasses(dir: string): string {
+    const p = join(dir, "classes.fixture.json");
+    writeFileSync(p, JSON.stringify({
+      classes: [
+        { name: "dev_orch", kind: "pipeline", skill: "hydra-dev", scope: "orch" },
+        { name: "dev_target", kind: "pipeline", skill: "hydra-target-build", scope: "target" },
+        { name: "health", kind: "signal", skill: "hydra-doctor", scope: "both" },
+      ],
+    }));
+    return p;
+  }
+
+  function usageFixture(cross: Record<string, Record<string, { total: number }>>): string {
+    return JSON.stringify({ bySkillByModel: cross });
+  }
+
+  test("source contract: fetches /usage bySkillByModel via classes.json scope — never costByClass (AC1)", () => {
+    // Slice from the REALM_CLASSES_JSON resolution line (above the echo) so
+    // the block includes both the taxonomy path and the fetch.
+    const markerAt = collectorSrc.indexOf("REALM_CLASSES_JSON=");
+    assert.ok(markerAt >= 0, "the collector must resolve the taxonomy path");
+    const blockEnd = collectorSrc.indexOf("emergency_brake_json=", markerAt);
+    const block = collectorSrc.slice(markerAt, blockEnd > 0 ? blockEnd : undefined);
+    assert.ok(block.includes("hydra raw GET /usage"),
+      "the collector must read the /api/usage snapshot");
+    assert.ok(block.includes("bySkillByModel"),
+      "the fold must read the bySkillByModel cross-tab (the only trustworthy per-skill surface)");
+    assert.ok(block.includes("classes.json"),
+      "the realm mapping must come from the classes.json scope column");
+    assert.ok(!block.includes("costByClass"),
+      "costByClass covers only ~13% of measured spend — it must NOT back the split (issue evidence)");
+  });
+
+  test("source contract: decide.py reads the signal from state, not from any HTTP client (AC2 purity)", () => {
+    assert.ok(decideSrc.includes("orch_realm_weekly_share"),
+      "decide.py must read the pre-qualified signal");
+    assert.ok(decideSrc.includes('state.get("signals")'),
+      "the read goes through the state signals seam");
+  });
+
+  test("fold: maps skills to realms via scope, excluding 'both' and unattributable skills", () => {
+    const dir = mkdtempSync(join(tmpdir(), "realm-fold-"));
+    try {
+      const classes = writeFixtureClasses(dir);
+      const out = runRealmFold(usageFixture({
+        "hydra-dev": { sonnet: { total: 300 } },
+        "hydra-target-build": { sonnet: { total: 100 } },
+        "hydra-doctor": { haiku: { total: 999 } },      // scope=both → neither realm
+        "interactive": { sonnet: { total: 5000 } },      // not a dispatch class
+        "hydra-autopilot": { sonnet: { total: 4000 } },  // the parent brain itself
+      }), classes);
+      assert.equal(
+        out,
+        "0.7500 orch_realm_weekly_tokens=300 target_realm_weekly_tokens=100",
+        "orch share is over dispatch-class-attributed spend only: 300/(300+100)",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fold: sums across model families per skill", () => {
+    const dir = mkdtempSync(join(tmpdir(), "realm-fold-"));
+    try {
+      const classes = writeFixtureClasses(dir);
+      const out = runRealmFold(usageFixture({
+        "hydra-dev": { opus: { total: 60 }, sonnet: { total: 30 }, haiku: { total: 10 } },
+        "hydra-target-build": { sonnet: { total: 100 } },
+      }), classes);
+      assert.equal(
+        out,
+        "0.5000 orch_realm_weekly_tokens=100 target_realm_weekly_tokens=100",
+        "a skill's burn is the sum over all four family buckets",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fold: an empty cross-tab degrades to share 0.0 (nothing spent → nothing to guard)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "realm-fold-"));
+    try {
+      const out = runRealmFold(usageFixture({}), writeFixtureClasses(dir));
+      assert.equal(
+        out,
+        "0.0000 orch_realm_weekly_tokens=0 target_realm_weekly_tokens=0",
+        "zero denominator emits share 0.0, not an error — 0 < any positive max, guard idle",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fold: unparseable usage JSON degrades to 'unavailable' (AC1 fail-open)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "realm-fold-"));
+    try {
+      const out = runRealmFold("not json at all", writeFixtureClasses(dir));
+      assert.equal(out, "unavailable",
+        "orchestrator-down / garbage snapshot must degrade to the not-enforced sentinel");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fold: a missing classes.json degrades to 'unavailable' (the collect step never fails)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "realm-fold-"));
+    try {
+      const out = runRealmFold(
+        usageFixture({ "hydra-dev": { sonnet: { total: 1 } } }),
+        join(dir, "does-not-exist.json"),
+      );
+      assert.equal(out, "unavailable",
+        "a taxonomy read failure must disable the guard, not crash the collector");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

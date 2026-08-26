@@ -1643,6 +1643,90 @@ PY
 echo -n "usage_eligibility_json="
 hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
 
+# Per-realm weekly spend share (issue #4161) — the orch-vs-target budget split.
+#
+# Every USD-denominated cost gate in decide.py is structurally inert
+# (issue #4161 evidence, measured 2026-08-19): `HYDRA_TOKEN_USD_RATE` was
+# never set post-ADR-0006, so `scout_spend_usd_today` /
+# `dev_target_spend_usd_cycle` are permanently $0 and any cap compares zero
+# against zero. The only trustworthy per-skill spend surface is
+# `GET /api/usage`'s `bySkillByModel` cross-tab (rolling 7d RAW token counts
+# per dispatching skill — issue #2402's in-transcript attribution), which is
+# exactly what this collector folds.
+#
+# The fold maps each skill to a REALM via the `scope` column of the
+# Dispatch-Class Taxonomy (scripts/autopilot/classes.json — sibling file):
+#   scope=orch    -> orch bucket   (hydra-dev, hydra-qa, hydra-cleanup, ...)
+#   scope=target  -> target bucket (hydra-target-build, hydra-target-sweep, ...)
+#   scope=both    -> NEITHER bucket. `health` (hydra-doctor) is whole-system
+#                    overhead, not realm self-work; folding it into either
+#                    side would distort the ratio by construction.
+# Skills absent from the taxonomy (`interactive`, `login`, `clear`,
+# `hydra-autopilot` — the parent brain itself, `hydra-review`, ...) are
+# likewise unattributable and skipped. The share is therefore over
+# DISPATCH-CLASS-ATTRIBUTED spend only:
+#   orch_realm_weekly_share = orch_tokens / (orch_tokens + target_tokens)
+#
+# decide.py reads the share VERBATIM from `state.signals` (signal-seam
+# discipline: no HTTP inside decide.py) and suppresses orch-scope dispatch
+# once it exceeds `limits.orch_realm_weekly_share_cap` (default 0 = the
+# guard ships disabled — ADR-0021 D5).
+#
+# Best-effort on the same contract as the siblings above: the collect step
+# NEVER fails, and any failed or unparseable read degrades to
+# `orch_realm_weekly_share=unavailable`, which decide.py's parse treats as
+# "not enforced" — an unreadable meter must never suppress dispatch
+# (fail-open, the same direction ADR-0032 chose for the drainer heartbeat
+# and the OPPOSITE of #4128's fabricated-certainty failure).
+REALM_CLASSES_JSON="${HYDRA_AUTOPILOT_CLASSES_JSON:-$(dirname "$0")/classes.json}"
+echo -n "orch_realm_weekly_share="
+hydra raw GET /usage 2>/dev/null | REALM_CLASSES_JSON="$REALM_CLASSES_JSON" python3 -c "$(cat <<'PY'
+import json, os, sys
+
+def _degrade():
+    print("unavailable")
+
+try:
+    usage = json.load(sys.stdin)
+    with open(os.environ["REALM_CLASSES_JSON"], "r", encoding="utf-8") as fh:
+        taxonomy = json.load(fh)
+    scope_of_skill = {}
+    for row in taxonomy.get("classes") or []:
+        if isinstance(row, dict):
+            scope_of_skill[row.get("skill")] = row.get("scope")
+    orch = 0
+    target = 0
+    cross = usage.get("bySkillByModel")
+    if not isinstance(cross, dict):
+        raise ValueError("bySkillByModel is not an object")
+    for skill, families in cross.items():
+        scope = scope_of_skill.get(skill)
+        if scope not in ("orch", "target"):
+            continue
+        if not isinstance(families, dict):
+            continue
+        for fam in families.values():
+            if isinstance(fam, dict):
+                try:
+                    total = int(fam.get("total") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                if total > 0:
+                    if scope == "orch":
+                        orch += total
+                    else:
+                        target += total
+    denom = orch + target
+    share = (orch / denom) if denom > 0 else 0.0
+    print(
+        f"{share:.4f} orch_realm_weekly_tokens={orch} "
+        f"target_realm_weekly_tokens={target}"
+    )
+except Exception:
+    _degrade()
+PY
+)" || echo "unavailable"
+
 # Emergency brake — issue #744 (operator-only).
 #
 # `GET /api/autopilot/emergency-brake` (src/api/autopilot.ts) returns the
