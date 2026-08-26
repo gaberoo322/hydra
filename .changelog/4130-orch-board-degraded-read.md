@@ -1,0 +1,1 @@
+- fix: distinguish failed GitHub board reads from genuinely empty boards — lane-scoped degraded flags, fail-closed orch_backfill_idle, and decide.py suppression of idle conclusions and blind backfill (#4130)
