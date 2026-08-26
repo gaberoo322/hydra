@@ -1,0 +1,1 @@
+- fix: hydra-target-build builds now hand off instead of self-merging when the anchor issue is fenced for operator review (#4224)

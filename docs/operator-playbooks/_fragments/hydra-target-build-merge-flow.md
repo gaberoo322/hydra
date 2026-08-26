@@ -138,12 +138,47 @@ PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MER
     NOT green / still in progress is NOT a clean success — do not silently treat it
     as one. Wait for CI to conclude before classifying the outcome.
 
-- **PR is NOT merged** → attempt the explicit merge yourself (poll-to-green then
-  merge). **Record friction (`betting-emulated-automerge-lands-before-explicit-merge`
-  or the genuine merge-failure cue) ONLY if that explicit merge actually fails.**
-  This is the only branch that records the cue — the genuine merge-failure signal
-  is preserved; suppression is narrowly the already-merged-post-green case, nothing
-  wider.
+- **PR is NOT merged, and the anchor issue is fenced** (its labels include
+  `money-critical` or `hold-for-operator`) → **STOP: the merge is the
+  operator's** (gaberoo322/hydra#4224). The emulated automerge deliberately
+  skips fenced PRs — its run log + step summary say "fenced for operator
+  review" — so green-but-unmerged here is the fence working, not merge
+  friction. Detect the fence at the source (the linked issue's labels), never
+  by scraping workflow logs:
+
+  ```bash
+  FENCED=$(gh issue view "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+    --json labels --jq '.labels[].name' 2>/dev/null \
+    | grep -xE 'money-critical|hold-for-operator' || true)
+  ```
+
+  When non-empty, the build's terminal state is **green PR open, fenced for
+  operator review** — report the PR number and the fencing label as the final
+  answer and stop. Specifically:
+  - **NEVER merge it yourself, retry the merge, or re-run the workflow.** An
+    explicit `gh pr merge` here is exactly the unreviewed merge the fence
+    exists to prevent (PR #1026, money-critical, was squash-merged ~2 minutes
+    after CI went green). The direct-to-main `git merge` block in Step 7 is
+    equally forbidden for a fenced anchor — the PR path is the only path a
+    fenced issue may take.
+  - **Do NOT remove the fencing label** from the issue — that is the
+    operator's release lever, not the build's.
+  - **Do NOT delete the remote branch** — deleting it closes the PR and
+    discards the operator's review target. Local worktree cleanup (Step 8.5)
+    is safe and should still run.
+  - **Skip Steps 7.5–8.6 and the merged-PR bookkeeping** (no deploy, no
+    post-merge verify, no `merged:true` / done-move): nothing has landed on
+    main, so there is nothing to deploy, verify, or mark shipped. The merge
+    and everything after it belong to whoever merges.
+
+- **PR is NOT merged (not fenced)** → attempt the explicit merge yourself
+  (poll-to-green then merge). **Record friction
+  (`betting-emulated-automerge-lands-before-explicit-merge` or the genuine
+  merge-failure cue) ONLY if that explicit merge actually fails.** This is the
+  only branch that records the cue — the genuine merge-failure signal is
+  preserved; suppression is narrowly the already-merged-post-green case,
+  nothing wider. A fenced skip is not friction either — it is the fence
+  working as designed; do not record a cue for it.
 
 ### 7.5. Deploy + post-deploy health
 
