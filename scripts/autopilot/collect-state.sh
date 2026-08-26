@@ -1643,6 +1643,80 @@ PY
 echo -n "usage_eligibility_json="
 hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
 
+# Per-realm weekly share (issue #4161) — the enumeration half of the orch
+# realm budget-split guard. decide.py is pure (no HTTP inside it, pinned by
+# test/autopilot-decide.test.mts), so THIS script folds the per-realm share
+# and emits it as one pre-qualified scalar; decide.py reads
+# `state.orch_realm_weekly_share` verbatim and compares it against
+# `limits.orch_realm_share_max`.
+#
+# Source: `/api/usage` `bySkillByModel` (the ONLY trustworthy per-skill
+# surface — `costByClass` covers ~13% of measured spend and the USD gates'
+# numerators are structurally $0 post-ADR-0006; see decide.py's INERT block).
+# It is keyed by SKILL over the rolling 7d window; each skill is mapped to a
+# realm via the `scope` column of the sibling classes.json taxonomy
+# (orch | target | both) and the per-model `total` tokens are folded:
+#
+#   orch_realm_weekly_share = orch / (orch + target)
+#
+# - scope "both" (only `health`) is EXCLUDED from both numerator and
+#   denominator (design-concept invariant for #4161): shared infrastructure
+#   spend belongs to neither realm's ratio, and the whole-system probe is
+#   never suppressed by the guard either.
+# - Skills with NO taxonomy row (`interactive`, `clear`, `login`, the
+#   autopilot session's own `hydra-autopilot`, non-class skills like
+#   `hydra-review`/`hydra-digest`) are EXCLUDED from both buckets: they are
+#   not dispatch classes, and the guard governs DISPATCH spend. The
+#   denominator is therefore "single-realm dispatch-class-attributed weekly
+#   spend", not all spend.
+#
+# BEST-EFFORT, FAIL-OPEN: any failure (orchestrator down, malformed payload,
+# unreadable classes.json, zero attributed spend) prints the literal
+# `disabled` and exits 0 — decide.py treats a non-usable share as the guard
+# being DISABLED, never a suppression. An unreadable meter must never
+# suppress dispatch (issue #4161 AC1, same direction as ADR-0032 #3753).
+_CLASSES_JSON="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/classes.json"
+echo -n "orch_realm_weekly_share="
+hydra raw GET /usage 2>/dev/null | python3 -c "$(cat <<'PY'
+import json, sys
+
+# argv[1] = path to classes.json (the dispatch-class taxonomy: skill -> scope)
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        rows = json.load(fh)["classes"]
+    scope_of = {row["skill"]: row["scope"] for row in rows}
+
+    usage = json.load(sys.stdin)
+    by_skill = usage.get("bySkillByModel")
+    if not isinstance(by_skill, dict):
+        raise ValueError("bySkillByModel is not an object")
+
+    orch = target = 0.0
+    for skill, models in by_skill.items():
+        scope = scope_of.get(skill)
+        if scope is None:
+            continue  # not a dispatch class — outside the fold
+        total = 0.0
+        for bucket in (models or {}).values():
+            t = bucket.get("total") if isinstance(bucket, dict) else None
+            if isinstance(t, (int, float)) and not isinstance(t, bool):
+                total += float(t)
+        if scope == "orch":
+            orch += total
+        elif scope == "target":
+            target += total
+        # scope "both": excluded from numerator AND denominator (invariant 5)
+
+    denom = orch + target
+    if denom <= 0:
+        print("disabled")
+    else:
+        print(f"{orch / denom:.6f}")
+except Exception:
+    print("disabled")
+PY
+)" "$_CLASSES_JSON" 2>/dev/null || echo "disabled"
+
 # Emergency brake — issue #744 (operator-only).
 #
 # `GET /api/autopilot/emergency-brake` (src/api/autopilot.ts) returns the

@@ -1,0 +1,1 @@
+- feat: add an opt-in per-realm weekly share guard to the autopilot — collect-state.sh folds `/api/usage` bySkillByModel into `orch_realm_weekly_share` via the classes.json scope column, and decide.py suppresses orch-scope dispatch above `limits.orch_realm_share_max` (default disabled, fail-open) (#4161)

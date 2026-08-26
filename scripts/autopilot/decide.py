@@ -588,6 +588,23 @@ def _normalize_emergency_brake(raw) -> dict:
 # Daily research-force cap (grilled decision 6).
 RESEARCH_FORCE_DAILY_CAP = 4
 
+# ⚠ STRUCTURALLY INERT (issue #4161, measured 2026-08-19) — do NOT re-derive
+# this, and do NOT "fix" it by restoring `limits.daily_spend_cap_usd`: both
+# USD gates below (`scout_cost_cap_*`, `dev_target_cost_cap_*`) compare a
+# PERMANENTLY-ZERO spend numerator against their cap, because the only USD
+# conversion path (`HYDRA_TOKEN_USD_RATE`) was never set post-ADR-0006 —
+# `src/scheduler/heartbeat.ts:648` records the rate as unset and
+# `src/api/metrics-cost.ts:95` calls the conversion "structurally $0; no
+# live dollar cap". collect-state.sh therefore always emits
+# `scout_spend_usd_today=0.00` (and nothing populates
+# `dev_target_spend_usd_cycle`), so `enforced: false` / spend 0 < cap holds
+# for every configured cap value. They are kept (not deleted) as pinned
+# scaffolding: the kill-switch + backstop SHAPES are correct and become
+# live the day a real USD rate exists. The gate that actually governs
+# per-realm spend today is the quota-percent budget (`limits.quota_*`, run
+# currency) and the per-realm weekly share guard (`ORCH_REALM_SHARE_MAX_*`,
+# issue #4161 — share currency, folded from `/api/usage bySkillByModel`).
+#
 # Tool-scout cost-cap defaults (issue #532). Mirror the constants in
 # src/scout/calendar-walk.ts so the gate has sane fallbacks when state.json
 # lacks the limits keys (e.g. legacy state from a v1 schema).
@@ -699,6 +716,53 @@ CONTEXT_COMPACTION_TURNS_DEFAULT = 8
 # baseline CAPTURE — term-check.py is intentionally side-effect-free, so it skips
 # the cap entirely until decide.py has written `state.quota_baseline`.
 QUOTA_CAP_DISABLED = 0.0
+
+# Per-realm weekly share guard (issue #4161).
+#
+# WHY THIS EXISTS. Over the 7 days to 2026-08-19 the orchestrator merged 98
+# PRs entirely on itself while the Target merged 1, and weekly quota still
+# projected 110%. The operator wants a standing guard expressing "no more
+# than N% of weekly quota goes to orchestrator self-work" so reverting
+# `scope=all` can never silently re-concentrate spend on one realm.
+#
+# WHY THE EXISTING COST GATES COULD NOT EXPRESS IT. Every USD gate in this
+# file is structurally inert (measured 2026-08-19, issue #4161): the spend
+# numerators (`scout_spend_usd_today`, `dev_target_spend_usd_cycle`) are
+# USD-converted via `HYDRA_TOKEN_USD_RATE`, which was never set post-ADR-0006
+# (`src/scheduler/heartbeat.ts:648` records the conversion as permanently 0;
+# `src/api/metrics-cost.ts:95` calls it "structurally $0; no live dollar
+# cap"), so both gates compare a permanently-zero counter against whatever
+# cap you set. `costByClass` covers only ~13% of measured spend and cannot
+# back a per-realm ratio, and `quota_5h/week_max_pts` are per-run deltas
+# with no realm dimension. The only trustworthy per-skill surface is
+# `/api/usage` `bySkillByModel` — which is exactly what the new guard reads
+# (folded server-of-decide by collect-state.sh; see below).
+#
+# SIGNAL-SEAM SPLIT. decide.py is pure — pinned by this suite's
+# "no gh/curl/GraphQL inside decide.py" case — so it cannot read an HTTP
+# endpoint. The enumeration half lives in collect-state.sh: it fetches
+# `/api/usage` `bySkillByModel`, maps each dispatch class to orch/target
+# via the `scope` column of scripts/autopilot/classes.json, and emits the
+# folded share as ONE pre-qualified scalar, `orch_realm_weekly_share=`
+# (0..1, or the literal `disabled` when the meter is unreadable). decide.py
+# reads that one signal verbatim and stays a pure function of
+# (state, events, now). An unreadable meter must never suppress dispatch —
+# fail-open, the same direction ADR-0032 #3753 chose for the drainer
+# heartbeat.
+#
+# ONE-DIRECTIONAL BY DESIGN. The guard only suppresses ORCH-scope dispatch
+# when the orch realm exceeds its configured share (`>=` semantics). When
+# the TARGET realm is over its share nothing is suppressed — the operator's
+# stated concern is orchestrator self-work crowding out Target work, not the
+# mirror.
+#
+# OPT-IN, DEFAULT DISABLED — ADR-0021 D5: per-run limits stay hygiene caps,
+# subordinate to the Pace Gate, and never become a second governor switched
+# on behind the operator's back. `limits.orch_realm_share_cap` (a fraction
+# in (0, 1]; 0, absent, negative, NaN or unparseable = disabled) defaults
+# to disabled here, in decide.py POLICY space — bootstrap.sh deliberately
+# writes no key, so legacy state shapes keep today's behaviour.
+ORCH_REALM_SHARE_CAP_DISABLED = 0.0
 
 
 def _quota_finite_pct(value) -> float | None:
@@ -970,6 +1034,18 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # tickets_orch is excluded, mirroring wayfinder_orch / scout_orch /
     # architecture_orch / retro_orch / cleanup_orch / skill_prune above.
     "tickets_orch",
+)
+
+# Classes whose taxonomy `scope` column is "orch" — the SUPPRESSION SET for
+# the per-realm weekly share guard (issue #4161). Derived from
+# CLASS_TAXONOMY (the alphabet), same as PIPELINE_SLOTS / SIGNAL_CLASSES,
+# so it can never drift from classes.json; collect-state.sh folds the share
+# signal from the SAME column on the enumeration side. `health` (scope
+# "both") is deliberately absent: the whole-system probe is never suppressed
+# by a per-realm budget, mirroring its scope-mask exemption. Target-scope
+# classes are absent because the guard is ONE-DIRECTIONAL (orch-only).
+ORCH_SCOPE_CLASSES = frozenset(
+    r["name"] for r in CLASS_TAXONOMY if r["scope"] == "orch"
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -2407,6 +2483,29 @@ def _rule_pipeline_dispatch(
             )
             out.skipped += 1
             continue
+        # Per-realm weekly share guard (issue #4161) — checked BEFORE the
+        # selectors and before the per-class cost caps, mirroring the
+        # "cap is the harder limit, checked first" placement of the #532/#1059
+        # gates. One-directional: only ORCH-scope classes are suppressed when
+        # the orch realm's share of the rolling weekly window exceeds
+        # `limits.orch_realm_share_cap`; target-scope classes fall through
+        # untouched (the operator's concern is orch self-work crowding out
+        # Target work, never the mirror). Default-disabled + fail-open on an
+        # unreadable meter, so on a default run this branch is inert.
+        if cls in ORCH_SCOPE_CLASSES and orch_realm_share_exceeded(state):
+            share_state = orch_realm_share_state(state)
+            out.debug.setdefault("orch_realm_share_skipped", {
+                "share": share_state["share"],
+                "cap": share_state["cap"],
+            })
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="budget",
+                    reason="orch realm weekly share exceeded (issue #4161)",
+                )
+            )
+            out.skipped += 1
+            continue
         # Per-cycle cost-cap backstop (issue #1059) — checked BEFORE the
         # selector so a runaway cycle halts further dev_target sub-dispatch
         # regardless of available work. HIGH cap: this is a runaway backstop,
@@ -2651,6 +2750,24 @@ def _rule_signal_classes(
                 make_dispatch_decision_event(
                     state, now, cls=sig, outcome="idle",
                     reason=f"scope excluded ({scope})",
+                )
+            )
+            out.skipped += 1
+            continue
+        # Per-realm weekly share guard (issue #4161) — the signal-loop twin of
+        # the pipeline-loop gate above: orch-scope SIGNAL classes are suppressed
+        # under the same one-directional share cap, before the burned/cooldown/
+        # cost-cap reads. Same default-disabled + fail-open contract.
+        if sig in ORCH_SCOPE_CLASSES and orch_realm_share_exceeded(state):
+            share_state = orch_realm_share_state(state)
+            out.debug.setdefault("orch_realm_share_skipped", {
+                "share": share_state["share"],
+                "cap": share_state["cap"],
+            })
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="budget",
+                    reason="orch realm weekly share exceeded (issue #4161)",
                 )
             )
             out.skipped += 1
@@ -4671,6 +4788,86 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
     if not s["enforced"]:
         return False
     return s["spend_usd"] >= s["cap_usd"]
+
+
+def _realm_share_value(state: dict) -> float | None:
+    """Parse `state.orch_realm_weekly_share` into a usable fraction, or None.
+
+    The signal is emitted by collect-state.sh as either a float in [0, 1] or
+    the literal `disabled` (meter unreadable / zero attributed spend). The
+    playbook's model-mediated merge may land it as a JSON number OR a numeric
+    string — both are accepted here (same defensive coercion as
+    `scout_cost_cap_state`'s `float(...)` reads). `None` means "no usable
+    reading this turn" and every caller treats that as fail-open (guard
+    disabled): a bool, a non-numeric string, NaN/±inf, or anything outside
+    [0, 1] is an unreadable meter, and an unreadable meter must never
+    suppress dispatch (issue #4161 AC1).
+    """
+    raw = state.get("orch_realm_weekly_share")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        f = float(raw)
+    elif isinstance(raw, str):
+        try:
+            f = float(raw.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(f) or f < 0.0 or f > 1.0:
+        return None
+    return f
+
+
+def orch_realm_share_state(state: dict) -> dict:
+    """Resolve the per-realm weekly share guard inputs from state (issue #4161).
+
+    Reads (with fail-open fallbacks for legacy state shapes):
+      - state.limits.orch_realm_share_cap    (default 0.0 = DISABLED)
+      - state.orch_realm_weekly_share        (emitted by collect-state.sh;
+                                              absent/unusable = DISABLED)
+
+    Returns a dict with the resolved floats AND a boolean `enforced` flag.
+    `enforced` is False when the configured cap is <= 0 (the default —
+    ADR-0021 D5: no second governor behind the operator's back) OR when the
+    share signal is absent/unparseable (fail-open: an unreadable meter never
+    suppresses dispatch). Unlike `scout_cost_cap_state` there is no
+    kill-SWITCH semantics for a 0 cap: 0 means "no guard", never "suppress
+    everything" — the guard is opt-in, so an unset value must disable it.
+
+    Pure: no side effects.
+    """
+    limits = state.get("limits") or {}
+
+    try:
+        cap = float(limits.get("orch_realm_share_cap", ORCH_REALM_SHARE_CAP_DISABLED))
+    except (TypeError, ValueError):
+        cap = ORCH_REALM_SHARE_CAP_DISABLED
+    if not (cap > 0.0):  # NaN-safe: 0, negative, NaN all mean disabled
+        cap = ORCH_REALM_SHARE_CAP_DISABLED
+
+    share = _realm_share_value(state)
+
+    return {
+        "share": share,
+        "cap": cap,
+        "enforced": cap > 0.0 and share is not None,
+    }
+
+
+def orch_realm_share_exceeded(state: dict) -> bool:
+    """True when the orch realm's weekly share guard should suppress dispatch.
+
+    Pure wrapper over `orch_realm_share_state` — a sibling of
+    `scout_cost_cap_exceeded`, separated so callers can log either the bool
+    decision or the full breakdown. `>=` semantics match the sibling cost
+    gates: at exactly the configured share the guard fires.
+    """
+    s = orch_realm_share_state(state)
+    if not s["enforced"]:
+        return False
+    return s["share"] >= s["cap"]
 
 
 def _check_termination(state: dict, now: int) -> dict | None:
