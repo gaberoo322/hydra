@@ -21,6 +21,26 @@ signals-first read, the synthesis, and the `gh`/git emit.
 > runs under `--apply`. Without `--apply` the skill prints the emit plan and
 > stops.
 
+> **Autopilot pre-check (issue #3871):** the `retro_orch` signal class no
+> longer dispatches this skill on every completed run. `collect-state.sh`
+> precomputes `retro_run_drillable` — true iff the candidate run's retro
+> bundle has ANY flagged dispatch, or a non-empty `reflections` /
+> `stuckSignals` / `recommendations` — from the bundle JSON alone (the same
+> `GET /autopilot/runs/:runId/retro` read step 2 below performs), and
+> `decide.py` fires the dispatch only when `retro_run_available AND
+> retro_run_drillable`. A clean run (empty bundle) is skipped WITHOUT a
+> cooldown stamp, so a later run's genuine findings are never suppressed by an
+> earlier clean run's skip. This pre-check is purely an autopilot-side
+> DISPATCH gate — it changes nothing about what happens once this skill
+> actually runs (steps 1-9 below are unchanged), and a manual `/hydra-retro`
+> invocation or the operator running it directly is unaffected. A mandatory
+> weekly override (`RETRO_WEEKLY_OVERRIDE_SEC`, 7 days) forces a dispatch
+> regardless of `retro_run_drillable` once the class has gone dark that long,
+> so a broken drillability predicate can never permanently blind the learning
+> loop — an occasional dispatch that lands on a genuinely clean bundle and
+> synthesises 0 findings (the pre-#3871 behaviour on every clean run) is
+> therefore still expected and correct, just rare instead of daily.
+
 ## 1. Resolve the run id
 
 `/hydra-retro [run_id]` — argument is optional. Parse via the pure helper so

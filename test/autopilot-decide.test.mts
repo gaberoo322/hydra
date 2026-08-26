@@ -1937,6 +1937,133 @@ describe("decide.py — backfill starvation floor (issue #2428)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7c2. retro_orch drillability pre-check + mandatory weekly override
+//      (issue #3871)
+// ---------------------------------------------------------------------------
+//
+// collect-state.sh precomputes `retro_run_drillable` (true iff the most-recent
+// completed run's retro bundle actually has something to analyse: a flagged
+// dispatch, or non-empty reflections/stuckSignals/recommendations). decide.py
+// gates the retro_orch dispatch on `retro_run_available AND retro_run_drillable`
+// so a clean run never pays for a ~115k-token hydra-retro dispatch that files
+// nothing — UNLESS the class has gone dark for RETRO_WEEKLY_OVERRIDE_SEC (7d),
+// in which case the mandatory weekly override forces a dispatch regardless of
+// drillability (operator grilling correction (b): the whole saving rests on the
+// drillability predicate being correct, so a periodic forced retro is the only
+// thing that converts a silently-broken predicate into an observable one).
+// ---------------------------------------------------------------------------
+
+describe("decide.py — retro_orch drillability pre-check (issue #3871)", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const DAY = 24 * 60 * 60;
+
+  function retroDispatch(plan: any) {
+    return findAction(plan, (a: any) => a.type === "dispatch" && a.slot === "retro_orch");
+  }
+
+  test("retro_run_available + retro_run_drillable=true → dispatches hydra-retro with apply:true", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: true },
+    });
+    const plan = runDecide(state, null);
+    const a = retroDispatch(plan);
+    assert.ok(a, "a drillable bundle must dispatch retro_orch");
+    assert.equal(a.skill, "hydra-retro");
+    assert.equal(a.prompt_args?.apply, true, "apply:true must be threaded so the headless retro actually emits (#1078)");
+  });
+
+  test("retro_run_available + retro_run_drillable=false, class fired 2d ago (cooled, not yet stale) → NO dispatch", () => {
+    // 2 days clears the 24h SIGNAL_COOLDOWNS gate (so the branch is actually
+    // reached) but stays well under the 7d weekly-override floor.
+    const t = makeTmp();
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 2 * DAY } as any,
+    });
+    const plan = runDecide(state, null, [], t);
+    assert.equal(retroDispatch(plan), undefined, "a clean run inside the weekly floor must not dispatch");
+    // Correction (a): a skip must NEVER stamp the cooldown — decide.py does
+    // not mutate signal_last_fired for any class, so the persisted state file
+    // must carry the EXACT timestamp this test wrote, unchanged.
+    const stateAfter = JSON.parse(readFileSync(t.state, "utf-8"));
+    assert.equal(
+      stateAfter.signal_last_fired?.retro_orch,
+      now - 2 * DAY,
+      "signal_last_fired.retro_orch must be unchanged by a skip — stamping it would suppress a LATER run's genuine findings",
+    );
+    rmSync(t.dir, { recursive: true, force: true });
+  });
+
+  test("retro_run_available=false → NO dispatch regardless of retro_run_drillable", () => {
+    const state = baseState({
+      signals: { retro_run_available: false, retro_run_drillable: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(retroDispatch(plan), undefined, "nothing to retro when no completed run exists");
+  });
+
+  test("mandatory weekly override: retro_run_drillable=false but class dark >7d → dispatches anyway", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 8 * DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    const a = retroDispatch(plan);
+    assert.ok(a, "8 days dark must force the weekly override through despite a non-drillable bundle");
+    assert.equal(a.skill, "hydra-retro");
+    assert.equal(a.prompt_args?.apply, true);
+    assert.match(
+      String(a.reason),
+      /staleness floor|weekly override/i,
+      "the forced-dispatch reason must name the weekly override, not the ordinary drillable path (audit trail)",
+    );
+  });
+
+  test("weekly override boundary: dark exactly 7d (inclusive) forces the dispatch", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 7 * DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(retroDispatch(plan), "exactly 7 days dark is >= the floor → forced through");
+  });
+
+  test("weekly override does not fire just under the 7d floor (6d) — ordinary cooldown/drillable gating holds", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 6 * DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(retroDispatch(plan), undefined, "6 days dark is under the 7d floor and the bundle is non-drillable → no dispatch");
+  });
+
+  test("weekly override never fires without retro_run_available — nothing to retro even when maximally dark", () => {
+    const state = baseState({
+      signals: { retro_run_available: false, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 30 * DAY } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      retroDispatch(plan),
+      undefined,
+      "the weekly override forces a retro of the most-recent completed run — with none available there is nothing to force",
+    );
+  });
+
+  test("weekly override never bypasses the 24h class cooldown", () => {
+    // Constructed so the floor would WANT to force a dispatch (retro_run_drillable
+    // false) but the class fired 1h ago — well inside the 24h SIGNAL_COOLDOWNS
+    // gate, which is checked before this branch is ever reached.
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(retroDispatch(plan), undefined, "1h ago is inside the 24h cooldown — the floor cannot resurrect a cooling class");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7d. cleanup_orch signal class (issue #960, parent #958)
 // ---------------------------------------------------------------------------
 //

@@ -1376,17 +1376,17 @@ else
   echo "design_qa_target_due=false"
 fi
 
-# Per-run retrospective — daily trigger (issue #920, epic #917).
+# Per-run retrospective — daily trigger (issue #920, epic #917); cheap
+# drillability pre-check (issue #3871).
 #
 # `retro_run_available` is true when at least one COMPLETED autopilot run
 # exists to analyse. The autopilot promotes it into
 # `state.signals.retro_run_available`; decide.py's `retro_orch` signal class
-# (issue #920) reads it verbatim and dispatches /hydra-retro on the most-
-# recent completed run. The 24h per-class cooldown (SIGNAL_COOLDOWNS in
-# decide.py) is what enforces the once-per-day cadence — this signal only
-# asserts that there is SOMETHING to retro, mirroring how scout_walk_due /
-# orch_backfill_idle are pure board/state reads with the cooldown applied
-# downstream.
+# (issue #920) reads it verbatim. The 24h per-class cooldown
+# (SIGNAL_COOLDOWNS in decide.py) is what enforces the once-per-day cadence —
+# this signal only asserts that there is SOMETHING to retro, mirroring how
+# scout_walk_due / orch_backfill_idle are pure board/state reads with the
+# cooldown applied downstream.
 #
 # A "completed" run is any run whose `status` is NOT `running` (the run-tree
 # writer flips it to ended/killed/completed on clean exit or read-time
@@ -1396,8 +1396,9 @@ fi
 # advance; the retro skill itself resolves and stamps the run it analyses.
 # Orchestrator-down / empty-index degrades to `false` (nothing to retro),
 # which suppresses the dispatch — the safe default.
+RETRO_RUNS_JSON=$(hydra raw GET /autopilot/runs?limit=14 2>/dev/null)
 echo -n "retro_run_available="
-hydra raw GET /autopilot/runs?limit=14 2>/dev/null | python3 -c "$(cat <<'PY'
+echo "$RETRO_RUNS_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin)
@@ -1408,6 +1409,73 @@ except Exception:
   print('false')
 PY
 )" || echo "false"
+
+# `retro_run_drillable` (issue #3871) — the cheap pre-check that answers "is
+# there anything to analyse in the most-recent completed run?" from the
+# bundle JSON alone, so a clean run never pays for a ~115k-token hydra-retro
+# dispatch that files nothing. decide.py's `retro_orch` branch fires only
+# when `retro_run_available` AND `retro_run_drillable` (a mandatory weekly
+# full-retro override bypasses `retro_run_drillable` — see
+# RETRO_WEEKLY_OVERRIDE_SEC in decide.py — so the predicate can never
+# permanently blind the learning loop even if it is wrong).
+#
+# The candidate run is the NEWEST completed run from the list above (the
+# runs index is already newest-first via ZREVRANGE on started_epoch — see
+# listRecentAutopilotRunIds). We fetch its retro bundle
+# (`GET /autopilot/runs/:runId/retro`, issue #918 — the same read
+# hydra-retro itself performs) and call it drillable iff ANY dispatch is
+# flagged for drill OR `reflections` / `stuckSignals` / `recommendations` is
+# non-empty — the exact synthesis inputs the skill would otherwise burn a
+# dispatch to discover are empty.
+#
+# Degrades to `true` (NOT `false`) on any failure — a down orchestrator, a
+# failed fetch, or unparseable JSON — deliberately the OPPOSITE direction
+# from `retro_run_available`'s degrade-to-false. `retro_run_available`
+# degrading to false means "nothing to retro", which is correct; degrading
+# `retro_run_drillable` to false would let a transient API failure silently
+# disable the learning loop while every log line still reads "clean run,
+# nothing to do". A wasted dispatch is recoverable; a silently dark retro
+# loop is not (operator grilling, 2026-08-19).
+RETRO_CANDIDATE_RUN_ID=$(echo "$RETRO_RUNS_JSON" | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d=json.load(sys.stdin)
+  runs=d.get('runs',[]) if isinstance(d,dict) else []
+  for r in runs:
+    if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running'):
+      print(r.get('run_id') or '')
+      break
+except Exception:
+  pass
+PY
+)" 2>/dev/null)
+echo -n "retro_run_drillable="
+if [ -z "$RETRO_CANDIDATE_RUN_ID" ]; then
+  # No completed run to fetch a bundle for. retro_run_available is already
+  # `false` in this case, so decide.py's AND-gate suppresses the dispatch
+  # regardless of this value — emit the fail-toward-doing-the-work default
+  # for consistency with every other failure path below.
+  echo "true"
+else
+  hydra raw GET "/autopilot/runs/${RETRO_CANDIDATE_RUN_ID}/retro" 2>/dev/null | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d=json.load(sys.stdin)
+  if not isinstance(d, dict):
+    print('true')
+  else:
+    dispatches = d.get('dispatches') or []
+    flagged = any(isinstance(x, dict) and x.get('flagged') for x in dispatches)
+    reflections = d.get('reflections') or []
+    stuck = d.get('stuckSignals') or []
+    recs = d.get('recommendations') or []
+    drillable = bool(flagged) or bool(reflections) or bool(stuck) or bool(recs)
+    print('true' if drillable else 'false')
+except Exception:
+  print('true')
+PY
+)" || echo "true"
+fi
 
 # Wayfinder map frontier — AFK working path (issue #3351, epic #3350, ADR-0029).
 #
