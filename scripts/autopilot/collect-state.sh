@@ -1047,6 +1047,14 @@ gh issue list --repo gaberoo322/hydra --state open --label enhancement --limit "
 # matching src/cost-surrogate.ts). When the rate is 0 or unset, USD
 # evaluates to 0 — decide.py treats that as "rate not configured" and
 # skips the cap (the gate is opt-in on the rate, mirroring the dashboard).
+#
+# STRUCTURALLY INERT on this deployment (issue #4161 AC6): HYDRA_TOKEN_USD_RATE
+# was never set post-ADR-0006 (see src/scheduler/heartbeat.ts's "Daily-spend
+# cap retired" note), so this conversion always emits 0.00 and the scout cap
+# can never fire. Kept (not deleted) because the kill-switch arm
+# (scout_cost_share == 0) remains a live operator lever. The LIVE per-realm
+# guard is the orch_realm_weekly_share fold below — a token-share signal no
+# USD rate feeds.
 SCOUT_TODAY_DATE="$(date -u +%Y-%m-%d)"
 SCOUT_TOKENS_TODAY=$(docker exec hydra-redis-1 redis-cli HGET "hydra:metrics:tokens:by-skill:daily:${SCOUT_TODAY_DATE}" hydra-tool-scout 2>/dev/null | tr -d '"' || true)
 if [ -z "$SCOUT_TOKENS_TODAY" ] || ! [[ "$SCOUT_TOKENS_TODAY" =~ ^[0-9]+$ ]]; then
@@ -1642,6 +1650,87 @@ PY
 # is non-fatal — we just dispatch normally.
 echo -n "usage_eligibility_json="
 hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
+
+# Orch-vs-target realm share (issue #4161) — the per-realm budget split's
+# ENUMERATION half. The signal seam: decide.py reads the folded value VERBATIM
+# from state.signals and stays pure (no HTTP inside decide.py — the same
+# division of labour as wayfinder_orch_frontier).
+#
+# `GET /api/usage` (src/api/usage.ts) exposes the Subscription Usage
+# Tracker's rolling-7d per-skill cross-tab `bySkillByModel` — the ONE
+# trustworthy per-skill surface (costByClass covers only ~13% of measured
+# spend, #3752; quota_*_max_pts are per-run deltas with no realm dimension;
+# every USD gate is structurally $0 post-ADR-0006). The fold maps each
+# dispatch SKILL to its realm via the `scope` column of this directory's
+# classes.json:
+#   - scope "orch"   -> orch bucket
+#   - scope "target" -> target bucket
+#   - scope "both" (the scope-agnostic health probe) and skills matching no
+#     class row (interactive, login, the parent hydra-autopilot loop, ...) are
+#     EXCLUDED from the fold — the share is a partition of CLASSIFIED dispatch
+#     spend only, so it answers exactly "how much of dispatched work was
+#     orchestrator self-work".
+# Emitted signal: orch_realm_weekly_share = orch / (orch + target), a
+# fraction in [0,1] with 4-decimal precision. decide.py's
+# orch_realm_share_exceeded() compares it against
+# limits.orch_realm_share_cap (default disabled).
+#
+# BEST-EFFORT, FAIL-OPEN (the same contract as every sibling here: the
+# collect step never fails). Orchestrator-down / unparseable usage / missing
+# classes.json / zero classified spend ALL degrade to an EMPTY value
+# (`orch_realm_weekly_share=`), which decide.py's tolerant parse treats as
+# "no usable reading this turn" and leaves the guard DISABLED — an
+# unreadable meter must never suppress dispatch (issue #4161 AC1, the same
+# fail-open direction ADR-0032 chose for the drainer heartbeat).
+echo -n "orch_realm_weekly_share="
+hydra raw GET /usage 2>/dev/null | CLASSES_JSON="$(dirname "$0")/classes.json" python3 -c "$(cat <<'PY'
+import json, os, sys
+
+def emit_empty():
+    print("")
+
+try:
+    usage = json.load(sys.stdin)
+    with open(os.environ.get("CLASSES_JSON", ""), "r", encoding="utf-8") as fh:
+        taxonomy = json.load(fh)
+except Exception:
+    emit_empty()
+    sys.exit(0)
+
+# skill -> realm, from the taxonomy rows (scope column). `both` rows and
+# non-class skills intentionally stay unmapped (excluded from the fold).
+realm_of = {}
+for row in taxonomy.get("classes", []):
+    if isinstance(row, dict) and row.get("scope") in ("orch", "target"):
+        realm_of[row.get("skill")] = row["scope"]
+
+by_skill = usage.get("bySkillByModel") if isinstance(usage, dict) else None
+if not isinstance(by_skill, dict):
+    emit_empty()
+    sys.exit(0)
+
+totals = {"orch": 0, "target": 0}
+for skill, models in by_skill.items():
+    realm = realm_of.get(skill)
+    if realm is None or not isinstance(models, dict):
+        continue
+    for fam in models.values():
+        if not isinstance(fam, dict):
+            continue
+        try:
+            totals[realm] += int(fam.get("total", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+
+total = totals["orch"] + totals["target"]
+if total <= 0:
+    # No classified dispatch spend in the rolling window: the share is
+    # undefined (0/0) — emit the empty degrade marker, guard stays disabled.
+    emit_empty()
+    sys.exit(0)
+print(f"{totals['orch'] / total:.4f}")
+PY
+)"
 
 # Emergency brake — issue #744 (operator-only).
 #

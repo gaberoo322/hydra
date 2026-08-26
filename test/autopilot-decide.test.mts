@@ -3977,3 +3977,166 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Orch-realm weekly-share guard (issue #4161)
+// ---------------------------------------------------------------------------
+//
+// The per-realm budget split's POLICY half. collect-state.sh folds /api/usage
+// `bySkillByModel` (the rolling-7d transcript cross-tab — the one trustworthy
+// per-skill surface; costByClass covers only ~13% of spend, #3752) into
+// orch/target token totals via the `scope` column of classes.json and emits the
+// single pre-qualified signal `orch_realm_weekly_share` (a fraction in [0,1],
+// or EMPTY on any failed/unparseable read). decide.py reads that signal
+// VERBATIM (staying PURE — no HTTP/FS/Redis here) and suppresses ORCH-scope
+// dispatch when the share >= limits.orch_realm_share_cap. One-directional by
+// design: a target realm over its mirror share suppresses nothing. Default
+// disabled (cap 0/absent) per ADR-0021 D5 — a hygiene cap, never a second
+// governor behind the operator's back.
+//
+// New TOP-LEVEL describe with its own lifecycle (per the CLAUDE.md authoring
+// rule) — decide.py runs are pure over temp state files, nothing shared.
+// ---------------------------------------------------------------------------
+describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
+  // Build a state whose signals carry the folded share (string float, the
+  // collect-state wire form; wayfinder_orch_inflight_global precedent) and
+  // whose limits carry the configured cap. `extraSignals` lets a case pick
+  // WHICH work signal fires (orch_work_available for the dev_orch pipeline
+  // arm, orch_backfill_idle for the discover_orch signal arm, ...).
+  function realmState(
+    share: unknown,
+    cap: unknown,
+    extraSignals: Record<string, unknown> = {},
+  ): any {
+    const state = baseState({ signals: { ...extraSignals } });
+    if (cap !== undefined) state.limits.orch_realm_share_cap = cap;
+    if (share !== undefined) state.signals.orch_realm_weekly_share = share;
+    return state;
+  }
+
+  function devOrchDispatch(plan: any): any {
+    return findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+  }
+
+  test("disabled by default (no cap configured): share 1.0 does NOT suppress dev_orch", () => {
+    const plan = runDecide(realmState("1.0", undefined, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "with no orch_realm_share_cap in limits the guard must be a clean no-op",
+    );
+  });
+
+  test("cap 0 is the explicit disabled value", () => {
+    const plan = runDecide(realmState("1.0", 0, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "orch_realm_share_cap = 0 means disabled (the documented default), not suppress-everything",
+    );
+  });
+
+  test("orch-over-share SUPPRESSES orch pipeline dispatch (dev_orch)", () => {
+    const plan = runDecide(realmState("0.9", 0.5, { orch_work_available: true }), null);
+    assert.equal(
+      devOrchDispatch(plan), undefined,
+      "orch share 0.9 over a 0.5 cap must suppress the dev_orch dispatch",
+    );
+    assert.ok(
+      plan.debug?.orch_realm_share_skipped,
+      "plan.debug should record the share-guard skip for operator audit",
+    );
+  });
+
+  test("orch-over-share SUPPRESSES orch signal dispatch (discover_orch)", () => {
+    const plan = runDecide(realmState("0.9", 0.5, { orch_backfill_idle: true }), null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_orch"),
+      undefined,
+      "the guard must also cover orch SIGNAL classes, not just pipeline slots",
+    );
+  });
+
+  test("one-directional: target dispatch UNAFFECTED while orch is over share", () => {
+    const plan = runDecide(realmState("0.9", 0.5, { target_work_available: true }), null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "the guard suppresses orch-scope classes only — dev_target must still dispatch",
+    );
+  });
+
+  test("target-over-share (orch under cap) leaves orch dispatch alone", () => {
+    // orch share 0.1 means the TARGET realm is at 0.9 — over the mirror of a
+    // 0.5 cap. The guard is one-directional: nothing suppresses on the target
+    // side, and the orch side is under its own cap, so dev_orch fires.
+    const plan = runDecide(realmState("0.1", 0.5, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "orch under its cap must dispatch even though the target realm is over the mirror share",
+    );
+  });
+
+  test("health (scope both) is NOT suppressed even over share", () => {
+    const plan = runDecide(realmState("0.9", 0.5, { health_fail: true }), null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "health"),
+      "the scope-agnostic health probe is realm-neutral — never share-suppressed",
+    );
+  });
+
+  test("boundary: share == cap suppresses (>= semantics)", () => {
+    const plan = runDecide(realmState("0.5", 0.5, { orch_work_available: true }), null);
+    assert.equal(
+      devOrchDispatch(plan), undefined,
+      "at exactly the configured share the realm has consumed its whole budget (>=, matching the scout cap)",
+    );
+  });
+
+  test("fail-open on an ABSENT signal (no reading this turn)", () => {
+    const plan = runDecide(realmState(undefined, 0.5, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "an absent share signal must leave the guard disabled — never suppress on missing evidence",
+    );
+  });
+
+  test("fail-open on the EMPTY signal (collect-state's degrade marker)", () => {
+    // collect-state.sh emits `orch_realm_weekly_share=` (empty value) on any
+    // failed/unparseable read — the documented fail-open degrade (AC1).
+    const plan = runDecide(realmState("", 0.5, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "an empty share value must parse to no-usable-reading (guard disabled)",
+    );
+  });
+
+  test("fail-open on a GARBAGE signal (non-numeric)", () => {
+    const plan = runDecide(realmState("not-a-number", 0.5, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "a malformed share must default to no-usable-reading (guard disabled), not suppress",
+    );
+  });
+
+  test("fail-open on an out-of-range signal (share > 1)", () => {
+    const plan = runDecide(realmState("1.2", 0.5, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "a share above 1.0 is not a fraction — treated as unusable, guard disabled",
+    );
+  });
+
+  test("cap > 1 resolves to disabled (a share can never reach it)", () => {
+    const plan = runDecide(realmState("1.0", 1.5, { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "an out-of-range cap is unparseable policy, not an unreachable ceiling — disabled",
+    );
+  });
+
+  test("non-numeric cap resolves to disabled", () => {
+    const plan = runDecide(realmState("0.9", "half", { orch_work_available: true }), null);
+    assert.ok(
+      devOrchDispatch(plan),
+      "a garbage cap must fail open (disabled), never accidentally coerce",
+    );
+  });
+});

@@ -1,0 +1,1 @@
+- feat: add the opt-in orch-realm weekly-share guard — collect-state.sh folds /api/usage bySkillByModel into an orch_realm_weekly_share signal and decide.py suppresses orch-scope dispatch over limits.orch_realm_share_cap (default disabled); the structurally-inert USD cost gates are now documented as such (#4161)
