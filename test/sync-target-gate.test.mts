@@ -454,4 +454,37 @@ describe("hydra-target-build playbook wiring (issue #1451)", () => {
       "Step 6.6 must explicitly forbid hand-stripping web/ (classifyTargetRisk does it)",
     );
   });
+
+  test("the operator-review fence lookup fails CLOSED on a gh lookup failure (#4224, #4230 QA remediation)", () => {
+    // A transient `gh issue view` failure (API error, rate limit, auth) is
+    // indistinguishable from a confirmed "not fenced", so it must count as
+    // FENCED — the build's explicit-merge fallback must never resolve that
+    // ambiguity toward merging a possibly money-critical PR unreviewed.
+    assert.match(
+      PLAYBOOK,
+      /FENCE_LOOKUP="failed"/,
+      "a failed gh issue view must be recorded as a distinct lookup state",
+    );
+    assert.match(
+      PLAYBOOK,
+      /if ! ANCHOR_LABELS=\$\(gh issue view/,
+      "the fence lookup must branch on gh's exit code, not on empty output",
+    );
+    // The #4230 fail-open shape — FENCED assigned directly from the gh
+    // pipeline, `|| true` swallowing the failure into "" (unfenced) — must
+    // not return.
+    assert.doesNotMatch(
+      PLAYBOOK,
+      /FENCED=\$\(gh issue view/,
+      "FENCED must not be assigned directly from the gh pipeline: that shape turns a lookup failure into a silent not-fenced",
+    );
+  });
+
+  test("a non-board anchor (empty ANCHOR_NUM) is not phantom-fenced (#4224)", () => {
+    assert.match(
+      PLAYBOOK,
+      /if \[ -n "\$\{ANCHOR_NUM:-\}" \]; then/,
+      "the fence lookup must be gated on ANCHOR_NUM so failing-test / priorities-doc anchors proceed unfenced",
+    );
+  });
 });

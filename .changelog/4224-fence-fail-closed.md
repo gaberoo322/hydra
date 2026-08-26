@@ -1,0 +1,1 @@
+- fix: hydra-target-build's operator-review fence fails closed — a failed anchor-label lookup counts as fenced, never as not-fenced (#4224)
