@@ -1,0 +1,1 @@
+- docs: record the 30-day re-grill measurement (2 re-grills / 65 grill dispatches, 3.1%) — DESIGN_CONCEPT_TTL_SECONDS stays 7 days, issue closed wontfix (#4163)

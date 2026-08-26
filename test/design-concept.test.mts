@@ -551,3 +551,30 @@ describe("design-concept seam canonicalizes anchorRef at entry (#797)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// TTL-constant consistency (#4163) — pure, no Redis
+// ---------------------------------------------------------------------------
+//
+// The persistence TTL (src/design-concept.ts) and the gate freshness window
+// (src/design-concept-gate.ts) must always encode the SAME wall-clock
+// duration: the Redis EXPIRE reaps an artifact at the exact age the gate
+// starts calling it stale. #4163 measured the re-grill economics (2
+// re-grills / 65 grill dispatches over the 30 days to 2026-08-26 — both at
+// TTL expiry on >7d-parked issues) and closed the TTL bump as wontfix;
+// these tests pin both constants at 7 days so any future bump must change
+// BOTH files in lockstep and re-open the measurement question explicitly.
+describe("design-concept TTL constants encode one wall-clock duration (#4163)", () => {
+  test("TTL_SECONDS and MAX_AGE_MS encode the same wall-clock duration", () => {
+    assert.equal(
+      dc.DESIGN_CONCEPT_TTL_SECONDS * 1000,
+      gate.DESIGN_CONCEPT_MAX_AGE_MS,
+      "Redis EXPIRE and the gate freshness window must agree on the artifact lifetime",
+    );
+  });
+
+  test("DESIGN_CONCEPT_TTL_SECONDS and DESIGN_CONCEPT_MAX_AGE_MS are unchanged at 7 days", () => {
+    assert.equal(dc.DESIGN_CONCEPT_TTL_SECONDS, 7 * 24 * 60 * 60);
+    assert.equal(gate.DESIGN_CONCEPT_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000);
+  });
+});

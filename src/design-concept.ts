@@ -237,8 +237,30 @@ export {
 // index pruning) and `computeArtifactHash` (for the save path) as imported
 // values from the leaf.
 
-/** 7 days, in seconds — for Redis EXPIRE. */
-const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
+/**
+ * 7 days, in seconds — for Redis EXPIRE.
+ *
+ * Measured 2026-08-26 (#4163, closed wontfix): over the 30 days to
+ * 2026-08-26 the autopilot ran 65 `design_concept_orch` grill dispatches,
+ * of which exactly 2 were re-grills of an already-grilled anchor (3.1%,
+ * under the issue's 10% materiality bar) — issue-3870 and issue-3871, both
+ * re-grilled 7.01 days after their first grill (i.e. at TTL expiry) and
+ * both parked operator-promotion issues that sat unbuilt past a week on a
+ * board whose median issue lifetime is 0.9 days. Raising the TTL would
+ * have averted ~2 × 147k tokens a month while tripling staleness exposure
+ * for the ~97% of grills whose issue closes inside the window — measured
+ * not worth it. Do not re-file a TTL bump on economics grounds without a
+ * fresh re-grill count: the per-anchor source is the `anchorReference`
+ * field of the `hydra:autopilot:dispatch-outcomes:*` rows (90-day TTL),
+ * with journald's `[Metrics] Recorded cycle` lines as the full-dispatch
+ * denominator.
+ *
+ * Exported (previously file-private) so `test/design-concept.test.mts` can
+ * pin it against `DESIGN_CONCEPT_MAX_AGE_MS` — the two constants must
+ * always encode the same wall-clock duration (design-concept artifact for
+ * issue-4163, invariant INV-1).
+ */
+export const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * Save (or overwrite) a design concept. Computes `createdAt` and
