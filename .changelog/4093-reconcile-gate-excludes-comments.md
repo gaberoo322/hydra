@@ -1,0 +1,1 @@
+- fix: exclude comments and docstrings when counting `occurrences:` matches in the design-concept reconciliation gate, fixing both a false-green (symbol named only in a comment) and false-red (unrelated comment mention) failure mode (#4093)

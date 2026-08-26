@@ -50,6 +50,7 @@ import {
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
+  stripCommentsAndDocstrings,
   type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
@@ -479,6 +480,96 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(ev("occurrences: a.ts :: doThing( == 3").ok, false);
     assert.equal(ev("occurrences: a.ts :: doThing( <= 5").ok, true);
     assert.equal(ev("manual: fine").ok, true);
+  });
+
+  // --- issue #4093: occurrences: excludes comments/docstrings ------------
+
+  test("stripCommentsAndDocstrings strips // and /* */ from .ts/.mts, leaves strings alone", () => {
+    const src = [
+      "// mentions closingIssuesReferences but never uses it",
+      "/* also closingIssuesReferences, in a block comment */",
+      'const url = "http://closingIssuesReferences.example/not-a-comment";',
+      "const real = closingIssuesReferences();",
+    ].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "a.mts");
+    assert.equal(countOccurrences(stripped, "closingIssuesReferences"), 2);
+    // one from the string literal (untouched) + one from the real call
+  });
+
+  test("stripCommentsAndDocstrings strips # and triple-quoted docstrings from .py, leaves strings alone", () => {
+    const src = [
+      "def closing_issues():",
+      '    """',
+      "    NOTE: closingIssuesReferences is unused by either predicate today.",
+      '    """',
+      "    # closingIssuesReferences mentioned again here",
+      '    marker = "closingIssuesReferences appears in a string too"',
+      "    return []",
+    ].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "a.py");
+    // Only the string-literal mention survives stripping.
+    assert.equal(countOccurrences(stripped, "closingIssuesReferences"), 1);
+  });
+
+  test("stripCommentsAndDocstrings strips # from .sh, leaves strings alone", () => {
+    const src = ['# Date.now() mentioned in a shell comment', 'echo "Date.now() in a string"'].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "a.sh");
+    assert.equal(countOccurrences(stripped, "Date.now()"), 1);
+  });
+
+  test("stripCommentsAndDocstrings is a no-op for unrecognised extensions", () => {
+    const src = "// not stripped: unknown extension\nDate.now()";
+    assert.equal(stripCommentsAndDocstrings(src, "a.txt"), src);
+  });
+
+  test("PR #4090 shape (false GREEN): occurrences: whose only match is inside a docstring evaluates FALSE", () => {
+    const read = fakeReader({
+      "reap.py": [
+        "def closing_issues(pr):",
+        '    """',
+        "    closingIssuesReferences is unused by either predicate today.",
+        '    """',
+        "    return _CLOSE_RE.findall(pr.body)",
+      ].join("\n"),
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: reap.py :: closingIssuesReferences == 1"), read);
+    assert.equal(res.ok, false);
+    assert.equal(res.observed, "0");
+  });
+
+  test("PR #4112 shape (false RED): occurrences: with one real call + one unrelated comment mention evaluates TRUE", () => {
+    const read = fakeReader({
+      "clock.ts": ["// Date.now() is called once per request for tracing purposes", "const t = Date.now();"].join(
+        "\n",
+      ),
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: clock.ts :: Date.now() == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
+  });
+
+  test("occurrences: still counts a needle sitting inside a string literal (strings are not stripped)", () => {
+    const read = fakeReader({ "a.py": '# not a real comment about it\nmarker = "doThing( inside a string"' });
+    const res = evaluateAssertion(parseAssertion("occurrences: a.py :: doThing( == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
+  });
+
+  test("file-contains / file-lacks are ALSO comment-aware (approved design concept, issue #4093)", () => {
+    // `file-contains` / `file-lacks` share `countOccurrences` with `occurrences:`
+    // and are subject to the identical bug class, so the approved design
+    // concept scopes the exclusion to all three call sites, not just
+    // `occurrences:`. A symbol named only in a comment must NOT satisfy
+    // `file-contains`, and must satisfy `file-lacks`.
+    const read = fakeReader({ "a.ts": "// mentions pruneIndex in a comment only\n" });
+    assert.equal(evaluateAssertion(parseAssertion("file-contains: a.ts :: pruneIndex"), read).ok, false);
+    assert.equal(evaluateAssertion(parseAssertion("file-lacks: a.ts :: pruneIndex"), read).ok, true);
+
+    // Genuine code usage still satisfies file-contains / fails file-lacks,
+    // even with an extra comment mention of the exact same literal alongside.
+    const readCode = fakeReader({ "b.ts": "pruneIndex(); // also mentions pruneIndex( right here\n" });
+    assert.equal(evaluateAssertion(parseAssertion("file-contains: b.ts :: pruneIndex("), readCode).ok, true);
+    assert.equal(evaluateAssertion(parseAssertion("file-lacks: b.ts :: pruneIndex("), readCode).ok, false);
   });
 
   test("file-lacks / file-not-matches FAIL on a missing file (no vacuous pass)", () => {
