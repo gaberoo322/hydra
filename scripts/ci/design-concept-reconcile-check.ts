@@ -77,6 +77,16 @@
  * than passing vacuously: "src/api.ts does not contain pruneX()" is not
  * satisfied by pointing at a path that does not exist.
  *
+ * `file-contains` / `file-lacks` / `occurrences` count only genuine
+ * code-level matches: for `.ts`/`.mts`/`.py`/`.sh` files, comments and Python
+ * docstrings are excluded before counting via {@link stripCommentsAndDocstrings}
+ * (issue #4093) — a symbol named only in a comment or docstring can no longer
+ * discharge a `file-contains`/`occurrences` assertion (PR #4090's false
+ * green), and a code-level match is no longer defeated by an unrelated
+ * mention of the same literal in a comment (PR #4112's false red). String
+ * literal contents always keep counting — only comments/docstrings are
+ * excluded. `file-matches`/`file-not-matches` (regex) are untouched.
+ *
  * # What this gate deliberately does NOT judge
  *
  * It never adjudicates *which* of several issue-offered options the dev chose
@@ -593,6 +603,228 @@ export function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Comment/docstring exclusion (issue #4093)
+// ---------------------------------------------------------------------------
+
+/**
+ * File extensions this exclusion understands. Anything else is returned
+ * unchanged by {@link stripCommentsAndDocstrings} — `countOccurrences`
+ * behaves exactly as before for those paths.
+ */
+type CommentLanguage = "ts" | "py" | "sh" | null;
+
+function commentLanguageForPath(path: string): CommentLanguage {
+  if (/\.m?ts$/.test(path)) return "ts";
+  if (/\.py$/.test(path)) return "py";
+  if (/\.sh$/.test(path)) return "sh";
+  return null;
+}
+
+/** Replaces a character with a same-width blank, preserving newlines. */
+function blank(ch: string): string {
+  return ch === "\n" ? "\n" : " ";
+}
+
+/**
+ * TS/MTS: blanks out `//` line comments and `/* *\/` block comments. String
+ * literals (`'...'`, `"..."`, and `` `...` `` template literals) are copied
+ * through verbatim, including escaped characters, so a needle that only
+ * exists as executable string content still counts.
+ */
+function stripTsLikeComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const two = source.slice(i, i + 2);
+    if (two === "//") {
+      while (i < n && source[i] !== "\n") {
+        out += " ";
+        i++;
+      }
+      continue;
+    }
+    if (two === "/*") {
+      out += "  ";
+      i += 2;
+      while (i < n && source.slice(i, i + 2) !== "*/") {
+        out += blank(source[i]);
+        i++;
+      }
+      if (i < n) {
+        out += "  ";
+        i += 2;
+      }
+      continue;
+    }
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      out += ch;
+      i++;
+      while (i < n && source[i] !== ch) {
+        if (source[i] === "\\" && i + 1 < n) {
+          out += source[i] + source[i + 1];
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Python: blanks out `#` line comments and every triple-quoted span
+ * (`"""..."""` / `'''...'''`), whether or not it sits in true docstring
+ * position — distinguishing the two needs a real parser, which this module's
+ * zero-imports purity contract forecloses, and the motivating #4090 case
+ * (`closingIssuesReferences` appearing only inside `reap.py`'s function
+ * docstrings) is a triple-quoted span regardless of position. Regular
+ * single/double-quoted strings are copied through verbatim.
+ */
+function stripPythonComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const three = source.slice(i, i + 3);
+    if (three === '"""' || three === "'''") {
+      const delim = three;
+      out += delim;
+      i += 3;
+      while (i < n && source.slice(i, i + 3) !== delim) {
+        out += blank(source[i]);
+        i++;
+      }
+      if (i < n) {
+        out += delim;
+        i += 3;
+      }
+      continue;
+    }
+    if (source[i] === "#") {
+      while (i < n && source[i] !== "\n") {
+        out += " ";
+        i++;
+      }
+      continue;
+    }
+    const ch = source[i];
+    if (ch === "'" || ch === '"') {
+      out += ch;
+      i++;
+      while (i < n && source[i] !== ch) {
+        if (source[i] === "\\" && i + 1 < n) {
+          out += source[i] + source[i + 1];
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Shell: blanks out `#` line comments (shell has no block-comment syntax).
+ * Single-quoted strings are literal (no escapes) per POSIX/bash; double-quoted
+ * strings honour backslash escapes. Both are copied through verbatim so a
+ * `#` — or any needle — inside a string is never mistaken for a comment.
+ */
+function stripShellComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const ch = source[i];
+    if (ch === "#") {
+      while (i < n && source[i] !== "\n") {
+        out += " ";
+        i++;
+      }
+      continue;
+    }
+    if (ch === "'") {
+      out += ch;
+      i++;
+      while (i < n && source[i] !== "'") {
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      out += ch;
+      i++;
+      while (i < n && source[i] !== '"') {
+        if (source[i] === "\\" && i + 1 < n) {
+          out += source[i] + source[i + 1];
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Blanks out comments and (Python) docstrings from `source` before it is
+ * handed to {@link countOccurrences}, so `file-contains:`, `file-lacks:` and
+ * `occurrences:` assertions count only genuine code-level matches — not a
+ * symbol that exists solely in prose (issue #4093, PR #4090's false-green:
+ * `closingIssuesReferences` was named only in `reap.py` docstrings, yet an
+ * `occurrences: … == 1` assertion discharged a MUST-NEVER invariant against
+ * an implementation that never parsed the field) and does not punish a
+ * legitimate code-level match that happens to share a file with an unrelated
+ * comment mention (PR #4112's false-red).
+ *
+ * String literal contents are always preserved verbatim — a literal inside a
+ * string is still executable intent, not documentation. Recognises `.ts` /
+ * `.mts` (`//`, `/* *\/`), `.py` (`#`, `"""…"""`, `'''…'''`), and `.sh` (`#`)
+ * — the file types the gate actually reads. Any other extension is returned
+ * unchanged (occurrence counting for it is unaffected by this change).
+ */
+export function stripCommentsAndDocstrings(source: string, path: string): string {
+  const lang = commentLanguageForPath(path);
+  if (lang === "ts") return stripTsLikeComments(source);
+  if (lang === "py") return stripPythonComments(source);
+  if (lang === "sh") return stripShellComments(source);
+  return source;
+}
+
 function missing(path: string): AssertionResult {
   return { ok: false, expected: `readable file ${path}`, observed: "file not found or unreadable" };
 }
@@ -619,14 +851,14 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "file-contains": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       return { ok: n > 0, expected: `${a.path} contains "${a.needle}"`, observed: `${n} occurrence(s)` };
     }
     case "file-lacks": {
       // A missing file does NOT vacuously satisfy "does not contain X".
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       return { ok: n === 0, expected: `${a.path} does not contain "${a.needle}"`, observed: `${n} occurrence(s)` };
     }
     case "file-matches":
@@ -660,7 +892,7 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "occurrences": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       const ok = a.op === "==" ? n === a.count : a.op === "<=" ? n <= a.count : n >= a.count;
       return {
         ok,

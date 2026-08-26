@@ -1,0 +1,1 @@
+- fix: design-concept reconciliation gate excludes comments and docstrings from `file-contains`/`file-lacks`/`occurrences` counting, so a symbol named only in a comment can no longer discharge an invariant and a code-level match is no longer defeated by an unrelated comment mention (#4093)

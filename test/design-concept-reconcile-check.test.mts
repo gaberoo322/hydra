@@ -50,6 +50,7 @@ import {
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
+  stripCommentsAndDocstrings,
   type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
@@ -461,6 +462,44 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(countOccurrences("abc", ""), 0);
   });
 
+  // --- stripCommentsAndDocstrings (issue #4093) --------------------------
+
+  test("stripCommentsAndDocstrings blanks // and /* */ comments in .ts/.mts, keeps string literals", () => {
+    const src = [
+      "// closingIssuesReferences mentioned here only",
+      "const x = 1; /* also closingIssuesReferences in a block comment */",
+      'const y = "closingIssuesReferences"; // and in a trailing comment',
+    ].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "src/reap.ts");
+    assert.equal(countOccurrences(stripped, "closingIssuesReferences"), 1);
+    assert.ok(stripped.includes('const y = "closingIssuesReferences";'));
+    assert.equal(stripCommentsAndDocstrings(src, "scripts/autopilot/reap.mts").includes("also closing"), false);
+  });
+
+  test("stripCommentsAndDocstrings blanks # comments and triple-quoted docstrings in .py, keeps string literals", () => {
+    const src = [
+      '"""',
+      "This docstring mentions closingIssuesReferences but never uses it.",
+      '"""',
+      "# closingIssuesReferences appears in this comment too",
+      'x = "closingIssuesReferences"  # a real usage plus a trailing mention',
+    ].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "scripts/autopilot/reap.py");
+    assert.equal(countOccurrences(stripped, "closingIssuesReferences"), 1);
+    assert.ok(stripped.includes('x = "closingIssuesReferences"'));
+  });
+
+  test("stripCommentsAndDocstrings blanks # comments in .sh, keeps string literals", () => {
+    const src = ['# closingIssuesReferences mentioned in a comment', 'echo "closingIssuesReferences"'].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "scripts/deploy.sh");
+    assert.equal(countOccurrences(stripped, "closingIssuesReferences"), 1);
+  });
+
+  test("stripCommentsAndDocstrings leaves unrecognised extensions unchanged", () => {
+    const src = "// closingIssuesReferences";
+    assert.equal(stripCommentsAndDocstrings(src, "README.md"), src);
+  });
+
   test("evaluateAssertion re-executes each kind against the injected reader", () => {
     const read = fakeReader({ "a.ts": "alpha doThing( beta doThing(", "empty.ts": "" });
     const ev = (s: string) => evaluateAssertion(parseAssertion(s), read);
@@ -495,6 +534,55 @@ describe("design-concept reconcile check (pure)", () => {
     const res = evaluateAssertion({ kind: "file-matches", path: "a.ts", source: "(", flags: "" }, read);
     assert.equal(res.ok, false);
     assert.match(res.observed, /invalid regex/i);
+  });
+
+  // --- comment/docstring exclusion regression tests (issue #4093) --------
+
+  test("false-GREEN regression (PR #4090 shape): a symbol named only in a docstring does not discharge occurrences:", () => {
+    const read = fakeReader({
+      "scripts/autopilot/reap.py": [
+        'def closing_issues():',
+        '    """',
+        '    Uses closingIssuesReferences to compute closing intent.',
+        '    """',
+        '    return _CLOSE_RE.findall(body)',
+      ].join("\n"),
+    });
+    const res = evaluateAssertion(
+      parseAssertion("occurrences: scripts/autopilot/reap.py :: closingIssuesReferences == 1"),
+      read,
+    );
+    assert.equal(res.ok, false, "a docstring-only mention must not discharge the assertion");
+    assert.equal(res.observed, "0");
+
+    // Same file, same needle — file-contains must also reject it, per the
+    // design concept's uniform application across all three call sites.
+    const contains = evaluateAssertion(
+      parseAssertion("file-contains: scripts/autopilot/reap.py :: closingIssuesReferences"),
+      read,
+    );
+    assert.equal(contains.ok, false);
+  });
+
+  test("false-RED regression (PR #4112 shape): a genuine code-level match survives an unrelated comment mention", () => {
+    const read = fakeReader({
+      "src/x.ts": [
+        "// note: this touches Date.now() elsewhere too, see the other module",
+        "const readAt = Date.now();",
+      ].join("\n"),
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: src/x.ts :: Date.now() == 1"), read);
+    assert.equal(res.ok, true, "the single code-level match must still discharge the assertion");
+    assert.equal(res.observed, "1");
+  });
+
+  test("string literal contents keep counting toward occurrences — only comments/docstrings are excluded", () => {
+    const read = fakeReader({
+      "src/x.ts": '// mentions doThing( in a comment\nconst label = "doThing(";',
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: src/x.ts :: doThing( == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
   });
 
   // --- the verdict reducer ------------------------------------------------
