@@ -50,6 +50,7 @@ import {
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
+  stripCommentsAndDocstrings,
   type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
@@ -459,6 +460,103 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(countOccurrences("aaaa", "aa"), 2);
     assert.equal(countOccurrences("abc", "z"), 0);
     assert.equal(countOccurrences("abc", ""), 0);
+  });
+
+  // --- issue #4093: comment/docstring exclusion for occurrences: ---------
+
+  test("stripCommentsAndDocstrings strips // and /* */ from .ts/.mts, keeps strings", () => {
+    const src = [
+      "const a = 1; // mentions doThing( in a line comment",
+      "/* doThing( appears in a block comment too */",
+      'const url = "http://not-a-comment.example/doThing(";',
+      "doThing();",
+    ].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "a.ts");
+    assert.equal(countOccurrences(stripped, "doThing("), 2); // the string literal + the real call
+    assert.equal(stripCommentsAndDocstrings(src, "a.mts"), stripped);
+  });
+
+  test("stripCommentsAndDocstrings strips # comments and triple-quoted docstrings from .py, keeps strings", () => {
+    const src = [
+      '"""',
+      "Uses closingIssuesReferences elsewhere.",
+      '"""',
+      "value = 'closingIssuesReferences'  # not a real call either",
+      "def foo():",
+      "    pass",
+    ].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "reap.py");
+    // The docstring and the trailing comment are gone; the string literal survives.
+    assert.equal(countOccurrences(stripped, "closingIssuesReferences"), 1);
+  });
+
+  test("stripCommentsAndDocstrings strips # comments from .sh, keeps quoted strings", () => {
+    const src = ['echo "deploy.sh"  # deploy.sh is also mentioned here', 'x="# not a comment"'].join("\n");
+    const stripped = stripCommentsAndDocstrings(src, "run.sh");
+    assert.equal(countOccurrences(stripped, "deploy.sh"), 1);
+    assert.ok(stripped.includes("# not a comment")); // inside double quotes: not a comment
+  });
+
+  test("stripCommentsAndDocstrings is a no-op for unrecognised extensions", () => {
+    const src = "// looks like a comment but this is .md\nfoo bar";
+    assert.equal(stripCommentsAndDocstrings(src, "notes.md"), src);
+  });
+
+  test("regression (false green, PR #4090 shape): an occurrences: match only inside a docstring/comment evaluates FALSE", () => {
+    const read = fakeReader({
+      "scripts/autopilot/reap.py": [
+        '"""',
+        "docstring only: closingIssuesReferences is unused by either predicate today.",
+        '"""',
+        "def closing_issues():",
+        "    return []",
+      ].join("\n"),
+    });
+    const res = evaluateAssertion(
+      parseAssertion("occurrences: scripts/autopilot/reap.py :: closingIssuesReferences == 1"),
+      read,
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.observed, "0");
+  });
+
+  test("regression (false red, PR #4112 shape): a genuine single code match survives an unrelated comment mention", () => {
+    const read = fakeReader({
+      "a.ts": "const now = Date.now(); // per-call clock read, see Date.now() in the invariant text",
+    });
+    const res = evaluateAssertion(parseAssertion("occurrences: a.ts :: Date.now() == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
+  });
+
+  test("string literals are NOT excluded — only comments and docstrings", () => {
+    const read = fakeReader({ "a.ts": 'const msg = "pruneIndex is never called here"; // unrelated comment' });
+    // The needle appears once, inside a string literal — strings must still count.
+    const res = evaluateAssertion(parseAssertion("occurrences: a.ts :: pruneIndex == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
+  });
+
+  test("file-contains excludes a match that lives only in a comment/docstring (same primitive as occurrences:)", () => {
+    const read = fakeReader({
+      "a.ts": "// pruneIndex mentioned only here\nfunction doSomethingElse() {}",
+      "b.py": '"""\npruneIndex mentioned only in the docstring.\n"""\ndef foo():\n    pass\n',
+    });
+    assert.equal(evaluateAssertion(parseAssertion("file-contains: a.ts :: pruneIndex"), read).ok, false);
+    assert.equal(evaluateAssertion(parseAssertion("file-contains: b.py :: pruneIndex"), read).ok, false);
+  });
+
+  test("file-lacks passes when the only match lives in a comment/docstring", () => {
+    const read = fakeReader({ "a.ts": "// pruneIndex mentioned only here\nfunction doSomethingElse() {}" });
+    const res = evaluateAssertion(parseAssertion("file-lacks: a.ts :: pruneIndex"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "0 occurrence(s)");
+  });
+
+  test("file-contains / file-lacks still see a genuine code-level match", () => {
+    const read = fakeReader({ "a.ts": "pruneIndex(); // and mentioned here too" });
+    assert.equal(evaluateAssertion(parseAssertion("file-contains: a.ts :: pruneIndex"), read).ok, true);
+    assert.equal(evaluateAssertion(parseAssertion("file-lacks: a.ts :: pruneIndex"), read).ok, false);
   });
 
   test("evaluateAssertion re-executes each kind against the injected reader", () => {

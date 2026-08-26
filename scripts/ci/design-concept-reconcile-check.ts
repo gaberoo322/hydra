@@ -580,6 +580,211 @@ export function isMachineCheckable(a: Assertion): boolean {
   return a.kind !== "manual" && a.kind !== "unparseable";
 }
 
+// ---------------------------------------------------------------------------
+// Comment/docstring exclusion for occurrence counting (issue #4093, direction 4)
+//
+// `countOccurrences` is a raw non-overlapping literal count over whole file
+// text, with no comment awareness — and `file-contains`, `file-lacks`, and
+// `occurrences:` all evaluate through it. That is provably wrong in both
+// directions:
+//
+//  - FALSE GREEN (PR #4090, this issue's motivating case): a symbol named
+//    only inside a docstring/comment (never in executable code) still counted
+//    as >=1, discharging an invariant against an implementation that never
+//    actually used the mechanism the invariant required.
+//  - FALSE RED (PR #4112, cue `comment-literal-breaks-occurrences-assertion`):
+//    an unrelated comment mentioning the same literal as a genuine single
+//    code occurrence pushed the count above the declared `== 1`, forcing a
+//    developer to degrade a code comment just to satisfy the gate.
+//
+// Both stem from the same root — the primitive, not one call site — so one
+// fix cures both: strip comments and (Python) docstrings before counting, in
+// all three call sites, for the file kinds the gate actually reads. String
+// literals are NOT stripped — a literal inside a string is
+// still executable intent and must keep counting.
+// ---------------------------------------------------------------------------
+
+/** Lower-cased file extension (no dot), or `""` when the path has none. */
+function fileExtension(path: string): string {
+  const m = /\.([A-Za-z0-9]+)$/.exec(path ?? "");
+  return m ? m[1].toLowerCase() : "";
+}
+
+/**
+ * Strip `//` line comments and `/* *\/` block comments from C-like source
+ * (`.ts` / `.mts`), leaving string/template-literal contents untouched. A
+ * stripped block comment is replaced with a single space (never nothing) so
+ * code immediately before and after it on the same line cannot glue into an
+ * accidental new substring match.
+ */
+function stripCLikeComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    const c2 = i + 1 < n ? source[i + 1] : "";
+    if (c === "/" && c2 === "/") {
+      while (i < n && source[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && c2 === "*") {
+      i += 2;
+      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      i = Math.min(i + 2, n);
+      out += " ";
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n && source[i] !== quote) {
+        if (source[i] === "\\" && i + 1 < n) {
+          out += source[i] + source[i + 1];
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Strip `#` line comments and triple-quoted (`"""…"""` / `'''…'''`) docstring
+ * spans from Python source, leaving single/double-quoted string contents
+ * untouched. Every triple-quoted span is treated as a docstring per the
+ * acceptance criteria — this does not attempt to distinguish a genuine
+ * docstring position from a triple-quoted value; that distinction is out of
+ * scope. A stripped span is replaced with a single space, same rationale as
+ * the C-like block-comment case.
+ */
+function stripPythonComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    if ((c === '"' || c === "'") && source[i + 1] === c && source[i + 2] === c) {
+      const q = c;
+      i += 3;
+      while (i < n && !(source[i] === q && source[i + 1] === q && source[i + 2] === q)) i++;
+      i = Math.min(i + 3, n);
+      out += " ";
+      continue;
+    }
+    if (c === "#") {
+      while (i < n && source[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n && source[i] !== quote) {
+        if (source[i] === "\\" && i + 1 < n) {
+          out += source[i] + source[i + 1];
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Strip `#` line comments from shell source, leaving single- and
+ * double-quoted string contents untouched (a `#` inside either quote form is
+ * literal, never a comment opener).
+ */
+function stripShellComments(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    if (c === "#") {
+      while (i < n && source[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "'") {
+      out += c;
+      i++;
+      while (i < n && source[i] !== "'") {
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    if (c === '"') {
+      out += c;
+      i++;
+      while (i < n && source[i] !== '"') {
+        if (source[i] === "\\" && i + 1 < n) {
+          out += source[i] + source[i + 1];
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Strip comments (and, for Python, docstrings) out of `source`, dispatching
+ * on `path`'s extension. Unrecognised extensions are returned unchanged —
+ * this only covers the file kinds the gate actually reads (`.ts`, `.mts`,
+ * `.py`, `.sh`), per the acceptance criteria; widening it to more languages
+ * is future work, not a silent behaviour claim.
+ */
+export function stripCommentsAndDocstrings(source: string, path: string): string {
+  switch (fileExtension(path)) {
+    case "ts":
+    case "mts":
+      return stripCLikeComments(source);
+    case "py":
+      return stripPythonComments(source);
+    case "sh":
+      return stripShellComments(source);
+    default:
+      return source;
+  }
+}
+
 /** Non-overlapping occurrence count of a literal. */
 export function countOccurrences(haystack: string, needle: string): number {
   if (needle.length === 0) return 0;
@@ -619,15 +824,29 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "file-contains": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
-      return { ok: n > 0, expected: `${a.path} contains "${a.needle}"`, observed: `${n} occurrence(s)` };
+      // Issue #4093: same comment/docstring-blind bug class as `occurrences:`
+      // — a symbol named only in a comment/docstring must not satisfy
+      // file-contains either. String literals are NOT excluded.
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
+      return {
+        ok: n > 0,
+        expected: `${a.path} contains "${a.needle}" (excluding comments/docstrings)`,
+        observed: `${n} occurrence(s)`,
+      };
     }
     case "file-lacks": {
       // A missing file does NOT vacuously satisfy "does not contain X".
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
-      return { ok: n === 0, expected: `${a.path} does not contain "${a.needle}"`, observed: `${n} occurrence(s)` };
+      // Issue #4093: strip comments/docstrings first, same rationale as
+      // file-contains above — an unrelated mention in a comment must not
+      // trip a "does not contain" assertion about code.
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
+      return {
+        ok: n === 0,
+        expected: `${a.path} does not contain "${a.needle}" (excluding comments/docstrings)`,
+        observed: `${n} occurrence(s)`,
+      };
     }
     case "file-matches":
     case "file-not-matches": {
@@ -660,11 +879,14 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "occurrences": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      // Issue #4093: count occurrences of code intent, not of text — comments
+      // and (Python) docstrings are excluded before counting. String literals
+      // are NOT excluded (see stripCommentsAndDocstrings' module comment).
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       const ok = a.op === "==" ? n === a.count : a.op === "<=" ? n <= a.count : n >= a.count;
       return {
         ok,
-        expected: `occurrences of "${a.needle}" in ${a.path} ${a.op} ${a.count}`,
+        expected: `occurrences of "${a.needle}" in ${a.path} (excluding comments/docstrings) ${a.op} ${a.count}`,
         observed: `${n}`,
       };
     }
