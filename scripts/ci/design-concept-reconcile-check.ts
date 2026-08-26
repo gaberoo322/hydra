@@ -593,6 +593,217 @@ export function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
+/** Replace a stripped char with whitespace, preserving newlines (so line-based diagnostics stay sane). */
+function blank(ch: string): string {
+  return ch === "\n" ? "\n" : " ";
+}
+
+/**
+ * `.ts`/`.mts` comment/string state machine. Line comments (`//`) and block
+ * comments (`/* *\/`) are blanked out (replaced with same-length whitespace,
+ * never deleted — deletion could fuse the code on either side of a removed
+ * comment into a brand-new accidental match). Single/double/backtick string
+ * literals are copied through verbatim (including their content) since a
+ * literal inside a string is still executable intent, not documentation —
+ * only escape sequences are tracked so an escaped quote doesn't end the
+ * string early.
+ */
+function stripTsLike(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    const c2 = source[i + 1];
+    if (c === "/" && c2 === "/") {
+      while (i < n && source[i] !== "\n") {
+        out += blank(source[i]);
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && c2 === "*") {
+      out += "  ";
+      i += 2;
+      while (i < n && !(source[i] === "*" && source[i + 1] === "/")) {
+        out += blank(source[i]);
+        i++;
+      }
+      if (i < n) {
+        out += "  ";
+        i += 2;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n) {
+        const ch = source[i];
+        out += ch;
+        i++;
+        if (ch === "\\" && i < n) {
+          out += source[i];
+          i++;
+          continue;
+        }
+        if (ch === quote) break;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * `.py` comment/string state machine. `#` line comments are blanked. Every
+ * triple-quoted span (`"""..."""` or `'''...'''`) is blanked regardless of
+ * statement position — distinguishing true docstring position from an
+ * ordinary triple-quoted string literal needs a real Python parser, which
+ * this module's zero-imports purity contract forecloses, and treating every
+ * triple-quoted span as excluded correctly handles the motivating case
+ * (a symbol named only inside a function docstring). Ordinary single/double
+ * quoted string literals are copied through verbatim.
+ */
+function stripPython(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    const c3 = source.slice(i, i + 3);
+    if (c3 === '"""' || c3 === "'''") {
+      const delim = c3;
+      out += "   ";
+      i += 3;
+      while (i < n && source.slice(i, i + 3) !== delim) {
+        if (source[i] === "\\" && i + 1 < n) {
+          out += "  ";
+          i += 2;
+          continue;
+        }
+        out += blank(source[i]);
+        i++;
+      }
+      if (i < n) {
+        out += "   ";
+        i += 3;
+      }
+      continue;
+    }
+    if (c === "#") {
+      while (i < n && source[i] !== "\n") {
+        out += blank(source[i]);
+        i++;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n) {
+        const ch = source[i];
+        out += ch;
+        i++;
+        if (ch === "\\" && i < n) {
+          out += source[i];
+          i++;
+          continue;
+        }
+        if (ch === quote || ch === "\n") break;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * `.sh` comment/string state machine. `#` line comments are blanked.
+ * Single-quoted strings are copied through verbatim with no escape
+ * processing (POSIX shell: nothing is special inside `'...'`, not even a
+ * backslash). Double-quoted strings are copied through verbatim with
+ * backslash-escape tracking.
+ */
+function stripShell(source: string): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i];
+    if (c === "#") {
+      while (i < n && source[i] !== "\n") {
+        out += blank(source[i]);
+        i++;
+      }
+      continue;
+    }
+    if (c === "'") {
+      out += c;
+      i++;
+      while (i < n && source[i] !== "'") {
+        out += source[i];
+        i++;
+      }
+      if (i < n) {
+        out += source[i];
+        i++;
+      }
+      continue;
+    }
+    if (c === '"') {
+      out += c;
+      i++;
+      while (i < n) {
+        const ch = source[i];
+        out += ch;
+        i++;
+        if (ch === "\\" && i < n) {
+          out += source[i];
+          i++;
+          continue;
+        }
+        if (ch === '"') break;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Strip comments and docstrings from `source`, keyed off `path`'s extension,
+ * so occurrence-based assertions (`file-contains`, `file-lacks`,
+ * `occurrences`) never mistake a mention of a symbol *inside a comment or
+ * docstring* for a mention *in code* (issue #4093 — the PR #4090 false-green
+ * shape: `closingIssuesReferences` appeared only inside `reap.py`'s function
+ * docstrings, and a raw substring count could not tell the difference).
+ *
+ * String literal contents are NEVER stripped — a literal inside a string is
+ * still executable intent, not documentation. Covers only the file types
+ * this gate actually reads (`.ts`/`.mts`, `.py`, `.sh`); an unrecognised
+ * extension is returned unchanged, never guessed at.
+ *
+ * Kept separate from {@link countOccurrences} (rather than a third parameter
+ * on it) so the counting primitive stays a pure, path-agnostic literal
+ * counter with zero behavior change — the existing "countOccurrences counts
+ * non-overlapping literals" unit test needs no modification.
+ */
+export function stripCommentsAndDocstrings(source: string, path: string): string {
+  if (/\.(ts|mts)$/.test(path)) return stripTsLike(source);
+  if (/\.py$/.test(path)) return stripPython(source);
+  if (/\.sh$/.test(path)) return stripShell(source);
+  return source;
+}
+
 function missing(path: string): AssertionResult {
   return { ok: false, expected: `readable file ${path}`, observed: "file not found or unreadable" };
 }
@@ -619,14 +830,14 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "file-contains": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       return { ok: n > 0, expected: `${a.path} contains "${a.needle}"`, observed: `${n} occurrence(s)` };
     }
     case "file-lacks": {
       // A missing file does NOT vacuously satisfy "does not contain X".
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       return { ok: n === 0, expected: `${a.path} does not contain "${a.needle}"`, observed: `${n} occurrence(s)` };
     }
     case "file-matches":
@@ -660,7 +871,7 @@ export function evaluateAssertion(a: Assertion, readFile: FileReader): Assertion
     case "occurrences": {
       const c = readFile(a.path);
       if (c === null) return missing(a.path);
-      const n = countOccurrences(c, a.needle);
+      const n = countOccurrences(stripCommentsAndDocstrings(c, a.path), a.needle);
       const ok = a.op === "==" ? n === a.count : a.op === "<=" ? n <= a.count : n >= a.count;
       return {
         ok,

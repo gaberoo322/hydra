@@ -50,6 +50,7 @@ import {
   parseReconciliationSection,
   quoteMatchesInvariant,
   resolveEnforceDecision,
+  stripCommentsAndDocstrings,
   type ArtifactEnforceDecision,
   type FileReader,
   type Violation,
@@ -495,6 +496,85 @@ describe("design-concept reconcile check (pure)", () => {
     const res = evaluateAssertion({ kind: "file-matches", path: "a.ts", source: "(", flags: "" }, read);
     assert.equal(res.ok, false);
     assert.match(res.observed, /invalid regex/i);
+  });
+
+  // --- stripCommentsAndDocstrings (issue #4093) ---------------------------
+
+  test("stripCommentsAndDocstrings leaves an unrecognised extension unchanged", () => {
+    const src = "// not really stripped\nfoo";
+    assert.equal(stripCommentsAndDocstrings(src, "a.json"), src);
+  });
+
+  test("stripCommentsAndDocstrings (.ts) blanks // and /* */ comments, keeps code", () => {
+    const src = "const x = 1; // trailing comment mentions doThing(\n/* block\n   also mentions doThing( */\nreal doThing(";
+    const out = stripCommentsAndDocstrings(src, "a.ts");
+    assert.equal(countOccurrences(out, "doThing("), 1);
+    assert.match(out, /real doThing\(/);
+  });
+
+  test("stripCommentsAndDocstrings (.ts) keeps string-literal contents, incl. escaped quotes", () => {
+    const src = 'const s = "a quoted doThing( mention with an \\"escaped\\" quote";';
+    const out = stripCommentsAndDocstrings(src, "a.ts");
+    assert.equal(countOccurrences(out, "doThing("), 1);
+  });
+
+  test("stripCommentsAndDocstrings (.mts) applies the same TS rules", () => {
+    const src = "// doThing(\nreal doThing(";
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "a.mts"), "doThing("), 1);
+  });
+
+  test("stripCommentsAndDocstrings (.py) blanks # comments and every triple-quoted span", () => {
+    const src = [
+      "def closing_issues():",
+      '    """Uses closingIssuesReferences under the hood."""',
+      "    # closingIssuesReferences is also mentioned here",
+      "    return _CLOSE_RE.findall(body)",
+    ].join("\n");
+    const out = stripCommentsAndDocstrings(src, "reap.py");
+    assert.equal(countOccurrences(out, "closingIssuesReferences"), 0);
+    assert.match(out, /_CLOSE_RE\.findall\(body\)/);
+  });
+
+  test("stripCommentsAndDocstrings (.py) keeps ordinary quoted-string contents", () => {
+    const src = 'msg = "please call doThing( now"';
+    assert.equal(countOccurrences(stripCommentsAndDocstrings(src, "x.py"), "doThing("), 1);
+  });
+
+  test("stripCommentsAndDocstrings (.sh) blanks # comments, keeps quoted contents", () => {
+    const src = '# mentions doThing( here\necho "real doThing( call"';
+    const out = stripCommentsAndDocstrings(src, "x.sh");
+    assert.equal(countOccurrences(out, "doThing("), 1);
+  });
+
+  test("regression (PR #4090 false-green shape): occurrences: FALSE when the only match is inside a docstring", () => {
+    const src = [
+      "def closing_issues():",
+      '    """',
+      "    Uses closingIssuesReferences to compute closing intent.",
+      '    """',
+      "    return _CLOSE_RE.findall(body)",
+    ].join("\n");
+    const read = fakeReader({ "scripts/autopilot/reap.py": src });
+    const res = evaluateAssertion(
+      parseAssertion("occurrences: scripts/autopilot/reap.py :: closingIssuesReferences == 1"),
+      read,
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.observed, "0");
+  });
+
+  test("regression (PR #4112 false-red shape): occurrences: ... == 1 stays TRUE when a code match is joined by a comment mention", () => {
+    const src = "const now = Date.now(); // per-call clock read, see Date.now( in the header comment too";
+    const read = fakeReader({ "src/x.ts": src });
+    const res = evaluateAssertion(parseAssertion("occurrences: src/x.ts :: Date.now( == 1"), read);
+    assert.equal(res.ok, true);
+    assert.equal(res.observed, "1");
+  });
+
+  test("file-contains / file-lacks also go through the comment/docstring strip", () => {
+    const read = fakeReader({ "a.ts": "// mentions pruneIndex( only in a comment\nreal();" });
+    assert.equal(evaluateAssertion(parseAssertion("file-contains: a.ts :: pruneIndex("), read).ok, false);
+    assert.equal(evaluateAssertion(parseAssertion("file-lacks: a.ts :: pruneIndex("), read).ok, true);
   });
 
   // --- the verdict reducer ------------------------------------------------
