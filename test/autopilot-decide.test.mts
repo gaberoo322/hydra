@@ -1492,6 +1492,189 @@ describe("decide.py — dev_target per-cycle cost-cap (issue #1059)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 6d. Orch-realm weekly-share guard (issue #4161)
+// ---------------------------------------------------------------------------
+//
+// Every USD-denominated cost gate in decide.py is structurally inert on this
+// deployment (HYDRA_TOKEN_USD_RATE was never set post-ADR-0006, so the spend
+// counters they compare are permanently $0 — see the INERT notes on
+// scout_cost_cap_state / dev_target_cost_cap_state). The one live budget-split
+// signal is the orch-vs-target REALM share of the rolling weekly window:
+//
+//  - collect-state.sh folds /api/usage bySkillByModel over the taxonomy's
+//    scope column (scripts/autopilot/classes.json) and emits ONE pre-qualified
+//    line, `orch_realm_weekly_share=<0..1 fraction | unavailable>` — the
+//    enumeration seam (issue #4161 AC1).
+//  - decide.py reads that signal verbatim from
+//    `state.signals.orch_realm_weekly_share` and stays a pure function of
+//    (state, events, now) — the policy seam (AC2).
+//  - The guard suppresses ORCH-scope dispatch only (pipeline AND signal
+//    classes with taxonomy scope "orch"); target-scope and "both"-scope
+//    (health) classes are never touched — the guard is one-directional by
+//    design (AC3/AC5).
+//  - `state.limits.orch_realm_max_share` configures the ceiling; 0 / absent /
+//    unparseable / >1 means DISABLED (the default), matching ADR-0021 D5 —
+//    per-run limits stay subordinate to the Pace Gate and never become a
+//    second governor switched on behind the operator's back (AC4).
+//  - Fail-open: an absent / unparseable / out-of-range signal value leaves
+//    the guard disabled — an unreadable meter must never suppress dispatch
+//    (AC1, same direction ADR-0032 chose for the drainer heartbeat).
+//
+// New TOP-LEVEL describe with its own lifecycle (decide.py is a pure CLI over
+// temp state files — nothing shared to tear down — kept top-level per the
+// CLAUDE.md authoring rule).
+describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
+  function realmState(o: {
+    maxShare?: number;
+    share?: number | string;
+    signals?: Record<string, unknown>;
+    signalLastFired?: Record<string, number>;
+  }): any {
+    // orch_work_available arms dev_orch; target_work_available arms dev_target,
+    // so one fixture can pin both directions of the one-directional guard.
+    const s = baseState({
+      signals: o.signals ?? { orch_work_available: true, target_work_available: true },
+    });
+    if (o.maxShare !== undefined) s.limits.orch_realm_max_share = o.maxShare;
+    if (o.share !== undefined) s.signals.orch_realm_weekly_share = o.share;
+    if (o.signalLastFired !== undefined) s.signal_last_fired = o.signalLastFired;
+    return s;
+  }
+
+  test("no-op when the share knob is absent (default disabled — issue #4161 AC4, ADR-0021 D5)", () => {
+    const state = realmState({ share: 0.99 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "absent orch_realm_max_share = disabled — a 99% orch share must NOT suppress dev_orch",
+    );
+  });
+
+  test("no-op when the share knob is 0 (explicit disabled)", () => {
+    const state = realmState({ maxShare: 0, share: 0.99 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "orch_realm_max_share=0 = disabled — dev_orch must dispatch",
+    );
+  });
+
+  test("suppresses orch-scope dispatch when orch share >= max (issue #4161 AC3/AC5)", () => {
+    const state = realmState({ maxShare: 0.5, share: 0.9 });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      undefined,
+      "orch share 0.9 over the 0.5 ceiling must suppress dev_orch (orch-scope pipeline class)",
+    );
+    assert.ok(plan.debug?.orch_realm_share_skipped,
+      "plan.debug should record the share-guard skip for operator audit");
+    assert.ok(
+      plan.events?.some(
+        (e: any) => e.event === "dispatch_decision" && e.class === "dev_orch" && e.outcome === "budget",
+      ),
+      "the skip should surface as a budget-outcome dispatch_decision event",
+    );
+  });
+
+  test("boundary: share == max suppresses (>= semantics, mirroring the scout cost-cap)", () => {
+    const state = realmState({ maxShare: 0.5, share: 0.5 });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      undefined,
+      "share exactly at the ceiling counts as exceeded (>=), like scout_cost_cap_exceeded",
+    );
+  });
+
+  test("allows orch-scope dispatch when share below max", () => {
+    const state = realmState({ maxShare: 0.9, share: 0.5 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "orch share 0.5 under the 0.9 ceiling must allow dev_orch",
+    );
+    assert.equal(plan.debug?.orch_realm_share_skipped, undefined,
+      "no skip stamp when the guard passes");
+  });
+
+  test("one-directional: target-scope dispatch is NEVER suppressed by an over-share orch realm (issue #4161 AC5)", () => {
+    const state = realmState({ maxShare: 0.5, share: 0.9 });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      undefined,
+      "orch-scope dev_orch suppressed by the over-share orch realm",
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "target-scope dev_target must still dispatch — the guard suppresses orch only",
+    );
+  });
+
+  test("suppresses orch-scope SIGNAL classes too (sweep_orch) while target-scope sweep_target fires", () => {
+    // sweep_orch fires on needs_triage_orch; sweep_target on needs_triage_target
+    // (both 900s-cooldown signal classes). With the orch realm over share,
+    // sweep_orch must be skipped and sweep_target unaffected.
+    const state = realmState({
+      maxShare: 0.5,
+      share: 0.9,
+      signals: {
+        needs_triage_orch: true,
+        needs_triage_target: true,
+      },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "sweep_orch"),
+      undefined,
+      "orch-scope signal class sweep_orch must be suppressed by the share guard",
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "sweep_target"),
+      "target-scope signal class sweep_target must be unaffected",
+    );
+  });
+
+  test("fail-open: an unparseable signal value (collect-state 'unavailable') leaves the guard disabled (issue #4161 AC1)", () => {
+    const state = realmState({ maxShare: 0.5, share: "unavailable" });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "'unavailable' share = unreadable meter = guard disabled — never suppress dispatch on it",
+    );
+  });
+
+  test("fail-open: an absent signal key leaves the guard disabled", () => {
+    const state = realmState({ maxShare: 0.5 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "no orch_realm_weekly_share signal = guard disabled (legacy state shapes keep today's behaviour)",
+    );
+  });
+
+  test("string share parses — the playbook merges collect-state lines as strings", () => {
+    const state = realmState({ maxShare: 0.5, share: "0.9" });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      undefined,
+      "a numeric-string share (the collect-state line verbatim) must arm the guard",
+    );
+  });
+
+  test("misconfigured max_share > 1 disables the guard (fail-open)", () => {
+    const state = realmState({ maxShare: 1.5, share: 0.9 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "a share ceiling above 100% is unparseable config — disabled, never a silent always-armed guard",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7b. architecture_orch signal class (issue #790, parent #787;
 //     unified board-idle signal + 1h cadence by issue #959, epic #958)
 // ---------------------------------------------------------------------------

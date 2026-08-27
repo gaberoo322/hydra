@@ -1059,6 +1059,11 @@ docker exec hydra-redis-1 redis-cli SET "hydra:scout:spend:${SCOUT_TODAY_DATE}" 
 # = unconfigured). `awk` keeps this hermetic — no python boot just for one
 # multiply. When the rate is 0 (or unset/non-numeric), spend evaluates to
 # 0.00 and decide.py treats the cap as inactive.
+#
+# INERT ON THIS DEPLOYMENT (issue #4161): the rate is not merely defaulted —
+# it was never set post-ADR-0006 and #704 removed the conversion machinery
+# outright, so this always evaluates to 0.00 here. The live budget split is
+# the orch_realm_weekly_share collector below (issue #4161).
 SCOUT_USD_RATE="${HYDRA_TOKEN_USD_RATE:-0}"
 SCOUT_SPEND_USD=$(awk -v t="$SCOUT_TOKENS_TODAY" -v r="$SCOUT_USD_RATE" 'BEGIN {
   if (r+0 <= 0 || t+0 <= 0) { printf "0.00"; }
@@ -1627,6 +1632,109 @@ try: d=json.load(sys.stdin); print(len(d.get('eligible',[])))
 except: print(0)
 PY
 )" || echo 0
+
+# Orch-realm weekly share — the one LIVE budget split (issue #4161).
+#
+# Every USD-denominated cost gate in decide.py is structurally inert on this
+# deployment (HYDRA_TOKEN_USD_RATE never set post-ADR-0006; #704 stripped the
+# dollar-conversion machinery — the spend counters are permanently $0), so
+# none of them can back an orch-vs-target budget split. This collector
+# enumerates the real one: it fetches `/api/usage` `bySkillByModel` — the
+# 7-day rolling weekly cross-tab, and the only trustworthy per-skill surface
+# (NOT `costByClass`, which covers only ~13% of measured spend) — folds each
+# skill's token total into per-realm buckets via the taxonomy `scope` column
+# in the sibling classes.json, and emits ONE pre-qualified line the playbook
+# merges as `state.signals.orch_realm_weekly_share`:
+#
+#   orch_realm_weekly_share=<fraction 0..1>  orch dispatch spend over
+#                                            (orch + target) dispatch spend
+#   orch_realm_weekly_share=unavailable      no usable reading this turn
+#
+# decide.py reads that value verbatim and suppresses ORCH-scope dispatch when
+# it exceeds `state.limits.orch_realm_max_share` (default 0 = guard
+# disabled — ADR-0021 D5: never a second governor behind the operator's
+# back). Fold rules:
+#   - taxonomy scope "orch"   -> orch numerator
+#   - taxonomy scope "target" -> target side of the denominator
+#   - taxonomy scope "both" (health) -> NEITHER side: realm-agnostic shared
+#     spend must not tilt either realm's share
+#   - skills absent from the taxonomy (operator `interactive` sessions, the
+#     `hydra-autopilot` brain loop itself, ...) -> NEITHER side: the split
+#     measures DISPATCH-class spend only, so shared/unattributed spend
+#     changes neither realm's share
+#
+# Best-effort on the sibling contract: the collect step NEVER fails — an
+# orchestrator-down fetch, an unparseable payload, an unreadable taxonomy,
+# or a zero denominator (no dispatch spend in the window at all) all degrade
+# to `orch_realm_weekly_share=unavailable`, which decide.py treats as "no
+# usable reading" and leaves the guard DISABLED. An unreadable meter must
+# never suppress dispatch (issue #4161 AC1 — the same fail-open direction
+# ADR-0032 chose for the drainer heartbeat, and the opposite of the
+# fabricated-certainty failure #4128 documents). The python below prints
+# exactly one line on EVERY path, so no `||` fallback echo is needed (and
+# none is safe: under `set -o pipefail` a failed `hydra` fetch would fire a
+# fallback echo AFTER python's own line, corrupting the output with a
+# duplicate).
+echo -n "orch_realm_weekly_share="
+ORCH_REALM_TAXONOMY="${0%/*}/classes.json"
+hydra raw GET /usage 2>/dev/null | python3 -c "$(cat <<'PY'
+import json, math, sys
+
+def unavailable():
+    print("unavailable")
+    sys.exit(0)
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    unavailable()
+bsm = payload.get("bySkillByModel") if isinstance(payload, dict) else None
+if not isinstance(bsm, dict):
+    unavailable()
+
+# skill -> taxonomy scope ("orch" | "target" | "both"). An unreadable
+# taxonomy degrades the WHOLE fold — never a guessed split.
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        rows = (json.load(fh) or {}).get("classes") or []
+except Exception:
+    unavailable()
+skill_scope = {}
+for row in rows:
+    if not isinstance(row, dict):
+        continue
+    skill, realm = row.get("skill"), row.get("scope")
+    if isinstance(skill, str) and realm in ("orch", "target", "both"):
+        skill_scope[skill] = realm
+
+orch = 0.0
+target = 0.0
+for skill, entry in bsm.items():
+    realm = skill_scope.get(skill)
+    if realm not in ("orch", "target"):
+        continue  # unknown skill or realm-agnostic "both" — neither side
+    if not isinstance(entry, dict):
+        continue
+    for fam in entry.values():
+        if not isinstance(fam, dict):
+            continue
+        raw = fam.get("total")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        if realm == "orch":
+            orch += float(raw)
+        else:
+            target += float(raw)
+
+denom = orch + target
+if not math.isfinite(denom) or denom <= 0:
+    unavailable()
+share = orch / denom
+if not math.isfinite(share) or share < 0 or share > 1:
+    unavailable()
+print(f"{share:.4f}")
+PY
+)" "$ORCH_REALM_TAXONOMY"
 
 # Subscription Usage Tracker — PR B1 eligibility verdict.
 #
