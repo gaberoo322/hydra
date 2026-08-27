@@ -392,6 +392,36 @@ SIGNAL_COOLDOWNS = {
 # deliberately NOT in this set.
 BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 
+# Orch-board-degraded suppression set (issue #4130). Every class whose
+# selector keys off `orch_backfill_idle` (the precomputed board-empty signal
+# collect-state.sh owns): discover_orch and architecture_orch (the backfill
+# set above), cleanup_orch, and skill_prune. During a turn flagged
+# `orch_board_signals_degraded` the board-empty predicate was computed from a
+# FAILED read (a GraphQL-only outage renders every lane as zero/none), so an
+# "idle board" conclusion of any kind is a lie — `_rule_signal_classes`
+# suppresses these classes for the turn, and `_check_termination` /
+# `_rule_idle_fallback` decline to terminate `idle`. decide.py stays PURE
+# throughout: it only reads the pre-resolved flag exactly like every other
+# collect-state-owned signal (the signal-seam discipline).
+ORCH_BACKFILL_KEYED_CLASSES = (
+    "discover_orch",
+    "architecture_orch",
+    "cleanup_orch",
+    "skill_prune",
+)
+
+
+def _orch_board_degraded(state: dict, events: list[dict] | None = None) -> bool:
+    """True when collect-state.sh flagged the orchestrator board read as degraded.
+
+    Issue #4130. The flag is a first-class collect-state signal (emitted in
+    BOTH branches so this key is never missing): `orch_board_signals_degraded`
+    folds ANY orch-lane gh board read failing this turn (non-zero exit or an
+    empty payload where the query must print at least `[]`). Events take
+    precedence over `state.signals`, mirroring `_signal_present`.
+    """
+    return _signal_present(state, list(events or []), "orch_board_signals_degraded")
+
 # Backfill starvation floor (issue #2428). The one-per-turn stagger guard above
 # means that on a busy run a staggered backfill class (discover_orch /
 # architecture_orch) can LOSE the stagger slot every idle turn and go fully dark
@@ -2683,6 +2713,27 @@ def _rule_signal_classes(
             )
             out.skipped += 1
             continue
+        # Issue #4130 — orch-board-degraded suppression. Checked BEFORE
+        # `_select_for_signal` so a flagged turn never even consults the
+        # selector for a class keyed off `orch_backfill_idle`: the board-empty
+        # predicate underneath it was computed from a FAILED read (a
+        # GraphQL-only outage renders every lane zero/none), so dispatching a
+        # discover/architecture/cleanup/prune pass against a board the
+        # collector could not see would manufacture work to fill a phantom
+        # idle. Recorded as an `idle` dispatch_decision (not `cooldown`) so
+        # the audit trail distinguishes outage suppression from cadence
+        # gating. Self-clearing: the flag is a fresh per-turn collect-state
+        # fact, so the classes resume the moment the read succeeds again.
+        if sig in ORCH_BACKFILL_KEYED_CLASSES and _orch_board_degraded(state, events):
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="idle",
+                    reason="orch board read degraded — backfill suppressed (issue #4130)",
+                )
+            )
+            out.debug["orch_board_signals_degraded"] = True
+            out.skipped += 1
+            continue
         action = _select_for_signal(sig, state, events, now)
         if action is None:
             # Could be cooldown OR idle (no signal present); inspect the
@@ -2837,15 +2888,34 @@ def _rule_idle_fallback(
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
     if not dispatched_any and occupied == 0 and not plan_has_actions:
-        out.emit(
-            make_terminate(
-                "idle",
-                merged_prs=int(state.get("merged_prs", 0) or 0),
-                reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
-            ),
-            reason="idle-drain",
-        )
-        out.debug["idle_fallback"] = "terminate"
+        if _orch_board_degraded(state):
+            # Issue #4130: the wait-only shape here is an artifact of a FAILED
+            # orch board read (every lane rendered zero/none), not a drained
+            # board — terminating `idle` on it would end the run on evidence
+            # that was never collected. Keep the #1352 print-mode liveness
+            # argument intact by heartbeat-waiting instead: the pace-gate
+            # relaunch contract is unchanged, and the next turn re-reads the
+            # board. The suppressed-terminate fact is stamped into
+            # `out.debug` so the turn record shows WHY no idle drain fired.
+            out.emit(
+                make_wait(
+                    WALL_CLOCK_HEARTBEAT_SEC,
+                    "orch board read degraded — not concluding idle (issue #4130)",
+                ),
+                reason="degraded-board-heartbeat",
+            )
+            out.debug["idle_fallback"] = "suppressed-degraded-board"
+            out.debug["orch_board_signals_degraded"] = True
+        else:
+            out.emit(
+                make_terminate(
+                    "idle",
+                    merged_prs=int(state.get("merged_prs", 0) or 0),
+                    reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
+                ),
+                reason="idle-drain",
+            )
+            out.debug["idle_fallback"] = "terminate"
     elif not dispatched_any and occupied == 0:
         out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
     elif not dispatched_any:
@@ -4713,7 +4783,15 @@ def _check_termination(state: dict, now: int) -> dict | None:
     if elapsed >= wall_max:
         return make_terminate("wall_clock", merged_prs=merged_prs, reason=f"elapsed={elapsed}s")
     if idle >= idle_max and occupied == 0:
-        return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
+        # Issue #4130: an idle conclusion is a claim that the board was SEEN
+        # empty. On a degraded orch board read every lane renders zero/none,
+        # so `idle >= idle_max` here reflects an outage, not a drained board —
+        # keep the run alive (the heartbeat wait in `_rule_idle_fallback`
+        # carries the turn) instead of terminating on evidence that was never
+        # collected. The run still ends through budget / wall_clock if the
+        # outage outlasts them.
+        if not _orch_board_degraded(state):
+            return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.
     log = state.get("failure_log") or []

@@ -235,11 +235,34 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     );
   });
 
-  test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
-    assert.match(
+  test("total failure of the fallback emits NO counts and folds the lane-degraded flag (issue #4130)", () => {
+    // Pre-#4130 this arm echoed all four counts as literal zeros. That was
+    // safe for the three suppressing counts (0 never dispatches sweep_target
+    // / qa_target) but ACTIVATING for the fourth: `target_ready_for_agent=0`
+    // is the board-empty condition that sets `target_board_research_due`, so
+    // a failed read phantom-dispatched research against a board it could not
+    // see — measured live during the 2026-08-17 GraphQL-only outage (true
+    // value 34 rendered as 0). #4130's contract: the counts are UNKNOWN, not
+    // zero — emit none of them (an absent key derives no signal in either
+    // direction) and fold TARGET_BOARD_DEGRADED so the lane's aggregate
+    // `target_board_signals_degraded` flips true.
+    assert.doesNotMatch(
       src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
-      "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+      /echo "target_ready_for_agent=0"/,
+      "a failed read must never render target_ready_for_agent as a legitimate 0",
+    );
+    const fallbackStart = src.indexOf('TARGET_FALLBACK_RAW=$(gh issue list --repo "$TARGET_GH_REPO"');
+    assert.ok(fallbackStart >= 0, "could not locate the direct Target fallback read");
+    const fallbackArm = src.slice(fallbackStart, src.indexOf("fi", fallbackStart));
+    assert.match(
+      fallbackArm,
+      /TARGET_BOARD_DEGRADED=1/,
+      "the failed-read arm must fold the target lane's degraded counter",
+    );
+    assert.doesNotMatch(
+      fallbackArm,
+      /echo "target_/,
+      "the failed-read arm must emit no target_ count lines — the counts are unknown, not zero",
     );
   });
 

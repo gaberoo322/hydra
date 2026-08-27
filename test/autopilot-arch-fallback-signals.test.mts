@@ -133,7 +133,13 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     assert.ok(overCap.includes("arch_board_open_scan=7"));
   });
 
-  test("malformed board JSON degrades to safe zeros (fallback_due reflects work_queue only)", () => {
+  test("malformed board JSON fails closed: no backfill-idle, both caps saturated (issue #4130)", () => {
+    // Pre-#4130 the except arm zeroed every count, so an unparseable payload
+    // rendered as a fully-IDLE board: with ARCH_WORK_QUEUE=0 the emitter
+    // printed orch_backfill_idle=true and decide.py dispatched backfill
+    // classes against a board it could not read. The counts are UNKNOWN on
+    // a failed read — flip idle to the non-acting direction (false) and
+    // saturate both anti-flood caps so nothing keys off phantom zeros.
     const r = spawnSync("python3", ["-c", extractArchEmitter()], {
       input: "not json",
       encoding: "utf-8",
@@ -141,7 +147,8 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     });
     assert.equal(r.status, 0);
     const out = r.stdout.trim().split("\n");
-    assert.ok(out.includes("arch_board_open_scan=0"));
-    assert.ok(out.includes("arch_board_saturated=false"));
+    assert.ok(out.includes("orch_backfill_idle=false"));
+    assert.ok(out.includes("arch_board_saturated=true"));
+    assert.ok(out.includes("cleanup_board_saturated=true"));
   });
 });

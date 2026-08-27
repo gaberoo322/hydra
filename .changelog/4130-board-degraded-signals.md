@@ -1,0 +1,1 @@
+- fix: flag a failed GitHub board read as `orch_board_signals_degraded` (new) / `target_board_signals_degraded` (now the lane aggregate) and stop rendering unknown counts as zeros; decide.py declines to idle-terminate or dispatch backfill classes on a flagged snapshot (#4130)
