@@ -63,7 +63,7 @@ Full autonomy: pick the task, plan, challenge your own plan, execute, verify, me
 
 ## CRITICAL SAFETY RULE — READ FIRST (issues #542, #3889)
 
-Two repos are in play: `~/hydra` (orchestrator) and `~/hydra-betting` (target). `dev_target` is dispatched WITHOUT harness `isolation: "worktree"` (issue #3889): the harness's worktree isolation only covers `~/hydra`, and because `~/hydra-betting` is a sibling repo not nested under it, a pinned session is refused ALL git ops against the target — which made Step 0.6's `git -C ~/hydra-betting worktree add …` categorically fail (2/2 dispatches). So this skill isolates the target ITSELF via Step 0.6 below (`/dev/shm/hydra-worktrees/`), and the installed `worktree-write-fence.sh` PreToolUse hook fences ghost-writes back into that worktree. Step 0.6 is therefore the SOLE isolation for the target repo — never skip it.
+Two repos are in play: `~/hydra` (orchestrator) and `~/hydra-betting` (target). `dev_target` is dispatched WITHOUT harness `isolation: "worktree"` (issue #3889): the harness's worktree isolation only covers `~/hydra`, and because `~/hydra-betting` is a sibling repo not nested under it, a pinned session is refused ALL git ops against the target — which made Step 0.6's `git -C ~/hydra-betting worktree add …` categorically fail (2/2 dispatches). So this skill isolates the target ITSELF via Step 0.6 below (nested under `~/hydra-betting/web/.worktrees/` — relocated off `/dev/shm` in issue #4177 to eliminate the reach-back `node_modules` symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook fences ghost-writes back into that worktree. Step 0.6 is therefore the SOLE isolation for the target repo — never skip it.
 
 Before running ANY `git`, `npm`, `Edit`, or `Write` against the target repo:
 
@@ -80,12 +80,29 @@ CYCLE_ID="claude-cycle-$(date -u +%Y-%m-%d-%H%M)"
 hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"}"
 ```
 
-### 0.6. Create hydra-betting worktree (issue #542)
+### 0.6. Create hydra-betting worktree (issue #542, relocated off `/dev/shm` in #4177)
 
 Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`~/hydra-betting`) is a separate git repo — the harness can't isolate it for us. Create one ourselves:
 
 ```bash
-TARGET_WT="/dev/shm/hydra-worktrees/hydra-betting-worktree-${CYCLE_ID}"
+# Nested under ~/hydra-betting/web/ (issue #4177) — NOT /dev/shm. Node's
+# upward module-resolution walk from a file inside the worktree now finds the
+# REAL ~/hydra-betting/web/node_modules as an ancestor, the same mechanism
+# `~/hydra/.claude/worktrees/` already relies on for the orchestrator's own
+# worktrees (see CLAUDE.md). This eliminates BOTH hazards of the prior
+# /dev/shm design: no per-worktree `npm ci` (~975M RAM per concurrent
+# worktree) and no reach-back `node_modules` symlink (the 2026-08-19
+# incident, issue #4175 — six money-critical services down ~70min). A
+# destructive `rm -rf node_modules/` run inside the worktree targets only a
+# LOCAL path; since no node_modules is ever created or linked there, it has
+# nothing to remove — Node's ancestor walk is a resolver READ, not a
+# filesystem entry a destructive write can follow.
+#
+# MUST be nested directly under `web/`, not `~/hydra-betting/.worktrees/`:
+# the walk from `<wt>/web/src/foo.ts` tries `<wt>/web/node_modules`,
+# `<wt>/node_modules`, `<wt>/../node_modules`, … — only a `.worktrees` dir
+# living inside `web/` puts `~/hydra-betting/web/node_modules` on that path.
+TARGET_WT="/home/gabe/hydra-betting/web/.worktrees/${CYCLE_ID}"
 mkdir -p "$(dirname "$TARGET_WT")"
 
 # Ensure base is fresh before branching off.
@@ -106,17 +123,19 @@ case "$GIT_DIR" in
   *) echo "ABORT: hydra-betting cwd is not a worktree (git-dir=$GIT_DIR)" >&2; exit 1 ;;
 esac
 
-# Worktrees do not share node_modules with the main checkout — install once per worktree.
-# Cost: ~30–60s. Acceptable; this is the price of parallel-safe target builds.
-# The install command + appSubdir come from the Target Manifest (verify.install /
-# verify.appSubdir; epic #3014, ADR-0026, issue #3019) — not hardcoded. For
-# hydra-betting these resolve to `npm ci --prefer-offline` in `web/`.
+# No UNCONDITIONAL install step here (issue #4177): node_modules resolves by
+# the ancestor walk above, and npm's own `node_modules/.bin` PATH lookup for
+# `npm run <script>` walks the SAME ancestor chain — so `npm run typecheck` /
+# `npm run test:raw` / `npm run build` all resolve their binaries with no
+# local install, for a change that doesn't touch dependencies. A change that
+# DOES add/bump a dependency needs a LOCAL install so that new dependency is
+# actually present somewhere verify can find it — Step 6 (Verify) runs `npm
+# ci` there, but ONLY when the diff touches package.json/package-lock.json,
+# and only as a local worktree install (never touching the shared ancestor).
+# appSubdir still comes from the Target Manifest (verify.appSubdir; epic
+# #3014, ADR-0026, issue #3019) — not hardcoded — because later steps
+# `cd "$TARGET_WT/$APP_SUBDIR"`.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
-INSTALL_CMD=$(jq -r '.verify.install' "$TARGET_WT/.hydra/manifest.json")
-# eval word-splits the multi-word manifest command under zsh (which does NOT
-# IFS-split a bare `$INSTALL_CMD` — it would be taken as one command word, e.g.
-# `command not found: npm ci --prefer-offline`). Portable across bash + zsh.
-(cd "$TARGET_WT/$APP_SUBDIR" && eval "$INSTALL_CMD --no-audit --no-fund")
 
 # Mirror the Target SDLC gate scripts into the worktree (issue #1451). The gate
 # scripts (mutation-check / target-design-concept / post-merge-health) and their
@@ -128,7 +147,7 @@ INSTALL_CMD=$(jq -r '.verify.install' "$TARGET_WT/.hydra/manifest.json")
 bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 ```
 
-`scripts/branch-prune.sh` (issue #443) sweeps `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` so we don't have to clean these up on the happy path. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash. The `.hydra-gate/` mirror is inside the worktree, so it is GC'd with it.
+`scripts/branch-prune.sh` (issue #443) sweeps stale worktrees under `~/hydra-betting/web/.worktrees/*` the same way it sweeps every other worktree in the repo — its classifier is path-agnostic, so relocating off `/dev/shm` needed no branch-prune.sh code change. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash. The `.hydra-gate/` mirror is inside the worktree, so it is GC'd with it.
 
 ### 0.5. Drift check
 ```bash
@@ -406,6 +425,23 @@ APP_SUBDIR=$(jq -r '.verify.appSubdir' "$MANIFEST")
 TEST_CMD=$(jq -r '.verify.test' "$MANIFEST")
 TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
 cd "$TARGET_WT/$APP_SUBDIR"
+
+# JIT local install, ONLY if this change touched package.json/package-lock.json
+# (issue #4177). Step 0.6 no longer runs an unconditional per-worktree install —
+# node_modules resolves by ancestor walk to the real ~/hydra-betting/web/node_modules
+# for free. But a PR that adds/bumps a dependency needs THAT new dependency
+# actually installed somewhere the verify commands below can find it, and the
+# worktree must never write into the shared ancestor. `npm ci` run here, with no
+# local node_modules present yet, creates a fresh LOCAL node_modules inside the
+# worktree (the same safe mechanism `~/hydra/.claude/worktrees/*` already relies
+# on when ITS package.json changes) — Node then resolves from the nearest
+# node_modules first, so the local install shadows the ancestor without ever
+# touching it. A change that does NOT touch these files pays no install cost.
+if ! git diff --quiet origin/main -- package.json package-lock.json; then
+  INSTALL_CMD=$(jq -r '.verify.install' "$MANIFEST")
+  eval "$INSTALL_CMD --no-audit --no-fund"
+fi
+
 # eval word-splits the multi-word manifest commands under zsh (a bare `$TYPECHECK_CMD`
 # is taken as one command word — `command not found: npm run typecheck`). Portable.
 eval "$TYPECHECK_CMD"  # must pass
@@ -620,14 +656,14 @@ failure mode.
 
 ### Step 8.5. Worktree cleanup (on success)
 
-On success, remove the hydra-betting worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `/dev/shm` does not fill with stale directories (issue #3173, issue #542):
+On success, remove the hydra-betting worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `~/hydra-betting/web/.worktrees/` does not fill with stale directories (issue #3173, issue #542; relocated off tmpfs in #4177 — the disk-fill risk is smaller now but not zero):
 
 ```bash
 git -C ~/hydra-betting worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
-# Prune stale metadata: $TARGET_WT lives on tmpfs and may vanish underneath the
-# remove, leaving an orphaned .git/worktrees/<id> entry that blocks the next
-# `git branch -d` with "branch ... used by worktree at '/dev/shm/...'".
+# Prune stale metadata: an interrupted remove (or an out-of-band `rm -rf` of
+# $TARGET_WT) can leave an orphaned .git/worktrees/<id> entry that blocks the
+# next `git branch -d` with "branch ... used by worktree at '...'".
 git -C ~/hydra-betting worktree prune 2>&1 || true
 ```
 
