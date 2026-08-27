@@ -50,18 +50,55 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
   // numbers, or issue-number cross-references.
   const playbook = readRepoFile("docs/operator-playbooks/hydra-target-build.md");
 
-  test("creates a git worktree under ~/hydra-betting with a GC-able $TARGET_WT path", () => {
+  test("creates a git worktree under ~/hydra-betting/web/.worktrees, GC-able and node_modules-symlink-free", () => {
     // The load-bearing invocation: `git -C ~/hydra-betting worktree add ...`
-    // with a /dev/shm/hydra-worktrees/hydra-betting-worktree-* path so the
-    // existing branch-prune sweep can GC it. KEPT VERBATIM — these strings
-    // are the real canary, not the surrounding heading.
+    // with a $TARGET_WT nested under `web/.worktrees/` (issue #4177 —
+    // relocated off `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` to
+    // eliminate the reach-back node_modules symlink hazard, #4175) so the
+    // existing branch-prune sweep can still GC it AND Node's upward
+    // module-resolution walk finds the real ~/hydra-betting/web/node_modules
+    // as an ancestor with no symlink. KEPT VERBATIM — these strings are the
+    // real canary, not the surrounding heading.
     assert.match(
       playbook,
       /git -C ~\/hydra-betting worktree add -b "feature\/\$\{CYCLE_ID\}"/,
     );
     assert.match(
       playbook,
-      /TARGET_WT="\/dev\/shm\/hydra-worktrees\/hydra-betting-worktree-\$\{CYCLE_ID\}"/,
+      /TARGET_WT="\/home\/gabe\/hydra-betting\/web\/\.worktrees\/\$\{CYCLE_ID\}"/,
+    );
+  });
+
+  test("Step 0.6 no longer runs an UNCONDITIONAL per-worktree npm install (issue #4177)", () => {
+    // Step 0.6 used to `npm ci` into $TARGET_WT/$APP_SUBDIR on EVERY worktree
+    // creation, before the relocation — the RAM-hungry alternative the issue
+    // explicitly rejected. With the worktree nested under web/, node_modules
+    // resolves via the ancestor walk instead, so Step 0.6 itself must not
+    // install anything: the install line (below) may still exist, but ONLY
+    // inside the Step 6 conditional (see next test).
+    const step06 = playbook.slice(playbook.indexOf("### 0.6."), playbook.indexOf("### 0.5."));
+    assert.doesNotMatch(
+      step06,
+      /eval "\$INSTALL_CMD --no-audit --no-fund"/,
+      "Step 0.6 must not unconditionally install — node_modules resolves by ancestor walk",
+    );
+  });
+
+  test("Step 6 installs LOCALLY, but only when the diff touches package.json/package-lock.json (issue #4177)", () => {
+    // A Target PR that adds/bumps a dependency needs it installed somewhere
+    // verify can find it — but the worktree must never write into the shared
+    // ancestor node_modules. The fix is a JIT local install gated on whether
+    // package.json/package-lock.json actually changed, not an unconditional
+    // per-worktree install.
+    assert.match(
+      playbook,
+      /if ! git diff --quiet origin\/main -- package\.json package-lock\.json; then/,
+      "the local install must be gated on a package.json/package-lock.json diff check",
+    );
+    assert.match(
+      playbook,
+      /eval "\$INSTALL_CMD --no-audit --no-fund"/,
+      "the gated branch must still run the manifest-declared install command",
     );
   });
 
@@ -96,8 +133,9 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
 
   test("removes the worktree on success", () => {
     // Leaking on crash is acceptable (branch-prune.sh will GC it), but on the
-    // happy path we should clean up so /dev/shm doesn't fill with stale dirs.
-    // The remove invocation is KEPT VERBATIM; the heading is not pinned.
+    // happy path we should clean up so ~/hydra-betting/web/.worktrees/ doesn't
+    // fill with stale dirs. The remove invocation is KEPT VERBATIM; the
+    // heading is not pinned.
     assert.match(playbook, /git -C ~\/hydra-betting worktree remove --force "\$TARGET_WT"/);
   });
 });

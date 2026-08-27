@@ -85,6 +85,10 @@ WORKTREE_ROOTS=(
   "/home/gabe/hydra/.claude/worktrees/"
   "/dev/shm/hydra-worktrees/"
   "/home/gabe/hydra-worktrees/"
+  # hydra-betting (Target) worktrees, relocated off /dev/shm in issue #4177 to
+  # eliminate the reach-back node_modules symlink hazard (#4175) — nested
+  # under web/ so node_modules resolves by Node's upward walk instead.
+  "/home/gabe/hydra-betting/web/.worktrees/"
 )
 
 is_worktree_cwd=0

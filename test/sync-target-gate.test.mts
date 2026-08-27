@@ -78,13 +78,19 @@ const FAKE_MANIFEST = {
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SYNC_SCRIPT = join(REPO_ROOT, "scripts", "sync-target-gate.sh");
 
-// The fake worktree's web/node_modules is symlinked to the REAL node_modules
-// dir that actually contains `zod` (imported by the manifest schema, newly in
-// the closure) so it resolves hermetically — no dependency on a hydra-betting
-// checkout. In a git worktree the repo's own `node_modules/` may not exist as a
-// real dir (deps resolve via Node's upward walk to an ancestor), so we resolve
-// zod's ACTUAL location rather than assuming `REPO_ROOT/node_modules`. zod is an
-// orchestrator runtime dep (ADR-0005), so it is always resolvable.
+// The fake worktree is nested inside a fake `web/` dir the same way #4177
+// nests the real hydra-betting worktree under `web/.worktrees/<name>` — so
+// `web/node_modules` sits on the Node ancestor-walk path from
+// `<wt>/.hydra-gate/src/schemas/target-manifest.ts` and `zod` (imported by
+// that manifest schema, newly in the closure) resolves with NO symlink inside
+// the mirror itself (sync-target-gate.sh stopped creating one in #4177 — the
+// nesting alone is now sufficient). `web/node_modules` is symlinked to the
+// REAL node_modules dir that actually contains `zod`, hermetically — no
+// dependency on a hydra-betting checkout. In a git worktree the repo's own
+// `node_modules/` may not exist as a real dir (deps resolve via Node's upward
+// walk to an ancestor), so we resolve zod's ACTUAL location rather than
+// assuming `REPO_ROOT/node_modules`. zod is an orchestrator runtime dep
+// (ADR-0005), so it is always resolvable.
 const ORCH_NODE_MODULES = (() => {
   const require = createRequire(import.meta.url);
   let dir = dirname(require.resolve("zod"));
@@ -129,23 +135,29 @@ function makeFakeWorktree(): { wt: string; cleanup: () => void } {
   writeFileSync(join(repo, "seed"), "x");
   run("add", "seed");
   assert.equal(run("commit", "-q", "-m", "init").status, 0, "seed commit failed");
-  const wt = `${repo}-wt`;
+  // Provide `web/node_modules` on the fake repo BEFORE creating the worktree
+  // (issue #4177): it is an untracked, ancestor-shared dir — exactly like the
+  // real `~/hydra-betting/web/node_modules` — symlinked to the orchestrator's
+  // own node_modules so `zod` resolves hermetically. Not part of the git
+  // history (a real worktree add wouldn't need it to be either).
+  mkdirSync(join(repo, "web"), { recursive: true });
+  try {
+    symlinkSync(ORCH_NODE_MODULES, join(repo, "web", "node_modules"), "dir");
+  } catch (err) {
+    // intentional: a pre-existing symlink (idempotent re-setup) is fine.
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  // Nest the worktree under `web/.worktrees/<name>` (issue #4177) — NOT a
+  // sibling `<repo>-wt` dir — so it sits on the SAME ancestor-walk path as
+  // the real hydra-betting layout and `web/node_modules` above resolves with
+  // no symlink inside the worktree or the gate mirror.
+  const wt = join(repo, "web", ".worktrees", "feat");
   const add = run("worktree", "add", "-q", "-b", "feat", wt);
   assert.equal(add.status, 0, `worktree add failed: ${add.stderr}`);
   // Ship a realistic Target Manifest (issue #3018): the synced gate scripts read
   // the risk surface from <wt>/.hydra/manifest.json.
   mkdirSync(join(wt, ".hydra"), { recursive: true });
   writeFileSync(join(wt, ".hydra", "manifest.json"), JSON.stringify(FAKE_MANIFEST), "utf-8");
-  // Provide web/node_modules (the appSubdir the manifest declares) so the mirror
-  // can symlink it and `zod` resolves for the manifest schema. Symlink to the
-  // orchestrator's own node_modules — hermetic, no betting checkout needed.
-  mkdirSync(join(wt, "web"), { recursive: true });
-  try {
-    symlinkSync(ORCH_NODE_MODULES, join(wt, "web", "node_modules"), "dir");
-  } catch (err) {
-    // intentional: a pre-existing symlink (idempotent re-setup) is fine.
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
   return {
     wt,
     cleanup: () => {
