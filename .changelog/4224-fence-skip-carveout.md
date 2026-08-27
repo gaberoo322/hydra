@@ -1,0 +1,1 @@
+- docs: hydra-target-build fenced handoff names its skipped steps (7.5, 8, 8.6) explicitly — Step 8.5 worktree cleanup stays (#4224)
