@@ -3977,3 +3977,414 @@ describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// orch-realm weekly share cap (issue #4161)
+// ---------------------------------------------------------------------------
+//
+// Every USD-denominated cost gate in decide.py (scout_cost_cap_exceeded,
+// dev_target_cost_cap_exceeded) is structurally inert on this deployment:
+// HYDRA_TOKEN_USD_RATE was never set post-ADR-0006 (src/scheduler/heartbeat.ts
+// records the conversion as permanently $0), so the spend numerators
+// (scout_spend_usd_today / dev_target_spend_usd_cycle) are structurally zero
+// against ANY cap — the gates are decorative. There was also no per-realm
+// (orch-vs-target) budget split at all, while the operator wants a standing
+// guard expressing "no more than N% of weekly usage goes to orchestrator
+// self-work" so reverting limits.scope=all can never silently re-concentrate
+// spend on one realm.
+//
+// The signal-seam split (grilled seam correction, 2026-08-19):
+//   - collect-state.sh (the ENUMERATION seam) fetches /api/usage
+//     bySkillByModel — the rolling-7d per-skill cross-tab, NOT costByClass
+//     (which covers only ~13% of measured spend) — maps each skill to a realm
+//     via the scope column in scripts/autopilot/classes.json, and folds the
+//     per-realm totals into the single pre-qualified signal
+//     `orch_realm_weekly_share=<fraction>`.
+//   - decide.py (the POLICY seam) reads that signal verbatim and stays a pure
+//     function of (state, events, now) — no network, no FS, no Redis (AC2,
+//     the pinned purity contract).
+//
+// This suite is the decide.py half. Contract points it pins:
+//  - DEFAULT DISABLED: no limits.orch_realm_share_cap (or 0/unparseable/>1)
+//    → no-op, byte-identical dispatch behaviour (AC4, ADR-0021 D5: a per-run
+//    limit must never become a second governor switched on behind the
+//    operator's back)
+//  - fail-open on a missing/unparseable signal: an unreadable meter never
+//    suppresses dispatch (AC1's degrade contract, the ADR-0032 #3753 direction)
+//  - orch realm over share → EVERY orch-scope class (pipeline + signal)
+//    suppressed with a budget-outcome dispatch_decision + a debug skip record
+//  - ONE-DIRECTIONAL: target-realm classes are never suppressed by this gate
+//    (AC5) — there is no target share knob
+//  - scope-agnostic classes (taxonomy scope "both" — health) stay live: the
+//    health probe must keep flowing while orch dispatch is throttled
+//  - boundary: share == max counts as exceeded (>=, mirroring scout/dev_target)
+//
+// New TOP-LEVEL describe with its own lifecycle (decide.py is a pure CLI over
+// temp files — nothing to tear down — but kept top-level per the CLAUDE.md
+// authoring rule).
+// ---------------------------------------------------------------------------
+describe("decide.py — orch-realm weekly share cap (issue #4161)", () => {
+  function realmState(o: {
+    shareMax?: number | string;
+    share?: number | string;
+    signals?: Record<string, unknown>;
+    scope?: string;
+    signalLastFired?: Record<string, number>;
+  } = {}): any {
+    const s = baseState({
+      scope: o.scope,
+      signals: o.signals ?? { orch_work_available: true },
+      signal_last_fired: o.signalLastFired as any,
+    });
+    if (o.shareMax !== undefined) s.limits.orch_realm_share_cap = o.shareMax;
+    if (o.share !== undefined) s.orch_realm_weekly_share = o.share;
+    return s;
+  }
+
+  const devOrchDispatch = (a: any) => a.type === "dispatch" && a.slot === "dev_orch";
+
+  test("defaults to disabled — no limits key, over-share signal present, dev_orch still dispatches", () => {
+    // AC4: the share is operator-configurable and defaults to disabled. A
+    // 0.95 orch share with NO orch_realm_share_cap in limits must be a no-op.
+    const plan = runDecide(realmState({ share: 0.95 }), null);
+    assert.ok(
+      findAction(plan, devOrchDispatch),
+      "no configured max → the guard is a no-op and dev_orch dispatches",
+    );
+    assert.equal(plan.debug?.orch_realm_share_skipped, undefined,
+      "a disabled guard must not record a skip");
+  });
+
+  test("an explicit orch_realm_share_cap of 0 is disabled (documented default, NOT a kill-switch)", () => {
+    // Deliberate difference from the scout gate's share==0 kill-switch: this
+    // gate's 0 means "off" (AC4), never "suppress everything".
+    const plan = runDecide(realmState({ shareMax: 0, share: 0.95 }), null);
+    assert.ok(
+      findAction(plan, devOrchDispatch),
+      "share_max of 0 disables the guard — dispatch proceeds",
+    );
+  });
+
+  test("unparseable / negative / >1 max share degrades to disabled (fail-open)", () => {
+    for (const bad of ["not-a-number", -0.5, 1.5]) {
+      const plan = runDecide(realmState({ shareMax: bad as any, share: 0.95 }), null);
+      assert.ok(
+        findAction(plan, devOrchDispatch),
+        `invalid max share ${JSON.stringify(bad)} must disable the guard, not arm it`,
+      );
+    }
+  });
+
+  test("absent signal (collect-state down / no reading this turn) leaves the guard disabled", () => {
+    // AC1's degrade contract: an unreadable meter must never suppress
+    // dispatch. Absent key → no reading → disabled even with a live max.
+    const plan = runDecide(realmState({ shareMax: 0.5 }), null);
+    assert.ok(
+      findAction(plan, devOrchDispatch),
+      "no orch_realm_weekly_share reading → guard disabled → dev_orch dispatches",
+    );
+  });
+
+  test("unparseable / out-of-range share signal degrades to disabled (fail-open)", () => {
+    for (const bad of ["garbage", -0.1, 1.4]) {
+      const plan = runDecide(realmState({ shareMax: 0.5, share: bad as any }), null);
+      assert.ok(
+        findAction(plan, devOrchDispatch),
+        `invalid share reading ${JSON.stringify(bad)} must be treated as no reading (disabled)`,
+      );
+    }
+  });
+
+  test("orch realm over share suppresses dev_orch and records the skip in plan.debug", () => {
+    // AC3: suppresses orch-scope dispatch when the orch realm exceeds its
+    // configured share of the rolling weekly window.
+    const plan = runDecide(realmState({ shareMax: 0.5, share: 0.87 }), null);
+    assert.equal(
+      findAction(plan, devOrchDispatch),
+      undefined,
+      "orch share 0.87 over the 0.5 max must suppress dev_orch",
+    );
+    assert.ok(plan.debug?.orch_realm_share_skipped,
+      "plan.debug should record the share-cap skip for operator audit");
+    assert.equal(plan.debug.orch_realm_share_skipped.share, 0.87);
+    assert.equal(plan.debug.orch_realm_share_skipped.cap_share, 0.5);
+  });
+
+  test("the suppression carries a budget-outcome dispatch_decision naming the cap", () => {
+    const plan = runDecide(realmState({ shareMax: 0.5, share: 0.87 }), null);
+    const events = (plan.events ?? []).filter(
+      (e: any) => e.event === "dispatch_decision" && e.class === "dev_orch",
+    );
+    assert.ok(
+      events.some((e: any) => e.outcome === "budget" && /orch realm/.test(e.reason ?? "")),
+      "the suppressed dev_orch must record a budget-outcome decision naming the realm cap",
+    );
+  });
+
+  test("one-directional: target-realm classes keep dispatching while orch is suppressed (AC5)", () => {
+    const state = realmState({
+      shareMax: 0.5,
+      share: 0.87,
+      signals: { orch_work_available: true, target_work_available: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, devOrchDispatch),
+      undefined,
+      "orch over share → dev_orch suppressed",
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "dev_target must NOT be suppressed — the guard is one-directional by design",
+    );
+  });
+
+  test("boundary: share exactly at the max counts as exceeded (>=)", () => {
+    const plan = runDecide(realmState({ shareMax: 0.5, share: 0.5 }), null);
+    assert.equal(
+      findAction(plan, devOrchDispatch),
+      undefined,
+      "share == max must suppress (>= comparison, mirroring scout/dev_target caps)",
+    );
+  });
+
+  test("a share just under the max does not suppress", () => {
+    const plan = runDecide(realmState({ shareMax: 0.5, share: 0.4999 }), null);
+    assert.ok(
+      findAction(plan, devOrchDispatch),
+      "share 0.4999 under the 0.5 max → dispatch proceeds",
+    );
+  });
+
+  test("scope-agnostic classes (taxonomy scope both — health) are NOT suppressed", () => {
+    // health is the only scope=both class; the meter must keep flowing while
+    // orch dispatch is throttled, mirroring its scope-mask exemption.
+    const state = realmState({
+      shareMax: 0.5,
+      share: 0.87,
+      signals: { health_fail: true },
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "health"),
+      "health (scope=both) must stay dispatchable while orch is over share",
+    );
+  });
+
+  test("signal classes are suppressed too (sweep_orch — an orch-scope signal class)", () => {
+    const state = realmState({
+      shareMax: 0.5,
+      share: 0.87,
+      signals: { needs_triage_orch: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "sweep_orch"),
+      undefined,
+      "orch over share must also suppress orch-scope SIGNAL classes, not just pipeline slots",
+    );
+  });
+
+  test("target-realm SIGNAL classes stay live under an over-share orch reading", () => {
+    const state = realmState({
+      shareMax: 0.5,
+      share: 0.87,
+      signals: { needs_triage_target: true, target_needs_triage_items: "626" },
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "sweep_target"),
+      "sweep_target (target realm) must be unaffected by the orch share cap",
+    );
+  });
+
+  test("string-typed readings merge cleanly (the playbook may merge the value as a string)", () => {
+    // collect-state emits `orch_realm_weekly_share=0.87`; the model-mediated
+    // merge can land it as "0.87" (string) or 0.87 (number). Both must work.
+    const plan = runDecide(realmState({ shareMax: "0.5", share: "0.87" }), null);
+    assert.equal(
+      findAction(plan, devOrchDispatch),
+      undefined,
+      "string-typed max/share must behave identically to numeric",
+    );
+  });
+
+  test("the gate block performs no gh/curl/GraphQL/Redis/FS IO (design-concept INV-1 purity pin)", () => {
+    // Source-shape pin (the #4042 source-pinning precedent): slice decide.py
+    // from the gate's constants through the end of orch_realm_share_exceeded
+    // (the region ends where _check_termination starts) and assert it
+    // contains no IO seam. decide.py's sanctioned IO lives ONLY in the
+    // CLI/main() helpers (_smoke, _xadd_observability_events,
+    // _post_run_end_for_terminate) and the import-time taxonomy load — the
+    // decide() path must stay a pure function of (state, events, now), the
+    // boundary this invariant pins. The two rule-loop call sites only CALL
+    // the predicate, so they add no IO by construction.
+    const py = readFileSync(DECIDE, "utf-8");
+    const start = py.indexOf("ORCH_REALM_SHARE_DISABLED = 0.0");
+    const end = py.indexOf("def _check_termination(", start);
+    assert.ok(start >= 0 && end > start, "gate region not found in decide.py");
+    const region = py.slice(start, end);
+    for (const seam of ["urllib", "subprocess", "requests", "socket", "redis", "open("]) {
+      assert.ok(
+        !region.includes(seam),
+        `the orch-realm gate region must not touch the ${seam} IO seam (purity)`,
+      );
+    }
+    // And the predicate reads its inputs verbatim from the state dict.
+    assert.ok(region.includes('limits.get("orch_realm_share_cap")'),
+      "the knob read must be state.limits.orch_realm_share_cap");
+    assert.ok(region.includes('state.get("orch_realm_weekly_share")'),
+      "the signal read must be state.orch_realm_weekly_share");
+    // The suppression set derives from the taxonomy scope column, not a fork.
+    assert.ok(py.includes('r["scope"] == "orch"'),
+      "ORCH_REALM_CLASSES must derive from the classes.json scope column");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — orch-realm weekly share fold (issue #4161)
+// ---------------------------------------------------------------------------
+//
+// The ENUMERATION half of the seam: collect-state.sh fetches /api/usage
+// bySkillByModel (the rolling-7d per-skill cross-tab — NOT costByClass, which
+// covers only ~13% of measured spend and cannot back a per-realm ratio), maps
+// each skill to orch/target via the scope column of
+// scripts/autopilot/classes.json, and emits the folded shares:
+//
+//   orch_realm_weekly_points=<int>
+//   target_realm_weekly_points=<int>
+//   orch_realm_weekly_share=<fraction>
+//
+// The share is orch/(orch+target) over DISPATCH-CLASS-mapped skills only —
+// unmapped rows (interactive, the hydra-autopilot parent session, one-off
+// skills like hydra-review) are excluded from BOTH numerator and denominator,
+// and scope=both classes (health) are excluded likewise: the ratio answers
+// "of the dispatch-skill spend, how much went to the orch realm", so a busy
+// operator session can never dilute the ratio and mask orch concentration.
+//
+// These cases run the COMMITTED python reducer through real python3 (extracted
+// verbatim from the script, the #3353/#4042 precedent), NOT a TypeScript
+// re-derivation. Fail-open degrade contract (AC1): an unreadable/empty meter
+// emits NO numeric share, so decide.py sees no reading and the guard stays
+// disabled — never fabricated certainty (#4128).
+// ---------------------------------------------------------------------------
+describe("collect-state.sh — orch-realm weekly share fold (issue #4161)", () => {
+  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
+  const CLASSES_JSON = join(SCRIPTS, "classes.json");
+  const src = readFileSync(COLLECT_STATE, "utf-8");
+
+  /** Extract the committed realm-fold python reducer verbatim from the
+   *  script (anchored on the block's marker comment so it can never grab an
+   *  unrelated heredoc). Fails loud if the anchor moves. */
+  function extractRealmFoldPython(): string {
+    const ANCHOR = "orch-realm weekly share fold (issue #4161)";
+    const anchor = src.indexOf(ANCHOR);
+    assert.ok(anchor >= 0, "realm-fold block missing from collect-state.sh");
+    const open = src.indexOf("<<'PY'", anchor);
+    assert.ok(open >= 0, "realm-fold python heredoc missing after its marker");
+    const bodyStart = src.indexOf("\n", open) + 1;
+    const bodyEnd = src.indexOf("\nPY\n", bodyStart);
+    assert.ok(bodyEnd >= 0, "realm-fold heredoc is never closed");
+    return src.slice(bodyStart, bodyEnd);
+  }
+
+  /** Run the committed reducer over a synthetic /api/usage payload. */
+  function fold(payload: unknown): string {
+    const r = spawnSync(
+      "python3",
+      ["-c", extractRealmFoldPython(), CLASSES_JSON],
+      { input: JSON.stringify(payload), encoding: "utf-8" },
+    );
+    assert.equal(r.status, 0, `reducer exited ${r.status}: ${r.stderr}`);
+    return r.stdout;
+  }
+
+  /** The rolling-7d cross-tab shape: skill -> model -> {total}. */
+  function usage(skills: Record<string, number>): unknown {
+    return {
+      bySkillByModel: Object.fromEntries(
+        Object.entries(skills).map(([skill, total]) => [
+          skill,
+          { sonnet: { total }, opus: { total: 0 } },
+        ]),
+      ),
+    };
+  }
+
+  function shareValue(out: string): string {
+    const m = /^orch_realm_weekly_share=(.*)$/m.exec(out);
+    assert.ok(m, "reducer must emit an orch_realm_weekly_share line");
+    return m![1];
+  }
+
+  test("folds a mixed board: share = orch / (orch + target)", () => {
+    const out = fold(usage({
+      "hydra-dev": 300,        // dev_orch — orch
+      "hydra-qa": 100,         // qa_orch — orch
+      "hydra-target-build": 400, // dev_target — target
+      "hydra-autopilot": 500,  // unmapped — excluded from both
+      "interactive": 200,      // unmapped — excluded from both
+    }));
+    assert.match(out, /^orch_realm_weekly_points=400$/m);
+    assert.match(out, /^target_realm_weekly_points=400$/m);
+    // 400 / (400 + 400) — the unmapped 700 never enters the ratio.
+    assert.equal(shareValue(out), "0.500000");
+  });
+
+  test("target-heavy and orch-heavy boards fold to the right fractions", () => {
+    assert.equal(shareValue(fold(usage({ "hydra-dev": 100, "hydra-target-build": 300 }))), "0.250000");
+    assert.equal(shareValue(fold(usage({ "hydra-dev": 900, "hydra-target-build": 100 }))), "0.900000");
+  });
+
+  test("unmapped skills alone yield an empty share (no fabricated 0.0 — #4128)", () => {
+    const out = fold(usage({ "hydra-autopilot": 500, "interactive": 200, "hydra-review": 50 }));
+    assert.equal(shareValue(out), "",
+      "a meter with no dispatch-class rows must emit an EMPTY share, not a fabricated 0.0");
+  });
+
+  test("scope=both classes (health / hydra-doctor) are excluded from both realms", () => {
+    const out = fold(usage({ "hydra-doctor": 999, "hydra-dev": 100 }));
+    assert.match(out, /^orch_realm_weekly_points=100$/m);
+    assert.match(out, /^target_realm_weekly_points=0$/m);
+    assert.equal(shareValue(out), "1.000000");
+  });
+
+  test("empty bySkillByModel emits an empty share (explicit no-reading degrade)", () => {
+    assert.equal(shareValue(fold({ bySkillByModel: {} })), "");
+  });
+
+  test("missing bySkillByModel key emits no numeric share", () => {
+    assert.equal(shareValue(fold({ tokensLast7d: 42 })), "");
+  });
+
+  test("unparseable usage JSON emits NO share line at all (collector-down degrade)", () => {
+    const r = spawnSync(
+      "python3",
+      ["-c", extractRealmFoldPython(), CLASSES_JSON],
+      { input: "not json at all", encoding: "utf-8" },
+    );
+    // The reducer swallows the parse error and prints nothing — an absent
+    // key in state, which decide.py treats as no reading (guard disabled).
+    assert.equal(r.status, 0, `reducer must not exit non-zero on garbage input: ${r.stderr}`);
+    assert.equal(r.stdout, "");
+  });
+
+  test("the reducer is anchored next to the /api/usage fetch it folds (seam stays wired)", () => {
+    // Source-shape pin (the #4042 source-pinning precedent): the fold must
+    // consume `hydra raw GET /usage` — the bySkillByModel surface — not some
+    // other endpoint, and must pass classes.json as argv so the realm map
+    // rides the taxonomy file rather than a forked copy. The window spans the
+    // anchor through just past the heredoc close, so it covers the fetch, the
+    // reducer body, AND the invocation line that trails the heredoc.
+    const ANCHOR = "orch-realm weekly share fold (issue #4161)";
+    const anchor = src.indexOf(ANCHOR);
+    assert.ok(anchor >= 0, "realm-fold block missing from collect-state.sh");
+    const close = src.indexOf("\nPY\n", anchor);
+    assert.ok(close >= 0, "realm-fold heredoc is never closed");
+    const window = src.slice(anchor, close + 200);
+    assert.ok(/hydra raw GET \/usage/.test(window),
+      "the fold must be wired to the /api/usage fetch (bySkillByModel surface)");
+    assert.ok(window.includes('"$CLASSES_JSON"'),
+      "classes.json must reach the reducer as argv (no forked realm map)");
+  });
+});

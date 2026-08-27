@@ -1,0 +1,1 @@
+- feat: add a default-disabled orch-vs-target weekly budget-share guard to the autopilot — collect-state.sh folds /api/usage bySkillByModel into an orch_realm_weekly_share signal and decide.py suppresses orch-scope dispatch past an operator-set share cap (#4161)

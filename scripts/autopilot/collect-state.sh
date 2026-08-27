@@ -1643,6 +1643,94 @@ PY
 echo -n "usage_eligibility_json="
 hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
 
+# orch-realm weekly share fold (issue #4161) — the ENUMERATION half of the
+# per-realm budget split. decide.py's orch-realm share cap
+# (orch_realm_share_exceeded) suppresses orch-scope dispatch when the orch
+# realm exceeds its configured share of the rolling weekly window; this
+# collector is where that share is measured, keeping decide.py a pure
+# function of (state, events, now) — the signal-seam discipline.
+#
+# Source surface: /api/usage bySkillByModel, the rolling-7d per-skill
+# cross-tab — deliberately NOT costByClass, which covers only ~13% of
+# measured spend and cannot back a per-realm ratio (a split computed from it
+# would be wrong by construction). Each skill is mapped to a realm via the
+# scope column of scripts/autopilot/classes.json (sibling of this script, so
+# the realm map can never drift from the taxonomy decide.py derives
+# ORCH_REALM_CLASSES from). Emits the folded pre-qualified signal:
+#
+#   orch_realm_weekly_points=<int>     orch-attributed token total (7d)
+#   target_realm_weekly_points=<int>   target-attributed token total (7d)
+#   orch_realm_weekly_share=<fraction> orch / (orch + target)
+#
+# The ratio is over DISPATCH-CLASS-mapped skills only: unmapped rows (the
+# hydra-autopilot parent session, interactive operator turns, one-off skills
+# like hydra-review) are excluded from BOTH numerator and denominator, and
+# so are scope=both classes (health) — the share answers "of the
+# dispatch-skill spend, how much went to the orch realm", so unmapped spend
+# can never dilute the ratio and mask orch concentration. Raw token counts
+# make the ratio dimensionless; model mix is an accepted approximation (the
+# surface is token-denominated).
+#
+# BEST-EFFORT, FAIL-OPEN (the issue #4161 AC1 contract, the same direction
+# ADR-0032 #3753 chose for the drainer heartbeat and the opposite of the
+# fabricated-certainty failure #4128 documents): an unreadable meter (API
+# down, unparseable JSON, unreadable taxonomy) emits NO share line at all,
+# and an empty cross-tab emits the EMPTY share — both leave the key absent
+# or unparseable in state, which decide.py treats as "no reading this turn"
+# and keeps the guard DISABLED. An unreadable meter must never suppress
+# dispatch, and must never fabricate a 0.0 reading either.
+CLASSES_JSON="$(dirname "${BASH_SOURCE[0]}")/classes.json"
+USAGE_JSON=$(hydra raw GET /usage 2>/dev/null || true)
+printf '%s' "$USAGE_JSON" | python3 -c "$(cat <<'PY'
+import json, sys
+
+try:
+    usage = json.load(sys.stdin)
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        classes = json.load(fh)
+except Exception:
+    # Unreadable meter or taxonomy: emit nothing. An absent key in state is
+    # the no-reading degrade decide.py fail-opens on.
+    sys.exit(0)
+
+realm_of_skill = {}
+for row in classes.get("classes", []):
+    skill, scope = row.get("skill"), row.get("scope")
+    if scope not in ("orch", "target"):
+        continue
+    prev = realm_of_skill.get(skill)
+    # A skill mapping to conflicting realms (orch AND target class rows)
+    # is attributed to neither: the fold stays deterministic.
+    realm_of_skill[skill] = scope if prev in (None, scope) else "conflict"
+
+orch = 0
+target = 0
+for skill, models in (usage.get("bySkillByModel") or {}).items():
+    if realm_of_skill.get(skill) not in ("orch", "target"):
+        continue
+    total = 0
+    for m in (models or {}).values():
+        try:
+            total += int(m.get("total") or 0)
+        except (TypeError, ValueError):
+            pass
+    if realm_of_skill[skill] == "orch":
+        orch += total
+    else:
+        target += total
+
+if orch + target <= 0:
+    # Nothing dispatch-attributed to fold: the explicit EMPTY share, the
+    # same degrade shape as scout_last_walk_iso= (collector ran, meter
+    # empty) — never a fabricated 0.0.
+    print("orch_realm_weekly_share=")
+else:
+    print(f"orch_realm_weekly_points={orch}")
+    print(f"target_realm_weekly_points={target}")
+    print(f"orch_realm_weekly_share={orch / (orch + target):.6f}")
+PY
+)" "$CLASSES_JSON" || true
+
 # Emergency brake — issue #744 (operator-only).
 #
 # `GET /api/autopilot/emergency-brake` (src/api/autopilot.ts) returns the
