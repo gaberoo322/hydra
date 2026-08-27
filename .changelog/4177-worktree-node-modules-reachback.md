@@ -1,0 +1,1 @@
+- fix: hydra-target-build worktrees relocate off `/dev/shm` to nest under `~/hydra-betting/web/.worktrees/`, eliminating the reach-back node_modules symlink hazard that caused the 2026-08-19 outage (#4177)
