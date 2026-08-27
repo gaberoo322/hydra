@@ -1,0 +1,1 @@
+- feat: autopilot gains a live orch-vs-target weekly budget-share guard (orch_realm_weekly_share signal + orch_realm_max_share knob, default disabled); the structurally inert USD cost gates are now documented as such (#4161)
