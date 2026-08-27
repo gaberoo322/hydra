@@ -166,10 +166,15 @@ PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MER
   - **Do NOT delete the remote branch** — deleting it closes the PR and
     discards the operator's review target. Local worktree cleanup (Step 8.5)
     is safe and should still run.
-  - **Skip Steps 7.5–8.6 and the merged-PR bookkeeping** (no deploy, no
-    post-merge verify, no `merged:true` / done-move): nothing has landed on
-    main, so there is nothing to deploy, verify, or mark shipped. The merge
-    and everything after it belong to whoever merges.
+  - **Skip Steps 7.5, 8, and 8.6 — NOT Step 8.5** (no deploy, no post-merge
+    verify, no `merged:true` / done-move): nothing has landed on main, so
+    there is nothing to deploy, verify, or mark shipped. The merge and
+    everything after it belong to whoever merges. The skip list names its
+    steps individually on purpose (#4230 QA review): a "7.5–8.6" range
+    numerically swallows Step 8.5 and contradicts the carve-out in the
+    bullet above. Step 8.5 still runs — on an unmerged fenced branch its
+    local `git branch -d` simply refuses (branch not merged), which that
+    step's own `|| echo warn` already absorbs.
 
 - **PR is NOT merged (not fenced)** → attempt the explicit merge yourself
   (poll-to-green then merge). **Record friction
