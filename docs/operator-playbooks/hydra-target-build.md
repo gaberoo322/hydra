@@ -616,7 +616,7 @@ failure mode.
 
 ### 7–10. Merge, deploy, verify, state sync, and report
 
-> **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY on both direct-to-main AND auto-merge/PR paths), merge lock, direct-to-main git merge, auto-merge/PR path (already-merged-post-green is SUCCESS not friction; and the operator-review fence — an anchor issue labelled `money-critical` or `hold-for-operator` is NEVER merged by the build, green-but-unmerged is a handoff, see gaberoo322/hydra#4224), deploy + post-deploy health, post-merge verify (auto-rollback on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
+> **CONTEXT POINTER:** when you reach the merge phase, read `hydra-target-build-merge-flow.md` (sibling of this SKILL.md). It covers: pre-merge health baseline snapshot (MANDATORY on both direct-to-main AND auto-merge/PR paths), merge lock, direct-to-main git merge, auto-merge/PR path (already-merged-post-green is SUCCESS not friction; and the operator-review fence — an anchor issue labelled `money-critical` or `hold-for-operator` is NEVER merged by the build, the label lookup fails closed so a failed lookup counts as fenced, green-but-unmerged is a handoff, see gaberoo322/hydra#4224), deploy + post-deploy health, post-merge verify (auto-rollback on regression), operational-health smoke check (alarm-only), worktree cleanup, state sync, friction report, and the summary table.
 
 ### Step 8.5. Worktree cleanup (on success)
 

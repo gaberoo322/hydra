@@ -139,22 +139,42 @@ PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MER
     as one. Wait for CI to conclude before classifying the outcome.
 
 - **PR is NOT merged, and the anchor issue is fenced** (its labels include
-  `money-critical` or `hold-for-operator`) → **STOP: the merge is the
-  operator's** (gaberoo322/hydra#4224). The emulated automerge deliberately
-  skips fenced PRs — its run log + step summary say "fenced for operator
-  review" — so green-but-unmerged here is the fence working, not merge
-  friction. Detect the fence at the source (the linked issue's labels), never
-  by scraping workflow logs:
+  `money-critical` or `hold-for-operator`, **or the label lookup itself
+  failed**) → **STOP: the merge is the operator's** (gaberoo322/hydra#4224).
+  The emulated automerge deliberately skips fenced PRs — its run log + step
+  summary say "fenced for operator review" — so green-but-unmerged here is the
+  fence working, not merge friction. Detect the fence at the source (the
+  linked issue's labels), never by scraping workflow logs. **Fail closed (the
+  #4230 QA remediation): a failed `gh issue view` — transient API error, rate
+  limit, auth expiry — is indistinguishable from a confirmed "not fenced", so
+  it counts as FENCED.** Only a successful label read with no fencing label
+  releases the explicit merge. A non-board anchor (empty `$ANCHOR_NUM`:
+  failing-test / priorities-doc picks) has no issue to fence on and proceeds
+  unfenced:
 
   ```bash
-  FENCED=$(gh issue view "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
-    --json labels --jq '.labels[].name' 2>/dev/null \
-    | grep -xE 'money-critical|hold-for-operator' || true)
+  # Fence lookup — FAIL CLOSED: branch on gh's exit code, never on empty
+  # output. An empty ANCHOR_LABELS from a SUCCESSFUL read means "confirmed
+  # no fencing label"; a FAILED read means "could not confirm" = fenced.
+  FENCE_LOOKUP="ok"
+  FENCED=""
+  if [ -n "${ANCHOR_NUM:-}" ]; then
+    if ! ANCHOR_LABELS=$(gh issue view "$ANCHOR_NUM" --repo gaberoo322/hydra-betting \
+          --json labels --jq '.labels[].name' 2>/dev/null); then
+      FENCE_LOOKUP="failed"
+    else
+      FENCED=$(printf '%s\n' "$ANCHOR_LABELS" \
+        | grep -xE 'money-critical|hold-for-operator' || true)
+    fi
+  fi
+  # Fenced means: $FENCED non-empty (a matching label) OR
+  # $FENCE_LOOKUP == "failed" (could not confirm — treat as fenced).
   ```
 
-  When non-empty, the build's terminal state is **green PR open, fenced for
-  operator review** — report the PR number and the fencing label as the final
-  answer and stop. Specifically:
+  When non-empty — or when the lookup failed — the build's terminal state is
+  **green PR open, fenced for operator review** — report the PR number and the
+  fencing label (or the lookup failure) as the final answer and stop.
+  Specifically:
   - **NEVER merge it yourself, retry the merge, or re-run the workflow.** An
     explicit `gh pr merge` here is exactly the unreviewed merge the fence
     exists to prevent (PR #1026, money-critical, was squash-merged ~2 minutes
@@ -171,14 +191,15 @@ PR_MERGED=$(printf '%s' "$PR_STATE" | jq -r '.state // ""' 2>/dev/null)   # "MER
     main, so there is nothing to deploy, verify, or mark shipped. The merge
     and everything after it belong to whoever merges.
 
-- **PR is NOT merged (not fenced)** → attempt the explicit merge yourself
-  (poll-to-green then merge). **Record friction
-  (`betting-emulated-automerge-lands-before-explicit-merge` or the genuine
-  merge-failure cue) ONLY if that explicit merge actually fails.** This is the
-  only branch that records the cue — the genuine merge-failure signal is
-  preserved; suppression is narrowly the already-merged-post-green case,
-  nothing wider. A fenced skip is not friction either — it is the fence
-  working as designed; do not record a cue for it.
+- **PR is NOT merged, and the fence lookup SUCCEEDED with no fencing label**
+  → attempt the explicit merge yourself (poll-to-green then merge). **Record
+  friction (`betting-emulated-automerge-lands-before-explicit-merge` or the
+  genuine merge-failure cue) ONLY if that explicit merge actually fails.**
+  This is the only branch that records the cue — the genuine merge-failure
+  signal is preserved; suppression is narrowly the already-merged-post-green
+  case, nothing wider. A fenced skip — label match or lookup failure — is not
+  friction either — it is the fence working as designed; do not record a cue
+  for it.
 
 ### 7.5. Deploy + post-deploy health
 
