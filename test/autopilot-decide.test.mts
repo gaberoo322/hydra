@@ -2254,6 +2254,128 @@ describe("decide.py — cleanup_orch signal class (issue #960)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7b. retro_orch signal class (issue #3871, correcting the original #920
+// design per the 2026-08-19 operator grill).
+//
+// `retro_run_available` alone used to be sufficient to dispatch /hydra-retro
+// once a day. The observed 2026-08-05 run (2bcba309) showed that answer is
+// too coarse: a COMPLETED run existing does not mean it has anything to
+// analyse, and the agent burned 115k tokens / 28 tool calls discovering that
+// on its own. `retro_run_drillable` (precomputed by collect-state.sh from
+// the same candidate run's retro bundle) now gates the dispatch too, with two
+// correctness backstops from the grill: (a) a clean-run SKIP must never stamp
+// the cooldown (or a later run with real findings could be starved out), and
+// (b) a mandatory weekly override fires regardless of drillability, so a
+// silently broken predicate can never permanently blind the learning loop.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — retro_orch signal class (issue #3871)", () => {
+  const now = Math.floor(Date.now() / 1000);
+
+  // Run against a tmp state file WITHOUT deleting it before reading it back —
+  // lets these tests assert on signal_last_fired post-run (issue #1666
+  // write-back), mirroring runOrchGuard's {plan, stateAfter} shape above.
+  function runRetro(state: any): { plan: any; stateAfter: any } {
+    const t = makeTmp();
+    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.cands, JSON.stringify(null));
+    writeFileSync(t.events, JSON.stringify([]));
+    const plan = runDecideOnFiles(t);
+    const stateAfter = JSON.parse(readFileSync(t.state, "utf-8"));
+    rmSync(t.dir, { recursive: true, force: true });
+    return { plan, stateAfter };
+  }
+
+  const retroDispatch = (a: any) => a.type === "dispatch" && a.slot === "retro_orch";
+
+  test("AC #1: retro_run_available=true + retro_run_drillable=false -> no dispatch, and the cooldown stamp is UNCHANGED (correction (a))", () => {
+    // 25h in the past: past the 24h SIGNAL_COOLDOWNS gate (so the handler is
+    // actually reached) but well inside the 7d weekly-override window (so the
+    // override does not mask what we're testing).
+    const priorStamp = now - 25 * 60 * 60;
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: priorStamp },
+    });
+    const { plan, stateAfter } = runRetro(state);
+    assert.equal(
+      findAction(plan, retroDispatch),
+      undefined,
+      "a clean (non-drillable) run must not dispatch retro_orch — this is the whole point of #3871",
+    );
+    assert.equal(
+      stateAfter.signal_last_fired.retro_orch,
+      priorStamp,
+      "a skipped (non-drillable, non-override) turn must leave signal_last_fired.retro_orch untouched — " +
+        "stamping here would let a clean run's skip suppress a LATER run that carries genuine findings",
+    );
+  });
+
+  test("a clean-run day performs zero retro_orch dispatches", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 25 * 60 * 60 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      (plan.actions ?? []).filter(retroDispatch).length,
+      0,
+      "a clean run must produce zero retro_orch dispatches",
+    );
+  });
+
+  test("AC #2: retro_run_available=true + retro_run_drillable=true -> dispatch unchanged from today", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: true },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, retroDispatch);
+    assert.ok(a, "retro_orch must dispatch when the candidate run is drillable");
+    assert.equal(a.skill, "hydra-retro");
+    assert.deepEqual(a.prompt_args, { apply: true }, "issue #1078: apply:true must still be threaded");
+  });
+
+  test("AC #3: retro_run_drillable=false but no retro_orch dispatch within 7 days -> dispatches anyway (correction (b))", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 8 * 24 * 60 * 60 },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, retroDispatch);
+    assert.ok(
+      a,
+      "retro_orch must dispatch via the weekly override when dark >=7d, even though the candidate run is not drillable",
+    );
+    assert.match(a.reason, /weekly/i, "the override-triggered reason must be distinguishable in the audit trail");
+  });
+
+  test("weekly override does NOT fire while still under the 7-day floor (6d dark, not drillable)", () => {
+    const state = baseState({
+      signals: { retro_run_available: true, retro_run_drillable: false },
+      signal_last_fired: { retro_orch: now - 6 * 24 * 60 * 60 },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, retroDispatch),
+      undefined,
+      "6 days dark is inside the 7-day weekly-override floor — must still skip",
+    );
+  });
+
+  test("no dispatch at all when retro_run_available is false, even if retro_run_drillable is true", () => {
+    const state = baseState({
+      signals: { retro_run_available: false, retro_run_drillable: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, retroDispatch),
+      undefined,
+      "nothing to retro (no completed run) must suppress the dispatch regardless of drillable",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8. Idle fallback / heartbeat wait
 // ---------------------------------------------------------------------------
 
@@ -3944,6 +4066,167 @@ const sweepOrchDispatch = (a: any) => a.type === "dispatch" && a.slot === "sweep
 function findSweepOrch(plan: any): any | undefined {
   return (plan.actions ?? []).find(sweepOrchDispatch);
 }
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — retro_run_drillable bundle reducer (issue #3871)
+//
+// Golden-fixture the two Python reducers `retro_run_drillable` runs, EXTRACTED
+// from collect-state.sh at test time (same convention as the wayfinder jq
+// extractors above), so the fixtures exercise the production source rather
+// than a copy that could drift.
+//
+// collect-state.sh itself is network-dependent (live `hydra raw` / orchestrator
+// HTTP calls), so — mirroring test/collect-state-python-block-quoting.test.mts
+// and the wayfinder jq blocks above — these tests pin BEHAVIOUR by running the
+// extracted interpreter program directly against a golden stdin fixture, not by
+// executing the whole script end-to-end.
+// ---------------------------------------------------------------------------
+describe("collect-state.sh — retro_run_drillable bundle reducer (issue #3871)", () => {
+  const COLLECT_STATE = join(SCRIPTS, "collect-state.sh");
+  const src = readFileSync(COLLECT_STATE, "utf-8");
+
+  // Extract the python source between the nearest `<<'PY'` before `anchor` and
+  // the next standalone `PY` delimiter line after it.
+  function extractPythonBlock(anchor: string): string {
+    const anchorIdx = src.indexOf(anchor);
+    assert.ok(anchorIdx >= 0, `anchor "${anchor}" not found in collect-state.sh — retro_run_drillable block moved?`);
+    const DELIM = "<<'PY'\n";
+    const delimIdx = src.lastIndexOf(DELIM, anchorIdx);
+    assert.ok(delimIdx >= 0 && delimIdx < anchorIdx, `no <<'PY' heredoc opener found before "${anchor}"`);
+    const bodyStart = delimIdx + DELIM.length;
+    const endIdx = src.indexOf("\nPY\n", bodyStart);
+    assert.ok(endIdx > bodyStart, `unterminated PY heredoc after "${anchor}"`);
+    return src.slice(bodyStart, endIdx);
+  }
+
+  // The bundle-drillability reducer: reads the `/autopilot/runs/:id/retro`
+  // bundle JSON on stdin, prints `true`/`false`.
+  function extractBundleReducer(): string {
+    const prog = extractPythonBlock("any_flagged=any(");
+    assert.ok(prog.includes("drillable = bool"), "extracted block lost the drillable computation");
+    return prog;
+  }
+
+  // The candidate-run-id reducer: reads the `/autopilot/runs?limit=14` index
+  // JSON on stdin (the same `RETRO_RUNS_JSON` `retro_run_available` reads),
+  // prints the most-recent completed run's `run_id` (or nothing).
+  function extractCandidateRunIdReducer(): string {
+    // Anchored INSIDE the python body (not the shell invocation line) — the
+    // shell line `RETRO_CANDIDATE_RUN_ID=$(printf ... | python3 -c "$(cat <<'PY'`
+    // has its OWN heredoc opener AFTER that variable-name text, so anchoring
+    // there would make the backward `<<'PY'` search land on the PRECEDING
+    // block's opener instead (the retro_run_available reducer above it).
+    return extractPythonBlock("rid=r.get('run_id')");
+  }
+
+  function runBundleReducer(stdin: string): { stdout: string; status: number | null } {
+    const r = spawnSync("python3", ["-c", extractBundleReducer()], { input: stdin, encoding: "utf-8" });
+    return { stdout: r.stdout.trim(), status: r.status };
+  }
+
+  test("sanity: the reducer actually reads dispatches[].flagged (guard is not vacuous)", () => {
+    assert.ok(extractBundleReducer().includes("flagged"), "extracted reducer lost the flagged-dispatch check");
+  });
+
+  // Correction (c) — three separately-asserted degrade-to-true cases. The
+  // first two ("fetch fails" and "response body is empty") are mechanically
+  // the SAME code path by design: collect-state.sh's `hydra raw ... 2>/dev/null`
+  // swallows a curl error into empty stdout exactly as a genuine empty HTTP
+  // body would, so both manifest here as empty stdin. The third exercises
+  // truly malformed (non-empty, non-JSON) content instead.
+  test("correction (c), case 1/3: bundle fetch fails (curl error -> empty stdout) degrades to drillable=true", () => {
+    const { stdout, status } = runBundleReducer("");
+    assert.equal(status, 0);
+    assert.equal(stdout, "true", "a failed fetch must fail OPEN (dispatch anyway), never silently suppress");
+  });
+
+  test("correction (c), case 2/3: bundle response body is empty degrades to drillable=true", () => {
+    const { stdout, status } = runBundleReducer("");
+    assert.equal(status, 0);
+    assert.equal(stdout, "true", "an empty response body must fail OPEN (dispatch anyway)");
+  });
+
+  test("correction (c), case 3/3: unparseable (malformed, non-JSON) bundle response degrades to drillable=true", () => {
+    const { stdout, status } = runBundleReducer("<html>502 Bad Gateway</html>");
+    assert.equal(status, 0);
+    assert.equal(stdout, "true", "malformed JSON must fail OPEN (dispatch anyway)");
+  });
+
+  test("a non-dict JSON payload (e.g. bare `null` or an array) degrades to drillable=true", () => {
+    const { stdout, status } = runBundleReducer("null");
+    assert.equal(status, 0);
+    assert.equal(stdout, "true", "a bundle that didn't even parse to an object must fail OPEN");
+  });
+
+  test("emits false ONLY on a successfully-parsed bundle with every drill input empty", () => {
+    const bundle = JSON.stringify({ dispatches: [], reflections: [], stuckSignals: [], recommendations: [] });
+    const { stdout, status } = runBundleReducer(bundle);
+    assert.equal(status, 0);
+    assert.equal(stdout, "false", "a fully-empty, successfully-parsed bundle is the ONLY false case");
+  });
+
+  test("emits false on a minimal `{}` bundle (missing keys default to empty, not a parse failure)", () => {
+    const { stdout, status } = runBundleReducer("{}");
+    assert.equal(status, 0);
+    assert.equal(stdout, "false");
+  });
+
+  test("emits true when any dispatch is flagged for drill, even with empty reflections/stuckSignals/recommendations", () => {
+    const bundle = JSON.stringify({
+      dispatches: [{ flagged: false }, { flagged: true }],
+      reflections: [],
+      stuckSignals: [],
+      recommendations: [],
+    });
+    const { stdout } = runBundleReducer(bundle);
+    assert.equal(stdout, "true", "a single flagged dispatch must make the bundle drillable");
+  });
+
+  test("emits true when reflections/stuckSignals/recommendations carry entries even with no flagged dispatch", () => {
+    for (const field of ["reflections", "stuckSignals", "recommendations"]) {
+      const bundle = JSON.stringify({
+        dispatches: [{ flagged: false }],
+        reflections: [],
+        stuckSignals: [],
+        recommendations: [],
+        [field]: [{ any: "entry" }],
+      });
+      const { stdout } = runBundleReducer(bundle);
+      assert.equal(stdout, "true", `a non-empty "${field}" alone must make the bundle drillable`);
+    }
+  });
+
+  test("candidate-run-id reducer: picks the most-recent (first) non-running run's run_id", () => {
+    const runsIndex = {
+      runs: [
+        { run_id: "run-newest-still-running", status: "running" },
+        { run_id: "run-most-recent-completed", status: "ended" },
+        { run_id: "run-older-completed", status: "completed" },
+      ],
+    };
+    const r = spawnSync("python3", ["-c", extractCandidateRunIdReducer()], {
+      input: JSON.stringify(runsIndex),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0);
+    assert.equal(
+      r.stdout.trim(),
+      "run-most-recent-completed",
+      "must skip a still-running run and pick the first non-running entry (newest-first index)",
+    );
+  });
+
+  test("candidate-run-id reducer: prints nothing when every run is still running", () => {
+    const runsIndex = { runs: [{ run_id: "run-a", status: "running" }, { run_id: "run-b", status: "" }] };
+    // status "" is treated as running/unterminated too (mirrors retro_run_available's own filter).
+    const r = spawnSync("python3", ["-c", extractCandidateRunIdReducer()], {
+      input: JSON.stringify(runsIndex),
+      encoding: "utf-8",
+    });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.trim(), "", "no completed run -> no candidate run_id emitted");
+  });
+});
 
 describe("decide.py — sweep_orch per-item verdict-stability guard (issue #3939)", () => {
   test("AC1 (direction a): all current items freshly stamped → no sweep_orch dispatch", () => {
