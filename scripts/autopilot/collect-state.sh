@@ -1497,8 +1497,9 @@ fi
 # advance; the retro skill itself resolves and stamps the run it analyses.
 # Orchestrator-down / empty-index degrades to `false` (nothing to retro),
 # which suppresses the dispatch — the safe default.
+RETRO_RUNS_JSON=$(hydra raw GET /autopilot/runs?limit=14 2>/dev/null)
 echo -n "retro_run_available="
-hydra raw GET /autopilot/runs?limit=14 2>/dev/null | python3 -c "$(cat <<'PY'
+printf '%s' "$RETRO_RUNS_JSON" | python3 -c "$(cat <<'PY'
 import json,sys
 try:
   d=json.load(sys.stdin)
@@ -1509,6 +1510,80 @@ except Exception:
   print('false')
 PY
 )" || echo "false"
+
+# `retro_run_drillable` (issue #3871, correction of the original #920 design
+# during 2026-08-19 operator grilling): the cheap pre-check that gates the
+# `retro_orch` DISPATCH, not just its existence. `retro_run_available` above
+# only asserts a completed run exists to look at; the observed 2026-08-05 run
+# (run 2bcba309) burned 115k tokens / 28 tool calls / 3.4 min of a full
+# /hydra-retro dispatch to discover the bundle's reflections / stuckSignals /
+# recommendations were ALL empty and every dispatch unflagged — i.e. to answer
+# a question the bundle JSON already answers. This signal answers it here,
+# for the cost of one extra HTTP GET, so decide.py can skip the dispatch
+# entirely on a clean run.
+#
+# The candidate run is the SAME one retro_orch would dispatch against: the
+# most-recent COMPLETED (non-running) entry in the `RETRO_RUNS_JSON` index
+# already fetched above (`/autopilot/runs?limit=14` is newest-first — the
+# reader walks the runs ZSET with ZREVRANGE). We fetch that run's retro
+# bundle (`GET /autopilot/runs/:runId/retro`, issue #918 — the same
+# never-throw join `/hydra-retro` itself reads first) and check exactly the
+# fields the skill's own "was there anything to analyze?" step reads:
+# `dispatches[].flagged`, `reflections`, `stuckSignals`, `recommendations`.
+# `drillable=true` iff ANY dispatch is flagged OR any of the other three is
+# non-empty; `false` only on a successfully-parsed bundle where every one of
+# those is empty.
+#
+# Degrades to `true` (dispatch anyway) on ANY failure of THIS read — bundle
+# fetch error, empty body, or unparseable JSON — deliberately the OPPOSITE
+# direction from `retro_run_available` above. That signal degrading to
+# `false` means "nothing to retro" (safe to suppress); this one degrading to
+# `false` on a failure would let a transient API error silently disable the
+# whole learning loop while every log line still reads "clean run, nothing to
+# do" — the same fabricated-certainty failure #4128 documents. A wasted ~115k
+# dispatch is recoverable; a silently dark retro loop is not. When there is no
+# completed run at all (the candidate-selection step below finds none), we
+# emit `false` — moot, since `retro_run_available=false` already suppresses
+# the dispatch independently, and `false` is the more honest "nothing to
+# drill" answer for a bare read of this signal in isolation.
+echo -n "retro_run_drillable="
+RETRO_CANDIDATE_RUN_ID=$(printf '%s' "$RETRO_RUNS_JSON" | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  d=json.load(sys.stdin)
+  runs=d.get('runs',[]) if isinstance(d,dict) else []
+  for r in runs:
+    if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running'):
+      rid=r.get('run_id')
+      if rid:
+        print(rid)
+      break
+except Exception:
+  pass
+PY
+)" || true)
+if [ -z "$RETRO_CANDIDATE_RUN_ID" ]; then
+  echo "false"
+else
+  hydra raw GET "/autopilot/runs/${RETRO_CANDIDATE_RUN_ID}/retro" 2>/dev/null | python3 -c "$(cat <<'PY'
+import json,sys
+try:
+  b=json.load(sys.stdin)
+  if not isinstance(b,dict):
+    print('true')
+    sys.exit(0)
+  dispatches=b.get('dispatches',[])
+  any_flagged=any(isinstance(x,dict) and x.get('flagged') for x in dispatches) if isinstance(dispatches,list) else False
+  reflections=b.get('reflections') or []
+  stuck=b.get('stuckSignals') or []
+  recs=b.get('recommendations') or []
+  drillable = bool(any_flagged or reflections or stuck or recs)
+  print('true' if drillable else 'false')
+except Exception:
+  print('true')
+PY
+)" || echo "true"
+fi
 
 # Wayfinder map frontier — AFK working path (issue #3351, epic #3350, ADR-0029).
 #

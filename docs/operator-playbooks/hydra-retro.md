@@ -21,6 +21,53 @@ signals-first read, the synthesis, and the `gh`/git emit.
 > runs under `--apply`. Without `--apply` the skill prints the emit plan and
 > stops.
 
+## 0. When the autopilot dispatches this (pre-check, issue #3871)
+
+`retro_orch`'s daily trigger used to be a single signal: `retro_run_available`
+(a COMPLETED run exists to analyse), enforced once/day by the 24h
+`SIGNAL_COOLDOWNS["retro_orch"]`. That was too coarse — a completed run
+existing does not mean it has anything worth drilling, and a clean run still
+cost a full `/hydra-retro` dispatch (~115k tokens / 28 tool calls, observed on
+the 2026-08-05 run `2bcba309`) just to discover the bundle's `reflections` /
+`stuckSignals` / `recommendations` were all empty and no dispatch was flagged.
+
+`collect-state.sh` now precomputes a second signal, `retro_run_drillable`, from
+the SAME candidate run's retro bundle (`GET /autopilot/runs/:runId/retro`) —
+`true` iff any `dispatches[].flagged` is set OR `reflections` /
+`stuckSignals` / `recommendations` is non-empty. `decide.py`'s `retro_orch`
+selector now dispatches only when **both** `retro_run_available` AND
+`retro_run_drillable` are true — a clean run is skipped entirely, for the cost
+of one extra HTTP GET instead of a full agent dispatch.
+
+Two correctness backstops, both from 2026-08-19 operator grilling of the
+original design:
+
+- **A skipped (non-drillable) turn never stamps the cooldown.** If it did, and
+  a *different* run completed an hour later carrying real findings,
+  `retro_run_available` would track that newer run while the stale cooldown
+  stamp suppressed it for the rest of the 24h window — by which time it is no
+  longer the most-recent run and may never be retro'd. Skipping leaves
+  `signal_last_fired.retro_orch` untouched.
+- **A mandatory weekly override fires regardless of `retro_run_drillable`.**
+  The entire savings rest on that predicate staying correct; if it silently
+  breaks (a renamed bundle field, a flag that stops being set), "filed no
+  findings" and "was never dispatched" look identical from outside, and
+  nothing would surface the bug. `decide.py` forces a real dispatch at least
+  once every 7 days (`RETRO_ORCH_WEEKLY_OVERRIDE_SEC`) no matter what
+  `retro_run_drillable` says — ~115k/week against the ~800k/week the
+  pre-check saves, and the only mechanism that turns a silent predicate bug
+  into an observable one.
+
+`retro_run_drillable` degrades to `true` (dispatch anyway) on ANY failure of
+its own bundle fetch — a down orchestrator, a network error, an empty body, or
+unparseable JSON — the OPPOSITE direction from `retro_run_available`
+(which degrades to `false`, "nothing to retro"). A wasted dispatch is
+recoverable; a silently dark retro loop is not.
+
+None of this changes what happens once `/hydra-retro` actually runs — steps 1
+through 9 below are unaffected. It only changes whether the autopilot
+dispatches it at all on a given day.
+
 ## 1. Resolve the run id
 
 `/hydra-retro [run_id]` — argument is optional. Parse via the pure helper so
