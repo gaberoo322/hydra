@@ -1512,7 +1512,7 @@ describe("decide.py — dev_target per-cycle cost-cap (issue #1059)", () => {
 //    classes with taxonomy scope "orch"); target-scope and "both"-scope
 //    (health) classes are never touched — the guard is one-directional by
 //    design (AC3/AC5).
-//  - `state.limits.orch_realm_max_share` configures the ceiling; 0 / absent /
+//  - `state.limits.orch_realm_weekly_share_cap` configures the ceiling; 0 / absent /
 //    unparseable / >1 means DISABLED (the default), matching ADR-0021 D5 —
 //    per-run limits stay subordinate to the Pace Gate and never become a
 //    second governor switched on behind the operator's back (AC4).
@@ -1535,7 +1535,7 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     const s = baseState({
       signals: o.signals ?? { orch_work_available: true, target_work_available: true },
     });
-    if (o.maxShare !== undefined) s.limits.orch_realm_max_share = o.maxShare;
+    if (o.maxShare !== undefined) s.limits.orch_realm_weekly_share_cap = o.maxShare;
     if (o.share !== undefined) s.signals.orch_realm_weekly_share = o.share;
     if (o.signalLastFired !== undefined) s.signal_last_fired = o.signalLastFired;
     return s;
@@ -1546,7 +1546,7 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     const plan = runDecide(state, null);
     assert.ok(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
-      "absent orch_realm_max_share = disabled — a 99% orch share must NOT suppress dev_orch",
+      "absent orch_realm_weekly_share_cap = disabled — a 99% orch share must NOT suppress dev_orch",
     );
   });
 
@@ -1555,7 +1555,7 @@ describe("decide.py — orch-realm weekly-share guard (issue #4161)", () => {
     const plan = runDecide(state, null);
     assert.ok(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
-      "orch_realm_max_share=0 = disabled — dev_orch must dispatch",
+      "orch_realm_weekly_share_cap=0 = disabled — dev_orch must dispatch",
     );
   });
 

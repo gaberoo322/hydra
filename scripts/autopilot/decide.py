@@ -153,7 +153,7 @@ state.json {
   # NEW IN #4161 — orch-realm weekly-share guard (the one LIVE budget split;
   # the USD gates are documented INERT). Two keys, both optional and absent on
   # a default run, so default state stays byte-identical:
-  #   limits.orch_realm_max_share   (operator ceiling, fraction 0..1;
+  #   limits.orch_realm_weekly_share_cap   (operator ceiling, fraction 0..1;
   #                                  absent/0/unparseable/>1 = guard DISABLED
   #                                  — ADR-0021 D5: never a second governor
   #                                  switched on behind the operator's back)
@@ -2455,7 +2455,7 @@ def _rule_pipeline_dispatch(
         # placement. Suppresses ORCH-scope classes only (CLASS_SCOPE "orch"):
         # target-scope and realm-agnostic ("both") classes fall through, so
         # the guard is one-directional by construction. Default-disabled —
-        # armed only by an explicit orch_realm_max_share AND a usable share
+        # armed only by an explicit orch_realm_weekly_share_cap AND a usable share
         # reading, so on a default run this branch is inert.
         if CLASS_SCOPE.get(cls) == "orch" and orch_realm_share_exceeded(state):
             cap = orch_realm_share_state(state)
@@ -4788,13 +4788,13 @@ def dev_target_cost_cap_exceeded(state: dict) -> bool:
 #     `state.signals.orch_realm_weekly_share` and stays a pure function of
 #     (state, events, now): no network, no FS, no Redis.
 #
-# The share is operator-configurable via `state.limits.orch_realm_max_share`
+# The share is operator-configurable via `state.limits.orch_realm_weekly_share_cap`
 # and DEFAULTS TO DISABLED (absent / 0 / unparseable / >1 = never fires),
 # matching the ADR-0021 D5 rule: per-run limits stay subordinate to the Pace
 # Gate and never become a second governor switched on behind the operator's
 # back. The guard suppresses ORCH-scope dispatch only (see CLASS_SCOPE) —
 # one-directional by design, so a Target-heavy week is never throttled by it.
-ORCH_REALM_MAX_SHARE_DISABLED = 0.0
+ORCH_REALM_SHARE_CAP_DISABLED = 0.0
 
 
 def _realm_share_finite(value) -> float | None:
@@ -4827,7 +4827,7 @@ def orch_realm_share_state(state: dict) -> dict:
     """Resolve the orch-realm weekly-share guard inputs from state (issue #4161).
 
     Reads (with the same fail-open fallbacks as the sibling cost-cap gates):
-      - state.limits.orch_realm_max_share   (default 0 = DISABLED)
+      - state.limits.orch_realm_weekly_share_cap   (default 0 = DISABLED)
       - state.signals.orch_realm_weekly_share (folded by collect-state.sh)
 
     Returns `{max_share, share, enforced}`. `enforced` is False when the
@@ -4844,12 +4844,12 @@ def orch_realm_share_state(state: dict) -> dict:
 
     try:
         max_share = float(
-            limits.get("orch_realm_max_share", ORCH_REALM_MAX_SHARE_DISABLED)
+            limits.get("orch_realm_weekly_share_cap", ORCH_REALM_SHARE_CAP_DISABLED)
         )
     except (TypeError, ValueError):
-        max_share = ORCH_REALM_MAX_SHARE_DISABLED
+        max_share = ORCH_REALM_SHARE_CAP_DISABLED
     if not math.isfinite(max_share) or max_share <= 0 or max_share > 1:
-        max_share = ORCH_REALM_MAX_SHARE_DISABLED
+        max_share = ORCH_REALM_SHARE_CAP_DISABLED
 
     share = _realm_share_finite((state.get("signals") or {}).get("orch_realm_weekly_share"))
 

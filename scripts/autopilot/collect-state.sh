@@ -1651,7 +1651,7 @@ PY
 #   orch_realm_weekly_share=unavailable      no usable reading this turn
 #
 # decide.py reads that value verbatim and suppresses ORCH-scope dispatch when
-# it exceeds `state.limits.orch_realm_max_share` (default 0 = guard
+# it exceeds `state.limits.orch_realm_weekly_share_cap` (default 0 = guard
 # disabled — ADR-0021 D5: never a second governor behind the operator's
 # back). Fold rules:
 #   - taxonomy scope "orch"   -> orch numerator
