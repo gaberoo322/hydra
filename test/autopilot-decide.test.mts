@@ -4367,17 +4367,51 @@ describe("collect-state.sh — retro_run_drillable bundle reducer (issue #3871)"
     assert.equal(stdout, "true", "a bundle that didn't even parse to an object must fail OPEN");
   });
 
-  test("emits false ONLY on a successfully-parsed bundle with every drill input empty", () => {
-    const bundle = JSON.stringify({ dispatches: [], reflections: [], stuckSignals: [], recommendations: [] });
-    const { stdout, status } = runBundleReducer(bundle);
-    assert.equal(status, 0);
-    assert.equal(stdout, "false", "a fully-empty, successfully-parsed bundle is the ONLY false case");
+  // Issue #4244, INV-3 fourth arm: a SUCCESSFULLY-PARSED bundle whose
+  // `runFound` is not strictly `true` is an unreadable run record, not a clean
+  // run — `retro-bundle.ts` skips the run-scoped joins in that case, so the
+  // empty lists prove nothing. The reducer used to fall through to `false`
+  // here, silently suppressing that day's retro.
+  test("issue #4244: a parsed bundle whose runFound is not strictly true degrades to drillable=true", () => {
+    const unreadable = JSON.stringify({
+      runFound: false,
+      dispatches: [],
+      reflections: [],
+      stuckSignals: [],
+      recommendations: [],
+    });
+    assert.equal(
+      runBundleReducer(unreadable).stdout,
+      "true",
+      "runFound !== true means the meter is unreadable — degrade open, never suppress dispatch",
+    );
+
+    // Strictness pin: a truthy string is not the boolean true either.
+    const stringy = JSON.stringify({
+      runFound: "true",
+      dispatches: [],
+      reflections: [],
+      stuckSignals: [],
+      recommendations: [],
+    });
+    assert.equal(
+      runBundleReducer(stringy).stdout,
+      "true",
+      "only strictly-boolean true attests a found run; anything else fails open",
+    );
   });
 
-  test("emits false on a minimal `{}` bundle (missing keys default to empty, not a parse failure)", () => {
+  test("emits false ONLY on a successfully-parsed, run-found bundle with every drill input empty", () => {
+    const bundle = JSON.stringify({ runFound: true, dispatches: [], reflections: [], stuckSignals: [], recommendations: [] });
+    const { stdout, status } = runBundleReducer(bundle);
+    assert.equal(status, 0);
+    assert.equal(stdout, "false", "a fully-empty, successfully-parsed, run-found bundle is the ONLY false case");
+  });
+
+  test("a minimal `{}` bundle degrades to drillable=true (missing runFound = unreadable run record, issue #4244)", () => {
     const { stdout, status } = runBundleReducer("{}");
     assert.equal(status, 0);
-    assert.equal(stdout, "false");
+    assert.equal(stdout, "true", "a bundle that cannot attest its run record loaded must fail OPEN, not read as a clean run");
   });
 
   test("emits true when any dispatch is flagged for drill, even with empty reflections/stuckSignals/recommendations", () => {

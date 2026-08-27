@@ -1531,12 +1531,16 @@ PY
 # fields the skill's own "was there anything to analyze?" step reads:
 # `dispatches[].flagged`, `reflections`, `stuckSignals`, `recommendations`.
 # `drillable=true` iff ANY dispatch is flagged OR any of the other three is
-# non-empty; `false` only on a successfully-parsed bundle where every one of
-# those is empty.
+# non-empty; `false` only on a successfully-parsed, run-found bundle where
+# every one of those is empty.
 #
 # Degrades to `true` (dispatch anyway) on ANY failure of THIS read — bundle
-# fetch error, empty body, or unparseable JSON — deliberately the OPPOSITE
-# direction from `retro_run_available` above. That signal degrading to
+# fetch error, empty body, unparseable JSON, or a successfully-parsed bundle
+# whose `runFound` is not strictly `true` (issue #4244, INV-3 of #3871's
+# artifact `ec2fe076`): `runFound: false` means the run record itself was
+# unreadable and the run-scoped joins were skipped, so the empty lists prove
+# nothing — the meter is unreadable, not the run clean — deliberately the
+# OPPOSITE direction from `retro_run_available` above. That signal degrading to
 # `false` means "nothing to retro" (safe to suppress); this one degrading to
 # `false` on a failure would let a transient API error silently disable the
 # whole learning loop while every log line still reads "clean run, nothing to
@@ -1570,6 +1574,9 @@ import json,sys
 try:
   b=json.load(sys.stdin)
   if not isinstance(b,dict):
+    print('true')
+    sys.exit(0)
+  if b.get('runFound') is not True:
     print('true')
     sys.exit(0)
   dispatches=b.get('dispatches',[])

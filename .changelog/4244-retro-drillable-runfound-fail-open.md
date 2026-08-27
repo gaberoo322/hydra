@@ -1,0 +1,1 @@
+- fix: retro_run_drillable now fails open when the retro bundle's run record is unreadable (runFound !== true), so a dark run record no longer silently suppresses that day's retro dispatch (#4244)
