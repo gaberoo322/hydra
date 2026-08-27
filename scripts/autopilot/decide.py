@@ -1509,6 +1509,45 @@ def make_cascade_blocked_event(
     }
 
 
+def make_candidate_exclusion_event(
+    state: dict,
+    now: int,
+    *,
+    anchor: str,
+    member: str,
+    verdict: str,
+    evidence: str,
+) -> dict:
+    """Construct one `candidate_exclusion` telemetry event (issue #3964).
+
+    `collect-state.sh` already re-evaluates the four live Candidate Exclusion
+    predicates (target-scope #2701, in-flight-dev #3711, mechanical #1230,
+    trivial-anchor #1088) against every open `ready-for-agent` orchestrator
+    issue and threads the verdicts into `state.candidate_exclusions` under
+    `candidate_exclusions_json=` — this function just re-emits ONE evaluation
+    of that pre-computed list as an observability event, identical mechanism
+    to `make_cascade_blocked_event`.
+
+    `anchor` is `issue-<N>` (never a bare number — matches the
+    `orch_*_anchor` convention). `verdict` is `excluded` | `survived`;
+    `evidence` is the exclusion reason (`pr-body-ref` / `target-backlog-label`
+    / etc.) or `""` for a `survived` verdict. Rides
+    `hydra:autopilot:slot-events` alongside the other decide.py observability
+    events; the field-agnostic bridge forwards it verbatim. Every value is
+    string-serialisable for XADD.
+    """
+    return {
+        "event": "candidate_exclusion",
+        "turn_n": str(int(state.get("turn", 0) or 0)),
+        "run_id": str(state.get("run_id") or ""),
+        "anchor": str(anchor),
+        "member": str(member),
+        "verdict": str(verdict),
+        "evidence": str(evidence),
+        "ts_epoch": str(now),
+    }
+
+
 def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "") -> dict:
     """Silent-wedge fallback (issue #509). Hooks are the primary slot
     accounting path; this action fires when an active slot has aged past
@@ -1990,6 +2029,50 @@ def _rule_termination(state: dict, now: int, events: list[dict] | None = None) -
             tokens_after=int(state.get("cumulative_tokens", 0) or 0),
         )
     )
+    return out
+
+
+def _rule_candidate_exclusions(state: dict, now: int) -> _RuleOutput:
+    """Step 1.1 — Candidate Exclusion telemetry (issue #3964).
+
+    `collect-state.sh` already re-evaluates the four live Candidate Exclusion
+    predicates (target-scope #2701, in-flight-dev #3711, mechanical #1230,
+    trivial-anchor #1088) against every open `ready-for-agent` orchestrator
+    issue and threads the pre-computed verdicts into
+    `state.candidate_exclusions` under `candidate_exclusions_json=` (design
+    decided on wayfinder #3954). This rule stays PURE — it does no
+    enumeration, no network, no Redis; it just re-emits one
+    `candidate_exclusion` event per evaluation, identical mechanism to
+    `_rule_escalation`'s `make_cascade_blocked_event` calls.
+
+    No dispatch decision reads `state.candidate_exclusions` — this rule
+    exists solely so the slot-events bridge can persist each evaluation into
+    the durable ring the `rollupCandidateExclusions` aggregator folds.
+    `state.candidate_exclusions` absent/malformed (legacy state, or a
+    collect-state.sh failure) degrades to zero events — never an error.
+    """
+    out = _RuleOutput()
+    raw = state.get("candidate_exclusions")
+    if not isinstance(raw, list):
+        return out
+    for ev in raw:
+        if not isinstance(ev, dict):
+            continue
+        anchor = ev.get("anchor")
+        member = ev.get("member")
+        verdict = ev.get("verdict")
+        if not anchor or not member or verdict not in ("excluded", "survived"):
+            continue
+        out.events.append(
+            make_candidate_exclusion_event(
+                state,
+                now,
+                anchor=str(anchor),
+                member=str(member),
+                verdict=str(verdict),
+                evidence=str(ev.get("evidence") or ""),
+            )
+        )
     return out
 
 
@@ -3037,6 +3120,11 @@ def decide(
 
     Decision order (each step appends 0+ actions):
 
+      0. Candidate Exclusion telemetry (issue #3964) — re-emits
+         `state.candidate_exclusions` (pre-computed by collect-state.sh) as
+         `candidate_exclusion` observability events. Contributes events only,
+         never an action; runs unconditionally, even ahead of termination.
+
       1. Termination check (budget / wall-clock / idle / 5-failure backstop).
          Emits exactly one `terminate` action and stops if tripped.
 
@@ -3119,6 +3207,13 @@ def decide(
     # turn terminates the loop. The matching `turn_end` is emitted just
     # before `return plan` at the bottom of this function.
     plan.events.append(make_turn_start_event(state, now))
+
+    # 1.1. Candidate Exclusion telemetry (issue #3964) — pure re-emission of
+    #      collect-state.sh's pre-computed verdicts. Never contributes an
+    #      action, so it is safe to fold unconditionally BEFORE the
+    #      termination short-circuit below: the census is wanted even on a
+    #      terminating turn, exactly like `turn_start` above.
+    fold(_rule_candidate_exclusions(state, now))
 
     # 1. Termination — a turn-ending decision; short-circuit when tripped.
     term_out = _rule_termination(state, now, events)
