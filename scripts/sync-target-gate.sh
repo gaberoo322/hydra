@@ -73,7 +73,7 @@ GATE_DIR_NAME=".hydra-gate"
 #   src/exec-with-timeout.ts                → (stdlib only)
 #   src/target/risk-critical.ts             → (no imports)
 #   src/target/manifest.ts                  → src/schemas/target-manifest.ts
-#   src/schemas/target-manifest.ts          → zod (resolved via the web/node_modules symlink below)
+#   src/schemas/target-manifest.ts          → zod (resolved via the ancestor node_modules walk — see below)
 #   src/target-config.ts                    → (node: stdlib only)
 # Paths are repo-relative; the layout is preserved under $GATE_DIR_NAME so the
 # scripts' `../../src/...` relative imports resolve unchanged.
@@ -149,40 +149,23 @@ done
 # Target PR diff.
 printf '%s\n' '{ "type": "module" }' > "$GATE_ROOT/package.json"
 
-# Resolve bare npm imports for the mirror (issue #3018). The manifest schema
-# (src/schemas/target-manifest.ts, newly in the closure) imports `zod`. The
-# gate scripts run with cwd = the Target worktree root, whose node_modules does
-# NOT contain zod — only the app subdir's node_modules does (hydra-betting keeps
-# its deps under web/node_modules). Node resolves a bare import by walking
-# UPWARD from the importing file, so a `node_modules` symlink at the mirror root
-# ($GATE_ROOT) is found from .hydra-gate/src/schemas/target-manifest.ts before
-# the (zod-less) worktree-root node_modules. Symlink it to the app subdir's
-# node_modules so `zod` (and any future runtime dep in the closure) resolves.
-# The app subdir is read from the manifest's verify.appSubdir; we default to
-# "web" for the resolution symlink only when the manifest is unreadable here
-# (the gate itself fails loud on a bad manifest — this symlink is best-effort
-# plumbing so the loader can even run to produce that error).
-APP_SUBDIR="web"
-if [ -f "$TARGET_WT/.hydra/manifest.json" ]; then
-  # Extract verify.appSubdir without a JSON parser dep: grep the field.
-  parsed_subdir="$(sed -n 's/.*"appSubdir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$TARGET_WT/.hydra/manifest.json" | head -n1)"
-  # An empty appSubdir ("" for a repo-root target) means deps live at the
-  # worktree root; leave APP_SUBDIR empty so we symlink the root node_modules.
-  if grep -q '"appSubdir"' "$TARGET_WT/.hydra/manifest.json"; then
-    APP_SUBDIR="$parsed_subdir"
-  fi
-fi
-if [ -n "$APP_SUBDIR" ]; then
-  APP_NODE_MODULES="$TARGET_WT/$APP_SUBDIR/node_modules"
-else
-  APP_NODE_MODULES="$TARGET_WT/node_modules"
-fi
-if [ -d "$APP_NODE_MODULES" ]; then
-  ln -sfn "$APP_NODE_MODULES" "$GATE_ROOT/node_modules"
-else
-  echo "sync-target-gate: WARN — app node_modules '$APP_NODE_MODULES' not found;" \
-       "the manifest loader's zod import may fail from the mirror." >&2
-fi
+# Resolve bare npm imports for the mirror (issue #3018, no longer a symlink as
+# of #4177). The manifest schema (src/schemas/target-manifest.ts, newly in the
+# closure) imports `zod`. Node resolves a bare import by walking UPWARD from
+# the importing file (.hydra-gate/src/schemas/target-manifest.ts) through
+# every ancestor's node_modules — and since #4177 nests the Target worktree
+# itself under the app subdir (e.g. $TARGET_WT = .../web/.worktrees/<name>),
+# that walk now reaches the REAL app node_modules (e.g.
+# ~/hydra-betting/web/node_modules) a few directory levels up with NO symlink
+# needed — Node checks $GATE_ROOT/node_modules, then each ancestor in turn,
+# until it finds one; since $TARGET_WT is nested under `web/`, the app's own
+# node_modules is on that ancestor path. This retires the prior worktree-root symlink,
+# which pointed at $TARGET_WT/$APP_SUBDIR/node_modules — a real directory only
+# because Step 0.6 used to run `npm ci` per worktree; #4177 also removed that
+# install, so the old target would no longer exist to link to. No action
+# needed here beyond deleting the symlink logic; a missing zod resolution
+# would surface as a loud MODULE_NOT_FOUND from the gate script itself rather
+# than a silent mirror gap.
 
 # Exclude the mirror from the betting worktree's git so it never pollutes the
 # Target PR diff. `.git/info/exclude` is local to this worktree's checkout and

@@ -145,3 +145,94 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     assert.ok(out.includes("arch_board_saturated=false"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — orch board DEGRADED flag (issue #4130)
+// ---------------------------------------------------------------------------
+//
+// A GraphQL-only GitHub outage (REST healthy, 2026-08-17) made every orch
+// board read silently render as 0/none: the ARCH read's `|| echo zeros`
+// substitution fed the emitter fake zeros, the emitter computed
+// orch_backfill_idle=true from a board it never saw (inverse-fire backfill
+// against a FULL board), and the counts read vanished whole — leaving
+// decide.py to drain runs to a clean terminate:idle with 15 eligible issues.
+// The fix distinguishes FAILED reads from EMPTY ones at every orch-lane read
+// and surfaces a single observable `orch_board_signals_degraded` flag. These
+// tests pin the EMISSION side; the decide.py suppression side lives in
+// test/autopilot-decide.test.mts's "degraded orch board read" describe.
+// ---------------------------------------------------------------------------
+
+describe("scripts/autopilot/collect-state.sh — orch board degraded flag (issue #4130)", () => {
+  test("the ARCH read's fake-zeros substitution arm is GONE", () => {
+    assert.doesNotMatch(
+      src,
+      /\|\| echo '\{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0,"cleanup_sourced":0\}'\)/,
+      "substituting zeros on a failed read is what made the emitter compute board-empty from a board it never saw",
+    );
+  });
+
+  test("a failed ARCH read takes a suppressing else-arm that flags the lane degraded", () => {
+    // The healthy printf|python3 arm keeps its exact #959-pinned shape; the
+    // empty-payload path is a sibling else-arm emitting the SAME suppressing
+    // defaults the python-failure arm emits, plus the accumulator flip.
+    const arm = src.match(
+      /else\n  # Issue #4130[\s\S]*?ORCH_BOARD_DEGRADED=1\n  echo "orch_backfill_idle=false"\n  echo "arch_board_open_scan=0"\n  echo "arch_board_saturated=false"\n  echo "cleanup_board_open_scan=0"\n  echo "cleanup_board_saturated=false"\nfi/,
+    );
+    assert.ok(
+      arm,
+      "an empty ARCH_BOARD_JSON must emit orch_backfill_idle=false (never compute idle from fake zeros) and set ORCH_BOARD_DEGRADED",
+    );
+  });
+
+  test("orch_board_signals_degraded is emitted UNCONDITIONALLY (both branches), after the ARCH block", () => {
+    assert.match(
+      src,
+      /if \[ "\$ORCH_BOARD_DEGRADED" = "1" \]; then\n  echo "orch_board_signals_degraded=true"\nelse\n  echo "orch_board_signals_degraded=false"\nfi/,
+      "the flag must ship on every pass — a missing key must never be indistinguishable from a healthy read",
+    );
+    // And it is emitted AFTER the ARCH accumulator site (the last read that
+    // can flip it), so the line reflects the whole pass.
+    const archFlip = src.indexOf("ORCH_BOARD_DEGRADED=1");
+    const flagEmit = src.indexOf('echo "orch_board_signals_degraded=true"');
+    assert.ok(archFlip > -1 && flagEmit > archFlip, "the flag emission must follow the ARCH read it summarizes");
+  });
+
+  test("a failed orch COUNTS read emits NO counts line (never a legitimate zero)", () => {
+    // The fallback board-counts gh call is captured; empty output (gh failed —
+    // the jq object always prints) prints nothing and flips the accumulator
+    // instead of rendering a failed read as an all-zero board.
+    assert.match(
+      src,
+      /if \[ -n "\$ORCH_BOARD_FALLBACK_JSON" \]; then\n    printf '%s\\n' "\$ORCH_BOARD_FALLBACK_JSON"\n  else\n    ORCH_BOARD_DEGRADED=1/,
+      "the counts fallback must withhold its counts on failure and flag the lane",
+    );
+  });
+
+  test("an EMPTY grill-list payload (failed query) also flips the accumulator", () => {
+    // A healthy gh query over an empty lane prints `[]`; only a failed query
+    // yields the empty string — so `[ -z ]` is the failed-read discriminator.
+    assert.match(
+      src,
+      /if \[ -z "\$ORCH_GRILL_LIST_JSON" \]; then\n  ORCH_BOARD_DEGRADED=1/,
+      "the grill/dev-ready candidate enumeration must not silently render 'no candidates' on a failed read",
+    );
+  });
+
+  test("BEHAVIOURAL: the orch counts fallback jq prints a full object over an EMPTY board — empty output ⟺ gh failure", () => {
+    // This is the discriminator the shell `[ -n ]` test relies on: extract
+    // the committed jq and run it through real `jq` over `[]` — it must print
+    // a complete all-zero OBJECT, never nothing. (Mirrors the #3687/#3754
+    // pattern of running the committed filter rather than a copy.)
+    const m = src.match(/ORCH_BOARD_FALLBACK_JSON=\$\(gh issue list[^\n]*--jq '\{([\s\S]*?)\n  \}'\)/);
+    assert.ok(m, "could not locate the orch counts fallback jq in collect-state.sh");
+    const r = spawnSync("jq", ["{" + m[1] + "}"], { input: "[]", encoding: "utf-8" });
+    assert.equal(r.status, 0, `jq failed: ${r.stderr}`);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.ready_for_agent, 0, "an empty board is all-zero…");
+    assert.deepEqual(
+      parsed.stale_in_progress,
+      [],
+      "…but every key still prints — so a genuinely empty board can never be mistaken for a failed read",
+    );
+  });
+});

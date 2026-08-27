@@ -8,7 +8,10 @@
 #  - `hydra-dev` against `~/hydra` under `.claude/worktrees/agent-*` or
 #    `/dev/shm/hydra-worktrees/issue-*`
 #  - `hydra-target-build` against `~/hydra-betting` under
-#    `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` (added by #542)
+#    `web/.worktrees/<cycle-id>` (added by #542; relocated off
+#    `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` in #4177 to eliminate
+#    the reach-back node_modules symlink hazard, #4175). The classifier below
+#    is path-agnostic, so this sweep needed no code change for the move.
 #
 # When an agent finishes (or crashes) the worktree often leaks — `git branch -vv`
 # accumulates `[gone]` upstreams and the worktree dirs stick around forever.

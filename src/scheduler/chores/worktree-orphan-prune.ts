@@ -2,14 +2,15 @@
  * Orphan-worktree prune chore (issue #3136).
  *
  * One of the Housekeeping chore family (`src/scheduler/chores/`). It reclaims
- * orphaned `/dev/shm/hydra-worktrees/` worktrees in the target workspace so the
- * stale-branch sweep can then delete their pinned `feature/claude-cycle-*`
+ * orphaned `web/.worktrees/` worktrees (issue #4177; previously
+ * `/dev/shm/hydra-worktrees/`) in the target workspace so the stale-branch
+ * sweep can then delete their pinned `feature/claude-cycle-*`
  * branches — a registered worktree holding a feature branch makes `git branch -D`
  * fail closed (recurrence of #2115 -> #2465).
  *
  * WHY a chore and not just the startup prune: `pruneOrphanedTargetWorktrees` ran
  * ONLY once at boot (`src/index.ts`). A target build that crashes mid-cycle
- * leaves a `/dev/shm` worktree pinning its branch, and because those worktrees
+ * leaves a worktree pinning its branch, and because those worktrees
  * are past the 6h age floor only after some hours, the boot-time sweep that ran
  * at startup missed them — they accumulated between restarts and the hourly
  * branch-cleanup chore then failed on every tick (issue #3136 evidence: three
@@ -84,8 +85,8 @@ export interface WorktreeOrphanPruneDeps {
 }
 
 /**
- * Run the orphan-worktree prune chore. Reclaims eligible orphaned `/dev/shm`
- * worktrees in the target workspace and returns the count reclaimed this tick
+ * Run the orphan-worktree prune chore. Reclaims eligible orphaned
+ * `web/.worktrees/` worktrees in the target workspace and returns the count reclaimed this tick
  * (0 when nothing was eligible / on any fault). Never throws.
  *
  * Returns the reclaimed count so the registry / a test can observe whether the

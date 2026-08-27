@@ -182,7 +182,10 @@ describe("worktree-orphan: classifyOrphanWorktree decision order", () => {
 describe("worktree-orphan: pruneOrphanedTargetWorktrees (injected deps)", () => {
   const WORKSPACE = "/home/gabe/hydra-betting";
   const gitOpts = { cwd: WORKSPACE, timeout: 30_000 };
-  const ORPHAN = SHM + "hydra-betting-worktree-claude-cycle-9001";
+  // Issue #4177: the reclaim now scopes to `web/.worktrees/` (nested under the
+  // app subdir so node_modules resolves by ancestor walk, no reach-back
+  // symlink) instead of the prior `/dev/shm/hydra-worktrees/` pool.
+  const ORPHAN = `${WORKSPACE}/web/.worktrees/claude-cycle-9001`;
 
   // A recording git stub: replays canned stdout per subcommand and records the
   // arg vectors it was called with. Any subcommand not in `responses` returns
@@ -234,6 +237,26 @@ describe("worktree-orphan: pruneOrphanedTargetWorktrees (injected deps)", () => 
     assert.equal(removed[0].at(-1), ORPHAN);
     // The trailing `git worktree prune` always runs.
     assert.ok(git.calls.some((c) => c[0] === "worktree" && c[1] === "prune"));
+  });
+
+  test("a worktree at the RETIRED /dev/shm location is now out-of-scope (0 reclaimed) — issue #4177", () => {
+    // Regression guard for the #4177 relocation: pruneOrphanedTargetWorktrees
+    // must NOT reach into the old /dev/shm pool anymore — that path family is
+    // no longer where hydra-target-build creates worktrees, and reclaiming it
+    // is the broader hydra-branch-prune skill's job now (same as any other
+    // out-of-scope worktree).
+    const oldLocationOrphan = "/dev/shm/hydra-worktrees/hydra-betting-worktree-claude-cycle-8999";
+    const scopePrefix = `${WORKSPACE}/web/.worktrees/`;
+    const result = classifyOrphanWorktree(
+      {
+        path: oldLocationOrphan,
+        branch: "feature/claude-cycle-8999",
+        lockedByPid: null,
+        ageSeconds: OLD,
+      },
+      baseCtx({ mainWorktreePath: WORKSPACE, scopePrefix }),
+    );
+    assert.equal(result.action, "skip-out-of-scope");
   });
 
   test("a LIVE-pid lock is skipped (0 reclaimed) — never destroys an active agent's worktree", async () => {

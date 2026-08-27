@@ -236,9 +236,12 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
   });
 
   test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+    // Issue #4130 reshaped the arm from `|| { echo … }` to an if/else so it
+    // can ALSO flip the lane's degraded accumulator — the fail-open zeros
+    // themselves are pinned unchanged.
     assert.match(
       src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
+      /TARGET_LANE_DEGRADED=1\n    \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
       "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
     );
   });
@@ -730,6 +733,76 @@ describe("collect-state.sh — wire-or-retire unlabelled advisory count (issue #
       degradedBranch.slice(0, 700),
       /echo "wire_or_retire_target_unlabelled=0"/,
       "the unreachable-read branch must emit wire_or_retire_target_unlabelled=0, not omit it or emit non-zero",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — TARGET_LANE_DEGRADED accumulator (issue #4130)
+// ---------------------------------------------------------------------------
+//
+// The 2026-08-17 GraphQL-only outage exposed a structural gap in the Target
+// degraded flag: `target_board_signals_degraded` keyed on the PER-ITEM read
+// only (TARGET_BOARD_ISSUES_JSON), while the COUNTS read failed separately
+// and kept emitting its fail-open zeros. Intermittent per-request 503s made
+// the two disagree within one pass — the measured outage table showed the
+// flag `false` while every count read zero. The fix is a per-lane
+// ACCUMULATOR (`TARGET_LANE_DEGRADED`) flipped by EITHER Target read, with
+// the healthy per-item branch emitting the accumulated verdict instead of a
+// hard `false`. This pins the accumulator wiring (the orch-side mirror is
+// pinned in test/autopilot-arch-fallback-signals.test.mts).
+// ---------------------------------------------------------------------------
+
+describe("collect-state.sh — target lane degraded accumulator (issue #4130)", () => {
+  test("the accumulator is initialized before the counts read can flip it", () => {
+    const init = src.indexOf("TARGET_LANE_DEGRADED=0");
+    const firstFlip = src.indexOf("TARGET_LANE_DEGRADED=1");
+    assert.ok(init > -1, "TARGET_LANE_DEGRADED=0 must be initialized");
+    assert.ok(firstFlip > init, "every flip site must follow the initialization");
+  });
+
+  test("the healthy per-item branch emits the ACCUMULATED verdict, not a hard false", () => {
+    // A failed counts read + successful per-item read is the exact mixed-read
+    // shape the outage measurement caught; the healthy branch must therefore
+    // consult the accumulator. Command-substitution form keeps the first
+    // literal `echo "target_board_signals_degraded=true"` in the file on the
+    // fail-closed branch (the slice anchors above key on it).
+    assert.match(
+      src,
+      /echo "target_board_signals_degraded=\$\( \[ "\$TARGET_LANE_DEGRADED" = "1" \] && echo true \|\| echo false \)"/,
+      "the healthy branch must publish the lane-accumulated verdict",
+    );
+    const cmdSubst = src.indexOf('echo "target_board_signals_degraded=$( [ "$TARGET_LANE_DEGRADED"');
+    const literalTrue = src.indexOf('echo "target_board_signals_degraded=true"');
+    assert.ok(
+      cmdSubst > -1 && literalTrue > -1 && literalTrue > cmdSubst,
+      "the literal degraded=true emission must stay on the fail-closed branch, after the accumulated healthy form",
+    );
+  });
+
+  test("the fail-closed per-item branch also latches the accumulator", () => {
+    const elseIdx = src.indexOf('echo "target_board_signals_degraded=true"');
+    const before = src.slice(Math.max(0, elseIdx - 400), elseIdx);
+    assert.match(
+      before,
+      /TARGET_LANE_DEGRADED=1/,
+      "an unreachable per-item read must set the lane accumulator alongside its literal flag",
+    );
+  });
+
+  test("a failed counts read is distinguishable from a genuinely zero board", () => {
+    // The counts fallback jq builds its output object from literal keys, so a
+    // SUCCESSFUL read always prints 4 lines — even over an empty board. Empty
+    // output therefore means the gh call failed, which is exactly when the
+    // zeros may flow only alongside the degraded flip (pinned above).
+    const m = src.match(
+      /TARGET_COUNTS_OUT=\$\(gh issue list[^\n]*--jq '\{([\s\S]*?)\n  \} \| to_entries/,
+    );
+    assert.ok(m, "could not locate the target counts fallback jq in collect-state.sh");
+    assert.match(
+      m[1],
+      /target_ready_for_agent:/,
+      "the fallback filter constructs its output keys literally — empty output ⟺ gh failure",
     );
   });
 });

@@ -104,6 +104,17 @@ describe("worktree-write-fence — pass-through cases", () => {
     assert.equal(r.status, 0);
   });
 
+  test("dev_target worktree at the #4177 location (nested under hydra-betting/web/) allowed when file is inside it", () => {
+    const r = runHook({
+      cwd: "/home/gabe/hydra-betting/web/.worktrees/claude-cycle-100",
+      tool_name: "MultiEdit",
+      tool_input: {
+        file_path: "/home/gabe/hydra-betting/web/.worktrees/claude-cycle-100/src/x.ts",
+      },
+    });
+    assert.equal(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+  });
+
   test("scratch paths (/tmp) outside main tree are allowed", () => {
     const r = runHook({
       cwd: "/home/gabe/hydra/.claude/worktrees/agent-abc123",
@@ -155,6 +166,21 @@ describe("worktree-write-fence — deny cases", () => {
       tool_input: { file_path: "/home/gabe/hydra-betting/web/x.ts" },
     });
     assert.equal(r.status, 2);
+    assert.match(r.stderr, /worktree-write-fence/);
+  });
+
+  test("hydra-target-build worktree at the #4177 location writing to hydra-betting main tree is DENIED", () => {
+    // Regression guard for the nested-worktree edge case: the worktree itself
+    // lives UNDER a MAIN_TREE_ROOT (/home/gabe/hydra-betting/), so a naive
+    // prefix match alone would wrongly allow every write. The in-cwd
+    // short-circuit must still gate this correctly — a write OUTSIDE cwd but
+    // inside the main tree stays denied.
+    const r = runHook({
+      cwd: "/home/gabe/hydra-betting/web/.worktrees/claude-cycle-100",
+      tool_name: "Write",
+      tool_input: { file_path: "/home/gabe/hydra-betting/web/x.ts" },
+    });
+    assert.equal(r.status, 2, `expected exit 2, got ${r.status}; stderr=${r.stderr}`);
     assert.match(r.stderr, /worktree-write-fence/);
   });
 
