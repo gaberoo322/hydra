@@ -468,35 +468,91 @@ describe("hydra-target-build playbook wiring (issue #1451)", () => {
   });
 
   test("the operator-review fence lookup fails CLOSED on a gh lookup failure (#4224, #4230 QA remediation)", () => {
-    // A transient `gh issue view` failure (API error, rate limit, auth) is
+    // A transient `gh` failure (API error, rate limit, auth) is
     // indistinguishable from a confirmed "not fenced", so it must count as
     // FENCED — the build's explicit-merge fallback must never resolve that
     // ambiguity toward merging a possibly money-critical PR unreviewed.
     assert.match(
       PLAYBOOK,
       /FENCE_LOOKUP="failed"/,
-      "a failed gh issue view must be recorded as a distinct lookup state",
+      "a failed gh lookup must be recorded as a distinct lookup state",
     );
     assert.match(
       PLAYBOOK,
-      /if ! ANCHOR_LABELS=\$\(gh issue view/,
-      "the fence lookup must branch on gh's exit code, not on empty output",
+      /if ! ISSUE_LABELS=\$\(gh issue view/,
+      "every per-issue label read must branch on gh's exit code, not on empty output",
+    );
+    assert.match(
+      PLAYBOOK,
+      /\|\| FENCE_LOOKUP="failed"/,
+      "the linked-issue list read must fail closed too — a failed closingIssuesReferences lookup must not read as \"no links\"",
     );
     // The #4230 fail-open shape — FENCED assigned directly from the gh
     // pipeline, `|| true` swallowing the failure into "" (unfenced) — must
     // not return.
     assert.doesNotMatch(
       PLAYBOOK,
-      /FENCED=\$\(gh issue view/,
-      "FENCED must not be assigned directly from the gh pipeline: that shape turns a lookup failure into a silent not-fenced",
+      /FENCED=\$\(gh (issue view|pr view)/,
+      "FENCED must not be assigned directly from a gh pipeline: that shape turns a lookup failure into a silent not-fenced",
     );
   });
 
-  test("a non-board anchor (empty ANCHOR_NUM) is not phantom-fenced (#4224)", () => {
+  test("the fence lookup resolves the PR's linked issues — the same subject the workflow's fence resolves (#4224 predicate alignment)", () => {
+    // The workflow-side fence (hydra-betting automerge.yml, PR
+    // gaberoo322/hydra-betting#1076) skips a PR when any SAME-REPO issue it
+    // links (closingIssuesReferences) carries a fencing label. The
+    // build-side lookup must resolve the same subject: keying it on the
+    // anchor alone desyncs the two fences — a PR linked to a DIFFERENT
+    // money-critical issue passes an anchor-only check, and the "attempt the
+    // explicit merge yourself" branch would then merge the exact PR the
+    // workflow just withheld.
     assert.match(
       PLAYBOOK,
-      /if \[ -n "\$\{ANCHOR_NUM:-\}" \]; then/,
-      "the fence lookup must be gated on ANCHOR_NUM so failing-test / priorities-doc anchors proceed unfenced",
+      /closingIssuesReferences/,
+      "the fence lookup must resolve the PR's closingIssuesReferences, mirroring the workflow's fence",
+    );
+    assert.match(
+      PLAYBOOK,
+      /for N in \$\(printf '%s' "\$LINKED"\) \$\{ANCHOR_NUM:-\}; do/,
+      "the lookup must read every linked issue plus the anchor (belt-and-braces)",
+    );
+    // The pre-alignment shape — the lookup gated on ANCHOR_NUM wrapping a
+    // single anchor-only gh issue view — must not return. (Step 9's residual
+    // close guard keeps its own, unrelated ANCHOR_NUM gate.)
+    assert.doesNotMatch(
+      PLAYBOOK,
+      /if \[ -n "\$\{ANCHOR_NUM:-\}" \]; then\s+if ! ANCHOR_LABELS=\$\(gh issue view/,
+      "an anchor-only lookup gated on ANCHOR_NUM desyncs from the workflow's linked-issue fence",
+    );
+  });
+
+  test("a non-board anchor that links no issue is not phantom-fenced (#4224)", () => {
+    // The intent the old ANCHOR_NUM gate carried, now expressed against the
+    // aligned predicate: a failing-test / priorities-doc pick links no issue
+    // and has no anchor number, so its lookup resolves nothing and it
+    // proceeds unfenced — mirroring the workflow, which merges a PR with an
+    // empty closingIssuesReferences list.
+    assert.match(
+      PLAYBOOK,
+      /Empty \$LINKED with an empty anchor/,
+      "the lookup's empty case must be documented: no linked issues and no anchor means unfenced",
+    );
+  });
+
+  test("a fenced anchor whose PR lacks its Closes link is fence-blind — held by draft and reported, never quietly merged (#4224)", () => {
+    // The workflow's fence resolves labels ONLY through the PR's linked
+    // issues, so the Closes link is load-bearing for the fence itself: a
+    // fenced anchor without it cannot be held by the workflow, which
+    // squash-merges on green unreviewed (the PR #1026 class).
+    assert.match(
+      PLAYBOOK,
+      /without the `Closes #<ANCHOR_NUM>` link the workflow's fence cannot see the anchor/,
+      "the close-discipline must name the Closes link as load-bearing for the fence",
+    );
+    assert.match(
+      PLAYBOOK,
+      /gh pr ready --undo/,
+      "the fence-blind branch must take the one mechanical hold available (mark the PR draft) before reporting",
     );
   });
 });

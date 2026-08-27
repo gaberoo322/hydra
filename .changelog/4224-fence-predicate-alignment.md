@@ -1,0 +1,1 @@
+- fix: hydra-target-build's fence lookup resolves every issue the PR links (the same subject the workflow's fence resolves), so an explicit merge can no longer defeat a workflow fence-skip on a linked non-anchor issue (#4224)
