@@ -196,11 +196,11 @@ done
   fence lookup itself failed**) → **STOP: the merge is the operator's**
   (gaberoo322/hydra#4224). The emulated automerge deliberately skips fenced
   PRs — its run log + step summary say "fenced for operator review" — so
-  green-but-unmerged here is the fence working, not merge friction. Detect
-  the fence at the source (the linked issues' labels — the SAME subject the
-  workflow's own fence resolves, which is why the lookup above reads
-  `closingIssuesReferences` and not just the anchor), never by scraping
-  workflow logs. **Fail closed (the #4230 QA remediation): a failed lookup —
+  green-but-unmerged here is the fence working, not merge friction.
+  **Detect the fence at the source** (the linked issues' labels — the SAME
+  subject the workflow's own fence resolves, which is why the lookup above
+  reads `closingIssuesReferences` and not just the anchor), never by
+  scraping workflow logs. **Fail closed (the #4230 QA remediation): a failed lookup —
   transient API error, rate limit, auth expiry — is indistinguishable from a
   confirmed "not fenced", so it counts as FENCED.** Only a successful label
   read with no fencing label releases the explicit merge.
