@@ -204,7 +204,7 @@
   "test/github-seam-check.test.mts": 3,
   "test/github-seam.test.mts": 1,
   "test/glm-beachhead-report.test.mts": 7,
-  "test/glm-drainer-loop.test.mts": 6,
+  "test/glm-drainer-loop.test.mts": 7,
   "test/glm-drainer-runner.test.mts": 7,
   "test/glm-eligibility-sweep.test.mts": 2,
   "test/grill-artifact-script.test.mts": 5,

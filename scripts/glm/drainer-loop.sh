@@ -39,7 +39,11 @@
 #      that already has an open PR referencing it (`Closes #<n>` or
 #      equivalent in an open PR body) — the open-PR pre-dispatch gate other
 #      classes already apply, closing the duplicate-dispatch hole from issue
-#      #3900.
+#      #3900 — or a MERGED PR already referencing it (closing keyword in
+#      title/body, or the repo's "(#<n>)" PR-title anchor convention): a
+#      merged PR whose body lacked a closing keyword leaves the issue open,
+#      and re-dispatching it re-implements merged code every tick (issue
+#      #4130, whose fix merged as #4236 and was re-picked the same day).
 #   7. Claim it: `ready-for-agent` → `in-progress` (the same label swap
 #      hydra-dev's PARENT flow does before spawning a worktree agent —
 #      docs/operator-playbooks/_fragments/hydra-dev-parent-flow.md step 4).
@@ -458,6 +462,36 @@ issue_has_open_pr() {
     <<<"$open_prs_json" >/dev/null 2>&1
 }
 
+# issue_has_merged_pr <issue> <merged_prs_json>
+# TRUE when a MERGED PR already references the issue — the shipped-work
+# guard. `issue_has_open_pr` above answers "is someone on it right now"
+# (closing keyword in an OPEN PR body), but a MERGED PR answers "did work
+# for this issue already ship" — and if the issue is still open after that
+# merge, it is because the PR body carried no closing keyword (GitHub only
+# auto-closes on the keyword), not because the work is unclaimed. Live
+# incident (2026-08-27, this guard's motivation): PR #4236 implemented
+# issue #4130 but referenced it ONLY as the title's "(#4130)" anchor
+# suffix — no closing keyword in title or body — so the issue stayed open
+# and pick_eligible_issue re-dispatched the already-merged work ~90 minutes
+# later, burning a full authoring session per tick until an operator
+# intervenes. Deliberately WIDER than the open-PR check: this repo's PR
+# title convention carries the anchor as a bare "(#<n>)" suffix
+# ("fix(scope): subject (#issue) (#pr)") even when the body has no keyword
+# at all, so BOTH signals count here — a closing keyword in the merged PR's
+# title or body, OR the "(#<n>)" title anchor. The false-positive cost is
+# one skip plus an operator-triage log line; the hole's cost is an
+# authoring session per tick re-implementing merged code.
+issue_has_merged_pr() {
+  local issue="$1"
+  local merged_prs_json="$2"
+  jq -e --argjson n "$issue" \
+    '[.[] | select(
+        (((.title // "") + "\n" + (.body // "")) | test("(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s*#" + ($n | tostring) + "\\b"; "i"))
+        or ((.title // "") | test("\\(#" + ($n | tostring) + "\\)"; "i"))
+      )] | length > 0' \
+    <<<"$merged_prs_json" >/dev/null 2>&1
+}
+
 pick_eligible_issue() {
   # DRY_RUN gates this too — not just the mutating actions further down the
   # pipeline. Picking is a real network round-trip (gh + the design-concepts
@@ -497,11 +531,28 @@ pick_eligible_issue() {
     open_prs_json="[]"
   fi
 
+  # Merged-PR shipped-work guard (issue #4130): same single-fetch shape as
+  # the open-PR list above, but over MERGED PRs. Without it, an issue whose
+  # fix merged without a closing keyword (only the title's "(#<n>)" anchor)
+  # never auto-closes and is re-picked EVERY tick — 2026-08-27: #4236 merged
+  # at 14:00Z and the drainer re-dispatched #4130 by 15:37Z. A WARN (not a
+  # silent fallback, mirroring the sibling above) because a swallowed
+  # failure here degrades straight back into re-dispatching shipped work.
+  local merged_prs_json
+  if ! merged_prs_json=$(gh pr list --repo "$REPO" --state merged --json number,title,body --limit 100 2>/dev/null); then
+    log "WARN gh pr list --state merged failed while building the merged-PR skip list — proceeding without it this tick (shipped-work skip degraded, not blocked)"
+    merged_prs_json="[]"
+  fi
+
   local n
   while IFS= read -r n; do
     [[ -z "$n" ]] && continue
     if issue_has_open_pr "$n" "$open_prs_json"; then
       log "skipping issue #$n — an open PR already references it (Closes #$n or equivalent) — not re-dispatching"
+      continue
+    fi
+    if issue_has_merged_pr "$n" "$merged_prs_json"; then
+      log "skipping issue #$n — a MERGED PR already references it (shipped; the issue is likely open only because that PR body had no closing keyword) — not re-dispatching; close or re-scope the issue by hand"
       continue
     fi
     if [[ "$(has_approved_design_concept "$n")" == "true" ]]; then

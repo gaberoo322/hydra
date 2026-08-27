@@ -507,6 +507,144 @@ exit 1
   });
 });
 
+describe("scripts/glm/drainer-loop.sh — pick_eligible_issue() skips a candidate already shipped by a MERGED PR (issue #4130)", () => {
+  // The merged fetch is a SECOND `gh pr list` call scoped `--state merged`,
+  // so this fake dispatches on whether "merged" appears in the args (the
+  // sibling picker fake above cats one fixture for every pr list and cannot
+  // distinguish the two calls).
+  function fakeGhForMergedPicker(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  for a in "$@"; do
+    if [[ "$a" == "merged" ]]; then
+      if [[ "\${FAKE_GH_MERGED_PR_FAIL:-0}" == "1" ]]; then exit 1; fi
+      cat "$FAKE_GH_MERGED_PR_LIST_FILE"
+      exit 0
+    fi
+  done
+  cat "$FAKE_GH_PR_LIST_FILE"
+  exit 0
+fi
+echo "fake gh (merged-picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  function setupMergedPicker(tmp: string, mergedPrs: unknown[]) {
+    const binDir = join(tmp, "bin");
+    mkdirSync(binDir);
+    writeFileSync(join(binDir, "gh"), fakeGhForMergedPicker(), { mode: 0o755 });
+    const issueListFile = join(tmp, "issues.json");
+    writeFileSync(
+      issueListFile,
+      JSON.stringify([
+        { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+        { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+      ]),
+    );
+    const prListFile = join(tmp, "prs-open.json");
+    writeFileSync(prListFile, JSON.stringify([]));
+    const mergedPrListFile = join(tmp, "prs-merged.json");
+    writeFileSync(mergedPrListFile, JSON.stringify(mergedPrs));
+    return {
+      env: {
+        PATH: `${binDir}:${process.env.PATH}`,
+        FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+        FAKE_GH_PR_LIST_FILE: prListFile,
+        FAKE_GH_MERGED_PR_LIST_FILE: mergedPrListFile,
+      },
+    };
+  }
+
+  test("a candidate referenced only by a MERGED PR's title anchor — no closing keyword anywhere, the exact #4236/#4130 shape — is skipped", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-skip-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      // Reproduces the live 2026-08-27 incident verbatim in miniature: PR
+      // #4236 merged carrying issue #4130 ONLY as the title's "(#4130)"
+      // anchor suffix — its body had no "Closes #4130" — so GitHub never
+      // auto-closed the issue and the loop re-picked it the same day.
+      const { env } = setupMergedPicker(tmp, [
+        {
+          number: 4236,
+          title: "fix(autopilot): distinguish failed orch board reads from empty ones (#10) (#4236)",
+          body: "Autopilot no longer mistakes a failed GitHub board read for an empty board (#10)\n\n## Files in scope\n- scripts/x\n",
+        },
+      ]);
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #10 — a MERGED PR already references it/);
+      assert.match(r.combined, /^20$/m, `expected #20 to be picked instead:\n${r.combined}`);
+      assert.doesNotMatch(r.combined, /^10$/m);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a MERGED PR body carrying a closing keyword also skips the candidate", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-keyword-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const { env } = setupMergedPicker(tmp, [
+        { number: 502, title: "unrelated title", body: "Reworks the lane.\n\nFixes #10" },
+      ]);
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /skipping issue #10 — a MERGED PR already references it/);
+      assert.match(r.combined, /^20$/m, `expected #20 to be picked instead:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a merged PR referencing only OTHER issues, or mentioning #10 with neither keyword nor title anchor, does NOT skip (no false-positive)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-nomatch-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const { env } = setupMergedPicker(tmp, [
+        { number: 503, title: "fix(core): something else (#999)", body: "Discusses #10 in prose but neither closes nor anchors it. Closes #999" },
+      ]);
+      const r = await runShellSnippet(
+        { ...env, HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.doesNotMatch(r.combined, /skipping issue/);
+      assert.match(r.combined, /^10$/m, `expected #10 (oldest updatedAt) to be picked:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the merged-PR fetch failing degrades to no skip (WARN, not blocked) — same fail-open as the open-PR list", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-merged-fail-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const { env } = setupMergedPicker(tmp, []);
+      const r = await runShellSnippet(
+        { ...env, FAKE_GH_MERGED_PR_FAIL: "1", HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /WARN gh pr list --state merged failed/);
+      assert.match(r.combined, /^10$/m, `expected #10 to still be picked without the merged list:\n${r.combined}`);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/glm/drainer-loop.sh — systemd units mirror the pace-gate shape (issue #3689)", () => {
   test("the .service is Type=oneshot with a WorkingDirectory and journal logging, like hydra-pace-gate.service", async () => {
     const fs = await import("node:fs");

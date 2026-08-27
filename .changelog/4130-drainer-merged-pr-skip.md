@@ -1,0 +1,1 @@
+- fix: the GLM drainer skips glm-eligible issues whose work a merged PR already shipped — a keyword-less merge used to leave the issue open and re-dispatched every tick (#4130)
