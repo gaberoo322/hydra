@@ -61,6 +61,7 @@
   "test/autopilot-arch-fallback-signals.test.mts": 1,
   "test/autopilot-args.test.mts": 2,
   "test/autopilot-auto-merge-no-self-approve.test.mts": 1,
+  "test/autopilot-board-degraded-signals.test.mts": 4,
   "test/autopilot-board.test.mts": 11,
   "test/autopilot-brain-smoke.test.mts": 2,
   "test/autopilot-collect-state-signals.test.mts": 3,

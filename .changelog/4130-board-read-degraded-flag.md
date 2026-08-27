@@ -1,0 +1,1 @@
+- fix: collect-state.sh distinguishes failed board reads from empty ones — a GraphQL-only outage now folds into orch_board_signals_degraded and decide.py holds idle conclusions + backfill instead of reading a full board as "no work" (#4130)

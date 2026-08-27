@@ -235,11 +235,30 @@ describe("collect-state.sh — Target board gh-REST fallback (issue #3709)", () 
     );
   });
 
-  test("total failure of the fallback emits target_needs_triage=0, like its siblings", () => {
+  test("total failure of the fallback emits NO count lines — it folds the lane degraded flag (#4130)", () => {
+    // Pre-#4130 the fallback tail fabricated all-four-zero lines
+    // (`|| { echo "target_ready_for_agent=0"; … }`), so a FAILED read was
+    // indistinguishable from a genuinely empty board: during the 2026-08-17
+    // GraphQL-only outage target_ready_for_agent read 0 (true 34) and the
+    // autopilot read "no work". #4130 removes the fabrication — a failed read
+    // emits NOTHING (absent ≠ zero) and sets TARGET_BOARD_DEGRADED, which the
+    // lane block folds into target_board_signals_degraded. The fallback jq
+    // prints one key=value line per count even on an empty board, so an EMPTY
+    // capture is a faithful failure detector.
+    assert.doesNotMatch(
+      src,
+      /\|\| \{ echo "target_ready_for_agent=0"/,
+      "a failed fallback read must not fabricate count lines (#4130): absent ≠ zero",
+    );
     assert.match(
       src,
-      /\|\| \{ echo "target_ready_for_agent=0"; echo "target_needs_qa=0"; echo "target_needs_triage=0"; echo "target_needs_research=0"; \}/,
-      "a failed fallback read must fail open to zero for all four counts — a degraded read must never phantom-dispatch sweep_target",
+      /TARGET_FALLBACK_OUT=\$\(gh issue list --repo "\$TARGET_GH_REPO"/,
+      "the fallback must capture its gh output so a failed (empty) read is distinguishable from a real one",
+    );
+    assert.match(
+      src,
+      /TARGET_BOARD_DEGRADED=true/,
+      "an empty fallback capture must fold into TARGET_BOARD_DEGRADED — never into fabricated zeros",
     );
   });
 

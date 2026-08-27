@@ -421,6 +421,21 @@ SIGNAL_COOLDOWNS = {
 # deliberately NOT in this set.
 BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 
+# Every signal class keyed on `orch_backfill_idle` (issue #4130). When the
+# orch board read is DEGRADED (collect-state.sh emitted
+# `orch_board_signals_degraded=true` — a FAILED read, not an empty board),
+# the counts behind the idle predicate are absent-because-unread, not zero:
+# firing any of these would dispatch new-issue-producing classes against a
+# board they cannot see (observed live: orch_backfill_idle read true during
+# the 2026-08-17 GraphQL-only outage with 15 ready-for-agent issues on the
+# board). `_rule_signal_classes` suppresses the whole class for the turn —
+# including discover_orch's 7d staleness floor, which is the same hazard
+# wearing a calendar: a stale-but-blind board is not a backfill condition.
+# cleanup_orch and skill_prune consume the same signal (issue #960 / #2949)
+# and are suppressed with it. Target-lane classes (cleanup_target et al.) key
+# off `target_backfill_idle` and are deliberately NOT here.
+ORCH_BACKFILL_IDLE_CLASSES = ("discover_orch", "architecture_orch", "cleanup_orch", "skill_prune")
+
 # Backfill starvation floor (issue #2428). The one-per-turn stagger guard above
 # means that on a busy run a staggered backfill class (discover_orch /
 # architecture_orch) can LOSE the stagger slot every idle turn and go fully dark
@@ -2738,6 +2753,21 @@ def _rule_signal_classes(
             )
             out.skipped += 1
             continue
+        # Degraded orch board read (issue #4130): the idle predicate behind
+        # every ORCH_BACKFILL_IDLE_CLASSES class is absent-because-unread, not
+        # zero. Suppress the whole class for the turn — backfill selectors AND
+        # discover_orch's staleness floor (a stale-but-blind board is not a
+        # backfill condition). Checked BEFORE `burned`/cooldown so the emitted
+        # skip reason names the degradation, not a coincidental cooldown.
+        if sig in ORCH_BACKFILL_IDLE_CLASSES and _orch_board_degraded(state):
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="idle",
+                    reason="orch board read degraded — backfill withheld (issue #4130)",
+                )
+            )
+            out.skipped += 1
+            continue
         if sig in burned:
             out.events.append(
                 make_dispatch_decision_event(
@@ -2920,15 +2950,35 @@ def _rule_idle_fallback(
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
     if not dispatched_any and occupied == 0 and not plan_has_actions:
-        out.emit(
-            make_terminate(
-                "idle",
-                merged_prs=int(state.get("merged_prs", 0) or 0),
-                reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
-            ),
-            reason="idle-drain",
-        )
-        out.debug["idle_fallback"] = "terminate"
+        if _orch_board_degraded(state):
+            # (#4130) The board read FAILED — the emptiness behind this
+            # wait-only turn is fabricated, so the #1352 clean idle drain
+            # would record a cause the run didn't earn. Hold open instead:
+            # emit the heartbeat wait with an explicit degraded reason. The
+            # print-mode session may still exit on it (ADR-0021 D5 —
+            # continuity comes from the pace-gate relaunch), but the turn
+            # record now carries WHY: `degraded-board-hold`, not a clean
+            # `idle`. wall_clock/budget/context_compaction still end a
+            # permanently-blind run honestly.
+            out.emit(
+                make_wait(
+                    WALL_CLOCK_HEARTBEAT_SEC,
+                    "orch board read degraded — idle conclusions withheld (issue #4130)",
+                ),
+                reason="degraded-board-hold",
+            )
+            out.debug["idle_fallback"] = "degraded-board-hold"
+            out.debug["orch_board_degraded"] = True
+        else:
+            out.emit(
+                make_terminate(
+                    "idle",
+                    merged_prs=int(state.get("merged_prs", 0) or 0),
+                    reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
+                ),
+                reason="idle-drain",
+            )
+            out.debug["idle_fallback"] = "terminate"
     elif not dispatched_any and occupied == 0:
         out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
     elif not dispatched_any:
@@ -3244,14 +3294,17 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
 
     `collect-state.sh` emits the orch anchor signals (`orch_pending_grill_anchor`
     and, post-#3711, `orch_dev_ready_anchor`) as a single string that is either
-    an `issue-<N>` ref or the literal `"none"` when there is no such anchor —
-    including the degraded case where the board read failed. The signal may also
-    be omitted from `state.signals` entirely by an older autopilot turn.
+    an `issue-<N>` ref, the literal `"none"` when there is no such anchor, or —
+    post-#4130 — the literal `"degraded"` when the candidate read itself failed
+    (an explicit sentinel so a failed read is never emitted as a legitimate
+    `none`; `_orch_board_degraded` carries the gate, this just must not mistake
+    the sentinel for a real ref). The signal may also be omitted from
+    `state.signals` entirely by an older autopilot turn.
 
-    All three "no anchor" spellings (absent key, empty string, literal "none")
-    collapse to None here so callers branch on one condition instead of
-    re-deriving the triple. Anything non-string is also None: a malformed signal
-    must never be mistaken for a real anchor ref.
+    All "no anchor" spellings (absent key, empty string, literal "none",
+    literal "degraded") collapse to None here so callers branch on one
+    condition instead of re-deriving them. Anything non-string is also None: a
+    malformed signal must never be mistaken for a real anchor ref.
 
     Pure: reads the passed-in dict only. No I/O (issue #3711 keeps decide.py a
     pure function of (state, events, now)).
@@ -3262,7 +3315,7 @@ def _orch_anchor_signal(signals: dict | None, key: str) -> str | None:
     if not isinstance(raw, str):
         return None
     raw = raw.strip()
-    if not raw or raw == "none":
+    if not raw or raw in ("none", "degraded"):
         return None
     return raw
 
@@ -4569,6 +4622,21 @@ def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
     return bool((state.get("signals") or {}).get(signal))
 
 
+def _orch_board_degraded(state: dict) -> bool:
+    """True when collect-state.sh flagged the orch board read as FAILED (#4130).
+
+    Reads the pre-resolved `orch_board_signals_degraded` boolean merged into
+    state.signals — board-read health is a STATE-borne fact (Phase 1 emits it
+    alongside the counts), never a hook event, so unlike `_signal_present`
+    there is no events fallback to consult. Consumers: the
+    `ORCH_BACKFILL_IDLE_CLASSES` suppression in `_rule_signal_classes`, and
+    the idle-conclusion holds in `_check_termination` /
+    `_rule_idle_fallback` — a degraded snapshot must never be read as a quiet
+    board. Pure: reads the passed-in state only.
+    """
+    return bool((state.get("signals") or {}).get("orch_board_signals_degraded"))
+
+
 def _research_force_allowed(state: dict, slot: str, now: int) -> bool:
     """Per-day cap on forced research dispatches (grilled decision 6, AC: capped at 4/day).
 
@@ -4913,6 +4981,15 @@ def _check_termination(state: dict, now: int) -> dict | None:
     if elapsed >= wall_max:
         return make_terminate("wall_clock", merged_prs=merged_prs, reason=f"elapsed={elapsed}s")
     if idle >= idle_max and occupied == 0:
+        # (#4130) A degraded orch board read must not drain the run: "nothing
+        # to do" was fabricated by a failed read (absent counts read as 0).
+        # Return no termination and let the rules run — step 6's
+        # `_rule_idle_fallback` emits the observable degraded hold. The other
+        # causes above (quota/budget/wall_clock) and below (failure backstop,
+        # context compaction) remain honest backstops, so a permanently-blind
+        # run still ends — just never as a *clean* idle drain it didn't earn.
+        if _orch_board_degraded(state):
+            return None
         return make_terminate("idle", merged_prs=merged_prs, reason=f"idle_turns={idle}")
 
     # 5-failure global backstop — looks at the most recent failure pattern.
