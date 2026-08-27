@@ -755,17 +755,42 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
     );
   });
 
-  test("retro_orch fires after 24h cooldown elapses", () => {
+  test("retro_orch fires after 24h cooldown elapses, when the run is drillable", () => {
     const now = Math.floor(Date.now() / 1000);
     const state = baseState({
-      signals: { retro_run_available: true },
-      // 25h ago → past the 24h cooldown.
+      // Issue #3871 narrowed this class: an elapsed cooldown is necessary but
+      // no longer sufficient — the SAME run's retro bundle must also carry
+      // something to drill (`retro_run_drillable`). This case pins the
+      // conjunction's positive arm.
+      signals: { retro_run_available: true, retro_run_drillable: true },
+      // 25h ago → past the 24h cooldown, and well inside the 7d weekly floor
+      // so the correction-(b) override is NOT what makes this fire.
       signal_last_fired: { retro_orch: now - 25 * 60 * 60 } as any,
     });
     const plan = runDecide(state, null);
     assert.ok(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
-      "retro_orch must fire once the 24h cooldown has elapsed",
+      "retro_orch must fire once the 24h cooldown has elapsed and the run is drillable",
+    );
+  });
+
+  test("retro_orch does NOT fire on an elapsed cooldown when the run is not drillable", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      // The negative arm of the same conjunction (issue #3871): a completed
+      // run whose bundle carries no flagged dispatch / reflection / stuck
+      // signal / recommendation is not worth a ~115k-token /hydra-retro
+      // dispatch, even though its cooldown has elapsed.
+      signals: { retro_run_available: true },
+      // 25h ago: past the 24h cooldown but far inside the 7d weekly-override
+      // floor, so correction (b) cannot mask the drillability gate here.
+      signal_last_fired: { retro_orch: now - 25 * 60 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "retro_orch"),
+      undefined,
+      "an elapsed cooldown alone no longer dispatches retro_orch — the run must also be drillable",
     );
   });
 
