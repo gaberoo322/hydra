@@ -1,0 +1,1 @@
+- fix: Target merge fence is now enforced — automerge.yml skips money-critical/hold-for-operator PRs for operator review instead of squash-merging them on green (#4224)
