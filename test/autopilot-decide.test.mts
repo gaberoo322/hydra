@@ -31,7 +31,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -2348,6 +2348,215 @@ describe("decide.py — idle fallback / heartbeat", () => {
       findAction(plan, (a) => a.type === "wait" && a.reason === "idle heartbeat"),
       "housekeeping turn keeps the heartbeat wait",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8.2 Degraded orch board read (issue #4130)
+// ---------------------------------------------------------------------------
+//
+// A GraphQL-only GitHub outage (REST healthy, 2026-08-17) made every
+// collect-state.sh orch board read silently render as 0/none, so decide.py
+// concluded "no work": wait-only turns drained runs to a clean terminate:idle
+// with 15 eligible issues on the board, and the same fake zeros satisfied the
+// orch_backfill_idle conjunction (inverse-fire backfill against a FULL board).
+// collect-state.sh now emits an observable `orch_board_signals_degraded` flag
+// (the orch mirror of target_board_signals_degraded); these tests pin the
+// decide.py side: a degraded snapshot withholds BOTH terminate:idle producers
+// and every orch_backfill_idle-driven backfill dispatch, stamps the turn
+// record, and leaves a genuinely-empty board's behaviour byte-identical.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — degraded orch board read (issue #4130)", () => {
+  // Seed discover_orch as fired 2h ago everywhere a WAIT-ONLY turn is needed:
+  // past the 1h cooldown, inside the 7d #4114 staleness floor — eligible on
+  // every axis except a trigger, so no dispatch masks the paths under test
+  // (same seeding trick as the "dead orch_idle" case above).
+  const COOLED = { discover_orch: Math.floor(Date.now() / 1000) - 2 * 60 * 60 } as any;
+
+  test("degraded wait-only turn takes the heartbeat wait, NOT terminate:idle", () => {
+    const state = baseState({
+      signals: { orch_board_signals_degraded: true },
+      signal_last_fired: COOLED,
+    });
+    const plan = runDecide(state, null);
+    const w = findAction(plan, (a) => a.type === "wait");
+    assert.ok(w, "a degraded wait-only turn must wait, not terminate");
+    assert.equal(w.seconds, 900, "the degraded turn waits one heartbeat cadence");
+    assert.match(String(w.reason), /degraded/, "the wait's reason must name the degraded read");
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "blindness is not quiet — a degraded read must never be recorded as a clean idle drain",
+    );
+    assert.equal(
+      plan.debug?.idle_fallback,
+      "degraded-board-wait",
+      "the idle_fallback debug hint must distinguish the degraded wait",
+    );
+  });
+
+  test("contrast: the same wait-only turn WITHOUT the flag still terminate:idle (#1352 unchanged)", () => {
+    const plan = runDecide(baseState({ signal_last_fired: COOLED }), null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "a genuinely quiet board still drains");
+    assert.equal(t.cause, "idle");
+  });
+
+  test("idle_turns at the drain threshold + degraded → idle cause withheld (not just the fallback path)", () => {
+    // _check_termination's own idle-drain arm (idle_turns >= idle_drain_turns)
+    // is the SECOND terminate:idle producer; both must honor the flag. With
+    // the flag set the run keeps waiting — an outage must not be able to
+    // out-wait the drain counter into a clean exit either.
+    const state = baseState({
+      signals: { orch_board_signals_degraded: true },
+      idle_turns: 5,
+      signal_last_fired: COOLED,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "idle turns accumulated against a degraded read are blindness, not quiet",
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "wait"),
+      "the degraded snapshot keeps the heartbeat wait alive instead",
+    );
+  });
+
+  test("contrast: idle_turns at the threshold WITHOUT the flag still terminates idle", () => {
+    const plan = runDecide(
+      baseState({ idle_turns: 5, signal_last_fired: COOLED }),
+      null,
+    );
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t);
+    assert.equal(t.cause, "idle");
+  });
+
+  test("degraded snapshot suppresses EVERY orch_backfill_idle backfill dispatch", () => {
+    // The board-empty conjunction is carried as a (possibly stale) true while
+    // the read itself failed — belt-and-braces: collect-state emits
+    // orch_backfill_idle=false on a failed read, and decide.py independently
+    // refuses to act on it while degraded. architecture_orch / cleanup_orch
+    // are left NEVER-fired so no starvation/stagger floor can sneak a
+    // dispatch through a suppressed signal.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, orch_board_signals_degraded: true },
+      signal_last_fired: COOLED,
+    });
+    const plan = runDecide(state, null);
+    const backfill = (plan.actions ?? []).filter(
+      (a: any) =>
+        a.type === "dispatch" &&
+        ["discover_orch", "architecture_orch", "cleanup_orch", "skill_prune"].includes(a.slot),
+    );
+    assert.deepEqual(
+      backfill.map((a: any) => a.slot),
+      [],
+      "no backfill class may fire off a board read that failed",
+    );
+  });
+
+  test("contrast: orch_backfill_idle WITHOUT degradation still dispatches backfill (unchanged)", () => {
+    const state = baseState({ signals: { orch_backfill_idle: true }, signal_last_fired: COOLED });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_orch"),
+      "a genuinely idle board still backfills — the flag must not over-suppress",
+    );
+  });
+
+  test("the degraded flag is readable from the event stream too (the _signal_present seam)", () => {
+    // Pre-resolved signals arrive either on state.signals or as signal events;
+    // the gate must honor both, mirroring every other collect-state signal.
+    const state = baseState({ signal_last_fired: COOLED });
+    const plan = runDecide(state, null, [
+      { type: "signal", name: "orch_board_signals_degraded", value: true },
+    ]);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "an event-borne degraded flag must suppress terminate:idle the same way",
+    );
+  });
+
+  test("a degraded turn stamps the turn record (plan.debug.orch_board_read_degraded)", () => {
+    // AC visibility: the degraded condition rides the persisted plan JSON on
+    // EVERY turn decided against a degraded snapshot — not only the ones whose
+    // dispatches were suppressed by it. A busy-but-degraded turn must carry
+    // the stamp too, so a retro can see the outage from the turn record.
+    const state = baseState({
+      signals: { orch_work_available: true, orch_board_signals_degraded: true },
+      signal_last_fired: COOLED,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      plan.debug?.orch_board_read_degraded,
+      true,
+      "the turn record must name the degraded read, even on a dispatch-bearing turn",
+    );
+    // And the healthy snapshot never carries it.
+    const healthy = runDecide(
+      baseState({ signals: { orch_work_available: true }, signal_last_fired: COOLED }),
+      null,
+    );
+    assert.equal(
+      healthy.debug?.orch_board_read_degraded,
+      undefined,
+      "a healthy board read must not be stamped degraded",
+    );
+  });
+
+  test("purity: the degraded gating needs NO gh/curl — decide.py only reads pre-resolved signals", () => {
+    // Design-concept issue-4130 INV-3 (a MUST NOT): decide.py must not shell
+    // out to gh/curl to verify a degraded read itself. Behavioural proof:
+    // run the CLI with a PATH stripped to a directory containing ONLY the
+    // python3 binary — every other executable (gh, curl, sh, jq) is
+    // unresolvable, so a decide.py that verified the board itself would fail
+    // or change its plan. The suppressed plan must come out identical to the
+    // normal run above: terminate withheld, degraded heartbeat wait emitted.
+    const which = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], {
+      encoding: "utf-8",
+    });
+    assert.equal(which.status, 0, "could not resolve the python3 executable");
+    const pyAbs = which.stdout.trim();
+    const binDir = mkdtempSync(join(tmpdir(), "decide-pure-path-"));
+    symlinkSync(pyAbs, join(binDir, "python3"));
+    const t = makeTmp();
+    writeFileSync(
+      t.state,
+      JSON.stringify(
+        baseState({ signals: { orch_board_signals_degraded: true }, signal_last_fired: COOLED }),
+      ),
+    );
+    writeFileSync(t.cands, JSON.stringify(null));
+    writeFileSync(t.events, JSON.stringify([]));
+    try {
+      const r = spawnSync(pyAbs, [DECIDE, "decide", t.state, t.cands, t.events], {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          PATH: binDir,
+          HYDRA_AUTOPILOT_RUN_END_POST: "off",
+        },
+      });
+      assert.equal(r.status, 0, `decide.py failed on the stripped PATH: ${r.stderr}`);
+      const plan = JSON.parse(r.stdout);
+      assert.equal(
+        findAction(plan, (a) => a.type === "terminate"),
+        undefined,
+        "with every external binary unresolvable, the degraded gate still suppresses terminate:idle — the verdict came from the input files, not the network",
+      );
+      assert.ok(
+        findAction(plan, (a) => a.type === "wait"),
+        "the degraded heartbeat wait survives the stripped PATH",
+      );
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(t.dir, { recursive: true, force: true });
+    }
   });
 });
 

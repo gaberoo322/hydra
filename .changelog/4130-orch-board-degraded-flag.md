@@ -1,0 +1,1 @@
+- fix: autopilot no longer reads a failed GitHub board read as an empty board — a degraded read suppresses idle termination and backfill dispatch, and is visible as a per-lane degraded flag (#4130)
