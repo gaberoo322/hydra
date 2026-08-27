@@ -31,7 +31,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -2324,6 +2324,56 @@ describe("decide.py — degraded orch board read (issue #4130)", () => {
       undefined,
       "a healthy board read must not be stamped degraded",
     );
+  });
+
+  test("purity: the degraded gating needs NO gh/curl — decide.py only reads pre-resolved signals", () => {
+    // Design-concept issue-4130 INV-3 (a MUST NOT): decide.py must not shell
+    // out to gh/curl to verify a degraded read itself. Behavioural proof:
+    // run the CLI with a PATH stripped to a directory containing ONLY the
+    // python3 binary — every other executable (gh, curl, sh, jq) is
+    // unresolvable, so a decide.py that verified the board itself would fail
+    // or change its plan. The suppressed plan must come out identical to the
+    // normal run above: terminate withheld, degraded heartbeat wait emitted.
+    const which = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], {
+      encoding: "utf-8",
+    });
+    assert.equal(which.status, 0, "could not resolve the python3 executable");
+    const pyAbs = which.stdout.trim();
+    const binDir = mkdtempSync(join(tmpdir(), "decide-pure-path-"));
+    symlinkSync(pyAbs, join(binDir, "python3"));
+    const t = makeTmp();
+    writeFileSync(
+      t.state,
+      JSON.stringify(
+        baseState({ signals: { orch_board_signals_degraded: true }, signal_last_fired: COOLED }),
+      ),
+    );
+    writeFileSync(t.cands, JSON.stringify(null));
+    writeFileSync(t.events, JSON.stringify([]));
+    try {
+      const r = spawnSync(pyAbs, [DECIDE, "decide", t.state, t.cands, t.events], {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          PATH: binDir,
+          HYDRA_AUTOPILOT_RUN_END_POST: "off",
+        },
+      });
+      assert.equal(r.status, 0, `decide.py failed on the stripped PATH: ${r.stderr}`);
+      const plan = JSON.parse(r.stdout);
+      assert.equal(
+        findAction(plan, (a) => a.type === "terminate"),
+        undefined,
+        "with every external binary unresolvable, the degraded gate still suppresses terminate:idle — the verdict came from the input files, not the network",
+      );
+      assert.ok(
+        findAction(plan, (a) => a.type === "wait"),
+        "the degraded heartbeat wait survives the stripped PATH",
+      );
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(t.dir, { recursive: true, force: true });
+    }
   });
 });
 
