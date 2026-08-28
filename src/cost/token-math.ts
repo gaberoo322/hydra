@@ -188,7 +188,7 @@ export function modelToFamily(model: string | null | undefined): ModelFamily {
  * cosmetic miscount, it is the quota inversion described on
  * {@link isForeignProviderModel}.
  */
-export const FOREIGN_PROVIDER_MODEL_PREFIXES: readonly string[] = Object.freeze(["glm-"]);
+const FOREIGN_PROVIDER_MODEL_PREFIXES: readonly string[] = Object.freeze(["glm-"]);
 
 /**
  * Is this model billed to a provider OTHER than the Anthropic subscription?
