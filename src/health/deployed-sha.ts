@@ -162,11 +162,3 @@ export async function getRemoteMasterSha(deps: DeployedShaDeps = {}): Promise<st
   remoteMasterShaCache = { sha, at };
   return sha;
 }
-
-/**
- * Test hook: drop the memoized origin/master cache (the sibling of
- * {@link resetDeployedShaCache}).
- */
-export function resetRemoteMasterShaCache(): void {
-  remoteMasterShaCache = { sha: null, at: -Infinity };
-}

@@ -131,7 +131,7 @@ export const DRAINER_SETTINGS_RELATIVE_PATH = "config/glm/drainer-settings.json"
 export const DRAINER_SETTINGS_PATH = join(REPO_ROOT, DRAINER_SETTINGS_RELATIVE_PATH);
 
 /** Repo-relative path of the output-side secret scanner. */
-export const SECRET_SCAN_RELATIVE_PATH = "scripts/ci/secret-scan.sh";
+const SECRET_SCAN_RELATIVE_PATH = "scripts/ci/secret-scan.sh";
 
 /**
  * Environment variables that must NEVER survive into the drainer's env.
@@ -350,7 +350,7 @@ export type SecretScanRunner = (
  * list. `bash` is used directly (not `shell: true`) so filenames are never
  * re-parsed by a shell.
  */
-export function defaultSecretScanRunner(repoRoot: string = REPO_ROOT): SecretScanRunner {
+function defaultSecretScanRunner(repoRoot: string = REPO_ROOT): SecretScanRunner {
   const script = join(repoRoot, SECRET_SCAN_RELATIVE_PATH);
   return async (files) => {
     const result = await execWithGroupCleanup("bash", [script, ...files], {
