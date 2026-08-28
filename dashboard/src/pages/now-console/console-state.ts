@@ -43,9 +43,6 @@ export { VIEW_CONSOLE as DEFAULT_NOW_VIEW };
 
 export const NOW_VIEW_STORAGE_KEY = "hydra:now:view-mode";
 
-/** The query-param key used to deep-link the view choice (`/now?view=habitat`). */
-export const NOW_VIEW_QUERY_KEY = "view";
-
 export function isNowViewMode(v: unknown): v is NowViewMode {
   return v === VIEW_CONSOLE || v === VIEW_HABITAT;
 }
