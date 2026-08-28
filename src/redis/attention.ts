@@ -39,7 +39,7 @@ import type {
 } from "../schemas/attention.ts";
 
 /** The three feed signals, as the counters are keyed. */
-export const ATTENTION_SIGNALS: readonly AttentionSignal[] = [
+const ATTENTION_SIGNALS: readonly AttentionSignal[] = [
   "blocked-on-human",
   "breakage",
   "repetition",
@@ -50,7 +50,7 @@ export const ATTENTION_SIGNALS: readonly AttentionSignal[] = [
  * snooze, NOT permanent suppression (design-concept #4007) — a genuinely
  * still-crossing item resurfaces after this window.
  */
-export const DISMISSAL_SNOOZE_DAYS = 30;
+const DISMISSAL_SNOOZE_DAYS = 30;
 const DISMISSAL_SNOOZE_MS = DISMISSAL_SNOOZE_DAYS * 24 * 60 * 60 * 1000;
 
 /**
