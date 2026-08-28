@@ -683,6 +683,45 @@ except Exception:
   pass
 PY
 )" 2>/dev/null || true)
+# issue #3964: the two evidence channels are ALSO computed separately (this
+# is purely ADDITIVE — `ORCH_INFLIGHT_ISSUES` above is untouched, byte-
+# identical to before, and still the ONLY thing that drives the real
+# candidate-pool filter below) so the Candidate Exclusion telemetry can
+# report WHICH matcher actually fired for a given anchor — the wayfinder
+# #3954 measurement found the branch matcher dead against real dispatch
+# output (0/11) and the whole exclusion resting on the body closing-keyword
+# matcher (11/11), a fact invisible without per-source attribution.
+# `test/collect-state-inflight-exclusion.test.mts` extracts the
+# `ORCH_INFLIGHT_ISSUES` block above BY NAME via regex, so that assignment's
+# shape must stay exactly as committed — hence these ride as separate,
+# additional blocks rather than `ORCH_INFLIGHT_ISSUES` being derived from them.
+ORCH_INFLIGHT_BRANCH_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
+import json, re, sys
+try:
+  out = set()
+  for pr in json.load(sys.stdin):
+    m = re.match(r'issue-(\d+)\b', pr.get('headRefName') or '')
+    if m:
+      out.add(int(m.group(1)))
+  print(' '.join(str(x) for x in sorted(out)))
+except Exception:
+  pass
+PY
+)" 2>/dev/null || true)
+ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
+import json, re, sys
+try:
+  out = set()
+  for pr in json.load(sys.stdin):
+    for m in re.finditer(
+        r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s*:?\s+#(\d+)\b',
+        pr.get('body') or '', re.IGNORECASE):
+      out.add(int(m.group(1)))
+  print(' '.join(str(x) for x in sorted(out)))
+except Exception:
+  pass
+PY
+)" 2>/dev/null || true)
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)
@@ -1001,6 +1040,127 @@ fi
 echo "orch_pending_grill_anchor=$ORCH_GRILL_PICK"
 echo "orch_dev_ready_anchor=$ORCH_DEV_READY_PICK"
 echo "orch_dev_ready_anchor_design_concept_status=$ORCH_DEV_READY_DESIGN_CONCEPT_STATUS"
+
+# ---------------------------------------------------------------------------
+# CANDIDATE EXCLUSION TELEMETRY (issue #3964, design decided on wayfinder
+# #3954). The four predicates above (target-scope #2701, in-flight-dev
+# #3711, mechanical #1230, trivial-anchor #1088) already compute every
+# verdict and discard them via `continue` — nothing measures how often each
+# one fires, or against a denominator. This block RE-EVALUATES the same four
+# predicates, independently, against the full raw ready-for-agent pool so
+# each member's {considered, excluded, survived} denominator is the WHOLE
+# board — matching the #3954 measurement's "share of board" column, which
+# divides every member's excluded count by the same 18.
+#
+# `ORCH_GRILL_LIST_JSON` above is ALREADY target-backlog-filtered (its `--jq`
+# excludes target-scope issues, issue #2704) — evaluating target-scope-
+# exclusion against it could never observe a real exclusion, since a
+# target-backlog issue never appears in that list at all. This is a
+# deliberate SEPARATE, uncapped, unfiltered `gh issue list` fetch (one extra
+# API round-trip) rather than deriving from `ORCH_GRILL_LIST_JSON`'s source
+# text — `test/autopilot-collect-state-signals.test.mts` pins that
+# assignment's exact literal text (`ORCH_GRILL_LIST_JSON=$(gh issue list
+# --repo gaberoo322/hydra --state open --label ready-for-agent...`), so it
+# must stay untouched.
+#
+# This is a READ-ONLY re-derivation for observability: it NEVER feeds back
+# into ORCH_GRILL_LIST_JSON / ORCH_GRILL_CANDIDATES / the dispatch loop
+# above, and touches none of their bash variables. It exists purely so
+# decide.py can emit one `candidate_exclusion` event per (anchor, member)
+# evaluation (mirroring `cascade_routing_blocked`); the slot-events bridge
+# persists those into a durable, anchor+member-keyed bounded ring for the
+# `rollupCandidateExclusions` aggregator to fold into a rate.
+#
+# Best-effort — same `2>/dev/null || true` degrade as every sibling collector
+# in this file; a failure here NEVER fails the collect step. Emitted under
+# `candidate_exclusions_json=`, exact shape precedent `slot_events_json=`
+# below, printing `[]` rather than nothing so a downstream `jq`/`json.loads`
+# on the merged state never chokes on an empty string.
+ORCH_GRILL_RAW_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title 2>/dev/null || true)
+CANDIDATE_EXCLUSIONS_JSON=$(printf '%s' "$ORCH_GRILL_RAW_JSON" | \
+  ORCH_INFLIGHT_BRANCH_ISSUES="$ORCH_INFLIGHT_BRANCH_ISSUES" \
+  ORCH_INFLIGHT_BODYREF_ISSUES="$ORCH_INFLIGHT_BODYREF_ISSUES" \
+  python3 -c "$(cat <<'PY'
+import json, os, re, sys
+
+def parse_set(raw):
+  return {int(x) for x in (raw or '').split() if x.isdigit()}
+
+branch_issues = parse_set(os.environ.get('ORCH_INFLIGHT_BRANCH_ISSUES'))
+bodyref_issues = parse_set(os.environ.get('ORCH_INFLIGHT_BODYREF_ISSUES'))
+
+try:
+  items = json.load(sys.stdin)
+  if not isinstance(items, list):
+    items = []
+except Exception:
+  items = []
+
+records = []
+
+def add(anchor, member, verdict, evidence):
+  records.append({
+    "anchor": anchor,
+    "member": member,
+    "verdict": verdict,
+    "evidence": evidence,
+  })
+
+for it in items:
+  n = it.get('number')
+  if not isinstance(n, int):
+    continue
+  anchor = f"issue-{n}"
+  labels = {l.get('name', '') for l in (it.get('labels') or [])}
+  title = (it.get('title') or '').lstrip()
+  body = it.get('body') or ''
+
+  # 1. target-scope-exclusion (issue #2704) — target-backlog-labelled issues
+  #    are Target-scope, never an orchestrator grill/dev anchor.
+  if 'target-backlog' in labels:
+    add(anchor, 'target-scope-exclusion', 'excluded', 'target-backlog-label')
+  else:
+    add(anchor, 'target-scope-exclusion', 'survived', '')
+
+  # 2. in-flight-dev-exclusion (issue #3711). Evidence priority mirrors the
+  #    #3954 measurement's own reporting order: PR-body closing-keyword ref
+  #    first, then the issue-<N>-slug branch name, then the in-progress
+  #    label (documented belt-and-braces, not the primary source).
+  if n in bodyref_issues:
+    add(anchor, 'in-flight-dev-exclusion', 'excluded', 'pr-body-ref')
+  elif n in branch_issues:
+    add(anchor, 'in-flight-dev-exclusion', 'excluded', 'pr-branch-name')
+  elif 'in-progress' in labels:
+    add(anchor, 'in-flight-dev-exclusion', 'excluded', 'in-progress-label')
+  else:
+    add(anchor, 'in-flight-dev-exclusion', 'survived', '')
+
+  # 3. mechanical-exclusion (issue #1230) — cleanup-scan label OR a
+  #    calendar-bound `track:` title prefix.
+  if 'cleanup-scan' in labels:
+    add(anchor, 'mechanical-exclusion', 'excluded', 'cleanup-scan-label')
+  elif title.lower().startswith('track:'):
+    add(anchor, 'mechanical-exclusion', 'excluded', 'track-title-prefix')
+  else:
+    add(anchor, 'mechanical-exclusion', 'survived', '')
+
+  # 4. trivial-anchor-exclusion (issue #1088) — an explicit `Expected tier:
+  #    T1`/`1` body stamp, UNLESS the needs-design-concept opt-in label
+  #    overrides it (always grill in that case).
+  if 'needs-design-concept' in labels:
+    add(anchor, 'trivial-anchor-exclusion', 'survived', '')
+  elif re.search(r'Expected\s+tier:\s*T?1\b', body, re.IGNORECASE):
+    add(anchor, 'trivial-anchor-exclusion', 'excluded', 'expected-tier-t1')
+  else:
+    add(anchor, 'trivial-anchor-exclusion', 'survived', '')
+
+print(json.dumps(records))
+PY
+)" 2>/dev/null || true)
+if [ -z "$CANDIDATE_EXCLUSIONS_JSON" ]; then
+  CANDIDATE_EXCLUSIONS_JSON='[]'
+fi
+echo "candidate_exclusions_json=${CANDIDATE_EXCLUSIONS_JSON}"
 
 # active dev_orch detector (issue #412): an open PR on a hydra-dev head
 # branch updated within the last 90 minutes is the only reliable gate

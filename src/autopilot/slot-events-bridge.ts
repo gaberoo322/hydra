@@ -32,6 +32,10 @@
 import type { EventBus } from "../event-bus.ts";
 import type { WsBroadcastRegistry } from "../ws-broadcast-registry.ts";
 import { cascadeRecordFromEvent, recordCascade } from "../redis/cascade-telemetry.ts";
+import {
+  candidateExclusionEvaluationFromEvent,
+  recordCandidateExclusion,
+} from "../redis/candidate-exclusions.ts";
 import { logger } from "../logger.ts";
 
 const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
@@ -94,6 +98,11 @@ export async function startSlotEventsBridge(
       // telemetry write must never break the animation broadcast it rides
       // (mirrors the bridge's existing best-effort-broadcast contract).
       await persistCascadeTelemetry(event);
+      // Candidate Exclusion telemetry (issue #3964): persist each
+      // (anchor, member) evaluation into the durable, anchor+member-keyed
+      // ring. Same best-effort contract as the cascade persist above — a
+      // non-candidate_exclusion event is a cheap no-op.
+      await persistCandidateExclusionTelemetry(event);
     },
     // reapStale: this group is `$`-anchored (no backlog replay) and only
     // animates NEW events, so dropping a dead zombie's PEL is correct (#1221).
@@ -116,6 +125,24 @@ export async function persistCascadeTelemetry(event: any): Promise<void> {
   } catch (err: any) {
     // Never propagate — telemetry must not break the bridge (fail-loud log).
     logger.error({ err }, "[slot-events-bridge] cascade telemetry persist failed");
+  }
+}
+
+/**
+ * Best-effort persist of a `candidate_exclusion` telemetry event into the
+ * durable, anchor+member-keyed ring (issue #3964). Same lossy/best-effort
+ * contract as `persistCascadeTelemetry` above — the bridge is `$`-anchored
+ * and may lag/skip on restart, so this is a durability layer for a RATE,
+ * never an exactly-once census. A non-candidate_exclusion event is a cheap
+ * no-op (`candidateExclusionEvaluationFromEvent` returns null).
+ */
+export async function persistCandidateExclusionTelemetry(event: any): Promise<void> {
+  try {
+    const ev = candidateExclusionEvaluationFromEvent(extractPayload(event));
+    if (ev) await recordCandidateExclusion(ev);
+  } catch (err: any) {
+    // Never propagate — telemetry must not break the bridge (fail-loud log).
+    logger.error({ err }, "[slot-events-bridge] candidate exclusion telemetry persist failed");
   }
 }
 
