@@ -101,11 +101,25 @@ import {
  * here regardless of labels. That is the fail-open-toward-work direction
  * (#3754): a down/absent/stale drainer un-gates `glm-eligible` issues rather
  * than starving the Claude lane. Must not be inverted.
+ *
+ * **Both-labels deadlock guard (issue #4124).** `glm-ab-control` (the A/B
+ * control-arm marker, routed identically to `glm-withhold` — see
+ * `ORCH_BOARD_LABELS.glm_ab_control`) always wins over `glm-eligible` here,
+ * checked BEFORE the partition-liveness short-circuit. Nothing enforces that
+ * an issue carries at most one of `glm-eligible` / `glm-ab-control`; if a
+ * hand-label or a future sweep change ever stamps both onto the same issue,
+ * the drainer already skips it (`glm-ab-control` is excluded at both the
+ * eligibility-sweep producer and the drainer's own candidate query), so
+ * without this guard it would ALSO be subtracted from this count — worked by
+ * nobody, with no alarm. The guard costs nothing in the steady state #4125
+ * (the randomiser slice) actually produces, since that slice applies
+ * `glm-ab-control` INSTEAD OF `glm-eligible`, never both.
  */
 export function isGlmWithheldFromClaude(
   labels: readonly string[],
   glmPartitionActive: boolean,
 ): boolean {
+  if (labels.includes(ORCH_BOARD_LABELS.glm_ab_control)) return false;
   return glmPartitionActive && labels.includes(ORCH_BOARD_LABELS.glm_eligible);
 }
 

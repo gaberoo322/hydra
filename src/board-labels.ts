@@ -93,6 +93,22 @@ export const ORCH_BOARD_LABELS = {
   // in `src/autopilot/board-state.ts` (that wiring is the sweep's follow-on,
   // out of scope of #3755).
   glm_withhold: "glm-withhold",
+  // `glm-ab-control` (issue #4124, parent epic #4123) is a SIBLING of
+  // `glm-withhold`, not a reuse of it: its ROUTING is deliberately identical
+  // (skip the drainer, route to the Opus `dev_orch` lane) but its MEANING is
+  // different. `glm-withhold` marks "the brain judges this single issue
+  // genuinely needs frontier capability" (ADR-0032 withhold clause (b)) — a
+  // population that is systematically harder than average. `glm-ab-control`
+  // marks "a future randomiser (slice beta, out of scope here) assigned this
+  // issue to the Claude control arm of a GLM-vs-Opus A/B measurement" — a
+  // population that should be representative, not capability-fenced. Placing
+  // A/B controls under `glm-withhold` would contaminate the control arm with
+  // hard issues and bias the comparison in GLM's favour, and would collapse
+  // two distinct reasons ("randomiser said so" vs "GLM can't do this") into
+  // one indistinguishable signal. Hence a distinct label with the same
+  // routing effect. This slice (alpha) wires the label + routing parity only
+  // — no randomisation, no measurement.
+  glm_ab_control: "glm-ab-control",
 } as const;
 
 /**

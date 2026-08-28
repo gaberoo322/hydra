@@ -388,6 +388,39 @@ describe("isGlmWithheldFromClaude — the shared count/selection predicate (issu
     // a caller that never resolves liveness must never withhold.
     assert.equal(isGlmWithheldFromClaude(["glm-eligible"], false), false);
   });
+
+  // -------------------------------------------------------------------------
+  // Both-labels deadlock guard (issue #4124) — glm-ab-control always wins
+  // over glm-eligible, so an issue mistakenly carrying both is never
+  // double-excluded (skipped by the drainer AND subtracted from the Opus
+  // pool, worked by nobody).
+  // -------------------------------------------------------------------------
+
+  test("BOTH glm-eligible AND glm-ab-control, partition LIVE -> NOT withheld (the deadlock guard)", () => {
+    // This is the criterion that must fail against unmodified code: the
+    // unmodified predicate keys solely on glm-eligible + partition liveness,
+    // so a row carrying both labels would be wrongly withheld without the
+    // glm-ab-control override.
+    assert.equal(
+      isGlmWithheldFromClaude(["ready-for-agent", "glm-eligible", "glm-ab-control"], true),
+      false,
+    );
+  });
+
+  test("BOTH glm-eligible AND glm-ab-control, partition NOT live -> NOT withheld (fail-open arm unchanged)", () => {
+    // Pins that the new glm-ab-control override does not disturb the #3754
+    // fail-open behaviour when the partition is inactive regardless of labels.
+    assert.equal(
+      isGlmWithheldFromClaude(["ready-for-agent", "glm-eligible", "glm-ab-control"], false),
+      false,
+    );
+  });
+
+  test("glm-ab-control alone (no glm-eligible), partition LIVE -> NOT withheld", () => {
+    // Already true before #4124 (the predicate keys on glm-eligible), but
+    // pinned here as the baseline the both-labels case is layered on top of.
+    assert.equal(isGlmWithheldFromClaude(["ready-for-agent", "glm-ab-control"], true), false);
+  });
 });
 
 describe("hydra-dev selector — GLM partition selection-path exclusion (issue #4153)", () => {

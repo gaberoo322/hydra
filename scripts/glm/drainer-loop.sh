@@ -162,6 +162,7 @@ DAILY_CAP="${HYDRA_GLM_DRAINER_DAILY_CAP:-5}"
 WORKTREE_ROOT="${HYDRA_GLM_DRAINER_WORKTREE_ROOT:-/home/gabe/hydra/.claude/worktrees}"
 GLM_LABEL_ELIGIBLE="glm-eligible"
 GLM_LABEL_WITHHOLD="glm-withhold"
+GLM_LABEL_AB_CONTROL="glm-ab-control"
 GLM_LABEL_AUTHORED="glm-authored"
 LABEL_READY="ready-for-agent"
 LABEL_IN_PROGRESS="in-progress"
@@ -513,9 +514,14 @@ pick_eligible_issue() {
     --state open --json number,updatedAt,labels --limit 30 2>/dev/null || echo "[]")
   # Defense in depth against a stale/incorrectly-labelled row: exclude
   # glm-withhold client-side even though the eligibility sweep (#3756) is
-  # supposed to never apply glm-eligible alongside it.
-  candidates=$(jq -r --arg withhold "$GLM_LABEL_WITHHOLD" \
-    '[.[] | select((.labels | map(.name) | index($withhold)) | not)] | sort_by(.updatedAt) | .[].number' \
+  # supposed to never apply glm-eligible alongside it. Also exclude
+  # glm-ab-control (issue #4124) for the same reason and with the same
+  # status — the candidate query already requires glm-eligible, so a control
+  # issue (which the eligibility sweep is now made to skip) is never a
+  # candidate in the first place; this is a second, independent guard against
+  # a stale/hand-labelled row, not the fix itself.
+  candidates=$(jq -r --arg withhold "$GLM_LABEL_WITHHOLD" --arg abcontrol "$GLM_LABEL_AB_CONTROL" \
+    '[.[] | select((.labels | map(.name) | index($withhold)) | not) | select((.labels | map(.name) | index($abcontrol)) | not)] | sort_by(.updatedAt) | .[].number' \
     <<<"$rows" 2>/dev/null)
 
   # Open-PR pre-dispatch gate (issue #3900): fetch every open PR's body ONCE

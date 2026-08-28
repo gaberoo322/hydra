@@ -645,6 +645,100 @@ exit 1
   });
 });
 
+describe("scripts/glm/drainer-loop.sh — pick_eligible_issue() skips a candidate carrying glm-ab-control (issue #4124, defense in depth)", () => {
+  // Mirrors the sibling glm-withhold picker fakes above: `gh issue list`
+  // cats a fixture (regardless of the real --label filters, which the
+  // eligibility sweep + the candidate query already enforce server-side),
+  // and every `gh pr list` call (open or merged) returns an empty array —
+  // this suite is only exercising the client-side jq label filter, not the
+  // open/merged-PR skip guards covered by the sibling describes above.
+  function fakeGhForAbControlSkip(): string {
+    return `#!/usr/bin/env bash
+set -u
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "list" ]]; then
+  cat "$FAKE_GH_ISSUE_LIST_FILE"
+  exit 0
+fi
+if [[ "\${1:-}" == "pr" && "\${2:-}" == "list" ]]; then
+  echo "[]"
+  exit 0
+fi
+echo "fake gh (ab-control picker test): unhandled args: $*" >&2
+exit 1
+`;
+  }
+
+  test("a candidate labelled glm-ab-control is skipped client-side; the next eligible candidate is picked", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-abcontrol-skip-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForAbControlSkip(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [{ name: "glm-ab-control" }] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(
+        r.combined,
+        /^20$/m,
+        `expected #20 to be picked instead of the glm-ab-control-labelled #10:\n${r.combined}`,
+      );
+      assert.doesNotMatch(r.combined, /^10$/m);
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("no glm-ab-control label present => the oldest-updated candidate is picked unchanged (no false-positive skip)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-abcontrol-nomatch-"));
+    const dc = await designConceptServer(new Set([10, 20]));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      writeFileSync(join(binDir, "gh"), fakeGhForAbControlSkip(), { mode: 0o755 });
+      const issueListFile = join(tmp, "issues.json");
+      writeFileSync(
+        issueListFile,
+        JSON.stringify([
+          { number: 10, updatedAt: "2026-08-01T00:00:00Z", labels: [] },
+          { number: 20, updatedAt: "2026-08-02T00:00:00Z", labels: [] },
+        ]),
+      );
+      const r = await runShellSnippet(
+        {
+          PATH: `${binDir}:${process.env.PATH}`,
+          HYDRA_GLM_DRAINER_DESIGN_CONCEPT_URL: dc.url,
+          FAKE_GH_ISSUE_LIST_FILE: issueListFile,
+        },
+        `pick_eligible_issue; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.doesNotMatch(r.combined, /skipping issue/);
+      assert.match(
+        r.combined,
+        /^10$/m,
+        `expected #10 (oldest updatedAt) to be picked:\n${r.combined}`,
+      );
+    } finally {
+      dc.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("scripts/glm/drainer-loop.sh — systemd units mirror the pace-gate shape (issue #3689)", () => {
   test("the .service is Type=oneshot with a WorkingDirectory and journal logging, like hydra-pace-gate.service", async () => {
     const fs = await import("node:fs");

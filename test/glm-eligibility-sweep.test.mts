@@ -30,6 +30,7 @@ const RFA = ORCH_BOARD_LABELS.ready_for_agent;
 const GLM_ELIGIBLE = ORCH_BOARD_LABELS.glm_eligible;
 const GLM_WITHHOLD = ORCH_BOARD_LABELS.glm_withhold;
 const TARGET_BACKLOG = ORCH_BOARD_LABELS.target_backlog;
+const GLM_AB_CONTROL = ORCH_BOARD_LABELS.glm_ab_control;
 
 /** Build an IssueRow with sane defaults; override what the case cares about. */
 function row(number: number, labels: string[]): IssueRow {
@@ -75,6 +76,13 @@ describe("glm-eligibility-sweep — predicate (issue #3756)", () => {
     assert.equal(isGlmEligibleCandidate(row(4, [RFA, TARGET_BACKLOG])), false);
   });
 
+  test("skipped: carries glm-ab-control (issue #4124, the A/B control-arm marker)", () => {
+    // Load-bearing case (#4124): without this skip, the sweep re-applies
+    // glm-eligible to a control issue on the very next tick and the
+    // experiment silently loses its control group.
+    assert.equal(isGlmEligibleCandidate(row(9, [RFA, GLM_AB_CONTROL])), false);
+  });
+
   test("skipped: no ready-for-agent", () => {
     assert.equal(isGlmEligibleCandidate(row(5, [GLM_ELIGIBLE])), false);
     assert.equal(isGlmEligibleCandidate(row(6, [])), false);
@@ -107,6 +115,7 @@ describe("glm-eligibility-sweep — chore wiring (issue #3756)", () => {
           row(14, [RFA, TARGET_BACKLOG]), // target routing -> skip
           row(15, [RFA]), // eligible
           row(16, []), // no ready-for-agent -> skip
+          row(17, [RFA, GLM_AB_CONTROL]), // A/B control arm -> skip
         ]),
       addIssueLabel: async (n, label) => {
         assert.equal(
