@@ -103,7 +103,7 @@ export const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
  * from a crashed row's `run-<reason>`. It is counted `undrillable` downstream,
  * never flagged (no transcript handle to drill).
  */
-export const HANDOFF_TERM_REASONS: ReadonlySet<string> = new Set(["handoff"]);
+const HANDOFF_TERM_REASONS: ReadonlySet<string> = new Set(["handoff"]);
 
 /**
  * Never-throw sub-source runner, threaded in from the assembler so a failed

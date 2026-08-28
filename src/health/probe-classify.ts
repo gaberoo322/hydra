@@ -55,7 +55,7 @@ export type ProbeStatus = "ok" | "degraded" | "down";
  * yellow on the strip, not a green. Preserved 1:1 from the former inline
  * service-strip threshold (#2281).
  */
-export const DEGRADED_LATENCY_THRESHOLD_MS = 1000;
+const DEGRADED_LATENCY_THRESHOLD_MS = 1000;
 
 /**
  * The generic settled-probe outcome the display classifier maps to a

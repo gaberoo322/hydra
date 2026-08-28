@@ -69,18 +69,6 @@ export type IssueActionWriteResult =
   | { ok: false; code: GhErrorCode; stderr: string };
 
 /**
- * Type guard narrowing an {@link IssueActionWriteResult} to its failure arm.
- * `tsconfig.json` runs `strict: false` (no `strictNullChecks`), so a boolean
- * `ok` does not narrow via plain `if (!res.ok)` — mirrors
- * `isIssueLabelWriteFailure`.
- */
-export function isIssueActionWriteFailure(
-  res: IssueActionWriteResult,
-): res is { ok: false; code: GhErrorCode; stderr: string } {
-  return res.ok === false;
-}
-
-/**
  * The single-issue re-read every action verifies through. `ok:false` covers
  * both CLI failures and an unparseable/numberless payload (the defensive-parse
  * miss), so a verification read NEVER fabricates a row.
