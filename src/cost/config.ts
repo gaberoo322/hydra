@@ -156,6 +156,45 @@ export const DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR = 1.5;
  */
 export const DEFAULT_WEEKLY_PACE_CEILING = 0.92;
 
+/**
+ * Default GLM A/B **control-arm** assignment fraction (issue #4125, epic
+ * #4123): the fraction of issues entering the GLM-eligible pool that the
+ * eligibility sweep's coin flip routes to the CONTROL arm (`glm-ab-control`,
+ * stays in the Opus `dev_orch` pool) rather than TREATMENT (`glm-eligible`,
+ * picked up by the drainer). Gates the control share, not the treatment
+ * share, per the issue's Ramp section ("the control arm can be dialled
+ * down") and its pinned acceptance criterion that fraction 0 means "everything
+ * to treatment" — i.e. today's pre-#4125 behaviour, byte-identical.
+ * Overridable via `HYDRA_GLM_AB_CONTROL_FRACTION`.
+ */
+export const DEFAULT_GLM_AB_CONTROL_FRACTION = 0.5;
+
+/**
+ * The GLM A/B control-arm assignment fraction from
+ * `HYDRA_GLM_AB_CONTROL_FRACTION`, falling back to
+ * {@link DEFAULT_GLM_AB_CONTROL_FRACTION}. Must be a finite number in
+ * `[0, 1]` (a probability) to be meaningful; an out-of-range or non-finite
+ * value is logged (fail-loud) and falls back to the default. Pure + env-only
+ * so the sweep's coin-flip math stays unit-testable. (issue #4125)
+ */
+export function getGlmAbControlFraction(): number {
+  const raw = process.env.HYDRA_GLM_AB_CONTROL_FRACTION;
+  if (raw === undefined || raw === "") return DEFAULT_GLM_AB_CONTROL_FRACTION;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    logger.error(
+      {
+        envVar: "HYDRA_GLM_AB_CONTROL_FRACTION",
+        raw,
+        fallback: DEFAULT_GLM_AB_CONTROL_FRACTION,
+      },
+      "[glm-ab] HYDRA_GLM_AB_CONTROL_FRACTION is set but not a finite number in [0,1]; falling back to default",
+    );
+    return DEFAULT_GLM_AB_CONTROL_FRACTION;
+  }
+  return parsed;
+}
+
 export function getWeeklyQuotaTokens(): number {
   return parseQuotaEnv(process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS);
 }

@@ -184,3 +184,147 @@ export async function setGlmDrainerHeartbeat(
     };
   }
 }
+
+/**
+ * Durable GLM A/B assignment log (issue #4125, epic #4123).
+ *
+ * `glm-eligibility-sweep.ts` randomly assigns each issue entering the
+ * GLM-eligible pool to one of two arms ("treatment" keeps today's
+ * `glm-eligible` routing to the drainer; "control" applies `glm-ab-control`,
+ * per #4124, and stays in the Opus `dev_orch` pool). The sweep's board-label
+ * read is mutable and lossy — an operator or another chore can add/remove
+ * labels later, and a closed issue's labels are not a reliable record of
+ * what it was assigned at entry — so this per-issue key is the experiment's
+ * durable source of truth, independent of label state.
+ *
+ * One key per issue (`${GLM_AB_ASSIGNMENT_KEY_PREFIX}<issue>`), storing the
+ * JSON-serialised {@link GlmAbAssignmentRecord}. No TTL: unlike the drainer
+ * heartbeat above, this is a durable analysis record, not a liveness signal —
+ * it must outlive the issue's lifecycle so a downstream per-arm analysis
+ * (siblings #4126 gamma, #4127 delta) can reconstruct arms without
+ * re-deriving them from label history.
+ */
+
+/**
+ * Redis key prefix for the durable GLM A/B assignment log. Exported (rather
+ * than kept file-private, unlike {@link GLM_DRAINER_ACTIVE_KEY}'s inlining
+ * precedent) so a downstream per-arm analysis can SCAN the keyspace using the
+ * SAME prefix this module writes, instead of re-deriving the naming scheme.
+ */
+export const GLM_AB_ASSIGNMENT_KEY_PREFIX = "hydra:glm:ab-assignment:";
+
+function glmAbAssignmentKey(issue: number): string {
+  return `${GLM_AB_ASSIGNMENT_KEY_PREFIX}${issue}`;
+}
+
+/** Which arm of the GLM-vs-Opus A/B measurement an issue was assigned to. */
+export type GlmAbArm = "treatment" | "control";
+
+/** One durable assignment-log record, per the issue's pinned shape. */
+export interface GlmAbAssignmentRecord {
+  issue: number;
+  arm: GlmAbArm;
+  /** ISO8601 instant the assignment was made. */
+  assignedAt: string;
+  /** Identifier of the sweep invocation that made this assignment. */
+  sweepRunId: string;
+}
+
+/** Why an assignment-log lookup resolved the way it did — machine-readable. */
+export type GlmAbAssignmentLookupReason = "found" | "absent" | "unreadable";
+
+export interface GlmAbAssignmentLookup {
+  /**
+   * True when the issue must NOT be coin-flipped this tick: either a record
+   * already exists, OR the lookup could not be trusted. Fail-closed direction
+   * (issue #4125): an unreadable/erroring lookup is treated as "already
+   * assigned" so a flaky Redis read can never cause a double coin-flip — the
+   * safe failure is under-labelling (retried next tick), never a re-flip.
+   */
+  alreadyAssigned: boolean;
+  /** The parsed record, when one was found and parseable; else null. */
+  record: GlmAbAssignmentRecord | null;
+  reason: GlmAbAssignmentLookupReason;
+}
+
+/**
+ * Look up one issue's durable A/B assignment-log record. Never throws — a
+ * Redis failure or an unparseable value both fail closed to
+ * `alreadyAssigned: true` (see {@link GlmAbAssignmentLookup}).
+ */
+export async function getGlmAbAssignment(
+  issue: number,
+): Promise<GlmAbAssignmentLookup> {
+  let raw: string | null;
+  try {
+    const r = getRedisConnection();
+    raw = await r.get(glmAbAssignmentKey(issue));
+  } catch (err: any) {
+    logger.error(
+      { err, issue },
+      "[autopilot/glm-ab] assignment-log read threw — treating as already-assigned (fail-closed, #4125)",
+    );
+    return { alreadyAssigned: true, record: null, reason: "unreadable" };
+  }
+
+  if (raw === null || raw === "") {
+    return { alreadyAssigned: false, record: null, reason: "absent" };
+  }
+
+  try {
+    const record = JSON.parse(raw) as GlmAbAssignmentRecord;
+    return { alreadyAssigned: true, record, reason: "found" };
+  } catch (err: any) {
+    logger.error(
+      { err, issue, raw },
+      "[autopilot/glm-ab] unparseable assignment-log record — treating as already-assigned (fail-closed, #4125)",
+    );
+    return { alreadyAssigned: true, record: null, reason: "unreadable" };
+  }
+}
+
+/** Machine-readable failure code for an assignment-log write fault. */
+export type RecordGlmAbAssignmentResult =
+  | { ok: true }
+  | { ok: false; code: "glm-ab-assignment-write-failed"; message: string };
+
+/**
+ * Type guard narrowing a {@link RecordGlmAbAssignmentResult} to its failure
+ * arm. The orchestrator's `tsconfig.json` runs `strict: false` (no
+ * `strictNullChecks`), so a boolean `ok` does not narrow via plain
+ * `if (!res.ok)` — mirrors {@link isIssueLabelWriteFailure}
+ * (`src/github/issues.ts`) for the same reason.
+ */
+export function isGlmAbAssignmentWriteFailure(
+  res: RecordGlmAbAssignmentResult,
+): res is { ok: false; code: "glm-ab-assignment-write-failed"; message: string } {
+  return res.ok === false;
+}
+
+/**
+ * Durably record one issue's A/B assignment. Never throws (never-throw-from-
+ * verification convention, CLAUDE.md): a Redis failure returns a result
+ * object so the caller (the sweep) can fail closed — per the issue's
+ * invariant, a failed log write must block the label write entirely for that
+ * tick, so the row keeps lacking both a label and a log record and the next
+ * tick's attempt is a first assignment, never a re-assignment.
+ */
+export async function recordGlmAbAssignment(
+  record: GlmAbAssignmentRecord,
+): Promise<RecordGlmAbAssignmentResult> {
+  try {
+    const r = getRedisConnection();
+    await r.set(glmAbAssignmentKey(record.issue), JSON.stringify(record));
+    return { ok: true };
+  } catch (err: any) {
+    logger.error(
+      { err, issue: record.issue },
+      "[autopilot/glm-ab] assignment-log write failed (#4125)",
+    );
+    return {
+      ok: false,
+      code: "glm-ab-assignment-write-failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}

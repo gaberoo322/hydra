@@ -26,6 +26,8 @@ import {
   DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
+  getGlmAbControlFraction,
+  DEFAULT_GLM_AB_CONTROL_FRACTION,
   sessionIdFromPath,
   INTERACTIVE_SKILL,
   type UsageSnapshot,
@@ -2499,6 +2501,38 @@ describe("usage-tracker", () => {
     test("returns the parsed positive fractional weight when set", () => {
       process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
       assert.equal(getCacheReadWeight(), 0.1);
+    });
+  });
+
+  describe("GLM A/B control-arm fraction env parsing (issue #4125)", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+    });
+    afterEach(() => restore());
+
+    test("defaults to 0.5 when unset", () => {
+      delete process.env.HYDRA_GLM_AB_CONTROL_FRACTION;
+      assert.equal(getGlmAbControlFraction(), DEFAULT_GLM_AB_CONTROL_FRACTION);
+      assert.equal(getGlmAbControlFraction(), 0.5);
+    });
+
+    test("falls back to the default on a non-finite or out-of-[0,1] value", () => {
+      process.env.HYDRA_GLM_AB_CONTROL_FRACTION = "abc";
+      assert.equal(getGlmAbControlFraction(), DEFAULT_GLM_AB_CONTROL_FRACTION);
+      process.env.HYDRA_GLM_AB_CONTROL_FRACTION = "-0.1";
+      assert.equal(getGlmAbControlFraction(), DEFAULT_GLM_AB_CONTROL_FRACTION);
+      process.env.HYDRA_GLM_AB_CONTROL_FRACTION = "1.1";
+      assert.equal(getGlmAbControlFraction(), DEFAULT_GLM_AB_CONTROL_FRACTION);
+    });
+
+    test("returns the parsed fraction when set to a valid boundary or interior value", () => {
+      process.env.HYDRA_GLM_AB_CONTROL_FRACTION = "0";
+      assert.equal(getGlmAbControlFraction(), 0);
+      process.env.HYDRA_GLM_AB_CONTROL_FRACTION = "1";
+      assert.equal(getGlmAbControlFraction(), 1);
+      process.env.HYDRA_GLM_AB_CONTROL_FRACTION = "0.25";
+      assert.equal(getGlmAbControlFraction(), 0.25);
     });
   });
 

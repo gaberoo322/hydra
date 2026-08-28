@@ -89,6 +89,10 @@ export {
   // Consumed by `scripts/cost/weighted-quota-report.ts`.
   getBurnCategoryWeights,
   getBurnFamilyWeights,
+  // GLM A/B control-arm ramp fraction (issue #4125) — consumed by the
+  // eligibility sweep's coin flip (`src/scheduler/chores/glm-eligibility-sweep.ts`).
+  getGlmAbControlFraction,
+  DEFAULT_GLM_AB_CONTROL_FRACTION,
 } from "./config.ts";
 
 // ---------------------------------------------------------------------------

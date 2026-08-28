@@ -53,7 +53,41 @@
  * beachhead report (#3690) and the operator can see the pool forming",
  * including the candidate pool size for context. A steady-state tick with
  * nothing new to label logs `labelled: 0, candidates: 0`.
+ *
+ * ## Randomized A/B arm assignment (issue #4125, epic #4123, beta)
+ *
+ * Once a row passes the (unchanged) `isGlmEligibleCandidate` predicate above,
+ * it is no longer unconditionally labelled `glm-eligible`. Instead it is coin-
+ * flipped into one of two arms:
+ *   - **treatment** (default ~50%, see {@link GlmEligibilitySweepDeps.controlFraction}):
+ *     applies `glm-eligible` exactly as before. The drainer picks it up.
+ *   - **control** (~50%): applies `glm-ab-control` instead. Per #4124 the
+ *     drainer skips it, this sweep's predicate never re-enrolls it, and it
+ *     stays in the Opus `ready_for_agent` pool.
+ *
+ * A SECOND guard, independent of the label-based predicate, prevents
+ * re-assignment: before flipping, the sweep looks up the candidate's durable
+ * assignment-log record (`getGlmAbAssignment`, `src/redis/autopilot.ts`). A
+ * found-or-unreadable lookup means "treat as already assigned" — skip the
+ * flip entirely this tick — which closes the crash window where a row's log
+ * write succeeded but its label write did not (see ordering below).
+ *
+ * **Ordering is log-then-label, not label-then-log.** The assignment-log
+ * write happens FIRST; the label write is gated on its success. A crash
+ * between the two steps must leave the SAFE half undone: if the log write
+ * fails, NEITHER label is applied (fail-closed, matching the issue's own
+ * invariant) — the row is unlabelled-and-unlogged, which the next tick
+ * correctly treats as a first assignment. The reverse ordering would risk a
+ * labelled-but-unlogged row, which is unanalysable and can never self-heal.
+ *
+ * The assignment log is the experiment's durable source of truth (label
+ * history is mutable and lossy — an operator or another chore can add/remove
+ * labels later), and its per-issue record shape is designed to be read
+ * directly by a downstream per-arm analysis (siblings #4126 gamma, #4127
+ * delta) without re-deriving arms from label history.
  */
+
+import { randomUUID } from "node:crypto";
 
 import { logger } from "../../logger.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
@@ -65,6 +99,13 @@ import {
   type IssueReadResult,
   type IssueRow,
 } from "../../github/issues.ts";
+import {
+  getGlmAbAssignment,
+  recordGlmAbAssignment,
+  isGlmAbAssignmentWriteFailure,
+  type GlmAbArm,
+} from "../../redis/autopilot.ts";
+import { getGlmAbControlFraction } from "../../cost/index.ts";
 
 /**
  * External touchpoints of the GLM eligibility sweep, injected so the chore is
@@ -81,6 +122,39 @@ export interface GlmEligibilitySweepDeps {
   listOpenIssues?: typeof listOpenIssues;
   /** Add one label to one issue. Defaults to the seam's `addIssueLabel`. */
   addIssueLabel?: typeof addIssueLabel;
+  /**
+   * Look up a candidate's durable A/B assignment-log record (issue #4125).
+   * Defaults to the seam's `getGlmAbAssignment` (`src/redis/autopilot.ts`).
+   */
+  getGlmAbAssignment?: typeof getGlmAbAssignment;
+  /**
+   * Durably record a new A/B assignment (issue #4125). Defaults to the
+   * seam's `recordGlmAbAssignment` (`src/redis/autopilot.ts`).
+   */
+  recordGlmAbAssignment?: typeof recordGlmAbAssignment;
+  /**
+   * Randomness source for the coin flip, uniform on `[0, 1)`. Defaults to
+   * `Math.random`. Injectable so both arms are deterministically pinned by
+   * tests (issue #4125 acceptance criterion: "no flaky real randomness in
+   * the suite") — never called bare inline elsewhere in this module.
+   */
+  random?: () => number;
+  /**
+   * Control-arm assignment fraction in `[0, 1]`. Defaults to the live config
+   * reader `getGlmAbControlFraction` (`src/cost/index.ts`, ramp default 0.5).
+   * A roll below this fraction resolves to the CONTROL arm; fraction 0 means
+   * every candidate resolves to TREATMENT — byte-identical to pre-#4125
+   * behaviour.
+   */
+  controlFraction?: number;
+  /** Returns the current instant as an ISO8601 string. Defaults to `() => new Date().toISOString()`; injectable for deterministic assignment-log timestamps in tests. */
+  nowIso?: () => string;
+  /**
+   * Identifier for this sweep invocation, stamped on every assignment-log
+   * record written during this run. Defaults to `randomUUID()`; injectable
+   * so tests can assert the exact value written.
+   */
+  sweepRunId?: string;
 }
 
 /**
@@ -112,13 +186,33 @@ export function isGlmEligibleCandidate(row: IssueRow): boolean {
 }
 
 /**
- * Run the GLM eligibility sweep chore. Labels every open `ready-for-agent`
+ * Resolve a coin-flip roll to an arm. `roll` is uniform on `[0, 1)`;
+ * `controlFraction` gates the CONTROL share (issue #4125 Ramp): a roll below
+ * the fraction resolves to control, so fraction 0 makes "roll < 0" never
+ * true and every candidate resolves to treatment — byte-identical to
+ * pre-#4125 behaviour. Pure so the ramp math is unit-testable without a real
+ * randomness source.
+ */
+function resolveArm(roll: number, controlFraction: number): GlmAbArm {
+  return roll < controlFraction ? "control" : "treatment";
+}
+
+/**
+ * Run the GLM eligibility sweep chore. For every open `ready-for-agent`
  * orchestrator issue that lacks `glm-eligible` (skipping `glm-withhold` /
- * `target-backlog`) and returns the count labelled this tick (0 when nothing was
- * eligible / on any fault). Never throws.
+ * `target-backlog` / `glm-ab-control`, and any row already carrying a durable
+ * assignment-log record), coin-flips it into the treatment (`glm-eligible`)
+ * or control (`glm-ab-control`) arm, durably logs the assignment, and only
+ * then applies the corresponding label (issue #4125). Returns the count of
+ * issues LABELLED this tick — either arm — (0 when nothing was eligible / on
+ * any fault). Never throws.
  *
  * Fail-closed: a board read that fails (`ok:false`) labels NOTHING — never a
  * partial or guessed pass; the failure code is logged so it is attributable.
+ * Per-issue, an unreadable/erroring assignment-log lookup is treated as
+ * "already assigned" (skip the flip) and a failed assignment-log write blocks
+ * the label write for that row entirely — see the module docstring's
+ * "Randomized A/B arm assignment" section for the full ordering rationale.
  *
  * A per-issue label-write failure (or a throw) is logged and does NOT abort the
  * remaining issues: the sweep is idempotent, so an unlabelled issue is retried
@@ -133,6 +227,12 @@ export async function runGlmEligibilitySweep(
 ): Promise<number> {
   const readBoard = deps.listOpenIssues ?? listOpenIssues;
   const addLabel = deps.addIssueLabel ?? addIssueLabel;
+  const lookupAssignment = deps.getGlmAbAssignment ?? getGlmAbAssignment;
+  const writeAssignment = deps.recordGlmAbAssignment ?? recordGlmAbAssignment;
+  const random = deps.random ?? Math.random;
+  const controlFraction = deps.controlFraction ?? getGlmAbControlFraction();
+  const nowIso = deps.nowIso ?? (() => new Date().toISOString());
+  const sweepRunId = deps.sweepRunId ?? randomUUID();
 
   try {
     const board: IssueReadResult<IssueRow> = await readBoard();
@@ -151,7 +251,42 @@ export async function runGlmEligibilitySweep(
     let labelled = 0;
     for (const row of candidates) {
       try {
-        const res = await addLabel(row.number, ORCH_BOARD_LABELS.glm_eligible);
+        // Second, independent guard (issue #4125): a row already carrying a
+        // durable assignment-log record (or an unreadable lookup) is treated
+        // as already assigned and never re-flipped — this closes the crash
+        // window between a successful log write and a subsequently failed
+        // label write that the label-based predicate alone cannot see.
+        const lookup = await lookupAssignment(row.number);
+        if (lookup.alreadyAssigned) {
+          continue;
+        }
+
+        const arm = resolveArm(random(), controlFraction);
+        const label =
+          arm === "control"
+            ? ORCH_BOARD_LABELS.glm_ab_control
+            : ORCH_BOARD_LABELS.glm_eligible;
+
+        // Log-then-label (issue #4125): the assignment-log write happens
+        // FIRST and the label write is gated on its success, so a crash
+        // between the two steps leaves only the label missing — a
+        // detectable, non-corrupting edge case — rather than a
+        // labelled-but-unlogged, unanalysable one.
+        const logRes = await writeAssignment({
+          issue: row.number,
+          arm,
+          assignedAt: nowIso(),
+          sweepRunId,
+        });
+        if (isGlmAbAssignmentWriteFailure(logRes)) {
+          logger.error(
+            { issue: row.number, code: logRes.code, message: logRes.message },
+            "glm-eligibility-sweep: assignment-log write failed; not labelling this tick (fail-closed, issue #4125)",
+          );
+          continue;
+        }
+
+        const res = await addLabel(row.number, label);
         if (res.ok) {
           labelled++;
         } else if (isIssueLabelWriteFailure(res)) {
@@ -164,11 +299,11 @@ export async function runGlmEligibilitySweep(
           );
         }
       } catch (err: any) {
-        // Defense in depth: the real write never throws, but a fault on ONE
-        // issue must not abort the rest. Log with context and continue.
+        // Defense in depth: the real read/write never throw, but a fault on
+        // ONE issue must not abort the rest. Log with context and continue.
         logger.error(
           { err, issue: row.number },
-          "glm-eligibility-sweep: label write threw for issue",
+          "glm-eligibility-sweep: assignment/label write threw for issue",
         );
       }
     }
@@ -176,8 +311,8 @@ export async function runGlmEligibilitySweep(
     // Log the per-run labelled count every tick (issue body) so the beachhead
     // report (#3690) and the operator can see the drainer pool forming.
     logger.info(
-      { labelled, candidates: candidates.length },
-      "glm-eligibility-sweep: labelled glm-eligible issues (issue #3756)",
+      { labelled, candidates: candidates.length, sweepRunId },
+      "glm-eligibility-sweep: labelled glm-eligible/glm-ab-control issues (issue #3756, #4125)",
     );
     return labelled;
   } catch (err: any) {

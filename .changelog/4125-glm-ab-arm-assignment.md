@@ -1,0 +1,1 @@
+- feat: randomly assign issues entering the GLM-eligible pool to a treatment or control arm, with a durable per-issue assignment log for A/B analysis (#4125)
