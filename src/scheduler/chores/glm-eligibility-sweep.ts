@@ -84,10 +84,18 @@ export interface GlmEligibilitySweepDeps {
 }
 
 /**
- * The eligibility predicate (ADR-0032): true for an issue that carries
- * `ready-for-agent`, lacks `glm-eligible`, and carries NEITHER `glm-withhold`
- * NOR `target-backlog`. Pure (no I/O) so the predicate — including both skip
- * labels — is pinned directly by a unit test.
+ * The eligibility predicate (ADR-0032, extended by issue #4124): true for an
+ * issue that carries `ready-for-agent`, lacks `glm-eligible`, and carries
+ * NONE of `glm-withhold` / `target-backlog` / `glm-ab-control`. Pure (no I/O)
+ * so the predicate — including all skip labels — is pinned directly by a
+ * unit test.
+ *
+ * `glm-ab-control` (issue #4124) is the LOAD-BEARING site for the A/B control
+ * arm: without this skip, the sweep re-applies `glm-eligible` to a control
+ * issue on the very next hourly tick and the experiment silently loses its
+ * control group. Its routing effect is deliberately identical to
+ * `glm-withhold`'s, even though the two labels mean different things (see
+ * `ORCH_BOARD_LABELS.glm_ab_control`'s doc comment in `board-labels.ts`).
  *
  * The OPEN-ness precondition is satisfied by the caller reading the OPEN board
  * (`listOpenIssues` defaults to `--state open`); this predicate concerns itself
@@ -99,6 +107,7 @@ export function isGlmEligibleCandidate(row: IssueRow): boolean {
   if (labels.has(ORCH_BOARD_LABELS.glm_eligible)) return false;
   if (labels.has(ORCH_BOARD_LABELS.glm_withhold)) return false;
   if (labels.has(ORCH_BOARD_LABELS.target_backlog)) return false;
+  if (labels.has(ORCH_BOARD_LABELS.glm_ab_control)) return false;
   return true;
 }
 
