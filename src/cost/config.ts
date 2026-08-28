@@ -83,7 +83,7 @@ export const DEFAULT_OAUTH_USAGE_MAX_STALE_MS = 1_800_000;
  *
  * Overridable via `HYDRA_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS`.
  */
-export const DEFAULT_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS = 3_600_000;
+const DEFAULT_ELIGIBILITY_LAST_GOOD_MAX_AGE_MS = 3_600_000;
 
 /**
  * Default OAuth-meter backoff BASE delay (issue #2619): after the first failed

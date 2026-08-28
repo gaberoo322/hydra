@@ -37,7 +37,6 @@ export {
   recordSubagentTokens,
   getDailyTokenCounter,
   todayDateString,
-  yesterdayDateString,
   // Re-export key helpers so tests that probe Redis directly stay on the
   // public Interface rather than reaching into `surrogate.ts`.
 } from "./surrogate.ts";
@@ -83,22 +82,12 @@ export {
   // write 1.25x / output 5.0x / input 1.0x; family opus 5 / sonnet 3 / haiku 1)
   // under a separate `HYDRA_USAGE_BURN_WEIGHT_*` / `HYDRA_USAGE_BURN_FAMILY_*`
   // namespace so the report's calibration never leaks into the identity-by-
-  // default live gate. Consumed by `scripts/cost/weighted-quota-report.ts`.
-  getBurnWeightInput,
-  getBurnWeightOutput,
-  getBurnWeightCacheRead,
-  getBurnWeightCacheCreation,
-  DEFAULT_BURN_WEIGHT_INPUT,
-  DEFAULT_BURN_WEIGHT_OUTPUT,
-  DEFAULT_BURN_WEIGHT_CACHE_READ,
-  DEFAULT_BURN_WEIGHT_CACHE_CREATION,
+  // default live gate. Only the composed folds (`getBurnCategoryWeights` /
+  // `getBurnFamilyWeights`) are re-exported here — the per-category /
+  // per-family readers and their DEFAULT_* constants are consumed directly
+  // from `./config.ts` (by its own tests), not through this barrel.
+  // Consumed by `scripts/cost/weighted-quota-report.ts`.
   getBurnCategoryWeights,
-  getBurnFamilyWeightOpus,
-  getBurnFamilyWeightSonnet,
-  getBurnFamilyWeightHaiku,
-  DEFAULT_BURN_FAMILY_OPUS,
-  DEFAULT_BURN_FAMILY_SONNET,
-  DEFAULT_BURN_FAMILY_HAIKU,
   getBurnFamilyWeights,
 } from "./config.ts";
 
