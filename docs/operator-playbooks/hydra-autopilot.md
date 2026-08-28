@@ -67,9 +67,9 @@ Each tick:
 | pipeline | `dev_target` | hydra-target-build |
 | pipeline | `qa_target` | hydra-qa (target scope) |
 | pipeline | `research_target` | hydra-target-research |
-| pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only — the **spec** stage of the one-lineage refit; ADR-0030 Decision 2 folds grill-before-build in as this stage's interactive mode over the vendored upstream `to-spec` base, #3422) |
+| pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only — the **spec** stage of the one-lineage refit; ADR-0030 Decision 2, superseded for this stage's base by ADR-0035) |
 
-> **One-lineage stage bindings (ADR-0030 Decision 2 — #3422; contract complete, epsilon #3424).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (the lineage home is `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) composes on NO upstream base (ADR-0035 supersedes that binding). The expand-contract sequence (ADR-0030 Decision 5) has **landed end-to-end**: gamma (#3422) added the composed bindings, delta (#3423/#3448) migrated the learning-loop seams and wired the `tickets_orch` selector (a wiring-only slice — the class stayed **dormant** until #4014 landed the `collect-state.sh` `tickets_available` producer that actually feeds it), and epsilon (#3424) **retired the fork identities** as documented concepts. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern; retiring the fork *identity* is a framing/lineage change, not a seam edit. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — see the Signal wiring table) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
+> **One-lineage stage bindings (ADR-0030 Decision 2; ADR-0035 supersedes the spec-stage base).** The three code-writing pipeline stages compose against the *same* vendored upstream Pocock skills the operator runs interactively (lineage home `docs/operator-playbooks/_vendor/`, ADR-0030 Decision 4 / Option C): the **implement** stage (`dev_orch` → `hydra-dev`) rides `_vendor/implement.md`, the **review** stage (`qa_orch` → `hydra-qa`) rides `_vendor/code-review.md`, and the **spec** stage (`design_concept_orch` → `hydra-grill`) composes on NO upstream base. The `decide.py` `make_dispatch` string literals (`hydra-dev` / `hydra-qa` / `hydra-grill`) **stay live and unchanged** — they are the class rows that *select* these composed stages, not a second inline copy of the pattern. The grill-before-build sequencing (the #628 gate; post-#3711 `dev_orch` yields **per-anchor** rather than board-wide — see the Signal wiring table) is a documentation/lineage rebind here, **not** a change to that `decide.py` gate.
 | signal | `health` | hydra-doctor (scope-agnostic) |
 | signal | `sweep_orch` | hydra-sweep |
 | signal | `sweep_target` | hydra-target-sweep |
@@ -458,13 +458,9 @@ fi
 echo "[autopilot] schema handshake OK (v${PLAYBOOK_SCHEMA})"
 ```
 
-Why: PR #429 changed the state.json shape (10 flat slots → 6 pipeline
-slots + 5 signal_last_fired) but the installed `~/.claude/skills/`
-mirror of this playbook was stale because `sync-skills.sh` hadn't run.
-The model attempted to reconcile and silently wedged for ~20 min
-producing no observable output. The handshake makes that wedge a
-loud abort at second 0 of the run instead of an invisible stall at
-minute 20.
+Why: a stale `~/.claude/skills/` mirror of this playbook against a newer
+state.json shape makes the model silently wedge mid-reconcile. The handshake
+converts that into a loud abort at second 0.
 
 A v1 state.json (legacy, no `schema_version` field) is interpreted as
 v1 via the `// 1` jq fallback above — mismatched against any modern
@@ -820,20 +816,15 @@ received target-product anchors (item-26x). Post-#458, candidates are
 treated as target-side work: `dev_target` surfaces the top candidate as
 a hint, and a low best-score forces `research_target` (not `research_orch`).
 
-**Discover signals (revived, then un-starved — #4114).** `discover_orch` was
-**revived by issue #959** (epic #958) onto the unified **`orch_backfill_idle`**
-board-empty signal — the SAME signal `architecture_orch` reads
-(`collect-state.sh` line ~1150; the dead `orch_idle` name it never produced is
-gone). Both classes are members of `BACKFILL_SIGNAL_CLASSES` (`decide.py:373`)
-and share the 1h backfill cadence. **But idle-only gating starved the class for
-3+ weeks (#4114)**: the board-empty conjunction (`ready_for_agent==0 &&
-needs_research==0 && needs_triage==0 && work_queue==0` — `collect-state.sh`'s
-`fallback_due`) stays permanently false on a healthy, continuously-stocked orch
-board, so `discover_orch` recorded **0 lifetime dispatches** (never fired;
-`signal_last_fired.discover_orch == 0`), and #3920's cooldown carry-forward fix
-was orthogonal — a tracking fix, not a dispatch-gap fix. The **#4114 fix** gives
-the selector (`decide.py:3708`) a SECOND trigger path: it fires on
-`orch_backfill_idle` OR the **7-day staleness floor**
+**Discover signals (#959, epic #958; un-starved by #4114).** `discover_orch`
+reads the unified **`orch_backfill_idle`** board-empty signal — the SAME signal
+`architecture_orch` reads. Both classes are members of
+`BACKFILL_SIGNAL_CLASSES` (`decide.py:373`) and share the 1h backfill cadence.
+Because the board-empty conjunction (`ready_for_agent==0 && needs_research==0 &&
+needs_triage==0 && work_queue==0` — `collect-state.sh`'s `fallback_due`) stays
+permanently false on a healthy, continuously-stocked orch board, idle-only
+gating starves the class. So the selector (`decide.py:3708`) has a SECOND
+trigger path: it fires on `orch_backfill_idle` OR the **7-day staleness floor**
 (`DISCOVER_STALENESS_FLOOR_SEC`, `decide.py:420`, via `signal_dark_past_floor`)
 — a never-fired class (last == 0) counts as dark, and a floor dispatch carries
 the "discover staleness floor (>7d dark since last fire)" reason so it is
