@@ -1,0 +1,1 @@
+- docs: /hydra-review now reports the hitl-grill parked-idea lane (open count + oldest rows with producer provenance + Work-page link) instead of silently omitting the board's largest operator-blocked bucket; verdicts stay on the dashboard (#4276)
