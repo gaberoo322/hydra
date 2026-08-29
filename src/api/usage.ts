@@ -18,6 +18,7 @@ import { z } from "zod";
 import {
   getUsage,
   parseSessionLimitReset,
+  getUsageByIssue,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import {
@@ -28,6 +29,15 @@ import { getWorklessUntil } from "../redis/workless-hint.ts";
 import { getEligibilityUsage } from "../cost/eligibility-usage.ts";
 import { getEligibilityView } from "../aggregators/usage-eligibility.ts";
 import { booleanFlag } from "../schemas/common.ts";
+import {
+  recordDispatchCostJoin,
+  isDispatchCostJoinWriteFailure,
+  type DispatchCostJoinRecord,
+} from "../redis/cost.ts";
+import {
+  DispatchCostJoinBodySchema,
+  UsageByIssueQuerySchema,
+} from "../schemas/usage.ts";
 
 /**
  * Query schema for the `?force=1` cache-bust knob shared by both usage read
@@ -200,6 +210,77 @@ export function createUsageRouter() {
       });
     } catch (err: any) {
       console.error(`[usage] /api/usage/session-block record failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  /**
+   * POST /api/usage/dispatch-cost — record one dispatch -> issue cost-join
+   * row (issue #4126, ADR-0032 epic #4123 slice gamma — the prerequisite for
+   * the A/B primary endpoint). THE writer is `scripts/autopilot/reap.py`'s
+   * `run_completion`, which POSTs here once per completed dispatch alongside
+   * its existing `_fire_token_record` per-cycle write, for EVERY completed
+   * class (not just code-writing) — including a GLM-arm issue's later
+   * `qa_orch` / `sweep_orch` completions, so that issue's real Anthropic-side
+   * QA/sweep cost lands here even though its own coding dispatch never does
+   * (that dispatch ran on the GLM drainer, outside reap.py entirely).
+   *
+   * `reapedAt` is stamped here (server clock), not accepted from the body —
+   * see `DispatchCostJoinBodySchema`'s docstring. Never blocks a completion:
+   * reap swallows any non-2xx / network error the same way it already does
+   * for `/api/metrics/tokens`.
+   */
+  router.post("/usage/dispatch-cost", async (req, res) => {
+    const parsed = DispatchCostJoinBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    try {
+      const record: DispatchCostJoinRecord = {
+        issue: parsed.data.issue,
+        class: parsed.data.class,
+        dispatchKind: parsed.data.dispatchKind,
+        dispatchTokensEstimate: parsed.data.dispatchTokensEstimate,
+        reapedAt: new Date().toISOString(),
+      };
+      const result = await recordDispatchCostJoin(record);
+      if (isDispatchCostJoinWriteFailure(result)) {
+        console.error(`[usage] dispatch-cost record failed: ${result.error}`);
+        return res.status(500).json({ recorded: false, error: result.error });
+      }
+      return res.json({ recorded: true, attributed: result.attributed });
+    } catch (err: any) {
+      console.error(`[usage] /api/usage/dispatch-cost failed: ${err?.message || err}`);
+      return res.status(500).json({ recorded: false, error: err?.message || String(err) });
+    }
+  });
+
+  /**
+   * GET /api/usage/by-issue — per-issue attributed dispatch cost (issue
+   * #4126). The read surface #4123's A/B primary endpoint is blocked on:
+   * without `?issue=`, returns every attributed issue's rollup PLUS the
+   * unattributable residual and its `attributedPercent` — never a silent
+   * drop, mirroring the `attributedPercent` convention `/api/usage` already
+   * established at the skill level (~90% attributed there). With
+   * `?issue=N`, narrows `byIssue` to just that issue while the residual /
+   * `attributedPercent` stay computed over the WHOLE ledger (a GLM-arm
+   * issue's own residual visibility must not depend on which issue the
+   * caller happened to query).
+   */
+  router.get("/usage/by-issue", async (req, res) => {
+    const parsed = UsageByIssueQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    try {
+      const view = await getUsageByIssue(parsed.data.issue);
+      return res.json(view);
+    } catch (err: any) {
+      console.error(`[usage] /api/usage/by-issue failed: ${err?.message || err}`);
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });
