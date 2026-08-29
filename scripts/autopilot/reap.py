@@ -1735,6 +1735,83 @@ def _fire_token_record(
         _post_token_record(worktree_branch, skill, total_tokens)
 
 
+def _parse_anchor_issue_number(anchor_ref: str | None) -> int | None:
+    """Extract the bare issue number from an `issue-<N>` anchor ref (issue #4126).
+
+    Mirrors the `^issue-(\\d+)$` pattern used throughout this file (e.g.
+    `_dev_orch_pr_exists_for_anchor`). Returns None for a missing anchor or a
+    non-`issue-<N>` shape — both are the caller's "unattributable" signal, not
+    an error.
+    """
+    if not anchor_ref:
+        return None
+    m = re.match(r"^issue-(\d+)$", anchor_ref.strip())
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _post_dispatch_cost_join(anchor_ref: str | None, cls: str, total_tokens: int) -> None:
+    """POST one dispatch -> issue cost-join row (issue #4126, ADR-0032 epic
+    #4123 slice gamma — the prerequisite for the A/B primary endpoint).
+
+    THE producer for `hydra:cost:dispatch-join:*` (`src/redis/cost.ts`'s
+    `DispatchCostJoinRecord`), read by `GET /api/usage/by-issue`
+    (`src/api/usage.ts`). Fires for EVERY completed class — mirrors
+    `_fire_token_record`'s "fired for every completed class, not just
+    code-writing" posture — including `qa_orch` / `sweep_orch` completions on
+    an anchor whose initial coding dispatch ran on the GLM arm (outside
+    reap.py entirely): that issue's real Anthropic-side review/sweep cost
+    still lands in its by-issue ledger this way, rather than reading as free
+    (issue #4126 acceptance criterion).
+
+    `anchor_ref` resolves to an issue number via `_parse_anchor_issue_number`;
+    a miss (no anchor, or a non-`issue-<N>` shape — e.g. a signal class with
+    no anchor at all) posts with `issue: null` so the read surface reports it
+    as an explicit UNATTRIBUTED residual rather than silently dropping it
+    (issue #4126's third open question).
+
+    `dispatchKind` is always `"autopilot-dispatched"` here: `run_completion`
+    only ever runs against a dispatch `decide.py` itself launched, so it can
+    never observe an `operator-invoked` or `interactive` session (the other
+    two `src/cost/token-breakdown.ts` `DispatchKind` values) — those come from
+    the transcript-scan side of the Cost module, not the reap side (see the
+    `DispatchCostJoinRecord` docstring in `src/redis/cost.ts` for the full
+    reasoning).
+
+    Posted ONLY when `total_tokens > 0` — the same "0 == unattributed, never
+    a fabricated zero-cost record" posture as `_fire_token_record`.
+    Best-effort: any non-2xx / network error is logged to the run-log and
+    SWALLOWED — cost-join accounting must never block or fail the reap path.
+    """
+    if total_tokens <= 0:
+        return
+    issue = _parse_anchor_issue_number(anchor_ref)
+    payload = {
+        "issue": issue,
+        "class": cls,
+        "dispatchKind": "autopilot-dispatched",
+        "dispatchTokensEstimate": int(total_tokens),
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/usage/dispatch-cost",
+        data=data,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        msg = f"dispatch_cost_join_skipped issue={issue} class={cls} tokens={total_tokens} err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+
+
 def _classify_failure_pattern(cue: str) -> str:
     """Map a free-form failure cue to a stable self-heal pattern ID (issue #1820).
 
@@ -2289,6 +2366,14 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # #2964 trend join reads by — closing the ~56% tokenCost coverage gap for
     # pipeline classes whose metrics record is branch-keyed, not task_id-keyed.
     _fire_token_record(task_id, skill, total_tokens, worktree_branch=worktree_branch)
+
+    # Issue #4126 (ADR-0032 epic #4123 slice gamma): fire the dispatch -> issue
+    # cost-join record — the join key the A/B primary endpoint needs to
+    # produce a number. Uses `cls` (the raw Dispatch-Class Taxonomy name, e.g.
+    # `dev_orch`/`qa_orch`/`sweep_orch`), not `skill`, as the join's class
+    # field — `anchor_ref` was already recovered above (issue #2112 recovery,
+    # before any slot mutation) so it survives regardless of class.
+    _post_dispatch_cost_join(anchor_ref, cls, total_tokens)
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
