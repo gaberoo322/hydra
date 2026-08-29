@@ -1,0 +1,1 @@
+- feat: publish per-league forecast-calibration Brier metrics and drop the sport-blind aggregate from Outcome Holdback auto-revert (#4247)

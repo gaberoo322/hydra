@@ -19,6 +19,15 @@ export interface ForecastCalibrationBrierDeps {
  * producer itself never throws and never writes on failure, so "ran" here means
  * "sampled", not necessarily "wrote". Hourly re-publish of the same current
  * value is idempotent, so no Redis time-guard is needed.
+ *
+ * Since issue #4247 (hydra-betting ADR-0007 D5) the SAME sample also publishes
+ * one sibling file per league reported in the target's `bySourceLeague` map
+ * (metrics/forecast-calibration-brier-<league>.txt — see
+ * `publishPerLeagueBrierFiles` in src/metrics/publish.ts). The aggregate file
+ * keeps flowing unchanged as a display number; Outcome Holdback no longer keys
+ * on it (excluded via src/holdback-policy.ts) — the per-league siblings carry
+ * the holdback signal instead. This chore stays a thin delegate: the per-league
+ * logic lives with the rest of the producer's fetch/write policy.
  */
 export async function runForecastCalibrationBrier(
   deps: ForecastCalibrationBrierDeps = {},

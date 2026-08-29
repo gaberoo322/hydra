@@ -27,7 +27,7 @@
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,7 +35,10 @@ const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/7";
 process.env.REDIS_URL = REDIS_URL;
 
 import { publishForecastCalibrationBrierMetric } from "../src/metrics/publish.ts";
-import { getOutcomeValue, type Outcome } from "../src/outcomes.ts";
+import { getOutcomeValue, loadOutcomes } from "../src/outcomes.ts";
+import type { Outcome } from "../src/outcomes.ts";
+import { fileURLToPath } from "node:url";
+import { dirname as pathDirname, resolve as pathResolve } from "node:path";
 
 let tmpDir: string;
 
@@ -191,6 +194,268 @@ describe("publishForecastCalibrationBrierMetric — never write a fabricated val
       "0.24\n",
       "prior value must survive a failed sample verbatim",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-league sibling files (issue #4247, hydra-betting ADR-0007 D5)
+//
+// The aggregate is sport-blind: admitting a more-predictable sport (538: NFL
+// Brier 0.208 vs MLB 0.243) moves the blended number toward its 0.18 target
+// with zero edge improvement, so it left the Outcome Holdback decision set
+// (src/holdback-policy.ts) and per-league siblings carry the honest signal.
+// The producer derives them from the SAME fetch's `bySourceLeague` map (keys
+// "<source>:<league>", e.g. "paper_llm:baseball_mlb") by pooling each league's
+// entries with a count-weighted average of brierScore — mathematically exact
+// for a mean-of-squared-errors, so sum(count_i * brier_i) / sum(count_i)
+// recovers the pooled per-league Brier over identical rows.
+// ---------------------------------------------------------------------------
+
+describe("publishForecastCalibrationBrierMetric — per-league sibling files (#4247)", () => {
+  test("pools bySourceLeague entries per league and writes one sibling file per league", async () => {
+    const filePath = join(tmpDir, "brier-league1.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({
+        brierScore: 0.22,
+        bySourceLeague: {
+          "paper_llm:baseball_mlb": { count: 40, brierScore: 0.21 },
+          "sportsbook_fair_line:baseball_mlb": { count: 10, brierScore: 0.26 },
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+    // (40*0.21 + 10*0.26) / 50 = 0.22 — the count-weighted pooled league Brier.
+    const sibling = join(tmpDir, "brier-league1-baseball-mlb.txt");
+    const raw = await readFile(sibling, "utf-8");
+    assert.equal(Number(raw.trim()), 0.22);
+    assert.ok(raw.endsWith("\n"), "trailing newline expected (file-adapter contract)");
+    assert.ok(result.leagues, "per-league results must be reported");
+    assert.equal(result.leagues!.length, 1);
+    assert.equal(result.leagues![0].slug, "baseball-mlb");
+    assert.equal(result.leagues![0].value, 0.22);
+    assert.equal(result.leagues![0].ok, true);
+  });
+
+  test("each sibling file holds ONE numeric value that round-trips the outcomes file adapter (INV-1)", async () => {
+    const filePath = join(tmpDir, "brier-league2.txt");
+    await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({
+        brierScore: 0.25,
+        bySourceLeague: {
+          "paper_llm:baseball_mlb": { count: 7, brierScore: 0.2 },
+          "paper_llm:basketball_nba": { count: 3, brierScore: 0.3 },
+        },
+      }),
+    });
+    for (const slug of ["baseball-mlb", "basketball-nba"]) {
+      const sibling = join(tmpDir, `brier-league2-${slug}.txt`);
+      const outcome: Outcome = {
+        name: `forecast-calibration-brier-${slug}`,
+        kind: "leading",
+        direction: "down",
+        source: "file",
+        query: sibling,
+        baseline: 0.25,
+        target: 0.18,
+        noise_epsilon: 0.005,
+      };
+      const reading = await getOutcomeValue(outcome);
+      assert.ok(reading, `${slug} sibling must parse as a single finite number`);
+      assert.ok(Number.isFinite(reading!.value));
+    }
+  });
+
+  test("slug rule: lowercase, non-alphanumerics collapse to dashes; case-variants pool together", async () => {
+    const filePath = join(tmpDir, "brier-league3.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({
+        brierScore: 0.25,
+        bySourceLeague: {
+          "paper_llm:MLB": { count: 3, brierScore: 0.2 },
+          "paper_llm:baseball_mlb": { count: 3, brierScore: 0.4 },
+        },
+      }),
+    });
+    // "MLB" and "baseball_mlb" slug differently, so they stay separate files —
+    // but the SAME league in two spellings ("MLB" vs "mlb") pools into one.
+    const slugs = result.leagues!.map((l) => l.slug).sort();
+    assert.deepEqual(slugs, ["baseball-mlb", "mlb"]);
+  });
+
+  test("same league different spellings differing only in case pool into one sibling", async () => {
+    const filePath = join(tmpDir, "brier-league4.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({
+        brierScore: 0.25,
+        bySourceLeague: {
+          "paper_llm:MLB": { count: 3, brierScore: 0.2 },
+          "sportsbook_fair_line:mlb": { count: 1, brierScore: 0.4 },
+        },
+      }),
+    });
+    assert.equal(result.leagues!.length, 1);
+    assert.equal(result.leagues![0].slug, "mlb");
+    // (3*0.2 + 1*0.4) / 4 = 0.25
+    assert.equal(result.leagues![0].value, 0.25);
+  });
+
+  test("never fabricates: null-brier entries are skipped; an all-invalid league writes no file", async () => {
+    const filePath = join(tmpDir, "brier-league5.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({
+        brierScore: 0.25,
+        bySourceLeague: {
+          "paper_llm:baseball_mlb": { count: 5, brierScore: null },
+          "paper_llm:basketball_nba": { count: 2, brierScore: 0.3 },
+        },
+      }),
+    });
+    assert.equal(result.ok, true, "aggregate write is independent of per-league no-data");
+    assert.deepEqual(
+      result.leagues!.map((l) => l.slug),
+      ["basketball-nba"],
+      "a league with no finite Brier must produce no sibling (INV-2/INV-7)",
+    );
+    await assert.rejects(
+      stat(join(tmpDir, "brier-league5-baseball-mlb.txt")),
+      /ENOENT/,
+      "no sibling file for a no-data league",
+    );
+  });
+
+  test("missing or empty bySourceLeague writes no siblings and keeps the aggregate ok", async () => {
+    for (const body of [
+      { brierScore: 0.25 }, // field absent (older target build)
+      { brierScore: 0.25, bySourceLeague: {} }, // live shape today: no league-tagged rows
+    ]) {
+      const filePath = join(tmpDir, `brier-league6-${body.bySourceLeague ? "empty" : "absent"}.txt`);
+      const result = await publishForecastCalibrationBrierMetric({
+        filePath,
+        fetchImpl: fetchOk(body),
+      });
+      assert.equal(result.ok, true);
+      assert.deepEqual(result.leagues ?? [], [], "no per-league data -> no sibling files");
+      // The two aggregate files themselves are the only brier-league6-* files
+      // allowed in the directory — any third one would be a phantom sibling.
+      const knownAggregates = new Set(["brier-league6-absent.txt", "brier-league6-empty.txt"]);
+      const strays = (await readdir(tmpDir)).filter(
+        (f) => f.startsWith("brier-league6-") && !knownAggregates.has(f),
+      );
+      assert.deepEqual(strays, [], "no sibling files may appear for a league-less response");
+    }
+  });
+
+  test("malformed bySourceLeague keys (no source:league separator) are skipped, not fatal", async () => {
+    const filePath = join(tmpDir, "brier-league7.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({
+        brierScore: 0.25,
+        bySourceLeague: {
+          "paper_llm:baseball_mlb": { count: 4, brierScore: 0.2 },
+          "not-a-source-league-key": { count: 4, brierScore: 0.9 },
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.leagues!.map((l) => l.slug), ["baseball-mlb"]);
+  });
+
+  test("a failed fetch leaves previously-written sibling files untouched (INV-2)", async () => {
+    const filePath = join(tmpDir, "brier-league8.txt");
+    await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({
+        brierScore: 0.25,
+        bySourceLeague: { "paper_llm:baseball_mlb": { count: 4, brierScore: 0.2 } },
+      }),
+    });
+    const sibling = join(tmpDir, "brier-league8-baseball-mlb.txt");
+    const before = await readFile(sibling, "utf-8");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: (async () => {
+        throw new TypeError("fetch failed: timeout");
+      }) as unknown as typeof fetch,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(await readFile(sibling, "utf-8"), before, "sibling must survive a failed fetch verbatim");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The live config manifest (config/direction/outcomes.yaml) — pinned against
+// regressions of the #4247 design-contract invariants. Resolved relative to
+// THIS test file (the worktree checkout), never HYDRA_ROOT, so the assertions
+// read the same tree the `test` job checks out.
+// ---------------------------------------------------------------------------
+
+describe("outcomes.yaml — per-league declarations (#4247)", () => {
+  const manifestPath = pathResolve(
+    pathDirname(fileURLToPath(import.meta.url)),
+    "../config/direction/outcomes.yaml",
+  );
+
+  async function loadManifest(): Promise<Outcome[]> {
+    const loaded = await loadOutcomes(manifestPath);
+    assert.equal(loaded.ok, true, `live outcomes.yaml must parse: ${JSON.stringify((loaded as any).errors)}`);
+    return loaded.outcomes;
+  }
+
+  test("live outcomes.yaml keeps the sport-blind aggregate as kind: leading with its query unchanged (INV-3)", async () => {
+    const outcomes = await loadManifest();
+    const aggregate = outcomes.find((o) => o.name === "forecast-calibration-brier");
+    assert.ok(aggregate, "the sport-blind aggregate outcome must stay declared");
+    // INV-3: unchanged entry — still leading, still reading the aggregate file,
+    // so the dashboard and the outcome-attribution ledger keep their display
+    // number while holdback excludes it by NAME (holdback-policy.ts).
+    assert.equal(aggregate.kind, "leading");
+    assert.equal(aggregate.direction, "down");
+    assert.equal(aggregate.query, "metrics/forecast-calibration-brier.txt");
+    assert.equal(aggregate.baseline, 0.25);
+    assert.equal(aggregate.target, 0.18);
+    assert.equal(aggregate.noise_epsilon, 0.005);
+  });
+
+  test("every forecast-calibration-brier outcome shares the aggregate's baseline/target/noise_epsilon (INV-6)", async () => {
+    const outcomes = await loadManifest();
+    const brierOutcomes = outcomes.filter((o) => o.name.startsWith("forecast-calibration-brier"));
+    assert.ok(brierOutcomes.length >= 5, "aggregate + at least the four declared leagues");
+    for (const o of brierOutcomes) {
+      assert.equal(o.kind, "leading", `${o.name} must be leading`);
+      assert.equal(o.direction, "down", `${o.name} must be direction down`);
+      assert.equal(o.source, "file", `${o.name} must be source file`);
+      assert.equal(o.baseline, 0.25, `${o.name} baseline must stay 0.25 (no per-sport skill score)`);
+      assert.equal(o.target, 0.18, `${o.name} target must stay 0.18`);
+      assert.equal(o.noise_epsilon, 0.005, `${o.name} noise_epsilon must stay 0.005`);
+    }
+  });
+
+  test("each per-league outcome's query is mechanically derived from its name (one file per league)", async () => {
+    const outcomes = await loadManifest();
+    const perLeague = outcomes.filter((o) => o.name.startsWith("forecast-calibration-brier-"));
+    assert.deepEqual(
+      perLeague.map((o) => o.name).sort(),
+      [
+        "forecast-calibration-brier-americanfootball-ncaaf",
+        "forecast-calibration-brier-americanfootball-nfl",
+        "forecast-calibration-brier-baseball-mlb",
+        "forecast-calibration-brier-basketball-nba",
+      ],
+      "the four ADR-0007 D3 lanes: MLB live + NBA/NFL/NCAAF admitted next",
+    );
+    for (const o of perLeague) {
+      assert.equal(
+        o.query,
+        `metrics/${o.name}.txt`,
+        `${o.name}: query must be the one-numeric-value file the producer writes for that league`,
+      );
+    }
   });
 });
 
