@@ -26,6 +26,8 @@ import {
   DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
+  getGlmAbAssignmentFraction,
+  DEFAULT_GLM_AB_ASSIGNMENT_FRACTION,
   sessionIdFromPath,
   INTERACTIVE_SKILL,
   type UsageSnapshot,
@@ -2161,6 +2163,54 @@ describe("usage-tracker", () => {
     test("non-numeric → default", () => {
       process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "abc";
       assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // GLM A/B ramp fraction env helper (issue #4125, ADR-0032 slice beta)
+  // -------------------------------------------------------------------------
+  describe("getGlmAbAssignmentFraction", () => {
+    const restore = withEnvSnapshot();
+    afterEach(() => restore());
+
+    test("unset → default (0.5)", () => {
+      delete process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION;
+      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
+    });
+
+    test("empty → default", () => {
+      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "";
+      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
+    });
+
+    test("valid fraction in [0,1] is used", () => {
+      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "0.25";
+      assert.equal(getGlmAbAssignmentFraction(), 0.25);
+    });
+
+    test("0 boundary is allowed (ramp fully off — never control)", () => {
+      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "0";
+      assert.equal(getGlmAbAssignmentFraction(), 0);
+    });
+
+    test("1 boundary is allowed (never treatment)", () => {
+      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "1";
+      assert.equal(getGlmAbAssignmentFraction(), 1);
+    });
+
+    test("above 1 → default (not clamped — out of range is a config error)", () => {
+      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "1.5";
+      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
+    });
+
+    test("negative → default", () => {
+      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "-0.3";
+      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
+    });
+
+    test("non-numeric → default", () => {
+      process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION = "abc";
+      assert.equal(getGlmAbAssignmentFraction(), DEFAULT_GLM_AB_ASSIGNMENT_FRACTION);
     });
   });
 

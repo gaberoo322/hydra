@@ -453,6 +453,44 @@ export function getWeeklyPaceCeiling(): number {
   return Math.min(parsed, 1);
 }
 
+/** Default fraction of newly-eligible issues routed to the GLM A/B control arm (issue #4125). */
+export const DEFAULT_GLM_AB_ASSIGNMENT_FRACTION = 0.5;
+
+/**
+ * The operator-tunable ramp fraction for the GLM-vs-Opus A/B experiment
+ * (issue #4125, ADR-0032 slice beta), read from
+ * `HYDRA_GLM_AB_ASSIGNMENT_FRACTION`. This is the probability that an issue
+ * newly entering the glm-eligible pool is assigned to the **control** arm
+ * (labelled `glm-ab-control`, routed to the Opus lane) rather than
+ * **treatment** (labelled `glm-eligible`, routed to the GLM drainer) — NOT
+ * the treatment probability.
+ *
+ * Unset/empty falls back to {@link DEFAULT_GLM_AB_ASSIGNMENT_FRACTION}; a
+ * non-empty-but-unparseable or out-of-`[0, 1]`-range value is logged
+ * (fail-loud, mis-configured env var) and also falls back to the default,
+ * mirroring {@link getWeeklyPaceCeiling}'s discipline. Fraction `0` means
+ * "never control" — the eligibility sweep's coin flip (`roll < fraction`)
+ * can never be true, so every issue lands on treatment, i.e. byte-identical
+ * to pre-#4125 behaviour. Fraction `1` means "never treatment".
+ */
+export function getGlmAbAssignmentFraction(): number {
+  const raw = process.env.HYDRA_GLM_AB_ASSIGNMENT_FRACTION;
+  if (raw === undefined || raw === "") return DEFAULT_GLM_AB_ASSIGNMENT_FRACTION;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    logger.error(
+      {
+        envVar: "HYDRA_GLM_AB_ASSIGNMENT_FRACTION",
+        raw,
+        fallback: DEFAULT_GLM_AB_ASSIGNMENT_FRACTION,
+      },
+      "[glm-ab] HYDRA_GLM_AB_ASSIGNMENT_FRACTION is set but not a finite number in [0, 1]; falling back to default",
+    );
+    return DEFAULT_GLM_AB_ASSIGNMENT_FRACTION;
+  }
+  return parsed;
+}
+
 /** Default Tier-1 5h-utilization throttle threshold (fraction of quota). */
 export const DEFAULT_FIVE_HOUR_THROTTLE_T1 = 0.6;
 /** Default Tier-2 5h-utilization throttle threshold (fraction of quota). */

@@ -35,6 +35,10 @@ import {
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
   GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
+  getGlmAbAssignment,
+  recordGlmAbAssignment,
+  glmAbAssignmentKey,
+  type GlmAbAssignmentRecord,
 } from "../src/redis/autopilot.ts";
 import {
   ORCH_BOARD_LABELS,
@@ -996,6 +1000,115 @@ describe("src/redis/autopilot.ts — GLM drainer heartbeat liveness (#3754)", ()
     await setGlmDrainerHeartbeat(2000);
     const stored = await redis.get(GLM_DRAINER_ACTIVE_KEY);
     assert.equal(stored, "2000");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// src/redis/autopilot.ts — GLM A/B assignment log (issue #4125)
+// ---------------------------------------------------------------------------
+//
+// A NEW top-level describe with its OWN before/after/beforeEach lifecycle
+// (CLAUDE.md's shared-Redis-teardown pitfall) rather than nesting inside the
+// heartbeat suite above: that suite's `after()` disconnects its own `redis`
+// client when IT finishes, which would tear down a connection this suite
+// still needs if it ran as a nested child instead of a sibling top-level
+// suite. `recordGlmAbAssignment` under test uses the shared connection
+// singleton (same REDIS_URL/DB); this client only sets up/tears down the
+// per-issue keys the accessor reads and writes.
+
+describe("src/redis/autopilot.ts — GLM A/B assignment log (issue #4125)", () => {
+  let redis: any;
+  const testIssues = [90001, 90002, 90003];
+
+  before(() => {
+    redis = new Redis(REDIS_URL);
+  });
+  after(async () => {
+    if (redis) {
+      await redis.del(...testIssues.map((n) => glmAbAssignmentKey(n)));
+      redis.disconnect();
+    }
+  });
+  beforeEach(async () => {
+    await redis.del(...testIssues.map((n) => glmAbAssignmentKey(n)));
+  });
+
+  function record(issue: number, arm: "treatment" | "control"): GlmAbAssignmentRecord {
+    return { issue, arm, assignedAt: "2026-08-29T00:00:00.000Z", sweepRunId: "test-run" };
+  }
+
+  // -------------------------------------------------------------------------
+  // recordGlmAbAssignment — the WRITE-path guard
+  // -------------------------------------------------------------------------
+
+  test("first assignment for an issue: plants the record and reports ok:true", async () => {
+    const candidate = record(90001, "control");
+    const res = await recordGlmAbAssignment(candidate);
+    assert.equal(res.ok, true);
+    const stored = await redis.get(glmAbAssignmentKey(90001));
+    assert.deepEqual(JSON.parse(stored), candidate);
+  });
+
+  test("defense-in-depth race: a second write for an already-assigned issue reports ok:false and does NOT overwrite the first record", async () => {
+    const first = record(90002, "treatment");
+    const second = record(90002, "control"); // deliberately a different arm
+
+    const res1 = await recordGlmAbAssignment(first);
+    assert.equal(res1.ok, true);
+
+    const res2 = await recordGlmAbAssignment(second);
+    assert.equal(res2.ok, false, "SET NX finding an existing key is reported as a write failure, not silently accepted");
+
+    // Only the FIRST write ever lands in Redis — the second call never overwrote it.
+    const stored = await redis.get(glmAbAssignmentKey(90002));
+    assert.deepEqual(JSON.parse(stored), first);
+  });
+
+  test("distinct issues get independent records", async () => {
+    const a = record(90001, "control");
+    const b = record(90003, "treatment");
+    await recordGlmAbAssignment(a);
+    await recordGlmAbAssignment(b);
+
+    assert.deepEqual(JSON.parse(await redis.get(glmAbAssignmentKey(90001))), a);
+    assert.deepEqual(JSON.parse(await redis.get(glmAbAssignmentKey(90003))), b);
+  });
+
+  // -------------------------------------------------------------------------
+  // getGlmAbAssignment — the READ-path guard (issue #4125)
+  // -------------------------------------------------------------------------
+
+  test("getGlmAbAssignment: absent key -> ok:true, record:null (safe to coin-flip)", async () => {
+    const res = await getGlmAbAssignment(90001);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.record, null);
+    }
+  });
+
+  test("getGlmAbAssignment: a planted record is read back verbatim", async () => {
+    const candidate = record(90001, "control");
+    await recordGlmAbAssignment(candidate);
+    const res = await getGlmAbAssignment(90001);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.deepEqual(res.record, candidate);
+    }
+  });
+
+  test("getGlmAbAssignment: an unparseable stored value fails closed (ok:false)", async () => {
+    await redis.set(glmAbAssignmentKey(90001), "not-json{{{");
+    const res = await getGlmAbAssignment(90001);
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.equal(res.code, "glm-ab-assignment-read-failed");
+    }
+  });
+
+  test("glmAbAssignmentKey is per-issue and stable", () => {
+    assert.equal(glmAbAssignmentKey(42), "hydra:glm:ab:assignment:42");
+    assert.equal(glmAbAssignmentKey(42), glmAbAssignmentKey(42));
+    assert.notEqual(glmAbAssignmentKey(42), glmAbAssignmentKey(43));
   });
 });
 
