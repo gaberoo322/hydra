@@ -21,7 +21,11 @@
  *   - It watches **leading** Target Outcomes only (terminal outcomes are too
  *     slow for the window) and reverts only when a leading outcome regresses
  *     past its `noise_epsilon` in the unfavorable direction vs the pre-merge
- *     baseline.
+ *     baseline — EXCEPT outcomes named in `HOLDBACK_UNWATCHABLE_OUTCOMES`
+ *     (issue #4247 / ADR-0007 D5: the sport-blind forecast-calibration-brier
+ *     aggregate moves on sport-lane mix, not merge quality, so it must never
+ *     key an auto-revert even though it stays `kind: leading` for display and
+ *     attribution).
  *   - It enforces the ADR-0004 step-4 **per-day revert cap**: once the cap is
  *     hit it emits `holdback.cap-reached` and SUPPRESSES further reverts for
  *     the UTC day rather than reverting.
@@ -46,7 +50,7 @@ import {
   utcDateKey,
   type HoldbackBaseline,
 } from "./redis/holdback.ts";
-import { isEnrolledTier, windowCyclesForTier } from "./holdback-policy.ts";
+import { isEnrolledTier, windowCyclesForTier, isOutcomeWatchable } from "./holdback-policy.ts";
 import {
   snapshotLeadingOutcomes,
   decideHoldback,
@@ -132,7 +136,15 @@ export async function enrollHoldback(input: EnrollInput): Promise<EnrollResult> 
 
   let leading: LeadingOutcomeSample[];
   try {
-    leading = await snapshotLeadingOutcomes(input.outcomesFile);
+    // Issue #4247 (ADR-0007 D5): the sport-blind forecast-calibration-brier
+    // aggregate is filtered OUT of the holdback decision set HERE — at the
+    // holdback-specific call site, not inside the shared snapshotLeadingOutcomes
+    // leaf (that leaf is also the read path of the independent outcome-
+    // attribution ledger, which still watches the aggregate as a display
+    // number). See HOLDBACK_UNWATCHABLE_OUTCOMES in src/holdback-policy.ts.
+    leading = (await snapshotLeadingOutcomes(input.outcomesFile)).filter((l) =>
+      isOutcomeWatchable(l.name),
+    );
   } catch (err: any) {
     const msg = `[holdback] enroll: snapshotLeadingOutcomes threw: ${err?.message || String(err)}`;
     logger.error({ commitSha: input.commitSha, tier: input.tier, err }, "[holdback] enroll: snapshotLeadingOutcomes threw");
@@ -234,7 +246,14 @@ export async function checkHoldback(
 
   let current: LeadingOutcomeSample[];
   try {
-    current = await snapshotLeadingOutcomes(input.outcomesFile);
+    // Issue #4247: same exclusion as enroll — a name in the unwatchable set
+    // reads as ABSENT from the fresh sample, so even a legacy baseline that
+    // still carries it (recorded before this filter existed) can never detect
+    // a "regression" on it: detectRegressions treats a name missing from the
+    // current sample as no-data, never a revert.
+    current = (await snapshotLeadingOutcomes(input.outcomesFile)).filter((l) =>
+      isOutcomeWatchable(l.name),
+    );
   } catch (err: any) {
     const msg = `[holdback] check: snapshotLeadingOutcomes threw: ${err?.message || String(err)}`;
     logger.error({ commitSha: input.commitSha, err }, "[holdback] check: snapshotLeadingOutcomes threw");

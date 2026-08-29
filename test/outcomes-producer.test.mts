@@ -27,7 +27,7 @@
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -193,6 +193,181 @@ describe("publishForecastCalibrationBrierMetric — never write a fabricated val
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-league sibling files (issue #4247 / ADR-0007 D5). The aggregate stays a
+// sport-blind scalar; the per-league slices are the honest per-sport signal.
+// The league set is reconstructed client-side from the SAME
+// /api/calibration/forecast-metrics response — `bySourceLeague` entries
+// (keyed "<source>:<league>") grouped by their league segment and pooled with
+// a count-weighted average, which is mathematically exact for Brier (a mean
+// of squared errors): sum(count_i * brier_i) / sum(count_i).
+// ---------------------------------------------------------------------------
+
+describe("publishForecastCalibrationBrierMetric — per-league sibling files (#4247)", () => {
+  function leagueDir(): string {
+    return join(tmpDir, `league-${Math.random().toString(36).slice(2)}`);
+  }
+
+  test("writes one sibling file per league, count-weighted across sources", async () => {
+    const dir = leagueDir();
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath: join(tmpDir, "agg-weighted.txt"),
+      leagueDirPath: dir,
+      fetchImpl: fetchOk({
+        brierScore: 0.24,
+        bySourceLeague: {
+          "paper_llm:mlb": { count: 100, brierScore: 0.2 },
+          "sportsbook_fair_line:mlb": { count: 300, brierScore: 0.3 },
+          "paper_llm:nba": { count: 50, brierScore: 0.21 },
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+    // (100*0.20 + 300*0.30) / 400 = 0.275 — the pooled per-league Brier.
+    assert.equal(Number((await readFile(join(dir, "mlb.txt"), "utf-8")).trim()), 0.275);
+    assert.equal(Number((await readFile(join(dir, "nba.txt"), "utf-8")).trim()), 0.21);
+    const leagues = (result.leagues ?? []).map((l: any) => l.league).sort();
+    assert.deepEqual(leagues, ["mlb", "nba"]);
+    for (const l of result.leagues ?? []) {
+      assert.ok(l.path.startsWith(dir), "league paths live under the league dir");
+      assert.ok(Number.isFinite(l.value), "reported league values are finite");
+    }
+  });
+
+  test("league file values round-trip through the outcomes file adapter", async () => {
+    const dir = leagueDir();
+    const result = await publishForecastCalibrationBrierMetric({
+      leagueDirPath: dir,
+      fetchImpl: fetchOk({
+        brierScore: 0.24,
+        bySourceLeague: { "paper_llm:mlb": { count: 12, brierScore: 0.183 } },
+      }),
+    });
+    assert.equal(result.ok, true);
+    const outcome: Outcome = {
+      name: "forecast-calibration-brier-mlb",
+      kind: "leading",
+      direction: "down",
+      source: "file",
+      query: join(dir, "mlb.txt"),
+      baseline: 0.25,
+      target: 0.18,
+      noise_epsilon: 0.005,
+    };
+    const reading = await getOutcomeValue(outcome);
+    assert.ok(reading, "per-league file should read back through the file adapter");
+    assert.equal(reading!.value, 0.183);
+  });
+
+  test("normalizes league keys (trim + lowercase) before naming the file", async () => {
+    const dir = leagueDir();
+    const result = await publishForecastCalibrationBrierMetric({
+      leagueDirPath: dir,
+      fetchImpl: fetchOk({
+        brierScore: 0.24,
+        bySourceLeague: { "paper_llm: MLB ": { count: 10, brierScore: 0.22 } },
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(Number((await readFile(join(dir, "mlb.txt"), "utf-8")).trim()), 0.22);
+    assert.equal((result.leagues ?? []).length, 1);
+  });
+
+  test("empty bySourceLeague writes the aggregate only, no league files (today's live shape)", async () => {
+    const dir = leagueDir();
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath: join(tmpDir, "agg-empty.txt"),
+      leagueDirPath: dir,
+      fetchImpl: fetchOk({ brierScore: 0.238, bySourceLeague: {} }),
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.leagues, []);
+    await assert.rejects(stat(dir), /ENOENT/, "no league directory is created when no league has data");
+  });
+
+  test("a league whose slices all have null brierScore stays absent (no phantom zero file)", async () => {
+    const dir = leagueDir();
+    const result = await publishForecastCalibrationBrierMetric({
+      leagueDirPath: dir,
+      fetchImpl: fetchOk({
+        brierScore: 0.24,
+        bySourceLeague: { "paper_llm:mlb": { count: 5, brierScore: null } },
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.leagues, []);
+    await assert.rejects(stat(join(dir, "mlb.txt")), /ENOENT/, "absent, never a phantom zero");
+  });
+
+  test("mixed null and finite slices: only finite slices contribute to the weighted average", async () => {
+    const dir = leagueDir();
+    const result = await publishForecastCalibrationBrierMetric({
+      leagueDirPath: dir,
+      fetchImpl: fetchOk({
+        brierScore: 0.24,
+        bySourceLeague: {
+          "paper_llm:mlb": { count: 100, brierScore: null },
+          "sportsbook_fair_line:mlb": { count: 100, brierScore: 0.3 },
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(Number((await readFile(join(dir, "mlb.txt"), "utf-8")).trim()), 0.3);
+  });
+
+  test("unsafe league strings are skipped, not written", async () => {
+    const dir = leagueDir();
+    const result = await publishForecastCalibrationBrierMetric({
+      leagueDirPath: dir,
+      fetchImpl: fetchOk({
+        brierScore: 0.24,
+        bySourceLeague: {
+          "paper_llm:../escape": { count: 10, brierScore: 0.2 },
+          "paper_llm:ml/b": { count: 10, brierScore: 0.2 },
+          "paper_llm:ok": { count: 10, brierScore: 0.21 },
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(Number((await readFile(join(dir, "ok.txt"), "utf-8")).trim()), 0.21);
+    const entries = await readdirSafe(dir);
+    assert.deepEqual(entries.sort(), ["ok.txt"], "path-unsafe league keys are routed out, never bucketed");
+  });
+});
+
+describe("publishForecastCalibrationBrierMetric — per-league never-fabricate posture (#4247)", () => {
+  test("per-league fetch/parse failure leaves league files untouched", async () => {
+    const dir = join(tmpDir, `league-stale-${Math.random().toString(36).slice(2)}`);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "mlb.txt"), "0.19\n", "utf-8");
+    const result = await publishForecastCalibrationBrierMetric({
+      leagueDirPath: dir,
+      fetchImpl: (async () => {
+        throw new TypeError("fetch failed: ECONNREFUSED");
+      }) as unknown as typeof fetch,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "fetch-failed");
+    assert.equal(
+      (await readFile(join(dir, "mlb.txt"), "utf-8")),
+      "0.19\n",
+      "prior per-league value must survive a failed sample verbatim",
+    );
+    const entries = await readdirSafe(dir);
+    assert.deepEqual(entries, ["mlb.txt"], "no partial/phantom files appear on failure");
+  });
+});
+
+/** readdir that returns [] on ENOENT (the league dir may legitimately not exist). */
+async function readdirSafe(dir: string): Promise<string[]> {
+  try {
+    const { readdir } = await import("node:fs/promises");
+    return await readdir(dir);
+  } catch {
+    return [];
+  }
+}
 
 describe("Housekeeping wiring (issue #1657 — seventh chore)", () => {
   // runHousekeeping's sibling chores read/write Redis guard keys, so these

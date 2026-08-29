@@ -22,6 +22,8 @@ import {
   windowCyclesForTier,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
+  HOLDBACK_UNWATCHABLE_OUTCOMES,
+  isOutcomeWatchable,
 } from "../src/holdback-policy.ts";
 
 describe("holdback-policy — isEnrolledTier (tier-membership contract)", () => {
@@ -77,6 +79,38 @@ describe("holdback-policy — windowCyclesForTier (monotonic + floor contract)",
       const w = windowCyclesForTier(tier);
       assert.ok(Number.isFinite(w), `window for tier ${tier} must be finite`);
       assert.ok(w >= 0, `window for tier ${tier} must be non-negative`);
+    }
+  });
+});
+
+describe("holdback-policy — HOLDBACK_UNWATCHABLE_OUTCOMES (issue #4247 / ADR-0007 D5)", () => {
+  test("the sport-blind forecast-calibration-brier aggregate is NOT watchable", () => {
+    assert.equal(
+      isOutcomeWatchable("forecast-calibration-brier"),
+      false,
+      "the sport-blind aggregate must never key an Outcome Holdback auto-revert",
+    );
+  });
+
+  test("the exclusion set contains exactly the sport-blind aggregate", () => {
+    assert.deepEqual([...HOLDBACK_UNWATCHABLE_OUTCOMES].sort(), ["forecast-calibration-brier"]);
+  });
+
+  test("every other outcome name defaults to watchable (denylist, not allowlist)", () => {
+    assert.equal(isOutcomeWatchable("orchestrator-self-improvement-share"), true);
+    assert.equal(isOutcomeWatchable("some-future-outcome"), true);
+    assert.equal(isOutcomeWatchable(""), true);
+  });
+
+  test("per-league Brier outcomes stay watchable — only the sport-blind blend is banned", () => {
+    // The per-league replacements (issue #4247) are the honest per-sport signal;
+    // they MUST remain eligible for holdback watch.
+    for (const league of ["mlb", "nfl", "nba", "ncaaf"]) {
+      assert.equal(
+        isOutcomeWatchable(`forecast-calibration-brier-${league}`),
+        true,
+        `per-league outcome for ${league} must stay watchable`,
+      );
     }
   });
 });

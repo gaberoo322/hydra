@@ -138,6 +138,16 @@ export async function publishOrchestratorShareMetric(
 const DEFAULT_BRIER_METRIC_PATH = join(HYDRA_ROOT, "metrics", "forecast-calibration-brier.txt");
 
 /**
+ * Default on-disk directory for the per-league Brier sibling files (issue
+ * #4247 / ADR-0007 D5). One file per league — `metrics/forecast-calibration-
+ * brier-league/mlb.txt`, `…/nba.txt`, … — each holding a single numeric value
+ * so the outcomes.yaml `file` source keeps its one-numeric-value-per-file
+ * contract with no new source kind. Per-league outcomes in
+ * `config/direction/outcomes.yaml` point their `query` here.
+ */
+const DEFAULT_BRIER_LEAGUE_DIR = join(HYDRA_ROOT, "metrics", "forecast-calibration-brier-league");
+
+/**
  * Time-bound on the target fetch so an unresponsive hydra-betting service
  * can never wedge the housekeeping endpoint.
  */
@@ -159,6 +169,23 @@ export interface PublishBrierResult {
   value?: number;
   /** Absolute path written (or attempted). */
   path: string;
+  /**
+   * Per-league sibling files written from the same response (issue #4247).
+   * Empty when no league slice carried data — a league with zero settled
+   * forecasts is ABSENT (no file, no entry), never a phantom zero. Absent on
+   * the failure arms: a failed fetch/parse writes nothing anywhere.
+   */
+  leagues?: LeagueBrierEntry[];
+}
+
+/** One published per-league Brier value (issue #4247 / ADR-0007 D5). */
+export interface LeagueBrierEntry {
+  /** Normalized league token (trim + lowercase), e.g. `mlb`. */
+  league: string;
+  /** The pooled per-league Brier as written to disk (6dp, like the aggregate). */
+  value: number;
+  /** Absolute path of the sibling file. */
+  path: string;
 }
 
 /**
@@ -172,24 +199,44 @@ export interface PublishBrierResult {
  * (`HYDRA_TARGET_WEB_URL`, legacy `HYDRA_BETTING_URL`, default
  * `http://localhost:3333`) — same precedent as `src/api/reflections.ts`.
  *
- * NEVER writes a fabricated value: on fetch failure, non-200, malformed JSON,
- * or null/non-finite `brierScore`, the metric file is left untouched — its
- * stale mtime is the staleness signal, and `getOutcomeValue` already treats a
- * missing file as no-data (never a regression). Never throws; every failure
- * path logs with `[metrics-publisher]` context and returns a result object.
+ * Since issue #4247 (ADR-0007 D5) the SAME fetch also publishes per-league
+ * sibling files under `metrics/forecast-calibration-brier-league/<league>.txt`
+ * (see {@link DEFAULT_BRIER_LEAGUE_DIR}): the response's `bySourceLeague`
+ * entries — keyed `"<source>:<league>"` — are grouped by their league segment
+ * and pooled per league with a count-weighted average of the per-source
+ * Briers. That pooling is mathematically exact, not an approximation: Brier
+ * is a mean of squared errors, so `sum(count_i * brier_i) / sum(count_i)`
+ * over the bySourceLeague entries of one league recovers the pooled Brier of
+ * exactly the rows that league contributed (both groupings are computed over
+ * the identical scored-rows population server-side). No hardcoded source
+ * list is needed — whichever sources appear for a league contribute their
+ * weight. The aggregate file itself keeps its sport-blind semantics and its
+ * existing consumers; per-league outcomes in outcomes.yaml read the siblings.
  *
- * `fetchImpl` / `filePath` / `baseUrl` are injectable so tests run without a
- * live target.
+ * NEVER writes a fabricated value: on fetch failure, non-200, malformed JSON,
+ * or null/non-finite `brierScore`, the metric file AND every league file are
+ * left untouched — stale mtime is the staleness signal, and `getOutcomeValue`
+ * already treats a missing file as no-data (never a regression). A league
+ * whose slices carry no finite Brier is ABSENT (no file), never a phantom
+ * zero — matching the target's own absent-not-phantom convention. Never
+ * throws; every failure path logs with `[metrics-publisher]` context and
+ * returns a result object.
+ *
+ * `fetchImpl` / `filePath` / `leagueDirPath` / `baseUrl` are injectable so
+ * tests run without a live target.
  */
 export async function publishForecastCalibrationBrierMetric(
   opts: {
     filePath?: string;
+    /** Directory for the per-league sibling files (issue #4247). */
+    leagueDirPath?: string;
     baseUrl?: string;
     fetchImpl?: typeof fetch;
     timeoutMs?: number;
   } = {},
 ): Promise<PublishBrierResult> {
   const filePath = opts.filePath || DEFAULT_BRIER_METRIC_PATH;
+  const leagueDirPath = opts.leagueDirPath || DEFAULT_BRIER_LEAGUE_DIR;
   const path = resolveMetricPath(filePath);
   const baseUrl = opts.baseUrl || getTargetWebUrl();
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -237,8 +284,84 @@ export async function publishForecastCalibrationBrierMetric(
   }
 
   const wrote = await writeMetricFile(brierScore, filePath);
+  // Per-league siblings (issue #4247) — from the SAME parsed body, after the
+  // legacy aggregate file has been attempted. A failed aggregate write does
+  // not suppress the league files: the two are independent outputs of one
+  // sample, and a league file is still an honest reading of this response.
+  const leagues = await publishLeagueBrierFiles(body, leagueDirPath);
   if (!wrote) {
-    return { ok: false, reason: "write-failed", value: brierScore, path };
+    return { ok: false, reason: "write-failed", value: brierScore, path, leagues };
   }
-  return { ok: true, value: brierScore, path };
+  return { ok: true, value: brierScore, path, leagues };
+}
+
+/**
+ * Publish one sibling metric file per league found in the response's
+ * `bySourceLeague` map (issue #4247). See the publisher doc above for the
+ * count-weighted pooling argument. Never throws; a per-league write failure is
+ * logged by `writeMetricFile` and the league is simply absent from the
+ * returned entries (the file's stale mtime remains the staleness signal).
+ */
+async function publishLeagueBrierFiles(
+  body: unknown,
+  leagueDirPath: string,
+): Promise<LeagueBrierEntry[]> {
+  const bySourceLeague = (body as { bySourceLeague?: unknown } | null)?.bySourceLeague;
+  if (bySourceLeague === null || typeof bySourceLeague !== "object" || Array.isArray(bySourceLeague)) {
+    return [];
+  }
+
+  // Pool per-source Briers into per-league weighted sums.
+  const pools = new Map<string, { weight: number; weightedSum: number }>();
+  for (const [key, slice] of Object.entries(bySourceLeague as Record<string, unknown>)) {
+    const separator = key.indexOf(":");
+    if (separator === -1) {
+      logger.warn(
+        { key },
+        "[metrics-publisher] forecast-calibration-brier: bySourceLeague key without '<source>:<league>' shape — skipped",
+      );
+      continue;
+    }
+    const league = key.slice(separator + 1).trim().toLowerCase();
+    if (!isSafeLeagueToken(league)) {
+      logger.warn(
+        { key, league },
+        "[metrics-publisher] forecast-calibration-brier: unsafe/unusable league token — skipped",
+      );
+      continue;
+    }
+    const brier = (slice as { brierScore?: unknown } | null)?.brierScore;
+    if (typeof brier !== "number" || !Number.isFinite(brier)) continue; // absent, not phantom
+    const count = (slice as { count?: unknown } | null)?.count;
+    const weight = typeof count === "number" && Number.isFinite(count) && count > 0 ? count : 0;
+    if (weight === 0) continue; // nothing to pool
+    const pool = pools.get(league) ?? { weight: 0, weightedSum: 0 };
+    pool.weight += weight;
+    pool.weightedSum += weight * brier;
+    pools.set(league, pool);
+  }
+
+  const written: LeagueBrierEntry[] = [];
+  for (const [league, { weight, weightedSum }] of pools) {
+    // Match the on-disk 6dp serialization so the reported value equals the
+    // value a consumer reads back through the file adapter.
+    const value = Number((weightedSum / weight).toFixed(6));
+    const path = join(leagueDirPath, `${league}.txt`);
+    if (await writeMetricFile(value, path)) {
+      written.push({ league, value, path });
+    }
+  }
+  return written;
+}
+
+/**
+ * League tokens that may name a sibling file: non-empty, no path separators,
+ * no dot-only segments — conservative allowlist evaluated after the
+ * trim+lowercase normalization, so a hostile or malformed league string is
+ * routed OUT (skipped with a warn) rather than bucketed or written outside
+ * the league directory.
+ */
+function isSafeLeagueToken(league: string): boolean {
+  if (league === "." || league === "..") return false;
+  return /^[a-z0-9._-]+$/.test(league);
 }

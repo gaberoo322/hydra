@@ -3,17 +3,20 @@
  * `src/outcome-regression.ts` extraction).
  *
  * This module owns the *pure* Outcome Holdback enrollment policy: which tiers
- * enroll in an Outcome Holdback watch, and how long the watch window runs for a
- * given tier. Both predicates are deterministic tier-membership / watch-window
- * arithmetic over env-read constants — no Redis I/O, no filesystem, no event
- * bus. They previously lived in `src/redis/holdback.ts` (a Redis Adapter),
- * which violated the Redis Adapters Seam contract (CLAUDE.md: the typed accessor
- * family owns storage, not policy). Relocating them here concentrates the policy
- * where its name matches the concept and lets a caller test "T1 never enrolls,
- * T2/T3/T4 always enroll" as a pure unit test with no Redis fixture.
+ * enroll in an Outcome Holdback watch, how long the watch window runs for a
+ * given tier, and — since issue #4247 (ADR-0007 D5) — which leading outcome
+ * NAMES may never key a revert. All predicates are deterministic tier-membership
+ * / watch-window / name-set arithmetic over env-read constants — no Redis I/O,
+ * no filesystem, no event bus. They previously lived in `src/redis/holdback.ts`
+ * (a Redis Adapter), which violated the Redis Adapters Seam contract (CLAUDE.md:
+ * the typed accessor family owns storage, not policy). Relocating them here
+ * concentrates the policy where its name matches the concept and lets a caller
+ * test "T1 never enrolls, T2/T3/T4 always enroll" as a pure unit test with no
+ * Redis fixture.
  *
- * No behaviour change — the predicate logic is byte-for-byte relocated, not
- * modified. `src/redis/holdback.ts` retains only storage operations; both
+ * The tier/window predicates were byte-for-byte relocated here, not modified;
+ * the outcome-name denylist is the one addition (issue #4247).
+ * `src/redis/holdback.ts` retains only storage operations; both
  * callers (`src/holdback.ts`, `src/scheduler/chores/holdback-merge-watch.ts`)
  * import the policy from here.
  *
@@ -55,6 +58,43 @@ const HOLDBACK_WINDOW_CYCLES_T4 = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLES_T4", 
  * **T2, T3, T4 only**.
  */
 const HOLDBACK_ENROLLED_TIERS: ReadonlyArray<number> = [2, 3, 4];
+
+/**
+ * Leading outcomes that may NEVER drive an Outcome Holdback revert, by name
+ * (issue #4247 / hydra-betting ADR-0007 D5).
+ *
+ * `forecast-calibration-brier` is the sport-blind aggregate Brier score.
+ * Different sports have different *intrinsic* predictability (FiveThirtyEight:
+ * NFL 0.208 vs MLB 0.243), so admitting a new sport lane moves the aggregate
+ * toward its 0.18 target with zero improvement in forecast edge — pure lane-mix
+ * drift. A holdback watch keyed on it would auto-revert good merges (or bless
+ * bad ones) on a number that moved for reasons unrelated to any single merge.
+ *
+ * The outcome KEEPS its `kind: leading` declaration in outcomes.yaml — it stays
+ * readable by the dashboard and by the outcome-attribution ledger, per the
+ * issue's "it may remain as a display number". The exclusion is applied at the
+ * two Outcome Holdback call sites (`enrollHoldback` / `checkHoldback` in
+ * `src/holdback.ts`), NOT inside the shared `snapshotLeadingOutcomes()` leaf,
+ * because that leaf is also the read path of the independent attribution
+ * ledger, which this issue does not ask to change.
+ *
+ * This is a DENYLIST, not an allowlist: any outcome not named here defaults to
+ * watchable, so future per-league Brier outcomes (the honest per-sport signal
+ * this issue publishes) enroll like any other leading outcome.
+ */
+export const HOLDBACK_UNWATCHABLE_OUTCOMES: ReadonlySet<string> = new Set([
+  "forecast-calibration-brier",
+]);
+
+/**
+ * True when a leading outcome may enter an Outcome Holdback baseline / decision
+ * (issue #4247). The complement of {@link HOLDBACK_UNWATCHABLE_OUTCOMES} —
+ * unknown names default to watchable so the denylist cannot silently blind the
+ * watch to a newly declared outcome.
+ */
+export function isOutcomeWatchable(name: string): boolean {
+  return !HOLDBACK_UNWATCHABLE_OUTCOMES.has(name);
+}
 
 /**
  * True when a merge of the given post-#767 monotonic tier enrolls in Outcome

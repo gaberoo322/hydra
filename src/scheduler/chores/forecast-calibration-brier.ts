@@ -3,6 +3,16 @@
  *
  * One of the Housekeeping chore family (`src/scheduler/chores/`) — extracted
  * from `src/scheduler/housekeeping.ts` (issue #2090). Behaviour unchanged.
+ *
+ * Since issue #4247 (ADR-0007 D5) one invocation publishes TWO shapes from a
+ * single target fetch: the legacy sport-blind aggregate scalar to
+ * metrics/forecast-calibration-brier.txt (unchanged contract for its existing
+ * readers — it is now display-only for Outcome Holdback, excluded via
+ * HOLDBACK_UNWATCHABLE_OUTCOMES) and one per-league sibling file under
+ * metrics/forecast-calibration-brier-league/ for the per-league replacement
+ * outcomes declared in config/direction/outcomes.yaml. Both live in
+ * `publishForecastCalibrationBrierMetric`; this chore stays the thin
+ * Housekeeping wrapper.
  */
 
 import { publishForecastCalibrationBrierMetric } from "../../metrics/publish.ts";

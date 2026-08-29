@@ -55,6 +55,7 @@ import {
 } from "../src/holdback-policy.ts";
 import {
   loadBaseline,
+  recordBaseline,
   getRevertCount,
   _resetRevertCount,
   holdbackBaselineKey,
@@ -590,6 +591,111 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     const ev = events.find((e) => e.type === "holdback.revert_failed");
     assert.ok(ev, "must emit holdback.revert_failed (the name digest.ts reads)");
     assert.equal(ev!.payload.commitSha, "failsha01");
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #4247 (ADR-0007 D5): the sport-blind forecast-calibration-brier
+  // aggregate must be out of the Outcome Holdback decision set. These tests pin
+  // the exclusion at the two producer call sites — enrollment (the baseline
+  // never carries it) and check (a regressed aggregate never yields a revert,
+  // including for a pre-change baseline that was enrolled while it still
+  // watched the aggregate).
+  // -------------------------------------------------------------------------
+
+  /** Fixture: one ordinary leading metric + the sport-blind Brier aggregate. */
+  async function aggregateYaml(
+    leadFile: string,
+    leadValue: number,
+    brierFile: string,
+    brierValue: number,
+  ): Promise<string> {
+    await valueFile(leadFile, leadValue);
+    await valueFile(brierFile, brierValue);
+    return outcomesFixture(`outcomes:
+  - name: lead-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, leadFile)}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+  - name: forecast-calibration-brier
+    kind: leading
+    direction: down
+    source: file
+    query: ${join(tmpDir, brierFile)}
+    baseline: 0.25
+    target: 0.18
+    noise_epsilon: 0.005
+`);
+  }
+
+  test("sport-blind aggregate is excluded from enrollment baselines (#4247)", async (t) => {
+    if (!guard(t)) return;
+    const path = await aggregateYaml("xlead.txt", 0.5, "xagg.txt", 0.24);
+    const sha = "aggsha01";
+    const r = await enrollHoldback({ commitSha: sha, prNumber: 51, tier: 2, outcomesFile: path });
+    assert.equal(r.ok, true);
+    assert.equal((r as any).enrolled, true);
+    const loaded = await loadBaseline(sha);
+    const names = ((loaded as any).baseline?.leading ?? []).map((l: any) => l.name);
+    assert.deepEqual(
+      names,
+      ["lead-metric"],
+      "the baseline must carry the watchable leading metric but NOT the sport-blind aggregate",
+    );
+    await redis.del(holdbackBaselineKey(sha));
+  });
+
+  test("a regressed sport-blind aggregate never reverts (#4247)", async (t) => {
+    if (!guard(t)) return;
+    const path = await aggregateYaml("ylead.txt", 0.5, "yagg.txt", 0.24);
+    const sha = "aggsha02";
+    await enrollHoldback({ commitSha: sha, prNumber: 52, tier: 2, outcomesFile: path });
+
+    // Lane-mix drift: the aggregate blows past its noise epsilon (0.24 → 0.40,
+    // direction down). The watchable metric does not move. The merge that sat
+    // in the window must NOT be reverted on the aggregate's move.
+    await writeFile(join(tmpDir, "yagg.txt"), "0.40");
+    const day = utcDateKey();
+    await _resetRevertCount(day);
+    const { bus, events } = captureBus();
+    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: path });
+    assert.equal(res.ok, true);
+    assert.equal((res as any).result.decision, "watching");
+    assert.ok(!events.find((e) => e.type === "holdback.reverted"), "must NOT revert on the sport-blind aggregate");
+    await redis.del(holdbackBaselineKey(sha));
+    await _resetRevertCount(day);
+  });
+
+  test("a legacy baseline carrying the aggregate cannot revert on it (#4247)", async (t) => {
+    if (!guard(t)) return;
+    // A baseline recorded BEFORE this change (or by any writer that did not
+    // filter) still carries the aggregate. The check-side exclusion must make
+    // that stale entry read as no-data, never as a regression.
+    const path = await aggregateYaml("zlead.txt", 0.5, "zagg.txt", 0.40);
+    const sha = "aggsha03";
+    await recordBaseline({
+      commitSha: sha,
+      prNumber: 53,
+      tier: 2,
+      enrolledAt: Date.now(),
+      windowCycles: 5,
+      leading: [
+        { name: "lead-metric", direction: "up", noiseEpsilon: 0.01, value: 0.5 },
+        { name: "forecast-calibration-brier", direction: "down", noiseEpsilon: 0.005, value: 0.24 },
+      ],
+    } as any);
+    const day = utcDateKey();
+    await _resetRevertCount(day);
+    const { bus, events } = captureBus();
+    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: path });
+    assert.equal(res.ok, true);
+    assert.equal((res as any).result.decision, "watching");
+    assert.ok(!events.find((e) => e.type === "holdback.reverted"), "a legacy aggregate entry must not revert");
+    await redis.del(holdbackBaselineKey(sha));
+    await _resetRevertCount(day);
   });
 });
 
