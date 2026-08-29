@@ -1,0 +1,1 @@
+- feat: forecast-calibration-brier is now published per league (sibling files under metrics/forecast-calibration-brier-league/, new per-league outcomes mlb/nfl/nba/ncaaf) and the sport-blind aggregate can no longer trigger an Outcome Holdback auto-revert — it stays a display number for the dashboard and attribution ledger (#4247)
