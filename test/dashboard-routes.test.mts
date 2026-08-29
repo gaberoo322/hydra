@@ -24,7 +24,9 @@
  *   5. The deliberately-orphaned leaf components stay ON DISK, unrouted
  *      (INV-4) — they are a follow-up hydra-cleanup/knip candidate, and
  *      this test must not re-couple to them beyond asserting they were not
- *      swept into this retirement.
+ *      swept into this retirement. The now-pixel Habitat leaf itself (and
+ *      its 19 sibling components) WAS swept by that anticipated follow-up
+ *      (issue #4255) — INV-6 pins that they are now gone.
  *
  * Lifecycle: top-level describes with no shared mutable state (per the
  * CLAUDE.md shared-Redis-teardown authoring rule).
@@ -246,8 +248,6 @@ describe("Sidebar drops only the Outcomes and Explore nav entries (INV-5)", () =
 
 describe("orphaned leaf components remain on disk for the follow-up cleanup (INV-4)", () => {
   const kept = [
-    // The Habitat pixel view (unrouted once /now collapses to Console).
-    "../dashboard/src/pages/now-pixel/NowPixel.jsx",
     // The non-reused Explore tab leaves.
     "../dashboard/src/components/pages/explore/FrictionTab.jsx",
     "../dashboard/src/components/pages/explore/BehaviorTab.jsx",
@@ -267,6 +267,41 @@ describe("orphaned leaf components remain on disk for the follow-up cleanup (INV
   for (const rel of kept) {
     test(`${rel} is NOT swept into this retirement`, async () => {
       assert.equal(await pathExists(rel), true, `${rel} must stay on disk (follow-up knip pass)`);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// INV-6 — the anticipated now-pixel follow-up cleanup happened (issue #4255)
+// ---------------------------------------------------------------------------
+
+describe("the now-pixel component leaves were swept in the follow-up cleanup (INV-6)", () => {
+  const swept = [
+    "../dashboard/src/pages/now-pixel/AlertsNoticeBoard.jsx",
+    "../dashboard/src/pages/now-pixel/Attribution.jsx",
+    "../dashboard/src/pages/now-pixel/AutopilotPavilion.jsx",
+    "../dashboard/src/pages/now-pixel/BattleCard.jsx",
+    "../dashboard/src/pages/now-pixel/BattleCardRow.jsx",
+    "../dashboard/src/pages/now-pixel/ClassSprite.jsx",
+    "../dashboard/src/pages/now-pixel/CooldownClock.jsx",
+    "../dashboard/src/pages/now-pixel/DispatchTween.jsx",
+    "../dashboard/src/pages/now-pixel/HabitatGrid.jsx",
+    "../dashboard/src/pages/now-pixel/HabitatZone.jsx",
+    "../dashboard/src/pages/now-pixel/HpBar.jsx",
+    "../dashboard/src/pages/now-pixel/Infirmary.jsx",
+    "../dashboard/src/pages/now-pixel/NowPixel.jsx",
+    "../dashboard/src/pages/now-pixel/OakTownCrier.jsx",
+    "../dashboard/src/pages/now-pixel/PokedexModal.jsx",
+    "../dashboard/src/pages/now-pixel/ReapingFade.jsx",
+    "../dashboard/src/pages/now-pixel/RecommendationsTab.jsx",
+    "../dashboard/src/pages/now-pixel/RecRunJournalModal.jsx",
+    "../dashboard/src/pages/now-pixel/SubagentSprite.jsx",
+    "../dashboard/src/pages/now-pixel/TurnJournalTab.jsx",
+  ];
+
+  for (const rel of swept) {
+    test(`${rel} is gone (issue #4255)`, async () => {
+      assert.equal(await pathExists(rel), false, `${rel} must be removed by the now-pixel cleanup`);
     });
   }
 });
