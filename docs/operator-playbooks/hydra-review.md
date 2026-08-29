@@ -1,6 +1,6 @@
 ---
 name: hydra-review
-description: The operator's HITL cockpit — surfaces everything needing the operator's hand and walks each item toward AFK-dispatchable: overnight decision queue, stalled PRs, ready-for-human, stale-blocked, AND every configured Target project's operator-attention items (ready-for-human, reframe, stale-blocked).
+description: The operator's HITL cockpit — surfaces everything needing the operator's hand and walks each item toward AFK-dispatchable: overnight decision queue, stalled PRs, ready-for-human, stale-blocked, every configured Target project's operator-attention items (ready-for-human, reframe, stale-blocked), AND the hitl-grill parked-idea lane (reported, not walked — verdicts live on the Work page).
 when_to_use: "When the user says 'review issues', 'what needs my attention', 'what can I do', 'check blocked issues', 'review target work', or wants to advance stuck work (orchestrator OR any Target project) toward autopilot. Also the morning hand-off for an overnight `/hydra-autopilot --unattended=true` run."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*)
 claude_only: true
@@ -23,7 +23,9 @@ like the Orchestrator's). The overnight decision queue (§0) applies to
 now-dead Redis backlog and was blind to the live Target GitHub board. The Target
 enumeration is a **loop** over `target-config.ts` (`getTargetGithubRepo()`), so it is
 N-ready; today Hydra is a single swappable Target (ADR-0013), so the loop has one
-entry (`gaberoo322/hydra-betting`).
+entry (`gaberoo322/hydra-betting`). The `hitl-grill` parked-idea lane (§1.6) is
+Orchestrator-only — every producer parks on `gaberoo322/hydra` — and it is
+reported, not walked.
 
 ## Buckets, in drain order
 
@@ -32,8 +34,9 @@ entry (`gaberoo322/hydra-betting`).
 3. **`ready-for-human`** (Orchestrator) — `gaberoo322/hydra` issues requiring operator decisions
 4. **Stale-blocked** (Orchestrator) — `blocked` issues where no linked open issue justifies the block
 5. **Per-Target operator-attention items** (§1.5) — for each configured Target board (`target-config.ts`), the Target's `ready-for-human`, `reframe` (a build that failed 2+ times, stamped by `hydra-target-qa`), and stale-`blocked` issues. Deliberately **not** `needs-triage` — that is `hydra-target-sweep`'s autonomous lane (mirroring how the Orchestrator buckets leave triage to `hydra-sweep`).
+6. **`hitl-grill` parked ideas** (§1.6) — Orchestrator-only: open `gaberoo322/hydra` issues labeled `hitl-grill`, agent-proposed ideas parked for an operator grill-or-dismiss verdict (issue #4025). **Report-only, never walked** — the cockpit renders the open count and the oldest rows with producer provenance and hands over the Work-page link; both verdicts are delivered on the dashboard's HITL grill inbox, so this bucket adds no `AskUserQuestion` row and no §4 options.
 
-The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Stalled PRs drain next: a green-but-stuck PR is finished work that is not landing, and it is the cheapest thing on the board to unstick — usually one command — so clearing it first converts effort into merged work before the session spends judgment on undecided issues. `ready-for-human` and stale-blocked follow: these need real operator thought, and a stale-blocked row in particular is only worth walking after its blocker has been verified against the tracker rather than trusted from the label. Per-Target items drain **last**: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier.
+The queue issue is drained first because each row is already paired with a recommendation from the autopilot — the operator answers fastest there. Stalled PRs drain next: a green-but-stuck PR is finished work that is not landing, and it is the cheapest thing on the board to unstick — usually one command — so clearing it first converts effort into merged work before the session spends judgment on undecided issues. `ready-for-human` and stale-blocked follow: these need real operator thought, and a stale-blocked row in particular is only worth walking after its blocker has been verified against the tracker rather than trusted from the label. Per-Target items drain after the Orchestrator buckets: the Orchestrator-self board is primary (it builds the machine that builds the Targets), and a Target `reframe`/`ready-for-human` blocks only that one Target build loop, not the whole AFK frontier. `hitl-grill` drains **last** — and it is the one bucket this cockpit only *reports*: a parked idea needs the operator's judgment, but no per-row decision fires in this session, so §1.6 surfaces the count and the oldest rows and defers both verdicts to the Work page's HITL grill inbox.
 
 ## Procedure
 
@@ -221,6 +224,53 @@ blocker referenced, → stale-blocked. **Do not** gather `needs-triage` (that is
 failed 2+ times (stamped by `hydra-target-qa` alongside `ready-for-human`); surface
 its prior-attempt history so the operator decides informed.
 
+### 1.6. Report the `hitl-grill` parked-idea lane (Orchestrator only)
+
+The final bucket is the park lane: open `gaberoo322/hydra` issues labeled
+`hitl-grill` — agent-proposed ideas waiting for an operator grill-or-dismiss
+verdict (issue #4025). The pilot producer is `hydra-architecture-scan`'s park
+tier (#4027: `Worth exploring` and Untouchable-Core-primary candidates), which
+stamps `architecture-scan` alongside the park label; further feeders may join
+(epic #4024), so treat provenance as *every label except `hitl-grill`* rather
+than hardcoding one producer.
+
+```bash
+gh issue list --repo gaberoo322/hydra --label hitl-grill --state open \
+  --json number,title,labels,createdAt --limit 200 \
+  --jq 'sort_by(.createdAt)
+        | "open: \(length)",
+          (.[:5][] | "#\(.number) [\([.labels[].name] | map(select(. != "hitl-grill")) | join(","))] \(.title) (\(.createdAt[:10]))")'
+```
+
+The `--limit 200` is load-bearing: `gh`'s default page is 30 and this lane
+already exceeded it (37 open on 2026-08-28), so the default would silently
+under-count the headline number. Sort oldest-first — the same ordering the Work
+page's lane renders.
+
+Render the open count and the oldest few rows (number, producer provenance
+label, title, park age) under the §2 report heading, and link the Work page's
+HITL grill inbox for the verdicts. That is the whole bucket — **it adds no
+write path of its own, on purpose.**
+
+**No Promote/Dismiss from this skill.** The authoritative write path for this
+lane is the Work page's HITL grill inbox (`http://localhost:4000/work`, backed
+by `GET /api/autopilot/hitl-grill`; epic #4024 slice #4028):
+
+- **Grill (promote)** — `POST /api/autopilot/board/promote`, confirm-gated: it
+  refuses when the issue is closed, already `ready-for-agent`, missing its
+  `## Files in scope` section, or blocked on an open blocker, and it adds
+  `ready-for-agent` **and strips `hitl-grill` in one verified write** (the
+  server re-reads and returns the post-write state).
+- **Dismiss** — `POST /api/autopilot/board/close` (`not planned`): a pure close
+  that deliberately **retains `hitl-grill`** on the closed issue as the
+  producer's dedup baseline.
+
+A second write path here would risk exactly the half-written states — both
+labels present after a promote, or the park label stripped on a dismiss — that
+the lane's single-round-trip design exists to prevent. This cockpit's job for
+the bucket is to stop the session silently under-reporting the lane (its rows
+were invisible to every query above) and to hand the operator the link.
+
 ### 2. Present
 
 ```
@@ -247,6 +297,12 @@ its prior-attempt history so the operator decides informed.
 (one block per configured Target board; omit a Target with nothing needing attention)
 | # | Kind | Title | Age | Why here / prior attempts |
 |---|------|-------|-----|---------------------------|
+
+### Hitl-grill (P) — parked ideas, Orchestrator, report-only — §1.6
+(open count + oldest few rows; verdicts happen on the Work page's HITL grill
+inbox — http://localhost:4000/work — never in this session)
+| # | Producer | Title | Parked |
+|---|----------|-------|--------|
 ```
 
 ### 2.5. Classify before presenting
@@ -394,8 +450,9 @@ carries on its next tick. That is the point of the cockpit — count it.
 
 ## Rules
 
-- **Drain order: overnight queue → stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning). Stalled PRs come next because they are the cheapest conversion of effort into merged work on the board. Don't reorder anything ahead of the overnight queue. **Per-Target items always drain last** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next.
+- **Drain order: overnight queue → stalled PRs (§0.9) → Orchestrator ready-for-human → Orchestrator stale-blocked → per-Target items (§1.5) → `hitl-grill` parked ideas (§1.6).** The queue is the most time-sensitive bucket (the operator already paid for the autopilot's reasoning). Stalled PRs come next because they are the cheapest conversion of effort into merged work on the board. Don't reorder anything ahead of the overnight queue. **Per-Target items drain after the Orchestrator buckets** (the Orchestrator-self board is primary); within the Target phase, finish one Target board fully before starting the next. **`hitl-grill` is last and is reported, never walked** — open count, oldest rows with producer provenance, and the Work-page link; no per-row question fires.
 - **Target rows resolve against the Target repo, never `gaberoo322/hydra`.** Every `gh` command for a Target row carries `--repo <TREPO>` (the row's own repo from the §1.5 enumeration), and codebase exploration uses that Target's workspace (e.g. `~/hydra-betting/web`, not `~/hydra`). Never gather or resolve a Target `needs-triage` item here — that is `hydra-target-sweep`'s autonomous lane.
+- **`hitl-grill` is reported, never actioned, from this session.** The §1.6 bucket renders the open count, the oldest rows with their producer provenance label, and the link to the Work page's HITL grill inbox (`http://localhost:4000/work`) — and stops there. Never promote, close, relabel, or comment on a parked idea from this skill: the dashboard lane owns the only write path (a confirm-gated promote that strips the park label in the same verified write that adds `ready-for-agent`; a dismiss that closes `not planned` while **retaining** `hitl-grill` as the producer's dedup baseline), and a second write path would risk the half-written states — both labels present after a promote, or the park label stripped on a dismiss — that the single-round-trip design exists to prevent.
 - **One issue at a time. No batching.** This survives `AskUserQuestion` intact:
   one row = one question = one call. Classification (§2.5) does the winnowing a
   batch step would otherwise do, and it does it on evidence rather than on a
