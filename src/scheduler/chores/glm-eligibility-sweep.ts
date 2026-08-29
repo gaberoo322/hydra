@@ -58,21 +58,38 @@
  *
  * This is the single well-defined entry point into the glm-eligible
  * population (see module docstring above), so it is also where the A/B coin
- * flip happens: for each candidate the sweep rolls an arm and — BEFORE
- * writing either label — durably records the assignment through
- * {@link recordGlmAbAssignment} (`src/redis/autopilot.ts`). Only once that
- * write succeeds does the sweep write the corresponding label
- * (`glm-ab-control` for the control arm, the pre-existing `glm-eligible` for
- * treatment). A failed assignment-log write is fail-closed: NEITHER label is
- * applied for that issue this tick, and it is retried (from scratch) on the
- * next tick since it is still a bare `isGlmEligibleCandidate` match.
+ * flip happens — gated by TWO independent guards, not one:
  *
- * Assign-once is enforced one level down, in `recordGlmAbAssignment` itself
- * (`SET key value NX` against the durable log) — not here. That means an issue whose
- * log write succeeded on a prior tick but whose LABEL write then failed is
- * NOT re-rolled on this tick: `recordGlmAbAssignment` returns the
- * already-durable record, and the sweep applies whatever arm that record
- * says, ignoring its own fresh roll. See that function's docstring for why.
+ *   (a) the pre-existing label predicate (`isGlmEligibleCandidate`,
+ *       unchanged from #4124) — a row already carrying `glm-eligible` or
+ *       `glm-ab-control` never reaches this section at all; and
+ *   (b) a lookup against the durable assignment log via
+ *       {@link getGlmAbAssignment} (`src/redis/autopilot.ts`) — closes the
+ *       crash window between a successful log write and a subsequently
+ *       failed label write, where guard (a) alone would let the row be
+ *       coin-flipped a SECOND time.
+ *
+ * Sequencing per candidate: LOOKUP first, then (only if absent) ROLL, then
+ * LOG-WRITE, then LABEL-WRITE — each gated on the previous step's success:
+ *
+ *   1. `getGlmAbAssignment(issue)`. A read FAILURE is treated the SAME as
+ *      "already assigned" — skip this issue entirely this tick (no roll, no
+ *      write); the safe failure direction is under-labelling, never a
+ *      possible double coin flip.
+ *   2. A record FOUND (the crash-window case) is left UNTOUCHED this tick —
+ *      no re-roll, and deliberately NO auto-repair of the missing label
+ *      either (that was considered and rejected as unrequested scope; see
+ *      the design-concept artifact's rejectedAlternatives). It is a rare,
+ *      logged, non-corrupting edge case, not something this slice repairs.
+ *   3. Absent a record: roll the arm and durably log it via
+ *      {@link recordGlmAbAssignment} BEFORE writing either label. A log
+ *      write FAILURE is fail-closed: NEITHER label is applied this tick, and
+ *      the issue is retried from scratch (fresh lookup, fresh roll) next
+ *      tick since it is still a bare `isGlmEligibleCandidate` match with no
+ *      durable record.
+ *   4. Only once the log write succeeds does the sweep write the
+ *      corresponding label (`glm-ab-control` for control, the pre-existing
+ *      `glm-eligible` for treatment).
  *
  * The ramp fraction (`getGlmAbAssignmentFraction`, `src/cost/config.ts`) is
  * the probability of the CONTROL arm; at the default 0.5 roughly half of
@@ -94,8 +111,10 @@ import {
   type IssueRow,
 } from "../../github/issues.ts";
 import {
+  getGlmAbAssignment,
   recordGlmAbAssignment,
-  isGlmAbAssignmentFailure,
+  isGlmAbAssignmentReadFailure,
+  isGlmAbAssignmentWriteFailure,
   type GlmAbArm,
   type GlmAbAssignmentRecord,
 } from "../../redis/autopilot.ts";
@@ -117,8 +136,15 @@ export interface GlmEligibilitySweepDeps {
   /** Add one label to one issue. Defaults to the seam's `addIssueLabel`. */
   addIssueLabel?: typeof addIssueLabel;
   /**
-   * Durably record a GLM A/B arm assignment (issue #4125). Defaults to the
-   * seam's `recordGlmAbAssignment` (`src/redis/autopilot.ts`).
+   * Look up whether an issue already has a durable GLM A/B assignment — the
+   * READ-path guard (issue #4125). Defaults to the seam's
+   * `getGlmAbAssignment` (`src/redis/autopilot.ts`).
+   */
+  getGlmAbAssignment?: typeof getGlmAbAssignment;
+  /**
+   * Durably record a GLM A/B arm assignment — the WRITE-path guard (issue
+   * #4125). Defaults to the seam's `recordGlmAbAssignment`
+   * (`src/redis/autopilot.ts`).
    */
   recordGlmAbAssignment?: typeof recordGlmAbAssignment;
   /**
@@ -203,6 +229,7 @@ export async function runGlmEligibilitySweep(
 ): Promise<number> {
   const readBoard = deps.listOpenIssues ?? listOpenIssues;
   const addLabel = deps.addIssueLabel ?? addIssueLabel;
+  const lookupAssignment = deps.getGlmAbAssignment ?? getGlmAbAssignment;
   const recordAssignment = deps.recordGlmAbAssignment ?? recordGlmAbAssignment;
   const random = deps.random ?? Math.random;
   const now = deps.now ?? (() => new Date());
@@ -228,23 +255,57 @@ export async function runGlmEligibilitySweep(
     let labelled = 0;
     for (const row of candidates) {
       try {
-        // Roll the arm and log it BEFORE writing any label (issue #4125).
-        // `roll < fraction` means fraction 0 can never route to control
-        // (Math.random() and any well-behaved injected generator return a
-        // value in [0, 1)), preserving byte-identical pre-#4125 behaviour.
+        // GUARD (b) — the READ-path lookup (issue #4125). Runs BEFORE any
+        // coin flip: guard (a) (isGlmEligibleCandidate, already applied via
+        // the `candidates` filter above) only excludes a row carrying a
+        // LABEL; this lookup additionally excludes a row that already has a
+        // durable log record even if its label write previously failed.
+        const lookup = await lookupAssignment(row.number);
+        if (isGlmAbAssignmentReadFailure(lookup)) {
+          // Fail-closed on the READ path: treat an unreadable lookup the
+          // SAME as "already assigned" — skip, never coin-flip. The safe
+          // failure direction is under-labelling, never a possible double
+          // coin flip.
+          logger.error(
+            { issue: row.number, code: lookup.code, message: lookup.message },
+            "glm-eligibility-sweep: A/B assignment lookup failed; treating as already-assigned (fail-closed, issue #4125)",
+          );
+          continue;
+        }
+        if (lookup.record) {
+          // Crash-window case: a durable record exists but (since this row
+          // still lacks glm-eligible/glm-ab-control per guard (a)) its label
+          // write must have failed on a prior tick. Deliberately left
+          // UNTOUCHED this tick — no re-roll, no auto-repair of the missing
+          // label (an explicitly rejected alternative; see the
+          // design-concept artifact). Logged so the gap is visible, not
+          // silently repeated.
+          logger.info(
+            { issue: row.number, arm: lookup.record.arm },
+            "glm-eligibility-sweep: assignment already logged without a matching label; leaving untouched this tick (issue #4125)",
+          );
+          continue;
+        }
+
+        // No existing record — safe to roll. `roll < fraction` means
+        // fraction 0 can never route to control (Math.random() and any
+        // well-behaved injected generator return a value in [0, 1)),
+        // preserving byte-identical pre-#4125 behaviour.
         const arm: GlmAbArm = random() < getAssignmentFraction() ? "control" : "treatment";
-        const speculative: GlmAbAssignmentRecord = {
+        const candidate: GlmAbAssignmentRecord = {
           issue: row.number,
           arm,
           assignedAt: now().toISOString(),
           sweepRunId,
         };
 
-        const logged = await recordAssignment(speculative);
-        if (isGlmAbAssignmentFailure(logged)) {
-          // Fail-closed (issue #4125): an unlogged assignment is an
+        // GUARD (c) — the WRITE-path log, BEFORE either label.
+        const logged = await recordAssignment(candidate);
+        if (isGlmAbAssignmentWriteFailure(logged)) {
+          // Fail-closed on the WRITE path: an unlogged assignment is an
           // unanalysable one. Apply NEITHER label; the issue is still a bare
-          // isGlmEligibleCandidate match, so it is retried next tick.
+          // isGlmEligibleCandidate match with no durable record, so it is
+          // retried from scratch (fresh lookup, fresh roll) next tick.
           logger.error(
             { issue: row.number, code: logged.code, message: logged.message },
             "glm-eligibility-sweep: A/B assignment log write failed; labelling nothing for this issue (fail-closed, issue #4125)",
@@ -252,36 +313,29 @@ export async function runGlmEligibilitySweep(
           continue;
         }
 
-        // Assign-once (issue #4125): when the issue was already durably
-        // assigned on a prior tick (its label write must have failed then),
-        // `recordAssignment` returns that EXISTING record rather than our
-        // speculative roll. Always label from the canonical record, never
-        // from `arm` directly, so a retry can never switch arms mid-flight.
-        const resolvedLabel =
-          logged.record.arm === "control"
-            ? ORCH_BOARD_LABELS.glm_ab_control
-            : ORCH_BOARD_LABELS.glm_eligible;
+        const label =
+          arm === "control" ? ORCH_BOARD_LABELS.glm_ab_control : ORCH_BOARD_LABELS.glm_eligible;
 
-        const res = await addLabel(row.number, resolvedLabel);
+        const res = await addLabel(row.number, label);
         if (res.ok) {
           labelled++;
         } else if (isIssueLabelWriteFailure(res)) {
-          // A single write failure does not abort the sweep — the sweep is
-          // idempotent, so an unlabelled issue is retried on the next tick
-          // (and, per assign-once above, will retry with the SAME logged
-          // arm rather than a fresh roll). Log the code + stderr so the
-          // failure is attributable.
+          // A single write failure does not abort the sweep. Per guard (b)
+          // above, the NEXT tick's lookup will find this issue's now-durable
+          // record and leave it untouched (no auto-repair) rather than retry
+          // the label — a rare, logged, non-corrupting edge case. Log the
+          // code + stderr here so the failure is attributable.
           logger.error(
             { issue: row.number, code: res.code, stderr: res.stderr },
             "glm-eligibility-sweep: label write failed for issue",
           );
         }
       } catch (err: any) {
-        // Defense in depth: the real writes never throw, but a fault on ONE
-        // issue must not abort the rest. Log with context and continue.
+        // Defense in depth: the real reads/writes never throw, but a fault
+        // on ONE issue must not abort the rest. Log with context and continue.
         logger.error(
           { err, issue: row.number },
-          "glm-eligibility-sweep: label write threw for issue",
+          "glm-eligibility-sweep: A/B assignment or label step threw for issue",
         );
       }
     }

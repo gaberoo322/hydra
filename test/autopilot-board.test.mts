@@ -35,6 +35,7 @@ import {
   GLM_DRAINER_ACTIVE_KEY,
   GLM_DRAINER_HEARTBEAT_STALE_MS,
   GLM_DRAINER_HEARTBEAT_TTL_SECONDS,
+  getGlmAbAssignment,
   recordGlmAbAssignment,
   glmAbAssignmentKey,
   type GlmAbAssignmentRecord,
@@ -1036,19 +1037,19 @@ describe("src/redis/autopilot.ts — GLM A/B assignment log (issue #4125)", () =
     return { issue, arm, assignedAt: "2026-08-29T00:00:00.000Z", sweepRunId: "test-run" };
   }
 
-  test("first assignment for an issue: plants the record and reports alreadyAssigned:false", async () => {
+  // -------------------------------------------------------------------------
+  // recordGlmAbAssignment — the WRITE-path guard
+  // -------------------------------------------------------------------------
+
+  test("first assignment for an issue: plants the record and reports ok:true", async () => {
     const candidate = record(90001, "control");
     const res = await recordGlmAbAssignment(candidate);
     assert.equal(res.ok, true);
-    if (res.ok) {
-      assert.deepEqual(res.record, candidate);
-      assert.equal(res.alreadyAssigned, false);
-    }
     const stored = await redis.get(glmAbAssignmentKey(90001));
     assert.deepEqual(JSON.parse(stored), candidate);
   });
 
-  test("assign-once: a second call for the same issue returns the FIRST record, ignoring the new candidate", async () => {
+  test("defense-in-depth race: a second write for an already-assigned issue reports ok:false and does NOT overwrite the first record", async () => {
     const first = record(90002, "treatment");
     const second = record(90002, "control"); // deliberately a different arm
 
@@ -1056,13 +1057,9 @@ describe("src/redis/autopilot.ts — GLM A/B assignment log (issue #4125)", () =
     assert.equal(res1.ok, true);
 
     const res2 = await recordGlmAbAssignment(second);
-    assert.equal(res2.ok, true);
-    if (res2.ok) {
-      assert.deepEqual(res2.record, first, "the canonical record is the FIRST one, not the second candidate");
-      assert.equal(res2.alreadyAssigned, true);
-    }
+    assert.equal(res2.ok, false, "SET NX finding an existing key is reported as a write failure, not silently accepted");
 
-    // Only one write ever lands in Redis — the second call never overwrote it.
+    // Only the FIRST write ever lands in Redis — the second call never overwrote it.
     const stored = await redis.get(glmAbAssignmentKey(90002));
     assert.deepEqual(JSON.parse(stored), first);
   });
@@ -1075,6 +1072,37 @@ describe("src/redis/autopilot.ts — GLM A/B assignment log (issue #4125)", () =
 
     assert.deepEqual(JSON.parse(await redis.get(glmAbAssignmentKey(90001))), a);
     assert.deepEqual(JSON.parse(await redis.get(glmAbAssignmentKey(90003))), b);
+  });
+
+  // -------------------------------------------------------------------------
+  // getGlmAbAssignment — the READ-path guard (issue #4125)
+  // -------------------------------------------------------------------------
+
+  test("getGlmAbAssignment: absent key -> ok:true, record:null (safe to coin-flip)", async () => {
+    const res = await getGlmAbAssignment(90001);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.record, null);
+    }
+  });
+
+  test("getGlmAbAssignment: a planted record is read back verbatim", async () => {
+    const candidate = record(90001, "control");
+    await recordGlmAbAssignment(candidate);
+    const res = await getGlmAbAssignment(90001);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.deepEqual(res.record, candidate);
+    }
+  });
+
+  test("getGlmAbAssignment: an unparseable stored value fails closed (ok:false)", async () => {
+    await redis.set(glmAbAssignmentKey(90001), "not-json{{{");
+    const res = await getGlmAbAssignment(90001);
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.equal(res.code, "glm-ab-assignment-read-failed");
+    }
   });
 
   test("glmAbAssignmentKey is per-issue and stable", () => {

@@ -189,29 +189,42 @@ export async function setGlmDrainerHeartbeat(
  * GLM A/B experiment: randomized arm assignment at eligibility-sweep entry,
  * with a durable assignment log (issue #4125, ADR-0032 slice beta; parent
  * epic #4123). The eligibility sweep
- * (`src/scheduler/chores/glm-eligibility-sweep.ts`) is the ONLY caller: at
- * the moment it decides an issue is entering the glm-eligible pool, it rolls
- * an arm and calls {@link recordGlmAbAssignment} BEFORE writing either
- * label. This module owns only the durable record; the coin flip itself
- * lives in the chore so the randomness source stays injectable there.
+ * (`src/scheduler/chores/glm-eligibility-sweep.ts`) is the ONLY caller and
+ * uses TWO independent guards before it will coin-flip a candidate row: (a)
+ * the pre-existing label predicate (`isGlmEligibleCandidate`, unchanged from
+ * #4124) and (b) a lookup against THIS module's durable log via
+ * {@link getGlmAbAssignment}. Guard (b) closes the crash window between a
+ * successful log write and a subsequently failed label write, where the
+ * label predicate alone would let the row be coin-flipped a second time.
  *
  * Storage: one Redis STRING key per issue (`hydra:glm:ab:assignment:<issue>`),
  * value = the JSON-serialized {@link GlmAbAssignmentRecord}. No TTL — unlike
  * the drainer heartbeat above, this is a permanent research record, not a
  * liveness signal.
  *
- * Assign-once is enforced with `SET key value NX`, not a read-then-write:
- * the sweep can retry a candidate whose LABEL write failed on a prior tick
- * (log succeeded, label didn't — the two writes are not atomic with each
- * other) without a check-then-act race re-randomising it. `SET ... NX`
- * either plants the caller's speculative record (this issue's FIRST
- * assignment, returning `"OK"`) or reports the key already exists
- * (returning `null`); on the latter, {@link recordGlmAbAssignment} reads
- * back and returns the EXISTING record so the caller retries with the arm
- * already on file, never a fresh roll. That is the load-bearing
- * implementation of the issue's "assign once, never re-assign" invariant.
- * (`SET NX` over `HSETNX` deliberately: the whole-project `tsc` elaboration
- * budget that truncates ioredis's `RedisCommander` — see this file's sibling
+ * Sequencing (load-bearing, issue #4125): the sweep calls
+ * {@link getGlmAbAssignment} FIRST. Absent a record, it rolls an arm and
+ * calls {@link recordGlmAbAssignment} — the log write — BEFORE writing
+ * either label; the label write is gated on that write's success (fail
+ * closed on the WRITE path). A record found already present (the crash
+ * window: log succeeded, label didn't) is deliberately left UNTOUCHED that
+ * tick rather than auto-repaired or re-rolled — the sweep never re-applies
+ * the recorded arm's label on its own; that is accepted as a rare,
+ * non-corrupting edge case rather than a repair loop this slice builds (see
+ * the design-concept artifact's rejected alternatives). A LOOKUP that itself
+ * fails to read (fail closed on the READ path) is treated the same as
+ * "already assigned" — skip, never coin-flip — because the safe failure
+ * direction is under-labelling, never a possible double coin flip.
+ *
+ * `recordGlmAbAssignment` still writes via `SET key value NX` as a
+ * defense-in-depth guard against a concurrent sweep run racing the same
+ * issue between the lookup and the write; that race is expected to be
+ * exercised approximately never in production (a single sweep tick, one
+ * candidate list) and, if it ever fires, degrades to exactly the same
+ * accepted "leave it for next tick's lookup" edge case above — the write is
+ * reported as failed (fail closed) rather than silently overwritten. (`SET
+ * NX` over `HSETNX` deliberately: the whole-project `tsc` elaboration budget
+ * that truncates ioredis's `RedisCommander` — see this file's sibling
  * `connection.ts` header — drops `hsetnx` but not the 3-arg `SET ... NX`
  * overload, so this stays inside issue #4125's file scope with no
  * `RedisCommands` re-declaration needed.)
@@ -235,45 +248,100 @@ export interface GlmAbAssignmentRecord {
   sweepRunId: string;
 }
 
-export type RecordGlmAbAssignmentResult =
-  | {
-      ok: true;
-      /**
-       * The CANONICAL record for this issue: the caller's own candidate
-       * record when this call planted the first assignment, or the
-       * pre-existing record when the issue was already assigned
-       * (assign-once, never re-assign).
-       */
-      record: GlmAbAssignmentRecord;
-      /** True when this issue already had a durable record before this call. */
-      alreadyAssigned: boolean;
+/**
+ * Result of a LOOKUP (the read-path guard, issue #4125). `record: null` means
+ * no assignment exists yet for this issue — safe to coin-flip. A non-null
+ * `record` means the issue was already assigned on a prior tick (whether or
+ * not its label write then succeeded) — never coin-flip again.
+ */
+export type GetGlmAbAssignmentResult =
+  | { ok: true; record: GlmAbAssignmentRecord | null }
+  | { ok: false; code: "glm-ab-assignment-read-failed"; message: string };
+
+/**
+ * Type-predicate guard for the failure arm of {@link GetGlmAbAssignmentResult}
+ * (issue #4125). Mirrors `isIssueReadFailure` (`src/github/issues.ts`): this
+ * repo's tsconfig runs with `strict: false` (no `strictNullChecks`), under
+ * which plain `if (!res.ok)` does NOT reliably narrow a discriminated union
+ * at call sites — an explicit `res is {...}` predicate is the established
+ * workaround.
+ */
+export function isGlmAbAssignmentReadFailure(
+  res: GetGlmAbAssignmentResult,
+): res is { ok: false; code: "glm-ab-assignment-read-failed"; message: string } {
+  return res.ok === false;
+}
+
+/**
+ * Look up whether an issue already has a durable GLM A/B assignment (the
+ * READ-path guard, issue #4125). Never throws — a Redis fault or an
+ * unparseable stored value returns `ok:false` so the caller fails closed
+ * (treats it as "already assigned", skips the coin flip) rather than risk a
+ * double assignment.
+ */
+export async function getGlmAbAssignment(
+  issue: number,
+): Promise<GetGlmAbAssignmentResult> {
+  const key = glmAbAssignmentKey(issue);
+  try {
+    const r = getRedisConnection();
+    const raw = await r.get(key);
+    if (raw === null) {
+      return { ok: true, record: null };
     }
-  | {
-      ok: false;
-      code: "glm-ab-assignment-write-failed";
-      message: string;
+    try {
+      const record = JSON.parse(raw) as GlmAbAssignmentRecord;
+      return { ok: true, record };
+    } catch (err: any) {
+      logger.error(
+        { err, issue, raw },
+        "[autopilot/glm-ab] unparseable assignment record on lookup",
+      );
+      return {
+        ok: false,
+        code: "glm-ab-assignment-read-failed",
+        message: "unparseable assignment record",
+      };
+    }
+  } catch (err: any) {
+    logger.error(
+      { err, issue },
+      "[autopilot/glm-ab] assignment log lookup failed (fail-closed, issue #4125)",
+    );
+    return {
+      ok: false,
+      code: "glm-ab-assignment-read-failed",
+      message: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+/** Result of a WRITE (the write-path guard, issue #4125). */
+export type RecordGlmAbAssignmentResult =
+  | { ok: true }
+  | { ok: false; code: "glm-ab-assignment-write-failed"; message: string };
 
 /**
  * Type-predicate guard for the failure arm of {@link RecordGlmAbAssignmentResult}
- * (issue #4125). Mirrors `isIssueReadFailure` / `isIssueLabelWriteFailure`
- * (`src/github/issues.ts`): this repo's tsconfig runs with `strict: false`
- * (no `strictNullChecks`), under which plain `if (!res.ok)` does NOT reliably
- * narrow a discriminated union at call sites — an explicit `res is {...}`
- * predicate is the established workaround, so callers use this guard rather
- * than inlining the `ok === false` check.
+ * (issue #4125). Mirrors `isIssueLabelWriteFailure` (`src/github/issues.ts`)
+ * for the same `strict: false` narrowing reason documented on
+ * {@link isGlmAbAssignmentReadFailure}.
  */
-export function isGlmAbAssignmentFailure(
+export function isGlmAbAssignmentWriteFailure(
   res: RecordGlmAbAssignmentResult,
 ): res is { ok: false; code: "glm-ab-assignment-write-failed"; message: string } {
   return res.ok === false;
 }
 
 /**
- * Durably record a GLM A/B arm assignment for one issue, enforcing
- * assign-once via `SET key value NX` (see module docstring). Never throws —
- * a Redis fault returns a result object so the caller can fail closed (apply
- * NO label) rather than label an unlogged assignment (issue #4125).
+ * Durably record a GLM A/B arm assignment for one issue (the WRITE-path
+ * guard, issue #4125). Callers are expected to have already confirmed via
+ * {@link getGlmAbAssignment} that no record exists — this function still
+ * writes via `SET key value NX` as defense-in-depth (see module docstring),
+ * reporting the rare already-exists race as a failure rather than silently
+ * overwriting. Never throws — a Redis fault returns a result object so the
+ * caller can fail closed (apply NO label) rather than label an unlogged
+ * assignment.
  */
 export async function recordGlmAbAssignment(
   candidate: GlmAbAssignmentRecord,
@@ -283,42 +351,22 @@ export async function recordGlmAbAssignment(
     const r = getRedisConnection();
     const planted = await r.set(key, JSON.stringify(candidate), "NX");
     if (planted === "OK") {
-      return { ok: true, record: candidate, alreadyAssigned: false };
+      return { ok: true };
     }
-
-    // Already assigned — read back the canonical record so the caller never
-    // re-randomises (assign-once invariant, issue #4125).
-    const existingRaw = await r.get(key);
-    if (!existingRaw) {
-      // SET NX reported the key already exists but GET found nothing — a
-      // genuine anomaly (e.g. a concurrent DEL). Fail closed rather than
-      // guess at an arm.
-      logger.error(
-        { issue: candidate.issue },
-        "[autopilot/glm-ab] assignment log inconsistency: SET NX reported an existing key but GET returned nothing",
-      );
-      return {
-        ok: false,
-        code: "glm-ab-assignment-write-failed",
-        message:
-          "assignment log inconsistency: key reported existing but unreadable",
-      };
-    }
-
-    try {
-      const existing = JSON.parse(existingRaw) as GlmAbAssignmentRecord;
-      return { ok: true, record: existing, alreadyAssigned: true };
-    } catch (err: any) {
-      logger.error(
-        { err, issue: candidate.issue, existingRaw },
-        "[autopilot/glm-ab] unparseable existing assignment record",
-      );
-      return {
-        ok: false,
-        code: "glm-ab-assignment-write-failed",
-        message: "unparseable existing assignment record",
-      };
-    }
+    // Defense-in-depth race (see module docstring): a record already exists
+    // even though the caller's lookup found none moments earlier. Report as
+    // a write failure so the sweep does not label this tick; the existing
+    // record is picked up as a "found" lookup result on the NEXT tick and
+    // left untouched there, per the accepted non-corrupting edge case.
+    logger.error(
+      { issue: candidate.issue },
+      "[autopilot/glm-ab] SET NX found an existing record (race) — treating as a write failure this tick",
+    );
+    return {
+      ok: false,
+      code: "glm-ab-assignment-write-failed",
+      message: "assignment record already exists (race)",
+    };
   } catch (err: any) {
     logger.error(
       { err, issue: candidate.issue },

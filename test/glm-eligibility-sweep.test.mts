@@ -4,12 +4,15 @@
  *
  * The chore is a thin scheduled wrapper over the read seam (`listOpenIssues`),
  * the write seam (`addIssueLabel`, #3755), and — since #4125 — the durable
- * assignment-log seam (`recordGlmAbAssignment`, `src/redis/autopilot.ts`).
- * These cases pin the chore's contract in isolation — no live `gh`, no Redis
- * — by injecting fakes and asserting the predicate, the wiring (only eligible
- * issues are labelled, in board order), the fail-closed rules, the A/B coin
- * flip (both branches via injected randomness), the assign-once invariant,
- * and the never-throw guard.
+ * assignment-log seams `getGlmAbAssignment` (read/lookup) and
+ * `recordGlmAbAssignment` (write), both `src/redis/autopilot.ts`. These cases
+ * pin the chore's contract in isolation — no live `gh`, no Redis — by
+ * injecting fakes and asserting the predicate, the wiring (only eligible
+ * issues are labelled, in board order), the fail-closed rules on BOTH the
+ * read and write paths, the A/B coin flip (both branches via injected
+ * randomness), the two-guard assign-once invariant (label predicate + log
+ * lookup, with a found-but-unlabelled record left untouched rather than
+ * auto-repaired), and the never-throw guard.
  *
  * Top-level describes with no shared-Redis lifecycle: the chore takes every
  * side-effecting dependency through its injectable deps bag, so nothing here
@@ -28,6 +31,7 @@ import { ORCH_BOARD_LABELS } from "../src/board-labels.ts";
 import type { IssueRow, IssueReadResult } from "../src/github/issues.ts";
 import type {
   GlmAbAssignmentRecord,
+  GetGlmAbAssignmentResult,
   RecordGlmAbAssignmentResult,
 } from "../src/redis/autopilot.ts";
 
@@ -62,34 +66,39 @@ function failedBoard(): IssueReadResult<IssueRow> {
   return { ok: false, code: "gh-failed" };
 }
 
-/**
- * A no-op assignment-log fake: always plants the caller's speculative record
- * as-is (mirrors a fresh `HSETNX` success). Used by every pre-#4125 wiring
- * case below so they exercise the label-writing plumbing without touching
- * Redis, while still going through the real A/B branch.
- */
-const alwaysFreshAssignment = async (
-  record: GlmAbAssignmentRecord,
-): Promise<RecordGlmAbAssignmentResult> => ({
+/** A lookup fake reporting "no existing assignment" — safe to coin-flip. */
+const alwaysNotYetAssigned = async (): Promise<GetGlmAbAssignmentResult> => ({
   ok: true,
-  record,
-  alreadyAssigned: false,
+  record: null,
 });
+
+/** A write fake that always plants the record successfully. */
+const alwaysFreshAssignment = async (
+  _record: GlmAbAssignmentRecord,
+): Promise<RecordGlmAbAssignmentResult> => ({ ok: true });
 
 /**
  * Deterministic "always treatment" fixture (issue #4125): `random` returns a
  * value the coin flip can never route to control regardless of the
- * assignment fraction, so cases that predate the A/B split keep asserting
- * exactly one label (`glm-eligible`) without depending on real randomness or
- * a live Redis connection.
+ * assignment fraction, and the lookup always reports "not yet assigned" so
+ * every candidate proceeds through to a fresh roll. Used by cases that
+ * predate the A/B split so they keep asserting exactly one label
+ * (`glm-eligible`) without depending on real randomness or a live Redis
+ * connection.
  */
 function alwaysTreatmentDeps(): Pick<
   GlmEligibilitySweepDeps,
-  "random" | "getAssignmentFraction" | "recordGlmAbAssignment" | "now" | "sweepRunId"
+  | "random"
+  | "getAssignmentFraction"
+  | "getGlmAbAssignment"
+  | "recordGlmAbAssignment"
+  | "now"
+  | "sweepRunId"
 > {
   return {
     random: () => 1, // 1 < fraction is never true for fraction in [0, 1]
     getAssignmentFraction: () => 0.5,
+    getGlmAbAssignment: alwaysNotYetAssigned,
     recordGlmAbAssignment: alwaysFreshAssignment,
     now: () => new Date("2026-08-29T00:00:00.000Z"),
     sweepRunId: "test-sweep-run",
@@ -119,7 +128,7 @@ describe("glm-eligibility-sweep — predicate (issue #3756)", () => {
 
   test("skipped: carries glm-ab-control (issue #4124, the A/B control-arm marker)", () => {
     // Load-bearing case (#4124): without this skip, the sweep re-applies
-    // glm-eligible to a control issue on the very next tick and the
+    // glm-eligible to a control issue on the very next hourly tick and the
     // experiment silently loses its control group.
     assert.equal(isGlmEligibleCandidate(row(9, [RFA, GLM_AB_CONTROL])), false);
   });
@@ -278,6 +287,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
 
     const deps: GlmEligibilitySweepDeps = {
       listOpenIssues: async () => okBoard([row(101, [RFA]), row(102, [RFA])]),
+      getGlmAbAssignment: alwaysNotYetAssigned,
       // roll < fraction -> control; fraction is fixed at 0.5 below.
       random: (() => {
         const rolls = [0.1, 0.9]; // issue 101 -> control, issue 102 -> treatment
@@ -293,7 +303,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
           arm: record.arm,
           sweepRunId: record.sweepRunId,
         });
-        return { ok: true, record, alreadyAssigned: false };
+        return { ok: true };
       },
       addIssueLabel: async (n, label) => {
         labelsByIssue.set(n, label);
@@ -320,6 +330,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     const labels: string[] = [];
     const deps: GlmEligibilitySweepDeps = {
       listOpenIssues: async () => okBoard([row(111, [RFA]), row(112, [RFA])]),
+      getGlmAbAssignment: alwaysNotYetAssigned,
       // Even a roll of exactly 0 must not route to control when fraction is 0.
       random: () => 0,
       getAssignmentFraction: () => 0,
@@ -336,10 +347,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.deepEqual(labels, [GLM_ELIGIBLE, GLM_ELIGIBLE], "fraction 0 -> everything treatment");
   });
 
-  test("assign-once: an issue already present in the assignment log is retried with the LOGGED arm, never re-randomised", async () => {
-    // Simulate a prior tick that logged this issue as "control" but whose
-    // label write then failed — so the issue is still a bare
-    // isGlmEligibleCandidate match this tick.
+  test("assign-once (crash window): an existing but unlabelled assignment record is left UNTOUCHED this tick — no re-roll, no auto-repair label write", async () => {
     const existingRecord: GlmAbAssignmentRecord = {
       issue: 121,
       arm: "control",
@@ -347,37 +355,75 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
       sweepRunId: "prior-run",
     };
 
+    let randomCalls = 0;
     let recordCalls = 0;
+    let labelCalls = 0;
+
     const deps: GlmEligibilitySweepDeps = {
       listOpenIssues: async () => okBoard([row(121, [RFA])]),
-      // Rig the fresh roll to say "treatment" — if the sweep used this
-      // instead of the logged record, the assertion below would catch it.
-      random: () => 0.999,
-      getAssignmentFraction: () => 0.5,
-      recordGlmAbAssignment: async (candidate) => {
-        recordCalls++;
-        assert.equal(candidate.arm, "treatment", "the speculative roll is still treatment");
-        // HSETNX-style: report the pre-existing record, ignoring the candidate.
-        return { ok: true, record: existingRecord, alreadyAssigned: true };
+      getGlmAbAssignment: async (issue) => {
+        assert.equal(issue, 121);
+        return { ok: true, record: existingRecord };
       },
-      addIssueLabel: async (n, label) => {
-        assert.equal(n, 121);
-        assert.equal(
-          label,
-          GLM_AB_CONTROL,
-          "the label matches the LOGGED arm (control), not the fresh roll (treatment)",
-        );
+      random: () => {
+        randomCalls++;
+        return 0;
+      },
+      getAssignmentFraction: () => 0.5,
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelCalls++;
         return { ok: true };
       },
     };
 
     const count = await runGlmEligibilitySweep(deps);
 
-    assert.equal(recordCalls, 1);
-    assert.equal(count, 1);
+    assert.equal(count, 0);
+    assert.equal(randomCalls, 0, "a found record must never trigger a coin flip");
+    assert.equal(recordCalls, 0, "a found record must never trigger another log write");
+    assert.equal(labelCalls, 0, "a found-but-unlabelled record is left untouched, not auto-repaired");
   });
 
-  test("fail-closed: a failed assignment-log write applies NEITHER label", async () => {
+  test("fail-closed on the READ path: a lookup failure is treated as already-assigned — skip, no roll, no write", async () => {
+    let randomCalls = 0;
+    let recordCalls = 0;
+    let labelWrites = 0;
+
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () => okBoard([row(151, [RFA])]),
+      getGlmAbAssignment: async () => ({
+        ok: false,
+        code: "glm-ab-assignment-read-failed",
+        message: "redis unavailable",
+      }),
+      random: () => {
+        randomCalls++;
+        return 0;
+      },
+      recordGlmAbAssignment: async () => {
+        recordCalls++;
+        return { ok: true };
+      },
+      addIssueLabel: async () => {
+        labelWrites++;
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.equal(count, 0);
+    assert.equal(randomCalls, 0, "a lookup failure must never trigger a coin flip");
+    assert.equal(recordCalls, 0, "a lookup failure must never trigger a log write");
+    assert.equal(labelWrites, 0, "no label is written when the assignment lookup failed");
+  });
+
+  test("fail-closed on the WRITE path: a failed assignment-log write applies NEITHER label", async () => {
     let labelWrites = 0;
     const deps: GlmEligibilitySweepDeps = {
       ...alwaysTreatmentDeps(),
@@ -399,7 +445,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.equal(labelWrites, 0, "no label is written when the assignment log write failed");
   });
 
-  test("fail-closed does not abort the rest of the board: other issues still get assigned + labelled", async () => {
+  test("fail-closed (write path) does not abort the rest of the board: other issues still get assigned + labelled", async () => {
     const labelled: number[] = [];
     const deps: GlmEligibilitySweepDeps = {
       ...alwaysTreatmentDeps(),
@@ -413,7 +459,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
             message: "transient redis error",
           };
         }
-        return { ok: true, record, alreadyAssigned: false };
+        return { ok: true };
       },
       addIssueLabel: async (n) => {
         labelled.push(n);
@@ -427,15 +473,48 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     assert.equal(count, 2);
   });
 
-  test("glm-withhold enters neither arm: no assignment-log call and no label write", async () => {
+  test("fail-closed (read path) does not abort the rest of the board: other issues still get assigned + labelled", async () => {
+    const labelled: number[] = [];
+    const deps: GlmEligibilitySweepDeps = {
+      ...alwaysTreatmentDeps(),
+      listOpenIssues: async () =>
+        okBoard([row(161, [RFA]), row(162, [RFA]), row(163, [RFA])]),
+      getGlmAbAssignment: async (issue) => {
+        if (issue === 162) {
+          return {
+            ok: false,
+            code: "glm-ab-assignment-read-failed",
+            message: "transient redis error",
+          };
+        }
+        return { ok: true, record: null };
+      },
+      addIssueLabel: async (n) => {
+        labelled.push(n);
+        return { ok: true };
+      },
+    };
+
+    const count = await runGlmEligibilitySweep(deps);
+
+    assert.deepEqual(labelled, [161, 163], "issue 162's failed lookup skips only issue 162");
+    assert.equal(count, 2);
+  });
+
+  test("glm-withhold enters neither arm: no lookup call, no log write, no label write", async () => {
+    let lookupCalls = 0;
     let recordCalls = 0;
     let labelWrites = 0;
     const deps: GlmEligibilitySweepDeps = {
       ...alwaysTreatmentDeps(),
-      listOpenIssues: async () => okBoard([row(151, [RFA, GLM_WITHHOLD])]),
+      listOpenIssues: async () => okBoard([row(171, [RFA, GLM_WITHHOLD])]),
+      getGlmAbAssignment: async () => {
+        lookupCalls++;
+        return { ok: true, record: null };
+      },
       recordGlmAbAssignment: async (record) => {
         recordCalls++;
-        return { ok: true, record, alreadyAssigned: false };
+        return { ok: true };
       },
       addIssueLabel: async () => {
         labelWrites++;
@@ -446,6 +525,7 @@ describe("glm-eligibility-sweep — A/B arm assignment (issue #4125)", () => {
     const count = await runGlmEligibilitySweep(deps);
 
     assert.equal(count, 0);
+    assert.equal(lookupCalls, 0, "the withheld issue never reaches the assignment lookup");
     assert.equal(recordCalls, 0, "the withheld issue never reaches the coin flip");
     assert.equal(labelWrites, 0);
   });
