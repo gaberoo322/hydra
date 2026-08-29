@@ -21,12 +21,16 @@
  *      toggle "collapses with the Habitat").
  *   4. Sidebar keeps the Now nav entry and drops only Outcomes/Explore
  *      (INV-5).
- *   5. The deliberately-orphaned leaf components stay ON DISK, unrouted
- *      (INV-4) — they are a follow-up hydra-cleanup/knip candidate, and
- *      this test must not re-couple to them beyond asserting they were not
- *      swept into this retirement. The now-pixel Habitat leaf itself (and
- *      its 19 sibling components) WAS swept by that anticipated follow-up
- *      (issue #4255) — INV-6 pins that they are now gone.
+ *   5. The remaining deliberately-orphaned leaf components stay ON DISK,
+ *      unrouted (INV-4) — they are a follow-up hydra-cleanup/knip candidate,
+ *      and this test must not re-couple to them beyond asserting they were
+ *      not swept into this retirement. The now-pixel Habitat leaf itself
+ *      (and its 19 sibling components) WAS swept by that anticipated
+ *      follow-up (issue #4255) — INV-6 pins that they are now gone. The
+ *      explore/outcomes leaf panels were likewise swept by a second
+ *      anticipated follow-up (issue #4256) — INV-7 pins that they are now
+ *      gone; only LessonsTab.jsx and TabShell.jsx (still reachable from
+ *      /explore/lessons and the tab shell wrapper) remain in INV-4.
  *
  * Lifecycle: top-level describes with no shared mutable state (per the
  * CLAUDE.md shared-Redis-teardown authoring rule).
@@ -248,15 +252,32 @@ describe("Sidebar drops only the Outcomes and Explore nav entries (INV-5)", () =
 
 describe("orphaned leaf components remain on disk for the follow-up cleanup (INV-4)", () => {
   const kept = [
-    // The non-reused Explore tab leaves.
+    // The remaining non-reused Explore tab leaves — the other five (Friction,
+    // Behavior, Flow, Anomalies, Architecture) were swept by issue #4256
+    // (INV-7).
+    "../dashboard/src/components/pages/explore/LessonsTab.jsx",
+    "../dashboard/src/components/pages/explore/TabShell.jsx",
+  ];
+
+  for (const rel of kept) {
+    test(`${rel} is NOT swept into this retirement`, async () => {
+      assert.equal(await pathExists(rel), true, `${rel} must stay on disk (follow-up knip pass)`);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// INV-7 — the anticipated explore/outcomes follow-up cleanup happened
+// (issue #4256)
+// ---------------------------------------------------------------------------
+
+describe("the explore/outcomes leaf components were swept in the follow-up cleanup (INV-7)", () => {
+  const swept = [
     "../dashboard/src/components/pages/explore/FrictionTab.jsx",
     "../dashboard/src/components/pages/explore/BehaviorTab.jsx",
     "../dashboard/src/components/pages/explore/FlowTab.jsx",
     "../dashboard/src/components/pages/explore/AnomaliesTab.jsx",
     "../dashboard/src/components/pages/explore/ArchitectureTab.jsx",
-    "../dashboard/src/components/pages/explore/LessonsTab.jsx",
-    "../dashboard/src/components/pages/explore/TabShell.jsx",
-    // The non-reused Outcomes leaf panels.
     "../dashboard/src/components/pages/outcomes/CacheEconomics.jsx",
     "../dashboard/src/components/pages/outcomes/CostByClass.jsx",
     "../dashboard/src/components/pages/outcomes/ClassScoreboard.jsx",
@@ -264,9 +285,9 @@ describe("orphaned leaf components remain on disk for the follow-up cleanup (INV
     "../dashboard/src/components/pages/outcomes/SubscriptionQuotaTrend.jsx",
   ];
 
-  for (const rel of kept) {
-    test(`${rel} is NOT swept into this retirement`, async () => {
-      assert.equal(await pathExists(rel), true, `${rel} must stay on disk (follow-up knip pass)`);
+  for (const rel of swept) {
+    test(`${rel} is gone (issue #4256)`, async () => {
+      assert.equal(await pathExists(rel), false, `${rel} must be removed by the explore/outcomes cleanup`);
     });
   }
 });
