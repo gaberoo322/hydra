@@ -53,8 +53,36 @@
  * beachhead report (#3690) and the operator can see the pool forming",
  * including the candidate pool size for context. A steady-state tick with
  * nothing new to label logs `labelled: 0, candidates: 0`.
+ *
+ * ## A/B arm assignment (issue #4125, ADR-0032 slice beta)
+ *
+ * This is the single well-defined entry point into the glm-eligible
+ * population (see module docstring above), so it is also where the A/B coin
+ * flip happens: for each candidate the sweep rolls an arm and — BEFORE
+ * writing either label — durably records the assignment through
+ * {@link recordGlmAbAssignment} (`src/redis/autopilot.ts`). Only once that
+ * write succeeds does the sweep write the corresponding label
+ * (`glm-ab-control` for the control arm, the pre-existing `glm-eligible` for
+ * treatment). A failed assignment-log write is fail-closed: NEITHER label is
+ * applied for that issue this tick, and it is retried (from scratch) on the
+ * next tick since it is still a bare `isGlmEligibleCandidate` match.
+ *
+ * Assign-once is enforced one level down, in `recordGlmAbAssignment` itself
+ * (`SET key value NX` against the durable log) — not here. That means an issue whose
+ * log write succeeded on a prior tick but whose LABEL write then failed is
+ * NOT re-rolled on this tick: `recordGlmAbAssignment` returns the
+ * already-durable record, and the sweep applies whatever arm that record
+ * says, ignoring its own fresh roll. See that function's docstring for why.
+ *
+ * The ramp fraction (`getGlmAbAssignmentFraction`, `src/cost/config.ts`) is
+ * the probability of the CONTROL arm; at the default 0.5 roughly half of
+ * newly-eligible issues go to each arm. At fraction 0, `random() < 0` can
+ * never be true (both `Math.random()` and any well-behaved injected
+ * generator return a value in `[0, 1)`), so every issue is treatment —
+ * byte-identical to pre-#4125 behaviour.
  */
 
+import { randomUUID } from "node:crypto";
 import { logger } from "../../logger.ts";
 import { ORCH_BOARD_LABELS } from "../../board-labels.ts";
 import {
@@ -65,6 +93,13 @@ import {
   type IssueReadResult,
   type IssueRow,
 } from "../../github/issues.ts";
+import {
+  recordGlmAbAssignment,
+  isGlmAbAssignmentFailure,
+  type GlmAbArm,
+  type GlmAbAssignmentRecord,
+} from "../../redis/autopilot.ts";
+import { getGlmAbAssignmentFraction } from "../../cost/config.ts";
 
 /**
  * External touchpoints of the GLM eligibility sweep, injected so the chore is
@@ -81,6 +116,35 @@ export interface GlmEligibilitySweepDeps {
   listOpenIssues?: typeof listOpenIssues;
   /** Add one label to one issue. Defaults to the seam's `addIssueLabel`. */
   addIssueLabel?: typeof addIssueLabel;
+  /**
+   * Durably record a GLM A/B arm assignment (issue #4125). Defaults to the
+   * seam's `recordGlmAbAssignment` (`src/redis/autopilot.ts`).
+   */
+  recordGlmAbAssignment?: typeof recordGlmAbAssignment;
+  /**
+   * Source of randomness for the per-issue A/B coin flip, injected so tests
+   * can pin both branches deterministically (issue #4125 — "no flaky real
+   * randomness in the suite"). Must return a value in `[0, 1)`, matching
+   * `Math.random()`'s contract. Defaults to `Math.random`.
+   */
+  random?: () => number;
+  /**
+   * Wall-clock source for each assignment record's `assignedAt` timestamp,
+   * injected for deterministic tests. Defaults to `() => new Date()`.
+   */
+  now?: () => Date;
+  /**
+   * Fraction of newly-eligible issues routed to the control arm (issue
+   * #4125). Defaults to the seam's `getGlmAbAssignmentFraction`
+   * (`src/cost/config.ts`, env `HYDRA_GLM_AB_ASSIGNMENT_FRACTION`).
+   */
+  getAssignmentFraction?: () => number;
+  /**
+   * Identifier stamped on every assignment record this sweep run makes.
+   * Defaults to a fresh UUID generated once per `runGlmEligibilitySweep`
+   * call (issue #4125).
+   */
+  sweepRunId?: string;
 }
 
 /**
@@ -112,13 +176,19 @@ export function isGlmEligibleCandidate(row: IssueRow): boolean {
 }
 
 /**
- * Run the GLM eligibility sweep chore. Labels every open `ready-for-agent`
- * orchestrator issue that lacks `glm-eligible` (skipping `glm-withhold` /
- * `target-backlog`) and returns the count labelled this tick (0 when nothing was
- * eligible / on any fault). Never throws.
+ * Run the GLM eligibility sweep chore. For every open `ready-for-agent`
+ * orchestrator issue that lacks both `glm-eligible` and `glm-ab-control`
+ * (skipping `glm-withhold` / `target-backlog`), rolls an A/B arm, durably
+ * logs the assignment (issue #4125), and — only on a successful log write —
+ * applies the corresponding label (`glm-eligible` for treatment,
+ * `glm-ab-control` for control). Returns the count labelled this tick across
+ * both arms (0 when nothing was eligible / on any fault). Never throws.
  *
- * Fail-closed: a board read that fails (`ok:false`) labels NOTHING — never a
- * partial or guessed pass; the failure code is logged so it is attributable.
+ * Fail-closed at TWO levels: a board read that fails (`ok:false`) labels
+ * NOTHING (unchanged from #3756); and, new in #4125, a per-issue assignment-
+ * log write that fails also labels NOTHING for that issue — an unlogged
+ * assignment is an unanalysable one, so neither label is guessed. Both
+ * failure codes are logged so they are attributable.
  *
  * A per-issue label-write failure (or a throw) is logged and does NOT abort the
  * remaining issues: the sweep is idempotent, so an unlabelled issue is retried
@@ -133,6 +203,13 @@ export async function runGlmEligibilitySweep(
 ): Promise<number> {
   const readBoard = deps.listOpenIssues ?? listOpenIssues;
   const addLabel = deps.addIssueLabel ?? addIssueLabel;
+  const recordAssignment = deps.recordGlmAbAssignment ?? recordGlmAbAssignment;
+  const random = deps.random ?? Math.random;
+  const now = deps.now ?? (() => new Date());
+  const getAssignmentFraction = deps.getAssignmentFraction ?? getGlmAbAssignmentFraction;
+  // One run ID per sweep invocation, shared across every assignment this
+  // tick makes (issue #4125) — not per-issue.
+  const sweepRunId = deps.sweepRunId ?? randomUUID();
 
   try {
     const board: IssueReadResult<IssueRow> = await readBoard();
@@ -151,20 +228,56 @@ export async function runGlmEligibilitySweep(
     let labelled = 0;
     for (const row of candidates) {
       try {
-        const res = await addLabel(row.number, ORCH_BOARD_LABELS.glm_eligible);
+        // Roll the arm and log it BEFORE writing any label (issue #4125).
+        // `roll < fraction` means fraction 0 can never route to control
+        // (Math.random() and any well-behaved injected generator return a
+        // value in [0, 1)), preserving byte-identical pre-#4125 behaviour.
+        const arm: GlmAbArm = random() < getAssignmentFraction() ? "control" : "treatment";
+        const speculative: GlmAbAssignmentRecord = {
+          issue: row.number,
+          arm,
+          assignedAt: now().toISOString(),
+          sweepRunId,
+        };
+
+        const logged = await recordAssignment(speculative);
+        if (isGlmAbAssignmentFailure(logged)) {
+          // Fail-closed (issue #4125): an unlogged assignment is an
+          // unanalysable one. Apply NEITHER label; the issue is still a bare
+          // isGlmEligibleCandidate match, so it is retried next tick.
+          logger.error(
+            { issue: row.number, code: logged.code, message: logged.message },
+            "glm-eligibility-sweep: A/B assignment log write failed; labelling nothing for this issue (fail-closed, issue #4125)",
+          );
+          continue;
+        }
+
+        // Assign-once (issue #4125): when the issue was already durably
+        // assigned on a prior tick (its label write must have failed then),
+        // `recordAssignment` returns that EXISTING record rather than our
+        // speculative roll. Always label from the canonical record, never
+        // from `arm` directly, so a retry can never switch arms mid-flight.
+        const resolvedLabel =
+          logged.record.arm === "control"
+            ? ORCH_BOARD_LABELS.glm_ab_control
+            : ORCH_BOARD_LABELS.glm_eligible;
+
+        const res = await addLabel(row.number, resolvedLabel);
         if (res.ok) {
           labelled++;
         } else if (isIssueLabelWriteFailure(res)) {
           // A single write failure does not abort the sweep — the sweep is
-          // idempotent, so an unlabelled issue is retried on the next tick. Log
-          // the code + stderr so the failure is attributable.
+          // idempotent, so an unlabelled issue is retried on the next tick
+          // (and, per assign-once above, will retry with the SAME logged
+          // arm rather than a fresh roll). Log the code + stderr so the
+          // failure is attributable.
           logger.error(
             { issue: row.number, code: res.code, stderr: res.stderr },
             "glm-eligibility-sweep: label write failed for issue",
           );
         }
       } catch (err: any) {
-        // Defense in depth: the real write never throws, but a fault on ONE
+        // Defense in depth: the real writes never throw, but a fault on ONE
         // issue must not abort the rest. Log with context and continue.
         logger.error(
           { err, issue: row.number },
@@ -177,7 +290,7 @@ export async function runGlmEligibilitySweep(
     // report (#3690) and the operator can see the drainer pool forming.
     logger.info(
       { labelled, candidates: candidates.length },
-      "glm-eligibility-sweep: labelled glm-eligible issues (issue #3756)",
+      "glm-eligibility-sweep: labelled glm-eligible/glm-ab-control issues (issues #3756, #4125)",
     );
     return labelled;
   } catch (err: any) {

@@ -77,6 +77,12 @@ export {
   DEFAULT_OAUTH_ESTIMATE_DIVERGENCE_FACTOR,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
+  // GLM-vs-Opus A/B ramp fraction (issue #4125). Consumed directly by the
+  // eligibility sweep (`src/scheduler/chores/glm-eligibility-sweep.ts`), but
+  // re-exported here too so the barrel's "every symbol below at the same
+  // name" contract stays true for this pure-leaf reader.
+  getGlmAbAssignmentFraction,
+  DEFAULT_GLM_AB_ASSIGNMENT_FRACTION,
   // Ranked-report burn weights (issue #3825). DISTINCT from the live-fold
   // readers above: these default to LIST-PRICE ratios (cache read 0.1x / cache
   // write 1.25x / output 5.0x / input 1.0x; family opus 5 / sonnet 3 / haiku 1)

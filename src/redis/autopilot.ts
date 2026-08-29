@@ -184,3 +184,150 @@ export async function setGlmDrainerHeartbeat(
     };
   }
 }
+
+/**
+ * GLM A/B experiment: randomized arm assignment at eligibility-sweep entry,
+ * with a durable assignment log (issue #4125, ADR-0032 slice beta; parent
+ * epic #4123). The eligibility sweep
+ * (`src/scheduler/chores/glm-eligibility-sweep.ts`) is the ONLY caller: at
+ * the moment it decides an issue is entering the glm-eligible pool, it rolls
+ * an arm and calls {@link recordGlmAbAssignment} BEFORE writing either
+ * label. This module owns only the durable record; the coin flip itself
+ * lives in the chore so the randomness source stays injectable there.
+ *
+ * Storage: one Redis STRING key per issue (`hydra:glm:ab:assignment:<issue>`),
+ * value = the JSON-serialized {@link GlmAbAssignmentRecord}. No TTL — unlike
+ * the drainer heartbeat above, this is a permanent research record, not a
+ * liveness signal.
+ *
+ * Assign-once is enforced with `SET key value NX`, not a read-then-write:
+ * the sweep can retry a candidate whose LABEL write failed on a prior tick
+ * (log succeeded, label didn't — the two writes are not atomic with each
+ * other) without a check-then-act race re-randomising it. `SET ... NX`
+ * either plants the caller's speculative record (this issue's FIRST
+ * assignment, returning `"OK"`) or reports the key already exists
+ * (returning `null`); on the latter, {@link recordGlmAbAssignment} reads
+ * back and returns the EXISTING record so the caller retries with the arm
+ * already on file, never a fresh roll. That is the load-bearing
+ * implementation of the issue's "assign once, never re-assign" invariant.
+ * (`SET NX` over `HSETNX` deliberately: the whole-project `tsc` elaboration
+ * budget that truncates ioredis's `RedisCommander` — see this file's sibling
+ * `connection.ts` header — drops `hsetnx` but not the 3-arg `SET ... NX`
+ * overload, so this stays inside issue #4125's file scope with no
+ * `RedisCommands` re-declaration needed.)
+ */
+
+/** Redis key for one issue's durable GLM A/B assignment record (issue #4125). */
+export function glmAbAssignmentKey(issue: number): string {
+  return `hydra:glm:ab:assignment:${issue}`;
+}
+
+/** The two arms of the GLM-vs-Opus A/B experiment (issue #4125). */
+export type GlmAbArm = "treatment" | "control";
+
+/** One durable assignment record — the experiment's source of truth. */
+export interface GlmAbAssignmentRecord {
+  issue: number;
+  arm: GlmAbArm;
+  /** ISO8601 timestamp of the assignment. */
+  assignedAt: string;
+  /** Identifier of the eligibility-sweep run that made this assignment. */
+  sweepRunId: string;
+}
+
+export type RecordGlmAbAssignmentResult =
+  | {
+      ok: true;
+      /**
+       * The CANONICAL record for this issue: the caller's own candidate
+       * record when this call planted the first assignment, or the
+       * pre-existing record when the issue was already assigned
+       * (assign-once, never re-assign).
+       */
+      record: GlmAbAssignmentRecord;
+      /** True when this issue already had a durable record before this call. */
+      alreadyAssigned: boolean;
+    }
+  | {
+      ok: false;
+      code: "glm-ab-assignment-write-failed";
+      message: string;
+    };
+
+/**
+ * Type-predicate guard for the failure arm of {@link RecordGlmAbAssignmentResult}
+ * (issue #4125). Mirrors `isIssueReadFailure` / `isIssueLabelWriteFailure`
+ * (`src/github/issues.ts`): this repo's tsconfig runs with `strict: false`
+ * (no `strictNullChecks`), under which plain `if (!res.ok)` does NOT reliably
+ * narrow a discriminated union at call sites — an explicit `res is {...}`
+ * predicate is the established workaround, so callers use this guard rather
+ * than inlining the `ok === false` check.
+ */
+export function isGlmAbAssignmentFailure(
+  res: RecordGlmAbAssignmentResult,
+): res is { ok: false; code: "glm-ab-assignment-write-failed"; message: string } {
+  return res.ok === false;
+}
+
+/**
+ * Durably record a GLM A/B arm assignment for one issue, enforcing
+ * assign-once via `SET key value NX` (see module docstring). Never throws —
+ * a Redis fault returns a result object so the caller can fail closed (apply
+ * NO label) rather than label an unlogged assignment (issue #4125).
+ */
+export async function recordGlmAbAssignment(
+  candidate: GlmAbAssignmentRecord,
+): Promise<RecordGlmAbAssignmentResult> {
+  const key = glmAbAssignmentKey(candidate.issue);
+  try {
+    const r = getRedisConnection();
+    const planted = await r.set(key, JSON.stringify(candidate), "NX");
+    if (planted === "OK") {
+      return { ok: true, record: candidate, alreadyAssigned: false };
+    }
+
+    // Already assigned — read back the canonical record so the caller never
+    // re-randomises (assign-once invariant, issue #4125).
+    const existingRaw = await r.get(key);
+    if (!existingRaw) {
+      // SET NX reported the key already exists but GET found nothing — a
+      // genuine anomaly (e.g. a concurrent DEL). Fail closed rather than
+      // guess at an arm.
+      logger.error(
+        { issue: candidate.issue },
+        "[autopilot/glm-ab] assignment log inconsistency: SET NX reported an existing key but GET returned nothing",
+      );
+      return {
+        ok: false,
+        code: "glm-ab-assignment-write-failed",
+        message:
+          "assignment log inconsistency: key reported existing but unreadable",
+      };
+    }
+
+    try {
+      const existing = JSON.parse(existingRaw) as GlmAbAssignmentRecord;
+      return { ok: true, record: existing, alreadyAssigned: true };
+    } catch (err: any) {
+      logger.error(
+        { err, issue: candidate.issue, existingRaw },
+        "[autopilot/glm-ab] unparseable existing assignment record",
+      );
+      return {
+        ok: false,
+        code: "glm-ab-assignment-write-failed",
+        message: "unparseable existing assignment record",
+      };
+    }
+  } catch (err: any) {
+    logger.error(
+      { err, issue: candidate.issue },
+      "[autopilot/glm-ab] assignment log write failed (fail-closed, issue #4125)",
+    );
+    return {
+      ok: false,
+      code: "glm-ab-assignment-write-failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
