@@ -103,7 +103,7 @@ export const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const DEFAULT_HISTORY_LIMIT = 20;
 
 /** Hard cap on `git show` spawns per cold repo read. */
-export const MAX_FRAGMENT_READS = 100;
+const MAX_FRAGMENT_READS = 100;
 
 /** Per-invocation git timeout — a dashboard read must never hang. */
 const GIT_TIMEOUT_MS = 5_000;
@@ -193,7 +193,7 @@ export interface ReleaseNote {
 }
 
 /** A release plus everything that shipped in its tag window. */
-export interface VersionHistoryEntry extends VersionRef {
+interface VersionHistoryEntry extends VersionRef {
   notes: ReleaseNote[];
 }
 
@@ -203,7 +203,7 @@ export interface VersionHistoryEntry extends VersionRef {
  * For a tagless Target, `current` is instead the checkout's {@link
  * CommitIdentity} and `history` is empty (no pseudo-history, #4172).
  */
-export interface ProjectVersionsData {
+interface ProjectVersionsData {
   current: VersionRef | CommitIdentity | null;
   history: VersionHistoryEntry[];
   /**
@@ -577,7 +577,7 @@ async function readVersionData(
  * Read one repository's version stream, served from the per-root cache when it
  * is inside {@link VERSIONS_CACHE_TTL_MS}. Never throws.
  */
-export async function readProjectVersions(
+async function readProjectVersions(
   project: VersionProject,
   deps: ReadVersionsDeps = {},
 ): Promise<ProjectVersions> {

@@ -42,7 +42,7 @@ export interface ReleaseNote {
 }
 
 /** A release pointer: the tag, when it was cut, and the commit it points at. */
-export interface VersionRef {
+interface VersionRef {
   version: string;
   date: string;
   sha: string;
@@ -62,7 +62,7 @@ export interface CommitIdentity {
 }
 
 /** A release plus everything that shipped in its tag window. */
-export interface VersionHistoryEntry extends VersionRef {
+interface VersionHistoryEntry extends VersionRef {
   notes: ReleaseNote[];
 }
 
@@ -100,7 +100,7 @@ export const NOTE_TYPE_ORDER: readonly string[] = [
 ];
 
 /** Human-facing heading per type; unknown types fall back to the raw type. */
-export const NOTE_TYPE_LABEL: Readonly<Record<string, string>> = {
+const NOTE_TYPE_LABEL: Readonly<Record<string, string>> = {
   feat: "Features",
   fix: "Fixes",
   perf: "Performance",
@@ -356,7 +356,7 @@ export function versionAnchorHref(): string {
  * number is only meaningful against its OWN repo — linking a Target note at
  * `gaberoo322/hydra` would silently point at an unrelated Orchestrator issue.
  */
-export const SCOPE_REPO: Readonly<Record<string, string>> = {
+const SCOPE_REPO: Readonly<Record<string, string>> = {
   orch: "gaberoo322/hydra",
   target: "gaberoo322/hydra-betting",
 };
