@@ -25,7 +25,10 @@ import { z } from "zod";
  * signal is an ADR-level decision, not a schema tweak. There is deliberately
  * NO spend / quota / duration / deviation member.
  */
-export const AttentionSignalSchema = z.enum([
+// Module-private (issue #4259): the schema const has no importer outside this
+// file — every other module consumes the derived `AttentionSignal` type below
+// or (for the closed-vocabulary values) `AttentionSignal`-typed data.
+const AttentionSignalSchema = z.enum([
   "blocked-on-human",
   "breakage",
   "repetition",
@@ -107,8 +110,11 @@ export const DismissAttentionRequestSchema = z
 
 export type DismissAttentionRequest = z.infer<typeof DismissAttentionRequestSchema>;
 
-/** One per-threshold calibration row. */
-export const AttentionThresholdCountSchema = z
+/**
+ * One per-threshold calibration row. Module-private (issue #4259) — the
+ * derived `AttentionThresholdCount` type is what every other module imports.
+ */
+const AttentionThresholdCountSchema = z
   .object({
     signal: AttentionSignalSchema,
     /** Items this line has surfaced (counted once per item id). */
@@ -123,9 +129,11 @@ export type AttentionThresholdCount = z.infer<typeof AttentionThresholdCountSche
 /**
  * Response body for `GET /api/attention/counts` — the falsifiable-calibration
  * read (ADR-0034 §4): a line whose items are always dismissed unread is
- * miscalibrated and says so in the data.
+ * miscalibrated and says so in the data. Module-private (issue #4259) — the
+ * derived `AttentionCountsResponse` type is what `src/api/attention.ts`
+ * actually imports.
  */
-export const AttentionCountsResponseSchema = z
+const AttentionCountsResponseSchema = z
   .object({
     counts: z.array(AttentionThresholdCountSchema),
     generatedAt: z.string(),
