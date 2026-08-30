@@ -50,8 +50,6 @@ import {
   type CandidateExclusionVerdict,
 } from "../aggregators/candidate-exclusions.ts";
 
-export type { CandidateExclusionRecord, CandidateExclusionRollup };
-
 /**
  * Cap on retained candidate-exclusion ledger rows. With anchor+member-keyed
  * dedup the volume is DISTINCT (anchor, member) pairs, not turns — today's

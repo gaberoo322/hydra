@@ -74,7 +74,7 @@ import { getRedisConnection } from "./connection.ts";
 export const PACE_GATE_LAST_TICK_KEY = "hydra:autopilot:pace-gate:last-tick";
 
 /** Typed shape of the `hydra:autopilot:pace-gate:last-tick` hash fields. */
-export interface PaceGateLastTick {
+interface PaceGateLastTick {
   reason: string | null;
   class: string | null;
   at: number | null;
