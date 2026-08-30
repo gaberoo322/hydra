@@ -55,7 +55,7 @@ export interface VersionProject {
  * `src/health/deployed-sha.ts` / `deployed-version.ts`, but resolved per call so
  * it stays testable.
  */
-export function orchestratorRoot(): string {
+function orchestratorRoot(): string {
   const raw = process.env.HYDRA_ROOT;
   if (raw && raw.trim()) return raw.trim();
   return path.resolve(os.homedir(), "hydra");
