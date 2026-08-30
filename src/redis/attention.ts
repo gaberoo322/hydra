@@ -38,8 +38,12 @@ import type {
   AttentionThresholdCount,
 } from "../schemas/attention.ts";
 
-/** The three feed signals, as the counters are keyed. */
-export const ATTENTION_SIGNALS: readonly AttentionSignal[] = [
+/**
+ * The three feed signals, as the counters are keyed. Not exported (issue
+ * #4259) — no external call site imports this; it is used only inside this
+ * file's own `readAttentionCounts` loop.
+ */
+const ATTENTION_SIGNALS: readonly AttentionSignal[] = [
   "blocked-on-human",
   "breakage",
   "repetition",
@@ -48,9 +52,11 @@ export const ATTENTION_SIGNALS: readonly AttentionSignal[] = [
 /**
  * How long a dismissal suppresses an item: a "don't nag again for a month"
  * snooze, NOT permanent suppression (design-concept #4007) — a genuinely
- * still-crossing item resurfaces after this window.
+ * still-crossing item resurfaces after this window. Not exported (issue
+ * #4259) — no external call site imports this; only `DISMISSAL_SNOOZE_MS`
+ * below derives from it.
  */
-export const DISMISSAL_SNOOZE_DAYS = 30;
+const DISMISSAL_SNOOZE_DAYS = 30;
 const DISMISSAL_SNOOZE_MS = DISMISSAL_SNOOZE_DAYS * 24 * 60 * 60 * 1000;
 
 /**

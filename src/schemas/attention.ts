@@ -23,9 +23,11 @@ import { z } from "zod";
 /**
  * The three attention signals (ADR-0034 §4). Closed by design — adding a
  * signal is an ADR-level decision, not a schema tweak. There is deliberately
- * NO spend / quota / duration / deviation member.
+ * NO spend / quota / duration / deviation member. Not exported (issue #4259)
+ * — no external call site imports the schema const itself; the inferred
+ * `AttentionSignal` type below is the public surface.
  */
-export const AttentionSignalSchema = z.enum([
+const AttentionSignalSchema = z.enum([
   "blocked-on-human",
   "breakage",
   "repetition",
@@ -107,8 +109,12 @@ export const DismissAttentionRequestSchema = z
 
 export type DismissAttentionRequest = z.infer<typeof DismissAttentionRequestSchema>;
 
-/** One per-threshold calibration row. */
-export const AttentionThresholdCountSchema = z
+/**
+ * One per-threshold calibration row. Not exported (issue #4259) — no
+ * external call site imports the schema const itself; the inferred
+ * `AttentionThresholdCount` type below is the public surface.
+ */
+const AttentionThresholdCountSchema = z
   .object({
     signal: AttentionSignalSchema,
     /** Items this line has surfaced (counted once per item id). */
@@ -123,9 +129,11 @@ export type AttentionThresholdCount = z.infer<typeof AttentionThresholdCountSche
 /**
  * Response body for `GET /api/attention/counts` — the falsifiable-calibration
  * read (ADR-0034 §4): a line whose items are always dismissed unread is
- * miscalibrated and says so in the data.
+ * miscalibrated and says so in the data. Not exported (issue #4259) — no
+ * external call site imports the schema const itself; the inferred
+ * `AttentionCountsResponse` type below is the public surface.
  */
-export const AttentionCountsResponseSchema = z
+const AttentionCountsResponseSchema = z
   .object({
     counts: z.array(AttentionThresholdCountSchema),
     generatedAt: z.string(),

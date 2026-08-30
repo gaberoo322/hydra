@@ -160,8 +160,12 @@ export const RELABEL_TARGETS = [
 ] as const;
 export type RelabelTarget = (typeof RELABEL_TARGETS)[number];
 
-/** One /work queue row. */
-export const WorkQueueRowSchema = z
+/**
+ * One /work queue row. Not exported (issue #4259) — no external call site
+ * imports the schema const itself; the inferred `WorkQueueRow` type below is
+ * the public surface.
+ */
+const WorkQueueRowSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -184,8 +188,12 @@ export const WorkQueueRowSchema = z
 
 export type WorkQueueRow = z.infer<typeof WorkQueueRowSchema>;
 
-/** `GET /autopilot/work-queue` response — the trust-seam list contract. */
-export const WorkQueueResponseSchema = z
+/**
+ * `GET /autopilot/work-queue` response — the trust-seam list contract. Not
+ * exported (issue #4259) — no external call site imports the schema const
+ * itself; the inferred `WorkQueueResponse` type below is the public surface.
+ */
+const WorkQueueResponseSchema = z
   .object({
     items: z.array(WorkQueueRowSchema),
     /** Asserted-emptiness evidence: the count of open issues the lookup scanned. */
@@ -218,8 +226,12 @@ export const HITL_GRILL_LABEL = "hitl-grill";
  */
 export const HITL_GRILL_CAP = 10;
 
-/** One parked-idea row — an OPEN issue carrying {@link HITL_GRILL_LABEL}. */
-export const HitlGrillRowSchema = z
+/**
+ * One parked-idea row — an OPEN issue carrying {@link HITL_GRILL_LABEL}. Not
+ * exported (issue #4259) — no external call site imports the schema const
+ * itself; the inferred `HitlGrillRow` type below is the public surface.
+ */
+const HitlGrillRowSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -244,8 +256,12 @@ export const HitlGrillRowSchema = z
 
 export type HitlGrillRow = z.infer<typeof HitlGrillRowSchema>;
 
-/** `GET /autopilot/hitl-grill` response — the trust-seam list contract. */
-export const HitlGrillResponseSchema = z
+/**
+ * `GET /autopilot/hitl-grill` response — the trust-seam list contract. Not
+ * exported (issue #4259) — no external call site imports the schema const
+ * itself; the inferred `HitlGrillResponse` type below is the public surface.
+ */
+const HitlGrillResponseSchema = z
   .object({
     items: z.array(HitlGrillRowSchema),
     /** Asserted-emptiness evidence: the count of issues the lookup scanned. */
@@ -295,7 +311,10 @@ export const BoardRelabelActionSchema = z
  * close. Constrained to GitHub's own close-reason vocabulary so an
  * off-vocabulary literal is a 400 before any write.
  */
-export const BOARD_CLOSE_REASONS = ["completed", "not planned"] as const;
+// Not exported (issue #4259) — no external call site imports this constant;
+// only `BoardCloseActionSchema` below and the inferred `BoardCloseReason`
+// type consume it in-file.
+const BOARD_CLOSE_REASONS = ["completed", "not planned"] as const;
 export type BoardCloseReason = (typeof BOARD_CLOSE_REASONS)[number];
 
 export const BoardCloseActionSchema = z
@@ -318,7 +337,10 @@ export const BoardIssueRefSchema = z
  * convention — callers discriminate on `ok`/`reason`, not on status codes);
  * only a malformed body is a 400 `schema-validation-failed`.
  */
-export const BOARD_ACTION_REASONS = [
+// Not exported (issue #4259) — no external call site imports this constant;
+// only `BoardActionResponseSchema` below and the inferred `BoardActionReason`
+// type consume it in-file.
+const BOARD_ACTION_REASONS = [
   "already-ready",
   "closed",
   "missing-scope-section",
@@ -329,8 +351,12 @@ export const BOARD_ACTION_REASONS = [
 ] as const;
 export type BoardActionReason = (typeof BOARD_ACTION_REASONS)[number];
 
-/** One action's response envelope. */
-export const BoardActionResponseSchema = z
+/**
+ * One action's response envelope. Not exported (issue #4259) — no external
+ * call site imports the schema const itself; the inferred
+ * `BoardActionResponse` type below is the public surface.
+ */
+const BoardActionResponseSchema = z
   .object({
     ok: z.boolean(),
     action: z.enum(["promote", "relabel", "close", "reopen"]),
