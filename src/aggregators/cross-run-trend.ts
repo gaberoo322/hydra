@@ -78,7 +78,7 @@ export const RANKING_SOUND_THRESHOLD = 0.5;
  * everything else (null / unknown / in-flight). The identity
  * `dispatches == merged + failed + unaccounted` holds by construction.
  */
-export interface CrossRunOutcomeCounts {
+interface CrossRunOutcomeCounts {
   merged: number;
   failed: number;
   unaccounted: number;
@@ -89,7 +89,7 @@ export interface CrossRunOutcomeCounts {
  * (className === null records) is a first-class member of this array — never
  * dropped or silently folded into another class.
  */
-export interface CrossRunClassRow {
+interface CrossRunClassRow {
   /**
    * The dispatch class (`dev_orch`, ...), or {@link UNATTRIBUTABLE_CLASS_KEY}
    * for records whose `className` is null (unparseable cycleId / unknown class).
@@ -125,7 +125,7 @@ export interface CrossRunClassRow {
  * contribute (a run grouping requires a run identity; a null-prefix record has
  * none — precedented by `getDispatchOutcomesForRun`'s by-design exclusion).
  */
-export interface CrossRunRunRow {
+interface CrossRunRunRow {
   /** First 8 hex chars of the dispatching run's run_id (the cycleId-embedded prefix). */
   runIdPrefix: string;
   /** Dispatches attributed to the run. */
@@ -148,7 +148,7 @@ export interface CrossRunRunRow {
  * (b) class attribution (`classAttributedRecords` + token percentage). The
  * {@link rankingSound} flag gates any class ranking derived from the fold.
  */
-export interface CrossRunCoverage {
+interface CrossRunCoverage {
   /**
    * Every decoded dispatch-outcome record read in the window — the raw count
    * folded. The run-attribution denominator paired with `indexMembers`.

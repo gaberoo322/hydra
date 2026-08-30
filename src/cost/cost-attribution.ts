@@ -184,7 +184,7 @@ interface CostByClassEntry {
  * The two arms are NEVER blended in one response — each carries exactly one
  * `source`.
  */
-export type CostByClassSource = "transcript-24h" | "dispatch-surrogate";
+type CostByClassSource = "transcript-24h" | "dispatch-surrogate";
 
 export interface CostByClassResult {
   /** YYYY-MM-DD (UTC) the breakdown was computed for. */
