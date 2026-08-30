@@ -4,8 +4,8 @@
  * The board router's surfaces:
  *
  *   GET  /api/autopilot/board-state  → AutopilotBoardStateResponse
- *   GET  /api/autopilot/work-queue   → WorkQueueResponse        (#4010)
- *   GET  /api/autopilot/hitl-grill   → HitlGrillResponse        (#4028)
+ *   GET  /api/autopilot/work-queue   → { items: WorkQueueRow[], ... } (#4010)
+ *   GET  /api/autopilot/hitl-grill   → { items: HitlGrillRow[], ... } (#4028)
  *   POST /api/autopilot/board/promote|relabel|close|reopen      (#4010)
  *                                     → BoardActionResponse
  *
@@ -161,7 +161,7 @@ export const RELABEL_TARGETS = [
 export type RelabelTarget = (typeof RELABEL_TARGETS)[number];
 
 /** One /work queue row. */
-export const WorkQueueRowSchema = z
+const WorkQueueRowSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -183,19 +183,6 @@ export const WorkQueueRowSchema = z
   .strict();
 
 export type WorkQueueRow = z.infer<typeof WorkQueueRowSchema>;
-
-/** `GET /autopilot/work-queue` response — the trust-seam list contract. */
-export const WorkQueueResponseSchema = z
-  .object({
-    items: z.array(WorkQueueRowSchema),
-    /** Asserted-emptiness evidence: the count of open issues the lookup scanned. */
-    scanned: z.number().int().nonnegative(),
-    sourcesOk: z.boolean(),
-    generatedAt: z.string(),
-  })
-  .strict();
-
-export type WorkQueueResponse = z.infer<typeof WorkQueueResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // HITL grill lane (issue #4028 — the parked-idea inbox slice 4 of epic #4024)
@@ -219,7 +206,7 @@ export const HITL_GRILL_LABEL = "hitl-grill";
 export const HITL_GRILL_CAP = 10;
 
 /** One parked-idea row — an OPEN issue carrying {@link HITL_GRILL_LABEL}. */
-export const HitlGrillRowSchema = z
+const HitlGrillRowSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -243,25 +230,6 @@ export const HitlGrillRowSchema = z
   .strict();
 
 export type HitlGrillRow = z.infer<typeof HitlGrillRowSchema>;
-
-/** `GET /autopilot/hitl-grill` response — the trust-seam list contract. */
-export const HitlGrillResponseSchema = z
-  .object({
-    items: z.array(HitlGrillRowSchema),
-    /** Asserted-emptiness evidence: the count of issues the lookup scanned. */
-    scanned: z.number().int().nonnegative(),
-    /**
-     * `items.length >= HITL_GRILL_CAP` — the producer's parking cap is
-     * reached, precomputed from this same read (never a second network call
-     * to a producer's own cap check).
-     */
-    capReached: z.boolean(),
-    sourcesOk: z.boolean(),
-    generatedAt: z.string(),
-  })
-  .strict();
-
-export type HitlGrillResponse = z.infer<typeof HitlGrillResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Issue-lifecycle actions (issue #4010, ADR-0034 §7)
@@ -295,8 +263,7 @@ export const BoardRelabelActionSchema = z
  * close. Constrained to GitHub's own close-reason vocabulary so an
  * off-vocabulary literal is a 400 before any write.
  */
-export const BOARD_CLOSE_REASONS = ["completed", "not planned"] as const;
-export type BoardCloseReason = (typeof BOARD_CLOSE_REASONS)[number];
+const BOARD_CLOSE_REASONS = ["completed", "not planned"] as const;
 
 export const BoardCloseActionSchema = z
   .object({
@@ -318,7 +285,7 @@ export const BoardIssueRefSchema = z
  * convention — callers discriminate on `ok`/`reason`, not on status codes);
  * only a malformed body is a 400 `schema-validation-failed`.
  */
-export const BOARD_ACTION_REASONS = [
+const BOARD_ACTION_REASONS = [
   "already-ready",
   "closed",
   "missing-scope-section",
@@ -330,7 +297,7 @@ export const BOARD_ACTION_REASONS = [
 export type BoardActionReason = (typeof BOARD_ACTION_REASONS)[number];
 
 /** One action's response envelope. */
-export const BoardActionResponseSchema = z
+const BoardActionResponseSchema = z
   .object({
     ok: z.boolean(),
     action: z.enum(["promote", "relabel", "close", "reopen"]),

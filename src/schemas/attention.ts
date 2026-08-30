@@ -25,7 +25,7 @@ import { z } from "zod";
  * signal is an ADR-level decision, not a schema tweak. There is deliberately
  * NO spend / quota / duration / deviation member.
  */
-export const AttentionSignalSchema = z.enum([
+const AttentionSignalSchema = z.enum([
   "blocked-on-human",
   "breakage",
   "repetition",
@@ -105,10 +105,8 @@ export const DismissAttentionRequestSchema = z
   })
   .strict();
 
-export type DismissAttentionRequest = z.infer<typeof DismissAttentionRequestSchema>;
-
 /** One per-threshold calibration row. */
-export const AttentionThresholdCountSchema = z
+const AttentionThresholdCountSchema = z
   .object({
     signal: AttentionSignalSchema,
     /** Items this line has surfaced (counted once per item id). */
@@ -125,7 +123,7 @@ export type AttentionThresholdCount = z.infer<typeof AttentionThresholdCountSche
  * read (ADR-0034 §4): a line whose items are always dismissed unread is
  * miscalibrated and says so in the data.
  */
-export const AttentionCountsResponseSchema = z
+const AttentionCountsResponseSchema = z
   .object({
     counts: z.array(AttentionThresholdCountSchema),
     generatedAt: z.string(),
