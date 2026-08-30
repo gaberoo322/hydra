@@ -341,7 +341,7 @@ export function scanTierFence(
 }
 
 /** Injected runner seam so tests never shell out to the real scanner. */
-export type SecretScanRunner = (
+type SecretScanRunner = (
   files: readonly string[],
 ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 
