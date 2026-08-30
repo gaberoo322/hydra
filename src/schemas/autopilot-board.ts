@@ -195,8 +195,6 @@ export const WorkQueueResponseSchema = z
   })
   .strict();
 
-export type WorkQueueResponse = z.infer<typeof WorkQueueResponseSchema>;
-
 // ---------------------------------------------------------------------------
 // HITL grill lane (issue #4028 — the parked-idea inbox slice 4 of epic #4024)
 // ---------------------------------------------------------------------------
@@ -261,8 +259,6 @@ export const HitlGrillResponseSchema = z
   })
   .strict();
 
-export type HitlGrillResponse = z.infer<typeof HitlGrillResponseSchema>;
-
 // ---------------------------------------------------------------------------
 // Issue-lifecycle actions (issue #4010, ADR-0034 §7)
 // ---------------------------------------------------------------------------
@@ -296,7 +292,6 @@ export const BoardRelabelActionSchema = z
  * off-vocabulary literal is a 400 before any write.
  */
 export const BOARD_CLOSE_REASONS = ["completed", "not planned"] as const;
-export type BoardCloseReason = (typeof BOARD_CLOSE_REASONS)[number];
 
 export const BoardCloseActionSchema = z
   .object({

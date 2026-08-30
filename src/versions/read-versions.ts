@@ -193,7 +193,7 @@ export interface ReleaseNote {
 }
 
 /** A release plus everything that shipped in its tag window. */
-export interface VersionHistoryEntry extends VersionRef {
+interface VersionHistoryEntry extends VersionRef {
   notes: ReleaseNote[];
 }
 
@@ -203,7 +203,7 @@ export interface VersionHistoryEntry extends VersionRef {
  * For a tagless Target, `current` is instead the checkout's {@link
  * CommitIdentity} and `history` is empty (no pseudo-history, #4172).
  */
-export interface ProjectVersionsData {
+interface ProjectVersionsData {
   current: VersionRef | CommitIdentity | null;
   history: VersionHistoryEntry[];
   /**

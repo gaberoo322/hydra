@@ -62,7 +62,7 @@ export interface CommitIdentity {
 }
 
 /** A release plus everything that shipped in its tag window. */
-export interface VersionHistoryEntry extends VersionRef {
+interface VersionHistoryEntry extends VersionRef {
   notes: ReleaseNote[];
 }
 

@@ -105,8 +105,6 @@ export const DismissAttentionRequestSchema = z
   })
   .strict();
 
-export type DismissAttentionRequest = z.infer<typeof DismissAttentionRequestSchema>;
-
 /** One per-threshold calibration row. */
 export const AttentionThresholdCountSchema = z
   .object({
