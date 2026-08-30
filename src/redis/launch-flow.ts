@@ -73,37 +73,6 @@ import { getRedisConnection } from "./connection.ts";
  */
 export const PACE_GATE_LAST_TICK_KEY = "hydra:autopilot:pace-gate:last-tick";
 
-/** Typed shape of the `hydra:autopilot:pace-gate:last-tick` hash fields. */
-export interface PaceGateLastTick {
-  reason: string | null;
-  class: string | null;
-  at: number | null;
-  latencyMs: number | null;
-}
-
-/**
- * Read the most recent pace-gate tick record. Returns a struct of `null`
- * fields (never throws) when the key is absent (no tick has ever recorded
- * yet, e.g. a fresh Redis) or a numeric field fails to parse — the read side
- * is dark-tolerant, matching every other best-effort accessor in this repo:
- * a missing/corrupt telemetry record must never crash a caller.
- */
-export async function getPaceGateLastTick(): Promise<PaceGateLastTick> {
-  const r = getRedisConnection();
-  const fields = await r.hgetall(PACE_GATE_LAST_TICK_KEY);
-  if (!fields || Object.keys(fields).length === 0) {
-    return { reason: null, class: null, at: null, latencyMs: null };
-  }
-  const at = Number(fields.at);
-  const latencyMs = Number(fields.latency_ms);
-  return {
-    reason: fields.reason ?? null,
-    class: fields.class ?? null,
-    at: Number.isFinite(at) ? at : null,
-    latencyMs: Number.isFinite(latencyMs) ? latencyMs : null,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Launch-flow DETECTION state (issue #3847, epic #3844).
 //
@@ -115,9 +84,8 @@ export async function getPaceGateLastTick(): Promise<PaceGateLastTick> {
 // or a slow eligibility probe — has been SUSTAINED past a threshold, using the
 // per-signal streak state below. It is DETECTION ONLY; the watchdog bash is the
 // SOLE writer (SET NX / DEL via redis-cli), and this module owns only the key
-// NAMES plus a typed read for a future in-process consumer — mirroring the
-// `wiring-liveness-dark-outcomes.ts` split exactly (TypeScript owns the name,
-// bash owns the mutation).
+// NAMES — mirroring the `wiring-liveness-dark-outcomes.ts` split exactly
+// (TypeScript owns the name, bash owns the mutation).
 // ---------------------------------------------------------------------------
 
 /**

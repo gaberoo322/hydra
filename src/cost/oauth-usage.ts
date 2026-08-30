@@ -74,7 +74,7 @@ interface OAuthUsageWindow {
  * same way the meter itself does — which is exactly why a gate keyed off
  * {@link armed} must live in code rather than in a per-account env constant.
  */
-export interface OAuthExtraUsage {
+interface OAuthExtraUsage {
   /**
    * True when overage CAN bill: the facility is enabled AND the user has not
    * switched it off. This is a CAPABILITY flag, not evidence of spend — see
