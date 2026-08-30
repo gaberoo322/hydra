@@ -91,11 +91,74 @@ outcomes:
   # tracked in issue #1657; until it lands this outcome reads as no-data,
   # which the loader and holdback treat safely (null = no reading, never a
   # fabricated value).
+  #
+  # SPORT-BLIND (issue #4247, hydra-betting ADR-0007 D5): this aggregate
+  # blends all sports, and sports differ in intrinsic predictability (538:
+  # NFL Brier 0.208 vs MLB 0.243), so a sport-mix change moves it with zero
+  # change in forecast edge. It is therefore EXCLUDED from the Outcome
+  # Holdback decision set (HOLDBACK_EXCLUDED_OUTCOME_NAMES in
+  # src/holdback-policy.ts) and stays `kind: leading` only so the dashboard
+  # and the outcome-attribution ledger keep reading it as a display number.
+  # The per-league siblings below carry the holdback signal instead.
   - name: forecast-calibration-brier
     kind: leading
     direction: down
     source: file
     query: metrics/forecast-calibration-brier.txt
+    baseline: 0.25
+    target: 0.18
+    noise_epsilon: 0.005
+
+  # Per-league forecast-calibration Brier outcomes (issue #4247, ADR-0007 D5).
+  #
+  # The forecast-calibration-brier producer (src/metrics/publish.ts, sampled
+  # hourly by the Housekeeping chore) writes one sibling file per league the
+  # target reports in `bySourceLeague`, pooling that league's entries with a
+  # count-weighted average. File name = the aggregate's basename + the league
+  # slug (the target's canonical league string — an odds-api sport key such as
+  # `baseball_mlb` — lowercased, non-alphanumerics dashed). This manifest
+  # declares the live lane (MLB) plus the three game series the sibling
+  # hydra-betting ticket admits next (ADR-0007 D3/D4: THIS file must land
+  # first so the per-league watchers exist before new sports flow in).
+  #
+  # A league with no settled forecasts yet has NO file (null = no-data, never
+  # a fabricated zero, never a regression) — the wiring-liveness dark-outcome
+  # advisory may flag such a lane until its forecasts settle; that is honest
+  # signal, not a producer fault. Every league shares the aggregate's
+  # baseline/target/noise_epsilon: per-sport skill scoring was considered and
+  # explicitly deferred in ADR-0007 D5 (it redefines what 0.18 means).
+  - name: forecast-calibration-brier-baseball-mlb
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/forecast-calibration-brier-baseball-mlb.txt
+    baseline: 0.25
+    target: 0.18
+    noise_epsilon: 0.005
+
+  - name: forecast-calibration-brier-basketball-nba
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/forecast-calibration-brier-basketball-nba.txt
+    baseline: 0.25
+    target: 0.18
+    noise_epsilon: 0.005
+
+  - name: forecast-calibration-brier-americanfootball-nfl
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/forecast-calibration-brier-americanfootball-nfl.txt
+    baseline: 0.25
+    target: 0.18
+    noise_epsilon: 0.005
+
+  - name: forecast-calibration-brier-americanfootball-ncaaf
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/forecast-calibration-brier-americanfootball-ncaaf.txt
     baseline: 0.25
     target: 0.18
     noise_epsilon: 0.005

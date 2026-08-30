@@ -55,6 +55,7 @@ import {
 } from "../src/holdback-policy.ts";
 import {
   loadBaseline,
+  recordBaseline,
   getRevertCount,
   _resetRevertCount,
   holdbackBaselineKey,
@@ -422,6 +423,40 @@ describe("Outcome Holdback producer (enroll → check)", () => {
 `);
   }
 
+  /**
+   * Issue #4247 / ADR-0007 D5: a manifest that mirrors the real outcomes.yaml
+   * after this change — the sport-blind aggregate (`forecast-calibration-brier`,
+   * still `kind: leading`) declared ALONGSIDE an eligible leading metric. The
+   * aggregate must stay readable (display/attribution) but never key a revert.
+   */
+  async function aggregatePlusLeadingYaml(
+    brierFile: string,
+    brierValue: number,
+    leadFile: string,
+    leadValue: number,
+  ): Promise<string> {
+    await valueFile(brierFile, brierValue);
+    await valueFile(leadFile, leadValue);
+    return outcomesFixture(`outcomes:
+  - name: forecast-calibration-brier
+    kind: leading
+    direction: down
+    source: file
+    query: ${join(tmpDir, brierFile)}
+    baseline: 0.25
+    target: 0.18
+    noise_epsilon: 0.005
+  - name: lead-metric
+    kind: leading
+    direction: up
+    source: file
+    query: ${join(tmpDir, leadFile)}
+    baseline: 0
+    target: 1
+    noise_epsilon: 0.01
+`);
+  }
+
   test("enroll snapshots baseline; skips when no leading data", async (t) => {
     if (!guard(t)) return;
     // No leading outcomes at all → not enrolled.
@@ -590,6 +625,86 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     const ev = events.find((e) => e.type === "holdback.revert_failed");
     assert.ok(ev, "must emit holdback.revert_failed (the name digest.ts reads)");
     assert.equal(ev!.payload.commitSha, "failsha01");
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #4247 / ADR-0007 D5 — the sport-blind aggregate leaves the Outcome
+  // Holdback decision set. It stays `kind: leading` in the manifest (display +
+  // outcome-attribution read it through the SAME snapshot leaf), so the
+  // exclusion must be applied at the holdback call sites, not in the loader.
+  // -------------------------------------------------------------------------
+
+  test("enroll omits the sport-blind aggregate from the persisted baseline (#4247)", async (t) => {
+    if (!guard(t)) return;
+    const path = await aggregatePlusLeadingYaml("agg-enroll.txt", 0.24, "agg-lead.txt", 0.5);
+    const sha = "aggsha01";
+    const r = await enrollHoldback({ commitSha: sha, prNumber: 43, tier: 2, outcomesFile: path });
+    assert.equal((r as any).enrolled, true, "must still enroll on the eligible outcome");
+    const loaded = await loadBaseline(sha);
+    const names = ((loaded as any).baseline.leading as Array<{ name: string }>).map((l) => l.name);
+    assert.ok(
+      !names.includes("forecast-calibration-brier"),
+      `baseline.leading must exclude the sport-blind aggregate, got ${JSON.stringify(names)}`,
+    );
+    assert.ok(names.includes("lead-metric"), "eligible outcomes stay in the baseline");
+    await redis.del(holdbackBaselineKey(sha));
+  });
+
+  test("sport-blind aggregate regression alone never keys a revert (#4247, ADR-0007 D5)", async (t) => {
+    if (!guard(t)) return;
+    const path = await aggregatePlusLeadingYaml("agg-rev.txt", 0.24, "agg-rev-lead.txt", 0.5);
+    const sha = "aggsha02";
+    await enrollHoldback({ commitSha: sha, prNumber: 44, tier: 2, outcomesFile: path });
+
+    // Sport-mix drift: aggregate Brier blows past its 0.005 epsilon (the exact
+    // false-attribution vector D5 exists to kill) while the eligible metric is
+    // steady. The merge must stay on watch — no revert, no event.
+    await writeFile(join(tmpDir, "agg-rev.txt"), "0.30");
+    const day = utcDateKey();
+    await _resetRevertCount(day);
+    const { bus, events } = captureBus();
+    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: path });
+    assert.equal(res.ok, true);
+    assert.equal(
+      (res as any).result.decision,
+      "watching",
+      "an aggregate-only regression must not revert (it is out of the decision set)",
+    );
+    assert.equal(events.length, 0, "no holdback.* event may fire on an aggregate-only move");
+    await redis.del(holdbackBaselineKey(sha));
+  });
+
+  test("a legacy pre-#4247 baseline containing the aggregate cannot revert either", async (t) => {
+    if (!guard(t)) return;
+    // A baseline enrolled BEFORE this change still has the aggregate in its
+    // persisted leading array. checkHoldback filters the CURRENT sample, so the
+    // aggregate matches nothing (null = no-data) and cannot drive a revert.
+    const path = await aggregatePlusLeadingYaml("agg-old.txt", 0.30, "agg-old-lead.txt", 0.5);
+    const sha = "aggsha03";
+    const recorded = await recordBaseline({
+      commitSha: sha,
+      prNumber: 45,
+      tier: 2,
+      enrolledAt: Date.now(),
+      windowCycles: 5,
+      leading: [
+        { name: "forecast-calibration-brier", direction: "down", noiseEpsilon: 0.005, value: 0.24 },
+        { name: "lead-metric", direction: "up", noiseEpsilon: 0.01, value: 0.5 },
+      ],
+    });
+    assert.equal(recorded.ok, true, "fixture baseline must record");
+    const day = utcDateKey();
+    await _resetRevertCount(day);
+    const { bus, events } = captureBus();
+    const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: path });
+    assert.equal(res.ok, true);
+    assert.equal(
+      (res as any).result.decision,
+      "watching",
+      "aggregate regressed 0.24 -> 0.30 vs a legacy baseline, but must read as no-data",
+    );
+    assert.equal(events.length, 0);
+    await redis.del(holdbackBaselineKey(sha));
   });
 });
 

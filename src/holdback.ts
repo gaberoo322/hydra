@@ -46,7 +46,11 @@ import {
   utcDateKey,
   type HoldbackBaseline,
 } from "./redis/holdback.ts";
-import { isEnrolledTier, windowCyclesForTier } from "./holdback-policy.ts";
+import {
+  isEnrolledTier,
+  isHoldbackEligibleOutcomeName,
+  windowCyclesForTier,
+} from "./holdback-policy.ts";
 import {
   snapshotLeadingOutcomes,
   decideHoldback,
@@ -138,6 +142,13 @@ export async function enrollHoldback(input: EnrollInput): Promise<EnrollResult> 
     logger.error({ commitSha: input.commitSha, tier: input.tier, err }, "[holdback] enroll: snapshotLeadingOutcomes threw");
     return { ok: false, error: msg };
   }
+
+  // #4247 (ADR-0007 D5): drop outcome names ineligible for a holdback decision
+  // BEFORE the baseline is built, so an excluded name is never persisted into a
+  // watch. Applied here — at the holdback call site — and NOT inside the shared
+  // `snapshotLeadingOutcomes` leaf, which the outcome-attribution ledger also
+  // reads (the aggregate must stay visible to it as a display number).
+  leading = leading.filter((l) => isHoldbackEligibleOutcomeName(l.name));
 
   if (leading.length === 0) {
     return { ok: true, enrolled: false, reason: "no leading outcomes declared" };
@@ -240,6 +251,12 @@ export async function checkHoldback(
     logger.error({ commitSha: input.commitSha, err }, "[holdback] check: snapshotLeadingOutcomes threw");
     return { ok: false, error: msg };
   }
+
+  // #4247 (ADR-0007 D5): same exclusion on the re-sample. This also protects
+  // baselines persisted BEFORE this change (they still carry the excluded name
+  // in `leading`): filtered out of `current`, the name matches nothing in
+  // `detectRegressions` and reads as no-data — never a revert.
+  current = current.filter((l) => isHoldbackEligibleOutcomeName(l.name));
 
   const now = input.now ?? new Date();
   const day = utcDateKey(now);

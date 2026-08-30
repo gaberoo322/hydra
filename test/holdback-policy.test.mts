@@ -20,6 +20,8 @@ import assert from "node:assert/strict";
 import {
   isEnrolledTier,
   windowCyclesForTier,
+  isHoldbackEligibleOutcomeName,
+  HOLDBACK_EXCLUDED_OUTCOME_NAMES,
   HOLDBACK_WINDOW_CYCLES,
   HOLDBACK_WINDOW_CYCLES_T3,
 } from "../src/holdback-policy.ts";
@@ -78,5 +80,34 @@ describe("holdback-policy — windowCyclesForTier (monotonic + floor contract)",
       assert.ok(Number.isFinite(w), `window for tier ${tier} must be finite`);
       assert.ok(w >= 0, `window for tier ${tier} must be non-negative`);
     }
+  });
+});
+
+describe("holdback-policy — isHoldbackEligibleOutcomeName (outcome-name eligibility, #4247)", () => {
+  test("the sport-blind aggregate forecast-calibration-brier is excluded", () => {
+    assert.equal(
+      isHoldbackEligibleOutcomeName("forecast-calibration-brier"),
+      false,
+      "the sport-blind aggregate must never key an auto-revert (ADR-0007 D5)",
+    );
+  });
+
+  test("per-league Brier outcomes and every other leading outcome stay eligible", () => {
+    assert.equal(isHoldbackEligibleOutcomeName("forecast-calibration-brier-baseball-mlb"), true);
+    assert.equal(isHoldbackEligibleOutcomeName("forecast-calibration-brier-basketball-nba"), true);
+    assert.equal(isHoldbackEligibleOutcomeName("orchestrator-self-improvement-share"), true);
+    assert.equal(isHoldbackEligibleOutcomeName("anything-else"), true);
+  });
+
+  test("the exclusion set is exactly the sport-blind aggregate (no accidental over-exclusion)", () => {
+    assert.equal(HOLDBACK_EXCLUDED_OUTCOME_NAMES.size, 1);
+    assert.equal(HOLDBACK_EXCLUDED_OUTCOME_NAMES.has("forecast-calibration-brier"), true);
+  });
+
+  test("an empty or unknown name is eligible (fail-open to watching, never silent blindness)", () => {
+    // Unknown names must stay watched: excluding an unrecognized outcome would
+    // silently blind holdback to a metric the operator just declared.
+    assert.equal(isHoldbackEligibleOutcomeName(""), true);
+    assert.equal(isHoldbackEligibleOutcomeName("brand-new-outcome"), true);
   });
 });

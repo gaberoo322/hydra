@@ -57,6 +57,47 @@ const HOLDBACK_WINDOW_CYCLES_T4 = numFromEnv("HYDRA_HOLDBACK_WINDOW_CYCLES_T4", 
 const HOLDBACK_ENROLLED_TIERS: ReadonlyArray<number> = [2, 3, 4];
 
 /**
+ * Leading-outcome NAMES that never drive an Outcome Holdback decision (issue
+ * #4247, hydra-betting ADR-0007 D5).
+ *
+ * `forecast-calibration-brier` is the sport-blind aggregate Brier score. It is
+ * excluded from the holdback decision set because different sports have
+ * different *intrinsic* predictability (FiveThirtyEight scorecard: NFL Brier
+ * 0.208 vs MLB 0.243), so admitting a new game series moves the aggregate
+ * toward its 0.18 target **with zero improvement in forecast edge** — pure
+ * sport-mix drift. Outcome Holdback would attribute that drift to whichever PR
+ * sat in the enrolment window, auto-reverting good changes or blessing bad
+ * ones. Per-league siblings (`forecast-calibration-brier-<league>`, same
+ * outcomes.yaml) carry the honest per-sport signal instead.
+ *
+ * The outcome itself keeps `kind: leading` in outcomes.yaml so the dashboard
+ * and the outcome-attribution ledger (src/outcome-attribution/*) still read it
+ * as a display number — the exclusion applies ONLY to the holdback decision
+ * set, enforced at the two `snapshotLeadingOutcomes` call sites in
+ * `src/holdback.ts` (NOT in the shared leaf `snapshotLeadingOutcomes` itself,
+ * which the attribution ledger also reads — see the #4247 design concept's
+ * rejected alternatives).
+ *
+ * Mirrors the {@link HOLDBACK_ENROLLED_TIERS} pattern: a named constant the
+ * predicate below consults, rather than a new outcomes.yaml schema field —
+ * today only one name needs excluding, and a schema change would touch files
+ * outside this issue's scope.
+ */
+export const HOLDBACK_EXCLUDED_OUTCOME_NAMES: ReadonlySet<string> = new Set([
+  "forecast-calibration-brier",
+]);
+
+/**
+ * True when a leading outcome may drive an Outcome Holdback decision. False
+ * only for the names in {@link HOLDBACK_EXCLUDED_OUTCOME_NAMES}. Unknown names
+ * are eligible (fail-open to watching) — excluding an unrecognized outcome
+ * would silently blind holdback to a metric the operator just declared.
+ */
+export function isHoldbackEligibleOutcomeName(name: string): boolean {
+  return !HOLDBACK_EXCLUDED_OUTCOME_NAMES.has(name);
+}
+
+/**
  * True when a merge of the given post-#767 monotonic tier enrolls in Outcome
  * Holdback. T1 → false; T2/T3/T4 → true; null/unknown → false (a merge whose
  * tier we cannot resolve is treated as "no signal" rather than over-watched —

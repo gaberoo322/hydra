@@ -22,7 +22,7 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   DEFAULT_WINDOW_CYCLES,
@@ -159,6 +159,122 @@ export interface PublishBrierResult {
   value?: number;
   /** Absolute path written (or attempted). */
   path: string;
+  /**
+   * Per-league sibling files written from the same fetch's `bySourceLeague`
+   * map (issue #4247). Present only on runs that reached the per-league stage
+   * (fetch + parse + a valid aggregate `brierScore`); empty when the response
+   * carried no usable league data. Independent of `ok`, which reports ONLY the
+   * aggregate write — a dark league is no-data, never an aggregate failure.
+   */
+  leagues?: PublishBrierLeagueResult[];
+}
+
+/** One per-league sibling file the Brier producer wrote (or attempted). */
+export interface PublishBrierLeagueResult {
+  /** League segment of the `bySourceLeague` key, verbatim (first spelling seen). */
+  league: string;
+  /** Dash-separated lowercase slug used in the sibling file name. */
+  slug: string;
+  /** Count-weighted pooled Brier over that league's source entries. */
+  value: number;
+  /** Absolute sibling path written (or attempted). */
+  path: string;
+  /** Whether the sibling write landed. */
+  ok: boolean;
+}
+
+/**
+ * Collapse a target `bySourceLeague` league string (free text from forecast
+ * metadata, e.g. `baseball_mlb`, `MLB`, `soccer_epl`) to the dash-separated
+ * lowercase slug used in sibling file names AND as the pooling key — two
+ * spellings that differ only in case/separator pool into ONE league file.
+ * Returns null when nothing slugifiable remains (defensive; the caller skips).
+ */
+function leagueSlug(league: string): string | null {
+  const slug = league
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug.length > 0 ? slug : null;
+}
+
+/**
+ * Derive the per-league sibling metrics from the SAME parsed response the
+ * aggregate came from, and write one file per league next to the aggregate
+ * (issue #4247, hydra-betting ADR-0007 D5).
+ *
+ * `bySourceLeague` keys are `"<source>:<league>"` (e.g. `paper_llm:baseball_mlb`)
+ * computed by the target over the identical scored-rows population as the
+ * top-level `brierScore`, so pooling each league's entries with a
+ * count-weighted average — `sum(count_i * brier_i) / sum(count_i)` — recovers
+ * the exact per-league Brier (a mean of squared errors pools exactly under
+ * count weighting). No hardcoded source list: whichever source keys appear for
+ * a league contribute.
+ *
+ * NEVER writes a fabricated value (mirrors the aggregate's posture): a league
+ * whose entries are all no-data (null/non-finite `brierScore`, non-positive
+ * `count`) yields no file — its absence (or stale mtime) IS the no-data
+ * signal, matching `getOutcomeValue`'s missing-file semantics. Malformed keys
+ * (no `:` separator) are skipped with one loud line — a shape bug, not
+ * no-data. Sibling names share the aggregate's basename prefix so an overridden
+ * `filePath` (tests, alternate roots) keeps its siblings in the same directory.
+ */
+async function publishPerLeagueBrierFiles(
+  body: unknown,
+  aggregatePath: string,
+): Promise<PublishBrierLeagueResult[]> {
+  const raw = (body as { bySourceLeague?: unknown } | null)?.bySourceLeague;
+  if (raw === undefined || raw === null) {
+    logger.error(
+      { path: aggregatePath },
+      "[metrics-publisher] forecast-calibration-brier: response carried no bySourceLeague " +
+        "(older target build?) — per-league files untouched",
+    );
+    return [];
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    logger.error(
+      { path: aggregatePath, bySourceLeague: Array.isArray(raw) ? "array" : typeof raw },
+      "[metrics-publisher] forecast-calibration-brier: bySourceLeague is not an object — per-league files untouched",
+    );
+    return [];
+  }
+
+  const dir = dirname(aggregatePath);
+  const base = basename(aggregatePath).replace(/\.txt$/, "");
+  const pools = new Map<string, { league: string; sum: number; weight: number }>();
+  for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
+    const sep = key.indexOf(":");
+    if (sep <= 0 || sep >= key.length - 1) {
+      logger.error(
+        { key },
+        '[metrics-publisher] forecast-calibration-brier: malformed bySourceLeague key (expected "<source>:<league>") — entry skipped',
+      );
+      continue;
+    }
+    const slug = leagueSlug(key.slice(sep + 1));
+    if (slug === null) continue;
+    const e = (entry ?? {}) as { count?: unknown; brierScore?: unknown };
+    // No-data slice (null/non-finite Brier, non-positive count): quiet skip —
+    // a league with too few settled forecasts is normal, not an error.
+    if (typeof e.brierScore !== "number" || !Number.isFinite(e.brierScore)) continue;
+    if (typeof e.count !== "number" || !Number.isFinite(e.count) || e.count <= 0) continue;
+    const acc = pools.get(slug) ?? { league: key.slice(sep + 1).trim(), sum: 0, weight: 0 };
+    acc.sum += e.count * e.brierScore;
+    acc.weight += e.count;
+    pools.set(slug, acc);
+  }
+
+  const results: PublishBrierLeagueResult[] = [];
+  for (const [slug, acc] of pools) {
+    const value = acc.sum / acc.weight;
+    if (!Number.isFinite(value)) continue;
+    const path = join(dir, `${base}-${slug}.txt`);
+    const ok = await writeMetricFile(value, path);
+    results.push({ league: acc.league, slug, value, path: resolveMetricPath(path), ok });
+  }
+  return results;
 }
 
 /**
@@ -171,6 +287,13 @@ export interface PublishBrierResult {
  * resolved forecasts. Base URL comes from `getTargetWebUrl()`
  * (`HYDRA_TARGET_WEB_URL`, legacy `HYDRA_BETTING_URL`, default
  * `http://localhost:3333`) — same precedent as `src/api/reflections.ts`.
+ *
+ * Since issue #4247 (ADR-0007 D5) the SAME fetch also publishes per-league
+ * sibling files (`metrics/forecast-calibration-brier-<league>.txt`, e.g.
+ * `…-baseball-mlb.txt`) derived from the response's `bySourceLeague` map —
+ * see {@link publishPerLeagueBrierFiles}. The aggregate stays published
+ * unchanged as a display number; Outcome Holdback no longer keys on it
+ * (excluded in `src/holdback-policy.ts`).
  *
  * NEVER writes a fabricated value: on fetch failure, non-200, malformed JSON,
  * or null/non-finite `brierScore`, the metric file is left untouched — its
@@ -233,12 +356,19 @@ export async function publishForecastCalibrationBrierMetric(
       "[metrics-publisher] forecast-calibration-brier: brierScore is null/non-finite " +
         "(null until enough resolved forecasts exist) — leaving file untouched",
     );
+    // No scoreable rows at all ⇒ bySourceLeague is over the same (empty)
+    // population, so there is no per-league stage to run either.
     return { ok: false, reason: "no-score", path };
   }
 
+  // Per-league siblings (#4247) run on the same parsed body, independently of
+  // the aggregate write outcome — each stage leaves the other's files
+  // untouched on its own failure paths.
+  const leagues = await publishPerLeagueBrierFiles(body, path);
+
   const wrote = await writeMetricFile(brierScore, filePath);
   if (!wrote) {
-    return { ok: false, reason: "write-failed", value: brierScore, path };
+    return { ok: false, reason: "write-failed", value: brierScore, path, leagues };
   }
-  return { ok: true, value: brierScore, path };
+  return { ok: true, value: brierScore, path, leagues };
 }
