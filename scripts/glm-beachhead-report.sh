@@ -125,6 +125,41 @@
 #                                          into its weekly window is "not comparable" — its
 #                                          window-relative %/day is still near-totally sampling noise)
 #   HYDRA_GLM_BEACHHEAD_NOW_EPOCH        override "now" (unix seconds) for deterministic tests
+#   HYDRA_GLM_AB_MIN_N                   default 10 (--ab mode: an arm with fewer MERGED cohort
+#                                          issues than this prints "under-powered" in place of any
+#                                          comparison verdict; figures still print)
+#   HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL     default http://localhost:4000/api/usage/by-issue
+#                                          (--ab mode: the per-issue dispatch-cost-join read
+#                                          surface, slice gamma #4126)
+#
+# ---
+#
+# Per-arm A/B analysis (`--ab` mode, issue #4127 / epic #4123 slice delta).
+# STRICTLY ADDITIVE: the default invocation stays byte-identical to the
+# single-line report above (hydra-review consumes that line verbatim); the
+# per-arm block is reachable only via the explicit `--ab` argument. It
+# computes the A/B's endpoints per arm — primary: Anthropic weighted-quota
+# tokens per MERGED issue (a GLM-arm issue's cost is its Anthropic-side cost
+# — QA/sweep/any Opus involvement — summed from the by-issue cost-join
+# ledger, never zero); secondary: first-pass QA PASS-rate, churn, wall-clock
+# assignment->merge, bounce rate — so the next keep/kill/expand call rests on
+# an attributable comparison rather than a confounded delta.
+#
+# Arm membership is read from the glm-eligible / glm-ab-control GitHub issue
+# labels. The Redis assignment log (#4125's declared source of truth) has no
+# enumeration index and no HTTP route (only a per-issue in-process lookup),
+# and reaching it would require new src/ code that is explicitly out of
+# #4127's file scope; neither label is ever removed once applied (grep of
+# glm-eligibility-sweep.ts / drainer-loop.sh), so current label state is a
+# non-mutating substitute — the same discovery convention as glm-authored.
+# The cohort further excludes any issue whose arm label was applied BEFORE
+# slice beta merged (see AB_COHORT_SINCE_ISO below): pre-beta glm-eligible
+# issues were 100% forced-treatment with no coin flip.
+#
+# The --ab mode NEVER touches baseline.json (not even the bootstrap-once the
+# default mode performs), never labels anything, never calls decide.py,
+# never disables the drainer, and prints numbers + advisory prose only —
+# nothing here may auto-flip keep/kill/expand (ADR-0032 #3671).
 #
 # Sourceable for tests (test/glm-beachhead-report.test.mts) without running main.
 
@@ -157,6 +192,24 @@ WINDOW_PRS="${HYDRA_GLM_BEACHHEAD_WINDOW_PRS:-25}"
 BASELINE_SAMPLE="${HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE:-20}"
 MIN_DAYS_INTO_WINDOW="${HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW:-0.5}"
 NOW_EPOCH="${HYDRA_GLM_BEACHHEAD_NOW_EPOCH:-$(date -u +%s)}"
+
+# --- Per-arm A/B analysis constants (issue #4127, `--ab` mode) -----------
+# The two randomized arms from slice beta (#4125): treatment is drained by
+# GLM exactly as before; control carries glm-ab-control, is skipped by the
+# drainer, and is worked by the Opus dev_orch lane. Assignment happens at
+# eligibility-sweep ENTRY (one event per issue), so reading the label now is
+# reading the arm.
+AB_TREATMENT_LABEL="glm-eligible"
+AB_CONTROL_LABEL="glm-ab-control"
+# Cohort cutoff = the instant slice beta (#4125, PR #4281) merged. Before it,
+# glm-eligible was applied unconditionally — 100% forced treatment, no coin
+# flip — so an issue labeled earlier must not enter either arm: mixing those
+# in would silently defeat the randomization the epic exists to establish
+# (design-concept invariant). At-or-after is IN (the first genuinely
+# randomized sweep tick could land in the same second as the merge).
+AB_COHORT_SINCE_ISO="2026-08-29T19:03:38Z"
+AB_MIN_N="${HYDRA_GLM_AB_MIN_N:-10}"
+BY_ISSUE_URL="${HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL:-http://localhost:4000/api/usage/by-issue}"
 
 log() {
   # STDERR, deliberately — several functions below return a value via stdout
@@ -375,6 +428,93 @@ recommend() {
   fi
 
   echo "KEEP (informational, operator-driven) -- window in progress (${days_elapsed}/${window_days}d, ${pr_count}/${pr_target} PRs); no action needed yet"
+}
+
+# ---------------------------------------------------------------------------
+# Per-arm A/B pure helpers (issue #4127, `--ab` mode) — unit-tested directly
+# like the helpers above; no gh/curl inside this block.
+# ---------------------------------------------------------------------------
+
+# arm_label_epoch <events_json> <label> -> epoch of the FIRST `labeled` event
+# carrying <label>, "" when the issue has no such event (which the caller
+# treats as not provably post-beta -> excluded from the cohort).
+arm_label_epoch() { # <events_json> <label>
+  local iso
+  iso=$(jq -r --arg label "$2" \
+    '[.[] | select(.event == "labeled" and .label.name == $label)]
+     | sort_by(.created_at) | .[0].created_at // ""' \
+    <<<"$1" 2>/dev/null)
+  iso_to_epoch "$iso"
+}
+
+# issue_closed_by_merge <events_json> -> ISO created_at of the first `closed`
+# event carrying a NON-NULL commit_id ("closed by a merged commit"), "" when
+# none. A close with commit_id null is a manual close, not a merge outcome —
+# per the closed-completed-!=-shipped convention (a null commit_id means no
+# fix ever landed).
+issue_closed_by_merge() { # <events_json>
+  jq -r '[.[] | select(.event == "closed" and .commit_id != null)]
+         | sort_by(.created_at) | .[0].created_at // ""' <<<"$1" 2>/dev/null
+}
+
+# days_between_2dp <epoch_then> <epoch_now> -> fractional days, 2dp; "" when
+# either epoch is empty/non-numeric or now predates then (clock skew never
+# fabricates a negative wall-clock).
+days_between_2dp() { # <epoch_then> <epoch_now>
+  local then="${1:-}" now="${2:-}"
+  if [[ -z "$then" || -z "$now" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -v a="$then" -v b="$now" 'BEGIN{
+    if (a !~ /^[0-9]+$/ || b !~ /^[0-9]+$/) { print ""; exit }
+    d = (b - a) / 86400
+    if (d < 0) { print ""; exit }
+    printf "%.2f", d
+  }'
+}
+
+# closing_ref_prs <merged_prs_json> <issue> -> JSON array of the merged PRs
+# whose body references <issue> with a GitHub closing keyword (the Closes /
+# Fixes / Resolves family, case-insensitive). Word-boundary anchored so
+# closing #412 never false-matches inside #4127 — the same reconcile-by-
+# Closes-ref-not-title convention the drainer's own claim detection uses.
+closing_ref_prs() { # <merged_prs_json> <issue>
+  jq -c --arg issue "$2" \
+    '[.[] | select((.body // "")
+      | test("(?i)(close[ds]?|fix(e[ds]?)?|resolve[ds]?)[ :]*#" + $issue + "\\b"))]' \
+    <<<"$1" 2>/dev/null
+}
+
+# arm_cost_fold <byissue_json> <issues_json_array>
+#   -> "<weightedSum>|<issuesWithRecords>|<uncalibratedRecordCount>"
+# Folds records[].weightedQuotaTokensEstimate over EXACTLY the arm's issue
+# numbers — the WEIGHTED figure the A/B primary endpoint asks for, never the
+# raw dispatchTokensEstimate rollup /api/usage/by-issue's composer returns
+# (it sums the raw field even though every record carries the weighted one).
+# Also counts the arm's records whose quotaWeightCalibrated is not true: any
+# such record makes the arm's figure "not comparable (uncalibrated
+# Quota-Weight)" rather than a silently blended, misleadingly-precise number.
+# Empty output (jq parse failure over a malformed response) means the caller
+# prints not-comparable, never a zero.
+arm_cost_fold() { # <byissue_json> <issues_json_array>
+  jq -r --argjson issues "$2" '
+    [.byIssue[] | select(.issue as $i | $issues | index($i))] as $rows
+    | ([$rows[].records[].weightedQuotaTokensEstimate] | add // 0) as $sum
+    | ([$rows[] | select((.records | length) > 0)] | length) as $withRec
+    | ([$rows[].records[] | select(.quotaWeightCalibrated != true)] | length) as $uncal
+    | "\($sum)|\($withRec)|\($uncal)"
+  ' <<<"$1" 2>/dev/null
+}
+
+# per_merged_issue <sum> <n> -> sum/n to 0dp (whole tokens); "" on empty/zero n.
+per_merged_issue() { # <sum> <n>
+  local sum="${1:-}" n="${2:-}"
+  if [[ -z "$sum" || -z "$n" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -v s="$sum" -v n="$n" 'BEGIN{ if (n+0==0) { print ""; exit } printf "%.0f", s/n }'
 }
 
 # ---------------------------------------------------------------------------
@@ -782,6 +922,350 @@ main() {
     "$rec"
 }
 
+# ---------------------------------------------------------------------------
+# Per-arm A/B data gathering + main (issue #4127, `--ab` mode)
+# ---------------------------------------------------------------------------
+
+# fetch_ab_labeled_issues <label> -> raw gh JSON array of {number} rows for
+# every issue (any state) carrying <label>. FAIL LOUD on a gh failure or an
+# empty stdout (issue #4128 discipline): a masked [] here fabricates an EMPTY
+# ARM, and an A/B verdict built on one reads as a confident answer.
+fetch_ab_labeled_issues() { # <label>
+  local out err
+  err="$(mktemp)" || {
+    log "ERROR mktemp failed (TMPDIR unwritable/full?) -- cannot capture gh stderr; refusing to render the A/B report (issue #4128 discipline)"
+    return 1
+  }
+  trap 'rm -f "$err"' RETURN
+  if ! out=$(gh issue list --repo "$REPO" --label "$1" --state all \
+    --json number --limit 500 2>"$err"); then
+    log "ERROR gh issue list --label $1 exited non-zero, gh stderr [$(head -c 300 "$err" | tr -s '[:space:]' ' ')]-- a failed query is NOT an empty result set; refusing to render an A/B report built on it (issue #4128 discipline)"
+    return 1
+  fi
+  if [[ -z "$out" ]]; then
+    log "ERROR gh issue list --label $1 exited 0 with EMPTY stdout (a successful --json query always prints at least []) -- treating that as a failed query (issue #4128 discipline)"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# fetch_ab_issue_events <issue_number> -> raw gh api JSON of one issue's
+# events (the `labeled` events carry the arm-assignment moment; the `closed`
+# events carry merge evidence). FAIL LOUD: a dropped issue silently
+# fabricates the cohort (an under-counted arm reads as under-powered, or at
+# the margin flips which arm clears the minimum-n bar).
+fetch_ab_issue_events() { # <issue_number>
+  local out err
+  err="$(mktemp)" || {
+    log "ERROR mktemp failed -- cannot capture gh stderr; refusing to render the A/B report (issue #4128 discipline)"
+    return 1
+  }
+  trap 'rm -f "$err"' RETURN
+  if ! out=$(gh api "repos/${REPO}/issues/${1}/events?per_page=100" 2>"$err"); then
+    log "ERROR gh api events fetch failed for issue #${1}, gh stderr [$(head -c 300 "$err" | tr -s '[:space:]' ' ')]-- a dropped issue would fabricate the A/B cohort; refusing to render (issue #4128 discipline)"
+    return 1
+  fi
+  if [[ -z "$out" ]]; then
+    log "ERROR gh api events fetch for issue #${1} exited 0 with EMPTY stdout -- treating that as a failed query (issue #4128 discipline)"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# fetch_ab_merged_pool -> raw gh JSON of recent merged PRs carrying the
+# fields per-arm PR resolution needs (body for closing-keyword matching,
+# mergeCommit to pin THE PR that closed an issue). Same fail-loud rule.
+fetch_ab_merged_pool() {
+  local out err
+  err="$(mktemp)" || {
+    log "ERROR mktemp failed -- cannot capture gh stderr; refusing to render the A/B report (issue #4128 discipline)"
+    return 1
+  }
+  trap 'rm -f "$err"' RETURN
+  if ! out=$(gh pr list --repo "$REPO" --state merged \
+    --json number,body,additions,deletions,mergedAt,mergeCommit --limit 500 2>"$err"); then
+    log "ERROR gh pr list --state merged (A/B pool) exited non-zero, gh stderr [$(head -c 300 "$err" | tr -s '[:space:]' ' ')]-- a failed query is NOT an empty result set (issue #4128 discipline)"
+    return 1
+  fi
+  if [[ -z "$out" ]]; then
+    log "ERROR gh pr list --state merged (A/B pool) exited 0 with EMPTY stdout -- treating that as a failed query (issue #4128 discipline)"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# issue_close_commit_id <events_json> -> the commit_id of the first
+# closed-with-commit_id event ("" when none) — pins WHICH PR closed the issue.
+issue_close_commit_id() { # <events_json>
+  jq -r '[.[] | select(.event == "closed" and .commit_id != null)]
+         | sort_by(.created_at) | .[0].commit_id // ""' <<<"$1" 2>/dev/null
+}
+
+# ab_collect_arm <label> <issues_json> <merged_pool_json> <cutoff_epoch>
+#   Walks one arm's candidate issues; prints machine-parsed stdout lines the
+#   caller parses (the function runs inside a command substitution, so it
+#   communicates ONLY via stdout + its return code — never a global):
+#     cohort|<issue>|<label_epoch>|<closed_epoch>  a MERGED cohort issue
+#     pr|<pr-row-json>                             the PR representing a cohort issue
+#     open|<issue>                                 cohort issue, no merged outcome yet
+#     prebeta|<issue>                              excluded: label pre-cutoff, or no label
+#                                                 event found (not provably randomized)
+#     nopr|<issue>                                 merged cohort issue with no resolvable PR
+#   Non-zero return = a failed gh query (fail loud; see fetch_ab_issue_events).
+ab_collect_arm() { # <label> <issues_json> <merged_pool_json> <cutoff_epoch>
+  local label="$1" issues_json="$2" pool="$3" cutoff="$4"
+  local n events label_epoch closed_iso closed_ep commit_id prs pr
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    events=$(fetch_ab_issue_events "$n") || return 1
+    label_epoch=$(arm_label_epoch "$events" "$label")
+    if [[ -z "$label_epoch" ]]; then
+      echo "prebeta|$n"
+      continue
+    fi
+    if [[ -n "$cutoff" ]] && awk -v l="$label_epoch" -v c="$cutoff" 'BEGIN{exit !(l+0 < c+0)}'; then
+      echo "prebeta|$n"
+      continue
+    fi
+    closed_iso=$(issue_closed_by_merge "$events")
+    commit_id=""
+    if [[ -z "$closed_iso" ]]; then
+      # Fallback merge evidence: a merged PR that closing-keyword-refs the
+      # issue — its merge is what closed the issue (its mergedAt is the
+      # merge moment for wall-clock purposes).
+      prs=$(closing_ref_prs "$pool" "$n")
+      closed_iso=$(jq -r 'sort_by(.mergedAt) | .[-1].mergedAt // ""' <<<"$prs" 2>/dev/null)
+      if [[ -z "$closed_iso" ]]; then
+        echo "open|$n"
+        continue
+      fi
+    else
+      commit_id=$(issue_close_commit_id "$events")
+    fi
+    closed_ep=$(iso_to_epoch "$closed_iso")
+    echo "cohort|$n|$label_epoch|$closed_ep"
+    # THE PR whose QA/churn metrics represent this issue: the PR pinned by
+    # the issue's close commit when there is one, else the most recent merged
+    # PR that closing-keyword-refs the issue.
+    pr=""
+    if [[ -n "$commit_id" ]]; then
+      pr=$(jq -c --arg cid "$commit_id" \
+        '[.[] | select((.mergeCommit.oid // "") == $cid)] | .[0]
+         | if . then {number, additions, deletions} else empty end' <<<"$pool" 2>/dev/null)
+    fi
+    if [[ -z "$pr" ]]; then
+      prs=$(closing_ref_prs "$pool" "$n")
+      pr=$(jq -c 'sort_by(.mergedAt) | .[-1]
+          | if . then {number, additions, deletions} else empty end' <<<"$prs" 2>/dev/null)
+    fi
+    if [[ -z "$pr" ]]; then
+      echo "nopr|$n"
+    else
+      echo "pr|$pr"
+    fi
+  done <<<"$(jq -r '.[].number' <<<"$issues_json" 2>/dev/null)"
+}
+
+# ab_summarize_arm <lines> <byissue_json> — folds ab_collect_arm's output for
+# ONE arm into the AB_* globals below. Called in the CALLER's shell (never a
+# subshell) so the globals stick; the caller snapshots them into arm-local
+# variables before summarizing the other arm:
+#   AB_MERGED_N AB_OPEN_N AB_PREBETA_N AB_NOPR_N AB_PR_TOTAL AB_PR_ROWS
+#   AB_WALLCLOCK AB_COHORT_ISSUES AB_PRIMARY AB_PASS_RATE AB_PASS_N
+#   AB_FAIL_N AB_DENOM AB_BOUNCE AB_CHURN
+ab_summarize_arm() { # <lines> <byissue_json>
+  local lines="$1"
+  AB_BYISSUE_JSON="$2"
+  AB_MERGED_N=0 AB_OPEN_N=0 AB_PREBETA_N=0 AB_NOPR_N=0
+  AB_PR_ROWS="[]" AB_WALLCLOCK="" AB_COHORT_ISSUES="[]" AB_PRIMARY=""
+  local kind rest issue label_ep closed_ep pr d
+  local -a prs=() wall=() issues=()
+  while IFS='|' read -r kind rest; do
+    [[ -z "$kind" ]] && continue
+    case "$kind" in
+      cohort)
+        IFS='|' read -r issue label_ep closed_ep <<<"$rest"
+        AB_MERGED_N=$((AB_MERGED_N + 1))
+        issues+=("$issue")
+        d=$(days_between_2dp "$label_ep" "$closed_ep")
+        [[ -n "$d" ]] && wall+=("$d")
+        ;;
+      pr) prs+=("$rest") ;;
+      open) AB_OPEN_N=$((AB_OPEN_N + 1)) ;;
+      prebeta) AB_PREBETA_N=$((AB_PREBETA_N + 1)) ;;
+      nopr) AB_NOPR_N=$((AB_NOPR_N + 1)) ;;
+    esac
+  done <<<"$lines"
+
+  if [[ ${#prs[@]} -gt 0 ]]; then
+    AB_PR_ROWS=$(printf '%s\n' "${prs[@]}" | jq -s '.' 2>/dev/null)
+    [[ -z "$AB_PR_ROWS" ]] && AB_PR_ROWS="[]"
+  fi
+  AB_PR_TOTAL=$(jq -r 'length' <<<"$AB_PR_ROWS" 2>/dev/null || echo 0)
+  if [[ ${#issues[@]} -gt 0 ]]; then
+    AB_COHORT_ISSUES=$(printf '%s\n' "${issues[@]}" | jq -R -s 'split("\n") | map(select(length > 0) | tonumber)' 2>/dev/null)
+    [[ -z "$AB_COHORT_ISSUES" ]] && AB_COHORT_ISSUES="[]"
+  fi
+  AB_WALLCLOCK=""
+  if [[ ${#wall[@]} -gt 0 ]]; then
+    AB_WALLCLOCK=$(avg "${wall[@]}")
+  fi
+
+  # Primary endpoint (the attribution discipline: every reason below prints
+  # not comparable with WHY, never a fabricated figure).
+  if [[ -z "$AB_BYISSUE_JSON" ]]; then
+    AB_PRIMARY="not comparable (usage by-issue endpoint unreachable)"
+  elif [[ "$AB_MERGED_N" -eq 0 ]]; then
+    AB_PRIMARY="not comparable (no merged issues in arm yet)"
+  else
+    local fold sum withrec uncal per
+    fold=$(arm_cost_fold "$AB_BYISSUE_JSON" "$AB_COHORT_ISSUES")
+    if [[ -z "$fold" ]]; then
+      AB_PRIMARY="not comparable (malformed usage by-issue response)"
+    else
+      IFS='|' read -r sum withrec uncal <<<"$fold"
+      if [[ "$uncal" -gt 0 ]]; then
+        AB_PRIMARY="not comparable (uncalibrated Quota-Weight)"
+      else
+        per=$(per_merged_issue "$sum" "$AB_MERGED_N")
+        AB_PRIMARY="${per} weighted-quota tokens/merged issue (sum ${sum}, attributed ${withrec}/${AB_MERGED_N})"
+      fi
+    fi
+  fi
+
+  # Secondary endpoints — QA PASS-rate and churn go through the EXACT
+  # existing implementations on the arm's PR rows (no second implementation
+  # of either metric), so both arms are measured identically. Bounce rate is
+  # the first-FAIL share of the same denominator (a FAIL first pass is a
+  # re-review bounce; the `reframe` label is a Target-board concept with no
+  # equivalent on this orchestrator board).
+  local pass_line
+  pass_line=$(first_pass_pass_rate "$AB_PR_ROWS")
+  IFS='|' read -r AB_PASS_RATE AB_PASS_N AB_FAIL_N AB_DENOM <<<"$pass_line"
+  AB_BOUNCE=$(ratio "$AB_FAIL_N" "$AB_DENOM")
+  AB_CHURN=$(churn_avg_from_rows "$AB_PR_ROWS")
+}
+
+# main_ab — the `--ab` mode entry point (issue #4127). READ-ONLY, and unlike
+# main() it does not even bootstrap baseline.json: the baseline is
+# operator-owned state (2026-08-17 ruling) and the A/B endpoints have no use
+# for it. Prints a multi-line advisory block. Exit 0 on success (including
+# not-comparable/under-powered outputs); exit 1 only on a FAILED QUERY (same
+# fail-loud class as main's measurement fetch).
+main_ab() {
+  if ! require_tools; then
+    echo "GLM A/B: ERROR required tools (gh/jq/curl/awk) unavailable -- cannot compute report"
+    exit 0
+  fi
+
+  local cutoff_epoch
+  cutoff_epoch=$(iso_to_epoch "$AB_COHORT_SINCE_ISO")
+
+  local treat_issues ctrl_issues pool
+  treat_issues=$(fetch_ab_labeled_issues "$AB_TREATMENT_LABEL") || ab_fail_loud
+  ctrl_issues=$(fetch_ab_labeled_issues "$AB_CONTROL_LABEL") || ab_fail_loud
+  pool=$(fetch_ab_merged_pool) || ab_fail_loud
+
+  # An issue carrying BOTH arm labels has no attributable arm — excluded from
+  # both and counted loudly, rather than double-counted into both arms.
+  local both_count t_orig c_orig
+  t_orig="$treat_issues"
+  c_orig="$ctrl_issues"
+  both_count=$(jq -n --argjson t "$t_orig" --argjson c "$c_orig" \
+    '[$t[].number] as $tn | [$c[].number] as $cn
+     | [$tn[] | select(. as $x | $cn | index($x))] | length' 2>/dev/null || echo 0)
+  if [[ "$both_count" -gt 0 ]]; then
+    log "WARNING ${both_count} issue(s) carry BOTH ${AB_TREATMENT_LABEL} and ${AB_CONTROL_LABEL} -- no attributable arm; excluded from both arms (operator may want to fix by hand)"
+    treat_issues=$(jq -n --argjson t "$t_orig" --argjson c "$c_orig" \
+      '[$c[].number] as $cn | [$t[] | select((.number as $n | ($cn | index($n))) | not)]' 2>/dev/null)
+    ctrl_issues=$(jq -n --argjson t "$t_orig" --argjson c "$c_orig" \
+      '[$t[].number] as $tn | [$c[] | select((.number as $n | ($tn | index($n))) | not)]' 2>/dev/null)
+  fi
+
+  local treat_lines ctrl_lines
+  treat_lines=$(ab_collect_arm "$AB_TREATMENT_LABEL" "$treat_issues" "$pool" "$cutoff_epoch") || ab_fail_loud
+  ctrl_lines=$(ab_collect_arm "$AB_CONTROL_LABEL" "$ctrl_issues" "$pool" "$cutoff_epoch") || ab_fail_loud
+
+  # The cost-join read surface (slice gamma #4126). A failed fetch is NOT a
+  # failed query over the cohort: it degrades the primary endpoint to an
+  # explicit not-comparable while the gh-derived secondaries still print.
+  local byissue_json residual_text
+  byissue_json="$(curl -fsS --max-time 10 "$BY_ISSUE_URL" 2>/dev/null || true)"
+  if [[ -n "$byissue_json" ]] && ! jq -e '.byIssue' <<<"$byissue_json" >/dev/null 2>&1; then
+    byissue_json=""
+  fi
+  if [[ -z "$byissue_json" ]]; then
+    residual_text="not comparable (usage by-issue endpoint unreachable) -- the unattributed residual cannot be shown"
+  else
+    residual_text="$(jq -r '.residualTokensEstimate // 0' <<<"$byissue_json" 2>/dev/null) tokens across $(jq -r '.residualDispatchCount // 0' <<<"$byissue_json" 2>/dev/null) unattributed dispatches (global dispatch-cost-join ledger, NOT cohort-scoped; global attributedPercent $(jq -r '.attributedPercent // 0' <<<"$byissue_json" 2>/dev/null)%)"
+  fi
+
+  ab_summarize_arm "$treat_lines" "$byissue_json"
+  local t_n="$AB_MERGED_N" t_open="$AB_OPEN_N" t_pre="$AB_PREBETA_N" t_nopr="$AB_NOPR_N"
+  local t_primary="$AB_PRIMARY" t_pr_total="$AB_PR_TOTAL" t_wall="$AB_WALLCLOCK"
+  local t_rate="$AB_PASS_RATE" t_passn="$AB_PASS_N" t_failn="$AB_FAIL_N" t_denom="$AB_DENOM"
+  local t_bounce="$AB_BOUNCE" t_churn="$AB_CHURN"
+  ab_summarize_arm "$ctrl_lines" "$byissue_json"
+  local c_n="$AB_MERGED_N" c_open="$AB_OPEN_N" c_pre="$AB_PREBETA_N" c_nopr="$AB_NOPR_N"
+  local c_primary="$AB_PRIMARY" c_pr_total="$AB_PR_TOTAL" c_wall="$AB_WALLCLOCK"
+  local c_rate="$AB_PASS_RATE" c_passn="$AB_PASS_N" c_failn="$AB_FAIL_N" c_denom="$AB_DENOM"
+  local c_bounce="$AB_BOUNCE" c_churn="$AB_CHURN"
+
+  # Verdict discipline: never a verdict from an under-powered arm (the
+  # configurable minimum, default 10); never a comparison when either figure
+  # is not comparable; advisory prose only either way.
+  local verdict under="" t_per="" c_per="" pct
+  # A primary that leads with a whole number is a real figure; anything else
+  # is one of the not-comparable branches above.
+  [[ "$t_primary" =~ ^([0-9]+) ]] && t_per="${BASH_REMATCH[1]}"
+  [[ "$c_primary" =~ ^([0-9]+) ]] && c_per="${BASH_REMATCH[1]}"
+  if [[ "$t_n" -lt "$AB_MIN_N" ]]; then
+    under="under-powered (n=${t_n} < ${AB_MIN_N})"
+  fi
+  if [[ "$c_n" -lt "$AB_MIN_N" ]]; then
+    under="${under:+${under}; }under-powered (n=${c_n} < ${AB_MIN_N})"
+  fi
+  if [[ -n "$under" ]]; then
+    verdict="${under} -- no comparison published (informational, operator-driven)"
+  elif [[ -n "$t_per" && -n "$c_per" ]]; then
+    pct=$(awk -v t="$t_per" -v c="$c_per" 'BEGIN{ if (c+0==0) { print "n/a"; exit } printf "%+.0f", (t-c)/c*100 }')
+    if [[ "$pct" == "n/a" ]]; then
+      verdict="not comparable (control per-merged-issue figure is zero -- ratio undefined; informational, operator-driven)"
+    else
+      verdict="treatment ${t_per} vs control ${c_per} weighted-quota tokens per merged issue (treatment ${pct}%; informational, operator-driven -- acting on it is an operator decision, never this script)"
+    fi
+  else
+    verdict="not comparable -- see the per-arm primary reasons above (informational, operator-driven)"
+  fi
+
+  printf 'GLM A/B per-arm report: cohort = issues labeled %s/%s at eligibility-sweep entry on/after %s (slice beta #4125, PR #4281)%s; advisory only -- nothing here flips keep/kill/expand, changes any label or timer, or touches the baseline\n' \
+    "$AB_TREATMENT_LABEL" "$AB_CONTROL_LABEL" "$AB_COHORT_SINCE_ISO" \
+    "$([[ "$both_count" -gt 0 ]] && printf '; %s both-labeled issue(s) excluded from both arms' "$both_count")"
+  printf '  treatment (%s): merged n=%s (open %s, excluded pre-beta %s, no resolvable PR %s) | primary %s | QA first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s PRs) | bounce (first FAIL -> re-review) %s | churn avg %s | wall-clock assignment->merge %s\n' \
+    "$AB_TREATMENT_LABEL" "$t_n" "$t_open" "$t_pre" "$t_nopr" \
+    "$t_primary" "$(display "$t_rate")" "$t_passn" "$t_failn" "$((t_pr_total - t_denom))" "$t_pr_total" \
+    "$(display "$t_bounce")" "$(display "$t_churn")" "$(display "${t_wall:+${t_wall}d}")"
+  printf '  control   (%s): merged n=%s (open %s, excluded pre-beta %s, no resolvable PR %s) | primary %s | QA first-pass PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s PRs) | bounce (first FAIL -> re-review) %s | churn avg %s | wall-clock assignment->merge %s\n' \
+    "$AB_CONTROL_LABEL" "$c_n" "$c_open" "$c_pre" "$c_nopr" \
+    "$c_primary" "$(display "$c_rate")" "$c_passn" "$c_failn" "$((c_pr_total - c_denom))" "$c_pr_total" \
+    "$(display "$c_bounce")" "$(display "$c_churn")" "$(display "${c_wall:+${c_wall}d}")"
+  printf '  ledger residual: %s\n' "$residual_text"
+  printf '  verdict: %s\n' "$verdict"
+}
+
+# One stdout ERROR line for the --ab mode's fail-loud exits (a failed query
+# is not an empty result set — issue #4128 discipline; the loud log()
+# diagnostic with gh's own stderr has already gone to stderr by now).
+ab_fail_loud() {
+  echo "GLM A/B: ERROR gh query failed -- no report printed (a failed query is not an empty result set; see stderr diagnostic)"
+  exit 1
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
+  case "${1:-}" in
+    # Per-arm A/B analysis (issue #4127): explicit opt-in only — the default
+    # invocation stays byte-identical to the single-line report above.
+    --ab) main_ab "$@" ;;
+    *) main "$@" ;;
+  esac
 fi

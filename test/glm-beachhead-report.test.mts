@@ -30,7 +30,7 @@ import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -186,11 +186,24 @@ interface FakePr {
   // (issue #4048). Optional as in the pre-#4048 fixtures — gh only returns
   // requested fields, and the script's jq guards with `// ""`.
   headRefName?: string;
+  // --- `--ab` mode (issue #4127) fixtures: served for the merged-PR pool
+  // fetch (gh pr list --state merged --json number,body,...,mergeCommit).
+  body?: string;
+  mergedAt?: string;
+  mergeCommit?: { oid: string };
 }
 
 interface FakeComment {
   createdAt: string;
   body: string;
+}
+
+/** A GitHub issue-event row as `gh api .../issues/N/events` returns (issue #4127). */
+interface FakeAbEvent {
+  event: string;
+  created_at: string;
+  label?: { name: string };
+  commit_id?: string | null;
 }
 
 /**
@@ -206,11 +219,13 @@ interface FakeComment {
 function makeGhStub(
   dir: string,
   opts: {
-    mergedBaselinePrs: FakePr[];
-    glmAuthoredPrs: FakePr[];
+    // Optional because `--ab`-mode runs (issue #4127) never issue the legacy
+    // queries these feed — the stub only reads a key when its query arrives.
+    mergedBaselinePrs?: FakePr[];
+    glmAuthoredPrs?: FakePr[];
     /** Served to the label-less `--state all` branch scan (issue #4048). */
     allPrsForBranchScan?: FakePr[];
-    commentsByPr: Record<number, FakeComment[]>;
+    commentsByPr?: Record<number, FakeComment[]>;
     /**
      * Force selected queries to FAIL gh-style (diagnostic on stderr, exit 1,
      * no stdout) — the 2026-08-17 503-window shape (issue #4128).
@@ -224,6 +239,19 @@ function makeGhStub(
     labelFetchEmptyOutput?: boolean;
     /** Serve this raw string (exit 0) for the branch scan instead of JSON — the malformed/partial-response class. */
     branchScanRaw?: string;
+    /** --- `--ab` mode (issue #4127) fixtures. */
+    /** Issues per arm label, served for `gh issue list --label <L> --state all`. */
+    issuesByLabel?: Record<string, Array<{ number: number }>>;
+    /** Issue events, served for `gh api repos/.../issues/N/events`. */
+    eventsByIssue?: Record<string, FakeAbEvent[]>;
+    /** Merged-PR pool, served for the --ab fetch (recognised by `body` among the --json fields). */
+    abMergedPrs?: FakePr[];
+    /** Force the --ab-mode gh queries to FAIL gh-style (issue #4128 discipline). */
+    failAb?: {
+      issueListLabels?: string[];
+      eventsForIssue?: number;
+      abPool?: boolean;
+    };
   },
 ): string {
   const binDir = join(dir, "bin");
@@ -233,6 +261,7 @@ function makeGhStub(
 
   const helper = `#!/usr/bin/env python3
 import json
+import re
 import sys
 
 FIXTURE_FILE = ${JSON.stringify(fixtureFile)}
@@ -260,9 +289,19 @@ def main():
     argv = sys.argv[1:]
     fx = load()
     fail = fx.get("fail", {})
+    fail_ab = fx.get("failAb", {})
     if argv[:2] == ["pr", "list"]:
         state = find_flag(argv, "--state")
         label = find_flag(argv, "--label")
+        # --ab mode's merged-PR pool fetch is the only pr-list query that asks
+        # for "body" — discriminate on it so the legacy fetches stay unaffected.
+        json_fields = (find_flag(argv, "--json") or "").split(",")
+        if "body" in json_fields:
+            if fail_ab.get("abPool"):
+                fail_hard()
+            rows = fx.get("abMergedPrs", [])
+            sys.stdout.write(json.dumps(rows))
+            return
         if state == "merged":
             if fail.get("mergedBaseline"):
                 fail_hard()
@@ -288,6 +327,24 @@ def main():
         number = int(argv[2])
         comments = fx["commentsByPr"].get(str(number), [])
         sys.stdout.write(json.dumps({"comments": comments}))
+        return
+    if argv[:2] == ["issue", "list"]:
+        label = find_flag(argv, "--label")
+        if label is not None and label in fail_ab.get("issueListLabels", []):
+            fail_hard()
+        rows = fx.get("issuesByLabel", {}).get(label, [])
+        sys.stdout.write(json.dumps(rows))
+        return
+    if argv[:1] == ["api"]:
+        m = re.search(r"/issues/(\\d+)/events", " ".join(argv))
+        if m is None:
+            sys.stderr.write("gh-stub: unsupported api path: " + " ".join(argv) + "\\n")
+            sys.exit(99)
+        n = m.group(1)
+        if fail_ab.get("eventsForIssue") is not None and int(n) == fail_ab["eventsForIssue"]:
+            fail_hard()
+        rows = fx.get("eventsByIssue", {}).get(n, [])
+        sys.stdout.write(json.dumps(rows))
         return
     sys.stderr.write("gh-stub: unsupported invocation: " + " ".join(argv) + "\\n")
     sys.exit(99)
@@ -335,15 +392,35 @@ function usageServer(
   });
 }
 
-function runReport(env: Record<string, string>): Promise<{ status: number; stdout: string; stderr: string }> {
+function runReport(
+  env: Record<string, string>,
+  args: string[] = [],
+): Promise<{ status: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("bash", [SCRIPT], { env: { ...process.env, ...env } });
+    const child = spawn("bash", [SCRIPT, ...args], { env: { ...process.env, ...env } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => { stdout += d.toString(); });
     child.stderr.on("data", (d) => { stderr += d.toString(); });
     child.on("error", reject);
     child.on("close", (code) => resolve({ status: code ?? -1, stdout, stderr }));
+  });
+}
+
+/**
+ * Serve an arbitrary JSON payload (the `--ab` mode's by-issue cost-join
+ * fixture, issue #4127) on an ephemeral port.
+ */
+function jsonServer(payload: unknown): Promise<{ url: string; close: () => void }> {
+  return new Promise((resolve) => {
+    const server = http.createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(payload));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as any;
+      resolve({ url: `http://127.0.0.1:${addr.port}/api/usage/by-issue`, close: () => server.close() });
+    });
   });
 }
 
@@ -1579,6 +1656,668 @@ describe("glm-beachhead-report.sh — fail-loud on failed gh queries (issue #412
       assert.match(r.stdout, /recommendation: KEEP/);
     } finally {
       usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-arm A/B analysis (`--ab` mode, issue #4127 / epic #4123 slice delta).
+//
+// Computes the A/B's endpoints per arm so the next keep/kill/expand call
+// rests on an attributable comparison: primary = Anthropic weighted-quota
+// tokens per MERGED issue (a GLM-arm issue's cost is its Anthropic-side cost,
+// never zero); secondary = first-pass QA PASS-rate, churn, wall-clock
+// assignment->merge, bounce rate. Arm membership is read from the
+// glm-eligible / glm-ab-control labels; the cohort excludes issues labeled
+// before slice beta (#4125, PR #4281) merged — those were 100% forced
+// treatment with no coin flip. Everything is strictly additive: the default
+// invocation stays byte-identical, the mode never touches baseline.json, and
+// the output is advisory prose only (nothing auto-flips keep/kill/expand).
+// ---------------------------------------------------------------------------
+
+// The `--ab` pure helpers take gh's RAW json as a single argument. JSON.stringify
+// output for these fixtures contains no single quotes, so it can be inlined into
+// a bash expression inside single quotes (what `$(cat <<heredoc)` cannot do from
+// inside an already-single-quoted argument — see the child-flow pitfall notes).
+describe("glm-beachhead-report.sh — per-arm A/B pure helpers (issue #4127)", () => {
+  test("arm_label_epoch: the EARLIEST labeled event with the arm label wins", () => {
+    const events = JSON.stringify([
+      { event: "labeled", created_at: "2026-08-30T10:00:00Z", label: { name: "glm-eligible" } },
+      { event: "labeled", created_at: "2026-08-30T02:00:00Z", label: { name: "glm-eligible" } },
+      { event: "labeled", created_at: "2026-08-30T01:00:00Z", label: { name: "ready-for-agent" } },
+    ]);
+    // A later re-label (10:00) must not move the assignment moment — the
+    // cohort cut and the wall-clock denominator both hang off the FIRST one.
+    const r = callHelper(`arm_label_epoch '${events}' glm-eligible`);
+    assert.equal(r.stdout.trim(), String(epochOf("2026-08-30T02:00:00Z")));
+  });
+
+  test("arm_label_epoch: no labeled event for that label -> empty (not provably randomized)", () => {
+    const events = JSON.stringify([
+      { event: "labeled", created_at: "2026-08-30T01:00:00Z", label: { name: "ready-for-agent" } },
+    ]);
+    const r = callHelper(`echo "[\$(arm_label_epoch '${events}' glm-eligible)]"`);
+    assert.equal(r.stdout.trim(), "[]");
+  });
+
+  test("issue_closed_by_merge: a manual close (null commit_id) is NOT a merge outcome", () => {
+    const events = JSON.stringify([
+      { event: "closed", created_at: "2026-09-02T10:00:00Z", commit_id: null },
+    ]);
+    const r = callHelper(`echo "[\$(issue_closed_by_merge '${events}')] "`);
+    assert.equal(r.stdout.trim(), "[]");
+  });
+
+  test("issue_closed_by_merge + issue_close_commit_id: the first closed-with-commit_id event wins", () => {
+    const events = JSON.stringify([
+      { event: "closed", created_at: "2026-09-02T10:00:00Z", commit_id: null },
+      { event: "closed", created_at: "2026-09-03T10:00:00Z", commit_id: "sha-merge-1" },
+      { event: "closed", created_at: "2026-09-04T10:00:00Z", commit_id: "sha-merge-2" },
+    ]);
+    const iso = callHelper(`issue_closed_by_merge '${events}'`);
+    assert.equal(iso.stdout.trim(), "2026-09-03T10:00:00Z");
+    const cid = callHelper(`issue_close_commit_id '${events}'`);
+    assert.equal(cid.stdout.trim(), "sha-merge-1");
+  });
+
+  test("days_between_2dp: fractional days 2dp; clock skew or empty inputs -> empty", () => {
+    const ok = callHelper("days_between_2dp 1000000 1216000");
+    assert.equal(ok.stdout.trim(), "2.50");
+    const skew = callHelper('echo "[$(days_between_2dp 1216000 1000000)]"');
+    assert.equal(skew.stdout.trim(), "[]");
+    const empty = callHelper('echo "[$(days_between_2dp "" 1000000)]"');
+    assert.equal(empty.stdout.trim(), "[]");
+  });
+
+  test("closing_ref_prs: Closes/Fixes/Resolves match; a bare mention, a different issue, and a longer issue number do not", () => {
+    const pool = JSON.stringify([
+      { number: 1, body: "Closes #4127 ok", mergedAt: "2026-09-01T00:00:00Z" },
+      { number: 2, body: "fixes #4127 ok", mergedAt: "2026-09-02T00:00:00Z" },
+      { number: 3, body: "Resolves: #4271 wrong issue", mergedAt: "2026-09-03T00:00:00Z" },
+      { number: 4, body: "see #4127 — no closing keyword", mergedAt: "2026-09-04T00:00:00Z" },
+      { number: 5, body: "Closes #41271 longer number", mergedAt: "2026-09-05T00:00:00Z" },
+      { number: 6, body: "Closes #412 wrong issue", mergedAt: "2026-09-06T00:00:00Z" },
+    ]);
+    const r = callHelper(`closing_ref_prs '${pool}' 4127 | jq -c "[.[].number]"`);
+    // #1 and #2 keyword-match #4127; #3 targets 4271; #4 mentions without a
+    // keyword; #5 is #41271 (the word-boundary trap); #6 targets 412.
+    assert.equal(r.stdout.trim(), "[1,2]");
+  });
+
+  test("arm_cost_fold: folds the WEIGHTED figure (never the raw rollup), counts attributed issues and uncalibrated records", () => {
+    const byissue = JSON.stringify({
+      byIssue: [
+        {
+          issue: 4127,
+          totalDispatchTokensEstimate: 999999, // the RAW composer rollup — must NOT be used
+          records: [
+            { weightedQuotaTokensEstimate: 100000, dispatchTokensEstimate: 150000, quotaWeightCalibrated: true },
+            { weightedQuotaTokensEstimate: 50000, dispatchTokensEstimate: 60000, quotaWeightCalibrated: true },
+          ],
+        },
+        { issue: 5000, records: [{ weightedQuotaTokensEstimate: 7, quotaWeightCalibrated: true }] },
+      ],
+    });
+    const r = callHelper(`arm_cost_fold '${byissue}' "[4127]"`);
+    assert.equal(r.stdout.trim(), "150000|1|0");
+    // An issue outside the arm's list contributes nothing.
+    const none = callHelper(`arm_cost_fold '${byissue}' "[99999]"`);
+    assert.equal(none.stdout.trim(), "0|0|0");
+    // Any uncalibrated record is counted so the caller prints not-comparable.
+    const uncal = JSON.stringify({
+      byIssue: [{ issue: 4127, records: [{ weightedQuotaTokensEstimate: 100000, quotaWeightCalibrated: false }] }],
+    });
+    const u = callHelper(`arm_cost_fold '${uncal}' "[4127]"`);
+    assert.equal(u.stdout.trim(), "100000|1|1");
+    // A malformed response folds to empty — never a zero the caller could
+    // mistake for "this arm consumed nothing".
+    const bad = callHelper(`arm_cost_fold 'not-json' "[4127]"`);
+    assert.equal(bad.stdout.trim(), "");
+  });
+
+  test("per_merged_issue: sum over n, 0dp; empty/zero n -> empty", () => {
+    const ok = callHelper("per_merged_issue 300000 2");
+    assert.equal(ok.stdout.trim(), "150000");
+    const zero = callHelper('echo "[$(per_merged_issue 300000 0)]"');
+    assert.equal(zero.stdout.trim(), "[]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `--ab` end-to-end: fake gh (labels, per-issue events, merged-PR pool, PR
+// comments) + a fixture /api/usage/by-issue server, then assert on the
+// multi-line advisory block. The A/B cohort cutoff constant lives in the
+// script (2026-08-29T19:03:38Z = slice beta merge); fixtures below sit
+// strictly either side of it.
+// ---------------------------------------------------------------------------
+
+/** One `labeled` timeline event, as gh api serves it. */
+function labeledAt(iso: string, label: string): FakeAbEvent {
+  return { event: "labeled", created_at: iso, label: { name: label } };
+}
+
+/** One `closed` timeline event; null commit_id = a manual close, not a merge. */
+function closedAt(iso: string, commitId: string | null): FakeAbEvent {
+  return { event: "closed", created_at: iso, commit_id: commitId };
+}
+
+/** An Automated-QA review comment body carrying a first-pass verdict. */
+function qaComment(createdAt: string, verdict: string): FakeComment {
+  return { createdAt, body: `${AUTOMATED_QA_PREFIX} first-pass review\n\n**Verdict:** \`${verdict}\`` };
+}
+
+/**
+ * A GET /api/usage/by-issue payload: one calibrated weighted-token record per
+ * issue (override with `calibrated: false` to exercise INV-6), plus the global
+ * residual + attributedPercent fields the residual line quotes.
+ */
+function byIssuePayload(
+  entries: Array<{ issue: number; weighted: number; calibrated?: boolean }>,
+): Record<string, unknown> {
+  return {
+    byIssue: entries.map((e) => ({
+      issue: e.issue,
+      records: [
+        {
+          weightedQuotaTokensEstimate: e.weighted,
+          dispatchTokensEstimate: 0,
+          quotaWeightCalibrated: e.calibrated ?? true,
+        },
+      ],
+    })),
+    residualTokensEstimate: 123456,
+    residualDispatchCount: 7,
+    attributedPercent: 42,
+  };
+}
+
+describe("glm-beachhead-report.sh — per-arm A/B report (--ab mode, issue #4127)", () => {
+  test("happy path: both arms comparable — primary per arm with attributed fraction, secondaries, residual, comparison verdict", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    const byissue = await jsonServer(
+      byIssuePayload([
+        { issue: 5001, weighted: 100000 },
+        { issue: 5002, weighted: 200000 },
+        { issue: 6001, weighted: 400000 },
+        { issue: 6002, weighted: 600000 },
+      ]),
+    );
+    try {
+      const binDir = makeGhStub(tmp, {
+        issuesByLabel: {
+          "glm-eligible": [{ number: 5001 }, { number: 5002 }],
+          "glm-ab-control": [{ number: 6001 }, { number: 6002 }],
+        },
+        eventsByIssue: {
+          // Treatment: labeled 08-30, merged via commit sha-t1 (3d) / sha-t2 (5d).
+          "5001": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-02T00:00:00Z", "sha-t1")],
+          "5002": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-04T00:00:00Z", "sha-t2")],
+          // Control: labeled 08-30, merged 09-01 (2d) / 09-03 (4d).
+          "6001": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control"), closedAt("2026-09-01T00:00:00Z", "sha-c1")],
+          "6002": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control"), closedAt("2026-09-03T00:00:00Z", "sha-c2")],
+        },
+        abMergedPrs: [
+          { number: 9101, createdAt: "2026-08-30T01:00:00Z", additions: 100, deletions: 50, labels: [], body: "Closes #5001", mergedAt: "2026-09-02T00:00:00Z", mergeCommit: { oid: "sha-t1" } },
+          { number: 9102, createdAt: "2026-08-30T01:00:00Z", additions: 200, deletions: 100, labels: [], body: "Closes #5002", mergedAt: "2026-09-04T00:00:00Z", mergeCommit: { oid: "sha-t2" } },
+          { number: 9201, createdAt: "2026-08-30T01:00:00Z", additions: 300, deletions: 100, labels: [], body: "Closes #6001", mergedAt: "2026-09-01T00:00:00Z", mergeCommit: { oid: "sha-c1" } },
+          { number: 9202, createdAt: "2026-08-30T01:00:00Z", additions: 150, deletions: 50, labels: [], body: "Closes #6002", mergedAt: "2026-09-03T00:00:00Z", mergeCommit: { oid: "sha-c2" } },
+        ],
+        commentsByPr: {
+          "9101": [qaComment("2026-09-02T06:00:00Z", "PASS")],
+          "9102": [qaComment("2026-09-04T06:00:00Z", "PASS-pending-CI")],
+          // 9201 BOUNCED: first pass FAIL, later PASS — first-pass semantics
+          // count the FAIL, and the bounce rate counts it again.
+          "9201": [
+            qaComment("2026-09-01T06:00:00Z", "FAIL"),
+            qaComment("2026-09-01T18:00:00Z", "PASS"),
+          ],
+          // 9202 never got a QA comment: excluded from the denominator.
+        },
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      const r = await runReport(
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: byissue.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_AB_MIN_N: "2",
+        },
+        ["--ab"],
+      );
+      assert.equal(r.status, 0);
+      // Treatment: primary 150000 = (100000+200000)/2 with the attributed
+      // fraction beside it; churn (150+300)/2; wall-clock (3+5)/2.
+      assert.match(
+        r.stdout,
+        /treatment \(glm-eligible\): merged n=2 \(open 0, excluded pre-beta 0, no resolvable PR 0\) \| primary 150000 weighted-quota tokens\/merged issue \(sum 300000, attributed 2\/2\)/,
+      );
+      assert.match(r.stdout, /PASS-rate 1\.00 \(2 pass, 0 fail, 0 excluded no-verdict, of 2 PRs\)/);
+      assert.match(r.stdout, /bounce \(first FAIL -> re-review\) 0\.00 \| churn avg 225\.00 \| wall-clock assignment->merge 4\.00d/);
+      // Control: primary 500000 = (400000+600000)/2; first-pass FAIL on 9201.
+      assert.match(
+        r.stdout,
+        /control\s+\(glm-ab-control\): merged n=2 \(open 0, excluded pre-beta 0, no resolvable PR 0\) \| primary 500000 weighted-quota tokens\/merged issue \(sum 1000000, attributed 2\/2\)/,
+      );
+      assert.match(r.stdout, /PASS-rate 0\.00 \(0 pass, 1 fail, 1 excluded no-verdict, of 2 PRs\)/);
+      assert.match(r.stdout, /bounce \(first FAIL -> re-review\) 1\.00 \| churn avg 300\.00 \| wall-clock assignment->merge 3\.00d/);
+      // The residual is quoted next to the cost figures and explicitly NOT
+      // cohort-scoped (it is the global ledger's, context only).
+      assert.match(
+        r.stdout,
+        /ledger residual: 123456 tokens across 7 unattributed dispatches \(global dispatch-cost-join ledger, NOT cohort-scoped; global attributedPercent 42%\)/,
+      );
+      assert.match(
+        r.stdout,
+        /verdict: treatment 150000 vs control 500000 weighted-quota tokens per merged issue \(treatment -70%; informational, operator-driven -- acting on it is an operator decision, never this script\)/,
+      );
+      // Advisory banner + read-only: no baseline bootstrapped, no gh mutation.
+      assert.match(r.stdout, /advisory only -- nothing here flips keep\/kill\/expand, changes any label or timer, or touches the baseline/);
+      assert.equal(existsSync(baselineFile), false);
+      assert.doesNotMatch(r.stdout + r.stderr, /gh (issue|pr) edit|decide\.py/);
+      assert.doesNotMatch(r.stderr, /unsupported invocation/);
+    } finally {
+      byissue.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("cohort cutoff (INV-4): pre-beta labels excluded loudly, cutoff-instant labels admitted, unmerged post-beta issues count as open", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    const byissue = await jsonServer(
+      byIssuePayload([
+        { issue: 5102, weighted: 100000 },
+        { issue: 6101, weighted: 300000 },
+      ]),
+    );
+    try {
+      const binDir = makeGhStub(tmp, {
+        issuesByLabel: {
+          "glm-eligible": [{ number: 5101 }, { number: 5102 }, { number: 5103 }],
+          "glm-ab-control": [{ number: 6101 }],
+        },
+        eventsByIssue: {
+          // 5101 labeled BEFORE slice beta merged: forced treatment, no coin
+          // flip — must be excluded from the cohort.
+          "5101": [labeledAt("2026-08-28T06:00:20Z", "glm-eligible"), closedAt("2026-08-29T00:00:00Z", "sha-old")],
+          // 5102 labeled EXACTLY at the cutoff instant: admitted (>= cutoff).
+          "5102": [labeledAt("2026-08-29T19:03:38Z", "glm-eligible"), closedAt("2026-08-30T19:03:38Z", "sha-t3")],
+          // 5103 post-beta but never merged: open, not in any figure.
+          "5103": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible")],
+          "6101": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control"), closedAt("2026-08-31T00:00:00Z", "sha-c3")],
+        },
+        abMergedPrs: [
+          { number: 9105, createdAt: "2026-08-29T19:03:38Z", additions: 40, deletions: 10, labels: [], body: "Closes #5102", mergedAt: "2026-08-30T19:03:38Z", mergeCommit: { oid: "sha-t3" } },
+          { number: 9205, createdAt: "2026-08-30T01:00:00Z", additions: 100, deletions: 50, labels: [], body: "Closes #6101", mergedAt: "2026-08-31T00:00:00Z", mergeCommit: { oid: "sha-c3" } },
+        ],
+        commentsByPr: {
+          "9105": [qaComment("2026-08-30T20:00:00Z", "PASS")],
+          "9205": [qaComment("2026-08-31T02:00:00Z", "PASS")],
+        },
+      });
+      const r = await runReport(
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: byissue.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+          HYDRA_GLM_AB_MIN_N: "1",
+        },
+        ["--ab"],
+      );
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /treatment \(glm-eligible\): merged n=1 \(open 1, excluded pre-beta 1, no resolvable PR 0\)/);
+      // 5101's pre-beta cost never enters the sum (sha-old PR absent, and the
+      // issue is excluded before any cost fold): primary is 5102's alone.
+      assert.match(r.stdout, /primary 100000 weighted-quota tokens\/merged issue \(sum 100000, attributed 1\/1\)/);
+      assert.match(r.stdout, /wall-clock assignment->merge 1\.00d/);
+      assert.match(r.stdout, /control\s+\(glm-ab-control\): merged n=1 \(open 0, excluded pre-beta 0, no resolvable PR 0\)/);
+      assert.match(r.stdout, /verdict: treatment 100000 vs control 300000 weighted-quota tokens per merged issue \(treatment -67%; informational/);
+    } finally {
+      byissue.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("under-powered arm (INV-8): a below-minimum arm suppresses the comparison but still prints its own figures", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    const byissue = await jsonServer(
+      byIssuePayload([
+        { issue: 5001, weighted: 100000 },
+        { issue: 5002, weighted: 200000 },
+        { issue: 6001, weighted: 400000 },
+      ]),
+    );
+    try {
+      const binDir = makeGhStub(tmp, {
+        issuesByLabel: {
+          "glm-eligible": [{ number: 5001 }, { number: 5002 }],
+          "glm-ab-control": [{ number: 6001 }],
+        },
+        eventsByIssue: {
+          "5001": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-02T00:00:00Z", "sha-t1")],
+          "5002": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-04T00:00:00Z", "sha-t2")],
+          "6001": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control"), closedAt("2026-09-01T00:00:00Z", "sha-c1")],
+        },
+        abMergedPrs: [
+          { number: 9101, createdAt: "2026-08-30T01:00:00Z", additions: 100, deletions: 50, labels: [], body: "Closes #5001", mergedAt: "2026-09-02T00:00:00Z", mergeCommit: { oid: "sha-t1" } },
+          { number: 9102, createdAt: "2026-08-30T01:00:00Z", additions: 200, deletions: 100, labels: [], body: "Closes #5002", mergedAt: "2026-09-04T00:00:00Z", mergeCommit: { oid: "sha-t2" } },
+          { number: 9201, createdAt: "2026-08-30T01:00:00Z", additions: 300, deletions: 100, labels: [], body: "Closes #6001", mergedAt: "2026-09-01T00:00:00Z", mergeCommit: { oid: "sha-c1" } },
+        ],
+        commentsByPr: {
+          "9101": [qaComment("2026-09-02T06:00:00Z", "PASS")],
+          "9102": [qaComment("2026-09-04T06:00:00Z", "PASS")],
+          "9201": [qaComment("2026-09-01T06:00:00Z", "PASS")],
+        },
+      });
+      const r = await runReport(
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: byissue.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+          HYDRA_GLM_AB_MIN_N: "2",
+        },
+        ["--ab"],
+      );
+      assert.equal(r.status, 0);
+      // The control arm's own figures still print — suppression applies to
+      // the COMPARISON only, never to per-arm transparency.
+      assert.match(r.stdout, /control\s+\(glm-ab-control\): merged n=1 .*primary 400000 weighted-quota tokens\/merged issue \(sum 400000, attributed 1\/1\)/);
+      assert.match(
+        r.stdout,
+        /verdict: under-powered \(n=1 < 2\) -- no comparison published \(informational, operator-driven\)/,
+      );
+      assert.doesNotMatch(r.stdout, /verdict: treatment \d+ vs control/);
+    } finally {
+      byissue.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("usage by-issue endpoint unreachable: primary degrades to not comparable WITH the reason, secondaries still print, exit 0", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    try {
+      const binDir = makeGhStub(tmp, {
+        issuesByLabel: {
+          "glm-eligible": [{ number: 5001 }],
+          "glm-ab-control": [{ number: 6001 }],
+        },
+        eventsByIssue: {
+          "5001": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-02T00:00:00Z", "sha-t1")],
+          "6001": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control"), closedAt("2026-09-01T00:00:00Z", "sha-c1")],
+        },
+        abMergedPrs: [
+          { number: 9101, createdAt: "2026-08-30T01:00:00Z", additions: 100, deletions: 50, labels: [], body: "Closes #5001", mergedAt: "2026-09-02T00:00:00Z", mergeCommit: { oid: "sha-t1" } },
+          { number: 9201, createdAt: "2026-08-30T01:00:00Z", additions: 300, deletions: 100, labels: [], body: "Closes #6001", mergedAt: "2026-09-01T00:00:00Z", mergeCommit: { oid: "sha-c1" } },
+        ],
+        commentsByPr: {
+          "9101": [qaComment("2026-09-02T06:00:00Z", "PASS")],
+          "9201": [qaComment("2026-09-01T06:00:00Z", "FAIL")],
+        },
+      });
+      // Port 9 (discard): connection refused instantly — the endpoint-down
+      // case, NOT a failed gh query, so the mode must degrade, not exit 1.
+      const r = await runReport(
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: "http://127.0.0.1:9/api/usage/by-issue",
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+          HYDRA_GLM_AB_MIN_N: "1",
+        },
+        ["--ab"],
+      );
+      assert.equal(r.status, 0);
+      // The lookahead-terminated form matches only the two arm lines — not
+      // the verdict's "per-arm primary reasons" prose.
+      const primaries =
+        r.stdout.match(/primary not comparable \(usage by-issue endpoint unreachable\)(?= \|)/g) ?? [];
+      assert.equal(primaries.length, 2);
+      for (const p of primaries) {
+        assert.equal(p, "primary not comparable (usage by-issue endpoint unreachable)");
+      }
+      assert.match(
+        r.stdout,
+        /ledger residual: not comparable \(usage by-issue endpoint unreachable\) -- the unattributed residual cannot be shown/,
+      );
+      // gh-derived secondaries are untouched by the endpoint outage.
+      assert.match(r.stdout, /PASS-rate 1\.00 \(1 pass, 0 fail/);
+      assert.match(r.stdout, /churn avg 150\.00/);
+      assert.match(r.stdout, /verdict: not comparable -- see the per-arm primary reasons above \(informational, operator-driven\)/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("uncalibrated Quota-Weight record (INV-6): that arm's primary is not comparable, never a blended figure", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    const byissue = await jsonServer(
+      byIssuePayload([
+        { issue: 5001, weighted: 100000 },
+        { issue: 5002, weighted: 200000, calibrated: false },
+        { issue: 6001, weighted: 400000 },
+      ]),
+    );
+    try {
+      const binDir = makeGhStub(tmp, {
+        issuesByLabel: {
+          "glm-eligible": [{ number: 5001 }, { number: 5002 }],
+          "glm-ab-control": [{ number: 6001 }],
+        },
+        eventsByIssue: {
+          "5001": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-02T00:00:00Z", "sha-t1")],
+          "5002": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-04T00:00:00Z", "sha-t2")],
+          "6001": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control"), closedAt("2026-09-01T00:00:00Z", "sha-c1")],
+        },
+        abMergedPrs: [
+          { number: 9101, createdAt: "2026-08-30T01:00:00Z", additions: 100, deletions: 50, labels: [], body: "Closes #5001", mergedAt: "2026-09-02T00:00:00Z", mergeCommit: { oid: "sha-t1" } },
+          { number: 9102, createdAt: "2026-08-30T01:00:00Z", additions: 200, deletions: 100, labels: [], body: "Closes #5002", mergedAt: "2026-09-04T00:00:00Z", mergeCommit: { oid: "sha-t2" } },
+          { number: 9201, createdAt: "2026-08-30T01:00:00Z", additions: 300, deletions: 100, labels: [], body: "Closes #6001", mergedAt: "2026-09-01T00:00:00Z", mergeCommit: { oid: "sha-c1" } },
+        ],
+        commentsByPr: {
+          "9101": [qaComment("2026-09-02T06:00:00Z", "PASS")],
+          "9102": [qaComment("2026-09-04T06:00:00Z", "PASS")],
+          "9201": [qaComment("2026-09-01T06:00:00Z", "PASS")],
+        },
+      });
+      const r = await runReport(
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: byissue.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+          HYDRA_GLM_AB_MIN_N: "1",
+        },
+        ["--ab"],
+      );
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /treatment \(glm-eligible\): merged n=2 .*primary not comparable \(uncalibrated Quota-Weight\)/);
+      // The calibrated control arm still gets its real figure.
+      assert.match(r.stdout, /primary 400000 weighted-quota tokens\/merged issue \(sum 400000, attributed 1\/1\)/);
+      assert.match(r.stdout, /verdict: not comparable -- see the per-arm primary reasons above/);
+    } finally {
+      byissue.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("read-only: a pre-existing operator baseline.json survives an --ab run byte-for-byte", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    const byissue = await jsonServer(byIssuePayload([]));
+    try {
+      const binDir = makeGhStub(tmp, {
+        issuesByLabel: { "glm-eligible": [], "glm-ab-control": [] },
+        eventsByIssue: {},
+        abMergedPrs: [],
+        commentsByPr: {},
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      const sentinel = '{"percentLast7dBaseline": 55, "churnBaseline": 150, "churnSampleSize": 2, "note": "operator-owned"}';
+      writeFileSync(baselineFile, sentinel);
+      const r = await runReport(
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: byissue.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+          HYDRA_GLM_AB_MIN_N: "1",
+        },
+        ["--ab"],
+      );
+      assert.equal(r.status, 0);
+      assert.equal(readFileSync(baselineFile, "utf8"), sentinel);
+      // Both arms print their zero-cohort state honestly (never a verdict).
+      assert.match(r.stdout, /treatment \(glm-eligible\): merged n=0/);
+      assert.match(r.stdout, /primary not comparable \(no merged issues in arm yet\)/);
+      assert.match(r.stdout, /verdict: under-powered \(n=0 < 1\); under-powered \(n=0 < 1\) -- no comparison published/);
+    } finally {
+      byissue.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("default invocation stays byte-identical (INV-1): no --ab arg -> the original one-line report, by-issue URL never consulted", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-"));
+    const usage = await usageServer(55);
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [
+          { number: 1, createdAt: "2026-07-01T00:00:00Z", additions: 100, deletions: 50, labels: [] },
+        ],
+        glmAuthoredPrs: [],
+        commentsByPr: {},
+      });
+      const baselineFile = join(tmp, "baseline.json");
+      const r = await runReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_BEACHHEAD_USAGE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: baselineFile,
+        // Deliberately dead: the default mode must not touch the by-issue
+        // endpoint — reaching for it would break the byte-identity promise.
+        HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: "http://127.0.0.1:9/api/usage/by-issue",
+      });
+      assert.equal(r.status, 0);
+      const lines = r.stdout.trim().split("\n");
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /^GLM beachhead: window/);
+      assert.doesNotMatch(r.stdout, /A\/B per-arm report/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("fail-loud (issue #4128 discipline): a failed gh query exits 1 with one ERROR line — never an empty-arm report", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    const byissue = await jsonServer(byIssuePayload([]));
+    const baseEnv = {
+      PATH: "", // filled per-run below
+      HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: byissue.url,
+      HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+      HYDRA_GLM_AB_MIN_N: "1",
+    };
+    const okIssues = {
+      issuesByLabel: { "glm-eligible": [], "glm-ab-control": [] },
+      eventsByIssue: {},
+      abMergedPrs: [],
+      commentsByPr: {},
+    };
+    try {
+      // (a) the control arm's label fetch fails.
+      const a = makeGhStub(tmp, { ...okIssues, failAb: { issueListLabels: ["glm-ab-control"] } });
+      const ra = await runReport(
+        { ...baseEnv, PATH: `${a}:${process.env.PATH ?? ""}` },
+        ["--ab"],
+      );
+      assert.equal(ra.status, 1);
+      assert.match(ra.stdout, /^GLM A\/B: ERROR gh query failed -- no report printed/);
+      assert.match(ra.stderr, /gh issue list --label glm-ab-control exited non-zero/);
+      assert.doesNotMatch(ra.stdout, /treatment|control/);
+
+      // (b) one issue's events fetch fails — a dropped issue would fabricate
+      // the cohort, so the whole report refuses to render.
+      const b = makeGhStub(tmp, {
+        issuesByLabel: { "glm-eligible": [{ number: 5001 }, { number: 5002 }], "glm-ab-control": [{ number: 6001 }] },
+        eventsByIssue: {
+          "5001": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-09-02T00:00:00Z", "sha-t1")],
+          "6001": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control"), closedAt("2026-09-01T00:00:00Z", "sha-c1")],
+        },
+        abMergedPrs: [],
+        commentsByPr: {},
+        failAb: { eventsForIssue: 5002 },
+      });
+      const rb = await runReport(
+        { ...baseEnv, PATH: `${b}:${process.env.PATH ?? ""}` },
+        ["--ab"],
+      );
+      assert.equal(rb.status, 1);
+      assert.match(rb.stdout, /^GLM A\/B: ERROR gh query failed -- no report printed/);
+      assert.match(rb.stderr, /gh api events fetch failed for issue #5002/);
+
+      // (c) the merged-PR pool fetch fails.
+      const c = makeGhStub(tmp, { ...okIssues, failAb: { abPool: true } });
+      const rc = await runReport(
+        { ...baseEnv, PATH: `${c}:${process.env.PATH ?? ""}` },
+        ["--ab"],
+      );
+      assert.equal(rc.status, 1);
+      assert.match(rc.stdout, /^GLM A\/B: ERROR gh query failed -- no report printed/);
+      assert.match(rc.stderr, /A\/B pool\) exited non-zero/);
+    } finally {
+      byissue.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("merged-outcome resolution: closing-keyword PR fallback works; a merged issue with NO resolvable PR prints n=1 + no-PR n/a metrics, not a fabricated row", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-beachhead-ab-"));
+    const byissue = await jsonServer(
+      byIssuePayload([
+        { issue: 5301, weighted: 50000 },
+        { issue: 6201, weighted: 250000 },
+      ]),
+    );
+    try {
+      const binDir = makeGhStub(tmp, {
+        issuesByLabel: {
+          "glm-eligible": [{ number: 5301 }],
+          "glm-ab-control": [{ number: 6201 }],
+        },
+        eventsByIssue: {
+          // 5301 closed by a commit that matches NO pool PR and is not
+          // closing-keyword-referenced by any body either.
+          "5301": [labeledAt("2026-08-30T00:00:00Z", "glm-eligible"), closedAt("2026-08-31T00:00:00Z", "sha-x")],
+          // 6201 has NO closed event at all — the merged PR that
+          // closing-keyword-refs it is the (only) merge evidence.
+          "6201": [labeledAt("2026-08-30T00:00:00Z", "glm-ab-control")],
+        },
+        abMergedPrs: [
+          { number: 9301, createdAt: "2026-08-30T02:00:00Z", additions: 10, deletions: 5, labels: [], body: "Closes #6201", mergedAt: "2026-09-05T00:00:00Z", mergeCommit: { oid: "sha-c9" } },
+        ],
+        commentsByPr: {},
+      });
+      const r = await runReport(
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HYDRA_GLM_BEACHHEAD_BY_ISSUE_URL: byissue.url,
+          HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+          HYDRA_GLM_AB_MIN_N: "1",
+        },
+        ["--ab"],
+      );
+      assert.equal(r.status, 0);
+      // Treatment: merged (its cost counts toward the primary) but with no
+      // resolvable PR row — QA/churn print n/a, wall-clock still 1.00d.
+      assert.match(
+        r.stdout,
+        /treatment \(glm-eligible\): merged n=1 \(open 0, excluded pre-beta 0, no resolvable PR 1\) \| primary 50000 weighted-quota tokens\/merged issue \(sum 50000, attributed 1\/1\)/,
+      );
+      assert.match(r.stdout, /PASS-rate n\/a \(0 pass, 0 fail, 0 excluded no-verdict, of 0 PRs\)/);
+      assert.match(r.stdout, /bounce \(first FAIL -> re-review\) n\/a \| churn avg n\/a \| wall-clock assignment->merge 1\.00d/);
+      // Control: the closing-keyword fallback pins PR 9301 — mergedAt is the
+      // merge moment (6d after assignment) and its churn is the arm's churn.
+      assert.match(r.stdout, /control\s+\(glm-ab-control\): merged n=1 \(open 0, excluded pre-beta 0, no resolvable PR 0\)/);
+      assert.match(r.stdout, /primary 250000 weighted-quota tokens\/merged issue \(sum 250000, attributed 1\/1\)/);
+      assert.match(r.stdout, /churn avg 15\.00 \| wall-clock assignment->merge 6\.00d/);
+      assert.match(r.stdout, /verdict: treatment 50000 vs control 250000 weighted-quota tokens per merged issue \(treatment -80%; informational/);
+    } finally {
+      byissue.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });

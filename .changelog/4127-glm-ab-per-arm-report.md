@@ -1,0 +1,1 @@
+- feat: add `--ab` per-arm report to glm-beachhead-report.sh — weighted-quota tokens per merged issue, QA PASS-rate, churn, wall-clock and bounce by arm (#4127)
