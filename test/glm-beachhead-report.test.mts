@@ -256,6 +256,8 @@ function makeGhStub(
     eventsByIssue?: Record<string, FakeEvent[]>;
     /** `--ab-report`: extra `gh pr view` fields beyond `comments`, keyed by PR number as a string (issue #4127). */
     prDetailsByNumber?: Record<string, { mergedAt?: string | null; additions?: number; deletions?: number }>;
+    /** `--ab-report`: PR numbers (as strings) whose `gh pr view` fails hard — the merge-outcome-unknown input gap (issue #4127). */
+    failPrView?: string[];
   },
 ): string {
   const binDir = join(dir, "bin");
@@ -319,8 +321,13 @@ def main():
         return
     if argv[:2] == ["pr", "view"]:
         number = int(argv[2])
+        if str(number) in fx.get("failPrView", []):
+            fail_hard()
         comments = fx["commentsByPr"].get(str(number), [])
-        result = {"comments": comments}
+        # "number" is always present in a real "gh pr view --json number,..."
+        # response -- the script uses its absence as the fetch-failure
+        # discriminator (issue #4127 merge-outcome-unknown path).
+        result = {"comments": comments, "number": number}
         result.update(fx.get("prDetailsByNumber", {}).get(str(number), {}))
         sys.stdout.write(json.dumps(result))
         return
@@ -425,14 +432,23 @@ function runAbReport(env: Record<string, string>): Promise<{ status: number; std
  * `byIssue[]` entry (matching the real route's `?issue=` narrowing) built
  * from those records, or an empty `byIssue` when the queried issue has no
  * entry in the map (mirrors "no cost-join record for this issue yet").
+ * `failIssues` (issue numbers as strings) get an HTTP 500 instead — the
+ * per-issue MISSING cost input the not-comparable discipline guards, as
+ * distinct from a successful empty response.
  */
 function usageByIssueServer(
   byIssue: Record<string, Array<{ weightedQuotaTokensEstimate: number; quotaWeightCalibrated: boolean }>>,
+  failIssues: string[] = [],
 ): Promise<{ url: string; close: () => void }> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url ?? "", "http://127.0.0.1");
       const issue = url.searchParams.get("issue") ?? "";
+      if (failIssues.includes(issue)) {
+        res.statusCode = 500;
+        res.end("internal error");
+        return;
+      }
       const records = byIssue[issue];
       res.setHeader("content-type", "application/json");
       res.end(
@@ -1788,11 +1804,59 @@ describe("glm-beachhead-report.sh --ab-report — pure helpers (issue #4127)", (
     assert.equal(r.stdout.trim(), "not comparable (uncalibrated Quota-Weight)");
   });
 
+  test("format_arm_primary: a missing cost-join input -> not comparable, never a fabricated zero-cost figure", () => {
+    const r = callHelper("format_arm_primary 12 10 0 true 3");
+    assert.equal(r.stdout.trim(), "not comparable (cost-join input missing for 3/12 merged issues)");
+  });
+
+  test("format_arm_primary: the cost-missing guard is checked BEFORE under-powered (validity before power)", () => {
+    // Below the minimum AND a missing cost input -- the figure is uncomputable
+    // at any n while an input is missing, so the cost-missing reason wins over
+    // "wait for more n".
+    const r = callHelper("format_arm_primary 5 10 0 true 2");
+    assert.equal(r.stdout.trim(), "not comparable (cost-join input missing for 2/5 merged issues)");
+  });
+
   test("format_arm_primary: the under-powered guard is checked BEFORE calibration (order matters)", () => {
     // Below the minimum AND uncalibrated -- under-powered wins, since a tiny
     // sample is disqualifying regardless of calibration state.
     const r = callHelper("format_arm_primary 3 10 3000 false");
     assert.equal(r.stdout.trim(), "under-powered (n=3 < 10)");
+  });
+
+  test("format_arm_primary: four-arg (pre-cost-missing) call shape still behaves exactly as before", () => {
+    const r = callHelper("format_arm_primary 10 10 10000 true");
+    assert.equal(r.stdout.trim(), "1000 weighted-quota tokens/merged-issue (n=10)");
+  });
+
+  test("first_automated_qa_body: earliest '> *Automated QA' comment body across an unsorted array", () => {
+    const json = JSON.stringify({
+      comments: [
+        { createdAt: "2026-08-10T00:00:00Z", body: "> *Automated QA (second)\n\n**Verdict:** `PASS`" },
+        { createdAt: "2026-08-05T00:00:00Z", body: "> *Automated QA (first)\n\n**Verdict:** `FAIL`" },
+        { createdAt: "2026-08-06T00:00:00Z", body: "unrelated review comment" },
+      ],
+    });
+    const r = callHelper(`first_automated_qa_body '${json}'`);
+    assert.match(r.stdout, /Automated QA \(first\)/);
+    assert.match(r.stdout, /\*\*Verdict:\*\* `FAIL`/);
+  });
+
+  test("first_automated_qa_body: no Automated QA comment -> empty string", () => {
+    const r = callHelper(`echo "[$(first_automated_qa_body '{"comments":[]}')]"`);
+    assert.equal(r.stdout.trim(), "[]");
+  });
+
+  test("automated_qa_comment_count: counts only '> *Automated QA'-prefixed comments", () => {
+    const json = JSON.stringify({
+      comments: [
+        { createdAt: "2026-08-05T00:00:00Z", body: "> *Automated QA one" },
+        { createdAt: "2026-08-06T00:00:00Z", body: "not QA" },
+        { createdAt: "2026-08-07T00:00:00Z", body: "> *Automated QA two" },
+      ],
+    });
+    const r = callHelper(`automated_qa_comment_count '${json}'`);
+    assert.equal(r.stdout.trim(), "2");
   });
 
   test("format_rate: percent with the raw counts alongside", () => {
@@ -2043,14 +2107,18 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
       assert.match(r.stdout, /QA PASS-rate 1\.00 \(2 pass, 0 fail, 0 excluded no-verdict, of 2 merged\)/);
       // Churn: (30+20)/2 = 25.00. Wall-clock: (24h+48h)/2 = 36.00h. No bounces.
       assert.match(r.stdout, /churn avg 25\.00 \| wall-clock avg 36\.00h \| bounce rate 0% \(0\/2\)/);
+      // Zero input gaps print too (explicit zeros, not an omitted segment) --
+      // a clean run must still show the counters so "no gaps" is observable.
+      assert.match(r.stdout, /treatment:.*input gaps: cost-join missing 0\/2 merged, merge-outcome unknown 0/);
+      assert.match(r.stdout, /control\s*:.*input gaps: cost-join missing 0\/2 merged, merge-outcome unknown 0/);
     } finally {
       usage.close();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  test("a `reframe` label ever applied counts as a bounce even when the first QA verdict passed", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "glm-ab-reframe-"));
+  test("a re-review (>= 2 Automated-QA comments) counts as a bounce even when the first QA verdict passed", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-ab-rereview-"));
     const usage = await usageByIssueServer({
       "5001": [{ weightedQuotaTokensEstimate: 100, quotaWeightCalibrated: true }],
       "5002": [{ weightedQuotaTokensEstimate: 100, quotaWeightCalibrated: true }],
@@ -2060,7 +2128,12 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
         mergedBaselinePrs: [],
         glmAuthoredPrs: [],
         commentsByPr: {
-          "6001": [{ createdAt: "2026-08-06T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+          // 6001 was QA'd twice: first PASS, then re-reviewed (and passed
+          // again) -- the second look itself is the bounce signal.
+          "6001": [
+            { createdAt: "2026-08-06T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` },
+            { createdAt: "2026-08-06T05:00:00Z", body: `${AUTOMATED_QA_PREFIX}* (re-review)\n\n**Verdict:** \`PASS\`` },
+          ],
           "6002": [{ createdAt: "2026-08-07T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
         },
         eligibleIssues: [
@@ -2069,11 +2142,7 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
         ],
         controlIssues: [],
         eventsByIssue: {
-          // Reframed AFTER an initial PASS -- still a bounce.
-          "5001": [
-            { event: "labeled", created_at: "2026-08-05T00:00:00Z", label: { name: "glm-eligible" } },
-            { event: "labeled", created_at: "2026-08-06T02:00:00Z", label: { name: "reframe" } },
-          ],
+          "5001": [{ event: "labeled", created_at: "2026-08-05T00:00:00Z", label: { name: "glm-eligible" } }],
           "5002": [{ event: "labeled", created_at: "2026-08-05T00:00:00Z", label: { name: "glm-eligible" } }],
         },
         prDetailsByNumber: {
@@ -2089,11 +2158,189 @@ describe("glm-beachhead-report.sh --ab-report — end-to-end (issue #4127)", () 
         HYDRA_GLM_AB_MIN_N: "2",
       });
       assert.equal(r.status, 0);
-      // Both PRs' first QA verdict PASSED (QA PASS-rate 1.00), yet 5001's
-      // later reframe still counts as a bounce -- reframe and QA-fail are
-      // independent bounce signals.
+      // Both PRs' first QA verdict PASSED (QA PASS-rate 1.00), yet 6001's
+      // re-review still counts as a bounce -- re-review and QA-fail are
+      // independent bounce signals (issue text: "bounce rate (reframe /
+      // re-review)"; `reframe` is not a label on the orchestrator repo, so
+      // the re-review half of that pair is what this repo can observe).
       assert.match(r.stdout, /QA PASS-rate 1\.00 \(2 pass, 0 fail, 0 excluded no-verdict, of 2 merged\)/);
       assert.match(r.stdout, /bounce rate 50% \(1\/2\)/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreachable usage-by-issue endpoint yields not comparable, never a fabricated zero-cost arm (issue #4127 regression)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-ab-costmissing-"));
+    // Port 1 refuses connections -- every cost fetch fails, so the WRONG
+    // behaviour would be a confident "0 weighted-quota tokens/merged-issue"
+    // reading as maximal quota relief.
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [],
+        commentsByPr: {
+          "2001": [{ createdAt: "2026-08-06T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+          "2002": [{ createdAt: "2026-08-11T13:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+        },
+        eligibleIssues: [
+          { number: 1001, createdAt: "2026-08-04T00:00:00Z", closedByPullRequestsReferences: [{ number: 2001 }] },
+          { number: 1002, createdAt: "2026-08-09T00:00:00Z", closedByPullRequestsReferences: [{ number: 2002 }] },
+        ],
+        controlIssues: [],
+        eventsByIssue: {
+          "1001": [{ event: "labeled", created_at: "2026-08-05T00:00:00Z", label: { name: "glm-eligible" } }],
+          "1002": [{ event: "labeled", created_at: "2026-08-10T00:00:00Z", label: { name: "glm-eligible" } }],
+        },
+        prDetailsByNumber: {
+          "2001": { mergedAt: "2026-08-06T00:00:00Z", additions: 100, deletions: 50 },
+          "2002": { mergedAt: "2026-08-11T12:00:00Z", additions: 60, deletions: 40 },
+        },
+      });
+      const r = await runAbReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_AB_USAGE_BY_ISSUE_URL: "http://127.0.0.1:1/api/usage/by-issue",
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_AB_COHORT_START: "2026-08-01T00:00:00Z",
+        HYDRA_GLM_AB_MIN_N: "2",
+      });
+      assert.equal(r.status, 0);
+      // The primary endpoint is suppressed with the reason, both merged
+      // issues counted as missing inputs, and the attributed fraction shows
+      // the honest 0/2 -- never a zero figure.
+      assert.match(
+        r.stdout,
+        /treatment: cohort n=2, merged n=2 \| primary: not comparable \(cost-join input missing for 2\/2 merged issues\)/,
+      );
+      assert.match(r.stdout, /attributed 0% \(0\/2\)/);
+      assert.match(r.stdout, /input gaps: cost-join missing 2\/2 merged, merge-outcome unknown 0/);
+      // Secondary endpoints still compute -- they read GitHub, not the cost API.
+      assert.match(r.stdout, /QA PASS-rate 1\.00/);
+      assert.match(r.stdout, /churn avg 125\.00/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a PARTIALLY missing cost input suppresses the figure and prints the k/n gap, while the other arm still computes", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-ab-partialcost-"));
+    const usage = await usageByIssueServer(
+      {
+        "1001": [{ weightedQuotaTokensEstimate: 1000, quotaWeightCalibrated: true }],
+        "1002": [{ weightedQuotaTokensEstimate: 2000, quotaWeightCalibrated: true }],
+        "3001": [{ weightedQuotaTokensEstimate: 500, quotaWeightCalibrated: true }],
+        "3002": [{ weightedQuotaTokensEstimate: 800, quotaWeightCalibrated: true }],
+      },
+      ["1002"], // one treatment issue's cost fetch 500s
+    );
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [],
+        commentsByPr: {
+          "2001": [{ createdAt: "2026-08-06T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+          "2002": [{ createdAt: "2026-08-11T13:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+          "4001": [{ createdAt: "2026-08-04T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+          "4002": [{ createdAt: "2026-08-08T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+        },
+        eligibleIssues: [
+          { number: 1001, createdAt: "2026-08-04T00:00:00Z", closedByPullRequestsReferences: [{ number: 2001 }] },
+          { number: 1002, createdAt: "2026-08-09T00:00:00Z", closedByPullRequestsReferences: [{ number: 2002 }] },
+        ],
+        controlIssues: [
+          { number: 3001, createdAt: "2026-08-02T00:00:00Z", closedByPullRequestsReferences: [{ number: 4001 }] },
+          { number: 3002, createdAt: "2026-08-05T00:00:00Z", closedByPullRequestsReferences: [{ number: 4002 }] },
+        ],
+        eventsByIssue: {
+          "1001": [{ event: "labeled", created_at: "2026-08-05T00:00:00Z", label: { name: "glm-eligible" } }],
+          "1002": [{ event: "labeled", created_at: "2026-08-10T00:00:00Z", label: { name: "glm-eligible" } }],
+          "3001": [{ event: "labeled", created_at: "2026-08-03T00:00:00Z", label: { name: "glm-ab-control" } }],
+          "3002": [{ event: "labeled", created_at: "2026-08-06T00:00:00Z", label: { name: "glm-ab-control" } }],
+        },
+        prDetailsByNumber: {
+          "2001": { mergedAt: "2026-08-06T00:00:00Z", additions: 100, deletions: 50 },
+          "2002": { mergedAt: "2026-08-11T12:00:00Z", additions: 60, deletions: 40 },
+          "4001": { mergedAt: "2026-08-04T00:00:00Z", additions: 20, deletions: 10 },
+          "4002": { mergedAt: "2026-08-08T00:00:00Z", additions: 10, deletions: 10 },
+        },
+      });
+      const r = await runAbReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_AB_USAGE_BY_ISSUE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_AB_COHORT_START: "2026-08-01T00:00:00Z",
+        HYDRA_GLM_AB_MIN_N: "2",
+      });
+      assert.equal(r.status, 0);
+      // Treatment: one of two cost inputs missing -> figure suppressed with
+      // the 1/2 reason and the gap printed; the attributed fraction shows
+      // the one issue that did resolve. A silently-blended figure would have
+      // read 500 tokens/merged-issue (1000/2) -- relief that did not happen.
+      assert.match(
+        r.stdout,
+        /treatment: cohort n=2, merged n=2 \| primary: not comparable \(cost-join input missing for 1\/2 merged issues\)/,
+      );
+      assert.match(r.stdout, /treatment:.*attributed 50% \(1\/2\)/);
+      assert.match(r.stdout, /treatment:.*input gaps: cost-join missing 1\/2 merged, merge-outcome unknown 0/);
+      // Control: untouched by the treatment-side failure -- still computes.
+      assert.match(
+        r.stdout,
+        /control\s*: cohort n=2, merged n=2 \| primary: 650 weighted-quota tokens\/merged-issue \(n=2\)/,
+      );
+      assert.match(r.stdout, /control\s*:.*input gaps: cost-join missing 0\/2 merged, merge-outcome unknown 0/);
+    } finally {
+      usage.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a failed gh pr view counts as merge-outcome unknown and keeps the issue out of every figure (never a smaller merged-n)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-ab-outcomeunknown-"));
+    const usage = await usageByIssueServer({
+      "1001": [{ weightedQuotaTokensEstimate: 1000, quotaWeightCalibrated: true }],
+      "1002": [{ weightedQuotaTokensEstimate: 3000, quotaWeightCalibrated: true }],
+    });
+    try {
+      const binDir = makeGhStub(tmp, {
+        mergedBaselinePrs: [],
+        glmAuthoredPrs: [],
+        commentsByPr: {
+          "2001": [{ createdAt: "2026-08-06T01:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+          "2002": [{ createdAt: "2026-08-11T13:00:00Z", body: `${AUTOMATED_QA_PREFIX}*\n\n**Verdict:** \`PASS\`` }],
+        },
+        eligibleIssues: [
+          { number: 1001, createdAt: "2026-08-04T00:00:00Z", closedByPullRequestsReferences: [{ number: 2001 }] },
+          { number: 1002, createdAt: "2026-08-09T00:00:00Z", closedByPullRequestsReferences: [{ number: 2002 }] },
+        ],
+        controlIssues: [],
+        eventsByIssue: {
+          "1001": [{ event: "labeled", created_at: "2026-08-05T00:00:00Z", label: { name: "glm-eligible" } }],
+          "1002": [{ event: "labeled", created_at: "2026-08-10T00:00:00Z", label: { name: "glm-eligible" } }],
+        },
+        prDetailsByNumber: {
+          "2001": { mergedAt: "2026-08-06T00:00:00Z", additions: 100, deletions: 50 },
+          "2002": { mergedAt: "2026-08-11T12:00:00Z", additions: 60, deletions: 40 },
+        },
+        failPrView: ["2001"],
+      });
+      const r = await runAbReport({
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HYDRA_GLM_AB_USAGE_BY_ISSUE_URL: usage.url,
+        HYDRA_GLM_BEACHHEAD_BASELINE_FILE: join(tmp, "baseline.json"),
+        HYDRA_GLM_AB_COHORT_START: "2026-08-01T00:00:00Z",
+        HYDRA_GLM_AB_MIN_N: "2",
+      });
+      assert.equal(r.status, 0);
+      // Cohort n=2 (both issues assigned), merged n=1 (only 2002's view
+      // resolved), the unknown outcome PRINTED as an input gap. Under the
+      // minimum, the arm reports under-powered rather than a verdict.
+      assert.match(
+        r.stdout,
+        /treatment: cohort n=2, merged n=1 \| primary: under-powered \(n=1 < 2\)/,
+      );
+      assert.match(r.stdout, /treatment:.*input gaps: cost-join missing 0\/1 merged, merge-outcome unknown 1/);
+      assert.match(r.stderr, /pr view fetch failed for PR 2001/);
     } finally {
       usage.close();
       rmSync(tmp, { recursive: true, force: true });
