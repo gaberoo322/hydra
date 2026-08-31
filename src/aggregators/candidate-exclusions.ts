@@ -38,19 +38,6 @@
 export type CandidateExclusionVerdict = "excluded" | "survived";
 
 /**
- * The four canonical member names (issue #3954: "`<member>-exclusion`,
- * never `filter_N`"). Kept as a plain `string` on the record type (not this
- * union) so a future fifth member — or a malformed/unknown one from a
- * corrupt ledger row — folds without a type error; the aggregator groups by
- * whatever string is present.
- */
-export type CandidateExclusionMember =
-  | "target-scope-exclusion"
-  | "in-flight-dev-exclusion"
-  | "mechanical-exclusion"
-  | "trivial-anchor-exclusion";
-
-/**
  * One anchor-keyed (anchor, member) ledger record — the `boundedJsonList`
  * entry shape persisted by `src/redis/candidate-exclusions.ts`. Fields
  * mirror the shape decided on wayfinder #3954 verbatim.
@@ -78,7 +65,7 @@ export interface CandidateExclusionRecord {
 }
 
 /** Rollup for one member: how often it fires, against what denominator. */
-export interface CandidateExclusionMemberRollup {
+interface CandidateExclusionMemberRollup {
   /** Distinct (anchor, member) records currently on the ledger for this member. */
   considered: number;
   excluded: number;

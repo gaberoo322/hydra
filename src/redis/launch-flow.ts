@@ -73,14 +73,6 @@ import { getRedisConnection } from "./connection.ts";
  */
 export const PACE_GATE_LAST_TICK_KEY = "hydra:autopilot:pace-gate:last-tick";
 
-/** Typed shape of the `hydra:autopilot:pace-gate:last-tick` hash fields. */
-export interface PaceGateLastTick {
-  reason: string | null;
-  class: string | null;
-  at: number | null;
-  latencyMs: number | null;
-}
-
 // ---------------------------------------------------------------------------
 // Launch-flow DETECTION state (issue #3847, epic #3844).
 //
@@ -92,9 +84,8 @@ export interface PaceGateLastTick {
 // or a slow eligibility probe — has been SUSTAINED past a threshold, using the
 // per-signal streak state below. It is DETECTION ONLY; the watchdog bash is the
 // SOLE writer (SET NX / DEL via redis-cli), and this module owns only the key
-// NAMES plus a typed read for a future in-process consumer — mirroring the
-// `wiring-liveness-dark-outcomes.ts` split exactly (TypeScript owns the name,
-// bash owns the mutation).
+// NAMES — mirroring the `wiring-liveness-dark-outcomes.ts` split exactly
+// (TypeScript owns the name, bash owns the mutation).
 // ---------------------------------------------------------------------------
 
 /**

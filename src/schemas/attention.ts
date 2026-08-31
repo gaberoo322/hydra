@@ -108,8 +108,6 @@ export const DismissAttentionRequestSchema = z
   })
   .strict();
 
-export type DismissAttentionRequest = z.infer<typeof DismissAttentionRequestSchema>;
-
 /**
  * One per-threshold calibration row. Module-private (issue #4259) — the
  * derived `AttentionThresholdCount` type is what every other module imports.

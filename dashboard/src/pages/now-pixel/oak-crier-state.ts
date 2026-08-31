@@ -31,7 +31,7 @@ export interface CrierFrame {
   payload?: Record<string, unknown> | null;
 }
 
-export type BubbleKind = "stop" | "wait" | "slot" | "generic";
+type BubbleKind = "stop" | "wait" | "slot" | "generic";
 
 export interface EventSummary {
   /** Class/slot the event came from; drives the bubble colour. */

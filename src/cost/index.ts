@@ -114,10 +114,6 @@ export {
   // from the same leaf the live fold uses, not a re-derived formula.
   weightedTokens,
 } from "./token-math.ts";
-// `CategoryWeights` — the four-knob weight shape `weightedTokens` consumes
-// (issue #3825). Type-only on the barrel so callers compose it without a deep
-// `./token-math.ts` import.
-export type { CategoryWeights } from "./token-math.ts";
 
 // ---------------------------------------------------------------------------
 // Transcript scan — real per-session token recovery (issue #3250)
@@ -217,7 +213,6 @@ export {
   getCostByClass,
   getRollingCostByClass,
 } from "./cost-attribution.ts";
-export type { CostByClassSource } from "./cost-attribution.ts";
 
 // ---------------------------------------------------------------------------
 // Cost per merged PR — pure derived ratio over recorded totals (issue #2807)
