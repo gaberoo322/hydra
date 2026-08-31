@@ -13,6 +13,10 @@
 # line to stdout. `hydra-review` (docs/operator-playbooks/hydra-review.md)
 # runs this script and surfaces that line verbatim.
 #
+# Usage: scripts/glm-beachhead-report.sh             # single-line keep/kill/expand readout
+#        scripts/glm-beachhead-report.sh --ab-report # per-arm GLM-vs-Opus A/B endpoints (see
+#                                                    # the --ab-report mode section below)
+#
 # A FAILED gh query aborts the whole report loud — stderr diagnostic quoting
 # gh's own error text, ONE stdout ERROR line, exit 1 — BEFORE any metric
 # renders: a numeric readout built on a masked "[]" is a wrong answer that
