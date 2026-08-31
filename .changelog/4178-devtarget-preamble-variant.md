@@ -1,0 +1,1 @@
+- fix: dev_target dispatches carry a worktree-guard preamble variant that treats the ~/hydra launch cwd as expected instead of a mandatory abort (#4178)
