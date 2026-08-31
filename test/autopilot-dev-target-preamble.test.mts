@@ -68,14 +68,19 @@ const targetVariant = blocks.find((b) => b.includes("dev_target variant"));
 describe("autopilot worktree-guard preamble — default variant unchanged (#4178)", () => {
   test("the default safety preamble keeps its cwd-ABORT contract for harness-isolated classes", () => {
     // dev_orch and every other class launched with isolation="worktree" keep
-    // today's preamble byte-for-byte. These clause strings ARE the safety
-    // contract for that population; weakening them to fix dev_target would
-    // reopen the cwd-confusion hole the preamble exists to close (#549-era).
+    // today's preamble byte-identical (design-concept INV-2 for issue #4178).
+    // The whole normalized block is compared for equality, not clause
+    // matchers, so no wording inside it can drift either.
     assert.ok(defaultBlock, "the default CRITICAL SAFETY RULE block is missing");
-    assert.match(defaultBlock, /Run `pwd` and `git rev-parse --git-dir` first\./);
-    assert.match(defaultBlock, /Worktree path AND `\.git\/worktrees\/\.\.\.` gitdir → proceed\./);
-    assert.match(defaultBlock, /cwd == `\/home\/gabe\/hydra` \(or `\/home\/gabe\/hydra-betting`\) → ABORT\./);
-    assert.match(defaultBlock, /No fallback\. No `git checkout` in the main tree\./);
+    assert.equal(
+      defaultBlock,
+      "## CRITICAL SAFETY RULE — READ FIRST " +
+        "Run `pwd` and `git rev-parse --git-dir` first. " +
+        "- Worktree path AND `.git/worktrees/...` gitdir → proceed. " +
+        "- cwd == `/home/gabe/hydra` (or `/home/gabe/hydra-betting`) → ABORT. " +
+        "No fallback. No `git checkout` in the main tree.",
+      "the default preamble must stay byte-identical (whitespace-normalised) for harness-isolated classes",
+    );
   });
 
   test("exactly one default block exists — the split did not fork the orchestrator path", () => {
@@ -123,6 +128,33 @@ describe("autopilot worktree-guard preamble — dev_target variant (#4178)", () 
     assert.ok(targetVariant);
     assert.match(targetVariant, /ABORT only if Step 0\.6/);
   });
+
+  test("the variant carries no ABORT-on-launch-cwd instruction", () => {
+    // Design-concept INV-1 for issue #4178: a composed dev_target prompt must
+    // never contain a literal ABORT-on-cwd==/home/gabe/hydra instruction as
+    // its first-read safety rule — that cwd is dev_target's expected start.
+    // The default block's exact clause must be absent from the variant (the
+    // composition rule above keeps the default block out of a dev_target
+    // prompt entirely).
+    assert.ok(targetVariant);
+    assert.doesNotMatch(
+      targetVariant,
+      /cwd == `?\/home\/gabe\/hydra`? \(or `?\/home\/gabe\/hydra-betting`?\) → ABORT/,
+      "the dev_target variant must not carry the default block's ABORT-on-launch-cwd clause",
+    );
+  });
+
+  test("the variant still ABORTs on Step 0.6 failure and forbids main-checkout writes", () => {
+    // Design-concept INV-3 for issue #4178: removing the false trigger must
+    // not remove the real ones. Both halves asserted in one place — the
+    // Step 0.6 abort trigger AND the never-Edit/Write-either-main-checkout
+    // prohibition (with both trees named).
+    assert.ok(targetVariant);
+    assert.match(targetVariant, /ABORT only if Step 0\.6/);
+    assert.match(targetVariant, /Edit\/Write/);
+    assert.match(targetVariant, /\/home\/gabe\/hydra-betting/);
+    assert.match(targetVariant, /\/home\/gabe\/hydra/);
+  });
 });
 
 describe("autopilot playbook — variant composition rule (#4178)", () => {
@@ -152,13 +184,19 @@ describe("autopilot playbook — variant composition rule (#4178)", () => {
   test("safety rule 2 reflects the two-variant split", () => {
     // Rule 2 previously read "mandatory for dev_orch / dev_target" as one
     // shared preamble — the sentence that made the false-abort mandatory.
-    // It must now distinguish the variants instead of mandating one block
-    // for both classes.
+    // It must now point at TWO named variants (design-concept INV-4 for
+    // issue #4178) so a composing model cannot resolve the ambiguity toward
+    // the false-abort reading again.
     const rules = playbook.slice(playbook.indexOf("## Safety rules"));
     assert.match(
       rules,
       /dev_target variant/i,
       "safety rule 2 must name the dev_target variant rather than mandating the default preamble for dev_target",
+    );
+    assert.match(
+      rules,
+      /default variant/i,
+      "safety rule 2 must name the default variant too — two named variants, not one",
     );
   });
 });
