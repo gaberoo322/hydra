@@ -593,6 +593,336 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
 });
 
 // ---------------------------------------------------------------------------
+// Issue #4304 — the snapshot-before-mutate boundary inside run_completion
+// (architecture-scan finding; the sprawl ratchet #4134 forbids a new file for
+// this subject, so these cases join the existing `reap.py completion` suite).
+//
+// The slot-derived reads run_completion's fire steps depend on (anchor_ref /
+// worktree_branch / duration_ms) used to live inline in the function body,
+// ordered before the slot-nulling mutation only by prose comments ("capture
+// ... BEFORE the slot is nulled", cited against #1591 / #1820 / #3391) — the
+// exact ordering discipline that #2112 and #3785 each broke in production
+// (a read helper correctly PLACED but fed by a field nothing populated in
+// time). The restructure names the boundary so the ordering is a data
+// dependency, not a comment:
+//
+//   _snapshot_completion_slot(s, cls, task_id) -> frozen CompletionSnapshot
+//     — the ONLY reader of s.slots[cls] on the completion path (past the
+//       #3895 task_id-mismatch probe at the top of the guards);
+//   _release_pipeline_slot(s, cls, total_tokens)
+//     — the ONLY mutation of s.slots[cls] (stamp tokens + null).
+//
+// Cases 1-3 unit-test the snapshot builder by importing reap.py as a module:
+//   1. occupied slot → captures anchor/branch/duration and leaves state
+//      byte-identical (a pure read — the builder must never mutate);
+//   2. the returned record is frozen (interpreter-enforced immutability);
+//   3. signal class (no slot) → None/None/0/False and NO branch-recovery
+//      attempt (the #3785 gate: recovery is pipeline-only).
+// Case 4 spies the two boundary functions from inside run_completion:
+//   4. the slot is read exactly once, through the snapshot builder, STRICTLY
+//      before the release mutation — the temporal coupling the comments used
+//      to carry, now asserted by the interpreter.
+// Case 5 is the CLI-level regression net for the restructure:
+//   5. a stamped slot's anchor/branch/duration all survive into the
+//      post-null fire steps (slot_complete line + cycle_record_fired key).
+// ---------------------------------------------------------------------------
+describe("scripts/autopilot/reap.py completion — snapshot-before-mutate boundary (issue #4304)", () => {
+  // Import reap.py as a module (its __main__ guard keeps import side-effect
+  // free) so the boundary functions can be unit-tested in isolation. Env is
+  // pinned the same way runReap pins it — dead API base, isolated
+  // state/log/refl paths, a `true` redis-cli stub (branch recovery + the
+  // cross-run mirror become instant no-ops), and worktree GC off.
+  function runPython(code: string, tmp: { dir: string; state: string; log: string }):
+    { status: number; stdout: string; stderr: string } {
+    const r = spawnSync("python3", ["-c", code], {
+      env: {
+        ...process.env,
+        REAP_PATH: REAP,
+        HYDRA_API_BASE: DEAD_API_BASE,
+        HYDRA_BASE_URL: DEAD_API_BASE,
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_LOG: tmp.log,
+        HYDRA_AUTOPILOT_REFL_DIR: tmp.dir,
+        HYDRA_AUTOPILOT_REDIS_CLI: "true",
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        GH_TOKEN: "invalid-test-token",
+        HYDRA_REAP_WORKTREE_GC: "0",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  function runCompletionSnapshot(
+    args: string[],
+    paths: { state: string; log: string; dir: string },
+  ): { status: number; stdout: string; stderr: string } {
+    const r = spawnSync(REAP, ["completion", ...args], {
+      env: {
+        ...process.env,
+        HYDRA_API_BASE: DEAD_API_BASE,
+        HYDRA_BASE_URL: DEAD_API_BASE,
+        HYDRA_AUTOPILOT_STATE: paths.state,
+        HYDRA_AUTOPILOT_LOG: paths.log,
+        HYDRA_AUTOPILOT_REFL_DIR: paths.dir,
+        HYDRA_AUTOPILOT_REDIS_CLI: "true",
+        HYDRA_AUTOPILOT_REPO: "hydra-test/nonexistent-fixture",
+        GH_TOKEN: "invalid-test-token",
+        HYDRA_REAP_WORKTREE_GC: "0",
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  test("snapshot builder captures an occupied slot's fields and mutates nothing (pure read)", () => {
+    const tmp = makeTempState();
+    try {
+      const r = runPython(`
+import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location("reap_u", os.environ["REAP_PATH"])
+reap = importlib.util.module_from_spec(spec)
+# Register BEFORE exec_module: reap.py uses PEP 563 future annotations,
+# so @dataclass resolves cls.__module__ through sys.modules and an
+# unregistered module makes the decorator blow up with a bare
+# AttributeError on NoneType.
+sys.modules["reap_u"] = reap
+spec.loader.exec_module(reap)
+state = {
+    "limits": {},
+    "slots": {"dev_orch": {
+        "task_id": "task-snap-1",
+        "skill": "hydra-dev",
+        "started_epoch": int(time.time()) - 4,
+        "anchor": "issue-4304",
+        "branch": "worktree-agent-run9-t2-dev_orch",
+    }},
+}
+before = json.dumps(state, sort_keys=True)
+snap = reap._snapshot_completion_slot(state, "dev_orch", "task-snap-1")
+after = json.dumps(state, sort_keys=True)
+print(json.dumps({
+    "pure_read": before == after,
+    "anchor_ref": snap.anchor_ref,
+    "worktree_branch": snap.worktree_branch,
+    "duration_ms": snap.duration_ms,
+    "slot_occupied": snap.slot_occupied,
+}))
+`, tmp);
+      assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.pure_read, true, "snapshot builder must not mutate state");
+      assert.equal(out.anchor_ref, "issue-4304", "slot-stamped anchor must be captured");
+      assert.equal(
+        out.worktree_branch,
+        "worktree-agent-run9-t2-dev_orch",
+        "slot-stamped branch must be captured",
+      );
+      assert.ok(
+        out.duration_ms >= 3900,
+        `duration_ms must be computed from started_epoch (got ${out.duration_ms})`,
+      );
+      assert.equal(out.slot_occupied, true, "occupied slot must report slot_occupied");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the snapshot record is frozen — fire steps cannot smuggle a write through it", () => {
+    const tmp = makeTempState();
+    try {
+      const r = runPython(`
+import dataclasses, importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("reap_u", os.environ["REAP_PATH"])
+reap = importlib.util.module_from_spec(spec)
+# Register BEFORE exec_module: reap.py uses PEP 563 future annotations,
+# so @dataclass resolves cls.__module__ through sys.modules and an
+# unregistered module makes the decorator blow up with a bare
+# AttributeError on NoneType.
+sys.modules["reap_u"] = reap
+spec.loader.exec_module(reap)
+state = {"limits": {}, "slots": {"dev_orch": {"task_id": "task-snap-2"}}}
+snap = reap._snapshot_completion_slot(state, "dev_orch", "task-snap-2")
+try:
+    snap.anchor_ref = "mutated"
+    print(json.dumps({"frozen": False}))
+except dataclasses.FrozenInstanceError:
+    print(json.dumps({"frozen": True}))
+`, tmp);
+      assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+      const out = JSON.parse(r.stdout);
+      assert.equal(
+        out.frozen,
+        true,
+        "CompletionSnapshot must be a frozen dataclass — the boundary's immutability is interpreter-enforced",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("signal class (no slot): snapshot is None/None/0/False and branch recovery is never attempted", () => {
+    const tmp = makeTempState();
+    try {
+      const r = runPython(`
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("reap_u", os.environ["REAP_PATH"])
+reap = importlib.util.module_from_spec(spec)
+# Register BEFORE exec_module: reap.py uses PEP 563 future annotations,
+# so @dataclass resolves cls.__module__ through sys.modules and an
+# unregistered module makes the decorator blow up with a bare
+# AttributeError on NoneType.
+sys.modules["reap_u"] = reap
+spec.loader.exec_module(reap)
+state = {"limits": {}, "slots": {"dev_orch": None}}
+snap = reap._snapshot_completion_slot(state, "sweep_orch", "task-snap-3")
+print(json.dumps({
+    "anchor_ref": snap.anchor_ref,
+    "worktree_branch": snap.worktree_branch,
+    "duration_ms": snap.duration_ms,
+    "slot_occupied": snap.slot_occupied,
+}))
+`, tmp);
+      assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.anchor_ref, null, "no slot + no deposit → anchor None");
+      assert.equal(out.worktree_branch, null, "no slot → branch None");
+      assert.equal(out.duration_ms, 0, "no slot → duration 0");
+      assert.equal(out.slot_occupied, false, "no slot → slot_occupied False");
+      const log = existsSync(tmp.log) ? readFileSync(tmp.log, "utf-8") : "";
+      assert.match(log, /compute_duration_missing_start_stamp/);
+      assert.ok(
+        !log.includes("worktree_branch_recover_skipped"),
+        "branch recovery must NOT run for a signal class (issue #3785 gate)",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("run_completion reads the slot exactly once, via the snapshot builder, strictly before the release mutation", () => {
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state, {
+        slots: {
+          dev_orch: {
+            task_id: "task-snap-4",
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000) - 2,
+            partial_tokens: 0,
+          },
+          qa_orch: null,
+          research_orch: null,
+          dev_target: null,
+          qa_target: null,
+          research_target: null,
+        },
+      });
+      const r = runPython(`
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("reap_u", os.environ["REAP_PATH"])
+reap = importlib.util.module_from_spec(spec)
+# Register BEFORE exec_module: reap.py uses PEP 563 future annotations,
+# so @dataclass resolves cls.__module__ through sys.modules and an
+# unregistered module makes the decorator blow up with a bare
+# AttributeError on NoneType.
+sys.modules["reap_u"] = reap
+spec.loader.exec_module(reap)
+state_path = os.environ["HYDRA_AUTOPILOT_STATE"]
+calls = []
+orig_snapshot = reap._snapshot_completion_slot
+orig_release = reap._release_pipeline_slot
+def spy_snapshot(s, cls, task_id):
+    slot = (s.get("slots") or {}).get(cls)
+    calls.append(["snapshot", json.dumps(slot, sort_keys=True)])
+    return orig_snapshot(s, cls, task_id)
+def spy_release(s, cls, total_tokens):
+    slot = (s.get("slots") or {}).get(cls)
+    calls.append(["release", json.dumps(slot, sort_keys=True)])
+    return orig_release(s, cls, total_tokens)
+reap._snapshot_completion_slot = spy_snapshot
+reap._release_pipeline_slot = spy_release
+rc = reap.run_completion("dev_orch", "task-snap-4", 5000, "hydra-dev")
+order = [c[0] for c in calls]
+first_slot = json.loads(calls[0][1]) if calls and calls[0][0] == "snapshot" else None
+with open(state_path, encoding="utf-8") as fh:
+    final = json.load(fh)
+print("SNAP_RESULT:" + json.dumps({
+    "rc": rc,
+    "order": order,
+    "snapshot_saw_occupied": first_slot is not None,
+    "snapshot_saw_task_id": (first_slot or {}).get("task_id") == "task-snap-4",
+    "final_slot": final["slots"]["dev_orch"],
+    "final_cumulative": final["cumulative_tokens"],
+    "final_reaped": final["reaped_task_ids"],
+}))
+`, tmp);
+      assert.equal(r.status, 0, `python probe failed: ${r.stderr}`);
+      // run_completion prints its own [autopilot] lines to stdout; the
+      // probe prefixes its JSON with a marker so it survives that noise.
+      const out = JSON.parse(r.stdout.split("SNAP_RESULT:").pop()!);
+      assert.equal(out.rc, 0, "run_completion never hard-fails");
+      assert.deepEqual(
+        out.order,
+        ["snapshot", "release"],
+        "the slot must be read through the snapshot builder exactly once, then released",
+      );
+      assert.equal(out.snapshot_saw_occupied, true, "snapshot must see the slot still populated");
+      assert.equal(out.snapshot_saw_task_id, true, "snapshot must see the real occupant");
+      assert.equal(out.final_slot, null, "release must null the slot");
+      assert.equal(out.final_cumulative, 5000, "token accounting unchanged by the restructure");
+      assert.deepEqual(out.final_reaped, ["task-snap-4"], "dedup ledger unchanged");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("CLI: a stamped slot's anchor/branch/duration survive into the post-null fire steps", () => {
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state, {
+        slots: {
+          dev_orch: {
+            task_id: "task-snap-5",
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000) - 3,
+            anchor: "issue-4304",
+            branch: "worktree-agent-run9-t5-dev_orch",
+            partial_tokens: 0,
+          },
+          qa_orch: null,
+          research_orch: null,
+          dev_target: null,
+          qa_target: null,
+          research_target: null,
+        },
+      });
+      const r = runCompletionSnapshot(
+        ["dev_orch", "task-snap-5", "7500", "hydra-dev"],
+        tmp,
+      );
+      assert.equal(r.status, 0, `completion failed: ${r.stderr}`);
+      const log = readFileSync(tmp.log, "utf-8");
+      assert.match(
+        log,
+        /slot_complete class=dev_orch skill=hydra-dev task_id=task-snap-5 tokens=7500 cumulative=7500 duration_ms=[1-9]\d* task_title=issue-4304/,
+        "slot_complete must carry a non-zero duration_ms and the slot-stamped anchor — values only available BEFORE the slot was nulled",
+      );
+      assert.match(
+        log,
+        /cycle_record_fired cycleId=worktree-agent-run9-t5-dev_orch task_id=task-snap-5/,
+        "cycle-record must key on the slot-stamped branch (the #3391/#3785 capture, post-restructure)",
+      );
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.slots.dev_orch, null, "slot released");
+      assert.equal(s.cumulative_tokens, 7500, "tokens accounted");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Issue #2954 — bounded run-end POST retry (`__reap_post_run_end` via the
 // `--reap-post-run-end` dry-run flag).
 //

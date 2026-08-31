@@ -1,0 +1,1 @@
+- refactor: reap.py's completion path now snapshots slot fields (anchor, branch, duration) into a frozen record before clearing the slot, making the read-before-clear ordering a checked data dependency instead of a comment (#4304)

@@ -76,6 +76,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
@@ -2006,6 +2007,122 @@ def run_hardcap() -> int:
     return 0
 
 
+# Issue #4304: the snapshot-before-mutate boundary. Every slot-derived value
+# the completion fire steps consume is read ONCE, through
+# `_snapshot_completion_slot`, into this frozen record — BEFORE
+# `_release_pipeline_slot` nulls the slot. That ordering used to live only in
+# repeated prose comments ("capture ... BEFORE the slot is nulled" — #1591,
+# #1820, #3391) and was broken twice in production (#2112, #3785: a read
+# helper correctly placed but fed by a field nothing populated in time). It
+# is now a data dependency: run_completion's fire steps take this record —
+# never the mutable slot — and nothing between the #3895 mismatch probe and
+# the release reads `s["slots"][cls]` at all.
+@dataclass(frozen=True)
+class CompletionSnapshot:
+    """Immutable copy of every slot-derived field a completion's fire steps need.
+
+    Each field falls back honestly when the slot is absent (a signal class —
+    health/sweep_orch/discover_*, which never occupy a slot) or already
+    cleared (a hard-cap that fired before this completion arrived):
+
+      anchor_ref        per-cycle anchor reference (e.g. "issue-1820"), or
+                        None when neither the slot nor the planning-time
+                        anchor deposit carried one.
+      worktree_branch   the dispatch's synthesised worktree branch
+                        (`worktree-agent-<runToken>-t<N>-<slot>`), or None
+                        for signal classes / sessions whose registry entry
+                        could not be recovered.
+      duration_ms       wall-clock cycle span in ms derived from the slot's
+                        dispatch-start stamp; 0 is the truthful "unknown"
+                        sentinel (no start stamp / unparseable / skew).
+      slot_occupied     whether the completing class held a pipeline slot —
+                        gates the release mutation and lets a fire step
+                        distinguish a pipeline completion from a signal one.
+    """
+
+    anchor_ref: str | None
+    worktree_branch: str | None
+    duration_ms: int
+    slot_occupied: bool
+
+
+def _snapshot_completion_slot(s: dict, cls: str, task_id: str) -> CompletionSnapshot:
+    """Phase 1 of run_completion (issue #4304): read every slot-derived field
+    into an immutable record, BEFORE any slot mutation.
+
+    THE ONLY READER of `s["slots"][cls]` on the completion path (the one
+    other read is run_completion's #3895 task_id-mismatch probe, which touches
+    only the stamped `task_id`). Pure: it never mutates `s` and never writes
+    state — the regression suite pins state byte-identity across a call. Each
+    field's recovery chain, in read order:
+
+    `duration_ms` (issue #1591): computed from the slot's dispatch-start stamp
+    so the cycle-record write carries a non-zero `totalDurationMs` for
+    target/betting cycles (not just orchestrator cycles that got a model-fired
+    auto-merge follow-up). 0 when the slot is absent/cleared or carries no
+    start stamp (`_compute_duration_ms`).
+
+    `anchor_ref` (issues #1820/#2112): the slot's `anchor` field is the only
+    place the per-cycle anchor was ever supposed to survive to reap — but the
+    dispatch harness never stamps it (the live slot carries only task_id/
+    skill/started_epoch/branch) and dev_orch passes no prompt_args anchor
+    (#458), so the slot read is a never-populated-today fallback. The
+    authoritative source is the planning-time anchor deposit the code-writing
+    dispatch leaves (keyed on the same task_id as the reflection-source
+    deposit; `_read_anchor_deposit`) — without it the failure reflection fire
+    below was a permanent no-op, the dead-producer bug #2112 names. None when
+    both miss (signal class / cleared slot / no deposit).
+
+    `worktree_branch` (issues #3391/#3785, superseding #3252): the slot's
+    synthesised branch is THE cycleId the cycle-record write keys on, so the
+    test-count-bearing write and the merge-watch enrichment land on ONE
+    indexed record instead of un-joinable twins. But `slot["branch"]` is a
+    permanent no-op for the same reason as `anchor` (#3785 — the harness's
+    ad hoc slot-occupy edit never stamps it), so an occupied pipeline slot
+    falls through to `_recover_worktree_branch`, which reads the same value
+    back from the subagent-dispatch registry. Deliberately ONLY for an
+    occupied slot (`slot is not None`): a signal-class completion has no slot
+    by design and must keep keying on its task_id (its cycleId IS the
+    task_id) — pinned by test/autopilot-cycle-record-branch-cycleid.test.mts.
+    """
+    slots = s.get("slots") or {}
+    slot = slots.get(cls)
+    duration_ms = _compute_duration_ms(slot)
+    anchor_ref = slot.get("anchor") if isinstance(slot, dict) else None
+    if not anchor_ref:
+        anchor_ref = _read_anchor_deposit(task_id)
+    worktree_branch = slot.get("branch") if isinstance(slot, dict) else None
+    if slot is not None and not worktree_branch:
+        worktree_branch = _recover_worktree_branch(task_id)
+    return CompletionSnapshot(
+        anchor_ref=anchor_ref,
+        worktree_branch=worktree_branch,
+        duration_ms=duration_ms,
+        slot_occupied=slot is not None,
+    )
+
+
+def _release_pipeline_slot(s: dict, cls: str, total_tokens: int) -> None:
+    """Phase boundary of run_completion (issue #4304): release the pipeline slot.
+
+    THE ONLY MUTATION of `s["slots"][cls]` on the completion path — stamps the
+    final token count onto the slot dict (mirroring the pre-#4304 inline
+    write) and nulls it, freeing the class for the next dispatch. Re-fetches
+    the slot defensively: one already cleared (the hard-cap-already-fired /
+    late-arriving-completion case) or absent (signal classes) has nothing to
+    release, and both are tolerated exactly as before the restructure.
+
+    Must run AFTER `_snapshot_completion_slot` — everything the fire steps
+    need has already been copied into the frozen record, which is precisely
+    why this null is safe to perform here. `s["slots"]` only ever contains
+    pipeline keys.
+    """
+    slot = (s.get("slots") or {}).get(cls)
+    if slot is not None:
+        slot["tokens"] = total_tokens
+        s["slots"][cls] = None
+
+
 def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None, last_segment_tokens: int | None = None) -> int:
     """`completion` mode: idempotent token accounting keyed by task_id.
 
@@ -2065,6 +2182,19 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     unrelated fabricated task_id previously cleared the REAL occupant's
     slot, inflated `cumulative_tokens`, and could falsely burn the class.
     Regression-tested in `test/autopilot-reap-task-id-mismatch.test.mts`.
+
+    Issue #4304 structure: the body is two phases around a named boundary.
+    Phase 1 (`_snapshot_completion_slot`) reads every slot-derived field —
+    anchor, worktree branch, duration — ONCE, into a frozen
+    CompletionSnapshot, before any slot mutation. `_release_pipeline_slot`
+    then performs the single slot mutation (stamp `tokens` + null). The
+    ordered fire steps that follow (slot_complete log, cycle-record,
+    token-record, cost-join, reflection-record, the shared dev_orch PR
+    fetch, stall check, needs-qa promotion, worktree GC) all read from the
+    snapshot, never from the mutable slot — the "read X before you clear Y"
+    discipline that the historical comments (#1591/#1820/#3391) enforced in
+    prose is a data dependency the spy test in
+    test/autopilot-dedup-reap.test.mts asserts.
     """
     s = _load_state()
     if s is None:
@@ -2185,59 +2315,26 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     if soft_cap_hit and cls not in s.get("burned_classes", []):
         s.setdefault("burned_classes", []).append(cls)
 
-    # Pipeline-only slot bookkeeping. The slot may already be cleared
-    # (e.g. hard-cap already fired) or absent (signal classes) — both
-    # are tolerated. `s["slots"]` only contains pipeline keys.
-    #
-    # Issue #1591: compute the wall-clock cycle duration from the slot's
-    # dispatch-start stamp BEFORE the slot is nulled, so the cycle-record
-    # write carries a non-zero `totalDurationMs` for target/betting cycles
-    # (not just orchestrator cycles that got a model-fired auto-merge
-    # follow-up). 0 when the slot is absent/cleared or carries no start stamp.
-    slots = s.get("slots") or {}
-    slot = slots.get(cls)
-    duration_ms = _compute_duration_ms(slot)
-    # Issue #1820: recover the anchor reference from the slot BEFORE it is
-    # nulled. The dispatcher stamps `slot["anchor"]` (e.g. "issue-1820") at
-    # dispatch time — it is the only place the per-cycle anchor survives to
-    # reap. Captured here so a failure reflection-record fire below can key on
-    # it (see `_fire_reflection_for_completion`). None when the slot is absent
-    # (signal class / already-cleared) or carries no anchor.
-    #
-    # Issue #2112: the dispatch harness never stamps `slot["anchor"]` (the live
-    # slot carries only task_id/skill/started_epoch/branch) and dev_orch passes
-    # no prompt_args anchor (#458), so `slot.get("anchor")` was always None and
-    # the reflection producer below was a permanent no-op. Recover the anchor
-    # from the planning-time deposit the code-writing dispatch leaves (keyed on
-    # the same task_id as the reflection-source deposit). The deposit is the
-    # authoritative source; the slot field is a (never-populated today) fallback.
-    anchor_ref = slot.get("anchor") if isinstance(slot, dict) else None
-    if not anchor_ref:
-        anchor_ref = _read_anchor_deposit(task_id)
-    # Issue #3391 (superseding #3252): capture the slot's synthesised worktree
-    # branch BEFORE the slot is nulled below. It is now THE cycleId reap's
-    # cycle-record write is keyed on (see `_fire_cycle_record`), so the
-    # test-count-bearing write and the merge-watch enrichment land on ONE indexed
-    # record instead of un-joinable twins — `testsAfter` therefore stops recording
-    # 0 on the sampled record. None when the slot is absent (signal class /
-    # cleared): those keep keying on task_id (their cycleId IS the task_id).
-    worktree_branch = slot.get("branch") if isinstance(slot, dict) else None
-    # Issue #3785: `slot.get("branch")` above is a permanent no-op — the live
-    # slot dict the harness writes at dispatch time never actually carries a
-    # `branch` field (same gap #2112 already documented for `slot["anchor"]`
-    # just above), so EVERY pipeline dispatch fell through to the unparseable
-    # bare task_id, defeating the #3391 fix it was meant to feed. Recover the
-    # branch from the subagent-dispatch registry instead (see
-    # `_recover_worktree_branch`'s docstring) — but ONLY for an occupied
-    # pipeline slot (`slot is not None`); a signal-class completion
-    # (grill/sweep/discover/...) has no slot by design and must keep keying on
-    # its task_id unchanged (`test/autopilot-cycle-record-branch-cycleid.test.mts`
-    # pins that invariant).
-    if slot is not None and not worktree_branch:
-        worktree_branch = _recover_worktree_branch(task_id)
-    if slot is not None:
-        slot["tokens"] = total_tokens
-        s["slots"][cls] = None  # release the pipeline slot
+    # ------------------------------------------------------------------
+    # Phase 1 — SNAPSHOT (issue #4304). Every slot-derived field the fire
+    # steps below consume is read ONCE, here, into an immutable record —
+    # strictly BEFORE `_release_pipeline_slot` nulls the slot. The per-field
+    # recovery chains (#1591 duration, #1820/#2112 anchor, #3391/#3785
+    # branch) live in `_snapshot_completion_slot`'s docstring now; what this
+    # call site enforces is the ORDER, as a data dependency rather than the
+    # prose comments this block replaces.
+    # ------------------------------------------------------------------
+    snap = _snapshot_completion_slot(s, cls, task_id)
+
+    # ------------------------------------------------------------------
+    # Phase boundary — release the slot. The snapshot already holds every
+    # value this null would destroy, so every fire step below keys on `snap`
+    # instead of reaching back into `s["slots"]`. The slot may already be
+    # cleared (e.g. hard-cap already fired) or absent (signal classes) —
+    # `_release_pipeline_slot` tolerates both.
+    # ------------------------------------------------------------------
+    if snap.slot_occupied:
+        _release_pipeline_slot(s, cls, total_tokens)
 
     _save_state(s)
 
@@ -2310,7 +2407,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
             )):
         warn_msg = (
             f"refl_deposit_broken skill={skill} task_id={task_id} "
-            f"anchor={anchor_ref or ''} presence={reflection_presence} — the "
+            f"anchor={snap.anchor_ref or ''} presence={reflection_presence} — the "
             f"deposit recipe ran but the reflection-source file is unkeyable, "
             f"unreadable, or blank; check for refl-deposit-no-task-id / "
             f"refl-deposit-write-failed in the child's stderr "
@@ -2329,7 +2426,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "
         f"tokens={total_tokens} cumulative={s['cumulative_tokens']} "
-        f"duration_ms={duration_ms} task_title={anchor_ref or ''} "
+        f"duration_ms={snap.duration_ms} task_title={snap.anchor_ref or ''} "
         f"refl_sources={reflection_sources or ''} "
         f"refl_presence={reflection_presence} status={status}{last_seg_field}"
     )
@@ -2357,11 +2454,11 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
         status,
         total_tokens,
         reflection_sources,
-        duration_ms,
-        task_title=anchor_ref or "",
-        anchor_ref=anchor_ref or "",
+        snap.duration_ms,
+        task_title=snap.anchor_ref or "",
+        anchor_ref=snap.anchor_ref or "",
         grounding_tests=grounding_tests,
-        worktree_branch=worktree_branch or "",
+        worktree_branch=snap.worktree_branch or "",
         escalation=escalation or "",
     )
 
@@ -2374,22 +2471,24 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # runs after the `reaped_task_ids` dup-guard so the underlying hincrby fires
     # exactly once per task_id.
     #
-    # Issue #3187: forward the synthesised worktree branch (captured above before
-    # the slot was nulled) so the record ALSO lands under the branch-keyed id the
+    # Issue #3187: forward the synthesised worktree branch (snapshotted in
+    # phase 1, before the slot was released) so the record ALSO lands under
+    # the branch-keyed id the
     # #2964 trend join reads by — closing the ~56% tokenCost coverage gap for
     # pipeline classes whose metrics record is branch-keyed, not task_id-keyed.
-    _fire_token_record(task_id, skill, total_tokens, worktree_branch=worktree_branch)
+    _fire_token_record(task_id, skill, total_tokens, worktree_branch=snap.worktree_branch)
 
     # Issue #4126 (ADR-0032 epic #4123 slice gamma): fire the dispatch -> issue
     # cost-join record — the join key the A/B primary endpoint needs to
     # produce a number. Uses `cls` (the raw Dispatch-Class Taxonomy name, e.g.
     # `dev_orch`/`qa_orch`/`sweep_orch`), not `skill`, as the join's class
-    # field — `anchor_ref` was already recovered above (issue #2112 recovery,
-    # before any slot mutation) so it survives regardless of class. `skill` IS
-    # additionally forwarded (INV-2) — same variable already passed to
-    # `_fire_token_record` above — so the orchestrator route can split the
-    # dispatch's raw tokens across model families using THAT skill's 7-day mix.
-    _post_dispatch_cost_join(anchor_ref, cls, total_tokens, skill=skill)
+    # field — `snap.anchor_ref` was already recovered in the phase-1 snapshot
+    # (issue #2112 recovery, before any slot mutation) so it survives
+    # regardless of class. `skill` IS additionally forwarded (INV-2) — same
+    # variable already passed to `_fire_token_record` above — so the
+    # orchestrator route can split the dispatch's raw tokens across model
+    # families using THAT skill's 7-day mix.
+    _post_dispatch_cost_join(snap.anchor_ref, cls, total_tokens, skill=skill)
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live
@@ -2401,7 +2500,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # attempt on this anchor reads why the prior one failed (the #193 retry-
     # correctness invariant). Fully best-effort — see the helper.
     _fire_reflection_for_completion(
-        s, anchor_ref, task_id, soft_cap_hit, task_title=skill
+        s, snap.anchor_ref, task_id, soft_cap_hit, task_title=skill
     )
 
     # Issue #3866 / #4045 (INV-5, PR #4090 design-concept reconciliation):
@@ -2416,15 +2515,16 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # fire above so a `gh` hiccup here can never affect the accounting/
     # reflection writes that already landed.
     dev_orch_pr_list_json: str | None = None
-    if cls == "dev_orch" and anchor_ref:
-        dev_orch_pr_list_json = _fetch_dev_orch_pr_list_json(anchor_ref)
+    if cls == "dev_orch" and snap.anchor_ref:
+        dev_orch_pr_list_json = _fetch_dev_orch_pr_list_json(snap.anchor_ref)
 
     # Issue #3866: a dev_orch completion that opened no PR is a STALL, not a
     # finished cycle — relabel the anchor away from ready-for-agent (so it
     # can never re-surface for a from-scratch redo) and queue it for a
     # pinned resume dispatch. Fully best-effort/non-fatal.
     _handle_dev_orch_stall(
-        s, cls, skill, anchor_ref, task_id, worktree_branch, dev_orch_pr_list_json
+        s, cls, skill, snap.anchor_ref, task_id, snap.worktree_branch,
+        dev_orch_pr_list_json
     )
 
     # Issue #4045: the flip side of the stall check above — a dev_orch
@@ -2433,7 +2533,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # than leaving that transition to a human/agent remembering to do it.
     # Independent best-effort step (shares the fetch above, not the outcome);
     # a `gh` hiccup here can never affect the stall check or accounting.
-    _handle_dev_orch_needs_qa_promotion(cls, anchor_ref, dev_orch_pr_list_json)
+    _handle_dev_orch_needs_qa_promotion(cls, snap.anchor_ref, dev_orch_pr_list_json)
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
     # reap time rather than waiting for the daily timer. Best-effort, fully
