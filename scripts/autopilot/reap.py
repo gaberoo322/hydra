@@ -101,6 +101,16 @@ DEV_RESUME_PENDING_CAP = 20
 # for this issue) — reap never attempts to create it, only to apply it.
 DEV_RESUME_LABEL = "needs-dev-resume"
 
+# Issue #4195: the Target repo's GitHub coordinate, for the dev_target no-PR
+# stall backstop (`_handle_dev_target_stall`). Reuses collect-state.sh's
+# existing env-var name (HYDRA_TARGET_GITHUB_REPO, ~line 285) rather than
+# inventing a new one, so one override retargets both readers. Every gh call
+# the dev_target stall check makes targets THIS repo — the anchor a
+# dev_target dispatch works (e.g. "issue-864") is a hydra-betting board
+# issue, and relabelling that number against the orch REPO would mutate an
+# unrelated orchestrator issue that happens to share the number.
+TARGET_REPO = os.environ.get("HYDRA_TARGET_GITHUB_REPO", "gaberoo322/hydra-betting")
+
 # Issue #2715 — Redis mirror of the cross-run cooldown subset.
 #
 # /tmp/hydra-autopilot-state.json is boot-wiped, so `signal_last_fired` /
@@ -352,21 +362,22 @@ def _pr_refs_closing_issues(pr_list_json: str) -> set[int]:
     return _load_pr_refs_module().closing_issues(pr_list_json)
 
 
-def _fetch_dev_orch_pr_list_json(anchor_ref: str) -> str | None:
-    """Fetch the OPEN PR list ONCE, shared by both the #3866 stall check
-    (`_dev_orch_pr_exists_for_anchor`) and the #4045 closing-PR check
-    (`_dev_orch_pr_closes_anchor`) — closes the INV-5 design-concept gap
-    (PR #4090): the two checks used to each shell out their own `gh pr
-    list --json headRefName,body --limit 200`, doubling the `gh` call
-    volume per qualifying dev_orch completion. `run_completion` now calls
-    this ONCE (guarded on `cls == "dev_orch" and anchor_ref`) and threads
-    the raw JSON into both handlers.
+def _fetch_pr_list_json(repo: str, anchor_ref: str) -> str | None:
+    """Fetch a repo's OPEN PR list for an issue-shaped anchor (issues #3866,
+    #4045, #4195).
+
+    Shared fetch body, parameterised on the repo: `_fetch_dev_orch_pr_list_json`
+    calls it with the orch REPO (issue #4045 INV-5 — the #3866 stall check and
+    the #4045 closing-PR check share ONE `gh pr list` per qualifying dev_orch
+    completion instead of each shelling out their own), and the #4195
+    dev_target stall check calls it with TARGET_REPO. Closes the INV-5
+    design-concept gap (PR #4090) that first motivated the shared-call shape.
 
     Requests `closingIssuesReferences` in addition to `headRefName,body` —
-    unused by either predicate today (both parse `body` via regex), but
-    matches the approved design-concept artifact's literal field list for
-    "the one shared call" and leaves room for a future GitHub-computed
-    closing check without a second field-shape migration.
+    unused by any predicate today (they parse `body` via regex), but matches
+    the approved design-concept artifact's literal field list for "the one
+    shared call" and leaves room for a future GitHub-computed closing check
+    without a second field-shape migration.
 
     Returns:
       Raw `gh pr list` stdout (JSON text) on success.
@@ -375,9 +386,10 @@ def _fetch_dev_orch_pr_list_json(anchor_ref: str) -> str | None:
              "unknown" and take no action — never fabricate an empty list.
              Fail-open, matching every other best-effort `gh`/network call
              in this module (e.g. `_recover_tokens_from_transcript`). Because
-             both checks now share this one fetch, a single failure here
-             fails BOTH open — the same net effect as the old two-independent-
-             calls shape, where each `gh` hiccup independently failed open.
+             each handler's checks share this one fetch, a single failure
+             here fails them open — the same net effect as the old
+             independent-calls shape, where each `gh` hiccup independently
+             failed open.
     """
     m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
     if not m:
@@ -385,7 +397,7 @@ def _fetch_dev_orch_pr_list_json(anchor_ref: str) -> str | None:
     try:
         proc = subprocess.run(
             _gh_argv(
-                "pr", "list", "--repo", REPO, "--state", "open",
+                "pr", "list", "--repo", repo, "--state", "open",
                 "--json", "headRefName,body,closingIssuesReferences", "--limit", "200",
             ),
             check=False,
@@ -396,19 +408,34 @@ def _fetch_dev_orch_pr_list_json(anchor_ref: str) -> str | None:
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         print(
             f"[autopilot] reap: gh pr list failed for anchor={anchor_ref} "
-            f"({exc}); PR-existence/closing-status unknown, no relabel this reap",
+            f"repo={repo} ({exc}); PR-existence/closing-status unknown, no "
+            "relabel this reap",
             file=sys.stderr,
         )
         return None
     if proc.returncode != 0:
         print(
             f"[autopilot] reap: gh pr list exited {proc.returncode} for "
-            f"anchor={anchor_ref}; PR-existence/closing-status unknown, no "
-            "relabel this reap",
+            f"anchor={anchor_ref} repo={repo}; PR-existence/closing-status "
+            "unknown, no relabel this reap",
             file=sys.stderr,
         )
         return None
     return proc.stdout
+
+
+def _fetch_dev_orch_pr_list_json(anchor_ref: str) -> str | None:
+    """Fetch the orch repo's OPEN PR list ONCE, shared by both the #3866 stall
+    check (`_dev_orch_pr_exists_for_anchor`) and the #4045 closing-PR check
+    (`_dev_orch_pr_closes_anchor`).
+
+    Thin wrapper over the shared `_fetch_pr_list_json(repo, anchor_ref)`
+    (issue #4195 extracted the repo-parameterised body so the dev_target
+    stall check can fetch TARGET_REPO through the identical fail-open
+    contract) called with REPO — dev_orch behaviour is byte-for-byte
+    unchanged. See that function's docstring for the fetch contract.
+    """
+    return _fetch_pr_list_json(REPO, anchor_ref)
 
 
 def _dev_orch_pr_exists_for_anchor(anchor_ref: str, pr_list_json: str | None) -> bool | None:
@@ -450,7 +477,7 @@ def _dev_orch_pr_exists_for_anchor(anchor_ref: str, pr_list_json: str | None) ->
     return issue_num in referenced
 
 
-def _anchor_issue_is_closed(issue_num: str) -> bool | None:
+def _anchor_issue_is_closed(issue_num: str, repo: str = REPO) -> bool | None:
     """Is anchor issue #N currently CLOSED? (issue #4057)
 
     `_handle_dev_orch_stall` treats "dev_orch completed and no open PR
@@ -463,6 +490,11 @@ def _anchor_issue_is_closed(issue_num: str) -> bool | None:
     `_dev_orch_pr_exists_for_anchor`'s shared open-PR-list fetch — no shape
     of PR-list payload can observe a closure that has no PR.
 
+    `repo` (issue #4195) defaults to the orch REPO so every existing caller
+    is byte-for-byte unchanged; `_handle_dev_target_stall` passes TARGET_REPO
+    — a dev_target anchor is a hydra-betting board issue, so the state read
+    must hit the same board the stall relabel would mutate.
+
     Returns:
       True  — `gh issue view` succeeded and the issue's state is CLOSED.
       False — succeeded and the state is OPEN.
@@ -474,7 +506,7 @@ def _anchor_issue_is_closed(issue_num: str) -> bool | None:
     try:
         proc = subprocess.run(
             _gh_argv(
-                "issue", "view", issue_num, "--repo", REPO,
+                "issue", "view", issue_num, "--repo", repo,
                 "--json", "state",
             ),
             check=False,
@@ -844,6 +876,190 @@ def _handle_dev_orch_needs_qa_promotion(
         return
 
     line = f"dev_pr_closes_anchor anchor={anchor_ref} relabelled={relabelled}"
+    print(f"[autopilot] {line}")
+    _append_log(line)
+
+
+def _handle_dev_target_stall(
+    cls: str,
+    anchor_ref: str | None,
+    task_id: str,
+    worktree_branch: str | None,
+    pr_list_json: str | None,
+) -> None:
+    """Detect + release a dev_target completion that opened no PR (issue #4195).
+
+    The Target-side mirror of `_handle_dev_orch_stall` (#3866) — with the
+    differences the issue's own analysis demands rather than a verbatim
+    copy:
+
+      - TARGET_REPO, not REPO. A dev_target anchor ("issue-864") is a
+        hydra-betting board issue; every gh call here targets TARGET_REPO.
+      - closing_issues(), not referenced_issues() (INV of the approved
+        design concept): Target build branches are always
+        `feature/<cycle-id>` (hydra-target-build Step 0.6), so
+        referenced_issues()'s branch-name half can never match a Target PR
+        anyway, and ADR-0031 Decision 5 (as amended by #3700) enforces a
+        `Closes #<ANCHOR_NUM>` body line for every board-picked-issue Target
+        build — the closing verb is both sufficient and the documented,
+        enforced signal.
+      - in-progress -> ready-for-agent, never needs-dev-resume: that label
+        does not exist on gaberoo322/hydra-betting, and Target's
+        board-picker has no per-anchor pin mechanism to feed, so the
+        release lands on the label pair Step 2's picker already reads —
+        freeing the WIP-gate slot (ADR-0031 Decision 4, cap 3) on the very
+        next board read with zero new label taxonomy and zero decide.py
+        wiring.
+      - No resume-pin queue: nothing is appended to
+        state.dev_resume_pending (that queue is drained by the dev_orch
+        selector only) and no state mutation happens here at all.
+
+    Motivating incident (autopilot run b0253320, 2026-08-21): dev_target
+    burned 67k tokens stopping at pre-flight because the WIP cap was
+    3/3-occupied by hydra-betting #864/#840/#836 — all three orphaned
+    claims (no open PR, no branch, no live session). Three orphaned claims
+    don't just lose three issues: nothing can free a slot (no dispatch is
+    actually in flight), so the lane deadlocks at zero throughput
+    indefinitely. The recovery path that eventually released #864 ran only
+    opportunistically, and the deadlock re-formed within hours.
+
+    Like the orch handler, only applies to completions carrying an
+    issue-shaped anchor — non-issue dev_target picks (failing-tests /
+    typecheck / priorities-doc, which carry no GitHub issue number) and
+    every other class skip this by construction. `pr_list_json` is the
+    ALREADY-FETCHED TARGET_REPO `gh pr list` payload (`run_completion`
+    fetches it once, guarded on `cls == "dev_target" and anchor_ref`);
+    unparseable-but-non-None output is validated HERE and fails open —
+    pr-refs.py's predicates deliberately swallow JSON parse errors as an
+    empty set, which would otherwise read as "no closing PR" and risk a
+    false stall on a garbage payload.
+
+    Issue #4057 parity: "no closing PR" alone is not stall evidence — the
+    dispatch may have legitimately CLOSED the anchor itself (observed:
+    hydra-betting #1247, a triage/research cycle whose done-when criterion
+    was bucketing + filing follow-ons, closed directly with no PR by
+    design). Before any mutation the anchor's own state is read via
+    `_anchor_issue_is_closed` (repo=TARGET_REPO); a CLOSED anchor
+    short-circuits with a log line only, an unreadable one fails open.
+
+    Every step is best-effort and non-fatal — a relabel/comment failure
+    logs to stderr and the reap still returns normally, exactly like the
+    other post-accounting side effects in `run_completion`.
+    """
+    if cls != "dev_target" or not anchor_ref:
+        return
+    m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
+    issue_num = m.group(1) if m else None
+    if issue_num is None:
+        return
+    if pr_list_json is None:
+        # The shared fetch could not complete — unknown, never a stall.
+        return
+    try:
+        parsed_prs = json.loads(pr_list_json)
+        if not isinstance(parsed_prs, list):
+            raise ValueError("payload is not a JSON array")
+    except Exception as exc:  # noqa: BLE001 — best-effort, never abort the reap
+        print(
+            f"[autopilot] reap: unparseable TARGET pr list payload for "
+            f"anchor={anchor_ref} ({exc}); PR-closing status unknown, no "
+            "relabel this reap",
+            file=sys.stderr,
+        )
+        return
+    try:
+        closing = _pr_refs_closing_issues(pr_list_json)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never abort the reap
+        print(
+            f"[autopilot] reap: pr-refs closing-parse failed for "
+            f"anchor={anchor_ref} ({exc}); no relabel this reap",
+            file=sys.stderr,
+        )
+        return
+    if int(issue_num) in closing:
+        # An open PR on TARGET_REPO closes the anchor → the dispatch is
+        # legitimately progressing; no action. (Unlike dev_orch there is no
+        # separate needs-qa promotion step for Target — that lane's
+        # advancement is owned by the Target QA flow, not reap.)
+        return
+
+    # Issue #4057 parity, Target-side: disambiguate the stall signal before
+    # mutating. A CLOSED anchor is a terminal outcome (the #1247 shape) —
+    # relabelling it would re-queue finished work into the board-picker.
+    # Unreadable state → no mutation, per the fail-open convention.
+    issue_closed = _anchor_issue_is_closed(issue_num, repo=TARGET_REPO)
+    if issue_closed is None:
+        return
+    if issue_closed:
+        line = (
+            f"dev_target_stall_no_pr_skipped_closed anchor={anchor_ref} "
+            f"task_id={task_id} branch={worktree_branch or ''}"
+        )
+        print(f"[autopilot] {line}")
+        _append_log(line)
+        return
+
+    relabelled = False
+    try:
+        edit = subprocess.run(
+            _gh_argv(
+                "issue", "edit", issue_num, "--repo", TARGET_REPO,
+                "--remove-label", "in-progress",
+                "--add-label", "ready-for-agent",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        relabelled = edit.returncode == 0
+        if not relabelled:
+            print(
+                f"[autopilot] reap: WARN failed to relabel TARGET issue "
+                f"#{issue_num} to ready-for-agent (non-fatal): "
+                f"{edit.stderr.strip()}",
+                file=sys.stderr,
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: WARN gh issue edit failed for TARGET "
+            f"#{issue_num} (non-fatal): {exc}",
+            file=sys.stderr,
+        )
+
+    try:
+        branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
+        subprocess.run(
+            _gh_argv(
+                "issue", "comment", issue_num, "--repo", TARGET_REPO, "--body",
+                "> *Automated reap — dev_target stalled with no PR "
+                "(issue #4195)*\n\n"
+                "The `dev_target` dispatch for this anchor ended its "
+                "session without opening a PR (no open PR on this repo "
+                f"closes this issue).{branch_note}\n\n"
+                "Released `in-progress` → `ready-for-agent` so the WIP "
+                "gate (ADR-0031 Decision 4, cap 3) frees this slot on the "
+                "next board read — orphaned `in-progress` claims "
+                "otherwise deadlock the entire `dev_target` lane. No "
+                "resume queue is kept Target-side (#4195); the next "
+                "dispatch re-picks this issue oldest-first.",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        print(
+            f"[autopilot] reap: WARN gh issue comment failed for TARGET "
+            f"#{issue_num} (non-fatal): {exc}",
+            file=sys.stderr,
+        )
+
+    line = (
+        f"dev_target_stall_no_pr anchor={anchor_ref} task_id={task_id} "
+        f"branch={worktree_branch or ''} relabelled={relabelled}"
+    )
     print(f"[autopilot] {line}")
     _append_log(line)
 
@@ -2434,6 +2650,23 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # Independent best-effort step (shares the fetch above, not the outcome);
     # a `gh` hiccup here can never affect the stall check or accounting.
     _handle_dev_orch_needs_qa_promotion(cls, anchor_ref, dev_orch_pr_list_json)
+
+    # Issue #4195: the dev_target mirror of the #3866 stall backstop. A
+    # dev_target completion that opened no PR leaves its Target-board anchor
+    # labelled in-progress forever — and because hydra-target-build Step 1's
+    # WIP gate refuses to claim work at 3 in-progress issues (ADR-0031
+    # Decision 4), three orphaned claims structurally deadlock the entire
+    # dev_target lane. Fetch the TARGET_REPO open-PR list once here (guarded
+    # on `cls == "dev_target" and anchor_ref`, mirroring the dev_orch block
+    # above) and hand it to the release handler. Independently gated on a
+    # mutually exclusive cls value, so a dev_target completion can never
+    # affect dev_orch accounting and vice versa. Fully best-effort/non-fatal.
+    dev_target_pr_list_json: str | None = None
+    if cls == "dev_target" and anchor_ref:
+        dev_target_pr_list_json = _fetch_pr_list_json(TARGET_REPO, anchor_ref)
+    _handle_dev_target_stall(
+        cls, anchor_ref, task_id, worktree_branch, dev_target_pr_list_json
+    )
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
     # reap time rather than waiting for the daily timer. Best-effort, fully
