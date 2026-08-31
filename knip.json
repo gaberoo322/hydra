@@ -11,11 +11,11 @@
   },
   "workspaces": {
     ".": {
-      "entry": ["src/index.ts", "scripts/**/*.{ts,mts}", "test/**/*.{test,spec}.{ts,mts}"],
+      "entry": ["scripts/**/*.{ts,mts}", "test/**/*.{test,spec}.{ts,mts}"],
       "project": ["src/**/*.ts", "scripts/**/*.{ts,mts}"]
     },
     "dashboard": {
-      "entry": ["src/main.jsx", "vite.config.js", "index.html"],
+      "entry": ["index.html"],
       "project": ["src/**/*.{js,jsx,ts,tsx}"]
     }
   }
