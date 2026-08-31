@@ -21,7 +21,7 @@
   "scripts/autopilot/grill-artifact.sh": 1,
   "scripts/autopilot/hooks/on-subagent-tool-call.sh": 2,
   "scripts/autopilot/pace-gate.sh": 1,
-  "scripts/autopilot/reap.py": 15,
+  "scripts/autopilot/reap.py": 16,
   "scripts/autopilot/recover-stale.sh": 2,
   "scripts/branch-prune.sh": 5,
   "scripts/build-spritesheet.js": 1,
