@@ -766,3 +766,31 @@ describe("scripts/glm/drainer-loop.sh — systemd units mirror the pace-gate sha
     assert.match(timer, /WantedBy=timers\.target/);
   });
 });
+
+describe("scripts/glm/drainer-loop.sh — never produces a dispatch cost-join record, by construction (issue #4126 INV-6)", () => {
+  test("the script never references reap.py or the dispatch-cost-join write path", () => {
+    // Issue #4126's join write (`_post_dispatch_cost_join` in
+    // scripts/autopilot/reap.py, POSTing to /api/usage/dispatch-cost) is
+    // fired ONLY from reap.py's `run_completion` — the SubagentStop hook /
+    // reap.py fallback that owns this write path. The GLM drainer is a
+    // wholly separate lane (ADR-0032): it never sources, execs, or shells out
+    // to reap.py, so a GLM-authored dev_orch run structurally cannot reach
+    // this write path — there is no code path connecting the two scripts.
+    // This is the intended behavior, not a defect: it's exactly what lets a
+    // GLM-arm issue's dev_orch entry read near-zero-Anthropic while its
+    // later qa_orch entry (which DOES run through the normal harness) still
+    // carries real Anthropic cost, satisfying the epic's "GLM issues must
+    // not read as free" acceptance criterion.
+    const source = readFileSync(DRAINER_LOOP, "utf8");
+    assert.doesNotMatch(
+      source,
+      /reap\.py/,
+      "drainer-loop.sh must never reference reap.py — the two lanes stay structurally disjoint",
+    );
+    assert.doesNotMatch(
+      source,
+      /dispatch-cost/,
+      "drainer-loop.sh must never reference the /api/usage/dispatch-cost write path directly either",
+    );
+  });
+});

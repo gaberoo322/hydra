@@ -239,3 +239,28 @@ export {
   getClassCostEfficiency,
 } from "./cost-attribution.ts";
 
+// ---------------------------------------------------------------------------
+// Usage by issue — the dispatch -> issue cost join read surface (issue
+// #4126, ADR-0032 epic #4123 slice gamma)
+// ---------------------------------------------------------------------------
+// The prerequisite for the A/B primary endpoint (#4123): joins the per-
+// dispatch token figure recorded at reap time (`src/redis/cost.ts`'s
+// `DispatchCostJoinRecord`, written via `POST /api/usage/dispatch-cost`)
+// back to the anchor issue it worked on. `projectUsageByIssue` is the pure
+// fold; `getUsageByIssue` composes it with the Redis-seam reads.
+export {
+  projectUsageByIssue,
+  getUsageByIssue,
+} from "./cost-attribution.ts";
+export type { UsageByIssueEntry, UsageByIssueResult } from "./cost-attribution.ts";
+
+// `weightedQuotaTokensEstimate` (issue #4126 INV-2): the quota-weighted
+// dispatch-cost-join figure `POST /api/usage/dispatch-cost` computes at write
+// time. `projectWeightedQuotaTokensEstimate` is the pure fold (unit-testable
+// on fixtures); `getWeightedQuotaTokensEstimate` composes it with the
+// already-memoized `getUsage()` snapshot + calibrated env weights.
+export {
+  projectWeightedQuotaTokensEstimate,
+  getWeightedQuotaTokensEstimate,
+} from "./cost-attribution.ts";
+

@@ -42,6 +42,15 @@ import type { TokenBreakdown, ModelFamily } from "./token-math.ts";
 // The residual `INTERACTIVE_SKILL` constant (issue #2402) lives in the pure
 // token-breakdown leaf; the `interactive` cost class below maps it.
 import { INTERACTIVE_SKILL } from "./token-breakdown.ts";
+// Dispatch -> issue cost-join ledger (issue #4126, ADR-0032 epic #4123 slice
+// gamma): the Redis-seam accessors this module composes into the by-issue
+// read surface. One-way import — `src/redis/cost.ts` imports nothing back.
+import {
+  listDispatchCostJoinIssues,
+  getDispatchCostJoinForIssue,
+  getUnattributedDispatchCostJoin,
+} from "../redis/cost.ts";
+import type { DispatchCostJoinRecord } from "../redis/cost.ts";
 
 /**
  * The dispatch-class buckets used for per-class cost attribution. This is the
@@ -653,4 +662,204 @@ export async function getClassCostEfficiency(
 ): Promise<ClassCostEfficiencyResult> {
   const costByClass = await getRollingCostByClass(now, opts);
   return projectClassCostEfficiency(costByClass, mergedPrCount);
+}
+
+// ---------------------------------------------------------------------------
+// Usage-by-issue — the dispatch -> issue cost join read surface (issue #4126,
+// ADR-0032 epic #4123 slice gamma)
+// ---------------------------------------------------------------------------
+
+/** One issue's rolled-up dispatch-cost-join ledger. */
+export interface UsageByIssueEntry {
+  issue: number;
+  /** Sum of `dispatchTokensEstimate` across every recorded dispatch for this issue. */
+  totalDispatchTokensEstimate: number;
+  /** Number of recorded dispatches (any class) attributed to this issue. */
+  dispatchCount: number;
+  /** Per-class token subtotal, keyed by the raw dispatch-class name. */
+  byClass: Record<string, number>;
+  /** The raw records this entry was folded from, newest-first. */
+  records: DispatchCostJoinRecord[];
+}
+
+/**
+ * `GET /api/usage/by-issue`'s response shape. Always carries the residual —
+ * issue #4126's acceptance criterion that an unattributable dispatch is
+ * reported as an explicit residual, never dropped — and `attributedPercent`
+ * alongside it, mirroring the existing `attributedPercent` convention
+ * `UsageSnapshot` already established for skill-level attribution (~90%
+ * there; this is the SAME honesty contract at issue granularity).
+ */
+export interface UsageByIssueResult {
+  /** Every attributed issue's rollup (or just the one queried, if filtered),
+   *  sorted by `totalDispatchTokensEstimate` descending. */
+  byIssue: UsageByIssueEntry[];
+  /** Sum of every attributed issue's `totalDispatchTokensEstimate`. */
+  totalAttributedTokensEstimate: number;
+  /** Sum of the unattributable residual ledger's `dispatchTokensEstimate`. */
+  residualTokensEstimate: number;
+  /** Count of unattributable records — never silently dropped (issue #4126). */
+  residualDispatchCount: number;
+  /** `100 * attributed / (attributed + residual)`, rounded to 2dp; 0 when
+   *  both are 0 (nothing recorded yet). */
+  attributedPercent: number;
+  /** ISO8601 timestamp this view was assembled. */
+  generatedAt: string;
+}
+
+/**
+ * Pure fold: turn a per-issue set of raw ledger reads plus the global
+ * unattributed residual into the {@link UsageByIssueResult} shape. Redis-free
+ * (ADR-0014 pure-core seam) so the fold is unit-testable on fixtures without
+ * a live Redis — mirrors `projectCostByClass` / `projectClassCostEfficiency`'s
+ * split from their Redis-reading `get*` coordinators above.
+ */
+export function projectUsageByIssue(
+  perIssue: Array<{ issue: number; records: DispatchCostJoinRecord[] }>,
+  unattributed: DispatchCostJoinRecord[],
+  now: () => string = () => new Date().toISOString(),
+): UsageByIssueResult {
+  const byIssue: UsageByIssueEntry[] = [];
+  let totalAttributed = 0;
+
+  for (const { issue, records } of perIssue) {
+    const byClass: Record<string, number> = {};
+    let issueTotal = 0;
+    for (const rec of records) {
+      const n =
+        Number.isFinite(rec.dispatchTokensEstimate) && rec.dispatchTokensEstimate > 0
+          ? rec.dispatchTokensEstimate
+          : 0;
+      byClass[rec.class] = (byClass[rec.class] || 0) + n;
+      issueTotal += n;
+    }
+    byIssue.push({
+      issue,
+      totalDispatchTokensEstimate: issueTotal,
+      dispatchCount: records.length,
+      byClass,
+      records,
+    });
+    totalAttributed += issueTotal;
+  }
+  byIssue.sort((a, b) => b.totalDispatchTokensEstimate - a.totalDispatchTokensEstimate);
+
+  let residual = 0;
+  for (const rec of unattributed) {
+    residual +=
+      Number.isFinite(rec.dispatchTokensEstimate) && rec.dispatchTokensEstimate > 0
+        ? rec.dispatchTokensEstimate
+        : 0;
+  }
+
+  const denom = totalAttributed + residual;
+  const attributedPercent = denom > 0 ? Math.round((totalAttributed / denom) * 10000) / 100 : 0;
+
+  return {
+    byIssue,
+    totalAttributedTokensEstimate: totalAttributed,
+    residualTokensEstimate: residual,
+    residualDispatchCount: unattributed.length,
+    attributedPercent,
+    generatedAt: now(),
+  };
+}
+
+/**
+ * Read the dispatch -> issue cost-join view (issue #4126). No `issueFilter`
+ * reads every issue in the index; a supplied `issueFilter` narrows `byIssue`
+ * to that one issue while the residual / `attributedPercent` figures still
+ * fold over the WHOLE ledger (see this file's `UsageByIssueQuerySchema`
+ * consumer in `src/api/usage.ts` for why: a GLM-arm issue's residual
+ * visibility must not depend on which issue the caller happened to query).
+ */
+export async function getUsageByIssue(issueFilter?: number): Promise<UsageByIssueResult> {
+  const unattributed = await getUnattributedDispatchCostJoin();
+  if (issueFilter) {
+    const records = await getDispatchCostJoinForIssue(issueFilter);
+    return projectUsageByIssue([{ issue: issueFilter, records }], unattributed);
+  }
+  const issues = await listDispatchCostJoinIssues();
+  const perIssue = await Promise.all(
+    issues.map(async (issue) => ({ issue, records: await getDispatchCostJoinForIssue(issue) })),
+  );
+  return projectUsageByIssue(perIssue, unattributed);
+}
+
+// ---------------------------------------------------------------------------
+// weightedQuotaTokensEstimate — the quota-weighted dispatch-cost-join figure
+// (issue #4126 INV-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure fold: split one dispatch's raw `dispatchTokensEstimate` across model
+ * families using a skill's per-family 7-day token mix, then apply the
+ * calibrated per-family Quota-Weight — the SAME `familyWeight` fold
+ * {@link projectCostByClassFromTranscript}'s `entry.quotaWeight` uses, just
+ * applied to a single dispatch's raw total instead of a class's already-real
+ * per-family split (a dispatch has no per-family breakdown of its own — reap's
+ * hook-floor `total_tokens` is a scalar — so this fold estimates one by
+ * assuming the dispatch's tokens land across families in the SAME proportion
+ * as the skill's recent history).
+ *
+ * Degrades to `dispatchTokensEstimate` unchanged (identity, implicit weight
+ * 1.0) when either guard fails: `quotaWeightCalibrated` is false (the env
+ * weights are not all positive), or `familyTotals` has no tokens yet (a cold
+ * skill with no 7-day history to split by) — never fabricates a family split
+ * from data that isn't there.
+ *
+ * Pure + total: no Redis, no env read, no `Date.now()` — mirrors this file's
+ * other `project*` folds (ADR-0014).
+ */
+export function projectWeightedQuotaTokensEstimate(
+  dispatchTokensEstimate: number,
+  familyTotals: Record<ModelFamily, TokenBreakdown> | undefined,
+  weights: { opus: number; sonnet: number; haiku: number },
+  quotaWeightCalibrated: boolean,
+): number {
+  const raw =
+    Number.isFinite(dispatchTokensEstimate) && dispatchTokensEstimate > 0 ? dispatchTokensEstimate : 0;
+  if (raw === 0 || !quotaWeightCalibrated || !familyTotals) return raw;
+
+  const skillTotal = MODEL_FAMILIES.reduce((sum, f) => sum + (familyTotals[f]?.total ?? 0), 0);
+  if (skillTotal <= 0) return raw;
+
+  const weighted = MODEL_FAMILIES.reduce((sum, f) => {
+    const familyTokens = familyTotals[f]?.total ?? 0;
+    const fraction = familyTokens / skillTotal;
+    return sum + raw * fraction * familyWeight(f, weights);
+  }, 0);
+  return Math.round(weighted);
+}
+
+/**
+ * Composer: reads the ALREADY-MEMOIZED `getUsage()` snapshot (the 60s
+ * in-process cache the autopilot tick and dashboard share — no new
+ * filesystem walk per dispatch-cost POST) and the calibrated env weights,
+ * then folds them with {@link projectWeightedQuotaTokensEstimate}. `skill`
+ * `null`/absent (reap could not resolve one) skips straight to the raw
+ * identity — same degrade posture as an unknown skill.
+ */
+export async function getWeightedQuotaTokensEstimate(
+  dispatchTokensEstimate: number,
+  skill: string | null,
+): Promise<{ weightedQuotaTokensEstimate: number; quotaWeightCalibrated: boolean }> {
+  const weights = {
+    opus: getQuotaWeightOpus(),
+    sonnet: getQuotaWeightSonnet(),
+    haiku: getQuotaWeightHaiku(),
+  };
+  const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
+  if (!skill) {
+    return { weightedQuotaTokensEstimate: dispatchTokensEstimate, quotaWeightCalibrated };
+  }
+  const snapshot = await getUsage();
+  const familyTotals = snapshot.bySkillByModel[skill];
+  const weightedQuotaTokensEstimate = projectWeightedQuotaTokensEstimate(
+    dispatchTokensEstimate,
+    familyTotals,
+    weights,
+    quotaWeightCalibrated,
+  );
+  return { weightedQuotaTokensEstimate, quotaWeightCalibrated };
 }
