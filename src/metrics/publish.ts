@@ -170,7 +170,7 @@ export interface PublishBrierResult {
 }
 
 /** One per-league sibling file the Brier producer wrote (or attempted). */
-export interface PublishBrierLeagueResult {
+interface PublishBrierLeagueResult {
   /** League segment of the `bySourceLeague` key, verbatim (first spelling seen). */
   league: string;
   /** Dash-separated lowercase slug used in the sibling file name. */
