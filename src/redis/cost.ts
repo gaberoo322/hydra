@@ -1,7 +1,7 @@
 /**
  * Cost & spend Redis seam — ADR-0009 closure follow-up.
  *
- * Owns three surfaces:
+ * Owns three surfaces (issue #4126: dispatch-cost-join is surface 3, below):
  *
  *   1. Subagent token spend surrogate (issue #394). Counters that the
  *      autopilot reap path writes via `recordSubagentTokens()` and that
