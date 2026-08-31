@@ -254,3 +254,13 @@ export {
 } from "./cost-attribution.ts";
 export type { UsageByIssueEntry, UsageByIssueResult } from "./cost-attribution.ts";
 
+// `weightedQuotaTokensEstimate` (issue #4126 INV-2): the quota-weighted
+// dispatch-cost-join figure `POST /api/usage/dispatch-cost` computes at write
+// time. `projectWeightedQuotaTokensEstimate` is the pure fold (unit-testable
+// on fixtures); `getWeightedQuotaTokensEstimate` composes it with the
+// already-memoized `getUsage()` snapshot + calibrated env weights.
+export {
+  projectWeightedQuotaTokensEstimate,
+  getWeightedQuotaTokensEstimate,
+} from "./cost-attribution.ts";
+

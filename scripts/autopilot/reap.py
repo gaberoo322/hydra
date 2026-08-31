@@ -1754,7 +1754,7 @@ def _parse_anchor_issue_number(anchor_ref: str | None) -> int | None:
         return None
 
 
-def _post_dispatch_cost_join(anchor_ref: str | None, cls: str, total_tokens: int) -> None:
+def _post_dispatch_cost_join(anchor_ref: str | None, cls: str, total_tokens: int, skill: str | None = None) -> None:
     """POST one dispatch -> issue cost-join row (issue #4126, ADR-0032 epic
     #4123 slice gamma — the prerequisite for the A/B primary endpoint).
 
@@ -1782,10 +1782,20 @@ def _post_dispatch_cost_join(anchor_ref: str | None, cls: str, total_tokens: int
     `DispatchCostJoinRecord` docstring in `src/redis/cost.ts` for the full
     reasoning).
 
+    `skill` (issue #4126 INV-2) is the SAME `bySkillByModel` cross-tab key
+    already passed to `_fire_token_record` at this call site — carried
+    through so the orchestrator route can look up that skill's 7-day
+    per-family mix and derive `weightedQuotaTokensEstimate`. Omitted (None)
+    degrades the derived figure to the raw identity server-side; it never
+    blocks this POST.
+
     Posted ONLY when `total_tokens > 0` — the same "0 == unattributed, never
     a fabricated zero-cost record" posture as `_fire_token_record`.
-    Best-effort: any non-2xx / network error is logged to the run-log and
-    SWALLOWED — cost-join accounting must never block or fail the reap path.
+    Best-effort: this function MUST NOT block or fail reap.py's completion
+    path — any POST failure (network, non-2xx, orchestrator down) is caught
+    below (never raised past this function) and logged to the run-log via
+    `dispatch_cost_join_skipped`, exactly like the existing
+    `_fire_token_record` / `token_record_skipped` contract.
     """
     if total_tokens <= 0:
         return
@@ -1795,6 +1805,7 @@ def _post_dispatch_cost_join(anchor_ref: str | None, cls: str, total_tokens: int
         "class": cls,
         "dispatchKind": "autopilot-dispatched",
         "dispatchTokensEstimate": int(total_tokens),
+        "skill": skill,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -1807,6 +1818,8 @@ def _post_dispatch_cost_join(anchor_ref: str | None, cls: str, total_tokens: int
         with urllib.request.urlopen(req, timeout=5) as resp:
             resp.read()
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        # Best-effort: caught here and never re-raised, so a dead/unreachable
+        # orchestrator can never fail or block run_completion's caller.
         msg = f"dispatch_cost_join_skipped issue={issue} class={cls} tokens={total_tokens} err={exc}"
         print(f"[autopilot] reap: {msg}", file=sys.stderr)
         _append_log(msg)
@@ -2372,8 +2385,11 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # produce a number. Uses `cls` (the raw Dispatch-Class Taxonomy name, e.g.
     # `dev_orch`/`qa_orch`/`sweep_orch`), not `skill`, as the join's class
     # field — `anchor_ref` was already recovered above (issue #2112 recovery,
-    # before any slot mutation) so it survives regardless of class.
-    _post_dispatch_cost_join(anchor_ref, cls, total_tokens)
+    # before any slot mutation) so it survives regardless of class. `skill` IS
+    # additionally forwarded (INV-2) — same variable already passed to
+    # `_fire_token_record` above — so the orchestrator route can split the
+    # dispatch's raw tokens across model families using THAT skill's 7-day mix.
+    _post_dispatch_cost_join(anchor_ref, cls, total_tokens, skill=skill)
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
     # (self_heal.append_failure → _fire_reflection_record) was dead on the live

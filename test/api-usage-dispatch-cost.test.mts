@@ -122,6 +122,18 @@ describe("POST /api/usage/dispatch-cost + GET /api/usage/by-issue (issue #4126)"
     const stored = JSON.parse(raw[0]);
     assert.equal(stored.dispatchTokensEstimate, 4200);
     assert.ok(typeof stored.reapedAt === "string" && stored.reapedAt.length > 0);
+
+    // Issue #4126 INV-2: no `skill` in the body -> the composer never reaches
+    // for the getUsage() snapshot, so weightedQuotaTokensEstimate degrades to
+    // the raw identity, and skill is stored as the explicit null.
+    assert.equal(stored.skill, null);
+    assert.equal(stored.weightedQuotaTokensEstimate, 4200);
+    assert.equal(typeof stored.quotaWeightCalibrated, "boolean");
+
+    // INV-8: the per-issue list carries a refreshed (bounded, non-permanent)
+    // TTL, not -1 (no expiry).
+    const ttl = await testRedis.ttl("hydra:cost:dispatch-join:by-issue:4126");
+    assert.ok(ttl > 0, `expected a positive TTL, got ${ttl}`);
   });
 
   test("POST with issue:null records unattributed, attributed:false in the response", async () => {

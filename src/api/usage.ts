@@ -19,6 +19,7 @@ import {
   getUsage,
   parseSessionLimitReset,
   getUsageByIssue,
+  getWeightedQuotaTokensEstimate,
 } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import {
@@ -238,11 +239,24 @@ export function createUsageRouter() {
         .json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
     try {
+      const skill = parsed.data.skill ?? null;
+      // Issue #4126 INV-2: split the raw dispatch tokens across model
+      // families using `skill`'s 7-day bySkillByModel mix (from the
+      // already-memoized getUsage() snapshot) and apply the calibrated
+      // per-family Quota-Weight — degrades to the raw identity when
+      // uncalibrated or the skill has no mix yet.
+      const { weightedQuotaTokensEstimate, quotaWeightCalibrated } = await getWeightedQuotaTokensEstimate(
+        parsed.data.dispatchTokensEstimate,
+        skill,
+      );
       const record: DispatchCostJoinRecord = {
         issue: parsed.data.issue,
         class: parsed.data.class,
         dispatchKind: parsed.data.dispatchKind,
         dispatchTokensEstimate: parsed.data.dispatchTokensEstimate,
+        skill,
+        weightedQuotaTokensEstimate,
+        quotaWeightCalibrated,
         reapedAt: new Date().toISOString(),
       };
       const result = await recordDispatchCostJoin(record);

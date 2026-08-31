@@ -140,6 +140,9 @@ export async function incrTokensBatch(input: IncrTokensBatchInput): Promise<Incr
 const DISPATCH_COST_JOIN_PER_ISSUE_MAX = 200;
 /** Max unattributable join records retained (bounded, newest-first). */
 const DISPATCH_COST_JOIN_UNATTRIBUTED_MAX = 500;
+/** TTL (seconds) refreshed on every write — issue #4126 INV-8: this ledger is
+ *  reconstructible accounting data, not a permanent record. */
+const DISPATCH_COST_JOIN_TTL_SECONDS = 60 * 60 * 24 * 30;
 
 /**
  * One durable dispatch -> issue cost-join record. Written once per completed
@@ -160,11 +163,23 @@ const DISPATCH_COST_JOIN_UNATTRIBUTED_MAX = 500;
  * the transcript-scan-recovered replacement for a zero hook floor. That is
  * the dispatch's own session usage, NEVER a time-sliced share of a wider
  * window (the answer to the question: own-session usage, not a slice). It is
- * also NOT model-family Quota-Weighted — that weighting needs the per-family
- * token breakdown the transcript-scan snapshot produces
- * (`UsageSnapshot.bySkillByModel`), which is not available on reap's
- * hook-floor path — so "Estimate" flags that residual imprecision honestly
- * instead of implying a false quota-weighted precision the data doesn't have.
+ * itself NOT model-family Quota-Weighted — see `weightedQuotaTokensEstimate`
+ * below for the derived figure that is.
+ *
+ * `weightedQuotaTokensEstimate` (issue #4126 INV-2) IS the quota-weighted
+ * figure: `POST /api/usage/dispatch-cost` (`src/api/usage.ts`) splits
+ * `dispatchTokensEstimate` across model families using the `skill`'s 7-day
+ * `UsageSnapshot.bySkillByModel` mix (from the already-memoized `getUsage()`
+ * snapshot) via `projectWeightedQuotaTokensEstimate`
+ * (`src/cost/cost-attribution.ts`), then applies the calibrated per-family
+ * Quota-Weight — the SAME `getQuotaWeightOpus/Sonnet/Haiku` +
+ * `familyWeight` machinery `getRollingCostByClass` already uses. When the
+ * skill has no 7-day mix yet (cold start) or the env weights are not all
+ * calibrated, it degrades to `dispatchTokensEstimate` (identity, weight
+ * 1.0) rather than fabricating a split from nothing. `quotaWeightCalibrated`
+ * carries the SAME all-three-env-vars-positive gate `getRollingCostByClass`
+ * computes, so a reader never mistakes an uncalibrated identity pass-through
+ * for a precise per-dispatch measurement.
  *
  * `issue` is `null` for a completion reap could not resolve to an anchor
  * issue (a signal class with no anchor, or a pipeline dispatch whose anchor
@@ -202,6 +217,21 @@ export interface DispatchCostJoinRecord {
   dispatchKind: string;
   /** See docstring above — a bounded estimate, not a quota-weighted figure. */
   dispatchTokensEstimate: number;
+  /** The `bySkillByModel` cross-tab key reap resolved for this dispatch (e.g.
+   *  `hydra-dev`), or `null` when reap did not supply one. Consumed by
+   *  `POST /api/usage/dispatch-cost` to compute `weightedQuotaTokensEstimate`
+   *  — carried on the record too so a later reader can see which skill's mix
+   *  produced it. */
+  skill: string | null;
+  /** See docstring above — the family-split, Quota-Weight-applied estimate.
+   *  Equal to `dispatchTokensEstimate` (identity) when `quotaWeightCalibrated`
+   *  is false or no 7-day mix was available for `skill`. */
+  weightedQuotaTokensEstimate: number;
+  /** True only when all three `HYDRA_QUOTA_WEIGHT_*` env vars are positive —
+   *  the SAME calibration gate `getRollingCostByClass` uses. False means
+   *  `weightedQuotaTokensEstimate` is an uncalibrated identity pass-through,
+   *  not a real per-family weighting. */
+  quotaWeightCalibrated: boolean;
   /** ISO8601 timestamp the recording route stamped (not reap's clock). */
   reapedAt: string;
 }
@@ -254,19 +284,23 @@ export async function recordDispatchCostJoin(
   record: DispatchCostJoinRecord,
 ): Promise<RecordDispatchCostJoinResult> {
   try {
+    const r = getRedisConnection();
     if (record.issue !== null && Number.isInteger(record.issue) && record.issue > 0) {
-      const r = getRedisConnection();
-      await boundedJsonList<DispatchCostJoinRecord>(
-        dispatchCostJoinByIssueKey(record.issue),
-        DISPATCH_COST_JOIN_PER_ISSUE_MAX,
-      ).push(record);
+      const key = dispatchCostJoinByIssueKey(record.issue);
+      await boundedJsonList<DispatchCostJoinRecord>(key, DISPATCH_COST_JOIN_PER_ISSUE_MAX).push(record);
+      // INV-8: refreshed (not one-time) TTL — every write pushes the expiry
+      // forward another 30 days, so an issue with recurring dispatches never
+      // silently expires mid-ledger.
+      await r.expire(key, DISPATCH_COST_JOIN_TTL_SECONDS);
       await r.sadd(dispatchCostJoinIssueIndexKey(), String(record.issue));
       return { ok: true, attributed: true };
     }
-    await boundedJsonList<DispatchCostJoinRecord>(
-      dispatchCostJoinUnattributedKey(),
-      DISPATCH_COST_JOIN_UNATTRIBUTED_MAX,
-    ).push({ ...record, issue: null });
+    const unattributedKey = dispatchCostJoinUnattributedKey();
+    await boundedJsonList<DispatchCostJoinRecord>(unattributedKey, DISPATCH_COST_JOIN_UNATTRIBUTED_MAX).push({
+      ...record,
+      issue: null,
+    });
+    await r.expire(unattributedKey, DISPATCH_COST_JOIN_TTL_SECONDS);
     return { ok: true, attributed: false };
   } catch (err: any) {
     return {

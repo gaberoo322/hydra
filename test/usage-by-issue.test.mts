@@ -43,7 +43,7 @@ const {
   getDispatchCostJoinForIssue,
   getUnattributedDispatchCostJoin,
 } = await import("../src/redis/cost.ts");
-const { projectUsageByIssue, getUsageByIssue } = await import(
+const { projectUsageByIssue, getUsageByIssue, projectWeightedQuotaTokensEstimate } = await import(
   "../src/cost/index.ts"
 );
 
@@ -57,6 +57,93 @@ function record(overrides: Partial<Record<string, unknown>> = {}) {
     ...overrides,
   } as any;
 }
+
+/** A fully-empty per-family TokenBreakdown, for {@link familyTotals} fixtures. */
+function emptyBreakdown() {
+  return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
+}
+
+/** A `Record<ModelFamily, TokenBreakdown>` fixture — every family present, only
+ *  `total` populated (the only field {@link projectWeightedQuotaTokensEstimate}
+ *  reads). */
+function familyTotals(totals: Partial<Record<"opus" | "sonnet" | "haiku" | "unknown", number>>) {
+  return {
+    opus: { ...emptyBreakdown(), total: totals.opus ?? 0 },
+    sonnet: { ...emptyBreakdown(), total: totals.sonnet ?? 0 },
+    haiku: { ...emptyBreakdown(), total: totals.haiku ?? 0 },
+    unknown: { ...emptyBreakdown(), total: totals.unknown ?? 0 },
+  } as any;
+}
+
+const CALIBRATED_WEIGHTS = { opus: 5, sonnet: 1, haiku: 0.2 };
+
+// ---------------------------------------------------------------------------
+// Pure: projectWeightedQuotaTokensEstimate (issue #4126 INV-2)
+// ---------------------------------------------------------------------------
+
+describe("projectWeightedQuotaTokensEstimate", () => {
+  test("uncalibrated env weights: returns the raw identity, never a fabricated split", () => {
+    const n = projectWeightedQuotaTokensEstimate(
+      1000,
+      familyTotals({ opus: 500, sonnet: 500 }),
+      CALIBRATED_WEIGHTS,
+      /* quotaWeightCalibrated */ false,
+    );
+    assert.equal(n, 1000);
+  });
+
+  test("no family mix for the skill (undefined): returns the raw identity", () => {
+    const n = projectWeightedQuotaTokensEstimate(1000, undefined, CALIBRATED_WEIGHTS, true);
+    assert.equal(n, 1000);
+  });
+
+  test("cold skill (all-zero family mix): returns the raw identity, no div-by-zero", () => {
+    const n = projectWeightedQuotaTokensEstimate(1000, familyTotals({}), CALIBRATED_WEIGHTS, true);
+    assert.equal(n, 1000);
+  });
+
+  test("100% one family: raw tokens scaled by exactly that family's Quota-Weight", () => {
+    const n = projectWeightedQuotaTokensEstimate(
+      1000,
+      familyTotals({ opus: 100 }),
+      CALIBRATED_WEIGHTS,
+      true,
+    );
+    assert.equal(n, 5000); // 1000 * 1.0 (100% opus fraction) * 5 (opus weight)
+  });
+
+  test("mixed family split: proportional blend of each family's Quota-Weight", () => {
+    // 80% sonnet (weight 1), 20% haiku (weight 0.2):
+    // 1000 * (0.8*1 + 0.2*0.2) = 1000 * 0.84 = 840
+    const n = projectWeightedQuotaTokensEstimate(
+      1000,
+      familyTotals({ sonnet: 800, haiku: 200 }),
+      CALIBRATED_WEIGHTS,
+      true,
+    );
+    assert.equal(n, 840);
+  });
+
+  test("dispatchTokensEstimate <= 0 short-circuits to 0, never a negative or NaN figure", () => {
+    assert.equal(
+      projectWeightedQuotaTokensEstimate(0, familyTotals({ opus: 100 }), CALIBRATED_WEIGHTS, true),
+      0,
+    );
+    assert.equal(
+      projectWeightedQuotaTokensEstimate(-5, familyTotals({ opus: 100 }), CALIBRATED_WEIGHTS, true),
+      0,
+    );
+    assert.equal(
+      projectWeightedQuotaTokensEstimate(
+        Number.NaN,
+        familyTotals({ opus: 100 }),
+        CALIBRATED_WEIGHTS,
+        true,
+      ),
+      0,
+    );
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Pure: projectUsageByIssue

@@ -22,12 +22,20 @@ import { z } from "zod";
  * `reapedAt` is deliberately NOT accepted from the caller: the route stamps
  * it server-side (`new Date().toISOString()`) so a skewed or stalled reap
  * subprocess clock can never corrupt the ledger's timestamp.
+ *
+ * `skill` (issue #4126 INV-2) is the `bySkillByModel` cross-tab key reap
+ * already resolved for this dispatch (e.g. `hydra-dev`) — the route uses it
+ * to look up that skill's 7-day per-family mix and derive
+ * `weightedQuotaTokensEstimate`. Optional/nullable: an older or non-reap
+ * caller that omits it still gets a valid record, just with the quota-weight
+ * fold degrading to the raw identity (see `getWeightedQuotaTokensEstimate`).
  */
 export const DispatchCostJoinBodySchema = z.object({
   issue: z.number().int().positive().nullable(),
   class: z.string().min(1),
   dispatchKind: z.string().min(1),
   dispatchTokensEstimate: z.number().finite().nonnegative(),
+  skill: z.string().min(1).nullable().optional(),
 });
 export type DispatchCostJoinBody = z.infer<typeof DispatchCostJoinBodySchema>;
 

@@ -785,3 +785,81 @@ export async function getUsageByIssue(issueFilter?: number): Promise<UsageByIssu
   );
   return projectUsageByIssue(perIssue, unattributed);
 }
+
+// ---------------------------------------------------------------------------
+// weightedQuotaTokensEstimate — the quota-weighted dispatch-cost-join figure
+// (issue #4126 INV-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure fold: split one dispatch's raw `dispatchTokensEstimate` across model
+ * families using a skill's per-family 7-day token mix, then apply the
+ * calibrated per-family Quota-Weight — the SAME `familyWeight` fold
+ * {@link projectCostByClassFromTranscript}'s `entry.quotaWeight` uses, just
+ * applied to a single dispatch's raw total instead of a class's already-real
+ * per-family split (a dispatch has no per-family breakdown of its own — reap's
+ * hook-floor `total_tokens` is a scalar — so this fold estimates one by
+ * assuming the dispatch's tokens land across families in the SAME proportion
+ * as the skill's recent history).
+ *
+ * Degrades to `dispatchTokensEstimate` unchanged (identity, implicit weight
+ * 1.0) when either guard fails: `quotaWeightCalibrated` is false (the env
+ * weights are not all positive), or `familyTotals` has no tokens yet (a cold
+ * skill with no 7-day history to split by) — never fabricates a family split
+ * from data that isn't there.
+ *
+ * Pure + total: no Redis, no env read, no `Date.now()` — mirrors this file's
+ * other `project*` folds (ADR-0014).
+ */
+export function projectWeightedQuotaTokensEstimate(
+  dispatchTokensEstimate: number,
+  familyTotals: Record<ModelFamily, TokenBreakdown> | undefined,
+  weights: { opus: number; sonnet: number; haiku: number },
+  quotaWeightCalibrated: boolean,
+): number {
+  const raw =
+    Number.isFinite(dispatchTokensEstimate) && dispatchTokensEstimate > 0 ? dispatchTokensEstimate : 0;
+  if (raw === 0 || !quotaWeightCalibrated || !familyTotals) return raw;
+
+  const skillTotal = MODEL_FAMILIES.reduce((sum, f) => sum + (familyTotals[f]?.total ?? 0), 0);
+  if (skillTotal <= 0) return raw;
+
+  const weighted = MODEL_FAMILIES.reduce((sum, f) => {
+    const familyTokens = familyTotals[f]?.total ?? 0;
+    const fraction = familyTokens / skillTotal;
+    return sum + raw * fraction * familyWeight(f, weights);
+  }, 0);
+  return Math.round(weighted);
+}
+
+/**
+ * Composer: reads the ALREADY-MEMOIZED `getUsage()` snapshot (the 60s
+ * in-process cache the autopilot tick and dashboard share — no new
+ * filesystem walk per dispatch-cost POST) and the calibrated env weights,
+ * then folds them with {@link projectWeightedQuotaTokensEstimate}. `skill`
+ * `null`/absent (reap could not resolve one) skips straight to the raw
+ * identity — same degrade posture as an unknown skill.
+ */
+export async function getWeightedQuotaTokensEstimate(
+  dispatchTokensEstimate: number,
+  skill: string | null,
+): Promise<{ weightedQuotaTokensEstimate: number; quotaWeightCalibrated: boolean }> {
+  const weights = {
+    opus: getQuotaWeightOpus(),
+    sonnet: getQuotaWeightSonnet(),
+    haiku: getQuotaWeightHaiku(),
+  };
+  const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
+  if (!skill) {
+    return { weightedQuotaTokensEstimate: dispatchTokensEstimate, quotaWeightCalibrated };
+  }
+  const snapshot = await getUsage();
+  const familyTotals = snapshot.bySkillByModel[skill];
+  const weightedQuotaTokensEstimate = projectWeightedQuotaTokensEstimate(
+    dispatchTokensEstimate,
+    familyTotals,
+    weights,
+    quotaWeightCalibrated,
+  );
+  return { weightedQuotaTokensEstimate, quotaWeightCalibrated };
+}
