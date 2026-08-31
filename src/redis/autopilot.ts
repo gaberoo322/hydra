@@ -77,7 +77,7 @@ export const GLM_DRAINER_HEARTBEAT_TTL_SECONDS = Math.ceil(
 );
 
 /** Why a liveness read resolved the way it did — machine-readable. */
-export type GlmDrainerLivenessReason =
+type GlmDrainerLivenessReason =
   | "fresh" // parseable heartbeat within the staleness window
   | "absent" // no key present (drainer never wrote, or key expired)
   | "unreadable" // value unparseable, or the Redis read itself threw

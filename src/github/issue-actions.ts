@@ -53,7 +53,7 @@ import {
  * injects a fake that records the argv and returns a canned result WITHOUT
  * spawning a process.
  */
-export type IssueActionTransport = (
+type IssueActionTransport = (
   args: string[],
   opts: GhExecOptions,
 ) => Promise<GhResult<{ stdout: string; stderr: string }>>;
