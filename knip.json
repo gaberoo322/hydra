@@ -9,6 +9,24 @@
     // exports elsewhere, and other issue types in this file, stay reported.
     "src/redis/recommendations.ts": ["exports"]
   },
+  // "Unlisted binaries" knip surfaces for workflow/script references that are
+  // not actually missing dependencies (#4263):
+  // - tsx: downloaded via `npx tsx` in CI workflows and package.json scripts
+  //   (ADR-0005 keeps it off the runtime-dep allowlist by design; npx
+  //   resolves the global/pinned install, so there is nothing to "list").
+  // - process.stdin.on: not a binary at all — knip's script parser
+  //   misidentifies this JS method-chain inside the inline `npx tsx -e
+  //   '...'` one-liner in ci.yml (PR_TIER stdin JSON parsing) as an
+  //   invoked command.
+  // - evals/golden.yaml / evals/hydra-dev.yaml: the `-c <file>` config-file
+  //   argument to `promptfoo eval` in the eval/eval:ts scripts, similarly
+  //   misparsed as a binary rather than a CLI flag value.
+  "ignoreBinaries": [
+    "tsx",
+    "process.stdin.on",
+    "evals/golden.yaml",
+    "evals/hydra-dev.yaml"
+  ],
   "workspaces": {
     ".": {
       "entry": ["scripts/**/*.{ts,mts}", "test/**/*.{test,spec}.{ts,mts}"],
