@@ -13,6 +13,10 @@
 # line to stdout. `hydra-review` (docs/operator-playbooks/hydra-review.md)
 # runs this script and surfaces that line verbatim.
 #
+# Usage: scripts/glm-beachhead-report.sh             # single-line keep/kill/expand readout
+#        scripts/glm-beachhead-report.sh --ab-report # per-arm GLM-vs-Opus A/B endpoints (see
+#                                                    # the --ab-report mode section below)
+#
 # A FAILED gh query aborts the whole report loud — stderr diagnostic quoting
 # gh's own error text, ONE stdout ERROR line, exit 1 — BEFORE any metric
 # renders: a numeric readout built on a masked "[]" is a wrong answer that
@@ -126,6 +130,64 @@
 #                                          window-relative %/day is still near-totally sampling noise)
 #   HYDRA_GLM_BEACHHEAD_NOW_EPOCH        override "now" (unix seconds) for deterministic tests
 #
+# --ab-report mode (issue #4127, ADR-0032 epic #4123 slice delta; approved
+# design-concept artifact on record for issue-4127): additive-only per-arm
+# analysis over the randomized GLM-vs-Opus A/B populated by slice beta
+# (#4125, PR #4281) and joined to cost by slice gamma (#4126, PR #4295). The
+# NO-ARGUMENT invocation above is completely untouched -- this mode is reached
+# ONLY via the explicit `--ab-report` flag, so hydra-review's existing
+# single-line consumer contract stays byte-identical. Hard invariant carried
+# over verbatim: still READ-ONLY (no baseline.json write, no label, no
+# decide.py call), and nothing it prints may auto-flip keep/kill/expand --
+# every figure is advisory prose for the operator to read.
+#
+# Cohort discovery is GitHub-label-based, not a direct Redis read: #4125's
+# assignment log (`getGlmAbAssignment` in src/redis/autopilot.ts) has no
+# enumeration index and no HTTP route, and src/redis/autopilot.ts is out of
+# this issue's file scope (belongs to closed slice beta). glm-eligible /
+# glm-ab-control are applied once by the eligibility sweep and never removed
+# by any chore in this codebase, so current label state is a safe,
+# non-mutating proxy -- mirroring the glm-authored discovery convention this
+# script already uses. Each candidate issue's `labeled` event timestamp (via
+# `gh api repos/OWNER/REPO/issues/N/events`) is then checked against
+# AB_COHORT_START (slice beta's PR #4281 merge instant): a pre-beta
+# glm-eligible label predates the coin flip entirely (100% forced treatment,
+# no randomization), so including it would silently defeat the whole
+# experiment's reason for existing.
+#
+# Missing-input discipline (the issue's "not comparable" reporting rule): a
+# FAILED per-issue fetch is never folded into a figure as a zero. A cost-join
+# fetch that fails (orchestrator unreachable) counts toward the arm's
+# cost-join-missing gap and suppresses the primary endpoint figure -- an
+# unreachable orchestrator silently zeroing every GLM-arm issue would read as
+# maximal quota relief, exactly the "silent drop reads as relief that did not
+# happen" failure the reporting rules forbid. A pr-view fetch that fails
+# counts as merge-outcome unknown and keeps the issue out of every figure --
+# folding it out silently would fabricate a smaller merged-n. Both gap
+# counters print on the arm line. A SUCCESSFUL response with empty content is
+# a different, legitimate outcome (no cost-join records yet; PR closed but
+# unmerged) and shows up in the attributed fraction / cohort-vs-merged n
+# instead -- never suppressed, never a gap.
+#
+# Bounce rate: first Automated-QA verdict FAIL, OR a re-review (>= 2
+# `> *Automated QA` comments on the PR). The issue text's "reframe" half is
+# proxied by that re-review signal because `reframe` is NOT a label on the
+# orchestrator repo (it is a Target-board label, src/target-board-labels.ts)
+# -- on gaberoo322/hydra the observable re-work signal is QA having to look
+# twice.
+#
+# Additional testability hooks for --ab-report mode:
+#   HYDRA_GLM_AB_COHORT_START            default 2026-08-29T19:03:38Z (slice
+#                                         beta's PR #4281 merge instant --
+#                                         labels applied before this predate
+#                                         the randomized coin flip)
+#   HYDRA_GLM_AB_MIN_N                   default 10 (an arm below this many
+#                                         merged issues prints under-powered
+#                                         in place of a primary-endpoint figure)
+#   HYDRA_GLM_AB_POOL_LIMIT              default 300 (gh issue list --limit
+#                                         for each of the two label queries)
+#   HYDRA_GLM_AB_USAGE_BY_ISSUE_URL      default http://localhost:4000/api/usage/by-issue
+#
 # Sourceable for tests (test/glm-beachhead-report.test.mts) without running main.
 
 set -uo pipefail
@@ -157,6 +219,15 @@ WINDOW_PRS="${HYDRA_GLM_BEACHHEAD_WINDOW_PRS:-25}"
 BASELINE_SAMPLE="${HYDRA_GLM_BEACHHEAD_BASELINE_SAMPLE:-20}"
 MIN_DAYS_INTO_WINDOW="${HYDRA_GLM_BEACHHEAD_MIN_DAYS_INTO_WINDOW:-0.5}"
 NOW_EPOCH="${HYDRA_GLM_BEACHHEAD_NOW_EPOCH:-$(date -u +%s)}"
+
+# --ab-report mode config (issue #4127) -- see the file header's dedicated
+# section above for the full rationale of each.
+GLM_LABEL_ELIGIBLE="glm-eligible"
+GLM_LABEL_AB_CONTROL="glm-ab-control"
+AB_COHORT_START="${HYDRA_GLM_AB_COHORT_START:-2026-08-29T19:03:38Z}"
+AB_MIN_N="${HYDRA_GLM_AB_MIN_N:-10}"
+AB_POOL_LIMIT="${HYDRA_GLM_AB_POOL_LIMIT:-300}"
+AB_USAGE_BY_ISSUE_URL="${HYDRA_GLM_AB_USAGE_BY_ISSUE_URL:-http://localhost:4000/api/usage/by-issue}"
 
 log() {
   # STDERR, deliberately — several functions below return a value via stdout
@@ -378,6 +449,144 @@ recommend() {
 }
 
 # ---------------------------------------------------------------------------
+# --ab-report pure helpers (issue #4127, ADR-0032 epic #4123 slice delta)
+# ---------------------------------------------------------------------------
+
+# label_added_at <events_json> <label_name> -> ISO8601 of the FIRST "labeled"
+# event carrying that label name, or "" when never applied. `events_json` is
+# the raw array `gh api repos/OWNER/REPO/issues/N/events` returns. Multiple
+# applications (re-add after a strip) are not expected for glm-eligible /
+# glm-ab-control (grepped: neither label is ever removed by any chore in this
+# codebase) but sort_by + first is the conservative choice regardless.
+label_added_at() {
+  local events="$1" label="$2"
+  jq -r --arg label "$label" \
+    '[.[] | select(.event=="labeled" and .label.name==$label)] | sort_by(.created_at) | .[0].created_at // ""' \
+    <<<"$events" 2>/dev/null
+}
+
+# arm_for_issue <events_json> <cohort_start_epoch> -> treatment|control|""
+# "" means: neither label was ever applied, OR the one that was predates
+# AB_COHORT_START (slice beta's #4281 merge instant) -- a pre-beta
+# glm-eligible label was 100% forced-treatment with no coin flip, and must
+# not be silently folded into the randomized cohort (issue #4127 invariant).
+arm_for_issue() {
+  local events="$1" cohort_start_epoch="$2"
+  local ctrl_at elig_at ctrl_epoch elig_epoch
+  ctrl_at=$(label_added_at "$events" "$GLM_LABEL_AB_CONTROL")
+  elig_at=$(label_added_at "$events" "$GLM_LABEL_ELIGIBLE")
+  ctrl_epoch=$(iso_to_epoch "$ctrl_at")
+  elig_epoch=$(iso_to_epoch "$elig_at")
+  if [[ -n "$ctrl_epoch" ]] && awk -v c="$ctrl_epoch" -v s="$cohort_start_epoch" 'BEGIN{exit !(c>=s)}'; then
+    echo "control"
+    return 0
+  fi
+  if [[ -n "$elig_epoch" ]] && awk -v c="$elig_epoch" -v s="$cohort_start_epoch" 'BEGIN{exit !(c>=s)}'; then
+    echo "treatment"
+    return 0
+  fi
+  echo ""
+}
+
+# elapsed_hours <epoch_then> <epoch_now> -> hours elapsed, 1dp; "" when either
+# epoch is empty/non-numeric or now predates then (never fabricate a negative
+# wall-clock figure). Used for the assignment-to-merge secondary endpoint,
+# where elapsed_days' whole-day granularity would round small/fast dispatches
+# to 0 and hide real variance.
+elapsed_hours() {
+  local then="${1:-}" now="${2:-}"
+  if [[ -z "$then" || -z "$now" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -v t="$then" -v n="$now" 'BEGIN{
+    if (t !~ /^[0-9]+$/ || n !~ /^[0-9]+$/) { print ""; exit }
+    if (n+0 < t+0) { print ""; exit }
+    printf "%.1f", (n-t)/3600
+  }'
+}
+
+# issue_weighted_tokens <usage_by_issue_json> -> "<sum>|<all_calibrated>|<dispatch_count>"
+# Folds `GET /api/usage/by-issue?issue=N`'s `byIssue[0].records[]` client-side
+# (design-concept artifact: the composer in src/cost/cost-attribution.ts only
+# rolls up the RAW totalDispatchTokensEstimate, never the quota-weighted
+# figure #4123/#4127 ask for, and extending it is out of this issue's file
+# scope). `all_calibrated` is "true" only when EVERY contributing record's
+# quotaWeightCalibrated is true (vacuously true for zero records) -- a single
+# uncalibrated record must not silently blend into a falsely-precise figure.
+issue_weighted_tokens() {
+  local json="$1"
+  jq -r '
+    (.byIssue[0]) as $e
+    | if $e == null then "0|true|0" else
+        ([$e.records[]?.weightedQuotaTokensEstimate // 0] | add // 0) as $sum
+        | (([$e.records[]?.quotaWeightCalibrated] | all) ) as $cal
+        | "\($sum)|\($cal)|\($e.dispatchCount // 0)"
+      end
+  ' <<<"$json" 2>/dev/null || echo "0|true|0"
+}
+
+# format_arm_primary <merged_n> <min_n> <weighted_sum> <all_calibrated> \
+#                    [<cost_missing_n>] ->
+# the primary-endpoint figure for one arm, or the reason it cannot be
+# printed. Order matters: zero merged issues -> nothing to measure yet;
+# cost-join input missing for >=1 merged issue -> not comparable (the figure
+# cannot be computed at any n while an input is missing -- validity before
+# power); under the configurable minimum -> under-powered (raw n still
+# visible to the caller separately); uncalibrated Quota-Weight -> not
+# comparable (a per-family split built from an identity pass-through is not
+# the figure #4123 asks for). Never a fabricated number on any of these
+# paths. <cost_missing_n> defaults to 0 so four-arg callers (the pre-#4127
+# helper contract) behave exactly as before.
+format_arm_primary() {
+  local merged_n="$1" min_n="$2" sum="$3" cal="$4" cost_missing="${5:-0}"
+  if [[ "$merged_n" -eq 0 ]]; then
+    echo "no merged issues yet"
+    return 0
+  fi
+  if [[ "$cost_missing" -gt 0 ]]; then
+    echo "not comparable (cost-join input missing for ${cost_missing}/${merged_n} merged issues)"
+    return 0
+  fi
+  if [[ "$merged_n" -lt "$min_n" ]]; then
+    echo "under-powered (n=${merged_n} < ${min_n})"
+    return 0
+  fi
+  if [[ "$cal" != "true" ]]; then
+    echo "not comparable (uncalibrated Quota-Weight)"
+    return 0
+  fi
+  awk -v s="$sum" -v n="$merged_n" 'BEGIN{printf "%.0f weighted-quota tokens/merged-issue (n=%d)", s/n, n}'
+}
+
+# format_rate <numerator> <denominator> -> "<pct>% (<num>/<den>)", or
+# "n/a (0)" when the denominator is 0 (never divide by zero, never fabricate
+# a rate from an empty cohort). Shared by the attributed-fraction and
+# bounce-rate lines -- both are "count over merged n" shapes.
+format_rate() {
+  local num="$1" den="$2"
+  if [[ "$den" -eq 0 ]]; then
+    echo "n/a (0)"
+    return 0
+  fi
+  local pct
+  pct=$(awk -v a="$num" -v m="$den" 'BEGIN{printf "%.0f", (a/m)*100}')
+  echo "${pct}% (${num}/${den})"
+}
+
+# numbers_to_rows_json <n1> <n2> ... -> '[{"number":n1},{"number":n2},...]',
+# or "[]" for zero args. The shape first_pass_pass_rate expects -- lets
+# --ab-report reuse that EXISTING QA-verdict computation unmodified rather
+# than re-implementing any part of it (issue #4127 invariant).
+numbers_to_rows_json() {
+  if [[ $# -eq 0 ]]; then
+    echo "[]"
+    return 0
+  fi
+  printf '%s\n' "$@" | jq -R 'tonumber' | jq -s 'map({number: .})'
+}
+
+# ---------------------------------------------------------------------------
 # Data gathering — gh/curl fetch RAW json only; all filtering/math is jq/awk
 # above/below, never gh's own --jq (keeps every gh call fakeable in tests
 # with a plain JSON-serving stub, mirrors test/autopilot-recover-stale.test.mts).
@@ -545,13 +754,31 @@ churn_avg_from_rows() { # <rows_json> -> avg additions+deletions
   avg "${arr[@]}"
 }
 
+# first_automated_qa_body <pr_view_json> -> the FIRST "> *Automated QA"
+# comment's body (earliest createdAt), or "" when the PR has none. Extracted
+# verbatim from first_pass_verdict_for_pr (issue #4127) so the --ab-report
+# bounce signal parses QA comments through the SAME expression the QA
+# PASS-rate path uses -- one parser, two consumers, no drift between the
+# metric and the bounce signal that reads it.
+first_automated_qa_body() { # <pr_view_json>
+  jq -r \
+    '[.comments[] | select(.body | startswith("> *Automated QA"))] | sort_by(.createdAt) | .[0].body // ""' \
+    <<<"$1" 2>/dev/null
+}
+
+# automated_qa_comment_count <pr_view_json> -> how many "> *Automated QA"
+# comments the PR carries. >= 2 is issue #4127's re-review bounce signal: QA
+# had to look at this PR more than once.
+automated_qa_comment_count() { # <pr_view_json>
+  jq -r '[.comments[] | select(.body | startswith("> *Automated QA"))] | length' \
+    <<<"$1" 2>/dev/null || echo 0
+}
+
 first_pass_verdict_for_pr() { # <pr_number> -> pass|fail|unknown|no-verdict
   local pr="$1"
   local json first_body
   json=$(gh pr view "$pr" --repo "$REPO" --json comments 2>/dev/null || echo '{"comments":[]}')
-  first_body=$(jq -r \
-    '[.comments[] | select(.body | startswith("> *Automated QA"))] | sort_by(.createdAt) | .[0].body // ""' \
-    <<<"$json" 2>/dev/null)
+  first_body=$(first_automated_qa_body "$json")
   if [[ -z "$first_body" ]]; then
     echo "no-verdict"
     return 0
@@ -634,6 +861,100 @@ display() { # <value> -> value, or "n/a" for empty/null
   else
     echo "$v"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# --ab-report data gathering (issue #4127). Same "never gh's own --jq"
+# convention as above: every fetch below returns RAW json for jq/awk to fold
+# afterward, which is what makes the fake-gh-on-PATH test fixtures tractable.
+# ---------------------------------------------------------------------------
+
+# gh_fetch_or_fail <description> <gh args...> -> prints gh's raw stdout on
+# success; on ANY failure (non-zero exit, or exit 0 with empty stdout -- a
+# successful --json query always prints at least []) logs a loud diagnostic
+# quoting gh's own stderr and returns 1. Factored out of fetch_glm_authored_prs's
+# inline trap/err_file dance (issue #4128) so the two NEW population-defining
+# fetches below (glm-eligible / glm-ab-control issue lists) get the SAME
+# fail-loud guarantee without duplicating that logic a third time. Scoped to
+# the two population-breadth fetches only -- the per-issue/per-PR fetches
+# below stay best-effort, mirroring first_pass_verdict_for_pr's existing
+# convention that a single row's fetch failure degrades that row, not the
+# whole report.
+gh_fetch_or_fail() {
+  local desc="$1"; shift
+  local out err_file rc
+  err_file="$(mktemp)" || {
+    log "ERROR mktemp failed (TMPDIR unwritable/full?) -- cannot capture gh stderr for ${desc}"
+    return 1
+  }
+  out="$(gh "$@" 2>"$err_file")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    log "ERROR ${desc} exited ${rc}, gh stderr [$(head -c 300 "$err_file" | tr -s '[:space:]' ' ')]"
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+  if [[ -z "$out" ]]; then
+    log "ERROR ${desc} exited 0 with EMPTY stdout (a successful --json query always prints at least [])"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# fetch_glm_ab_issue_pool -> union JSON of every issue ever carrying
+# glm-eligible OR glm-ab-control (any state), deduped by number. FAIL LOUD
+# (issue #4128 convention): a failed query here would silently zero out one
+# or both arms and render a confident empty report, so this is NOT a
+# best-effort fetch.
+fetch_glm_ab_issue_pool() {
+  local elig ctrl union
+  elig="$(gh_fetch_or_fail "glm-eligible issue-list fetch" issue list --repo "$REPO" \
+    --label "$GLM_LABEL_ELIGIBLE" --state all \
+    --json number,createdAt,closedAt,closedByPullRequestsReferences --limit "$AB_POOL_LIMIT")" || return 1
+  ctrl="$(gh_fetch_or_fail "glm-ab-control issue-list fetch" issue list --repo "$REPO" \
+    --label "$GLM_LABEL_AB_CONTROL" --state all \
+    --json number,createdAt,closedAt,closedByPullRequestsReferences --limit "$AB_POOL_LIMIT")" || return 1
+  union="$(printf '%s\n%s\n' "$elig" "$ctrl" | jq -s '.[0] + .[1] | unique_by(.number)' 2>/dev/null)" || {
+    log "ERROR glm-ab issue-pool union jq failed (malformed/partial gh response)"
+    return 1
+  }
+  printf '%s\n' "$union"
+}
+
+# fetch_issue_events <issue> -> raw JSON array from
+# `gh api repos/OWNER/REPO/issues/N/events` (best-effort: "[]" on any
+# failure, degrading that one issue out of the cohort rather than aborting
+# the whole report -- mirrors first_pass_verdict_for_pr's per-PR convention).
+fetch_issue_events() {
+  local issue="$1"
+  gh api "repos/${REPO}/issues/${issue}/events" 2>/dev/null || echo "[]"
+}
+
+# fetch_pr_view <pr_number> -> raw JSON object (best-effort: "{}" on any
+# failure). Carries mergedAt (the merge-outcome + wall-clock endpoint check),
+# additions/deletions (churn, reusing churn_avg_from_rows unmodified), and
+# comments (fed to the EXISTING first_pass_verdict_for_pr / first_pass_pass_rate
+# path below -- never a second QA-verdict implementation).
+fetch_pr_view() {
+  local pr="$1"
+  gh pr view "$pr" --repo "$REPO" --json number,mergedAt,additions,deletions,comments,headRefName 2>/dev/null || echo "{}"
+}
+
+# fetch_usage_by_issue <issue> -> raw JSON from `GET /api/usage/by-issue?issue=N`
+# on success; NO output and a non-zero exit when the fetch failed. A failed
+# fetch is a MISSING INPUT, not an empty ledger: masking it as "{}" would let
+# an unreachable orchestrator silently contribute a zero-cost issue to an
+# arm's weighted sum -- a fabricated zero on the GLM side is the strongest
+# false keep/expand signal there is ("a silent drop reads as relief that did
+# not happen"). The caller counts it per arm (cost-join missing) and
+# format_arm_primary prints "not comparable" over any figure built on it. A
+# SUCCESSFUL response with an empty byIssue (no cost-join records for this
+# issue yet) is a different, legitimate outcome: it contributes zero tokens
+# but stays visible in the attributed fraction, never suppressed.
+fetch_usage_by_issue() {
+  local issue="$1"
+  curl -fsS --max-time 10 "${AB_USAGE_BY_ISSUE_URL}?issue=${issue}" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -782,6 +1103,200 @@ main() {
     "$rec"
 }
 
+# ---------------------------------------------------------------------------
+# main_ab_report — --ab-report mode (issue #4127)
+# ---------------------------------------------------------------------------
+
+# print_arm_line <label> <pool_n> <merged_n> <weighted_sum> <calibrated> \
+#                <attributed_n> <pass_rate> <pass_n> <fail_n> <churn_avg> \
+#                <wallclock_avg> <bounce_n> <cost_missing_n> <outcome_unknown_n>
+# One arm's full line: cohort n, merged n, the primary endpoint (or its
+# under-powered/not-comparable reason), the cohort-scoped attributed
+# fraction, all four secondary endpoints, and the input-gap counters that
+# keep every missing input VISIBLE instead of silently folded into a figure
+# (see the file header's missing-input discipline note). Never a verdict
+# beyond the primary-endpoint slot -- every other figure is a plain computed
+# value or "n/a", per the existing not-comparable discipline.
+print_arm_line() {
+  local label="$1" pool_n="$2" merged_n="$3" weighted_sum="$4" calibrated="$5" \
+    attributed_n="$6" pass_rate="$7" pass_n="$8" fail_n="$9"
+  shift 9
+  local churn_avg="$1" wallclock_avg="$2" bounce_n="$3" cost_missing="$4" outcome_unknown="$5"
+  local excluded_n=$((merged_n - pass_n - fail_n))
+  printf '  %s: cohort n=%s, merged n=%s | primary: %s | attributed %s | QA PASS-rate %s (%s pass, %s fail, %s excluded no-verdict, of %s merged) | churn avg %s | wall-clock avg %sh | bounce rate %s | input gaps: cost-join missing %s/%s merged, merge-outcome unknown %s\n' \
+    "$label" "$pool_n" "$merged_n" \
+    "$(format_arm_primary "$merged_n" "$AB_MIN_N" "$weighted_sum" "$calibrated" "$cost_missing")" \
+    "$(format_rate "$attributed_n" "$merged_n")" \
+    "$(display "$pass_rate")" "$pass_n" "$fail_n" "$excluded_n" "$merged_n" \
+    "$(display "$churn_avg")" \
+    "$(display "$wallclock_avg")" \
+    "$(format_rate "$bounce_n" "$merged_n")" \
+    "$cost_missing" "$merged_n" "$outcome_unknown"
+}
+
+# main_ab_report — per-arm A/B analysis (issue #4127). READ-ONLY: no
+# baseline.json touch, no label write, no decide.py call, no auto-flip of
+# anything -- every printed figure is advisory prose for the operator, same
+# hard invariant as main()'s recommendation string. Reachable ONLY via the
+# explicit `--ab-report` flag (see the bottom dispatcher) so main()'s
+# no-argument behaviour above stays byte-identical to today.
+main_ab_report() {
+  if ! require_tools; then
+    echo "GLM A/B delta: ERROR required tools (gh/jq/curl/awk) unavailable -- cannot compute report"
+    exit 0
+  fi
+
+  local cohort_start_epoch
+  cohort_start_epoch=$(iso_to_epoch "$AB_COHORT_START")
+
+  local pool
+  pool="$(fetch_glm_ab_issue_pool)" || {
+    echo "GLM A/B delta: ERROR gh query failed -- no report printed (a failed query is not an empty result set; see stderr diagnostic)"
+    exit 1
+  }
+
+  local t_pool_n=0 c_pool_n=0
+  local t_merged=() c_merged=()
+  local t_churn_rows="[]" c_churn_rows="[]"
+  local t_weighted_sum=0 c_weighted_sum=0
+  local t_calibrated="true" c_calibrated="true"
+  local t_attributed=0 c_attributed=0
+  local t_wallclock=() c_wallclock=()
+  local t_bounce=0 c_bounce=0
+  local t_cost_missing=0 c_cost_missing=0
+  local t_outcome_unknown=0 c_outcome_unknown=0
+
+  local numbers
+  numbers=$(jq -r '.[].number' <<<"$pool" 2>/dev/null)
+  while IFS= read -r issue; do
+    [[ -z "$issue" ]] && continue
+
+    local events arm
+    events=$(fetch_issue_events "$issue")
+    arm=$(arm_for_issue "$events" "$cohort_start_epoch")
+    [[ -z "$arm" ]] && continue
+
+    if [[ "$arm" == "treatment" ]]; then t_pool_n=$((t_pool_n + 1)); else c_pool_n=$((c_pool_n + 1)); fi
+
+    local pr_number
+    pr_number=$(jq -r --argjson n "$issue" \
+      '[.[] | select(.number==$n)][0].closedByPullRequestsReferences[0].number // empty' \
+      <<<"$pool" 2>/dev/null)
+    [[ -z "$pr_number" ]] && continue
+
+    local pr_json merged_at
+    pr_json=$(fetch_pr_view "$pr_number")
+    # A FAILED pr-view fetch is a missing input, not "not merged": folding an
+    # un-fetchable PR out of the merged denominator would fabricate a smaller
+    # n (and its churn/QA figures would silently vanish). Counted per arm as
+    # merge-outcome unknown and excluded from every figure instead -- a
+    # successful gh pr view always carries .number, so its absence is the
+    # fetch-failure discriminator.
+    if ! jq -e '.number' <<<"$pr_json" >/dev/null 2>&1; then
+      if [[ "$arm" == "treatment" ]]; then t_outcome_unknown=$((t_outcome_unknown + 1)); else c_outcome_unknown=$((c_outcome_unknown + 1)); fi
+      log "pr view fetch failed for PR ${pr_number} (issue ${issue}) -- merge outcome unknown, issue excluded from every figure (issue #4127)"
+      continue
+    fi
+    merged_at=$(jq -r '.mergedAt // empty' <<<"$pr_json" 2>/dev/null)
+    # A closed-but-unmerged PR (e.g. superseded/abandoned) is not a merged
+    # outcome for this analysis -- skip it out of the merged-n denominator
+    # entirely rather than counting it as a zero-cost win. This is a
+    # LEGITIMATE non-outcome (the PR view succeeded), so it is not an input
+    # gap: it stays visible as cohort-n minus merged-n.
+    [[ -z "$merged_at" ]] && continue
+
+    local additions deletions
+    additions=$(jq -r '.additions // 0' <<<"$pr_json" 2>/dev/null)
+    deletions=$(jq -r '.deletions // 0' <<<"$pr_json" 2>/dev/null)
+
+    local usage_json wt_line wt_sum wt_cal wt_dispatch cost_missing=0
+    if usage_json=$(fetch_usage_by_issue "$issue"); then
+      wt_line=$(issue_weighted_tokens "$usage_json")
+      IFS='|' read -r wt_sum wt_cal wt_dispatch <<<"$wt_line"
+    else
+      # Missing cost input (see fetch_usage_by_issue): contributes nothing to
+      # the weighted sum and never to the attributed count, and suppresses
+      # the arm's primary figure via the cost-missing counter -- never a
+      # fabricated zero-cost issue.
+      wt_sum=0 wt_cal="true" wt_dispatch=0 cost_missing=1
+      log "usage by-issue fetch failed for issue ${issue} -- counted as a missing cost input, not a zero-cost issue (issue #4127)"
+    fi
+
+    local labeled_at label_epoch merge_epoch hours
+    if [[ "$arm" == "treatment" ]]; then
+      labeled_at=$(label_added_at "$events" "$GLM_LABEL_ELIGIBLE")
+    else
+      labeled_at=$(label_added_at "$events" "$GLM_LABEL_AB_CONTROL")
+    fi
+    label_epoch=$(iso_to_epoch "$labeled_at")
+    merge_epoch=$(iso_to_epoch "$merged_at")
+    hours=$(elapsed_hours "$label_epoch" "$merge_epoch")
+
+    # Bounce: first Automated-QA verdict FAIL, or a re-review (>= 2
+    # Automated-QA comments). Both parse through the SAME first-automated-QA
+    # expression the PASS-rate path uses (first_automated_qa_body), read off
+    # the pr view already fetched -- no second QA-verdict implementation.
+    local first_qa_body qa_count verdict bounced=0
+    first_qa_body=$(first_automated_qa_body "$pr_json")
+    qa_count=$(automated_qa_comment_count "$pr_json")
+    verdict=$(classify_qa_verdict "$first_qa_body")
+    [[ "$verdict" == "fail" ]] && bounced=1
+    [[ "$qa_count" -ge 2 ]] && bounced=1
+
+    if [[ "$arm" == "treatment" ]]; then
+      t_merged+=("$pr_number")
+      t_churn_rows=$(jq -c --argjson a "$additions" --argjson d "$deletions" '. + [{additions:$a, deletions:$d}]' <<<"$t_churn_rows")
+      t_weighted_sum=$(awk -v s="$t_weighted_sum" -v w="$wt_sum" 'BEGIN{printf "%.4f", s+w}')
+      [[ "$wt_cal" == "false" ]] && t_calibrated="false"
+      [[ "${wt_dispatch:-0}" -gt 0 ]] && t_attributed=$((t_attributed + 1))
+      [[ -n "$hours" ]] && t_wallclock+=("$hours")
+      [[ "$bounced" -eq 1 ]] && t_bounce=$((t_bounce + 1))
+      [[ "$cost_missing" -eq 1 ]] && t_cost_missing=$((t_cost_missing + 1))
+    else
+      c_merged+=("$pr_number")
+      c_churn_rows=$(jq -c --argjson a "$additions" --argjson d "$deletions" '. + [{additions:$a, deletions:$d}]' <<<"$c_churn_rows")
+      c_weighted_sum=$(awk -v s="$c_weighted_sum" -v w="$wt_sum" 'BEGIN{printf "%.4f", s+w}')
+      [[ "$wt_cal" == "false" ]] && c_calibrated="false"
+      [[ "${wt_dispatch:-0}" -gt 0 ]] && c_attributed=$((c_attributed + 1))
+      [[ -n "$hours" ]] && c_wallclock+=("$hours")
+      [[ "$bounced" -eq 1 ]] && c_bounce=$((c_bounce + 1))
+      [[ "$cost_missing" -eq 1 ]] && c_cost_missing=$((c_cost_missing + 1))
+    fi
+  done <<<"$numbers"
+
+  local t_pass_line c_pass_line
+  # Reuse (not reimplement) the existing single-cohort metric helpers below:
+  # first_pass_pass_rate for QA PASS-rate, churn_avg_from_rows for churn.
+  # INV-9: reuses the single-cohort helper verbatim — no second implementation.
+  t_pass_line=$(first_pass_pass_rate "$(numbers_to_rows_json "${t_merged[@]}")")
+  c_pass_line=$(first_pass_pass_rate "$(numbers_to_rows_json "${c_merged[@]}")")
+  local t_pass_rate t_pass_n t_fail_n t_denom
+  local c_pass_rate c_pass_n c_fail_n c_denom
+  IFS='|' read -r t_pass_rate t_pass_n t_fail_n t_denom <<<"$t_pass_line"
+  IFS='|' read -r c_pass_rate c_pass_n c_fail_n c_denom <<<"$c_pass_line"
+
+  local t_churn_avg c_churn_avg
+  t_churn_avg=$(churn_avg_from_rows "$t_churn_rows")
+  c_churn_avg=$(churn_avg_from_rows "$c_churn_rows")
+
+  local t_wallclock_avg c_wallclock_avg
+  t_wallclock_avg=$(avg "${t_wallclock[@]}")
+  c_wallclock_avg=$(avg "${c_wallclock[@]}")
+
+  echo "GLM A/B delta (issue #4127): cohort start ${AB_COHORT_START} (slice beta #4125 PR #4281 merge instant)"
+  print_arm_line "treatment" "$t_pool_n" "${#t_merged[@]}" "$t_weighted_sum" "$t_calibrated" \
+    "$t_attributed" "$t_pass_rate" "$t_pass_n" "$t_fail_n" \
+    "$t_churn_avg" "$t_wallclock_avg" "$t_bounce" "$t_cost_missing" "$t_outcome_unknown"
+  print_arm_line "control  " "$c_pool_n" "${#c_merged[@]}" "$c_weighted_sum" "$c_calibrated" \
+    "$c_attributed" "$c_pass_rate" "$c_pass_n" "$c_fail_n" \
+    "$c_churn_avg" "$c_wallclock_avg" "$c_bounce" "$c_cost_missing" "$c_outcome_unknown"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
+  if [[ "${1:-}" == "--ab-report" ]]; then
+    shift
+    main_ab_report "$@"
+  else
+    main "$@"
+  fi
 fi
