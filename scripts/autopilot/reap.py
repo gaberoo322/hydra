@@ -2731,8 +2731,8 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # dev_target completion can never touch dev_orch's accounting (and vice
     # versa); a fetch failure (None) fails the check open — no mutation.
     dev_target_pr_list_json: str | None = None
-    if cls == "dev_target" and anchor_ref:
-        dev_target_pr_list_json = _fetch_pr_list_json(TARGET_REPO, anchor_ref)
+    if cls == "dev_target" and snap.anchor_ref:
+        dev_target_pr_list_json = _fetch_pr_list_json(TARGET_REPO, snap.anchor_ref)
 
     # Issue #4195: a dev_target completion that opened no PR leaves its
     # Target anchor stuck `in-progress`, and three such orphaned claims
@@ -2741,7 +2741,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # in-progress -> ready-for-agent so the slot frees on the next board
     # read. Fully best-effort/non-fatal, like the dev_orch block above.
     _handle_dev_target_stall(
-        s, cls, skill, anchor_ref, task_id, worktree_branch, dev_target_pr_list_json
+        s, cls, skill, snap.anchor_ref, task_id, snap.worktree_branch, dev_target_pr_list_json
     )
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
