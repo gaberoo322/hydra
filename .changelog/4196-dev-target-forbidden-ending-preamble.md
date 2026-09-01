@@ -1,0 +1,1 @@
+- fix: give dev_target its own forbidden-ending preamble so build delegation blocks on the child in the foreground instead of silently ending the turn with no deliverable (#4196)

@@ -50,7 +50,9 @@ If either fails, stop. Do not delegate.
 
 **Mode detection (mandatory):** make exactly ONE `ToolSearch` query (`+agent spawn task`) against the deferred-tool list, then commit to a mode.
 
-**Delegated mode (spawn tool available):** spawn the child with the prompt below. Pass `$task` if provided. Child returns ONLY a summary table, `Mode | delegated`.
+**Delegated mode (spawn tool available):** spawn the child with the prompt below using `Agent(run_in_background=true)`. Pass `$task` if provided. Child returns ONLY a summary table, `Mode | delegated`.
+
+**The parent MUST block on the child in the FOREGROUND before its final message (issue #4196).** Spawning the child does not end your job — after the spawn, poll it to a terminal state (a `hydra-dev`-style deliverable: a PR is open, or a hard blocker) in THIS session before you speak your final message. Relaying a summary for a still-running child — "I'll relay its summary once it completes", arming a Monitor and waiting for its notification, or any other narrated future check-in — is a **forbidden ending**, not a valid one: nothing resumes an unattended dispatch session after its final message, so a promise to check back later is never kept. The full contract (why, and the exact wording to carry) lives in `hydra-autopilot.md`'s "NEVER END WAITING — dev_target variant" preamble, which the dispatcher prepends to every `dev_target` launch — this Step restates the obligation at the point the spawn actually happens because that is where it is easiest to violate by accident.
 
 **Inline mode (no spawn tool):** permitted ONLY under this explicit contract — never as a silent fallback. Do NOT abort: fail-loud here zeros Target throughput.
 
