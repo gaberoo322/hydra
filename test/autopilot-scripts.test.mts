@@ -2399,3 +2399,47 @@ describe("collect-state.sh untriaged_orphans hitl-grill exclusion (#4025)", () =
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4305 design-concept INV-2 — "cause derivation" is NOT duplicated
+// logic and must not be merged into the canonical run_termination.py module.
+//
+// bootstrap.sh's __reap_derive_cause (a systemd EXIT_CODE/EXIT_STATUS ->
+// {interrupted, handoff, crash} mapping) and term-check.py/decide.py's cause
+// values (quota/budget/wall_clock/idle/context_compaction) are two DIFFERENT
+// concepts that only share a wire field name ("cause" in the run-end
+// payload). The #4305 extraction unified count_slots_occupied and
+// post_run_end into scripts/autopilot/run_termination.py — this pins that
+// __reap_derive_cause was NOT touched (stays pure bash, zero subprocess
+// dependency, so the ExecStopPost backstop still works even when python3 is
+// what's broken) and that the canonical module never grew a cause-derivation
+// function of its own.
+//
+// Own top-level describe with no shared-Redis lifecycle (reads two files off
+// disk only), per the CLAUDE.md rule against nesting inside a sibling suite's
+// teardown timing.
+// ---------------------------------------------------------------------------
+describe("issue #4305 INV-2 — cause derivation stays unmerged", () => {
+  test("__reap_derive_cause is still declared as a bash function in bootstrap.sh", () => {
+    const source = readFileSync(join(SCRIPTS, "bootstrap.sh"), "utf-8");
+    assert.match(
+      source,
+      /^__reap_derive_cause\(\)\s*\{/m,
+      "the exit-code -> {interrupted, handoff, crash} mapping must stay a bash function in bootstrap.sh, never extracted into the canonical python module",
+    );
+  });
+
+  test("run_termination.py defines no cause-derivation function", () => {
+    const source = readFileSync(join(SCRIPTS, "run_termination.py"), "utf-8");
+    assert.doesNotMatch(
+      source,
+      /def\s+\w*derive_cause\w*\s*\(/,
+      "the canonical extraction (count_slots_occupied + post_run_end) must never grow a cause-derivation function — that concept is a different, unmerged one (issue #4305 INV-2)",
+    );
+    assert.doesNotMatch(
+      source,
+      /\bREAP_CAUSE\b/,
+      "run_termination.py must have no notion of bootstrap.sh's REAP_CAUSE — cause derivation is not a shared concept",
+    );
+  });
+});
