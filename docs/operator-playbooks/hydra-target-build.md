@@ -17,7 +17,15 @@ To prevent context window saturation under `/loop`, delegate the build to a chil
 
 Autopilot dispatch sessions carry NO Agent/Task spawn tool (issue #1782). In that environment the build runs under the **explicit inline-mode contract** in Step 2 — silently running the child prompt inline as an undeclared fallback is forbidden, and so is aborting just because the spawn tool is absent.
 
-In delegated mode the parent only does pre-flight + relays the summary. The child does the heavy work.
+In delegated mode the parent does pre-flight, spawns the child, blocks on the
+child in the FOREGROUND until it reaches a terminal state, and only then
+relays its outcome. The child does the heavy work; the parent must never end
+its turn while the child is still running (issue #4196) — relaying a summary
+for a still-running child, or narrating a future notification instead of
+watching the child finish now, is a forbidden ending, not a valid handoff. See
+the `dev_target` variant of the `## NEVER END WAITING` preamble in
+`hydra-autopilot.md`, which every `dev_target` dispatch carries verbatim
+alongside this skill's own contract.
 
 ## Step 1: Pre-flight (parent context)
 
@@ -50,7 +58,17 @@ If either fails, stop. Do not delegate.
 
 **Mode detection (mandatory):** make exactly ONE `ToolSearch` query (`+agent spawn task`) against the deferred-tool list, then commit to a mode.
 
-**Delegated mode (spawn tool available):** spawn the child with the prompt below. Pass `$task` if provided. Child returns ONLY a summary table, `Mode | delegated`.
+**Delegated mode (spawn tool available):** spawn the child with
+`Agent(run_in_background=true, ...)` and the prompt below, passing `$task` if
+provided. **Immediately after spawning, poll the child to a terminal state in
+the FOREGROUND** — repeated status checks with a bounded interval between
+them, in THIS session — before your final message. Do NOT end your turn on a
+still-running child, a narrated future wait ("I'll relay its summary once it
+completes"), or an armed Monitor; and if a notification wakes you while the
+child is STILL not done, re-arming the wait and ending your turn again is the
+same forbidden ending repeated (issue #4196). Once the child reaches a
+terminal state, relay its outcome: the child returns ONLY a summary table,
+`Mode | delegated`.
 
 **Inline mode (no spawn tool):** permitted ONLY under this explicit contract — never as a silent fallback. Do NOT abort: fail-loud here zeros Target throughput.
 
