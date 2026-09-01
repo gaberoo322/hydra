@@ -99,7 +99,7 @@ INV-008.
 
 | Action type | Tool the model invokes |
 |---|---|
-| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **`dev_target` exception (issue #3889):** omit `isolation="worktree"` for `dev_target` dispatches ONLY. The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, a pinned session is refused ALL git ops against it — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches). `dev_target` isolates itself via Step 0.6's worktree (nested under `~/hydra-betting/web/.worktrees/` since issue #4177 — previously `/dev/shm/hydra-worktrees/`, relocated to eliminate the reach-back node_modules symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the orchestrator-only classes. Every other class keeps `isolation="worktree"`. The preamble follows the same split (issue #4178): prepend the **dev_target variant** of the worktree-guard preamble (see the Worktree-guard preamble section) — NOT the default block, whose `cwd == /home/gabe/hydra → ABORT` line false-aborts a dispatch whose expected launch cwd is exactly that. |
+| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. **`dev_target` exception (issue #3889):** omit `isolation="worktree"` for `dev_target` dispatches ONLY. The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, a pinned session is refused ALL git ops against it — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches). `dev_target` isolates itself via Step 0.6's worktree (nested under `~/hydra-betting/web/.worktrees/` since issue #4177 — previously `/dev/shm/hydra-worktrees/`, relocated to eliminate the reach-back node_modules symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook provides the ghost-write protection `isolation="worktree"` plays for the orchestrator-only classes. Every other class keeps `isolation="worktree"`. The preamble follows the same split (issue #4178): prepend the **dev_target variant** of the worktree-guard preamble (see the Worktree-guard preamble section) — NOT the default block, whose `cwd == /home/gabe/hydra → ABORT` line false-aborts a dispatch whose expected launch cwd is exactly that. `dev_target` ALSO carries its OWN dev_target forbidden-ending preamble variant (issue #4196): append that variant (see the Worktree-guard preamble section) immediately after the dev_target worktree-guard block — never the `dev_orch`/`qa_orch` block, which bans the Agent tool outright and would contradict `hydra-target-build`'s own delegated-mode contract. |
 | `auto-merge` | `Bash` → `gh pr merge --auto --squash`, then a SINGLE `POST /api/holdback/pending {prNumber, tier, cycleId}` register call (see Phase 6). **No self-approve prefix** — every agent shares the `gaberoo322` identity and GitHub 422s a self-approval, so chaining an approval before the merge (`… && gh pr merge …`) short-circuits and silently skips the merge-enable, leaving green PRs to pile up for admin-merge (reference_qa_cannot_self_approve / #848; hydra-qa removed the same trap via #974). There is no approving-review branch-protection gate — CI required-status-checks are the merge gate — so approval is a no-op regardless. Guarded by `test/autopilot-auto-merge-no-self-approve.test.mts`. The handler does NOT itself enroll the holdback or write the merged cycle-record — it only ARMS the PR; the in-process merge-completion watcher (`src/scheduler/chores/holdback-merge-watch.ts`, issue #2623) fires both merge-coupled follow-ups once the merge lands. |
 | `route-prs-to-review` | `Bash` → emitted only while the operator-only **emergency brake** (issue #744) is engaged, IN PLACE OF every `auto-merge` action. The model routes the current open PRs to the `/hydra-review` pickup set: `gh pr list --repo gaberoo322/hydra --state open --json number` to enumerate them, then for each apply the review label (`gh api .../labels` — `gh pr edit` is broken, per operator memory) so `/hydra-review` surfaces them. The action carries no per-PR list — `decide()` is pure and cannot enumerate PRs. Because the brake suppresses all `auto-merge`, no PR auto-merges this turn; the operator clears the brake via `hydra brake off` once the incident is resolved. The autopilot NEVER engages or disengages the brake — there is no such action type. |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
@@ -610,6 +610,62 @@ acceptable). A `qa_orch` T4 re-check on PR #3853 posted the Deep-QA PASS
 marker and then ended its turn waiting for the `deep-qa-gate` re-check to
 complete, even though `hydra-qa.md`'s own verdict-tier design already never
 loops waiting on CI — the design was correct, the dispatch didn't follow it.
+
+**`dev_target` dispatches carry their OWN forbidden-ending preamble variant
+(issue #4196) — ADDITIVE to the dev_target worktree-guard variant above, never
+a replacement for it.** Append verbatim, immediately after the dev_target
+worktree-guard variant, for every `dev_target` dispatch. Unlike the
+`dev_orch`/`qa_orch` block above, this variant does NOT ban the Agent tool
+outright: `hydra-target-build`'s own contract requires spawning a delegated
+build child for context-window protection (issue #1782), and a flat ban here
+would recreate the exact degradation observed when the flat block was applied
+to `qa_orch` — it skipped its Standards+Spec Agent fan-out and reviewed both
+axes inline as one reviewer (run 8e50460f). What this variant forbids is going
+quiet while that delegated child is still running — the gap this issue was
+filed to close (autopilot run 155f6d3c: a `dev_target` dispatch spawned a
+nested `Agent(run_in_background=true)`, said "I'll relay its summary once it
+completes", and ended its turn 101s in with zero deliverable), and the
+recurrences that followed even after an earlier draft of this preamble was
+present (runs `ad07927f`, `b123538c`: an armed Monitor re-fired, the dispatch
+re-armed it and quit again, and a follow-on self-report claimed a push and a
+merge that had not actually happened):
+
+```
+## NEVER END WAITING — dev_target delegated-mode variant (issue #4196)
+This is an UNATTENDED dispatch. Nothing resumes you after your final message —
+reap.py records your session's end as a completion the instant it happens,
+whatever the delegated child did or didn't finish. `hydra-target-build`'s
+delegated mode PERMITS spawning `Agent(run_in_background=true)` for the build
+child itself (Step 2) — that is NOT the forbidden ending. The forbidden ending
+is spawning the child and then going quiet, or narrating a future action
+("I'll relay its summary once it completes", "the armed Monitor will notify
+me", "I'll stop polling and wait for the notification") instead of watching it
+happen now, in THIS turn.
+
+A Monitor cannot resume a reaped session, and neither can a plain "I'll wait"
+message: arming one and ending your turn is functionally identical to ending
+on the background child itself — nothing wakes this session back up, so the
+wait never ends and reap.py records a completion with zero deliverable. After
+spawning the delegated build child, poll it to a terminal state in the
+FOREGROUND — repeated status checks with a bounded interval between them, in
+THIS session, never a backgrounded Bash process and never an armed Monitor —
+then report exactly one of: a PR is open, or a hard blocker via
+## Friction Report. "The child is still running" is never itself the final
+message, and if a notification wakes you while the child is STILL not done,
+re-arming the wait and ending your turn again is the same forbidden ending
+repeated, not progress — keep polling in the foreground instead.
+
+Commit and push your work to the branch BEFORE running verification (`npm
+test`, `npm run typecheck`), not after — same rule as `dev_orch`/`qa_orch`.
+Verification gates whether the PR merges, not whether the work survives.
+
+Your final report is not verification. State only what you directly observed
+in THIS session — a `gh pr view` showing `MERGED`, a CI run you polled to
+green — never assert a push, a green run, or a merge you did not just watch
+happen. A prior dev_target dispatch reported "committed, and pushed... CI went
+green... merged" for a commit that in fact sat unpushed in the local worktree
+the whole time; a separate dispatch found and recovered it.
+```
 
 **`dev_target` dispatches are NOT harness-worktree-isolated (issue #3889, superseding the #542 framing).** Unlike every other dispatch class, `dev_target` is launched **without** `isolation="worktree"` (see the `dispatch` action-to-tool entry above). The harness's worktree isolation only covers the orchestrator repo (`~/hydra`); because `~/hydra-betting` is a sibling repo not nested under `~/hydra`, the harness refuses ALL git ops against it from a pinned session — which made `hydra-target-build` Step 0.6 (`git -C ~/hydra-betting worktree add …`) categorically fail (2/2 dispatches, issue #3889). `dev_target` therefore relies **solely** on Step 0.6's worktree (nested under `~/hydra-betting/web/.worktrees/` since issue #4177) for isolation, and on the installed `worktree-write-fence.sh` PreToolUse hook for ghost-write protection (the role `isolation="worktree"` plays for the orchestrator-only classes). Every `dev_target` dispatch MUST still go through Step 0.6 before any Edit/Write against the target. This launch shape is also why the dev_target variant of the worktree-guard preamble above exists (issue #4178): the default block's `cwd == /home/gabe/hydra → ABORT` clause describes exactly the EXPECTED `dev_target` launch state, so carrying the default preamble (or worse, both) is a guaranteed false-abort for this class — carry the variant instead.
 

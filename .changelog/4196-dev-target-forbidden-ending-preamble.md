@@ -1,0 +1,1 @@
+- fix: give dev_target dispatches a forbidden-ending preamble that permits the delegated build spawn but blocks the parent on it in the foreground, instead of allowing a silent zero-deliverable exit (#4196)
