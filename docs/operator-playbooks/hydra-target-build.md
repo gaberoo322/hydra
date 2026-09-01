@@ -50,7 +50,19 @@ If either fails, stop. Do not delegate.
 
 **Mode detection (mandatory):** make exactly ONE `ToolSearch` query (`+agent spawn task`) against the deferred-tool list, then commit to a mode.
 
-**Delegated mode (spawn tool available):** spawn the child with the prompt below. Pass `$task` if provided. Child returns ONLY a summary table, `Mode | delegated`.
+**Delegated mode (spawn tool available):** spawn the child with the prompt below. Pass `$task` if provided. The child, once it finishes its own full cycle, returns ONLY a summary table, `Mode | delegated`.
+
+**Spawning does NOT end your turn (issue #4196).** You (the parent) MUST poll
+the child to a terminal state in the FOREGROUND — in THIS turn, via repeated
+status checks, never by arming a notification and going quiet — before your
+own final message. Relaying a summary for a child that is STILL RUNNING
+("I'll relay its summary once it completes", "the armed Monitor will notify
+me") is a forbidden ending, not a valid delegated-mode report — every
+`dev_target` dispatch carries the `## NEVER END WAITING — dev_target
+variant` preamble block (`hydra-autopilot.md`) stating exactly this. Once
+the child reaches a terminal state, your final message relays its outcome:
+the `Mode | delegated` summary table it returned, or — if it never reached
+one — a hard blocker via `## Friction Report`.
 
 **Inline mode (no spawn tool):** permitted ONLY under this explicit contract — never as a silent fallback. Do NOT abort: fail-loud here zeros Target throughput.
 

@@ -1,0 +1,1 @@
+- fix: `dev_target` dispatches now carry a class-scoped forbidden-ending preamble so a delegated build no longer exits ~100s in with zero deliverable when its spawned child is still running (#4196)
