@@ -1,0 +1,1 @@
+- feat: glm-beachhead-report.sh --ab-report prints the GLM-vs-Opus A/B per-arm endpoints — weighted-quota tokens per merged issue (with attributed fraction and input-gap counters), QA PASS-rate, churn, assignment-to-merge wall-clock, and bounce rate (#4127)
