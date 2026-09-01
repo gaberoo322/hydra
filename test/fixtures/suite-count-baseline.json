@@ -79,6 +79,7 @@
   "test/autopilot-dev-resume-stall.test.mts": 2,
   "test/autopilot-dev-target-forbidden-ending-preamble.test.mts": 4,
   "test/autopilot-dev-target-preamble.test.mts": 3,
+  "test/autopilot-dev-target-resume-stall.test.mts": 2,
   "test/autopilot-dispatch-cost-join-reap.test.mts": 1,
   "test/autopilot-escalation-deposit-roundtrip.test.mts": 1,
   "test/autopilot-forbidden-ending-preamble.test.mts": 2,
