@@ -183,31 +183,25 @@ __reap_derive_cause() {
 # mid-flight — an honest baton-pass the successor run continues, not a
 # nothing-pending bypass.
 #
-# Echoes the integer count on stdout. A missing/garbage state file, slots
-# object, or signal map degrades each source to 0 (the pre-fix `interrupted`
-# behaviour) — never blocks the reap. INV-A is preserved by the caller:
-# __reap_derive_cause only consults this count on a CLEAN exit code, so an
-# abnormal exit still derives `crash` regardless of in-flight work.
+# Issue #4305: this predicate used to be a standalone jq filter here, hand-
+# mirrored against `term-check.py`'s `count_slots_occupied` (a Python
+# docstring literally saying "mirrors bootstrap.sh:..." stood in for a shared
+# implementation). It now shells out to `run_termination.py` — the ONE
+# implementation both callers use — the same way this script already shells
+# out to `heartbeat.py` (see the `python3 "$(dirname "$0")/heartbeat.py"` call
+# below). Echoes the integer count on stdout. A missing/garbage state file,
+# unavailable python3, or malformed state degrades to 0 (the pre-fix
+# `interrupted` behaviour) — never blocks the reap. INV-A is preserved by the
+# caller: __reap_derive_cause only consults this count on a CLEAN exit code,
+# so an abnormal exit still derives `crash` regardless of in-flight work.
 __reap_count_slots_occupied() {
   __rcso_state_path="${1:-}"
   if [ -z "${__rcso_state_path}" ] || [ ! -f "${__rcso_state_path}" ] \
-    || ! command -v jq >/dev/null 2>&1; then
+    || ! command -v python3 >/dev/null 2>&1; then
     echo 0
     return 0
   fi
-  # jq computes both sources in one pass so the started_epoch comparison and
-  # the slot null-filter share a single read. `.started_epoch // 0` degrades a
-  # missing epoch to 0, which makes EVERY non-zero signal timestamp count as
-  # "fired this run" — the conservative direction (prefer handoff over a false
-  # interrupted) and harmless because a real run always has a started_epoch.
-  __rcso_count="$(jq -r '
-    ((.started_epoch // 0) | tonumber? // 0) as $start
-    | ([ (.slots // {}) | .[] | select(. != null) ] | length)
-      + ([ (.signal_last_fired // {})
-           | to_entries[]
-           | (.value | tonumber? // 0)
-           | select(. >= $start and . > 0) ] | length)
-  ' "${__rcso_state_path}" 2>/dev/null || echo 0)"
+  __rcso_count="$(python3 "$(dirname "$0")/run_termination.py" count-slots "${__rcso_state_path}" 2>/dev/null || echo 0)"
   case "${__rcso_count}" in
     ''|*[!0-9]*) echo 0 ;;
     *) echo "${__rcso_count}" ;;
@@ -339,41 +333,31 @@ __reap_build_crash_detail() {
 # success, 1 on exhaustion — the caller never aborts the unit stop either
 # way. Shared by the live --reap path and the --reap-post-run-end dry-run
 # so the test pins exactly the live assembly.
+#
+# Issue #4305: the retry-with-backoff loop used to be reimplemented here in
+# bash (curl) AND separately in `term-check.py` (urllib) — two independent
+# copies of the same "try, backoff, retry, give up" shape, with different
+# retry counts and no shared code. It now shells out to
+# `run_termination.py post-run-end`, the ONE implementation of that loop
+# (`term-check.py` imports the same module's `post_run_end` directly). This
+# function's OWN contract — exact log-line text, exit 0 on success / 1 on
+# exhaustion, the default "4 8 16" schedule, HYDRA_AUTOPILOT_REAP_POST_BACKOFFS
+# override — is unchanged and still pinned by
+# test/autopilot-dedup-reap.test.mts.
 __reap_post_run_end() {
-  # Deliberate word-split of the backoff schedule into positional params.
-  # shellcheck disable=SC2086
-  set -- ${HYDRA_AUTOPILOT_REAP_POST_BACKOFFS:-4 8 16}
-  __rpre_total=$(( $# + 1 ))
-  __rpre_attempt=1
-  while :; do
-    if curl -sf --max-time 5 -X POST \
-        -H "content-type: application/json" \
-        -d "${REAP_PAYLOAD}" \
-        "${REAP_API_BASE}/api/autopilot/run-end" >/dev/null 2>&1; then
-      if [ "${__rpre_attempt}" -gt 1 ]; then
-        echo "[autopilot] reap: recorded run-end run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM} (idempotent) attempt=${__rpre_attempt}/${__rpre_total}"
-      else
-        # Byte-compatible with the pre-#2954 first-attempt success line so
-        # existing log consumers keyed on it are unaffected.
-        echo "[autopilot] reap: recorded run-end run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM} (idempotent)"
-      fi
-      return 0
-    fi
-    if [ "$#" -eq 0 ]; then
-      # EXACT pre-existing exhaustion line — the dead-pid sweeper backstop
-      # contract (sweep-reader.ts) is unchanged (issue #2954 AC2).
-      echo "[autopilot] reap: run-end POST failed (orchestrator down?) run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} — sweeper will backstop"
-      return 1
-    fi
-    __rpre_delay="$1"
-    shift
-    # Sanitize so a garbage schedule entry can neither trip `set -e` via
-    # sleep nor unbound the total wall-clock.
-    case "${__rpre_delay}" in ''|*[!0-9]*) __rpre_delay=0 ;; esac
-    echo "[autopilot] reap: run-end POST attempt ${__rpre_attempt}/${__rpre_total} failed — retrying in ${__rpre_delay}s"
-    sleep "${__rpre_delay}"
-    __rpre_attempt=$(( __rpre_attempt + 1 ))
-  done
+  if ! command -v python3 >/dev/null 2>&1; then
+    # No python3 — degrade to the pre-existing exhaustion line so the dead-pid
+    # sweeper backstop contract still holds; never abort the unit stop.
+    echo "[autopilot] reap: run-end POST failed (orchestrator down?) run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} — sweeper will backstop"
+    return 1
+  fi
+  python3 "$(dirname "$0")/run_termination.py" post-run-end \
+    --api-base "${REAP_API_BASE}" \
+    --run-id "${REAP_RUN_ID}" \
+    --cause "${REAP_CAUSE}" \
+    --exit-code "${REAP_EXIT_NUM}" \
+    --payload "${REAP_PAYLOAD}" \
+    --backoffs "${HYDRA_AUTOPILOT_REAP_POST_BACKOFFS:-4 8 16}"
 }
 
 # Dry-run (issue #2479): echo the assembled crash_detail JSON for the current

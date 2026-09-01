@@ -33,9 +33,17 @@ import math
 import os
 import sys
 import time
-import urllib.request
-import urllib.error
 from pathlib import Path
+
+# Issue #4305: `count_slots_occupied` and the run-end POST retry loop used to
+# be reimplemented here AND independently in `bootstrap.sh` (`__reap_...`
+# functions) — two hand-mirrored copies of the same predicates, kept in sync
+# only by prose comments. `run_termination.py` (same directory — Python puts
+# the running script's own dir on sys.path[0], so a plain import resolves it;
+# no importlib workaround needed, unlike pr-refs.py's hyphenated filename) is
+# now the ONE implementation both this file and bootstrap.sh use.
+from run_termination import count_slots_occupied as _shared_count_slots_occupied
+from run_termination import post_run_end as _shared_post_run_end
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
 HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
@@ -186,6 +194,13 @@ def post_run_end(run_id: str, cause: str, ended_epoch: int) -> bool:
     summary after exhausting retries) instead of a single swallowed line, and
     the systemd ExecStopPost reap hook (scripts/autopilot/bootstrap.sh --reap)
     is the backstop that records the terminal status if every retry here lost.
+
+    Issue #4305: the retry-with-backoff LOOP is now `run_termination.py`'s
+    shared `post_run_end` (the same implementation `bootstrap.sh` shells out
+    to) — this wrapper owns only the request-body shape, ITS OWN retry count
+    (RUN_END_RETRIES=3) / backoff (linear, RUN_END_BACKOFF_SEC-based) /
+    early-stop-on-4xx policy, and its own log wording, all unchanged from
+    pre-#4305.
     """
     if not run_id:
         return False
@@ -194,38 +209,29 @@ def post_run_end(run_id: str, cause: str, ended_epoch: int) -> bool:
         "cause": cause,
         "ended_epoch": ended_epoch,
     }).encode("utf-8")
-    last_exc: Exception | None = None
-    for attempt in range(1, RUN_END_RETRIES + 1):
-        req = urllib.request.Request(
-            f"{HYDRA_API_BASE}/api/autopilot/run-end",
-            data=payload,
-            headers={"content-type": "application/json"},
-            method="POST",
+    # Linear backoff (1x, 2x, ... RUN_END_BACKOFF_SEC), matching the
+    # pre-#4305 `time.sleep(RUN_END_BACKOFF_SEC * attempt)` schedule exactly.
+    backoff_schedule = [RUN_END_BACKOFF_SEC * n for n in range(1, RUN_END_RETRIES)]
+    outcome, attempt = _shared_post_run_end(
+        HYDRA_API_BASE,
+        payload,
+        retries=RUN_END_RETRIES - 1,
+        backoff_schedule=backoff_schedule,
+        stop_on_4xx=True,
+        timeout=5.0,
+    )
+    if outcome == "success":
+        return True
+    if outcome == "terminal":
+        print(
+            f"[autopilot] term-check run-end got a 4xx "
+            f"(treating as already-terminal / idempotent no-op)",
+            file=sys.stderr,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                resp.read()
-            return True
-        except urllib.error.HTTPError as exc:
-            # A 4xx (e.g. 404 unknown run, 409 already-terminal) is a
-            # deterministic answer, not a transient fault — the run already
-            # has (or can never have) a terminal status from our side. Don't
-            # burn retries on it.
-            if 400 <= exc.code < 500:
-                print(
-                    f"[autopilot] term-check run-end got HTTP {exc.code} "
-                    f"(treating as already-terminal / idempotent no-op)",
-                    file=sys.stderr,
-                )
-                return True
-            last_exc = exc
-        except (urllib.error.URLError, OSError) as exc:
-            last_exc = exc
-        if attempt < RUN_END_RETRIES:
-            time.sleep(RUN_END_BACKOFF_SEC * attempt)
+        return True
     print(
-        f"[autopilot] term-check run-end POST FAILED after {RUN_END_RETRIES} "
-        f"attempts (run_id={run_id} cause={cause}): {last_exc}. The "
+        f"[autopilot] term-check run-end POST FAILED after {attempt} "
+        f"attempts (run_id={run_id} cause={cause}). The "
         f"ExecStopPost reap hook will backstop the terminal status.",
         file=sys.stderr,
     )
@@ -235,39 +241,14 @@ def post_run_end(run_id: str, cause: str, ended_epoch: int) -> bool:
 def count_slots_occupied(s: dict) -> int:
     """Count "work in flight" for the idle-drain gate (issue #2030).
 
-    Sums two sources, mirroring `bootstrap.sh:__reap_count_slots_occupied`:
-
-      1. Pipeline slots (`s["slots"]`) — a slot is occupied when non-null
-         (the 7 long-lived dev/qa/research/design slots).
-      2. Background/signal classes fired DURING this run — every
-         `s["signal_last_fired"][<class>]` whose timestamp is
-         `>= s["started_epoch"]`. These (`sweep_orch` / `retro_orch` /
-         `discover_*` / `scout_orch` / `architecture_orch` / `cleanup_*`)
-         never enter `slots`, so the prior slots-only count saw 0 for a
-         background-only run and prematurely tripped `TERM:idle` — the same
-         gap #2030 fixes in the reap baton-pass derivation.
-
-    Pure and total over its input: a missing/garbage `slots`,
-    `signal_last_fired`, or `started_epoch` degrades that source to 0 (the
-    conservative direction: prefer "busy" over a false idle-terminate).
+    Issue #4305: this is now a thin wrapper over `run_termination.py`'s
+    canonical `count_slots_occupied` — THE ONE implementation of the
+    predicate, also used by `bootstrap.sh`'s `__reap_count_slots_occupied`
+    (which shells out to the same module). See that function's docstring for
+    the full two-source derivation (pipeline slots + this-run background
+    fires) and the conservative degrade-to-0 behaviour on malformed input.
     """
-    slots = s.get("slots") or {}
-    pipeline = sum(1 for v in slots.values() if v is not None) if isinstance(slots, dict) else 0
-    try:
-        start = int(s.get("started_epoch") or 0)
-    except (TypeError, ValueError):
-        start = 0
-    fired = s.get("signal_last_fired") or {}
-    background = 0
-    if isinstance(fired, dict):
-        for ts in fired.values():
-            try:
-                ts_int = int(ts)
-            except (TypeError, ValueError):
-                continue
-            if ts_int > 0 and ts_int >= start:
-                background += 1
-    return pipeline + background
+    return _shared_count_slots_occupied(s)
 
 
 def main() -> int:
