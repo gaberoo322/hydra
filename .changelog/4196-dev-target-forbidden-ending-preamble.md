@@ -1,0 +1,1 @@
+- fix: give dev_target its own forbidden-ending preamble so a delegated build blocks on its child instead of exiting with zero deliverable (#4196)

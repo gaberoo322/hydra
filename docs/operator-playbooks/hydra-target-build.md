@@ -50,7 +50,7 @@ If either fails, stop. Do not delegate.
 
 **Mode detection (mandatory):** make exactly ONE `ToolSearch` query (`+agent spawn task`) against the deferred-tool list, then commit to a mode.
 
-**Delegated mode (spawn tool available):** spawn the child with the prompt below. Pass `$task` if provided. Child returns ONLY a summary table, `Mode | delegated`.
+**Delegated mode (spawn tool available):** spawn the child with `Agent(run_in_background=true, ...)` and the prompt below, passing `$task` if provided. Spawning is not the end of the parent's job: after the spawn call returns, the parent MUST block on the child in the FOREGROUND — poll it to a terminal state — before its final message (issue #4196; see the `dev_target` forbidden-ending preamble in hydra-autopilot.md). Relaying a summary for a still-running child ("I'll relay its summary once it completes", "waiting for the completion notification") is a forbidden ending, not a valid delegated-mode return — it produces a completion with zero deliverable (observed live on run `155f6d3c`: parent exited ~100s in, no PR, no verdict). Only once the child has reached a terminal state does the parent return ONLY a summary table, `Mode | delegated`, reporting the child's outcome — a PR is open, or a hard blocker via `## Friction Report`.
 
 **Inline mode (no spawn tool):** permitted ONLY under this explicit contract — never as a silent fallback. Do NOT abort: fail-loud here zeros Target throughput.
 
