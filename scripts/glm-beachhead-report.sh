@@ -1267,6 +1267,7 @@ main_ab_report() {
   local t_pass_line c_pass_line
   # Reuse (not reimplement) the existing single-cohort metric helpers below:
   # first_pass_pass_rate for QA PASS-rate, churn_avg_from_rows for churn.
+  # INV-9: reuses the single-cohort helper verbatim — no second implementation.
   t_pass_line=$(first_pass_pass_rate "$(numbers_to_rows_json "${t_merged[@]}")")
   c_pass_line=$(first_pass_pass_rate "$(numbers_to_rows_json "${c_merged[@]}")")
   local t_pass_rate t_pass_n t_fail_n t_denom
