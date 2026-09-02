@@ -1,0 +1,1 @@
+- docs: ADR-0013 amended — hydra-betting retired as the crucible, Claw Street Bets adopted as crucible #2; the fork stays (B) and the 25% self-improvement floor survives (#4315)

@@ -23,6 +23,6 @@
   "dashboard/": 14966,
   "config/direction/, config/orchestrator/": 4406,
   "docs/adr/ itself": 5249,
-  "process / policy (no code area)": 25255,
+  "process / policy (no code area)": 31116,
   "test/, scripts/test/ (the suite itself)": 5978
 }
