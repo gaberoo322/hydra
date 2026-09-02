@@ -122,3 +122,63 @@ export function aggregatorRouteNoQuery<T>(
   return async (req, res) =>
     isolateAggregator(res, routeLabel, () => produce(req));
 }
+
+/**
+ * The structural shape a degradable read produces (issue #4327). Deliberately
+ * NOT `github/issues.ts`'s `IssueReadResult` — this module is consumed by
+ * non-GitHub aggregators too (`metrics.ts`, `today-page.ts`, `now-page.ts`,
+ * `explore-page.ts`) and carries zero domain imports. `IssueReadResult<T>` is
+ * assignable to it structurally (its `GhErrorCode` is a string union), so a
+ * seam read closure passes through untouched.
+ */
+export type DegradableRead<T> =
+  | { ok: true; rows: T[] }
+  | { ok: false; code: string };
+
+/**
+ * What {@link degradeIssueRead} hands back: the read's own success arm, or a
+ * bare `{ ok: false }` the caller turns into its `degraded: true` /
+ * `sourcesOk: false` flag. No `code` on the failure arm — the helper already
+ * logged it, and the routes' response shapes never surface it.
+ */
+export type DegradedReadResult<T> = { ok: true; rows: T[] } | { ok: false };
+
+/**
+ * Run a degradable read behind the never-throw-**200** contract (issue #4327,
+ * ADR-0034 §5). Awaits `read()`:
+ *
+ *   - `{ ok: true, rows }`  → returned as-is;
+ *   - `{ ok: false, code }` → `logger.error` ONCE with `routeLabel` + `code`,
+ *     returns `{ ok: false }`;
+ *   - a thrown error        → `logger.error` ONCE with `routeLabel` + `err`
+ *     ("read threw despite never-throw seam"), returns `{ ok: false }`.
+ *
+ * This is the "degrade-to-flag" sibling of {@link isolateAggregator}, NOT a
+ * layer on top of it: `isolateAggregator` / `aggregatorRouteNoQuery` convert a
+ * throw into a logged **500**, whereas the `/autopilot/*` read routes
+ * (`board-state`, `work-queue`, `hitl-grill`) promise a **200** safe default
+ * with `degraded: true` on ANY read failure — `collect-state.sh` parses that
+ * body to decide whether to fall back to its inline `gh` call, so a 500 would
+ * wedge the autopilot turn. The helper therefore never touches `res` and
+ * never throws; failure is reported purely through the return value, and the
+ * single log site here replaces the two per-route call sites (ok:false branch
+ * + thrown branch) each route used to hand-roll.
+ */
+export async function degradeIssueRead<T>(
+  routeLabel: string,
+  read: () => Promise<DegradableRead<T>>,
+): Promise<DegradedReadResult<T>> {
+  try {
+    const result = await read();
+    if (result.ok === false) {
+      logger.error({ routeLabel, code: result.code }, "read failed — degraded");
+      return { ok: false };
+    }
+    return result;
+  } catch (err: any) {
+    // Belt-and-braces: the seam never throws, but honour the never-throw
+    // contract here too — a thrown read degrades, it does not 500.
+    logger.error({ routeLabel, err }, "read threw despite never-throw seam");
+    return { ok: false };
+  }
+}
