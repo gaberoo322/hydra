@@ -23,6 +23,12 @@
 
 set -uo pipefail
 
+# Directory of this script — pr-refs.py (the shared reference predicate,
+# issue #3852) lives next to it. Resolved to an absolute path so the
+# predicate is found regardless of how $0 was passed (relative invocation,
+# worktree path), mirroring recover-stale.sh's idiom.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)
+
 # Shared page size for EVERY `gh issue list` in this script (issue #3710).
 #
 # `gh issue list` defaults to 30 results with no warning, so an unlimited call
@@ -666,62 +672,22 @@ echo
 # dev_orch dispatch for a whole run. Best-effort — a gh failure yields an empty
 # set, which is exactly today's (no-exclusion) behaviour.
 ORCH_INFLIGHT_PR_JSON=$(gh pr list --repo gaberoo322/hydra --state open --limit "$GH_ISSUE_LIST_LIMIT" --json headRefName,body 2>/dev/null || true)
-ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
-import json, re, sys
-try:
-  out = set()
-  for pr in json.load(sys.stdin):
-    m = re.match(r'issue-(\d+)\b', pr.get('headRefName') or '')
-    if m:
-      out.add(int(m.group(1)))
-    for m in re.finditer(
-        r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s*:?\s+#(\d+)\b',
-        pr.get('body') or '', re.IGNORECASE):
-      out.add(int(m.group(1)))
-  print(' '.join(str(x) for x in sorted(out)))
-except Exception:
-  pass
-PY
-)" 2>/dev/null || true)
-# issue #3964: the two evidence channels are ALSO computed separately (this
-# is purely ADDITIVE — `ORCH_INFLIGHT_ISSUES` above is untouched, byte-
-# identical to before, and still the ONLY thing that drives the real
-# candidate-pool filter below) so the Candidate Exclusion telemetry can
-# report WHICH matcher actually fired for a given anchor — the wayfinder
-# #3954 measurement found the branch matcher dead against real dispatch
-# output (0/11) and the whole exclusion resting on the body closing-keyword
-# matcher (11/11), a fact invisible without per-source attribution.
-# `test/collect-state-inflight-exclusion.test.mts` extracts the
-# `ORCH_INFLIGHT_ISSUES` block above BY NAME via regex, so that assignment's
-# shape must stay exactly as committed — hence these ride as separate,
-# additional blocks rather than `ORCH_INFLIGHT_ISSUES` being derived from them.
-ORCH_INFLIGHT_BRANCH_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
-import json, re, sys
-try:
-  out = set()
-  for pr in json.load(sys.stdin):
-    m = re.match(r'issue-(\d+)\b', pr.get('headRefName') or '')
-    if m:
-      out.add(int(m.group(1)))
-  print(' '.join(str(x) for x in sorted(out)))
-except Exception:
-  pass
-PY
-)" 2>/dev/null || true)
-ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 -c "$(cat <<'PY'
-import json, re, sys
-try:
-  out = set()
-  for pr in json.load(sys.stdin):
-    for m in re.finditer(
-        r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s*:?\s+#(\d+)\b',
-        pr.get('body') or '', re.IGNORECASE):
-      out.add(int(m.group(1)))
-  print(' '.join(str(x) for x in sorted(out)))
-except Exception:
-  pass
-PY
-)" 2>/dev/null || true)
+# Reference detection lives in ONE place — scripts/autopilot/pr-refs.py
+# (issue #3852, adopted here by #4334). All three in-flight sets below are
+# the SAME payload piped through that one predicate, selecting the channel:
+# no selector = the union (branch convention + body keyword refs), which is
+# the ONLY thing that drives the real candidate-pool filter below;
+# `--source branch` / `--source body` = each channel in isolation, so the
+# issue #3964 Candidate Exclusion telemetry can report WHICH matcher
+# actually fired for a given anchor — the wayfinder #3954 measurement found
+# the branch matcher dead against real dispatch output (0/11) and the whole
+# exclusion resting on the body closing-keyword matcher (11/11), a fact
+# invisible without per-source attribution. recover-stale.sh pipes its own
+# `gh pr list` payload through the same script (zero-arg union form), so
+# the two call sites can never drift.
+ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)
+ORCH_INFLIGHT_BRANCH_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source branch 2>/dev/null || true)
+ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source body 2>/dev/null || true)
 ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --limit "$GH_ISSUE_LIST_LIMIT" --json number,updatedAt,body,labels,title --jq '
   [ .[] | select((.labels | map(.name) | index("target-backlog")) | not) ]
 ' 2>/dev/null || true)

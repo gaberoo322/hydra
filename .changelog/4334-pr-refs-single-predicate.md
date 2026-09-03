@@ -1,0 +1,1 @@
+- refactor: autopilot open-PR reference detection lives solely in pr-refs.py — collect-state.sh delegates to it instead of carrying three inline regex copies (#4334)

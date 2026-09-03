@@ -1,6 +1,7 @@
 /**
  * Regression test for issue #3851 — the in-flight dev-work exclusion's open-PR
- * body matcher now recognises the NON-closing reference keyword `Refs #N`.
+ * body matcher recognises the NON-closing reference keyword `Refs #N` — now
+ * exercising the SHARED predicate (issue #4334).
  *
  * `scripts/autopilot/collect-state.sh` keeps an anchor dev_orch "has already
  * built, or is building" out of BOTH the `orch_pending_grill_anchor` and the
@@ -15,11 +16,18 @@
  * an anchor that already had an open PR awaiting review (observed: PR #3802 on
  * branch `worktree-agent-a9a703393fd943448`, body line 42 `Refs #3708`).
  *
- * The fix broadens the body-keyword alternation to also match `refs?`. These
- * tests extract the ACTUAL python3 extraction block (and the candidate filter
- * that consumes it) from the committed script and run them against constructed
- * `gh pr list --json headRefName,body` / issue fixtures — so any drift in the
- * script's regex is caught here. This mirrors the extract-and-run discipline of
+ * Since issue #4334 the reference-detection regexes live in ONE place —
+ * `scripts/autopilot/pr-refs.py` — and collect-state.sh computes all three of
+ * its in-flight sets by piping the `gh pr list --json headRefName,body`
+ * payload through that script (no selector = the union, `--source branch` /
+ * `--source body` = the per-channel subsets its Candidate Exclusion telemetry
+ * attributes, issue #3964). These tests therefore run the REAL pr-refs.py
+ * exactly the way collect-state.sh invokes it, plus the candidate filter it
+ * feeds — so any drift in the shared regex is caught here. The
+ * `ORCH_GRILL_CANDIDATES` filter is still an inline python3 heredoc in
+ * collect-state.sh (it is a candidate filter, not a reference predicate), so
+ * that one block is still extracted from the committed script and run
+ * directly, mirroring the extract-and-run discipline of
  * `test/autopilot-dev-orch-gate.test.mts`.
  *
  * The exclusion set is the single input BOTH picks derive from: the
@@ -36,6 +44,7 @@ import { resolve, join } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh");
+const PR_REFS = join(REPO_ROOT, "scripts", "autopilot", "pr-refs.py");
 
 interface OpenPr {
   headRefName: string;
@@ -49,7 +58,7 @@ interface Issue {
 
 /**
  * Pull a `python3 -c "<code>"` block out of collect-state.sh by its bash
- * assignment LHS (e.g. `ORCH_INFLIGHT_ISSUES`). The block may span many lines
+ * assignment LHS (e.g. `ORCH_GRILL_CANDIDATES`). The block may span many lines
  * and is terminated by `" 2>/dev/null || true)`. Returns the literal python
  * source so the test runs the committed logic, not a re-implementation.
  */
@@ -64,23 +73,39 @@ function extractPythonBlock(lhs: string): string {
 }
 
 /**
- * Run the `ORCH_INFLIGHT_ISSUES` extraction block against a constructed
- * `gh pr list --json headRefName,body` fixture and return the set of issue
- * numbers it marks as in-flight.
+ * Run the REAL shared predicate — scripts/autopilot/pr-refs.py — against a
+ * constructed `gh pr list --json headRefName,body` payload, exactly the way
+ * collect-state.sh invokes it. `selector` mirrors the CLI flags: no selector
+ * = the union (ORCH_INFLIGHT_ISSUES), "--source branch" and "--source body"
+ * = the per-channel subsets (ORCH_INFLIGHT_BRANCH_ISSUES /
+ * ORCH_INFLIGHT_BODYREF_ISSUES). Returns the set of issue numbers it marks
+ * as in-flight.
  */
-function inflightIssues(prs: OpenPr[]): Set<number> {
-  const code = extractPythonBlock("ORCH_INFLIGHT_ISSUES");
-  const r = spawnSync("python3", ["-c", code], {
-    input: JSON.stringify(prs),
+function runPrRefs(
+  payload: OpenPr[] | string,
+  ...selector: string[]
+): { status: number | null; stdout: string; stderr: string } {
+  const input = typeof payload === "string" ? payload : JSON.stringify(payload);
+  const r = spawnSync("python3", [PR_REFS, ...selector], {
+    input,
     encoding: "utf-8",
   });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+function parseSet(stdout: string): Set<number> {
+  const out = stdout.trim();
+  return new Set(out.length ? out.split(/\s+/).map(Number) : []);
+}
+
+function inflightIssues(prs: OpenPr[]): Set<number> {
+  const r = runPrRefs(prs);
   assert.equal(
     r.status,
     0,
-    `ORCH_INFLIGHT_ISSUES extractor exited non-zero: ${r.stderr}`,
+    `pr-refs.py (union) exited non-zero: ${r.stderr}`,
   );
-  const out = (r.stdout ?? "").trim();
-  return new Set(out.length ? out.split(/\s+/).map(Number) : []);
+  return parseSet(r.stdout);
 }
 
 /**
@@ -208,7 +233,7 @@ describe("collect-state.sh — in-flight dev-work exclusion (issue #3851)", () =
   });
 
   test("a single body with multiple distinct keyword refs contributes all of them", () => {
-    // The extractor iterates every match (re.finditer) and accumulates into a
+    // The predicate iterates every match (re.finditer) and accumulates into a
     // Python set(), so one PR body carrying BOTH a closing keyword and a Refs
     // keyword lands both issue numbers in the emitted set.
     const inflight = inflightIssues([
@@ -267,13 +292,147 @@ describe("collect-state.sh — in-flight dev-work exclusion (issue #3851)", () =
   // ---- Source-level guard --------------------------------------------------
 
   test("the body-keyword alternation includes refs? (drift guard for #3851)", () => {
-    // If a future edit drops `refs?` from the regex, this fails loudly here
-    // rather than silently re-opening the #3851 gap in production.
-    const src = readFileSync(SCRIPT, "utf-8");
+    // If a future edit drops `refs?` from the shared regex in pr-refs.py,
+    // this fails loudly here rather than silently re-opening the #3851 gap in
+    // production. Since #4334 the regex lives ONLY in pr-refs.py —
+    // collect-state.sh carries no inline copy — so the guard points there.
+    const src = readFileSync(PR_REFS, "utf-8");
     assert.match(
       src,
       /resolve\[sd\]\?\|refs\?/,
-      "the in-flight body-keyword regex must include `refs?` in its alternation",
+      "the shared body-keyword regex in pr-refs.py must include `refs?` in its alternation",
     );
+  });
+});
+
+describe("collect-state.sh — in-flight exclusion delegates to pr-refs.py (issue #4334)", () => {
+  // ---- Delegation shape: one predicate, zero inline copies -----------------
+
+  test("all three in-flight sets are piped through the shared pr-refs.py (no inline regex copies)", () => {
+    // The dedupe contract: collect-state.sh must carry ZERO hand-written
+    // copies of the branch-prefix / body-keyword regexes. Every one of the
+    // three in-flight assignments invokes scripts/autopilot/pr-refs.py —
+    // the union with no selector, and `--source branch` / `--source body`
+    // for the per-channel subsets the #3964 Candidate Exclusion telemetry
+    // attributes. A reintroduced inline heredoc here is the exact drift this
+    // PR removed (#4334).
+    const src = readFileSync(SCRIPT, "utf-8");
+    for (const line of [
+      `ORCH_INFLIGHT_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" 2>/dev/null || true)`,
+      `ORCH_INFLIGHT_BRANCH_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source branch 2>/dev/null || true)`,
+      `ORCH_INFLIGHT_BODYREF_ISSUES=$(printf '%s' "$ORCH_INFLIGHT_PR_JSON" | python3 "$SCRIPT_DIR/pr-refs.py" --source body 2>/dev/null || true)`,
+    ]) {
+      assert.ok(src.includes(line), `collect-state.sh must invoke: ${line}`);
+    }
+    // And the regexes themselves are gone from the script: no inline copy of
+    // the branch-prefix pattern or the body-keyword alternation may remain.
+    assert.doesNotMatch(
+      src,
+      /issue-\(\\d\+\)/,
+      "collect-state.sh must not carry an inline copy of the issue-(\\d+) branch regex",
+    );
+    assert.doesNotMatch(
+      src,
+      /close\[sd\]\?/,
+      "collect-state.sh must not carry an inline copy of the body-keyword alternation",
+    );
+    // Exactly the three delegating invocations — a fourth copy-paste call
+    // site would be new duplication of a different kind.
+    const calls = src.match(/python3 "\$SCRIPT_DIR\/pr-refs\.py"/g) ?? [];
+    assert.equal(calls.length, 3, "expected exactly three pr-refs.py invocations");
+  });
+
+  test("collect-state.sh resolves pr-refs.py relative to its own file (SCRIPT_DIR idiom)", () => {
+    // Mirrors recover-stale.sh's idiom (issue #3852) so the predicate is
+    // found regardless of how $0 was passed — a relative invocation or a
+    // worktree path must never silently miss the sibling file.
+    const src = readFileSync(SCRIPT, "utf-8");
+    assert.match(
+      src,
+      /SCRIPT_DIR=\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]:-\$0\}"\)" && pwd\)/,
+      "collect-state.sh must define SCRIPT_DIR via the BASH_SOURCE idiom",
+    );
+  });
+
+  // ---- The per-source selectors the #3964 telemetry consumes ----------------
+
+  test("--source branch returns the branch-name channel only", () => {
+    const r = runPrRefs(
+      [
+        { headRefName: "issue-40-slug", body: "Refs #41\n" },
+        { headRefName: "worktree-agent-x", body: "Closes #42\n" },
+      ],
+      "--source",
+      "branch",
+    );
+    assert.equal(r.status, 0, `--source branch exited non-zero: ${r.stderr}`);
+    assert.deepEqual([...parseSet(r.stdout)].sort((a, b) => a - b), [40]);
+  });
+
+  test("--source body returns the body-keyword channel only", () => {
+    const r = runPrRefs(
+      [
+        { headRefName: "issue-40-slug", body: "Refs #41\n" },
+        { headRefName: "worktree-agent-x", body: "Closes #42\n" },
+      ],
+      "--source",
+      "body",
+    );
+    assert.equal(r.status, 0, `--source body exited non-zero: ${r.stderr}`);
+    assert.deepEqual([...parseSet(r.stdout)].sort((a, b) => a - b), [41, 42]);
+  });
+
+  test("zero-argument invocation prints the sorted union (recover-stale.sh / parent-flow contract)", () => {
+    // recover-stale.sh and the hydra-dev parent flow call pr-refs.py with NO
+    // arguments; that zero-arg surface must keep printing the UNION of both
+    // channels, space-separated and sorted — never a single channel.
+    const r = runPrRefs([
+      { headRefName: "issue-9-b", body: "Refs #2\n" },
+      { headRefName: "worktree-agent-x", body: "Closes #1\n" },
+    ]);
+    assert.equal(r.status, 0, `zero-arg invocation exited non-zero: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), "1 2 9");
+  });
+
+  // ---- Fail-open degrade contract (never-abort) -----------------------------
+
+  test("fail-open degrade: empty / non-JSON / non-list stdin prints nothing and exits 0 for every --source value", () => {
+    // The never-abort contract every caller relies on: a failed `gh pr list`
+    // (empty payload), a mangled payload, or a non-list JSON top level must
+    // print NOTHING and exit 0 for all three selector values — the empty set
+    // is the caller's "no open PR" signal, which falls through to today's
+    // behaviour (no exclusion / re-queue to ready-for-agent).
+    const badPayloads: string[] = [
+      "",
+      "not json at all",
+      '{"degraded": true}', // valid JSON, wrong shape (object, not list)
+      "42", // valid JSON, wrong shape (scalar)
+      "[1, 2]", // list of non-dicts
+    ];
+    const selectors: string[][] = [[], ["--source", "branch"], ["--source", "body"]];
+    for (const selector of selectors) {
+      for (const payload of badPayloads) {
+        const r = runPrRefs(payload, ...selector);
+        assert.equal(
+          r.status,
+          0,
+          `pr-refs.py ${selector.join(" ")} must exit 0 on bad stdin (${JSON.stringify(payload)}): ${r.stderr}`,
+        );
+        assert.equal(
+          r.stdout,
+          "",
+          `pr-refs.py ${selector.join(" ")} must print nothing on bad stdin (${JSON.stringify(payload)})`,
+        );
+      }
+    }
+  });
+
+  test("an unknown selector is rejected loudly (exit 2), never silently misread", () => {
+    // A typo'd --source value must not silently fall back to the union: the
+    // bash call sites wrap this in `2>/dev/null || true`, so a loud exit 2
+    // degrades to the documented empty-set no-op while staying diagnosable
+    // when run by hand.
+    const r = runPrRefs([{ headRefName: "issue-1-x", body: "" }], "--source", "bogus");
+    assert.notEqual(r.status, 0, "--source bogus must exit non-zero");
   });
 });
