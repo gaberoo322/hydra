@@ -125,9 +125,12 @@ this playbook, not in `decide()`.
 Right-sized by **stakes × frequency** — drop the high-frequency non-authoring
 classes off the frontier model; keep behaviour-reshaping and money-critical
 authoring classes on Fable 5 (the frontier model, replacing Opus as of
-2026-06-10) **when Fable is actually entitled**. As of 2026-08-04 it isn't, and
-the static map below reflects that — see the cost-emergency note before the
-table.
+2026-06-10) **when Fable is actually entitled**. Entitlement returned
+2026-08-19 and was re-verified 2026-09-02 with the prescribed
+`Agent(model="fable")` smoke test (`FABLE-OK: claude-fable-5`), so the map
+routes the behaviour-reshaping and money-critical classes back to Fable — the
+cost-emergency note before the table is retained as history and marked
+superseded.
 
 **`dev_orch` demoted to Sonnet 2026-07-29 — on evidence, not a cost guess.** The
 GLM dev-drainer beachhead (ADR-0032) authored 9 CI-green PRs here on GLM-5.2, a
@@ -154,14 +157,28 @@ obsoletes this whole note; re-promote all three once it's live and re-verified
 (don't just flip the table back on faith — dispatch one `Agent(model="fable", …)`
 smoke test first, per the fallback rule below).
 
+**Superseded 2026-09-02 — operator-approved re-promotion.** Fable entitlement
+returned 2026-08-19; the required smoke test passed 2026-09-02
+(`FABLE-OK: claude-fable-5`). The cost emergency is over: weekly usage sat at
+8% with the Target mothballed (Kalshi banned in WA; the successor target CSB is
+being founded via map #4313). Per this note's own re-promotion instruction,
+`retro_orch` and `design_concept_orch` return to Fable immediately;
+`dev_target` and `qa_target` are stamped Fable in the table but those rows are
+moot until the CSB swap lifts the orch-only scope pin — CSB launches its
+money-critical authoring and review at the frontier tier and demotes on
+evidence, never the reverse. `dev_orch` deliberately stays Sonnet: that
+demotion was evidence-based (the GLM-5.2 beachhead cleared the bar from below
+Sonnet), not cost-driven, and its `ESCALATION_POLICY` row already self-rescues
+failures at Fable.
+
 | Class (`slot`) | Model | Rationale |
 |---|---|---|
 | `dev_orch` | Sonnet | Multi-file, tier-gated self-modification — but measured (above). An `ESCALATION_POLICY` row re-dispatches a `subagent_failure` once at frontier, so a capability miss self-rescues. `qa_orch` + CI unchanged. |
-| `dev_target` | Sonnet (trial, 2026-08-04) | Money-critical betting code — was silently paying Opus (Fable unentitled); demoted under cost emergency, unmeasured at this tier. Watch Target PR QA/CI closely; revert to Fable/Opus on quality regression. |
-| `retro_orch` | Sonnet (2026-08-04) | Reshapes future behaviour; per-run low volume; orchestrator-side, not money-critical — same evidence class as `dev_orch`'s demotion |
-| `design_concept_orch` | Sonnet (2026-08-04) | A weak design concept wastes a full dev+QA cycle, but orchestrator-side and not money-critical — same evidence class as `dev_orch`'s demotion |
+| `dev_target` | Fable (re-promoted 2026-09-02; effective at the CSB swap) | Money-critical authoring. The 2026-08-04 Sonnet trial ended unmeasured (Target mothballed before a verdict); the successor target launches at the frontier tier and demotes on evidence, not the reverse. |
+| `retro_orch` | Fable (re-promoted 2026-09-02) | Reshapes future behaviour; per-run low volume. The 2026-08-04 demotion was cost-emergency-driven and prescribed its own reversal on entitlement + smoke test (both done). |
+| `design_concept_orch` | Fable (re-promoted 2026-09-02) | A weak design concept wastes a full dev+QA cycle downstream; low volume — same re-promotion basis as `retro_orch`. |
 | `qa_orch` | Sonnet | Highest ROI; structured review against an artifact, ~every PR |
-| `qa_target` | Sonnet | Floor — money-critical review, do NOT drop below Sonnet |
+| `qa_target` | Fable (re-promoted 2026-09-02; effective at the CSB swap) | Money-critical review — the last judgment before auto-merge on real-money code. Sonnet remains the hard floor if cost ever forces a demotion. |
 | `sweep_orch` / `sweep_target` | Sonnet | Board-routing decisions, not authorship |
 | `health` | Sonnet | Structured diagnosis; rare small fixes |
 | `research_orch` | Sonnet | Bounded codebase+web enrichment, not design |
