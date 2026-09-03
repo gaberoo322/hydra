@@ -1,0 +1,284 @@
+# Claw Street Bets (CSB) — Target Outcomes.
+#
+# FOUNDING-PACK DRAFT (issue #4319 on map #4313). Drop this file, unchanged,
+# into the CSB direction dir at swap time (`HYDRA_CONFIG_PATH/direction/
+# outcomes.yaml`, docs/target-swap-runbook.md Step 2a) — it is the contract
+# between the CSB vision (prose) and orchestrator behaviour (code). Same
+# schema and loader as the orchestrator's config/direction/outcomes.yaml
+# (src/outcomes.ts; the flat grammar in src/config-yaml.ts): `name`, `kind`
+# (leading | terminal), `direction` (up | down), `source: file`, `query` (a
+# path resolved against HYDRA_ROOT holding one number), `baseline`, `target`,
+# optional `noise_epsilon` and `attribution_window_ms`. Read the field docs in
+# the orchestrator file; they are not repeated here.
+#
+# Why this shape (decisions #4314, rounds 1–2; do not re-litigate here):
+#   - The business is trading P&L — no customers. ONE terminal outcome:
+#     real-money cumulative P&L net of fees. It reads 0 until a strategy
+#     graduates. That is honest, and it is issue #4301's lesson applied from
+#     day one: the previous target ran four months with no terminal outcome
+#     declared at all, so nothing external could brake a loop optimising
+#     leading numbers (1,180 settled forecasts at Brier 0.2307 — no edge).
+#   - Leading outcomes are PAPER numbers: rolling expectancy and Sharpe, max
+#     drawdown, settled-trade count, and the paper-vs-backtest fill
+#     divergence hydra-betting never measured. CSB owns one fill simulator
+#     (fees + slippage + book-awareness) that prices backtest, paper and live
+#     identically — "one fill model, three clocks" — so the divergence
+#     outcome is the metric that says whether the fill model is lying.
+#   - Real money (thousands-scale) sits behind the PRE-REGISTERED GRADUATION
+#     GATE at the bottom of this file. The gate is written before the first
+#     paper trade and is operator-only-editable: the system being measured
+#     must never be able to move its own gate.
+#
+# Reading conventions (shared with the orchestrator file):
+#   - null = no reading. A MISSING file is no-data, never a fabricated value
+#     and never a regression. The terminal P&L file is the one deliberate
+#     exception in spirit: the CSB producer writes a literal 0 from day one,
+#     because 0 is the TRUE sum of an empty real-money ledger, not a
+#     placeholder. A missing terminal file means the producer is dark.
+#   - Every `query` below lives under metrics/csb/ (relative to HYDRA_ROOT).
+#     The producer is a CSB-side responsibility: CSB's web API exposes the
+#     numbers and the orchestrator's metrics publisher samples them into
+#     these files. TODAY src/metrics/publish.ts is hardcoded to
+#     hydra-betting's /api/calibration/forecast-metrics — de-hardcoding it
+#     to a target-neutral endpoint is swap-readiness work (#4324), NOT a
+#     reason to put a CSB literal in src/ (ADR-0013 Decision 4).
+#   - Program vs strategy: this file measures the PROGRAM (the equal-weight
+#     paper portfolio of every candidate currently inside a graduation
+#     stage), because the orchestrator's Outcome Holdback asks "did a merge
+#     break trading?", not "which strategy graduates?". Per-strategy numbers
+#     live in CSB's append-only trial ledger; the graduation gate reads
+#     THOSE. Using a portfolio here also keeps the leading outcomes free of
+#     best-of-k selection bias.
+#   - Sharpe and drawdown are computed on daily UTC P&L marks (365/yr),
+#     never on per-trade returns (Lo 2002 serial-correlation caveat, and
+#     per-trade marking is far more non-normal — #4318 §4.1/§4.2).
+#   - "net" always means net of the frozen cost model c (exchange fees +
+#     modeled slippage + funding), itemised per venue/instrument. Cost-
+#     denominated outcomes are expressed in MULTIPLES OF c so the numbers
+#     stay comparable if the venue fee schedule is re-frozen by the operator.
+#
+# Outcome Holdback: only `kind: leading` outcomes drive a post-merge revert
+# (T2+ merges; windows/caps documented in the orchestrator file). Two notes
+# for the swap checklist (#4326) and swap-readiness (#4324):
+#   - paper-settled-trade-count-cumulative is a monotone CLOCK, not a quality
+#     signal; it belongs in HOLDBACK_EXCLUDED_OUTCOME_NAMES
+#     (src/holdback-policy.ts) the same way the sport-blind Brier aggregate
+#     did, and that set is currently a hardcoded betting literal.
+#   - attribution_window_ms is sized to how fast each metric MOVES: the
+#     180-day rolling Sharpe cannot register a merge in an afternoon; the
+#     divergence check can.
+
+outcomes:
+  # ---------------------------------------------------------------------
+  # Builder-self — carried across EVERY swap, verbatim from the
+  # orchestrator's config/direction/outcomes.yaml. ADR-0003's 25% self-
+  # improvement floor survives the CSB swap (ADR-0013 §3 + its 2026-09-02
+  # amendment), and this outcome is its only declared metric; because
+  # HYDRA_CONFIG_PATH swaps the whole direction dir, omitting it here would
+  # silently delete the floor's measurement at swap time. Producer:
+  # src/metrics/publish.ts (orchestrator-side, target-independent).
+  # ---------------------------------------------------------------------
+  - name: orchestrator-self-improvement-share
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/orchestrator-share.txt
+    baseline: 0
+    target: 0.25
+    noise_epsilon: 0.01
+
+  # ---------------------------------------------------------------------
+  # TERMINAL — the business metric. Real-money cumulative P&L, net of all
+  # exchange fees, in USD, since the first live fill. Reads a true 0 until
+  # the first strategy clears the gate below; the orchestrator may NEVER
+  # optimise this directly (it is the external brake, #4301). `target` is
+  # the first real-money milestone at a thousands-scale bankroll — a goal,
+  # not a gate; the operator revises it when the bankroll number is set
+  # (map #4313 "Not yet specified"). noise_epsilon is unused for terminal
+  # outcomes (they never drive holdback) and is left at the schema default.
+  # ---------------------------------------------------------------------
+  - name: real-money-cumulative-pnl-net
+    kind: terminal
+    direction: up
+    source: file
+    query: metrics/csb/real-money-cumulative-pnl-net.txt
+    baseline: 0
+    target: 1000
+
+  # ---------------------------------------------------------------------
+  # LEADING — paper metrics. All four graduation clauses have a leading
+  # twin here so the dashboard, the attribution ledger and holdback see the
+  # same numbers the gate will read.
+  # ---------------------------------------------------------------------
+
+  # Annualised net Sharpe of the in-stage paper portfolio, trailing 180
+  # days (one stage length) of daily UTC marks. baseline 0 = the zero-edge
+  # null; target 2.0 = the Stage-A screen floor — below 2.0 is both
+  # statistically undecidable inside a one-year paper program (SE of an
+  # annualised Sharpe is 1.42 at 180 d) and inside best-of-k selection
+  # noise (#4318 §4.1, §7.1). noise_epsilon 0.3 is deliberately well under
+  # that SE: holdback compares two readings of the SAME window days apart,
+  # where a 0.3 move is a real level shift, not sampling noise.
+  - name: paper-net-sharpe-annualized
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/paper-net-sharpe-annualized.txt
+    baseline: 0
+    target: 2.0
+    noise_epsilon: 0.3
+    attribution_window_ms: 1209600000
+
+  # Net per-trade expectancy of the in-stage paper portfolio over the
+  # trailing 400 settled trades (one stage's trade floor), in MULTIPLES of
+  # the frozen round-trip cost c. target 0.5 = the gate's expectancy floor:
+  # a strategy netting less than half its own cost stack has its sign
+  # decided by the fill model's error bars, not by alpha (#4318 §5.2).
+  - name: paper-net-expectancy-per-trade
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/paper-net-expectancy-per-trade.txt
+    baseline: 0
+    target: 0.5
+    noise_epsilon: 0.05
+    attribution_window_ms: 604800000
+
+  # Peak-to-trough drawdown of the in-stage paper portfolio over the
+  # trailing 180 days, in PERCENT of paper capital, at the 1%-daily-vol risk
+  # template. A driftless walk already "expects" ~16.8% per 180-day stage,
+  # so baseline 20 = the gate's absolute backstop (the fail line) and
+  # target 10 = comfortably inside what no-edge produces (#4318 §5.3).
+  # Lower is better.
+  - name: paper-max-drawdown-pct
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/paper-max-drawdown-pct.txt
+    baseline: 20
+    target: 10
+    noise_epsilon: 1.0
+    attribution_window_ms: 604800000
+
+  # Settled paper trades across all candidates since the first paper trade.
+  # CUMULATIVE and never reset (a per-stage count resets to 0 on a stage
+  # clock reset, which holdback would misread as a catastrophic regression
+  # of an unrelated merge). A clock, not a quality signal — see the
+  # holdback-exclusion note in the header. target 800 = the two-stage
+  # minimum (2 × 400) one strategy needs before it can graduate; per-
+  # strategy per-stage counts live in the trial ledger.
+  - name: paper-settled-trade-count-cumulative
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/csb/paper-settled-trade-count-cumulative.txt
+    baseline: 0
+    target: 800
+    noise_epsilon: 0
+    attribution_window_ms: 86400000
+
+  # Fill-model honesty — the metric hydra-betting never had. Absolute mean
+  # per-trade difference between the paper fill and the shadow backtest
+  # (the backtester re-run over the exact paper period on the same signal
+  # stream, matched 1:1), over the rolling 100 settled trades, in MULTIPLES
+  # of c. baseline 0.25 = the gate's tolerance line (a breach declares the
+  # fill model lying: halt, fix, stage clock resets); target 0.05 = the fill
+  # model and the paper account agree to within a sliver of one fee.
+  # Lower is better. The gate's two companion clauses (directional-bias
+  # t-test, limit-order fill-rate ±10 pp) are stage-level tests evaluated
+  # by CSB's gate code, not rolling outcomes.
+  - name: paper-vs-backtest-fill-divergence
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/csb/paper-vs-backtest-fill-divergence.txt
+    baseline: 0.25
+    target: 0.05
+    noise_epsilon: 0.02
+    attribution_window_ms: 259200000
+
+# =============================================================================
+# === PRE-REGISTERED GRADUATION GATE — BEGIN ==================================
+# =============================================================================
+#
+# status: DRAFT (#4319). Becomes PRE-REGISTERED the moment the locking ticket
+#         on map #4313 closes, which must happen BEFORE the first Stage-A trade
+#         is counted. Two lock preconditions (from #4318 §9): the cost model c
+#         is frozen from the launch venue's LIVE fee schedule (Coinbase
+#         Advanced Trade per #4317 — verify the operator's Coinbase One effect
+#         on Advanced-Trade fees first) plus slippage MEASURED during early
+#         paper trading, never estimated post hoc.
+#
+# EDIT CONVENTION — operator-only. The system being measured must not be
+# able to move its own gate, so:
+#   1. Only the operator edits this block, by hand, in a PR labelled
+#      operator-approved. No Hydra agent class (dev, sweep, retro, cleanup,
+#      research, target-build) may propose or apply a change to it, and CSB's
+#      own code may never write to this file.
+#   2. Orchestrator repo: test/csb-founding-pack-outcomes.test.mts pins every
+#      number in this block. A PR that moves the bar reddens the REQUIRED
+#      test job unless it also rewrites that test — which puts the change in
+#      the diff where the operator sees it. Silent drift is impossible.
+#   3. CSB repo: the gate's machine-readable mirror (CSB's gate evaluator
+#      reads its own config, not this comment block) belongs on the
+#      .hydra/manifest.json riskCritical surface (#4322) — the money-critical
+#      review path — and under an operator-only CODEOWNERS rule. CSB CI
+#      asserts the mirror equals this block; a mismatch fails the build.
+#   4. Rule of the bar: NO number below is lowered because a strategy is
+#      close. The pre-registered bar is the whole point (#4301, and the
+#      predecessor's 1,180-forecasts-no-edge outcome).
+#
+# Source: #4318 "Graduation-bar math" (resolution + docs/research/
+# 2026-09-02-csb-graduation-bar.md on branch research/csb-graduation-bar).
+# Section refs below are to that document. This block is deliberately a
+# comment: the orchestrator's outcomes grammar admits only the `outcomes:`
+# list, and the gate is CSB's contract with the operator, not a holdback
+# input.
+#
+# csb_graduation_gate:
+#   cost_model:
+#     round_trip_cost_c: "fees + modeled slippage + funding, itemised per venue/instrument, FROZEN at lock"
+#     frozen_from: "live Coinbase Advanced Trade fee schedule + measured early-paper slippage (§9.1, §9.2)"
+#   per_stage_floors:                     # BOTH must hold before a stage can be judged (§4.4)
+#     min_settled_paper_trades: 400       # below this, expectancy + divergence tests are undecidable (§4.3)
+#     min_calendar_days: 180              # Sharpe SE = 1.42 at 180 d; shorter is astrology (§4.1)
+#   stage_a_screen:                       # selection allowed here, and priced in (§7.2)
+#     net_sharpe_floor: "max(2.0, SR0(k, window))"   # SR0 = expected max of k null trials (§7.1)
+#     net_sharpe_floor_min: 2.0
+#     beats_random_entry_controls: "net Sharpe > p95 of the control fleet over the identical window (§5.1)"
+#     control_fleet_min_paths: 200        # same risk template, randomised entries (White 2000 reality check)
+#     control_fleet_percentile: 95
+#     net_expectancy_floor_x_cost: 0.5    # net per-trade expectancy >= 0.5 x c (§5.2)
+#   stage_b_confirm:                      # fresh sample => k = 1 by construction (§7.2)
+#     frozen_parameters: true             # ANY parameter edit resets Stage B to day zero
+#     pass: "PSR(SR*=0) >= 0.95 on Stage-B data alone"
+#     psr_min: 0.95
+#     earliest_day: 180                   # and >= 400 settled trades, per the per-stage floors
+#     hard_fail_day: 365                  # never reached by day 365 => fail; re-enter Stage A as a new ledger entry
+#   max_drawdown:                         # monitoring clause: evaluated continuously, action is conservative (§5.4)
+#     fail_fast: "paper MDD > p95 of the control fleet's MDD over the same window => immediate fail (§5.3)"
+#     absolute_backstop_pct: 20           # of paper capital at the 1%-daily-vol template; scale with the template's vol
+#   fill_model_honesty:                   # breach => fill model is lying => halt, fix, stage clock resets (§6)
+#     pnl_divergence_x_cost: 0.25         # |mean(paper - shadow-backtest)| <= 0.25 x c over rolling 100 trades
+#     pnl_divergence_window_trades: 100
+#     directional_bias: "one-sided t-test paper < backtest significant at 95% over the full stage => breach"
+#     fill_rate_tolerance_pp: 10          # limit-order fill rate within +/-10 pp of backtest per order-type bucket
+#     divergent_period_counts: false      # data from a breached period never counts toward graduation
+#   multiple_testing:                     # the best of 10 dead strategies is EXPECTED to print SR 2.2 over 180 d (§7.1)
+#     trial_ledger: "append-only; k = every strategy that ever entered Stage A"
+#     trailing_months: 24
+#     failures_deleted: never             # deleting failures is retroactively lowering the bar
+#     rule: "Stage-A floor and control percentile computed at CURRENT k; Stage B immune via the fresh sample"
+#   graduation:                           # what clearing the gate unlocks (decisions #4314 rounds 1–2)
+#     unlocks: "live lane at minimum viable stake, thousands-scale, under the five risk invariants"
+#     per_strategy: true                  # one strategy graduates; the program does not
+#
+# Operating characteristics (approximate, Gaussian; §7.3): false graduation
+# ~0.3% per dead strategy (~3% at k = 10); a true net-SR-2.5 strategy
+# graduates ~50% per 12-month attempt; a true SR-1.0 strategy is deliberately
+# near-invisible (undecidable in-program and economically marginal at this
+# frequency). Worst-case honest timeline to first real-money trade: ~12 months.
+#
+# =============================================================================
+# === PRE-REGISTERED GRADUATION GATE — END ====================================
+# =============================================================================

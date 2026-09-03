@@ -1,0 +1,1 @@
+- docs: draft the Claw Street Bets outcomes.yaml founding-pack file — one terminal real-money P&L outcome, five leading paper metrics, and the pinned pre-registered graduation gate (#4319)
