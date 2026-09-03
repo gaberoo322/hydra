@@ -64,6 +64,7 @@ import { enrollHoldback, type EnrollResult } from "../../holdback.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
 import { isEnrolledTier } from "../../holdback-policy.ts";
 import { viewPr } from "../../github/issues.ts";
+import { decodePrStateAndHeadRef } from "../../github/view-pr.ts";
 import { logger } from "../../logger.ts";
 
 /**
@@ -102,8 +103,18 @@ interface RawPrView {
  * would silently drop them. This runs only over the (small) pending-registry set
  * at the housekeeping cadence, so the GraphQL-pool cost is negligible. `viewPr`
  * returns `null` on any failure and never throws.
+ *
+ * The `state`/`headRefName` decode itself is shared with
+ * `cycle-merge-reconcile.ts`'s `fetchPrStateViaGh` via
+ * {@link decodePrStateAndHeadRef} (issue #4328) — this site layers its own
+ * additional `mergeCommit.oid`/`changedFiles` decode on top of the SAME
+ * (wider-field) `viewPr` call rather than re-deriving the shared pair.
+ *
+ * Exported (test-only) so a wired test can drive it through a fake `gh` binary
+ * and count invocations — proving it still makes exactly one `viewPr` call
+ * (issue #4328: the shared helper must not turn one call into two).
  */
-async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStatus | null> {
+export async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStatus | null> {
   const view = await viewPr<RawPrView>(
     prNumber,
     // Issue #3579: `headRefName` rides along on the SAME view — it is a plain
@@ -116,13 +127,9 @@ async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStatus | nu
   if (view == null) return null;
   const oid = view.mergeCommit?.oid;
   return {
-    state: typeof view.state === "string" ? view.state : null,
+    ...decodePrStateAndHeadRef(view),
     mergeCommitSha: typeof oid === "string" && oid.length > 0 ? oid : null,
     changedFiles: typeof view.changedFiles === "number" ? view.changedFiles : null,
-    headRefName:
-      typeof view.headRefName === "string" && view.headRefName.length > 0
-        ? view.headRefName
-        : null,
   };
 }
 

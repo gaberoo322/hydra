@@ -284,6 +284,47 @@ async function viewPrViaGraphql<T>(
 }
 
 /**
+ * The normalized `{state, headRefName}` pair {@link decodePrStateAndHeadRef}
+ * always produces.
+ */
+export interface PrStateAndHeadRef {
+  /** The `gh pr view` state (`MERGED`/`OPEN`/`CLOSED`), or `null` if unreported. */
+  state: string | null;
+  /** The PR's head-branch ref, or `null` if unreported/empty. */
+  headRefName: string | null;
+}
+
+/**
+ * Safely decode the `state` + `headRefName` fields off a raw {@link viewPr}
+ * response, whatever wider field set the caller additionally requested
+ * alongside them. Both fields are untyped on the wire, so each degrades to
+ * `null` independently: `state` on anything but a non-empty string,
+ * `headRefName` on anything but a non-empty string (an empty string is
+ * treated the same as absent).
+ *
+ * Extracted (issue #4328) from two independently written call sites —
+ * `cycle-merge-reconcile.ts`'s `fetchPrStateViaGh` and
+ * `holdback-merge-watch.ts`'s `fetchMergeStatusViaGh` — that had converged on
+ * the byte-identical normalization idiom for this pair while each also
+ * decoding its own additional fields (`headRefName`/`mergeCommit.oid` and
+ * `changedFiles` respectively) from the SAME `viewPr` call. This helper is
+ * pure (no I/O) so each site keeps its own field-set request and additional
+ * decode, and only the shared decode rule lives in one place.
+ */
+export function decodePrStateAndHeadRef(view: {
+  state?: string | null;
+  headRefName?: string | null;
+}): PrStateAndHeadRef {
+  return {
+    state: typeof view.state === "string" ? view.state : null,
+    headRefName:
+      typeof view.headRefName === "string" && view.headRefName.length > 0
+        ? view.headRefName
+        : null,
+  };
+}
+
+/**
  * View a single PR's fields. Returns the raw parsed object (typed `T` is the
  * caller's responsibility, as with `ghJson`) or `null` on any failure — the
  * historical `gh pr view` consumers (recent-merges, builder-health) treat a
