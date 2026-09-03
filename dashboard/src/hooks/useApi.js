@@ -76,6 +76,9 @@ export function useServerConfirmedWrite(refresh) {
         await refresh();
         return { ok: true, res };
       } catch (err) {
+        /* intentional: surfaced, not silent — the rejection reaches the page
+           twice (the error state the rows render + the { ok: false, error }
+           result), matching the read hook's contract; no console spam. */
         const message = err?.message || String(err);
         setError(message);
         return { ok: false, error: message };

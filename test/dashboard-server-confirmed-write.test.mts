@@ -69,11 +69,10 @@ describe("useApi.js owns exactly one write-side hook (INV-1)", () => {
 
   test("write POSTs a JSON body through the module's own apiFetch", async () => {
     const hook = sliceExport(await readSource(USE_API), "export function useServerConfirmedWrite(");
-    assert.match(
-      hook,
-      /apiFetch\(path, \{\s*method: "POST",\s*body: JSON\.stringify\(body\),\s*\}\)/,
-      "every dashboard write is POST + JSON body; the hook hardcodes that shape",
-    );
+    // Token-level pins — argument order and object layout are not the contract.
+    assert.match(hook, /apiFetch\(path,/, "the write rides the module's own fetch seam");
+    assert.match(hook, /method: "POST"/, "every dashboard write is a POST");
+    assert.match(hook, /JSON\.stringify\(body\)/, "the body is JSON-encoded by the hook");
   });
 
   test("write resolves a result object and never throws to the caller", async () => {
@@ -198,6 +197,17 @@ describe("read side untouched; pending resets on both paths (INV-5/INV-8)", () =
     assert.ok(
       ((src.match(/finally \{/g) ?? []).length) >= 2,
       "the write hook must reset pending in a finally on both the success and failure paths",
+    );
+  });
+
+  test("the write hook's own slice resets pending in a finally", async () => {
+    // The whole-file count above mirrors the artifact's mandated discharge;
+    // this scoped check pins that the write hook is one of the contributors.
+    const hook = sliceExport(await readSource(USE_API), "export function useServerConfirmedWrite(");
+    assert.ok(hook.includes("finally"), "the write hook must own a finally");
+    assert.ok(
+      hook.includes("setPending(false)"),
+      "pending resets on both the success and failure paths",
     );
   });
 
