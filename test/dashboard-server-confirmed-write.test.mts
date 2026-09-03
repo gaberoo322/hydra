@@ -59,7 +59,11 @@ function sliceExport(src: string, marker: string): string {
 describe("useApi.js owns exactly one write-side hook (INV-1)", () => {
   test("the module's exports are exactly apiFetch, useApi, useServerConfirmedWrite", async () => {
     const src = await readSource(USE_API);
-    const names = Array.from(src.matchAll(/export (?:async )?function (\w+)/g), (m) => m[1]);
+    // Line-anchored so a doc-comment phrase cannot register a phantom export.
+    const names = Array.from(src.matchAll(/^export (?:async )?function (\w+)/gm), (m) => m[1]);
+    // …and the arrow-function form is invisible to that regex — pin it absent
+    // so a second write-side home cannot sneak in as `export const use…`.
+    assert.doesNotMatch(src, /^export const use\w*/m, "no const-arrow hook exports either");
     assert.deepEqual(
       names,
       ["apiFetch", "useApi", "useServerConfirmedWrite"],
@@ -119,13 +123,20 @@ describe("useServerConfirmedWrite is server-confirmed, never optimistic (INV-4)"
 
     // refresh() is awaited INSIDE the try, BEFORE the ok:true resolution —
     // the follow-up read must land before the caller treats the write as
-    // confirmed.
+    // confirmed. Bounding both past the try AND before the catch/finally
+    // keeps them lexically inside the try block (a refresh moved into a
+    // finally would still satisfy plain ordering).
     const tryAt = hook.indexOf("try {");
     const refreshAt = hook.indexOf("await refresh()");
     const okAt = hook.indexOf("{ ok: true");
+    const catchAt = hook.indexOf("} catch");
     assert.ok(tryAt !== -1, "the hook body must contain a try block");
     assert.ok(refreshAt > tryAt, "await refresh() must sit inside the try block");
     assert.ok(okAt > refreshAt, "ok:true may only resolve after the follow-up read");
+    assert.ok(
+      catchAt === -1 || (refreshAt < catchAt && okAt < catchAt),
+      "the refresh and the ok:true resolution must precede the catch — inside the try",
+    );
 
     // The rendered pause/brake value keeps deriving solely from the read
     // hook's data — never from the write's own success.
@@ -181,9 +192,11 @@ describe("NowConsole.jsx delegates the pause write to the hook (INV-3)", () => {
 
   test("the StatusVerdict props keep their names and types", async () => {
     const src = await readSource(NOW_CONSOLE);
-    for (const pin of ["onTogglePause=", "pausePending=", "pauseError="]) {
-      assert.ok(src.includes(pin), `NowConsole must keep handing ${pin} to StatusVerdict`);
-    }
+    // Pin the props ON the StatusVerdict handoff with their exact values —
+    // bare substring pins would match a prop moved onto any other element.
+    assert.match(src, /<StatusVerdict\b[\s\S]{0,600}?onTogglePause=\{handleTogglePause\}/);
+    assert.match(src, /<StatusVerdict\b[\s\S]{0,600}?pausePending=\{pausePending\}/);
+    assert.match(src, /<StatusVerdict\b[\s\S]{0,600}?pauseError=\{pauseError\}/);
   });
 });
 
@@ -226,9 +239,11 @@ describe("the brake's confirm arm stays in the page (INV-6)", () => {
   test("brakeArmed remains local Health.jsx state, cleared only on an ok write", async () => {
     const src = await readSource(HEALTH);
     assert.ok(src.includes("brakeArmed"), "the hook knows nothing about arming — the arm is page state");
+    // `if (res.ok)` — the positive guard only; `\.ok` alone would equally
+    // match an inverted `if (!res.ok)` disarm.
     assert.match(
       src,
-      /\.ok[\s\S]{0,120}?setBrakeArmed\(false\)/,
+      /if \(res\.ok\)[\s\S]{0,120}?setBrakeArmed\(false\)/,
       "the arm may clear only once write resolves ok — a failed POST keeps the confirm visible for a retry",
     );
   });

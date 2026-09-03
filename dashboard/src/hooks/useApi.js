@@ -70,9 +70,11 @@ export function useServerConfirmedWrite(refresh) {
           method: "POST",
           body: JSON.stringify(body),
         });
-        // SERVER-CONFIRMED: the follow-up read must land before this call
-        // resolves ok — the page flips displayed state from that read,
-        // never from the write's own success.
+        // SERVER-CONFIRMED: the write only counts as confirmed once the
+        // follow-up read has been re-fetched — the page flips displayed
+        // state from that read, never from the write's own success. A
+        // failed re-read stays the READ's failure state (INV-8: the hook
+        // must not detect or mask it); `ok` means the write landed.
         await refresh();
         return { ok: true, res };
       } catch (err) {
