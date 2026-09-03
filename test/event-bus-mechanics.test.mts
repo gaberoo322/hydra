@@ -13,12 +13,14 @@
  *   - `shouldPromoteToDlq` — the 3-attempt DLQ threshold.
  *   - `runAutoclaimRecovery` — the deleted-message (empty-fields) short-circuit
  *     the issue calls out as previously untested: the handler must NOT run.
- *   - The shared per-entry consume fold (#4333) — a structural guard that the
- *     "handler → ACK on success / defer to the DLQ policy on throw" contract
- *     is declared exactly ONCE in the module (both loops route through it),
- *     plus parity tests feeding the SAME synthetic entry through
- *     `runAutoclaimRecovery` and `runLongPollLoop` and asserting the two drive
- *     the identical observable deps sequence.
+ *   - The shared per-entry consume fold (#4333) — DIRECT pins on
+ *     `processStreamEntry` (exactly-one settlement, ack ordering, ack-reject
+ *     routing, onFailure-rejection propagation), a structural guard that the
+ *     contract is declared exactly ONCE in the module (both loops route
+ *     through it), and parity tests feeding the SAME synthetic entry through
+ *     `runAutoclaimRecovery` and `runLongPollLoop` asserting the two drive
+ *     the identical observable deps sequence. Plus: the long-poll path has
+ *     NO empty-fields skip (that short-circuit is autoclaim-only).
  */
 
 import { test, describe } from "node:test";
@@ -30,6 +32,7 @@ import {
   shouldPromoteToDlq,
   runAutoclaimRecovery,
   runLongPollLoop,
+  processStreamEntry,
   type RawStreamEntry,
   type ConsumedEvent,
 } from "../src/event-bus-mechanics.ts";
@@ -217,6 +220,102 @@ function recordingDeps(handlerImpl?: (event: ConsumedEvent) => void) {
 }
 
 describe("event-bus-mechanics — the shared per-entry consume fold", () => {
+  test("direct: exactly-one settlement — a resolved handler settles ack-only; a throwing handler settles onFailure-only", async () => {
+    // Success path: handler resolves → ack fires, and ONLY ack.
+    const okCalls: string[] = [];
+    await processStreamEntry(
+      {
+        handler: () => { okCalls.push("handler"); },
+        ack: async (msgId) => { okCalls.push(`ack:${msgId}`); },
+        onFailure: async () => { okCalls.push("onFailure"); },
+      },
+      "9-1",
+      { type: "merge" },
+    );
+    assert.deepEqual(okCalls, ["handler", "ack:9-1"], "settlement is ack-only");
+
+    // Failure path: handler throws → onFailure fires, and ONLY onFailure.
+    const failCalls: string[] = [];
+    await processStreamEntry(
+      {
+        handler: () => { failCalls.push("handler"); throw new Error("boom"); },
+        ack: async () => { failCalls.push("ack"); },
+        onFailure: async (msgId) => { failCalls.push(`onFailure:${msgId}`); },
+      },
+      "9-2",
+      { type: "boom" },
+    );
+    assert.deepEqual(failCalls, ["handler", "onFailure:9-2"], "settlement is onFailure-only");
+  });
+
+  test("direct: ack ordering — deps.ack is awaited strictly after deps.handler resolves; a throwing handler is never ACKed", async () => {
+    const order: string[] = [];
+    await processStreamEntry(
+      {
+        // An async handler: the fold must AWAIT its resolution before acking.
+        handler: async () => {
+          order.push("handler-start");
+          await Promise.resolve();
+          order.push("handler-end");
+        },
+        ack: async () => { order.push("ack"); },
+        onFailure: async () => { order.push("onFailure"); },
+      },
+      "9-3",
+      { type: "t" },
+    );
+    assert.deepEqual(order, ["handler-start", "handler-end", "ack"]);
+
+    // Synchronous throw AND async rejection both land pre-ack.
+    for (const handler of [
+      () => { throw new Error("sync throw"); },
+      async () => { throw new Error("async reject"); },
+    ] as const) {
+      let ackCalled = false;
+      let failureMsgId = "";
+      await processStreamEntry(
+        { handler, ack: async () => { ackCalled = true; }, onFailure: async (msgId) => { failureMsgId = msgId; } },
+        "9-4",
+        { type: "t" },
+      );
+      assert.equal(ackCalled, false, "a handler that throws/rejects is never ACKed");
+      assert.equal(failureMsgId, "9-4");
+    }
+  });
+
+  test("direct: the try wraps handler AND ack — a rejected deps.ack routes to onFailure exactly like a handler throw", async () => {
+    const calls: string[] = [];
+    let routedMessage = "";
+    await processStreamEntry(
+      {
+        handler: () => { calls.push("handler"); },
+        ack: async () => { calls.push("ack"); throw new Error("XACK down"); },
+        onFailure: async (_msgId, _event, err) => { calls.push("onFailure"); routedMessage = err.message; },
+      },
+      "9-5",
+      { type: "t" },
+    );
+    // ack was attempted (handler succeeded), its rejection was caught and
+    // routed to onFailure with the ack error itself — the helper RESOLVES.
+    assert.deepEqual(calls, ["handler", "ack", "onFailure"]);
+    assert.equal(routedMessage, "XACK down");
+  });
+
+  test("direct: a rejected deps.onFailure propagates — the helper's promise rejects (no inner catch)", async () => {
+    await assert.rejects(
+      processStreamEntry(
+        {
+          handler: () => { throw new Error("boom"); },
+          ack: async () => {},
+          onFailure: async () => { throw new Error("dlq policy down"); },
+        },
+        "9-6",
+        { type: "t" },
+      ),
+      /dlq policy down/,
+    );
+  });
+
   test("the per-entry contract is declared exactly ONCE and both loops route through it", async () => {
     // Issue #4333: the parse → handler → ACK-on-success / defer-to-DLQ-on-throw
     // body was copy-pasted into both runAutoclaimRecovery and runLongPollLoop,
@@ -303,5 +402,28 @@ describe("event-bus-mechanics — the shared per-entry consume fold", () => {
       claim.calls,
       "the failure path must be IDENTICAL through both loops",
     );
+  });
+
+  test("loop: the long-poll path has NO empty-fields skip — an empty delivery still reaches the handler", async () => {
+    // The deleted-message short-circuit is autoclaim-only (only XAUTOCLAIM
+    // surfaces PEL entries whose fields were trimmed). The long-poll path
+    // must keep NO such check: an empty field list parses to {} and is
+    // handled + ACKed like any other delivery (#4333 INV-6).
+    let active = true;
+    const handled: ConsumedEvent[] = [];
+    const acked: string[] = [];
+    await runLongPollLoop(
+      stubRedisWithRead([["8-0", []]], () => { active = false; }),
+      "s", "g", "c", { count: 1, blockMs: 1 },
+      () => active,
+      {
+        handler: (e) => { handled.push(e); },
+        ack: async (msgId) => { acked.push(msgId); },
+        onFailure: async () => {},
+      },
+    );
+    assert.equal(handled.length, 1, "an empty-fields delivery is parsed to {} and handled — no skip on this path");
+    assert.deepEqual(handled[0], {});
+    assert.deepEqual(acked, ["8-0"]);
   });
 });

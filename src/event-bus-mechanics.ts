@@ -168,12 +168,14 @@ export async function reapStaleConsumers(
 // client. `EventBus` becomes a thin coordinator that wires these into its own
 // connections; its public method signatures are unchanged.
 //
-// The per-entry consume contract itself — parse, handler, ACK on success,
-// defer to the DLQ policy on a throw — lives in ONE place here, the private
+// The per-entry consume contract itself — handler, ACK on success, defer to
+// the DLQ policy on a throw — lives in ONE place here, the exported
 // `processStreamEntry` fold both `runAutoclaimRecovery` and `runLongPollLoop`
-// route every entry through (issue #4333; previously the body was copy-pasted
-// into both loops). A structural test pins the single-copy invariant, so the
-// contract can never silently re-fork.
+// route every entry through (issue #4333; previously the try/catch body was
+// copy-pasted into both loops). Parsing and the autoclaim-only reclaim log
+// stay caller-side, so the fold owns exactly the shared settlement contract.
+// A structural test pins the single-copy invariant, so the contract can never
+// silently re-fork.
 // ---------------------------------------------------------------------------
 
 /**
@@ -300,47 +302,46 @@ interface ConsumeDeps {
 }
 
 /**
- * Process ONE stream entry through the per-entry consume contract — parse the
- * flat fields, run the handler, ACK on success, defer to the DLQ policy on a
- * throw (issue #4333). `runAutoclaimRecovery` and `runLongPollLoop` previously
- * each carried a near byte-identical copy of this body — the exact duplicated
- * fold this module's header (and `settled-fold.ts`'s origin story) warns
- * about: a future change to the ack/DLQ contract had to be made in two
+ * Run ONE already-parsed stream entry through the per-entry consume contract:
+ * invoke the handler, ACK on success, defer to the DLQ policy on a throw
+ * (issue #4333). `runAutoclaimRecovery` and `runLongPollLoop` previously each
+ * carried a near byte-identical copy of this try/catch body — the exact
+ * duplicated fold this module's header (and `settled-fold.ts`'s origin story)
+ * warns about: a future change to the ack/DLQ contract had to be made in two
  * places, with nothing enforcing the copies stayed in sync beyond reading the
- * two loops side by side. Both loops now route every entry through this
- * single fold, so the contract has one referent and one test surface (the
- * parity tests in `test/event-bus-mechanics.test.mts`).
+ * two loops side by side. Both loops now route every entry through this one
+ * fold, so the contract has one referent and one test surface.
  *
- * The deleted-message (empty-fields) short-circuit deliberately stays OUT of
- * this fold, loop-local to the autoclaim pass: only XAUTOCLAIM surfaces PEL
- * entries whose stream fields were trimmed after delivery — the long-poll
- * loop never sees them, and folding the skip in would change what an
- * empty-fields delivery does on that path.
+ * Deliberately NARROW, per the grilled design concept for #4333: parsing
+ * stays caller-side (each loop runs the module-level field parser exactly
+ * once per entry and passes the resulting event in — the fold takes no
+ * parser), and the autoclaim-only "reclaimed orphan" log stays caller-side
+ * too (it is not a parameter here), so the fold owns ONLY the shared
+ * settlement contract. The deleted-message (empty-fields) short-circuit
+ * likewise stays loop-local to the autoclaim pass: only XAUTOCLAIM surfaces
+ * PEL entries whose fields were trimmed after delivery — the long-poll loop
+ * never sees them, and folding the skip in would change what an empty-fields
+ * delivery does on that path.
  *
- * Module-private on purpose: the fold is observable through the two exported
- * loops that share it, which remain the protocol's test surface.
+ * A rejection from `onFailure` is NOT caught here — it surfaces to the
+ * calling loop's own outer catch (the fail-loud division of labor the two
+ * loops already establish).
+ *
+ * Exported (from this leaf module ONLY — never re-exported by `event-bus.ts`)
+ * so tests can pin the settlement contract directly, without driving a whole
+ * loop; the loops remain the protocol's integration surface.
  *
  * @param deps  - handler / ack / onFailure wiring (the SAME object both loops
  *                receive from their caller).
  * @param msgId - The raw stream entry's message ID.
- * @param fields - The entry's flat `[k0, v0, k1, v1, ...]` field list.
- * @param opts  - `reclaimedFrom` — set only by the autoclaim pass, which logs
- *                the "reclaimed orphan" line before invoking the handler.
+ * @param event - The entry's fields, already parsed by the calling loop.
  */
-async function processStreamEntry(
+export async function processStreamEntry(
   deps: ConsumeDeps,
   msgId: string,
-  fields: string[],
-  opts: { reclaimedFrom?: { stream: string; group: string } } = {},
+  event: ConsumedEvent,
 ): Promise<void> {
-  const event = parseStreamFields(fields);
   try {
-    if (opts.reclaimedFrom) {
-      logger.info(
-        { ...opts.reclaimedFrom, msgId, eventType: event.type },
-        "[EventBus] reclaimed orphan",
-      );
-    }
     await deps.handler(event);
     await deps.ack(msgId);
   } catch (err: any) {
@@ -354,9 +355,11 @@ const AUTOCLAIM_MIN_IDLE_MS = 60_000;
 /**
  * The XAUTOCLAIM orphan-recovery pass (issue #2455): reclaim messages pending
  * on dead consumers and run each through the shared per-entry fold
- * (`processStreamEntry`, #4333) — handler, ACK on success, DLQ policy on
- * failure — the SAME fold the long-poll loop routes fresh deliveries through.
- * XREADGROUP with ">" only delivers
+ * (`processStreamEntry`, #4333) — the SAME settlement contract the long-poll
+ * loop routes fresh deliveries through. This pass keeps its loop-local
+ * pieces: the deleted-message short-circuit, the field parse, and the
+ * reclaim log (they do not belong to the shared fold). XREADGROUP with ">"
+ * only delivers
  * NEW messages, so without this pass a message orphaned by a crashed consumer
  * (its PEL entry) is never redelivered. Deleted messages surface with an empty
  * field list (`fields.length === 0`) and are short-circuited — the gap the
@@ -392,7 +395,9 @@ export async function runAutoclaimRecovery(
 
       for (const [msgId, fields] of claimed) {
         if (!fields || fields.length === 0) continue; // deleted message
-        await processStreamEntry(deps, msgId, fields, { reclaimedFrom: { stream, group } });
+        const event = parseStreamFields(fields);
+        logger.info({ stream, group, msgId, eventType: event.type }, "[EventBus] reclaimed orphan");
+        await processStreamEntry(deps, msgId, event);
       }
       if (nextId === "0-0") break;
       startId = nextId;
@@ -405,9 +410,9 @@ export async function runAutoclaimRecovery(
 /**
  * The XREADGROUP long-poll loop (issue #2455): block on new messages for the
  * group, run each through the shared per-entry fold (`processStreamEntry`,
- * #4333) — handler, ACK on success, DLQ policy on failure — the SAME fold the
- * autoclaim recovery pass routes reclaimed orphans through — looping while
- * `isActive()` returns true. The active flag
+ * #4333) — the SAME settlement contract the autoclaim recovery pass routes
+ * reclaimed orphans through; the field parse stays here, caller-side —
+ * looping while `isActive()` returns true. The active flag
  * is read through a callback (the bus reads its own `_consuming` instance flag)
  * so the loop owns no class state; `stopConsuming()` flips the flag and the
  * loop exits after its current BLOCK.
@@ -445,7 +450,8 @@ export async function runLongPollLoop(
       if (!result) continue;
 
       for (const [msgId, fields] of result[0][1]) {
-        await processStreamEntry(deps, msgId, fields);
+        const event = parseStreamFields(fields);
+        await processStreamEntry(deps, msgId, event);
       }
     } catch (err: any) {
       if (isActive()) {
