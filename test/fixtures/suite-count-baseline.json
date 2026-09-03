@@ -164,6 +164,7 @@
   "test/cycles.test.mts": 2,
   "test/dashboard-response-contract.test.mts": 1,
   "test/dashboard-routes.test.mts": 8,
+  "test/dashboard-server-confirmed-write.test.mts": 7,
   "test/decide-escalation-events.test.mts": 8,
   "test/decide-golden.test.mts": 1,
   "test/decide-guards.test.mts": 5,

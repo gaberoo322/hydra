@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import { useApi, apiFetch } from "../hooks/useApi.js";
+import { useState } from "react";
+import { useApi, useServerConfirmedWrite } from "../hooks/useApi.js";
 import { derivePageStatus } from "../hooks/usePageItems.js";
 import LocalTimestamp from "../components/LocalTimestamp.jsx";
 import DeployAxes from "../components/pages/health/DeployAxes.jsx";
@@ -23,8 +23,9 @@ import CostPanel from "../components/pages/health/CostPanel.jsx";
  *
  * Actions are SERVER-CONFIRMED, never optimistic (design-concept 2880e735
  * INV-6): the control shows a pending state and only re-renders once the
- * follow-up GET confirms the write — the established /now Console pause
- * pattern (StatusVerdict.jsx), relocated here rather than rebuilt. The
+ * follow-up GET confirms the write — both toggles ride the shared
+ * useServerConfirmedWrite hook (useApi.js, issue #4335), extracted from the
+ * /now Console pause pattern rather than hand-rolled per control. The
  * emergency brake additionally requires an explicit second confirm action
  * before its POST fires (INV-7); pause/resume stays single-click.
  */
@@ -107,56 +108,30 @@ export default function Health() {
   const pauseVerified = health.data?.autopilotPause?.ok !== false;
   const isPaused = pauseVerified && health.data?.autopilotPause?.paused === true;
 
-  const [pausePending, setPausePending] = useState(false);
-  const [pauseError, setPauseError] = useState(null);
+  const { pending: pausePending, error: pauseError, write: writePause } =
+    useServerConfirmedWrite(health.refresh);
 
-  const handleTogglePause = useCallback(
-    async (next) => {
-      setPausePending(true);
-      setPauseError(null);
-      try {
-        await apiFetch("/autopilot/paused", {
-          method: "POST",
-          body: JSON.stringify({ paused: next }),
-        });
-        // SERVER-CONFIRMED: re-render only once the read confirms the write.
-        await health.refresh();
-      } catch (err) {
-        setPauseError(err?.message || String(err));
-      } finally {
-        setPausePending(false);
-      }
-    },
-    [health],
-  );
+  // Single-click toggle (the brake below carries the confirm step): the
+  // shared write hook POSTs, re-GETs, and only the read flips the chip.
+  const handleTogglePause = (next) => writePause("/autopilot/paused", { paused: next });
 
   // ---- Emergency brake (two-step confirm, INV-7) ---------------------------
   const brakeVerified = health.data?.emergencyBrake?.ok !== false;
   const brakeEngaged = brakeVerified && health.data?.emergencyBrake?.engaged === true;
   const [brakeArmed, setBrakeArmed] = useState(false); // the confirm step
-  const [brakePending, setBrakePending] = useState(false);
-  const [brakeError, setBrakeError] = useState(null);
+  const { pending: brakePending, error: brakeError, write: writeBrake } =
+    useServerConfirmedWrite(health.refresh);
 
-  const postBrake = useCallback(
-    async (engaged) => {
-      setBrakePending(true);
-      setBrakeError(null);
-      try {
-        await apiFetch("/autopilot/emergency-brake", {
-          method: "POST",
-          body: JSON.stringify(engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false }),
-        });
-        setBrakeArmed(false);
-        // SERVER-CONFIRMED: only the follow-up read flips the indicator.
-        await health.refresh();
-      } catch (err) {
-        setBrakeError(err?.message || String(err));
-      } finally {
-        setBrakePending(false);
-      }
-    },
-    [health],
-  );
+  const postBrake = async (engaged) => {
+    const res = await writeBrake(
+      "/autopilot/emergency-brake",
+      engaged ? { engaged: true, engagedBy: "health-page" } : { engaged: false },
+    );
+    // Disarm the two-step confirm only once the write landed — the hook's
+    // result says so after the follow-up read; a failed POST keeps the
+    // confirm visible for an immediate retry.
+    if (res.ok) setBrakeArmed(false);
+  };
 
   const deepUnknown = deepStatus === "loading" || deepStatus === "unknown";
   const deepStale = deepStatus === "stale";

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { apiFetch, useApi } from "../../hooks/useApi.js";
+import { useEffect, useMemo, useState } from "react";
+import { useApi, useServerConfirmedWrite } from "../../hooks/useApi.js";
 import StatusVerdict from "./StatusVerdict.jsx";
 import StatusStrip from "./StatusStrip.jsx";
 import StopBanner from "./StopBanner.jsx";
@@ -101,34 +101,17 @@ export default function NowConsole() {
   const idle = useApi("/autopilot/idle-diagnostics", { poll: 30_000 });
   const paused = useApi("/autopilot/paused", { poll: 10_000 });
 
-  const [pausePending, setPausePending] = useState(false);
-  const [pauseError, setPauseError] = useState(null);
+  const { pending: pausePending, error: pauseError, write: writePause } =
+    useServerConfirmedWrite(paused.refresh);
 
   // RunHistoryStrip → RunDetailDrawer open/close state (issue #2410). The
   // selected run_id is null when no drawer is open.
   const [selectedRunId, setSelectedRunId] = useState(null);
 
-  // Server-confirmed, never optimistic: POST the new state, then re-fetch the
-  // flag and only let the verdict flip once the read confirms the write. A
+  // Server-confirmed, never optimistic: the shared write hook POSTs the new
+  // state, re-fetches the flag, and only then lets the verdict flip. A
   // failed POST surfaces the error and leaves the verdict where it was.
-  const handleTogglePause = useCallback(
-    async (next) => {
-      setPausePending(true);
-      setPauseError(null);
-      try {
-        await apiFetch("/autopilot/paused", {
-          method: "POST",
-          body: JSON.stringify({ paused: next }),
-        });
-        await paused.refresh();
-      } catch (err) {
-        setPauseError(err?.message || String(err));
-      } finally {
-        setPausePending(false);
-      }
-    },
-    [paused],
-  );
+  const handleTogglePause = (next) => writePause("/autopilot/paused", { paused: next });
 
   const loading = tick.loading && !tick.data;
 
