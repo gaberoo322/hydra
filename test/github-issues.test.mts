@@ -33,6 +33,7 @@ import {
   _clearViewPrCache,
   ViewPrCache,
 } from "../src/github/issues.ts";
+import { decodePrStateAndHeadRef } from "../src/github/view-pr.ts";
 
 // ---------------------------------------------------------------------------
 // PURE — repo handle
@@ -239,6 +240,54 @@ describe("normalizePrViewFromRest", () => {
     const out = normalizePrViewFromRest({}, "reviews,commits");
     assert.deepEqual(out.reviews, []);
     assert.deepEqual(out.commits, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PURE — shared state/headRefName decode (issue #4328)
+// ---------------------------------------------------------------------------
+
+describe("decodePrStateAndHeadRef", () => {
+  test("passes through a well-formed state + headRefName pair", () => {
+    const out = decodePrStateAndHeadRef({ state: "MERGED", headRefName: "worktree-agent-abc-t1-dev_orch" });
+    assert.deepEqual(out, { state: "MERGED", headRefName: "worktree-agent-abc-t1-dev_orch" });
+  });
+
+  test("a missing state degrades to null", () => {
+    const out = decodePrStateAndHeadRef({ headRefName: "feat/x" });
+    assert.equal(out.state, null);
+  });
+
+  test("a non-string state degrades to null", () => {
+    // @ts-expect-error — exercising the wire-untyped defensive branch
+    const out = decodePrStateAndHeadRef({ state: 42, headRefName: "feat/x" });
+    assert.equal(out.state, null);
+  });
+
+  test("a missing headRefName degrades to null", () => {
+    const out = decodePrStateAndHeadRef({ state: "OPEN" });
+    assert.equal(out.headRefName, null);
+  });
+
+  test("an empty-string headRefName degrades to null (treated as absent)", () => {
+    const out = decodePrStateAndHeadRef({ state: "OPEN", headRefName: "" });
+    assert.equal(out.headRefName, null);
+  });
+
+  test("a null view (both fields explicitly null) decodes to {state:null, headRefName:null}", () => {
+    const out = decodePrStateAndHeadRef({ state: null, headRefName: null });
+    assert.deepEqual(out, { state: null, headRefName: null });
+  });
+
+  test("extra unrelated fields on the view are ignored", () => {
+    const out = decodePrStateAndHeadRef({
+      state: "CLOSED",
+      headRefName: "feat/y",
+      // @ts-expect-error — a wider viewPr response (e.g. mergeCommit/changedFiles)
+      mergeCommit: { oid: "deadbeef" },
+      changedFiles: 3,
+    });
+    assert.deepEqual(out, { state: "CLOSED", headRefName: "feat/y" });
   });
 });
 

@@ -68,6 +68,7 @@
 import { getRecentMetricIdsDesc, getCycleMetrics } from "../../redis/cycle-metrics.ts";
 import { recordCycle, type CycleRecordResult } from "../../autopilot/cycle-close.ts";
 import { viewPr } from "../../github/issues.ts";
+import { decodePrStateAndHeadRef } from "../../github/view-pr.ts";
 import {
   pendingEnrollList,
   pendingEnrollAdd,
@@ -120,19 +121,18 @@ interface ReconcilePrView {
  * (`worktree-agent-<tok>-t{N}-<slot>`), since the bare cycleId itself carries no
  * class token. Fetched via GraphQL for parity with holdback-merge-watch's
  * `headRefName` fetch; the confirmation set is bounded by `confirmLimit` per tick.
+ *
+ * The `state`/`headRefName` decode itself is shared with
+ * `holdback-merge-watch.ts`'s `fetchMergeStatusViaGh` via
+ * {@link decodePrStateAndHeadRef} (issue #4328) — this site needs nothing else,
+ * so it calls the shared decode directly on its (narrower) view.
  */
 async function fetchPrStateViaGh(prNumber: number): Promise<ReconcilePrView | null> {
   const view = await viewPr<RawPrState>(prNumber, "state,headRefName", {
     transport: "graphql",
   });
   if (view == null) return null;
-  return {
-    state: typeof view.state === "string" ? view.state : null,
-    headRefName:
-      typeof view.headRefName === "string" && view.headRefName.length > 0
-        ? view.headRefName
-        : null,
-  };
+  return decodePrStateAndHeadRef(view);
 }
 
 /** External touchpoints (all injectable for tests so the logic runs without gh / live Redis). */
