@@ -128,7 +128,9 @@ export class ConsumerSession {
    *
    * Orphan recovery and the long-poll loop run through the SAME
    * handler/ack/onFailure deps, so a reclaimed orphan and a fresh delivery
-   * follow the identical success-ACK / failure-DLQ path.
+   * follow the identical success-ACK / failure-DLQ path — a single per-entry
+   * fold in event-bus-mechanics.ts owns that contract (#4333), so the two
+   * loops cannot drift apart.
    *
    * @param stream   - Stream name.
    * @param group    - Consumer group name.

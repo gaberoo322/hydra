@@ -13,15 +13,23 @@
  *   - `shouldPromoteToDlq` — the 3-attempt DLQ threshold.
  *   - `runAutoclaimRecovery` — the deleted-message (empty-fields) short-circuit
  *     the issue calls out as previously untested: the handler must NOT run.
+ *   - The shared per-entry consume fold (#4333) — a structural guard that the
+ *     "handler → ACK on success / defer to the DLQ policy on throw" contract
+ *     is declared exactly ONCE in the module (both loops route through it),
+ *     plus parity tests feeding the SAME synthetic entry through
+ *     `runAutoclaimRecovery` and `runLongPollLoop` and asserting the two drive
+ *     the identical observable deps sequence.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   parseStreamFields,
   shouldPromoteToDlq,
   runAutoclaimRecovery,
+  runLongPollLoop,
   type RawStreamEntry,
   type ConsumedEvent,
 } from "../src/event-bus-mechanics.ts";
@@ -158,5 +166,142 @@ describe("event-bus-mechanics — runAutoclaimRecovery deleted-message short-cir
 
     assert.deepEqual(failures, ["3-0"], "a throwing handler routes to onFailure");
     assert.equal(acked.length, 0, "a failed message is not ACKed by the recovery pass");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The shared per-entry consume fold (issue #4333)
+// ---------------------------------------------------------------------------
+
+/**
+ * A minimal stub Redis whose `xreadgroup` delivers one canned batch on the
+ * first poll (flipping the loop off via `onFirstPoll` so it exits after that
+ * pass — the same idiom as the runLongPollLoop tests in event-bus.test.mts),
+ * then null. Only the method `runLongPollLoop` touches is implemented.
+ */
+function stubRedisWithRead(entries: RawStreamEntry[], onFirstPoll?: () => void) {
+  let served = false;
+  return {
+    async xreadgroup() {
+      if (served) return null;
+      served = true;
+      onFirstPoll?.();
+      // XREADGROUP reply: [[streamName, [[msgId, fields], ...]], ...]
+      return [["stream", entries]];
+    },
+  } as any;
+}
+
+/**
+ * Recording deps — captures the exact observable call sequence a loop drives
+ * (handler → ack on success; handler → onFailure on throw), so the two loops
+ * can be compared sequence-for-sequence on the same synthetic entry.
+ */
+function recordingDeps(handlerImpl?: (event: ConsumedEvent) => void) {
+  const calls: string[] = [];
+  return {
+    calls,
+    deps: {
+      handler: (event: ConsumedEvent) => {
+        calls.push("handler");
+        handlerImpl?.(event);
+      },
+      ack: async (msgId: string) => {
+        calls.push(`ack:${msgId}`);
+      },
+      onFailure: async (msgId: string) => {
+        calls.push(`onFailure:${msgId}`);
+      },
+    },
+  };
+}
+
+describe("event-bus-mechanics — the shared per-entry consume fold", () => {
+  test("the per-entry contract is declared exactly ONCE and both loops route through it", async () => {
+    // Issue #4333: the parse → handler → ACK-on-success / defer-to-DLQ-on-throw
+    // body was copy-pasted into both runAutoclaimRecovery and runLongPollLoop,
+    // with nothing enforcing the two copies stayed in sync. Both loops now
+    // route every entry through ONE fold (processStreamEntry); this structural
+    // guard fails if the contract is ever re-forked into a second copy.
+    const src = readFileSync(
+      new URL("../src/event-bus-mechanics.ts", import.meta.url),
+      "utf8",
+    );
+    const count = (literal: string) => src.split(literal).length - 1;
+    assert.equal(
+      count("await deps.handler(event);"),
+      1,
+      "the handler call site must exist exactly once (in the shared fold)",
+    );
+    assert.equal(
+      count("await deps.ack(msgId);"),
+      1,
+      "the success-ACK call site must exist exactly once (in the shared fold)",
+    );
+    assert.equal(
+      count("await deps.onFailure(msgId, event, err);"),
+      1,
+      "the failure-deferral call site must exist exactly once (in the shared fold)",
+    );
+    assert.equal(
+      count("await processStreamEntry("),
+      2,
+      "both runAutoclaimRecovery and runLongPollLoop must route through the fold",
+    );
+  });
+
+  test("parity: the SAME entry drives the identical success sequence through BOTH loops", async () => {
+    const entry: RawStreamEntry = ["7-1", ["type", "merge", "source", "ci"]];
+
+    const claim = recordingDeps();
+    await runAutoclaimRecovery(stubRedisWithClaim([entry]), "s", "g", "c", claim.deps);
+
+    let active = true;
+    const poll = recordingDeps();
+    await runLongPollLoop(
+      stubRedisWithRead([entry], () => { active = false; }),
+      "s", "g", "c", { count: 1, blockMs: 1 },
+      () => active,
+      poll.deps,
+    );
+
+    assert.deepEqual(
+      claim.calls,
+      ["handler", "ack:7-1"],
+      "a reclaimed orphan is handled then ACKed",
+    );
+    assert.deepEqual(
+      poll.calls,
+      claim.calls,
+      "a fresh delivery must follow the IDENTICAL contract as a reclaimed orphan",
+    );
+  });
+
+  test("parity: the SAME throwing entry drives the identical failure sequence through BOTH loops", async () => {
+    const entry: RawStreamEntry = ["7-1", ["type", "boom"]];
+    const boom = () => { throw new Error("handler blew up"); };
+
+    const claim = recordingDeps(boom);
+    await runAutoclaimRecovery(stubRedisWithClaim([entry]), "s", "g", "c", claim.deps);
+
+    let active = true;
+    const poll = recordingDeps(boom);
+    await runLongPollLoop(
+      stubRedisWithRead([entry], () => { active = false; }),
+      "s", "g", "c", { count: 1, blockMs: 1 },
+      () => active,
+      poll.deps,
+    );
+
+    assert.deepEqual(
+      claim.calls,
+      ["handler", "onFailure:7-1"],
+      "a throwing handler defers to onFailure and is never ACKed",
+    );
+    assert.deepEqual(
+      poll.calls,
+      claim.calls,
+      "the failure path must be IDENTICAL through both loops",
+    );
   });
 });
