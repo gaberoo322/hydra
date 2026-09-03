@@ -34,6 +34,8 @@ import {
   ViewPrCache,
 } from "../src/github/issues.ts";
 import { decodePrStateAndHeadRef } from "../src/github/view-pr.ts";
+import { fetchPrStateViaGh } from "../src/scheduler/chores/cycle-merge-reconcile.ts";
+import { fetchMergeStatusViaGh } from "../src/scheduler/chores/holdback-merge-watch.ts";
 
 // ---------------------------------------------------------------------------
 // PURE — repo handle
@@ -292,6 +294,21 @@ describe("decodePrStateAndHeadRef", () => {
 });
 
 // ---------------------------------------------------------------------------
+// PURE — no import cycle between view-pr.ts and issues.ts (issue #4328, INV-6)
+// ---------------------------------------------------------------------------
+
+describe("view-pr.ts / issues.ts import-cycle guard", () => {
+  test("view-pr.ts imports no VALUE from issues.ts — a value import would reintroduce the cycle issues.ts's own viewPr wrapper was written to avoid", async () => {
+    const src = await readFile(new URL("../src/github/view-pr.ts", import.meta.url), "utf-8");
+    // A bare `import type { ... } from "./issues.ts"` is fine (erased at
+    // compile time, no runtime module-graph edge); a VALUE import — anything
+    // NOT immediately preceded by the `type` keyword — would be the cycle.
+    const valueImportFromIssues = /^import\s+(?!type\b)[^;]*from\s+["']\.\/issues\.ts["']/m;
+    assert.doesNotMatch(src, valueImportFromIssues);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // WIRED — readers through a fake gh binary
 // ---------------------------------------------------------------------------
 
@@ -321,6 +338,7 @@ case "$SCENARIO" in
   issues) echo '[{"number":11,"title":"A","labels":[{"name":"dev_orch"}],"state":"open"}]'; exit 0 ;;
   prs)    echo '[{"number":22,"title":"P","statusCheckRollup":[{"conclusion":"FAILURE","name":"ci"}]}]'; exit 0 ;;
   one)    echo '{"number":33,"labels":[{"name":"qa"}]}'; exit 0 ;;
+  merged) echo '{"state":"MERGED","headRefName":"worktree-agent-abc-t1-dev_orch","mergeCommit":{"oid":"deadbeef1234"},"changedFiles":3}'; exit 0 ;;
   empty)  exit 0 ;;
   fail)   echo "boom" >&2; exit 1 ;;
   *)      echo '[]'; exit 0 ;;
@@ -514,6 +532,37 @@ esac
     if (res.ok) assert.deepEqual(res.rows, []);
     const inv = await readInvocations();
     assert.equal(inv.length, 0, "should not have shelled out");
+  });
+
+  // -------------------------------------------------------------------------
+  // Design-concept INV-3 (issue #4328): holdback-merge-watch.ts's
+  // fetchMergeStatusViaGh must make exactly ONE viewPr/gh call per invocation
+  // — the shared decodePrStateAndHeadRef helper must not turn one call into
+  // two. Driven through the real default fetch functions (not deps-injected
+  // fakes) so the invocation COUNT is observable.
+  // -------------------------------------------------------------------------
+
+  test("cycle-merge-reconcile's fetchPrStateViaGh makes exactly ONE gh call and decodes state+headRefName (issue #4328)", async () => {
+    process.env.FAKE_SCENARIO = "merged";
+    const result = await fetchPrStateViaGh(33);
+    assert.deepEqual(result, { state: "MERGED", headRefName: "worktree-agent-abc-t1-dev_orch" });
+    const inv = await readInvocations();
+    assert.equal(inv.length, 1, "expected exactly one gh invocation");
+    assert.ok(inv[0].startsWith("pr view 33"), "expected the GraphQL `gh pr view` transport");
+  });
+
+  test("holdback-merge-watch's fetchMergeStatusViaGh makes exactly ONE gh call, decoding state/headRefName + its own mergeCommit/changedFiles from the SAME view (issue #4328)", async () => {
+    process.env.FAKE_SCENARIO = "merged";
+    const result = await fetchMergeStatusViaGh(33);
+    assert.deepEqual(result, {
+      state: "MERGED",
+      headRefName: "worktree-agent-abc-t1-dev_orch",
+      mergeCommitSha: "deadbeef1234",
+      changedFiles: 3,
+    });
+    const inv = await readInvocations();
+    assert.equal(inv.length, 1, "expected exactly one gh invocation — the shared decode must not add a second call");
+    assert.ok(inv[0].startsWith("pr view 33"), "expected the GraphQL `gh pr view` transport");
   });
 });
 

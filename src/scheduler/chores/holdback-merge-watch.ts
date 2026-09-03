@@ -109,8 +109,12 @@ interface RawPrView {
  * {@link decodePrStateAndHeadRef} (issue #4328) — this site layers its own
  * additional `mergeCommit.oid`/`changedFiles` decode on top of the SAME
  * (wider-field) `viewPr` call rather than re-deriving the shared pair.
+ *
+ * Exported (test-only) so a wired test can drive it through a fake `gh` binary
+ * and count invocations — proving it still makes exactly one `viewPr` call
+ * (issue #4328: the shared helper must not turn one call into two).
  */
-async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStatus | null> {
+export async function fetchMergeStatusViaGh(prNumber: number): Promise<MergeStatus | null> {
   const view = await viewPr<RawPrView>(
     prNumber,
     // Issue #3579: `headRefName` rides along on the SAME view — it is a plain

@@ -126,8 +126,11 @@ interface ReconcilePrView {
  * `holdback-merge-watch.ts`'s `fetchMergeStatusViaGh` via
  * {@link decodePrStateAndHeadRef} (issue #4328) — this site needs nothing else,
  * so it calls the shared decode directly on its (narrower) view.
+ *
+ * Exported (test-only) so a wired test can drive it through a fake `gh` binary
+ * and count invocations — proving it still makes exactly one `viewPr` call.
  */
-async function fetchPrStateViaGh(prNumber: number): Promise<ReconcilePrView | null> {
+export async function fetchPrStateViaGh(prNumber: number): Promise<ReconcilePrView | null> {
   const view = await viewPr<RawPrState>(prNumber, "state,headRefName", {
     transport: "graphql",
   });
