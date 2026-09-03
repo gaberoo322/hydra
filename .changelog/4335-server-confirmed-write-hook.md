@@ -1,0 +1,1 @@
+- refactor: extract the server-confirmed write hook (useServerConfirmedWrite) shared by the Health pause/brake toggles and the /now Console pause control (#4335)
