@@ -15,6 +15,11 @@
 // `consumer-session.ts` now import DOWN from here, and this module imports
 // nothing back from either (issue #2759).
 //
+// #4333 later deduplicated the per-entry settlement fold the two loops had
+// each carried inline: `processConsumedEvent` is now the single place the
+// "handler → ACK on success / defer to the DLQ policy on failure" contract
+// lives, with both loops routing every entry through it.
+//
 // Each function takes a raw Redis client (plus an explicit config / callback
 // surface) so the protocol is directly assertable with synthetic
 // `RawStreamEntry[]` inputs and a stub client, no full bus instance required —
@@ -282,8 +287,12 @@ export async function promoteToDlqIfExhausted(
   return true;
 }
 
-/** What `runAutoclaimRecovery` / `runLongPollLoop` do with each parsed event. */
-interface ConsumeDeps {
+/**
+ * What `runAutoclaimRecovery` / `runLongPollLoop` do with each parsed event.
+ * Exported as a type only (issue #4333) so a test can build a typed stub for
+ * `processConsumedEvent`; the shape `{ handler, ack, onFailure }` is unchanged.
+ */
+export interface ConsumeDeps {
   /** The handler the producer registered. */
   handler: EventHandler;
   /** ACK a successfully-processed message off the group's PEL. */
@@ -292,17 +301,56 @@ interface ConsumeDeps {
   onFailure: (msgId: string, event: ConsumedEvent, err: Error) => Promise<void>;
 }
 
+/**
+ * The shared per-entry settlement fold (issue #4333): run one ALREADY-PARSED
+ * event through the handler, ACK on success, and defer to the DLQ policy
+ * (`onFailure`) when the handler throws — or when the ACK itself rejects, the
+ * try deliberately wrapping both calls. Both stream-consume loops —
+ * `runAutoclaimRecovery` and `runLongPollLoop` — route every claimed/delivered
+ * entry through this one function, so the "ack on success / defer to the DLQ
+ * policy on failure" contract lives in exactly one place instead of being
+ * copy-pasted into two loop bodies that nothing kept in sync beyond being read
+ * side by side.
+ *
+ * Deliberately narrow, per the grilled concept: parsing stays CALLER-side
+ * (each loop calls `parseStreamFields` itself — the helper takes no parser
+ * argument), the recovery pass's deleted-message short-circuit and
+ * orphan-reclaim log stay in that loop, and a rejection from `onFailure`
+ * itself is NOT caught here — it surfaces to the calling loop's outer catch,
+ * exactly as it did when the fold was inline.
+ *
+ * Exported so the fold is directly assertable with a synthetic event and stub
+ * deps, per this module's testability contract.
+ *
+ * @param msgId - The entry's stream message ID.
+ * @param event - The entry's already-parsed event (caller-side parse).
+ * @param deps  - handler / ack / onFailure wiring.
+ */
+export async function processConsumedEvent(
+  msgId: string,
+  event: ConsumedEvent,
+  deps: ConsumeDeps,
+): Promise<void> {
+  try {
+    await deps.handler(event);
+    await deps.ack(msgId);
+  } catch (err: any) {
+    await deps.onFailure(msgId, event, err);
+  }
+}
+
 /** XAUTOCLAIM minimum idle: only reclaim messages idle longer than this (ms). */
 const AUTOCLAIM_MIN_IDLE_MS = 60_000;
 
 /**
  * The XAUTOCLAIM orphan-recovery pass (issue #2455): reclaim messages pending
- * on dead consumers and run each through the handler, ACKing on success and
- * deferring to the DLQ policy on failure. XREADGROUP with ">" only delivers
- * NEW messages, so without this pass a message orphaned by a crashed consumer
- * (its PEL entry) is never redelivered. Deleted messages surface with an empty
- * field list (`fields.length === 0`) and are short-circuited — the gap the
- * issue calls out as previously untested.
+ * on dead consumers and run each through the shared `processConsumedEvent` fold
+ * (issue #4333) — handler, ACK on success, DLQ policy on failure. XREADGROUP
+ * with ">" only delivers NEW messages, so without this pass a message orphaned
+ * by a crashed consumer (its PEL entry) is never redelivered. Deleted messages
+ * surface with an empty field list (`fields.length === 0`) and are
+ * short-circuited here, BEFORE the fold is called — the gap the issue calls
+ * out as previously untested.
  *
  * Best-effort and never throws (fail-loud convention): a reclaim failure must
  * not block the long-poll loop that follows. Takes a raw Redis client so it is
@@ -335,13 +383,8 @@ export async function runAutoclaimRecovery(
       for (const [msgId, fields] of claimed) {
         if (!fields || fields.length === 0) continue; // deleted message
         const event = parseStreamFields(fields);
-        try {
-          logger.info({ stream, group, msgId, eventType: event.type }, "[EventBus] reclaimed orphan");
-          await deps.handler(event);
-          await deps.ack(msgId);
-        } catch (err: any) {
-          await deps.onFailure(msgId, event, err);
-        }
+        logger.info({ stream, group, msgId, eventType: event.type }, "[EventBus] reclaimed orphan");
+        await processConsumedEvent(msgId, event, deps);
       }
       if (nextId === "0-0") break;
       startId = nextId;
@@ -353,8 +396,9 @@ export async function runAutoclaimRecovery(
 
 /**
  * The XREADGROUP long-poll loop (issue #2455): block on new messages for the
- * group, run each through the handler, ACK on success and defer to the DLQ
- * policy on failure — looping while `isActive()` returns true. The active flag
+ * group, run each through the shared `processConsumedEvent` fold (issue #4333) —
+ * handler, ACK on success, DLQ policy on failure — looping while `isActive()`
+ * returns true. The active flag
  * is read through a callback (the bus reads its own `_consuming` instance flag)
  * so the loop owns no class state; `stopConsuming()` flips the flag and the
  * loop exits after its current BLOCK.
@@ -393,12 +437,7 @@ export async function runLongPollLoop(
 
       for (const [msgId, fields] of result[0][1]) {
         const event = parseStreamFields(fields);
-        try {
-          await deps.handler(event);
-          await deps.ack(msgId);
-        } catch (err: any) {
-          await deps.onFailure(msgId, event, err);
-        }
+        await processConsumedEvent(msgId, event, deps);
       }
     } catch (err: any) {
       if (isActive()) {
