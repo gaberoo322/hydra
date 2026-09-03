@@ -18,6 +18,7 @@ import { z } from "zod";
 import {
   aggregatorRoute,
   aggregatorRouteNoQuery,
+  degradeIssueRead,
   isolateAggregator,
   schemaValidationError,
 } from "../src/api/route-helpers.ts";
@@ -205,6 +206,70 @@ describe("isolateAggregator", () => {
       cap.restore();
       assert.equal(res._status, 500);
       assert.equal(res._body.error, "string failure");
+    } finally {
+      cap.restore();
+    }
+  });
+});
+
+/**
+ * The degrade-to-flag sibling (issue #4327). Unlike `isolateAggregator`, a
+ * failed read here must NEVER become a 500 — the `/autopilot/*` read routes
+ * promise a 200 safe default with `degraded:true` / `sourcesOk:false` on ANY
+ * read failure. The helper therefore never touches `res` and never throws; it
+ * reports failure purely by return value and logs exactly once per failure
+ * (the single log site that replaced the two per-route call sites). The
+ * per-route response shapes stay pinned in `test/autopilot-board.test.mts` and
+ * `test/work-page.test.mts`; this suite pins only the shared contract.
+ */
+describe("degradeIssueRead — degrade-to-flag (never-throw-200, #4327)", () => {
+  test("ok:true read → returned as-is, no log", async () => {
+    const cap = captureStderr();
+    try {
+      const out = await degradeIssueRead("test/degrade", async () => ({
+        ok: true as const,
+        rows: [1, 2, 3],
+      }));
+      cap.restore();
+      assert.deepEqual(out, { ok: true, rows: [1, 2, 3] });
+      assert.equal(cap.lines().length, 0);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  test("ok:false read → {ok:false}, exactly one logger.error with routeLabel + code", async () => {
+    const cap = captureStderr();
+    try {
+      const out = await degradeIssueRead("test/degrade", async () => ({
+        ok: false as const,
+        code: "gh-failed",
+      }));
+      cap.restore();
+      assert.deepEqual(out, { ok: false });
+      const lines = cap.lines();
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0]!.routeLabel, "test/degrade");
+      assert.equal(lines[0]!.code, "gh-failed");
+      assert.match(String(lines[0]!.msg), /read failed — degraded/);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  test("thrown read → {ok:false}, exactly one logger.error, never rethrows", async () => {
+    const cap = captureStderr();
+    try {
+      const out = await degradeIssueRead("test/degrade", async () => {
+        throw new Error("read boom");
+      });
+      cap.restore();
+      assert.deepEqual(out, { ok: false });
+      const lines = cap.lines();
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0]!.routeLabel, "test/degrade");
+      assert.match(String(lines[0]!.msg), /despite never-throw seam/);
+      assert.match(String(lines[0]!.err?.message ?? ""), /read boom/);
     } finally {
       cap.restore();
     }

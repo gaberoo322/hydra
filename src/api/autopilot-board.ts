@@ -87,7 +87,7 @@ import {
   resolveOpenBlockers,
 } from "../autopilot/board-state.ts";
 import { getGlmDrainerLiveness } from "../redis/autopilot.ts";
-import { schemaValidationError } from "./route-helpers.ts";
+import { schemaValidationError, degradeIssueRead } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -422,60 +422,57 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
 
     const nowMs = clock();
     let counts = emptyCounts();
-    let degraded = false;
 
-    try {
-      const result = await readOpenIssues();
-      if (result.ok === false) {
-        degraded = true;
-        // Not a 500: the degraded all-zero board (with degraded:true) IS the
-        // never-throw SAFE DEFAULT collect-state.sh parses, so the
-        // isolateAggregator seam does not apply. ADR-0027 eighth sweep: the log
-        // adopts the pino `err`-field seam.
+    // Not a 500: the degraded all-zero board (with degraded:true) IS the
+    // never-throw SAFE DEFAULT collect-state.sh parses, so the
+    // isolateAggregator (never-throw-500) seam does not apply — the
+    // degrade-to-flag sibling does (issue #4327). It logs once on either an
+    // `ok:false` result or a thrown read and reports failure by return value.
+    const read = await degradeIssueRead("autopilot/board-state", readOpenIssues);
+    let degraded = read.ok === false;
+
+    if (read.ok === true) {
+      // Resolve GLM drainer liveness (issue #3754): it gates BOTH the
+      // `glm-eligible` subtraction in `deriveBoardState` AND the matching
+      // skip in the blocker resolver. The accessor never throws; this inner
+      // try is belt-and-braces for an injected stub and the fail-open
+      // contract — any read failure → partition inactive → `glm-eligible`
+      // issues stay visible to Opus rather than being hidden by default.
+      let glmPartitionActive = false;
+      try {
+        glmPartitionActive = await glmLiveness(nowMs);
+      } catch (err: any) {
         logger.error(
-          { code: result.code },
-          "[autopilot/board-state] gh issue list failed — degraded all-zero board",
+          { err },
+          "[autopilot/board-state] glm drainer liveness read threw — partition inactive (fail-open, #3754)",
         );
-      } else {
-        // Resolve GLM drainer liveness (issue #3754): it gates BOTH the
-        // `glm-eligible` subtraction in `deriveBoardState` AND the matching
-        // skip in the blocker resolver. The accessor never throws; this inner
-        // try is belt-and-braces for an injected stub and the fail-open
-        // contract — any read failure → partition inactive → `glm-eligible`
-        // issues stay visible to Opus rather than being hidden by default.
-        let glmPartitionActive = false;
-        try {
-          glmPartitionActive = await glmLiveness(nowMs);
-        } catch (err: any) {
-          logger.error(
-            { err },
-            "[autopilot/board-state] glm drainer liveness read threw — partition inactive (fail-open, #3754)",
-          );
-          glmPartitionActive = false;
-        }
-        const resolveBlockers =
-          deps.resolveOpenBlockers ??
-          ((rows: readonly IssueRow[]) =>
-            resolveOpenBlockers(rows, repoOverride, glmPartitionActive));
-        // Pre-resolve the OPEN strict-blocker set (async) and inject it into
-        // the pure bucketer so the dependency-aware ready_for_agent filter
-        // (issue #3059) stays golden-fixture testable.
-        const openBlockers = await resolveBlockers(result.rows);
+        glmPartitionActive = false;
+      }
+      const resolveBlockers =
+        deps.resolveOpenBlockers ??
+        ((rows: readonly IssueRow[]) =>
+          resolveOpenBlockers(rows, repoOverride, glmPartitionActive));
+      // Pre-resolve the OPEN strict-blocker set (async) and inject it into
+      // the pure bucketer so the dependency-aware ready_for_agent filter
+      // (issue #3059) stays golden-fixture testable. The default resolver is
+      // fail-safe (never throws), but an injected one may reject — that is a
+      // distinct post-read failure the read helper cannot see, and it degrades
+      // the board exactly like a failed read does (pinned by #3059), never 500s.
+      try {
+        const openBlockers = await resolveBlockers(read.rows);
         counts = deriveBoardState(
-          result.rows,
+          read.rows,
           nowMs,
           openBlockers,
           glmPartitionActive,
         );
+      } catch (err: any) {
+        degraded = true;
+        logger.error(
+          { err },
+          "[autopilot/board-state] blocker resolution threw — degraded all-zero board",
+        );
       }
-    } catch (err: any) {
-      // Belt-and-braces: the seam never throws, but honour the never-throw
-      // contract here too — a thrown read degrades, it does not 500.
-      degraded = true;
-      logger.error(
-        { err },
-        "[autopilot/board-state] open-issue read threw despite never-throw seam",
-      );
     }
 
     const body: AutopilotBoardStateResponse = {
@@ -507,44 +504,41 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       ((ms: number) => getGlmDrainerLiveness(ms).then((l) => l.live));
     let items: WorkQueueRow[] = [];
     let scanned = 0;
-    let sourcesOk = true;
 
-    try {
-      const result = await readQueueIssues();
-      if (result.ok === false) {
-        sourcesOk = false;
+    const read = await degradeIssueRead("autopilot/work-queue", readQueueIssues);
+    let sourcesOk = read.ok === true;
+
+    if (read.ok === true) {
+      scanned = read.rows.length;
+      let glmPartitionActive = false;
+      try {
+        glmPartitionActive = await glmQueueLiveness(nowMs);
+      } catch (err: any) {
         logger.error(
-          { code: result.code },
-          "[autopilot/work-queue] gh issue list failed — degraded empty queue",
+          { err },
+          "[autopilot/work-queue] glm drainer liveness read threw — partition inactive (fail-open, #3754)",
         );
-      } else {
-        scanned = result.rows.length;
-        let glmPartitionActive = false;
-        try {
-          glmPartitionActive = await glmQueueLiveness(nowMs);
-        } catch (err: any) {
-          logger.error(
-            { err },
-            "[autopilot/work-queue] glm drainer liveness read threw — partition inactive (fail-open, #3754)",
-          );
-          glmPartitionActive = false;
-        }
-        const resolveBlockers =
-          deps.resolveOpenBlockers ??
-          ((rows: readonly IssueRow[]) =>
-            resolveOpenBlockers(rows, undefined, glmPartitionActive));
-        const openBlockers = await resolveBlockers(result.rows);
-        items = result.rows
+        glmPartitionActive = false;
+      }
+      const resolveBlockers =
+        deps.resolveOpenBlockers ??
+        ((rows: readonly IssueRow[]) =>
+          resolveOpenBlockers(rows, undefined, glmPartitionActive));
+      // Same post-read belt-and-braces as board-state (#3059): a rejecting
+      // injected resolver degrades the queue, never 500s.
+      try {
+        const openBlockers = await resolveBlockers(read.rows);
+        items = read.rows
           .map((row) => toWorkQueueRow(row, openBlockers))
           .filter((row): row is WorkQueueRow => row !== null)
           .sort(compareWorkQueueRows);
+      } catch (err: any) {
+        sourcesOk = false;
+        logger.error(
+          { err },
+          "[autopilot/work-queue] blocker resolution threw — degraded empty queue",
+        );
       }
-    } catch (err: any) {
-      sourcesOk = false;
-      logger.error(
-        { err },
-        "[autopilot/work-queue] open-issue read threw despite never-throw seam",
-      );
     }
 
     return res.json({
@@ -570,29 +564,16 @@ export function createAutopilotBoardRouter(deps: AutopilotBoardRouterDeps = {}) 
       deps.readHitlGrillIssues ?? (() => defaultReadHitlGrillIssues());
     let items: HitlGrillRow[] = [];
     let scanned = 0;
-    let sourcesOk = true;
 
-    try {
-      const result = await readLane();
-      if (result.ok === false) {
-        sourcesOk = false;
-        logger.error(
-          { code: result.code },
-          "[autopilot/hitl-grill] gh issue list --label failed — degraded empty lane",
-        );
-      } else {
-        scanned = result.rows.length;
-        items = result.rows
-          .map((row) => toHitlGrillRow(row))
-          .filter((row): row is HitlGrillRow => row !== null)
-          .sort(compareHitlGrillRows);
-      }
-    } catch (err: any) {
-      sourcesOk = false;
-      logger.error(
-        { err },
-        "[autopilot/hitl-grill] lane read threw despite never-throw seam",
-      );
+    const read = await degradeIssueRead("autopilot/hitl-grill", readLane);
+    const sourcesOk = read.ok === true;
+
+    if (read.ok === true) {
+      scanned = read.rows.length;
+      items = read.rows
+        .map((row) => toHitlGrillRow(row))
+        .filter((row): row is HitlGrillRow => row !== null)
+        .sort(compareHitlGrillRows);
     }
 
     return res.json({
