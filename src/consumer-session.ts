@@ -156,7 +156,9 @@ export class ConsumerSession {
 
     // Wire the extracted stream-consume protocol (issue #2455) onto the
     // injected transport: orphan recovery and the long-poll loop both run
-    // through the same handler/ack/onFailure deps.
+    // through the same handler/ack/onFailure deps — and, since #4333, fold
+    // each entry through the same `processStreamEntry` helper, so the two
+    // loops cannot drift apart on the success-ACK / failure-DLQ contract.
     const deps = {
       handler,
       ack: (msgId: string) => this.transport.subscriber.xack(stream, group, msgId),
