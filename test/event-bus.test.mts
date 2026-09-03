@@ -747,34 +747,3 @@ test("runLongPollLoop: exits immediately when isActive() is already false", asyn
   );
   assert.equal(xreadCalled, false, "loop must not poll when already inactive");
 });
-
-test("runLongPollLoop: a deleted (empty-fields) delivery is skipped via the shared fold (#4333)", async () => {
-  let active = true;
-  const redis = {
-    async xreadgroup() {
-      // Deliver one batch holding a deleted entry then a real one; flip the
-      // loop off so it exits after this pass.
-      active = false;
-      return [["s", [["1-0", []], ["2-0", ["type", "kept"]]]]];
-    },
-  } as any;
-
-  const handled: ConsumedEvent[] = [];
-  const acked: string[] = [];
-  await runLongPollLoop(
-    redis, "s", "g", "c", { count: 1, blockMs: 1 },
-    () => active,
-    {
-      handler: (e) => { handled.push(e); },
-      ack: async (msgId) => { acked.push(msgId); return 1; },
-      onFailure: async () => {},
-    },
-  );
-
-  // Both loops fold entries through processStreamEntry, so the recovery
-  // pass's deleted-message short-circuit holds here too: an empty-fields
-  // entry never reaches the handler and is never ACKed.
-  assert.equal(handled.length, 1);
-  assert.equal(handled[0].type, "kept");
-  assert.deepEqual(acked, ["2-0"]);
-});

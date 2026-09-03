@@ -15,11 +15,10 @@
 // `consumer-session.ts` now import DOWN from here, and this module imports
 // nothing back from either (issue #2759).
 //
-// #4333 later deduplicated the per-entry consume fold the two loops had each
-// carried inline: `processStreamEntry` is now the single place the "handler →
-// ACK on success / defer to the DLQ policy on failure" contract (and the
-// deleted-message short-circuit) lives, with both loops routing every entry
-// through it.
+// #4333 later deduplicated the per-entry settlement fold the two loops had
+// each carried inline: `processStreamEntry` is now the single place the
+// "handler → ACK on success / defer to the DLQ policy on failure" contract
+// lives, with both loops routing every entry through it.
 //
 // Each function takes a raw Redis client (plus an explicit config / callback
 // surface) so the protocol is directly assertable with synthetic
@@ -299,43 +298,36 @@ interface ConsumeDeps {
 }
 
 /**
- * The shared per-entry consume fold (issue #4333): parse one raw stream
- * entry's flat field list, run it through the handler, ACK on success, and
- * defer to the DLQ policy (`onFailure`) when the handler throws. Both
- * stream-consume loops — `runAutoclaimRecovery` and `runLongPollLoop` —
- * route every claimed/delivered entry through this one function, so the
- * "ack on success / defer to the DLQ policy on failure" contract lives in
- * exactly one place instead of being copy-pasted into two loop bodies that
- * nothing kept in sync beyond being read side by side.
+ * The shared per-entry settlement fold (issue #4333): run one ALREADY-PARSED
+ * event through the handler, ACK on success, and defer to the DLQ policy
+ * (`onFailure`) when the handler throws — or when the ACK itself rejects, the
+ * try deliberately wrapping both calls. Both stream-consume loops —
+ * `runAutoclaimRecovery` and `runLongPollLoop` — route every claimed/delivered
+ * entry through this one function, so the "ack on success / defer to the DLQ
+ * policy on failure" contract lives in exactly one place instead of being
+ * copy-pasted into two loop bodies that nothing kept in sync beyond being read
+ * side by side.
  *
- * A deleted message — an entry whose field list is absent or empty, the shape
- * XAUTOCLAIM returns for entries removed between claim and read — is a no-op:
- * `beforeHandler`, handler, ack, and onFailure are all skipped.
+ * Deliberately narrow, per the grilled concept: parsing stays CALLER-side
+ * (each loop calls `parseStreamFields` itself — the helper takes no parser
+ * argument), the recovery pass's deleted-message short-circuit and
+ * orphan-reclaim log stay in that loop, and a rejection from `onFailure`
+ * itself is NOT caught here — it surfaces to the calling loop's outer catch,
+ * exactly as it did when the fold was inline.
  *
- * `beforeHandler` is the recovery pass's only specialization: an optional hook
- * invoked inside the same try, after parsing and before the handler, where
- * `runAutoclaimRecovery` logs the orphan reclaim — so a reclaimed orphan and a
- * fresh delivery follow the identical success-ACK / failure-DLQ path.
- *
- * Exported so the fold is directly assertable with a synthetic entry and stub
+ * Exported so the fold is directly assertable with a synthetic event and stub
  * deps, per this module's testability contract.
  *
- * @param msgId         - The entry's stream message ID.
- * @param fields        - The entry's flat [k0, v0, k1, v1, ...] field list.
- * @param deps          - handler / ack / onFailure wiring.
- * @param beforeHandler - Optional pre-handler hook (the recovery pass's
- *                        reclaim log).
+ * @param msgId - The entry's stream message ID.
+ * @param event - The entry's already-parsed event (caller-side parse).
+ * @param deps  - handler / ack / onFailure wiring.
  */
 export async function processStreamEntry(
   msgId: string,
-  fields: string[] | undefined | null,
+  event: ConsumedEvent,
   deps: ConsumeDeps,
-  beforeHandler?: (event: ConsumedEvent) => void,
 ): Promise<void> {
-  if (!fields || fields.length === 0) return; // deleted message — nothing to fold
-  const event = parseStreamFields(fields);
   try {
-    beforeHandler?.(event);
     await deps.handler(event);
     await deps.ack(msgId);
   } catch (err: any) {
@@ -353,8 +345,8 @@ const AUTOCLAIM_MIN_IDLE_MS = 60_000;
  * with ">" only delivers NEW messages, so without this pass a message orphaned
  * by a crashed consumer (its PEL entry) is never redelivered. Deleted messages
  * surface with an empty field list (`fields.length === 0`) and are
- * short-circuited inside the fold — the gap the issue calls out as previously
- * untested.
+ * short-circuited here, BEFORE the fold is called — the gap the issue calls
+ * out as previously untested.
  *
  * Best-effort and never throws (fail-loud convention): a reclaim failure must
  * not block the long-poll loop that follows. Takes a raw Redis client so it is
@@ -385,13 +377,10 @@ export async function runAutoclaimRecovery(
       if (claimed.length === 0) break;
 
       for (const [msgId, fields] of claimed) {
-        // Deleted messages (empty/absent field list) are skipped inside the
-        // shared fold; the reclaim log rides the beforeHandler hook so an
-        // orphan and a fresh delivery take the identical handler/ack/failure
-        // path (issue #4333).
-        await processStreamEntry(msgId, fields, deps, (event) => {
-          logger.info({ stream, group, msgId, eventType: event.type }, "[EventBus] reclaimed orphan");
-        });
+        if (!fields || fields.length === 0) continue; // deleted message
+        const event = parseStreamFields(fields);
+        logger.info({ stream, group, msgId, eventType: event.type }, "[EventBus] reclaimed orphan");
+        await processStreamEntry(msgId, event, deps);
       }
       if (nextId === "0-0") break;
       startId = nextId;
@@ -443,9 +432,8 @@ export async function runLongPollLoop(
       if (!result) continue;
 
       for (const [msgId, fields] of result[0][1]) {
-        // The same shared fold the recovery pass uses — including its
-        // deleted-message short-circuit (issue #4333).
-        await processStreamEntry(msgId, fields, deps);
+        const event = parseStreamFields(fields);
+        await processStreamEntry(msgId, event, deps);
       }
     } catch (err: any) {
       if (isActive()) {
