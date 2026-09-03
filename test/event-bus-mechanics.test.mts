@@ -13,7 +13,7 @@
  *   - `shouldPromoteToDlq` — the 3-attempt DLQ threshold.
  *   - `runAutoclaimRecovery` — the deleted-message (empty-fields) short-circuit
  *     the issue calls out as previously untested: the handler must NOT run.
- *   - `processStreamEntry` — the shared per-entry settlement fold (issue
+ *   - `processConsumedEvent` — the shared per-entry settlement fold (issue
  *     #4333) both stream-consume loops route through: handler then ACK on
  *     success, onFailure on a handler throw or a rejected ACK, and a
  *     rejected onFailure propagating to the calling loop.
@@ -26,9 +26,10 @@ import {
   parseStreamFields,
   shouldPromoteToDlq,
   runAutoclaimRecovery,
-  processStreamEntry,
+  processConsumedEvent,
   type RawStreamEntry,
   type ConsumedEvent,
+  type ConsumeDeps,
 } from "../src/event-bus-mechanics.ts";
 
 describe("event-bus-mechanics — parseStreamFields", () => {
@@ -167,7 +168,7 @@ describe("event-bus-mechanics — runAutoclaimRecovery deleted-message short-cir
 });
 
 // ---------------------------------------------------------------------------
-// processStreamEntry — the shared per-entry settlement fold (issue #4333).
+// processConsumedEvent — the shared per-entry settlement fold (issue #4333).
 // Both stream-consume loops route every claimed/delivered entry through this
 // one function, so the "ack on success / defer to the DLQ policy on failure"
 // contract is asserted here once instead of being pinned separately (and
@@ -176,15 +177,17 @@ describe("event-bus-mechanics — runAutoclaimRecovery deleted-message short-cir
 // these cases stub the deps directly — no Redis, no loop scaffolding.
 // ---------------------------------------------------------------------------
 
-describe("event-bus-mechanics — processStreamEntry (the shared per-entry settlement fold)", () => {
+describe("event-bus-mechanics — processConsumedEvent (the shared per-entry settlement fold)", () => {
   test("success: the handler resolves, then the entry is ACKed — no onFailure", async () => {
     const order: string[] = [];
 
-    await processStreamEntry("7-1", { type: "merge" }, {
+    const deps: ConsumeDeps = {
       handler: async (ev: ConsumedEvent) => { order.push(`handler:${ev.type}`); },
       ack: async (msgId: string) => { order.push(`ack:${msgId}`); },
       onFailure: async () => { order.push("onFailure"); },
-    });
+    };
+
+    await processConsumedEvent("7-1", { type: "merge" }, deps);
 
     // Ordering matters: the handler must resolve BEFORE the ACK is awaited.
     assert.deepEqual(order, ["handler:merge", "ack:7-1"]);
@@ -195,7 +198,7 @@ describe("event-bus-mechanics — processStreamEntry (the shared per-entry settl
     let ackCalled = false;
     const boom = new Error("handler blew up");
 
-    await processStreamEntry("7-2", { type: "boom" }, {
+    await processConsumedEvent("7-2", { type: "boom" }, {
       handler: () => { throw boom; },
       ack: async () => { ackCalled = true; },
       onFailure: async (msgId, event, err) => { failures.push({ msgId, event, err }); },
@@ -213,7 +216,7 @@ describe("event-bus-mechanics — processStreamEntry (the shared per-entry settl
     let handlerRan = false;
     const ackBoom = new Error("XACK connection lost");
 
-    await processStreamEntry("7-3", { type: "merge" }, {
+    await processConsumedEvent("7-3", { type: "merge" }, {
       handler: async () => { handlerRan = true; },
       ack: async () => { throw ackBoom; },
       onFailure: async (msgId, _event, err) => { failures.push({ msgId, err }); },
@@ -229,7 +232,7 @@ describe("event-bus-mechanics — processStreamEntry (the shared per-entry settl
     const dlqBoom = new Error("DLQ policy itself failed");
 
     await assert.rejects(
-      processStreamEntry("7-4", { type: "boom" }, {
+      processConsumedEvent("7-4", { type: "boom" }, {
         handler: () => { throw new Error("handler blew up"); },
         ack: async () => 1,
         onFailure: async () => { throw dlqBoom; },
