@@ -577,6 +577,32 @@ describe("design-concept reconcile check (pure)", () => {
     }
   });
 
+  // Issue #4354's MUST-NOT invariants (INV-2, INV-5) are discharged in the PR
+  // body's reconciliation section via `test:` assertions naming these two
+  // subtests exclusively — a `file-lacks`/`file-not-matches` assertion is
+  // REJECTED for a MUST-NOT invariant by `checkReconciliation` (issue #4118):
+  // it proves text is absent, which is satisfiable by an implementation that
+  // does the opposite of what the invariant forbids. Naming a real subtest
+  // instead ties the invariant to an assertion this suite actually runs.
+
+  test("the three pre-refactor per-language scanners do not survive the refactor (issue #4354)", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
+      "utf-8",
+    );
+    for (const name of ["stripTsLikeComments", "stripPythonComments", "stripShellComments"]) {
+      assert.equal(src.includes(name), false, `${name} must not survive the refactor`);
+    }
+  });
+
+  test("the module gains no import — purity contract holds (issue #4354)", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
+      "utf-8",
+    );
+    assert.doesNotMatch(src, /^import /m);
+  });
+
   test("evaluateAssertion re-executes each kind against the injected reader", () => {
     const read = fakeReader({ "a.ts": "alpha doThing( beta doThing(", "empty.ts": "" });
     const ev = (s: string) => evaluateAssertion(parseAssertion(s), read);
