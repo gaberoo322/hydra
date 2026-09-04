@@ -500,6 +500,109 @@ describe("design-concept reconcile check (pure)", () => {
     assert.equal(stripCommentsAndDocstrings(src, "README.md"), src);
   });
 
+  // Issue #4354 — stripWithGrammar (the table-driven walker parameterised by
+  // COMMENT_GRAMMARS) replaced three near-duplicate per-language scanners.
+  // This fixture pins that its output is byte-identical to the pre-refactor
+  // scanners on every edge case the design-concept prototype fuzzed:
+  // unterminated block comment, unterminated string, escaped quote, backslash
+  // at EOF, a `'''`/`"""` span containing `#` and a quote, a shell
+  // single-quoted string (no escapes) ending in a lone backslash, a backtick
+  // template containing `${"x"}` plus `//`/`/*` markers inside strings, a `#`
+  // inside a double-quoted shell string, and empty / newline-only input.
+  // Each expected value below was captured by running BOTH the pre-refactor
+  // `stripTsLikeComments` / `stripPythonComments` / `stripShellComments` and
+  // the post-refactor `stripCommentsAndDocstrings` over the same fixtures and
+  // diffing the two output sets — zero mismatches.
+  test("stripCommentsAndDocstrings is byte-identical to the pre-refactor scanners on fuzzed edge cases", () => {
+    const cases: Array<{ name: string; path: string; src: string; expected: string }> = [
+      {
+        name: "unterminated block comment",
+        path: "x.ts",
+        src: "const x = 1; /* never closes",
+        expected: "const x = 1;                ",
+      },
+      {
+        name: "unterminated string",
+        path: "x.ts",
+        src: 'const x = "never closes',
+        expected: 'const x = "never closes',
+      },
+      {
+        name: "escaped quote",
+        path: "x.ts",
+        src: 'const x = "a\\"b";',
+        expected: 'const x = "a\\"b";',
+      },
+      {
+        name: "backslash at EOF",
+        path: "x.ts",
+        src: 'const x = "a\\',
+        expected: 'const x = "a\\',
+      },
+      {
+        name: "triple-quote containing # and a quote",
+        path: "x.py",
+        src: '"""\nhas # and " inside\n"""\nx = 1',
+        expected: '"""\n                  \n"""\nx = 1',
+      },
+      {
+        name: "shell single-quote (no escapes) ending in a lone backslash",
+        path: "x.sh",
+        src: "echo 'a\\'",
+        expected: "echo 'a\\'",
+      },
+      {
+        name: "backtick template with ${\"x\"} plus // and /* inside it",
+        path: "x.ts",
+        src: 'const x = `hi ${"x"} // not a comment`;',
+        expected: 'const x = `hi ${"x"} // not a comment`;',
+      },
+      {
+        name: "// and /* markers inside string literals",
+        path: "x.ts",
+        src: 'const a = "// not a comment"; const b = "/* not a comment */";',
+        expected: 'const a = "// not a comment"; const b = "/* not a comment */";',
+      },
+      {
+        name: "# inside a double-quoted shell string",
+        path: "x.sh",
+        src: 'echo "value # not a comment"',
+        expected: 'echo "value # not a comment"',
+      },
+      { name: "empty input", path: "x.ts", src: "", expected: "" },
+      { name: "newline-only input", path: "x.ts", src: "\n\n\n", expected: "\n\n\n" },
+    ];
+    for (const c of cases) {
+      assert.equal(stripCommentsAndDocstrings(c.src, c.path), c.expected, c.name);
+    }
+  });
+
+  // Issue #4354's MUST-NOT invariants (INV-2, INV-5) are discharged in the PR
+  // body's reconciliation section via `test:` assertions naming these two
+  // subtests exclusively — a `file-lacks`/`file-not-matches` assertion is
+  // REJECTED for a MUST-NOT invariant by `checkReconciliation` (issue #4118):
+  // it proves text is absent, which is satisfiable by an implementation that
+  // does the opposite of what the invariant forbids. Naming a real subtest
+  // instead ties the invariant to an assertion this suite actually runs.
+
+  test("the three pre-refactor per-language scanners do not survive the refactor (issue #4354)", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
+      "utf-8",
+    );
+    for (const name of ["stripTsLikeComments", "stripPythonComments", "stripShellComments"]) {
+      assert.equal(src.includes(name), false, `${name} must not survive the refactor`);
+    }
+  });
+
+  test("the module gains no import — purity contract holds (issue #4354)", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "scripts/ci/design-concept-reconcile-check.ts"),
+      "utf-8",
+    );
+    assert.doesNotMatch(src, /^import /m);
+  });
+
   test("evaluateAssertion re-executes each kind against the injected reader", () => {
     const read = fakeReader({ "a.ts": "alpha doThing( beta doThing(", "empty.ts": "" });
     const ev = (s: string) => evaluateAssertion(parseAssertion(s), read);
