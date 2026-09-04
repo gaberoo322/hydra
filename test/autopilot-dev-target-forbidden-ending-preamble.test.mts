@@ -91,15 +91,23 @@ function neverEndWaitingBlocks(
 }
 
 const blocks = neverEndWaitingBlocks(autopilot);
-const devOrchQaOrchBlock = blocks.find((b) => !b.heading.includes("dev_target"));
+// As of issue #4272, `dev_orch` and `qa_orch` no longer share one block —
+// each carries its own variant. The dev_orch block is the one whose heading
+// carries neither "dev_target" nor "qa_orch"; it retains the original flat
+// Agent-tool ban unchanged (see test/autopilot-forbidden-ending-preamble.test.mts,
+// which independently pins that block via a first-match extractor).
+const devOrchBlock = blocks.find(
+  (b) => !b.heading.includes("dev_target") && !b.heading.includes("qa_orch"),
+);
+const qaOrchBlock = blocks.find((b) => b.heading.includes("qa_orch"));
 const devTargetBlock = blocks.find((b) => b.heading.includes("dev_target"));
 
 describe("autopilot dev_target forbidden-ending preamble — exists and is additive (#4196)", () => {
-  test("exactly two NEVER END WAITING blocks exist in hydra-autopilot.md", () => {
+  test("exactly three NEVER END WAITING blocks exist in hydra-autopilot.md", () => {
     assert.equal(
       blocks.length,
-      2,
-      `expected exactly two "## NEVER END WAITING" blocks (dev_orch/qa_orch + dev_target), found ${blocks.length}`,
+      3,
+      `expected exactly three "## NEVER END WAITING" blocks (dev_orch, qa_orch, dev_target), found ${blocks.length}`,
     );
   });
 
@@ -110,24 +118,31 @@ describe("autopilot dev_target forbidden-ending preamble — exists and is addit
     );
   });
 
-  test("the dev_target block is positioned AFTER the dev_orch/qa_orch block", () => {
+  test("file order is dev_orch -> dev_target -> qa_orch (#4272 INV-1)", () => {
     // test/autopilot-forbidden-ending-preamble.test.mts's extractor takes the
     // FIRST "## NEVER END WAITING" match — inserting the dev_target block
     // earlier would make that existing regression test silently pin the
-    // wrong block (design-concept invariant for #4196).
-    assert.ok(devOrchQaOrchBlock && devTargetBlock);
+    // wrong block (design-concept invariant for #4196). The design-concept
+    // artifact for issue #4272 (INV-1) fixes the dev_target/qa_orch relative
+    // order: qa_orch is appended AFTER the dev_target block's closing fence,
+    // not before it.
+    assert.ok(devOrchBlock && qaOrchBlock && devTargetBlock);
     assert.ok(
-      devTargetBlock.index > devOrchQaOrchBlock.index,
-      "the dev_target NEVER END WAITING block must appear AFTER the dev_orch/qa_orch block in hydra-autopilot.md",
+      devTargetBlock.index > devOrchBlock.index,
+      "the dev_target NEVER END WAITING block must appear AFTER the dev_orch block in hydra-autopilot.md",
+    );
+    assert.ok(
+      qaOrchBlock.index > devTargetBlock.index,
+      "the qa_orch NEVER END WAITING block must appear AFTER the dev_target block in hydra-autopilot.md (issue #4272 INV-1)",
     );
   });
 
-  test("the pre-existing dev_orch/qa_orch block is untouched (out of scope per the operator decision)", () => {
-    assert.ok(devOrchQaOrchBlock);
+  test("the pre-existing dev_orch block still carries the flat Agent-tool ban (out of scope per the operator decision)", () => {
+    assert.ok(devOrchBlock);
     assert.match(
-      devOrchQaOrchBlock.body,
+      devOrchBlock.body,
       /Do NOT use the Agent tool at all\. Search with Grep\/Glob\/Read yourself, inline, in THIS session\. There is no sub-agent that keeps you alive\./,
-      "the dev_orch/qa_orch block's flat Agent-tool ban must remain byte-for-byte intact — #4196 is additive, not a rewrite of the existing block",
+      "the dev_orch block's flat Agent-tool ban must remain byte-for-byte intact — #4196 is additive, not a rewrite of the existing block, and #4272 narrows qa_orch only",
     );
   });
 });

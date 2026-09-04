@@ -1,7 +1,17 @@
 /**
  * Regression guard — the `## NEVER END WAITING` preamble appended to every
- * `dev_orch` / `qa_orch` dispatch must impose a FLAT Agent-tool ban, with no
+ * `dev_orch` dispatch must impose a FLAT Agent-tool ban, with no
  * read-only-helper carve-out (issue #4109).
+ *
+ * NOTE (issue #4272, 2026-09): `qa_orch` used to share this exact block but
+ * now carries its own hazard-scoped variant (pinned separately in
+ * test/autopilot-qa-orch-forbidden-ending-preamble.test.mts) that permits
+ * BLOCKING (`run_in_background: false`) reviewer spawns — a `qa_orch`
+ * dispatch complying with the flat ban this test pins was silently skipping
+ * hydra-qa's designed 2-reviewer fan-out (run `8e50460f`). This file's
+ * extractor takes the FIRST "## NEVER END WAITING" block in the playbook,
+ * which is still the dev_orch-only block below; `dev_orch` keeps the flat
+ * ban unchanged because it has no equivalent internal blocking mandate.
  *
  * ROOT CAUSE (2026-08-16, autopilot run 62e8020d, turn 2): the post-#4052
  * preamble (PR #4091) ended with "Read-only helper sub-agents for search are
@@ -39,9 +49,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLAYBOOK = join(__dirname, "..", "docs", "operator-playbooks", "hydra-autopilot.md");
 
 /**
- * Extract the fenced `## NEVER END WAITING` preamble block — the text the
- * playbook instructs the autopilot to append verbatim to every `dev_orch` /
- * `qa_orch` dispatch — whitespace-normalised so wrapped lines don't defeat
+ * Extract the FIRST fenced `## NEVER END WAITING` preamble block in the
+ * playbook — as of issue #4272 that is the `dev_orch`-scoped block (the
+ * text the playbook instructs the autopilot to append verbatim to every
+ * `dev_orch` dispatch) — whitespace-normalised so wrapped lines don't defeat
  * matching. The block opens with the `## NEVER END WAITING` heading inside a
  * fenced code block; the slice runs to that block's closing fence.
  */

@@ -54,13 +54,17 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 
 > **NEVER end your session waiting on CI, a monitor, or a background process
 > (issue #3866).** The full rule lives ONCE, canonically, in
-> `hydra-autopilot.md`'s "Worktree-guard preamble" section — it is prepended
-> verbatim to every `qa_orch` dispatch prompt, so you receive it at dispatch
-> time regardless of this pointer. Restated here only as a cross-reference
-> (not duplicated, to avoid drift): this skill already never loops waiting on
-> CI by design (the four-verdict system below exists exactly to avoid that),
-> but the design was violated in practice — a `qa_orch` T4 re-check on PR
-> #3853 posted the Deep-QA PASS marker and then ended its turn waiting for the
+> `hydra-autopilot.md`'s "Worktree-guard preamble" section — as of issue #4272
+> the block prepended verbatim to every `qa_orch` dispatch prompt is the
+> **qa_orch blocking-fan-out variant**, not the shared `dev_orch` block, so you
+> receive it at dispatch time regardless of this pointer. The variant permits
+> exactly the blocking (`run_in_background: false`) reviewer spawns step 7
+> below directs — never a background spawn, and never ending your turn with
+> any child still running. Restated here only as a cross-reference (not
+> duplicated, to avoid drift): this skill already never loops waiting on CI by
+> design (the four-verdict system below exists exactly to avoid that), but the
+> design was violated in practice — a `qa_orch` T4 re-check on PR #3853 posted
+> the Deep-QA PASS marker and then ended its turn waiting for the
 > `deep-qa-gate` re-check to complete instead of returning. Once you have
 > computed a verdict and executed its step-10 routing, you are DONE — return
 > immediately.
