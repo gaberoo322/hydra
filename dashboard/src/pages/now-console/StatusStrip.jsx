@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
+import { useTickingClock } from "../../hooks/useTickingClock.js";
 import { formatNextDispatchCountdown, deriveInflightSlots } from "./console-state.ts";
 
 /**
@@ -34,11 +34,7 @@ function NextDispatchWidget() {
   const { data, error, loading } = useApi("/autopilot/idle-diagnostics", { poll: POLL_MS });
 
   // Tick a local clock so the countdown ticks down between 30s polls.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => clearInterval(t);
-  }, []);
+  const nowMs = useTickingClock(1_000);
 
   const countdown = formatNextDispatchCountdown(data?.nextPaceGateCheck, nowMs);
   const blockedBy = typeof data?.blockedBy === "string" ? data.blockedBy : null;
@@ -80,11 +76,7 @@ function NextDispatchWidget() {
 function InflightSlotsWidget() {
   const { data, error, loading } = useApi("/autopilot/inflight-slots", { poll: POLL_MS });
 
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => clearInterval(t);
-  }, []);
+  const nowMs = useTickingClock(1_000);
 
   const rows = deriveInflightSlots(data?.slots, nowMs);
 

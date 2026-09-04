@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useApi, useServerConfirmedWrite } from "../../hooks/useApi.js";
+import { useTickingClock } from "../../hooks/useTickingClock.js";
 import StatusVerdict from "./StatusVerdict.jsx";
 import StatusStrip from "./StatusStrip.jsx";
 import StopBanner from "./StopBanner.jsx";
@@ -33,12 +34,8 @@ import { summariseTurns, formatRelativeTime } from "../now-pixel/oak-tab-state.t
  */
 function TurnJournal() {
   const { data } = useApi("/autopilot/runs/current", { poll: 10_000 });
-  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
-
-  useEffect(() => {
-    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1_000);
-    return () => clearInterval(t);
-  }, []);
+  const nowMs = useTickingClock(1_000);
+  const nowSec = Math.floor(nowMs / 1000);
 
   const rows = useMemo(() => summariseTurns(data?.turns), [data]);
 
