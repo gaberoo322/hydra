@@ -627,174 +627,117 @@ function blank(ch: string): string {
 }
 
 /**
- * TS/MTS: blanks out `//` line comments and `/* *\/` block comments. String
- * literals (`'...'`, `"..."`, and `` `...` `` template literals) are copied
- * through verbatim, including escaped characters, so a needle that only
- * exists as executable string content still counts.
+ * One language's comment/string shape, consumed by {@link stripWithGrammar}.
+ * `spans` are ordered multi-char comment/docstring regions (checked before
+ * `lineComment` and `strings` at every offset — Python's triple-quote spans
+ * must be tried before its single-char string quotes); `keepDelimiters`
+ * controls whether the open/close markers themselves are copied through
+ * (Python docstring fences) or blanked like the interior (TS block-comment
+ * markers). `strings` are quote characters copied through verbatim (with or
+ * without backslash-escape handling) so a needle inside executable string
+ * content is never blanked.
  */
-function stripTsLikeComments(source: string): string {
-  let out = "";
-  let i = 0;
-  const n = source.length;
-  while (i < n) {
-    const two = source.slice(i, i + 2);
-    if (two === "//") {
-      while (i < n && source[i] !== "\n") {
-        out += " ";
-        i++;
-      }
-      continue;
-    }
-    if (two === "/*") {
-      out += "  ";
-      i += 2;
-      while (i < n && source.slice(i, i + 2) !== "*/") {
-        out += blank(source[i]);
-        i++;
-      }
-      if (i < n) {
-        out += "  ";
-        i += 2;
-      }
-      continue;
-    }
-    const ch = source[i];
-    if (ch === "'" || ch === '"' || ch === "`") {
-      out += ch;
-      i++;
-      while (i < n && source[i] !== ch) {
-        if (source[i] === "\\" && i + 1 < n) {
-          out += source[i] + source[i + 1];
-          i += 2;
-          continue;
-        }
-        out += source[i];
-        i++;
-      }
-      if (i < n) {
-        out += source[i];
-        i++;
-      }
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
+type CommentGrammar = {
+  spans: Array<{ open: string; close: string; keepDelimiters: boolean }>;
+  lineComment: string | null;
+  strings: Array<{ quote: string; escapes: boolean }>;
+};
+
+/** Per-language grammars, selected by {@link commentLanguageForPath}. */
+const COMMENT_GRAMMARS: Record<"ts" | "py" | "sh", CommentGrammar> = {
+  ts: {
+    spans: [{ open: "/*", close: "*/", keepDelimiters: false }],
+    lineComment: "//",
+    strings: [
+      { quote: "'", escapes: true },
+      { quote: '"', escapes: true },
+      { quote: "`", escapes: true },
+    ],
+  },
+  py: {
+    spans: [
+      { open: '"""', close: '"""', keepDelimiters: true },
+      { open: "'''", close: "'''", keepDelimiters: true },
+    ],
+    lineComment: "#",
+    strings: [
+      { quote: "'", escapes: true },
+      { quote: '"', escapes: true },
+    ],
+  },
+  sh: {
+    spans: [],
+    lineComment: "#",
+    strings: [
+      { quote: "'", escapes: false },
+      { quote: '"', escapes: true },
+    ],
+  },
+};
+
+/** Replaces every non-newline character of `s` with a space. */
+function blankRun(s: string): string {
+  return s.replace(/[^\n]/g, " ");
 }
 
 /**
- * Python: blanks out `#` line comments and every triple-quoted span
- * (`"""..."""` / `'''...'''`), whether or not it sits in true docstring
- * position — distinguishing the two needs a real parser, which this module's
- * zero-imports purity contract forecloses, and the motivating #4090 case
- * (`closingIssuesReferences` appearing only inside `reap.py`'s function
- * docstrings) is a triple-quoted span regardless of position. Regular
- * single/double-quoted strings are copied through verbatim.
+ * Table-driven comment/docstring blanker: walks `source` once, and at every
+ * offset tries `grammar.spans` (in order) first, then `grammar.lineComment`,
+ * then `grammar.strings`, falling through to a verbatim copy of the current
+ * character. String contents are always copied through verbatim (escapes
+ * honoured per-entry); span/line-comment interiors are blanked via
+ * {@link blank} so line structure survives. This one walker replaces the
+ * three former hand-rolled per-language scanners (issue #4354) — see
+ * {@link COMMENT_GRAMMARS} for the three grammars it is parameterised by.
  */
-function stripPythonComments(source: string): string {
+function stripWithGrammar(source: string, grammar: CommentGrammar): string {
   let out = "";
   let i = 0;
   const n = source.length;
-  while (i < n) {
-    const three = source.slice(i, i + 3);
-    if (three === '"""' || three === "'''") {
-      const delim = three;
-      out += delim;
-      i += 3;
-      while (i < n && source.slice(i, i + 3) !== delim) {
-        out += blank(source[i]);
-        i++;
+  outer: while (i < n) {
+    for (const span of grammar.spans) {
+      if (source.startsWith(span.open, i)) {
+        out += span.keepDelimiters ? span.open : blankRun(span.open);
+        i += span.open.length;
+        while (i < n && !source.startsWith(span.close, i)) {
+          out += blank(source[i]);
+          i++;
+        }
+        if (i < n) {
+          out += span.keepDelimiters ? span.close : blankRun(span.close);
+          i += span.close.length;
+        }
+        continue outer;
       }
-      if (i < n) {
-        out += delim;
-        i += 3;
-      }
-      continue;
     }
-    if (source[i] === "#") {
+    if (grammar.lineComment !== null && source.startsWith(grammar.lineComment, i)) {
       while (i < n && source[i] !== "\n") {
         out += " ";
         i++;
       }
       continue;
     }
-    const ch = source[i];
-    if (ch === "'" || ch === '"') {
-      out += ch;
-      i++;
-      while (i < n && source[i] !== ch) {
-        if (source[i] === "\\" && i + 1 < n) {
-          out += source[i] + source[i + 1];
-          i += 2;
-          continue;
+    for (const str of grammar.strings) {
+      if (source[i] === str.quote) {
+        out += str.quote;
+        i++;
+        while (i < n && source[i] !== str.quote) {
+          if (str.escapes && source[i] === "\\" && i + 1 < n) {
+            out += source[i] + source[i + 1];
+            i += 2;
+            continue;
+          }
+          out += source[i];
+          i++;
         }
-        out += source[i];
-        i++;
-      }
-      if (i < n) {
-        out += source[i];
-        i++;
-      }
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
-}
-
-/**
- * Shell: blanks out `#` line comments (shell has no block-comment syntax).
- * Single-quoted strings are literal (no escapes) per POSIX/bash; double-quoted
- * strings honour backslash escapes. Both are copied through verbatim so a
- * `#` — or any needle — inside a string is never mistaken for a comment.
- */
-function stripShellComments(source: string): string {
-  let out = "";
-  let i = 0;
-  const n = source.length;
-  while (i < n) {
-    const ch = source[i];
-    if (ch === "#") {
-      while (i < n && source[i] !== "\n") {
-        out += " ";
-        i++;
-      }
-      continue;
-    }
-    if (ch === "'") {
-      out += ch;
-      i++;
-      while (i < n && source[i] !== "'") {
-        out += source[i];
-        i++;
-      }
-      if (i < n) {
-        out += source[i];
-        i++;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      out += ch;
-      i++;
-      while (i < n && source[i] !== '"') {
-        if (source[i] === "\\" && i + 1 < n) {
-          out += source[i] + source[i + 1];
-          i += 2;
-          continue;
+        if (i < n) {
+          out += source[i];
+          i++;
         }
-        out += source[i];
-        i++;
+        continue outer;
       }
-      if (i < n) {
-        out += source[i];
-        i++;
-      }
-      continue;
     }
-    out += ch;
+    out += source[i];
     i++;
   }
   return out;
@@ -819,10 +762,8 @@ function stripShellComments(source: string): string {
  */
 export function stripCommentsAndDocstrings(source: string, path: string): string {
   const lang = commentLanguageForPath(path);
-  if (lang === "ts") return stripTsLikeComments(source);
-  if (lang === "py") return stripPythonComments(source);
-  if (lang === "sh") return stripShellComments(source);
-  return source;
+  if (lang === null) return source;
+  return stripWithGrammar(source, COMMENT_GRAMMARS[lang]);
 }
 
 function missing(path: string): AssertionResult {
