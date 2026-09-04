@@ -572,23 +572,15 @@ JSONL transcript history to quantify ghost-write incidents across past
 dispatches (useful as a before/after measurement when the hook is rolled
 out).
 
-**`dev_orch` and `qa_orch` dispatches each carry a SECOND required preamble
-block — the forbidden-ending rule (issue #3866) — but as of issue #4272 they
-carry DIFFERENT variants of it, not the same shared block.** `dev_orch`
-keeps the original flat Agent-tool ban unchanged below. `qa_orch` gets its own
-hazard-scoped variant further down, because `hydra-qa`'s step 7 review
-fan-out is an `Agent(*)`-based design by construction (Standards + Spec
-sub-agents reviewed in **parallel sub-agents** so neither pollutes the
-other's context, `hydra-qa/SKILL.md` lines 48/103) and every spawn in that
-fan-out already carries its own blocking mandate (`run_in_background: false`,
-issues #3789/#3880) — a blocking spawn cannot outlive the turn, so it sits in
-the same safety class as a foreground `Bash` call and is mechanically
-incapable of the #3866 hazard. `dev_orch` has no equivalent internal blocking
-mandate, so for that class the tool ban and the hazard ban still coincide and
-the flat wording stays correct. Append the matching block verbatim,
-immediately after the worktree-guard preamble above, for the dispatch's own
-class — `dev_orch` gets the block below, `qa_orch` gets its own variant
-further down, never both:
+**`dev_orch` dispatches carry a SECOND required preamble block — the
+forbidden-ending rule (issue #3866), unchanged.** Append verbatim, immediately
+after the worktree-guard preamble above, for every `dev_orch` dispatch. As of
+issue #4272, `qa_orch` and `dev_target` no longer share this block — each
+carries its OWN forbidden-ending preamble variant instead (the `qa_orch`
+blocking-fan-out variant, appended after the `dev_target` block further down;
+the `dev_target` delegated-mode variant, immediately below this one). Every
+code-writing dispatch class carries EXACTLY ONE forbidden-ending block, chosen
+by class — never this block composed with either variant:
 
 ```
 ## NEVER END WAITING — deliverable or terminal state, always (issue #3866)
@@ -597,8 +589,9 @@ reap.py records your session's end as a completion the instant it happens,
 whatever you did or didn't finish. NEVER end your turn waiting on CI, a
 monitor, or a background process ("I'll wait for the test run to finish",
 "standing by for the re-check"). Either poll to a terminal state in the
-FOREGROUND, or your final message reports one of: a PR is open, OR a hard
-blocker via ## Friction Report. There is no third option.
+FOREGROUND, or your final message reports one of: a PR is open (dev_orch) / a
+verdict was posted (qa_orch), OR a hard blocker via ## Friction Report. There
+is no third option.
 
 You MUST do this work yourself, in THIS session. Do NOT delegate the skill
 invocation to a nested background agent (`Agent(run_in_background=true)`) and
@@ -638,66 +631,6 @@ backstop below, which now catches this case at reap time — but the backstop
 exists to limit the blast radius of this failure mode, not to make it
 acceptable).
 
-**`qa_orch` dispatches carry their OWN forbidden-ending preamble variant
-(issue #4272) — the hazard-scoped rewrite, not the flat ban above.** Append
-verbatim, immediately after the worktree-guard preamble above, for every
-`qa_orch` dispatch, REPLACING the `dev_orch` block above (never composed with
-it, never both):
-
-```
-## NEVER END WAITING — deliverable or terminal state, always (issue #3866, qa_orch variant issue #4272)
-This is an UNATTENDED dispatch. Nothing resumes you after your final message —
-reap.py records your session's end as a completion the instant it happens,
-whatever you did or didn't finish. NEVER end your turn waiting on CI, a
-monitor, or a background process ("I'll wait for the test run to finish",
-"standing by for the re-check"). Either poll to a terminal state in the
-FOREGROUND, or your final message reports one of: a verdict was posted, OR a
-hard blocker via ## Friction Report. There is no third option.
-
-Do NOT spawn a background agent (`Agent(run_in_background: true)`) and end
-your turn waiting on it — a background child does not keep this session
-alive, and reap.py will record your session as a completion with no verdict
-the moment you go quiet. You MAY spawn blocking reviewer sub-agents
-(`run_in_background: false`) where this skill's step 7 fan-out directs — a
-blocking spawn cannot outlive your turn, because the message that spawns it
-cannot return control until every reviewer has produced a result. Never end
-your turn with any child still running, blocking or not.
-
-A backgrounded Bash process and an armed Monitor are the same class of handle
-as a background Agent: neither keeps this session alive. Ending your turn with
-a test run (or any command) still running in the background, or with a
-Monitor armed to notify you later, is exactly the forbidden ending above —
-reap.py records completion the instant you go quiet, whatever is still
-running or armed.
-
-Commit and push your work to the branch BEFORE running verification (`npm
-test`, `npm run typecheck`), not after. Verification gates whether the PR
-merges, not whether the work survives — the hourly worktree-orphan-prune
-destroys anything still uncommitted when a session stalls.
-```
-
-The prohibition here is scoped to the *hazard* (a background spawn that
-outlives the turn), not the *tool*: a `run_in_background: false` spawn is
-mechanically blocking, so it cannot produce the end-turn-while-children-run
-failure the flat ban above exists to prevent. The flat ban's cost, before
-this variant existed, was silent: a `qa_orch` dispatch reviewing PR #4270 /
-issue #4257 (autopilot run `8e50460f`, turn 7) complied with the flat wording
-by skipping `hydra-qa` step 7's parallel Standards+Spec fan-out and reviewing
-both axes itself inline — a competent single review, but not the two
-independent, context-isolated reviewers the design calls for, and nothing
-errored to surface the degradation (filed hitl-grill as issue #4272; operator
-decision 2026-08-31 accepted the narrowing, gated on issue #4196 landing
-first because both rewrite this same preamble section — see the issue's
-comment thread for the full reasoning).
-
-Motivating incident for the pre-split shared block, still relevant history: a
-`qa_orch` T4 re-check on PR #3853 posted the Deep-QA PASS marker and then
-ended its turn waiting for the `deep-qa-gate` re-check to complete, even
-though `hydra-qa.md`'s own verdict-tier design already never loops waiting on
-CI — the design was correct, the dispatch didn't follow it. Both the
-`dev_orch` and `qa_orch` variants above still forbid this: waiting on CI is
-never permitted, independent of the Agent-tool split.
-
 **`dev_target` dispatches carry their OWN forbidden-ending preamble variant
 (issue #4196) — ADDITIVE to the dev_target worktree-guard variant above, never
 a replacement for it.** Append verbatim, immediately after the dev_target
@@ -707,7 +640,7 @@ outright: `hydra-target-build`'s own contract requires spawning a delegated
 build child for context-window protection (issue #1782), and a flat ban here
 would recreate the exact degradation once observed when the flat block was
 still applied to `qa_orch` (before issue #4272 gave it its own hazard-scoped
-variant above) — it skipped its Standards+Spec Agent fan-out and reviewed both
+variant below) — it skipped its Standards+Spec Agent fan-out and reviewed both
 axes inline as one reviewer (run 8e50460f). What this variant forbids is going
 quiet while that delegated child is still running — the gap this issue was
 filed to close (autopilot run 155f6d3c: a `dev_target` dispatch spawned a
@@ -766,6 +699,75 @@ Before writing to ~/hydra-betting:
 - Use ONLY worktree-anchored paths for Edit/Write — never raw `/home/gabe/hydra-betting/...`.
 - ABORT if any check fails. The two-repo asymmetry was the silent-leak failure mode in #542.
 ```
+
+**`qa_orch` dispatches carry their OWN forbidden-ending preamble variant
+(issue #4272) — the hazard-scoped rewrite, not the `dev_orch` flat ban above.**
+`hydra-qa`'s step 7 review fan-out is an `Agent(*)`-based design by
+construction (Standards + Spec sub-agents run as **parallel sub-agents** so
+neither pollutes the other's context, `hydra-qa/SKILL.md` lines 48/103), and
+every spawn in it already carries the #3789/#3880 blocking mandate
+(`run_in_background: false`) plus the step 7.5 incomplete-fan-out exit — a
+blocking spawn cannot outlive the turn, so it sits in the same safety class as
+a foreground `Bash` call and is mechanically incapable of the #3866 hazard.
+`dev_orch` has no equivalent internal blocking mandate, so for that class the
+tool ban and the hazard ban still coincide and the flat wording stays
+(operator decision, 2026-08-31). Before this variant existed, a `qa_orch`
+dispatch reviewing PR #4270 / issue #4257 (autopilot run `8e50460f`, turn 7)
+complied with the flat ban's letter by skipping `hydra-qa` step 7's parallel
+Standards+Spec fan-out and reviewing both axes itself inline — a competent
+single review, but not the two independent, context-isolated reviewers the
+design calls for, and nothing errored to surface the degradation.
+
+Append verbatim, immediately after the worktree-guard preamble above, for
+every `qa_orch` dispatch — REPLACING the `dev_orch` block above, never
+composed with it and never with the `dev_target` variant either:
+
+```
+## NEVER END WAITING — qa_orch blocking-fan-out variant (issue #4272)
+This is an UNATTENDED dispatch. Nothing resumes you after your final message —
+reap.py records your session's end as a completion the instant it happens,
+whatever you did or didn't finish. NEVER end your turn waiting on CI, a
+monitor, or a background process. Either poll to a terminal state in the
+FOREGROUND, or your final message reports one of: a verdict was posted, OR
+hydra-qa's own pre-verdict exit was executed (step 7.5 incomplete fan-out /
+step 6.6 defer, with `needs-qa` left in place), OR a hard blocker via
+## Friction Report. There is no fourth option.
+
+Do NOT spawn a background agent (`Agent(run_in_background: true)`) for ANY
+purpose — not to run the skill, not to search, not to "explore first" — and
+NEVER end your turn with any child still running. A background child does not
+keep you alive, and it cannot outlive your worktree: run 793fa896 spawned 9
+background children and quit; the hourly orphan-prune reaped the parent
+worktree and every child died with it — ~790k tokens, zero verdicts.
+
+You MAY spawn reviewer sub-agents ONLY where hydra-qa step 7 directs, ONLY
+with `run_in_background: false`, and ONLY all in one message. That spawn is
+BLOCKING — the message cannot return, and your turn cannot end, until every
+reviewer has returned — so it is mechanically incapable of the forbidden
+ending, the same safety class as a foreground Bash call. That is the ONLY
+permitted Agent use. Everything else you do yourself, inline, in THIS session,
+with Grep/Glob/Read. Then run step 7.5: if any reviewer came back empty, post
+the incomplete-fan-out comment and exit — never aggregate a partial set.
+
+A backgrounded Bash process and an armed Monitor are the same class of handle
+as a background Agent: neither keeps this session alive. Ending your turn with
+any command still running in the background, or with a Monitor armed to
+notify you later, is exactly the forbidden ending above.
+
+Post the verdict and execute its step-10 routing BEFORE any optional follow-on
+work (step 11 lesson capture) — the posted verdict is the deliverable that
+survives a reap; nothing after it does.
+```
+
+Filed `hitl-grill` as issue #4272 (self-filed-defect admission rule);
+operator decision 2026-08-31 accepted the narrowing, gated on issue #4196
+landing first because both rewrite this same preamble section — see the
+issue's comment thread for the full reasoning. The run 793fa896 catastrophe
+this variant's background-spawn ban cites (9 background reviewer children,
+parent worktree reaped by the hourly orphan-prune, ~790k tokens, zero
+verdicts) is the reason the ban is unconditional — "for ANY purpose" — while
+the `run_in_background: false` fan-out stays permitted: only a *background*
+spawn can outlive the parent's worktree.
 
 ## Inspecting a run
 
@@ -1090,3 +1092,4 @@ supply was self-filed. This rule cuts the edge from "the loop noticed a defect" 
 5. `hydra-architect` is operator-only.
 6. Phase 7 is the only path to the end-of-run digest (idempotent shutdown).
 7. Self-filed orchestrator defects are filed `hitl-grill`, never `ready-for-agent` — see the admission rule above. Only the operator promotes.
+8. The forbidden-ending preamble (issue #3866) is class-selected, exactly one block per code-writing dispatch: `dev_orch` gets the flat Agent-tool ban, `qa_orch` gets the blocking-fan-out variant (issue #4272), `dev_target` gets the delegated-mode variant (issue #4196) — never two of these composed on the same dispatch.

@@ -1,0 +1,1 @@
+- fix: qa_orch's forbidden-ending preamble now permits the designed Standards+Spec reviewer fan-out instead of a flat Agent-tool ban that silently skipped it (#4272)

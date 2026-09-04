@@ -118,16 +118,22 @@ describe("autopilot dev_target forbidden-ending preamble — exists and is addit
     );
   });
 
-  test("the dev_target block is positioned AFTER the dev_orch and qa_orch blocks", () => {
+  test("file order is dev_orch -> dev_target -> qa_orch (#4272 INV-1)", () => {
     // test/autopilot-forbidden-ending-preamble.test.mts's extractor takes the
     // FIRST "## NEVER END WAITING" match — inserting the dev_target block
     // earlier would make that existing regression test silently pin the
-    // wrong block (design-concept invariant for #4196).
+    // wrong block (design-concept invariant for #4196). The design-concept
+    // artifact for issue #4272 (INV-1) fixes the dev_target/qa_orch relative
+    // order: qa_orch is appended AFTER the dev_target block's closing fence,
+    // not before it.
     assert.ok(devOrchBlock && qaOrchBlock && devTargetBlock);
     assert.ok(
-      devTargetBlock.index > devOrchBlock.index &&
-        devTargetBlock.index > qaOrchBlock.index,
-      "the dev_target NEVER END WAITING block must appear AFTER both the dev_orch and qa_orch blocks in hydra-autopilot.md",
+      devTargetBlock.index > devOrchBlock.index,
+      "the dev_target NEVER END WAITING block must appear AFTER the dev_orch block in hydra-autopilot.md",
+    );
+    assert.ok(
+      qaOrchBlock.index > devTargetBlock.index,
+      "the qa_orch NEVER END WAITING block must appear AFTER the dev_target block in hydra-autopilot.md (issue #4272 INV-1)",
     );
   });
 
