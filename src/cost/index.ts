@@ -252,7 +252,6 @@ export {
   projectUsageByIssue,
   getUsageByIssue,
 } from "./cost-attribution.ts";
-export type { UsageByIssueResult } from "./cost-attribution.ts";
 
 // `weightedQuotaTokensEstimate` (issue #4126 INV-2): the quota-weighted
 // dispatch-cost-join figure `POST /api/usage/dispatch-cost` computes at write
