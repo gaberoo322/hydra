@@ -73,6 +73,6 @@ Nothing has been built. The following are **decided** on the founding map and ar
 
 # Operator actions needed
 
-- **Verify Coinbase One's effect on Advanced Trade / API fees** on the primary fee page (bot-blocked; a browser read). Must settle before the cost model `c` is frozen for the gate.
+- **Confirm whether personal Coinbase spot volume/balance on the same account counts toward CSB's fee tier** (portfolios share an account tier). The primary fee schedule itself is now recorded on the map's venue ticket; the cost-model freeze ticket consumes it.
 - **Create the dedicated Coinbase portfolio** and provision market-data + read-only (`can_view`) portfolio-scoped keys for the paper phase. Never the personal account's keys; never `can_transfer`.
 - **Lock the graduation numbers** in `outcomes.yaml` once drafted (map ticket). The risk-template numbers are already decided (map ticket [Decide CSB risk-config parameters](https://github.com/gaberoo322/hydra/issues/4341): 0.5% per trade at stop, 1% hard cap, 3% daily-loss halt, 3% total open risk, identical in every lane; live proof $5k/strategy stepping ×2 per 90 clean days to a $20k ceiling) and live in a versioned `config/risk-template.json` that `outcomes.yaml` pins by version.
