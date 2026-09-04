@@ -670,7 +670,7 @@ export async function getClassCostEfficiency(
 // ---------------------------------------------------------------------------
 
 /** One issue's rolled-up dispatch-cost-join ledger. */
-export interface UsageByIssueEntry {
+interface UsageByIssueEntry {
   issue: number;
   /** Sum of `dispatchTokensEstimate` across every recorded dispatch for this issue. */
   totalDispatchTokensEstimate: number;
