@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
+import { useTickingClock } from "../../hooks/useTickingClock.js";
 import { formatTokens } from "./console-state.ts";
 import { formatRelativeTime } from "../now-pixel/oak-tab-state.ts";
 
@@ -36,11 +36,8 @@ export default function RunHistoryStrip({ onSelect }) {
   const runs = Array.isArray(data?.runs) ? data.runs : [];
 
   // A ticking "now" keeps the relative start times honest without re-fetching.
-  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
-  useEffect(() => {
-    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 30_000);
-    return () => clearInterval(t);
-  }, []);
+  const nowMs = useTickingClock(30_000);
+  const nowSec = Math.floor(nowMs / 1000);
 
   return (
     <section
