@@ -81,7 +81,7 @@ Full autonomy: pick the task, plan, challenge your own plan, execute, verify, me
 
 ## CRITICAL SAFETY RULE — READ FIRST (issues #542, #3889)
 
-Two repos are in play: `~/hydra` (orchestrator) and `~/hydra-betting` (target). `dev_target` is dispatched WITHOUT harness `isolation: "worktree"` (issue #3889): the harness's worktree isolation only covers `~/hydra`, and because `~/hydra-betting` is a sibling repo not nested under it, a pinned session is refused ALL git ops against the target — which made Step 0.6's `git -C ~/hydra-betting worktree add …` categorically fail (2/2 dispatches). So this skill isolates the target ITSELF via Step 0.6 below (nested under `~/hydra-betting/web/.worktrees/` — relocated off `/dev/shm` in issue #4177 to eliminate the reach-back `node_modules` symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook fences ghost-writes back into that worktree. Step 0.6 is therefore the SOLE isolation for the target repo — never skip it.
+Two repos are in play: `~/hydra` (orchestrator) and `~/hydra-betting` (target). `dev_target` is dispatched WITHOUT harness `isolation: "worktree"` (issue #3889): the harness's worktree isolation only covers `~/hydra`, and because `~/hydra-betting` is a sibling repo not nested under it, a pinned session is refused ALL git ops against the target. So this skill isolates the target ITSELF via Step 0.6 below (nested under `~/hydra-betting/web/.worktrees/` — relocated off `/dev/shm` in issue #4177 to eliminate the reach-back `node_modules` symlink hazard, #4175), and the installed `worktree-write-fence.sh` PreToolUse hook fences ghost-writes back into that worktree. Step 0.6 is therefore the SOLE isolation for the target repo — never skip it.
 
 Before running ANY `git`, `npm`, `Edit`, or `Write` against the target repo:
 
@@ -104,22 +104,15 @@ Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`~/
 
 ```bash
 # Nested under ~/hydra-betting/web/ (issue #4177) — NOT /dev/shm. Node's
-# upward module-resolution walk from a file inside the worktree now finds the
-# REAL ~/hydra-betting/web/node_modules as an ancestor, the same mechanism
-# `~/hydra/.claude/worktrees/` already relies on for the orchestrator's own
-# worktrees (see CLAUDE.md). This eliminates BOTH hazards of the prior
-# /dev/shm design: no per-worktree `npm ci` (~975M RAM per concurrent
-# worktree) and no reach-back `node_modules` symlink (the 2026-08-19
-# incident, issue #4175 — six money-critical services down ~70min). A
-# destructive `rm -rf node_modules/` run inside the worktree targets only a
-# LOCAL path; since no node_modules is ever created or linked there, it has
-# nothing to remove — Node's ancestor walk is a resolver READ, not a
-# filesystem entry a destructive write can follow.
+# upward module-resolution walk from a file inside the worktree finds the
+# REAL ~/hydra-betting/web/node_modules as an ancestor (the same mechanism
+# `~/hydra/.claude/worktrees/` relies on — see CLAUDE.md), so there is no
+# per-worktree `npm ci` and no reach-back `node_modules` symlink (the
+# 2026-08-19 incident, issue #4175).
 #
 # MUST be nested directly under `web/`, not `~/hydra-betting/.worktrees/`:
-# the walk from `<wt>/web/src/foo.ts` tries `<wt>/web/node_modules`,
-# `<wt>/node_modules`, `<wt>/../node_modules`, … — only a `.worktrees` dir
-# living inside `web/` puts `~/hydra-betting/web/node_modules` on that path.
+# only a `.worktrees` dir living inside `web/` puts
+# `~/hydra-betting/web/node_modules` on the walk from `<wt>/web/src/foo.ts`.
 TARGET_WT="/home/gabe/hydra-betting/web/.worktrees/${CYCLE_ID}"
 mkdir -p "$(dirname "$TARGET_WT")"
 
@@ -141,18 +134,12 @@ case "$GIT_DIR" in
   *) echo "ABORT: hydra-betting cwd is not a worktree (git-dir=$GIT_DIR)" >&2; exit 1 ;;
 esac
 
-# No UNCONDITIONAL install step here (issue #4177): node_modules resolves by
-# the ancestor walk above, and npm's own `node_modules/.bin` PATH lookup for
-# `npm run <script>` walks the SAME ancestor chain — so `npm run typecheck` /
-# `npm run test:raw` / `npm run build` all resolve their binaries with no
-# local install, for a change that doesn't touch dependencies. A change that
-# DOES add/bump a dependency needs a LOCAL install so that new dependency is
-# actually present somewhere verify can find it — Step 6 (Verify) runs `npm
-# ci` there, but ONLY when the diff touches package.json/package-lock.json,
-# and only as a local worktree install (never touching the shared ancestor).
-# appSubdir still comes from the Target Manifest (verify.appSubdir; epic
-# #3014, ADR-0026, issue #3019) — not hardcoded — because later steps
-# `cd "$TARGET_WT/$APP_SUBDIR"`.
+# No install step here (issue #4177): node_modules AND `npm run <script>`
+# binaries resolve by the ancestor walk above. A change that adds/bumps a
+# dependency gets a LOCAL `npm ci` in Step 6 (Verify), only when the diff
+# touches package.json/package-lock.json. appSubdir comes from the Target
+# Manifest (verify.appSubdir; epic #3014, ADR-0026, issue #3019) — not
+# hardcoded — because later steps `cd "$TARGET_WT/$APP_SUBDIR"`.
 APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 
 # Mirror the Target SDLC gate scripts into the worktree (issue #1451). The gate
@@ -165,7 +152,7 @@ APP_SUBDIR=$(jq -r '.verify.appSubdir' "$TARGET_WT/.hydra/manifest.json")
 bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 ```
 
-`scripts/branch-prune.sh` (issue #443) sweeps stale worktrees under `~/hydra-betting/web/.worktrees/*` the same way it sweeps every other worktree in the repo — its classifier is path-agnostic, so relocating off `/dev/shm` needed no branch-prune.sh code change. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash. The `.hydra-gate/` mirror is inside the worktree, so it is GC'd with it.
+`scripts/branch-prune.sh` (issue #443) sweeps stale worktrees under `~/hydra-betting/web/.worktrees/*`. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash. The `.hydra-gate/` mirror is inside the worktree, so it is GC'd with it.
 
 ### 0.5. Drift check
 ```bash
@@ -210,12 +197,11 @@ Load context (parallel):
 > **Direction docs are a mirror — refresh if stale (issue #1791).** The
 > `~/hydra/config/direction/{priorities,roadmap}.md` files loaded above are the
 > orchestrator's COMMITTED copy and the runtime source of truth for the
-> in-process readers (`readPriorities()` in `src/api/recommendations.ts`,
-> `getCurrentMilestoneProgress()` in `src/backlog/reads.ts`). The LIVE docs that
+> in-process readers. The LIVE docs that
 > `/hydra-target-research` writes each cycle live in the Target repo at
 > `$HYDRA_TARGET_REPO/direction/` (default `~/hydra-betting/direction/`).
 > Nothing auto-syncs the two, so the orch copy can lag the research cycle by
-> milestones — it was 3 milestones / 2 cycles stale on 2026-06-12. The
+> milestones. The
 > `collect-state.sh` Phase-1 collector emits `direction_drift=true` when the
 > committed orch copy no longer matches the live Target docs. When you see that
 > signal (or notice the loaded `priorities.md` frontmatter `updated:` lagging
@@ -234,7 +220,7 @@ Load context (parallel):
 > > **STATUS: superseded by <doc-or-ADR> on <YYYY-MM-DD>.** <one-line pointer to the current doc.>
 > ```
 >
-> (e.g. the Target's `north-star.md`, documented stale-not-deprecated, and any M12 / cross-venue-arb framing docs post hydra-betting ADR-0002.) A banner'd doc is a dead premise: **do NOT plan from it** — exactly as the Step 3.1 grounding preflight refuses to build on a wire-or-retire ledger row. Read the banner's pointer and ground on the doc it names instead. This is a thin banner slice, NOT a doc-lifecycle system — there is no freshness scoring and no staleness detector. A banner is applied only when an explicit supersession decision happens, under the same **ADR acceptance-checklist rule** that governs code ledger annotations: *when an ADR (or an equivalent operator supersession decision) retires a doc's premise, the acceptance checklist requires stamping the retired doc with the STATUS-superseded banner in that same change — code annotations and doc banners are the two arms of one rule.*
+> A banner'd doc is a dead premise: **do NOT plan from it** — read the banner's pointer and ground on the doc it names instead. The full check (banner contract, detection recipe, STOP-AND-REFRAME handling) is the Step 3.2 grounding preflight in `hydra-target-build-anchor-preflight.md`.
 
 ### 2. Anchor (select task) — GitHub-Issues board (ADR-0031)
 
@@ -280,7 +266,7 @@ Complexity:
 
 ### 3.5. Self-declare scope (issue #396)
 
-When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR (the subagent-side replacement for the deleted `reconcilePlanVsActual()` step — control-loop step 6.5, removed in PR #400). A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `gaberoo322/hydra-betting` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below.
+When hydra-target-build picks its own task from a failing test or the priorities doc there is no pre-existing scope contract, so the child MUST write its own before opening the PR. A board-picked anchor (Step 2 priority 3) is now a GitHub issue on `gaberoo322/hydra-betting` and may already carry a `## Files in scope` section — reuse it verbatim when present; otherwise author the contract as below.
 
 Compute the in-scope list from the plan's `scopeBoundary.in`. Record it locally so it can be embedded in the PR body in Step 7:
 
@@ -321,7 +307,7 @@ Read `~/hydra/config/agents/skeptic.md`. Challenge:
 3. Scope bounded? >5 files → reject.
 4. Verification hard? (shell commands, not "review")
 5. Smallest possible move?
-6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line (this is why `verified-pairs.ts`'s multi-line import of `nba-finals-pair-seeding` read as zero-importer). It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`, falsely flagging live `kalshi-tail-zone-scanner` / `polymarket-sports-route-timing` modules). Verify by **bare basename** across the Target code root (`web/src`, NOT `src/` — Target code lives under `web/`), then let the compiler be the proof:
+6. Before deleting, prove the module is truly orphaned — but a **single-line `from`-grep is a false-negative trap** (retro cue `multiline-import-misses-importer-grep`, recurrence 4): a live consumer whose `import { … }` list spans several lines puts the symbol and the `from "./x"` clause on *different* lines, so a `from.*['"].*<name>` regex matches neither line. It also misses relative + `.ts`-suffixed specifiers (a path-fragment regex like `arbitrage/mod` skips `./mod` and `./mod.ts`). Verify by **bare basename** across the Target code root (`web/src`, NOT `src/` — Target code lives under `web/`), then let the compiler be the proof:
    ```bash
    grep -rn "<basename-without-ext>" web/src   # bare name, every line — necessary-but-not-sufficient
    npm run typecheck && npm run deadcode:check  # the authoritative liveness verdict; red ⇒ NOT orphaned
@@ -334,12 +320,10 @@ If rejected, replan narrower.
 
 Before execute, risk-critical Target builds capture a **lightweight
 design-concept artifact** and persist it per-anchor, so a retry on the same
-anchor reuses it instead of rediscovering scope every cycle. This is the
-Target analogue of the Orchestrator's `hydra-grill` design-concept — but
-**deliberately lighter**: a flat 4-field record (scope / modules-touched /
-invariants / rejected-alternatives), NOT the full Q&A loop, NOT a
-draft/approved/stale gate, NOT a tier ladder (epic #1052: selectively
-converge, do not mirror). The pure builder/serializer lives in the gate
+anchor reuses it instead of rediscovering scope every cycle. It is a flat
+4-field record (scope / modules-touched / invariants / rejected-alternatives)
+— NOT the Orchestrator's `hydra-grill` Q&A loop, draft/approved/stale gate,
+or tier ladder (epic #1052). The pure builder/serializer lives in the gate
 mirror at `.hydra-gate/scripts/target/target-design-concept.ts` (synced into
 the worktree by Step 0.6, issue #1451); this step is the I/O wrapper. Run it
 from `$TARGET_WT` so the mirror's `../../src/…` imports resolve — never from
@@ -415,7 +399,7 @@ cd "$TARGET_WT"
 git status --short    # must be clean — we just branched off origin/main
 ```
 
-**Path discipline for Read/Edit/Write tools (issues #542, #1861):** every `file_path` argument MUST be either repo-relative (e.g. `web/src/foo.ts`) when cwd is `$TARGET_WT`, OR an absolute path anchored to `$TARGET_WT/...`. Do NOT construct paths like `/home/gabe/hydra-betting/web/...` — those bypass the worktree and write to the main checkout (the exact bug behind #542, which kept recurring under six friction cues until #1861). This applies to **Read** too: reading the main-checkout copy of a file anchors you on the path your later Edit/Write would ghost-write into the main tree. The `worktree-write-fence.sh` PreToolUse hook now fences Read/Edit/Write/MultiEdit and, on a deny, names the corrected `$TARGET_WT/...` path — re-issue against that path rather than recomputing it or `cd`-ing out of the worktree.
+**Path discipline for Read/Edit/Write tools (issues #542, #1861):** every `file_path` argument MUST be either repo-relative (e.g. `web/src/foo.ts`) when cwd is `$TARGET_WT`, OR an absolute path anchored to `$TARGET_WT/...`. Do NOT construct paths like `/home/gabe/hydra-betting/web/...` — those bypass the worktree and write to the main checkout. This applies to **Read** too: reading the main-checkout copy of a file anchors you on the path your later Edit/Write would ghost-write into the main tree. The `worktree-write-fence.sh` PreToolUse hook now fences Read/Edit/Write/MultiEdit and, on a deny, names the corrected `$TARGET_WT/...` path — re-issue against that path rather than recomputing it or `cd`-ing out of the worktree.
 
 **EnterWorktree / cwd discipline (issues #2371, #3889):** `dev_target` is dispatched WITHOUT `isolation="worktree"` (#3889), so you reach `$TARGET_WT` via Step 0.6 (`git worktree add` + `cd`) — there is normally NO harness `EnterWorktree` anchor engaged, and the installed `worktree-write-fence.sh` PreToolUse hook is what fences stray Edit/Write back into `$TARGET_WT`. If a harness anchor IS engaged (a session that genuinely called `EnterWorktree`), the harness tracks ONE writable-worktree-root anchor per agent: NEVER call `EnterWorktree` when your `pwd` already satisfies the worktree predicate (`git rev-parse --git-dir` under `.git/worktrees/`); a redundant or sibling switch desyncs that anchor from cwd and makes a perfectly-valid in-cwd Edit/Write get DENIED. After ANY `EnterWorktree`, re-run `pwd` immediately and re-derive every subsequent `file_path` from that fresh root. If an in-`$TARGET_WT` Edit/Write is STILL denied even though the file resolves inside your cwd, the anchor has desynced — recover by `ExitWorktree` then `EnterWorktree` by `path` (the documented re-anchor path), NOT by writing the file via `python3`/`Bash`. The shell-out workaround is reactive, bypasses the harness diff tracking, and is the exact friction #2371 exists to eliminate.
 
@@ -445,16 +429,9 @@ TYPECHECK_CMD=$(jq -r '.verify.typecheck' "$MANIFEST")
 cd "$TARGET_WT/$APP_SUBDIR"
 
 # JIT local install, ONLY if this change touched package.json/package-lock.json
-# (issue #4177). Step 0.6 no longer runs an unconditional per-worktree install —
-# node_modules resolves by ancestor walk to the real ~/hydra-betting/web/node_modules
-# for free. But a PR that adds/bumps a dependency needs THAT new dependency
-# actually installed somewhere the verify commands below can find it, and the
-# worktree must never write into the shared ancestor. `npm ci` run here, with no
-# local node_modules present yet, creates a fresh LOCAL node_modules inside the
-# worktree (the same safe mechanism `~/hydra/.claude/worktrees/*` already relies
-# on when ITS package.json changes) — Node then resolves from the nearest
-# node_modules first, so the local install shadows the ancestor without ever
-# touching it. A change that does NOT touch these files pays no install cost.
+# (issue #4177). With no local node_modules present yet, `npm ci` creates a
+# fresh LOCAL node_modules inside the worktree that shadows the shared
+# ancestor without ever touching it. Any other change pays no install cost.
 if ! git diff --quiet origin/main -- package.json package-lock.json; then
   INSTALL_CMD=$(jq -r '.verify.install' "$MANIFEST")
   eval "$INSTALL_CMD --no-audit --no-fund"
@@ -475,32 +452,19 @@ After the first edit batch, sanity-check that the edits actually landed in the w
 
 Fail → fix → re-verify. After 2 failed fixes, abandon branch.
 
-**Run the full `npm test`, or pass `--test-force-exit` when running a single file. NEVER run a bare `node --test <file>`.** Modules that open a DB/Redis connection or a timer keep `node:test`'s event loop alive, so the process **hangs forever** after the assertions pass — which blocks the Bash tool call and froze an autopilot session for 11h with the process never reaped (2026-05-28, orchestrator side). `npm test` already includes `--test-force-exit`; for a subset use `node --test --test-force-exit <file>`.
-
-For orchestrator changes (~/hydra/): `node --check src/<file>.ts` + `npm test` + restart service.
+**NEVER run a bare `node --test <file>` — always pass `--test-force-exit`.** Modules that open a DB/Redis connection or a timer keep `node:test`'s event loop alive, so the process **hangs forever** after the assertions pass and blocks the Bash tool call.
 
 ### 6.6. Risk-critical mutation gate (issue #1057 — diff-scoped)
 
 After the test/typecheck gate passes (Step 6), the changed-file set runs through
-the **risk-critical mutation gate**. This is the Target analogue of the
-Orchestrator's diff-scoped mutation gate, with two deliberate differences from
-epic #1052:
-
-- **Diff-scoped to risk-critical paths only.** The gate mutates ONLY the
-  changed files that `classifyRisk()` (the keystone classifier from #1053, in
-  `src/target/risk-critical.ts`) flags as risk-critical — the paths the
-  Target's own `.hydra/manifest.json` declares under `riskCritical.surface`
-  (epic #3014, ADR-0026; for hydra-betting that is provider integrations,
-  execution, staking, bet-math — but the vocabulary now lives in the target
-  repo, not here). A green-but-empty suite over those paths is high-risk; a
-  green-but-empty suite over UI/docs/config is not.
-- **Safe-path PRs skip mutation entirely.** When no changed file is
-  risk-critical, the gate exits 0 with a `skipped` status and never spins up
-  the runner — keeping the single hydra-server-betting runner fast for the
-  common UI/docs change.
-- **A single kill-floor — NOT a tier ladder.** Either the changed
-  risk-critical files clear the one floor or the build fails. Mirrors the
-  classifier's own two-level boolean (risk-critical vs. safe).
+the **risk-critical mutation gate**. It mutates ONLY the changed files that
+`classifyRisk()` (the keystone classifier from #1053, in
+`src/target/risk-critical.ts`) flags as risk-critical — the paths the Target's
+own `.hydra/manifest.json` declares under `riskCritical.surface` (epic #3014,
+ADR-0026). When no changed file is risk-critical the gate exits 0 with a
+`skipped` status and never spins up the runner. There is a single kill-floor,
+NOT a tier ladder: either the changed risk-critical files clear it or the build
+fails.
 
 Invoke the **mirrored** gate script from the target worktree (issue #1451 —
 synced into `$TARGET_WT/.hydra-gate/` by Step 0.6), feeding it the PR diff
@@ -614,10 +578,7 @@ Before opening the code PR (or, for direct-to-main merges, before merging), auth
 A backgrounded wait is **structurally unrecoverable**: end the turn while CI (or
 any other result) is still pending and the result is delivered to a session
 that has already exited — the only path back is an external `SendMessage`
-resume. In autopilot run `028f420d` (2026-08-11) a `dev_target` dispatch said
-*"I've set up a background monitor that will notify me when the checks reach a
-terminal state"* and stopped; **PR #870 was built and green locally but never
-merged** until an operator resumed it.
+resume.
 
 **The rule: a turn ends only when the result you were waiting for is in hand
 and acted on.** For the merge phase that means: block on CI in the FOREGROUND
@@ -626,11 +587,6 @@ monitor and stop. This is the same discipline as `hydra-qa`'s blocking-dispatch
 mandate (`run_in_background: false` on every spawn), applied to this build's
 own CI wait.
 
-**Commit before you verify** (Step 6): `git commit` the moment the change is
-structurally complete, before the long `test:raw` / typecheck run — so a stall
-degrades to "unmerged PR" (resumed next tick) instead of work destroyed by the
-worktree-orphan-prune.
-
 **Foreground bounded poll** — block on CI in THIS turn instead of backgrounding
 a monitor and stopping:
 
@@ -638,11 +594,8 @@ a monitor and stopping:
 # BOUNDED FOREGROUND POLL — block in THIS turn until CI on $PR settles. This is
 # the foreground alternative to backgrounding a monitor/wait and ending the turn.
 #
-# zsh $status pitfall: name the state variable `run_state` (or `st`), never
-# `status` — zsh aliases `$status` to `$?`, so assigning a value to a variable
-# named `status` silently fails and the loop exits 1. `status` is the natural
-# spelling of this variable; that is exactly why the loop breaks. (Documented
-# CLAUDE.md pitfall.)
+# Name the state variable `run_state` (or `st`), never `status` — zsh aliases
+# `$status` to `$?`, so the assignment silently fails and the loop exits 1.
 deadline=$((SECONDS + 600))            # 10-min budget; size to your slowest check
 while [ "$SECONDS" -lt "$deadline" ]; do
   run_state=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup \
@@ -674,7 +627,7 @@ failure mode.
 
 ### Step 8.5. Worktree cleanup (on success)
 
-On success, remove the hydra-betting worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `~/hydra-betting/web/.worktrees/` does not fill with stale directories (issue #3173, issue #542; relocated off tmpfs in #4177 — the disk-fill risk is smaller now but not zero):
+On success, remove the hydra-betting worktree created in Step 0.6. Leaking on crash is acceptable — `scripts/branch-prune.sh` will GC it — but on the happy path we clean up so `~/hydra-betting/web/.worktrees/` does not fill with stale directories (issues #3173, #542, #4177):
 
 ```bash
 git -C ~/hydra-betting worktree remove --force "$TARGET_WT" 2>&1 || \
@@ -697,7 +650,7 @@ git -C ~/hydra-betting worktree prune 2>&1 || true
 - **Redis**: `docker exec hydra-redis-1 redis-cli`
 - **Stack**: Next.js 16, React 19, Tailwind 4, Zod 4, Drizzle, vitest
 
-Read `web/AGENTS.md` before assuming Next.js conventions — APIs may differ from training data. Use atomic backlog claims, merge locks, metrics, and events for parallel execution with Codex cycles.
+Read `web/AGENTS.md` before assuming Next.js conventions — APIs may differ from training data.
 
 ## Guard-compatible shell forms (issue #3837 AC #3, swept in #3896)
 
@@ -712,15 +665,10 @@ multi-line, and a bare loop is refused even with no substitution at all):
 
 This is about our snippets meeting the guard halfway. Split compound commands
 into plain sequential ones: write intermediate results to temp files or plain
-variables, then operate on those — never nest `$( $( ) )` and never use `<(...)`.
-The Step 6 mutation-gate recipe above is the canonical rewrite for THIS playbook:
-`MERGE_BASE=$(git merge-base ...)` first, then
-`CHANGED_FILES=$(git diff --name-only "${MERGE_BASE}"...HEAD)` — instead of the
-nested one-liner `$(git diff ... "$(git merge-base ...)"...)`. The shipped-anchor
-preflight (`_fragments/hydra-target-build-anchor-preflight.md`) makes the same
-substitution for its subject-coverage matcher — and, because the guard also
-refuses shell `for`/`while` loops, keeps its per-commit scoring inside a single
-awk stage (issue #4167) rather than a loop.
+variables, then operate on those — never nest `$( $( ) )` and never use `<(...)`
+(the Step 6.6 mutation-gate recipe resolves `MERGE_BASE` first for exactly this
+reason); replace a loop with a single awk stage (as the shipped-anchor preflight
+does, issue #4167).
 
 Do NOT disable or work around the guard itself — it is the isolation fence. The
 full note (with the `Monitor` CI-poll corollary) lives in
@@ -729,21 +677,16 @@ full note (with the `Monitor` CI-poll corollary) lives in
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 
 Every tool call inside this skill emits a `subagent_tool_call` event onto the
-Redis stream `hydra:autopilot:slot-events`. The classification is done at
-emit-time so the /now-pixel dashboard can route on `category` without
-re-deriving it from the tool name:
+Redis stream `hydra:autopilot:slot-events`, classified at emit-time so the
+/now-pixel dashboard can route on `category`:
 
 - `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
   Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
 - `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
 - `background` — Read, Grep, Glob
 
-**Hook script:** `scripts/autopilot/hooks/on-subagent-tool-call.sh`
-**Hook registration:** sibling `<this-playbook>.settings.json` →
-`~/.claude/skills/<this-skill>/.claude/settings.json` (propagated by
-`scripts/sync-skills.sh`)
-
-The hook MUST NEVER propagate errors back to this skill's session — a Redis
-outage, a malformed payload, or a missing `jq` all result in a stderr
-warning and `exit 0`. See `test/on-subagent-tool-call.test.mts` for the
-pinned behavior.
+Hook script: `scripts/autopilot/hooks/on-subagent-tool-call.sh`. Registration:
+sibling `<this-playbook>.settings.json` → `~/.claude/skills/<this-skill>/.claude/settings.json`
+(propagated by `scripts/sync-skills.sh`). The hook never propagates errors back
+to this session — any failure is a stderr warning and `exit 0`
+(`test/on-subagent-tool-call.test.mts`).
