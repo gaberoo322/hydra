@@ -201,7 +201,6 @@
   "src/logger.ts": 1,
   "src/metrics/grounding.ts": 1,
   "src/metrics/instrumentation.ts": 1,
-  "src/metrics/math.ts": 1,
   "src/metrics/publish.ts": 2,
   "src/metrics/stats-projection.ts": 2,
   "src/mutation.ts": 2,

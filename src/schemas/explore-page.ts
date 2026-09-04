@@ -14,9 +14,10 @@
  * new schema needed for it. (The Search tab's `/api/openviking/search` was
  * deleted with the knowledge plane, ADR-0033.)
  *
- * `AnomalyDirection` (below) is kept even though the anomaly-detector
- * aggregator that originally motivated it is gone — it is still the return
- * type of `classifyZ` in the shared `src/metrics/math.ts` z-score leaf.
+ * `AnomalyDirection`/`AnomalyDirectionSchema` and the `meanStd`/`zScore`/
+ * `classifyZ` z-score primitives they backed were themselves deleted in this
+ * same pass — a repo-wide grep confirmed classifyZ (their last consumer) had
+ * no remaining callers once `anomaly-detector.ts` was gone.
  *
  * Conventions follow slice-1/2 (today.ts): `.strict()` objects, trimmed
  * coerce-from-string number queries, structured `schema-validation-failed`
@@ -42,16 +43,6 @@ const AutopilotRunOutcomeSchema = z.enum([
 ]);
 
 export type AutopilotRunOutcome = z.infer<typeof AutopilotRunOutcomeSchema>;
-
-/**
- * Direction of an anomaly relative to the baseline. `high` = the latest
- * sample is far ABOVE the mean (e.g. token-burn-rate spiked), `low` = far
- * BELOW (e.g. abandonment-rate suddenly collapsed). Both are anomalies but
- * the dashboard renders them differently.
- */
-const AnomalyDirectionSchema = z.enum(["high", "low"]);
-
-export type AnomalyDirection = z.infer<typeof AnomalyDirectionSchema>;
 
 // ---------------------------------------------------------------------------
 // /v2/explore/friction

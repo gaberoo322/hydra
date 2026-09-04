@@ -278,7 +278,6 @@
   "test/merge-commit-parser.test.mts": 6,
   "test/metrics-aggregate.test.mts": 2,
   "test/metrics-aggregators.test.mts": 5,
-  "test/metrics-math.test.mts": 3,
   "test/metrics-publisher.test.mts": 2,
   "test/metrics-record-schema-guard.test.mts": 2,
   "test/metrics-session-tokens-api.test.mts": 1,
