@@ -37,7 +37,6 @@ export const DispatchCostJoinBodySchema = z.object({
   dispatchTokensEstimate: z.number().finite().nonnegative(),
   skill: z.string().min(1).nullable().optional(),
 });
-export type DispatchCostJoinBody = z.infer<typeof DispatchCostJoinBodySchema>;
 
 /**
  * Query schema for `GET /api/usage/by-issue`. `issue` is optional — absent
@@ -51,4 +50,3 @@ export type DispatchCostJoinBody = z.infer<typeof DispatchCostJoinBodySchema>;
 export const UsageByIssueQuerySchema = z.object({
   issue: z.coerce.number().int().positive().optional(),
 });
-export type UsageByIssueQuery = z.infer<typeof UsageByIssueQuerySchema>;
