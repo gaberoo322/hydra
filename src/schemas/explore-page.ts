@@ -1,17 +1,22 @@
 /**
  * Schemas for the Dashboard v2 Explore page (issue #620, PRD #615).
  *
- * Slice 5 adds five new endpoints under `/api/v2/explore/*`:
+ * Slice 5 added five new endpoints under `/api/v2/explore/*`; the
+ * `anomalies` and `flow` routes (and their response schemas) were removed as
+ * orphaned dead code (issue #4356) — their frontend tabs were deleted in
+ * #4012/#4256 but the backend routes were missed. The three that remain:
  *
  *   GET /v2/explore/friction       — friction-patterns aggregator
  *   GET /v2/explore/behavior       — behavior-gallery (autopilot run gallery)
- *   GET /v2/explore/flow           — backlog-flow (per-class added/closed/blocked)
  *   GET /v2/explore/lessons        — lessons-explorer (promoted lessons)
- *   GET /v2/explore/anomalies      — anomaly-detector (z-score deviations)
  *
  * The Architecture tab reuses the existing `/api/architecture` endpoint — no
  * new schema needed for it. (The Search tab's `/api/openviking/search` was
  * deleted with the knowledge plane, ADR-0033.)
+ *
+ * `AnomalyDirection` (below) is kept even though the anomaly-detector
+ * aggregator that originally motivated it is gone — it is still the return
+ * type of `classifyZ` in the shared `src/metrics/math.ts` z-score leaf.
  *
  * Conventions follow slice-1/2 (today.ts): `.strict()` objects, trimmed
  * coerce-from-string number queries, structured `schema-validation-failed`
@@ -37,19 +42,6 @@ const AutopilotRunOutcomeSchema = z.enum([
 ]);
 
 export type AutopilotRunOutcome = z.infer<typeof AutopilotRunOutcomeSchema>;
-
-/**
- * Which metric an anomaly was detected on. The anomaly-detector aggregator
- * uses a z-score against the rolling baseline for each series; the metric
- * is the discriminator the dashboard uses to badge each item.
- */
-const AnomalyMetricSchema = z.enum([
-  "token-burn-rate",
-  "abandonment-rate",
-  "dispatch-class-failure-rate",
-]);
-
-export type AnomalyMetric = z.infer<typeof AnomalyMetricSchema>;
 
 /**
  * Direction of an anomaly relative to the baseline. `high` = the latest
@@ -164,46 +156,6 @@ const BehaviorGalleryResponseSchema = z
 export type BehaviorGalleryResponse = z.infer<typeof BehaviorGalleryResponseSchema>;
 
 // ---------------------------------------------------------------------------
-// /v2/explore/flow
-// ---------------------------------------------------------------------------
-
-export const BacklogFlowQuerySchema = z
-  .object({
-    window: z
-      .string()
-      .trim()
-      .regex(/^\d+d$/, { message: "window must look like '7d'" })
-      .default("7d"),
-  })
-  .strict();
-
-const ClassFlowRowSchema = z
-  .object({
-    class: z.string(),
-    added: z.number().int().nonnegative(),
-    closed: z.number().int().nonnegative(),
-    blocked: z.number().int().nonnegative(),
-  })
-  .strict();
-
-const BacklogFlowResponseSchema = z
-  .object({
-    byClass: z.array(ClassFlowRowSchema),
-    windowDays: z.number().int().positive(),
-    totals: z
-      .object({
-        added: z.number().int().nonnegative(),
-        closed: z.number().int().nonnegative(),
-        blocked: z.number().int().nonnegative(),
-      })
-      .strict(),
-    generatedAt: z.string(),
-  })
-  .strict();
-
-export type BacklogFlowResponse = z.infer<typeof BacklogFlowResponseSchema>;
-
-// ---------------------------------------------------------------------------
 // /v2/explore/lessons
 // ---------------------------------------------------------------------------
 
@@ -237,32 +189,3 @@ const LessonsExplorerResponseSchema = z
   .strict();
 
 export type LessonsExplorerResponse = z.infer<typeof LessonsExplorerResponseSchema>;
-
-// ---------------------------------------------------------------------------
-// /v2/explore/anomalies
-// ---------------------------------------------------------------------------
-
-const AnomalySchema = z
-  .object({
-    metric: AnomalyMetricSchema,
-    subKey: z.string().nullable(),
-    latest: z.number(),
-    baselineMean: z.number(),
-    baselineStd: z.number(),
-    zScore: z.number(),
-    direction: AnomalyDirectionSchema,
-    threshold: z.number(),
-    sampleAt: z.string(),
-  })
-  .strict();
-
-const AnomalyDetectorResponseSchema = z
-  .object({
-    anomalies: z.array(AnomalySchema),
-    threshold: z.number(),
-    baselineWindowDays: z.number().int().positive(),
-    generatedAt: z.string(),
-  })
-  .strict();
-
-export type AnomalyDetectorResponse = z.infer<typeof AnomalyDetectorResponseSchema>;
