@@ -2,8 +2,9 @@
  * Regression tests for the Explore-page API router (`src/api/explore-page.ts`,
  * issue #3652).
  *
- * The router is a thin aggregator seam (issue #620, PRD #615): each of its five
- * GET routes parses `req.query` through a zod schema, delegates to a pure
+ * The router is a thin aggregator seam (issue #620, PRD #615): each of its
+ * three (originally five — `anomalies`/`flow` removed as dead code, issue
+ * #4356) GET routes parses `req.query` through a zod schema, delegates to a pure
  * aggregator, and wraps the result in the never-throw-500 isolation from
  * `route-helpers.ts`. Its backing aggregators are tested separately (see
  * `test/aggregator-friction-patterns.test.mts` et al.), but the ROUTER'S call
@@ -91,12 +92,10 @@ function mockRes(): any {
 // ---------------------------------------------------------------------------
 
 describe("explore-page router — route registration (issue #3652)", () => {
-  test("registers exactly the five explore GET routes", () => {
+  test("registers exactly the three explore GET routes", () => {
     const routes = routeTable(createExplorePageRouter()).sort();
     assert.deepEqual(routes, [
-      "GET /explore/anomalies",
       "GET /explore/behavior",
-      "GET /explore/flow",
       "GET /explore/friction",
       "GET /explore/lessons",
     ]);
@@ -160,35 +159,6 @@ describe("explore-page router — aggregator delegation (issue #3652)", () => {
     assert.equal(res._body.filters.outcome, null);
   });
 
-  test("GET /explore/flow converts the window token to a day count", async () => {
-    let windowDays: number | undefined;
-    const router = createExplorePageRouter({
-      getBacklogFlow: async (days) => {
-        windowDays = days;
-        return { marker: "flow" } as any;
-      },
-    });
-    const res = mockRes();
-    await findHandler(router, "GET", "/explore/flow")!(
-      mockReq({ window: "14d" }),
-      res,
-    );
-    assert.equal(windowDays, 14, "'14d' → 14");
-    assert.deepEqual(res._body, { marker: "flow" });
-  });
-
-  test("GET /explore/flow defaults the window to 7 days", async () => {
-    let windowDays: number | undefined;
-    const router = createExplorePageRouter({
-      getBacklogFlow: async (days) => {
-        windowDays = days;
-        return {} as any;
-      },
-    });
-    await findHandler(router, "GET", "/explore/flow")!(mockReq(), mockRes());
-    assert.equal(windowDays, 7, "absent window defaults to 7d → 7");
-  });
-
   test("GET /explore/lessons forwards the skill filter", async () => {
     let filters: any;
     const router = createExplorePageRouter({
@@ -215,20 +185,6 @@ describe("explore-page router — aggregator delegation (issue #3652)", () => {
     await findHandler(router, "GET", "/explore/lessons")!(mockReq(), mockRes());
     assert.deepEqual(filters, {});
   });
-
-  test("GET /explore/anomalies delegates to getAnomalies", async () => {
-    let called = false;
-    const router = createExplorePageRouter({
-      getAnomalies: async () => {
-        called = true;
-        return { marker: "anomalies" } as any;
-      },
-    });
-    const res = mockRes();
-    await findHandler(router, "GET", "/explore/anomalies")!(mockReq(), res);
-    assert.equal(called, true);
-    assert.deepEqual(res._body, { marker: "anomalies" });
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -253,24 +209,6 @@ describe("explore-page router — schema validation (issue #3652)", () => {
     assert.equal(res._body.code, "schema-validation-failed");
     assert.ok(Array.isArray(res._body.issues) && res._body.issues.length > 0);
     assert.equal(called, false, "aggregator must not run on a bad query");
-  });
-
-  test("GET /explore/flow returns 400 on a malformed window", async () => {
-    let called = false;
-    const router = createExplorePageRouter({
-      getBacklogFlow: async () => {
-        called = true;
-        return {} as any;
-      },
-    });
-    const res = mockRes();
-    await findHandler(router, "GET", "/explore/flow")!(
-      mockReq({ window: "7days" }),
-      res,
-    );
-    assert.equal(res._status, 400);
-    assert.equal(res._body.code, "schema-validation-failed");
-    assert.equal(called, false);
   });
 });
 

@@ -4,8 +4,8 @@
 > [ADR-0024](../../docs/adr/0024-api-versioning.md)); it introduces no runtime
 > code and changes no behavior.
 
-**As of:** commit `a5cb096` (origin/master, 2026-08-11)
-**Endpoint count:** 138 routes across 47 router modules
+**As of:** commit `823eca90c` (origin/master, 2026-09-04)
+**Endpoint count:** 147 routes across 47 router modules
 
 > The count fell from 154 (2026-06-22) partly through the OpenViking
 > retirement — ADR-0033 deleted `src/api/openviking.ts` (4 routes) and the
@@ -252,9 +252,7 @@ broad consumers are:
 
 | Method | Path | Stability |
 |---|---|---|
-| GET | `/api/explore/anomalies` | stable |
 | GET | `/api/explore/behavior` | stable |
-| GET | `/api/explore/flow` | stable |
 | GET | `/api/explore/friction` | stable |
 | GET | `/api/explore/lessons` | stable |
 
