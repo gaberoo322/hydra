@@ -98,6 +98,7 @@
   "test/autopilot-quota-budget-3867.test.mts": 3,
   "test/autopilot-read-and-sweep.test.mts": 1,
   "test/autopilot-reap-segment-softcap.test.mts": 1,
+  "test/autopilot-reap-state.test.mts": 4,
   "test/autopilot-reap-task-id-mismatch.test.mts": 1,
   "test/autopilot-recover-stale.test.mts": 1,
   "test/autopilot-reflection-anchor-deposit.test.mts": 1,
