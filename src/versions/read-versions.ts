@@ -30,9 +30,9 @@
  *    describe-based read fails 100% of requests on day one. It also answers
  *    "nearest reachable ancestor tag", a different question from "latest
  *    release". `git for-each-ref` exits 0 with EMPTY stdout when tagless, which
- *    is the degrade behaviour we want. This is a DELIBERATE divergence from the
- *    sibling `src/health/deployed-version.ts` (an orphan with zero production
- *    consumers; wiring or retiring it is out of scope for #3680).
+ *    is the degrade behaviour we want. This diverges from `git describe`'s
+ *    default failure mode on purpose — `git for-each-ref`'s empty-stdout
+ *    degrade is the one this module wants (#3680).
  *
  * 2. THE COMMIT SHA COMES FROM `%(*objectname)`, WITH `%(objectname)` AS
  *    FALLBACK. On an ANNOTATED tag (what `scripts/deploy.sh` stamps),
@@ -365,9 +365,8 @@ const cache = new Map<string, CacheEntry>();
 
 /**
  * Test hook: drop the memoized per-root cache so the next read goes back to git.
- * Mirrors `resetDeployedShaCache()` / `resetDeployedVersionCache()` — this repo
- * has no module-reset harness, so a module owning a process-lifetime singleton
- * exports an explicit reset.
+ * Mirrors `resetDeployedShaCache()` — this repo has no module-reset harness, so
+ * a module owning a process-lifetime singleton exports an explicit reset.
  */
 export function resetVersionsCache(): void {
   cache.clear();

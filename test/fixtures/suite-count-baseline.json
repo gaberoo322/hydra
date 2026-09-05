@@ -174,7 +174,6 @@
   "test/decide-signal-classes.test.mts": 6,
   "test/dep-boundary-check.test.mts": 1,
   "test/deploy-drift.test.mts": 8,
-  "test/deployed-version.test.mts": 1,
   "test/derive-version-bump.test.mts": 8,
   "test/design-concept-daily-snapshot.test.mts": 1,
   "test/design-concept-exempt-log.test.mts": 1,
