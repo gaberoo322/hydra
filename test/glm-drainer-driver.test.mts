@@ -215,17 +215,18 @@ describe("src/glm/drainer-driver.ts — runDriverMode (issue #4371)", () => {
     }
   });
 
-  test("unknown mode -> glm-driver-bad-argv", async () => {
+  test("unknown mode -> glm-driver-bad-argv, no stack (never a thrown Error)", async () => {
     const deps = makeDeps();
     const outcome = await runDriverMode(["no-such-mode"], deps);
     assert.ok(isDriverFailure(outcome));
     if (isDriverFailure(outcome)) {
       assert.equal(outcome.code, "glm-driver-bad-argv");
       assert.match(outcome.message, /unknown mode: no-such-mode/);
+      assert.equal(outcome.stack, undefined);
     }
   });
 
-  test("a rejecting dependency never throws out of runDriverMode -> glm-driver-fault", async () => {
+  test("a rejecting dependency never throws out of runDriverMode -> glm-driver-fault, stack preserved", async () => {
     const deps = makeDeps({
       setGlmDrainerHeartbeat: (async () => {
         throw new Error("kaboom");
@@ -236,6 +237,30 @@ describe("src/glm/drainer-driver.ts — runDriverMode (issue #4371)", () => {
     if (isDriverFailure(outcome)) {
       assert.equal(outcome.code, "glm-driver-fault");
       assert.match(outcome.message, /kaboom/);
+      // The original heredoc's `main().catch` wrote `err.stack` to stderr,
+      // not just `err.message` — pin that the full multi-line stack survives
+      // into the outcome so the CLI entrypoint can reproduce it byte-for-byte.
+      assert.ok(outcome.stack, "expected a stack to be carried on glm-driver-fault");
+      assert.match(outcome.stack!, /kaboom/);
+      assert.match(outcome.stack!, /Error: kaboom\n\s+at /, "expected a real multi-line Error stack, not just the message");
+    }
+  });
+
+  test("a rejecting dependency that throws a non-Error still falls back to String(err), matching the original heredoc", async () => {
+    const deps = makeDeps({
+      setGlmDrainerHeartbeat: (async () => {
+        // eslint has no opinion here (no eslint config in this repo) — a
+        // non-Error throw is a legitimate JS possibility runDriverMode's
+        // catch must still handle per `err instanceof Error ? ... : String(err)`.
+        throw "not an Error object";
+      }) as DriverDeps["setGlmDrainerHeartbeat"],
+    });
+    const outcome = await runDriverMode(["heartbeat"], deps);
+    assert.ok(isDriverFailure(outcome));
+    if (isDriverFailure(outcome)) {
+      assert.equal(outcome.code, "glm-driver-fault");
+      assert.equal(outcome.message, "not an Error object");
+      assert.equal(outcome.stack, "not an Error object");
     }
   });
 });

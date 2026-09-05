@@ -11,7 +11,10 @@ import { isDriverFailure, runDriverMode } from "../../src/glm/drainer-driver.ts"
 
 const outcome = await runDriverMode(process.argv.slice(2));
 if (isDriverFailure(outcome)) {
-  process.stderr.write("glm-drainer driver threw: " + outcome.message + "\n");
+  // `stack` is only set for glm-driver-fault (a caught exception) — prefer
+  // it so the stderr text matches the original heredoc's
+  // `err && err.stack ? err.stack : String(err)` byte-for-byte for that arm.
+  process.stderr.write("glm-drainer driver threw: " + (outcome.stack ?? outcome.message) + "\n");
   process.exit(1);
 } else {
   process.stdout.write(outcome.line + "\n");

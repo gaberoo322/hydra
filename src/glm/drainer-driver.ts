@@ -14,8 +14,16 @@
  * `runDriverMode` NEVER throws (never-throw-from-verification convention,
  * CLAUDE.md) — every failure, including a rejecting dependency, is caught
  * into a `DriverOutcome` with `ok: false`. The entrypoint maps that to the
- * bash-facing `glm-drainer driver threw: ` stderr prefix + exit 1, matching
- * the original heredoc's `main().catch(...)` behaviour byte-for-byte.
+ * bash-facing `glm-drainer driver threw: ` stderr prefix + exit 1. For the
+ * `glm-driver-fault` arm (a caught exception — an unexpected rejecting
+ * dependency) the outcome also carries `stack`, populated the same way the
+ * original heredoc's `main().catch((err) => ... err.stack ? err.stack :
+ * String(err))` picked what to print — so the stderr text an on-call
+ * engineer sees for that arm is unchanged. The `glm-driver-bad-argv` arm
+ * (unknown mode / missing positional arg) was never a thrown `Error` in the
+ * new never-throw design — it is a synthesized `DriverOutcome`, not a caught
+ * exception — so it has no stack to carry; that arm's stderr text is exactly
+ * `message`, same as before.
  *
  * Every mode's SUCCESSFUL outcome (`ok: true`) carries exactly one JSON line
  * to print on stdout — the driver-level exit code is independent of the
@@ -47,6 +55,7 @@
 
 import { readFileSync } from "node:fs";
 
+import { logger } from "../logger.ts";
 import { setGlmDrainerHeartbeat } from "../redis/autopilot.ts";
 import {
   buildDrainerArgs,
@@ -111,6 +120,15 @@ export type DriverOutcome =
       ok: false;
       code: "glm-driver-bad-argv" | "glm-driver-fault";
       message: string;
+      /**
+       * Only set for `glm-driver-fault` (a genuinely caught exception). The
+       * CLI entrypoint prefers this over `message` when present, matching
+       * the original heredoc's `err && err.stack ? err.stack : String(err)`
+       * stderr text byte-for-byte for that arm. `glm-driver-bad-argv` never
+       * sets it — that arm was never a thrown `Error` under the new
+       * never-throw design, so there is no stack to carry.
+       */
+      stack?: string;
     };
 
 /**
@@ -219,10 +237,21 @@ export async function runDriverMode(
       message: `unknown mode: ${String(mode)}`,
     };
   } catch (err) {
+    // Fail loud (CLAUDE.md): this is the never-throw boundary for the whole
+    // driver, so a rejecting dependency or unexpected exception must be
+    // logged here — nothing upstream of runDriverMode ever sees the raw err.
+    logger.error(
+      { err },
+      "[glm-drainer/driver] runDriverMode threw — surfacing as glm-driver-fault",
+    );
     return {
       ok: false,
       code: "glm-driver-fault",
       message: err instanceof Error ? err.message : String(err),
+      // Matches the original heredoc's `err && err.stack ? err.stack :
+      // String(err)` fallback exactly, so the CLI entrypoint's stderr output
+      // for this arm is unchanged.
+      stack: err instanceof Error && err.stack ? err.stack : String(err),
     };
   }
 }
