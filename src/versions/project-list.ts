@@ -52,8 +52,7 @@ export interface VersionProject {
 
 /**
  * Absolute path to the Orchestrator checkout. Mirrors the `HYDRA_ROOT` read in
- * `src/health/deployed-sha.ts` / `deployed-version.ts`, but resolved per call so
- * it stays testable.
+ * `src/health/deployed-sha.ts`, but resolved per call so it stays testable.
  */
 function orchestratorRoot(): string {
   const raw = process.env.HYDRA_ROOT;

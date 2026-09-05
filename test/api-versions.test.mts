@@ -25,7 +25,7 @@
  *
  * No real git process, no Redis, no live Express server: the git seam and the
  * clock are injected, and the route handler is called directly (the
- * test/taxonomy-route.test.mts + test/deployed-version.test.mts patterns).
+ * test/taxonomy-route.test.mts pattern).
  */
 
 import { test, describe, beforeEach } from "node:test";
