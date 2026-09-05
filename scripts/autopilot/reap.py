@@ -46,6 +46,8 @@ field are tolerated: missing field defaults to `[]`.
 State writes happen in place to /tmp/hydra-autopilot-state.json (override
 via HYDRA_AUTOPILOT_STATE). Run-log writes go to
 /tmp/hydra-autopilot-nightly.log (override via HYDRA_AUTOPILOT_LOG).
+State load/save and the Redis cross-run cooldown mirror (issue #2715) are
+owned by the sibling module scripts/autopilot/reap_state.py (issue #4366).
 
 WARNING (issue #3895): the default state path is a SHARED, unlocked file —
 every process on the box, including a dispatched agent correctly isolated
@@ -79,16 +81,35 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
+# Issue #4366: reap_state.py lives next to this script but is not guaranteed
+# to already be on sys.path — test/autopilot-dedup-reap.test.mts loads this
+# module via importlib.util.spec_from_file_location with cwd = repo root
+# (sys.path[0] == ''), so a bare `from reap_state import ...` would raise
+# ModuleNotFoundError under that loader. Every other invocation (shebang
+# exec, `python3 reap.py`, self_heal.py's lazy `from reap import ...`)
+# already puts the script's own directory on sys.path[0], so this guarded
+# insert is a no-op there. Name-binding import (not `import reap_state` +
+# attribute access) so `reap.load_state = spy`-style monkeypatching in tests
+# keeps working on the state-plumbing names too.
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from reap_state import (
+    bound_reaped,
+    ensure_reaped_list,
+    load_state,
+    mirror_cross_run_state_to_redis,
+    redis_cli,
+    save_state,
+)
+
 LOG_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_LOG", "/tmp/hydra-autopilot-nightly.log"))
 REPO = os.environ.get("HYDRA_AUTOPILOT_REPO", "gaberoo322/hydra")
 HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 
-REAPED_TASK_IDS_CAP = 1000
-
 # Issue #3866: argv prefix for `gh` calls made by the dev_orch no-PR-stall
 # check below. Mirrors the HYDRA_AUTOPILOT_REDIS_CLI override pattern for
-# _redis_cli — tests inject a stub `gh` recorder here instead of shelling out
+# redis_cli — tests inject a stub `gh` recorder here instead of shelling out
 # to the real CLI / network. Whitespace-split so a multi-word override works.
 GH_CLI_OVERRIDE = os.environ.get("HYDRA_AUTOPILOT_GH_CLI", "").strip()
 
@@ -110,30 +131,13 @@ DEV_RESUME_LABEL = "needs-dev-resume"
 # than inventing a second spelling for the same operator knob.
 TARGET_REPO = os.environ.get("HYDRA_TARGET_GITHUB_REPO", "gaberoo322/hydra-betting")
 
-# Issue #2715 — Redis mirror of the cross-run cooldown subset.
-#
-# /tmp/hydra-autopilot-state.json is boot-wiped, so `signal_last_fired` /
-# `research_force_counter` are lost on host reboot and the long-cooldown classes
-# reset to epoch 0 (a per-reboot recurrence of the #2575 churn). Redis survives
-# reboot (AOF + docker volume), so reap mirrors the cross-run subset to Redis on
-# EVERY completion — the reliable executor-side "a class fired" seam (reap runs on
-# every terminal dispatch, including signal-class completions). bootstrap.sh reads
-# these keys back as a seed tier behind the prior file (prior-file → Redis → 0).
-#
-# The bash→Redis seam is `docker exec hydra-redis-1 redis-cli` — the exact pattern
-# collect-state.sh uses — not a typed accessor / HTTP route (design-concept #2715).
-# `HYDRA_AUTOPILOT_REDIS_CLI` overrides the argv prefix so tests inject a stub and
-# exercise the mirror hermetically. Every write is best-effort / fail-open: any
-# error logs to stderr and NEVER aborts the reap (design-concept #2715 Invariant 5).
-REDIS_SIGNAL_LAST_FIRED_KEY = "hydra:autopilot:signal-last-fired"
-REDIS_RESEARCH_FORCE_KEY = "hydra:autopilot:research-force-counter"
-
 # Issue #3785: key PREFIX (not a single key) for the subagent-dispatch registry
 # `src/redis/dispatches.ts` owns — `hydra:dispatches:subagent:<sessionId>` HASH,
-# `dispatchId` field. Read-only from here via `_redis_cli(..., capture=True)`
-# (the same docker-exec redis-cli seam as the #2715 mirror above, per the
-# design-concept's rejected-alternatives: no new HTTP route, no typed-accessor
-# import across the Python/TS process boundary) — see `_recover_worktree_branch`.
+# `dispatchId` field. Read-only from here via `redis_cli(..., capture=True)`
+# (the same docker-exec redis-cli seam the #2715 mirror in reap_state.py uses,
+# per the design-concept's rejected-alternatives: no new HTTP route, no
+# typed-accessor import across the Python/TS process boundary) — see
+# `_recover_worktree_branch`.
 REDIS_SUBAGENT_DISPATCH_KEY_PREFIX = "hydra:dispatches:subagent:"
 
 # Issue #1136 (Slice 2 of #1119): directory the code-writing dispatch deposits
@@ -199,119 +203,10 @@ def _append_log(line: str) -> None:
         print(f"[autopilot] reap: log append failed: {exc}", file=sys.stderr)
 
 
-def _load_state() -> dict | None:
-    if not STATE_PATH.exists():
-        print(f"[autopilot] reap: state file missing at {STATE_PATH}; skipping", file=sys.stderr)
-        return None
-    return json.loads(STATE_PATH.read_text())
-
-
-def _save_state(s: dict) -> None:
-    STATE_PATH.write_text(json.dumps(s))
-
-
-def _redis_cli(*args: str, capture: bool = False) -> str | None:
-    """Run one redis-cli command best-effort (issue #2715). Never raises.
-
-    Mirrors the docker-exec redis-cli seam collect-state.sh uses. The argv prefix
-    is `docker exec hydra-redis-1 redis-cli` unless HYDRA_AUTOPILOT_REDIS_CLI
-    overrides it (whitespace-split — a trusted test/override prefix, e.g.
-    `redis-cli -h 127.0.0.1 -p 6390`, or a stub recorder). Any failure (redis
-    down, docker absent, timeout) is logged to stderr and swallowed: the state
-    file is already the source of truth, so a missed mirror only costs one extra
-    post-reboot fire, never a crash.
-
-    `capture` (issue #3785): the fire-and-forget WRITE call sites (the #2715
-    HSET/SET mirrors below) all use the default `capture=False` — unchanged
-    DEVNULL stdout, `None` return, byte-identical behavior. Passing
-    `capture=True` (the ONE read call site, `_recover_worktree_branch` below)
-    instead pipes stdout and returns it decoded + stripped — redis-cli in a
-    non-tty/piped invocation (this is a `subprocess.run`, never a tty) prints a
-    successful reply's raw value with no surrounding quotes, and prints nothing
-    (an empty stdout) for a nil/missing key or field. A failure — non-2xx exit,
-    timeout, docker/redis absent — returns `None` under `capture=True` too,
-    exactly like the fire-and-forget write path: never raises, never
-    distinguishes "empty" from "erred" for the caller (both mean "no value").
-    """
-    override = os.environ.get("HYDRA_AUTOPILOT_REDIS_CLI", "").strip()
-    if override:
-        cmd = [*override.split(), *args]
-    else:
-        cmd = ["docker", "exec", "hydra-redis-1", "redis-cli", *args]
-    try:
-        result = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"[autopilot] reap: redis mirror {args[:2]} failed ({exc}); "
-            "state.json remains source of truth",
-            file=sys.stderr,
-        )
-        return None
-    if not capture:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.decode("utf-8", errors="replace").strip()
-
-
-def _mirror_cross_run_state_to_redis(s: dict) -> None:
-    """Mirror the cross-run durable subset of state to Redis (issue #2715).
-
-    ONLY the reboot-survival subset is mirrored — `signal_last_fired` (the 10
-    signal classes) and `research_force_counter`. Run-scoped fields
-    (pid/turn/dispatches/slots/idle_turns/burned_classes) are NEVER mirrored:
-    they legitimately die with the run and the concurrent-run PID guard + #1352
-    slot re-seeding DEPEND on them resetting (design-concept #2715 Invariant 4).
-
-    Called after `_save_state` in `run_completion`, so a Redis hiccup can never
-    lose the local write. Best-effort throughout — no exception escapes.
-    """
-    try:
-        slf = s.get("signal_last_fired")
-        if isinstance(slf, dict) and slf:
-            # HSET the hash field-by-field; each value is an epoch int (or 0).
-            # Skip non-int-coercible values rather than corrupting the field.
-            hset_args: list[str] = ["HSET", REDIS_SIGNAL_LAST_FIRED_KEY]
-            for cls, ts in slf.items():
-                try:
-                    hset_args.extend([str(cls), str(int(ts))])
-                except (TypeError, ValueError):
-                    continue
-            # Only issue the HSET when at least one field pair was collected.
-            if len(hset_args) > 2:
-                _redis_cli(*hset_args)
-
-        rfc = s.get("research_force_counter")
-        if isinstance(rfc, dict):
-            # Store as one canonical-JSON string (a date-keyed nested object) so
-            # bootstrap can prune it to today's key on read, mirroring the
-            # prior-file path. An empty {} is still written — it faithfully
-            # records "no forced-research today" and never resurrects a stale day.
-            _redis_cli(
-                "SET",
-                REDIS_RESEARCH_FORCE_KEY,
-                json.dumps(rfc, sort_keys=True),
-            )
-    except Exception as exc:  # pragma: no cover - defensive belt-and-braces
-        # The subset mirror is a pure best-effort side-effect; never let it
-        # bubble up and abort a reap that already persisted state locally.
-        print(
-            f"[autopilot] reap: cross-run redis mirror failed ({exc}); "
-            "state.json remains source of truth",
-            file=sys.stderr,
-        )
-
-
 def _gh_argv(*args: str) -> list[str]:
     """Build a `gh` CLI argv, honouring HYDRA_AUTOPILOT_GH_CLI (issue #3866).
 
-    Mirrors `_redis_cli`'s override pattern: default prefix is the single
+    Mirrors `redis_cli`'s override pattern: default prefix is the single
     token `gh`; a test/operator override is whitespace-split so a stub
     recorder script (or a `gh --hostname ...` prefix) can stand in.
     """
@@ -704,7 +599,7 @@ def _handle_dev_orch_stall(
     if len(pending) > DEV_RESUME_PENDING_CAP:
         pending = pending[-DEV_RESUME_PENDING_CAP:]
     s["dev_resume_pending"] = pending
-    _save_state(s)
+    save_state(s)
 
     line = (
         f"dev_stall_no_pr anchor={anchor_ref} task_id={task_id} "
@@ -1034,23 +929,6 @@ def _handle_dev_target_stall(
     )
     print(f"[autopilot] {line}")
     _append_log(line)
-
-
-def _ensure_reaped_list(s: dict) -> list[str]:
-    """Read `reaped_task_ids` from state, defaulting to []. Tolerates older
-    state.json files written before issue #411 that lack the field."""
-    ids = s.get("reaped_task_ids")
-    if not isinstance(ids, list):
-        ids = []
-        s["reaped_task_ids"] = ids
-    return ids
-
-
-def _bound_reaped(ids: list[str]) -> list[str]:
-    """FIFO-bound the dedup ledger to the most-recent 1000 entries."""
-    if len(ids) > REAPED_TASK_IDS_CAP:
-        return ids[-REAPED_TASK_IDS_CAP:]
-    return ids
 
 
 # Issue #2020: a reflection-deposit presence diagnostic. `_read_reflection_sources`
@@ -1798,7 +1676,7 @@ def _recover_worktree_branch(task_id: str) -> str | None:
     Instead, recover the SAME `worktreeBranch` value from the subagent-
     dispatch registry `hydra:dispatches:subagent:<sessionId>` (HASH, field
     `dispatchId`; `src/redis/dispatches.ts`) via `HGET` through the existing
-    `_redis_cli` docker-exec seam (issue #2715) — NOT a new HTTP route or a
+    `redis_cli` docker-exec seam (issue #2715) — NOT a new HTTP route or a
     cross-process typed-accessor import, both rejected alternatives in the
     same artifact (a new route would touch `src/api/dispatches.ts`, outside
     this issue's declared `## Files in scope`). That registry is populated
@@ -1819,7 +1697,7 @@ def _recover_worktree_branch(task_id: str) -> str | None:
     """
     if not task_id:
         return None
-    branch = _redis_cli(
+    branch = redis_cli(
         "HGET",
         f"{REDIS_SUBAGENT_DISPATCH_KEY_PREFIX}{task_id}",
         "dispatchId",
@@ -2112,7 +1990,7 @@ def _fire_reflection_for_completion(
 
 def run_hardcap() -> int:
     """Default mode: hard-cap enforcement against `partial_tokens`."""
-    s = _load_state()
+    s = load_state()
     if s is None:
         return 0
     hard = s["limits"]["subagent_hard_max_tokens"]
@@ -2147,7 +2025,7 @@ def run_hardcap() -> int:
             s["slots"][cls] = None
             if cls not in s.get("burned_classes", []):
                 s.setdefault("burned_classes", []).append(cls)
-    _save_state(s)
+    save_state(s)
     for cls, skill, tokens, task_id, anchor_ref, branch in runaways:
         title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
         body = (
@@ -2383,13 +2261,13 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     prose is a data dependency the spy test in
     test/autopilot-dedup-reap.test.mts asserts.
     """
-    s = _load_state()
+    s = load_state()
     if s is None:
         # No state file — nothing to accumulate against. Treat as no-op.
         print(f"[autopilot] reap completion: state missing, skipping task_id={task_id}", file=sys.stderr)
         return 0
 
-    reaped = _ensure_reaped_list(s)
+    reaped = ensure_reaped_list(s)
     if task_id in reaped:
         msg = f"dup_skip task_id={task_id} class={cls} skill={skill or '?'} tokens={total_tokens}"
         print(f"[autopilot] {msg}")
@@ -2440,7 +2318,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     # First reap for this task_id. Append BEFORE token accounting so a
     # crash mid-update doesn't leave us double-counting on retry.
     reaped.append(task_id)
-    s["reaped_task_ids"] = _bound_reaped(reaped)
+    s["reaped_task_ids"] = bound_reaped(reaped)
 
     # Issue #3250: recover the REAL token count when the hook floor is 0. The
     # SubagentStop hook cannot carry the subagent's usage, so `total_tokens`
@@ -2523,13 +2401,13 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None,
     if snap.slot_occupied:
         _release_pipeline_slot(s, cls, total_tokens)
 
-    _save_state(s)
+    save_state(s)
 
     # Issue #2715: mirror the cross-run durable subset (signal_last_fired +
     # research_force_counter) to Redis so a host reboot (which wipes /tmp) can
     # reseed the long-cooldown timestamps instead of resetting them to epoch 0.
-    # AFTER _save_state so the local write is never at risk from a Redis hiccup.
-    _mirror_cross_run_state_to_redis(s)
+    # AFTER save_state so the local write is never at risk from a Redis hiccup.
+    mirror_cross_run_state_to_redis(s)
 
     # Issue #1136 (Slice 2 of #1119): forward the planning-time reflection
     # buckets the dispatch deposited for this task_id so the cycle metric
@@ -2767,7 +2645,7 @@ def run_grill_crash(task_id: str) -> int:
     the counter as well as the cycle-record (which is itself idempotent
     on cycleId).
     """
-    s = _load_state()
+    s = load_state()
     # Issue #3970 (INV-2): a grill crash is always for the design_concept_orch
     # slot (see docstring). Capture that slot's synthesised worktree branch so
     # the failed cycle-record keys on the same worktree-branch cycleId form the
@@ -2780,15 +2658,15 @@ def run_grill_crash(task_id: str) -> int:
     grill_slot = (s.get("slots") or {}).get("design_concept_orch") if s else None
     branch = grill_slot.get("branch") if isinstance(grill_slot, dict) else None
     if s is not None:
-        reaped = _ensure_reaped_list(s)
+        reaped = ensure_reaped_list(s)
         if task_id in reaped:
             msg = f"dup_skip_grill_crash task_id={task_id}"
             print(f"[autopilot] {msg}")
             _append_log(msg)
             return 0
         reaped.append(task_id)
-        s["reaped_task_ids"] = _bound_reaped(reaped)
-        _save_state(s)
+        s["reaped_task_ids"] = bound_reaped(reaped)
+        save_state(s)
     _fire_cycle_record(task_id, "hydra-grill", "failed", 0, worktree_branch=branch or "")
     line = f"grill_crash task_id={task_id}"
     print(f"[autopilot] {line}")
