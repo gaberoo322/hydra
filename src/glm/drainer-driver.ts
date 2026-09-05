@@ -102,7 +102,7 @@ export interface DriverDeps {
 }
 
 /** Real dependencies — what the committed CLI entrypoint uses. */
-export const defaultDriverDeps: DriverDeps = {
+const defaultDriverDeps: DriverDeps = {
   setGlmDrainerHeartbeat,
   preflightBeforePr,
   buildGlmEnv,
