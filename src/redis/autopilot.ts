@@ -34,10 +34,12 @@
  * writer the drainer loop (`scripts/glm/drainer-loop.sh`) is permitted to use
  * for this key, per the CLAUDE.md Redis-seam rule ("Redis access through
  * `src/redis/<domain>.ts` typed accessors — never a raw client"). The loop is
- * bash, so it reaches this function through a small generated Node driver
- * (`node --experimental-strip-types` importing this module directly) rather
- * than a raw `redis-cli SET` — see the loop script's header comment for the
- * exact invocation. Per the issue's 2026-07-27 AMENDMENTS, the CALLER decides
+ * bash, so it reaches this function through the committed bridge file
+ * `src/glm/drainer-driver.ts` (invoked via its thin `scripts/glm/drainer-driver.ts`
+ * CLI entrypoint, `node --experimental-strip-types` importing this module
+ * directly — issue #4371) rather than a raw `redis-cli SET` — see the loop
+ * script's header comment for the exact invocation. Per the issue's
+ * 2026-07-27 AMENDMENTS, the CALLER decides
  * *whether* to write on a given tick (only when neither operator-paused nor
  * daily-cap-exhausted — heartbeat means "able to author", not "the process
  * ran"; a flock-blocked tick must still refresh it because a run already in
@@ -155,8 +157,9 @@ export type SetGlmDrainerHeartbeatResult =
  * constant's docstring for why the staleness decision does not depend on it.
  *
  * Never throws (never-throw-from-verification convention, CLAUDE.md): a Redis
- * failure returns a result object so the caller (the drainer loop, via its
- * generated Node driver) can log and continue the tick rather than crash it.
+ * failure returns a result object so the caller (the drainer loop, via
+ * `src/glm/drainer-driver.ts`) can log and continue the tick rather than
+ * crash it.
  * Fails loud — every failure is logged with context before the result is
  * returned.
  */
