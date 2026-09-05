@@ -529,3 +529,144 @@ describe("reap.py completion → closed-anchor short-circuit (issue #4057)", () 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #4377 — reap.py's 8 byte-identical `gh` subprocess try/except sites
+// (the ones exercised end-to-end by the two suites above) collapsed into one
+// private helper, `_gh_run`. This suite pins the helper's own exception-
+// branch contract directly, Redis-free and independent of the two suites
+// above (its own lifecycle — no shared before/after), plus one end-to-end
+// case proving the collapse didn't change `_handle_dev_orch_stall`'s
+// fail-open behaviour when `gh` cannot be run at all.
+// ---------------------------------------------------------------------------
+describe("scripts/autopilot/reap.py _gh_run — exception-branch contract (issue #4377)", () => {
+  // Imports reap.py as a module (its __main__ guard keeps import side-effect
+  // free) so `_gh_run` can be probed directly, mirroring the
+  // spec_from_file_location + sys.modules-registration-before-exec_module
+  // pattern test/autopilot-dedup-reap.test.mts already established.
+  function runPython(
+    code: string,
+    env: Record<string, string> = {},
+  ): { status: number; stdout: string; stderr: string } {
+    const r = spawnSync("python3", ["-c", code], {
+      env: {
+        ...process.env,
+        REAP_PATH: REAP,
+        ...env,
+      },
+      encoding: "utf-8",
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  const IMPORT_PREAMBLE = (name: string) => `
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("${name}", os.environ["REAP_PATH"])
+reap = importlib.util.module_from_spec(spec)
+# Register BEFORE exec_module: reap.py uses PEP 563 future annotations, so a
+# decorator resolving cls.__module__ needs the module already in sys.modules
+# (test/autopilot-dedup-reap.test.mts hit this first).
+sys.modules["${name}"] = reap
+spec.loader.exec_module(reap)
+`;
+
+  test("gh binary missing (FileNotFoundError) → _gh_run returns None and logs one canonical WARN naming the context", () => {
+    const r = runPython(
+      `${IMPORT_PREAMBLE("reap_ghrun_a")}
+proc = reap._gh_run("issue", "view", "1", "--repo", "x/y", "--json", "state", context="unit-test-context-a")
+print("NONE" if proc is None else "NOT_NONE")
+`,
+      { HYDRA_AUTOPILOT_GH_CLI: "/nonexistent/hydra-test-4377-gh-binary" },
+    );
+    assert.equal(r.status, 0, `probe must exit 0, got ${r.status}; stderr=${r.stderr}`);
+    assert.equal(r.stdout.trim(), "NONE", "a missing gh binary must make _gh_run return None");
+    assert.match(
+      r.stderr,
+      /\[autopilot\] reap: WARN gh issue view failed for unit-test-context-a \(non-fatal\):/,
+      `must log the canonical WARN line with the caller's context: ${r.stderr}`,
+    );
+  });
+
+  test("subprocess.run raises TimeoutExpired → _gh_run returns None and logs the canonical WARN", () => {
+    const r = runPython(`${IMPORT_PREAMBLE("reap_ghrun_b")}
+import subprocess
+def boom(*args, **kwargs):
+    raise subprocess.TimeoutExpired(cmd="gh", timeout=15)
+reap.subprocess.run = boom
+proc = reap._gh_run("pr", "list", "--repo", "x/y", context="unit-test-context-b")
+print("NONE" if proc is None else "NOT_NONE")
+`);
+    assert.equal(r.status, 0, `probe must exit 0, got ${r.status}; stderr=${r.stderr}`);
+    assert.equal(r.stdout.trim(), "NONE", "a TimeoutExpired must make _gh_run return None");
+    assert.match(
+      r.stderr,
+      /\[autopilot\] reap: WARN gh pr list failed for unit-test-context-b \(non-fatal\):/,
+      `must log the canonical WARN line with the caller's context: ${r.stderr}`,
+    );
+  });
+
+  test("gh exits non-zero → _gh_run returns the CompletedProcess as-is, never None (INV-3)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "autopilot-reap-ghrun-c-"));
+    try {
+      const ghStub = join(dir, "gh-stub-exit3.sh");
+      writeFileSync(ghStub, `#!/usr/bin/env bash\nexit 3\n`);
+      chmodSync(ghStub, 0o755);
+
+      const r = runPython(
+        `${IMPORT_PREAMBLE("reap_ghrun_c")}
+proc = reap._gh_run("issue", "edit", "1", "--repo", "x/y", context="unit-test-context-c")
+print("NONE" if proc is None else f"RETURNCODE={proc.returncode}")
+`,
+        { HYDRA_AUTOPILOT_GH_CLI: ghStub },
+      );
+      assert.equal(r.status, 0, `probe must exit 0, got ${r.status}; stderr=${r.stderr}`);
+      assert.equal(
+        r.stdout.trim(),
+        "RETURNCODE=3",
+        "a non-zero gh exit must be returned as a CompletedProcess, not swallowed into None",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("end-to-end: gh unreachable during a dev_orch stall check → reap still exits 0 and mutates nothing", () => {
+    const tmp = makeTmp();
+    try {
+      writeState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started_epoch: Math.floor(Date.now() / 1000) - 600,
+            task_id: "t-ghrun-d",
+            anchor: "issue-9999",
+            branch: "issue-9999-fix",
+          },
+        },
+      });
+
+      // Route every gh call at a nonexistent binary — the collapsed helper's
+      // FileNotFoundError branch must keep the whole completion path
+      // fail-open, exactly as the pre-#4377 per-site try/except blocks did.
+      const r = runCompletion(["dev_orch", "t-ghrun-d", "20000", "hydra-dev"], tmp, {
+        HYDRA_AUTOPILOT_GH_CLI: "/nonexistent/hydra-test-4377-gh-binary-e2e",
+      });
+      assert.equal(r.status, 0, `reap must exit 0 even when gh cannot be run at all, got ${r.status}; stderr=${r.stderr}`);
+
+      const log = runLog(tmp);
+      assert.ok(!log.includes("dev_stall_no_pr"), "an unreachable gh must never be treated as a confirmed stall");
+
+      // paths.ghStub was overridden away, so nothing ever wrote ghCallsLog —
+      // proof the real (nonexistent) binary path was the one attempted.
+      assert.deepEqual(ghCalls(tmp), [], "no gh call can have recorded a response when the binary does not exist");
+
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(
+        !s.dev_resume_pending || s.dev_resume_pending.length === 0,
+        "an unreachable gh must never queue a resume record",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+});

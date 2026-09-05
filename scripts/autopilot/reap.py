@@ -214,6 +214,46 @@ def _gh_argv(*args: str) -> list[str]:
     return [*prefix, *args]
 
 
+def _gh_run(
+    *args: str, context: str, timeout: int = 15
+) -> subprocess.CompletedProcess[str] | None:
+    """Run one `gh` subprocess call, collapsing this module's 8
+    byte-identical try/except sites into a single helper (issue #4377, PR #4378, INV-6 fix).
+
+    Composes `_gh_argv(*args)` and calls `subprocess.run` with the same
+    four kwargs every site already used (`check=False, capture_output=True,
+    text=True, timeout=timeout`). Catches exactly the tuple all 8 sites
+    already caught — `(subprocess.TimeoutExpired, FileNotFoundError,
+    OSError)` — prints one canonical WARN line naming the `gh` subcommand
+    and the caller-supplied `context`, and returns None. Nothing else is
+    caught, so a genuine programming error still fails loud.
+
+    A non-zero exit is NEVER swallowed here — the `CompletedProcess` is
+    returned as-is so each call site keeps its own `returncode` branch,
+    message text, and control flow byte-for-byte. `proc is None` always
+    means "gh could not be run/completed at all"; a caller that needs to
+    react to "gh ran but exited non-zero" still checks `.returncode`
+    itself, exactly as before this helper existed.
+    """
+    try:
+        return subprocess.run(
+            _gh_argv(*args),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        sub = args[0] if len(args) > 0 else ""
+        cmd = args[1] if len(args) > 1 else ""
+        print(
+            f"[autopilot] reap: WARN gh {sub} {cmd} failed for {context} "
+            f"(non-fatal): {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _load_pr_refs_module():
     """Load pr-refs.py (issue #3852) via importlib — the file is not
     import-friendly by name (lives next to this script, not on sys.path, and
@@ -289,24 +329,12 @@ def _fetch_pr_list_json(repo: str, anchor_ref: str) -> str | None:
     m = re.match(r"^issue-(\d+)$", (anchor_ref or "").strip())
     if not m:
         return None
-    try:
-        proc = subprocess.run(
-            _gh_argv(
-                "pr", "list", "--repo", repo, "--state", "open",
-                "--json", "headRefName,body,closingIssuesReferences", "--limit", "200",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"[autopilot] reap: gh pr list failed for repo={repo} "
-            f"anchor={anchor_ref} ({exc}); PR-existence/closing-status "
-            "unknown, no relabel this reap",
-            file=sys.stderr,
-        )
+    proc = _gh_run(
+        "pr", "list", "--repo", repo, "--state", "open",
+        "--json", "headRefName,body,closingIssuesReferences", "--limit", "200",
+        context=f"repo={repo} anchor={anchor_ref} pr list",
+    )
+    if proc is None:
         return None
     if proc.returncode != 0:
         print(
@@ -395,23 +423,12 @@ def _anchor_issue_is_closed(issue_num: str, repo: str = REPO) -> bool | None:
               nothing — the same fail-open-as-no-mutation convention
               `_dev_orch_pr_exists_for_anchor` follows.
     """
-    try:
-        proc = subprocess.run(
-            _gh_argv(
-                "issue", "view", issue_num, "--repo", repo,
-                "--json", "state",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"[autopilot] reap: gh issue view failed for #{issue_num} "
-            f"({exc}); issue state unknown, no relabel this reap",
-            file=sys.stderr,
-        )
+    proc = _gh_run(
+        "issue", "view", issue_num, "--repo", repo,
+        "--json", "state",
+        context=f"#{issue_num} issue view (state)",
+    )
+    if proc is None:
         return None
     if proc.returncode != 0:
         print(
@@ -530,58 +547,33 @@ def _handle_dev_orch_stall(
         _append_log(line)
         return
 
-    relabelled = False
-    try:
-        edit = subprocess.run(
-            _gh_argv(
-                "issue", "edit", issue_num, "--repo", REPO,
-                "--remove-label", "ready-for-agent",
-                "--remove-label", "in-progress",
-                "--add-label", DEV_RESUME_LABEL,
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        relabelled = edit.returncode == 0
-        if not relabelled:
-            print(
-                f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
-                f"to {DEV_RESUME_LABEL} (non-fatal): {edit.stderr.strip()}",
-                file=sys.stderr,
-            )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+    edit = _gh_run(
+        "issue", "edit", issue_num, "--repo", REPO,
+        "--remove-label", "ready-for-agent",
+        "--remove-label", "in-progress",
+        "--add-label", DEV_RESUME_LABEL,
+        context=f"#{issue_num} needs-dev-resume relabel",
+    )
+    relabelled = edit is not None and edit.returncode == 0
+    if edit is not None and not relabelled:
         print(
-            f"[autopilot] reap: WARN gh issue edit failed for #{issue_num} "
-            f"(non-fatal): {exc}",
+            f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
+            f"to {DEV_RESUME_LABEL} (non-fatal): {edit.stderr.strip()}",
             file=sys.stderr,
         )
 
-    try:
-        branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
-        subprocess.run(
-            _gh_argv(
-                "issue", "comment", issue_num, "--repo", REPO, "--body",
-                "> *Automated reap — dev_orch stalled with no PR (issue #3866)*\n\n"
-                "The `dev_orch` dispatch for this anchor ended its session "
-                "without opening a PR (no open PR currently references this "
-                f"issue).{branch_note}\n\n"
-                f"Relabelled `{DEV_RESUME_LABEL}` so the next autopilot turn "
-                "resumes this anchor instead of re-dispatching a fresh "
-                "implementation from scratch.",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"[autopilot] reap: WARN gh issue comment failed for #{issue_num} "
-            f"(non-fatal): {exc}",
-            file=sys.stderr,
-        )
+    branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
+    _gh_run(
+        "issue", "comment", issue_num, "--repo", REPO, "--body",
+        "> *Automated reap — dev_orch stalled with no PR (issue #3866)*\n\n"
+        "The `dev_orch` dispatch for this anchor ended its session "
+        "without opening a PR (no open PR currently references this "
+        f"issue).{branch_note}\n\n"
+        f"Relabelled `{DEV_RESUME_LABEL}` so the next autopilot turn "
+        "resumes this anchor instead of re-dispatching a fresh "
+        "implementation from scratch.",
+        context=f"#{issue_num} dev_orch stall comment",
+    )
 
     # Append/replace the resume record — dedup by anchor so a repeated stall
     # on the SAME anchor keeps only its latest attempt, then FIFO-bound the
@@ -699,20 +691,11 @@ def _handle_dev_orch_needs_qa_promotion(
     if issue_num is None:
         return
 
-    try:
-        view = subprocess.run(
-            _gh_argv("issue", "view", issue_num, "--repo", REPO, "--json", "labels"),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"[autopilot] reap: WARN gh issue view failed for #{issue_num} "
-            f"needs-qa promotion (non-fatal): {exc}",
-            file=sys.stderr,
-        )
+    view = _gh_run(
+        "issue", "view", issue_num, "--repo", REPO, "--json", "labels",
+        context=f"#{issue_num} needs-qa promotion labels view",
+    )
+    if view is None:
         return
     if view.returncode != 0:
         print(
@@ -739,33 +722,21 @@ def _handle_dev_orch_needs_qa_promotion(
         # or never was ready-for-agent to begin with) — idempotent no-op.
         return
 
-    relabelled = False
-    try:
-        edit = subprocess.run(
-            _gh_argv(
-                "issue", "edit", issue_num, "--repo", REPO,
-                "--remove-label", "ready-for-agent",
-                "--add-label", "needs-qa",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        relabelled = edit.returncode == 0
-        if not relabelled:
-            print(
-                f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
-                f"to needs-qa (non-fatal): {edit.stderr.strip()}",
-                file=sys.stderr,
-            )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+    edit = _gh_run(
+        "issue", "edit", issue_num, "--repo", REPO,
+        "--remove-label", "ready-for-agent",
+        "--add-label", "needs-qa",
+        context=f"#{issue_num} needs-qa promotion relabel",
+    )
+    if edit is None:
+        return
+    relabelled = edit.returncode == 0
+    if not relabelled:
         print(
-            f"[autopilot] reap: WARN gh issue edit failed for #{issue_num} "
-            f"needs-qa promotion (non-fatal): {exc}",
+            f"[autopilot] reap: WARN failed to relabel issue #{issue_num} "
+            f"to needs-qa (non-fatal): {edit.stderr.strip()}",
             file=sys.stderr,
         )
-        return
 
     line = f"dev_pr_closes_anchor anchor={anchor_ref} relabelled={relabelled}"
     print(f"[autopilot] {line}")
@@ -869,59 +840,34 @@ def _handle_dev_target_stall(
         _append_log(line)
         return
 
-    relabelled = False
-    try:
-        edit = subprocess.run(
-            _gh_argv(
-                "issue", "edit", issue_num, "--repo", TARGET_REPO,
-                "--remove-label", "in-progress",
-                "--add-label", "ready-for-agent",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        relabelled = edit.returncode == 0
-        if not relabelled:
-            print(
-                f"[autopilot] reap: WARN failed to release issue #{issue_num} "
-                f"on {TARGET_REPO} to ready-for-agent (non-fatal): "
-                f"{edit.stderr.strip()}",
-                file=sys.stderr,
-            )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+    edit = _gh_run(
+        "issue", "edit", issue_num, "--repo", TARGET_REPO,
+        "--remove-label", "in-progress",
+        "--add-label", "ready-for-agent",
+        context=f"#{issue_num} on {TARGET_REPO} ready-for-agent release",
+    )
+    relabelled = edit is not None and edit.returncode == 0
+    if edit is not None and not relabelled:
         print(
-            f"[autopilot] reap: WARN gh issue edit failed for #{issue_num} on "
-            f"{TARGET_REPO} (non-fatal): {exc}",
+            f"[autopilot] reap: WARN failed to release issue #{issue_num} "
+            f"on {TARGET_REPO} to ready-for-agent (non-fatal): "
+            f"{edit.stderr.strip()}",
             file=sys.stderr,
         )
 
-    try:
-        branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
-        subprocess.run(
-            _gh_argv(
-                "issue", "comment", issue_num, "--repo", TARGET_REPO, "--body",
-                "> *Automated reap — dev_target stalled with no PR (issue #4195)*\n\n"
-                "The `dev_target` dispatch for this anchor ended its session "
-                "without opening a PR (no open PR currently closes this "
-                f"issue).{branch_note}\n\n"
-                "Released `in-progress` -> `ready-for-agent` so the WIP gate "
-                "(ADR-0031 Decision 4) frees this slot on the next board "
-                "read; the issue re-enters the normal pick order instead of "
-                "wedging the lane as an orphaned claim.",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"[autopilot] reap: WARN gh issue comment failed for #{issue_num} "
-            f"on {TARGET_REPO} (non-fatal): {exc}",
-            file=sys.stderr,
-        )
+    branch_note = f"\n**Branch:** `{worktree_branch}`" if worktree_branch else ""
+    _gh_run(
+        "issue", "comment", issue_num, "--repo", TARGET_REPO, "--body",
+        "> *Automated reap — dev_target stalled with no PR (issue #4195)*\n\n"
+        "The `dev_target` dispatch for this anchor ended its session "
+        "without opening a PR (no open PR currently closes this "
+        f"issue).{branch_note}\n\n"
+        "Released `in-progress` -> `ready-for-agent` so the WIP gate "
+        "(ADR-0031 Decision 4) frees this slot on the next board "
+        "read; the issue re-enters the normal pick order instead of "
+        "wedging the lane as an orphaned claim.",
+        context=f"#{issue_num} on {TARGET_REPO} dev_target stall comment",
+    )
 
     line = (
         f"dev_target_stall_no_pr anchor={anchor_ref} task_id={task_id} "
