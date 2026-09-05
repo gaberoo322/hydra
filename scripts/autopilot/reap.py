@@ -218,7 +218,7 @@ def _gh_run(
     *args: str, context: str, timeout: int = 15
 ) -> subprocess.CompletedProcess[str] | None:
     """Run one `gh` subprocess call, collapsing this module's 8
-    byte-identical try/except sites into a single helper (issue #4377, PR #4378).
+    byte-identical try/except sites into a single helper (issue #4377, PR #4378, INV-6 fix).
 
     Composes `_gh_argv(*args)` and calls `subprocess.run` with the same
     four kwargs every site already used (`check=False, capture_output=True,
