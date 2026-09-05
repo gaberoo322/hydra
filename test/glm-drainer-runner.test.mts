@@ -222,6 +222,7 @@ describe("glm drainer-runner — subprocess seam", () => {
     assert.equal(captured.opts.cwd, "/tmp/worktree");
     assert.equal(captured.opts.env.ANTHROPIC_BASE_URL, GLM_ANTHROPIC_BASE_URL);
     assert.deepEqual(captured.opts.stdio, ["ignore", "pipe", "pipe"]);
+    assert.equal(captured.opts.detached, true);
   });
 
   test("resolves with {code,stdout,stderr} regardless of a non-zero exit code", async () => {
