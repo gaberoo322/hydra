@@ -38,7 +38,7 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const DRAINER_LOOP = join(
@@ -792,5 +792,72 @@ describe("scripts/glm/drainer-loop.sh — never produces a dispatch cost-join re
       /dispatch-cost/,
       "drainer-loop.sh must never reference the /api/usage/dispatch-cost write path directly either",
     );
+  });
+});
+
+describe("scripts/glm/drainer-loop.sh — run_driver() invokes the COMMITTED driver file, not a regenerated /tmp heredoc (issue #4371)", () => {
+  const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+  test("run_driver invokes the exact argv against the committed scripts/glm/drainer-driver.ts, and never writes a /tmp driver file", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "glm-drainer-rundriver-"));
+    try {
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      // Fake `node` on PATH: echoes its own argv verbatim so the snippet can
+      // assert the exact invocation run_driver() makes, without actually
+      // spawning a real node process (and therefore without touching Redis
+      // or claude at all).
+      writeFileSync(
+        join(binDir, "node"),
+        `#!/usr/bin/env bash\necho "NODE_ARGV:$*"\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const r = await runShellSnippet(
+        { PATH: `${binDir}:${process.env.PATH}`, TMPDIR: tmp },
+        `run_driver preflight /fake/changed-files.txt; echo "SNIPPET_EXIT:$?"`,
+      );
+      assert.match(r.combined, /SNIPPET_EXIT:0/, `expected run_driver to exit 0:\n${r.combined}`);
+      assert.match(
+        r.combined,
+        new RegExp(
+          `NODE_ARGV:--experimental-strip-types ${REPO_ROOT}/scripts/glm/drainer-driver\\.ts preflight /fake/changed-files\\.txt`,
+        ),
+        `expected the exact committed-driver argv:\n${r.combined}`,
+      );
+      // The heredoc-generated /tmp driver must no longer be written — the
+      // committed file is invoked directly.
+      const legacyDriverPath = join(tmp, "hydra-glm-drainer-driver.mts");
+      assert.equal(
+        existsSync(legacyDriverPath),
+        false,
+        "run_driver must never (re)write a /tmp driver file",
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("write_node_driver / node_driver_path no longer exist as functions", async () => {
+    const r = await runShellSnippet(
+      {},
+      `declare -F write_node_driver >/dev/null 2>&1; echo "WND_EXIT:$?"; ` +
+        `declare -F node_driver_path >/dev/null 2>&1; echo "NDP_EXIT:$?"`,
+    );
+    assert.match(r.combined, /WND_EXIT:1/, "write_node_driver must no longer be a defined function");
+    assert.match(r.combined, /NDP_EXIT:1/, "node_driver_path must no longer be a defined function");
+  });
+
+  test("real-process smoke: the committed entrypoint resolves its import graph and exits 1 with the fault prefix on an unknown mode", async () => {
+    const driverPath = join(REPO_ROOT, "scripts", "glm", "drainer-driver.ts");
+    const result = await new Promise<{ status: number | null; combined: string }>((resolve, reject) => {
+      const child = spawn("node", ["--experimental-strip-types", driverPath, "no-such-mode"]);
+      let combined = "";
+      child.stdout.on("data", (d) => { combined += d.toString(); });
+      child.stderr.on("data", (d) => { combined += d.toString(); });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ status: code, combined }));
+    });
+    assert.equal(result.status, 1, `expected exit 1:\n${result.combined}`);
+    assert.match(result.combined, /glm-drainer driver threw: unknown mode: no-such-mode/);
   });
 });
