@@ -1,0 +1,1 @@
+- fix: `runClaudeCli`'s timeout now SIGKILLs the whole process group (not just the direct `claude` child), preventing leaked subprocess trees (#4379)

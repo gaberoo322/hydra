@@ -49,6 +49,19 @@
  * auth/quota/model failures as an `is_error` envelope on STDOUT while exiting
  * non-zero, and rejecting on `code !== 0` before the caller can parse that
  * envelope would swallow the human-readable diagnosis.
+ *
+ * Process-group timeout cleanup (issue #4379)
+ * --------------------------------------------
+ * The child is spawned `detached: true` so it becomes its own process-group
+ * leader. On timeout, before the existing direct-child `SIGKILL`, the group is
+ * also signalled via the negative PID (`process.kill(-pid, "SIGKILL")`) so a
+ * `claude` subprocess tree (e.g. an MCP server it launched) cannot outlive the
+ * timeout the way issue #4379 documented. This ports the same mechanism
+ * `src/exec-with-timeout.ts::execWithGroupCleanup` uses — the pattern is
+ * ported, not delegated to, because that helper hard-imports `spawn` with no
+ * injection seam and never rejects, which would break the standing
+ * no-live-`claude`-in-CI test contract and the reject-on-timeout message this
+ * seam's callers pin.
  */
 
 import { spawn } from "node:child_process";
@@ -89,9 +102,9 @@ export interface ClaudeCliSpawnOptions {
 /**
  * Run the `claude` CLI and resolve on close REGARDLESS of exit code.
  *
- * stdin is ignored so the CLI never blocks waiting on it; a timeout SIGKILLs the
- * child and rejects. All argv is passed as an array (no shell), so there is no
- * shell-quoting or injection surface.
+ * stdin is ignored so the CLI never blocks waiting on it; a timeout SIGKILLs
+ * the child's process group and rejects. All argv is passed as an array (no
+ * shell), so there is no shell-quoting or injection surface.
  */
 export function runClaudeCli(
   spawnImpl: SpawnFn,
@@ -108,6 +121,7 @@ export function runClaudeCli(
         stdio: ["ignore", "pipe", "pipe"],
         env: options.env,
         cwd: options.cwd,
+        detached: true,
       });
     } catch (error) {
       reject(
@@ -131,6 +145,25 @@ export function runClaudeCli(
 
     const timer = setTimeout(() => {
       finish(() => {
+        // Process-group cleanup (issue #4379): a plain `child.kill()` below
+        // only signals the direct child, leaking any subprocess tree the
+        // `claude` CLI spawned (e.g. an MCP server). Because the child was
+        // spawned `detached: true`, its pid is also its process-group id, so
+        // signalling the negative pid reaches the whole group.
+        if (typeof child.pid === "number") {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch (error) {
+            const err = error as NodeJS.ErrnoException;
+            if (err?.code === "ESRCH") {
+              /* intentional: group already gone — the timeout rejection is what matters */
+            } else {
+              console.error(
+                `[claude-cli] ${label}: failed to SIGKILL process group -${child.pid}: ${err?.message ?? String(err)}`,
+              );
+            }
+          }
+        }
         try {
           child.kill("SIGKILL");
         } catch {

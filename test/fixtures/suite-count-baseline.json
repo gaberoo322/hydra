@@ -139,6 +139,7 @@
   "test/ci-test-job-pipefail-guard.test.mts": 3,
   "test/class-stats-redis.test.mts": 1,
   "test/class-stats.test.mts": 12,
+  "test/claude-cli-exec.test.mts": 3,
   "test/claude-cli-seam-check.test.mts": 3,
   "test/collect-state-inflight-exclusion.test.mts": 2,
   "test/collect-state-python-block-quoting.test.mts": 1,
