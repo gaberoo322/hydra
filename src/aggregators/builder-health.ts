@@ -42,8 +42,9 @@
  * # Design contract
  *
  * - **Never throws.** Every sub-source runs under `Promise.allSettled` and
- *   degrades to an empty/zero slot — same contract as friction-patterns.ts
- *   and lessons-trend.ts. The digest section and dashboard widget must
+ *   degrades to an empty/zero slot through the shared settled-fold helpers
+ *   (`src/settled-fold.ts`) — the same single-home contract every other
+ *   aggregator routes through. The digest section and dashboard widget must
  *   render "no data yet" rather than error.
  * - **Per-metric native windows.** Each metric echoes its own `window` +
  *   provenance; there is no false-precision single global window.
@@ -70,7 +71,7 @@ import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
-import { settledOrNull } from "../settled-fold.ts";
+import { settledOr, settledOrNull } from "../settled-fold.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
 import {
   computeStagnationPanel,
@@ -327,21 +328,12 @@ async function computeLearningThroughput(
     lessonsReader(windowDays),
     (deps.getDesignConceptProductionCountForDate ?? defaultDcCount)(utcDate(now)),
   ]);
-  const lessons =
-    lessonsSettled.status === "fulfilled"
-      ? lessonsSettled.value
-      : { promotionRate: [], metaFrictionOpened: 0 };
-  if (lessonsSettled.status === "rejected") {
-    console.error(
-      `[builder-health] lessons-trend failed: ${(lessonsSettled.reason as any)?.message || lessonsSettled.reason}`,
-    );
-  }
-  const dcCount = dcSettled.status === "fulfilled" ? dcSettled.value : 0;
-  if (dcSettled.status === "rejected") {
-    console.error(
-      `[builder-health] design-concept count failed: ${(dcSettled.reason as any)?.message || dcSettled.reason}`,
-    );
-  }
+  const lessons = settledOr(
+    lessonsSettled,
+    { promotionRate: [], metaFrictionOpened: 0 },
+    "builder-health/lessons-trend",
+  );
+  const dcCount = settledOr(dcSettled, 0, "builder-health/design-concept-count");
   return {
     promotionRate: Array.isArray(lessons.promotionRate) ? lessons.promotionRate : [],
     metaFrictionOpened: Number(lessons.metaFrictionOpened) || 0,

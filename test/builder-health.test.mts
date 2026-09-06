@@ -253,6 +253,31 @@ describe("getBuilderHealthScorecard — composition", () => {
     assert.equal(card.autonomyRate?.total, 2);
   });
 
+  test("learning-throughput readers throw => zero slots, never null", async () => {
+    // The inner computeLearningThroughput fan-out degrades each rejected
+    // sub-read to its zero slot (issue #4403: via the shared settled-fold),
+    // so the outer settledOrNull sees a FULFILLED slice — the metric ships
+    // as an explicit zero object, not null.
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getLessonsTrend: async () => {
+          throw new Error("lessons redis down");
+        },
+        getDesignConceptProductionCountForDate: async () => {
+          throw new Error("dc redis down");
+        },
+      }),
+    );
+    assert.deepEqual(card.learningThroughput, {
+      promotionRate: [],
+      metaFrictionOpened: 0,
+      designConceptsProducedToday: 0,
+      windowDays: 7,
+    });
+    // Other metrics still computed.
+    assert.equal(card.autonomyRate?.total, 2);
+  });
+
   test("unmerged PRs are excluded from the autonomy denominator", async () => {
     const card = await getBuilderHealthScorecard(
       happyDeps({

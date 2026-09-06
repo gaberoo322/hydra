@@ -16,8 +16,9 @@
  *
  * - **Pure helpers exported.** `pickTopFriction` and `promotionsByDay`
  *   are tested directly.
- * - **Never throws.** Sub-source failures degrade to zero / [] without
- *   blanking the whole response.
+ * - **Never throws.** Sub-source failures degrade to zero / [] via the
+ *   shared settled-fold helpers (`src/settled-fold.ts`) without blanking
+ *   the whole response.
  * - **Friction reader is overridable.** Tests pass a stub so no Redis is
  *   required.
  * - **Shared meta-friction reader.** `metaFrictionOpened` is the `.length` of
@@ -37,6 +38,7 @@ import {
   sortByTimeAsc,
   type TrendPoint,
 } from "./trend-series.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
 import type { FrictionPattern } from "../pattern-memory/index.ts";
 
@@ -96,22 +98,11 @@ export async function getLessonsTrend(
     readMetaFrictionIssues("lessons-trend", windowStart, deps),
   ]);
 
-  const groups =
-    patternsResult.status === "fulfilled" ? patternsResult.value : [];
-  if (patternsResult.status === "rejected") {
-    console.error(
-      `[lessons-trend] friction reader failed: ${patternsResult.reason?.message || patternsResult.reason}`,
-    );
-  }
+  const groups = settledOrEmpty(patternsResult, "lessons-trend/friction-patterns");
   // The shared reader already never-throws + re-filters by exact createdAt, so
   // its length is the in-window meta-friction count. The allSettled wrapper is
   // belt-and-suspenders in case a future deps stub rejects.
-  const meta = metaResult.status === "fulfilled" ? metaResult.value.length : 0;
-  if (metaResult.status === "rejected") {
-    console.error(
-      `[lessons-trend] meta-friction count failed: ${metaResult.reason?.message || metaResult.reason}`,
-    );
-  }
+  const meta = settledOrEmpty(metaResult, "lessons-trend/meta-friction").length;
 
   const promoted = collectPromoted(groups, windowStart, now);
 

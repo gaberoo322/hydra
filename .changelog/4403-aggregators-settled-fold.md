@@ -1,0 +1,1 @@
+- refactor: migrate builder-health and lessons-trend sub-read folds onto the shared settledOr/settledOrEmpty helpers, switching their degrade logs to the structured logger (#4403)
