@@ -328,8 +328,8 @@ async function computeLearningThroughput(
     (deps.getDesignConceptProductionCountForDate ?? defaultDcCount)(utcDate(now)),
   ]);
   // Both sub-reads degrade through the shared settled-fold (issue #4403) — the
-  // hand-rolled ternary + console.error pairs this used to carry were the last
-  // pre-#916 copies of the fold `settled-fold.ts` exists to own.
+  // hand-rolled fulfilled-ternary + freeform-error-log pairs this used to
+  // carry were the last pre-#916 copies of the fold `settled-fold.ts` owns.
   const lessons = settledOr(
     lessonsSettled,
     { promotionRate: [], metaFrictionOpened: 0 },

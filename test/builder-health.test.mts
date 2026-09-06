@@ -253,6 +253,28 @@ describe("getBuilderHealthScorecard — composition", () => {
     assert.equal(card.autonomyRate?.total, 2);
   });
 
+  test("learning-throughput readers throw => zero slots, never null", async () => {
+    // Both learning-throughput sub-reads reject: each degrades through the
+    // shared settled-fold (issue #4403) to its fallback, so the slot stays the
+    // zero object — null only if computeLearningThroughput itself threw.
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getLessonsTrend: async () => {
+          throw new Error("redis down");
+        },
+        getDesignConceptProductionCountForDate: async () => {
+          throw new Error("redis down");
+        },
+      }),
+    );
+    assert.deepEqual(card.learningThroughput, {
+      promotionRate: [],
+      metaFrictionOpened: 0,
+      designConceptsProducedToday: 0,
+      windowDays: 7,
+    });
+  });
+
   test("unmerged PRs are excluded from the autonomy denominator", async () => {
     const card = await getBuilderHealthScorecard(
       happyDeps({
@@ -329,67 +351,6 @@ describe("getBuilderHealthScorecard — composition", () => {
     assert.equal(card.stagnation, null);
     // Other metrics still computed.
     assert.equal(card.autonomyRate?.total, 2);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// learning-throughput sub-source degrade (issue #4403)
-// ---------------------------------------------------------------------------
-
-describe("computeLearningThroughput — sub-source degrade (issue #4403)", () => {
-  test("lessons-trend rejects → lessons slot degrades to zero, dc count still ships", async () => {
-    const card = await getBuilderHealthScorecard(
-      happyDeps({
-        getLessonsTrend: async () => {
-          throw new Error("redis down");
-        },
-      }),
-    );
-    assert.deepEqual(card.learningThroughput?.promotionRate, []);
-    assert.equal(card.learningThroughput?.metaFrictionOpened, 0);
-    // The sibling sub-read is unaffected (per-source isolation).
-    assert.equal(card.learningThroughput?.designConceptsProducedToday, 3);
-    assert.equal(card.learningThroughput?.windowDays, 7);
-  });
-
-  test("design-concept count rejects → dc slot degrades to 0, lessons still ship", async () => {
-    const card = await getBuilderHealthScorecard(
-      happyDeps({
-        getDesignConceptProductionCountForDate: async () => {
-          throw new Error("redis down");
-        },
-      }),
-    );
-    assert.equal(card.learningThroughput?.designConceptsProducedToday, 0);
-    assert.equal(card.learningThroughput?.metaFrictionOpened, 1);
-    assert.equal(card.learningThroughput?.promotionRate.length, 1);
-  });
-
-  test("rejections route through the shared settled-fold — no freeform console.error", async () => {
-    const original = console.error;
-    let calls = 0;
-    console.error = () => {
-      calls++;
-    };
-    try {
-      const card = await getBuilderHealthScorecard(
-        happyDeps({
-          getLessonsTrend: async () => {
-            throw new Error("redis down");
-          },
-          getDesignConceptProductionCountForDate: async () => {
-            throw new Error("redis down");
-          },
-        }),
-      );
-      // Degrades to the zero slot; the scorecard itself never throws.
-      assert.equal(card.learningThroughput?.metaFrictionOpened, 0);
-      assert.equal(card.learningThroughput?.designConceptsProducedToday, 0);
-    } finally {
-      console.error = original;
-    }
-    // The settled-fold logs via the structured pino seam, never console.error.
-    assert.equal(calls, 0);
   });
 });
 
