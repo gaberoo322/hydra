@@ -1,6 +1,7 @@
 """reap_stall.py — dev_orch/dev_target stall-recovery handlers for
 scripts/autopilot/reap.py (issue #4398, the architecture-scan follow-on to
-#4366/#4367's reap.py split).
+#4366/#4367's reap.py split). See PR #4399 for the design-concept
+reconciliation against artifact ac7ab343f7df90c5.
 
 Owns the three `run_completion` post-accounting side effects that detect a
 code-writing dispatch that ended its session without opening (or advancing)
