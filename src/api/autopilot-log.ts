@@ -29,6 +29,11 @@ export function createAutopilotLogRouter() {
 
   // -------------------------------------------------------------------------
   // GET /autopilot/runs/:runId/log — log tail.
+  //
+  // Not an isolateAggregator route (issue #4402): the success path streams
+  // text/plain (this file's header contract — "NOT JSON") with trailing
+  // headers and an await-dependent 404 for a rotated log, none of which the
+  // seam (JSON-at-200 of produce's return) can express.
   // -------------------------------------------------------------------------
   router.get("/autopilot/runs/:runId/log", async (req, res) => {
     const runId = String(req.params.runId || "").trim();
@@ -79,6 +84,9 @@ export function createAutopilotLogRouter() {
 
   // -------------------------------------------------------------------------
   // GET /autopilot/runs/:runId/journal — systemd journal slice.
+  //
+  // Not an isolateAggregator route (issue #4402): text/plain stream + trailing
+  // headers, like the /log route above.
   // -------------------------------------------------------------------------
   router.get("/autopilot/runs/:runId/journal", async (req, res) => {
     const runId = String(req.params.runId || "").trim();

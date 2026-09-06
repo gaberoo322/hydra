@@ -53,6 +53,7 @@ import {
   type ClassScoreboard,
 } from "../autopilot/class-stats-math.ts";
 import { putClassScoreboard } from "../redis/class-stats.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 /** The one dependency the handler needs: the scoreboard composer (tests stub). */
 type BuildScoreboard = typeof buildClassScoreboard;
@@ -68,8 +69,12 @@ export function createAutopilotClassStatsRouter(
 ) {
   const router = Router();
 
-  router.get("/autopilot/class-stats", async (_req, res) => {
-    try {
+  // Issue #4402: the never-throw-500 isolation comes from the
+  // isolateAggregator seam (route-helpers.ts, #909) — the 500 envelope + its
+  // log live there once. buildClassScoreboard degrades rather than throwing,
+  // so the seam is the defensive guard Express needs against a bodyless 500.
+  router.get("/autopilot/class-stats", async (_req, res) =>
+    isolateAggregator(res, "api/autopilot/class-stats", async () => {
       const scoreboard = await buildScoreboard();
       const shadow = shadowDampener(scoreboard);
       // Best-effort cache write — a failure here must not fail the read.
@@ -78,20 +83,13 @@ export function createAutopilotClassStatsRouter(
           `[autopilot/class-stats] snapshot persist failed (non-fatal): ${err?.message || err}`,
         );
       });
-      res.json({
+      return {
         scoreboard,
         shadow,
         generatedAt: new Date(scoreboard.computedAt).toISOString(),
-      });
-    } catch (err: any) {
-      // Defensive — buildClassScoreboard degrades rather than throwing, so this
-      // guard just guarantees Express never returns a bodyless 500.
-      console.error(
-        `[autopilot/class-stats] unexpected error: ${err?.message || String(err)}`,
-      );
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      };
+    }),
+  );
 
   return router;
 }

@@ -110,6 +110,10 @@ export function createAutopilotLifecycleRouter() {
   // 400 {code:"schema-validation-failed", issues} on a schema miss (issue
   // #2636). recordCycle returns a result object (never throws); a result.ok:false
   // maps to 500 (code:redis) / 400 exactly like the sibling handler above.
+  //
+  // Not an isolateAggregator route (issue #4402): the result.ok:false arm maps
+  // the typed result code to a 400/500 mid-handler — the seam collapses every
+  // throw into a logged 500 and can't express it.
   // -------------------------------------------------------------------------
   router.post("/metrics/record", async (req, res) => {
     try {

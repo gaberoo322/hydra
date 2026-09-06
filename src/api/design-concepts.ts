@@ -64,7 +64,7 @@ import {
   DesignConceptListQuerySchema,
   EXEMPT_LOG_DEFAULT_LIMIT,
 } from "../schemas/design-concept.ts";
-import { aggregatorRouteNoQuery } from "./route-helpers.ts";
+import { aggregatorRouteNoQuery, isolateAggregator } from "./route-helpers.ts";
 import { logger } from "../logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -155,21 +155,24 @@ export function createDesignConceptsRouter() {
     }),
   );
 
+  // Issue #4402: never-throw-500 isolation via isolateAggregator
+  // (route-helpers.ts, #909). The 400 schema guard runs BEFORE the isolation;
+  // the 201 success status is set inside produce and honored by the seam's
+  // trailing res.json (Express applies the pending status).
   router.post("/design-concepts/exempt-log", async (req, res) => {
-    try {
-      // Zod boundary parse (ADR-0011, slice 1). Replaces the hand-rolled
-      // `typeof body.pr === "number"` / falsy-string checks with a
-      // structured 400 that downstream clients can pattern-match on.
-      const parsed = ExemptLogEntryInputSchema.safeParse(req.body ?? {});
-      if (!parsed.success) {
-        res.status(400).json({
-          code: "schema-validation-failed",
-          issues: parsed.error.issues,
-        });
-        return;
-      }
-      const body = parsed.data;
+    // Zod boundary parse (ADR-0011, slice 1). Replaces the hand-rolled
+    // `typeof body.pr === "number"` / falsy-string checks with a
+    // structured 400 that downstream clients can pattern-match on.
+    const parsed = ExemptLogEntryInputSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const body = parsed.data;
 
+    return isolateAggregator(res, "api/design-concepts/exempt-log", async () => {
       // Truncate each reason — the audit log doesn't need full paragraphs.
       // This is a transformation, not a validation, so it stays in the
       // handler rather than the schema.
@@ -189,13 +192,9 @@ export function createDesignConceptsRouter() {
 
       // LPUSH so reads return newest-first.
       await appendExemptLogEntry(JSON.stringify(entry));
-      res.status(201).json(entry);
-    } catch (err: any) {
-      logger.error({ err }, "[api/design-concepts] exempt-log write failed");
-      res
-        .status(500)
-        .json({ error: err?.message ?? "exempt-log write failed" });
-    }
+      res.status(201);
+      return entry;
+    });
   });
 
   //
@@ -245,6 +244,10 @@ export function createDesignConceptsRouter() {
    *
    * Declared BEFORE the bare `/:anchorRef` route so the literal `resolve`
    * sub-path is matched here and never captured as an anchorRef.
+   *
+   * Not an isolateAggregator route (issue #4402): the await-dependent 404
+   * `{ found, handle, reason }` miss arm is the QA contract — the seam
+   * (JSON-at-200 of produce's return) can't express it.
    */
   router.get("/design-concepts/:anchorRef/resolve", async (req, res) => {
     try {
@@ -290,6 +293,9 @@ export function createDesignConceptsRouter() {
    * at `.gate`. Probing for a `.concept` field returns `undefined`; do not add
    * one — it would break `test/api-design-concepts-schema.test.mts` and every
    * existing consumer (decide.py, hydra-qa's Spec axis, grill-artifact.sh).
+   *
+   * Not an isolateAggregator route (issue #4402): the await-dependent 404 for
+   * a missing artifact can't be expressed through the seam (JSON-at-200).
    */
   router.get("/design-concepts/:anchorRef", async (req, res) => {
     try {
@@ -309,21 +315,23 @@ export function createDesignConceptsRouter() {
     }
   });
 
+  // Issue #4402: never-throw-500 isolation via isolateAggregator (see
+  // POST /design-concepts/exempt-log above — 400 guard outside, 201 set
+  // inside produce).
   router.post("/design-concepts", async (req, res) => {
-    try {
-      // Zod boundary parse (ADR-0011, slice 1). The schema enforces both
-      // anchorRef (non-empty string) and scope (orch | target), so the
-      // hand-rolled prose 400s are gone.
-      const parsed = DesignConceptInputSchema.safeParse(req.body ?? {});
-      if (!parsed.success) {
-        res.status(400).json({
-          code: "schema-validation-failed",
-          issues: parsed.error.issues,
-        });
-        return;
-      }
-      const body = parsed.data;
+    // Zod boundary parse (ADR-0011, slice 1). The schema enforces both
+    // anchorRef (non-empty string) and scope (orch | target), so the
+    // hand-rolled prose 400s are gone.
+    const parsed = DesignConceptInputSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const body = parsed.data;
 
+    return isolateAggregator(res, "api/design-concepts/create", async () => {
       const dc = await saveDesignConcept({
         anchorRef: body.anchorRef,
         scope: body.scope,
@@ -337,13 +345,14 @@ export function createDesignConceptsRouter() {
         status: body.status,
         approvedBy: body.approvedBy,
       });
-      res.status(201).json(dc);
-    } catch (err: any) {
-      logger.error({ err }, "[api/design-concepts] create failed");
-      res.status(500).json({ error: err?.message ?? "create failed" });
-    }
+      res.status(201);
+      return dc;
+    });
   });
 
+  // Not an isolateAggregator route (issue #4402): the catch discriminates on
+  // the typed `err.code` (NotFoundError → 404) — the seam collapses every
+  // throw into a logged 500.
   router.post("/design-concepts/:anchorRef/approve", async (req, res) => {
     try {
       // Zod boundary parse (ADR-0011, slice 1). `by` is optional on the

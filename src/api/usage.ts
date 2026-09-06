@@ -39,6 +39,7 @@ import {
   DispatchCostJoinBodySchema,
   UsageByIssueQuerySchema,
 } from "../schemas/usage.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 /**
  * Query schema for the `?force=1` cache-bust knob shared by both usage read
@@ -70,15 +71,12 @@ const SessionBlockBodySchema = z
 export function createUsageRouter() {
   const router = Router();
 
+  // Issue #4402: the never-throw-500 isolation comes from the
+  // isolateAggregator seam (route-helpers.ts, #909) — the 500 envelope + its
+  // log live there once.
   router.get("/usage", async (req, res) => {
     const force = ForceQuerySchema.parse(req.query).force;
-    try {
-      const snapshot = await getUsage({ force });
-      return res.json(snapshot);
-    } catch (err: any) {
-      console.error(`[usage] /api/usage failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+    return isolateAggregator(res, "api/usage", () => getUsage({ force }));
   });
 
   /**
@@ -124,7 +122,9 @@ export function createUsageRouter() {
    * genuine 500, not a degradable slice), builds the resolved deps bag from the
    * live Redis accessors, and formats the response.
    */
-  router.get("/usage/eligibility", async (req, res) => {
+  // Issue #4402: the never-throw-500 isolation comes from the
+  // isolateAggregator seam (route-helpers.ts, #909).
+  router.get("/usage/eligibility", async (_req, res) => {
     // METER-ONLY (2026-07-30). This handler deliberately does NOT call
     // getUsage(): that runs the transcript scan, which grew to ~1.7 GB of
     // in-window JSONL and stopped answering inside the Pace Gate's 10s probe
@@ -137,9 +137,9 @@ export function createUsageRouter() {
     // scan cache, and there is no scan on this path. The meter has its own
     // independent TTL + backoff and must not be forced by an HTTP caller —
     // that is exactly how a rate-limited meter gets hammered.
-    try {
+    return isolateAggregator(res, "api/usage/eligibility", async () => {
       const meter = await getEligibilityUsage();
-      const eligibility = await getEligibilityView({
+      return getEligibilityView({
         snapshot: meter.input,
         // BLOCK when quota cannot be measured (2026-07-30 operator decision,
         // replacing the #1124 fail-open; hardened by issue #4165). True only
@@ -164,11 +164,7 @@ export function createUsageRouter() {
         readWorklessUntil: () => getWorklessUntil(),
         now: () => Date.now(),
       });
-      return res.json(eligibility);
-    } catch (err: any) {
-      console.error(`[usage] /api/usage/eligibility failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+    });
   });
 
   /**
@@ -195,24 +191,24 @@ export function createUsageRouter() {
     if (blockedUntilMs === null && parsed.data.line !== undefined) {
       blockedUntilMs = parseSessionLimitReset(parsed.data.line, nowMs);
     }
-    if (blockedUntilMs === null) {
-      // Not a session-limit notice / unparseable time → nothing to record.
-      return res.json({ recorded: false, blockedUntil: null });
-    }
-    try {
+    // Issue #4402: never-throw-500 isolation via isolateAggregator (see
+    // GET /usage above). All three 200 arms (nothing-to-record / stored-null /
+    // stored) are produce returns — identical wire behavior.
+    return isolateAggregator(res, "api/usage/session-block", async () => {
+      if (blockedUntilMs === null) {
+        // Not a session-limit notice / unparseable time → nothing to record.
+        return { recorded: false, blockedUntil: null };
+      }
       const stored = await setSessionBlockedUntil(blockedUntilMs, nowMs);
       if (stored === null) {
-        return res.json({ recorded: false, blockedUntil: null });
+        return { recorded: false, blockedUntil: null };
       }
-      return res.json({
+      return {
         recorded: true,
         blockedUntil: new Date(stored).toISOString(),
         blockedUntilMs: stored,
-      });
-    } catch (err: any) {
-      console.error(`[usage] /api/usage/session-block record failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+      };
+    });
   });
 
   /**
@@ -266,6 +262,12 @@ export function createUsageRouter() {
       }
       return res.json({ recorded: true, attributed: result.attributed });
     } catch (err: any) {
+      // Not an isolateAggregator route (issue #4402): the catch's 500 keeps
+      // the `recorded:false` envelope so both failure arms of this recorder —
+      // the recordDispatchCostJoin result-failure above and an unexpected
+      // throw here — answer with the SAME shape (reap.py branches on the
+      // status code, not the body, but the paired envelope keeps the
+      // recorder's contract legible).
       console.error(`[usage] /api/usage/dispatch-cost failed: ${err?.message || err}`);
       return res.status(500).json({ recorded: false, error: err?.message || String(err) });
     }
@@ -290,13 +292,11 @@ export function createUsageRouter() {
         .status(400)
         .json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
-    try {
-      const view = await getUsageByIssue(parsed.data.issue);
-      return res.json(view);
-    } catch (err: any) {
-      console.error(`[usage] /api/usage/by-issue failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+    // Issue #4402: never-throw-500 isolation via isolateAggregator (see
+    // GET /usage above).
+    return isolateAggregator(res, "api/usage/by-issue", () =>
+      getUsageByIssue(parsed.data.issue),
+    );
   });
 
   return router;

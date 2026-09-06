@@ -2,7 +2,11 @@ import { Router } from "express";
 import { STREAMS, streamKey } from "../event-bus-stream-keys.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { PublishEventBodySchema } from "../schemas/events.ts";
-import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
+import {
+  aggregatorRouteNoQuery,
+  isolateAggregator,
+  schemaValidationError,
+} from "./route-helpers.ts";
 import type { EventReaderBus } from "../event-bus-seams.ts";
 
 /**
@@ -41,7 +45,9 @@ export function createEventsRouter(eventBus: EventReaderBus) {
     if (!parsed.success) {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
-    try {
+    // Issue #4402: never-throw-500 isolation via isolateAggregator
+    // (route-helpers.ts, #909).
+    return isolateAggregator(res, "api/events/publish", async () => {
       const { type, payload, correlationId } = parsed.data;
       await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type,
@@ -49,10 +55,8 @@ export function createEventsRouter(eventBus: EventReaderBus) {
         correlationId: correlationId ?? null,
         payload: payload ?? {},
       });
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true };
+    });
   });
 
   return router;

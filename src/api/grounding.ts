@@ -17,6 +17,7 @@
 import { Router } from "express";
 import { groundProject } from "../grounding/index.ts";
 import { getTargetWorkspace } from "../target-config.ts";
+import { isolateAggregator } from "./route-helpers.ts";
 
 export function createGroundingRouter() {
   const router = Router();
@@ -29,17 +30,17 @@ export function createGroundingRouter() {
   // nested fields. See issue #456 — the parser used to silently return
   // `{passed:0, failed:0, total:0}` on unrecognised output and downstream
   // metrics treated that as ground truth.
-  router.get("/grounding/latest", async (req, res) => {
-    try {
+  // Issue #4402: the never-throw-500 isolation comes from the
+  // isolateAggregator seam (route-helpers.ts, #909) — the 500 envelope + its
+  // log live there once.
+  router.get("/grounding/latest", async (_req, res) =>
+    isolateAggregator(res, "api/grounding/latest", async () => {
       const projectDir = getTargetWorkspace();
       const report = await groundProject(projectDir);
       const testParseStatus = report?.testReport?.parseStatus ?? null;
-      res.json({ ...report, testParseStatus });
-    } catch (err: any) {
-      console.error(`[grounding-api] GET /grounding/latest failed: ${err?.message || err}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return { ...report, testParseStatus };
+    }),
+  );
 
   return router;
 }

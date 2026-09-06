@@ -1,0 +1,1 @@
+- refactor: drain the hand-rolled API 500 `{ error }` catch ritual onto the isolateAggregator seam across src/api, with a CI ratchet keeping it drained (#4402)
