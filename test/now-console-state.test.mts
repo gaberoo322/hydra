@@ -31,6 +31,7 @@ import {
   flattenAttribution,
   formatDuration,
   formatRatio,
+  formatRelativeTime,
   formatTokens,
   isNowViewMode,
   rankStuckSignals,
@@ -318,6 +319,35 @@ test("formatDuration: —/s/m/h branches and the 60/3600 boundaries", () => {
   assert.equal(formatDuration(5400), "1.5h");
 });
 
+test("formatRelativeTime: s/m/h/d bands and the 60/3600/86400 boundaries", () => {
+  const now = 1_000_000;
+  assert.equal(formatRelativeTime(now - 12, now), "12s ago");
+  assert.equal(formatRelativeTime(now - 59, now), "59s ago");
+  assert.equal(formatRelativeTime(now - 60, now), "1m ago");
+  assert.equal(formatRelativeTime(now - 240, now), "4m ago");
+  assert.equal(formatRelativeTime(now - 3599, now), "59m ago");
+  assert.equal(formatRelativeTime(now - 3600, now), "1h ago");
+  assert.equal(formatRelativeTime(now - 7200, now), "2h ago");
+  assert.equal(formatRelativeTime(now - 86_399, now), "23h ago");
+  assert.equal(formatRelativeTime(now - 86_400, now), "1d ago");
+  assert.equal(formatRelativeTime(now - 172_800, now), "2d ago");
+});
+
+test("formatRelativeTime: empty string for invalid input", () => {
+  assert.equal(formatRelativeTime(null, 1_000_000), "");
+  assert.equal(formatRelativeTime(undefined, 1_000_000), "");
+  assert.equal(formatRelativeTime(0, 1_000_000), "");
+  assert.equal(formatRelativeTime(-5, 1_000_000), "");
+  assert.equal(formatRelativeTime(Number.NaN, 1_000_000), "");
+});
+
+test("formatRelativeTime: future timestamps clamp to 0s ago (no negative diff)", () => {
+  // Clock skew between the dashboard and the orchestrator process could
+  // make a turn's epoch appear slightly in the future. Render "0s ago"
+  // rather than "-3s ago" so the row stays readable.
+  assert.equal(formatRelativeTime(1_000_010, 1_000_000), "0s ago");
+});
+
 // ---------------------------------------------------------------------------
 // StatusStrip widgets (issue #2411) — next-dispatch countdown
 // ---------------------------------------------------------------------------
@@ -403,4 +433,17 @@ test("deriveInflightSlots: missing skill/epoch degrade safely", () => {
   assert.equal(rows[0].skill, "unknown");
   assert.equal(rows[0].relativeStart, ""); // no usable epoch → omitted segment
   assert.equal(rows[0].taskId, "t");
+});
+
+test("deriveInflightSlots: relative start uses the shared s/m/h/d buckets", () => {
+  // formatRelativeStart is a "started " prefix over the canonical
+  // formatRelativeTime buckets (issue #4400) — pin one non-minute bucket so
+  // the delegation cannot silently fork back into its own threshold math.
+  const now = Date.parse("2026-06-24T02:00:00.000Z");
+  const nowSec = Math.floor(now / 1000);
+  const rows = deriveInflightSlots(
+    { "wt-h": { skill: "retro_orch", task_id: "t", started_epoch: nowSec - 7200 } },
+    now,
+  );
+  assert.equal(rows[0].relativeStart, "started 2h ago");
 });

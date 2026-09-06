@@ -6,6 +6,8 @@
 // the inline originals — these are pure functions with no React or side
 // effects.
 
+import { formatRelativeTime } from "../pages/now-console/console-state.ts";
+
 export const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
 export const STATUS_STYLES = {
@@ -45,11 +47,12 @@ export function truncId(id) {
   return `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
+// relativeTime delegates the s/m/h/d bucket math to the canonical
+// formatRelativeTime in console-state.ts (issue #4400) — the thresholds live
+// in exactly one place. This wrapper keeps this module's own public contract:
+// it supplies Date.now() itself and renders "—" (not "") for an unusable
+// epoch, matching what HistoryTable renders for missing rows.
 export function relativeTime(epoch) {
-  if (!Number.isFinite(epoch) || epoch <= 0) return "—";
-  const delta = Math.max(0, Math.floor(Date.now() / 1000) - epoch);
-  if (delta < 60) return `${delta}s ago`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
+  const rel = formatRelativeTime(epoch, Math.floor(Date.now() / 1000));
+  return rel === "" ? "—" : rel;
 }
