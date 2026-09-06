@@ -333,6 +333,32 @@ describe("getLessonsTrend — failure isolation", () => {
     assert.equal(response.metaFrictionOpened, 1);
   });
 
+  test("seam reader rejects → meta count degrades to 0, friction still ships", async () => {
+    // The shared reader itself never throws, but a rejecting deps stub
+    // propagates — the allSettled slot must degrade to a 0 count (issue #4403).
+    const response = await getLessonsTrend(7, {
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => {
+        throw new Error("seam down");
+      },
+      readFrictionPatterns: async () => [
+        {
+          skill: "hydra-dev",
+          patterns: [
+            {
+              category: "cue-promoted",
+              hitCount: PROMOTION_THRESHOLD,
+              promoted: true,
+              lastSeen: "2026-05-26T01:00:00Z",
+            },
+          ],
+        },
+      ],
+    });
+    assert.equal(response.topFriction.length, 1);
+    assert.equal(response.metaFrictionOpened, 0);
+  });
+
   test("meta-friction reader degrades to [] → friction signals still ship", async () => {
     const response = await getLessonsTrend(7, {
       now: NOW,

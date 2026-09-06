@@ -253,6 +253,27 @@ describe("getBuilderHealthScorecard — composition", () => {
     assert.equal(card.autonomyRate?.total, 2);
   });
 
+  test("learning-throughput sub-sources reject → zeroed slots, siblings intact", async () => {
+    // The metric's inner fan-out degrades in place (issue #4403): the scorecard
+    // slot itself stays non-null when only its sub-reads reject.
+    const card = await getBuilderHealthScorecard(
+      happyDeps({
+        getLessonsTrend: async () => {
+          throw new Error("lessons-trend down");
+        },
+        getDesignConceptProductionCountForDate: async () => {
+          throw new Error("design-concept count down");
+        },
+      }),
+    );
+    assert.notEqual(card.learningThroughput, null);
+    assert.deepEqual(card.learningThroughput?.promotionRate, []);
+    assert.equal(card.learningThroughput?.metaFrictionOpened, 0);
+    assert.equal(card.learningThroughput?.designConceptsProducedToday, 0);
+    // Sibling metrics still computed.
+    assert.equal(card.autonomyRate?.total, 2);
+  });
+
   test("unmerged PRs are excluded from the autonomy denominator", async () => {
     const card = await getBuilderHealthScorecard(
       happyDeps({

@@ -1,0 +1,1 @@
+- refactor: builder-health and lessons-trend sub-read failures now degrade through the shared settled-fold helpers with structured logs (#4403)

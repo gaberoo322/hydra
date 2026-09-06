@@ -27,6 +27,7 @@
  */
 
 import { PROMOTION_THRESHOLD } from "../pattern-memory/index.ts";
+import { settledOrEmpty } from "../settled-fold.ts";
 import {
   readFrictionPatterns,
   readMetaFrictionIssues,
@@ -96,22 +97,13 @@ export async function getLessonsTrend(
     readMetaFrictionIssues("lessons-trend", windowStart, deps),
   ]);
 
-  const groups =
-    patternsResult.status === "fulfilled" ? patternsResult.value : [];
-  if (patternsResult.status === "rejected") {
-    console.error(
-      `[lessons-trend] friction reader failed: ${patternsResult.reason?.message || patternsResult.reason}`,
-    );
-  }
+  // Both sub-reads degrade through the shared settled-fold (#916/#4403):
+  // never-throw + fail-loud structured log, one home for the fold.
+  const groups = settledOrEmpty(patternsResult, "lessons-trend/friction-patterns");
   // The shared reader already never-throws + re-filters by exact createdAt, so
   // its length is the in-window meta-friction count. The allSettled wrapper is
   // belt-and-suspenders in case a future deps stub rejects.
-  const meta = metaResult.status === "fulfilled" ? metaResult.value.length : 0;
-  if (metaResult.status === "rejected") {
-    console.error(
-      `[lessons-trend] meta-friction count failed: ${metaResult.reason?.message || metaResult.reason}`,
-    );
-  }
+  const meta = settledOrEmpty(metaResult, "lessons-trend/meta-friction").length;
 
   const promoted = collectPromoted(groups, windowStart, now);
 
