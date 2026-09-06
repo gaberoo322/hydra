@@ -26,13 +26,6 @@
  * lacked; some logs carried a `(${label})` suffix, some didn't; one variant
  * swallowed `result.value ?? null`.
  *
- * The consolidation completed in #4403: the last two pre-#916 holdouts —
- * `aggregators/builder-health.ts`'s `computeLearningThroughput` and
- * `aggregators/lessons-trend.ts`'s `getLessonsTrend` — had kept hand-rolled
- * `status === "fulfilled" ? value : fallback` + bespoke `console.error`
- * sites; both now route through {@link settledOr}/{@link settledOrEmpty}, so
- * every aggregator fan-out degrades through this module.
- *
  * This module is the single home for that fold. The three observed shapes
  * are the same fold parameterised by fallback:
  *
