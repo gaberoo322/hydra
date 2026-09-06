@@ -11,6 +11,7 @@
 
 import { Router } from "express";
 import { loadOutcomes, getOutcomeValue, type Outcome } from "../outcomes.ts";
+import { logger } from "../logger.ts";
 
 interface OutcomeRow {
   name: string;
@@ -47,6 +48,11 @@ export function createOutcomesRouter(outcomesFile?: string) {
   const router = Router();
 
   // GET /outcomes — list declared outcomes + their current values.
+  //
+  // Not an isolateAggregator route (issue #4402): the degraded
+  // `{ outcomes: [], errors }` envelope is this route's contract — the
+  // dashboard renders the empty list plus the error strings, which the
+  // seam's uniform `{ error }` 500 shape can't express.
   router.get("/outcomes", async (_req, res) => {
     try {
       const result = await loadOutcomes(outcomesFile);
@@ -63,7 +69,8 @@ export function createOutcomesRouter(outcomesFile?: string) {
     } catch (err: any) {
       // Defensive — loader/adapter both don't throw, but Express demands
       // a final guard so we never hand a 500 with no body to the dashboard.
-      console.error(`[outcomes-api] unexpected error: ${err?.message || String(err)}`);
+      // ADR-0027: log through the pino seam, not console.error.
+      logger.error({ err }, "[outcomes-api] unexpected error");
       res.status(500).json({ outcomes: [], errors: [err?.message || String(err)] });
     }
   });

@@ -40,6 +40,7 @@ import {
   UsageByIssueQuerySchema,
 } from "../schemas/usage.ts";
 import { isolateAggregator } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Query schema for the `?force=1` cache-bust knob shared by both usage read
@@ -257,7 +258,8 @@ export function createUsageRouter() {
       };
       const result = await recordDispatchCostJoin(record);
       if (isDispatchCostJoinWriteFailure(result)) {
-        console.error(`[usage] dispatch-cost record failed: ${result.error}`);
+        // ADR-0027: log through the pino seam, not console.error.
+        logger.error({ error: result.error }, "[usage] dispatch-cost record failed");
         return res.status(500).json({ recorded: false, error: result.error });
       }
       return res.json({ recorded: true, attributed: result.attributed });
@@ -268,7 +270,7 @@ export function createUsageRouter() {
       // throw here — answer with the SAME shape (reap.py branches on the
       // status code, not the body, but the paired envelope keeps the
       // recorder's contract legible).
-      console.error(`[usage] /api/usage/dispatch-cost failed: ${err?.message || err}`);
+      logger.error({ err }, "[usage] /api/usage/dispatch-cost failed");
       return res.status(500).json({ recorded: false, error: err?.message || String(err) });
     }
   });

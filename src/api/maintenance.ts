@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { runHousekeeping } from "../scheduler/housekeeping.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
-import { isolateAggregator } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Maintenance sub-router (issue #723 — scheduler fold PR-3/4).
@@ -33,17 +33,21 @@ export function createMaintenanceRouter(
   // POST /maintenance/housekeeping — run the housekeeping chores.
   // Idempotent: each chore's internal time-guard means repeated calls within
   // a window are no-ops (reflected in the `skipped` array of the summary).
-  // Issue #4402: the never-throw-500 isolation comes from the
-  // isolateAggregator seam (route-helpers.ts, #909) — the 500 envelope + its
-  // log live there once. runHousekeeping is itself defensive (per-chore
-  // try/catch); the seam guards the route so an unexpected throw becomes a
-  // logged 500 rather than an unhandled rejection.
-  router.post("/maintenance/housekeeping", async (_req, res) =>
-    isolateAggregator(res, "api/maintenance/housekeeping", async () => {
+  // Not an isolateAggregator route (issue #4402): the catch keeps its
+  // `{ ok: false, error }` envelope — housekeeping.sh logs the non-200 body
+  // verbatim, so the ok-flag stays part of this route's contract.
+  router.post("/maintenance/housekeeping", async (_req, res) => {
+    try {
       const summary = await runHousekeeping(eventBus, opts.housekeepingDeps);
-      return { ok: true, ...summary };
-    }),
-  );
+      res.json({ ok: true, ...summary });
+    } catch (err: any) {
+      // runHousekeeping is itself defensive (per-chore try/catch), but guard
+      // the route too so an unexpected throw becomes a 500 with context rather
+      // than an unhandled rejection.
+      logger.error({ err }, "[api/maintenance] housekeeping run failed");
+      res.status(500).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
 
   return router;
 }

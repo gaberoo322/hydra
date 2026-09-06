@@ -17,6 +17,7 @@ import {
   isolateAggregator,
   schemaValidationError,
 } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 export function createCyclesRouter() {
   const router = Router();
@@ -82,6 +83,9 @@ export function createCyclesRouter() {
         },
       });
     } catch (err: any) {
+      // ADR-0027: log through the pino seam so the read failure is
+      // observable server-side, not only in the 500 body.
+      logger.error({ err }, "[api/cycles] report failed");
       res.status(500).json({ error: err.message });
     }
   });

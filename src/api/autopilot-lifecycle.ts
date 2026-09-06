@@ -57,6 +57,7 @@ import { recordReflectionOutcome } from "../reflections/outcome-record.ts";
 // deps arg and relies on the module default deps); only the import path moves.
 import { recordCycle } from "../autopilot/cycle-close.ts";
 import { schemaValidationError } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 export function createAutopilotLifecycleRouter() {
   const router = Router();
@@ -142,6 +143,10 @@ export function createAutopilotLifecycleRouter() {
         enriched: result.enriched,
       });
     } catch (err: any) {
+      // ADR-0027: log through the pino seam so the unexpected throw is
+      // observable — recordCycle is never-throw by contract, so reaching
+      // here is a genuine surprise worth a loud log line.
+      logger.error({ err }, "[api/autopilot-lifecycle] metrics/record failed");
       res.status(500).json({ error: err.message });
     }
   });

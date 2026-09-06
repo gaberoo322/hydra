@@ -23,6 +23,7 @@ import {
 // Journal Adapter seam (issue #1958): the journalctl slice moved out of
 // autopilot/log.ts behind its own private spawn primitive + typed accessor.
 import { readJournalSlice, isJournalSliceFailure } from "../journal/read.ts";
+import { logger } from "../logger.ts";
 
 export function createAutopilotLogRouter() {
   const router = Router();
@@ -77,7 +78,8 @@ export function createAutopilotLogRouter() {
       res.setHeader("x-autopilot-log-source", logResult.source);
       return res.status(200).send(logResult.text);
     } catch (err: any) {
-      console.error(`[autopilot] runs/:runId/log failed: ${err?.message || err}`);
+      // ADR-0027: log through the pino seam, not console.error.
+      logger.error({ err }, "[autopilot] runs/:runId/log failed");
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });
@@ -115,7 +117,7 @@ export function createAutopilotLogRouter() {
       if (slice.timedOut) res.setHeader("x-autopilot-journal-timed-out", "true");
       return res.status(200).send(slice.text);
     } catch (err: any) {
-      console.error(`[autopilot] runs/:runId/journal failed: ${err?.message || err}`);
+      logger.error({ err }, "[autopilot] runs/:runId/journal failed");
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });

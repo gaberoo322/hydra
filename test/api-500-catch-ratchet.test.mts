@@ -8,14 +8,22 @@
  * of hand-rolled copies of that ritual across the src/api route files. This
  * suite keeps the tail drained:
  *
- *   1. STRUCTURAL — scan every `src/api/*.ts` for hand-rolled
- *      `res.status(500).json({ error ... })` sends and require the count to
- *      sit at or below the frozen DOCUMENTED_EXCEPTIONS map. Every entry there
- *      is a route the seam genuinely cannot express (text/plain send,
- *      await-dependent non-500 status, typed err.code discrimination, or a
- *      result-object check that is not a catch at all), documented at the
- *      route itself. A NEW hand-rolled send fails here; the fix is to adopt
- *      isolateAggregator — not to grow the map.
+ *   1. STRUCTURAL — count RAW `status(500)` occurrences in every `src/api/*.ts`
+ *      and require the count to EQUAL the frozen EXPECTED_500_COUNTS map,
+ *      entry for entry (and 0 for every file absent from it). Raw counting is
+ *      deliberate: it is immune to envelope-shape drift (`{ error }` vs
+ *      `{ recorded:false, error }` vs `{ outcomes: [], errors }`), so ANY new
+ *      500 send — whatever its body — trips the ratchet. Exact equality (not
+ *      `<=`) also trips when a count DROPS: the map then understates reality
+ *      and must be regenerated in the same PR that changed it.
+ *
+ *      Every non-zero entry is a route the seam genuinely cannot express
+ *      (text/plain send, await-dependent non-500 status, typed err.code
+ *      discrimination, a specialized degraded envelope, or a result-object
+ *      check that is not a catch at all), documented here AND in a comment at
+ *      the route. The fix for a violation is to adopt isolateAggregator — or,
+ *      when a route legitimately enters/leaves the kept set, to update this
+ *      map in the same PR with the reason.
  *
  *   2. BEHAVIORAL — pin the seam's wire contract end-to-end on a migrated
  *      route (GET /api/autopilot/class-stats, whose composer is injectable):
@@ -47,19 +55,11 @@ const SRC_API_DIR = join(
 );
 
 /**
- * The hand-rolled ritual shape this ratchet freezes out: a 500 send whose body
- * is the bare `{ error ... }` envelope. Tolerates the multiline spelling
- * (`res\n  .status(500)\n  .json({`).
+ * Exact per-file count of `status(500)` occurrences across `src/api/*.ts`
+ * after the issue #4402 drain. Raw textual occurrences — every spelling
+ * (`res.status(500).json(...)`, multiline chains) contains the substring.
  */
-const HAND_ROLLED_500 = /res\s*\.\s*status\(500\)\s*\.\s*json\(\s*\{\s*error/g;
-
-/**
- * Frozen residue of hand-rolled 500 `{ error }` sends, per src/api file. Each
- * count is a route the seam cannot express, with the reason inline here AND in
- * a comment at the route. The assertion is `<=`, so draining an entry (welcome!)
- * never breaks this suite; only RAISING a count or adding a new file does.
- */
-const DOCUMENTED_EXCEPTIONS: Record<string, number> = {
+const EXPECTED_500_COUNTS: Record<string, number> = {
   // /agents/stream — SSE; the seam JSONs produce's return, a stream can't.
   "agents.ts": 1,
   // POST /alerts/:id/dismiss — mid-loop, await-dependent 404 for a not-found
@@ -78,41 +78,44 @@ const DOCUMENTED_EXCEPTIONS: Record<string, number> = {
   "config.ts": 2,
   // GET /cycle/report/:cycleId — await-dependent 404.
   "cycles.ts": 1,
-  // /resolve — await-dependent 404 {found,handle,reason} (QA contract);
-  // /:anchorRef GET — await-dependent 404; /approve — typed err.code → 404
-  // discrimination in the catch.
-  "design-concepts.ts": 3,
+  // exempt-log POST + resolve + /:anchorRef GET + create + approve — each
+  // keeps an await-dependent 404 / typed err.code→404 discrimination /
+  // res.status(201) success the seam (JSON-at-200) can't express.
+  "design-concepts.ts": 5,
   // GET transcript — 404 / not-available branches (comment at the route).
   "dispatches.ts": 1,
   // GET /goals — await-dependent 404; GET /goals/summary — text/plain send.
   "goals.ts": 2,
   // Three result.ok:false checks (result-object convention, not catches).
   "holdback.ts": 3,
+  // POST /maintenance/housekeeping — keeps the `{ ok:false, error }` envelope
+  // housekeeping.sh logs verbatim (comment at the route).
+  "maintenance.ts": 1,
   // POST /merge/lock — await-dependent 409 when the lock is held.
   "merge-lock.ts": 1,
   // Outside issue #4402's Files-in-scope list — one leftover site parked for a
   // follow-up sweep. Do not grow it.
   "metrics.ts": 1,
-  // GET /memory/:agent — text/plain send (comment at the route).
-  "pattern-memory.ts": 1,
+  // GET /outcomes — the degraded `{ outcomes: [], errors }` envelope is the
+  // dashboard contract: one result.ok:false arm + one defensive catch.
+  "outcomes.ts": 2,
+  // GET /memory/:agent — text/plain send; ineffective-rules /
+  // rule-action-log / friction-patterns — specialized degraded envelopes the
+  // uniform `{ error }` shape can't express (comments at the routes).
+  "pattern-memory.ts": 4,
+  // The seam itself: isolateAggregator's single canonical 500 send.
+  "route-helpers.ts": 1,
+  // POST /usage/dispatch-cost — keeps the paired `recorded:false` envelope so
+  // both failure arms of the recorder answer the same shape.
+  "usage.ts": 2,
 };
 
-function countHandRolled500(src: string): number {
-  return (src.match(HAND_ROLLED_500) ?? []).length;
+function countRaw500(src: string): number {
+  return src.split("status(500)").length - 1;
 }
 
 describe("isolateAggregator seam — structural ratchet (issue #4402)", () => {
-  test("the seam itself owns exactly one canonical 500 send", () => {
-    const src = readFileSync(join(SRC_API_DIR, "route-helpers.ts"), "utf8");
-    assert.equal(
-      countHandRolled500(src),
-      1,
-      "route-helpers.ts isolateAggregator must keep the single canonical " +
-        "res.status(500).json({ error }) site",
-    );
-  });
-
-  test("no src/api file carries hand-rolled 500 error sends beyond the documented exceptions", () => {
+  test("every src/api file's raw status(500) count equals the frozen map exactly", () => {
     const files = readdirSync(SRC_API_DIR)
       .filter((f) => f.endsWith(".ts"))
       .sort();
@@ -120,23 +123,34 @@ describe("isolateAggregator seam — structural ratchet (issue #4402)", () => {
 
     const violations: string[] = [];
     for (const f of files) {
-      if (f === "route-helpers.ts") continue; // the seam itself — pinned at 1 above
-      const allowed = DOCUMENTED_EXCEPTIONS[f] ?? 0;
-      const observed = countHandRolled500(
+      const expected = EXPECTED_500_COUNTS[f] ?? 0;
+      const observed = countRaw500(
         readFileSync(join(SRC_API_DIR, f), "utf8"),
       );
-      if (observed > allowed) {
+      if (observed !== expected) {
         violations.push(
-          `${f}: ${observed} hand-rolled 500 { error } send(s), ` +
-            `${allowed} allowed — adopt isolateAggregator ` +
-            `(src/api/route-helpers.ts) or document the exception`,
+          `${f}: observed ${observed} status(500) occurrence(s), ` +
+            `${expected} expected — adopt isolateAggregator ` +
+            `(src/api/route-helpers.ts) for a new 500 send, or update ` +
+            `EXPECTED_500_COUNTS in this test in the same PR when the kept ` +
+            `set legitimately changes`,
+        );
+      }
+    }
+    // A stale map entry (file deleted/renamed) must fail too, not rot.
+    const knownFiles = new Set(files);
+    for (const f of Object.keys(EXPECTED_500_COUNTS)) {
+      if (!knownFiles.has(f)) {
+        violations.push(
+          `${f}: listed in EXPECTED_500_COUNTS but no such file under src/api ` +
+            `— prune the stale map entry`,
         );
       }
     }
     assert.deepEqual(
       violations,
       [],
-      "hand-rolled never-throw-500 ritual outside the frozen exception map:\n" +
+      "hand-rolled never-throw-500 ritual outside the frozen count map:\n" +
         violations.join("\n") +
         (violations.length ? "\n" : ""),
     );

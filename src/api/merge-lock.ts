@@ -5,6 +5,7 @@ import {
   releaseMergeLock,
 } from "../redis/cycle-tracking.ts";
 import { isolateAggregator } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Merge lock routes.
@@ -16,7 +17,7 @@ import { isolateAggregator } from "./route-helpers.ts";
 export function createMergeLockRouter() {
   const router = Router();
 
-  // POST /merge/lock is NOT an isolateAggregator route (issue #4402): the
+  // Not an isolateAggregator route (issue #4402): POST /merge/lock's
   // await-dependent 409 (lock already held, `{ locked, holder }`) can't be
   // expressed through the seam (JSON-at-200 of produce's return).
   router.post("/merge/lock", async (req, res) => {
@@ -29,6 +30,9 @@ export function createMergeLockRouter() {
       }
       res.json({ acquired: true });
     } catch (err: any) {
+      // ADR-0027: log through the pino seam so the lock failure is
+      // observable server-side, not only in the 500 body.
+      logger.error({ err }, "[api/merge-lock] lock failed");
       res.status(500).json({ error: err.message });
     }
   });
