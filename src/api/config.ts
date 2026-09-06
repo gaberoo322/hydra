@@ -15,6 +15,8 @@ import {
   upsertEnvVar,
   deleteEnvVar,
 } from "./config-io.ts";
+import { isolateAggregator } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Config + env-var routes.
@@ -30,6 +32,13 @@ import {
  * primitive → shape the response. It resolves the env-project and config-root
  * paths (the only config the leaf refuses to read from `process.env`) and holds
  * no `readFile`/`writeFile`/`readdir` of its own.
+ *
+ * Issue #4402: the 404/400 pre-checks stay outside the seam (their envelopes
+ * are unchanged); the leaf call + plain JSON 200 ride `isolateAggregator`
+ * (route-helpers.ts, #909), which owns the logged 500 `{ error }`. The two
+ * routes whose success path the seam cannot express (a text/plain send, a 404
+ * inside the try) keep an annotated hand-rolled catch — ADR-0022 precedent:
+ * enforce the seam, do not grow it for n=1.
  */
 export function createConfigRouter() {
   const router = Router();
@@ -45,14 +54,17 @@ export function createConfigRouter() {
   router.get("/config/:section", async (req, res) => {
     const section = CONFIG_SECTIONS[req.params.section];
     if (!section) return res.status(404).json({ error: `Unknown config section: ${req.params.section}` });
-    try {
-      res.json(await listConfigSection(CONFIG_PATH, section));
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+    return isolateAggregator(res, "api/config/section", () =>
+      listConfigSection(CONFIG_PATH, section),
+    );
   });
 
   // GET /config/:section/:name — Read a config file
+  //
+  // Not an isolateAggregator route: the success path is a text/plain send (and
+  // a 404 for a missing file), not a JSON body, so the seam (which JSONs its
+  // produce result) does not fit. The catch adopts the pino `err`-field seam
+  // (ADR-0027) instead.
   router.get("/config/:section/:name", async (req, res) => {
     const section = CONFIG_SECTIONS[req.params.section];
     if (!section) return res.status(404).json({ error: `Unknown config section: ${req.params.section}` });
@@ -61,6 +73,10 @@ export function createConfigRouter() {
       if (content === null) return res.status(404).json({ error: `Not found: ${req.params.name}` });
       res.type("text/plain").send(content);
     } catch (err: any) {
+      logger.error(
+        { routeLabel: "api/config/file", section: req.params.section, name: req.params.name, err },
+        "[api/config] read config file failed",
+      );
       res.status(500).json({ error: err.message });
     }
   });
@@ -71,12 +87,10 @@ export function createConfigRouter() {
     if (!section) return res.status(404).json({ error: `Unknown config section: ${req.params.section}` });
     const content = req.body?.content;
     if (typeof content !== "string") return res.status(400).json({ error: "Body must include 'content' string" });
-    try {
+    return isolateAggregator(res, "api/config/write", async () => {
       const path = await writeConfigFile(CONFIG_PATH, section, req.params.name, content);
-      res.json({ ok: true, path });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true, path };
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -98,18 +112,16 @@ export function createConfigRouter() {
   router.get<{ project: string }>("/env/:project", requireEnvAuth, async (req, res) => {
     const envPath = ENV_PROJECTS[req.params.project];
     if (!envPath) return res.status(404).json({ error: `Unknown project: ${req.params.project}` });
-    try {
+    return isolateAggregator(res, "api/env/list", async () => {
       const vars = parseEnvFile(await readEnvFile(envPath));
       // ADR-0022: read the `reveal` flag through the Schemas seam via the
       // common booleanFlag helper. Absent/unset => false (mask values).
       const reveal = z.object({ reveal: booleanFlag() }).parse(req.query).reveal;
-      res.json(vars.map(v => ({
+      return vars.map(v => ({
         key: v.key,
         value: reveal ? v.value : maskValue(v.value),
-      })));
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      }));
+    });
   });
 
   // PUT /env/:project — Set/update a variable
@@ -123,15 +135,18 @@ export function createConfigRouter() {
     if (typeof value !== "string") {
       return res.status(400).json({ error: "Value must be a string" });
     }
-    try {
+    return isolateAggregator(res, "api/env/upsert", async () => {
       const action = await upsertEnvVar(envPath, key, value);
-      res.json({ ok: true, key, action });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true, key, action };
+    });
   });
 
   // DELETE /env/:project/:key — Remove a variable
+  //
+  // Not an isolateAggregator route: the success path writes a 404 for a
+  // not-found key from inside the try, which the seam (JSON-at-200 of
+  // produce's return) can't express. The catch adopts the pino `err`-field
+  // seam (ADR-0027) instead.
   router.delete<{ project: string; key: string }>("/env/:project/:key", requireEnvAuth, async (req, res) => {
     const envPath = ENV_PROJECTS[req.params.project];
     if (!envPath) return res.status(404).json({ error: `Unknown project: ${req.params.project}` });
@@ -141,6 +156,10 @@ export function createConfigRouter() {
       if (!removed) return res.status(404).json({ error: `Key not found: ${key}` });
       res.json({ ok: true, key, action: "deleted" });
     } catch (err: any) {
+      logger.error(
+        { routeLabel: "api/env/delete", project: req.params.project, key, err },
+        "[api/config] delete env var failed",
+      );
       res.status(500).json({ error: err.message });
     }
   });

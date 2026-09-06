@@ -11,6 +11,7 @@
 
 import { Router } from "express";
 import { loadOutcomes, getOutcomeValue, type Outcome } from "../outcomes.ts";
+import { logger } from "../logger.ts";
 
 interface OutcomeRow {
   name: string;
@@ -47,6 +48,11 @@ export function createOutcomesRouter(outcomesFile?: string) {
   const router = Router();
 
   // GET /outcomes — list declared outcomes + their current values.
+  //
+  // Not an isolateAggregator route: both 500 branches carry the specialized
+  // `{ outcomes: [], errors }` envelope the dashboard reads (the loader's
+  // result-object branch and the defensive catch), not the seam's `{ error }`.
+  // The catch adopts the pino `err`-field seam (ADR-0027) instead.
   router.get("/outcomes", async (_req, res) => {
     try {
       const result = await loadOutcomes(outcomesFile);
@@ -63,7 +69,7 @@ export function createOutcomesRouter(outcomesFile?: string) {
     } catch (err: any) {
       // Defensive — loader/adapter both don't throw, but Express demands
       // a final guard so we never hand a 500 with no body to the dashboard.
-      console.error(`[outcomes-api] unexpected error: ${err?.message || String(err)}`);
+      logger.error({ routeLabel: "api/outcomes", err }, "[outcomes-api] unexpected error");
       res.status(500).json({ outcomes: [], errors: [err?.message || String(err)] });
     }
   });

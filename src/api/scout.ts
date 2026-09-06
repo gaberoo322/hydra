@@ -11,6 +11,7 @@ import {
   ScoutDispatchesQuerySchema,
   ScoutStatsQuerySchema,
 } from "../schemas/scout.ts";
+import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 /**
  * Tool-scout API surface (issue #485, Phase B).
@@ -19,6 +20,13 @@ import {
  * answer "what did the scout do this week?" without reading Redis by
  * hand. The endpoint is read-only — all writes go through the scout
  * skill (Phase A) / autopilot dispatch (Phase B).
+ *
+ * Issue #4402: every route rides the `aggregatorRouteNoQuery` seam
+ * (route-helpers.ts, #909) — the never-throw 500 `{ error }` envelope and its
+ * pino `err`-field log line live there once. The 500 body now carries the
+ * thrown message (the seam's `err?.message || String(err)`) instead of a
+ * per-route constant label; no consumer parsed the label (collect-state.sh
+ * reads /scout/alert-plan with a non-2xx fallback).
  */
 export function createScoutRouter() {
   const router = Router();
@@ -37,8 +45,9 @@ export function createScoutRouter() {
   //     },
   //     totals: { candidates: N, filtered: N, filed: N, dropped: N, rejected: N }
   //   }
-  router.get("/scout/stats", async (req, res) => {
-    try {
+  router.get(
+    "/scout/stats",
+    aggregatorRouteNoQuery("api/scout/stats", async (req) => {
       // ADR-0022: read `window` through the Schemas seam (absent/garbage → 7),
       // then clamp to the rollup ceiling. The clamp stays in the route because
       // the legacy behaviour clamps an over-range value (Math.min) rather than
@@ -61,19 +70,16 @@ export function createScoutRouter() {
 
       const lastWalk = await getScoutLastCalendarWalk();
 
-      res.json({
+      return {
         window,
         since: since.toISOString(),
         until: now.toISOString(),
         lastCalendarWalkAt: lastWalk,
         categories,
         totals,
-      });
-    } catch (err) {
-      console.error("/api/scout/stats failed:", err);
-      res.status(500).json({ error: "scout-stats failed" });
-    }
-  });
+      };
+    }),
+  );
 
   // GET /scout/dispatches?limit=N — Phase C (issue #486) audit trail of
   // every scout invocation (calendar + alert). Newest-first. Returns:
@@ -89,32 +95,25 @@ export function createScoutRouter() {
   // Lets operators answer "did the test_decline alert last Tuesday
   // actually trigger a scout, and what came out of it?" without
   // dredging the Redis stream by hand.
-  router.get("/scout/dispatches", async (req, res) => {
-    try {
+  router.get(
+    "/scout/dispatches",
+    aggregatorRouteNoQuery("api/scout/dispatches", async (req) => {
       // ADR-0022: read `limit` through the Schemas seam (default 50 on garbage).
       const { limit } = ScoutDispatchesQuerySchema.parse(req.query);
       const entries = await listDispatchAudits(limit);
-      res.json({ limit, entries });
-    } catch (err) {
-      console.error("/api/scout/dispatches failed:", err);
-      res.status(500).json({ error: "scout-dispatches failed" });
-    }
-  });
+      return { limit, entries };
+    }),
+  );
 
   // GET /scout/alert-plan — Phase C (issue #486) read-only preview of what
   // the alert listener WOULD dispatch right now. The autopilot consumes
   // this via collect-state.sh; operators can hit it directly to debug
   // why a known alert pattern didn't fire a scout. Doesn't advance the
   // cursor or stamp any cooldown — purely diagnostic.
-  router.get("/scout/alert-plan", async (_req, res) => {
-    try {
-      const plan = await planAlertDispatches();
-      res.json(plan);
-    } catch (err) {
-      console.error("/api/scout/alert-plan failed:", err);
-      res.status(500).json({ error: "scout-alert-plan failed" });
-    }
-  });
+  router.get(
+    "/scout/alert-plan",
+    aggregatorRouteNoQuery("api/scout/alert-plan", () => planAlertDispatches()),
+  );
 
   return router;
 }

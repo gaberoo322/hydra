@@ -2,7 +2,11 @@ import { Router } from "express";
 import { STREAMS, streamKey } from "../event-bus-stream-keys.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { PublishEventBodySchema } from "../schemas/events.ts";
-import { aggregatorRouteNoQuery, schemaValidationError } from "./route-helpers.ts";
+import {
+  aggregatorRouteNoQuery,
+  isolateAggregator,
+  schemaValidationError,
+} from "./route-helpers.ts";
 import type { EventReaderBus } from "../event-bus-seams.ts";
 
 /**
@@ -36,12 +40,15 @@ export function createEventsRouter(eventBus: EventReaderBus) {
   // the prior `if (!type)` guard) and admits optional `payload` / `correlationId`;
   // `.passthrough()` ignores unknown keys. A parse failure returns the canonical
   // 400 `{ code: "schema-validation-failed", issues }` envelope.
+  //
+  // Issue #4402: the body pre-check stays outside the seam; the publish + the
+  // plain JSON 200 ride isolateAggregator (#909), which owns the logged 500.
   router.post("/events/publish", async (req, res) => {
     const parsed = PublishEventBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return res.status(400).json(schemaValidationError(parsed.error));
     }
-    try {
+    return isolateAggregator(res, "api/events/publish", async () => {
       const { type, payload, correlationId } = parsed.data;
       await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type,
@@ -49,10 +56,8 @@ export function createEventsRouter(eventBus: EventReaderBus) {
         correlationId: correlationId ?? null,
         payload: payload ?? {},
       });
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      return { ok: true };
+    });
   });
 
   return router;

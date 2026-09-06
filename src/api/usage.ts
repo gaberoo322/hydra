@@ -39,6 +39,8 @@ import {
   DispatchCostJoinBodySchema,
   UsageByIssueQuerySchema,
 } from "../schemas/usage.ts";
+import { aggregatorRouteNoQuery, isolateAggregator } from "./route-helpers.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Query schema for the `?force=1` cache-bust knob shared by both usage read
@@ -70,15 +72,12 @@ const SessionBlockBodySchema = z
 export function createUsageRouter() {
   const router = Router();
 
+  // Issue #4402: the read routes ride the isolateAggregator /
+  // aggregatorRouteNoQuery seam (route-helpers.ts, #909) — the never-throw 500
+  // `{ error }` envelope and its pino `err`-field log line live there once.
   router.get("/usage", async (req, res) => {
     const force = ForceQuerySchema.parse(req.query).force;
-    try {
-      const snapshot = await getUsage({ force });
-      return res.json(snapshot);
-    } catch (err: any) {
-      console.error(`[usage] /api/usage failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+    return isolateAggregator(res, "api/usage", () => getUsage({ force }));
   });
 
   /**
@@ -124,20 +123,21 @@ export function createUsageRouter() {
    * genuine 500, not a degradable slice), builds the resolved deps bag from the
    * live Redis accessors, and formats the response.
    */
-  router.get("/usage/eligibility", async (req, res) => {
-    // METER-ONLY (2026-07-30). This handler deliberately does NOT call
-    // getUsage(): that runs the transcript scan, which grew to ~1.7 GB of
-    // in-window JSONL and stopped answering inside the Pace Gate's 10s probe
-    // budget, silently halting autopilot launches while /api/health stayed
-    // green. Every field the verdict reads comes from the Anthropic OAuth
-    // meter plus config — see src/cost/eligibility-usage.ts for the full
-    // rationale, including why this is also the more ACCURATE source.
-    //
-    // `?force=1` is accepted and ignored here: it exists to bust the snapshot
-    // scan cache, and there is no scan on this path. The meter has its own
-    // independent TTL + backoff and must not be forced by an HTTP caller —
-    // that is exactly how a rate-limited meter gets hammered.
-    try {
+  router.get(
+    "/usage/eligibility",
+    aggregatorRouteNoQuery("api/usage/eligibility", async () => {
+      // METER-ONLY (2026-07-30). This handler deliberately does NOT call
+      // getUsage(): that runs the transcript scan, which grew to ~1.7 GB of
+      // in-window JSONL and stopped answering inside the Pace Gate's 10s probe
+      // budget, silently halting autopilot launches while /api/health stayed
+      // green. Every field the verdict reads comes from the Anthropic OAuth
+      // meter plus config — see src/cost/eligibility-usage.ts for the full
+      // rationale, including why this is also the more ACCURATE source.
+      //
+      // `?force=1` is accepted and ignored here: it exists to bust the snapshot
+      // scan cache, and there is no scan on this path. The meter has its own
+      // independent TTL + backoff and must not be forced by an HTTP caller —
+      // that is exactly how a rate-limited meter gets hammered.
       const meter = await getEligibilityUsage();
       const eligibility = await getEligibilityView({
         snapshot: meter.input,
@@ -164,12 +164,9 @@ export function createUsageRouter() {
         readWorklessUntil: () => getWorklessUntil(),
         now: () => Date.now(),
       });
-      return res.json(eligibility);
-    } catch (err: any) {
-      console.error(`[usage] /api/usage/eligibility failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      return eligibility;
+    }),
+  );
 
   /**
    * POST /api/usage/session-block — record a session-limit hard block (#1089).
@@ -199,20 +196,20 @@ export function createUsageRouter() {
       // Not a session-limit notice / unparseable time → nothing to record.
       return res.json({ recorded: false, blockedUntil: null });
     }
-    try {
-      const stored = await setSessionBlockedUntil(blockedUntilMs, nowMs);
+    // Issue #4402: the pre-checks above stay outside the seam; the Redis write
+    // + both 200 branches ride isolateAggregator, which owns the logged 500.
+    const resolvedBlockedUntilMs = blockedUntilMs;
+    return isolateAggregator(res, "api/usage/session-block", async () => {
+      const stored = await setSessionBlockedUntil(resolvedBlockedUntilMs, nowMs);
       if (stored === null) {
-        return res.json({ recorded: false, blockedUntil: null });
+        return { recorded: false, blockedUntil: null };
       }
-      return res.json({
+      return {
         recorded: true,
         blockedUntil: new Date(stored).toISOString(),
         blockedUntilMs: stored,
-      });
-    } catch (err: any) {
-      console.error(`[usage] /api/usage/session-block record failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+      };
+    });
   });
 
   /**
@@ -230,6 +227,11 @@ export function createUsageRouter() {
    * see `DispatchCostJoinBodySchema`'s docstring. Never blocks a completion:
    * reap swallows any non-2xx / network error the same way it already does
    * for `/api/metrics/tokens`.
+   *
+   * Not an isolateAggregator route: both 500 branches carry the specialized
+   * `{ recorded: false, error }` envelope (the write-failure result-object
+   * branch and the defensive catch), not the seam's `{ error }`. The catch
+   * adopts the pino `err`-field seam (ADR-0027) instead.
    */
   router.post("/usage/dispatch-cost", async (req, res) => {
     const parsed = DispatchCostJoinBodySchema.safeParse(req.body);
@@ -261,12 +263,18 @@ export function createUsageRouter() {
       };
       const result = await recordDispatchCostJoin(record);
       if (isDispatchCostJoinWriteFailure(result)) {
-        console.error(`[usage] dispatch-cost record failed: ${result.error}`);
+        logger.error(
+          { routeLabel: "api/usage/dispatch-cost", issue: record.issue, error: result.error },
+          "[usage] dispatch-cost record failed",
+        );
         return res.status(500).json({ recorded: false, error: result.error });
       }
       return res.json({ recorded: true, attributed: result.attributed });
     } catch (err: any) {
-      console.error(`[usage] /api/usage/dispatch-cost failed: ${err?.message || err}`);
+      logger.error(
+        { routeLabel: "api/usage/dispatch-cost", err },
+        "[usage] /api/usage/dispatch-cost failed",
+      );
       return res.status(500).json({ recorded: false, error: err?.message || String(err) });
     }
   });
@@ -290,13 +298,9 @@ export function createUsageRouter() {
         .status(400)
         .json({ code: "schema-validation-failed", issues: parsed.error.issues });
     }
-    try {
-      const view = await getUsageByIssue(parsed.data.issue);
-      return res.json(view);
-    } catch (err: any) {
-      console.error(`[usage] /api/usage/by-issue failed: ${err?.message || err}`);
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
+    return isolateAggregator(res, "api/usage/by-issue", () =>
+      getUsageByIssue(parsed.data.issue),
+    );
   });
 
   return router;

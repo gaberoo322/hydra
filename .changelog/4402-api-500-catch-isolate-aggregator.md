@@ -1,0 +1,1 @@
+- refactor: route the remaining hand-rolled 500 catch blocks in src/api through the isolateAggregator seam, with a blocking per-file ratchet test (#4402)

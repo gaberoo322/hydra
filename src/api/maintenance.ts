@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { runHousekeeping } from "../scheduler/housekeeping.ts";
 import type { PublishableBus } from "../event-bus-seams.ts";
+import { logger } from "../logger.ts";
 
 /**
  * Maintenance sub-router (issue #723 — scheduler fold PR-3/4).
@@ -32,6 +33,11 @@ export function createMaintenanceRouter(
   // POST /maintenance/housekeeping — run the housekeeping chores.
   // Idempotent: each chore's internal time-guard means repeated calls within
   // a window are no-ops (reflected in the `skipped` array of the summary).
+  //
+  // Not an isolateAggregator route: the 500 carries the specialized
+  // `{ ok: false, error }` envelope (the `ok` flag mirrors the success body),
+  // not the seam's bare `{ error }`. The catch adopts the pino `err`-field seam
+  // (ADR-0027) instead of an unstructured console line.
   router.post("/maintenance/housekeeping", async (req, res) => {
     try {
       const summary = await runHousekeeping(eventBus, opts.housekeepingDeps);
@@ -40,7 +46,7 @@ export function createMaintenanceRouter(
       // runHousekeeping is itself defensive (per-chore try/catch), but guard
       // the route too so an unexpected throw becomes a 500 with context rather
       // than an unhandled rejection.
-      console.error(`[Maintenance] housekeeping run failed: ${err?.message || err}`);
+      logger.error({ routeLabel: "api/maintenance/housekeeping", err }, "[Maintenance] housekeeping run failed");
       res.status(500).json({ ok: false, error: err?.message || String(err) });
     }
   });

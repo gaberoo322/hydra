@@ -42,7 +42,8 @@
  *     `weightedQuota` is null.
  *
  *   - **Never throws to the client.** `buildClassScoreboard` degrades to an empty
- *     scoreboard on a Redis-read failure (never throws); a defensive catch still
+ *     scoreboard on a Redis-read failure (never throws); the
+ *     `aggregatorRouteNoQuery` seam (route-helpers.ts, #909 / #4402) still
  *     guards the handler so Express never returns a bodyless 500.
  */
 
@@ -53,6 +54,8 @@ import {
   type ClassScoreboard,
 } from "../autopilot/class-stats-math.ts";
 import { putClassScoreboard } from "../redis/class-stats.ts";
+import { logger } from "../logger.ts";
+import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 /** The one dependency the handler needs: the scoreboard composer (tests stub). */
 type BuildScoreboard = typeof buildClassScoreboard;
@@ -68,30 +71,27 @@ export function createAutopilotClassStatsRouter(
 ) {
   const router = Router();
 
-  router.get("/autopilot/class-stats", async (_req, res) => {
-    try {
+  // Defensive — buildClassScoreboard degrades rather than throwing, so the
+  // seam's catch just guarantees Express never returns a bodyless 500.
+  router.get(
+    "/autopilot/class-stats",
+    aggregatorRouteNoQuery("api/autopilot/class-stats", async () => {
       const scoreboard = await buildScoreboard();
       const shadow = shadowDampener(scoreboard);
       // Best-effort cache write — a failure here must not fail the read.
       await persist(scoreboard).catch((err: any) => {
-        console.error(
-          `[autopilot/class-stats] snapshot persist failed (non-fatal): ${err?.message || err}`,
+        logger.error(
+          { routeLabel: "api/autopilot/class-stats", err },
+          "[autopilot/class-stats] snapshot persist failed (non-fatal)",
         );
       });
-      res.json({
+      return {
         scoreboard,
         shadow,
         generatedAt: new Date(scoreboard.computedAt).toISOString(),
-      });
-    } catch (err: any) {
-      // Defensive — buildClassScoreboard degrades rather than throwing, so this
-      // guard just guarantees Express never returns a bodyless 500.
-      console.error(
-        `[autopilot/class-stats] unexpected error: ${err?.message || String(err)}`,
-      );
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      };
+    }),
+  );
 
   return router;
 }
